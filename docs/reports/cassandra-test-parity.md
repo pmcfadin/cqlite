@@ -10,20 +10,20 @@ Sources: [`docs/cassandra_test_index.md`](../../docs/cassandra_test_index.md) ·
 
 | Status | Scenarios |
 |---|---|
-| `mirrored` | 165 |
-| `partial` | 11 |
-| `planned` | 17 |
+| `mirrored` | 180 |
+| `partial` | 18 |
+| `planned` | 18 |
 | `out_of_scope` | 14 |
-| **total** | **207** |
+| **total** | **230** |
 
 ## Evidence counts
 
 | Evidence | Scenarios |
 |---|---|
-| `byte_for_byte` | 93 |
-| `canonical_semantic` | 69 |
+| `byte_for_byte` | 98 |
+| `canonical_semantic` | 80 |
 | `smoke` | 7 |
-| `partial` | 22 |
+| `partial` | 29 |
 | `out_of_scope` | 16 |
 
 ## ⚠️ P0 scenarios with weak evidence
@@ -36,9 +36,12 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.compression_info.deflate.real_fixture_chunks.strict` — Deflate real-fixture CompressionInfo.db + chunk parity (partial)
 - `cass.compression_info.zstd.real_fixture_chunks.strict` — Zstd real-fixture CompressionInfo.db + chunk parity (partial)
 - `cass.corruption_verify.component_corruption_detection` — Component corruption detection, scrub, and verify (partial)
-- `cass.delta_scan.tombstone_liveness_facts` — Delta-scan tombstone/TTL/liveness fact extraction (partial)
+- `cass.data_db_decode.wide_partition.row_boundaries` — Wide-partition Data.db row boundaries align with promoted-index offsets (partial)
 - `cass.filter_db_bloom.serialization_no_false_negative` — Filter.db Bloom filter serialization with no false negatives (partial)
 - `cass.index_db.RowIndexEntryTest.promoted_index_entries` — BIG Index.db promoted-index (wide-partition) boundary metadata (partial)
+- `cass.index_db.promoted_index.clustering_bounds` — BIG promoted-index IndexInfo clustering bounds ordering and coverage (partial)
+- `cass.index_db.promoted_index.index_info_offsets` — BIG promoted-index IndexInfo Data.db offsets and width chain (partial)
+- `cass.index_db.promoted_index.range_tombstone_boundary_at_block_edge` — BIG promoted-index decode across a range-tombstone block boundary (partial)
 - `cass.index_summary.column_index.range_tombstone_boundary_big_bti` — Column-index range-tombstone boundary across BIG and BTI formats (partial)
 - `cass.index_summary.summary_boundaries` — Summary.db sampling boundaries (BIG) (partial)
 - `cass.schema_evolution.dropped_column.empty_index_block_reverse_scan` — Dropped-column empty-index-block reverse-scan parity (partial)
@@ -46,6 +49,9 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.tombstone_ttl.range_tombstone_boundaries` — Range tombstone boundary and deletion-time parity (partial)
 - `cass.tombstone_ttl.repaired_unrepaired_purge_gate` — Repaired vs unrepaired purge gate parity (partial)
 - `cass.write_load_path.cassandra_sstable_writer_fixtures` — CQLite-written SSTables load into Cassandra via sstableloader (smoke)
+- `cass.write_load_path.cql_sstable_writer.finished_data_db_artifacts` — Finished CQLite-written Data.db / component artifacts (write path) (partial)
+- `cass.write_load_path.flush.partition_boundary_artifacts` — Flush produces partition-boundary artifacts (promoted index / BTI Partitions.db) (partial)
+- `cass.write_load_path.flush.tombstone_and_ttl_artifacts` — Flush produces tombstone + TTL Data.db / Statistics.db artifacts (partial)
 
 ## P0 scenarios
 
@@ -117,12 +123,26 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 | `cass.data_db.inline_crc.offset_delta_minus_crc_length` | compression_checksum | mirrored | byte_for_byte | `sstable_parity_corruption_verify` | p0_data_loss |
 | `cass.data_db.inline_crc.short_final_chunk` | compression_checksum | mirrored | byte_for_byte | `sstable_parity_corruption_verify` | p0_data_loss |
 | `cass.data_db.inline_crc.valid_trailer` | compression_checksum | mirrored | byte_for_byte | `sstable_parity_corruption_verify` | p0_data_loss |
+| `cass.data_db_decode.clustering_bounds.desc_order` | data_db_decode | mirrored | byte_for_byte | `sstable_parity_data_db_jsonl` | p1_correctness |
+| `cass.data_db_decode.clustering_bounds.multi_column_prefix` | data_db_decode | mirrored | byte_for_byte | `sstable_parity_data_db_jsonl` | p1_correctness |
+| `cass.data_db_decode.clustering_bounds.null_vs_empty` | data_db_decode | mirrored | byte_for_byte | `sstable_parity_data_db_jsonl` | p1_correctness |
 | `cass.data_db_decode.row_cell_flags_and_vint` | data_db_decode | mirrored | canonical_semantic | `sstable_parity_data_db_jsonl` | p1_correctness |
 | `cass.data_db_decode.serialization_header.timestamp_ttl_ldt_deltas` | data_db_decode | mirrored | byte_for_byte | `schema_parity_serialization_header` | p1_correctness |
 | `cass.data_db_decode.serialization_mirror.multi_clustering_column_order` | data_db_decode | mirrored | byte_for_byte | `sstable_parity_data_db_jsonl` | p1_correctness |
+| `cass.data_db_decode.static_rows.static_only_partition` | data_db_decode | mirrored | byte_for_byte | `sstable_parity_data_db_jsonl` | p1_correctness |
+| `cass.data_db_decode.static_rows.static_with_clustering_rows` | data_db_decode | mirrored | byte_for_byte | `sstable_parity_data_db_jsonl` | p1_correctness |
 | `cass.data_db_decode.unfiltered_serializer.row_and_cell_flags` | data_db_decode | mirrored | byte_for_byte | `sstable_parity_data_db_jsonl` | p1_correctness |
 | `cass.data_db_decode.unfiltered_serializer.row_size_vints` | data_db_decode | mirrored | byte_for_byte | `sstable_parity_data_db_jsonl` | p1_correctness |
-| `cass.delta_scan.tombstone_liveness_facts` | delta_scan | partial | partial | `sstable_parity_delta_scan` | p1_correctness |
+| `cass.data_db_decode.wide_partition.row_boundaries` | data_db_decode | partial | partial | `sstable_parity_data_db_jsonl` | p1_correctness |
+| `cass.delta_scan.adjacent_ranges` | delta_scan | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p1_correctness |
+| `cass.delta_scan.cell_tombstones` | delta_scan | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p1_correctness |
+| `cass.delta_scan.collection_ops` | delta_scan | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p1_correctness |
+| `cass.delta_scan.partial_updates` | delta_scan | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p1_correctness |
+| `cass.delta_scan.partition_tombstones` | delta_scan | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p1_correctness |
+| `cass.delta_scan.range_tombstones` | delta_scan | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p1_correctness |
+| `cass.delta_scan.row_tombstones` | delta_scan | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p1_correctness |
+| `cass.delta_scan.static_with_rows` | delta_scan | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p1_correctness |
+| `cass.delta_scan.ttl_cells` | delta_scan | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p1_correctness |
 | `cass.filter_db.corruption_fails_closed` | filter_db_bloom | mirrored | byte_for_byte | `sstable_parity_filter_db_bloom` | p1_correctness |
 | `cass.filter_db.no_false_negative_membership` | filter_db_bloom | mirrored | byte_for_byte | `sstable_parity_filter_db_bloom` | p0_data_loss |
 | `cass.filter_db.serialization_round_trip` | filter_db_bloom | mirrored | byte_for_byte | `sstable_parity_filter_db_bloom` | p1_correctness |
@@ -134,6 +154,9 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 | `cass.index_db.SSTableScannerTest.range_boundaries` | index_summary | mirrored | byte_for_byte | `sstable_parity_index_db_big` | p1_correctness |
 | `cass.index_db.big.raw_partition_keys_and_offsets` | index_summary | mirrored | byte_for_byte | `sstable_parity_index_db_big` | p1_correctness |
 | `cass.index_db.bti.index_component_discovery` | index_summary | mirrored | byte_for_byte | `sstable_parity_bti_partitions_rows` | p1_correctness |
+| `cass.index_db.promoted_index.clustering_bounds` | index_summary | partial | partial | `sstable_parity_index_db_big` | p1_correctness |
+| `cass.index_db.promoted_index.index_info_offsets` | index_summary | partial | partial | `sstable_parity_index_db_big` | p1_correctness |
+| `cass.index_db.promoted_index.range_tombstone_boundary_at_block_edge` | index_summary | partial | partial | `sstable_parity_index_db_big` | p1_correctness |
 | `cass.index_summary.big_index_offsets` | index_summary | mirrored | canonical_semantic | `sstable_parity_index_db_big` | p1_correctness |
 | `cass.index_summary.column_index.range_tombstone_boundary_big_bti` | index_summary | partial | partial | `sstable_parity_index_db_big` | p1_correctness |
 | `cass.index_summary.summary_boundaries` | index_summary | partial | partial | `sstable_parity_summary_db_big` | p1_correctness |
@@ -189,11 +212,15 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 | `cass.verify.inline_crc_validation` | corruption_verify | mirrored | canonical_semantic | `sstable_parity_corruption_verify` | p0_data_loss |
 | `cass.verify.no_silent_empty_result_on_corruption` | corruption_verify | mirrored | canonical_semantic | `sstable_parity_corruption_verify` | p0_data_loss |
 | `cass.write_load_path.cassandra_sstable_writer_fixtures` | write_load_path | mirrored | smoke | `sstable_writer_cassandra_fixture_parity` | p0_data_loss |
+| `cass.write_load_path.cql_sstable_writer.finished_data_db_artifacts` | write_load_path | partial | partial | `sstable_writer_cassandra_fixture_parity` | p0_data_loss |
+| `cass.write_load_path.flush.partition_boundary_artifacts` | write_load_path | partial | partial | `sstable_parity_bti_partitions_rows` | p1_correctness |
+| `cass.write_load_path.flush.tombstone_and_ttl_artifacts` | write_load_path | partial | partial | `sstable_writer_cassandra_fixture_parity` | p0_data_loss |
+| `cass.write_load_path.live_readback.semantic_only` | write_load_path | mirrored | canonical_semantic | `sstable_writer_cassandra_fixture_parity` | p0_data_loss |
 
 ## Byte-for-byte scenarios
 
-- `cass.compaction.SSTableRewriterTest.output_component_integrity` — Compaction output components byte-identical to Cassandra SSTableRewriter (the parity claim)
-- `cass.compaction.harness_byte_tier_artifacts` — Differential harness byte-tier MECHANISM — per-component cmp engine + failure artifacts
+- `cass.compaction.SSTableRewriterTest.output_component_integrity` — Compaction output components byte-identical to Cassandra SSTableRewriter (the parity claim) _(planned — no evidence yet)_
+- `cass.compaction.harness_byte_tier_artifacts` — Differential harness byte-tier MECHANISM — per-component cmp engine + failure artifacts _(planned — no evidence yet)_
 - `cass.compression.fixture_matrix.deflate` — Deflate (zlib) compression fixture — CompressionInfo.db parity
 - `cass.compression.fixture_matrix.incompressible_uncompressed_chunk` — Incompressible payload — chunk stored uncompressed within compressed file
 - `cass.compression.fixture_matrix.lz4` — LZ4 compression fixture — CompressionInfo.db chunk-offset/CRC parity
@@ -223,8 +250,8 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.compression_info.lz4.real_fixture_chunks.strict` — LZ4 real-fixture CompressionInfo.db + chunk parity
 - `cass.compression_info.snappy.real_fixture_chunks` — SnappyCompressor real-fixture chunk + CRC parity
 - `cass.compression_info.snappy.real_fixture_chunks.strict` — Snappy real-fixture CompressionInfo.db + chunk parity
-- `cass.corruption.bti_partitions_footer_bit_flip` — BTI Partitions.db footer bit flip is detected
-- `cass.corruption.bti_rows_truncation` — BTI Rows.db truncation is detected
+- `cass.corruption.bti_partitions_footer_bit_flip` — BTI Partitions.db footer bit flip is detected _(planned — no evidence yet)_
+- `cass.corruption.bti_rows_truncation` — BTI Rows.db truncation is detected _(planned — no evidence yet)_
 - `cass.corruption.compression_info.bad_offset` — CompressionInfo.db out-of-bounds chunk offset is detected
 - `cass.corruption.data_db.bit_flip` — Data.db single-bit flip is detected (LZ4 chunk decode / CRC)
 - `cass.corruption.data_db.truncation` — Data.db mid-stream truncation is detected
@@ -251,10 +278,20 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.data_db.inline_crc.offset_delta_minus_crc_length` — Chunk payload length = next_offset - this_offset - 4 (CRC length)
 - `cass.data_db.inline_crc.short_final_chunk` — Data.db inline CRC on the short final chunk
 - `cass.data_db.inline_crc.valid_trailer` — Data.db per-chunk inline CRC32 trailer validation
+- `cass.data_db_decode.clustering_bounds.desc_order` — Data.db DESC (ReversedType) clustering-bound parity
+  - Normalization: BYTE parity (DESC timestamp + ASC text clustering values at exact offsets, proving ReversedType does NOT invert on-disk value bytes) is asserted separately from SEMANTIC JSONL parity (full clustering tuple). The fixture is decompressed first (FAIL CLOSED on a missing fixture).
+- `cass.data_db_decode.clustering_bounds.multi_column_prefix` — Data.db multi-column clustering-prefix byte consumption parity
+  - Normalization: The deterministic writer lane asserts the FULL multi-column prefix → row_size framing byte-for-byte; the wide fixture lane asserts the first four real-Cassandra clustering values' widths/values at exact offsets (the 5th DATE column's on-disk offset is NOT byte-asserted — see known_limitations) and the JSONL lane asserts the full 5-tuple semantically. FAIL CLOSED on a missing fixture.
+- `cass.data_db_decode.clustering_bounds.null_vs_empty` — Data.db null-vs-empty clustering value distinction parity
+  - Normalization: Pure BYTE-level distinction: the EMPTY clustering's PRESENT header + zero-length value VInt vs the static (absent) row's omitted prefix (prev_size=0), both asserted at exact offsets via the public DataWriter encode surface and re-decoded through the reader's parse_vuint. The ABSENT/static byte shape is additionally observed in the pinned static_columns_table fixture (`fixture_static_columns_marker_byte_parity`).
 - `cass.data_db_decode.serialization_header.timestamp_ttl_ldt_deltas` — Data.db timestamp / TTL / local-deletion-time delta parity
   - Normalization: Deltas are decoded as unsigned VInts and reconstructed against the Statistics.db EncodingStats minima; the fixture lane compares the reconstructed absolute timestamp to the JSONL golden in microseconds (FAIL CLOSED on a missing fixture). Wall-clock-derived LDT bytes are asserted only for sign/magnitude, not an exact constant.
 - `cass.data_db_decode.serialization_mirror.multi_clustering_column_order` — Data.db multi-clustering-column order parity
   - Normalization: Clustering header and per-column value bytes are compared at their exact offsets in declared order; the fixture lane decompresses the LZ4 Data.db first (FAIL CLOSED on a missing fixture).
+- `cass.data_db_decode.static_rows.static_only_partition` — Data.db static-only partition marker parity
+  - Normalization: Two distinct assertion families: (1) STATIC-ROW BYTE parity — the row flag byte, extended IS_STATIC bit, hard-coded prev_size=0, and the omitted clustering prefix are compared at exact offsets in the decompressed Data.db; (2) SEMANTIC/JSONL parity — the decoded static cell value and the static structure are compared against the sstabledump golden. These are asserted separately. The pinned fixture is decompressed first (FAIL CLOSED on a missing pinned fixture); the truly static-ONLY partition shape is covered deterministically (always) plus the local-only static_with_rows lane (skip-on-presence).
+- `cass.data_db_decode.static_rows.static_with_clustering_rows` — Data.db static cells + clustering rows in one partition parity
+  - Normalization: STATIC-ROW + clustering BYTE parity (static marker, then clustered-row clustering header + value offsets) is asserted separately from SEMANTIC JSONL parity (static value + static/clustering coexistence). The pinned fixture is decompressed first (FAIL CLOSED on a missing pinned fixture).
 - `cass.data_db_decode.unfiltered_serializer.row_and_cell_flags` — Data.db row and cell flag-byte parity
   - Normalization: Flag bytes are compared as raw u8 values at their exact wire offset; the fixture lane additionally checks every leading flag byte stays within the known UnfilteredSerializer row-flag mask (FAIL CLOSED on a missing fixture).
 - `cass.data_db_decode.unfiltered_serializer.row_size_vints` — Data.db row-size and previous-size VInt framing parity
@@ -377,6 +414,35 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
   - Normalization: Values are normalized against the declared schema type (not guessed) so that ascii vs text, frozen vs multicell, and numeric widths are compared with the correct typed model; ambiguous coercion is rejected.
 - `cass.data_db_decode.row_cell_flags_and_vint` — Data.db row/cell flags and VInt decode parity
   - Normalization: Rows and cells are normalized to the sstabledump JSONL fact model (partition key, clustering, cell name/value, liveness, deletion) and compared field-by-field; presentation ordering and whitespace ignored.
+- `cass.delta_scan.adjacent_ranges` — Delta-scan adjacent range tombstones (shared boundary markers)
+  - Normalization: scan_delta range-delete records are reconstructed from sstabledump JSONL boundary markers (excl_end_incl_start / incl_end_excl_start) into synthetic end/start bound pairs and compared with a writetime tolerance.
+  - Byte-for-byte: not yet — needs Data.db backing (follow-up under epic #969).
+- `cass.delta_scan.cell_tombstones` — Delta-scan cell tombstones (DELETE col)
+  - Normalization: scan_delta cell-tombstone records are mapped to sstabledump JSONL deletion facts (deleted_at) and compared with a writetime tolerance.
+  - Byte-for-byte: not yet — needs Data.db backing (follow-up under epic #969).
+- `cass.delta_scan.collection_ops` — Delta-scan collection operations (append/overwrite/element delete)
+  - Normalization: scan_delta collection cell upserts and the complex-cell deletion markers emitted by SET append / overwrite / element removal are mapped to the sstabledump JSONL collection cells and compared with a writetime tolerance.
+  - Byte-for-byte: not yet — needs Data.db backing (follow-up under epic #969).
+- `cass.delta_scan.partial_updates` — Delta-scan partial updates (UPDATE-only rows, no row liveness)
+  - Normalization: scan_delta cell upserts are mapped to sstabledump JSONL per-cell records and compared; row-liveness presence (INSERT) vs absence (UPDATE-only) is asserted against the JSONL liveness_info markers.
+  - Byte-for-byte: not yet — needs Data.db backing (follow-up under epic #969).
+- `cass.delta_scan.partition_tombstones` — Delta-scan partition tombstones (DELETE FROM ... WHERE pk)
+  - Normalization: scan_delta partition-delete records are mapped to the sstabledump JSONL partition deletion_info marker (marked_deleted) and compared with a writetime tolerance.
+  - Byte-for-byte: not yet — needs Data.db backing (follow-up under epic #969).
+- `cass.delta_scan.range_tombstones` — Delta-scan range tombstones (DELETE ... WHERE ck range)
+  - Normalization: scan_delta range-delete records are mapped to consecutive sstabledump JSONL range_tombstone_bound start/end pairs and compared with a writetime tolerance; boundary markers are paired into synthetic end/start bounds.
+  - Byte-for-byte: not yet — needs Data.db backing (follow-up under epic #969).
+- `cass.delta_scan.row_tombstones` — Delta-scan row tombstones (DELETE FROM ... WHERE pk AND ck)
+  - Normalization: scan_delta row-delete records are mapped to sstabledump JSONL row deletion_info markers and compared with a writetime tolerance.
+  - Byte-for-byte: not yet — needs Data.db backing (follow-up under epic #969).
+- `cass.delta_scan.static_with_rows` — Delta-scan static columns alongside clustered rows
+  - Normalization: scan_delta static-cell upserts are mapped to the sstabledump JSONL static row block and clustered-row cells to their per-row cell lists; both are compared by value and writetime with tolerance.
+  - Byte-for-byte: not yet — needs Data.db backing (follow-up under epic #969).
+- `cass.delta_scan.ttl_cells` — Delta-scan TTL / expiring cells (INSERT ... USING TTL)
+  - Normalization: scan_delta expiring-cell records are mapped to sstabledump JSONL cell ttl / local_deletion_time fields and compared; mixed live + expiring cells in the same fixture exercise both code paths.
+  - Byte-for-byte: not yet — needs Data.db backing (follow-up under epic #969).
+- `cass.delta_scan.wide_partition_corpus` — Delta-scan over wide partitions (planned — no test_deltas fixture yet) _(planned — no evidence yet)_
+  - Normalization: Planned: scan_delta facts over a wide partition (many clustered rows + range/cell tombstones in one partition, exercising index-block skipping) compared to the sstabledump JSONL golden.
 - `cass.index_summary.big_index_offsets` — Index.db partition key digests and data offsets (BIG)
   - Normalization: Partition key digests and Data.db offsets resolved through Index.db are compared against the partition order and keys derived from sstabledump JSONL.
 - `cass.schema_evolution.dropped_column.per_cell_purge` — Dropped regular column per-cell purge parity
@@ -439,13 +505,15 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
   - Normalization: During the verify scan each chunk's inline CRC32 trailer is checked; a clean fixture passes and a bit-flip case fails. Decoded rows compared to the JSONL golden.
 - `cass.verify.no_silent_empty_result_on_corruption` — Verifier never returns a silent empty result on corruption
   - Normalization: For every corruption-corpus case the verifier must surface an explicit error; returning an empty (zero-row) result on corrupted input is a contract violation. The clean fixture's full row scan defines the non-empty baseline.
+- `cass.write_load_path.live_readback.semantic_only` — Live Cassandra readback of CQLite-written SSTables (semantic-only)
+  - Normalization: CQLite-written artifacts are loaded into Cassandra 5.0.2 and read back; the sstabledump JSON of the loaded SSTable and the cqlsh SELECT rows (including TTL(col), static columns, clustering rows, and tombstone presence/absence) are compared for semantic equivalence to what CQLite wrote. This proves loaded rows, TTLs, tombstones, static rows and clustering rows are semantically visible — NOT a byte comparison of writer output.
 
 ## Smoke-only scenarios
 
 - `cass.cli_reporting.parity_manifest_lint_and_report` — Parity manifest lint and report tooling
 - `cass.compaction_merge.load_path_validity` — Compaction output load-path validity (Tier-1)
 - `cass.data_db_decode.row_preamble_size_mismatch` — Malformed row-preamble size fails loud
-- `cass.filter_db.statistical_false_positive_rate` — Filter.db empirical false-positive-rate report
+- `cass.filter_db.statistical_false_positive_rate` — Filter.db empirical false-positive-rate report _(planned — no evidence yet)_
 - `cass.schema_evolution.serialization_header_column_order` — Serialization-header column order across schema evolution
 - `cass.sstable_format.descriptor_component_resolution` — Descriptor and on-disk version/component resolution
 - `cass.write_load_path.cassandra_sstable_writer_fixtures` — CQLite-written SSTables load into Cassandra via sstableloader
@@ -463,23 +531,31 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.corruption.bti_partitions_footer_bit_flip` (planned): Clean BTI source (test_da/wide_table Partitions.db) is not git-tracked, so the corrupted fixture cannot be regenerated by CI. → _Commit the clean test_da/wide_table BTI components (or add them to the published dataset bundle) so generate-corruption-corpus.sh can emit the corrupted Partitions.db, then flip status to mirrored._
 - `cass.corruption.bti_rows_truncation` (planned): Clean BTI source (test_da/wide_table Rows.db) is not git-tracked, so the truncated fixture cannot be regenerated by CI. → _Commit the clean test_da/wide_table BTI components so generate-corruption-corpus.sh can emit the truncated Rows.db, then flip status to mirrored._
 - `cass.corruption_verify.component_corruption_detection` (planned): No scrub/verify parity pass implemented. → _Implement a verify pass and compare detected-corruption outcomes against Cassandra VerifyTest/ScrubTest scenarios._
-- `cass.delta_scan.tombstone_liveness_facts` (partial): test_deltas dataset asset not published/enforced (#701). → _Publish and enforce the test_deltas dataset in delta-roundtrip CI._
+- `cass.data_db_decode.wide_partition.row_boundaries` (partial): Byte-level promoted-index parity (Index.db offsets, widths, clustering bounds) runs only against local-only binaries that are not in the pinned CI dataset; the required lane enforces only the committed-JSONL canonical-semantic facts. → _Add the test_big.wide_partition binaries to the dataset release pin (regenerate the tarball + update DATASET_SHA256) to promote these scenarios to byte_for_byte enforced in the required_parity lane._
+- `cass.delta_scan.wide_partition_corpus` (planned): No test_deltas wide-partition delete fixture; wide partitions are produced by the wide-row corpus (epic #993), not generate-deltas.sh. Byte-for-byte backing for delta_scan remains tracked by epic #969. → _Add a wide-partition delete shape (or reuse a wide-row corpus fixture) and a paired test_delta_parity_wide_partition test under epic #993._
 - `cass.filter_db.bti_membership` (partial): No raw-partition-key source for BTI fixtures, so the no-false-negative probe cannot run against da Filter.db. → _Recover raw BTI partition keys (e.g. by decoding partitions during a Data.db scan) and extend the no-false-negative gate to cover da fixtures._
 - `cass.filter_db.statistical_false_positive_rate` (planned): No gated comparison of measured FPR against Cassandra's configured bloom_filter_fp_chance. → _Add larger-cardinality fixtures and assert the measured FPR tracks the configured fp_chance within a documented statistical tolerance._
 - `cass.filter_db_bloom.serialization_no_false_negative` (partial): No no-false-negative parity assertion against Cassandra Filter.db. → _Add a Filter.db serialization parity test asserting zero false negatives across the present-key set._
-- `cass.index_db.RowIndexEntryTest.promoted_index_entries` (partial): No committed BIG fixture triggers promoted-index emission (all partitions are below the column_index_size threshold). → _Generate a wide-partition BIG fixture (partition exceeding column_index_size_in_kb) and assert decoded promoted-index clustering boundaries against the Cassandra reference._
-- `cass.index_db.big.wide_partition_promoted_entries` (partial): No committed wide BIG fixture exercises promoted clustering boundaries. → _Add a BIG fixture with a partition exceeding column_index_size_in_kb and compare decoded promoted clustering boundaries to the Cassandra reference._
+- `cass.index_db.RowIndexEntryTest.promoted_index_entries` (partial): Byte-level promoted-index parity (Index.db offsets, widths, clustering bounds) runs only against local-only binaries that are not in the pinned CI dataset; the required lane enforces only the committed-JSONL canonical-semantic facts. → _Add the test_big.wide_partition binaries to the dataset release pin (regenerate the tarball + update DATASET_SHA256) to promote these scenarios to byte_for_byte enforced in the required_parity lane._
+- `cass.index_db.big.wide_partition_promoted_entries` (partial): Byte-level promoted-index parity (Index.db offsets, widths, clustering bounds) runs only against local-only binaries that are not in the pinned CI dataset; the required lane enforces only the committed-JSONL canonical-semantic facts. → _Add the test_big.wide_partition binaries to the dataset release pin (regenerate the tarball + update DATASET_SHA256) to promote these scenarios to byte_for_byte enforced in the required_parity lane._
+- `cass.index_db.promoted_index.clustering_bounds` (partial): Byte-level promoted-index parity (Index.db offsets, widths, clustering bounds) runs only against local-only binaries that are not in the pinned CI dataset; the required lane enforces only the committed-JSONL canonical-semantic facts. → _Add the test_big.wide_partition binaries to the dataset release pin (regenerate the tarball + update DATASET_SHA256) to promote these scenarios to byte_for_byte enforced in the required_parity lane._
+- `cass.index_db.promoted_index.index_info_offsets` (partial): Byte-level promoted-index parity (Index.db offsets, widths, clustering bounds) runs only against local-only binaries that are not in the pinned CI dataset; the required lane enforces only the committed-JSONL canonical-semantic facts. → _Add the test_big.wide_partition binaries to the dataset release pin (regenerate the tarball + update DATASET_SHA256) to promote these scenarios to byte_for_byte enforced in the required_parity lane._
+- `cass.index_db.promoted_index.range_tombstone_boundary_at_block_edge` (partial): Byte-level promoted-index parity (Index.db offsets, widths, clustering bounds) runs only against local-only binaries that are not in the pinned CI dataset; the required lane enforces only the committed-JSONL canonical-semantic facts. → _Add the test_big.wide_partition binaries to the dataset release pin (regenerate the tarball + update DATASET_SHA256) to promote these scenarios to byte_for_byte enforced in the required_parity lane._
 - `cass.index_summary.column_index.range_tombstone_boundary_big_bti` (partial): BTI (da) range-tombstone-at-block-edge fixtures are not yet generated (no da tombstone generator). → _Add a da/BTI wide-partition range-tombstone fixture generator and assert BTI column-index boundary parity; file a follow-up issue._
 - `cass.index_summary.summary_boundaries` (partial): Cassandra Summary.db reference dumps not published for all tables. → _Publish Summary.db reference dumps and enable strict first/last-key boundary comparison in the sstable_parity_summary_db_big suite._
 - `cass.repaired_metadata.statistics_db.pending_repair_uuid` (planned): No Cassandra 5.0 pending-repair fixture available; the reference null (`Pending repair: --`) state is confirmed, and the read path reports the field as Unparsed (it is not walked from bytes) rather than a fabricated absent value. → _When a pending-repair fixture is generated, decode the pendingRepair UUID (type-aware skip past improvedMinMax + commitLogIntervals) — promoting the field from RepairField::Unparsed to Decoded — and assert it byte-for-byte against the `Pending repair: <uuid>` reference line._
 - `cass.repaired_metadata.statistics_db.transient_repair_flag` (planned): No transiently-replicated fixture available; the reference `IsTransient: false` state is confirmed, and the read path reports the field as Unparsed (it is not walked from bytes) rather than a fabricated `false`. → _When a transient-replication fixture is generated, decode the isTransient flag (after the version-gated improvedMinMax block and commitLogIntervals) — promoting it from RepairField::Unparsed to Decoded — and assert it byte-for-byte against the `IsTransient: true` reference line._
 - `cass.schema_evolution.dropped_column.empty_index_block_reverse_scan` (partial): A wide dropped-column empty-index-block reverse-scan fixture is not yet generated. → _Generate a wide dropped-column fixture that yields an empty index block under reverse scan and assert parity; file a follow-up issue._
+- `cass.sstable_scan.wide_partition.forward_reverse_bounds` (partial): Reverse SSTable iteration is not implemented for BIG wide partitions; only a post-fetch in-memory ORDER BY DESC sort exists, which does not exercise reverse promoted-index block decoding. → _Implement a BIG-format reverse partition iterator that uses the promoted IndexInfo blocks to seek/decode blocks back-to-front (mirroring Cassandra SSTableReversedIterator), then assert forward and reverse scans of pk=1 return the identical 290-row clustering set with no rows lost adjacent to the deleted block._
 - `cass.statistics_db.SSTableMetadataTest.max_local_deletion_time` (planned): STATS-section max timestamp / max local-deletion-time not yet decoded. → _Decode the STATS MetadataType component and assert max timestamp / max local-deletion-time against the reference dump._
 - `cass.statistics_db.clustering_key_bounds` (planned): Covered-clustering min/max bounds not yet decoded from the STATS component. → _Decode the STATS-section clustering bounds and compare against the "Covered clusterings" reference line._
 - `cass.statistics_db.histograms_and_estimates` (planned): STATS-section histograms and partition/row estimates not yet decoded. → _Decode the STATS-section EstimatedHistograms and count estimates and compare bucket boundaries against the reference dump._
 - `cass.summary_db.IndexSummaryRedistributionTest.downsampled_summary_entries` (planned): No downsampled (sampling_level < 128) Summary.db fixture exists. → _Publish a redistributed Summary.db fixture and extend the strict suite to assert downsampled offset tables and size_at_full_sampling > entry count._
 - `cass.tombstone_ttl.range_tombstone_boundaries` (partial): test_deltas dataset asset not published/enforced in CI (#701). → _Publish the test_deltas dataset and enforce scan_delta parity in CI._
 - `cass.tombstone_ttl.repaired_unrepaired_purge_gate` (partial): repairedAt / pendingRepair parsing is not implemented (gated on #968/#988), so the repaired-vs-unrepaired purge gate is only partially exercised. → _Parse repairedAt / pendingRepair from Statistics.db and gate purge on repair status (#968/#988)._
+- `cass.write_load_path.cql_sstable_writer.finished_data_db_artifacts` (partial): Writer byte invariants + component/TOC presence are asserted, but no committed Cassandra-written reference Data.db exists to diff finished CQLite output (whole-file bytes / row offsets / sstabledump JSONL) against for the same schema/data. Consistent with cass.write_load_path.cassandra_sstable_writer_fixtures. → _Commit a Cassandra-written reference SSTable for an identical writer schema/data and add a strict file-vs-file byte + offset + sstabledump JSONL diff test, then upgrade this scenario to byte_for_byte (epic #969)._
+- `cass.write_load_path.flush.partition_boundary_artifacts` (partial): Writer partition-boundary entries round-trip through CQLite's own reader and the Cassandra boundary layout is re-parsed byte-exactly, but no committed Cassandra-written reference exists to diff the finished CQLite-written Partitions.db / promoted Index.db byte-for-byte. → _Commit a Cassandra-written reference for an identical multi-block / multi-partition flush input and add a strict Partitions.db / Index.db byte diff, then upgrade to byte_for_byte (epic #969)._
+- `cass.write_load_path.flush.tombstone_and_ttl_artifacts` (partial): Flushed tombstone/TTL bytes are asserted against derived expected values, but no committed Cassandra-written reference for the same flush input exists to diff the finished artifact byte-for-byte. → _Commit a Cassandra-written tombstone+TTL reference SSTable for an identical flush input and add a strict Data.db + Statistics.db byte diff, then upgrade to byte_for_byte (epic #969)._
 
 ## Out-of-scope taxonomy
 
@@ -650,13 +726,28 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.data_db.inline_crc.offset_delta_minus_crc_length` | required_parity | .github/workflows/cassandra-parity.yml |
 | `cass.data_db.inline_crc.short_final_chunk` | required_parity | .github/workflows/cassandra-parity.yml |
 | `cass.data_db.inline_crc.valid_trailer` | required_parity | .github/workflows/cassandra-parity.yml |
+| `cass.data_db_decode.clustering_bounds.desc_order` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.data_db_decode.clustering_bounds.multi_column_prefix` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.data_db_decode.clustering_bounds.null_vs_empty` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.data_db_decode.row_cell_flags_and_vint` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.data_db_decode.row_preamble_size_mismatch` | required_parity | .github/workflows/cql-type-parity.yml |
 | `cass.data_db_decode.serialization_header.timestamp_ttl_ldt_deltas` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.data_db_decode.serialization_mirror.multi_clustering_column_order` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.data_db_decode.static_rows.static_only_partition` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.data_db_decode.static_rows.static_with_clustering_rows` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.data_db_decode.unfiltered_serializer.row_and_cell_flags` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.data_db_decode.unfiltered_serializer.row_size_vints` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.delta_scan.tombstone_liveness_facts` | required_parity | .github/workflows/delta-roundtrip.yml |
+| `cass.data_db_decode.wide_partition.row_boundaries` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.delta_scan.adjacent_ranges` | required_parity | .github/workflows/delta-roundtrip.yml |
+| `cass.delta_scan.cell_tombstones` | required_parity | .github/workflows/delta-roundtrip.yml |
+| `cass.delta_scan.collection_ops` | required_parity | .github/workflows/delta-roundtrip.yml |
+| `cass.delta_scan.partial_updates` | required_parity | .github/workflows/delta-roundtrip.yml |
+| `cass.delta_scan.partition_tombstones` | required_parity | .github/workflows/delta-roundtrip.yml |
+| `cass.delta_scan.range_tombstones` | required_parity | .github/workflows/delta-roundtrip.yml |
+| `cass.delta_scan.row_tombstones` | required_parity | .github/workflows/delta-roundtrip.yml |
+| `cass.delta_scan.static_with_rows` | required_parity | .github/workflows/delta-roundtrip.yml |
+| `cass.delta_scan.ttl_cells` | required_parity | .github/workflows/delta-roundtrip.yml |
+| `cass.delta_scan.wide_partition_corpus` | exhaustive_regeneration | .github/workflows/delta-roundtrip.yml |
 | `cass.distributed_consensus.paxos_accord_out_of_scope` | fast_pr | — |
 | `cass.filter_db.bti_membership` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.filter_db.corruption_fails_closed` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
@@ -672,6 +763,9 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.index_db.big.raw_partition_keys_and_offsets` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.index_db.big.wide_partition_promoted_entries` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.index_db.bti.index_component_discovery` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.index_db.promoted_index.clustering_bounds` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.index_db.promoted_index.index_info_offsets` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.index_db.promoted_index.range_tombstone_boundary_at_block_edge` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.index_summary.big_index_offsets` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.index_summary.column_index.range_tombstone_boundary_big_bti` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.index_summary.summary_boundaries` | fast_pr | — |
@@ -696,6 +790,7 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.sstable_format.toc_component_manifest` | fast_pr | — |
 | `cass.sstable_io.reader.tombstone_only_partition` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.sstable_io.scanner.tombstone_only_partition_ranges` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.sstable_scan.wide_partition.forward_reverse_bounds` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.statistics_db.MetadataSerializerTest.metadata_components` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.statistics_db.SSTableMetadataTest.max_local_deletion_time` | manual_debug | — |
 | `cass.statistics_db.SSTableMetadataTrackingTest.timestamp_and_ttl_metadata` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
@@ -745,6 +840,10 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.verify.inline_crc_validation` | required_parity | .github/workflows/cassandra-parity.yml |
 | `cass.verify.no_silent_empty_result_on_corruption` | required_parity | .github/workflows/cassandra-parity.yml |
 | `cass.write_load_path.cassandra_sstable_writer_fixtures` | required_parity | .github/workflows/cassandra-validation.yml |
+| `cass.write_load_path.cql_sstable_writer.finished_data_db_artifacts` | exhaustive_regeneration | .github/workflows/cassandra-parity.yml |
+| `cass.write_load_path.flush.partition_boundary_artifacts` | exhaustive_regeneration | .github/workflows/cassandra-parity.yml |
+| `cass.write_load_path.flush.tombstone_and_ttl_artifacts` | exhaustive_regeneration | .github/workflows/cassandra-parity.yml |
+| `cass.write_load_path.live_readback.semantic_only` | nightly_docker | .github/workflows/cassandra-validation.yml |
 | `cass.zstd_dictionary.dictionary_assisted_decompression` | fast_pr | — |
 | `cass.zstd_dictionary.dictionary_cache_reuse` | fast_pr | — |
 | `cass.zstd_dictionary.dictionary_checksum` | fast_pr | — |
@@ -862,13 +961,28 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.data_db.inline_crc.offset_delta_minus_crc_length` | nb | test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt<br>test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_comp/snappy_table-2588f3a071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt<br>_fail:_ target/cassandra-parity/inline-crc-offset_delta_minus_crc_length.log |
 | `cass.data_db.inline_crc.short_final_chunk` | nb | test-data/datasets/sstables/test_comp/short_final_chunk-25aef23071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt<br>test-data/datasets/sstables/test_comp/short_final_chunk-25aef23071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/inline-crc-short_final_chunk.log |
 | `cass.data_db.inline_crc.valid_trailer` | nb | test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt<br>test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/inline-crc-valid_trailer.log |
+| `cass.data_db_decode.clustering_bounds.desc_order` | nb, oa | test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-desc-clustering-diff.log |
+| `cass.data_db_decode.clustering_bounds.multi_column_prefix` | nb, oa | test-data/datasets/sstables/test_wide_rows/wide_partition_table-6d6d0f80a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-multi-clustering-diff.log |
+| `cass.data_db_decode.clustering_bounds.null_vs_empty` | nb, oa | test-data/datasets/sstables/test_basic/static_columns_table-6b0425d0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-null-empty-clustering-diff.log |
 | `cass.data_db_decode.row_cell_flags_and_vint` | nb, oa | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
 | `cass.data_db_decode.row_preamble_size_mismatch` | nb | — |
 | `cass.data_db_decode.serialization_header.timestamp_ttl_ldt_deltas` | nb, oa | test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-delta-diff.log |
 | `cass.data_db_decode.serialization_mirror.multi_clustering_column_order` | nb, oa | test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-clustering-order-diff.log |
+| `cass.data_db_decode.static_rows.static_only_partition` | nb, oa | test-data/datasets/sstables/test_basic/static_columns_table-6b0425d0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-static-row-diff.log |
+| `cass.data_db_decode.static_rows.static_with_clustering_rows` | nb, oa | test-data/datasets/sstables/test_tomb/static_with_tombstones-4cdb9780702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-static-clustering-diff.log |
 | `cass.data_db_decode.unfiltered_serializer.row_and_cell_flags` | nb, oa | test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-flag-diff.log |
 | `cass.data_db_decode.unfiltered_serializer.row_size_vints` | nb, oa | test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-row-framing-diff.log |
-| `cass.delta_scan.tombstone_liveness_facts` | nb | test-data/datasets/sstables/test_deltas/collection_ops-2a5006f06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl |
+| `cass.data_db_decode.wide_partition.row_boundaries` | nb | test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl |
+| `cass.delta_scan.adjacent_ranges` | nb | test-data/datasets/sstables/test_deltas/adjacent_ranges-972f22806c7811f1a24ff924a65838e2/nb-1-big-Data.db.jsonl |
+| `cass.delta_scan.cell_tombstones` | nb | test-data/datasets/sstables/test_deltas/cell_tombstones-29f7fbe06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl |
+| `cass.delta_scan.collection_ops` | nb | test-data/datasets/sstables/test_deltas/collection_ops-2a5006f06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl |
+| `cass.delta_scan.partial_updates` | nb | test-data/datasets/sstables/test_deltas/partial_updates-2a5ed4006c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl |
+| `cass.delta_scan.partition_tombstones` | nb | test-data/datasets/sstables/test_deltas/partition_tombstones-2a26fb206c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl |
+| `cass.delta_scan.range_tombstones` | nb | test-data/datasets/sstables/test_deltas/range_tombstones-2a1a50f06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl |
+| `cass.delta_scan.row_tombstones` | nb | test-data/datasets/sstables/test_deltas/row_tombstones-2a0e91206c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl |
+| `cass.delta_scan.static_with_rows` | nb | test-data/datasets/sstables/test_deltas/static_with_rows-2a4299706c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl |
+| `cass.delta_scan.ttl_cells` | nb | test-data/datasets/sstables/test_deltas/ttl_cells-2a35ef406c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl |
+| `cass.delta_scan.wide_partition_corpus` | nb | — |
 | `cass.distributed_consensus.paxos_accord_out_of_scope` | — | — |
 | `cass.filter_db.bti_membership` | da | — |
 | `cass.filter_db.corruption_fails_closed` | nb, oa, da | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/filter-db-corruption.log |
@@ -878,12 +992,15 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.filter_db_bloom.serialization_no_false_negative` | nb | — |
 | `cass.index_db.CorruptPrimaryIndexTest.big_primary_index_corruption` | nb, oa | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/index-db-diff.log |
 | `cass.index_db.RowIndexEntryTest.partition_offsets` | nb, oa | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/index-db-diff.log |
-| `cass.index_db.RowIndexEntryTest.promoted_index_entries` | nb, oa | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
+| `cass.index_db.RowIndexEntryTest.promoted_index_entries` | nb | test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl |
 | `cass.index_db.SSTableReaderTest.point_lookup_offsets` | nb, oa | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/index-db-diff.log |
 | `cass.index_db.SSTableScannerTest.range_boundaries` | nb, oa | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/index-db-diff.log |
 | `cass.index_db.big.raw_partition_keys_and_offsets` | nb, oa | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/index-db-diff.log |
-| `cass.index_db.big.wide_partition_promoted_entries` | nb, oa | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
+| `cass.index_db.big.wide_partition_promoted_entries` | nb | test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl |
 | `cass.index_db.bti.index_component_discovery` | da | test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-TOC.txt<br>_fail:_ target/cassandra-parity/index-db-diff.log |
+| `cass.index_db.promoted_index.clustering_bounds` | nb | test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl |
+| `cass.index_db.promoted_index.index_info_offsets` | nb | test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl |
+| `cass.index_db.promoted_index.range_tombstone_boundary_at_block_edge` | nb | test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl |
 | `cass.index_summary.big_index_offsets` | nb | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
 | `cass.index_summary.column_index.range_tombstone_boundary_big_bti` | nb | test-data/datasets/sstables/test_tomb/wide_range_tombstone-4ce3add0702011f1b8f419c9a388d558/nb-1-big-Statistics.db.txt |
 | `cass.index_summary.summary_boundaries` | nb | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
@@ -908,6 +1025,7 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.sstable_format.toc_component_manifest` | nb, oa, da | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt<br>test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-TOC.txt<br>test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-TOC.txt<br>test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Digest.crc32<br>test-data/datasets/sstables/test_oa/simple_table-4b7cd05064e711f1bd3ac7dbf655c673/oa-2-big-Digest.crc32<br>_fail:_ panic diff: cqlite-recomputed Digest.crc32 payload vs Cassandra reference (bytes + decoded decimal + Data.db path) |
 | `cass.sstable_io.reader.tombstone_only_partition` | nb | test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-2-big-Data.db.jsonl |
 | `cass.sstable_io.scanner.tombstone_only_partition_ranges` | nb | test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-2-big-Data.db.jsonl |
+| `cass.sstable_scan.wide_partition.forward_reverse_bounds` | nb | test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl |
 | `cass.statistics_db.MetadataSerializerTest.metadata_components` | nb, oa, da | test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt<br>test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-Statistics.db.txt<br>test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Statistics.db.txt<br>_fail:_ target/cassandra-parity/statistics-db-toc-mismatch.log |
 | `cass.statistics_db.SSTableMetadataTest.max_local_deletion_time` | — | — |
 | `cass.statistics_db.SSTableMetadataTrackingTest.timestamp_and_ttl_metadata` | nb, oa, da | test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt<br>_fail:_ target/cassandra-parity/statistics-db-encodingstats-mismatch.log |
@@ -957,6 +1075,10 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.verify.inline_crc_validation` | nb | test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl |
 | `cass.verify.no_silent_empty_result_on_corruption` | nb | test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml<br>test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl |
 | `cass.write_load_path.cassandra_sstable_writer_fixtures` | nb | — |
+| `cass.write_load_path.cql_sstable_writer.finished_data_db_artifacts` | nb, da | — |
+| `cass.write_load_path.flush.partition_boundary_artifacts` | nb, da | — |
+| `cass.write_load_path.flush.tombstone_and_ttl_artifacts` | nb | — |
+| `cass.write_load_path.live_readback.semantic_only` | nb | — |
 | `cass.zstd_dictionary.dictionary_assisted_decompression` | — | — |
 | `cass.zstd_dictionary.dictionary_cache_reuse` | — | — |
 | `cass.zstd_dictionary.dictionary_checksum` | — | — |

@@ -323,7 +323,7 @@ async fn validate_table_index_parity(
     let mut promoted_count = 0;
     for entry in partition_entries {
         if let Some(ref promoted_index) = entry.promoted_index {
-            promoted_count += promoted_index.entries.len();
+            promoted_count += promoted_index.block_count() as usize;
         }
     }
     validation_result.promoted_index_count = promoted_count;
@@ -416,26 +416,17 @@ async fn validate_promoted_index_paths(
 
     for (i, entry) in partition_entries.iter().enumerate() {
         if let Some(ref promoted_index) = entry.promoted_index {
-            // Validate promoted index structure
-            if promoted_index.entries.is_empty() {
+            // Issue #993: the promoted payload is CAPTURED (not discarded). Validate
+            // the schema-free portion (payload non-empty + recoverable block count).
+            // firstName/lastName splitting needs schema and is covered elsewhere.
+            if promoted_index.is_empty() {
                 promoted_path_errors.push(format!("Partition {} has empty promoted index", i));
             }
-
-            // Validate promoted index entry offsets are within bounds
-            for (j, promoted_entry) in promoted_index.entries.iter().enumerate() {
-                if promoted_entry.partition_offset >= entry.data_size {
-                    promoted_path_errors.push(format!(
-                        "Partition {} promoted entry {} offset {} exceeds partition size {}",
-                        i, j, promoted_entry.partition_offset, entry.data_size
-                    ));
-                }
-
-                if promoted_entry.section_size == 0 {
-                    promoted_path_errors.push(format!(
-                        "Partition {} promoted entry {} has zero section size",
-                        i, j
-                    ));
-                }
+            if promoted_index.block_count() == 0 {
+                promoted_path_errors.push(format!(
+                    "Partition {} promoted index has no IndexInfo blocks",
+                    i
+                ));
             }
         }
     }

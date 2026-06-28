@@ -426,28 +426,22 @@ async fn test_promoted_index_wide_partitions() {
                                     promoted_count += 1;
                                     found_promoted_index = true;
 
+                                    // Issue #993: the promoted payload is CAPTURED (not
+                                    // discarded). The IndexInfo block count is recoverable
+                                    // schema-free; firstName/lastName need schema to split.
+                                    let block_count = promoted.block_count();
                                     println!(
-                                        "Found promoted index in partition {} with {} entries",
+                                        "Found promoted index in partition {} with {} blocks ({} payload bytes)",
                                         i,
-                                        promoted.entries.len()
+                                        block_count,
+                                        promoted.len()
                                     );
 
-                                    // Verify promoted index entries have proper structure
-                                    for (j, promoted_entry) in promoted.entries.iter().enumerate() {
-                                        assert!(
-                                            true, // partition_offset is u64, always >= 0
-                                            "Promoted index entry {} should have valid partition offset, got {}",
-                                            j,
-                                            promoted_entry.partition_offset
-                                        );
-                                        assert!(
-                                            promoted_entry.section_size > 0,
-                                            "Promoted index entry {} should have non-zero section size, got {}",
-                                            j,
-                                            promoted_entry.section_size
-                                        );
-                                        total_promoted_entries += 1;
-                                    }
+                                    assert!(
+                                        !promoted.is_empty(),
+                                        "captured promoted payload must be non-empty"
+                                    );
+                                    total_promoted_entries += block_count as usize;
                                 }
                             }
 

@@ -142,7 +142,52 @@ fn lint_scenario(s: &Scenario, repo_root: Option<&Path>, out: &mut Vec<Finding>)
     // --- status-conditional rules ---
     match s.status.as_str() {
         "mirrored" => {
-            if s.cqlite.coverage.tests.is_empty() && s.fixtures.references.is_empty() {
+            // delta_scan mirrored scenarios are held to a stricter bar than the
+            // generic OR rule (issue #995, AC6): a delta-shape claim is only
+            // trustworthy when it is backed by BOTH a real CQLite per-shape test
+            // (whose file exists on disk) AND a JSONL fixture reference. The
+            // generic OR rule below covers all other capabilities.
+            if s.capability == "delta_scan" {
+                if s.cqlite.coverage.tests.is_empty() {
+                    out.push(Finding::error(
+                        id,
+                        "cqlite.coverage.tests",
+                        "mirrored delta_scan scenarios must name a CQLite test target",
+                    ));
+                }
+                if s.fixtures.references.is_empty() {
+                    out.push(Finding::error(
+                        id,
+                        "fixtures.references",
+                        "mirrored delta_scan scenarios must name a fixture reference",
+                    ));
+                }
+                // The referenced test file(s) AND fixture(s) must actually exist
+                // on disk: a dangling/typo'd path must not pass lint silently
+                // (AC6 — backed by BOTH a real test AND a real fixture).
+                if let Some(root) = repo_root {
+                    for t in &s.cqlite.coverage.tests {
+                        if !root.join(t).exists() {
+                            out.push(Finding::error(
+                                id,
+                                "cqlite.coverage.tests",
+                                format!("mirrored delta_scan test target does not exist: {t}"),
+                            ));
+                        }
+                    }
+                    for r in &s.fixtures.references {
+                        if !root.join(r).exists() {
+                            out.push(Finding::error(
+                                id,
+                                "fixtures.references",
+                                format!(
+                                    "mirrored delta_scan fixture reference does not exist: {r}"
+                                ),
+                            ));
+                        }
+                    }
+                }
+            } else if s.cqlite.coverage.tests.is_empty() && s.fixtures.references.is_empty() {
                 out.push(Finding::error(
                     id,
                     "cqlite.coverage.tests|fixtures.references",

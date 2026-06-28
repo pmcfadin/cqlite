@@ -77,6 +77,11 @@ pub use filter_writer::FilterWriter;
 pub use index_writer::{
     IndexEntryInfo, IndexWriter, PromotedIndexBlock, COLUMN_INDEX_SIZE_BYTES, INDEX_INFO_WIDTH_BASE,
 };
+// Test-only oracle helper for the promoted-index reader round-trip (Issue #993):
+// reachable in-crate without widening the published API. Gated on `test` so the
+// non-test lib build does not flag it as dead code under `-D warnings`.
+#[cfg(all(test, feature = "write-support"))]
+pub(crate) use index_writer::serialize_promoted_index_for_test;
 #[cfg(feature = "write-support")]
 pub use stats_writer::{StatisticsMetadata, StatisticsWriter};
 #[cfg(feature = "write-support")]

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING (CLI):** dropped YAML as a query output format. `--out yaml` and
+  `--format yaml` are no longer accepted — both are now rejected at parse time
+  with a clear error listing the supported values (`table`, `json`, `csv`,
+  `parquet` for `--out`). YAML output was never implemented (it was only an
+  unused `OutputMode`/`OutputFormat` variant), so this removes a dead surface
+  rather than working behavior; anyone scripting `--out yaml`/`--format yaml`
+  must switch to a supported format. A parse-rejection regression test guards
+  against the variant being silently re-added (#283).
+
 ## [v0.12.0] - 2026-06-22
 
 The compaction release. CQLite now rewrites and compacts Cassandra 5.0 SSTables

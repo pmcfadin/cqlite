@@ -453,6 +453,362 @@ scenarios:
     scope: {}
 
   # ----------------------------------------------------------------------------
+  # data_db_decode — static-row markers + clustering-bound prefixes (issue #991 / epic #969)
+  # ----------------------------------------------------------------------------
+  - id: cass.data_db_decode.static_rows.static_only_partition
+    title: Data.db static-only partition marker parity
+    status: mirrored
+    capability: data_db_decode
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - UnfilteredSerializer.java
+        - UnfilteredSerializerTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_data_db_jsonl
+        tests:
+          - cqlite-core/tests/issue_991_static_clustering_parity.rs
+        notes: >-
+          A static row sets HAS_EXTENDED_FLAGS (0x80) and the extended IS_STATIC
+          bit (0x01), and OMITS the clustering prefix. The deterministic lane
+          (`static_only_row_sets_is_static_and_omits_clustering_prefix`) asserts
+          these bytes at absolute offsets and that the static row's
+          prev_unfiltered_size is hard-coded to 0 (issue #821 — the static
+          prelude is not part of the prev-size chain), with the body framing
+          closing exactly on the END_OF_PARTITION marker (a leaked clustering
+          prefix would shift it) — this lane runs everywhere and is the primary
+          static-only-shape evidence. The PINNED fixture lane
+          (`fixture_static_columns_marker_byte_parity`) walks the real Snappy
+          static_columns_table nb Data.db for the SAME static-row marker byte
+          assertions (HAS_EXTENDED_FLAGS + IS_STATIC + prev_size=0 + omitted
+          clustering prefix). A LOCAL-ONLY fixture lane
+          (`fixture_static_only_partition_marker_byte_parity`) additionally walks
+          the truly static-ONLY partition (PK=99) of test_deltas/static_with_rows
+          when that (non-pinned) binary is present, SKIPPING in CI where it is
+          absent.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/static_columns_table-6b0425d0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_991_static_clustering_parity
+        static_only fixture_static_columns_marker
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/static_columns_table-6b0425d0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/data-db-static-row-diff.log
+      normalization: >-
+        Two distinct assertion families: (1) STATIC-ROW BYTE parity — the row
+        flag byte, extended IS_STATIC bit, hard-coded prev_size=0, and the
+        omitted clustering prefix are compared at exact offsets in the
+        decompressed Data.db; (2) SEMANTIC/JSONL parity — the decoded static cell
+        value and the static structure are compared against the sstabledump
+        golden. These are asserted separately. The pinned fixture is decompressed
+        first (FAIL CLOSED on a missing pinned fixture); the truly static-ONLY
+        partition shape is covered deterministically (always) plus the local-only
+        static_with_rows lane (skip-on-presence).
+      known_limitations: >-
+        The pinned static_columns_table has no static-ONLY partition, so the
+        static-ONLY shape (a partition with a static_block and NO clustering rows)
+        is proven by the DETERMINISTIC writer lane (always runs) and the LOCAL-ONLY
+        test_deltas/static_with_rows lane (skip-on-presence; not in the CI
+        dataset). Per-static-cell value encoding across all CQL types is covered by
+        the cql_types suites, whole-file identity by
+        sstable_writer_cassandra_fixture_parity. This entry covers static-row BYTE
+        parity, distinct from query/scan semantic parity.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.data_db_decode.static_rows.static_with_clustering_rows
+    title: Data.db static cells + clustering rows in one partition parity
+    status: mirrored
+    capability: data_db_decode
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - UnfilteredSerializer.java
+        - UnfilteredSerializerTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_data_db_jsonl
+        tests:
+          - cqlite-core/tests/issue_991_static_clustering_parity.rs
+        notes: >-
+          A partition that carries BOTH a static prelude AND regular clustering
+          rows serializes the IS_STATIC static row first (no clustering prefix,
+          prev_size=0) followed by regular rows whose clustering prefix carries
+          the clustering value(s). The PINNED fixture lane
+          (`fixture_static_with_clustering_rows_byte_parity`) walks
+          test_tomb/static_with_tombstones (int32 PK + int32 clustering) partition
+          key 1 byte-for-byte: the static row marker, then the first clustered
+          row's PRESENT clustering header and its 4-byte int `ck=1` value (ASC) at
+          absolute offsets. `fixture_static_with_clustering_rows_jsonl_parity`
+          cross-checks the static cell value + the coexistence of static_block and
+          clustering rows + the ck=1/row_1 pair against the sstabledump golden.
+          `fixture_static_columns_marker_byte_parity` additionally walks the
+          pinned static_columns_table static→clustered transition (UUID PK +
+          TIMESTAMP clustering), and a LOCAL-ONLY lane
+          (`fixture_local_static_with_rows_jsonl_parity`, skip-on-presence) covers
+          a dense ck 1..=4 ASC sequence. A deterministic counterpart
+          (`regular_clustered_row_is_not_static_and_carries_clustering_prefix`)
+          contrasts the non-static row layout via the public writer.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_tomb/static_with_tombstones-4cdb9780702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_991_static_clustering_parity
+        static_with_clustering fixture_static_columns regular_clustered
+      reference_paths:
+        - test-data/datasets/sstables/test_tomb/static_with_tombstones-4cdb9780702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/data-db-static-clustering-diff.log
+      normalization: >-
+        STATIC-ROW + clustering BYTE parity (static marker, then clustered-row
+        clustering header + value offsets) is asserted separately from SEMANTIC
+        JSONL parity (static value + static/clustering coexistence). The pinned
+        fixture is decompressed first (FAIL CLOSED on a missing pinned fixture).
+      known_limitations: >-
+        Asserts the static→clustered ordering and the first clustered row's
+        clustering value at the byte level; full per-row cell decode across the
+        partition is covered by the broader scan/query parity suites. This entry
+        is static-row BYTE parity, distinct from query/scan semantic parity.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.data_db_decode.clustering_bounds.multi_column_prefix
+    title: Data.db multi-column clustering-prefix byte consumption parity
+    status: mirrored
+    capability: data_db_decode
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - ClusteringPrefix.java
+        - SerializationMirrorTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_data_db_jsonl
+        tests:
+          - cqlite-core/tests/issue_991_static_clustering_parity.rs
+        notes: >-
+          A multi-column clustering prefix is `[2-bit-per-column header VInt][per-
+          column values in DECLARED order]`, ahead of row_size. The deterministic
+          lane (`multi_column_clustering_prefix_byte_parity_writer`) asserts the
+          full prefix → row_size framing for a 3-column (int/text/int) clustering
+          via the public writer, including the length-prefixed text value and the
+          fixed-width int values, then prev_size == partition-header size. The
+          fixture lane (`fixture_wide_multi_column_clustering_prefix_byte_parity`)
+          anchors the FIRST FOUR clustering columns (timestamp/text/int/uuid) of
+          the real LZ4 test_wide_rows/wide_partition_table nb Data.db at absolute
+          offsets, and `fixture_wide_multi_column_clustering_jsonl_parity` covers
+          the full 5-tuple (incl. the DATE 5th column) semantically.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_wide_rows/wide_partition_table-6d6d0f80a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_991_static_clustering_parity
+        multi_column fixture_wide_multi_column
+      reference_paths:
+        - test-data/datasets/sstables/test_wide_rows/wide_partition_table-6d6d0f80a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/data-db-multi-clustering-diff.log
+      normalization: >-
+        The deterministic writer lane asserts the FULL multi-column prefix →
+        row_size framing byte-for-byte; the wide fixture lane asserts the first
+        four real-Cassandra clustering values' widths/values at exact offsets
+        (the 5th DATE column's on-disk offset is NOT byte-asserted — see
+        known_limitations) and the JSONL lane asserts the full 5-tuple
+        semantically. FAIL CLOSED on a missing fixture.
+      known_limitations: >-
+        For the wide 5-column fixture, the 5th clustering column (SimpleDateType
+        under ReversedType) is preceded on disk by a byte whose meaning is not yet
+        asserted, so the 5th value's offset and the wide row_size/prev_size
+        framing are covered SEMANTICALLY via the JSONL golden rather than
+        byte-for-byte; the full prefix→row_size byte framing is covered by the
+        deterministic writer lane. Byte parity here is the clustering-prefix
+        framing, distinct from query/scan semantic parity.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.data_db_decode.clustering_bounds.desc_order
+    title: Data.db DESC (ReversedType) clustering-bound parity
+    status: mirrored
+    capability: data_db_decode
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - ReversedType.java
+        - ClusteringPrefix.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_data_db_jsonl
+        tests:
+          - cqlite-core/tests/issue_991_static_clustering_parity.rs
+        notes: >-
+          ReversedType flips comparison ORDER only — the on-disk clustering VALUE
+          bytes are NOT pre-inverted. The fixture lane
+          (`fixture_composite_desc_clustering_order_byte_parity`) decompresses the
+          real LZ4 test_basic/composite_key_table (clustering_key1 TIMESTAMP DESC
+          via ReversedType, clustering_key2 TEXT ASC) and asserts the 8-byte DESC
+          timestamp decodes to the plain big-endian golden value, followed by the
+          length-prefixed ASC text 'information', ahead of row_size (prev_size ==
+          partition-header size). `fixture_composite_desc_clustering_jsonl_parity`
+          cross-checks the full [DESC timestamp, ASC text] tuple against the
+          sstabledump golden.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_991_static_clustering_parity
+        composite_desc
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/data-db-desc-clustering-diff.log
+      normalization: >-
+        BYTE parity (DESC timestamp + ASC text clustering values at exact offsets,
+        proving ReversedType does NOT invert on-disk value bytes) is asserted
+        separately from SEMANTIC JSONL parity (full clustering tuple). The fixture
+        is decompressed first (FAIL CLOSED on a missing fixture).
+      known_limitations: >-
+        Asserts the DESC clustering value's on-disk byte form and declared-order
+        placement; schema-aware ascending/descending BOUND COMPARISON at query
+        time is out of scope here (covered by the query-engine suites). This entry
+        is clustering-bound BYTE parity, distinct from query/scan semantic parity.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.data_db_decode.clustering_bounds.null_vs_empty
+    title: Data.db null-vs-empty clustering value distinction parity
+    status: mirrored
+    capability: data_db_decode
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - ClusteringPrefix.java
+        - UnfilteredSerializer.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_data_db_jsonl
+        tests:
+          - cqlite-core/tests/issue_991_static_clustering_parity.rs
+        notes: >-
+          An EMPTY clustering value (PRESENT, zero-length) is byte-distinct from
+          an ABSENT/null clustering (a static row, which OMITS the prefix
+          entirely). The deterministic lane
+          (`null_vs_empty_clustering_value_byte_distinction`) asserts both shapes
+          via the public writer: an empty TEXT clustering serializes
+          `[header PRESENT=0][len=0][row_size]`, while a static (absent-clustering)
+          row serializes `[ext_flags IS_STATIC][row_size]` with prev_size=0 and no
+          header/length VInt — proven by the END_OF_PARTITION framing.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/static_columns_table-6b0425d0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
+        — the EMPTY/PRESENT side is deterministic writer-driven (no dedicated
+        Cassandra fixture isolates a zero-length text clustering); the
+        ABSENT/static side's byte form is corroborated by the pinned
+        static_columns_table fixture (whose static rows OMIT the clustering prefix
+        with prev_size=0, exactly the absent-clustering shape this test asserts).
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_991_static_clustering_parity
+        null_vs_empty fixture_static_columns_marker
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/static_columns_table-6b0425d0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/data-db-null-empty-clustering-diff.log
+      normalization: >-
+        Pure BYTE-level distinction: the EMPTY clustering's PRESENT header +
+        zero-length value VInt vs the static (absent) row's omitted prefix
+        (prev_size=0), both asserted at exact offsets via the public DataWriter
+        encode surface and re-decoded through the reader's parse_vuint. The
+        ABSENT/static byte shape is additionally observed in the pinned
+        static_columns_table fixture (`fixture_static_columns_marker_byte_parity`).
+      known_limitations: >-
+        The EMPTY/PRESENT side is covered by a DETERMINISTIC writer-driven test
+        rather than a Cassandra fixture: no existing nb dataset isolates a
+        zero-length text clustering, so a fixture cannot express it (and a
+        dedicated empty-clustering fixture would require Docker regeneration via
+        test-data/scripts/regenerate-datasets.sh). The ABSENT/static side IS a real
+        Cassandra byte shape (pinned static_columns_table). This entry is
+        clustering-value BYTE parity, distinct from query/scan semantic parity.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  # ----------------------------------------------------------------------------
   # index_summary
   # ----------------------------------------------------------------------------
   - id: cass.index_summary.big_index_offsets
@@ -619,42 +975,48 @@ scenarios:
       coverage:
         suite: sstable_parity_index_db_big
         tests:
-          - cqlite-core/tests/sstable_parity_index_db_test.rs
+          - cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs
         notes: >-
-          The strict BIG lane decodes the promoted-index byte length on every
-          on-disk entry and asserts that any partition carrying a promoted block has
-          a Data.db span strictly larger than the promoted block it indexes (the
-          wide-partition boundary invariant). The aggregate promoted-byte total is
-          reported per run.
+          Issue #993: the BIG read path decodes the full promoted IndexInfo[] array
+          (header length, partition DeletionTime, block count, per-block clustering
+          bounds, Data.db offset, signed width delta, end-open marker, trailing
+          offsets array) against a wide-partition fixture whose partitions exceed
+          column_index_size, instead of decoding only the promoted byte length.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
     evidence:
       type: partial
       artifacts: [bytes, offsets]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
-      storage_format_version: [nb, oa]
+      storage_format_version: [nb]
       fixture_generation_command: >-
-        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 flush emits Index.db
+        bash test-data/scripts/gen-wide-big.sh
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
       known_limitations: >-
-        No committed BIG fixture has partitions wide enough to emit a non-empty
-        promoted index, so the promoted-entry invariant is exercised structurally
-        (it activates the moment a wide-partition BIG fixture is added) but not yet
-        with non-zero promoted bytes.
+        The BIG promoted IndexInfo[] decode is implemented and proven byte-for-byte
+        LOCALLY against the real Cassandra wide-partition fixture (see
+        cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs). The
+        committed-JSONL canonical-semantic checks (3 partitions, live counts
+        290/300/300, pk=1 missing exactly ck 30..39, ascending clustering) ARE
+        enforced in the required CI lane on every run; the byte-level Index.db
+        promoted-offset/bounds assertions are NOT in the required lane because they
+        depend on local-only binaries absent from the pinned CI dataset.
     ci:
       tier: required_parity
       workflow: .github/workflows/sstabledump-parity-gate.yml
     scope:
       gap: >-
-        No committed BIG fixture triggers promoted-index emission (all partitions
-        are below the column_index_size threshold).
+        Byte-level promoted-index parity (Index.db offsets, widths, clustering
+        bounds) runs only against local-only binaries that are not in the pinned CI
+        dataset; the required lane enforces only the committed-JSONL
+        canonical-semantic facts.
       next_step: >-
-        Generate a wide-partition BIG fixture (partition exceeding
-        column_index_size_in_kb) and assert decoded promoted-index clustering
-        boundaries against the Cassandra reference.
+        Add the test_big.wide_partition binaries to the dataset release pin
+        (regenerate the tarball + update DATASET_SHA256) to promote these scenarios
+        to byte_for_byte enforced in the required_parity lane.
 
   - id: cass.index_db.SSTableReaderTest.point_lookup_offsets
     title: BIG Index.db point/absent-key lookup offsets
@@ -877,38 +1239,335 @@ scenarios:
       coverage:
         suite: sstable_parity_index_db_big
         tests:
-          - cqlite-core/tests/sstable_parity_index_db_test.rs
+          - cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs
         notes: >-
-          The strict BIG lane decodes and validates the promoted-index byte length
-          per entry and the wide-partition span invariant; it reports the aggregate
-          promoted-byte count. No committed BIG fixture currently emits a non-empty
-          promoted index.
+          Issue #993: the BIG read path now decodes the promoted IndexInfo[] array
+          (clustering bounds, Data.db offsets, width deltas, deletion time, block
+          count) instead of discarding it. The wide-partition fixture
+          (test_big.wide_partition, three ~600 KiB partitions) emits multi-block
+          promoted indexes; the parity test decodes them and asserts ordered,
+          covering, monotonic boundaries against the fixture.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
     evidence:
       type: partial
       artifacts: [bytes, offsets]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
-      storage_format_version: [nb, oa]
+      storage_format_version: [nb]
       fixture_generation_command: >-
-        bash test-data/scripts/regenerate-datasets.sh  # needs a partition > column_index_size_in_kb
+        bash test-data/scripts/gen-wide-big.sh
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
       known_limitations: >-
-        Promoted-index clustering-boundary decoding is not yet compared against a
-        Cassandra reference because no committed BIG fixture is wide enough to emit
-        promoted entries.
+        The BIG promoted IndexInfo[] decode is implemented and proven byte-for-byte
+        LOCALLY against the real Cassandra wide-partition fixture (see
+        cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs). The
+        committed-JSONL canonical-semantic checks (3 partitions, live counts
+        290/300/300, pk=1 missing exactly ck 30..39, ascending clustering) ARE
+        enforced in the required CI lane on every run; the byte-level Index.db
+        promoted-offset/bounds assertions are NOT in the required lane because they
+        depend on local-only binaries absent from the pinned CI dataset.
     ci:
       tier: required_parity
       workflow: .github/workflows/sstabledump-parity-gate.yml
     scope:
       gap: >-
-        No committed wide BIG fixture exercises promoted clustering boundaries.
+        Byte-level promoted-index parity (Index.db offsets, widths, clustering
+        bounds) runs only against local-only binaries that are not in the pinned CI
+        dataset; the required lane enforces only the committed-JSONL
+        canonical-semantic facts.
       next_step: >-
-        Add a BIG fixture with a partition exceeding column_index_size_in_kb and
-        compare decoded promoted clustering boundaries to the Cassandra reference.
+        Add the test_big.wide_partition binaries to the dataset release pin
+        (regenerate the tarball + update DATASET_SHA256) to promote these scenarios
+        to byte_for_byte enforced in the required_parity lane.
+
+  - id: cass.data_db_decode.wide_partition.row_boundaries
+    title: Wide-partition Data.db row boundaries align with promoted-index offsets
+    status: partial
+    capability: data_db_decode
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: sstable-format
+      relevance: high
+      files:
+        - RowIndexEntryTest.java
+        - ColumnIndexTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_data_db_jsonl
+        tests:
+          - cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs
+        notes: >-
+          For each wide partition the promoted IndexInfo block offset+width chain
+          is validated to be consistent and to span the partition; the first block
+          offset matches the partition header length and offsets are strictly
+          increasing, so Data.db row boundaries align with the Index.db blocks.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/gen-wide-big.sh
+      reference_paths:
+        - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
+      known_limitations: >-
+        The BIG promoted IndexInfo[] decode is implemented and proven byte-for-byte
+        LOCALLY against the real Cassandra wide-partition fixture (see
+        cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs). The
+        committed-JSONL canonical-semantic checks (3 partitions, live counts
+        290/300/300, pk=1 missing exactly ck 30..39, ascending clustering) ARE
+        enforced in the required CI lane on every run; the byte-level Index.db
+        promoted-offset/bounds assertions are NOT in the required lane because they
+        depend on local-only binaries absent from the pinned CI dataset.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope:
+      gap: >-
+        Byte-level promoted-index parity (Index.db offsets, widths, clustering
+        bounds) runs only against local-only binaries that are not in the pinned CI
+        dataset; the required lane enforces only the committed-JSONL
+        canonical-semantic facts.
+      next_step: >-
+        Add the test_big.wide_partition binaries to the dataset release pin
+        (regenerate the tarball + update DATASET_SHA256) to promote these scenarios
+        to byte_for_byte enforced in the required_parity lane.
+
+  - id: cass.index_db.promoted_index.index_info_offsets
+    title: BIG promoted-index IndexInfo Data.db offsets and width chain
+    status: partial
+    capability: index_summary
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: sstable-format
+      relevance: high
+      files:
+        - RowIndexEntryTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_index_db_big
+        tests:
+          - cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs
+        notes: >-
+          Decodes each IndexInfo block's Data.db offset (vint) and width (signed
+          vint delta vs WIDTH_BASE=64 KiB) and asserts offset+width chains to the
+          next block's offset, the trailing offsets array is monotonic from zero,
+          and the first block offset equals the partition header length.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/gen-wide-big.sh
+      reference_paths:
+        - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
+      known_limitations: >-
+        The BIG promoted IndexInfo[] decode is implemented and proven byte-for-byte
+        LOCALLY against the real Cassandra wide-partition fixture (see
+        cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs). The
+        committed-JSONL canonical-semantic checks (3 partitions, live counts
+        290/300/300, pk=1 missing exactly ck 30..39, ascending clustering) ARE
+        enforced in the required CI lane on every run; the byte-level Index.db
+        promoted-offset/bounds assertions are NOT in the required lane because they
+        depend on local-only binaries absent from the pinned CI dataset.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope:
+      gap: >-
+        Byte-level promoted-index parity (Index.db offsets, widths, clustering
+        bounds) runs only against local-only binaries that are not in the pinned CI
+        dataset; the required lane enforces only the committed-JSONL
+        canonical-semantic facts.
+      next_step: >-
+        Add the test_big.wide_partition binaries to the dataset release pin
+        (regenerate the tarball + update DATASET_SHA256) to promote these scenarios
+        to byte_for_byte enforced in the required_parity lane.
+
+  - id: cass.index_db.promoted_index.clustering_bounds
+    title: BIG promoted-index IndexInfo clustering bounds ordering and coverage
+    status: partial
+    capability: index_summary
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: sstable-format
+      relevance: high
+      files:
+        - RowIndexEntryTest.java
+        - ColumnIndexTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_index_db_big
+        tests:
+          - cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs
+        notes: >-
+          Decodes each IndexInfo block's first/last clustering bound with the
+          schema-driven prefix length (6 bytes for a single int clustering
+          column) and asserts within-block first<=last, across-block
+          last[N]<=first[N+1] (non-overlapping byte-comparable order), and that
+          the overall range covers the partition clustering span (ck 0..299).
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/gen-wide-big.sh
+      reference_paths:
+        - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
+      known_limitations: >-
+        The BIG promoted IndexInfo[] decode is implemented and proven byte-for-byte
+        LOCALLY against the real Cassandra wide-partition fixture (see
+        cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs). The
+        committed-JSONL canonical-semantic checks (3 partitions, live counts
+        290/300/300, pk=1 missing exactly ck 30..39, ascending clustering) ARE
+        enforced in the required CI lane on every run; the byte-level Index.db
+        promoted-offset/bounds assertions are NOT in the required lane because they
+        depend on local-only binaries absent from the pinned CI dataset.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope:
+      gap: >-
+        Byte-level promoted-index parity (Index.db offsets, widths, clustering
+        bounds) runs only against local-only binaries that are not in the pinned CI
+        dataset; the required lane enforces only the committed-JSONL
+        canonical-semantic facts.
+      next_step: >-
+        Add the test_big.wide_partition binaries to the dataset release pin
+        (regenerate the tarball + update DATASET_SHA256) to promote these scenarios
+        to byte_for_byte enforced in the required_parity lane.
+
+  - id: cass.index_db.promoted_index.range_tombstone_boundary_at_block_edge
+    title: BIG promoted-index decode across a range-tombstone block boundary
+    status: partial
+    capability: index_summary
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - TombstonesWithIndexedSSTableTest.java
+        - RowIndexEntryTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_index_db_big
+        tests:
+          - cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs
+        notes: >-
+          The fixture deletes a clustering range (pk=1, ck 30..39) straddling a
+          promoted-index block edge. The test confirms the spanning block decodes
+          without error and the live row counts (290/300/300) are cross-validated
+          three ways: promoted-index decode, live forward scan, and the JSONL
+          golden.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/gen-wide-big.sh
+      reference_paths:
+        - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
+      known_limitations: >-
+        The BIG promoted IndexInfo[] decode is implemented and proven byte-for-byte
+        LOCALLY against the real Cassandra wide-partition fixture (see
+        cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs). The
+        committed-JSONL canonical-semantic checks (3 partitions, live counts
+        290/300/300, pk=1 missing exactly ck 30..39, ascending clustering) ARE
+        enforced in the required CI lane on every run; the byte-level Index.db
+        promoted-offset/bounds assertions are NOT in the required lane because they
+        depend on local-only binaries absent from the pinned CI dataset.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope:
+      gap: >-
+        Byte-level promoted-index parity (Index.db offsets, widths, clustering
+        bounds) runs only against local-only binaries that are not in the pinned CI
+        dataset; the required lane enforces only the committed-JSONL
+        canonical-semantic facts.
+      next_step: >-
+        Add the test_big.wide_partition binaries to the dataset release pin
+        (regenerate the tarball + update DATASET_SHA256) to promote these scenarios
+        to byte_for_byte enforced in the required_parity lane.
+
+  - id: cass.sstable_scan.wide_partition.forward_reverse_bounds
+    title: Wide-partition forward and reverse scan boundary parity
+    status: partial
+    capability: index_summary
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: sstable-io
+      relevance: high
+      files:
+        - SSTableScannerTest.java
+        - SSTableReverseIteratorTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_index_db_big
+        tests:
+          - cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs
+        notes: >-
+          Forward-scan completeness is proven: forward scans return exactly
+          290/300/300 live rows with no rows lost across promoted-index block
+          boundaries or the deleted range. Reverse-iteration parity is not yet
+          provable (see gap).
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
+    evidence:
+      type: partial
+      artifacts: [offsets, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/gen-wide-big.sh
+      reference_paths:
+        - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
+      known_limitations: >-
+        Only forward-scan completeness is proven. Local-only fixture
+        (gen-wide-big.sh) pending dataset re-pin; test skips-on-absence.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope:
+      gap: >-
+        Reverse SSTable iteration is not implemented for BIG wide partitions; only
+        a post-fetch in-memory ORDER BY DESC sort exists, which does not exercise
+        reverse promoted-index block decoding.
+      next_step: >-
+        Implement a BIG-format reverse partition iterator that uses the promoted
+        IndexInfo blocks to seek/decode blocks back-to-front (mirroring Cassandra
+        SSTableReversedIterator), then assert forward and reverse scans of pk=1
+        return the identical 290-row clustering set with no rows lost adjacent to
+        the deleted block.
 
   - id: cass.index_db.bti.index_component_discovery
     title: BTI index-component discovery and classification
@@ -3409,9 +4068,119 @@ scenarios:
   # ----------------------------------------------------------------------------
   # delta_scan
   # ----------------------------------------------------------------------------
-  - id: cass.delta_scan.tombstone_liveness_facts
-    title: Delta-scan tombstone/TTL/liveness fact extraction
-    status: partial
+  # Per-shape delta_scan scenarios (issue #995). Each maps one delete/write
+  # shape to its specific test_deltas fixture and per-table parity test. All are
+  # canonical_semantic (scan_delta records compared to sstabledump JSONL deletion
+  # facts) — NOT byte_for_byte. Byte-for-byte Data.db backing for these shapes is
+  # a follow-up under the Data.db decode parity epic #969 (capability
+  # data_db_decode); a delta_scan failure points back to that scenario group.
+  - id: cass.delta_scan.cell_tombstones
+    title: Delta-scan cell tombstones (DELETE col)
+    status: mirrored
+    capability: delta_scan
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - SerializationMirrorTest.java
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/scan_delta_parity_test.rs
+        notes: >-
+          Maps to test_delta_parity_cell_tombstones; scan_delta cell-tombstone
+          facts are compared to the sstabledump JSONL golden.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/cell_tombstones-29f7fbe06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-deltas.sh
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/cell_tombstones-29f7fbe06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+      normalization: >-
+        scan_delta cell-tombstone records are mapped to sstabledump JSONL
+        deletion facts (deleted_at) and compared with a writetime tolerance.
+      known_limitations: >-
+        Canonical-semantic JSONL parity only; byte-for-byte Data.db backing is a
+        follow-up under epic #969 (capability data_db_decode). test_deltas
+        binaries are not yet published/enforced in CI (issue #701).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/delta-roundtrip.yml
+    scope:
+      gap: >-
+        No byte-for-byte Data.db diff yet; backed by canonical-semantic JSONL
+        parity. Byte-for-byte backing tracked by Data.db decode parity epic #969.
+        test_deltas dataset binaries not yet published/enforced in CI (#701).
+      next_step: >-
+        Add a byte-for-byte Data.db cell-tombstone scenario under data_db_decode
+        (#969) and publish/enforce the test_deltas dataset in delta-roundtrip CI (#701).
+
+  - id: cass.delta_scan.row_tombstones
+    title: Delta-scan row tombstones (DELETE FROM ... WHERE pk AND ck)
+    status: mirrored
+    capability: delta_scan
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - SerializationMirrorTest.java
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/scan_delta_parity_test.rs
+        notes: >-
+          Maps to test_delta_parity_row_tombstones; scan_delta row-delete facts
+          are compared to the sstabledump JSONL golden.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/row_tombstones-2a0e91206c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-deltas.sh
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/row_tombstones-2a0e91206c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+      normalization: >-
+        scan_delta row-delete records are mapped to sstabledump JSONL row
+        deletion_info markers and compared with a writetime tolerance.
+      known_limitations: >-
+        Canonical-semantic JSONL parity only; byte-for-byte Data.db backing is a
+        follow-up under epic #969 (capability data_db_decode). test_deltas
+        binaries are not yet published/enforced in CI (issue #701).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/delta-roundtrip.yml
+    scope:
+      gap: >-
+        No byte-for-byte Data.db diff yet; backed by canonical-semantic JSONL
+        parity. Byte-for-byte backing tracked by Data.db decode parity epic #969.
+        test_deltas dataset binaries not yet published/enforced in CI (#701).
+      next_step: >-
+        Add a byte-for-byte Data.db row-tombstone scenario under data_db_decode
+        (#969) and publish/enforce the test_deltas dataset in delta-roundtrip CI (#701).
+
+  - id: cass.delta_scan.range_tombstones
+    title: Delta-scan range tombstones (DELETE ... WHERE ck range)
+    status: mirrored
     capability: delta_scan
     priority: P0
     risk: p1_correctness
@@ -3420,37 +4189,411 @@ scenarios:
       relevance: high
       files:
         - RangeTombstoneTest.java
+        - RangeTombstoneListTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/scan_delta_parity_test.rs
+        notes: >-
+          Maps to test_delta_parity_range_tombstones; scan_delta range-delete
+          start/end bound pairs are compared to the sstabledump JSONL golden.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/range_tombstones-2a1a50f06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-deltas.sh
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/range_tombstones-2a1a50f06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+      normalization: >-
+        scan_delta range-delete records are mapped to consecutive sstabledump
+        JSONL range_tombstone_bound start/end pairs and compared with a writetime
+        tolerance; boundary markers are paired into synthetic end/start bounds.
+      known_limitations: >-
+        Canonical-semantic JSONL parity only; byte-for-byte Data.db backing is a
+        follow-up under epic #969 (capability data_db_decode). test_deltas
+        binaries are not yet published/enforced in CI (issue #701).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/delta-roundtrip.yml
+    scope:
+      gap: >-
+        No byte-for-byte Data.db diff yet; backed by canonical-semantic JSONL
+        parity. Byte-for-byte backing tracked by Data.db decode parity epic #969.
+        test_deltas dataset binaries not yet published/enforced in CI (#701).
+      next_step: >-
+        Add a byte-for-byte Data.db range-tombstone scenario under data_db_decode
+        (#969) and publish/enforce the test_deltas dataset in delta-roundtrip CI (#701).
+
+  - id: cass.delta_scan.partition_tombstones
+    title: Delta-scan partition tombstones (DELETE FROM ... WHERE pk)
+    status: mirrored
+    capability: delta_scan
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - RangeTombstoneTest.java
+        - SerializationMirrorTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/scan_delta_parity_test.rs
+        notes: >-
+          Maps to test_delta_parity_partition_tombstones; scan_delta
+          partition-delete facts are compared to the sstabledump JSONL golden.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/partition_tombstones-2a26fb206c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-deltas.sh
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/partition_tombstones-2a26fb206c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+      normalization: >-
+        scan_delta partition-delete records are mapped to the sstabledump JSONL
+        partition deletion_info marker (marked_deleted) and compared with a
+        writetime tolerance.
+      known_limitations: >-
+        Canonical-semantic JSONL parity only; byte-for-byte Data.db backing is a
+        follow-up under epic #969 (capability data_db_decode). test_deltas
+        binaries are not yet published/enforced in CI (issue #701).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/delta-roundtrip.yml
+    scope:
+      gap: >-
+        No byte-for-byte Data.db diff yet; backed by canonical-semantic JSONL
+        parity. Byte-for-byte backing tracked by Data.db decode parity epic #969.
+        test_deltas dataset binaries not yet published/enforced in CI (#701).
+      next_step: >-
+        Add a byte-for-byte Data.db partition-tombstone scenario under
+        data_db_decode (#969) and publish/enforce the test_deltas dataset (#701).
+
+  - id: cass.delta_scan.ttl_cells
+    title: Delta-scan TTL / expiring cells (INSERT ... USING TTL)
+    status: mirrored
+    capability: delta_scan
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
         - TTLExpiryTest.java
     cqlite:
       coverage:
         suite: sstable_parity_delta_scan
         tests:
           - cqlite-core/tests/scan_delta_parity_test.rs
+        notes: >-
+          Maps to test_delta_parity_ttl_cells; scan_delta cell ttl /
+          local_deletion_time facts are compared to the sstabledump JSONL golden.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_deltas/collection_ops-2a5006f06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/ttl_cells-2a35ef406c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
     evidence:
-      type: partial
+      type: canonical_semantic
       artifacts: [jsonl]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
-        bash test-data/scripts/generate-deltas.sh  # all delete shapes → sstabledump JSONL
+        bash test-data/scripts/generate-deltas.sh
       reference_paths:
-        - test-data/datasets/sstables/test_deltas/collection_ops-2a5006f06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/ttl_cells-2a35ef406c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
       normalization: >-
-        scan_delta records (cell/row/partition/range tombstones, TTL, liveness)
-        are mapped to sstabledump JSONL deletion facts and compared.
+        scan_delta expiring-cell records are mapped to sstabledump JSONL cell
+        ttl / local_deletion_time fields and compared; mixed live + expiring
+        cells in the same fixture exercise both code paths.
       known_limitations: >-
-        test_deltas dataset binaries are not yet published/enforced in CI
-        (issue #701); validated locally only.
+        Canonical-semantic JSONL parity only; byte-for-byte Data.db backing is a
+        follow-up under epic #969 (capability data_db_decode). test_deltas
+        binaries are not yet published/enforced in CI (issue #701).
     ci:
       tier: required_parity
       workflow: .github/workflows/delta-roundtrip.yml
     scope:
-      gap: test_deltas dataset asset not published/enforced (#701).
-      next_step: Publish and enforce the test_deltas dataset in delta-roundtrip CI.
+      gap: >-
+        No byte-for-byte Data.db diff yet; backed by canonical-semantic JSONL
+        parity. Byte-for-byte backing tracked by Data.db decode parity epic #969.
+        test_deltas dataset binaries not yet published/enforced in CI (#701).
+      next_step: >-
+        Add a byte-for-byte Data.db ttl/expiring-cell scenario under
+        data_db_decode (#969) and publish/enforce the test_deltas dataset (#701).
+
+  - id: cass.delta_scan.static_with_rows
+    title: Delta-scan static columns alongside clustered rows
+    status: mirrored
+    capability: delta_scan
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationMirrorTest.java
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/scan_delta_parity_test.rs
+        notes: >-
+          Maps to test_delta_parity_static_with_rows; scan_delta static-cell
+          upserts and clustered-row cells are compared to the sstabledump JSONL
+          golden.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/static_with_rows-2a4299706c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-deltas.sh
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/static_with_rows-2a4299706c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+      normalization: >-
+        scan_delta static-cell upserts are mapped to the sstabledump JSONL static
+        row block and clustered-row cells to their per-row cell lists; both are
+        compared by value and writetime with tolerance.
+      known_limitations: >-
+        Canonical-semantic JSONL parity only; byte-for-byte Data.db backing is a
+        follow-up under epic #969 (capability data_db_decode). test_deltas
+        binaries are not yet published/enforced in CI (issue #701).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/delta-roundtrip.yml
+    scope:
+      gap: >-
+        No byte-for-byte Data.db diff yet; backed by canonical-semantic JSONL
+        parity. Byte-for-byte backing tracked by Data.db decode parity epic #969.
+        test_deltas dataset binaries not yet published/enforced in CI (#701).
+      next_step: >-
+        Add a byte-for-byte Data.db static-with-rows scenario under
+        data_db_decode (#969) and publish/enforce the test_deltas dataset (#701).
+
+  - id: cass.delta_scan.partial_updates
+    title: Delta-scan partial updates (UPDATE-only rows, no row liveness)
+    status: mirrored
+    capability: delta_scan
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationMirrorTest.java
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/scan_delta_parity_test.rs
+        notes: >-
+          Maps to test_delta_parity_partial_updates; scan_delta cell upserts and
+          row-liveness presence/absence are compared to the sstabledump JSONL
+          golden (UPDATE-only rows carry no row liveness token).
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/partial_updates-2a5ed4006c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-deltas.sh
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/partial_updates-2a5ed4006c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+      normalization: >-
+        scan_delta cell upserts are mapped to sstabledump JSONL per-cell records
+        and compared; row-liveness presence (INSERT) vs absence (UPDATE-only) is
+        asserted against the JSONL liveness_info markers.
+      known_limitations: >-
+        Canonical-semantic JSONL parity only; byte-for-byte Data.db backing is a
+        follow-up under epic #969 (capability data_db_decode). test_deltas
+        binaries are not yet published/enforced in CI (issue #701).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/delta-roundtrip.yml
+    scope:
+      gap: >-
+        No byte-for-byte Data.db diff yet; backed by canonical-semantic JSONL
+        parity. Byte-for-byte backing tracked by Data.db decode parity epic #969.
+        test_deltas dataset binaries not yet published/enforced in CI (#701).
+      next_step: >-
+        Add a byte-for-byte Data.db partial-update scenario under data_db_decode
+        (#969) and publish/enforce the test_deltas dataset (#701).
+
+  - id: cass.delta_scan.adjacent_ranges
+    title: Delta-scan adjacent range tombstones (shared boundary markers)
+    status: mirrored
+    capability: delta_scan
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - RangeTombstoneListTest.java
+        - RangeTombstoneTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/scan_delta_parity_test.rs
+        notes: >-
+          Maps to test_delta_parity_adjacent_ranges; scan_delta range-delete
+          bounds across shared excl_end/incl_start boundary markers are compared
+          to the sstabledump JSONL golden.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/adjacent_ranges-972f22806c7811f1a24ff924a65838e2/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-deltas.sh
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/adjacent_ranges-972f22806c7811f1a24ff924a65838e2/nb-1-big-Data.db.jsonl
+      normalization: >-
+        scan_delta range-delete records are reconstructed from sstabledump JSONL
+        boundary markers (excl_end_incl_start / incl_end_excl_start) into
+        synthetic end/start bound pairs and compared with a writetime tolerance.
+      known_limitations: >-
+        Canonical-semantic JSONL parity only; byte-for-byte Data.db backing is a
+        follow-up under epic #969 (capability data_db_decode). test_deltas
+        binaries are not yet published/enforced in CI (issue #701).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/delta-roundtrip.yml
+    scope:
+      gap: >-
+        No byte-for-byte Data.db diff yet; backed by canonical-semantic JSONL
+        parity. Byte-for-byte backing tracked by Data.db decode parity epic #969.
+        test_deltas dataset binaries not yet published/enforced in CI (#701).
+      next_step: >-
+        Add a byte-for-byte Data.db adjacent-range scenario under data_db_decode
+        (#969) and publish/enforce the test_deltas dataset (#701).
+
+  - id: cass.delta_scan.collection_ops
+    title: Delta-scan collection operations (append/overwrite/element delete)
+    status: mirrored
+    capability: delta_scan
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationMirrorTest.java
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/scan_delta_parity_test.rs
+        notes: >-
+          Maps to test_delta_parity_collection_ops; scan_delta collection cell
+          upserts and element/collection tombstones are compared to the
+          sstabledump JSONL golden.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/collection_ops-2a5006f06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-deltas.sh
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/collection_ops-2a5006f06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+      normalization: >-
+        scan_delta collection cell upserts and the complex-cell deletion markers
+        emitted by SET append / overwrite / element removal are mapped to the
+        sstabledump JSONL collection cells and compared with a writetime tolerance.
+      known_limitations: >-
+        Canonical-semantic JSONL parity only; byte-for-byte Data.db backing is a
+        follow-up under epic #969 (capability data_db_decode). test_deltas
+        binaries are not yet published/enforced in CI (issue #701).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/delta-roundtrip.yml
+    scope:
+      gap: >-
+        No byte-for-byte Data.db diff yet; backed by canonical-semantic JSONL
+        parity. Byte-for-byte backing tracked by Data.db decode parity epic #969.
+        test_deltas dataset binaries not yet published/enforced in CI (#701).
+      next_step: >-
+        Add a byte-for-byte Data.db collection-ops scenario under data_db_decode
+        (#969) and publish/enforce the test_deltas dataset (#701).
+
+  - id: cass.delta_scan.wide_partition_corpus
+    title: Delta-scan over wide partitions (planned — no test_deltas fixture yet)
+    status: planned
+    capability: delta_scan
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - SSTableSkippingReadTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+    fixtures: {}
+    evidence:
+      type: canonical_semantic
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      normalization: >-
+        Planned: scan_delta facts over a wide partition (many clustered rows +
+        range/cell tombstones in one partition, exercising index-block skipping)
+        compared to the sstabledump JSONL golden.
+      known_limitations: >-
+        No wide-partition delete fixture exists under test_deltas; wide
+        partitions live in the wide-row corpus (epic #993). No fixture is
+        fabricated here — this is recorded as a gap.
+    ci:
+      tier: exhaustive_regeneration
+      workflow: .github/workflows/delta-roundtrip.yml
+    scope:
+      target_issue: 993
+      target_suite: sstable_parity_delta_scan
+      gap: >-
+        No test_deltas wide-partition delete fixture; wide partitions are
+        produced by the wide-row corpus (epic #993), not generate-deltas.sh.
+        Byte-for-byte backing for delta_scan remains tracked by epic #969.
+      next_step: >-
+        Add a wide-partition delete shape (or reuse a wide-row corpus fixture)
+        and a paired test_delta_parity_wide_partition test under epic #993.
 
   # ----------------------------------------------------------------------------
   # compaction_merge
@@ -3911,6 +5054,255 @@ scenarios:
       next_step: >-
         Add fixture byte comparison once a committed Cassandra-written reference
         fixture exists for the same schema/data.
+
+  - id: cass.write_load_path.cql_sstable_writer.finished_data_db_artifacts
+    title: Finished CQLite-written Data.db / component artifacts (write path)
+    status: partial
+    capability: write_load_path
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: sstable-format
+      relevance: high
+      files:
+        - CQLSSTableWriterTest.java
+        - BigTableWriterTest.java
+    cqlite:
+      coverage:
+        suite: sstable_writer_cassandra_fixture_parity
+        tests:
+          - cqlite-core/tests/issue_821_writer_byte_invariants.rs
+          - cqlite-core/tests/issue_908_bti_canonical_write.rs
+        notes: >-
+          issue_821 anchors the Data.db row framing (previousUnfilteredSize chain,
+          static-row prev_size=0, 64-bit offsets) byte-by-byte against the exact
+          values read out of real Cassandra "nb" SSTables (uncompressed_table,
+          static_columns_table). issue_908 asserts the finished BTI component set
+          and TOC.txt: a da SSTable emits Data.db + Partitions.db + Rows.db + a TOC
+          listing exactly the BTI component set (no Index/Summary) and self-
+          referencing TOC.txt. Together they cover component presence, TOC.txt, and
+          Data.db row-offset byte invariants of the writer output.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets, component_files]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 → flush → component files + TOC.txt
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_821_writer_byte_invariants &&
+        cargo test -p cqlite-core --features write-support --test issue_908_bti_canonical_write
+      known_limitations: >-
+        Proves writer-output byte INVARIANTS (Data.db row framing / prev_size /
+        64-bit offsets anchored to real Cassandra nb bytes) plus BTI component
+        presence and TOC.txt content. It is NOT a whole-artifact file-vs-file
+        byte diff of finished CQLite Data.db against a committed Cassandra-written
+        reference for the same schema/data, and the sstabledump-JSONL parity of
+        CQLite-written output is covered separately by the live-readback scenario.
+    ci:
+      tier: exhaustive_regeneration
+      workflow: .github/workflows/cassandra-parity.yml
+    scope:
+      gap: >-
+        Writer byte invariants + component/TOC presence are asserted, but no
+        committed Cassandra-written reference Data.db exists to diff finished
+        CQLite output (whole-file bytes / row offsets / sstabledump JSONL) against
+        for the same schema/data. Consistent with
+        cass.write_load_path.cassandra_sstable_writer_fixtures.
+      next_step: >-
+        Commit a Cassandra-written reference SSTable for an identical writer
+        schema/data and add a strict file-vs-file byte + offset + sstabledump JSONL
+        diff test, then upgrade this scenario to byte_for_byte (epic #969).
+
+  - id: cass.write_load_path.flush.tombstone_and_ttl_artifacts
+    title: Flush produces tombstone + TTL Data.db / Statistics.db artifacts
+    status: partial
+    capability: write_load_path
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: memtable-flush
+      relevance: high
+      files:
+        - CQLSSTableWriterTest.java
+        - SSTableMetadataTrackingTest.java
+    cqlite:
+      coverage:
+        suite: sstable_writer_cassandra_fixture_parity
+        tests:
+          - cqlite-core/tests/issue_764_explicit_local_deletion_time.rs
+          - cqlite-core/tests/issue_821_writer_byte_invariants.rs
+        notes: >-
+          issue_764 flushes a mutation carrying an explicit local_deletion_time and
+          a TTL through the real WriteEngine, then asserts the WRITTEN Data.db row
+          tombstone flags/local-deletion-time bytes AND the parsed Statistics.db
+          min/max localDeletionTime + minTTL aggregates (writer + reader cannot be
+          wrong in the same way). issue_821 anchors the deletion/TTL-bearing row
+          framing byte invariants. These are the finished tombstone/TTL artifacts a
+          flush emits, not Cassandra memtable accounting internals (AC7).
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, component_files]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 flush → Data.db + Statistics.db
+      comparison_command: >-
+        cargo test -p cqlite-core --features write-support
+        --test issue_764_explicit_local_deletion_time
+      known_limitations: >-
+        Proves the flushed Data.db row-tombstone bytes (deletion flags +
+        local_deletion_time) and the Statistics.db local-deletion-time / TTL
+        aggregate bytes are correct against derived expected values. It is NOT a
+        whole-artifact byte diff of the flushed tombstone/TTL SSTable against a
+        committed Cassandra-written reference; semantic visibility of tombstones
+        and TTLs is covered by the live-readback scenario.
+    ci:
+      tier: exhaustive_regeneration
+      workflow: .github/workflows/cassandra-parity.yml
+    scope:
+      gap: >-
+        Flushed tombstone/TTL bytes are asserted against derived expected values,
+        but no committed Cassandra-written reference for the same flush input
+        exists to diff the finished artifact byte-for-byte.
+      next_step: >-
+        Commit a Cassandra-written tombstone+TTL reference SSTable for an identical
+        flush input and add a strict Data.db + Statistics.db byte diff, then upgrade
+        to byte_for_byte (epic #969).
+
+  - id: cass.write_load_path.flush.partition_boundary_artifacts
+    title: Flush produces partition-boundary artifacts (promoted index / BTI Partitions.db)
+    status: partial
+    capability: write_load_path
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: memtable-flush
+      relevance: high
+      files:
+        - CQLSSTableWriterTest.java
+        - ColumnIndexTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_bti_partitions_rows
+        tests:
+          - cqlite-core/tests/issue_766_bti_partitions_writer.rs
+          - cqlite-core/tests/issue_1013_rt_index_block_parity.rs
+        notes: >-
+          issue_766 flushes via SSTableWriter in BTI mode and proves the written
+          Partitions.db trie round-trips through CQLite's own BTI reader: every
+          partition key (int/bigint/text/uuid/timestamp/blob + composite) resolves
+          to the exact Data.db offset that was written. issue_1013 re-parses a
+          committed Cassandra Index.db promoted index byte-exactly (>1 IndexInfo
+          block, promoted-index byte length consumed exactly) at column-index block
+          boundaries, establishing the partition-boundary layout the writer targets.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets, component_files]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 flush → Index.db / Partitions.db boundaries
+      comparison_command: >-
+        cargo test -p cqlite-core --features write-support
+        --test issue_766_bti_partitions_writer &&
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features "delta-scan write-support" --test issue_1013_rt_index_block_parity
+      known_limitations: >-
+        Proves the written BTI Partitions.db partition-offset entries round-trip
+        through CQLite's reader, and that the Cassandra promoted Index.db boundary
+        layout is decoded byte-exactly. It is NOT a whole-artifact byte diff of the
+        CQLite-written partition-boundary component against a committed Cassandra-
+        written reference for the same flush input.
+    ci:
+      tier: exhaustive_regeneration
+      workflow: .github/workflows/cassandra-parity.yml
+    scope:
+      gap: >-
+        Writer partition-boundary entries round-trip through CQLite's own reader
+        and the Cassandra boundary layout is re-parsed byte-exactly, but no
+        committed Cassandra-written reference exists to diff the finished
+        CQLite-written Partitions.db / promoted Index.db byte-for-byte.
+      next_step: >-
+        Commit a Cassandra-written reference for an identical multi-block /
+        multi-partition flush input and add a strict Partitions.db / Index.db byte
+        diff, then upgrade to byte_for_byte (epic #969).
+
+  - id: cass.write_load_path.live_readback.semantic_only
+    title: Live Cassandra readback of CQLite-written SSTables (semantic-only)
+    status: mirrored
+    capability: write_load_path
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: sstable-format
+      relevance: high
+      files:
+        - CQLSSTableWriterTest.java
+        - SSTableLoaderTest.java
+    cqlite:
+      coverage:
+        suite: sstable_writer_cassandra_fixture_parity
+        tests:
+          - cqlite-core/tests/sstableloader_integration.rs
+        notes: >-
+          CQLite writes/flushes/exports SSTables, loads them into a real Cassandra
+          5.0.2 cluster (sstableloader / nodetool refresh), then verifies via
+          sstabledump on the loaded artifact AND cqlsh SELECT that the written rows
+          are visible. Coverage spans simple/clustering/multi-partition tables, all
+          stage-0 types, static rows + static-only partitions (issue_507), TTL
+          rows (TTL(col) within range), and large/wide partitions. The
+          e2e-cassandra-readback.sh harness additionally drives cell-delete,
+          row-delete, range-tombstone and partition-tombstone labels with structured
+          per-row / absence assertions.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/e2e-cassandra-readback.sh  # cqlite write → sstableloader/refresh → sstabledump + cqlsh SELECT
+      comparison_command: >-
+        cargo test -p cqlite-core --features write-support --test sstableloader_integration
+      normalization: >-
+        CQLite-written artifacts are loaded into Cassandra 5.0.2 and read back; the
+        sstabledump JSON of the loaded SSTable and the cqlsh SELECT rows
+        (including TTL(col), static columns, clustering rows, and tombstone
+        presence/absence) are compared for semantic equivalence to what CQLite
+        wrote. This proves loaded rows, TTLs, tombstones, static rows and clustering
+        rows are semantically visible — NOT a byte comparison of writer output.
+      known_limitations: >-
+        Canonical-semantic round-trip via a live Cassandra cluster. This is NEVER
+        byte_for_byte: a live readback proves semantic visibility, not that the
+        CQLite-written bytes match a Cassandra-written reference. Byte-for-byte
+        writer parity remains tracked under epic #969.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/cassandra-validation.yml
+    scope:
+      gap: >-
+        Semantic readback only; no byte comparison of CQLite writer output.
+      next_step: >-
+        Pair the readback with a committed Cassandra-written byte reference once it
+        exists (epic #969) so semantic visibility is backed by byte parity.
 
   # ----------------------------------------------------------------------------
   # bti_big_version_matrix
