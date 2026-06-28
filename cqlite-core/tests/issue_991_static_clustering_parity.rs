@@ -115,8 +115,11 @@ fn read_u8_loc(data: &[u8], pos: usize) -> Loc {
 /// when a truncated/malformed fixture is shorter than expected.
 #[track_caller]
 fn read_fixed_loc<'a>(data: &'a [u8], pos: usize, len: usize, what: &str) -> &'a [u8] {
+    // Use checked arithmetic so a `pos` derived from a corrupt VInt near
+    // usize::MAX cannot wrap `pos + len` (which would silently pass the guard and
+    // lose this helper's contextual panic to a raw slice-index panic instead).
     assert!(
-        pos + len <= data.len(),
+        pos.checked_add(len).is_none_or(|end| end <= data.len()),
         "{what}: fixed-width read of {len} bytes at offset {pos} (0x{pos:02X}) overruns the \
          {}-byte buffer — truncated/malformed fixture",
         data.len()
@@ -572,15 +575,30 @@ fn fixture_static_only_partition_marker_byte_parity() {
         );
         return;
     };
+    // Derive which PK is at file offset 0 from the golden (Cassandra orders by
+    // murmur3 token, not key value), so a dataset regen that reshuffles partition
+    // order produces a clear ordering signal rather than a confusing byte mismatch.
+    let Some(jsonl) =
+        read_jsonl_lines_opt(&format!("{STATIC_WITH_ROWS_DIR}/nb-1-big-Data.db.jsonl"))
+    else {
+        eprintln!(
+            "SKIP fixture_static_only_partition_marker_byte_parity: local-only golden absent \
+             (cannot derive first-partition PK)"
+        );
+        return;
+    };
+    let expected_first_pk = golden_first_partition_int_key(&jsonl[0]);
 
-    // First partition header: [u16 key_len=4][i32 key=99][i32 LDT][i64 mfda].
+    // First partition header: [u16 key_len=4][i32 key][i32 LDT][i64 mfda].
     let key_len = read_be_u16(&raw, 0, "static_with_rows partition key length") as usize;
     assert_eq!(key_len, 4, "static_with_rows PK is a 4-byte int32");
     let key = read_be_i32(&raw, 2, "static_with_rows partition key (int32)");
     assert_eq!(
-        key, 99,
-        "first partition in static_with_rows must be the static-only PK=99 \
-         (sstabledump golden: position 0)"
+        key, expected_first_pk,
+        "first partition on disk (PK={key}) must match the golden's first-partition \
+         PK={expected_first_pk}; partitions are token-ordered, so a mismatch here means \
+         the pinned dataset was regenerated with a different murmur3 order — regenerate \
+         the goldens alongside the binaries"
     );
     let row_pos = STATIC_FIXTURE_HEADER;
 
@@ -690,11 +708,23 @@ const INT_FIXTURE_HEADER: usize = 2 + 4 + 4 + 8;
 fn fixture_static_with_clustering_rows_byte_parity() {
     let raw = decompress_fixture(STATIC_TOMB_DIR);
 
-    // First partition header: [u16 key_len=4][i32 key=1][i32 LDT][i64 mfda].
+    // Derive which PK is at file offset 0 from the golden (token order, not key
+    // value), so a dataset regen that reshuffles partition order is reported as a
+    // clear ordering mismatch rather than a confusing byte mismatch deeper in.
+    let jsonl = read_jsonl_lines(&format!("{STATIC_TOMB_DIR}/nb-1-big-Data.db.jsonl"));
+    let expected_first_pk = golden_first_partition_int_key(&jsonl[0]);
+
+    // First partition header: [u16 key_len=4][i32 key][i32 LDT][i64 mfda].
     let key_len = read_be_u16(&raw, 0, "static_with_tombstones partition key length") as usize;
     assert_eq!(key_len, 4, "static_with_tombstones PK is a 4-byte int32");
     let key = read_be_i32(&raw, 2, "static_with_tombstones partition key (int32)");
-    assert_eq!(key, 1, "first partition must be PK=1 (golden position 0)");
+    assert_eq!(
+        key, expected_first_pk,
+        "first partition on disk (PK={key}) must match the golden's first-partition \
+         PK={expected_first_pk}; partitions are token-ordered, so a mismatch here means \
+         the pinned dataset was regenerated with a different murmur3 order — regenerate \
+         the goldens alongside the binaries"
+    );
     let row_pos = INT_FIXTURE_HEADER;
 
     // 1) Static row first: IS_STATIC, no clustering prefix, prev_size=0.
@@ -925,6 +955,35 @@ fn read_jsonl_lines(rel: &str) -> Vec<String> {
         path.display()
     );
     lines
+}
+
+/// Extract the FIRST partition's int32 partition key from a JSONL golden line.
+///
+/// Cassandra orders partitions on disk by murmur3 TOKEN, not by key value, so
+/// which key lands at file offset 0 is a property of the pinned dataset — not
+/// something a byte walk may hard-code. Deriving the expected on-disk PK from the
+/// golden's first line ties the assertion to the SAME ordering source the byte
+/// walk validates: a dataset regeneration that reshuffles token order then yields
+/// a clear "first golden PK X != on-disk PK Y" ordering signal here, rather than a
+/// confusing "PK mismatch at offset 2" deep in the byte walk.
+///
+/// The golden shape is `{"...","partition":{"key":["<pk>"],"position":0},...}`;
+/// for these int32-PK fixtures the key renders as a decimal string.
+fn golden_first_partition_int_key(golden_first_line: &str) -> i32 {
+    let marker = "\"key\":[\"";
+    let start = golden_first_line.find(marker).unwrap_or_else(|| {
+        panic!("golden first line has no \"key\":[\"...\"] partition key: {golden_first_line}")
+    }) + marker.len();
+    let rest = &golden_first_line[start..];
+    let end = rest
+        .find('"')
+        .unwrap_or_else(|| panic!("golden first-line partition key is unterminated: {rest}"));
+    rest[..end].parse::<i32>().unwrap_or_else(|e| {
+        panic!(
+            "golden first-partition key {:?} is not an int32 ({e})",
+            &rest[..end]
+        )
+    })
 }
 
 /// Read a LOCAL-ONLY JSONL golden, returning `None` when the file is absent
