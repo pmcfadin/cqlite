@@ -1,0 +1,408 @@
+//! Enhanced Statistics.db parser for Cassandra 5.0 'nb' format
+//!
+//! # Implementation Status (Issue #162)
+//!
+//! This module provides **MINIMAL PARSING** of nb-format Statistics.db files to support
+//! delta-coded timestamp decoding in V5CompressedLegacy parser.
+//!
+//! ## Current Implementation
+//!
+//! Parses ONLY the EncodingStats fields required for delta decoding:
+//! - Header (32 bytes): version, data_length, checksum, metadata
+//! - EncodingStats section: partitioner, minTimestamp, minLocalDeletionTime, minTTL
+//!
+//! All other statistics (row counts, histograms, column stats, etc.) are populated with
+//! placeholder values. This is sufficient for V5CompressedLegacy parser baseline values.
+//!
+//! ## Previous Implementation (REMOVED)
+//!
+//! The previous implementation violated the no-heuristics mandate (Issue #28) by fabricating
+//! statistics from header metadata. It was removed and replaced with this minimal real-data
+//! parser that extracts only what's needed from the actual binary format.
+//!
+//! ## Deferred to Future Milestones
+//!
+//! Complete Statistics.db parsing including:
+//! - Row count statistics and distribution histograms
+//! - Column-level statistics and cardinality estimates
+//! - Partition size histograms and percentiles
+//! - Compression ratio and performance metrics
+//! - Checksum validation (header.checksum field not yet validated)
+//!
+//! ## References
+//!
+//! - Issue #162: Fix Statistics reader for Cassandra 5 nb format
+//! - Issue #28: No-heuristics mandate for modern Cassandra 5.0 paths
+//! - Issue #105: Remove heuristic estimation from enhanced_statistics_parser.rs
+//! - `docs/development/rust_developer_guide.md`: Architecture decisions
+//!
+//! # Module layout (Issue #1125 split)
+//!
+//! - [`header`] — 32-byte file header + Table-of-Contents (component offsets).
+//! - [`encoding_stats`] — EncodingStats (min timestamp/deletion-time/TTL) decode.
+//! - [`serialization_header`] — table-schema (partition/clustering/static/regular columns).
+//! - [`marshal_type`] — Cassandra marshal-type → CQL conversion + `ColumnInfo` builders.
+//! - this `mod.rs` — the public entry points that orchestrate the above.
+
+mod encoding_stats;
+mod header;
+mod marshal_type;
+mod serialization_header;
+
+pub use header::parse_nb_format_header;
+
+use super::statistics::*;
+use crate::error::{Error, Result};
+use crate::storage::sstable::version_gate::VersionGates;
+use encoding_stats::parse_minimal_encoding_stats;
+use header::parse_statistics_toc_for_header_offset;
+
+/// Type alias for EncodingStats parse result to reduce complexity
+type EncodingStatsResult = (
+    i64,
+    i64,
+    Option<i64>,
+    Vec<super::header::ColumnInfo>,
+    Vec<super::header::ColumnInfo>,
+    Vec<super::header::ColumnInfo>,
+);
+
+/// Type alias for SerializationHeader parse result to reduce complexity
+type SerializationHeaderResult = (Vec<String>, Vec<String>, Vec<super::header::ColumnInfo>);
+
+/// Parse minimal nb-format statistics data for delta-coding baseline (Issue #162)
+///
+/// This implementation parses ONLY the EncodingStats fields required for delta decoding:
+/// - partitioner (string)
+/// - minTimestamp (VInt)
+/// - minLocalDeletionTime (VInt)
+/// - minTTL (VInt)
+///
+/// All other fields (histograms, column stats, etc.) are skipped to minimize complexity.
+/// This is sufficient for V5CompressedLegacy parser which needs baseline values for
+/// delta-coded timestamps and TTLs.
+///
+/// # Format (observed from real nb-format Statistics.db files)
+///
+/// After 32-byte header:
+/// - metadata_type (u32 BE) = 0x00000003 (indicates EncodingStats section)
+/// - data_length (VInt) - length of remaining data
+/// - partitioner_length (VInt) - length of partitioner class name string
+/// - partitioner (UTF-8 string) - e.g., "org.apache.cassandra.dht.Murmur3Partitioner"
+/// - additional_metadata (various VInts) - skipped
+/// - minTimestamp (VInt, microseconds)
+/// - minLocalDeletionTime (VInt, seconds)
+/// - minTTL (VInt, seconds)
+///
+/// # Returns
+///
+/// Partial statistics with only TimestampStatistics populated from real data.
+#[allow(clippy::type_complexity)]
+pub fn parse_nb_format_statistics_data(
+    input: &[u8],
+    header: &StatisticsHeader,
+    full_input: &[u8],
+    // VG3 plumbing: gates are threaded here so version-sensitive decisions in
+    // parse_encoding_stats_vuints (e.g. has_uint_deletion_time) can be flipped
+    // without re-deriving gates from the filename.
+    // Pass `None` from callers that do not have gates (standalone tools, tests).
+    gates: Option<&VersionGates>,
+) -> Result<(
+    RowStatistics,
+    TimestampStatistics,
+    TableStatistics,
+    PartitionStatistics,
+    CompressionStatistics,
+    Vec<super::header::ColumnInfo>,
+    Vec<super::header::ColumnInfo>,
+    Vec<super::header::ColumnInfo>,
+)> {
+    // Get HEADER offset from TOC (Issue #216)
+    let header_offset = parse_statistics_toc_for_header_offset(full_input);
+
+    // Parse the EncodingStats section from the data following the header
+    let result = parse_minimal_encoding_stats(input, full_input, header_offset, gates);
+
+    match result {
+        Ok((
+            _,
+            (
+                min_timestamp,
+                min_deletion_time,
+                min_ttl,
+                partition_columns,
+                clustering_columns,
+                regular_columns,
+            ),
+        )) => {
+            // Create minimal statistics with only timestamp data populated
+            let row_stats = RowStatistics {
+                total_rows: 0,
+                live_rows: 0,
+                tombstone_count: 0,
+                partition_count: 0,
+                avg_rows_per_partition: 0.0,
+                row_size_histogram: vec![],
+            };
+
+            let timestamp_stats = TimestampStatistics {
+                min_timestamp,
+                max_timestamp: min_timestamp, // Not parsed, use min as placeholder
+                min_deletion_time,
+                max_deletion_time: min_deletion_time,
+                min_ttl,
+                max_ttl: min_ttl,
+                rows_with_ttl: 0,
+            };
+
+            let table_stats = TableStatistics {
+                disk_size: 0,
+                uncompressed_size: 0,
+                compressed_size: 0,
+                compression_ratio: 1.0,
+                block_count: 0,
+                avg_block_size: 0.0,
+                index_size: 0,
+                bloom_filter_size: 0,
+                level_count: 0,
+            };
+
+            let partition_stats = PartitionStatistics {
+                avg_partition_size: 0.0,
+                min_partition_size: 0,
+                max_partition_size: 0,
+                large_partition_percentage: 0.0,
+                size_histogram: vec![],
+            };
+
+            let compression_stats = CompressionStatistics {
+                algorithm: "unknown".to_string(),
+                original_size: 0,
+                compressed_size: 0,
+                ratio: 1.0,
+                compression_speed: 0.0,
+                decompression_speed: 0.0,
+                compressed_blocks: 0,
+            };
+
+            Ok((
+                row_stats,
+                timestamp_stats,
+                table_stats,
+                partition_stats,
+                compression_stats,
+                partition_columns,
+                clustering_columns,
+                regular_columns,
+            ))
+        }
+        Err(e) => {
+            log::debug!(
+                "Failed to parse minimal EncodingStats from Statistics.db: {:?}",
+                e
+            );
+            Err(Error::UnsupportedFormat(format!(
+                "Failed to parse minimal nb-format Statistics.db EncodingStats: {:?}. \
+                         This is required for delta-coded timestamp decoding. \
+                         Header checksum: 0x{:08x}, data_length: {}",
+                e, header.checksum, header.data_length
+            )))
+        }
+    }
+}
+
+/// Main enhanced parser for real Statistics.db files (minimal implementation for Issue #162)
+///
+/// This function parses the header and minimal EncodingStats fields from nb-format
+/// Statistics.db files. Only timestamp-related fields are extracted; all other
+/// statistics (histograms, column stats, etc.) are populated with placeholder values.
+///
+/// This is sufficient for V5CompressedLegacy parser which requires min_timestamp,
+/// min_local_deletion_time, and min_ttl for delta decoding baseline.
+///
+/// # Arguments
+///
+/// * `gates` - Optional [`VersionGates`] for version-sensitive decoding decisions
+///   (VG1 plumbing).  Pass `None` from standalone tools/tests to use nb-compatible
+///   defaults; pass `Some(&gates)` from `SSTableReader` to enable VG3 gating.
+///
+/// # Returns
+///
+/// SSTableStatistics with only header and timestamp_stats populated from real data.
+pub fn parse_enhanced_statistics_file<'a>(
+    input: &'a [u8],
+    gates: Option<&VersionGates>,
+) -> nom::IResult<&'a [u8], SSTableStatistics> {
+    // Parse the 32-byte header
+    let (remaining, header) = parse_nb_format_header(input)?;
+
+    // Parse minimal statistics data (EncodingStats + SerializationHeader columns)
+    // Pass full input for TOC-based HEADER offset lookup (Issue #216)
+    let result = parse_nb_format_statistics_data(remaining, &header, input, gates);
+
+    match result {
+        Ok((
+            row_stats,
+            mut timestamp_stats,
+            table_stats,
+            partition_stats,
+            compression_stats,
+            partition_columns,
+            clustering_columns,
+            columns,
+        )) => {
+            log::debug!(
+                "Successfully parsed Statistics.db serialization header: {} partition keys, {} clustering keys, {} regular columns",
+                partition_columns.len(),
+                clustering_columns.len(),
+                columns.len()
+            );
+
+            // Best-effort STATS-extras decode over the FULL buffer (with TOC):
+            // recover the authoritative maxLocalDeletionTime (the inner parser
+            // leaves it as a placeholder equal to min_deletion_time) and the
+            // estimated tombstone-drop-times histogram (Issue #1073). This is
+            // strictly additive — a Statistics.db that parses today must keep
+            // parsing, so an Err here is logged and the placeholders are kept.
+            let tombstone_drop_times =
+                match crate::parser::repair_metadata::parse_stats_extras(input, gates) {
+                    Ok(extras) => {
+                        // Only set max_deletion_time. Do NOT touch min_deletion_time
+                        // (the EncodingStats min baseline consumed elsewhere).
+                        timestamp_stats.max_deletion_time = extras.max_local_deletion_time;
+                        extras.tombstone_drop_times
+                    }
+                    Err(e) => {
+                        log::debug!(
+                            "Best-effort STATS-extras decode failed; keeping placeholders: {:?}",
+                            e
+                        );
+                        vec![]
+                    }
+                };
+
+            let statistics = SSTableStatistics {
+                header,
+                row_stats,
+                timestamp_stats,
+                column_stats: vec![],
+                table_stats,
+                partition_stats,
+                compression_stats,
+                metadata: std::collections::HashMap::new(),
+                serialization_header_columns: columns,
+                serialization_header_partition_keys: partition_columns,
+                serialization_header_clustering_keys: clustering_columns,
+                tombstone_drop_times,
+            };
+
+            Ok((remaining, statistics))
+        }
+        Err(e) => {
+            // Convert Error to nom::Err
+            log::warn!("Failed to parse nb-format Statistics.db: {}", e);
+            Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )))
+        }
+    }
+}
+
+/// Enhanced statistics reader with fallback (minimal implementation for Issue #162)
+///
+/// Attempts to parse nb-format Statistics.db with minimal EncodingStats extraction.
+/// This provides the minimum fields needed for delta-coded timestamp decoding.
+///
+/// # Arguments
+///
+/// * `gates` - Optional [`VersionGates`] threaded from `SSTableReader` for VG3
+///   version-sensitive decoding.  Pass `None` from standalone tools/tests; the
+///   nb-compatible behaviour is used when `gates` is `None`.
+///
+/// # Returns
+///
+/// SSTableStatistics with minimal fields populated, or error if parsing fails.
+pub fn parse_statistics_with_fallback<'a>(
+    input: &'a [u8],
+    gates: Option<&VersionGates>,
+) -> nom::IResult<&'a [u8], SSTableStatistics> {
+    // Try the minimal enhanced parser
+    parse_enhanced_statistics_file(input, gates)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_statistics_data_extraction_with_invalid_data() {
+        // Test with insufficient/invalid data - should fail to parse VInts
+        let header = StatisticsHeader {
+            version: 4,
+            statistics_kind: 0x2629_1b05,
+            data_length: 44,
+            metadata1: 1,
+            metadata2: 101,
+            metadata3: 2,
+            checksum: 0x14d4,
+            table_id: None,
+        };
+
+        let dummy_data = vec![0xFF; 10]; // Too short to parse properly
+        let result = parse_nb_format_statistics_data(&dummy_data, &header, &dummy_data, None);
+
+        // Should return error because data is too short for VInt parsing
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_enhanced_statistics_file_with_incomplete_data() {
+        // Test data with valid header but missing data section
+        let test_data = vec![
+            0x00, 0x00, 0x00, 0x04, // version = 4
+            0x26, 0x29, 0x1b, 0x05, // statistics_kind
+            0x00, 0x00, 0x00, 0x00, // reserved
+            0x00, 0x00, 0x00, 0x2c, // data_length = 44
+            0x00, 0x00, 0x00, 0x01, // metadata1 = 1
+            0x00, 0x00, 0x00, 0x65, // metadata2 = 101
+            0x00, 0x00, 0x00, 0x02, // metadata3 = 2
+            0x00, 0x00, 0x14,
+            0xd4, // checksum = 5332
+                  // No data section - should fail parsing
+        ];
+
+        let result = parse_enhanced_statistics_file(&test_data, None);
+
+        // Should fail since there's no data section to parse
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parser_fallback_with_incomplete_data() {
+        // Test with valid header but incomplete data
+        let test_data = vec![
+            0x00, 0x00, 0x00, 0x04, // version = 4
+            0x26, 0x29, 0x1b, 0x05, // statistics_kind
+            0x00, 0x00, 0x00, 0x00, // reserved
+            0x00, 0x00, 0x00, 0x2c, // data_length = 44
+            0x00, 0x00, 0x00, 0x01, // metadata1 = 1
+            0x00, 0x00, 0x00, 0x65, // metadata2 = 101
+            0x00, 0x00, 0x00, 0x02, // metadata3 = 2
+            0x00, 0x00, 0x14, 0xd4, // checksum = 5332
+        ];
+
+        let result = parse_statistics_with_fallback(&test_data, None);
+
+        // Should fail - incomplete data
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_invalid_data_returns_error() {
+        // Test with insufficient data
+        let invalid_data = vec![0xFF; 10];
+        let result = parse_statistics_with_fallback(&invalid_data, None);
+        assert!(result.is_err(), "Invalid data should fail to parse");
+    }
+}
