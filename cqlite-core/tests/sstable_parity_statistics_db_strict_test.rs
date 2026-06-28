@@ -44,7 +44,9 @@ use cqlite_core::parser::enhanced_statistics_parser::parse_statistics_with_fallb
 
 #[path = "parity_support/mod.rs"]
 mod parity_support;
-use parity_support::{parity_datasets_required, scenario, ParityFailure};
+use parity_support::{
+    parity_datasets_required, scenario, write_summary, LaneStatus, ParityFailure,
+};
 
 /// `crc32(num_components=4)` — the marker Cassandra writes at bytes 4..8 of
 /// every `Statistics.db` (it is the CRC of the 4-byte component count, which is
@@ -648,6 +650,7 @@ fn statistics_db_strict_core_metadata_parity() {
         // above (all_statistics_txt fails closed).
         if parity_datasets_required() {
             ParityFailure::new(scenario::STATISTICS_DB)
+                .lane("statistics_db")
                 .cassandra_source("MetadataSerializer (Statistics.db core metadata)")
                 .fixture(datasets_sstables_root())
                 .components(["Statistics.db", "Statistics.db.txt"])
@@ -727,6 +730,13 @@ fn statistics_db_strict_core_metadata_parity() {
         saw_multi_regular,
         "no fixture with multiple regular columns — multi-column parity unproven"
     );
+
+    let _ = write_summary(
+        "statistics_db",
+        LaneStatus::Pass,
+        scenario::STATISTICS_DB,
+        &[],
+    );
 }
 
 /// Corrupted `Statistics.db` fixtures fail closed with explicit metadata-corruption
@@ -740,6 +750,7 @@ fn statistics_db_strict_corruption_fails_closed() {
     let Some(db) = refs.iter().map(|p| binary_for(p)).find(|p| p.exists()) else {
         if parity_datasets_required() {
             ParityFailure::new(scenario::STATISTICS_DB)
+                .lane("statistics_db")
                 .cassandra_source("MetadataSerializer corruption rejection (Statistics.db)")
                 .fixture(datasets_sstables_root())
                 .components(["Statistics.db"])

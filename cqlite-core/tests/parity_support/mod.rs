@@ -71,6 +71,10 @@ pub struct ParityFailure {
     components: Vec<String>,
     repro: Option<String>,
     detail: Option<String>,
+    /// Diff-artifact lane stem (e.g. `index_db_big`). When set, [`ParityFailure::panic`]
+    /// writes `target/cassandra-parity/<lane>.diff` and a `summary.json` row before
+    /// panicking, so CI uploads a structured diff for the failure.
+    lane: Option<String>,
 }
 
 impl ParityFailure {
@@ -83,7 +87,15 @@ impl ParityFailure {
             components: Vec::new(),
             repro: None,
             detail: None,
+            lane: None,
         }
+    }
+
+    /// Set the diff-artifact lane stem so [`ParityFailure::panic`] emits a
+    /// `target/cassandra-parity/<lane>.diff` and records the lane in `summary.json`.
+    pub fn lane(mut self, lane: &str) -> Self {
+        self.lane = Some(lane.to_string());
+        self
     }
 
     /// The Cassandra source test or format rule this lane mirrors
@@ -145,8 +157,19 @@ impl ParityFailure {
     }
 
     /// Render and panic — the fail-closed terminal for a strict lane.
+    ///
+    /// If a [`ParityFailure::lane`] was set, this first (best-effort) writes the
+    /// rendered diagnostic to `target/cassandra-parity/<lane>.diff` and records a
+    /// `Fail` row in `summary.json`, so the CI artifact upload captures a
+    /// structured diff for the failure before the test process aborts.
     pub fn panic(&self) -> ! {
-        panic!("{}", self.render())
+        let rendered = self.render();
+        if let Some(lane) = &self.lane {
+            let artifact = write_diff(lane, &rendered).ok();
+            let artifacts: Vec<PathBuf> = artifact.into_iter().collect();
+            let _ = write_summary(lane, LaneStatus::Fail, &self.scenario_id, &artifacts);
+        }
+        panic!("{rendered}")
     }
 }
 
@@ -205,20 +228,31 @@ struct SummaryRow {
     artifacts: Vec<String>,
 }
 
-static SUMMARY_ROWS: Mutex<Vec<SummaryRow>> = Mutex::new(Vec::new());
+/// Serialises summary.json writes within a single process. Cross-process
+/// accumulation is handled by merging with the existing on-disk file (the five
+/// strict lanes run as separate test binaries).
+static SUMMARY_LOCK: Mutex<()> = Mutex::new(());
 
 /// Record (and rewrite) one lane's entry in `target/cassandra-parity/summary.json`.
 ///
-/// The summary maps `lane -> { status, scenario_id, artifacts }`. It is rewritten
-/// on every call so the file is valid JSON at any point even if a lane panics
-/// mid-suite. `artifacts` are the diff/artifact paths produced for the lane.
+/// The summary maps `lane -> { status, scenario_id, artifacts }`. Because the
+/// strict lanes run as separate test binaries (separate processes), the existing
+/// on-disk file is read and merged on every call so a row written by one lane is
+/// preserved when another lane (another process) writes. The file is fully
+/// rewritten each time so it is valid JSON at any point even if a lane panics.
 pub fn write_summary(
     lane: &str,
     status: LaneStatus,
     scenario_id: &str,
     artifacts: &[PathBuf],
 ) -> std::io::Result<()> {
-    let mut rows = SUMMARY_ROWS.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = SUMMARY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = parity_artifact_dir();
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("summary.json");
+
+    // Merge with whatever a sibling test-binary process already wrote.
+    let mut rows = read_existing_summary(&path);
     let artifact_strs: Vec<String> = artifacts.iter().map(|p| p.display().to_string()).collect();
     if let Some(existing) = rows.iter_mut().find(|r| r.lane == lane) {
         existing.status = status;
@@ -232,12 +266,83 @@ pub fn write_summary(
             artifacts: artifact_strs,
         });
     }
+    rows.sort_by(|a, b| a.lane.cmp(&b.lane));
 
-    let json = render_summary_json(&rows);
-    let dir = parity_artifact_dir();
-    std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join("summary.json"), json)?;
+    std::fs::write(&path, render_summary_json(&rows))?;
     Ok(())
+}
+
+/// Recover existing lane rows from a previously written `summary.json` so that a
+/// row written by a sibling test-binary process is preserved on merge. This is a
+/// deliberately small line-oriented parser for the exact one-line-per-lane shape
+/// [`render_summary_json`] emits; on any parse trouble it returns what it could
+/// recover (the file is always rewritten cleanly afterward).
+fn read_existing_summary(path: &Path) -> Vec<SummaryRow> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        let line = line.trim().trim_end_matches(',');
+        // Each lane row looks like: "lane": {"status": "..", "scenario_id": "..", "artifacts": [..]}
+        let Some(rest) = line.strip_prefix('"') else {
+            continue;
+        };
+        let Some(end_key) = rest.find('"') else {
+            continue;
+        };
+        let lane = rest[..end_key].to_string();
+        if lane.is_empty() {
+            continue;
+        }
+        let status = match extract_json_str(line, "status").as_deref() {
+            Some("pass") => LaneStatus::Pass,
+            Some("fail") => LaneStatus::Fail,
+            Some("skip") => LaneStatus::Skip,
+            _ => continue,
+        };
+        let scenario_id = extract_json_str(line, "scenario_id").unwrap_or_default();
+        rows.push(SummaryRow {
+            lane,
+            status,
+            scenario_id,
+            artifacts: extract_json_array(line, "artifacts"),
+        });
+    }
+    rows
+}
+
+/// Extract the string value of `"key": "value"` from a single rendered line.
+fn extract_json_str(line: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\":");
+    let after = &line[line.find(&needle)? + needle.len()..];
+    let start = after.find('"')? + 1;
+    let end = after[start..].find('"')? + start;
+    Some(after[start..end].to_string())
+}
+
+/// Extract the string elements of `"key": ["a", "b"]` from a single line.
+fn extract_json_array(line: &str, key: &str) -> Vec<String> {
+    let needle = format!("\"{key}\":");
+    let Some(after_idx) = line.find(&needle) else {
+        return Vec::new();
+    };
+    let after = &line[after_idx + needle.len()..];
+    let Some(open) = after.find('[') else {
+        return Vec::new();
+    };
+    let Some(close) = after[open..].find(']') else {
+        return Vec::new();
+    };
+    after[open + 1..open + close]
+        .split(',')
+        .filter_map(|tok| {
+            let t = tok.trim();
+            let t = t.strip_prefix('"')?.strip_suffix('"')?;
+            Some(t.to_string())
+        })
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 fn json_escape(s: &str) -> String {

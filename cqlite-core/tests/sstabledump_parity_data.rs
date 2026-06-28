@@ -36,7 +36,9 @@ use tokio::io::AsyncWriteExt;
 
 #[path = "parity_support/mod.rs"]
 mod parity_support;
-use parity_support::{parity_datasets_required, scenario, ParityFailure};
+use parity_support::{
+    parity_datasets_required, scenario, write_summary, LaneStatus, ParityFailure,
+};
 
 /// Test configuration for Data.db parity validation
 #[derive(Debug, Clone)]
@@ -370,6 +372,7 @@ async fn test_data_db_jsonl_reference_parity() -> CqliteResult<()> {
         Err(e) => {
             if parity_datasets_required() {
                 ParityFailure::new(scenario::DATA_DB_JSONL)
+                    .lane("data_db_jsonl")
                     .cassandra_source("sstabledump JSONL (Data.db row/cell decode)")
                     .components(["Data.db", "Data.db.jsonl"])
                     .repro(
@@ -394,6 +397,7 @@ async fn test_data_db_jsonl_reference_parity() -> CqliteResult<()> {
         Err(e) => {
             if parity_datasets_required() {
                 ParityFailure::new(scenario::DATA_DB_JSONL)
+                    .lane("data_db_jsonl")
                     .cassandra_source("sstabledump JSONL (Data.db row/cell decode)")
                     .components(["Data.db", "Data.db.jsonl"])
                     .repro(
@@ -462,6 +466,12 @@ async fn test_data_db_jsonl_reference_parity() -> CqliteResult<()> {
         "Data.db JSONL parity failures detected; see validation artifacts for details"
     );
 
+    let _ = write_summary(
+        "data_db_jsonl",
+        LaneStatus::Pass,
+        scenario::DATA_DB_JSONL,
+        &[],
+    );
     Ok(())
 }
 

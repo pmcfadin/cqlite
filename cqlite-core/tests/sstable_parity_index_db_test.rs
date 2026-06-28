@@ -45,7 +45,9 @@ use cqlite_core::Config;
 
 #[path = "parity_support/mod.rs"]
 mod parity_support;
-use parity_support::{parity_datasets_required, scenario, ParityFailure};
+use parity_support::{
+    parity_datasets_required, scenario, write_summary, LaneStatus, ParityFailure,
+};
 
 // ============================================================================
 // Fixture discovery
@@ -539,6 +541,7 @@ async fn big_index_db_entry_byte_and_field_parity() {
     if big_checked == 0 {
         if parity_datasets_required() {
             ParityFailure::new(scenario::INDEX_DB_BIG)
+                .lane("index_db_big")
                 .cassandra_source("RowIndexEntryTest.java (BIG Index.db entry bytes)")
                 .fixture(datasets_sstables_root())
                 .components(["Index.db", "Data.db"])
@@ -575,6 +578,12 @@ async fn big_index_db_entry_byte_and_field_parity() {
          ({uuid_key_checked} UUID-keyed, {delta_checked} delta-verified, \
          {wide_partition_entries} wide-partition entries / {promoted_bytes_total} \
          promoted bytes); {skipped_unfetched} unfetched reference-only generations skipped"
+    );
+    let _ = write_summary(
+        "index_db_big",
+        LaneStatus::Pass,
+        scenario::INDEX_DB_BIG,
+        &[],
     );
 }
 
@@ -678,6 +687,7 @@ async fn bti_index_component_discovery() {
     if bti_checked == 0 {
         if parity_datasets_required() {
             ParityFailure::new(scenario::COMPONENT_MANIFEST)
+                .lane("component_manifest")
                 .cassandra_source(
                     "BTI component discovery (Partitions.db/Rows.db, no Index/Summary)",
                 )
@@ -802,6 +812,7 @@ async fn truncated_big_index_db_is_not_silently_full_or_empty() {
     if checked == 0 {
         if parity_datasets_required() {
             ParityFailure::new(scenario::INDEX_DB_BIG)
+                .lane("index_db_big")
                 .cassandra_source("CorruptPrimaryIndexTest.java (truncated BIG Index.db)")
                 .fixture(datasets_sstables_root())
                 .components(["Index.db", "Data.db"])
