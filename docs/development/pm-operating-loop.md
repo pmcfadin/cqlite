@@ -37,8 +37,27 @@ ORDER: k                # queue rank when several are Ready at once
    resumes; oracle/refactor runs straight through.
 4. **Before merging**: re-check for an open `HOLD`. If `HOLD: merge after #N`, block until #N is merged.
    Merge only on `agent-gate.sh` PASS + spec-auditor C PASS (design) + roborev clean + HOLD cleared.
-5. **Merge + clean up** (`flow-finalize`): squash-merge, archive any OpenSpec change, remove the worktree,
-   delete the origin claim branch, close the issue with a traceable comment. Board → Done (built-in).
+5. **Merge + clean up** (`flow-finalize`): squash-merge, archive any OpenSpec change, **stamp the
+   telemetry ledger**, remove the worktree, delete the origin claim branch, close the issue with a
+   traceable comment. Board → Done (built-in).
+
+## Self-improvement loop (telemetry + retro)
+
+The pipeline measures itself so improvement is data-driven, not anecdotal:
+- **Sense** — at finalize, the worker stamps one record per completed issue into the append-only ledger
+  `docs/reports/delivery-telemetry.jsonl` (schema: `docs/reports/delivery-telemetry.schema.json`) via
+  `scripts/delivery-telemetry.py record`. Records hold authoritative data only — GitHub-derived
+  timestamps (cycle time + coarse phase durations) plus run-observed counters (claim collisions, rebase
+  events, agent-gate pass/fail + run count, roborev findings, rework). A counter that was not observed is
+  an error, never a fabricated `0`.
+- **Diagnose** — on a cadence (per-epic or weekly) the **manager** runs `delivery-telemetry.py retro`,
+  which ranks the recorded failure categories by a documented weighted tally (deterministic, not an
+  inferred model) and reports the single highest-cost recurring failure. `--file` files a `flow-meta`
+  improvement issue, deduped against open `flow-meta` issues by a stable category marker.
+- **Improve** — that `flow-meta` issue enters Ready and runs through the normal pipeline like any other.
+
+The `delivery-telemetry` agent-gate component (SKIP-aware on `python3`) covers the tool: schema
+round-trip, lint-rejects-malformed, fixture-ledger → expected top failure, and dedupe.
 
 ## Merge sequencing (why HOLD exists)
 

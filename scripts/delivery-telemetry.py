@@ -1,0 +1,400 @@
+#!/usr/bin/env python3
+"""delivery-telemetry.py — delivery-pipeline telemetry ledger + recurring retro.
+
+Closes the pipeline self-improvement loop:
+  sense    -> an append-only ledger, one record per completed issue (`record`)
+  diagnose -> rank recorded failures, file a deduped flow-meta issue (`retro`)
+  improve  -> that issue runs through the normal pipeline
+
+Authoritative-data-only mandate (CLAUDE.md / issue #28): every field is an observed
+event — a GitHub timestamp/label or a run counter supplied by the stamping step — or
+arithmetic over authoritative timestamps. Nothing is inferred, estimated, or guessed.
+A required run counter that was not observed is an ERROR, never a fabricated zero.
+
+Subcommands:
+  record    build one ledger record and append it (one line)
+  lint      schema-validate every line of the ledger        (alias: validate)
+  retro     rank failure categories; optionally file a deduped flow-meta issue
+
+The two GitHub-touching paths (`record` live-pull, `retro --file`) sit behind explicit
+seams (`--from-json`, `--open-issues-json`, `--ledger`) so the unit tests run with no
+network and no datasets.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+# --------------------------------------------------------------------------- paths
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_LEDGER = REPO_ROOT / "docs" / "reports" / "delivery-telemetry.jsonl"
+DEFAULT_SCHEMA = REPO_ROOT / "docs" / "reports" / "delivery-telemetry.schema.json"
+
+# --------------------------------------------------------------------------- retro policy
+#
+# Failure-category weights are POLICY CONSTANTS (a documented, deterministic tally —
+# not an inferred or learned cost model). The retro rank is Sum(count * weight) per
+# category over the ledger. Tuning a weight is a constant edit, never a guess about
+# what the data means. Order of magnitude reflects how expensive each failure is to
+# the pipeline: a failed gate / rework round costs the most; a single rebase the least.
+RETRO_WEIGHTS = {
+    "gate_failures": 5,      # an agent-gate.sh FAIL round
+    "rework": 4,             # a re-open / re-review round
+    "claim_collisions": 3,   # a lost claim race (wasted setup)
+    "roborev_findings": 2,   # a roborev finding to resolve
+    "rebase_events": 2,      # a rebase / conflict resolution
+}
+
+# Required run counters for `record` — each MUST be supplied; a missing one is an error
+# (authoritative-data-only: we never fabricate a count we did not observe).
+REQUIRED_COUNTERS = ("claim_collisions", "rebase_events", "gate_runs", "roborev_findings", "rework")
+
+
+# ============================================================ minimal JSON-Schema check
+#
+# A pure-stdlib subset validator (keeps the tool dependency-free / SKIP-aware on python3
+# alone). The schema file remains the source of truth; this enforces the keywords the
+# record schema actually uses: type, required, properties, const, enum, minimum, pattern.
+
+def _type_ok(value, t: str) -> bool:
+    if t == "object":
+        return isinstance(value, dict)
+    if t == "array":
+        return isinstance(value, list)
+    if t == "string":
+        return isinstance(value, str)
+    if t == "integer":
+        # bool is a subclass of int — exclude it
+        return isinstance(value, int) and not isinstance(value, bool)
+    if t == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if t == "boolean":
+        return isinstance(value, bool)
+    if t == "null":
+        return value is None
+    return True
+
+
+def _validate(value, schema: dict, path: str, errors: list) -> None:
+    if "const" in schema and value != schema["const"]:
+        errors.append(f"{path}: must equal {schema['const']!r}, got {value!r}")
+    if "enum" in schema and value not in schema["enum"]:
+        errors.append(f"{path}: must be one of {schema['enum']}, got {value!r}")
+    if "type" in schema and not _type_ok(value, schema["type"]):
+        errors.append(f"{path}: expected type {schema['type']}, got {type(value).__name__}")
+        return  # further checks assume the type held
+    if "minimum" in schema and isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value < schema["minimum"]:
+            errors.append(f"{path}: {value} < minimum {schema['minimum']}")
+    if "pattern" in schema and isinstance(value, str):
+        if not re.search(schema["pattern"], value):
+            errors.append(f"{path}: {value!r} does not match /{schema['pattern']}/")
+    if schema.get("type") == "object" and isinstance(value, dict):
+        for req in schema.get("required", []):
+            if req not in value:
+                errors.append(f"{path}: missing required field '{req}'")
+        for key, subschema in schema.get("properties", {}).items():
+            if key in value:
+                _validate(value[key], subschema, f"{path}.{key}" if path else key, errors)
+
+
+def validate_record(record: dict, schema: dict) -> list:
+    """Return a list of human-readable validation errors (empty == valid)."""
+    errors: list = []
+    _validate(record, schema, "", errors)
+    return errors
+
+
+def load_schema(schema_path: Path) -> dict:
+    return json.loads(schema_path.read_text())
+
+
+# ============================================================ timestamp helpers
+
+def _parse_ts(value: str) -> datetime:
+    """Parse an RFC-3339 / ISO-8601 UTC timestamp (accepts a trailing 'Z')."""
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _seconds_between(start: str, end: str) -> int:
+    return int((_parse_ts(end) - _parse_ts(start)).total_seconds())
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ============================================================ record
+
+def _github_fields(issue: int, pr: int) -> dict:
+    """Pull authoritative timestamps/labels live from `gh` (only when not injected)."""
+    issue_json = json.loads(subprocess.run(
+        ["gh", "issue", "view", str(issue), "--json", "createdAt,closedAt,labels"],
+        check=True, capture_output=True, text=True).stdout)
+    pr_json = json.loads(subprocess.run(
+        ["gh", "pr", "view", str(pr), "--json", "createdAt,mergedAt"],
+        check=True, capture_output=True, text=True).stdout)
+    labels = [l["name"] for l in issue_json.get("labels", [])]
+    priority = next((l for l in labels if re.fullmatch(r"P[0-3]", l)), None)
+    routing = "oracle" if "oracle" in labels else "design"
+    return {
+        "created_at": issue_json["createdAt"],
+        "closed_at": issue_json["closedAt"],
+        "pr_opened_at": pr_json["createdAt"],
+        "merged_at": pr_json["mergedAt"],
+        "priority": priority,
+        "routing": routing,
+    }
+
+
+def build_record(args, gh_fields: dict) -> dict:
+    """Assemble a record from supplied counters + authoritative GitHub fields."""
+    for counter in REQUIRED_COUNTERS:
+        if getattr(args, counter) is None:
+            raise SystemExit(
+                f"error: --{counter.replace('_', '-')} is required "
+                f"(authoritative-data-only: a counter that was not observed is never defaulted)")
+    if args.gate is None:
+        raise SystemExit("error: --gate {pass|fail} is required")
+
+    created = gh_fields["created_at"]
+    pr_opened = gh_fields["pr_opened_at"]
+    merged = gh_fields["merged_at"]
+    closed = gh_fields["closed_at"]
+    priority = args.priority or gh_fields.get("priority")
+    routing = args.routing or gh_fields.get("routing")
+    if priority is None:
+        raise SystemExit("error: priority not found on the issue and not supplied via --priority")
+
+    return {
+        "schema": 1,
+        "issue": args.issue,
+        "slug": args.slug,
+        "pr": args.pr,
+        "routing": routing,
+        "priority": priority,
+        "created_at": created,
+        "pr_opened_at": pr_opened,
+        "merged_at": merged,
+        "closed_at": closed,
+        "cycle_time_s": _seconds_between(created, closed),
+        "phase_s": {
+            "to_pr_s": _seconds_between(created, pr_opened),
+            "review_s": _seconds_between(pr_opened, merged),
+        },
+        "claim_collisions": args.claim_collisions,
+        "rebase_events": args.rebase_events,
+        "gate": args.gate,
+        "gate_runs": args.gate_runs,
+        "roborev_findings": args.roborev_findings,
+        "rework": args.rework,
+        "stamped_at": _now_iso(),
+    }
+
+
+def cmd_record(args) -> int:
+    schema = load_schema(Path(args.schema))
+    if args.from_json:
+        gh_fields = json.loads(Path(args.from_json).read_text())
+    else:
+        gh_fields = _github_fields(args.issue, args.pr)
+
+    record = build_record(args, gh_fields)
+    errors = validate_record(record, schema)
+    if errors:
+        print("error: built record is not schema-valid:", file=sys.stderr)
+        for e in errors:
+            print(f"  - {e}", file=sys.stderr)
+        return 1
+
+    ledger = Path(args.ledger)
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    with ledger.open("a") as fh:
+        fh.write(json.dumps(record, sort_keys=True) + "\n")
+    print(f"recorded issue #{record['issue']} (pr #{record['pr']}) -> {ledger}")
+    return 0
+
+
+# ============================================================ lint
+
+def cmd_lint(args) -> int:
+    schema = load_schema(Path(args.schema))
+    ledger = Path(args.ledger)
+    if not ledger.exists():
+        print(f"error: ledger not found: {ledger}", file=sys.stderr)
+        return 1
+
+    bad = 0
+    for lineno, raw in enumerate(ledger.read_text().splitlines(), start=1):
+        if not raw.strip():
+            continue
+        try:
+            record = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            print(f"line {lineno}: invalid JSON: {exc}", file=sys.stderr)
+            bad += 1
+            continue
+        errors = validate_record(record, schema)
+        if errors:
+            bad += 1
+            for e in errors:
+                print(f"line {lineno}: {e}", file=sys.stderr)
+
+    if bad:
+        print(f"FAIL: {bad} malformed record(s)", file=sys.stderr)
+        return 1
+    print("OK: ledger is well-formed")
+    return 0
+
+
+# ============================================================ retro
+
+def aggregate(records: list) -> dict:
+    """Sum each failure category across records (authoritative recorded values only)."""
+    tally = {k: 0 for k in RETRO_WEIGHTS}
+    for r in records:
+        tally["claim_collisions"] += r.get("claim_collisions", 0)
+        tally["rebase_events"] += r.get("rebase_events", 0)
+        tally["roborev_findings"] += r.get("roborev_findings", 0)
+        tally["rework"] += r.get("rework", 0)
+        if r.get("gate") == "fail":
+            tally["gate_failures"] += 1
+    return tally
+
+
+def rank(tally: dict) -> list:
+    """Return [(category, count, weight, score)] sorted by score desc, then category."""
+    rows = [(cat, cnt, RETRO_WEIGHTS[cat], cnt * RETRO_WEIGHTS[cat]) for cat, cnt in tally.items()]
+    rows.sort(key=lambda r: (-r[3], r[0]))
+    return rows
+
+
+def _retro_marker(category: str) -> str:
+    return f"<!-- RETRO:{category} -->"
+
+
+def _open_flow_meta_issues(args) -> list:
+    if args.open_issues_json:
+        return json.loads(Path(args.open_issues_json).read_text())
+    return json.loads(subprocess.run(
+        ["gh", "issue", "list", "--label", "flow-meta", "--state", "open",
+         "--json", "number,title,body", "--limit", "200"],
+        check=True, capture_output=True, text=True).stdout)
+
+
+def cmd_retro(args) -> int:
+    ledger = Path(args.ledger)
+    if not ledger.exists():
+        print(f"error: ledger not found: {ledger}", file=sys.stderr)
+        return 1
+    records = [json.loads(l) for l in ledger.read_text().splitlines() if l.strip()]
+    if not records:
+        print("ledger is empty — nothing to retro")
+        return 0
+
+    tally = aggregate(records)
+    ranked = rank(tally)
+
+    print(f"delivery-pipeline retro over {len(records)} record(s):")
+    print(f"  {'category':<18} {'count':>6} {'weight':>7} {'score':>7}")
+    for cat, cnt, weight, score in ranked:
+        print(f"  {cat:<18} {cnt:>6} {weight:>7} {score:>7}")
+
+    top_cat, top_cnt, _, top_score = ranked[0]
+    if top_score == 0:
+        print("\nno recurring failures recorded — nothing to file")
+        return 0
+    print(f"\ntop recurring failure: {top_cat} (count={top_cnt}, score={top_score})")
+
+    # dedupe against open flow-meta issues by stable category marker
+    marker = _retro_marker(top_cat)
+    existing = [i for i in _open_flow_meta_issues(args) if marker in (i.get("body") or "")]
+    if existing:
+        nums = ", ".join(f"#{i['number']}" for i in existing)
+        print(f"already tracked by open flow-meta issue(s): {nums} — skipping filing")
+        return 0
+
+    title = f"flow-meta: reduce recurring '{top_cat}' (retro top failure)"
+    body = (
+        f"{marker}\n\n"
+        f"## Retro finding\n"
+        f"The recurring-retro over `{ledger}` ranks **{top_cat}** as the highest-cost "
+        f"recurring pipeline failure (count={top_cnt}, weighted score={top_score}).\n\n"
+        f"## Ranked categories\n"
+        + "\n".join(f"- {c}: count={n}, score={s}" for c, n, _, s in ranked)
+        + "\n\n_Filed by `scripts/delivery-telemetry.py retro`._\n"
+    )
+
+    if not args.file:
+        print("\n--- DRY RUN (pass --file to create) ---")
+        print(f"title: {title}")
+        print(body)
+        return 0
+
+    out = subprocess.run(
+        ["gh", "issue", "create", "--title", title, "--body", body,
+         "--label", "flow-meta", "--label", "P2"],
+        check=True, capture_output=True, text=True)
+    print(f"filed: {out.stdout.strip()}")
+    return 0
+
+
+# ============================================================ argparse
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="retro weight table (policy constants): "
+               + ", ".join(f"{k}={v}" for k, v in RETRO_WEIGHTS.items()),
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    def common(sp):
+        sp.add_argument("--ledger", default=str(DEFAULT_LEDGER), help="ledger path (JSONL)")
+        sp.add_argument("--schema", default=str(DEFAULT_SCHEMA), help="JSON Schema path")
+
+    rec = sub.add_parser("record", help="append one ledger record")
+    common(rec)
+    rec.add_argument("--issue", type=int, required=True)
+    rec.add_argument("--pr", type=int, required=True)
+    rec.add_argument("--slug", required=True)
+    rec.add_argument("--routing", choices=["design", "oracle"], default=None)
+    rec.add_argument("--priority", default=None, help="P0..P3 (else read from the issue)")
+    rec.add_argument("--gate", choices=["pass", "fail"], default=None)
+    rec.add_argument("--gate-runs", dest="gate_runs", type=int, default=None)
+    rec.add_argument("--claim-collisions", dest="claim_collisions", type=int, default=None)
+    rec.add_argument("--rebase-events", dest="rebase_events", type=int, default=None)
+    rec.add_argument("--roborev-findings", dest="roborev_findings", type=int, default=None)
+    rec.add_argument("--rework", type=int, default=None)
+    rec.add_argument("--from-json", dest="from_json", default=None,
+                     help="inject GitHub-derived fields from a JSON file (else pull via gh)")
+    rec.set_defaults(func=cmd_record)
+
+    lint = sub.add_parser("lint", aliases=["validate"], help="schema-validate the ledger")
+    common(lint)
+    lint.set_defaults(func=cmd_lint)
+
+    ret = sub.add_parser("retro", help="rank failures; optionally file a deduped issue")
+    common(ret)
+    ret.add_argument("--file", action="store_true", help="file a flow-meta issue (default: dry-run)")
+    ret.add_argument("--open-issues-json", dest="open_issues_json", default=None,
+                     help="inject open flow-meta issues from a JSON file (else query gh)")
+    ret.set_defaults(func=cmd_retro)
+    return p
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

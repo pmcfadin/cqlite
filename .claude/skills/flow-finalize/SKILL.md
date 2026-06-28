@@ -22,7 +22,24 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    only for a doc/infra change with no capability delta). This moves the change to
    `openspec/changes/archive/` and syncs its delta spec into `openspec/specs/<capability>/spec.md`.
    Commit the archive (and push / open a small PR per the repo's merge norms).
-4. **Set the board to Done + release the claim.** The PR-merged / issue-closed server-side automation
+4. **Stamp the telemetry ledger.** Write one record for this completed issue so the pipeline's
+   self-improvement loop has data (schema + doctrine: `docs/reports/delivery-telemetry.schema.json`;
+   tool: `scripts/delivery-telemetry.py`). GitHub-derived fields (issue/PR timestamps, priority,
+   routing) are pulled live; the run counters are what YOU observed during this issue — supply honest
+   values (a counter you did not observe is an error, never a fabricated `0`):
+   ```bash
+   python3 scripts/delivery-telemetry.py record \
+     --issue <N> --pr <pr> --slug <slug> \
+     --gate pass --gate-runs <how many times you ran agent-gate.sh> \
+     --claim-collisions <rejected claim pushes> --rebase-events <rebases/conflict resolutions> \
+     --roborev-findings <roborev findings raised> --rework <re-open / re-review rounds>
+   git -C <repo-root> add docs/reports/delivery-telemetry.jsonl
+   git -C <repo-root> commit -m "telemetry(#<N>): stamp delivery ledger" && git -C <repo-root> push
+   ```
+   (`routing`/`priority` default from the issue's labels; pass `--routing`/`--priority` to override. The
+   live ledger lives on `main`, so stamp it on the root checkout / via a tiny follow-up commit.) Confirm
+   with `python3 scripts/delivery-telemetry.py lint`.
+5. **Set the board to Done + release the claim.** The PR-merged / issue-closed server-side automation
    should already have moved the Project item to `Status=Done` (it fires even when you merge from the
    phone/web — no `flow-*` run needed); if it hasn't, set it yourself, else flip the `status:*` label in
    the fallback (the Project-vs-labels detection snippet is in `flow-board`):
@@ -35,17 +52,17 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    Releasing the claim = removing the `issue-<N>-<slug>` branch from origin (the cross-machine lock); the
    cleanup below does exactly that. After finalize, nothing for this issue may remain `In Progress`/`In
    Review` and no `issue-<N>-*` branch may remain on origin.
-5. **Remove the worktree + branch (releases the claim lock):**
+6. **Remove the worktree + branch (releases the claim lock):**
    ```bash
    git worktree remove .claude/worktrees/issue-<N>-<slug> --force
    git branch -D issue-<N>-<slug> 2>/dev/null
    git push origin --delete issue-<N>-<slug> 2>/dev/null   # deletes the origin claim lock
    ```
    Confirm the lock is gone: `git ls-remote --heads origin "issue-<N>-*"` returns nothing.
-6. **Close the issue** with a traceable comment referencing the merged PR + commit (only if its
+7. **Close the issue** with a traceable comment referencing the merged PR + commit (only if its
    acceptance criteria are fully met — never close an epic):
    ```bash
    gh issue close <N> --reason completed --comment "Merged via #<pr> (<commit>). <one-line why>."
    ```
-7. **Report** the closed issue, the live capability (if a spec was synced), and surface the next board
+8. **Report** the closed issue, the live capability (if a spec was synced), and surface the next board
    item.
