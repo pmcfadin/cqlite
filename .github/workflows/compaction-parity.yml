@@ -6,15 +6,16 @@ name: "CI: Compaction Parity (differential harness)"
 #   1. REFERENCE  — Apache Cassandra's compaction, in-JVM via CQLTester.
 #   2. CANDIDATE  — the external `cqlite compact` binary (--features write-support).
 #
-# TIER POLICY (issue #889, follow-up to #842):
+# TIER POLICY (issue #889/#1016, follow-up to #842):
 #   - LOGICAL tier (canonical sstabledump of both outputs must match) is
 #     implemented and green. It is a HARD GATE here: logical-tier failures fail
 #     this workflow.
-#   - BYTE tier (per-component `cmp`, the #842 north star) is NOT implemented in
-#     the harness yet. It is wired here as a NON-BLOCKING, opt-in step (see
-#     RUN_BYTE_TIER below) so it can be promoted to a hard gate once the
-#     divergence-fix children (#886 → #844/#887/#888/#846/#848) land. Until then
-#     the byte step never fails the build.
+#   - BYTE tier (per-component `cmp`, no allowlist — the #842 north star) is now
+#     implemented in the harness (issue #1016: `gradle byteParity`). It runs here
+#     as a NON-BLOCKING step (continue-on-error) so per-component byte diffs +
+#     failure artifacts are produced every run without turning the build red. It
+#     is promoted to a HARD GATE once the divergence-fix children
+#     (#886 → #844/#887/#888/#846/#848) land — by dropping continue-on-error.
 #
 # TRIGGERS: PRs that touch the write/merge/compaction paths or this harness, plus
 # manual workflow_dispatch. The pinned Cassandra source build (ant jar build-test)
@@ -40,7 +41,7 @@ on:
       run_byte_tier:
         description: 'Also run the (non-blocking) byte-equality tier'
         type: boolean
-        default: false
+        default: true
 
 permissions:
   contents: read
@@ -60,10 +61,11 @@ env:
   # Where bootstrap-cassandra.sh fetches+builds the pinned source. The script
   # uses $HOME/.cache/cqlite/cassandra-src/<ref>; pin the parent here for caching.
   CQLITE_CASSANDRA_CACHE: ${{ github.workspace }}/.cqlite-cache/cassandra-src
-  # Byte-tier promotion hook: defaults to off (non-blocking). When the harness's
-  # byte tier lands and stabilises, set this to 'true' (or make the step a hard
-  # gate) to promote it. workflow_dispatch can also opt in per-run.
-  RUN_BYTE_TIER: ${{ github.event.inputs.run_byte_tier || 'false' }}
+  # Byte tier (issue #1016): now implemented, so it runs every CI run by default
+  # but stays NON-BLOCKING (continue-on-error on the step) until the writer is
+  # byte-stable. Promotion to a hard gate = drop continue-on-error. A
+  # workflow_dispatch run can set this 'false' to skip the byte tier entirely.
+  RUN_BYTE_TIER: ${{ github.event.inputs.run_byte_tier || 'true' }}
 
 jobs:
   compaction-parity:
@@ -155,14 +157,15 @@ jobs:
         run: |
           gradle --no-daemon test
 
-      # ── BYTE tier — NON-BLOCKING promotion hook (issue #842 north star). ──
-      # The harness does not yet implement a separate byte-equality tier, so this
-      # is intentionally a no-op-tolerant placeholder gated on RUN_BYTE_TIER and
-      # kept continue-on-error: it can never turn the build red today. PROMOTION:
-      # once the byte tier lands (e.g. a `byteParity` Gradle task or a JUnit
-      # category/system-property the harness honours), wire it below, default
-      # RUN_BYTE_TIER to 'true', and drop continue-on-error to make it a hard gate.
-      - name: Run byte-tier parity (non-blocking, opt-in)
+      # ── BYTE tier — per-component cmp, NO allowlist (issue #1016, #842). ──
+      # Implemented as the `byteParity` Gradle task: it reruns the scenarios and
+      # additionally asserts every output component (Data/Index/Statistics/Summary/
+      # Filter/CompressionInfo/Digest/TOC, as present) is byte-identical, reporting
+      # the first byte/offset diff per component. Kept continue-on-error so it is
+      # NON-BLOCKING until the writer is byte-stable; PROMOTION to a hard gate =
+      # drop continue-on-error. The artifacts (byte-diff.txt, checksums.txt, both
+      # component dirs) are uploaded below on success AND failure.
+      - name: Run byte-tier parity (non-blocking)
         id: byte
         if: env.RUN_BYTE_TIER == 'true'
         continue-on-error: true
@@ -171,10 +174,7 @@ jobs:
           CQLITE_CASSANDRA_SRC: ${{ env.CQLITE_CASSANDRA_CACHE }}/${{ env.CASSANDRA_REF }}
           CQLITE_BIN: ${{ github.workspace }}/target/debug/cqlite
         run: |
-          echo "Byte tier is not yet implemented in the harness (issue #842)."
-          echo "This step is a documented, non-blocking promotion hook (issue #889)."
-          echo "When the byte tier lands, invoke it here, e.g.:"
-          echo "  gradle --no-daemon byteParity   # or: gradle test -Dparity.tier=byte"
+          gradle --no-daemon byteParity
 
       # ── Surface a readable per-scenario / per-component diff on failure. ──
       # The harness asserts on a canonical sstabledump (JSONL) of each output, so
@@ -202,6 +202,10 @@ jobs:
           find build/reports/tests -name '*.txt' -print -exec cat {} \; 2>/dev/null || true
           echo "::endgroup::"
 
+      # Upload on success AND failure (issue #1016 AC3/AC5): JUnit reports plus the
+      # harness's preserved per-scenario artifacts (inputs, both engines' output
+      # components, schema, exact command lines, stdout/stderr, normalized JSONL,
+      # checksum summary, and the first byte/offset diff per component).
       - name: Upload parity reports and diffs
         if: always()
         uses: actions/upload-artifact@v6
@@ -210,6 +214,8 @@ jobs:
           path: |
             compaction-parity/build/reports/tests/**
             compaction-parity/build/test-results/**
+            compaction-parity/build/parity-artifacts-test/**
+            compaction-parity/build/parity-artifacts-byteParity/**
           if-no-files-found: ignore
           retention-days: 14
 
@@ -219,14 +225,20 @@ jobs:
           {
             echo "# Compaction Parity Results"
             echo
-            echo "- Logical tier (HARD GATE): ${{ steps.logical.outcome }}"
-            echo "- Byte tier (non-blocking, opt-in): ${{ steps.byte.outcome || 'skipped' }}"
+            echo "| Tier | Comparison | Gating | Status |"
+            echo "|---|---|---|---|"
+            echo "| LOGICAL | canonical sstabledump JSONL equality | HARD GATE | ${{ steps.logical.outcome }} |"
+            echo "| BYTE | per-component cmp, no allowlist | non-blocking | ${{ steps.byte.outcome || 'skipped' }} |"
             echo
             echo "Cassandra pin: ${{ env.CASSANDRA_REF }} (cache hit: ${{ steps.cassandra-cache.outputs.cache-hit }})"
             echo
-            echo "Byte-tier is the #842 north star and stays non-blocking until the"
-            echo "divergence-fix children land; promote it by enabling RUN_BYTE_TIER"
-            echo "and dropping continue-on-error on the byte step."
+            echo "The LOGICAL tier blocks this workflow. The BYTE tier (issue #1016)"
+            echo "computes per-component byte/offset diffs and uploads them as the"
+            echo "**compaction-parity-reports** artifact (byte-diff.txt, checksums.txt,"
+            echo "and both engines' output component dirs) on success AND failure. It is"
+            echo "the #842 north star and stays non-blocking until the writer is"
+            echo "byte-stable; promote it to a hard gate by dropping continue-on-error"
+            echo "on the byte step."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Comment on PR (failure)
