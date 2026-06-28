@@ -71,13 +71,19 @@ while [ $# -gt 0 ]; do
     --main-ref)         MAIN_REF="${2:-}"; shift 2 ;;
     --confirm-unmerged) CONFIRM_UNMERGED=1; shift ;;
     --dry-run)          DRY_RUN=1; shift ;;
-    -h|--help)          sed -n '2,40p' "$0"; exit 0 ;;
+    -h|--help)          awk 'NR>=2 && /^set -euo pipefail/{exit} NR>=2' "$0"; exit 0 ;;
     *)                  die_usage "unknown argument: $1" ;;
   esac
 done
 
 [ -n "$ISSUE" ] || die_usage "--issue is required"
 [ -n "$MERGED_BRANCH" ] || die_usage "--merged-branch is required (the merged PR's headRefName)"
+# Identity guard: the merged branch MUST belong to this issue (1:1:1:1). Catches a
+# typo or a cross-issue branch name before any lock is touched.
+case "$MERGED_BRANCH" in
+  issue-${ISSUE}-*) : ;;
+  *) die_usage "--merged-branch '$MERGED_BRANCH' does not match --issue $ISSUE (expected issue-${ISSUE}-*)" ;;
+esac
 
 if [ -z "$REPO_ROOT" ]; then
   REPO_ROOT="$(git rev-parse --show-toplevel)"
@@ -171,25 +177,32 @@ if [ -n "$target_wt" ]; then
     echo "$prog: REFUSED — worktree '$target_wt' has uncommitted changes. Not removing." >&2
     exit 3
   fi
-  # 3c: unpushed commits? Compare HEAD against the best available "pushed" ref —
-  # the configured upstream (@{u}), else the live origin tip. If neither exists we
-  # cannot prove the work was pushed: refuse when HEAD is ahead of main unless
-  # --confirm-unmerged authorizes it (closes the no-upstream blind spot).
-  cmp_ref=""
-  if ! cmp_ref="$(git -C "$target_wt" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)"; then
-    cmp_ref="$remote_sha"
+  # 3c: unpushed commits? Compare HEAD against a "pushed" ref RESOLVED TO A SHA.
+  # A configured-but-deleted upstream (the common `gh pr merge --delete-branch`
+  # case) resolves by NAME but not as a ref, so we use `rev-parse --verify`, which
+  # only succeeds when @{u} names a live commit; otherwise fall back to the live
+  # origin tip. If neither resolves we cannot prove the work was pushed: refuse
+  # when HEAD is ahead of main unless --confirm-unmerged authorizes it.
+  cmp_sha=""
+  if cmp_sha="$(git -C "$target_wt" rev-parse --verify --quiet '@{u}' 2>/dev/null)"; then
+    :
   fi
-  if [ -n "$cmp_ref" ]; then
-    ahead="$(git -C "$target_wt" rev-list --count "${cmp_ref}..HEAD" 2>/dev/null || echo 0)"
-    if [ "${ahead:-0}" -gt 0 ]; then
-      echo "$prog: REFUSED — worktree '$target_wt' has $ahead unpushed commit(s) vs $cmp_ref. Not removing." >&2
+  [ -n "$cmp_sha" ] || cmp_sha="$remote_sha"
+  if [ -n "$cmp_sha" ]; then
+    ahead="$(git -C "$target_wt" rev-list --count "${cmp_sha}..HEAD" 2>/dev/null || echo "")"
+    if [ -z "$ahead" ]; then
+      echo "$prog: REFUSED — cannot compare worktree '$target_wt' against pushed ref $cmp_sha. Not removing." >&2
+      exit 3
+    fi
+    if [ "$ahead" -gt 0 ]; then
+      echo "$prog: REFUSED — worktree '$target_wt' has $ahead unpushed commit(s) vs $cmp_sha. Not removing." >&2
       exit 3
     fi
   else
     ahead_main="$(git -C "$target_wt" rev-list --count "${MAIN_REF}..HEAD" 2>/dev/null || echo 0)"
     if [ "${ahead_main:-0}" -gt 0 ] && [ "$CONFIRM_UNMERGED" -eq 0 ]; then
-      echo "$prog: REFUSED — worktree '$target_wt' has no upstream and no origin branch, and HEAD is" >&2
-      echo "  $ahead_main commit(s) ahead of $MAIN_REF — cannot confirm the work was pushed." >&2
+      echo "$prog: REFUSED — worktree '$target_wt' has no resolvable upstream and no origin branch, and" >&2
+      echo "  HEAD is $ahead_main commit(s) ahead of $MAIN_REF — cannot confirm the work was pushed." >&2
       echo "  Pass --confirm-unmerged only if you have verified the PR is MERGED. Not removing." >&2
       exit 3
     fi

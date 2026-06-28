@@ -210,6 +210,45 @@ remote_branches "$WORK" | grep -qx "issue-1209-feature" && ok "dry-run did not d
 echo "$out" | grep -q "DRY-RUN" && ok "dry-run prints planned actions" || fail "no DRY-RUN output"
 rm -rf "$T"
 
+# ===========================================================================
+echo "TEST 12: --dry-run still honors a refusal guard (dirty → exit 3)"
+# ===========================================================================
+T=$(mktemp -d); build_sandbox "$T"; WORK="$T/work"
+add_branch_worktree "$WORK" "issue-1211-feature" "$T/wt" dirty
+rc=0
+bash "$CLEANUP" --issue 1211 --merged-branch issue-1211-feature --dry-run \
+  --repo-root "$WORK" --worktrees-dir "$T" >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 3 ] && ok "dry-run aborts on dirty worktree (exit 3)" || fail "expected exit 3, got $rc"
+[ -d "$T/wt" ] && ok "worktree intact" || fail "worktree removed in dry-run"
+rm -rf "$T"
+
+# ===========================================================================
+echo "TEST 13: stale upstream must not mask unpushed commits (exit 3)"
+# ===========================================================================
+# Round-3 regression: @{u} stays *configured* after the origin branch is deleted,
+# so a name-only lookup + `|| echo 0` silently reported 0 unpushed. The SHA-verify
+# fallback must catch the real unpushed commit.
+T=$(mktemp -d); build_sandbox "$T"; WORK="$T/work"
+add_branch_worktree "$WORK" "issue-1210-feature" "$T/wt" ""    # pushed, upstream set
+( cd "$T/wt" || exit 1; echo more > h.txt; g add h.txt; g commit -qm "unpushed after push" )
+g -C "$WORK" push -q origin --delete issue-1210-feature        # origin branch gone; @{u} now stale
+rc=0
+bash "$CLEANUP" --issue 1210 --merged-branch issue-1210-feature \
+  --repo-root "$WORK" --worktrees-dir "$T" >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 3 ] && ok "exit 3 — unpushed work not masked by stale upstream" || fail "expected exit 3, got $rc"
+[ -d "$T/wt" ] && ok "worktree with unpushed work survives" || fail "worktree removed — REGRESSION"
+rm -rf "$T"
+
+# ===========================================================================
+echo "TEST 14: --merged-branch not matching --issue → usage error (exit 64)"
+# ===========================================================================
+T=$(mktemp -d); build_sandbox "$T"; WORK="$T/work"
+rc=0
+bash "$CLEANUP" --issue 1212 --merged-branch issue-9999-wrong-issue \
+  --repo-root "$WORK" --worktrees-dir "$T" >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 64 ] && ok "exit 64 — issue/branch identity mismatch rejected" || fail "expected exit 64, got $rc"
+rm -rf "$T"
+
 echo ""
 echo "================  finalize-cleanup: $PASS passed, $FAIL failed  ================"
 [ "$FAIL" -eq 0 ]
