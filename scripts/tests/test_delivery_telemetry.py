@@ -370,6 +370,31 @@ class GhPathTests(unittest.TestCase):
         self.assertIn("<!-- RETRO:rework -->", body)
 
 
+    def test_retro_empty_ledger(self):
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "ledger.jsonl"
+            ledger.write_text("")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = dt.main(["retro", "--ledger", str(ledger)])
+            self.assertEqual(rc, 0)
+            self.assertIn("ledger is empty", out.getvalue())
+
+    def test_retro_all_zero_files_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "ledger.jsonl"
+            rec = json.loads((FIXTURES / "sample-ledger.jsonl").read_text().splitlines()[0])
+            rec.update({"claim_collisions": 0, "rebase_events": 0, "roborev_findings": 0,
+                        "rework": 0, "gate": "pass", "gate_runs": 1})
+            ledger.write_text(json.dumps(rec) + "\n")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = dt.main(["retro", "--ledger", str(ledger),
+                              "--open-issues-json", str(FIXTURES / "open-issues-empty.json")])
+            self.assertEqual(rc, 0)
+            self.assertIn("no recurring failures", out.getvalue())
+
+
 class AggregateTests(unittest.TestCase):
     def test_aggregate_and_rank_are_deterministic_tallies(self):
         records = [json.loads(l) for l in

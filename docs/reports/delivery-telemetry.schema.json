@@ -50,7 +50,7 @@
     "claim_collisions": { "type": "integer", "minimum": 0, "description": "Run-observed: number of rejected claim pushes (a competing session won the race)." },
     "rebase_events": { "type": "integer", "minimum": 0, "description": "Run-observed: number of rebases / merge-conflict resolutions." },
     "gate": { "enum": ["pass", "fail"], "description": "Run-observed: final agent-gate.sh outcome." },
-    "gate_runs": { "type": "integer", "minimum": 1, "description": "Run-observed: how many times agent-gate.sh was run." },
+    "gate_runs": { "type": "integer", "minimum": 1, "description": "Run-observed: number of agent-gate.sh runs through (and including) the first PASS — runs stop at the first pass, so failed rounds = gate_runs-1 for a terminal pass and gate_runs for a terminal fail. Do not re-run the gate after a pass." },
     "roborev_findings": { "type": "integer", "minimum": 0, "description": "Run-observed: count of roborev findings raised." },
     "rework": { "type": "integer", "minimum": 0, "description": "Run-observed: re-open / re-review count." },
     "stamped_at": { "type": "string", "format": "date-time", "description": "Wall-clock when finalize wrote this record (observed at write time)." }

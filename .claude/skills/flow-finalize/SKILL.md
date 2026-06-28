@@ -30,7 +30,7 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    ```bash
    python3 scripts/delivery-telemetry.py record \
      --issue <N> --pr <pr> --slug <slug> --routing design|oracle \
-     --gate pass --gate-runs <how many times you ran agent-gate.sh> \
+     --gate pass --gate-runs <runs through the first PASS; don't re-run after a pass> \
      --claim-collisions <rejected claim pushes> --rebase-events <rebases/conflict resolutions> \
      --roborev-findings <roborev findings raised> --rework <re-open / re-review rounds>
    git -C <repo-root> add docs/reports/delivery-telemetry.jsonl

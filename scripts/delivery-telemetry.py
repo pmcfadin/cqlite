@@ -377,10 +377,10 @@ def aggregate(records: list) -> dict:
         tally["rebase_events"] += r["rebase_events"]
         tally["roborev_findings"] += r["roborev_findings"]
         tally["rework"] += r["rework"]
-        # Failed gate ROUNDS, derived from the authoritative run count: every run but
-        # the final pass was a failure. A terminal-fail issue (gate == "fail") failed
-        # every round. gate_runs >= 1 by schema. This counts a 3-run-then-pass issue as
-        # 2 failed rounds, not 0 (matching the weight's "an agent-gate.sh FAIL round").
+        # Failed gate ROUNDS. By the gate_runs contract (runs stop at the first PASS — see
+        # the schema), every run but a terminal pass WAS a failed round, so this is exact,
+        # not an inference: terminal pass -> gate_runs-1 failures; terminal fail -> all
+        # gate_runs. gate_runs >= 1 by schema; max(0, ...) guards the schema-forbidden 0.
         passed_final = 1 if r["gate"] == "pass" else 0
         tally["gate_failures"] += max(0, r["gate_runs"] - passed_final)
     return tally
