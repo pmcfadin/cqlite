@@ -34,13 +34,28 @@
 //! the exact byte boundary of every block; with `prefix_len == 6` every block
 //! decodes to a clean `endOpenMarker` of `0x00` and consumes its block exactly.
 //!
-//! # Fixture-availability rule (local-only fixture)
+//! # Fixture-availability rule (two enforcement tiers)
 //!
-//! This fixture is not yet in the CI dataset tarball (datasets-v3.2 pin), so CI
-//! will not have the binaries until a future dataset re-pin. Each test therefore
-//! SKIPS cleanly (logs a SKIP line and returns) when the fixture's
-//! `Data.db`/`Index.db` binaries are ABSENT, but FAILS if the fixture IS present
-//! and the data is wrong/empty (0 rows / 0 blocks when present is a failure).
+//! The committed sstabledump JSONL golden (`nb-2-big-Data.db.jsonl`) is
+//! git-tracked, so it is ALWAYS present in CI. The binary `Data.db`/`Index.db`
+//! are local-only (not yet in the datasets pin) until a future dataset re-pin.
+//! This suite therefore enforces parity in two tiers:
+//!
+//!   * **Canonical-semantic (runs in CI on every push):** assertions derived
+//!     from the committed JSONL golden alone — exactly 3 partitions (pk 1/2/3),
+//!     live-row counts 290/300/300, pk=1 missing exactly the deleted clustering
+//!     range ck 30..39 (the range tombstone), and ascending clustering order
+//!     within each partition. These do NOT depend on the binaries and FAIL if
+//!     the golden is wrong.
+//!   * **Byte-level (runs only when the binaries are present — local + nightly
+//!     docker / after a dataset re-pin):** promoted-index decode, the
+//!     offset/width chain, and clustering-bound ordering across blocks, read out
+//!     of the real `Index.db`/`Data.db`. When the binaries are absent these
+//!     checks log a clear skip line but the JSONL semantic checks above still
+//!     run.
+//!
+//! Fail-closed both ways: a present-but-empty/wrong JSONL or binaries is a
+//! failure, never a silent pass.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -81,39 +96,70 @@ const PK1_DELETED_CK_HI: i32 = 40;
 // Fixture discovery + skip-on-absence
 // ===========================================================================
 
-/// Resolve the committed datasets root (env override first, else workspace tree).
-fn datasets_root() -> PathBuf {
+/// The repo's own committed datasets tree (independent of `CQLITE_DATASETS_ROOT`).
+/// The git-tracked JSONL golden always lives here, so this is the authoritative
+/// fallback for the canonical-semantic checks even in CI where
+/// `CQLITE_DATASETS_ROOT` may point at a fetched binary tarball elsewhere.
+fn repo_datasets_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|w| w.join("test-data/datasets"))
+        .unwrap_or_else(|| PathBuf::from("test-data/datasets"))
+}
+
+/// Resolve the datasets root for the BINARY components (env override first, else
+/// the repo tree). The binaries are local-only / only present after a fetch.
+fn binary_datasets_root() -> PathBuf {
     if let Ok(root) = std::env::var("CQLITE_DATASETS_ROOT") {
         PathBuf::from(root)
     } else {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .map(|w| w.join("test-data/datasets"))
-            .unwrap_or_else(|| PathBuf::from("test-data/datasets"))
+        repo_datasets_root()
     }
 }
 
 fn fixture_dir() -> PathBuf {
-    datasets_root().join(FIXTURE_REL)
+    binary_datasets_root().join(FIXTURE_REL)
 }
 
 fn component(suffix: &str) -> PathBuf {
     fixture_dir().join(format!("{PREFIX}-{suffix}"))
 }
 
-/// Whether the binary components needed by a test are present. The committed tree
-/// always carries the JSONL/TOC; the binaries (Data.db/Index.db) are gitignored
-/// and only present after a dataset fetch.
+/// Locate the committed JSONL golden: prefer `CQLITE_DATASETS_ROOT` if it
+/// actually contains the file, else fall back to the repo's own committed tree
+/// (git rev-parse --show-toplevel semantics via CARGO_MANIFEST_DIR) so the
+/// git-tracked golden is found in CI even when `CQLITE_DATASETS_ROOT` points at a
+/// binary-only tarball.
+fn jsonl_golden_path() -> Option<PathBuf> {
+    let rel = format!("{FIXTURE_REL}/{PREFIX}-Data.db.jsonl");
+    let env_candidate = std::env::var("CQLITE_DATASETS_ROOT")
+        .ok()
+        .map(|root| PathBuf::from(root).join(&rel));
+    if let Some(p) = env_candidate {
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    let repo_candidate = repo_datasets_root().join(&rel);
+    if repo_candidate.exists() {
+        return Some(repo_candidate);
+    }
+    None
+}
+
+/// Whether the binary components needed by a byte-level test are present. The
+/// committed tree always carries the JSONL/TOC; the binaries (Data.db/Index.db)
+/// are gitignored and only present after a dataset fetch.
 fn binaries_present() -> bool {
     component("Data.db").exists() && component("Index.db").exists()
 }
 
-/// Emit a uniform SKIP line so the absence path is visible in CI logs.
-fn skip(test: &str) {
+/// Emit a uniform line noting the byte-level checks are skipped (binaries absent)
+/// while the JSONL semantic checks remain enforced.
+fn byte_level_skip(test: &str) {
     eprintln!(
-        "{test}: SKIP — local-only fixture {} binaries absent (not yet in the CI \
-         dataset pin); fetch the dataset to exercise wide-partition promoted-index \
-         parity",
+        "{test}: byte-level promoted-index checks skipped (binaries local-only at {}); \
+         JSONL semantic checks enforced",
         fixture_dir().display()
     );
 }
@@ -264,6 +310,97 @@ async fn decode_all_partitions() -> Vec<(Vec<u8>, u64, DecodedPromotedIndex)> {
 }
 
 // ===========================================================================
+// Canonical-semantic tier — runs in CI on every push (JSONL golden only)
+// ===========================================================================
+
+/// Enforce the wide-partition parity facts from the committed sstabledump JSONL
+/// golden ALONE, independent of the local-only binary `Data.db`/`Index.db`. The
+/// golden is git-tracked, so this runs (and fails on a wrong golden) in CI on
+/// every push — it is the required-tier coverage that the byte-level checks only
+/// augment when the binaries are present.
+///
+/// Asserts, straight from the golden:
+///   * exactly 3 partitions, pk = 1, 2, 3;
+///   * live-row counts 290 / 300 / 300;
+///   * pk=1 is missing exactly the deleted clustering range ck 30..39 (and only
+///     that range — every other ck in 0..299 is present);
+///   * clustering keys are in ascending order within each partition.
+#[test]
+fn jsonl_golden_canonical_semantics() {
+    let test = "jsonl_golden_canonical_semantics";
+    let by_pk = parse_jsonl_live_clusterings();
+
+    // Exactly 3 partitions: pk = 1, 2, 3.
+    let pks: Vec<i32> = by_pk.keys().copied().collect();
+    assert_eq!(
+        pks,
+        vec![1, 2, 3],
+        "{test}: JSONL golden must contain exactly partitions pk=1,2,3, got {pks:?}"
+    );
+
+    // Live-row counts: 290 / 300 / 300.
+    assert_eq!(
+        by_pk.get(&1).map(Vec::len),
+        Some(PK1_LIVE_ROWS),
+        "{test}: pk=1 live rows != {PK1_LIVE_ROWS}"
+    );
+    assert_eq!(
+        by_pk.get(&2).map(Vec::len),
+        Some(PK_FULL_LIVE_ROWS),
+        "{test}: pk=2 live rows != {PK_FULL_LIVE_ROWS}"
+    );
+    assert_eq!(
+        by_pk.get(&3).map(Vec::len),
+        Some(PK_FULL_LIVE_ROWS),
+        "{test}: pk=3 live rows != {PK_FULL_LIVE_ROWS}"
+    );
+
+    // Ascending clustering order within each partition.
+    for (pk, cks) in &by_pk {
+        let mut sorted = cks.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            cks, &sorted,
+            "{test}: pk={pk} clustering keys not in ascending order"
+        );
+    }
+
+    // pk=1 missing EXACTLY the deleted range ck 30..39 (range tombstone). Every
+    // other ck in 0..299 must be present; the deleted ones must be absent.
+    let pk1: std::collections::BTreeSet<i32> = by_pk
+        .get(&1)
+        .unwrap_or_else(|| panic!("{test}: pk=1 absent"))
+        .iter()
+        .copied()
+        .collect();
+    let missing: Vec<i32> = (0..300).filter(|c| !pk1.contains(c)).collect();
+    let expected_missing: Vec<i32> = (PK1_DELETED_CK_LO..PK1_DELETED_CK_HI).collect();
+    assert_eq!(
+        missing, expected_missing,
+        "{test}: pk=1 must be missing exactly ck [{PK1_DELETED_CK_LO},{PK1_DELETED_CK_HI}) \
+         (the range tombstone), got missing={missing:?}"
+    );
+
+    // pk=2/pk=3 must be the full contiguous ck 0..299 (no gaps).
+    for pk in [2, 3] {
+        let present: Vec<i32> = by_pk
+            .get(&pk)
+            .unwrap_or_else(|| panic!("{test}: pk={pk} absent"))
+            .clone();
+        let full: Vec<i32> = (0..300).collect();
+        assert_eq!(
+            present, full,
+            "{test}: pk={pk} must be the full contiguous ck 0..299"
+        );
+    }
+
+    eprintln!(
+        "{test}: PASS (canonical-semantic, JSONL golden) — 3 partitions, live counts \
+         290/300/300, pk=1 missing exactly ck 30..39, clustering ascending"
+    );
+}
+
+// ===========================================================================
 // Scenario 1 — row_boundaries / index_info_offsets
 // ===========================================================================
 
@@ -276,7 +413,7 @@ async fn decode_all_partitions() -> Vec<(Vec<u8>, u64, DecodedPromotedIndex)> {
 async fn row_boundaries_index_info_offsets() {
     let test = "row_boundaries_index_info_offsets";
     if !binaries_present() {
-        skip(test);
+        byte_level_skip(test);
         return;
     }
 
@@ -434,7 +571,7 @@ async fn row_boundaries_index_info_offsets() {
 async fn clustering_bounds() {
     let test = "clustering_bounds";
     if !binaries_present() {
-        skip(test);
+        byte_level_skip(test);
         return;
     }
 
@@ -503,7 +640,7 @@ async fn clustering_bounds() {
 async fn range_tombstone_boundary_at_block_edge() {
     let test = "range_tombstone_boundary_at_block_edge";
     if !binaries_present() {
-        skip(test);
+        byte_level_skip(test);
         return;
     }
 
@@ -611,7 +748,7 @@ async fn range_tombstone_boundary_at_block_edge() {
 async fn forward_bounds_completeness() {
     let test = "forward_bounds_completeness";
     if !binaries_present() {
-        skip(test);
+        byte_level_skip(test);
         return;
     }
 
@@ -688,13 +825,27 @@ async fn forward_row_counts_by_pk() -> BTreeMap<Vec<u8>, usize> {
     by_pk
 }
 
-/// Parse the committed sstabledump JSONL golden into per-pk live-row counts
-/// (`type == "row"` only; range_tombstone_bound markers excluded).
-fn parse_jsonl_live_counts() -> BTreeMap<i32, usize> {
-    let path = component("Data.db.jsonl");
+/// Per-pk live clustering values decoded from the committed JSONL golden, in the
+/// order they appear in the file (rows of `type == "row"` only).
+fn parse_jsonl_live_clusterings() -> BTreeMap<i32, Vec<i32>> {
+    let path = jsonl_golden_path().unwrap_or_else(|| {
+        panic!(
+            "committed JSONL golden not found via CQLITE_DATASETS_ROOT or repo fallback \
+             ({}); the git-tracked golden must always be present — fail-closed",
+            repo_datasets_root()
+                .join(FIXTURE_REL)
+                .join(format!("{PREFIX}-Data.db.jsonl"))
+                .display()
+        )
+    });
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read JSONL golden {} failed: {e}", path.display()));
-    let mut out: BTreeMap<i32, usize> = BTreeMap::new();
+    assert!(
+        !text.trim().is_empty(),
+        "JSONL golden {} present but empty — fail-closed",
+        path.display()
+    );
+    let mut out: BTreeMap<i32, Vec<i32>> = BTreeMap::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -714,16 +865,35 @@ fn parse_jsonl_live_counts() -> BTreeMap<i32, usize> {
             .and_then(serde_json::Value::as_str)
             .and_then(|s| s.parse().ok())
             .unwrap_or_else(|| panic!("JSONL partition key not a parseable int: {key_arr:?}"));
-        let live_rows = value
+        let rows = value
             .get("rows")
             .and_then(serde_json::Value::as_array)
-            .map(|rows| {
-                rows.iter()
-                    .filter(|r| r.get("type").and_then(serde_json::Value::as_str) == Some("row"))
-                    .count()
+            .unwrap_or_else(|| panic!("JSONL pk={pk} missing `rows` array"));
+        let cks: Vec<i32> = rows
+            .iter()
+            .filter(|r| r.get("type").and_then(serde_json::Value::as_str) == Some("row"))
+            .map(|r| {
+                r.get("clustering")
+                    .and_then(serde_json::Value::as_array)
+                    .and_then(|c| c.first())
+                    .and_then(|v| match v {
+                        serde_json::Value::String(s) => s.parse::<i32>().ok(),
+                        serde_json::Value::Number(n) => n.as_i64().map(|x| x as i32),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("JSONL pk={pk} row missing parseable clustering"))
             })
-            .unwrap_or(0);
-        out.insert(pk, live_rows);
+            .collect();
+        out.insert(pk, cks);
     }
     out
+}
+
+/// Parse the committed sstabledump JSONL golden into per-pk live-row counts
+/// (`type == "row"` only; range_tombstone_bound markers excluded).
+fn parse_jsonl_live_counts() -> BTreeMap<i32, usize> {
+    parse_jsonl_live_clusterings()
+        .into_iter()
+        .map(|(pk, cks)| (pk, cks.len()))
+        .collect()
 }

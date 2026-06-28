@@ -50,7 +50,7 @@
 //! - `DeletionTime.LegacySerializer` (NB form: ldt i32 BE, then mfda i64 BE)
 
 use crate::error::{Error, Result};
-use crate::parser::vint::parse_vuint;
+use crate::parser::vint::{parse_vuint, zigzag_decode};
 
 /// Byte size of an NB (legacy) `DeletionTime`: i32 BE localDeletionTime + i64 BE markedForDeleteAt.
 const NB_DELETION_TIME_SIZE: usize = 12;
@@ -162,12 +162,6 @@ fn decode_vuint(input: &[u8], what: &str) -> Result<(usize, u64)> {
     }
 }
 
-/// Inverse of the writer's `encode_signed`: zigzag-decode an unsigned VInt value.
-#[inline]
-fn zigzag_decode(u: u64) -> i64 {
-    ((u >> 1) as i64) ^ -((u & 1) as i64)
-}
-
 /// Decode a single `IndexInfo` block from the front of `input`.
 ///
 /// `prefix_len` splits `firstName`/`lastName` using authoritative schema.
@@ -268,6 +262,25 @@ pub fn decode_promoted_index(
     let input = &input[consumed..];
     let count = u32::try_from(count_u64)
         .map_err(|_| Error::Corruption("promoted index: count too large".to_string()))?;
+
+    // Bound `count` against the remaining payload BEFORE allocating: `count` is
+    // read from untrusted on-disk bytes, so a corrupt Index.db could declare a
+    // huge value and trigger a multi-hundred-GB `Vec::with_capacity` that aborts
+    // the process via `handle_alloc_error` (it would never reach the loop that
+    // returns Err). Every IndexInfo block consumes at least 1 byte for its
+    // payload AND contributes a 4-byte trailing offset entry, so a payload with
+    // `remaining` bytes can hold at most `remaining` blocks. `count > remaining`
+    // is therefore provably corrupt — fail closed instead of allocating. This
+    // upholds the module's "Returns Err (never panics)" guarantee for untrusted
+    // input.
+    if count as usize > input.len() {
+        return Err(Error::Corruption(format!(
+            "promoted index: declared block count {count} exceeds remaining payload \
+             length {} bytes (corrupt: each block needs >= 1 byte plus a 4-byte \
+             trailing offset entry)",
+            input.len()
+        )));
+    }
 
     // IndexInfo[count] blocks.
     let mut entries = Vec::with_capacity(count as usize);
@@ -490,6 +503,53 @@ mod tests {
         }
         // Full payload still decodes.
         assert!(decode_promoted_index(&payload, &fixed_prefix_len(2)).is_ok());
+    }
+
+    #[test]
+    fn test_huge_count_short_body_returns_err_no_alloc_abort() {
+        // A corrupt payload that declares a gigantic IndexInfo block count but
+        // carries almost no body. Without the pre-allocation bound this would do
+        // `Vec::with_capacity(~4 billion)` and abort the process via
+        // handle_alloc_error before ever reaching the decode loop. With the bound
+        // it must return Err (never panic/abort).
+        let mut payload = Vec::new();
+        encode_unsigned(18, &mut payload); // headerLength
+        payload.extend_from_slice(&i32::MAX.to_be_bytes()); // LIVE ldt
+        payload.extend_from_slice(&i64::MIN.to_be_bytes()); // LIVE mfda
+        encode_unsigned(u32::MAX as u64, &mut payload); // count = ~4 billion (untrusted)
+        payload.extend_from_slice(&[0x00, 0x01, 0x02]); // tiny body, far short of count
+
+        let res = decode_promoted_index(&payload, &fixed_prefix_len(0));
+        assert!(
+            res.is_err(),
+            "huge declared count with a short body must return Err (no alloc abort)"
+        );
+        match res {
+            Err(Error::Corruption(msg)) => assert!(
+                msg.contains("exceeds remaining payload"),
+                "expected bound-check corruption message, got: {msg}"
+            ),
+            other => panic!("expected Error::Corruption, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_count_exactly_at_payload_bound_then_short_returns_err() {
+        // count == remaining payload length passes the cheap bound check (each
+        // block could in principle be 1 byte), but the body is still too short to
+        // decode that many blocks → must Err in the decode loop, not panic.
+        let mut payload = Vec::new();
+        encode_unsigned(18, &mut payload);
+        payload.extend_from_slice(&i32::MAX.to_be_bytes());
+        payload.extend_from_slice(&i64::MIN.to_be_bytes());
+        let body = [0x00u8; 4];
+        encode_unsigned(body.len() as u64, &mut payload); // count == remaining len
+        payload.extend_from_slice(&body);
+        let res = decode_promoted_index(&payload, &fixed_prefix_len(0));
+        assert!(
+            res.is_err(),
+            "count == remaining but unfillable body must Err"
+        );
     }
 
     #[test]
