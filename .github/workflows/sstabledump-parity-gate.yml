@@ -115,7 +115,8 @@ jobs:
             --test issue_998_inline_crc_trailers \
             --test issue_1000_verifier \
             --test issue_1001_reject_unknown_compression \
-            --test issue_1082_deflate_zlib
+            --test issue_1082_deflate_zlib \
+            --test issue_990_data_db_row_framing_parity
 
       - name: Run Data.db parity tests
         id: data_parity
@@ -222,6 +223,14 @@ jobs:
             --test issue_1082_deflate_zlib \
             -- --nocapture
 
+      - name: Run Data.db row framing / VInt / flag byte parity tests (issue #990)
+        id: row_framing_parity
+        continue-on-error: true
+        run: |
+          cargo test --package cqlite-core --features write-support \
+            --test issue_990_data_db_row_framing_parity \
+            -- --nocapture
+
       - name: Generate parity summary
         if: always()
         run: |
@@ -239,6 +248,7 @@ jobs:
           - CompressionInfo.db (strict): ${{ steps.compression_info_strict_parity.outcome }}
           - Filter.db (strict): ${{ steps.filter_db_parity.outcome }}
           - Repaired-metadata (strict): ${{ steps.repaired_metadata_parity.outcome }}
+          - Data.db row framing / VInt / flags (issue #990): ${{ steps.row_framing_parity.outcome }}
           - Compression/corruption parity (epic #970, informational): ${{ steps.compression_corruption_parity.outcome }}
 
           Dataset:
@@ -336,9 +346,10 @@ jobs:
             });
 
       - name: Fail build on parity differences
-        if: always() && (steps.data_parity.outcome != 'success' || steps.index_parity.outcome != 'success' || steps.summary_parity.outcome != 'success' || steps.statistics_parity.outcome != 'success' || steps.toc_component_parity.outcome != 'success' || steps.index_db_strict_parity.outcome != 'success' || steps.statistics_db_strict_parity.outcome != 'success' || steps.compression_info_parity.outcome != 'success' || steps.compression_info_strict_parity.outcome != 'success' || steps.filter_db_parity.outcome != 'success' || steps.repaired_metadata_parity.outcome != 'success')
+        if: always() && (steps.data_parity.outcome != 'success' || steps.index_parity.outcome != 'success' || steps.summary_parity.outcome != 'success' || steps.statistics_parity.outcome != 'success' || steps.toc_component_parity.outcome != 'success' || steps.index_db_strict_parity.outcome != 'success' || steps.statistics_db_strict_parity.outcome != 'success' || steps.compression_info_parity.outcome != 'success' || steps.compression_info_strict_parity.outcome != 'success' || steps.filter_db_parity.outcome != 'success' || steps.repaired_metadata_parity.outcome != 'success' || steps.row_framing_parity.outcome != 'success')
         run: |
           echo "❌ M5 parity gate failed"
+          echo "Data.db row framing / VInt / flags (issue #990): ${{ steps.row_framing_parity.outcome }}"
           echo "Data.db: ${{ steps.data_parity.outcome }}"
           echo "Index.db: ${{ steps.index_parity.outcome }}"
           echo "Summary.db: ${{ steps.summary_parity.outcome }}"
