@@ -241,6 +241,9 @@ impl SSTableReader {
 
         // Test-only probe (issue #1143 regression guard): record the thread that
         // ran the parse so a guard test can prove it was NOT an async worker.
+        // Compiled ONLY under the non-default `scan-offload-probe` feature; a
+        // true no-op (not even referenced) in normal/release builds.
+        #[cfg(feature = "scan-offload-probe")]
         probe::record_parse_thread();
 
         log::debug!(
@@ -355,8 +358,13 @@ impl SSTableReader {
 /// Test-only probe (issue #1143): records the [`std::thread::ThreadId`] on which
 /// the windowed scan's decompress+parse half actually ran, so a guard test can
 /// deterministically prove that work executed on a `spawn_blocking` thread and
-/// NOT on a tokio async worker. Disarmed by default and effectively zero cost
-/// (one relaxed atomic load per scan); never observes anything in production.
+/// NOT on a tokio async worker.
+///
+/// Compiled ONLY under the non-default `scan-offload-probe` feature. In a
+/// normal/default/release build this module, its statics, and its call-site do
+/// not exist at all — the probe never enters the crate's public surface and adds
+/// zero cost (issue #1143 finding 1).
+#[cfg(feature = "scan-offload-probe")]
 #[doc(hidden)]
 pub mod probe {
     use std::sync::atomic::{AtomicBool, Ordering};

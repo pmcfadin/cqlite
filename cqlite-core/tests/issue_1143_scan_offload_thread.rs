@@ -33,9 +33,10 @@
 //!
 //! So this guard pins the MECHANISM directly and deterministically: it records
 //! the `ThreadId` on which the windowed scan's parse actually ran (via the
-//! always-compiled, default-disarmed `scan_offload_probe`), and asserts that
-//! thread is NOT one of the tokio async worker threads. This is exactly the
-//! distinction the fix turns on:
+//! `scan_offload_probe`, compiled only under the non-default
+//! `scan-offload-probe` feature so the instrumentation never ships in a normal
+//! build — issue #1143 finding 1), and asserts that thread is NOT one of the
+//! tokio async worker threads. This is exactly the distinction the fix turns on:
 //!   - inline-on-async-worker parse (regressed): parse runs ON a worker thread
 //!     → recorded thread is in the worker set → FAIL;
 //!   - `spawn_blocking` offload (fixed): parse runs on a blocking-pool thread
@@ -47,7 +48,14 @@
 //!   Dataset-dependent: skips when Data.db is absent, but a present fixture that
 //!   returns zero rows is a FAILURE (never vacuously passes).
 
-#![cfg(all(feature = "state_machine", feature = "cli-helpers"))]
+// Requires the non-default `scan-offload-probe` feature: that gates the
+// `scan_stream_windowed::probe` instrumentation this guard reads (issue #1143
+// finding 1). The agent gate runs this binary with the feature enabled.
+#![cfg(all(
+    feature = "state_machine",
+    feature = "cli-helpers",
+    feature = "scan-offload-probe"
+))]
 
 use std::collections::HashSet;
 use std::path::PathBuf;
