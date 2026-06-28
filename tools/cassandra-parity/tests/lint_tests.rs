@@ -396,6 +396,92 @@ fn schema_enums_match_lint_enums() {
     );
 }
 
+/// Extract the `test_deltas` table name from a fixture reference path of the
+/// form `.../test_deltas/<table>-<uuid>/nb-1-big-Data.db.jsonl`.
+fn delta_table_from_ref(path: &str) -> Option<String> {
+    let after = path.split("test_deltas/").nth(1)?;
+    let dir = after.split('/').next()?;
+    let table = dir.rsplit_once('-').map(|(t, _)| t).unwrap_or(dir);
+    Some(table.to_string())
+}
+
+/// Parse `CREATE TABLE [IF NOT EXISTS] <name>` table names from a CQL schema.
+fn cql_table_names(cql: &str) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let lower = cql.to_lowercase();
+    let mut search = 0usize;
+    while let Some(rel) = lower[search..].find("create table") {
+        let start = search + rel + "create table".len();
+        let rest = &cql[start..];
+        // Skip "if not exists" and whitespace; the next token is the table name.
+        let tokens: Vec<&str> = rest.split_whitespace().collect();
+        let mut idx = 0;
+        if tokens.get(0).map(|t| t.eq_ignore_ascii_case("if")) == Some(true) {
+            idx = 3; // if not exists
+        }
+        if let Some(name) = tokens.get(idx) {
+            let clean: String = name
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !clean.is_empty() {
+                out.insert(clean.to_lowercase());
+            }
+        }
+        search = start;
+    }
+    out
+}
+
+/// AC5 (issue #995): every `delta_scan` scenario's referenced fixture table must
+/// correspond to a table that `test-data/schemas/deltas.cql` actually creates
+/// (and therefore that `generate-deltas.sh` produces). A scenario cannot claim a
+/// delta shape the generator does not emit. Deterministic — no Cassandra/Docker.
+#[test]
+fn delta_scan_fixtures_map_to_generated_tables() {
+    let root = repo_root();
+    let m = Manifest::from_yaml(
+        &std::fs::read_to_string(root.join("test-data/cassandra-parity-manifest.yml")).unwrap(),
+    )
+    .unwrap();
+    let cql = std::fs::read_to_string(root.join("test-data/schemas/deltas.cql"))
+        .expect("deltas.cql exists");
+    let known = cql_table_names(&cql);
+    assert!(
+        !known.is_empty(),
+        "deltas.cql yielded no CREATE TABLE names"
+    );
+
+    let mut problems = Vec::new();
+    for s in m.scenarios.iter().filter(|s| s.capability == "delta_scan") {
+        // `planned` scenarios (e.g. the wide-partition corpus gap) intentionally
+        // carry no test_deltas fixture and are exempt.
+        if s.status == "planned" {
+            continue;
+        }
+        let refs = s
+            .fixtures
+            .references
+            .iter()
+            .chain(s.evidence.reference_paths.iter());
+        for r in refs {
+            if let Some(table) = delta_table_from_ref(r) {
+                if !known.contains(&table) {
+                    problems.push(format!(
+                        "[{}] references test_deltas table '{}' not created by deltas.cql (known: {:?})",
+                        s.id, table, known
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "delta_scan fixture/generator drift:\n{}",
+        problems.join("\n")
+    );
+}
+
 #[test]
 fn coverage_finds_high_relevance_files() {
     let root = repo_root();
