@@ -68,17 +68,29 @@ OpenSpec change `<slug>` (design-driven only).
 7. **Review.** roborev: `/roborev-review-branch --base origin/main` until clean (fix mechanical findings
    in the loop; escalate genuine decisions to the owner). Add `rust-reviewer` / `coverage-reviewer` /
    `test-validator` as the change warrants.
-8. **Open the PR** (do not merge). The claim branch is already on origin (pushed in step 2); this push
-   just sends the implementation commits. Move the board to `In Review`:
+8. **Open the PR.** The claim branch is already on origin (pushed in step 2); this push sends the
+   implementation commits. Use a closing keyword (`Closes #<N>`) so merge auto-closes the issue:
    ```bash
    gh issue edit <N> --remove-label status:in-progress --add-label status:in-review
    git -C <worktree> push -u origin issue-<N>-<slug>
-   gh pr create --base main --head issue-<N>-<slug> --fill
-   # Board → In Review: GitHub's "Pull request linked to issue" built-in normally does this on PR open.
-   # Also set it directly as a belt-and-suspenders: run the flow-board detection snippet first (it
-   # switches to the project-capable account), then gh project item-edit ... Status=In Review when
-   # have_project=1; on have_project=0 the label above suffices but print the loud ⚠️ board-unavailable warning.
+   gh pr create --base main --head issue-<N>-<slug> --fill   # ensure body has "Closes #<N>"
+   # Board → In Review fires via GitHub's "Pull request linked to issue" built-in. Belt-and-suspenders:
+   # run the flow-board detection snippet first (switches to the project-capable account), then
+   # gh project item-edit ... Status=In Review when have_project=1; else the label above + loud ⚠️ warning.
    ```
-9. **Report** the PR + the gate/C/roborev results, and hand back to the owner (or, if this issue is in a
-   set the owner explicitly pre-authorized for merge-on-green, proceed to merge-on-green per `flow-lead`'s
-   autonomy model, then `flow-finalize`).
+9. **Merge autonomously, then finalize.** Workers run the issue to completion — there is no human merge
+   click. Before merging:
+   - **Check the manager's orders**: read the issue's `🧭 MANAGER <!-- MGR:... -->` comments. If the
+     latest order is `HOLD: merge after #N`, **block** until #N is merged (poll its state); obey `ORDER`.
+   - **Confirm green**: `agent-gate.sh` PASS + (design-driven) spec-auditor C PASS + roborev clean + CI
+     required checks green. Rebase on current `origin/main`; resolve any conflict in your own worktree.
+   - Then squash-merge:
+     ```bash
+     gh auth switch --user pmcfadin >/dev/null 2>&1   # EMU guard
+     gh pr merge <pr> --squash --delete-branch
+     ```
+   - Run **`flow-finalize <N>`** to archive any OpenSpec change, remove the worktree, delete the origin
+     claim lock, and close the issue with a traceable comment.
+   Escalate to the owner (do NOT merge) only for: an unresolved roborev finding that's a genuine design
+   call, a scope/product question, or anything outside this issue. Report the merge + gate/C/roborev
+   summary.
