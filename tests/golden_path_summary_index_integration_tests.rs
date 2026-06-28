@@ -398,8 +398,12 @@ async fn test_golden_path_bloom_summary_index_coordination() -> Result<()> {
     // compile) while passing cleanly when idle.
     //
     // We assert the short-circuit *directly*, with two complementary signals that
-    // are immune to CPU load (the wall-clock flake) AND to cross-test counter
-    // races (the only nondeterminism the counter probe would otherwise add):
+    // are immune to CPU load (the wall-clock flake) and highly resistant to
+    // cross-test counter races (the only nondeterminism the counter probe would
+    // otherwise add — see the retry rationale below; the 5-attempt bound is a
+    // strong heuristic, not a mathematical guarantee, but a healthy fast path
+    // contributes zero so a concurrent scan would have to land in all 5 windows
+    // to false-fail):
     //
     //  1. STRUCTURAL (fully deterministic): the reader actually loaded a bloom
     //     filter, so the bloom pre-check branch in `get()` is reachable. Without
@@ -412,7 +416,7 @@ async fn test_golden_path_bloom_summary_index_coordination() -> Result<()> {
     //     integration-test binary runs its tests on multiple threads (other tests
     //     here call `get()`/`scan()` and can bump it), a single before/after read
     //     could observe a concurrent test's increment and false-fail. We make the
-    //     check race-immune by retrying: a genuine regression (bloom no longer
+    //     check highly resistant to that race by retrying: a genuine regression (bloom no longer
     //     short-circuits) makes OUR `get()` fall through to `scan_for_key` on
     //     EVERY attempt, so the delta is `>= 1` every time; a concurrent test's
     //     scan is sporadic, so at least one attempt sees our call contribute zero.
