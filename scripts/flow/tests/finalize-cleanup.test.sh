@@ -284,7 +284,7 @@ g -C "$WORK" show-ref --verify --quiet refs/heads/issue-1214-feature && fail "lo
 rm -rf "$T"
 
 # ===========================================================================
-echo "TEST 19: local main lagging origin/main (tip in origin/main) → still exit 0"
+echo "TEST 17: local main lagging origin/main (tip in origin/main) → still exit 0"
 # ===========================================================================
 # Realistic production state: the worktree repo's LOCAL main lags origin/main.
 # `git branch -d` judges against local main and would refuse + 128-abort
@@ -305,7 +305,7 @@ g -C "$WORK" show-ref --verify --quiet refs/heads/issue-1217-feature && fail "lo
 rm -rf "$T"
 
 # ===========================================================================
-echo "TEST 17: unresolvable --main-ref in indeterminate path → fail closed (exit 3)"
+echo "TEST 18: unresolvable --main-ref in indeterminate path → fail closed (exit 3)"
 # ===========================================================================
 # No upstream, no origin branch → indeterminate path falls back to MAIN_REF; if
 # that is unresolvable we must refuse, not silently treat as '0 ahead' and delete.
@@ -321,7 +321,7 @@ bash "$CLEANUP" --issue 1215 --merged-branch issue-1215-local --main-ref refs/he
 rm -rf "$T"
 
 # ===========================================================================
-echo "TEST 18: stale worktree dir (removed out-of-band) → prune, not a 128 abort"
+echo "TEST 19: stale worktree dir (removed out-of-band) → prune, not a 128 abort"
 # ===========================================================================
 T=$(mktemp -d); build_sandbox "$T"; WORK="$T/work"
 add_branch_worktree "$WORK" "issue-1216-feature" "$T/wt" ""

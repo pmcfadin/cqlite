@@ -237,6 +237,10 @@ if [ -n "$target_wt" ]; then
       exit 3
     fi
     if [ "$ahead" -gt 0 ]; then
+      # NOTE: --confirm-unmerged does NOT override this. That flag confirms the PR
+      # was MERGED (a branch-tip-vs-main question); it says nothing about local
+      # commits that were never pushed. Unpushed work is unrecoverable once the
+      # worktree is gone, so this always fails closed.
       echo "$prog: REFUSED — worktree '$target_wt' has $ahead unpushed commit(s) vs $cmp_sha. Not removing." >&2
       exit 3
     fi
@@ -273,13 +277,15 @@ fi
 # PHASE 2 — EXECUTE. All guards passed; mutations below are safe.
 # ===========================================================================
 
-# Guard 1: remove ONLY the merged-branch worktree (never a glob).
+# Guard 1: remove ONLY the merged-branch worktree (never a glob). The success
+# `note` is suppressed in --dry-run (the DRY-RUN: line already states the action),
+# so dry-run never reports work as done that was only previewed.
 if [ -n "$target_wt" ]; then
   run git_root worktree remove "$target_wt"
-  note "removed worktree $target_wt"
+  [ "$DRY_RUN" -eq 1 ] || note "removed worktree $target_wt"
 elif [ "$stale_wt" -eq 1 ]; then
   run git_root worktree prune
-  note "pruned stale worktree entry for '$MERGED_BRANCH'"
+  [ "$DRY_RUN" -eq 1 ] || note "pruned stale worktree entry for '$MERGED_BRANCH'"
 else
   note "no worktree checked out on '$MERGED_BRANCH' — skipping worktree removal"
 fi
@@ -289,7 +295,7 @@ fi
 # worktree is already gone — surface it instead.
 if [ "$remote_has_branch" -eq 1 ]; then
   if run git_root push "$REMOTE" --delete "$MERGED_BRANCH"; then
-    note "deleted origin lock $REMOTE/$MERGED_BRANCH"
+    [ "$DRY_RUN" -eq 1 ] || note "deleted origin lock $REMOTE/$MERGED_BRANCH"
   else
     note "could not delete origin lock $REMOTE/$MERGED_BRANCH — left in place (delete it manually)"
   fi
@@ -307,7 +313,7 @@ fi
 if git_root show-ref --verify --quiet "refs/heads/${MERGED_BRANCH}"; then
   if [ "$local_tip_in_main" -eq 1 ] || [ "$CONFIRM_UNMERGED" -eq 1 ]; then
     if run git_root branch -D "$MERGED_BRANCH"; then
-      note "deleted local branch $MERGED_BRANCH"
+      [ "$DRY_RUN" -eq 1 ] || note "deleted local branch $MERGED_BRANCH"
     else
       note "could not delete local branch '$MERGED_BRANCH' — left in place"
     fi
