@@ -10,14 +10,13 @@
  * Called automatically by the `postbuild` npm script.
  */
 
-import { writeFileSync } from 'node:fs'
+import { writeFileSync, existsSync, statSync, rmSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
 const BINARY_NAME = 'cqlite-node'
-const PACKAGE_NAME = '@cqlite/node'
 
 // All identifiers exported from src/lib.rs (pub use declarations).
 // Keep in sync with bindings/node/src/lib.rs.
@@ -37,17 +36,45 @@ const IDENTS = [
   'version',
 ]
 
-// Platform/arch → npm package suffix mapping (mirrors napi-rs defaults).
-// This must stay in sync with the `targets` array in package.json.
+// Native binary loader template.
+//
+// @cqlite/node ships as a single "fat" package: every supported platform's
+// prebuilt \`cqlite-node.<triple>.node\` is bundled at the package root and the
+// loader \`require\`s the one matching the host. There are NO per-platform scoped
+// npm packages (e.g. \`@cqlite/node-darwin-arm64\`) and no \`optionalDependencies\`,
+// so the loader must never fall back to \`require\`-ing them — on an unsupported
+// platform that only produces a confusing \`Cannot find module '@cqlite/node-...'\`.
+// Instead we throw one actionable error listing the supported matrix (issue #571).
+//
+// The supported triples below MUST stay in sync with the \`targets\` array in
+// package.json and the publish-gate matrix in node-ci.yml / node-release.yml.
 const PLATFORM_BINDINGS = `
 const { existsSync } = require('fs')
 const { join } = require('path')
 
 const { platform, arch } = process
 
-let nativeBinding = null
-let localFileExisted = false
-let loadError = null
+const SUPPORTED = 'linux-x64-gnu, linux-arm64-gnu, darwin-x64, darwin-arm64, win32-x64-msvc'
+
+// \`target\` overrides the reported platform string (e.g. 'linux-x64-musl') so the
+// message names the exact unsupported target rather than a bare \`linux-x64\` that
+// would read as a contradiction against the libc-qualified supported matrix.
+function unsupported(target) {
+  const reported = target || \`\${platform}-\${arch}\`
+  return new Error(
+    \`@cqlite/node has no prebuilt binary for \${reported}; supported: \${SUPPORTED}\`
+  )
+}
+
+// Resolve the bundled root .node for a given napi triple suffix, or throw the
+// actionable unsupported-platform error. Never falls back to a scoped package.
+function loadLocal(suffix) {
+  const file = join(__dirname, \`${BINARY_NAME}.\${suffix}.node\`)
+  if (!existsSync(file)) {
+    throw unsupported()
+  }
+  return require(file)
+}
 
 function isMusl() {
   if (!process.report || typeof process.report.getReport !== 'function') {
@@ -63,121 +90,43 @@ function isMusl() {
   }
 }
 
-switch (platform) {
-  case 'darwin':
-    switch (arch) {
-      case 'x64':
-        localFileExisted = existsSync(join(__dirname, '${BINARY_NAME}.darwin-x64.node'))
-        try {
-          if (localFileExisted) {
-            nativeBinding = require('./${BINARY_NAME}.darwin-x64.node')
-          } else {
-            nativeBinding = require('@cqlite/node-darwin-x64')
-          }
-        } catch (e) {
-          loadError = e
-        }
-        break
-      case 'arm64':
-        localFileExisted = existsSync(join(__dirname, '${BINARY_NAME}.darwin-arm64.node'))
-        try {
-          if (localFileExisted) {
-            nativeBinding = require('./${BINARY_NAME}.darwin-arm64.node')
-          } else {
-            nativeBinding = require('@cqlite/node-darwin-arm64')
-          }
-        } catch (e) {
-          loadError = e
-        }
-        break
-      default:
-        throw new Error(\`Unsupported architecture on macOS: \${arch}\`)
-    }
-    break
-  case 'linux':
-    switch (arch) {
-      case 'x64':
-        if (isMusl()) {
-          localFileExisted = existsSync(join(__dirname, '${BINARY_NAME}.linux-x64-musl.node'))
-          try {
-            if (localFileExisted) {
-              nativeBinding = require('./${BINARY_NAME}.linux-x64-musl.node')
-            } else {
-              nativeBinding = require('@cqlite/node-linux-x64-musl')
-            }
-          } catch (e) {
-            loadError = e
-          }
-        } else {
-          localFileExisted = existsSync(join(__dirname, '${BINARY_NAME}.linux-x64-gnu.node'))
-          try {
-            if (localFileExisted) {
-              nativeBinding = require('./${BINARY_NAME}.linux-x64-gnu.node')
-            } else {
-              nativeBinding = require('@cqlite/node-linux-x64-gnu')
-            }
-          } catch (e) {
-            loadError = e
-          }
-        }
-        break
-      case 'arm64':
-        if (isMusl()) {
-          localFileExisted = existsSync(join(__dirname, '${BINARY_NAME}.linux-arm64-musl.node'))
-          try {
-            if (localFileExisted) {
-              nativeBinding = require('./${BINARY_NAME}.linux-arm64-musl.node')
-            } else {
-              nativeBinding = require('@cqlite/node-linux-arm64-musl')
-            }
-          } catch (e) {
-            loadError = e
-          }
-        } else {
-          localFileExisted = existsSync(join(__dirname, '${BINARY_NAME}.linux-arm64-gnu.node'))
-          try {
-            if (localFileExisted) {
-              nativeBinding = require('./${BINARY_NAME}.linux-arm64-gnu.node')
-            } else {
-              nativeBinding = require('@cqlite/node-linux-arm64-gnu')
-            }
-          } catch (e) {
-            loadError = e
-          }
-        }
-        break
-      default:
-        throw new Error(\`Unsupported architecture on Linux: \${arch}\`)
-    }
-    break
-  case 'win32':
-    switch (arch) {
-      case 'x64':
-        localFileExisted = existsSync(join(__dirname, '${BINARY_NAME}.win32-x64-msvc.node'))
-        try {
-          if (localFileExisted) {
-            nativeBinding = require('./${BINARY_NAME}.win32-x64-msvc.node')
-          } else {
-            nativeBinding = require('@cqlite/node-win32-x64-msvc')
-          }
-        } catch (e) {
-          loadError = e
-        }
-        break
-      default:
-        throw new Error(\`Unsupported architecture on Windows: \${arch}\`)
-    }
-    break
-  default:
-    throw new Error(\`Unsupported OS: \${platform}, architecture: \${arch}\`)
+function resolveBinding() {
+  switch (platform) {
+    case 'darwin':
+      switch (arch) {
+        case 'x64':
+          return loadLocal('darwin-x64')
+        case 'arm64':
+          return loadLocal('darwin-arm64')
+        default:
+          throw unsupported()
+      }
+    case 'linux':
+      // musl (Alpine) is NOT in the published matrix — only glibc targets ship.
+      if (isMusl()) {
+        throw unsupported(\`linux-\${arch}-musl\`)
+      }
+      switch (arch) {
+        case 'x64':
+          return loadLocal('linux-x64-gnu')
+        case 'arm64':
+          return loadLocal('linux-arm64-gnu')
+        default:
+          throw unsupported()
+      }
+    case 'win32':
+      switch (arch) {
+        case 'x64':
+          return loadLocal('win32-x64-msvc')
+        default:
+          throw unsupported()
+      }
+    default:
+      throw unsupported()
+  }
 }
 
-if (!nativeBinding) {
-  if (loadError) {
-    throw loadError
-  }
-  throw new Error('Failed to load native binding')
-}
+const nativeBinding = resolveBinding()
 `
 
 const exportsLines = IDENTS.map(id => `module.exports.${id} = nativeBinding.${id}`).join('\n')
@@ -195,3 +144,23 @@ ${exportsLines}
 const outPath = join(__dirname, '..', 'index.js')
 writeFileSync(outPath, content, 'utf-8')
 console.log('Generated index.js platform loader.')
+
+// Issue #571: `napi build` emits an empty root index.d.ts stub. Types resolve
+// via the package's `types` field (lib/index.d.ts), so the root stub only ships
+// a 0-byte file. Remove it here (it is gitignored) to keep the package root and
+// any published tarball clean.
+const rootDts = join(__dirname, '..', 'index.d.ts')
+if (existsSync(rootDts)) {
+  if (statSync(rootDts).size === 0) {
+    rmSync(rootDts)
+    console.log('Removed empty root index.d.ts stub.')
+  } else {
+    // A non-empty root stub is unexpected: types ship via the `types` field
+    // (lib/index.d.ts) and the root file is not in package.json `files`. Surface
+    // it loudly rather than silently leaving it for an editor to resolve.
+    console.warn(
+      'WARNING: non-empty root index.d.ts found; not removed. Types resolve via ' +
+        'lib/index.d.ts and the root stub is not packaged — verify this file is intended.'
+    )
+  }
+}
