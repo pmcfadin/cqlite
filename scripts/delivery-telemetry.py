@@ -137,7 +137,9 @@ def load_schema(schema_path: Path) -> dict:
 
 def _parse_ts(value: str) -> datetime:
     """Parse an RFC-3339 / ISO-8601 UTC timestamp (accepts a trailing 'Z')."""
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    return datetime.fromisoformat(value)
 
 
 def _seconds_between(start: str, end: str) -> int:
@@ -319,20 +321,25 @@ def cmd_lint(args) -> int:
 # ============================================================ retro
 
 def aggregate(records: list) -> dict:
-    """Sum each failure category across records (authoritative recorded values only)."""
+    """Sum each failure category across records (authoritative recorded values only).
+
+    Precondition: every record is already schema-valid (every counter present). Callers
+    MUST validate first — `cmd_retro` does. Fields are indexed directly (not `.get` with a
+    default) so an unvalidated record raises rather than contributing a fabricated zero,
+    consistent with the authoritative-data-only mandate.
+    """
     tally = {k: 0 for k in RETRO_WEIGHTS}
     for r in records:
-        tally["claim_collisions"] += r.get("claim_collisions", 0)
-        tally["rebase_events"] += r.get("rebase_events", 0)
-        tally["roborev_findings"] += r.get("roborev_findings", 0)
-        tally["rework"] += r.get("rework", 0)
+        tally["claim_collisions"] += r["claim_collisions"]
+        tally["rebase_events"] += r["rebase_events"]
+        tally["roborev_findings"] += r["roborev_findings"]
+        tally["rework"] += r["rework"]
         # Failed gate ROUNDS, derived from the authoritative run count: every run but
         # the final pass was a failure. A terminal-fail issue (gate == "fail") failed
         # every round. gate_runs >= 1 by schema. This counts a 3-run-then-pass issue as
         # 2 failed rounds, not 0 (matching the weight's "an agent-gate.sh FAIL round").
-        gate_runs = r.get("gate_runs", 1)
-        passed_final = 1 if r.get("gate") == "pass" else 0
-        tally["gate_failures"] += max(0, gate_runs - passed_final)
+        passed_final = 1 if r["gate"] == "pass" else 0
+        tally["gate_failures"] += max(0, r["gate_runs"] - passed_final)
     return tally
 
 
