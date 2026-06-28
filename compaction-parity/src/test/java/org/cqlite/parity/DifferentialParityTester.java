@@ -179,10 +179,25 @@ public abstract class DifferentialParityTester extends CQLTester
 
         // ── BYTE tier: per-component cmp, NO allowlist. Computed + persisted ALWAYS;
         //    asserted only when the byte tier is enabled (gradle byteParity). ──
-        ComponentByteComparator.Result byteResult =
-            ComponentByteComparator.compare(cassOutDir, candOutDir);
-        artifacts.write("byte-diff.txt", byteResult.render());
-        artifacts.writeChecksums(cassOutDir, candOutDir);
+        // CRITICAL: the byte computation/persistence (compare() can throw on a
+        // duplicate-kind output, plus file I/O) must NEVER red the LOGICAL hard
+        // gate. On the per-PR logical path (byte tier not asserting) we swallow any
+        // failure into byte-diff.txt best-effort. Only when byteParity IS the
+        // asserting tier (nightly/dispatch) does a byte-tier exception surface.
+        ComponentByteComparator.Result byteResult;
+        try
+        {
+            byteResult = ComponentByteComparator.compare(cassOutDir, candOutDir);
+            artifacts.write("byte-diff.txt", byteResult.render());
+            artifacts.writeChecksums(cassOutDir, candOutDir);
+        }
+        catch (Exception e)
+        {
+            if (byteTierEnabled())
+                throw e; // byteParity is the asserting tier: surface the failure.
+            byteResult = null;
+            writeByteFailureArtifact(artifacts, e);
+        }
 
         // ── LOGICAL comparison: same sstabledump over both outputs ──
         String referenceJson = normalize(sstabledump(referenceData));
@@ -197,8 +212,9 @@ public abstract class DifferentialParityTester extends CQLTester
                      referenceJson, candidateJson);
 
         // BYTE tier assertion (opt-in, #842 north star). No allowlist: any
-        // component divergence is a failure.
-        if (byteTierEnabled() && byteResult.hasMismatch())
+        // component divergence is a failure. (byteResult is non-null whenever the
+        // byte tier is the asserting tier — a compute failure would have rethrown.)
+        if (byteTierEnabled() && byteResult != null && byteResult.hasMismatch())
         {
             StringBuilder msg = new StringBuilder("BYTE tier mismatch (no allowlist) — "
                 + "first diff per divergent component:\n");
@@ -206,6 +222,27 @@ public abstract class DifferentialParityTester extends CQLTester
                 msg.append("  ").append(d).append('\n');
             msg.append("Artifacts: ").append(artifacts.dir());
             fail(msg.toString());
+        }
+    }
+
+    /**
+     * Record a byte-tier computation failure into {@code byte-diff.txt} best-effort,
+     * for the logical (non-asserting) path only. Persisting this is itself
+     * best-effort — it must never mask or override the logical result.
+     */
+    private static void writeByteFailureArtifact(ParityArtifacts artifacts, Exception e)
+    {
+        try
+        {
+            java.io.StringWriter sw = new java.io.StringWriter();
+            e.printStackTrace(new java.io.PrintWriter(sw));
+            artifacts.write("byte-diff.txt",
+                "byte-tier computation failed (non-blocking on the logical PR path; the "
+                + "byte tier only gates under -Dparity.tier=byte / gradle byteParity):\n\n" + sw);
+        }
+        catch (IOException ignored)
+        {
+            // Artifact persistence is best-effort here; do not let it touch the logical gate.
         }
     }
 

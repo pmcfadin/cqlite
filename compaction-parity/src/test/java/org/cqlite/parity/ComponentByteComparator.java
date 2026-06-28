@@ -220,13 +220,19 @@ final class ComponentByteComparator
 
     private static ComponentDiff diffBytes(String kind, Path r, Path c) throws IOException
     {
+        // Acceptable at current scenario scale (small components, two reads into
+        // memory). If larger fixtures land, switch to a streamed/chunked cmp plus a
+        // single-pass digest so we don't hold whole components in memory.
         byte[] rb = Files.readAllBytes(r);
         byte[] cb = Files.readAllBytes(c);
         int min = Math.min(rb.length, cb.length);
         for (int i = 0; i < min; i++)
         {
             if (rb[i] != cb[i])
-                return new ComponentDiff(kind, Status.DIFFER, i, rb[i], cb[i],
+                // Mask to 0..255: a raw `byte` would sign-extend (e.g. 0xAB -> -85),
+                // both losing the value and colliding with the -1 absent-byte sentinel
+                // that hexOrEof() renders as EOF.
+                return new ComponentDiff(kind, Status.DIFFER, i, rb[i] & 0xFF, cb[i] & 0xFF,
                                          rb.length, cb.length);
         }
         if (rb.length != cb.length)
