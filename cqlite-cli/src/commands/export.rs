@@ -474,11 +474,57 @@ fn resolve_progress_total(limit: Option<usize>) -> ProgressTotal {
     }
 }
 
+/// The kind of progress indicator chosen for a given total (spec R1/R2).
+///
+/// A known total yields a [`BarKind::Determinate`] bar (percent + ETA); an
+/// unknown total yields a [`BarKind::Spinner`] (live row count, no ETA). A plain
+/// enum keeps the choice — and the templates it implies — unit testable without
+/// a TTY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BarKind {
+    /// Determinate bar: total is known, so percent + ETA are meaningful.
+    Determinate,
+    /// Indeterminate spinner: total unknown, live row count only (no ETA).
+    Spinner,
+}
+
+/// Choose the indicator kind from the (possibly unknown) total.
+///
+/// `Some(_)` -> [`BarKind::Determinate`]; `None` -> [`BarKind::Spinner`]. Pure
+/// and terminal-free so the decision is directly assertable in tests.
+fn progress_bar_kind(total: Option<u64>) -> BarKind {
+    match total {
+        Some(_) => BarKind::Determinate,
+        None => BarKind::Spinner,
+    }
+}
+
+/// Determinate-bar template: `{bar}`/`{percent}`/`{pos}`/`{len}` + live `{eta}`
+/// — the evidence the determinate path promises ETA + percent (spec R1).
+const DETERMINATE_TEMPLATE: &str = "[{bar:40}] {percent}% ({pos}/{len}) ETA: {eta}";
+
+/// Spinner template: `{spinner}` + a live `{pos}` row count, deliberately
+/// omitting `{eta}`/`{percent}` (spec R2).
+const SPINNER_TEMPLATE: &str = "{spinner:.green} {msg} ({pos} rows)";
+
+/// The template string for a given [`BarKind`]. Pure helper so tests can assert
+/// on the chosen template without a terminal-bound `ProgressBar`.
+fn progress_template(kind: BarKind) -> &'static str {
+    match kind {
+        BarKind::Determinate => DETERMINATE_TEMPLATE,
+        BarKind::Spinner => SPINNER_TEMPLATE,
+    }
+}
+
 /// Build the export progress bar.
 ///
 /// - `!show` -> a hidden bar (no output; used when `--quiet` or piped/non-TTY).
 /// - `Some(n)` -> a determinate bar with percent, `pos/len`, and a live ETA.
 /// - `None` -> the indeterminate spinner with a live row count (no ETA).
+///
+/// The style/template decision is delegated to [`progress_bar_kind`] +
+/// [`progress_template`] (terminal-free, unit-tested) so there is exactly one
+/// source of truth for which indicator is used.
 ///
 /// The `ProgressStyle::template(...)` result is handled without `unwrap()`/
 /// `expect()`: on a template error we fall back to indicatif's default style so
@@ -489,12 +535,11 @@ fn make_progress(show: bool, total: Option<u64>) -> ProgressBar {
         return ProgressBar::hidden();
     }
 
+    let template = progress_template(progress_bar_kind(total));
     match total {
         Some(n) => {
             let pb = ProgressBar::new(n);
-            match ProgressStyle::default_bar()
-                .template("[{bar:40}] {percent}% ({pos}/{len}) ETA: {eta}")
-            {
+            match ProgressStyle::default_bar().template(template) {
                 Ok(style) => pb.set_style(style.progress_chars("##-")),
                 Err(_) => { /* keep indicatif's default bar style */ }
             }
@@ -502,9 +547,7 @@ fn make_progress(show: bool, total: Option<u64>) -> ProgressBar {
         }
         None => {
             let pb = ProgressBar::new_spinner();
-            if let Ok(style) =
-                ProgressStyle::default_spinner().template("{spinner:.green} {msg} ({pos} rows)")
-            {
+            if let Ok(style) = ProgressStyle::default_spinner().template(template) {
                 pb.set_style(style);
             }
             pb.set_message("Exporting");
@@ -760,5 +803,40 @@ mod tests {
             !resolved.eta_eligible,
             "an unknown total must not be ETA-eligible (spinner, no ETA)"
         );
+    }
+
+    // Spec R1/R2: the determinate-vs-spinner choice is a pure, terminal-free
+    // function of the (possibly unknown) total.
+    #[test]
+    fn total_selects_bar_kind() {
+        assert_eq!(progress_bar_kind(Some(100)), BarKind::Determinate);
+        assert_eq!(progress_bar_kind(None), BarKind::Spinner);
+    }
+
+    // Spec R1 (determinate bar promises ETA + percent, observable without a
+    // TTY): the determinate template carries `{eta}` and `{percent}` plus the
+    // `{bar}`/`{pos}`/`{len}` evidence of a real bar.
+    #[test]
+    fn determinate_template_contains_eta_and_percent() {
+        let t = progress_template(progress_bar_kind(Some(42)));
+        assert!(t.contains("{eta}"), "must show an ETA: {t:?}");
+        assert!(t.contains("{percent}"), "must show a percent: {t:?}");
+        assert!(t.contains("{bar"), "must render a bar: {t:?}");
+        assert!(
+            t.contains("{pos}") && t.contains("{len}"),
+            "must show pos/len: {t:?}"
+        );
+    }
+
+    // Spec R2 (spinner promises no ETA / no percent, observable without a TTY):
+    // the spinner template carries `{spinner}` and a `{pos}` row count but
+    // never `{eta}` or `{percent}`.
+    #[test]
+    fn spinner_template_omits_eta_and_percent() {
+        let t = progress_template(progress_bar_kind(None));
+        assert!(t.contains("{spinner"), "must render a spinner: {t:?}");
+        assert!(t.contains("{pos}"), "must show a row count: {t:?}");
+        assert!(!t.contains("{eta}"), "must NOT show an ETA: {t:?}");
+        assert!(!t.contains("{percent}"), "must NOT show a percent: {t:?}");
     }
 }
