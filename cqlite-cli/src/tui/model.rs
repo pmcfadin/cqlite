@@ -1,62 +1,20 @@
+//! TUI application state model and state transitions (Issue #1130).
+//!
+//! Holds the panel-state structs, the [`TuiApp`] application state, and the
+//! pure/data-loading state transitions on it. Drawing lives in [`super::render`]
+//! and input handling lives in [`super::events`].
+
 use crate::config::Config;
-use crate::status_metrics::{HealthIndicator, StatusMetrics, METRICS_REFRESH_INTERVAL};
+use crate::status_metrics::{StatusMetrics, METRICS_REFRESH_INTERVAL};
 use anyhow::Result;
 use cqlite_core::Database;
-use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
 use ratatui::{
-    backend::{Backend, CrosstermBackend},
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{
-        Block, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap,
-    },
-    Frame, Terminal,
+    layout::Rect,
+    widgets::{ListState, TableState},
 };
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-pub async fn start_tui_mode(db_path: &Path, config: &Config, database: Database) -> Result<()> {
-    // CRITICAL: Disable log output to prevent messages from bleeding into the
-    // TUI display. The unified tracing subscriber is already installed in
-    // main.rs (Issue #1033) and cannot be replaced, so we suppress at the `log`
-    // facade level — this silences the `log::*` call sites bridged into tracing.
-    log::set_max_level(log::LevelFilter::Off);
-
-    // Initialize the database
-    let db = Arc::new(database);
-
-    // Setup terminal
-    enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    // Create app state
-    let mut app = TuiApp::new(db_path, config, db).await?;
-    let res = run_tui(&mut terminal, &mut app).await;
-
-    // Restore terminal
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-
-    if let Err(err) = res {
-        println!("{:?}", err)
-    }
-
-    Ok(())
-}
 
 // =============================================================================
 // Panel State Structures (Issue #251)
@@ -64,10 +22,10 @@ pub async fn start_tui_mode(db_path: &Path, config: &Config, database: Database)
 
 /// Panel visibility configuration - toggleable with F2/F3/F4 keys
 #[derive(Debug, Clone, Copy)]
-struct PanelVisibility {
-    tables: bool,  // F2 toggle - Tables browser panel
-    results: bool, // F3 toggle - Query results panel
-    history: bool, // F4 toggle - Query history panel
+pub(super) struct PanelVisibility {
+    pub(super) tables: bool,  // F2 toggle - Tables browser panel
+    pub(super) results: bool, // F3 toggle - Query results panel
+    pub(super) history: bool, // F4 toggle - Query history panel
 }
 
 impl Default for PanelVisibility {
@@ -82,14 +40,14 @@ impl Default for PanelVisibility {
 
 impl PanelVisibility {
     /// Reset to default layout (F5)
-    fn reset(&mut self) {
+    pub(super) fn reset(&mut self) {
         *self = Self::default();
     }
 }
 
 /// Active panel for keyboard focus navigation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FocusPanel {
+pub(super) enum FocusPanel {
     Tables,
     Results,
     History,
@@ -98,7 +56,7 @@ enum FocusPanel {
 
 impl FocusPanel {
     /// Cycle to next visible panel (Tab key)
-    fn next(self, visibility: &PanelVisibility) -> Self {
+    pub(super) fn next(self, visibility: &PanelVisibility) -> Self {
         let order = [
             (FocusPanel::Tables, visibility.tables),
             (FocusPanel::Results, visibility.results),
@@ -119,7 +77,7 @@ impl FocusPanel {
     }
 
     /// Cycle to previous visible panel (Shift+Tab key)
-    fn prev(self, visibility: &PanelVisibility) -> Self {
+    pub(super) fn prev(self, visibility: &PanelVisibility) -> Self {
         let order = [
             (FocusPanel::Tables, visibility.tables),
             (FocusPanel::Results, visibility.results),
@@ -141,22 +99,22 @@ impl FocusPanel {
 
 /// Table entry in the tables browser
 #[derive(Debug, Clone)]
-struct TableEntry {
+pub(super) struct TableEntry {
     #[allow(dead_code)] // Reserved for keyspace display
-    keyspace: String,
+    pub(super) keyspace: String,
     #[allow(dead_code)] // Reserved for table name display
-    name: String,
-    qualified_name: String, // "keyspace.table"
+    pub(super) name: String,
+    pub(super) qualified_name: String, // "keyspace.table"
 }
 
 /// Tables browser panel state
 #[derive(Debug)]
-struct TablesBrowserState {
-    entries: Vec<TableEntry>,
-    filtered_indices: Vec<usize>, // Indices into entries after filter
-    filter_text: String,
-    filter_active: bool, // Is filter input mode active
-    list_state: ListState,
+pub(super) struct TablesBrowserState {
+    pub(super) entries: Vec<TableEntry>,
+    pub(super) filtered_indices: Vec<usize>, // Indices into entries after filter
+    pub(super) filter_text: String,
+    pub(super) filter_active: bool, // Is filter input mode active
+    pub(super) list_state: ListState,
 }
 
 impl Default for TablesBrowserState {
@@ -173,7 +131,7 @@ impl Default for TablesBrowserState {
 
 impl TablesBrowserState {
     /// Apply filter to entries and update filtered_indices
-    fn apply_filter(&mut self) {
+    pub(super) fn apply_filter(&mut self) {
         if self.filter_text.is_empty() {
             self.filtered_indices = (0..self.entries.len()).collect();
         } else {
@@ -199,7 +157,7 @@ impl TablesBrowserState {
     }
 
     /// Get currently selected entry
-    fn selected_entry(&self) -> Option<&TableEntry> {
+    pub(super) fn selected_entry(&self) -> Option<&TableEntry> {
         self.list_state
             .selected()
             .and_then(|idx| self.filtered_indices.get(idx))
@@ -209,14 +167,14 @@ impl TablesBrowserState {
 
 /// Query results table state with scroll tracking
 #[derive(Debug)]
-struct ResultsTableState {
-    columns: Vec<String>,
-    rows: Vec<Vec<String>>,
-    row_offset: usize, // Vertical scroll position
-    col_offset: usize, // Horizontal scroll position (column index)
-    selected_row: Option<usize>,
-    column_widths: Vec<u16>, // Calculated widths for each column
-    table_state: TableState,
+pub(super) struct ResultsTableState {
+    pub(super) columns: Vec<String>,
+    pub(super) rows: Vec<Vec<String>>,
+    pub(super) row_offset: usize, // Vertical scroll position
+    pub(super) col_offset: usize, // Horizontal scroll position (column index)
+    pub(super) selected_row: Option<usize>,
+    pub(super) column_widths: Vec<u16>, // Calculated widths for each column
+    pub(super) table_state: TableState,
 }
 
 impl Default for ResultsTableState {
@@ -235,7 +193,7 @@ impl Default for ResultsTableState {
 
 impl ResultsTableState {
     /// Calculate column widths based on content
-    fn calculate_widths(&mut self) {
+    pub(super) fn calculate_widths(&mut self) {
         if self.columns.is_empty() {
             self.column_widths = vec![];
             return;
@@ -262,7 +220,7 @@ impl ResultsTableState {
     }
 
     /// Get visible columns range based on offset and available width
-    fn visible_columns(&self, available_width: u16) -> std::ops::Range<usize> {
+    pub(super) fn visible_columns(&self, available_width: u16) -> std::ops::Range<usize> {
         if self.column_widths.is_empty() {
             return 0..0;
         }
@@ -286,18 +244,18 @@ impl ResultsTableState {
     }
 
     /// Check if there are more columns to the left
-    fn has_scroll_left(&self) -> bool {
+    pub(super) fn has_scroll_left(&self) -> bool {
         self.col_offset > 0
     }
 
     /// Check if there are more columns to the right
-    fn has_scroll_right(&self, available_width: u16) -> bool {
+    pub(super) fn has_scroll_right(&self, available_width: u16) -> bool {
         let visible = self.visible_columns(available_width);
         visible.end < self.columns.len()
     }
 
     /// Clear results
-    fn clear(&mut self) {
+    pub(super) fn clear(&mut self) {
         self.columns.clear();
         self.rows.clear();
         self.row_offset = 0;
@@ -309,13 +267,13 @@ impl ResultsTableState {
 }
 
 /// Layout areas computed from panel visibility
-struct LayoutAreas {
-    header: Rect,
-    tables: Option<Rect>,
-    results: Option<Rect>,
-    history: Option<Rect>,
-    input: Rect,
-    status: Rect,
+pub(super) struct LayoutAreas {
+    pub(super) header: Rect,
+    pub(super) tables: Option<Rect>,
+    pub(super) results: Option<Rect>,
+    pub(super) history: Option<Rect>,
+    pub(super) input: Rect,
+    pub(super) status: Rect,
 }
 
 // =============================================================================
@@ -323,47 +281,47 @@ struct LayoutAreas {
 // =============================================================================
 
 /// TUI Application State
-struct TuiApp {
-    db_path: std::path::PathBuf,
-    database: Arc<Database>,
-    input: String,
+pub(super) struct TuiApp {
+    pub(super) db_path: std::path::PathBuf,
+    pub(super) database: Arc<Database>,
+    pub(super) input: String,
     #[allow(dead_code)] // Legacy mode - replaced by focus_panel
-    input_mode: InputMode,
-    messages: Vec<String>,
+    pub(super) input_mode: InputMode,
+    pub(super) messages: Vec<String>,
     #[allow(dead_code)] // Reserved for future scroll implementation
-    scroll_offset: usize,
-    history: Vec<String>,
-    history_index: Option<usize>,
-    query_results: Vec<QueryDisplayResult>,
+    pub(super) scroll_offset: usize,
+    pub(super) history: Vec<String>,
+    pub(super) history_index: Option<usize>,
+    pub(super) query_results: Vec<QueryDisplayResult>,
     #[allow(dead_code)] // Legacy - replaced by history_scroll
-    results_scroll: ListState,
-    show_help: bool,
-    status_message: String,
+    pub(super) results_scroll: ListState,
+    pub(super) show_help: bool,
+    pub(super) status_message: String,
     #[allow(dead_code)] // Reserved for future use
-    last_execution_time: Option<Duration>,
+    pub(super) last_execution_time: Option<Duration>,
     /// Status metrics for enhanced status bar (Issue #242)
-    status_metrics: Option<StatusMetrics>,
+    pub(super) status_metrics: Option<StatusMetrics>,
     /// Last time metrics were refreshed
-    metrics_last_updated: Option<Instant>,
+    pub(super) metrics_last_updated: Option<Instant>,
 
     // Issue #251: Multi-panel layout fields
     /// Panel visibility state (F2/F3/F4 toggles)
-    panel_visibility: PanelVisibility,
+    pub(super) panel_visibility: PanelVisibility,
     /// Currently focused panel for keyboard navigation
-    focus_panel: FocusPanel,
+    pub(super) focus_panel: FocusPanel,
     /// Tables browser panel state
-    tables_browser: TablesBrowserState,
+    pub(super) tables_browser: TablesBrowserState,
     /// Query results table with horizontal scrolling
-    results_table: ResultsTableState,
+    pub(super) results_table: ResultsTableState,
     /// History panel scroll state
-    history_scroll: ListState,
+    pub(super) history_scroll: ListState,
     /// Current keyspace context for header display
-    current_keyspace: Option<String>,
+    pub(super) current_keyspace: Option<String>,
 }
 
 #[derive(Clone, PartialEq)]
 #[allow(dead_code)] // Normal variant reserved for future use
-enum InputMode {
+pub(super) enum InputMode {
     Normal,
     Editing,
     Results,
@@ -371,18 +329,22 @@ enum InputMode {
 }
 
 #[derive(Clone)]
-struct QueryDisplayResult {
-    query: String,
-    success: bool,
+pub(super) struct QueryDisplayResult {
+    pub(super) query: String,
+    pub(super) success: bool,
     #[allow(dead_code)] // Row count - used in History panel display
-    rows: usize,
-    execution_time: Option<Duration>,
+    pub(super) rows: usize,
+    pub(super) execution_time: Option<Duration>,
     #[allow(dead_code)] // Reserved for future error display
-    error_message: Option<String>,
+    pub(super) error_message: Option<String>,
 }
 
 impl TuiApp {
-    async fn new(db_path: &Path, config: &Config, database: Arc<Database>) -> Result<Self> {
+    pub(super) async fn new(
+        db_path: &Path,
+        config: &Config,
+        database: Arc<Database>,
+    ) -> Result<Self> {
         // Collect initial metrics
         let initial_metrics = StatusMetrics::collect(Some(db_path), Some(&database)).await;
 
@@ -432,7 +394,7 @@ impl TuiApp {
     }
 
     /// Refresh status metrics if stale
-    async fn refresh_metrics(&mut self) {
+    pub(super) async fn refresh_metrics(&mut self) {
         if self.metrics_stale() {
             self.status_metrics =
                 Some(StatusMetrics::collect(Some(&self.db_path), Some(&self.database)).await);
@@ -535,7 +497,7 @@ impl TuiApp {
     }
 
     /// Execute a CQL query
-    async fn execute_query(&mut self) {
+    pub(super) async fn execute_query(&mut self) {
         if self.input.trim().is_empty() {
             return;
         }
@@ -643,7 +605,7 @@ impl TuiApp {
     }
 
     /// Handle navigation in query history
-    fn navigate_history(&mut self, up: bool) {
+    pub(super) fn navigate_history(&mut self, up: bool) {
         if self.history.is_empty() {
             return;
         }
@@ -672,930 +634,6 @@ impl TuiApp {
     }
 }
 
-/// Main TUI event loop
-async fn run_tui<B: Backend>(terminal: &mut Terminal<B>, app: &mut TuiApp) -> Result<()> {
-    loop {
-        // Refresh metrics if stale (every 5 seconds)
-        app.refresh_metrics().await;
-
-        terminal.draw(|f| ui(f, app))?;
-
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                // Handle key events
-                if handle_key_event(app, key).await {
-                    return Ok(()); // Exit requested
-                }
-            }
-        }
-    }
-}
-
-/// Handle key events - returns true if should exit
-async fn handle_key_event(app: &mut TuiApp, key: event::KeyEvent) -> bool {
-    // Help mode - any key closes it
-    if app.show_help {
-        app.show_help = false;
-        return false;
-    }
-
-    // Filter input mode in tables panel - handle specially
-    if app.tables_browser.filter_active {
-        return handle_filter_key(app, key);
-    }
-
-    // Global keybindings (always active)
-    match key.code {
-        KeyCode::F(1) => {
-            app.show_help = true;
-            return false;
-        }
-        KeyCode::F(2) => {
-            app.panel_visibility.tables = !app.panel_visibility.tables;
-            // Adjust focus if hiding current panel
-            if !app.panel_visibility.tables && app.focus_panel == FocusPanel::Tables {
-                app.focus_panel = app.focus_panel.next(&app.panel_visibility);
-            }
-            return false;
-        }
-        KeyCode::F(3) => {
-            app.panel_visibility.results = !app.panel_visibility.results;
-            if !app.panel_visibility.results && app.focus_panel == FocusPanel::Results {
-                app.focus_panel = app.focus_panel.next(&app.panel_visibility);
-            }
-            return false;
-        }
-        KeyCode::F(4) => {
-            app.panel_visibility.history = !app.panel_visibility.history;
-            if !app.panel_visibility.history && app.focus_panel == FocusPanel::History {
-                app.focus_panel = app.focus_panel.next(&app.panel_visibility);
-            }
-            return false;
-        }
-        KeyCode::F(5) => {
-            app.panel_visibility.reset();
-            return false;
-        }
-        KeyCode::Esc => {
-            return true; // Exit
-        }
-        KeyCode::Tab => {
-            app.focus_panel = app.focus_panel.next(&app.panel_visibility);
-            return false;
-        }
-        KeyCode::BackTab => {
-            app.focus_panel = app.focus_panel.prev(&app.panel_visibility);
-            return false;
-        }
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            return true; // Ctrl+C exits
-        }
-        KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.messages.clear();
-            app.query_results.clear();
-            app.results_table.clear();
-            app.status_message = "Screen cleared".to_string();
-            return false;
-        }
-        // Number keys for direct panel focus (only when NOT in Input panel)
-        KeyCode::Char('1')
-            if key.modifiers.is_empty()
-                && app.panel_visibility.tables
-                && app.focus_panel != FocusPanel::Input =>
-        {
-            app.focus_panel = FocusPanel::Tables;
-            return false;
-        }
-        KeyCode::Char('2')
-            if key.modifiers.is_empty()
-                && app.panel_visibility.results
-                && app.focus_panel != FocusPanel::Input =>
-        {
-            app.focus_panel = FocusPanel::Results;
-            return false;
-        }
-        KeyCode::Char('3')
-            if key.modifiers.is_empty()
-                && app.panel_visibility.history
-                && app.focus_panel != FocusPanel::Input =>
-        {
-            app.focus_panel = FocusPanel::History;
-            return false;
-        }
-        _ => {}
-    }
-
-    // Panel-specific keybindings
-    match app.focus_panel {
-        FocusPanel::Tables => handle_tables_key(app, key).await,
-        FocusPanel::Results => handle_results_key(app, key),
-        FocusPanel::History => handle_history_key(app, key),
-        FocusPanel::Input => handle_input_key(app, key).await,
-    }
-
-    false
-}
-
-/// Handle keys when filter input is active
-fn handle_filter_key(app: &mut TuiApp, key: event::KeyEvent) -> bool {
-    match key.code {
-        KeyCode::Enter | KeyCode::Esc => {
-            app.tables_browser.filter_active = false;
-        }
-        KeyCode::Char(c) => {
-            app.tables_browser.filter_text.push(c);
-            app.tables_browser.apply_filter();
-        }
-        KeyCode::Backspace => {
-            app.tables_browser.filter_text.pop();
-            app.tables_browser.apply_filter();
-        }
-        _ => {}
-    }
-    false
-}
-
-/// Handle keys in Tables panel
-async fn handle_tables_key(app: &mut TuiApp, key: event::KeyEvent) {
-    let browser = &mut app.tables_browser;
-
-    match key.code {
-        KeyCode::Char('j') | KeyCode::Down => {
-            let selected = browser.list_state.selected().unwrap_or(0);
-            if selected < browser.filtered_indices.len().saturating_sub(1) {
-                browser.list_state.select(Some(selected + 1));
-            }
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            let selected = browser.list_state.selected().unwrap_or(0);
-            if selected > 0 {
-                browser.list_state.select(Some(selected - 1));
-            }
-        }
-        KeyCode::Char('/') => {
-            browser.filter_active = true;
-        }
-        KeyCode::Enter => {
-            // Query selected table
-            if let Some(entry) = browser.selected_entry().cloned() {
-                app.input = format!("SELECT * FROM {} LIMIT 100", entry.qualified_name);
-                app.focus_panel = FocusPanel::Input;
-            }
-        }
-        KeyCode::Char('d') => {
-            // Describe selected table
-            if let Some(entry) = browser.selected_entry().cloned() {
-                app.input = format!("DESCRIBE {}", entry.qualified_name);
-                app.focus_panel = FocusPanel::Input;
-            }
-        }
-        KeyCode::Char('g') => {
-            browser.list_state.select(Some(0));
-        }
-        KeyCode::Char('G') => {
-            let last = browser.filtered_indices.len().saturating_sub(1);
-            browser.list_state.select(Some(last));
-        }
-        _ => {}
-    }
-}
-
-/// Handle keys in Results panel
-fn handle_results_key(app: &mut TuiApp, key: event::KeyEvent) {
-    let results = &mut app.results_table;
-
-    match key.code {
-        KeyCode::Char('j') | KeyCode::Down => {
-            if results.row_offset < results.rows.len().saturating_sub(1) {
-                results.row_offset += 1;
-            }
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            if results.row_offset > 0 {
-                results.row_offset -= 1;
-            }
-        }
-        KeyCode::Char('h') | KeyCode::Left => {
-            if results.col_offset > 0 {
-                results.col_offset -= 1;
-            }
-        }
-        KeyCode::Char('l') | KeyCode::Right => {
-            if results.col_offset < results.columns.len().saturating_sub(1) {
-                results.col_offset += 1;
-            }
-        }
-        KeyCode::Char('g') => {
-            results.row_offset = 0;
-            results.col_offset = 0;
-        }
-        KeyCode::Char('G') => {
-            results.row_offset = results.rows.len().saturating_sub(10);
-        }
-        KeyCode::PageUp => {
-            results.row_offset = results.row_offset.saturating_sub(20);
-        }
-        KeyCode::PageDown => {
-            let max_offset = results.rows.len().saturating_sub(10);
-            results.row_offset = (results.row_offset + 20).min(max_offset);
-        }
-        _ => {}
-    }
-}
-
-/// Handle keys in History panel
-fn handle_history_key(app: &mut TuiApp, key: event::KeyEvent) {
-    match key.code {
-        KeyCode::Char('j') | KeyCode::Down => {
-            let selected = app.history_scroll.selected().unwrap_or(0);
-            if selected < app.query_results.len().saturating_sub(1) {
-                app.history_scroll.select(Some(selected + 1));
-            }
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            let selected = app.history_scroll.selected().unwrap_or(0);
-            if selected > 0 {
-                app.history_scroll.select(Some(selected - 1));
-            }
-        }
-        KeyCode::Enter => {
-            // Copy selected query to input
-            if let Some(selected) = app.history_scroll.selected() {
-                if let Some(result) = app.query_results.get(selected) {
-                    app.input = result.query.clone();
-                    app.focus_panel = FocusPanel::Input;
-                }
-            }
-        }
-        KeyCode::Char('g') => {
-            app.history_scroll.select(Some(0));
-        }
-        KeyCode::Char('G') => {
-            let last = app.query_results.len().saturating_sub(1);
-            app.history_scroll.select(Some(last));
-        }
-        _ => {}
-    }
-}
-
-/// Handle keys in Input panel
-async fn handle_input_key(app: &mut TuiApp, key: event::KeyEvent) {
-    match key.code {
-        KeyCode::Enter => {
-            app.execute_query().await;
-        }
-        KeyCode::Char(c) => {
-            app.input.push(c);
-            // Reset history navigation when user starts typing
-            app.history_index = None;
-        }
-        KeyCode::Backspace => {
-            app.input.pop();
-            // Reset history navigation when user edits input
-            app.history_index = None;
-        }
-        KeyCode::Up => {
-            app.navigate_history(true);
-        }
-        KeyCode::Down => {
-            app.navigate_history(false);
-        }
-        _ => {}
-    }
-}
-
-// =============================================================================
-// Layout Calculation (Issue #251)
-// =============================================================================
-
-/// Build dynamic layout based on panel visibility
-fn build_layout(area: Rect, visibility: &PanelVisibility) -> LayoutAreas {
-    // Vertical layout: Header | Main | Input | Status
-    let vertical_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .margin(0)
-        .constraints([
-            Constraint::Length(3), // Header
-            Constraint::Min(10),   // Main content
-            Constraint::Length(3), // Input
-            Constraint::Length(3), // Status
-        ])
-        .split(area);
-
-    let main_area = vertical_chunks[1];
-
-    // Horizontal split: Tables panel (left) | Right side
-    let (tables_area, right_area) = if visibility.tables {
-        let h_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(25), // Tables panel
-                Constraint::Percentage(75), // Right side
-            ])
-            .split(main_area);
-        (Some(h_chunks[0]), h_chunks[1])
-    } else {
-        (None, main_area)
-    };
-
-    // Right side vertical split: Results (top) | History (bottom)
-    let (results_area, history_area) = match (visibility.results, visibility.history) {
-        (true, true) => {
-            let v_chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Percentage(65), // Results
-                    Constraint::Percentage(35), // History
-                ])
-                .split(right_area);
-            (Some(v_chunks[0]), Some(v_chunks[1]))
-        }
-        (true, false) => (Some(right_area), None),
-        (false, true) => (None, Some(right_area)),
-        (false, false) => (None, None),
-    };
-
-    LayoutAreas {
-        header: vertical_chunks[0],
-        tables: tables_area,
-        results: results_area,
-        history: history_area,
-        input: vertical_chunks[2],
-        status: vertical_chunks[3],
-    }
-}
-
-// =============================================================================
-// Panel Rendering Functions (Issue #251)
-// =============================================================================
-
-/// Render the Tables browser panel
-fn render_tables_panel(f: &mut Frame, area: Rect, app: &mut TuiApp) {
-    let is_focused = app.focus_panel == FocusPanel::Tables;
-    let border_style = if is_focused {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-
-    // Split for filter input (if active or has text)
-    let (filter_area, list_area) =
-        if app.tables_browser.filter_active || !app.tables_browser.filter_text.is_empty() {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(3), Constraint::Min(1)])
-                .split(area);
-            (Some(chunks[0]), chunks[1])
-        } else {
-            (None, area)
-        };
-
-    // Render filter input if visible
-    if let Some(filter_rect) = filter_area {
-        let filter_border = if app.tables_browser.filter_active {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-        let filter = Paragraph::new(app.tables_browser.filter_text.as_str())
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Filter (/)")
-                    .border_style(filter_border),
-            )
-            .style(if app.tables_browser.filter_active {
-                Style::default().fg(Color::Yellow)
-            } else {
-                Style::default()
-            });
-        f.render_widget(filter, filter_rect);
-
-        // Set cursor in filter input mode
-        if app.tables_browser.filter_active {
-            f.set_cursor(
-                filter_rect.x + app.tables_browser.filter_text.len() as u16 + 1,
-                filter_rect.y + 1,
-            );
-        }
-    }
-
-    // Render table list - collect items before borrowing list_state mutably
-    let items: Vec<ListItem> = app
-        .tables_browser
-        .filtered_indices
-        .iter()
-        .map(|&idx| {
-            if let Some(entry) = app.tables_browser.entries.get(idx) {
-                ListItem::new(Line::from(vec![
-                    Span::styled("+ ", Style::default().fg(Color::Green)),
-                    Span::raw(entry.qualified_name.clone()),
-                ]))
-            } else {
-                ListItem::new(Line::from(""))
-            }
-        })
-        .collect();
-
-    let title = format!(
-        "Tables [1] ({}/{})",
-        app.tables_browser.filtered_indices.len(),
-        app.tables_browser.entries.len()
-    );
-
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(title)
-                .border_style(border_style),
-        )
-        .highlight_style(
-            Style::default()
-                .add_modifier(Modifier::REVERSED)
-                .fg(Color::Cyan),
-        )
-        .highlight_symbol("> ");
-
-    f.render_stateful_widget(list, list_area, &mut app.tables_browser.list_state);
-}
-
-/// Render the Query Results panel with Table widget
-fn render_results_panel(f: &mut Frame, area: Rect, app: &mut TuiApp) {
-    let is_focused = app.focus_panel == FocusPanel::Results;
-    let border_style = if is_focused {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-
-    // If no results, show empty state with messages
-    if app.results_table.columns.is_empty() {
-        // Show messages instead when no query results
-        let messages: Vec<ListItem> = app
-            .messages
-            .iter()
-            .enumerate()
-            .map(|(i, m)| {
-                let content = Line::from(Span::raw(format!("{}: {}", i + 1, m)));
-                ListItem::new(content)
-            })
-            .collect();
-
-        let empty_widget = List::new(messages).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Query Results [2]")
-                .border_style(border_style),
-        );
-        f.render_widget(empty_widget, area);
-        return;
-    }
-
-    // Calculate visible columns based on available width
-    let inner_width = area.width.saturating_sub(4); // Account for borders and highlight symbol
-    let visible_cols = app.results_table.visible_columns(inner_width);
-
-    // Build column widths for visible columns - clone to avoid borrow issues
-    let column_widths: Vec<u16> = app.results_table.column_widths.clone();
-
-    // Build header row - clone columns to avoid borrow issues and truncate to column width
-    let header_cells: Vec<Cell> = app.results_table.columns[visible_cols.clone()]
-        .iter()
-        .enumerate()
-        .map(|(idx, h)| {
-            // Get column index in full list for width lookup
-            let col_idx = visible_cols.start + idx;
-            let col_width = column_widths.get(col_idx).copied().unwrap_or(10) as usize;
-            let max_chars = col_width.saturating_sub(2);
-
-            // Truncate header to fit column width
-            let truncated = if h.len() > max_chars {
-                format!("{}…", &h[..max_chars.saturating_sub(1)])
-            } else {
-                h.clone()
-            };
-
-            Cell::from(truncated).style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )
-        })
-        .collect();
-    let header = Row::new(header_cells).height(1);
-
-    // Build data rows with vertical scrolling - clone row data to avoid borrow issues
-    let visible_height = area.height.saturating_sub(4) as usize; // Account for borders and header
-    let row_offset = app.results_table.row_offset;
-    let rows: Vec<Row> = app
-        .results_table
-        .rows
-        .iter()
-        .skip(row_offset)
-        .take(visible_height)
-        .map(|row| {
-            let cells: Vec<Cell> = visible_cols
-                .clone()
-                .enumerate()
-                .filter_map(|(_idx, i)| {
-                    row.get(i).map(|cell_content| {
-                        // Get the column width for truncation
-                        let col_width = column_widths.get(i).copied().unwrap_or(10) as usize;
-                        // Truncate cell content to fit column width (account for padding)
-                        let max_chars = col_width.saturating_sub(2);
-                        let truncated = if cell_content.len() > max_chars {
-                            format!("{}…", &cell_content[..max_chars.saturating_sub(1)])
-                        } else {
-                            cell_content.clone()
-                        };
-                        Cell::from(truncated)
-                    })
-                })
-                .collect();
-            Row::new(cells)
-        })
-        .collect();
-    let widths: Vec<Constraint> = visible_cols
-        .clone()
-        .filter_map(|i| column_widths.get(i).map(|&w| Constraint::Length(w)))
-        .collect();
-
-    // Build title with scroll indicators
-    let has_left = app.results_table.has_scroll_left();
-    let has_right = app.results_table.has_scroll_right(inner_width);
-    let num_cols = app.results_table.columns.len();
-    let num_rows = app.results_table.rows.len();
-    let scroll_hint = if has_left || has_right {
-        format!(
-            " (cols {}-{}/{}) ",
-            visible_cols.start + 1,
-            visible_cols.end,
-            num_cols
-        )
-    } else {
-        String::new()
-    };
-    let row_hint = if num_rows > visible_height {
-        format!(
-            " rows {}-{}/{}",
-            row_offset + 1,
-            (row_offset + visible_height).min(num_rows),
-            num_rows
-        )
-    } else {
-        format!(" {} rows", num_rows)
-    };
-    let title = format!("Query Results [2]{}{}", scroll_hint, row_hint);
-
-    let table = Table::new(rows)
-        .header(header)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(title)
-                .border_style(border_style),
-        )
-        .widths(&widths)
-        .column_spacing(1) // Add 1 space between columns to prevent overlap
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-        .highlight_symbol(">> ");
-
-    f.render_stateful_widget(table, area, &mut app.results_table.table_state);
-}
-
-/// Render the Query History panel
-fn render_history_panel(f: &mut Frame, area: Rect, app: &mut TuiApp) {
-    let is_focused = app.focus_panel == FocusPanel::History;
-    let border_style = if is_focused {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-
-    let items: Vec<ListItem> = app
-        .query_results
-        .iter()
-        .map(|result| {
-            let status = if result.success { "✓" } else { "✗" };
-            let time_str = result
-                .execution_time
-                .map(|t| format_duration(t))
-                .unwrap_or_else(|| "--".to_string());
-
-            let status_style = if result.success {
-                Style::default().fg(Color::Green)
-            } else {
-                Style::default().fg(Color::Red)
-            };
-
-            // Truncate query to fit available width (estimate ~60 chars for query text)
-            let query_text = if result.query.len() > 60 {
-                format!("{}…", &result.query[..59])
-            } else {
-                result.query.clone()
-            };
-
-            // CRITICAL: Build the entire line content as a single Line to prevent wrapping
-            // Format: "✓ 7ms SELECT * FROM test_basic.composite_key_table"
-            let line = Line::from(vec![
-                Span::styled(status, status_style),
-                Span::raw(" "),
-                Span::styled(time_str, Style::default().fg(Color::Cyan)),
-                Span::raw(" "),
-                Span::raw(query_text),
-            ]);
-
-            ListItem::new(line)
-        })
-        .collect();
-
-    let title = format!("Query History [3] ({})", app.query_results.len());
-
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(title)
-                .border_style(border_style),
-        )
-        .highlight_style(
-            Style::default()
-                .add_modifier(Modifier::BOLD)
-                .bg(Color::DarkGray),
-        )
-        .highlight_symbol("> ");
-
-    f.render_stateful_widget(list, area, &mut app.history_scroll);
-}
-
-/// Render the header bar
-fn render_header(f: &mut Frame, area: Rect, app: &TuiApp) {
-    let keyspace_text = app
-        .current_keyspace
-        .as_ref()
-        .map(|ks| format!("[{}]", ks))
-        .unwrap_or_else(|| "[no keyspace]".to_string());
-
-    let header = Paragraph::new(vec![
-        Line::from(vec![
-            Span::styled(
-                "CQLite TUI v0.1.0",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(keyspace_text, Style::default().fg(Color::Yellow)),
-            Span::raw("  "),
-            Span::styled("F1:Help", Style::default().fg(Color::DarkGray)),
-            Span::raw(" "),
-            Span::styled("F2-F4:Toggle", Style::default().fg(Color::DarkGray)),
-            Span::raw(" "),
-            Span::styled("Esc:Exit", Style::default().fg(Color::DarkGray)),
-        ]),
-        Line::from(vec![
-            Span::raw("Database: "),
-            Span::styled(
-                app.db_path.display().to_string(),
-                Style::default().fg(Color::Green),
-            ),
-        ]),
-    ])
-    .block(Block::default().borders(Borders::ALL));
-    f.render_widget(header, area);
-}
-
-/// Render the input area
-fn render_input(f: &mut Frame, area: Rect, app: &TuiApp) {
-    let is_focused = app.focus_panel == FocusPanel::Input;
-    let border_style = if is_focused {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-
-    let input = Paragraph::new(app.input.as_str())
-        .style(if is_focused {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default()
-        })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("CQL> ")
-                .border_style(border_style),
-        );
-    f.render_widget(input, area);
-
-    // Set cursor position when input is focused
-    if is_focused && !app.tables_browser.filter_active {
-        f.set_cursor(area.x + app.input.len() as u16 + 1, area.y + 1);
-    }
-}
-
-/// Render the status bar
-fn render_status(f: &mut Frame, area: Rect, app: &TuiApp) {
-    let (health_text, health_color) = match app.status_metrics.as_ref() {
-        Some(metrics) => match metrics.health {
-            HealthIndicator::Ok => ("OK", Color::Green),
-            HealthIndicator::Warning => ("WARN", Color::Yellow),
-            HealthIndicator::Error => ("ERR", Color::Red),
-        },
-        None => ("--", Color::DarkGray),
-    };
-
-    let memory_text = app
-        .status_metrics
-        .as_ref()
-        .map(|m| m.format_memory())
-        .unwrap_or_else(|| "--".to_string());
-
-    let data_text = app
-        .status_metrics
-        .as_ref()
-        .map(|m| m.format_data())
-        .unwrap_or_else(|| "--".to_string());
-
-    // Show focused panel in mode
-    let mode_text = match app.focus_panel {
-        FocusPanel::Tables => "TABLES",
-        FocusPanel::Results => "RESULTS",
-        FocusPanel::History => "HISTORY",
-        FocusPanel::Input => "INPUT",
-    };
-
-    let status_line = Line::from(vec![
-        Span::raw("Health: "),
-        Span::styled(health_text, Style::default().fg(health_color)),
-        Span::raw(" | Mem: "),
-        Span::styled(&memory_text, Style::default().fg(Color::Cyan)),
-        Span::raw(" | Data: "),
-        Span::styled(&data_text, Style::default().fg(Color::Cyan)),
-        Span::raw(" | Status: "),
-        Span::styled(&app.status_message, Style::default().fg(Color::Green)),
-        Span::raw(" | Mode: "),
-        Span::styled(mode_text, Style::default().fg(Color::Cyan)),
-    ]);
-
-    let status = Paragraph::new(status_line).block(Block::default().borders(Borders::ALL));
-    f.render_widget(status, area);
-}
-
-/// Draw the TUI interface
-fn ui(f: &mut Frame, app: &mut TuiApp) {
-    if app.show_help {
-        draw_help(f);
-        return;
-    }
-
-    // Build dynamic layout based on panel visibility
-    let layout = build_layout(f.size(), &app.panel_visibility);
-
-    // Render header
-    render_header(f, layout.header, app);
-
-    // Render visible panels
-    if let Some(tables_area) = layout.tables {
-        render_tables_panel(f, tables_area, app);
-    }
-
-    if let Some(results_area) = layout.results {
-        render_results_panel(f, results_area, app);
-    }
-
-    if let Some(history_area) = layout.history {
-        render_history_panel(f, history_area, app);
-    }
-
-    // If no panels are visible in main area, show a message
-    if layout.tables.is_none() && layout.results.is_none() && layout.history.is_none() {
-        // This shouldn't happen normally, but handle gracefully
-        let main_area = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Min(1),
-                Constraint::Length(3),
-                Constraint::Length(3),
-            ])
-            .split(f.size())[1];
-
-        let msg = Paragraph::new("Press F2/F3/F4 to show panels, or F5 to reset layout")
-            .block(Block::default().borders(Borders::ALL).title("No Panels"))
-            .style(Style::default().fg(Color::DarkGray));
-        f.render_widget(msg, main_area);
-    }
-
-    // Render input area
-    render_input(f, layout.input, app);
-
-    // Render status bar
-    render_status(f, layout.status, app);
-}
-
-/// Draw the help screen
-fn draw_help(f: &mut Frame) {
-    let help_text = vec![
-        Line::from(Span::styled(
-            "CQLite TUI Help (Issue #251)",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Global Commands:",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from("  F1          Toggle this help screen"),
-        Line::from("  F2          Toggle Tables panel"),
-        Line::from("  F3          Toggle Results panel"),
-        Line::from("  F4          Toggle History panel"),
-        Line::from("  F5          Reset layout (show all panels)"),
-        Line::from("  Tab         Cycle focus to next panel"),
-        Line::from("  Shift+Tab   Cycle focus to previous panel"),
-        Line::from("  1/2/3       Jump directly to panel"),
-        Line::from("  Esc         Exit application"),
-        Line::from("  Ctrl+C      Quit immediately"),
-        Line::from("  Ctrl+L      Clear screen and history"),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Tables Panel [1]:",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from("  j/k, Up/Down  Navigate tables"),
-        Line::from("  /             Open filter input"),
-        Line::from("  Enter         Query selected table"),
-        Line::from("  d             Describe selected table"),
-        Line::from("  g/G           Jump to first/last table"),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Results Panel [2]:",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from("  j/k, Up/Down  Scroll rows"),
-        Line::from("  h/l, Left/Right  Scroll columns (horizontal)"),
-        Line::from("  g/G           Jump to first/last row"),
-        Line::from("  PgUp/PgDn     Page up/down"),
-        Line::from(""),
-        Line::from(Span::styled(
-            "History Panel [3]:",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from("  j/k, Up/Down  Navigate history"),
-        Line::from("  Enter         Copy query to input"),
-        Line::from("  g/G           Jump to first/last entry"),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Input Panel:",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from("  Enter         Execute current query"),
-        Line::from("  Up/Down       Navigate command history"),
-        Line::from("  Backspace     Delete character"),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Press any key to close this help",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
-
-    let help_paragraph = Paragraph::new(help_text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Help - Press any key to close")
-                .border_style(Style::default().fg(Color::Yellow)),
-        )
-        .wrap(Wrap { trim: true });
-
-    let area = centered_rect(85, 95, f.size());
-    f.render_widget(help_paragraph, area);
-}
-
-/// Create a centered rectangle
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(r);
-
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(popup_layout[1])[1]
-}
-
 /// Format a Duration for display with smart unit selection
 ///
 /// - < 1ms: Display as "XXXμs" (microseconds)
@@ -1607,7 +645,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 /// - 1.2ms -> "1.2ms"
 /// - 7.0ms -> "7.0ms"
 /// - 1500ms -> "1.5s"
-fn format_duration(duration: Duration) -> String {
+pub(super) fn format_duration(duration: Duration) -> String {
     let micros = duration.as_micros();
 
     if micros < 1_000 {
@@ -1626,7 +664,7 @@ fn format_duration(duration: Duration) -> String {
 ///
 /// Expected format: tablename-uuid
 /// Returns the table name part before the first dash.
-fn extract_table_name(dir_name: &str) -> Option<String> {
+pub(super) fn extract_table_name(dir_name: &str) -> Option<String> {
     if let Some(dash_pos) = dir_name.find('-') {
         let table_part = &dir_name[..dash_pos];
         if !table_part.is_empty() && table_part.chars().all(|c| c.is_alphanumeric() || c == '_') {
@@ -1635,10 +673,6 @@ fn extract_table_name(dir_name: &str) -> Option<String> {
     }
     None
 }
-
-// =============================================================================
-// Unit Tests
-// =============================================================================
 
 #[cfg(test)]
 mod tests {
