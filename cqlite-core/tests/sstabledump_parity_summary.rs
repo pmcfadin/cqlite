@@ -32,6 +32,10 @@ use tempfile::TempDir;
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
 
+#[path = "parity_support/mod.rs"]
+mod parity_support;
+use parity_support::{parity_datasets_required, scenario, ParityFailure};
+
 /// Test configuration for Summary.db parity validation
 #[derive(Debug, Clone)]
 struct SummaryParityConfig {
@@ -80,10 +84,26 @@ struct SummaryValidationResult {
 async fn test_summary_db_parity_comprehensive() -> CqliteResult<()> {
     let config = SummaryParityConfig::default();
 
-    // Skip if test data not available
+    // Skip if test data not available (fail-closed in CI).
     let metadata = match load_metadata() {
         Ok(m) => m,
         Err(e) => {
+            if parity_datasets_required() {
+                ParityFailure::new(scenario::SUMMARY_DB_BIG)
+                    .cassandra_source("IndexSummaryTest / SSTableReaderTest (Summary.db)")
+                    .components(["Summary.db", "Data.db", "Index.db"])
+                    .repro(
+                        "bash test-data/scripts/fetch-datasets.sh && \
+                         CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core \
+                         --features write-support --test sstabledump_parity_summary \
+                         test_summary_db_parity_comprehensive -- --nocapture",
+                    )
+                    .detail(format!(
+                        "CQLITE_PARITY_REQUIRE_DATASETS=1 but datasets metadata could not be \
+                         loaded ({e}) — required parity gate must not skip when datasets are mandated"
+                    ))
+                    .panic();
+            }
             println!(
                 "⏭️ Skipping Summary.db comprehensive parity test: test data not available ({e})"
             );
@@ -91,10 +111,26 @@ async fn test_summary_db_parity_comprehensive() -> CqliteResult<()> {
         }
     };
 
-    // Skip if tables not available
+    // Skip if tables not available (fail-closed in CI).
     let available_tables = match list_tables(None) {
         Ok(t) => t,
         Err(e) => {
+            if parity_datasets_required() {
+                ParityFailure::new(scenario::SUMMARY_DB_BIG)
+                    .cassandra_source("IndexSummaryTest / SSTableReaderTest (Summary.db)")
+                    .components(["Summary.db", "Data.db", "Index.db"])
+                    .repro(
+                        "bash test-data/scripts/fetch-datasets.sh && \
+                         CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core \
+                         --features write-support --test sstabledump_parity_summary \
+                         test_summary_db_parity_comprehensive -- --nocapture",
+                    )
+                    .detail(format!(
+                        "CQLITE_PARITY_REQUIRE_DATASETS=1 but tables could not be listed ({e}) — \
+                         required parity gate must not skip when datasets are mandated"
+                    ))
+                    .panic();
+            }
             println!("⏭️ Skipping Summary.db comprehensive parity test: cannot list tables ({e})");
             return Ok(());
         }
@@ -103,6 +139,23 @@ async fn test_summary_db_parity_comprehensive() -> CqliteResult<()> {
     for target_table in &config.target_tables {
         let found = available_tables.iter().any(|t| t.table == *target_table);
         if !found {
+            if parity_datasets_required() {
+                ParityFailure::new(scenario::SUMMARY_DB_BIG)
+                    .cassandra_source("IndexSummaryTest / SSTableReaderTest (Summary.db)")
+                    .components(["Summary.db", "Data.db", "Index.db"])
+                    .repro(
+                        "bash test-data/scripts/fetch-datasets.sh && \
+                         CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core \
+                         --features write-support --test sstabledump_parity_summary \
+                         test_summary_db_parity_comprehensive -- --nocapture",
+                    )
+                    .detail(format!(
+                        "CQLITE_PARITY_REQUIRE_DATASETS=1 but target table '{}' was not found in \
+                         the datasets — required parity gate must not skip when datasets are mandated",
+                        target_table
+                    ))
+                    .panic();
+            }
             println!(
                 "⏭️ Skipping Summary.db comprehensive parity test: target table '{}' not found",
                 target_table
@@ -1015,6 +1068,23 @@ mod strict {
         if summaries.is_empty() {
             // Binary fixtures absent in this checkout (only JSONL refs committed).
             // Skip-on-absence per project doctrine; do NOT pass silently with 0 work.
+            if parity_datasets_required() {
+                ParityFailure::new(scenario::SUMMARY_DB_BIG)
+                    .cassandra_source("IndexSummaryTest (Summary.db byte/offset parity)")
+                    .fixture(root.clone())
+                    .components(["Summary.db", "Data.db", "Index.db"])
+                    .repro(
+                        "bash test-data/scripts/fetch-datasets.sh && \
+                         CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core \
+                         --features write-support --test sstabledump_parity_summary \
+                         strict::test_summary_db_strict_byte_parity -- --nocapture",
+                    )
+                    .detail(
+                        "CQLITE_PARITY_REQUIRE_DATASETS=1 but no *-Summary.db images were present \
+                         — required parity gate must not skip when datasets are mandated",
+                    )
+                    .panic();
+            }
             eprintln!(
                 "skip: no *-Summary.db images under {} (binary fixtures not fetched)",
                 root.display()
@@ -1285,6 +1355,25 @@ mod strict {
                 // Data.db on disk — the binary fixtures simply were not fetched
                 // in this checkout. There is nothing to validate, so skip
                 // cleanly; do NOT claim a fail-closed pass.
+                if parity_datasets_required() {
+                    ParityFailure::new(scenario::SUMMARY_DB_BIG)
+                        .cassandra_source("IndexSummaryTest (Summary.db byte/offset parity)")
+                        .fixture(root.clone())
+                        .components(["Summary.db", "Data.db", "Index.db"])
+                        .repro(
+                            "bash test-data/scripts/fetch-datasets.sh && \
+                             CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core \
+                             --features write-support --test sstabledump_parity_summary \
+                             strict::test_summary_db_strict_byte_parity -- --nocapture",
+                        )
+                        .detail(format!(
+                            "CQLITE_PARITY_REQUIRE_DATASETS=1 but {} Summary.db image(s) had no \
+                             sibling Data.db (binaries unfetched) — required parity gate must not \
+                             skip when datasets are mandated",
+                            summaries.len()
+                        ))
+                        .panic();
+                }
                 eprintln!(
                     "skip: {} Summary.db image(s) found under {} but none had a sibling Data.db \
                      (binary fixtures not fetched)",
@@ -1383,6 +1472,23 @@ mod strict {
         tocs.sort();
 
         if tocs.is_empty() {
+            if parity_datasets_required() {
+                ParityFailure::new(scenario::COMPONENT_MANIFEST)
+                    .cassandra_source("BTI/BIG TOC manifest classification (Summary.db presence)")
+                    .fixture(root.clone())
+                    .components(["TOC.txt", "Summary.db", "Partitions.db"])
+                    .repro(
+                        "bash test-data/scripts/fetch-datasets.sh && \
+                         CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core \
+                         --features write-support --test sstabledump_parity_summary \
+                         strict::test_bti_summary_discovery_classification -- --nocapture",
+                    )
+                    .detail(
+                        "CQLITE_PARITY_REQUIRE_DATASETS=1 but no *-TOC.txt fixtures were present — \
+                         required parity gate must not skip when datasets are mandated",
+                    )
+                    .panic();
+            }
             eprintln!(
                 "skip: no *-TOC.txt fixtures under {} (datasets not present)",
                 root.display()

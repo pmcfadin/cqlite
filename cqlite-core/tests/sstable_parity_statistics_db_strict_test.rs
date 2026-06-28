@@ -42,6 +42,10 @@ use std::path::{Path, PathBuf};
 
 use cqlite_core::parser::enhanced_statistics_parser::parse_statistics_with_fallback;
 
+#[path = "parity_support/mod.rs"]
+mod parity_support;
+use parity_support::{parity_datasets_required, scenario, ParityFailure};
+
 /// `crc32(num_components=4)` — the marker Cassandra writes at bytes 4..8 of
 /// every `Statistics.db` (it is the CRC of the 4-byte component count, which is
 /// always 4 for the VALIDATION/COMPACTION/STATS/HEADER set).
@@ -642,6 +646,24 @@ fn statistics_db_strict_core_metadata_parity() {
         // against. This is the documented dataset-absent SKIP path (distinct from a
         // silent pass); the committed references were still validated for presence
         // above (all_statistics_txt fails closed).
+        if parity_datasets_required() {
+            ParityFailure::new(scenario::STATISTICS_DB)
+                .cassandra_source("MetadataSerializer (Statistics.db core metadata)")
+                .fixture(datasets_sstables_root())
+                .components(["Statistics.db", "Statistics.db.txt"])
+                .repro(
+                    "bash test-data/scripts/fetch-datasets.sh && \
+                     CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core \
+                     --features write-support --test sstable_parity_statistics_db_strict_test \
+                     statistics_db_strict_core_metadata_parity -- --nocapture",
+                )
+                .detail(format!(
+                    "CQLITE_PARITY_REQUIRE_DATASETS=1 but no *-Statistics.db binaries were fetched \
+                     ({skipped} references present without binaries) — required parity gate must \
+                     not skip when datasets are mandated"
+                ))
+                .panic();
+        }
         eprintln!(
             "statistics_db_strict_core_metadata_parity: SKIP — no *-Statistics.db binaries \
              fetched ({skipped} references present without binaries)"
@@ -716,6 +738,24 @@ fn statistics_db_strict_core_metadata_parity() {
 fn statistics_db_strict_corruption_fails_closed() {
     let refs = all_statistics_txt();
     let Some(db) = refs.iter().map(|p| binary_for(p)).find(|p| p.exists()) else {
+        if parity_datasets_required() {
+            ParityFailure::new(scenario::STATISTICS_DB)
+                .cassandra_source("MetadataSerializer corruption rejection (Statistics.db)")
+                .fixture(datasets_sstables_root())
+                .components(["Statistics.db"])
+                .repro(
+                    "bash test-data/scripts/fetch-datasets.sh && \
+                     CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core \
+                     --features write-support --test sstable_parity_statistics_db_strict_test \
+                     statistics_db_strict_corruption_fails_closed -- --nocapture",
+                )
+                .detail(
+                    "CQLITE_PARITY_REQUIRE_DATASETS=1 but no *-Statistics.db binary was fetched to \
+                     use as the corruption baseline — required parity gate must not skip when \
+                     datasets are mandated",
+                )
+                .panic();
+        }
         eprintln!(
             "statistics_db_strict_corruption_fails_closed: SKIP — no *-Statistics.db binary fetched"
         );

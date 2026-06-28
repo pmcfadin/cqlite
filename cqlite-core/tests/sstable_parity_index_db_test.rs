@@ -43,6 +43,10 @@ use cqlite_core::storage::sstable::index_reader::IndexReader;
 use cqlite_core::storage::sstable::version_gate::{SsTableDescriptor, SsTableFormat};
 use cqlite_core::Config;
 
+#[path = "parity_support/mod.rs"]
+mod parity_support;
+use parity_support::{parity_datasets_required, scenario, ParityFailure};
+
 // ============================================================================
 // Fixture discovery
 // ============================================================================
@@ -533,6 +537,24 @@ async fn big_index_db_entry_byte_and_field_parity() {
     // was counted as unfetched and the test SKIPS cleanly. When binaries ARE present the
     // strict coverage assertions below must hold (UUID-keyed + delta lanes proven).
     if big_checked == 0 {
+        if parity_datasets_required() {
+            ParityFailure::new(scenario::INDEX_DB_BIG)
+                .cassandra_source("RowIndexEntryTest.java (BIG Index.db entry bytes)")
+                .fixture(datasets_sstables_root())
+                .components(["Index.db", "Data.db"])
+                .repro(
+                    "bash test-data/scripts/fetch-datasets.sh && \
+                     CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core \
+                     --features write-support --test sstable_parity_index_db_test \
+                     big_index_db_entry_byte_and_field_parity -- --nocapture",
+                )
+                .detail(format!(
+                    "CQLITE_PARITY_REQUIRE_DATASETS=1 but no BIG Index.db binaries were present \
+                     ({skipped_unfetched} unfetched generations) — required parity gate must not \
+                     skip when datasets are mandated"
+                ))
+                .panic();
+        }
         eprintln!(
             "big_index_db_entry_byte_and_field_parity: SKIP — no BIG Index.db binaries \
              present ({skipped_unfetched} unfetched generations); fetch the dataset to \
@@ -654,6 +676,26 @@ async fn bti_index_component_discovery() {
     // present (fetched dataset / CI corpus) we keep real coverage: at least one BTI
     // fixture must have been fully verified above.
     if bti_checked == 0 {
+        if parity_datasets_required() {
+            ParityFailure::new(scenario::COMPONENT_MANIFEST)
+                .cassandra_source(
+                    "BTI component discovery (Partitions.db/Rows.db, no Index/Summary)",
+                )
+                .fixture(datasets_sstables_root())
+                .components(["Partitions.db", "Rows.db", "TOC.txt"])
+                .repro(
+                    "bash test-data/scripts/fetch-datasets.sh && \
+                     CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core \
+                     --features write-support --test sstable_parity_index_db_test \
+                     bti_index_component_discovery -- --nocapture",
+                )
+                .detail(format!(
+                    "CQLITE_PARITY_REQUIRE_DATASETS=1 but no BTI binaries were present \
+                     ({bti_skipped_unfetched} unfetched fixtures) — required parity gate must not \
+                     skip when datasets are mandated"
+                ))
+                .panic();
+        }
         eprintln!(
             "bti_index_component_discovery: SKIP — no BTI binaries present \
              ({bti_skipped_unfetched} unfetched fixtures); fetch the dataset to exercise \
@@ -758,6 +800,23 @@ async fn truncated_big_index_db_is_not_silently_full_or_empty() {
     // Index.db to truncate, so the test SKIPS cleanly. When binaries ARE present we keep
     // real coverage above (at least one representative BIG fixture is exercised).
     if checked == 0 {
+        if parity_datasets_required() {
+            ParityFailure::new(scenario::INDEX_DB_BIG)
+                .cassandra_source("CorruptPrimaryIndexTest.java (truncated BIG Index.db)")
+                .fixture(datasets_sstables_root())
+                .components(["Index.db", "Data.db"])
+                .repro(
+                    "bash test-data/scripts/fetch-datasets.sh && \
+                     CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core \
+                     --features write-support --test sstable_parity_index_db_test \
+                     truncated_big_index_db_is_not_silently_full_or_empty -- --nocapture",
+                )
+                .detail(
+                    "CQLITE_PARITY_REQUIRE_DATASETS=1 but no BIG Index.db binaries were present \
+                     to truncate — required parity gate must not skip when datasets are mandated",
+                )
+                .panic();
+        }
         eprintln!(
             "truncated_big_index_db_is_not_silently_full_or_empty: SKIP — no BIG Index.db \
              binaries present; fetch the dataset to exercise the truncation path"

@@ -34,6 +34,10 @@ use tempfile::TempDir;
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
 
+#[path = "parity_support/mod.rs"]
+mod parity_support;
+use parity_support::{parity_datasets_required, scenario, ParityFailure};
+
 /// Test configuration for Data.db parity validation
 #[derive(Debug, Clone)]
 struct DataParityConfig {
@@ -360,10 +364,26 @@ async fn test_data_db_timestamp_delta_encoding() -> CqliteResult<()> {
 async fn test_data_db_jsonl_reference_parity() -> CqliteResult<()> {
     let config = DataParityConfig::default();
 
-    // Load available tables - skip if test data not available
+    // Load available tables - skip if test data not available (fail-closed in CI).
     let _metadata = match load_metadata() {
         Ok(m) => m,
         Err(e) => {
+            if parity_datasets_required() {
+                ParityFailure::new(scenario::DATA_DB_JSONL)
+                    .cassandra_source("sstabledump JSONL (Data.db row/cell decode)")
+                    .components(["Data.db", "Data.db.jsonl"])
+                    .repro(
+                        "bash test-data/scripts/fetch-datasets.sh && \
+                         CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core \
+                         --features write-support --test sstabledump_parity_data \
+                         test_data_db_jsonl_reference_parity -- --nocapture",
+                    )
+                    .detail(format!(
+                        "CQLITE_PARITY_REQUIRE_DATASETS=1 but datasets metadata could not be \
+                         loaded ({e}) — required parity gate must not skip when datasets are mandated"
+                    ))
+                    .panic();
+            }
             println!("⏭️ Skipping JSONL reference parity test: test data not available ({e})");
             return Ok(());
         }
@@ -372,6 +392,22 @@ async fn test_data_db_jsonl_reference_parity() -> CqliteResult<()> {
     let available_tables = match list_tables(None) {
         Ok(t) => t,
         Err(e) => {
+            if parity_datasets_required() {
+                ParityFailure::new(scenario::DATA_DB_JSONL)
+                    .cassandra_source("sstabledump JSONL (Data.db row/cell decode)")
+                    .components(["Data.db", "Data.db.jsonl"])
+                    .repro(
+                        "bash test-data/scripts/fetch-datasets.sh && \
+                         CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core \
+                         --features write-support --test sstabledump_parity_data \
+                         test_data_db_jsonl_reference_parity -- --nocapture",
+                    )
+                    .detail(format!(
+                        "CQLITE_PARITY_REQUIRE_DATASETS=1 but tables could not be listed ({e}) — \
+                         required parity gate must not skip when datasets are mandated"
+                    ))
+                    .panic();
+            }
             println!("⏭️ Skipping JSONL reference parity test: cannot list tables ({e})");
             return Ok(());
         }
