@@ -295,6 +295,20 @@ class RetroTests(unittest.TestCase):
         self.assertIn("DRY RUN", out.getvalue())
         self.assertIn("dedup check skipped", err.getvalue())
 
+    def test_retro_refuses_duplicate_issue_ledger(self):
+        # a duplicate issue would double-count in the tally — retro must refuse (run lint),
+        # mirroring lint's invariant via the shared loader.
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "ledger.jsonl"
+            line = (FIXTURES / "sample-ledger.jsonl").read_text().splitlines()[0]
+            ledger.write_text(line + "\n" + line + "\n")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = dt.main(["retro", "--ledger", str(ledger),
+                              "--open-issues-json", str(FIXTURES / "open-issues-empty.json")])
+            self.assertEqual(rc, 1)
+            self.assertIn("run `lint`", err.getvalue())
+
     def test_retro_dedupes_against_existing_flow_meta_issue(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):

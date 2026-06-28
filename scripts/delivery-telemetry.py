@@ -333,14 +333,13 @@ def cmd_record(args) -> int:
 
 # ============================================================ lint
 
-def cmd_lint(args) -> int:
-    schema = load_schema(Path(args.schema))
-    ledger = Path(args.ledger)
-    if not ledger.exists():
-        print(f"error: ledger not found: {ledger}", file=sys.stderr)
-        return 1
-
-    bad = 0
+def load_ledger(ledger: Path, schema: dict):
+    """Parse + validate every ledger line. Returns (records, errors) where errors is a
+    list of (lineno, message): malformed JSON, schema violations, AND duplicate issue
+    numbers (one-record-per-issue). Shared by `lint` and `retro` so both apply the exact
+    same rules — neither can rank/accept a ledger the other would reject.
+    """
+    records, errors = [], []
     seen_issues: dict = {}
     for lineno, raw in enumerate(ledger.read_text().splitlines(), start=1):
         if not raw.strip():
@@ -348,26 +347,32 @@ def cmd_lint(args) -> int:
         try:
             record = json.loads(raw)
         except json.JSONDecodeError as exc:
-            print(f"line {lineno}: invalid JSON: {exc}", file=sys.stderr)
-            bad += 1
+            errors.append((lineno, f"invalid JSON: {exc}"))
             continue
-        errors = validate_record(record, schema)
-        if errors:
-            bad += 1
-            for e in errors:
-                print(f"line {lineno}: {e}", file=sys.stderr)
+        for e in validate_record(record, schema):
+            errors.append((lineno, e))
         # one record per completed issue — a duplicate 'issue' skews retro. A non-object
         # line already produced a type error above; skip the bookkeeping (no .get crash).
         issue = record.get("issue") if isinstance(record, dict) else None
         if issue is not None and issue in seen_issues:
-            bad += 1
-            print(f"line {lineno}: duplicate record for issue #{issue} "
-                  f"(first seen line {seen_issues[issue]})", file=sys.stderr)
+            errors.append((lineno, f"duplicate record for issue #{issue} "
+                                   f"(first seen line {seen_issues[issue]})"))
         elif issue is not None:
             seen_issues[issue] = lineno
+        records.append(record)
+    return records, errors
 
-    if bad:
-        print(f"FAIL: {bad} malformed record(s)", file=sys.stderr)
+
+def cmd_lint(args) -> int:
+    ledger = Path(args.ledger)
+    if not ledger.exists():
+        print(f"error: ledger not found: {ledger}", file=sys.stderr)
+        return 1
+    _, errors = load_ledger(ledger, load_schema(Path(args.schema)))
+    for lineno, msg in errors:
+        print(f"line {lineno}: {msg}", file=sys.stderr)
+    if errors:
+        print(f"FAIL: {len(errors)} problem(s)", file=sys.stderr)
         return 1
     print("OK: ledger is well-formed")
     return 0
@@ -430,24 +435,15 @@ def cmd_retro(args) -> int:
     if not ledger.exists():
         print(f"error: ledger not found: {ledger}", file=sys.stderr)
         return 1
-    # Refuse to rank a non-conforming ledger: a malformed/partial line or a record
-    # missing a counter must be a clean error (run `lint`), never silently parsed or
-    # defaulted — the same authoritative-data-only bar `record` enforces.
-    schema = load_schema(Path(args.schema))
-    records = []
-    for lineno, raw in enumerate(ledger.read_text().splitlines(), start=1):
-        if not raw.strip():
-            continue
-        try:
-            rec = json.loads(raw)
-        except json.JSONDecodeError:
-            print(f"error: ledger malformed at line {lineno} — run `lint`", file=sys.stderr)
-            return 1
-        if validate_record(rec, schema):
-            print(f"error: ledger record at line {lineno} is not schema-valid — run `lint`",
-                  file=sys.stderr)
-            return 1
-        records.append(rec)
+    # Refuse to rank a non-conforming ledger: a malformed/partial line, a record missing a
+    # counter, OR a duplicate issue (which would double-count in the tally) must be a clean
+    # error (run `lint`), never silently parsed/defaulted/double-counted. Same loader as
+    # `lint`, so retro applies the identical bar.
+    records, errors = load_ledger(ledger, load_schema(Path(args.schema)))
+    if errors:
+        lineno, msg = errors[0]
+        print(f"error: ledger problem at line {lineno} ({msg}) — run `lint`", file=sys.stderr)
+        return 1
     if not records:
         print("ledger is empty — nothing to retro")
         return 0
