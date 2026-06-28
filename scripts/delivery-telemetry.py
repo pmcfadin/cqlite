@@ -98,9 +98,14 @@ def _validate(value, schema: dict, path: str, errors: list) -> None:
             errors.append(f"{path}: {value!r} does not match /{schema['pattern']}/")
     if schema.get("format") == "date-time" and isinstance(value, str):
         try:
-            _parse_ts(value)
+            parsed = _parse_ts(value)
         except ValueError:
             errors.append(f"{path}: {value!r} is not a valid RFC-3339 date-time")
+        else:
+            # fromisoformat accepts date-only / tz-naive strings on 3.11+; require a full
+            # date + time + offset so a value like "2026-06-01" is rejected.
+            if "T" not in value or parsed.tzinfo is None:
+                errors.append(f"{path}: {value!r} is not a full date-time with offset")
     if schema.get("type") == "object" and isinstance(value, dict):
         props = schema.get("properties", {})
         for req in schema.get("required", []):
@@ -364,7 +369,24 @@ def cmd_retro(args) -> int:
     if not ledger.exists():
         print(f"error: ledger not found: {ledger}", file=sys.stderr)
         return 1
-    records = [json.loads(l) for l in ledger.read_text().splitlines() if l.strip()]
+    # Refuse to rank a non-conforming ledger: a malformed/partial line or a record
+    # missing a counter must be a clean error (run `lint`), never silently parsed or
+    # defaulted — the same authoritative-data-only bar `record` enforces.
+    schema = load_schema(Path(args.schema))
+    records = []
+    for lineno, raw in enumerate(ledger.read_text().splitlines(), start=1):
+        if not raw.strip():
+            continue
+        try:
+            rec = json.loads(raw)
+        except json.JSONDecodeError:
+            print(f"error: ledger malformed at line {lineno} — run `lint`", file=sys.stderr)
+            return 1
+        if validate_record(rec, schema):
+            print(f"error: ledger record at line {lineno} is not schema-valid — run `lint`",
+                  file=sys.stderr)
+            return 1
+        records.append(rec)
     if not records:
         print("ledger is empty — nothing to retro")
         return 0

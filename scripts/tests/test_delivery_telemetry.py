@@ -12,6 +12,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -228,6 +229,64 @@ class RetroTests(unittest.TestCase):
         self.assertIn("already tracked", text)
         self.assertIn("#999", text)
         self.assertNotIn("DRY RUN", text)
+
+
+class _FakeProc:
+    def __init__(self, stdout):
+        self.stdout = stdout
+
+
+class GhPathTests(unittest.TestCase):
+    """Cover the live `gh`-touching paths offline by monkeypatching subprocess.run."""
+
+    def test_github_fields_builds_argv_and_maps_json(self):
+        def fake_run(argv, **kw):
+            if argv[:3] == ["gh", "issue", "view"]:
+                self.assertIn("createdAt,closedAt,labels", argv)
+                return _FakeProc(json.dumps({
+                    "createdAt": "2026-06-01T00:00:00Z",
+                    "closedAt": "2026-06-01T02:00:00Z",
+                    "labels": [{"name": "P1"}, {"name": "oracle"}],
+                }))
+            if argv[:3] == ["gh", "pr", "view"]:
+                self.assertIn("createdAt,mergedAt", argv)
+                return _FakeProc(json.dumps({
+                    "createdAt": "2026-06-01T00:30:00Z",
+                    "mergedAt": "2026-06-01T01:30:00Z",
+                }))
+            raise AssertionError(f"unexpected argv: {argv}")
+
+        with mock.patch.object(dt.subprocess, "run", fake_run):
+            fields = dt._github_fields(1234, 5678)
+        self.assertEqual(fields["created_at"], "2026-06-01T00:00:00Z")
+        self.assertEqual(fields["closed_at"], "2026-06-01T02:00:00Z")
+        self.assertEqual(fields["pr_opened_at"], "2026-06-01T00:30:00Z")
+        self.assertEqual(fields["merged_at"], "2026-06-01T01:30:00Z")
+        self.assertEqual(fields["priority"], "P1")
+        self.assertEqual(fields["routing"], "oracle")  # explicit label, not inferred
+
+    def test_retro_file_invokes_gh_issue_create(self):
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(argv)
+            return _FakeProc("https://github.com/pmcfadin/cqlite/issues/123")
+
+        with mock.patch.object(dt.subprocess, "run", fake_run):
+            rc = dt.main([
+                "retro",
+                "--ledger", str(FIXTURES / "sample-ledger.jsonl"),
+                "--open-issues-json", str(FIXTURES / "open-issues-empty.json"),
+                "--file",
+            ])
+        self.assertEqual(rc, 0)
+        self.assertTrue(calls, "expected a gh subprocess call")
+        argv = calls[-1]
+        self.assertEqual(argv[:3], ["gh", "issue", "create"])
+        self.assertIn("flow-meta", argv)
+        # the marker for the top category (rework) must be in the body
+        body = argv[argv.index("--body") + 1]
+        self.assertIn("<!-- RETRO:rework -->", body)
 
 
 class AggregateTests(unittest.TestCase):
