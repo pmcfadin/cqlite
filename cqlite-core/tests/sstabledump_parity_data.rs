@@ -468,11 +468,26 @@ async fn test_data_db_jsonl_reference_parity() -> CqliteResult<()> {
     // are the per-table parity verdicts: expected "<ks>.<table>: parity=true",
     // actual the observed verdict (with the recorded errors when it failed).
     if passed != results.len() {
-        let expected: Vec<String> = results
+        // Build both sides from ONLY the failing rows so `jsonl_diff` (which
+        // returns at the first differing line) pinpoints a *genuine* failure
+        // rather than line 0. Using all rows would make every line diverge —
+        // the `expected` "parity=true" verdict never carries the rows=…/errors=…
+        // suffix that `actual` always appends — so the first divergence would
+        // land on an arbitrary (often passing) table. Restricting to the
+        // failures keeps each side's formatting aligned per-table while
+        // guaranteeing the first divergence names a real failure.
+        let failures: Vec<&DataValidationResult> =
+            results.iter().filter(|r| !r.perfect_parity).collect();
+        let expected: Vec<String> = failures
             .iter()
-            .map(|r| format!("{}.{}: parity=true", r.keyspace, r.table))
+            .map(|r| {
+                format!(
+                    "{}.{}: parity=true rows={} errors=[]",
+                    r.keyspace, r.table, r.jsonl_row_count
+                )
+            })
             .collect();
-        let actual: Vec<String> = results
+        let actual: Vec<String> = failures
             .iter()
             .map(|r| {
                 format!(
