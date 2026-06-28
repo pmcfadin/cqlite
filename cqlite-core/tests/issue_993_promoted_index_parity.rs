@@ -119,6 +119,13 @@ async fn wide_partition_emits_capturable_promoted_index() {
 
     // Full decode: clustering key is a single `int` (4 fixed bytes) → each
     // serialized ClusteringPrefix is `[header VInt (1 byte)][4 value bytes]` = 5.
+    // NOTE: this 5 reflects CQLite's OWN writer encoding (1-byte clustering-prefix
+    // header). The real Cassandra 5.0 NB fixture uses a 2-byte header → 6 bytes
+    // (see CK_PREFIX_LEN in issue_993_wide_partition_promoted_index_parity.rs).
+    // So this round-trip proves CQLite-writer ↔ CQLite-reader self-consistency,
+    // NOT byte-for-byte writer parity with Cassandra; that divergence is tracked
+    // by #1186. The read path is independently validated against the real
+    // Cassandra bytes in the wide-partition byte-level parity tier.
     let prefix_len = |slice: &[u8]| -> cqlite_core::Result<usize> {
         if slice.len() < 5 {
             return Err(cqlite_core::error::Error::Corruption(
