@@ -109,6 +109,42 @@ fn read_u8_loc(data: &[u8], pos: usize) -> Loc {
     }
 }
 
+/// Read a fixed-width region `[pos, pos+len)` with a bounds guard, panicking with
+/// contextual offset/length information (mirroring the `read_u8_loc` /
+/// `read_uvint_loc` fail-with-context style) instead of a raw slice-index panic
+/// when a truncated/malformed fixture is shorter than expected.
+#[track_caller]
+fn read_fixed_loc<'a>(data: &'a [u8], pos: usize, len: usize, what: &str) -> &'a [u8] {
+    assert!(
+        pos + len <= data.len(),
+        "{what}: fixed-width read of {len} bytes at offset {pos} (0x{pos:02X}) overruns the \
+         {}-byte buffer — truncated/malformed fixture",
+        data.len()
+    );
+    &data[pos..pos + len]
+}
+
+/// Read a big-endian `i32` at `pos` with a bounds guard (contextual panic).
+#[track_caller]
+fn read_be_i32(data: &[u8], pos: usize, what: &str) -> i32 {
+    let b = read_fixed_loc(data, pos, 4, what);
+    i32::from_be_bytes([b[0], b[1], b[2], b[3]])
+}
+
+/// Read a big-endian `i64` at `pos` with a bounds guard (contextual panic).
+#[track_caller]
+fn read_be_i64(data: &[u8], pos: usize, what: &str) -> i64 {
+    let b = read_fixed_loc(data, pos, 8, what);
+    i64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
+}
+
+/// Read a big-endian `u16` at `pos` with a bounds guard (contextual panic).
+#[track_caller]
+fn read_be_u16(data: &[u8], pos: usize, what: &str) -> u16 {
+    let b = read_fixed_loc(data, pos, 2, what);
+    u16::from_be_bytes([b[0], b[1]])
+}
+
 /// Assert a flag byte equals `expected`, with full offset context on mismatch.
 #[track_caller]
 fn fail_flag(loc: Loc, expected: u8, what: &str) {
@@ -539,9 +575,9 @@ fn fixture_static_only_partition_marker_byte_parity() {
     };
 
     // First partition header: [u16 key_len=4][i32 key=99][i32 LDT][i64 mfda].
-    let key_len = u16::from_be_bytes([raw[0], raw[1]]) as usize;
+    let key_len = read_be_u16(&raw, 0, "static_with_rows partition key length") as usize;
     assert_eq!(key_len, 4, "static_with_rows PK is a 4-byte int32");
-    let key = i32::from_be_bytes([raw[2], raw[3], raw[4], raw[5]]);
+    let key = read_be_i32(&raw, 2, "static_with_rows partition key (int32)");
     assert_eq!(
         key, 99,
         "first partition in static_with_rows must be the static-only PK=99 \
@@ -656,9 +692,9 @@ fn fixture_static_with_clustering_rows_byte_parity() {
     let raw = decompress_fixture(STATIC_TOMB_DIR);
 
     // First partition header: [u16 key_len=4][i32 key=1][i32 LDT][i64 mfda].
-    let key_len = u16::from_be_bytes([raw[0], raw[1]]) as usize;
+    let key_len = read_be_u16(&raw, 0, "static_with_tombstones partition key length") as usize;
     assert_eq!(key_len, 4, "static_with_tombstones PK is a 4-byte int32");
-    let key = i32::from_be_bytes([raw[2], raw[3], raw[4], raw[5]]);
+    let key = read_be_i32(&raw, 2, "static_with_tombstones partition key (int32)");
     assert_eq!(key, 1, "first partition must be PK=1 (golden position 0)");
     let row_pos = INT_FIXTURE_HEADER;
 
@@ -710,12 +746,11 @@ fn fixture_static_with_clustering_rows_byte_parity() {
         "PK=1 clustered row clustering header (single col PRESENT)",
     );
     let ck_off = header.end();
-    let ck_val = i32::from_be_bytes([
-        raw[ck_off],
-        raw[ck_off + 1],
-        raw[ck_off + 2],
-        raw[ck_off + 3],
-    ]);
+    let ck_val = read_be_i32(
+        &raw,
+        ck_off,
+        "PK=1 first clustered-row clustering value (int)",
+    );
     assert_eq!(
         ck_val, 1,
         "PK=1 first clustered row clustering value (ck) must be 1 in ASC order, \
@@ -791,7 +826,7 @@ fn fixture_static_columns_marker_byte_parity() {
     let raw = decompress_fixture(STATIC_COLUMNS_DIR);
 
     // Partition header: [u16 key_len=16][16 UUID][i32 LDT][i64 mfda] = 30.
-    let key_len = u16::from_be_bytes([raw[0], raw[1]]) as usize;
+    let key_len = read_be_u16(&raw, 0, "static_columns_table partition key length") as usize;
     assert_eq!(key_len, 16, "static_columns_table has a 16-byte UUID PK");
     let header_size = 2 + key_len + 12;
 
@@ -1051,7 +1086,7 @@ fn fixture_wide_multi_column_clustering_prefix_byte_parity() {
     let raw = decompress_fixture(WIDE_DIR);
 
     // Partition header: [u16 key_len=16][16 UUID][i32 LDT][i64 mfda] = 30.
-    let key_len = u16::from_be_bytes([raw[0], raw[1]]) as usize;
+    let key_len = read_be_u16(&raw, 0, "wide_partition_table partition key length") as usize;
     assert_eq!(key_len, 16, "wide_partition_table has a 16-byte UUID PK");
     let header_size = 2 + key_len + 12;
     let row_pos = header_size;
@@ -1074,20 +1109,7 @@ fn fixture_wide_multi_column_clustering_prefix_byte_parity() {
     // and check it matches the golden first-row clustering timestamp (millis).
     let c1_off = header.end();
     let c1_end = c1_off + 8;
-    assert!(
-        c1_end <= raw.len(),
-        "clustering[0] timestamp (8B) overruns buffer"
-    );
-    let c1_millis = i64::from_be_bytes([
-        raw[c1_off],
-        raw[c1_off + 1],
-        raw[c1_off + 2],
-        raw[c1_off + 3],
-        raw[c1_off + 4],
-        raw[c1_off + 5],
-        raw[c1_off + 6],
-        raw[c1_off + 7],
-    ]);
+    let c1_millis = read_be_i64(&raw, c1_off, "wide clustering[0] timestamp (8B)");
     let golden_millis = iso8601_to_micros("2025-07-28T01:12:11.383Z") / 1000;
     assert_eq!(
         c1_millis, golden_millis,
@@ -1098,7 +1120,12 @@ fn fixture_wide_multi_column_clustering_prefix_byte_parity() {
     let c2_len = read_uvint_loc(&raw, c1_end);
     let c2_val_start = c2_len.end();
     let c2_val_end = c2_val_start + c2_len.value as usize;
-    let c2_bytes = &raw[c2_val_start..c2_val_end];
+    let c2_bytes = read_fixed_loc(
+        &raw,
+        c2_val_start,
+        c2_len.value as usize,
+        "wide clustering[1] text value",
+    );
     assert_eq!(
         c2_bytes, b"short",
         "clustering[1] text value must be 'short' (golden) at offset {c2_val_start}; \
@@ -1107,12 +1134,7 @@ fn fixture_wide_multi_column_clustering_prefix_byte_parity() {
 
     // Column 3: INT (ReversedType) → 4-byte fixed width = golden 704656.
     let c3_off = c2_val_end;
-    let c3_val = i32::from_be_bytes([
-        raw[c3_off],
-        raw[c3_off + 1],
-        raw[c3_off + 2],
-        raw[c3_off + 3],
-    ]);
+    let c3_val = read_be_i32(&raw, c3_off, "wide clustering[2] int value");
     assert_eq!(
         c3_val, 704_656,
         "clustering[2] int value must equal the golden 704656 at offset {c3_off}"
@@ -1120,18 +1142,13 @@ fn fixture_wide_multi_column_clustering_prefix_byte_parity() {
 
     // Column 4: UUID → 16-byte fixed width = golden 41bdf0fa-5411-4cae-b8ce-bccf9dc7e574.
     let c4_off = c3_off + 4;
-    let c4_end = c4_off + 16;
-    assert!(
-        c4_end <= raw.len(),
-        "clustering[3] uuid (16B) overruns buffer"
-    );
+    let c4_bytes = read_fixed_loc(&raw, c4_off, 16, "wide clustering[3] uuid value");
     let golden_uuid: [u8; 16] = [
         0x41, 0xbd, 0xf0, 0xfa, 0x54, 0x11, 0x4c, 0xae, 0xb8, 0xce, 0xbc, 0xcf, 0x9d, 0xc7, 0xe5,
         0x74,
     ];
     assert_eq!(
-        &raw[c4_off..c4_end],
-        &golden_uuid,
+        c4_bytes, &golden_uuid,
         "clustering[3] uuid bytes must match the golden at offset {c4_off}"
     );
 }
@@ -1171,7 +1188,7 @@ const COMPOSITE_DIR: &str =
 fn fixture_composite_desc_clustering_order_byte_parity() {
     let raw = decompress_fixture(COMPOSITE_DIR);
 
-    let key_len = u16::from_be_bytes([raw[0], raw[1]]) as usize;
+    let key_len = read_be_u16(&raw, 0, "composite_key_table partition key length") as usize;
     assert_eq!(key_len, 16, "composite_key_table has a 16-byte UUID PK");
     let header_size = 2 + key_len + 12;
     let row_pos = header_size;
@@ -1193,25 +1210,12 @@ fn fixture_composite_desc_clustering_order_byte_parity() {
     // are plain big-endian (DESC affects sort order, not on-disk byte form).
     let c1_off = header.end();
     let c1_end = c1_off + 8;
-    assert!(
-        c1_end <= raw.len(),
-        "clustering_key1 (8B timestamp) overruns buffer"
-    );
-    let c1_micros = i64::from_be_bytes([
-        raw[c1_off],
-        raw[c1_off + 1],
-        raw[c1_off + 2],
-        raw[c1_off + 3],
-        raw[c1_off + 4],
-        raw[c1_off + 5],
-        raw[c1_off + 6],
-        raw[c1_off + 7],
-    ]);
+    let c1_millis = read_be_i64(&raw, c1_off, "composite clustering_key1 timestamp (8B)");
     // Golden first-row clustering[0] = "2025-10-06 01:12:06.059Z" → millis since
     // epoch. Cassandra stores TimestampType as milliseconds (i64).
     let golden_millis = iso8601_to_micros("2025-10-06T01:12:06.059Z") / 1000;
     assert_eq!(
-        c1_micros, golden_millis,
+        c1_millis, golden_millis,
         "composite DESC clustering_key1 must decode to the golden timestamp \
          (millis {golden_millis}) at offset {c1_off}; ReversedType must NOT invert \
          the on-disk value bytes"
@@ -1222,11 +1226,16 @@ fn fixture_composite_desc_clustering_order_byte_parity() {
     let c2_val_start = c2_len.end();
     let c2_val_end = c2_val_start + c2_len.value as usize;
     assert!(
-        c2_val_end <= raw.len() && c2_len.value > 0,
-        "clustering_key2 (text, len {}) must be a non-empty length-prefixed value in bounds",
+        c2_len.value > 0,
+        "clustering_key2 (text, len {}) must be a non-empty length-prefixed value",
         c2_len.value
     );
-    let c2_bytes = &raw[c2_val_start..c2_val_end];
+    let c2_bytes = read_fixed_loc(
+        &raw,
+        c2_val_start,
+        c2_len.value as usize,
+        "composite clustering_key2 text value",
+    );
     assert_eq!(
         c2_bytes, b"information",
         "composite ASC clustering_key2 must be 'information' (golden) at offset {c2_val_start}"
@@ -1414,23 +1423,56 @@ fn null_vs_empty_clustering_value_byte_distinction() {
 #[test]
 fn fixture_static_row_flag_byte_well_formed() {
     let raw = decompress_fixture(STATIC_TOMB_DIR);
-    let known_mask = ROW_HAS_TIMESTAMP
-        | ROW_HAS_TTL
-        | ROW_HAS_DELETION
-        | ROW_HAS_ALL_COLUMNS
-        | ROW_HAS_COMPLEX_DELETION
-        | ROW_HAS_EXTENDED_FLAGS
-        | 0x02 // IS_MARKER (range tombstone) — also a valid leading byte
-        | 0x01; // END_OF_PARTITION
+
+    // Cassandra UnfilteredSerializer leading-byte sentinels that a LIVE STATIC
+    // ROW must NOT carry: 0x01 is the END_OF_PARTITION marker (Unfiltered.Kind),
+    // and 0x02 is IS_MARKER (a range-tombstone bound). A static row is a regular
+    // Row kind, so neither sentinel bit may be set on its leading flag byte.
+    const ROW_END_OF_PARTITION: u8 = 0x01;
+    const ROW_IS_MARKER: u8 = 0x02;
 
     let row_pos = INT_FIXTURE_HEADER;
     let flags = read_u8_loc(&raw, row_pos);
-    assert_eq!(
-        flags.value as u8 & !known_mask,
+
+    // (1) HAS_EXTENDED_FLAGS MUST be set — that is how the IS_STATIC extended bit
+    //     is reached at all.
+    assert_ne!(
+        flags.value as u8 & ROW_HAS_EXTENDED_FLAGS,
         0,
-        "static row flag byte 0x{:02X} at offset {} has bits outside the known row-flag mask",
+        "static row flag byte 0x{:02X} @ offset {} must set HAS_EXTENDED_FLAGS (0x80)",
         flags.value,
         flags.start
+    );
+    // (2) The static row is NOT an end-of-partition marker and NOT a range-tomb
+    //     marker — those sentinel bits must be clear on a live static row.
+    assert_eq!(
+        flags.value as u8 & (ROW_END_OF_PARTITION | ROW_IS_MARKER),
+        0,
+        "static row flag byte 0x{:02X} @ offset {} must NOT set the END_OF_PARTITION (0x01) \
+         or IS_MARKER (0x02) sentinel bits — a static row is a regular Row kind",
+        flags.value,
+        flags.start
+    );
+    // (3) This particular fixture's static row has no row-level timestamp,
+    //     TTL, deletion, or complex-deletion — those liveness/deletion bits must
+    //     be clear (the row's liveness is carried per-cell).
+    assert_eq!(
+        flags.value as u8
+            & (ROW_HAS_TIMESTAMP | ROW_HAS_TTL | ROW_HAS_DELETION | ROW_HAS_COMPLEX_DELETION),
+        0,
+        "static row flag byte 0x{:02X} @ offset {} must NOT set any of \
+         HAS_TIMESTAMP/HAS_TTL/HAS_DELETION/HAS_COMPLEX_DELETION for this fixture",
+        flags.value,
+        flags.start
+    );
+    // (4) Anchor the EXACT leading flag byte Cassandra writes for this fixture's
+    //     live static row: HAS_EXTENDED_FLAGS | HAS_ALL_COLUMNS (0xA0). This is
+    //     genuinely able to fail if the byte were wrong (carries offset context
+    //     via fail_flag).
+    fail_flag(
+        flags,
+        ROW_HAS_EXTENDED_FLAGS | ROW_HAS_ALL_COLUMNS,
+        "static row leading flag byte (HAS_EXTENDED_FLAGS | HAS_ALL_COLUMNS, 0xA0)",
     );
     // Sanity: a static row's extended-flag byte's only meaningful low bits are
     // IS_STATIC / HAS_SHADOWABLE_DELETION (0x02); assert IS_STATIC is set and no
