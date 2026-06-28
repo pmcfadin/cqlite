@@ -174,6 +174,12 @@ public abstract class DifferentialParityTester extends CQLTester
 
         assertTrue("cqlite compact failed (exit " + res.exitCode + "):\n" + res.stderr + res.stdout,
                    res.succeeded());
+        // Mirror the reference "exactly one output" assert for the candidate: a writer
+        // regression that emits >1 SSTable generation is a real divergence and must
+        // fail the LOGICAL gate directly, not stay hidden inside the swallowed
+        // byte-tier block (where a duplicate-kind would otherwise be suppressed on PRs).
+        assertEquals("expected exactly one cqlite output SSTable generation",
+                     1, countCandidateGenerations(outputDir));
         Path candidateData = findSingleData(outputDir);
         Path candOutDir = artifacts.copyComponentsOf(candidateData, "cqlite-output");
 
@@ -196,6 +202,9 @@ public abstract class DifferentialParityTester extends CQLTester
             if (byteTierEnabled())
                 throw e; // byteParity is the asserting tier: surface the failure.
             byteResult = null;
+            // Visible, greppable signal so a suppressed byte-tier failure on the
+            // logical PR path is never silently invisible in the CI log.
+            System.err.println("WARN: byte-tier computation suppressed on logical path: " + e);
             writeByteFailureArtifact(artifacts, e);
         }
 
@@ -263,13 +272,26 @@ public abstract class DifferentialParityTester extends CQLTester
         }
     }
 
-    private static Path findSingleData(Path outputDir) throws IOException
+    /** Every {@code -Data.db} under {@code outputDir} — one per output SSTable generation. */
+    private static List<Path> candidateDataFiles(Path outputDir) throws IOException
     {
         List<Path> data = new ArrayList<>();
         try (var stream = Files.walk(outputDir))
         {
             stream.filter(p -> p.getFileName().toString().endsWith("-Data.db")).forEach(data::add);
         }
+        return data;
+    }
+
+    /** Number of output SSTable generations cqlite emitted (one Data.db each). */
+    private static int countCandidateGenerations(Path outputDir) throws IOException
+    {
+        return candidateDataFiles(outputDir).size();
+    }
+
+    private static Path findSingleData(Path outputDir) throws IOException
+    {
+        List<Path> data = candidateDataFiles(outputDir);
         assertEquals("expected exactly one cqlite output Data.db under " + outputDir, 1, data.size());
         return data.get(0);
     }

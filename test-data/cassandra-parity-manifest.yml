@@ -3639,7 +3639,7 @@ scenarios:
     scope: {}
 
   - id: cass.compaction.SSTableRewriterTest.output_component_integrity
-    title: Compaction output component byte integrity (byte tier, no allowlist)
+    title: Compaction output components byte-identical to Cassandra SSTableRewriter (the parity claim)
     status: planned
     capability: compaction_merge
     priority: P0
@@ -3653,15 +3653,19 @@ scenarios:
       coverage:
         suite: compaction_parity_tombstone_ttl
         tests:
-          - compaction-parity/src/test/java/org/cqlite/parity/ComponentByteComparator.java
-          - compaction-parity/src/test/java/org/cqlite/parity/DifferentialParityTester.java
+          - compaction-parity/src/test/java/org/cqlite/parity/BasicDifferentialTest.java
+          - compaction-parity/src/test/java/org/cqlite/parity/ComponentByteComparatorTest.java
         notes: >-
-          The byte tier compares EVERY output component file produced by both
-          engines byte-for-byte with NO allowlist (Data.db, Index.db,
-          Statistics.db, Summary.db, Filter.db, CompressionInfo.db, Digest.crc32,
-          TOC.txt as present), reporting the first differing byte/offset per
-          component. It runs via `gradle byteParity` and is non-blocking until the
-          writer is byte-stable (#842 north star).
+          THE CLAIM (Cassandra-source-anchored): cqlite's compacted output
+          components must be byte-identical to what Cassandra's SSTableRewriter
+          emits for the same inputs (Data.db, Index.db, Statistics.db, Summary.db,
+          Filter.db, CompressionInfo.db, Digest.crc32, TOC.txt as present). Driven
+          by BasicDifferentialTest under `gradle byteParity`; the unit-level diff
+          semantics are covered by ComponentByteComparatorTest. The harness
+          MECHANISM that performs this comparison + preserves artifacts is the
+          separate cass.compaction.harness_byte_tier_artifacts scenario (utilities
+          ComponentByteComparator.java / ParityArtifacts.java). Non-blocking until
+          the writer is byte-stable (#842 north star).
     fixtures: {}
     evidence:
       type: byte_for_byte
@@ -3803,7 +3807,7 @@ scenarios:
 
   # cqlite.compaction_parity.harness.byte_tier_artifacts (issue identifier)
   - id: cass.compaction.harness_byte_tier_artifacts
-    title: Differential harness byte tier — per-component cmp + failure artifacts
+    title: Differential harness byte-tier MECHANISM — per-component cmp engine + failure artifacts
     status: planned
     capability: compaction_merge
     priority: P0
@@ -3818,14 +3822,19 @@ scenarios:
       coverage:
         suite: compaction_parity_tombstone_ttl
         tests:
-          - compaction-parity/src/test/java/org/cqlite/parity/ComponentByteComparator.java
-          - compaction-parity/src/test/java/org/cqlite/parity/ParityArtifacts.java
+          - compaction-parity/src/test/java/org/cqlite/parity/ComponentByteComparatorTest.java
+          - compaction-parity/src/test/java/org/cqlite/parity/BasicDifferentialTest.java
         notes: >-
-          The byte tier (gradle byteParity / -Dparity.tier=byte) compares every
-          output component byte-for-byte with no allowlist and writes the first
-          byte/offset diff per component plus a SHA-256 checksum summary into the
-          preserved artifacts dir. Component presence mismatches (a component on
-          one side only) and unexpected multiple outputs fail loudly.
+          THE MECHANISM (harness self-capability), distinct from the parity CLAIM
+          in cass.compaction.SSTableRewriterTest.output_component_integrity: this
+          scenario asserts the harness itself does the right thing — the
+          ComponentByteComparator engine (unit-tested by ComponentByteComparatorTest)
+          compares every component byte-for-byte with no allowlist, flags
+          one-sided components, fails loudly on duplicate component kinds, and the
+          ParityArtifacts utility preserves byte-diff.txt + SHA-256 checksums +
+          command lines + stdout/stderr on success AND failure. Run via
+          `gradle byteParity` / `-Dparity.tier=byte` (BasicDifferentialTest
+          scenarios). Utilities: ComponentByteComparator.java, ParityArtifacts.java.
     fixtures: {}
     evidence:
       type: byte_for_byte

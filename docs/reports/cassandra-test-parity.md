@@ -192,8 +192,8 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 
 ## Byte-for-byte scenarios
 
-- `cass.compaction.SSTableRewriterTest.output_component_integrity` — Compaction output component byte integrity (byte tier, no allowlist)
-- `cass.compaction.harness_byte_tier_artifacts` — Differential harness byte tier — per-component cmp + failure artifacts
+- `cass.compaction.SSTableRewriterTest.output_component_integrity` — Compaction output components byte-identical to Cassandra SSTableRewriter (the parity claim)
+- `cass.compaction.harness_byte_tier_artifacts` — Differential harness byte-tier MECHANISM — per-component cmp engine + failure artifacts
 - `cass.compression.fixture_matrix.deflate` — Deflate (zlib) compression fixture — CompressionInfo.db parity
 - `cass.compression.fixture_matrix.incompressible_uncompressed_chunk` — Incompressible payload — chunk stored uncompressed within compressed file
 - `cass.compression.fixture_matrix.lz4` — LZ4 compression fixture — CompressionInfo.db chunk-offset/CRC parity
