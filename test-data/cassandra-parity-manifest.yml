@@ -208,6 +208,251 @@ scenarios:
     scope: {}
 
   # ----------------------------------------------------------------------------
+  # data_db_decode — strict Data.db row framing byte parity (issue #990 / epic #969)
+  # ----------------------------------------------------------------------------
+  - id: cass.data_db_decode.unfiltered_serializer.row_size_vints
+    title: Data.db row-size and previous-size VInt framing parity
+    status: mirrored
+    capability: data_db_decode
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - UnfilteredSerializerTest.java
+        - CQLSSTableWriterTest.java
+        - CQLSSTableWriterDaemonTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_data_db_jsonl
+        tests:
+          - cqlite-core/tests/issue_990_data_db_row_framing_parity.rs
+        notes: >-
+          Deterministic byte tests assert the exact unsigned-VInt width
+          transitions (1→2 … 8→9 bytes) for row_size/prev_size using the writer's
+          own `encode_unsigned` and decode them back through the reader's
+          `parse_vuint` (the function the V5CompressedLegacy row-framing parser
+          uses). `writer_row_size_frames_body_exactly` and the fixture lane
+          (`fixture_uncompressed_row_framing_and_timestamp_delta_parity`) confirm
+          row_size frames the body and the first-row prev_size equals the
+          partition-header size against a real Cassandra nb Data.db.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_990_data_db_row_framing_parity
+        row_size_vint writer_row_size_frames_body_exactly prev_size_vint
+        fixture_uncompressed_row_framing
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/data-db-row-framing-diff.log
+      normalization: >-
+        row_size/prev_size are unsigned VInt deltas; the deterministic lane
+        compares raw encoded bytes and decoded values at the exact width
+        boundaries, the fixture lane compares the framing offsets of a real nb
+        Data.db (FAIL CLOSED on a missing fixture).
+      known_limitations: >-
+        Byte parity is asserted for the row_size/prev_size VInt framing; full
+        whole-file Data.db byte identity across all CQL types is covered by the
+        broader sstable_writer_cassandra_fixture_parity suite.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.data_db_decode.unfiltered_serializer.row_and_cell_flags
+    title: Data.db row and cell flag-byte parity
+    status: mirrored
+    capability: data_db_decode
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - UnfilteredSerializerTest.java
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_data_db_jsonl
+        tests:
+          - cqlite-core/tests/issue_990_data_db_row_framing_parity.rs
+        notes: >-
+          Asserts the exact row flag byte for timestamp-only, TTL, deletion,
+          all-columns, static-extension, and explicit-column-subset rows, and the
+          exact cell flag byte for live, expiring, deleted, empty,
+          row-timestamp-reuse, and row-TTL-reuse cells — driven through the public
+          `DataWriter::{write_partition, finish}` path. The fixture lane
+          (`fixture_uncompressed_row_flags_are_well_formed`) anchors the flag-bit
+          constants against a real nb Data.db. Mismatches report row, cell, flag
+          byte, offset, and consumed byte range.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_990_data_db_row_framing_parity
+        row_flag_ cell_flag_ fixture_uncompressed_row_flags
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/data-db-flag-diff.log
+      normalization: >-
+        Flag bytes are compared as raw u8 values at their exact wire offset; the
+        fixture lane additionally checks every leading flag byte stays within the
+        known UnfilteredSerializer row-flag mask (FAIL CLOSED on a missing fixture).
+      known_limitations: >-
+        The deterministic lane covers the six row-flag and six cell-flag cases
+        named in issue #990; complex-column (multi-cell) flag bytes are covered
+        separately by the data_writer scenario tests.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.data_db_decode.serialization_header.timestamp_ttl_ldt_deltas
+    title: Data.db timestamp / TTL / local-deletion-time delta parity
+    status: mirrored
+    capability: data_db_decode
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationHeaderTest.java
+        - UnfilteredSerializerTest.java
+    cqlite:
+      coverage:
+        suite: schema_parity_serialization_header
+        tests:
+          - cqlite-core/tests/issue_990_data_db_row_framing_parity.rs
+        notes: >-
+          Validates timestamp, TTL, and local-deletion-time deltas as UNSIGNED
+          VInts measured from the Statistics.db EncodingStats minima
+          (`SerializationHeader.writeTimestamp/writeTTL/writeLocalDeletionTime`),
+          for small and large/negative-looking values, with an explicit ZigZag
+          counter-check so there is no signed/unsigned ambiguity. The fixture lane
+          reproduces a real nb Data.db row's absolute liveness timestamp from its
+          Statistics.db min + the on-disk delta and matches the sstabledump JSONL
+          golden exactly.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_990_data_db_row_framing_parity
+        timestamp_delta ttl_and_ldt_deltas row_tombstone_ldt_delta
+        fixture_uncompressed_row_framing
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/data-db-delta-diff.log
+      normalization: >-
+        Deltas are decoded as unsigned VInts and reconstructed against the
+        Statistics.db EncodingStats minima; the fixture lane compares the
+        reconstructed absolute timestamp to the JSONL golden in microseconds
+        (FAIL CLOSED on a missing fixture). Wall-clock-derived LDT bytes are
+        asserted only for sign/magnitude, not an exact constant.
+      known_limitations: >-
+        The exact fixture cross-check is on the liveness timestamp delta; TTL and
+        local-deletion-time deltas are asserted against controlled Statistics.db
+        baselines in the deterministic lane (the EncodingStats min model), since
+        expiring LDTs are wall-clock-derived in real fixtures.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.data_db_decode.serialization_mirror.multi_clustering_column_order
+    title: Data.db multi-clustering-column order parity
+    status: mirrored
+    capability: data_db_decode
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationMirrorTest.java
+        - UnfilteredSerializerTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_data_db_jsonl
+        tests:
+          - cqlite-core/tests/issue_990_data_db_row_framing_parity.rs
+        notes: >-
+          Asserts the clustering prefix (2-bit-per-column header VInt + per-column
+          values in DECLARED order) is serialized before row_size, matching
+          Cassandra's ClusteringPrefix serializer exercised by
+          SerializationMirrorTest. The fixture lane decompresses
+          composite_key_table (TIMESTAMP DESC + TEXT ASC clustering) and checks
+          the two clustering values appear in order ahead of row_size in a real
+          nb Data.db.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_990_data_db_row_framing_parity
+        multi_clustering fixture_composite_multi_clustering
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/data-db-clustering-order-diff.log
+      normalization: >-
+        Clustering header and per-column value bytes are compared at their exact
+        offsets in declared order; the fixture lane decompresses the LZ4 Data.db
+        first (FAIL CLOSED on a missing fixture).
+      known_limitations: >-
+        Asserts declared-order placement and framing of the clustering prefix;
+        per-type clustering value encoding is covered by the cql_types suites.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  # ----------------------------------------------------------------------------
   # index_summary
   # ----------------------------------------------------------------------------
   - id: cass.index_summary.big_index_offsets
@@ -6068,7 +6313,7 @@ scenarios:
     cqlite:
       coverage:
         tests:
-          - cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy.rs
+          - cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy/row_framing.rs
     fixtures: {}
     evidence:
       type: smoke
