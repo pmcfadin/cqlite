@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+#
+# Regression tests for scripts/flow/finalize-cleanup.sh (issue #1162).
+#
+# Each test builds an isolated sandbox: a bare "origin" remote + a working clone,
+# feature branches, and worktrees — then runs the cleanup script and asserts the
+# guardrails. No network, no GitHub; the merged-branch name stands in for the
+# `gh pr view --json headRefName` the SKILL resolves in production.
+#
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CLEANUP="$SCRIPT_DIR/../finalize-cleanup.sh"
+
+PASS=0
+FAIL=0
+fail() { echo "  ✗ $*"; FAIL=$((FAIL+1)); }
+ok()   { echo "  ✓ $*"; PASS=$((PASS+1)); }
+
+# git in a throwaway identity so commits work in CI sandboxes
+g() { git -c user.email=t@t -c user.name=t -c init.defaultBranch=main -c commit.gpgsign=false "$@"; }
+
+# build_sandbox <dir> : a bare origin + a clone on `main` with one commit.
+build_sandbox() {
+  local root="$1"
+  mkdir -p "$root"
+  g init --bare -q "$root/origin.git"
+  g clone -q "$root/origin.git" "$root/work"
+  ( cd "$root/work" || exit 1
+    echo seed > seed.txt
+    g add seed.txt
+    g commit -qm "seed"
+    g push -q -u origin main
+  )
+}
+
+# add_branch_worktree <work> <branch> <wtdir> [dirty]
+# creates <branch> off main, pushes it, and checks it out in a worktree.
+add_branch_worktree() {
+  local work="$1" branch="$2" wt="$3" dirty="${4:-}"
+  ( cd "$work" || exit 1
+    g worktree add -q -b "$branch" "$wt" main
+    ( cd "$wt" || exit 1; echo "$branch" > f.txt; g add f.txt; g commit -qm "$branch work"; g push -q -u origin "$branch" )
+    if [ "$dirty" = "dirty" ]; then ( cd "$wt" || exit 1; echo extra >> f.txt ); fi
+  )
+}
+
+remote_branches() { g -C "$1" ls-remote --heads origin "issue-*" | awk '{print $2}' | sed 's,^refs/heads/,,' | sort; }
+
+# ===========================================================================
+echo "TEST 1: #1143 regression — merged branch's sibling active claim survives"
+# ===========================================================================
+T=$(mktemp -d); build_sandbox "$T"
+WORK="$T/work"
+# active, unmerged, DIRTY effort that must survive
+add_branch_worktree "$WORK" "issue-1143-scan-window-offload" "$T/wt-active" dirty
+# the merged branch: simulate gh pr merge --delete-branch already removed it from
+# origin, and finalize already... no: finalize is what we're testing. Create it,
+# push, then delete from origin to mimic --delete-branch, leaving only the sibling.
+add_branch_worktree "$WORK" "issue-1143-read-p99-regression" "$T/wt-merged" ""
+g -C "$WORK" push -q origin --delete issue-1143-read-p99-regression
+g -C "$WORK" worktree remove "$T/wt-merged" --force 2>/dev/null
+# Now origin has ONLY issue-1143-scan-window-offload (the active one).
+bash "$CLEANUP" --issue 1143 --merged-branch issue-1143-read-p99-regression \
+  --repo-root "$WORK" --worktrees-dir "$T" >/dev/null 2>&1
+rc=$?
+[ "$rc" -eq 0 ] && ok "exit 0 (clean no-op for already-deleted merged branch)" || fail "expected exit 0, got $rc"
+if remote_branches "$WORK" | grep -qx "issue-1143-scan-window-offload"; then
+  ok "active sibling 'issue-1143-scan-window-offload' SURVIVES on origin"
+else
+  fail "active sibling was deleted from origin — REGRESSION"
+fi
+[ -d "$T/wt-active" ] && ok "active worktree survives" || fail "active worktree was removed"
+rm -rf "$T"
+
+# ===========================================================================
+echo "TEST 2: >1 lock for the issue → refuse (exit 2), delete nothing"
+# ===========================================================================
+T=$(mktemp -d); build_sandbox "$T"; WORK="$T/work"
+add_branch_worktree "$WORK" "issue-1200-alpha" "$T/wt-a" ""
+add_branch_worktree "$WORK" "issue-1200-beta"  "$T/wt-b" ""
+out=$(bash "$CLEANUP" --issue 1200 --merged-branch issue-1200-alpha \
+  --repo-root "$WORK" --worktrees-dir "$T" 2>&1); rc=$?
+[ "$rc" -eq 2 ] && ok "exit 2 on multi-lock" || fail "expected exit 2, got $rc"
+echo "$out" | grep -q "1:1:1:1 violation" && ok "surfaces 1:1:1:1 violation" || fail "no 1:1:1:1 message"
+n=$(remote_branches "$WORK" | grep -c "issue-1200-")
+[ "$n" -eq 2 ] && ok "both branches still on origin (nothing deleted)" || fail "expected 2 branches, got $n"
+rm -rf "$T"
+
+# ===========================================================================
+echo "TEST 3: dirty worktree → refuse (exit 3), no deletion"
+# ===========================================================================
+T=$(mktemp -d); build_sandbox "$T"; WORK="$T/work"
+add_branch_worktree "$WORK" "issue-1201-feature" "$T/wt" dirty
+out=$(bash "$CLEANUP" --issue 1201 --merged-branch issue-1201-feature \
+  --repo-root "$WORK" --worktrees-dir "$T" 2>&1); rc=$?
+[ "$rc" -eq 3 ] && ok "exit 3 on dirty worktree" || fail "expected exit 3, got $rc"
+[ -d "$T/wt" ] && ok "dirty worktree survives" || fail "dirty worktree removed"
+remote_branches "$WORK" | grep -qx "issue-1201-feature" && ok "origin branch survives" || fail "origin branch deleted"
+rm -rf "$T"
+
+# ===========================================================================
+echo "TEST 4: unpushed commits → refuse (exit 3)"
+# ===========================================================================
+T=$(mktemp -d); build_sandbox "$T"; WORK="$T/work"
+add_branch_worktree "$WORK" "issue-1202-feature" "$T/wt" ""
+( cd "$T/wt" || exit 1; echo more > g.txt; g add g.txt; g commit -qm "unpushed" )  # ahead of upstream
+rc=0
+bash "$CLEANUP" --issue 1202 --merged-branch issue-1202-feature \
+  --repo-root "$WORK" --worktrees-dir "$T" >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 3 ] && ok "exit 3 on unpushed commits" || fail "expected exit 3, got $rc"
+[ -d "$T/wt" ] && ok "worktree with unpushed work survives" || fail "worktree removed"
+rm -rf "$T"
+
+# ===========================================================================
+echo "TEST 5: happy path (squash-merge semantics) → worktree + origin lock removed"
+# ===========================================================================
+T=$(mktemp -d); build_sandbox "$T"; WORK="$T/work"
+add_branch_worktree "$WORK" "issue-1203-feature" "$T/wt" ""
+# clean worktree, branch pushed; tip NOT in main (squash). Confirmed-merged via --merged-branch.
+bash "$CLEANUP" --issue 1203 --merged-branch issue-1203-feature \
+  --repo-root "$WORK" --worktrees-dir "$T" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] && ok "exit 0 on happy path" || fail "expected exit 0, got $rc"
+[ ! -d "$T/wt" ] && ok "clean worktree removed" || fail "worktree not removed"
+remote_branches "$WORK" | grep -qx "issue-1203-feature" && fail "origin lock NOT deleted" || ok "origin lock deleted"
+rm -rf "$T"
+
+# ===========================================================================
+echo "TEST 6: glob safety — only the merged branch is targeted, sibling untouched"
+# ===========================================================================
+# Here the merged branch IS still on origin (gh did not --delete-branch), so two
+# locks exist → guard 2 refuses. This proves the script never silently picks one
+# of an ambiguous pair. (The clean-resolution path is TEST 1.)
+T=$(mktemp -d); build_sandbox "$T"; WORK="$T/work"
+add_branch_worktree "$WORK" "issue-1204-merged" "$T/wt-m" ""
+add_branch_worktree "$WORK" "issue-1204-active" "$T/wt-x" dirty
+rc=0
+bash "$CLEANUP" --issue 1204 --merged-branch issue-1204-merged \
+  --repo-root "$WORK" --worktrees-dir "$T" >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 2 ] && ok "exit 2 — ambiguous pair refused, not guessed" || fail "expected exit 2, got $rc"
+[ -d "$T/wt-x" ] && ok "active sibling worktree survives" || fail "sibling worktree removed"
+rm -rf "$T"
+
+echo ""
+echo "================  finalize-cleanup: $PASS passed, $FAIL failed  ================"
+[ "$FAIL" -eq 0 ]

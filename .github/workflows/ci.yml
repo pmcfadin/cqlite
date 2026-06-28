@@ -245,4 +245,18 @@ jobs:
       - name: cargo publish --dry-run (cqlite-core)
         run: cargo publish --package cqlite-core --dry-run
 
+  # Guards the delivery-pipeline tooling itself (issue #1162). The flow-finalize
+  # cleanup destroyed an unrelated active claim via an issue-<N>-* glob on
+  # 2026-06-27 (the #1143 incident). This pure-git test (no Rust build) pins the
+  # guardrails so the regression can't return. Fast: seconds, runs every PR.
+  flow-tooling-tests:
+    name: Flow tooling guardrails
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Run flow-finalize cleanup guardrail tests
+        run: bash scripts/flow/tests/finalize-cleanup.test.sh
+
 
