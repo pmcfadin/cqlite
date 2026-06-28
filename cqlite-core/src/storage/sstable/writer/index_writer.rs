@@ -668,6 +668,7 @@ fn serialize_index_info(buf: &mut Vec<u8>, block: &PromotedIndexBlock) {
 /// round-trip tests (Issue #993), which must encode with the authoritative writer
 /// and then decode, asserting byte-exact field recovery. Not part of the public API.
 #[doc(hidden)]
+#[cfg(test)]
 pub(crate) fn serialize_promoted_index_for_test(
     blocks: &[PromotedIndexBlock],
     raw_key_len: usize,

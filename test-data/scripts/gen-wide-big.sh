@@ -16,6 +16,15 @@
 # Output (binaries are gitignored; the .jsonl golden is committed):
 #   $OUT/sstables/test_big/wide_partition-<hash>/nb-*-{Data,Index,Statistics,Summary}.db
 #   $OUT/sstables/test_big/wide_partition-<hash>/nb-*-Data.db.jsonl   (sstabledump -l)
+#
+# NOTE (reproducibility): Cassandra assigns the table directory a fresh random
+# UUID (wide_partition-<uuid>) and a generation-prefixed base name (e.g. nb-1-big
+# on a fresh table). The #993 parity tests pin the committed paths
+# (wide_partition-ffe2ee50733111f19e8f6d08b8e7a294, nb-2-big), so a re-run will
+# NOT match them without renaming the regenerated dir/prefix to the pinned names.
+# When promoting this fixture into the dataset release pin (issue #1185), rename
+# the regenerated directory + component prefix to the pinned values (or update the
+# test constants + manifest reference_paths to the new ones).
 set -euo pipefail
 
 IMAGE="${IMAGE:-cassandra:5.0.2}"

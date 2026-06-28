@@ -202,6 +202,11 @@ fn decode_index_info<'a>(
         })? as u64;
 
     // endOpenMarker presence byte, optionally followed by a DeletionTime.
+    // NOTE (oracle coverage): the `0x01` (open-marker-present) branch below is
+    // validated by hand-built byte vectors only — the CQLite writer currently
+    // emits `0x00` for every block, and no committed Cassandra fixture yet places
+    // an open range-tombstone marker exactly at a promoted-index block boundary.
+    // A real-fixture assertion of the `0x01` branch is tracked for follow-up.
     let (&marker_byte, input) = input
         .split_first()
         .ok_or_else(|| Error::Corruption("promoted index: missing endOpenMarker".to_string()))?;
