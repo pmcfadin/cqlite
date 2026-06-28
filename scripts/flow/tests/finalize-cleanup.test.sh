@@ -345,6 +345,15 @@ bash "$CLEANUP" --issue 'abc' --merged-branch issue-abc-x \
 [ "$rc" -eq 64 ] && ok "exit 64 — non-numeric --issue rejected" || fail "expected exit 64, got $rc"
 rm -rf "$T"
 
+# ===========================================================================
+echo "TEST 21: --help exits 0 and renders the usage block"
+# ===========================================================================
+out="$(bash "$CLEANUP" --help 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] && ok "--help exits 0" || fail "expected exit 0, got $rc"
+echo "$out" | grep -q "USAGE" && ok "--help shows USAGE" || fail "--help missing USAGE"
+echo "$out" | grep -q "EXIT CODES" && ok "--help shows EXIT CODES" || fail "--help missing EXIT CODES"
+echo "$out" | grep -q "END-HELP" && fail "--help leaked the sentinel" || ok "--help stops before sentinel"
+
 echo ""
 echo "================  finalize-cleanup: $PASS passed, $FAIL failed  ================"
 [ "$FAIL" -eq 0 ]

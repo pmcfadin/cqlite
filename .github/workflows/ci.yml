@@ -249,14 +249,20 @@ jobs:
   # cleanup destroyed an unrelated active claim via an issue-<N>-* glob on
   # 2026-06-27 (the #1143 incident). This pure-git test (no Rust build) pins the
   # guardrails so the regression can't return. Fast: seconds, runs every PR.
+  # Runs on macOS too: flow-finalize's real production target is the macOS system
+  # bash (3.2), so the script's 3.2 compatibility is validated, not just asserted.
   flow-tooling-tests:
     name: Flow tooling guardrails
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Run flow-finalize cleanup guardrail tests
-        run: bash scripts/flow/tests/finalize-cleanup.test.sh
+      - name: Run flow-finalize cleanup guardrail tests (${{ matrix.os }} /bin/bash)
+        run: /bin/bash scripts/flow/tests/finalize-cleanup.test.sh
 
 
