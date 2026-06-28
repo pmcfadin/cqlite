@@ -280,7 +280,28 @@ bash "$CLEANUP" --issue 1214 --merged-branch issue-1214-feature \
 [ "$rc" -eq 0 ] && ok "exit 0 on merged tip without --confirm-unmerged" || fail "expected exit 0, got $rc"
 [ ! -d "$T/wt" ] && ok "worktree removed" || fail "worktree not removed"
 remote_branches "$WORK" | grep -qx "issue-1214-feature" && fail "origin branch not deleted" || ok "origin branch deleted"
-g -C "$WORK" show-ref --verify --quiet refs/heads/issue-1214-feature && fail "local branch not deleted" || ok "local branch deleted (-d)"
+g -C "$WORK" show-ref --verify --quiet refs/heads/issue-1214-feature && fail "local branch not deleted" || ok "local branch deleted"
+rm -rf "$T"
+
+# ===========================================================================
+echo "TEST 19: local main lagging origin/main (tip in origin/main) → still exit 0"
+# ===========================================================================
+# Realistic production state: the worktree repo's LOCAL main lags origin/main.
+# `git branch -d` judges against local main and would refuse + 128-abort
+# post-mutation; the script proves containment against origin/main and uses -D.
+T=$(mktemp -d); build_sandbox "$T"; WORK="$T/work"
+add_branch_worktree "$WORK" "issue-1217-feature" "$T/wt" ""
+g clone -q "$T/origin.git" "$T/work2" 2>/dev/null
+( cd "$T/work2" || exit 1
+  g fetch -q origin issue-1217-feature
+  g merge -q --no-ff -m "merge 1217" origin/issue-1217-feature
+  g push -q origin main )                 # origin/main now contains the feature
+g -C "$WORK" fetch -q origin              # WORK: remote-tracking current; LOCAL main still behind
+rc=0
+bash "$CLEANUP" --issue 1217 --merged-branch issue-1217-feature \
+  --repo-root "$WORK" --worktrees-dir "$T" >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 0 ] && ok "exit 0 with local main lagging origin/main" || fail "expected exit 0, got $rc"
+g -C "$WORK" show-ref --verify --quiet refs/heads/issue-1217-feature && fail "local branch not deleted" || ok "local branch deleted despite lagging local main"
 rm -rf "$T"
 
 # ===========================================================================

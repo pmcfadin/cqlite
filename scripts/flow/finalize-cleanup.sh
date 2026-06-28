@@ -47,12 +47,16 @@
 #   5  refused: remote query (ls-remote) failed — fail closed, changed nothing
 #   64 usage error
 #
+# ---END-HELP---
 set -euo pipefail
 
 prog="$(basename "$0")"
 
 die_usage() { echo "$prog: $*" >&2; exit 64; }
 note()      { echo "[finalize-cleanup] $*" >&2; }
+# Assert a value-taking flag actually has a value (else `shift 2` would exit 1
+# under set -e instead of a clean usage error). Call as: need2 "$@".
+need2()     { [ "$#" -ge 2 ] || die_usage "$1 requires a value"; }
 
 ISSUE=""
 MERGED_BRANCH=""
@@ -65,15 +69,15 @@ DRY_RUN=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --issue)            ISSUE="${2:-}"; shift 2 ;;
-    --merged-branch)    MERGED_BRANCH="${2:-}"; shift 2 ;;
-    --repo-root)        REPO_ROOT="${2:-}"; shift 2 ;;
-    --worktrees-dir)    WORKTREES_DIR="${2:-}"; shift 2 ;;
-    --remote)           REMOTE="${2:-}"; shift 2 ;;
-    --main-ref)         MAIN_REF="${2:-}"; shift 2 ;;
+    --issue)            need2 "$@"; ISSUE="$2"; shift 2 ;;
+    --merged-branch)    need2 "$@"; MERGED_BRANCH="$2"; shift 2 ;;
+    --repo-root)        need2 "$@"; REPO_ROOT="$2"; shift 2 ;;
+    --worktrees-dir)    need2 "$@"; WORKTREES_DIR="$2"; shift 2 ;;
+    --remote)           need2 "$@"; REMOTE="$2"; shift 2 ;;
+    --main-ref)         need2 "$@"; MAIN_REF="$2"; shift 2 ;;
     --confirm-unmerged) CONFIRM_UNMERGED=1; shift ;;
     --dry-run)          DRY_RUN=1; shift ;;
-    -h|--help)          awk 'NR>=2 && /^set -euo pipefail/{exit} NR>=2' "$0"; exit 0 ;;
+    -h|--help)          awk 'NR>=2 && /^# ---END-HELP---/{exit} NR>=2' "$0"; exit 0 ;;
     *)                  die_usage "unknown argument: $1" ;;
   esac
 done
@@ -285,15 +289,20 @@ else
   note "origin branch '$MERGED_BRANCH' already absent (likely deleted by gh pr merge --delete-branch) — nothing to delete"
 fi
 
-# Local branch: -d when mergeable, -D when merge is confirmed, else leave it.
+# Local branch: delete when we've PROVEN containment in $MAIN_REF
+# (local_tip_in_main) or the merge is confirmed; otherwise leave it. We use -D in
+# both delete cases because we've done the merge check ourselves against
+# $MAIN_REF — `git branch -d` would re-judge against the repo's *local* main,
+# which often lags origin/main and would 128-abort post-mutation. Deletion is also
+# made non-fatal (|| note) so it can never abort after the worktree/lock are gone.
 # Decision is computed (not inferred from run's echo) so --dry-run previews truly.
 if git_root show-ref --verify --quiet "refs/heads/${MERGED_BRANCH}"; then
-  if [ "$local_tip_in_main" -eq 1 ]; then
-    run git_root branch -d "$MERGED_BRANCH"
-    note "deleted local branch $MERGED_BRANCH"
-  elif [ "$CONFIRM_UNMERGED" -eq 1 ]; then
-    run git_root branch -D "$MERGED_BRANCH"
-    note "force-deleted local branch $MERGED_BRANCH (confirmed merged)"
+  if [ "$local_tip_in_main" -eq 1 ] || [ "$CONFIRM_UNMERGED" -eq 1 ]; then
+    if run git_root branch -D "$MERGED_BRANCH"; then
+      note "deleted local branch $MERGED_BRANCH"
+    else
+      note "could not delete local branch '$MERGED_BRANCH' — left in place"
+    fi
   else
     note "local branch '$MERGED_BRANCH' left in place (unmerged tip; pass --confirm-unmerged to force-delete)"
   fi
