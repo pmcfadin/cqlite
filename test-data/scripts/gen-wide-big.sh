@@ -20,7 +20,10 @@ set -euo pipefail
 
 IMAGE="${IMAGE:-cassandra:5.0.2}"
 CONTAINER="${CONTAINER:-cqlite-widebig}"
-OUT="${OUT:-/Users/pmcfadin/projects/cqlite/test-data/datasets}"
+# Default OUT to the repo's test-data/datasets, derived from the repo root so the
+# manifest's `bash test-data/scripts/gen-wide-big.sh` works in any checkout.
+REPO_ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")"
+OUT="${OUT:-$REPO_ROOT/test-data/datasets}"
 KS="test_big"
 TBL="wide_partition"
 ROWS_PER_PART="${ROWS_PER_PART:-300}"   # 300 rows * ~2KiB payload ~= 600KiB/partition
