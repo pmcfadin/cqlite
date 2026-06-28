@@ -228,9 +228,13 @@ struct SummaryRow {
     artifacts: Vec<String>,
 }
 
-/// Serialises summary.json writes within a single process. Cross-process
-/// accumulation is handled by merging with the existing on-disk file (the five
-/// strict lanes run as separate test binaries).
+/// Serialises summary.json writes **within a single process only**. There is no
+/// cross-process synchronization: the five strict lanes run as separate test
+/// binaries, and [`write_summary`] best-effort merges with the existing on-disk
+/// file (read-modify-write), so two separate-process lane writes that interleave
+/// can race and lose a row (last writer wins). This is artifact-only and never
+/// affects pass/fail — the summary.json is a CI diagnostic, not a gate input —
+/// so file locking is intentionally omitted to keep it simple.
 static SUMMARY_LOCK: Mutex<()> = Mutex::new(());
 
 /// Record (and rewrite) one lane's entry in `target/cassandra-parity/summary.json`.
@@ -240,6 +244,12 @@ static SUMMARY_LOCK: Mutex<()> = Mutex::new(());
 /// on-disk file is read and merged on every call so a row written by one lane is
 /// preserved when another lane (another process) writes. The file is fully
 /// rewritten each time so it is valid JSON at any point even if a lane panics.
+///
+/// NOTE: the merge is best-effort and **not cross-process safe** — the only
+/// synchronization is the in-process [`SUMMARY_LOCK`], so two concurrent
+/// separate-process lane writes can interleave their read-modify-write and lose
+/// a row. That is acceptable here because summary.json is an artifact-only CI
+/// diagnostic and never gates pass/fail.
 pub fn write_summary(
     lane: &str,
     status: LaneStatus,
@@ -277,6 +287,13 @@ pub fn write_summary(
 /// deliberately small line-oriented parser for the exact one-line-per-lane shape
 /// [`render_summary_json`] emits; on any parse trouble it returns what it could
 /// recover (the file is always rewritten cleanly afterward).
+///
+/// NOTE: this parser (and its [`extract_json_str`]/[`extract_json_array`]
+/// helpers) does NOT invert [`json_escape`]. It only handles the controlled
+/// identifier/path shape `render_summary_json` emits — lane and scenario_id are
+/// fixed identifiers and artifact paths are controlled `target/…` paths, none of
+/// which contain escapable characters — so round-tripping the escapes is
+/// unnecessary.
 fn read_existing_summary(path: &Path) -> Vec<SummaryRow> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();

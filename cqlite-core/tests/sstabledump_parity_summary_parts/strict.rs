@@ -2,8 +2,9 @@
 //!
 //! Extracted from `sstabledump_parity_summary.rs` (issue #1024 file-size split,
 //! epic #1135). Included as a child module via
-//! `#[path = "sstabledump_parity_summary_strict.rs"] mod strict;` so `use super::*`
-//! resolves against the parent test module exactly as the inline module did.
+//! `#[path = "sstabledump_parity_summary_parts/strict.rs"] mod strict;` so
+//! `use super::*` resolves against the parent test module exactly as the inline
+//! module did.
 //!
 //! Proves *byte-for-byte* parity against the on-disk `Summary.db` images Cassandra
 //! 5.0 wrote (header fields, LE offset table, per-entry keys/positions, trailing
