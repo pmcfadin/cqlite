@@ -162,9 +162,10 @@ fn delta_scan_mirrored_missing_fixture_reference_is_rejected() {
     );
     let errs = errors_checked(&wrap(&scenario));
     assert!(
-        errs.iter().any(|e| e.contains("cass.delta_scan.cell_tombstones")
-            && e.contains("fixtures.references")
-            && e.contains("delta_scan")),
+        errs.iter()
+            .any(|e| e.contains("cass.delta_scan.cell_tombstones")
+                && e.contains("fixtures.references")
+                && e.contains("delta_scan")),
         "expected a delta_scan fixture-required error, got: {errs:#?}"
     );
 }
@@ -179,9 +180,10 @@ fn delta_scan_mirrored_missing_test_target_is_rejected() {
     );
     let errs = errors_checked(&wrap(&scenario));
     assert!(
-        errs.iter().any(|e| e.contains("cass.delta_scan.cell_tombstones")
-            && e.contains("cqlite.coverage.tests")
-            && e.contains("delta_scan")),
+        errs.iter()
+            .any(|e| e.contains("cass.delta_scan.cell_tombstones")
+                && e.contains("cqlite.coverage.tests")
+                && e.contains("delta_scan")),
         "expected a delta_scan test-required error, got: {errs:#?}"
     );
 }
@@ -196,9 +198,10 @@ fn delta_scan_mirrored_with_nonexistent_test_path_is_rejected() {
     );
     let errs = errors_checked(&wrap(&scenario));
     assert!(
-        errs.iter().any(|e| e.contains("cass.delta_scan.cell_tombstones")
-            && e.contains("delta_scan")
-            && e.contains("does not exist")),
+        errs.iter()
+            .any(|e| e.contains("cass.delta_scan.cell_tombstones")
+                && e.contains("delta_scan")
+                && e.contains("does not exist")),
         "expected a delta_scan missing-test-file error, got: {errs:#?}"
     );
 }

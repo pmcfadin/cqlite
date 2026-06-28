@@ -66,7 +66,9 @@ fn delta_scan_canonical_semantic_marks_byte_for_byte_followup() {
 #[test]
 fn wide_partition_corpus_is_a_planned_gap() {
     let r = rendered();
-    let gaps_start = r.find("## Gaps and next steps").expect("gaps section present");
+    let gaps_start = r
+        .find("## Gaps and next steps")
+        .expect("gaps section present");
     let gaps = &r[gaps_start..];
     assert!(
         gaps.contains("cass.delta_scan.wide_partition_corpus"),

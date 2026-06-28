@@ -169,9 +169,7 @@ fn lint_scenario(s: &Scenario, repo_root: Option<&Path>, out: &mut Vec<Finding>)
                             out.push(Finding::error(
                                 id,
                                 "cqlite.coverage.tests",
-                                format!(
-                                    "mirrored delta_scan test target does not exist: {t}"
-                                ),
+                                format!("mirrored delta_scan test target does not exist: {t}"),
                             ));
                         }
                     }
