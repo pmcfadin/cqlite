@@ -253,6 +253,31 @@ async fn test_key_generation_divergence_documented() {
     let read = |rel: &str| {
         std::fs::read_to_string(manifest.join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"))
     };
+    // Read a module's source whether it is a single `foo.rs` or a split
+    // `foo/` directory (epic #1116 turned several monoliths into directory
+    // modules). Concatenates every `.rs` under the directory so these
+    // architecture probes survive a behavior-preserving split.
+    let read_module = |rel: &str| -> String {
+        let as_file = manifest.join(format!("{rel}.rs"));
+        if as_file.is_file() {
+            return std::fs::read_to_string(&as_file)
+                .unwrap_or_else(|e| panic!("read {}: {e}", as_file.display()));
+        }
+        let dir = manifest.join(rel);
+        let mut out = String::new();
+        let entries = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("read module dir {}: {e}", dir.display()));
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|e| e.to_str()) == Some("rs") {
+                if let Ok(c) = std::fs::read_to_string(&p) {
+                    out.push_str(&c);
+                    out.push('\n');
+                }
+            }
+        }
+        out
+    };
 
     // LEGACY path: synthetic `user_key_{id}` generation still lives in executor.rs.
     let legacy_pattern = "user_key_";
@@ -271,10 +296,10 @@ async fn test_key_generation_divergence_documented() {
         codec_content.contains("fn decode_partition_key_columns"),
         "ADVANCED path: canonical decoder 'decode_partition_key_columns' should live in partition_key_codec.rs",
     );
-    let select_executor_content = read("src/query/select_executor.rs");
+    let select_executor_content = read_module("src/query/select_executor");
     assert!(
         select_executor_content.contains("partition_key_codec::decode_partition_key_columns"),
-        "ADVANCED path: select_executor.rs should delegate partition-key decoding to partition_key_codec",
+        "ADVANCED path: select_executor should delegate partition-key decoding to partition_key_codec",
     );
 
     // Verify the routing hack exists

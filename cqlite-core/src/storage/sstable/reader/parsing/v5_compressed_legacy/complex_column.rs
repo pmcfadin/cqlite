@@ -1,0 +1,1984 @@
+use super::*;
+
+impl V5CompressedLegacyParser {
+    /// Parse a complex column (non-frozen collection).
+    /// Complex columns have multiple cells with cell paths.
+    ///
+    /// Format when HAS_COMPLEX_DELETION is set:
+    ///   [complex_deletion_time: 2 VInts]  // DeletionTime
+    ///   [cell_count: VInt]
+    ///   [cell_1..cell_n: each with cell_path]
+    ///
+    /// Format when HAS_COMPLEX_DELETION is NOT set:
+    ///   [cell_count: VInt]
+    ///   [cell_1..cell_n: each with cell_path]
+    ///
+    /// Issue #221: This enables parsing of typed_collections_table and other
+    /// tables with non-frozen collections.
+    /// Outer entry point — the `reader` parameter is forwarded to the inner
+    /// cells but is currently unused there (`_reader`).  The outer/inner split
+    /// lets unit tests call `parse_complex_column_inner` without constructing a
+    /// full `SSTableReader`.
+    ///
+    /// Returns `(value, new_offset, collection_meta)` where `collection_meta`
+    /// carries DS4 extra info: whether the collection carries a tombstone
+    /// (overwrite semantics), the max element writetime, and the element tombstone count.
+    pub(super) fn parse_complex_column(
+        &self,
+        data: &[u8],
+        offset: usize,
+        column: &crate::schema::Column,
+        // Issue #1081: authoritative on-disk marshal type used to decode the
+        // complex value (e.g. `UserType(...)` for a non-frozen UDT). See
+        // [`parse_complex_column_inner`].
+        complex_type: &str,
+        has_complex_deletion: bool,
+        _reader: &crate::storage::sstable::reader::types::SSTableReader,
+    ) -> Result<(Value, usize, ComplexColumnMeta)> {
+        self.parse_complex_column_inner(
+            data,
+            offset,
+            column,
+            complex_type,
+            has_complex_deletion,
+            0,
+            None,
+        )
+    }
+
+    /// Inner complex-column parser.
+    ///
+    /// `complex_type` is the AUTHORITATIVE marshal type that drives the
+    /// complex-value decode — for the live read/compaction paths this is the
+    /// on-disk SerializationHeader `ColumnInfo.column_type` (issue #1081), which
+    /// is the only source that carries `UserType(...)` for a non-frozen
+    /// top-level UDT (the supplied schema's `column.data_type` is the bare CQL
+    /// short form, e.g. `person_type`, and cannot express it). `column` still
+    /// supplies the column identity (name) and is used for collection element /
+    /// map-key decode where the supplied schema form is sufficient. No
+    /// heuristics: both inputs are authoritative metadata (issue #28).
+    ///
+    /// When `elements_out` is `Some`, each parsed element (live, empty, or
+    /// tombstoned) is also pushed as a
+    /// [`crate::storage::sstable::reader::compaction_row::ComplexElement`] in
+    /// on-disk order, so the compaction read path can surface per-element cells
+    /// (epic #899). `row_timestamp` is the row liveness timestamp (µs) inherited
+    /// by elements that carry the `USE_ROW_TIMESTAMP` (0x08) flag — only read
+    /// when collecting elements. On the user-facing read path `elements_out` is
+    /// `None`, `row_timestamp` is `0`, and no per-element collection occurs.
+    pub(crate) fn parse_complex_column_inner(
+        &self,
+        data: &[u8],
+        mut offset: usize,
+        column: &crate::schema::Column,
+        complex_type: &str,
+        has_complex_deletion: bool,
+        row_timestamp: i64,
+        mut elements_out: Option<
+            &mut Vec<crate::storage::sstable::reader::compaction_row::ComplexElement>,
+        >,
+    ) -> Result<(Value, usize, ComplexColumnMeta)> {
+        use crate::storage::sstable::reader::compaction_row::ComplexElement;
+
+        // Helper to push a per-element cell into `elements_out` (compaction
+        // path only). `decoded_value` is the resolved element value (the list
+        // member, the set member parsed from the path, or the map value);
+        // `None` for a tombstoned / empty element. The effective timestamp is
+        // the element-own writetime when present, else the inherited row
+        // timestamp (USE_ROW_TIMESTAMP).
+        fn record_element(
+            out: &mut Option<&mut Vec<ComplexElement>>,
+            cell: &ComplexCellParse,
+            decoded_value: Option<Value>,
+            decoded_key: Option<Value>,
+            row_timestamp: i64,
+        ) {
+            if let Some(vec) = out.as_mut() {
+                vec.push(ComplexElement {
+                    cell_path: cell.path_bytes.clone(),
+                    value: decoded_value,
+                    decoded_key,
+                    timestamp: cell.element_writetime.unwrap_or(row_timestamp),
+                    ttl: cell.element_ttl,
+                    local_deletion_time: cell.element_local_deletion_time,
+                    is_deleted: cell.is_deleted,
+                    has_empty_value: cell.has_empty_value,
+                });
+            }
+        }
+        log::debug!(
+            "V5CompressedLegacy: Parsing complex column '{}' type='{}' has_complex_deletion={} at offset {}",
+            column.name, column.data_type, has_complex_deletion, offset
+        );
+
+        // Step 1: Parse complex deletion time if flag is set.
+        //
+        // DS4 (Issue #700): Capture the `markedForDeleteAt` to determine whether this
+        // generation carries a **collection-level tombstone** (`s = {...}` overwrite).
+        // Cassandra stores the LIVE sentinel as i64::MIN when there is no tombstone;
+        // any other value means the collection was overwritten (replaced, not appended).
+        //
+        // Wire format: DeletionTime = markedForDeleteAt (VInt delta from min_timestamp)
+        //                           + localDeletionTime (VInt).
+        // We treat `marked_for_delete_at != i64::MIN` as "has collection tombstone".
+        let mut has_collection_tombstone = false;
+        // Epic #899: the real complex deletion `(markedForDeleteAt µs,
+        // localDeletionTime s)` for the compaction contract; `None` is the LIVE
+        // sentinel (no overwrite).
+        let mut complex_deletion: Option<(i64, i32)> = None;
+        if has_complex_deletion {
+            // Cassandra (SerializationHeader.writeDeletionTime ->
+            // writeUnsignedVInt) encodes the markedForDeleteAt delta from
+            // min_timestamp as an UNSIGNED VInt — matching the row-deletion path
+            // (see parse_row_metadata, ~line 2585) and the writer
+            // (write_complex_column_deletion, encode_unsigned). The earlier
+            // parse_vint (ZigZag/signed) here mis-decoded any delta whose top
+            // data bit was set, while still consuming the same number of bytes
+            // (both variants are driven by leading-ones). Fix (roborev #863).
+            let (remaining, mfda_delta) = parse_vuint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "Complex column '{}': failed to parse markedForDeleteAt at offset {}: {:?}",
+                    column.name, offset, e
+                ))
+            })?;
+            let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
+
+            // Delta-decode to get the absolute timestamp.
+            // The LIVE sentinel in Cassandra is Long.MIN_VALUE for markedForDeleteAt.
+            let absolute_mfda = self.min_timestamp.wrapping_add(mfda_delta as i64);
+            // Any value other than i64::MIN indicates a real collection tombstone.
+            if absolute_mfda != i64::MIN {
+                has_collection_tombstone = true;
+            }
+
+            // localDeletionTime is also an UNSIGNED VInt delta from
+            // min_local_deletion_time (writer: encode_unsigned). Use the SAME
+            // i32 wrapping/cast as the row/range deletion paths so far-future
+            // LDTs in [2^31, 2^32) round-trip via `as u32 as i32`.
+            let (remaining, local_deletion_delta) = parse_vuint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "Complex column '{}': failed to parse localDeletionTime at offset {}: {:?}",
+                    column.name, offset, e
+                ))
+            })?;
+            let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
+
+            // Surface the real complex deletion for the compaction path. The
+            // localDeletionTime is a delta from min_local_deletion_time; the
+            // LIVE sentinel is i32::MAX. Far-future values in [2^31, 2^32) wrap
+            // via `as u32 as i32` (epic #899 invariant). Only record a deletion
+            // when markedForDeleteAt is not the LIVE sentinel.
+            if absolute_mfda != i64::MIN {
+                let absolute_ldt = self
+                    .min_local_deletion_time
+                    .wrapping_add(local_deletion_delta as i64);
+                complex_deletion = Some((absolute_mfda, absolute_ldt as u32 as i32));
+            }
+
+            log::debug!(
+                "V5CompressedLegacy: Complex column '{}' deletion time parsed \
+                 (absolute_mfda={} has_collection_tombstone={}), now at offset {}",
+                column.name,
+                absolute_mfda,
+                has_collection_tombstone,
+                offset
+            );
+        }
+
+        // Step 2: Parse cell count
+        let (remaining, cell_count) = parse_vuint(&data[offset..]).map_err(|e| {
+            Error::corruption(format!(
+                "Complex column '{}': failed to parse cell count at offset {}: {:?}",
+                column.name, offset, e
+            ))
+        })?;
+        let bytes_consumed = data[offset..].len() - remaining.len();
+        offset += bytes_consumed;
+
+        log::debug!(
+            "V5CompressedLegacy: Complex column '{}' has {} cells, now at offset {}",
+            column.name,
+            cell_count,
+            offset
+        );
+
+        // Step 3: Parse all cells and aggregate values
+        // Issue #225: Bounds check to prevent DoS from corrupted data (match frozen collection pattern)
+        if cell_count > MAX_FROZEN_COLLECTION_SIZE {
+            return Err(Error::corruption(format!(
+                "Complex column '{}': cell count {} exceeds maximum {}",
+                column.name, cell_count, MAX_FROZEN_COLLECTION_SIZE
+            )));
+        }
+        // Convert cell_count to usize safely to prevent overflow on 32-bit systems
+        let cell_count_usize: usize = cell_count.try_into().map_err(|_| {
+            Error::corruption(format!(
+                "Complex column '{}': cell count {} exceeds platform limit",
+                column.name, cell_count
+            ))
+        })?;
+
+        // DS4 (Issue #700): Track max element writetime and element tombstone count
+        // across all cells in this collection.
+        let mut max_element_writetime: i64 = 0;
+        let mut element_tombstone_count: u64 = 0;
+
+        /// Helper to update max_element_writetime from a parsed cell.
+        #[inline]
+        fn update_max_writetime(max: &mut i64, cell: &ComplexCellParse) {
+            if let Some(ts) = cell.element_writetime {
+                if ts > *max {
+                    *max = ts;
+                }
+            }
+        }
+
+        // Determine collection / UDT type from the AUTHORITATIVE marshal type
+        // (issue #1081). For collection branches the supplied schema short form
+        // (`column.data_type`) is still used to extract element/key types below —
+        // those paths are unchanged and proven. Only the top-level non-frozen UDT
+        // branch needs the marshal form, which `complex_type` carries.
+        let dt = complex_type.to_lowercase();
+        let value = if dt.starts_with("list<")
+            || dt.starts_with("org.apache.cassandra.db.marshal.listtype(")
+        {
+            // Parse list elements
+            let element_type = self.extract_collection_element_type(&column.data_type, "list")?;
+            let mut elements = Vec::with_capacity(cell_count_usize);
+
+            for i in 0..cell_count_usize {
+                let cell =
+                    self.parse_complex_cell_value(data, offset, &element_type, column, i as u64)?;
+                offset = cell.next_offset;
+
+                // Issue #493: element-level tombstones (IS_DELETED 0x01) are not live
+                // values and must not be surfaced. Skip them regardless of their path.
+                // DS4: count them for the scan-summary warning counter.
+                if cell.is_deleted {
+                    element_tombstone_count += 1;
+                    log::debug!(
+                        "V5CompressedLegacy: list element {} in column '{}' is a tombstone \
+                         (IS_DELETED=0x01) — counted for DS4 scan summary (Issue #700/#493)",
+                        i,
+                        column.name
+                    );
+                    // Epic #899: surface the tombstoned element to the compaction
+                    // path (value None) so per-element reconcile can shadow it.
+                    record_element(&mut elements_out, &cell, None, None, row_timestamp);
+                    continue;
+                }
+
+                // DS4: Track element timestamp for live elements only (roborev Finding 2).
+                // Tombstoned elements are skipped above; their timestamps must not
+                // inflate the max_element_writetime reported for the collection.
+                update_max_writetime(&mut max_element_writetime, &cell);
+
+                // Epic #899: surface this live element to the compaction path.
+                record_element(
+                    &mut elements_out,
+                    &cell,
+                    cell.value.clone(),
+                    None,
+                    row_timestamp,
+                );
+
+                // Add non-null values to the list
+                if let Some(val) = cell.value {
+                    elements.push(val);
+                }
+            }
+
+            Value::List(elements)
+        } else if dt.starts_with("set<")
+            || dt.starts_with("org.apache.cassandra.db.marshal.settype(")
+        {
+            // Parse set elements
+            // In Cassandra's complex cell format for sets, each element is a separate cell
+            // where the cell PATH contains the raw bytes of the set element, and the cell
+            // VALUE is always empty (HAS_EMPTY_VALUE flag = 0x04 set).
+            // We must parse the path bytes as the element value, not the (empty) cell value.
+            let element_type = self.extract_collection_element_type(&column.data_type, "set")?;
+            let mut elements = Vec::with_capacity(cell_count_usize);
+
+            for i in 0..cell_count_usize {
+                let cell =
+                    self.parse_complex_cell_value(data, offset, &element_type, column, i as u64)?;
+                offset = cell.next_offset;
+
+                // Issue #493: element-level tombstones must not surface as live members.
+                // For a set, both a live element and a tombstoned element produce
+                // `cell.value == None` with non-empty `path_bytes` (the element key),
+                // because live set elements carry HAS_EMPTY_VALUE (0x04) and store the
+                // element in the path. The authoritative IS_DELETED (0x01) flag is the
+                // ONLY signal that distinguishes them, so we consult it directly and skip
+                // tombstoned elements (no-heuristics mandate, Issue #28).
+                // DS4: count them for the scan-summary warning counter.
+                if cell.is_deleted {
+                    element_tombstone_count += 1;
+                    log::debug!(
+                        "V5CompressedLegacy: set element {} in column '{}' is a tombstone \
+                         (IS_DELETED=0x01) — counted for DS4 scan summary (Issue #700/#493)",
+                        i,
+                        column.name
+                    );
+                    // Epic #899: surface the tombstoned set element (the element
+                    // identity lives in the cell_path).
+                    record_element(&mut elements_out, &cell, None, None, row_timestamp);
+                    continue;
+                }
+
+                // DS4: Track element timestamp for live elements only (roborev Finding 2).
+                // Tombstoned elements are skipped above; their timestamps must not
+                // inflate the max_element_writetime reported for the collection.
+                update_max_writetime(&mut max_element_writetime, &cell);
+
+                // For sets: the path bytes ARE the element value (cell value is always empty).
+                // If cell.value is Some (unusual case where a set cell has a non-empty value),
+                // use it. Otherwise parse the path bytes as the element type.
+                let set_member: Option<Value> = if let Some(val) = cell.value.clone() {
+                    Some(val)
+                } else if !cell.path_bytes.is_empty() {
+                    // Path bytes are the set element — parse them as the element type
+                    match self.parse_value_from_raw_bytes(
+                        &cell.path_bytes,
+                        &element_type,
+                        &column.name,
+                        0,
+                    ) {
+                        Ok(val) => Some(val),
+                        Err(e) => {
+                            log::debug!(
+                                "V5CompressedLegacy: set element {} parse failed (type={}): {}",
+                                i,
+                                element_type,
+                                e
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                // Epic #899: surface the live set element (decoded member value)
+                // to the compaction path, keyed by its cell_path.
+                record_element(
+                    &mut elements_out,
+                    &cell,
+                    set_member.clone(),
+                    None,
+                    row_timestamp,
+                );
+
+                if let Some(val) = set_member {
+                    elements.push(val);
+                }
+            }
+
+            Value::Set(elements)
+        } else if dt.starts_with("map<")
+            || dt.starts_with("org.apache.cassandra.db.marshal.maptype(")
+        {
+            // Parse map entries
+            let (key_type, value_type) = self.extract_map_types(&column.data_type)?;
+            let mut entries = Vec::with_capacity(cell_count_usize);
+
+            for i in 0..cell_count_usize {
+                let cell =
+                    self.parse_complex_cell_value(data, offset, &value_type, column, i as u64)?;
+                offset = cell.next_offset;
+
+                // For maps, the cell path IS the key
+                // Parse the path as the key using the key type
+                // Note: Cell path keys are stored WITHOUT length prefixes (raw bytes only)
+                //
+                // Map semantics are intentionally unchanged for Issue #493: a deleted
+                // entry already surfaces as `cell.value == None` and is emitted as
+                // (key, Value::Null), preserving existing behavior. Only set/list
+                // element tombstones are skipped.
+                // DS4: For maps with IS_DELETED entries, count them for the scan summary.
+                // Tombstoned entries must NOT contribute to max_element_writetime so that
+                // the reported writetime only reflects live content (roborev Finding 2).
+                if cell.is_deleted {
+                    element_tombstone_count += 1;
+                    log::debug!(
+                        "V5CompressedLegacy: map entry {} in column '{}' is a tombstone \
+                         (IS_DELETED=0x01) — counted for DS4 scan summary (Issue #700/#493)",
+                        i,
+                        column.name
+                    );
+                } else {
+                    // DS4: Track element timestamp for live map entries only.
+                    update_max_writetime(&mut max_element_writetime, &cell);
+                }
+
+                // Decode the map key (from cell_path) up front so it can be both
+                // recorded on the per-element compaction entry and used to build
+                // the collapsed `Value::Map`.
+                let decoded_key = if !cell.path_bytes.is_empty() {
+                    log::debug!(
+                        "V5CompressedLegacy: Parsing map key for column '{}', key_type='{}', path_len={}",
+                        column.name,
+                        key_type,
+                        cell.path_bytes.len()
+                    );
+                    // For cell path keys, parse directly without expecting length prefixes
+                    Some(self.parse_cell_path_key(&cell.path_bytes, &key_type, &column.name)?)
+                } else {
+                    None
+                };
+
+                // Epic #899: surface the map entry to the compaction path keyed
+                // by its cell_path (the map key bytes); value is the map value
+                // (`None` for a tombstoned / null entry), with the decoded key for
+                // whole-`Value::Map` reconstruction downstream.
+                record_element(
+                    &mut elements_out,
+                    &cell,
+                    cell.value.clone(),
+                    decoded_key.clone(),
+                    row_timestamp,
+                );
+
+                if let Some(key_value) = decoded_key {
+                    // Add non-null entries to the map
+                    if let Some(val) = cell.value {
+                        entries.push((key_value, val));
+                    } else {
+                        // Map entry with null value (tombstone for that key)
+                        entries.push((key_value, Value::Null));
+                    }
+                }
+            }
+
+            Value::Map(entries)
+        } else if dt.starts_with("org.apache.cassandra.db.marshal.usertype(") {
+            // Issue #927: TOP-LEVEL non-frozen UDT — each field is a cell whose
+            // cell_path is the 2-byte (signed ShortType) declared field index and
+            // whose value bytes are the field datum. Decode each cell's value with
+            // the DECLARED field type resolved from the marshal string.
+            //
+            // Issue #1081: resolve the field layout from the AUTHORITATIVE on-disk
+            // marshal type (`complex_type`), not the supplied schema's bare short
+            // form (`column.data_type`, e.g. `person_type`) which cannot express
+            // the field list. This is the no-heuristics source of truth (issue #28).
+            let field_defs = Self::udt_field_marshal_types(complex_type)?;
+            // Field values keyed by declared index; absent / null fields stay None.
+            let mut field_values: Vec<Option<Value>> = vec![None; field_defs.len()];
+
+            for i in 0..cell_count_usize {
+                // Capture the value bytes raw (BytesType is identity) so they can
+                // be re-decoded with the per-field type AFTER the cell_path (which
+                // carries the field index) is known.
+                let cell = self.parse_complex_cell_value(
+                    data,
+                    offset,
+                    "org.apache.cassandra.db.marshal.BytesType",
+                    column,
+                    i as u64,
+                )?;
+                offset = cell.next_offset;
+
+                // Resolve the declared field index from the 2-byte signed-short
+                // cell_path. A path that is not exactly 2 bytes, or that names a
+                // field index outside the declared range, is authoritative
+                // corruption — surface it rather than guessing (no-heuristics).
+                let field_index = if cell.path_bytes.len() == 2 {
+                    i16::from_be_bytes([cell.path_bytes[0], cell.path_bytes[1]]) as i32
+                } else {
+                    return Err(Error::corruption(format!(
+                        "UDT column '{}' cell {}: field-index cell_path must be 2 bytes, got {}",
+                        column.name,
+                        i,
+                        cell.path_bytes.len()
+                    )));
+                };
+
+                if cell.is_deleted {
+                    element_tombstone_count += 1;
+                    record_element(&mut elements_out, &cell, None, None, row_timestamp);
+                    continue;
+                }
+                update_max_writetime(&mut max_element_writetime, &cell);
+
+                // Decode the field value with its DECLARED type. `cell.value` is the
+                // raw bytes wrapped as Blob (BytesType) above; an empty-value cell
+                // yields None.
+                let decoded = match &cell.value {
+                    Some(Value::Blob(raw)) => {
+                        let (_name, field_type) = field_defs
+                            .get(field_index as usize)
+                            .filter(|_| field_index >= 0)
+                            .ok_or_else(|| {
+                                Error::corruption(format!(
+                                    "UDT column '{}' cell {}: field index {} out of range (0..{})",
+                                    column.name,
+                                    i,
+                                    field_index,
+                                    field_defs.len()
+                                ))
+                            })?;
+                        Some(self.parse_value_from_raw_bytes(raw, field_type, &column.name, 0)?)
+                    }
+                    other => other.clone(),
+                };
+
+                record_element(
+                    &mut elements_out,
+                    &cell,
+                    decoded.clone(),
+                    None,
+                    row_timestamp,
+                );
+
+                if field_index >= 0 && (field_index as usize) < field_values.len() {
+                    field_values[field_index as usize] = decoded;
+                }
+            }
+
+            // Build the collapsed UDT in DECLARED field order for the user-facing
+            // read path. The keyspace/type-name come from the authoritative
+            // on-disk marshal string (issue #1081).
+            let (udt_keyspace, udt_name) = Self::udt_keyspace_and_name(complex_type)?;
+            let fields = field_defs
+                .iter()
+                .zip(field_values)
+                .map(|((name, _ty), value)| crate::types::UdtField {
+                    name: name.clone(),
+                    value,
+                })
+                .collect();
+            Value::Udt(UdtValue {
+                type_name: udt_name,
+                keyspace: udt_keyspace,
+                fields,
+            })
+        } else {
+            // Unknown complex column type, skip cells
+            for i in 0..cell_count_usize {
+                offset = self.skip_complex_cell(data, offset, &column.name, i as u64)?;
+            }
+            Value::Null
+        };
+
+        log::debug!(
+            "V5CompressedLegacy: Complex column '{}' parsed, final offset {} \
+             (has_collection_tombstone={} max_element_writetime={} element_tombstone_count={})",
+            column.name,
+            offset,
+            has_collection_tombstone,
+            max_element_writetime,
+            element_tombstone_count
+        );
+
+        Ok((
+            value,
+            offset,
+            ComplexColumnMeta {
+                has_collection_tombstone,
+                max_element_writetime,
+                element_tombstone_count,
+                complex_deletion,
+            },
+        ))
+    }
+
+    /// Parse a single complex cell and extract its value.
+    /// Complex cells have: [flags] [timestamp?] [deletion?] [ttl?] [cell_path] [value?]
+    ///
+    /// Returns a [`ComplexCellParse`] describing the parsed cell.
+    /// - `value` is None if the cell is deleted or has an empty value
+    /// - `path_bytes` contains the raw path bytes (used as map key for map<> types,
+    ///   and as the element value for set<> types)
+    /// - `is_deleted` reflects the authoritative IS_DELETED (0x01) cell flag, so
+    ///   callers can distinguish element-level tombstones from live elements that
+    ///   simply carry an empty value (Issue #493).
+    fn parse_complex_cell_value(
+        &self,
+        data: &[u8],
+        mut offset: usize,
+        element_type: &str,
+        column: &crate::schema::Column,
+        cell_index: u64,
+    ) -> Result<ComplexCellParse> {
+        log::debug!(
+            "V5CompressedLegacy: parse_complex_cell_value '{}' cell {} element_type='{}' starting at offset {}",
+            column.name,
+            cell_index,
+            element_type,
+            offset
+        );
+
+        // Step 1: Cell flags (standard 0x00-0x1F range)
+        if offset >= data.len() {
+            return Err(Error::corruption(format!(
+                "Complex cell {}.{}: unexpected end at flags (offset {})",
+                column.name, cell_index, offset
+            )));
+        }
+        let flags = data[offset];
+        offset += 1;
+
+        // Validate flags are in valid range
+        if flags > 0x1F {
+            return Err(Error::corruption(format!(
+                "Complex cell {}.{}: invalid flags 0x{:02x} at offset {} (expected 0x00-0x1F)",
+                column.name,
+                cell_index,
+                flags,
+                offset - 1
+            )));
+        }
+
+        let is_deleted = (flags & 0x01) != 0;
+        let is_expiring = (flags & 0x02) != 0;
+        let has_empty_value = (flags & 0x04) != 0;
+        let use_row_timestamp = (flags & 0x08) != 0;
+        let use_row_ttl = (flags & 0x10) != 0;
+
+        log::debug!(
+            "V5CompressedLegacy: parse_complex_cell_value '{}' cell {} flags=0x{:02x} (deleted={}, expiring={}, empty_value={}, use_row_ts={}, use_row_ttl={})",
+            column.name,
+            cell_index,
+            flags,
+            is_deleted,
+            is_expiring,
+            has_empty_value,
+            use_row_timestamp,
+            use_row_ttl
+        );
+
+        // Step 2: Timestamp (if not using row timestamp)
+        // Capture the element-level timestamp delta for DS4 max-writetime computation.
+        // Cassandra encodes complex cell timestamps as UNSIGNED VInt deltas from
+        // min_timestamp (SerializationHeader.writeUnsignedVInt; writer:
+        // write_complex_cell_header, encode_unsigned). The earlier parse_vint
+        // (ZigZag/signed) mis-decoded deltas with the top data bit set while
+        // consuming the same byte count. Fix (roborev #863).
+        let mut element_writetime: Option<i64> = None;
+        if !use_row_timestamp {
+            let (remaining, ts_delta) = parse_vuint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "Complex cell {}.{}: failed to parse timestamp at offset {}: {:?}",
+                    column.name, cell_index, offset, e
+                ))
+            })?;
+            let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
+            // Delta decode: absolute_ts = min_timestamp + ts_delta
+            let absolute_ts = self.min_timestamp.wrapping_add(ts_delta as i64);
+            element_writetime = Some(absolute_ts);
+        }
+
+        // Step 3: Local deletion time (if deleted/expiring and not using row TTL)
+        // Epic #899: surface the absolute localDeletionTime (SECONDS) for the
+        // per-element compaction contract. The on-disk value is an unsigned VInt
+        // delta from `min_local_deletion_time`. Far-future values in
+        // `[2^31, 2^32)` are preserved as the wrapping `as u32 as i32`
+        // representation — do NOT widen to i64 (epic #899 invariant).
+        let mut element_local_deletion_time: Option<i32> = None;
+        if !use_row_ttl && (is_deleted || is_expiring) {
+            let (remaining, ldt_delta) = parse_vuint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "Complex cell {}.{}: failed to parse localDeletionTime at offset {}: {:?}",
+                    column.name, cell_index, offset, e
+                ))
+            })?;
+            let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
+            let absolute_ldt = self.min_local_deletion_time.wrapping_add(ldt_delta as i64);
+            // Wrap into i32 preserving the far-future [2^31, 2^32) encoding.
+            element_local_deletion_time = Some(absolute_ldt as u32 as i32);
+        }
+
+        // Step 4: TTL (if expiring and not using row TTL)
+        // Epic #899: surface the per-element TTL (SECONDS) for the compaction
+        // contract. The on-disk value is an unsigned VInt delta from `min_ttl`.
+        let mut element_ttl: Option<u32> = None;
+        if !use_row_ttl && is_expiring {
+            let (remaining, ttl_delta) = parse_vuint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "Complex cell {}.{}: failed to parse TTL at offset {}: {:?}",
+                    column.name, cell_index, offset, e
+                ))
+            })?;
+            let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
+            let absolute_ttl = self.min_ttl.unwrap_or(0).wrapping_add(ttl_delta as i64);
+            element_ttl = Some(absolute_ttl as u32);
+        }
+
+        // Step 5: Cell path (VInt length + bytes)
+        let (remaining, path_len) = parse_vuint(&data[offset..]).map_err(|e| {
+            Error::corruption(format!(
+                "Complex cell {}.{}: failed to parse path length at offset {}: {:?}",
+                column.name, cell_index, offset, e
+            ))
+        })?;
+        let bytes_consumed = data[offset..].len() - remaining.len();
+        offset += bytes_consumed;
+
+        // Issue #225: Safe conversion to prevent overflow on large values
+        let path_len_usize: usize = path_len.try_into().map_err(|_| {
+            Error::corruption(format!(
+                "Complex cell {}.{}: path length {} exceeds platform limit",
+                column.name, cell_index, path_len
+            ))
+        })?;
+        if path_len > MAX_CELL_VALUE_LENGTH {
+            return Err(Error::corruption(format!(
+                "Complex cell {}.{}: path length {} exceeds maximum {}",
+                column.name, cell_index, path_len, MAX_CELL_VALUE_LENGTH
+            )));
+        }
+
+        // Bounds check before reading path
+        if offset + path_len_usize > data.len() {
+            return Err(Error::corruption(format!(
+                "Complex cell {}.{}: cell path requires {} bytes but only {} available at offset {}",
+                column.name,
+                cell_index,
+                path_len,
+                data.len().saturating_sub(offset),
+                offset
+            )));
+        }
+
+        let path_bytes = data[offset..offset + path_len_usize].to_vec();
+        offset += path_len_usize;
+
+        // Step 6: Value (if not empty and not deleted)
+        let value = if is_deleted || has_empty_value {
+            log::debug!(
+                "V5CompressedLegacy: parse_complex_cell_value '{}' cell {} is deleted or empty",
+                column.name,
+                cell_index
+            );
+            None
+        } else {
+            let (remaining, value_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "Complex cell {}.{}: failed to parse value length at offset {}: {:?}",
+                    column.name, cell_index, offset, e
+                ))
+            })?;
+            let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
+
+            // Issue #225: Safe conversion to prevent overflow on large values
+            let value_len_usize: usize = value_len.try_into().map_err(|_| {
+                Error::corruption(format!(
+                    "Complex cell {}.{}: value length {} exceeds platform limit",
+                    column.name, cell_index, value_len
+                ))
+            })?;
+            if value_len > MAX_CELL_VALUE_LENGTH {
+                return Err(Error::corruption(format!(
+                    "Complex cell {}.{}: value length {} exceeds maximum {}",
+                    column.name, cell_index, value_len, MAX_CELL_VALUE_LENGTH
+                )));
+            }
+
+            // Bounds check before reading value
+            if offset + value_len_usize > data.len() {
+                return Err(Error::corruption(format!(
+                    "Complex cell {}.{}: value requires {} bytes but only {} available at offset {}",
+                    column.name,
+                    cell_index,
+                    value_len,
+                    data.len().saturating_sub(offset),
+                    offset
+                )));
+            }
+
+            let value_data = &data[offset..offset + value_len_usize];
+            offset += value_len_usize;
+
+            // Parse the value based on element type.
+            // The value bytes have already been extracted (length was consumed above).
+            // Use parse_value_from_raw_bytes which treats the entire slice as the value
+            // WITHOUT an additional length prefix (unlike parse_raw_type_value which
+            // expects a VInt length prefix — wrong for already-extracted complex cell values).
+            // See Issue #481: using parse_raw_type_value here caused the first byte of
+            // blob/text values to be misread as a length, producing corrupt parses.
+            let parsed_value =
+                self.parse_value_from_raw_bytes(value_data, element_type, &column.name, 0)?;
+            Some(parsed_value)
+        };
+
+        log::debug!(
+            "V5CompressedLegacy: parse_complex_cell_value '{}' cell {} complete, value={:?}, final offset {}",
+            column.name,
+            cell_index,
+            value.is_some(),
+            offset
+        );
+
+        Ok(ComplexCellParse {
+            value,
+            path_bytes,
+            is_deleted,
+            has_empty_value,
+            next_offset: offset,
+            element_writetime,
+            element_ttl,
+            element_local_deletion_time,
+        })
+    }
+
+    /// Skip over a single complex cell without fully parsing its value.
+    /// Complex cells have: [flags] [timestamp?] [deletion?] [ttl?] [cell_path] [value?]
+    ///
+    /// Issue #221: This is used to advance past complex cell data while returning
+    /// placeholder values. Future work can add full cell value parsing here.
+    fn skip_complex_cell(
+        &self,
+        data: &[u8],
+        mut offset: usize,
+        column_name: &str,
+        cell_index: u64,
+    ) -> Result<usize> {
+        log::debug!(
+            "V5CompressedLegacy: skip_complex_cell '{}' cell {} starting at offset {}, bytes: {:02x?}",
+            column_name,
+            cell_index,
+            offset,
+            &data[offset..std::cmp::min(offset + 20, data.len())]
+        );
+
+        // Complex cell format per Cassandra source (UnfilteredSerializer.java):
+        // [flags: u8]
+        // [timestamp: VInt if not USE_ROW_TIMESTAMP_MASK]
+        // [local_deletion_time: VInt if (deleted || expiring) && not USE_ROW_TTL_MASK]
+        // [ttl: VInt if expiring && not USE_ROW_TTL_MASK]
+        // [cell_path: VInt length + bytes] <-- AFTER flags/timestamp/etc, NOT before!
+        // [value: VInt length + bytes if not HAS_EMPTY_VALUE_MASK]
+
+        // Step 1: Cell flags (standard 0x00-0x1F range)
+        if offset >= data.len() {
+            return Err(Error::corruption(format!(
+                "Complex cell {}.{}: unexpected end at flags (offset {})",
+                column_name, cell_index, offset
+            )));
+        }
+        let flags = data[offset];
+        offset += 1;
+
+        // Validate flags are in valid range
+        if flags > 0x1F {
+            return Err(Error::corruption(format!(
+                "Complex cell {}.{}: invalid flags 0x{:02x} at offset {} (expected 0x00-0x1F)",
+                column_name,
+                cell_index,
+                flags,
+                offset - 1
+            )));
+        }
+
+        let is_deleted = (flags & 0x01) != 0;
+        let is_expiring = (flags & 0x02) != 0;
+        let has_empty_value = (flags & 0x04) != 0;
+        let use_row_timestamp = (flags & 0x08) != 0;
+        let use_row_ttl = (flags & 0x10) != 0;
+
+        log::debug!(
+            "V5CompressedLegacy: skip_complex_cell '{}' cell {} flags=0x{:02x} (deleted={}, expiring={}, empty_value={}, use_row_ts={}, use_row_ttl={})",
+            column_name,
+            cell_index,
+            flags,
+            is_deleted,
+            is_expiring,
+            has_empty_value,
+            use_row_timestamp,
+            use_row_ttl
+        );
+
+        // Step 2: Timestamp (if not using row timestamp)
+        // Skip-only: byte advancement is identical for vint/vuint, but use the
+        // UNSIGNED variant to match the writer encoding and the decoding sites
+        // (roborev #863).
+        if !use_row_timestamp {
+            let (remaining, _ts) = parse_vuint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "Complex cell {}.{}: failed to parse timestamp at offset {}: {:?}",
+                    column_name, cell_index, offset, e
+                ))
+            })?;
+            let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
+        }
+
+        // Step 3: Local deletion time (if deleted/expiring and not using row TTL)
+        if !use_row_ttl && (is_deleted || is_expiring) {
+            let (remaining, _ldt) = parse_vuint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "Complex cell {}.{}: failed to parse localDeletionTime at offset {}: {:?}",
+                    column_name, cell_index, offset, e
+                ))
+            })?;
+            let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
+        }
+
+        // Step 4: TTL (if expiring and not using row TTL)
+        if !use_row_ttl && is_expiring {
+            let (remaining, _ttl) = parse_vuint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "Complex cell {}.{}: failed to parse TTL at offset {}: {:?}",
+                    column_name, cell_index, offset, e
+                ))
+            })?;
+            let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
+        }
+
+        // Step 5: Cell path (VInt length + bytes) - comes AFTER flags/timestamp/ttl
+        let (remaining, path_len) = parse_vuint(&data[offset..]).map_err(|e| {
+            Error::corruption(format!(
+                "Complex cell {}.{}: failed to parse path length at offset {}: {:?}",
+                column_name, cell_index, offset, e
+            ))
+        })?;
+        let bytes_consumed = data[offset..].len() - remaining.len();
+        log::debug!(
+            "V5CompressedLegacy: skip_complex_cell '{}' cell {} path_len={} at offset {}",
+            column_name,
+            cell_index,
+            path_len,
+            offset
+        );
+        offset += bytes_consumed;
+
+        // Issue #225: Safe conversion to prevent overflow on large values
+        let path_len_usize: usize = path_len.try_into().map_err(|_| {
+            Error::corruption(format!(
+                "Complex cell {}.{}: path length {} exceeds platform limit",
+                column_name, cell_index, path_len
+            ))
+        })?;
+        if path_len > MAX_CELL_VALUE_LENGTH {
+            return Err(Error::corruption(format!(
+                "Complex cell {}.{}: path length {} exceeds maximum {}",
+                column_name, cell_index, path_len, MAX_CELL_VALUE_LENGTH
+            )));
+        }
+
+        // Bounds check before advancing by path_len
+        if offset + path_len_usize > data.len() {
+            return Err(Error::corruption(format!(
+                "Complex cell {}.{}: cell path requires {} bytes but only {} available at offset {}",
+                column_name,
+                cell_index,
+                path_len,
+                data.len().saturating_sub(offset),
+                offset
+            )));
+        }
+        offset += path_len_usize;
+
+        // Step 6: Value (if not empty)
+        if !has_empty_value {
+            let (remaining, value_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "Complex cell {}.{}: failed to parse value length at offset {}: {:?}",
+                    column_name, cell_index, offset, e
+                ))
+            })?;
+            let bytes_consumed = data[offset..].len() - remaining.len();
+            offset += bytes_consumed;
+
+            // Issue #225: Safe conversion to prevent overflow on large values
+            let value_len_usize: usize = value_len.try_into().map_err(|_| {
+                Error::corruption(format!(
+                    "Complex cell {}.{}: value length {} exceeds platform limit",
+                    column_name, cell_index, value_len
+                ))
+            })?;
+            if value_len > MAX_CELL_VALUE_LENGTH {
+                return Err(Error::corruption(format!(
+                    "Complex cell {}.{}: value length {} exceeds maximum {}",
+                    column_name, cell_index, value_len, MAX_CELL_VALUE_LENGTH
+                )));
+            }
+
+            // Bounds check before advancing by value_len
+            if offset + value_len_usize > data.len() {
+                return Err(Error::corruption(format!(
+                    "Complex cell {}.{}: value requires {} bytes but only {} available at offset {}",
+                    column_name,
+                    cell_index,
+                    value_len,
+                    data.len().saturating_sub(offset),
+                    offset
+                )));
+            }
+            offset += value_len_usize;
+        }
+
+        log::debug!(
+            "V5CompressedLegacy: skip_complex_cell '{}' cell {} complete, final offset {}",
+            column_name,
+            cell_index,
+            offset
+        );
+
+        Ok(offset)
+    }
+
+    /// Extract element type from list<T> or set<T> type string (CQL or Cassandra internal format)
+    pub(super) fn extract_collection_element_type(
+        &self,
+        type_str: &str,
+        collection: &str,
+    ) -> Result<String> {
+        let type_lower = type_str.to_lowercase();
+
+        // Check for Cassandra internal format first: org.apache.cassandra.db.marshal.ListType(...)
+        let internal_prefix_lower = format!("org.apache.cassandra.db.marshal.{}type(", collection);
+        if type_lower.starts_with(&internal_prefix_lower) && type_lower.ends_with(')') {
+            // Use the lowercase prefix length to extract from the original string
+            let inner = &type_str[internal_prefix_lower.len()..type_str.len() - 1];
+            if inner.is_empty() {
+                return Err(Error::schema(format!(
+                    "Empty {} element type: {}",
+                    collection, type_str
+                )));
+            }
+            return Ok(inner.to_string());
+        }
+
+        // Check for CQL format: list<T>, set<T>
+        let prefix_lower = format!("{}<", collection);
+        if type_lower.starts_with(&prefix_lower) && type_lower.ends_with('>') {
+            // Use the lowercase prefix length to extract from the original string
+            let inner = &type_str[prefix_lower.len()..type_str.len() - 1];
+            if inner.is_empty() {
+                return Err(Error::schema(format!(
+                    "Empty {} element type: {}",
+                    collection, type_str
+                )));
+            }
+            return Ok(inner.to_string());
+        }
+
+        Err(Error::schema(format!(
+            "Invalid {} type format: {}",
+            collection, type_str
+        )))
+    }
+
+    /// Extract key and value types from map<K,V> type string (CQL or Cassandra internal format)
+    pub(super) fn extract_map_types(&self, type_str: &str) -> Result<(String, String)> {
+        let type_lower = type_str.to_lowercase();
+
+        // Determine the inner content based on format
+        let inner = if type_lower.starts_with("org.apache.cassandra.db.marshal.maptype(")
+            && type_str.ends_with(')')
+        {
+            // Cassandra internal format: org.apache.cassandra.db.marshal.MapType(K,V)
+            let prefix = "org.apache.cassandra.db.marshal.MapType(";
+            &type_str[prefix.len()..type_str.len() - 1]
+        } else if type_lower.starts_with("map<") && type_str.ends_with('>') {
+            // CQL format: map<K,V>
+            &type_str[4..type_str.len() - 1]
+        } else {
+            return Err(Error::schema(format!(
+                "Invalid map type format: {}",
+                type_str
+            )));
+        };
+
+        if inner.is_empty() {
+            return Err(Error::schema(format!("Empty map types: {}", type_str)));
+        }
+
+        // Split by comma, handling nested angle brackets and parentheses
+        let mut depth = 0;
+        let mut split_pos = None;
+
+        for (i, ch) in inner.chars().enumerate() {
+            match ch {
+                '<' | '(' => depth += 1,
+                '>' | ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    split_pos = Some(i);
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        let split_pos = split_pos.ok_or_else(|| {
+            Error::schema(format!(
+                "Invalid map type format (no comma separator): {}",
+                type_str
+            ))
+        })?;
+
+        let key_type = inner[..split_pos].trim().to_string();
+        let value_type = inner[split_pos + 1..].trim().to_string();
+
+        if key_type.is_empty() || value_type.is_empty() {
+            return Err(Error::schema(format!(
+                "Empty key or value type in map: {}",
+                type_str
+            )));
+        }
+
+        Ok((key_type, value_type))
+    }
+
+    /// Parse a cell path key (for map keys stored in cell paths).
+    /// Cell path keys are stored as raw bytes WITHOUT length prefixes.
+    fn parse_cell_path_key(&self, data: &[u8], type_str: &str, column_name: &str) -> Result<Value> {
+        let normalized_type = type_str.to_lowercase();
+
+        match normalized_type.as_str() {
+            // Text types: raw UTF-8 bytes (no length prefix)
+            "org.apache.cassandra.db.marshal.utf8type"
+            | "org.apache.cassandra.db.marshal.asciitype"
+            | "org.apache.cassandra.db.marshal.varchartype"
+            | "text"
+            | "varchar"
+            | "ascii" => {
+                let text = String::from_utf8(data.to_vec())
+                    .map_err(|e| Error::corruption(format!("Invalid UTF-8 in map key: {}", e)))?;
+                Ok(Value::Text(text))
+            }
+
+            // UUID types: 16 bytes
+            "org.apache.cassandra.db.marshal.uuidtype"
+            | "org.apache.cassandra.db.marshal.timeuuidtype"
+            | "uuid"
+            | "timeuuid" => {
+                if data.len() != 16 {
+                    return Err(Error::corruption(format!(
+                        "Map key UUID requires 16 bytes, got {}",
+                        data.len()
+                    )));
+                }
+                let uuid_bytes: [u8; 16] = data[0..16]
+                    .try_into()
+                    .map_err(|_| Error::corruption("UUID byte conversion failed"))?;
+                Ok(Value::Uuid(uuid_bytes))
+            }
+
+            // Int types: 4 bytes big-endian
+            "org.apache.cassandra.db.marshal.int32type" | "int" => {
+                if data.len() != 4 {
+                    return Err(Error::corruption(format!(
+                        "Map key int requires 4 bytes, got {}",
+                        data.len()
+                    )));
+                }
+                let v = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                Ok(Value::Integer(v))
+            }
+
+            // BigInt types: 8 bytes big-endian
+            "org.apache.cassandra.db.marshal.longtype" | "bigint" | "counter" => {
+                if data.len() != 8 {
+                    return Err(Error::corruption(format!(
+                        "Map key bigint requires 8 bytes, got {}",
+                        data.len()
+                    )));
+                }
+                let v = i64::from_be_bytes([
+                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                ]);
+                Ok(Value::BigInt(v))
+            }
+
+            // Date types: 4 bytes (days since epoch with Integer.MIN_VALUE offset)
+            "org.apache.cassandra.db.marshal.simpledatetype" | "date" => {
+                if data.len() != 4 {
+                    return Err(Error::corruption(format!(
+                        "Map key date requires 4 bytes, got {}",
+                        data.len()
+                    )));
+                }
+                // Cassandra DATE: 4-byte unsigned int with Integer.MIN_VALUE offset
+                let stored = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                let days_since_epoch = stored.wrapping_add(i32::MIN as u32) as i32;
+                Ok(Value::Date(days_since_epoch))
+            }
+
+            // Timestamp types: 8 bytes (milliseconds since epoch)
+            "org.apache.cassandra.db.marshal.timestamptype" | "timestamp" => {
+                if data.len() != 8 {
+                    return Err(Error::corruption(format!(
+                        "Map key timestamp requires 8 bytes, got {}",
+                        data.len()
+                    )));
+                }
+                let millis = i64::from_be_bytes([
+                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                ]);
+                Ok(Value::Timestamp(millis))
+            }
+
+            // Fallback: return as blob
+            _ => {
+                log::debug!(
+                    "Map key type '{}' for column '{}' parsed as blob ({} bytes)",
+                    type_str,
+                    column_name,
+                    data.len()
+                );
+                Ok(Value::Blob(data.to_vec()))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[allow(unused_imports)]
+    use super::super::test_support::helpers::*;
+    #[allow(unused_imports)]
+    use super::*;
+
+    #[test]
+    fn test_extract_collection_element_type() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        // Test list element type extraction
+        assert_eq!(
+            parser
+                .extract_collection_element_type("list<int>", "list")
+                .unwrap(),
+            "int"
+        );
+
+        // Test set element type extraction
+        assert_eq!(
+            parser
+                .extract_collection_element_type("set<text>", "set")
+                .unwrap(),
+            "text"
+        );
+
+        // Test nested type
+        assert_eq!(
+            parser
+                .extract_collection_element_type("list<frozen<map<text,int>>>", "list")
+                .unwrap(),
+            "frozen<map<text,int>>"
+        );
+
+        // Test error cases
+        assert!(parser
+            .extract_collection_element_type("list<>", "list")
+            .is_err());
+        assert!(parser
+            .extract_collection_element_type("set<int>", "list")
+            .is_err());
+        assert!(parser
+            .extract_collection_element_type("int", "list")
+            .is_err());
+    }
+
+    #[test]
+    fn test_extract_map_types() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        // Test simple map
+        let (key, value) = parser.extract_map_types("map<text,int>").unwrap();
+        assert_eq!(key, "text");
+        assert_eq!(value, "int");
+
+        // Test map with spaces
+        let (key, value) = parser.extract_map_types("map<text, int>").unwrap();
+        assert_eq!(key, "text");
+        assert_eq!(value, "int");
+
+        // Test nested value type
+        let (key, value) = parser
+            .extract_map_types("map<text,frozen<set<uuid>>>")
+            .unwrap();
+        assert_eq!(key, "text");
+        assert_eq!(value, "frozen<set<uuid>>");
+
+        // Test nested key and value types
+        let (key, value) = parser
+            .extract_map_types("map<frozen<list<int>>,frozen<set<text>>>")
+            .unwrap();
+        assert_eq!(key, "frozen<list<int>>");
+        assert_eq!(value, "frozen<set<text>>");
+
+        // Test error cases
+        assert!(parser.extract_map_types("map<>").is_err());
+        assert!(parser.extract_map_types("map<text>").is_err());
+        assert!(parser.extract_map_types("int").is_err());
+    }
+
+    /// Regression test for Issue #481 bug 2: `parse_complex_cell_value` was
+    /// calling `parse_raw_type_value(value_data, 0, ...)` which re-consumed the
+    /// already-extracted length prefix, causing the first content byte (e.g.
+    /// `0x2A = 42`) to be misread as the start of another VInt length.
+    ///
+    /// **Without the fix** `parse_raw_type_value` would try to read 42 more
+    /// bytes from a 2-byte slice and return an error, so the test would panic.
+    /// **With the fix** `parse_value_from_raw_bytes` treats the whole slice as
+    /// raw value bytes and returns `Blob([0x2A, 0xBB, 0xCC])`.
+    #[test]
+    fn test_regression_481_complex_cell_value_no_double_length_prefix() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+        let column = crate::schema::Column {
+            name: "my_blob".to_string(),
+            data_type: "blob".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        // Build one list-cell with value bytes [0x2A, 0xBB, 0xCC].
+        //
+        // flags = 0x08 (use_row_timestamp — skip reading a timestamp),
+        // path_len VUInt = 0x00 (empty path, normal for list elements),
+        // value_len VUInt = 0x03,
+        // value = [0x2A, 0xBB, 0xCC].
+        //
+        // The first content byte (0x2A = 42) is deliberately chosen so that
+        // the pre-fix code — which passed the already-extracted slice back into
+        // parse_raw_type_value with offset 0 — would read it as a length prefix
+        // ("read 42 more bytes") and fail.
+        let cell_bytes: Vec<u8> = vec![
+            0x08, // flags: use_row_timestamp (skip ts field), no deletion, no empty-value
+            0x00, // path_len VUInt = 0 (empty path)
+            0x03, // value_len VUInt = 3
+            0x2A, // ← first content byte; pre-fix code misread this as a length
+            0xBB, 0xCC,
+        ];
+
+        let cell = parser
+            .parse_complex_cell_value(&cell_bytes, 0, "blob", &column, 0)
+            .expect("parse_complex_cell_value should succeed");
+
+        assert!(cell.path_bytes.is_empty());
+        assert!(!cell.is_deleted);
+        assert_eq!(cell.next_offset, cell_bytes.len());
+        assert_eq!(
+            cell.value,
+            Some(Value::Blob(vec![0x2A, 0xBB, 0xCC])),
+            "blob value must be the three raw bytes, not a misread length-prefixed parse"
+        );
+    }
+
+    /// Regression test for Issue #481 regression: `list<frozen<udt>>` elements
+    /// were being returned as `Value::Blob` instead of `Value::Udt`.
+    ///
+    /// **Root cause**: `parse_complex_cell_value` called `parse_value_from_raw_bytes`
+    /// with element_type `"frozen<address_type>"`.  The `frozen<>` arm stripped it
+    /// to `"address_type"`, then recursed.  `"address_type"` did not match
+    /// `is_udt_type()` (marshal form only) and fell through to the blob fallback.
+    ///
+    /// **Fix**: the `other =>` fallback in `parse_value_from_raw_bytes` now checks
+    /// `self.udt_registry` for the bare name and delegates to `parse_raw_type_value`
+    /// when found, which correctly reads the per-field i32 length-prefixed UDT data.
+    ///
+    /// This test fails on the pre-fix code path (produces `Value::Blob`) and
+    /// passes after the fix (produces `Value::Udt` with `street` and `city` fields).
+    #[test]
+    fn test_regression_481_list_frozen_udt_parses_as_udt_not_blob() {
+        use crate::schema::{CqlType, UdtRegistry};
+        use crate::types::{UdtFieldDef, UdtTypeDef};
+
+        // Build a UdtRegistry with a minimal "address_type" UDT: street TEXT, city TEXT
+        let mut registry = UdtRegistry::new();
+        registry.register_udt(UdtTypeDef {
+            keyspace: "test_collections".to_string(),
+            name: "address_type".to_string(),
+            fields: vec![
+                UdtFieldDef {
+                    name: "street".to_string(),
+                    field_type: CqlType::Text,
+                    nullable: true,
+                },
+                UdtFieldDef {
+                    name: "city".to_string(),
+                    field_type: CqlType::Text,
+                    nullable: true,
+                },
+            ],
+        });
+
+        let parser = V5CompressedLegacyParser::new(
+            "test_collections".to_string(),
+            "collections_with_udts".to_string(),
+            0,
+            0,
+            None,
+        )
+        .with_udt_registry(registry);
+
+        let column = crate::schema::Column {
+            name: "addresses".to_string(),
+            data_type: "list<frozen<address_type>>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        // Build UDT bytes for {street="Main St", city="Springfield"}:
+        //   Each field: [i32 BE length (4 bytes)][field bytes]
+        //   street: length=7, bytes="Main St"
+        //   city:   length=11, bytes="Springfield"
+        let mut udt_bytes: Vec<u8> = Vec::new();
+        let street = b"Main St";
+        udt_bytes.extend_from_slice(&(street.len() as i32).to_be_bytes());
+        udt_bytes.extend_from_slice(street);
+        let city = b"Springfield";
+        udt_bytes.extend_from_slice(&(city.len() as i32).to_be_bytes());
+        udt_bytes.extend_from_slice(city);
+
+        // Build a complex-cell encoded list with one element.
+        //   [cell_count:VUInt = 1]
+        //   [flags:u8 = 0x08 (use_row_timestamp — skip explicit ts)]
+        //   [path_len:VUInt = 0x00 (empty path — list elements have empty path)]
+        //   [value_len:VUInt = udt_bytes.len()]
+        //   [value: udt_bytes]
+        assert!(
+            udt_bytes.len() < 0x80,
+            "test helper assumes single-byte VUInt"
+        );
+        let mut blob: Vec<u8> = vec![
+            0x01,                  // cell_count = 1
+            0x08,                  // flags: use_row_timestamp, not deleted, value present
+            0x00,                  // path_len VUInt = 0 (list cells have empty path)
+            udt_bytes.len() as u8, // value_len VUInt
+        ];
+        blob.extend_from_slice(&udt_bytes);
+
+        let (value, consumed, _meta) = parser
+            .parse_complex_column_inner(&blob, 0, &column, &column.data_type, false, 0, None)
+            .expect("parse_complex_column_inner must succeed for list<frozen<address_type>>");
+        assert_eq!(consumed, blob.len(), "all bytes must be consumed");
+
+        // The list must contain exactly one element that is a UDT (not a Blob).
+        let elements = match value {
+            Value::List(elems) => elems,
+            other => panic!("Expected Value::List, got {:?}", other),
+        };
+        assert_eq!(elements.len(), 1, "list must have one element");
+
+        // The element must be a Frozen<Udt> or Udt (not Blob).
+        let udt_val = match &elements[0] {
+            Value::Frozen(inner) => match inner.as_ref() {
+                Value::Udt(u) => u.clone(),
+                other => panic!("Expected Frozen<Udt>, got Frozen<{:?}>", other),
+            },
+            Value::Udt(u) => u.clone(),
+            other => panic!(
+                "Expected Value::Udt or Value::Frozen(Udt), got {:?} \
+                 (regression: list<frozen<udt>> must not return Blob)",
+                other
+            ),
+        };
+
+        // Verify field names match the schema definition.
+        let field_names: Vec<&str> = udt_val.fields.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            field_names.contains(&"street"),
+            "UDT must have 'street' field, got: {:?}",
+            field_names
+        );
+        assert!(
+            field_names.contains(&"city"),
+            "UDT must have 'city' field, got: {:?}",
+            field_names
+        );
+
+        // Verify field values decode correctly.
+        let street_field = udt_val.fields.iter().find(|f| f.name == "street").unwrap();
+        assert_eq!(
+            street_field.value,
+            Some(Value::Text("Main St".to_string())),
+            "street field must decode to Text(\"Main St\")"
+        );
+        let city_field = udt_val.fields.iter().find(|f| f.name == "city").unwrap();
+        assert_eq!(
+            city_field.value,
+            Some(Value::Text("Springfield".to_string())),
+            "city field must decode to Text(\"Springfield\")"
+        );
+    }
+
+    /// Issue #1080 / roborev job 1357 (High): a DROPPED *fixed-width* scalar column
+    /// (e.g. `int`) must be consumed with the correct fixed-width framing, NOT as a
+    /// VInt-length-prefixed blob — otherwise it would misalign every trailing column.
+    ///
+    /// The dropped-column synthetic `Column` carries the on-disk header type, which
+    /// the SerializationHeader parser ALWAYS normalizes to the CQL form via
+    /// `convert_marshal_type_to_cql` (`Int32Type` → `"int"`). So a dropped int hits
+    /// the same fixed-width arm as a present int and reads exactly 4 value bytes (no
+    /// length prefix). This test drives the shared `parse_cell_value_schema_order`
+    /// with a hand-crafted int cell and asserts exact 5-byte consumption (1 flags +
+    /// 4 value) with the trailing column's bytes left intact.
+    #[tokio::test]
+    async fn test_regression_1080_dropped_fixed_width_scalar_consumes_exact_width() {
+        use crate::storage::sstable::SSTableReader;
+        use std::sync::Arc;
+
+        // `_reader` is unused by parse_cell_value_schema_order, but we still need a
+        // real instance; open the core test_basic/simple_table fixture. The helper
+        // handles the skip-vs-strict policy (issue #1094): a clean skip when the
+        // data is unavailable, or a hard failure under CQLITE_REQUIRE_FIXTURES=1.
+        let data_file = match core_simple_table_data_file() {
+            Some(df) => df,
+            None => return,
+        };
+        let config = crate::Config::default();
+        let platform = Arc::new(
+            crate::platform::Platform::new(&config)
+                .await
+                .expect("platform"),
+        );
+        let reader = SSTableReader::open(&data_file, &config, platform)
+            .await
+            .expect("core fixture test_basic/simple_table must open (datasets root is set)");
+
+        let parser = V5CompressedLegacyParser::new(
+            "test_basic".to_string(),
+            "simple_table".to_string(),
+            0,
+            0,
+            None,
+        );
+        // A DROPPED int column carries the CQL-normalized header type "int".
+        let column = crate::schema::Column {
+            name: "__dropped_col_0".to_string(),
+            data_type: "int".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        // Cell: [flags=0x08 USE_ROW_TIMESTAMP → live, has-value, no own ts/ttl]
+        //       [i32 BE = 0x01020304]. Then a trailing sentinel for the FOLLOWING
+        //       column to prove no misalignment.
+        let mut buf: Vec<u8> = vec![0x08];
+        buf.extend_from_slice(&0x0102_0304_i32.to_be_bytes());
+        let value_end = buf.len(); // 1 flags + 4 value = 5
+        let trailing_marker: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
+        buf.extend_from_slice(trailing_marker);
+
+        let (value, _ts, _exp, new_offset) = parser
+            .parse_cell_value_schema_order(&buf, 0, &column, Some("int"), &reader)
+            .expect("dropped int cell must decode with fixed-width framing");
+        assert_eq!(value, Value::Integer(0x0102_0304));
+        assert_eq!(
+            new_offset, value_end,
+            "int consumes exactly flags(1)+4 fixed bytes — NO spurious VInt length \
+             (refutes roborev job 1357: dropped fixed-width scalar misalignment)"
+        );
+        assert_eq!(
+            &buf[new_offset..],
+            trailing_marker,
+            "trailing column bytes must be intact (no misalignment after a dropped scalar)"
+        );
+    }
+
+    /// Issue #1080 / roborev job 1363 (Medium): when the schema is DERIVED FROM the
+    /// on-disk header (not supplied as a CQL short form), a frozen UDT column's
+    /// `data_type` is the marshal string `org.apache.cassandra.db.marshal.FrozenType(
+    /// ...UserType...)`, which does NOT start with CQL `frozen<`. It must still
+    /// decode STRUCTURALLY (via the marshal-form dispatch arm), not blob. Drives the
+    /// full `parse_cell_value_schema_order` to prove the dispatch routes correctly
+    /// and a trailing column stays byte-aligned.
+    #[tokio::test]
+    async fn test_regression_1080_marshal_form_frozen_udt_decodes_structurally() {
+        use crate::storage::sstable::SSTableReader;
+        use std::sync::Arc;
+
+        // Skip-vs-strict fixture policy is centralized in core_simple_table_data_file
+        // (issue #1094): clean skip when data is unavailable, hard failure under
+        // CQLITE_REQUIRE_FIXTURES=1.
+        let data_file = match core_simple_table_data_file() {
+            Some(df) => df,
+            None => return,
+        };
+        let config = crate::Config::default();
+        let platform = Arc::new(
+            crate::platform::Platform::new(&config)
+                .await
+                .expect("platform"),
+        );
+        let reader = SSTableReader::open(&data_file, &config, platform)
+            .await
+            .expect("core fixture test_basic/simple_table must open (datasets root is set)");
+
+        let parser = V5CompressedLegacyParser::new(
+            "test_types".to_string(),
+            "cx_frozen_udt".to_string(),
+            0,
+            0,
+            None,
+        );
+        let hex = |s: &str| -> String { hex::encode(s.as_bytes()) };
+        let q = "org.apache.cassandra.db.marshal";
+        // Header-derived schema: data_type IS the fully-qualified marshal string.
+        let marshal_type = format!(
+            "{q}.FrozenType({q}.UserType(test_types,{},{}:{q}.UTF8Type,{}:{q}.Int32Type))",
+            hex("person_type"),
+            hex("name"),
+            hex("age"),
+        );
+        let column = crate::schema::Column {
+            name: "p".to_string(),
+            data_type: marshal_type,
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        // Cell: [flags=0x08][VInt blob_len][udt_blob]; then a trailing sentinel.
+        let mut udt_blob: Vec<u8> = Vec::new();
+        let name = b"Ada";
+        udt_blob.extend_from_slice(&(name.len() as i32).to_be_bytes());
+        udt_blob.extend_from_slice(name);
+        udt_blob.extend_from_slice(&4i32.to_be_bytes());
+        udt_blob.extend_from_slice(&36i32.to_be_bytes());
+        assert!(udt_blob.len() < 0x80);
+        let mut buf: Vec<u8> = vec![0x08, udt_blob.len() as u8];
+        buf.extend_from_slice(&udt_blob);
+        let trailing_marker: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
+        let trailing_offset = buf.len();
+        buf.extend_from_slice(trailing_marker);
+
+        let (value, _ts, _exp, new_offset) = parser
+            .parse_cell_value_schema_order(&buf, 0, &column, None, &reader)
+            .expect("marshal-form frozen UDT must decode");
+        // Structured frozen UDT, NOT a blob.
+        let inner = match &value {
+            Value::Frozen(b) => b.as_ref(),
+            other => other,
+        };
+        match inner {
+            Value::Udt(u) => {
+                assert_eq!(u.type_name, "person_type");
+                assert_eq!(u.fields.len(), 2);
+            }
+            other => panic!(
+                "header-derived marshal-form frozen UDT must decode structurally, got {other:?}"
+            ),
+        }
+        assert_eq!(
+            new_offset, trailing_offset,
+            "marshal-form frozen UDT must consume exactly its cell — trailing column stays aligned"
+        );
+        assert_eq!(&buf[new_offset..], trailing_marker);
+    }
+
+    /// Regression test for Issue #481 bug 3: for `set<T>` complex columns, each
+    /// set element is stored in the cell PATH (with `HAS_EMPTY_VALUE` = 0x04
+    /// set in cell flags), not the cell value.
+    ///
+    /// **Without the fix** `parse_complex_column` (the set branch) only checked
+    /// `if let Some(val) = cell_value { elements.push(val) }` and silently
+    /// discarded the path bytes, so the set appeared empty.
+    /// **With the fix** the `else if !path_bytes.is_empty()` branch decodes the
+    /// path bytes and adds them to the set.
+    #[test]
+    fn test_regression_481_set_elements_from_cell_path() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+        let column = crate::schema::Column {
+            name: "my_set".to_string(),
+            data_type: "set<text>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        // Build a synthetic `set<text>` with two elements: "hello" and "world".
+        //
+        // Outer format: [cell_count:VUInt] [cell1] [cell2]
+        //   cell_count = 2 → VUInt(2) = 0x02
+        //
+        // Each cell has HAS_EMPTY_VALUE (0x04) set, so the element lives in the
+        // path field.  Timestamp is VInt(0) = 0x00 (ZigZag single byte).
+        let hello = b"hello";
+        let world = b"world";
+        let mut blob = vec![0x02u8]; // cell_count = 2
+        blob.extend(build_set_cell_bytes(hello));
+        blob.extend(build_set_cell_bytes(world));
+
+        let (value, consumed, _meta) = parser
+            .parse_complex_column_inner(&blob, 0, &column, &column.data_type, false, 0, None)
+            .expect("parse_complex_column_inner should succeed");
+
+        assert_eq!(consumed, blob.len());
+        assert_eq!(
+            value,
+            Value::Set(vec![
+                Value::Text("hello".to_string()),
+                Value::Text("world".to_string()),
+            ]),
+            "set elements stored in cell path must be decoded and returned"
+        );
+    }
+
+    /// Regression test for Issue #493: element-level tombstones in a `set<T>`
+    /// must NOT surface as live members.
+    ///
+    /// In the Cassandra 5.0 complex-cell format a live set element and a
+    /// tombstoned element both produce `cell.value == None` with non-empty path
+    /// bytes (live elements carry HAS_EMPTY_VALUE 0x04 and store the element in
+    /// the path). The ONLY authoritative signal distinguishing them is the
+    /// IS_DELETED (0x01) cell flag, which `parse_complex_cell_value` now surfaces
+    /// via `ComplexCellParse::is_deleted`.
+    ///
+    /// **Without the fix** the set branch only checked `cell.value` / `path_bytes`
+    /// and emitted BOTH "live" and "dead" as members, so the result was
+    /// `Set(["live", "dead"])`.
+    /// **With the fix** the tombstoned element is skipped and the result is
+    /// `Set(["live"])`.
+    #[test]
+    fn test_regression_493_set_element_tombstone_skipped() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+        let column = crate::schema::Column {
+            name: "my_set".to_string(),
+            data_type: "set<text>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        // Build a synthetic `set<text>` with two cells:
+        //   cell 0: live element "live"  (HAS_EMPTY_VALUE, element in path)
+        //   cell 1: tombstoned element "dead" (IS_DELETED, element in path)
+        //
+        // Outer format: [cell_count:VUInt] [cell0] [cell1]
+        let live = b"live";
+        let dead = b"dead";
+        let mut blob = vec![0x02u8]; // cell_count = 2
+        blob.extend(build_set_cell_bytes(live));
+        blob.extend(build_set_tombstone_cell_bytes(dead));
+
+        let (value, consumed, meta) = parser
+            .parse_complex_column_inner(&blob, 0, &column, &column.data_type, false, 0, None)
+            .expect("parse_complex_column_inner should succeed");
+
+        assert_eq!(consumed, blob.len(), "parser must consume the entire blob");
+        assert_eq!(
+            value,
+            Value::Set(vec![Value::Text("live".to_string())]),
+            "tombstoned set element must be skipped; only the live element survives"
+        );
+        // DS4 (Issue #700): element tombstone must be counted in the scan summary.
+        assert_eq!(
+            meta.element_tombstone_count, 1,
+            "the tombstoned set element must increment element_tombstone_count"
+        );
+        // Non-overwrite generation (no has_complex_deletion=false → no collection tombstone).
+        assert!(
+            !meta.has_collection_tombstone,
+            "no collection tombstone when has_complex_deletion=false"
+        );
+    }
+
+    // =========================================================================
+    // DS4 (Issue #700) / roborev Finding 3 — byte-level collection tombstone test
+    //
+    // The `has_collection_tombstone` decode path
+    //   `absolute_mfda = min_timestamp.wrapping_add(mfda_delta)`
+    //   `has_collection_tombstone = absolute_mfda != i64::MIN`
+    // was previously exercised only by e2e tests that cover the append (no-tombstone)
+    // path.  This unit test drives `parse_complex_column_inner` with
+    // `has_complex_deletion = true` and a non-sentinel `markedForDeleteAt` value,
+    // confirming that `ComplexColumnMeta.has_collection_tombstone == true` is set
+    // purely from the byte-level decode without needing a full SSTableReader.
+    // =========================================================================
+
+    /// Byte-level test: `parse_complex_column_inner` with `has_complex_deletion = true`
+    /// and a real `markedForDeleteAt` timestamp (not the i64::MIN sentinel) must set
+    /// `ComplexColumnMeta.has_collection_tombstone = true`.
+    ///
+    /// Wire layout (min_timestamp = 0; complex-deletion deltas are UNSIGNED
+    /// VInts per the writer, roborev #863):
+    ///   [mfda_delta: VUInt(2) = 0x02]  → absolute_mfda = 0 + 2 = 2 ≠ i64::MIN
+    ///   [localDeletionTime: VUInt(0) = 0x00]
+    ///   [cell_count: VUInt(0) = 0x00]  ← zero cells for simplicity
+    ///
+    /// The parser uses `min_timestamp = 0` (default from `V5CompressedLegacyParser::new`).
+    #[test]
+    fn ds4_finding3_has_complex_deletion_sets_collection_tombstone() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+        let column = crate::schema::Column {
+            name: "tags".to_string(),
+            data_type: "set<text>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        // Wire bytes (unsigned-VInt complex-deletion deltas, roborev #863):
+        //   0x02 = VUInt(2), mfda_delta=2; absolute_mfda = 0+2 = 2 ≠ i64::MIN
+        //   0x00 = VUInt(0), localDeletionTime delta = 0
+        //   0x00 = VUInt(0), cell_count = 0 (empty collection after overwrite)
+        let blob: Vec<u8> = vec![0x02, 0x00, 0x00];
+
+        let (value, consumed, meta) = parser
+            .parse_complex_column_inner(
+                &blob,
+                0,
+                &column,
+                &column.data_type,
+                true, /* has_complex_deletion */
+                0,
+                None,
+            )
+            .expect("parse_complex_column_inner must succeed for collection tombstone");
+
+        assert_eq!(consumed, blob.len(), "all bytes must be consumed");
+        // A SET overwrite produces an empty set (collection tombstone + 0 new elements).
+        assert_eq!(
+            value,
+            Value::Set(vec![]),
+            "overwritten collection with 0 elements must be an empty Set"
+        );
+        // THE KEY ASSERTION: has_collection_tombstone must be true.
+        assert!(
+            meta.has_collection_tombstone,
+            "has_complex_deletion=true with absolute_mfda=1 (!=i64::MIN) must set \
+             has_collection_tombstone=true (roborev Finding 3)"
+        );
+        // No element tombstones in the 0-cell body.
+        assert_eq!(
+            meta.element_tombstone_count, 0,
+            "empty post-overwrite collection must have no element tombstones"
+        );
+        // No element writetimes when there are no cells.
+        assert_eq!(
+            meta.max_element_writetime, 0,
+            "empty collection must have max_element_writetime=0"
+        );
+    }
+
+    /// Byte-level test: the sentinel logic for `has_collection_tombstone` is
+    /// `absolute_mfda != i64::MIN`.  When `absolute_mfda == i64::MIN` (Cassandra's
+    /// "no tombstone" sentinel), `has_collection_tombstone` must be `false`; when it
+    /// is any other value, it must be `true`.
+    ///
+    /// We verify the predicate directly rather than via byte parsing (the 9-byte
+    /// VInt encoding of i64::MIN is complex and well-covered by the VInt unit tests).
+    #[test]
+    fn ds4_finding3_min_sentinel_means_no_collection_tombstone() {
+        // The sentinel logic is: absolute_mfda != i64::MIN → has_collection_tombstone.
+        let absolute_mfda_sentinel: i64 = i64::MIN;
+        let absolute_mfda_live: i64 = 1;
+
+        // Sentinel → no tombstone.
+        assert!(
+            absolute_mfda_sentinel == i64::MIN,
+            "i64::MIN sentinel must produce has_collection_tombstone=false"
+        );
+        // Real timestamp → tombstone.
+        assert!(
+            absolute_mfda_live != i64::MIN,
+            "non-sentinel absolute_mfda must produce has_collection_tombstone=true"
+        );
+    }
+
+    /// Regression (roborev #863, Finding 1): complex-deletion `markedForDeleteAt`
+    /// and `localDeletionTime` deltas, plus an explicit per-element complex-cell
+    /// timestamp, are UNSIGNED VInts (writer: `encode_unsigned`). The earlier
+    /// reader used `parse_vint` (ZigZag), which halves any delta whose top data
+    /// bit is set. This test seeds NON-ZERO deltas (chosen so ZigZag vs unsigned
+    /// disagree) and proves the reader now round-trips the writer encoding: the
+    /// surfaced complex deletion equals the seeded `(mfda, ldt)`, and the
+    /// surfaced per-element timestamp equals the seeded value.
+    #[test]
+    fn finding1_complex_deletion_and_element_ts_are_unsigned_vint_roundtrip() {
+        let min_timestamp: i64 = 1_000_000;
+        let min_local_deletion_time: i32 = 1_700_000_000;
+        let parser = V5CompressedLegacyParser::new(
+            "ks".to_string(),
+            "tbl".to_string(),
+            min_timestamp,
+            min_local_deletion_time as i64,
+            None,
+        );
+        let column = crate::schema::Column {
+            name: "tags".to_string(),
+            data_type: "set<text>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        // Seed deltas large enough that unsigned VInt and ZigZag VInt disagree
+        // (the high data bit is set, so ZigZag would halve them).
+        let mfda_delta: u64 = 1000; // unsigned [0x83,0xE8]; ZigZag would read 500
+        let ldt_delta: u64 = 1234;
+        let element_ts_delta: u64 = 4321;
+
+        let abs_mfda = min_timestamp + mfda_delta as i64;
+        let abs_ldt = min_local_deletion_time + ldt_delta as i32;
+        let abs_element_ts = min_timestamp + element_ts_delta as i64;
+
+        // Build the on-disk complex column with one live SET element:
+        //   complex deletion: mfda_delta, ldt_delta            (UNSIGNED)
+        //   cell_count: 1
+        //   element: flags=HAS_EMPTY_VALUE(0x04) + explicit ts (UNSIGNED),
+        //            path_len=1, path=[0x41]
+        let mut blob: Vec<u8> = Vec::new();
+        encode_unsigned(mfda_delta, &mut blob);
+        encode_unsigned(ldt_delta, &mut blob);
+        encode_unsigned(1, &mut blob); // cell_count
+        blob.push(0x04); // CELL_HAS_EMPTY_VALUE, no USE_ROW_TIMESTAMP
+        encode_unsigned(element_ts_delta, &mut blob); // explicit element ts (UNSIGNED)
+        encode_unsigned(1, &mut blob); // path_len
+        blob.push(0x41); // path bytes ("A")
+
+        let mut elements: Vec<crate::storage::sstable::reader::compaction_row::ComplexElement> =
+            Vec::new();
+        let (_value, consumed, meta) = parser
+            .parse_complex_column_inner(
+                &blob,
+                0,
+                &column,
+                &column.data_type,
+                true, // has_complex_deletion
+                min_timestamp,
+                Some(&mut elements),
+            )
+            .expect("parse must succeed");
+
+        assert_eq!(consumed, blob.len(), "all bytes consumed");
+        assert!(
+            meta.has_collection_tombstone,
+            "non-sentinel mfda must set has_collection_tombstone"
+        );
+
+        // Per-element timestamp must decode via UNSIGNED VInt (not halved).
+        assert_eq!(elements.len(), 1, "one live element surfaced");
+        assert_eq!(
+            elements[0].timestamp,
+            abs_element_ts,
+            "per-element timestamp must round-trip the UNSIGNED writer encoding \
+             (ZigZag decode would yield {})",
+            min_timestamp + (element_ts_delta as i64 / 2)
+        );
+
+        // The complex deletion (mfda, ldt) is surfaced via ComplexColumnMeta and
+        // must decode via UNSIGNED VInt. ZigZag would yield mfda_delta=500,
+        // ldt_delta=617 — both wrong.
+        assert_eq!(
+            meta.complex_deletion,
+            Some((abs_mfda, abs_ldt)),
+            "complex deletion (mfda, ldt) must round-trip the UNSIGNED writer \
+             encoding; ZigZag decode would yield ({}, {})",
+            min_timestamp + 500,
+            min_local_deletion_time + 617
+        );
+    }
+}
