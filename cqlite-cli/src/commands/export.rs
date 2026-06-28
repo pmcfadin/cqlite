@@ -144,7 +144,7 @@ pub async fn export_data(
     // Resolve the progress total from the CLI `--limit` (spec Option A / R5):
     // a determinate bar + ETA only when the user supplied an explicit limit,
     // otherwise the indeterminate spinner. Never infer a total from data shape.
-    let progress_total = resolve_progress_total(limit).total;
+    let progress_total = resolve_progress_total(limit);
     let pb = make_progress(show_progress, progress_total);
 
     // Chunk size for collecting rows before writing
@@ -486,14 +486,26 @@ enum BarKind {
     Spinner,
 }
 
-/// Choose the indicator kind from the (possibly unknown) total.
+/// Choose the indicator kind from the resolved progress total (spec R5).
 ///
-/// `Some(_)` -> [`BarKind::Determinate`]; `None` -> [`BarKind::Spinner`]. Pure
-/// and terminal-free so the decision is directly assertable in tests.
-fn progress_bar_kind(total: Option<u64>) -> BarKind {
-    match total {
-        Some(_) => BarKind::Determinate,
-        None => BarKind::Spinner,
+/// ETA-eligibility is the single signal that drives the bar: a determinate bar
+/// (percent + ETA) is shown iff the total is ETA-eligible. This consumes
+/// [`ProgressTotal::eta_eligible`] so the field is load-bearing rather than a
+/// second, drift-prone derivation from `total`. Pure and terminal-free so the
+/// decision is directly assertable in tests.
+fn progress_bar_kind(progress: ProgressTotal) -> BarKind {
+    // Internal-consistency invariant from `resolve_progress_total`: a total is
+    // ETA-eligible exactly when it is known. Assert it so the two facets cannot
+    // silently disagree.
+    debug_assert_eq!(
+        progress.eta_eligible,
+        progress.total.is_some(),
+        "ETA-eligibility must track total-knownness"
+    );
+    if progress.eta_eligible {
+        BarKind::Determinate
+    } else {
+        BarKind::Spinner
     }
 }
 
@@ -517,8 +529,8 @@ fn progress_template(kind: BarKind) -> &'static str {
 /// Build the export progress bar.
 ///
 /// - `!show` -> a hidden bar (no output; used when `--quiet` or piped/non-TTY).
-/// - `Some(n)` -> a determinate bar with percent, `pos/len`, and a live ETA.
-/// - `None` -> the indeterminate spinner with a live row count (no ETA).
+/// - ETA-eligible total -> a determinate bar with percent, `pos/len`, and a live ETA.
+/// - not ETA-eligible -> the indeterminate spinner with a live row count (no ETA).
 ///
 /// The style/template decision is delegated to [`progress_bar_kind`] +
 /// [`progress_template`] (terminal-free, unit-tested) so there is exactly one
@@ -528,13 +540,13 @@ fn progress_template(kind: BarKind) -> &'static str {
 /// `expect()`: on a template error we fall back to indicatif's default style so
 /// the export still runs (the bar is cosmetic, never load-bearing).
 #[cfg(feature = "state_machine")]
-fn make_progress(show: bool, total: Option<u64>) -> ProgressBar {
+fn make_progress(show: bool, progress: ProgressTotal) -> ProgressBar {
     if !show {
         return ProgressBar::hidden();
     }
 
-    let template = progress_template(progress_bar_kind(total));
-    match total {
+    let template = progress_template(progress_bar_kind(progress));
+    match progress.total {
         Some(n) => {
             let pb = ProgressBar::new(n);
             match ProgressStyle::default_bar().template(template) {
@@ -600,12 +612,20 @@ mod tests {
         );
     }
 
-    // Spec R1/R2: the determinate-vs-spinner choice is a pure, terminal-free
-    // function of the (possibly unknown) total.
+    // Spec R1/R2/R5: the determinate-vs-spinner choice is driven by the
+    // resolved total's ETA-eligibility (a pure, terminal-free function), so the
+    // `eta_eligible` flag is the load-bearing signal — not a second derivation
+    // from `total`.
     #[test]
     fn total_selects_bar_kind() {
-        assert_eq!(progress_bar_kind(Some(100)), BarKind::Determinate);
-        assert_eq!(progress_bar_kind(None), BarKind::Spinner);
+        assert_eq!(
+            progress_bar_kind(resolve_progress_total(Some(100))),
+            BarKind::Determinate
+        );
+        assert_eq!(
+            progress_bar_kind(resolve_progress_total(None)),
+            BarKind::Spinner
+        );
     }
 
     // Spec R1 (determinate bar promises ETA + percent, observable without a
@@ -613,7 +633,7 @@ mod tests {
     // `{bar}`/`{pos}`/`{len}` evidence of a real bar.
     #[test]
     fn determinate_template_contains_eta_and_percent() {
-        let t = progress_template(progress_bar_kind(Some(42)));
+        let t = progress_template(progress_bar_kind(resolve_progress_total(Some(42))));
         assert!(t.contains("{eta}"), "must show an ETA: {t:?}");
         assert!(t.contains("{percent}"), "must show a percent: {t:?}");
         assert!(t.contains("{bar"), "must render a bar: {t:?}");
@@ -628,7 +648,7 @@ mod tests {
     // never `{eta}` or `{percent}`.
     #[test]
     fn spinner_template_omits_eta_and_percent() {
-        let t = progress_template(progress_bar_kind(None));
+        let t = progress_template(progress_bar_kind(resolve_progress_total(None)));
         assert!(t.contains("{spinner"), "must render a spinner: {t:?}");
         assert!(t.contains("{pos}"), "must show a row count: {t:?}");
         assert!(!t.contains("{eta}"), "must NOT show an ETA: {t:?}");
