@@ -11,6 +11,41 @@ compacted, filtered data back as Arrow.
 - Build & test: `./gradlew test`
 - Assemble the Trino plugin dir: `./gradlew installPlugin` → `build/plugin/cqlite_flight`
 
+## Maven Central / published artifact
+
+The connector is published to Maven Central on every `v*` release tag:
+
+```
+in.mcfad:cqlite-trino:<version>
+```
+
+A Trino plugin is **not a single jar** — Trino loads each plugin from its own
+isolated classloader directory, so the connector jar must sit alongside all of
+its runtime dependencies. The published Maven artifact is just the connector jar;
+to install it you assemble that *directory of jars* (exactly what `./gradlew
+installPlugin` produces under `build/plugin/cqlite_flight/`), then drop the
+directory into Trino's plugin path (`/usr/lib/trino/plugin/cqlite_flight`).
+
+Assemble the plugin directory from the published artifact with a throwaway
+Gradle/Maven project that depends on the coordinates above and copies the
+resolved runtime classpath into one directory, e.g.:
+
+```kotlin
+// build.gradle.kts
+plugins { java }
+repositories { mavenCentral() }
+dependencies { implementation("in.mcfad:cqlite-trino:<version>") }
+tasks.register<Sync>("assemblePlugin") {
+    into(layout.buildDirectory.dir("plugin/cqlite_flight"))
+    from(configurations.runtimeClasspath)
+}
+```
+
+`./gradlew assemblePlugin` yields `build/plugin/cqlite_flight/` (connector jar +
+flight-core + jackson + transitive deps). Note `trino-spi` is intentionally
+**not** a runtime dependency — Trino supplies it from the engine classpath.
+Building from this repo (`./gradlew installPlugin`) produces the same directory.
+
 ## Status
 
 | Piece | State |
