@@ -156,6 +156,16 @@ while IFS= read -r line; do
   esac
 done < <(git_root worktree list --porcelain)
 
+# Stale entry: `git worktree list` records the path but the directory is gone
+# (removed out-of-band). Don't fall through to `git worktree remove` (which would
+# abort under set -e with git's raw 128). Mark it for a prune in PHASE 2 instead.
+stale_wt=0
+if [ -n "$target_wt" ] && [ ! -d "$target_wt" ]; then
+  note "recorded worktree '$target_wt' is missing on disk — will prune the stale entry, not remove"
+  stale_wt=1
+  target_wt=""
+fi
+
 # Remote state for the merged branch — also FAIL CLOSED on a remote query error,
 # else a blip would read as "branch already deleted, nothing to do".
 if ! merged_raw="$(git_root ls-remote --heads "$REMOTE" "$MERGED_BRANCH" 2>/dev/null)"; then
@@ -223,9 +233,17 @@ if [ -n "$target_wt" ]; then
       echo "$prog: REFUSED — worktree '$target_wt' has $ahead unpushed commit(s) vs $cmp_sha. Not removing." >&2
       exit 3
     fi
-  else
-    ahead_main="$(git -C "$target_wt" rev-list --count "${MAIN_REF}..HEAD" 2>/dev/null || echo 0)"
-    if [ "${ahead_main:-0}" -gt 0 ] && [ "$CONFIRM_UNMERGED" -eq 0 ]; then
+  elif [ "$CONFIRM_UNMERGED" -eq 0 ]; then
+    # No resolvable pushed ref. Fall back to "is HEAD ahead of main?" — but FAIL
+    # CLOSED if even that comparison can't be made (MAIN_REF unresolvable: not
+    # fetched, renamed default, --main-ref typo). `|| echo 0` here would be a
+    # fail-open data-loss hole, so capture the rc explicitly.
+    if ! ahead_main="$(git -C "$target_wt" rev-list --count "${MAIN_REF}..HEAD" 2>/dev/null)"; then
+      echo "$prog: REFUSED — cannot compare worktree '$target_wt' against $MAIN_REF (unresolvable)." >&2
+      echo "  Cannot confirm the work was pushed. Not removing." >&2
+      exit 3
+    fi
+    if [ "${ahead_main:-0}" -gt 0 ]; then
       echo "$prog: REFUSED — worktree '$target_wt' has no locally-resolvable pushed ref (no upstream;" >&2
       echo "  origin tip absent or unfetched) and HEAD is $ahead_main commit(s) ahead of $MAIN_REF —" >&2
       echo "  cannot confirm the work was pushed. Pass --confirm-unmerged only if the PR is MERGED. Not removing." >&2
@@ -252,6 +270,9 @@ fi
 if [ -n "$target_wt" ]; then
   run git_root worktree remove "$target_wt"
   note "removed worktree $target_wt"
+elif [ "$stale_wt" -eq 1 ]; then
+  run git_root worktree prune
+  note "pruned stale worktree entry for '$MERGED_BRANCH'"
 else
   note "no worktree checked out on '$MERGED_BRANCH' — skipping worktree removal"
 fi

@@ -283,6 +283,37 @@ remote_branches "$WORK" | grep -qx "issue-1214-feature" && fail "origin branch n
 g -C "$WORK" show-ref --verify --quiet refs/heads/issue-1214-feature && fail "local branch not deleted" || ok "local branch deleted (-d)"
 rm -rf "$T"
 
+# ===========================================================================
+echo "TEST 17: unresolvable --main-ref in indeterminate path → fail closed (exit 3)"
+# ===========================================================================
+# No upstream, no origin branch → indeterminate path falls back to MAIN_REF; if
+# that is unresolvable we must refuse, not silently treat as '0 ahead' and delete.
+T=$(mktemp -d); build_sandbox "$T"; WORK="$T/work"
+( cd "$WORK" || exit 1
+  g worktree add -q -b issue-1215-local "$T/wt" main
+  ( cd "$T/wt" || exit 1; echo x > f.txt; g add f.txt; g commit -qm "local only" ) )
+rc=0
+bash "$CLEANUP" --issue 1215 --merged-branch issue-1215-local --main-ref refs/heads/does-not-exist \
+  --repo-root "$WORK" --worktrees-dir "$T" >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 3 ] && ok "exit 3 — unresolvable --main-ref fails closed" || fail "expected exit 3, got $rc"
+[ -d "$T/wt" ] && ok "worktree survives" || fail "worktree removed on unresolvable main-ref"
+rm -rf "$T"
+
+# ===========================================================================
+echo "TEST 18: stale worktree dir (removed out-of-band) → prune, not a 128 abort"
+# ===========================================================================
+T=$(mktemp -d); build_sandbox "$T"; WORK="$T/work"
+add_branch_worktree "$WORK" "issue-1216-feature" "$T/wt" ""
+rm -rf "$T/wt"   # delete the worktree dir out-of-band; git's admin entry lingers
+rc=0
+bash "$CLEANUP" --issue 1216 --merged-branch issue-1216-feature --confirm-unmerged \
+  --repo-root "$WORK" --worktrees-dir "$T" >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 0 ] && ok "exit 0 — stale entry handled (no set -e 128 abort)" || fail "expected exit 0, got $rc"
+remote_branches "$WORK" | grep -qx "issue-1216-feature" && fail "origin branch not deleted" || ok "origin branch deleted"
+n=$(g -C "$WORK" worktree list --porcelain | grep -c '^worktree ')
+[ "$n" -eq 1 ] && ok "stale worktree entry pruned (only root remains)" || fail "stale entry remains ($n worktrees)"
+rm -rf "$T"
+
 echo ""
 echo "================  finalize-cleanup: $PASS passed, $FAIL failed  ================"
 [ "$FAIL" -eq 0 ]
