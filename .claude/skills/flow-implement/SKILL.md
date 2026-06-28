@@ -57,8 +57,12 @@ OpenSpec change `<slug>` (design-driven only).
    ```
 3. **Test data.** Worktrees lack the gitignored `Data.db` binaries — run the gate and tests with
    `CQLITE_DATASETS_ROOT` pointed at the MAIN repo's `test-data/datasets` (or `fetch-datasets.sh`).
-4. **Implement (TDD).** Spawn `sstable-developer` (explicit model, e.g. opus) to implement the tasks
-   test-first in the worktree. For parallelizable subtasks, spawn several; sequence dependents.
+4. **Implement (TDD) — via subagents, NOT inline.** You orchestrate; you do not read source, write code,
+   or run the gate in your own context (that's what fills it up). Spawn `sstable-developer` (explicit
+   `model: opus` — pinned models are inaccessible) to implement test-first in the worktree AND run
+   `scripts/agent-gate.sh`, returning only a short summary + the AGENT-GATE SUMMARY block. For
+   parallelizable subtasks spawn several; sequence dependents. Use `test-validator` for gate/failure
+   triage and `Explore` for code search — keep raw file contents out of your context.
 5. **Gate (correctness).** Run `scripts/agent-gate.sh` in the worktree; it must be PASS. Paste the
    AGENT-GATE SUMMARY block. A known-flaky lane (e.g. `test_flush_throughput`, py3.9) that passes on
    re-run is not a failure — note it.

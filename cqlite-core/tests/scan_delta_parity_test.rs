@@ -1359,6 +1359,16 @@ async fn test_scan_delta_parity_all_test_deltas() {
         total_errors.len(),
         total_errors.join("\n")
     );
+
+    // We found at least one fixture with a Data.db above (else we returned).
+    // If every present fixture matched ZERO assertions, the parse path is
+    // broken and this would be a spurious green — fail loudly (issue #995, AC4).
+    assert!(
+        total_ok > 0,
+        "scan_delta parity ran on {} PRESENT fixture(s) but matched ZERO \
+         assertions — present-but-empty fixtures must fail, not pass silently.",
+        fixtures.len()
+    );
 }
 
 // ============================================================================
@@ -1416,6 +1426,20 @@ macro_rules! delta_fixture_test {
                 $table,
                 result.errors.len(),
                 result.errors.join("\n")
+            );
+
+            // The Data.db is PRESENT (we passed the SKIP gate above): a
+            // present-but-empty fixture that produced ZERO matched assertions is
+            // a FAILURE, not a silent green (issue #995, AC4). Every per-shape
+            // delta fixture is built by generate-deltas.sh to carry deletion/cell
+            // facts, so a zero-assertion run means the fixture or the parse path
+            // is broken — surface it loudly.
+            assert!(
+                result.total_ok() > 0,
+                "[{}] parity ran on a PRESENT Data.db but matched ZERO assertions — \
+                 present-but-empty fixtures must fail, not pass silently. \
+                 Regenerate with: bash test-data/scripts/generate-deltas.sh",
+                $table
             );
         }
     };
