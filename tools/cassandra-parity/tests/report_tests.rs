@@ -79,3 +79,32 @@ fn wide_partition_corpus_is_a_planned_gap() {
         "wide_partition_corpus must be marked planned in the gaps section"
     );
 }
+
+#[test]
+fn planned_scenario_in_evidence_group_is_marked_no_evidence_yet() {
+    let r = rendered();
+    let header = "## Canonical-semantic scenarios";
+    let start = r.find(header).expect("canonical-semantic section present");
+    let section = &r[start..];
+    // The planned wide_partition_corpus is grouped by its declared evidence type
+    // but must be flagged so it does not read as proven parity.
+    let line = section
+        .lines()
+        .find(|l| l.contains("cass.delta_scan.wide_partition_corpus"))
+        .expect("wide_partition_corpus listed in canonical-semantic section");
+    assert!(
+        line.contains("planned — no evidence yet"),
+        "planned scenario must be marked, got: {line}"
+    );
+    // The byte-for-byte follow-up note is NOT emitted for a planned scenario
+    // (it has no evidence to qualify).
+    let next = section
+        .lines()
+        .skip_while(|l| !l.contains("cass.delta_scan.wide_partition_corpus"))
+        .nth(1)
+        .unwrap_or("");
+    assert!(
+        !next.contains("Byte-for-byte: not yet"),
+        "planned scenario should not carry the byte-for-byte follow-up note"
+    );
+}

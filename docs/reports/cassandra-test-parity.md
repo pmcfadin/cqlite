@@ -223,8 +223,8 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.compression_info.lz4.real_fixture_chunks.strict` — LZ4 real-fixture CompressionInfo.db + chunk parity
 - `cass.compression_info.snappy.real_fixture_chunks` — SnappyCompressor real-fixture chunk + CRC parity
 - `cass.compression_info.snappy.real_fixture_chunks.strict` — Snappy real-fixture CompressionInfo.db + chunk parity
-- `cass.corruption.bti_partitions_footer_bit_flip` — BTI Partitions.db footer bit flip is detected
-- `cass.corruption.bti_rows_truncation` — BTI Rows.db truncation is detected
+- `cass.corruption.bti_partitions_footer_bit_flip` — BTI Partitions.db footer bit flip is detected _(planned — no evidence yet)_
+- `cass.corruption.bti_rows_truncation` — BTI Rows.db truncation is detected _(planned — no evidence yet)_
 - `cass.corruption.compression_info.bad_offset` — CompressionInfo.db out-of-bounds chunk offset is detected
 - `cass.corruption.data_db.bit_flip` — Data.db single-bit flip is detected (LZ4 chunk decode / CRC)
 - `cass.corruption.data_db.truncation` — Data.db mid-stream truncation is detected
@@ -398,9 +398,8 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.delta_scan.ttl_cells` — Delta-scan TTL / expiring cells (INSERT ... USING TTL)
   - Normalization: scan_delta expiring-cell records are mapped to sstabledump JSONL cell ttl / local_deletion_time fields and compared; mixed live + expiring cells in the same fixture exercise both code paths.
   - Byte-for-byte: not yet — needs Data.db backing (follow-up under epic #969).
-- `cass.delta_scan.wide_partition_corpus` — Delta-scan over wide partitions (planned — no test_deltas fixture yet)
+- `cass.delta_scan.wide_partition_corpus` — Delta-scan over wide partitions (planned — no test_deltas fixture yet) _(planned — no evidence yet)_
   - Normalization: Planned: scan_delta facts over a wide partition (many clustered rows + range/cell tombstones in one partition, exercising index-block skipping) compared to the sstabledump JSONL golden.
-  - Byte-for-byte: not yet — needs Data.db backing (follow-up under epic #969).
 - `cass.index_summary.big_index_offsets` — Index.db partition key digests and data offsets (BIG)
   - Normalization: Partition key digests and Data.db offsets resolved through Index.db are compared against the partition order and keys derived from sstabledump JSONL.
 - `cass.schema_evolution.dropped_column.per_cell_purge` — Dropped regular column per-cell purge parity
@@ -469,7 +468,7 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.cli_reporting.parity_manifest_lint_and_report` — Parity manifest lint and report tooling
 - `cass.compaction_merge.load_path_validity` — Compaction output load-path validity (Tier-1)
 - `cass.data_db_decode.row_preamble_size_mismatch` — Malformed row-preamble size fails loud
-- `cass.filter_db.statistical_false_positive_rate` — Filter.db empirical false-positive-rate report
+- `cass.filter_db.statistical_false_positive_rate` — Filter.db empirical false-positive-rate report _(planned — no evidence yet)_
 - `cass.schema_evolution.serialization_header_column_order` — Serialization-header column order across schema evolution
 - `cass.sstable_format.descriptor_component_resolution` — Descriptor and on-disk version/component resolution
 - `cass.write_load_path.cassandra_sstable_writer_fixtures` — CQLite-written SSTables load into Cassandra via sstableloader
