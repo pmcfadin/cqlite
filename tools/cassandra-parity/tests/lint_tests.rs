@@ -207,6 +207,26 @@ fn delta_scan_mirrored_with_nonexistent_test_path_is_rejected() {
 }
 
 #[test]
+fn delta_scan_mirrored_with_nonexistent_fixture_path_is_rejected() {
+    // A fixture reference that does not exist on disk must fail the delta_scan
+    // rule (mirrors the test-target existence check; AC6 — backed by BOTH a
+    // real test AND a real fixture).
+    let scenario = VALID_DELTA_SCAN_SCENARIO.replace(
+        "        - test-data/cassandra-parity-manifest.yml",
+        "        - test-data/does_not_exist_995.jsonl",
+    );
+    let errs = errors_checked(&wrap(&scenario));
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("cass.delta_scan.cell_tombstones")
+                && e.contains("fixtures.references")
+                && e.contains("delta_scan")
+                && e.contains("does not exist")),
+        "expected a delta_scan missing-fixture-file error, got: {errs:#?}"
+    );
+}
+
+#[test]
 fn out_of_scope_missing_required_fields_is_rejected() {
     let scenario = r#"  - id: cass.commitlog_replay.example_oos
     title: Out of scope example
@@ -404,6 +424,10 @@ fn schema_enums_match_lint_enums() {
 fn delta_table_from_ref(path: &str) -> Option<String> {
     let after = path.split("test_deltas/").nth(1)?;
     let dir = after.split('/').next()?;
+    // Assumes the trailing SSTable UUID is dashless 32-hex (true for the current
+    // fixture dir names, e.g. `cell_tombstones-29733830701f11f1b5d1d98b0640ec05`),
+    // so the last `-` separates table name from UUID. A dashed UUID would split
+    // mid-UUID; revisit (e.g. a length-based strip) if fixture naming changes.
     let table = dir.rsplit_once('-').map(|(t, _)| t).unwrap_or(dir);
     Some(table.to_string())
 }
@@ -413,9 +437,14 @@ fn cql_table_names(cql: &str) -> std::collections::BTreeSet<String> {
     let mut out = std::collections::BTreeSet::new();
     let lower = cql.to_lowercase();
     let mut search = 0usize;
+    // Index `lower` for both search and extraction: `to_lowercase()` is only
+    // byte-length-preserving for ASCII, so cross-indexing the original `cql`
+    // with offsets derived from `lower` could desync and panic on a non-char
+    // boundary. The token is lowercased anyway, so working entirely in `lower`
+    // is equivalent and safe.
     while let Some(rel) = lower[search..].find("create table") {
         let start = search + rel + "create table".len();
-        let rest = &cql[start..];
+        let rest = &lower[start..];
         // Skip "if not exists" and whitespace; the next token is the table name.
         let tokens: Vec<&str> = rest.split_whitespace().collect();
         let mut idx = 0;

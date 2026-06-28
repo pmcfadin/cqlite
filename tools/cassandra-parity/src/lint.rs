@@ -162,7 +162,9 @@ fn lint_scenario(s: &Scenario, repo_root: Option<&Path>, out: &mut Vec<Finding>)
                         "mirrored delta_scan scenarios must name a fixture reference",
                     ));
                 }
-                // The referenced test file(s) must actually exist on disk.
+                // The referenced test file(s) AND fixture(s) must actually exist
+                // on disk: a dangling/typo'd path must not pass lint silently
+                // (AC6 — backed by BOTH a real test AND a real fixture).
                 if let Some(root) = repo_root {
                     for t in &s.cqlite.coverage.tests {
                         if !root.join(t).exists() {
@@ -170,6 +172,17 @@ fn lint_scenario(s: &Scenario, repo_root: Option<&Path>, out: &mut Vec<Finding>)
                                 id,
                                 "cqlite.coverage.tests",
                                 format!("mirrored delta_scan test target does not exist: {t}"),
+                            ));
+                        }
+                    }
+                    for r in &s.fixtures.references {
+                        if !root.join(r).exists() {
+                            out.push(Finding::error(
+                                id,
+                                "fixtures.references",
+                                format!(
+                                    "mirrored delta_scan fixture reference does not exist: {r}"
+                                ),
                             ));
                         }
                     }
