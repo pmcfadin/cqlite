@@ -27,7 +27,7 @@ else
   # On a local/dev machine that simply lacks both tools, fall through with a
   # loud warning so iteration is not blocked; the operator can opt back into
   # fail-closed behavior with CQLITE_PARITY_REQUIRE_DATASETS=1.
-  if [ -n "${CQLITE_PARITY_REQUIRE_DATASETS:-}" ] || [ -n "${CI:-}" ]; then
+  if [ "${CQLITE_PARITY_REQUIRE_DATASETS:-}" = "1" ] || [ -n "${CI:-}" ]; then
     echo "ERROR: no sha256 checker found (need sha256sum or shasum) — cannot verify dataset provenance" >&2
     exit 1
   else

@@ -280,6 +280,29 @@ pub fn write_summary(
     scenario_id: &str,
     artifacts: &[PathBuf],
 ) -> std::io::Result<()> {
+    // Foot-gun guard: the read_existing_summary parser does NOT invert
+    // json_escape (see its NOTE), so any escapable/separator character in a
+    // lane/scenario/artifact string would silently corrupt the read-modify-write
+    // merge. Lane and scenario_id are fixed identifiers and artifact paths are
+    // controlled `target/…` paths, so this never trips on real values — but a
+    // future change that feeds an escapable value through here fails loudly in
+    // debug instead of corrupting summary.json.
+    let has_escapable = |s: &str| s.contains(['"', '\\', '\n', ',']);
+    debug_assert!(
+        !has_escapable(lane),
+        "lane contains escapable/separator char (summary.json reader does not unescape): {lane:?}"
+    );
+    debug_assert!(
+        !has_escapable(scenario_id),
+        "scenario_id contains escapable/separator char (summary.json reader does not unescape): {scenario_id:?}"
+    );
+    debug_assert!(
+        artifacts
+            .iter()
+            .all(|p| !has_escapable(&p.display().to_string())),
+        "artifact path contains escapable/separator char (summary.json reader does not unescape): {artifacts:?}"
+    );
+
     let _guard = SUMMARY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = parity_artifact_dir();
     std::fs::create_dir_all(&dir)?;
