@@ -37,7 +37,7 @@ use tokio::io::AsyncWriteExt;
 #[path = "parity_support/mod.rs"]
 mod parity_support;
 use parity_support::{
-    parity_datasets_required, scenario, write_summary, LaneStatus, ParityFailure,
+    jsonl_diff, parity_datasets_required, scenario, write_summary, LaneStatus, ParityFailure,
 };
 
 /// Test configuration for Data.db parity validation
@@ -460,11 +460,38 @@ async fn test_data_db_jsonl_reference_parity() -> CqliteResult<()> {
         results.len(),
         config.target_tables.len()
     );
-    assert_eq!(
-        passed,
-        results.len(),
-        "Data.db JSONL parity failures detected; see validation artifacts for details"
-    );
+    // PRIMARY jsonl_diff wiring (issue #1024 criterion f): on a Data.db JSONL
+    // value/row parity failure, emit a structured normalized-JSONL diff to
+    // `target/cassandra-parity/data_db_jsonl.diff` (+ a Fail summary row) before
+    // aborting, instead of a bare assert_eq!. The comparison semantics are
+    // unchanged (every validated table must reach perfect_parity). The diff lines
+    // are the per-table parity verdicts: expected "<ks>.<table>: parity=true",
+    // actual the observed verdict (with the recorded errors when it failed).
+    if passed != results.len() {
+        let expected: Vec<String> = results
+            .iter()
+            .map(|r| format!("{}.{}: parity=true", r.keyspace, r.table))
+            .collect();
+        let actual: Vec<String> = results
+            .iter()
+            .map(|r| {
+                format!(
+                    "{}.{}: parity={} rows={} errors={:?}",
+                    r.keyspace, r.table, r.perfect_parity, r.jsonl_row_count, r.errors
+                )
+            })
+            .collect();
+        let diff = jsonl_diff("data_db_jsonl row/value parity", &expected, &actual);
+        ParityFailure::new(scenario::DATA_DB_JSONL)
+            .lane("data_db_jsonl")
+            .cassandra_source("sstabledump JSONL (Data.db row/cell decode)")
+            .components(["Data.db", "Data.db.jsonl"])
+            .detail(format!(
+                "Data.db JSONL parity failures detected ({passed}/{} tables passed)\n{diff}",
+                results.len(),
+            ))
+            .panic();
+    }
 
     let _ = write_summary(
         "data_db_jsonl",

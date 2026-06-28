@@ -20,10 +20,22 @@
 //!     fail-closed dataset-absent panic) is formatted with the manifest scenario
 //!     ID, the Cassandra source test / format rule, the fixture path, the
 //!     component list, and a copy-pasteable reproduction command.
-//!   * Diff writers ([`write_diff`], [`write_summary`], [`LaneStatus`]) — on a
-//!     parity discrepancy each lane emits its diff to
-//!     `target/cassandra-parity/<lane>.diff` and records a row in
-//!     `target/cassandra-parity/summary.json`, which CI uploads as an artifact.
+//!   * Diff writers ([`write_diff`], [`write_summary`], [`LaneStatus`]) and the
+//!     four diff-body formatters ([`byte_diff`], [`offset_delta_diff`],
+//!     [`checksum_diff`], [`jsonl_diff`]). A `target/cassandra-parity/<lane>.diff`
+//!     (plus a `Fail` row in `target/cassandra-parity/summary.json`, which CI
+//!     uploads as an artifact) is written before aborting on TWO kinds of failure.
+//!     (a) The dataset-absent fail-closed path: `CQLITE_PARITY_REQUIRE_DATASETS=1`
+//!     with the binaries missing — the lane diff carries the structured
+//!     diagnostic. (b) The wired real-mismatch sites, one per diff type:
+//!     [`byte_diff`] at the Index.db raw-key byte mismatch (`index_db_big`);
+//!     [`offset_delta_diff`] at the Index.db offset-delta vs JSONL position-delta
+//!     mismatch (`index_db_big`); [`checksum_diff`] at the Statistics.db
+//!     accumulated-TOC-CRC32 mismatch (`statistics_db`); and [`jsonl_diff`] at the
+//!     Data.db JSONL row/value parity failure (`data_db_jsonl`). All OTHER parity
+//!     assertion sites still fail closed via `assert_eq!`/`assert!`/`panic!` with
+//!     the discrepancy printed to the test stdout (no `<lane>.diff` is written for
+//!     those); they remain real, build-failing assertions regardless.
 //!
 //! Allowing dead code: not every consumer uses every helper, and each strict
 //! test compiles this module independently.

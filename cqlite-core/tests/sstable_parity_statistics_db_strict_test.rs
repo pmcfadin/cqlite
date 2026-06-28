@@ -45,7 +45,7 @@ use cqlite_core::parser::enhanced_statistics_parser::parse_statistics_with_fallb
 #[path = "parity_support/mod.rs"]
 mod parity_support;
 use parity_support::{
-    parity_datasets_required, scenario, write_summary, LaneStatus, ParityFailure,
+    checksum_diff, parity_datasets_required, scenario, write_summary, LaneStatus, ParityFailure,
 };
 
 /// `crc32(num_components=4)` — the marker Cassandra writes at bytes 4..8 of
@@ -425,13 +425,32 @@ fn validate_toc_and_checksums(bytes: &[u8], db: &Path) {
     }
     let expected_acc = hasher.finalize();
     let stored_acc = u32::from_be_bytes([bytes[40], bytes[41], bytes[42], bytes[43]]);
-    assert_eq!(
-        stored_acc, expected_acc,
-        "{}: Statistics.db accumulated TOC CRC32 0x{:08x} != recomputed 0x{:08x} — corrupt metadata",
-        db.display(),
-        stored_acc,
-        expected_acc,
-    );
+    // PRIMARY checksum_diff wiring (issue #1024 criterion f): on an accumulated
+    // TOC CRC32 mismatch (the canonical Statistics.db corruption signal), emit a
+    // structured checksum diff to `target/cassandra-parity/statistics_db.diff`
+    // (+ a Fail summary row) before aborting, instead of a bare assert_eq!. The
+    // comparison semantics are unchanged (stored CRC must equal the recomputed CRC).
+    if stored_acc != expected_acc {
+        let diff = checksum_diff(
+            &format!("{} accumulated TOC CRC32", db.display()),
+            &[(
+                "toc_crc32",
+                format!("0x{expected_acc:08x}"),
+                format!("0x{stored_acc:08x}"),
+            )],
+        );
+        ParityFailure::new(scenario::STATISTICS_DB)
+            .lane("statistics_db")
+            .cassandra_source("MetadataSerializer TOC CRC32 (Statistics.db)")
+            .fixture(db.to_path_buf())
+            .components(["Statistics.db"])
+            .detail(format!(
+                "{}: Statistics.db accumulated TOC CRC32 0x{stored_acc:08x} != recomputed \
+                 0x{expected_acc:08x} — corrupt metadata\n{diff}",
+                db.display(),
+            ))
+            .panic();
+    }
 }
 
 /// Strict core-metadata parity across every committed fixture.

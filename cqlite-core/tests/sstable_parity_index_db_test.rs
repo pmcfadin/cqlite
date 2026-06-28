@@ -46,7 +46,8 @@ use cqlite_core::Config;
 #[path = "parity_support/mod.rs"]
 mod parity_support;
 use parity_support::{
-    parity_datasets_required, scenario, write_summary, LaneStatus, ParityFailure,
+    byte_diff, offset_delta_diff, parity_datasets_required, scenario, write_summary, LaneStatus,
+    ParityFailure,
 };
 
 // ============================================================================
@@ -360,14 +361,29 @@ async fn big_index_db_entry_byte_and_field_parity() {
             raw_entries.len(),
         );
         for (n, (got, raw)) in entries.iter().zip(raw_entries.iter()).enumerate() {
-            assert_eq!(
-                got.key_digest.as_ref(),
-                raw.key.as_slice(),
-                "{}: entry {n} raw key bytes mismatch (reader {:02x?} vs disk {:02x?})",
-                fx.name(),
-                got.key_digest.as_ref(),
-                raw.key,
-            );
+            // PRIMARY byte_diff wiring (issue #1024 criterion f): on a raw-key byte
+            // discrepancy, emit a structured byte diff to
+            // `target/cassandra-parity/index_db_big.diff` (+ a Fail summary row)
+            // before aborting, instead of a bare assert_eq!. The comparison
+            // semantics are unchanged (reader key bytes must equal the on-disk key).
+            if got.key_digest.as_ref() != raw.key.as_slice() {
+                let diff = byte_diff(
+                    "reader_key",
+                    got.key_digest.as_ref(),
+                    "disk_key",
+                    raw.key.as_slice(),
+                );
+                ParityFailure::new(scenario::INDEX_DB_BIG)
+                    .lane("index_db_big")
+                    .cassandra_source("RowIndexEntryTest.java (BIG Index.db entry bytes)")
+                    .fixture(index_path.clone())
+                    .components(["Index.db", "Data.db"])
+                    .detail(format!(
+                        "{}: entry {n} raw key bytes mismatch\n{diff}",
+                        fx.name()
+                    ))
+                    .panic();
+            }
             assert_eq!(
                 got.raw_key.as_deref(),
                 Some(raw.key.as_slice()),
@@ -466,13 +482,29 @@ async fn big_index_db_entry_byte_and_field_parity() {
             for n in 1..entries.len() {
                 let off_delta = entries[n].data_offset - entries[n - 1].data_offset;
                 let pos_delta = parts[n].position - parts[n - 1].position;
-                assert_eq!(
-                    off_delta,
-                    pos_delta,
-                    "{}: offset delta {off_delta} != JSONL position delta {pos_delta} at \
-                     partition {n}",
-                    fx.name(),
-                );
+                // PRIMARY offset_delta_diff wiring (issue #1024 criterion f): on an
+                // offset-delta discrepancy vs the JSONL position deltas, emit a
+                // structured offset-delta diff to
+                // `target/cassandra-parity/index_db_big.diff` (+ a Fail summary row)
+                // before aborting. Comparison semantics unchanged (the JSONL position
+                // delta is the expected, the Index.db offset delta is the actual).
+                if off_delta != pos_delta {
+                    let diff = offset_delta_diff(
+                        &format!("{} partition {n} (expected=JSONL pos delta)", fx.name()),
+                        &[(pos_delta as i64, off_delta as i64)],
+                    );
+                    ParityFailure::new(scenario::INDEX_DB_BIG)
+                        .lane("index_db_big")
+                        .cassandra_source("RowIndexEntryTest.java (BIG Index.db data offsets)")
+                        .fixture(index_path.clone())
+                        .components(["Index.db", "Data.db.jsonl"])
+                        .detail(format!(
+                            "{}: offset delta {off_delta} != JSONL position delta {pos_delta} at \
+                             partition {n}\n{diff}",
+                            fx.name(),
+                        ))
+                        .panic();
+                }
             }
             delta_checked += 1;
         }

@@ -214,6 +214,13 @@ async fn test_summary_db_parity_comprehensive() -> CqliteResult<()> {
         "Summary.db parity failures detected; see validation artifacts for details"
     );
 
+    let _ = write_summary(
+        "summary_db_big",
+        LaneStatus::Pass,
+        scenario::SUMMARY_DB_BIG,
+        &[],
+    );
+
     Ok(())
 }
 
