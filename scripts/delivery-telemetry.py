@@ -94,7 +94,10 @@ def _validate(value, schema: dict, path: str, errors: list) -> None:
         if value < schema["minimum"]:
             errors.append(f"{path}: {value} < minimum {schema['minimum']}")
     if "pattern" in schema and isinstance(value, str):
-        if not re.search(schema["pattern"], value):
+        # fullmatch (anchored) rather than search: the schema is the source of truth for
+        # field validity, and our patterns describe the WHOLE field. Matches the
+        # re.fullmatch used to derive priority from labels — no partial-match surprises.
+        if not re.fullmatch(schema["pattern"], value):
             errors.append(f"{path}: {value!r} does not match /{schema['pattern']}/")
     if schema.get("format") == "date-time" and isinstance(value, str):
         try:
@@ -136,7 +139,14 @@ def load_schema(schema_path: Path) -> dict:
 # ============================================================ timestamp helpers
 
 def _parse_ts(value: str) -> datetime:
-    """Parse an RFC-3339 / ISO-8601 UTC timestamp (accepts a trailing 'Z')."""
+    """Parse an RFC-3339 / ISO-8601 UTC timestamp (accepts a trailing 'Z').
+
+    We normalize a trailing 'Z' to '+00:00' ourselves, so `datetime.fromisoformat`
+    handles our timestamps on Python 3.9+ (it accepts numeric offsets there; only the
+    bare 'Z' shorthand needed pre-normalizing before 3.11). The format validator
+    additionally requires a 'T' separator + an offset, so date-only / tz-naive strings
+    are rejected regardless of interpreter version.
+    """
     if value.endswith("Z"):
         value = value[:-1] + "+00:00"
     return datetime.fromisoformat(value)
@@ -161,7 +171,13 @@ def _github_fields(issue: int, pr: int) -> dict:
         ["gh", "pr", "view", str(pr), "--json", "createdAt,mergedAt"],
         check=True, capture_output=True, text=True).stdout)
     labels = [l["name"] for l in issue_json.get("labels", [])]
-    priority = next((l for l in labels if re.fullmatch(r"P[0-3]", l)), None)
+    prio_labels = [l for l in labels if re.fullmatch(r"P[0-3]", l)]
+    # one-priority invariant: a multi-priority issue is a labeling error — surface it
+    # rather than silently picking the first (authoritative-data-only).
+    if len(prio_labels) > 1:
+        raise SystemExit(f"error: issue #{issue} has multiple priority labels "
+                         f"{prio_labels} (exactly one P0-P3 expected)")
+    priority = prio_labels[0] if prio_labels else None
     # Routing is authoritative, not inferred: set it ONLY from an explicit label. If
     # neither is present, leave it None so build_record requires --routing rather than
     # silently guessing "design".
@@ -258,12 +274,15 @@ def cmd_record(args) -> int:
     # append a second record (which would double-count that issue in retro). Refuse
     # unless --allow-duplicate is given.
     if ledger.exists():
-        for raw in ledger.read_text().splitlines():
+        for lineno, raw in enumerate(ledger.read_text().splitlines(), start=1):
             if not raw.strip():
                 continue
             try:
                 existing = json.loads(raw)
             except json.JSONDecodeError:
+                # surface ledger corruption at write time rather than only at next lint
+                print(f"warning: existing ledger line {lineno} is unparseable — run `lint`",
+                      file=sys.stderr)
                 continue
             if existing.get("issue") == record["issue"] and not args.allow_duplicate:
                 print(f"error: issue #{record['issue']} already has a ledger record "
