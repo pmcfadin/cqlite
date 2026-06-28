@@ -662,6 +662,19 @@ fn serialize_index_info(buf: &mut Vec<u8>, block: &PromotedIndexBlock) {
     buf.push(0x00u8);
 }
 
+/// Test/oracle helper: serialize a promoted index payload from blocks.
+///
+/// Exposes the private [`serialize_promoted_index`] for the promoted-index *reader*
+/// round-trip tests (Issue #993), which must encode with the authoritative writer
+/// and then decode, asserting byte-exact field recovery. Not part of the public API.
+#[doc(hidden)]
+pub fn serialize_promoted_index_for_test(
+    blocks: &[PromotedIndexBlock],
+    raw_key_len: usize,
+) -> Vec<u8> {
+    serialize_promoted_index(blocks, raw_key_len)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

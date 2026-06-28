@@ -58,24 +58,53 @@ pub struct PartitionIndexEntry {
     pub promoted_index: Option<PromotedIndexData>,
 }
 
-/// Promoted index for wide partitions
+/// Promoted index for wide partitions (BIG "nb" format, Issue #993).
+///
+/// Holds the RAW promoted-index payload bytes captured from the Index.db entry
+/// (previously these bytes were decoded-away/discarded on the read path). The
+/// payload's `firstName`/`lastName` clustering prefixes are not self-delimiting
+/// without the table's clustering column types, so full structural decode is
+/// deferred to [`PromotedIndexData::decode`], which takes an authoritative,
+/// schema-driven clustering-prefix length callback (no heuristics — Issue #28).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromotedIndexData {
-    /// Number of promoted index entries
-    pub entry_count: u32,
-    /// Individual promoted index entries
-    pub entries: Vec<PromotedIndexEntry>,
+    /// Raw promoted-index payload (the bytes after the `promoted_index_size` VInt).
+    pub raw_payload: Vec<u8>,
 }
 
-/// Individual promoted index entry
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PromotedIndexEntry {
-    /// Clustering key prefix
-    pub clustering_key: Vec<u8>,
-    /// Offset within the partition
-    pub partition_offset: u32,
-    /// Size of the indexed section
-    pub section_size: u32,
+impl PromotedIndexData {
+    /// Wrap a raw promoted-index payload.
+    pub fn from_raw(raw_payload: Vec<u8>) -> Self {
+        Self { raw_payload }
+    }
+
+    /// Number of bytes in the raw promoted-index payload.
+    pub fn len(&self) -> usize {
+        self.raw_payload.len()
+    }
+
+    /// True when the payload is empty.
+    pub fn is_empty(&self) -> bool {
+        self.raw_payload.is_empty()
+    }
+
+    /// Fully decode the promoted index using a schema-driven clustering-prefix
+    /// length callback. See [`crate::storage::sstable::promoted_index_reader`].
+    pub fn decode(
+        &self,
+        prefix_len: &super::promoted_index_reader::PrefixLen<'_>,
+    ) -> Result<super::promoted_index_reader::DecodedPromotedIndex> {
+        super::promoted_index_reader::decode_promoted_index(&self.raw_payload, prefix_len)
+    }
+
+    /// Read just the IndexInfo block count without decoding the (schema-dependent)
+    /// `firstName`/`lastName` prefixes. The leading `headerLength`, `DeletionTime`
+    /// and `count` fields are schema-free, so this is always recoverable.
+    ///
+    /// Returns 0 on a malformed/short payload (defensive — never panics).
+    pub fn block_count(&self) -> u32 {
+        super::promoted_index_reader::peek_block_count(&self.raw_payload).unwrap_or(0)
+    }
 }
 
 /// Complete Index.db data structure
@@ -186,7 +215,7 @@ impl IndexReader {
         for entry in &self.index_data.partition_entries {
             if let Some(ref promoted) = entry.promoted_index {
                 promoted_count += 1;
-                total_promoted_entries += promoted.entry_count as usize;
+                total_promoted_entries += promoted.block_count() as usize;
             }
         }
 
@@ -401,14 +430,15 @@ pub(crate) fn parse_big_index_entry(input: &[u8]) -> IResult<&[u8], PartitionInd
     // SSTableReader adds the header size when seeking).
     let (input, data_offset) = parse_vuint(input)?;
 
-    // Read promoted-index length (unsigned VInt) and skip the promoted data.
-    // Partition-level lookups work without decoding the promoted index.
+    // Read promoted-index length (unsigned VInt). When > 0, CAPTURE the promoted
+    // payload (Issue #993) instead of discarding it; structural decode is deferred
+    // to PromotedIndexData::decode (needs schema-driven clustering-prefix lengths).
     let (input, promoted_len) = parse_vuint(input)?;
     // Saturating cast: on a 32-bit target `promoted_len as usize` could truncate and
     // misalign subsequent entries. `usize::MAX` makes `take` return an Eof error on a
     // short buffer instead, which is the safe failure mode for a corrupt Index.db.
     let promoted_len = usize::try_from(promoted_len).unwrap_or(usize::MAX);
-    let (input, _promoted_data) = take(promoted_len)(input)?;
+    let (input, promoted_data) = take(promoted_len)(input)?;
 
     log::trace!(
         "Index.db BIG entry: key_len={}, data_offset={}, promoted_len={}",
@@ -416,6 +446,13 @@ pub(crate) fn parse_big_index_entry(input: &[u8]) -> IResult<&[u8], PartitionInd
         data_offset,
         promoted_len
     );
+
+    // promoted_len == 0 → no promoted index (None). Otherwise wrap the raw payload.
+    let promoted_index = if promoted_len > 0 {
+        Some(PromotedIndexData::from_raw(promoted_data.to_vec()))
+    } else {
+        None
+    };
 
     let raw_key: Arc<[u8]> = Arc::from(key_bytes);
 
@@ -427,7 +464,7 @@ pub(crate) fn parse_big_index_entry(input: &[u8]) -> IResult<&[u8], PartitionInd
             // Size is not stored in Index.db; determined during the Data.db read.
             data_offset,
             data_size: 0,
-            promoted_index: None,
+            promoted_index,
         },
     ))
 }
@@ -945,4 +982,25 @@ mod tests {
         assert_eq!(index_data.partition_entries[0].key_digest.as_ref(), key1);
         assert_eq!(index_data.partition_entries[1].key_digest.as_ref(), key2);
     }
+
+    /// Small partition: `promoted_len == 0` → `promoted_index` is `None` (Issue #993).
+    #[test]
+    fn test_parse_big_index_entry_no_promoted_index() {
+        // [key_len: u16=4][key: 4 bytes][data_offset vint=0][promoted_len vint=0]
+        let entry: Vec<u8> = vec![0x00, 0x04, 0xAA, 0xBB, 0xCC, 0xDD, 0x00, 0x00];
+        let (rest, parsed) = parse_big_index_entry(&entry).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(parsed.data_offset, 0);
+        assert!(
+            parsed.promoted_index.is_none(),
+            "promoted_len==0 must yield None"
+        );
+    }
+
+    // NOTE: the end-to-end "BIG entry promoted payload is CAPTURED and decodes
+    // byte-exactly" assertions live in the integration test
+    // `cqlite-core/tests/issue_993_promoted_index_parity.rs`
+    // (`wide_partition_emits_capturable_promoted_index`), which exercises the real
+    // writer → `parse_big_index_entry` → `PromotedIndexData::decode` path. Kept out
+    // of this already-over-threshold file per the campsite rule (epic #1116).
 }

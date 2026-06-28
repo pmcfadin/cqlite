@@ -75,7 +75,8 @@ pub use digest_writer::DigestWriter;
 pub use filter_writer::FilterWriter;
 #[cfg(feature = "write-support")]
 pub use index_writer::{
-    IndexEntryInfo, IndexWriter, PromotedIndexBlock, COLUMN_INDEX_SIZE_BYTES, INDEX_INFO_WIDTH_BASE,
+    serialize_promoted_index_for_test, IndexEntryInfo, IndexWriter, PromotedIndexBlock,
+    COLUMN_INDEX_SIZE_BYTES, INDEX_INFO_WIDTH_BASE,
 };
 #[cfg(feature = "write-support")]
 pub use stats_writer::{StatisticsMetadata, StatisticsWriter};

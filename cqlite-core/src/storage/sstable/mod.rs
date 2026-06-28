@@ -16,6 +16,7 @@ pub mod index;
 pub mod index_reader;
 pub mod key_digest;
 pub mod performance_benchmarks;
+pub mod promoted_index_reader;
 pub mod reader;
 pub mod summary_reader;
 pub mod version_gate;
