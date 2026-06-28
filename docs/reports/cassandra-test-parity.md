@@ -10,18 +10,18 @@ Sources: [`docs/cassandra_test_index.md`](../../docs/cassandra_test_index.md) ·
 
 | Status | Scenarios |
 |---|---|
-| `mirrored` | 162 |
+| `mirrored` | 165 |
 | `partial` | 11 |
-| `planned` | 15 |
+| `planned` | 17 |
 | `out_of_scope` | 14 |
-| **total** | **202** |
+| **total** | **207** |
 
 ## Evidence counts
 
 | Evidence | Scenarios |
 |---|---|
-| `byte_for_byte` | 91 |
-| `canonical_semantic` | 66 |
+| `byte_for_byte` | 93 |
+| `canonical_semantic` | 69 |
 | `smoke` | 7 |
 | `partial` | 22 |
 | `out_of_scope` | 16 |
@@ -53,6 +53,11 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 |---|---|---|---|---|---|
 | `cass.bti_big_version_matrix.big_nb_oa_read` | bti_big_version_matrix | mirrored | canonical_semantic | `sstable_parity_data_db_jsonl` | p1_correctness |
 | `cass.bti_big_version_matrix.bti_da_write_read` | bti_big_version_matrix | mirrored | canonical_semantic | `sstable_parity_bti_partitions_rows` | p1_correctness |
+| `cass.compaction.CompactionAwareWriterTest.row_count_and_order_preservation` | compaction_merge | mirrored | canonical_semantic | `compaction_parity_tombstone_ttl` | p1_correctness |
+| `cass.compaction.CompactionIteratorTest.differential_compaction_loop` | compaction_merge | mirrored | canonical_semantic | `compaction_parity_tombstone_ttl` | p0_data_loss |
+| `cass.compaction.SSTableRewriterTest.output_component_integrity` | compaction_merge | planned | byte_for_byte | `compaction_parity_tombstone_ttl` | p0_data_loss |
+| `cass.compaction.harness_byte_tier_artifacts` | compaction_merge | planned | byte_for_byte | `compaction_parity_tombstone_ttl` | p0_data_loss |
+| `cass.compaction.harness_logical_tier` | compaction_merge | mirrored | canonical_semantic | `compaction_parity_tombstone_ttl` | p1_correctness |
 | `cass.compaction_merge.byte_for_byte_output` | compaction_merge | planned | partial | `compaction_parity_tombstone_ttl` | p0_data_loss |
 | `cass.compaction_merge.load_path_validity` | compaction_merge | mirrored | smoke | `compaction_parity_tombstone_ttl` | p1_correctness |
 | `cass.compaction_merge.partial_source_retains_tombstones` | compaction_merge | mirrored | canonical_semantic | `compaction_parity_tombstone_ttl` | p0_data_loss |
@@ -187,6 +192,8 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 
 ## Byte-for-byte scenarios
 
+- `cass.compaction.SSTableRewriterTest.output_component_integrity` — Compaction output component byte integrity (byte tier, no allowlist)
+- `cass.compaction.harness_byte_tier_artifacts` — Differential harness byte tier — per-component cmp + failure artifacts
 - `cass.compression.fixture_matrix.deflate` — Deflate (zlib) compression fixture — CompressionInfo.db parity
 - `cass.compression.fixture_matrix.incompressible_uncompressed_chunk` — Incompressible payload — chunk stored uncompressed within compressed file
 - `cass.compression.fixture_matrix.lz4` — LZ4 compression fixture — CompressionInfo.db chunk-offset/CRC parity
@@ -298,6 +305,12 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
   - Normalization: Decoded rows for nb (Cassandra 4-compatible BIG) and oa (Cassandra 5 BIG) datasets are compared against sstabledump JSONL.
 - `cass.bti_big_version_matrix.bti_da_write_read` — BTI da write and read-back parity
   - Normalization: CQLite-written da BTI SSTables are dumped with Cassandra 5 sstabledump and compared for value equivalence; Partitions.db footer shape [firstPos|keyCount|root] is matched against a real Cassandra fixture.
+- `cass.compaction.CompactionAwareWriterTest.row_count_and_order_preservation` — Compaction preserves row count and partition order (logical)
+  - Normalization: Compared on the sstabledump JSONL fact model (partition key order, clustering order, surviving cell set); presentation and file layout ignored.
+- `cass.compaction.CompactionIteratorTest.differential_compaction_loop` — Differential compaction loop — same inputs through both engines (logical)
+  - Normalization: Both outputs are dumped with Cassandra's own sstabledump (-l) and the wall-clock-derived `expired` flag is normalized out; merged partition/row/cell/timestamp/TTL/deletion facts are compared, file layout and presentation ignored.
+- `cass.compaction.harness_logical_tier` — Differential harness logical tier — canonical sstabledump equality
+  - Normalization: sstabledump JSONL of both outputs with the wall-clock `expired` flag normalized out; logical facts compared, layout ignored.
 - `cass.compaction_merge.partial_source_retains_tombstones` — Partial-source compaction retains row/cell tombstones
   - Normalization: When only a subset of the overlapping sources is compacted, row/cell tombstones that may still shadow data in the un-compacted sources are retained; deletion facts are mapped to the sstabledump JSONL and compared.
 - `cass.compaction_merge.partition_delete_shadowing_across_skipped_sources` — Compaction partition-delete shadowing across skipped sources
@@ -439,6 +452,8 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 
 ## Gaps and next steps
 
+- `cass.compaction.SSTableRewriterTest.output_component_integrity` (planned): Byte-for-byte compaction output parity is computed and reported but not gated; the writer is not yet byte-identical to Cassandra. → _Land the divergence-fix children (#844/#846/#848 …), then drop continue-on-error on the byte step to promote it to a hard gate._
+- `cass.compaction.harness_byte_tier_artifacts` (planned): No gated byte-for-byte comparison; the tier reports diffs + artifacts but does not fail the build yet. → _Promote to a hard gate (drop continue-on-error) once compaction output is byte-stable across the scenario matrix._
 - `cass.compaction_merge.byte_for_byte_output` (planned): No gated byte-for-byte comparison of compaction output. → _Promote the debug byte tier in compaction-parity to a gated comparison once writer output is byte-stable._
 - `cass.compression_checksum.checksum_trailer_detection` (partial): No gated byte comparison of Digest.crc32 against the Cassandra reference. → _Add a Digest.crc32 byte comparison to the sstable_parity_corruption_verify suite._
 - `cass.compression_info.deflate.real_fixture_chunks` (planned): No real DeflateCompressor CompressionInfo.db / Data.db fixture in the committed corpus, so chunk + CRC parity cannot be byte-compared. → _Generate a DeflateCompressor SSTable via regenerate-datasets.sh and let the existing test exercise it (the codec dispatch already handles it)._
@@ -533,6 +548,11 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.bti_big_version_matrix.bti_da_write_read` | nightly_docker | .github/workflows/e2e-readback.yml |
 | `cass.cli_reporting.parity_manifest_lint_and_report` | fast_pr | .github/workflows/cassandra-parity.yml |
 | `cass.commitlog_replay.recovery_out_of_scope` | fast_pr | — |
+| `cass.compaction.CompactionAwareWriterTest.row_count_and_order_preservation` | required_parity | .github/workflows/compaction-parity.yml |
+| `cass.compaction.CompactionIteratorTest.differential_compaction_loop` | required_parity | .github/workflows/compaction-parity.yml |
+| `cass.compaction.SSTableRewriterTest.output_component_integrity` | nightly_docker | .github/workflows/compaction-parity.yml |
+| `cass.compaction.harness_byte_tier_artifacts` | nightly_docker | .github/workflows/compaction-parity.yml |
+| `cass.compaction.harness_logical_tier` | required_parity | .github/workflows/compaction-parity.yml |
 | `cass.compaction_merge.byte_for_byte_output` | manual_debug | — |
 | `cass.compaction_merge.load_path_validity` | required_parity | .github/workflows/compaction-parity.yml |
 | `cass.compaction_merge.partial_source_retains_tombstones` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
@@ -740,6 +760,11 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.bti_big_version_matrix.bti_da_write_read` | da | test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Data.db.jsonl |
 | `cass.cli_reporting.parity_manifest_lint_and_report` | — | — |
 | `cass.commitlog_replay.recovery_out_of_scope` | — | — |
+| `cass.compaction.CompactionAwareWriterTest.row_count_and_order_preservation` | nb | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
+| `cass.compaction.CompactionIteratorTest.differential_compaction_loop` | nb | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
+| `cass.compaction.SSTableRewriterTest.output_component_integrity` | nb | compaction-parity/build/parity-artifacts-byteParity/<scenario>/cassandra-output/<br>_fail:_ byte-diff.txt: first byte/offset diff per component (component, offset, ref byte, candidate byte, lengths), checksums.txt: SHA-256 of every component on both sides, cassandra-output/ and cqlite-output/: the full component dirs for offline decoding |
+| `cass.compaction.harness_byte_tier_artifacts` | nb | compaction-parity/build/parity-artifacts-byteParity/<scenario>/cassandra-output/<br>_fail:_ byte-diff.txt: first differing byte/offset per component, checksums.txt: SHA-256 per component, both engines, commands.txt: exact cqlite compact + sstabledump command lines, cqlite-compact.stdout / cqlite-compact.stderr |
+| `cass.compaction.harness_logical_tier` | nb | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
 | `cass.compaction_merge.byte_for_byte_output` | — | — |
 | `cass.compaction_merge.load_path_validity` | nb | — |
 | `cass.compaction_merge.partial_source_retains_tombstones` | nb | test-data/datasets/sstables/test_tomb/resurrection_gc0-4cb523c0702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_tomb/resurrection_gc0-4cb523c0702011f1b8f419c9a388d558/nb-2-big-Data.db.jsonl |
