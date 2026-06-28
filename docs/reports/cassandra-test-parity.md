@@ -10,17 +10,17 @@ Sources: [`docs/cassandra_test_index.md`](../../docs/cassandra_test_index.md) ·
 
 | Status | Scenarios |
 |---|---|
-| `mirrored` | 158 |
+| `mirrored` | 162 |
 | `partial` | 11 |
 | `planned` | 15 |
 | `out_of_scope` | 14 |
-| **total** | **198** |
+| **total** | **202** |
 
 ## Evidence counts
 
 | Evidence | Scenarios |
 |---|---|
-| `byte_for_byte` | 87 |
+| `byte_for_byte` | 91 |
 | `canonical_semantic` | 66 |
 | `smoke` | 7 |
 | `partial` | 22 |
@@ -113,6 +113,10 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 | `cass.data_db.inline_crc.short_final_chunk` | compression_checksum | mirrored | byte_for_byte | `sstable_parity_corruption_verify` | p0_data_loss |
 | `cass.data_db.inline_crc.valid_trailer` | compression_checksum | mirrored | byte_for_byte | `sstable_parity_corruption_verify` | p0_data_loss |
 | `cass.data_db_decode.row_cell_flags_and_vint` | data_db_decode | mirrored | canonical_semantic | `sstable_parity_data_db_jsonl` | p1_correctness |
+| `cass.data_db_decode.serialization_header.timestamp_ttl_ldt_deltas` | data_db_decode | mirrored | byte_for_byte | `schema_parity_serialization_header` | p1_correctness |
+| `cass.data_db_decode.serialization_mirror.multi_clustering_column_order` | data_db_decode | mirrored | byte_for_byte | `sstable_parity_data_db_jsonl` | p1_correctness |
+| `cass.data_db_decode.unfiltered_serializer.row_and_cell_flags` | data_db_decode | mirrored | byte_for_byte | `sstable_parity_data_db_jsonl` | p1_correctness |
+| `cass.data_db_decode.unfiltered_serializer.row_size_vints` | data_db_decode | mirrored | byte_for_byte | `sstable_parity_data_db_jsonl` | p1_correctness |
 | `cass.delta_scan.tombstone_liveness_facts` | delta_scan | partial | partial | `sstable_parity_delta_scan` | p1_correctness |
 | `cass.filter_db.corruption_fails_closed` | filter_db_bloom | mirrored | byte_for_byte | `sstable_parity_filter_db_bloom` | p1_correctness |
 | `cass.filter_db.no_false_negative_membership` | filter_db_bloom | mirrored | byte_for_byte | `sstable_parity_filter_db_bloom` | p0_data_loss |
@@ -240,6 +244,14 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.data_db.inline_crc.offset_delta_minus_crc_length` — Chunk payload length = next_offset - this_offset - 4 (CRC length)
 - `cass.data_db.inline_crc.short_final_chunk` — Data.db inline CRC on the short final chunk
 - `cass.data_db.inline_crc.valid_trailer` — Data.db per-chunk inline CRC32 trailer validation
+- `cass.data_db_decode.serialization_header.timestamp_ttl_ldt_deltas` — Data.db timestamp / TTL / local-deletion-time delta parity
+  - Normalization: Deltas are decoded as unsigned VInts and reconstructed against the Statistics.db EncodingStats minima; the fixture lane compares the reconstructed absolute timestamp to the JSONL golden in microseconds (FAIL CLOSED on a missing fixture). Wall-clock-derived LDT bytes are asserted only for sign/magnitude, not an exact constant.
+- `cass.data_db_decode.serialization_mirror.multi_clustering_column_order` — Data.db multi-clustering-column order parity
+  - Normalization: Clustering header and per-column value bytes are compared at their exact offsets in declared order; the fixture lane decompresses the LZ4 Data.db first (FAIL CLOSED on a missing fixture).
+- `cass.data_db_decode.unfiltered_serializer.row_and_cell_flags` — Data.db row and cell flag-byte parity
+  - Normalization: Flag bytes are compared as raw u8 values at their exact wire offset; the fixture lane additionally checks every leading flag byte stays within the known UnfilteredSerializer row-flag mask (FAIL CLOSED on a missing fixture).
+- `cass.data_db_decode.unfiltered_serializer.row_size_vints` — Data.db row-size and previous-size VInt framing parity
+  - Normalization: row_size/prev_size are unsigned VInt deltas; the deterministic lane compares raw encoded bytes and decoded values at the exact width boundaries, the fixture lane compares the framing offsets of a real nb Data.db (FAIL CLOSED on a missing fixture).
 - `cass.filter_db.corruption_fails_closed` — Filter.db malformed-byte rejection (fail-closed)
 - `cass.filter_db.no_false_negative_membership` — Filter.db no-false-negative membership over Cassandra present keys
   - Normalization: Present keys are the raw partition-key bytes from Index.db (not the decoded CQL values), matching the bytes Cassandra's Murmur3 hashed into Filter.db. The reference_paths point at the committed per-fixture Data.db.jsonl siblings (the binary Filter.db and Index.db are gitignored, fetched on demand).
@@ -620,6 +632,10 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.data_db.inline_crc.valid_trailer` | required_parity | .github/workflows/cassandra-parity.yml |
 | `cass.data_db_decode.row_cell_flags_and_vint` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.data_db_decode.row_preamble_size_mismatch` | required_parity | .github/workflows/cql-type-parity.yml |
+| `cass.data_db_decode.serialization_header.timestamp_ttl_ldt_deltas` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.data_db_decode.serialization_mirror.multi_clustering_column_order` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.data_db_decode.unfiltered_serializer.row_and_cell_flags` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.data_db_decode.unfiltered_serializer.row_size_vints` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.delta_scan.tombstone_liveness_facts` | required_parity | .github/workflows/delta-roundtrip.yml |
 | `cass.distributed_consensus.paxos_accord_out_of_scope` | fast_pr | — |
 | `cass.filter_db.bti_membership` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
@@ -823,6 +839,10 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.data_db.inline_crc.valid_trailer` | nb | test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt<br>test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/inline-crc-valid_trailer.log |
 | `cass.data_db_decode.row_cell_flags_and_vint` | nb, oa | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
 | `cass.data_db_decode.row_preamble_size_mismatch` | nb | — |
+| `cass.data_db_decode.serialization_header.timestamp_ttl_ldt_deltas` | nb, oa | test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-delta-diff.log |
+| `cass.data_db_decode.serialization_mirror.multi_clustering_column_order` | nb, oa | test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-clustering-order-diff.log |
+| `cass.data_db_decode.unfiltered_serializer.row_and_cell_flags` | nb, oa | test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-flag-diff.log |
+| `cass.data_db_decode.unfiltered_serializer.row_size_vints` | nb, oa | test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-row-framing-diff.log |
 | `cass.delta_scan.tombstone_liveness_facts` | nb | test-data/datasets/sstables/test_deltas/collection_ops-2a5006f06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl |
 | `cass.distributed_consensus.paxos_accord_out_of_scope` | — | — |
 | `cass.filter_db.bti_membership` | da | — |
