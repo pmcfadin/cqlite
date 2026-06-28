@@ -165,6 +165,58 @@ mod cli_parsing_tests {
     use super::*;
     use cqlite_cli::{AdminCommands, BenchCommands, Cli, Commands, SchemaCommands};
 
+    /// Regression guard for #283: `yaml` was removed from the output surface
+    /// (`OutputMode`/`--out` and `OutputFormat`/`--format`). A request for YAML
+    /// output must be a hard parse error with a clear message — never a silent
+    /// fallback to another format. If someone re-adds a `Yaml` variant, this
+    /// fails and forces the deprecation-vs-removal decision back into the open.
+    // (`Cli` derives only `Parser`, not `Debug`, so we inspect the `Err` side
+    // via `.err()` rather than `unwrap_err`/`expect_err`, which would require
+    // the `Ok` type to be `Debug`.)
+    #[test]
+    fn test_yaml_output_is_rejected_not_silently_accepted() {
+        fn rejection_message(args: &[&str]) -> String {
+            let res = Cli::try_parse_from(args.iter().copied());
+            assert!(
+                res.is_err(),
+                "{:?} must be rejected, not silently accepted",
+                args
+            );
+            res.err()
+                .map(|e| e.to_string().to_lowercase())
+                .unwrap_or_default()
+        }
+
+        // `--out yaml` (OutputMode value-enum). Subcommand is optional, so the
+        // only error here is the invalid enum value.
+        let msg = rejection_message(&["cqlite", "--out", "yaml"]);
+        assert!(
+            msg.contains("yaml"),
+            "error must name the rejected value `yaml`, got: {msg}"
+        );
+        assert!(
+            msg.contains("invalid value") || msg.contains("possible values"),
+            "error must explain that `yaml` is not a valid output value, got: {msg}"
+        );
+
+        // `--format yaml` (OutputFormat value-enum).
+        let msg = rejection_message(&["cqlite", "--format", "yaml"]);
+        assert!(
+            msg.contains("yaml"),
+            "error must name the rejected value `yaml`, got: {msg}"
+        );
+
+        // Sanity: still-supported output values continue to parse.
+        assert!(
+            Cli::try_parse_from(["cqlite", "--out", "json"]).is_ok(),
+            "`--out json` must remain valid"
+        );
+        assert!(
+            Cli::try_parse_from(["cqlite", "--format", "csv"]).is_ok(),
+            "`--format csv` must remain valid"
+        );
+    }
+
     #[test]
     fn test_basic_command_parsing() -> Result<()> {
         // Test query command
