@@ -83,6 +83,9 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$ISSUE" ] || die_usage "--issue is required"
+case "$ISSUE" in
+  *[!0-9]*|'') die_usage "--issue must be a positive integer (got '$ISSUE')" ;;
+esac
 [ -n "$MERGED_BRANCH" ] || die_usage "--merged-branch is required (the merged PR's headRefName)"
 # Identity guard: the merged branch MUST belong to this issue (1:1:1:1). Catches a
 # typo or a cross-issue branch name before any lock is touched.
@@ -281,10 +284,15 @@ else
   note "no worktree checked out on '$MERGED_BRANCH' — skipping worktree removal"
 fi
 
-# Delete the origin lock (only the merged branch).
+# Delete the origin lock (only the merged branch). Non-fatal: a TOCTOU race (ref
+# removed concurrently) or a network blip must not abort under set -e after the
+# worktree is already gone — surface it instead.
 if [ "$remote_has_branch" -eq 1 ]; then
-  run git_root push "$REMOTE" --delete "$MERGED_BRANCH"
-  note "deleted origin lock $REMOTE/$MERGED_BRANCH"
+  if run git_root push "$REMOTE" --delete "$MERGED_BRANCH"; then
+    note "deleted origin lock $REMOTE/$MERGED_BRANCH"
+  else
+    note "could not delete origin lock $REMOTE/$MERGED_BRANCH — left in place (delete it manually)"
+  fi
 else
   note "origin branch '$MERGED_BRANCH' already absent (likely deleted by gh pr merge --delete-branch) — nothing to delete"
 fi

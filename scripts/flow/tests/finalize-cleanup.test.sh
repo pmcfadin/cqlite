@@ -250,7 +250,7 @@ bash "$CLEANUP" --issue 1212 --merged-branch issue-9999-wrong-issue \
 rm -rf "$T"
 
 # ===========================================================================
-echo "TEST 15: remote query error → fail closed (exit 3), no mutation"
+echo "TEST 15: remote query error → fail closed (exit 5), no mutation"
 # ===========================================================================
 # A transient ls-remote failure must NOT read as '0 locks / branch deleted' and
 # bypass Guard 2. Point at a non-existent remote to force the error.
@@ -333,6 +333,16 @@ bash "$CLEANUP" --issue 1216 --merged-branch issue-1216-feature --confirm-unmerg
 remote_branches "$WORK" | grep -qx "issue-1216-feature" && fail "origin branch not deleted" || ok "origin branch deleted"
 n=$(g -C "$WORK" worktree list --porcelain | grep -c '^worktree ')
 [ "$n" -eq 1 ] && ok "stale worktree entry pruned (only root remains)" || fail "stale entry remains ($n worktrees)"
+rm -rf "$T"
+
+# ===========================================================================
+echo "TEST 20: non-numeric --issue rejected (exit 64) — keeps Guard 2 glob tight"
+# ===========================================================================
+T=$(mktemp -d); build_sandbox "$T"; WORK="$T/work"
+rc=0
+bash "$CLEANUP" --issue 'abc' --merged-branch issue-abc-x \
+  --repo-root "$WORK" --worktrees-dir "$T" >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 64 ] && ok "exit 64 — non-numeric --issue rejected" || fail "expected exit 64, got $rc"
 rm -rf "$T"
 
 echo ""
