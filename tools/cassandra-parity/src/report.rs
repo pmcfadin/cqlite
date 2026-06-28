@@ -271,11 +271,26 @@ fn render_evidence_group(
         return;
     }
     for x in &items {
-        line(&format!("- `{}` — {}", x.id, x.title));
+        // A `planned` scenario carries an evidence *type* but no evidence yet;
+        // mark it so the section never reads as if the parity exists today
+        // (issue #995 — wide_partition_corpus is planned canonical_semantic).
+        let planned = if x.status == "planned" {
+            " _(planned — no evidence yet)_"
+        } else {
+            ""
+        };
+        line(&format!("- `{}` — {}{planned}", x.id, x.title));
         if let Some(norm) = &x.evidence.normalization {
             if !norm.is_empty() {
                 line(&format!("  - Normalization: {norm}"));
             }
+        }
+        // delta_scan scenarios are JSONL semantic parity only; surface that
+        // byte-for-byte Data.db backing is still a follow-up so the report does
+        // not read as byte parity (issue #995, AC3/AC7). Skip the note for
+        // planned scenarios, which have no evidence to qualify.
+        if x.capability == "delta_scan" && x.status != "planned" {
+            line("  - Byte-for-byte: not yet — needs Data.db backing (follow-up under epic #969).");
         }
     }
     line("");

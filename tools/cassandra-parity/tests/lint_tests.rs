@@ -101,6 +101,131 @@ fn mirrored_without_test_or_reference_is_rejected() {
     );
 }
 
+/// A mirrored `delta_scan` scenario whose only coverage is a real test target
+/// (with an existing file path) AND a fixture reference. This is the strict bar
+/// the per-shape delta_scan scenarios must clear (issue #995, AC6).
+const VALID_DELTA_SCAN_SCENARIO: &str = r#"  - id: cass.delta_scan.cell_tombstones
+    title: Delta-scan cell tombstones
+    status: mirrored
+    capability: delta_scan
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files: [SerializationMirrorTest.java]
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests: [tools/cassandra-parity/src/lint.rs]
+        notes: maps to test_delta_parity_cell_tombstones
+    fixtures:
+      references:
+        - test-data/cassandra-parity-manifest.yml
+    evidence:
+      type: canonical_semantic
+      artifacts: [jsonl]
+      normalization: scan_delta records mapped to sstabledump JSONL deletion facts
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: bash test-data/scripts/generate-deltas.sh
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/delta-roundtrip.yml
+    scope: {}
+"#;
+
+fn errors_checked(yaml: &str) -> Vec<String> {
+    // Lint with repo_root so referenced paths are resolved against the repo.
+    let m = Manifest::from_yaml(yaml).expect("manifest should parse");
+    lint(&m, Some(&repo_root()))
+        .into_iter()
+        .filter(|f| f.level == Level::Error)
+        .map(|f| format!("[{}] {}: {}", f.id, f.field, f.message))
+        .collect()
+}
+
+#[test]
+fn delta_scan_mirrored_with_test_and_fixture_passes() {
+    let errs = errors_checked(&wrap(VALID_DELTA_SCAN_SCENARIO));
+    assert!(errs.is_empty(), "expected no errors, got: {errs:#?}");
+}
+
+#[test]
+fn delta_scan_mirrored_missing_fixture_reference_is_rejected() {
+    // Strip the fixture reference: generic OR rule would still pass (test present),
+    // but the delta_scan-specific rule requires BOTH.
+    let scenario = VALID_DELTA_SCAN_SCENARIO.replace(
+        "    fixtures:\n      references:\n        - test-data/cassandra-parity-manifest.yml\n",
+        "    fixtures: {}\n",
+    );
+    let errs = errors_checked(&wrap(&scenario));
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("cass.delta_scan.cell_tombstones")
+                && e.contains("fixtures.references")
+                && e.contains("delta_scan")),
+        "expected a delta_scan fixture-required error, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn delta_scan_mirrored_missing_test_target_is_rejected() {
+    // Strip the test target: generic OR rule would still pass (fixture present),
+    // but the delta_scan-specific rule requires BOTH a test AND a fixture.
+    let scenario = VALID_DELTA_SCAN_SCENARIO.replace(
+        "        tests: [tools/cassandra-parity/src/lint.rs]\n        notes: maps to test_delta_parity_cell_tombstones\n",
+        "",
+    );
+    let errs = errors_checked(&wrap(&scenario));
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("cass.delta_scan.cell_tombstones")
+                && e.contains("cqlite.coverage.tests")
+                && e.contains("delta_scan")),
+        "expected a delta_scan test-required error, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn delta_scan_mirrored_with_nonexistent_test_path_is_rejected() {
+    // A test path that does not exist on disk must fail the delta_scan rule
+    // (stricter than the generic "names a test" check).
+    let scenario = VALID_DELTA_SCAN_SCENARIO.replace(
+        "tests: [tools/cassandra-parity/src/lint.rs]",
+        "tests: [cqlite-core/tests/does_not_exist_995.rs]",
+    );
+    let errs = errors_checked(&wrap(&scenario));
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("cass.delta_scan.cell_tombstones")
+                && e.contains("delta_scan")
+                && e.contains("does not exist")),
+        "expected a delta_scan missing-test-file error, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn delta_scan_mirrored_with_nonexistent_fixture_path_is_rejected() {
+    // A fixture reference that does not exist on disk must fail the delta_scan
+    // rule (mirrors the test-target existence check; AC6 — backed by BOTH a
+    // real test AND a real fixture).
+    let scenario = VALID_DELTA_SCAN_SCENARIO.replace(
+        "        - test-data/cassandra-parity-manifest.yml",
+        "        - test-data/does_not_exist_995.jsonl",
+    );
+    let errs = errors_checked(&wrap(&scenario));
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("cass.delta_scan.cell_tombstones")
+                && e.contains("fixtures.references")
+                && e.contains("delta_scan")
+                && e.contains("does not exist")),
+        "expected a delta_scan missing-fixture-file error, got: {errs:#?}"
+    );
+}
+
 #[test]
 fn out_of_scope_missing_required_fields_is_rejected() {
     let scenario = r#"  - id: cass.commitlog_replay.example_oos
@@ -291,6 +416,106 @@ fn schema_enums_match_lint_enums() {
     assert_eq!(
         schema_enum(&props["scope"]["properties"]["out_of_scope_category"]),
         expect(enums::OUT_OF_SCOPE_CATEGORY)
+    );
+}
+
+/// Extract the `test_deltas` table name from a fixture reference path of the
+/// form `.../test_deltas/<table>-<uuid>/nb-1-big-Data.db.jsonl`.
+fn delta_table_from_ref(path: &str) -> Option<String> {
+    let after = path.split("test_deltas/").nth(1)?;
+    let dir = after.split('/').next()?;
+    // Assumes the trailing SSTable UUID is dashless 32-hex (true for the current
+    // fixture dir names, e.g. `cell_tombstones-29733830701f11f1b5d1d98b0640ec05`),
+    // so the last `-` separates table name from UUID. A dashed UUID would split
+    // mid-UUID; revisit (e.g. a length-based strip) if fixture naming changes.
+    let table = dir.rsplit_once('-').map(|(t, _)| t).unwrap_or(dir);
+    Some(table.to_string())
+}
+
+/// Parse `CREATE TABLE [IF NOT EXISTS] <name>` table names from a CQL schema.
+fn cql_table_names(cql: &str) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let lower = cql.to_lowercase();
+    let mut search = 0usize;
+    // Index `lower` for both search and extraction: `to_lowercase()` is only
+    // byte-length-preserving for ASCII, so cross-indexing the original `cql`
+    // with offsets derived from `lower` could desync and panic on a non-char
+    // boundary. The token is lowercased anyway, so working entirely in `lower`
+    // is equivalent and safe.
+    while let Some(rel) = lower[search..].find("create table") {
+        let start = search + rel + "create table".len();
+        let rest = &lower[start..];
+        // Skip "if not exists" and whitespace; the next token is the table name.
+        let tokens: Vec<&str> = rest.split_whitespace().collect();
+        let mut idx = 0;
+        if tokens.first().map(|t| t.eq_ignore_ascii_case("if")) == Some(true) {
+            idx = 3; // if not exists
+        }
+        if let Some(name) = tokens.get(idx) {
+            // Assumes unqualified table names (deltas.cql uses `USE test_deltas;`
+            // + bare `CREATE TABLE [IF NOT EXISTS] <name>`). The alphanumeric/'_'
+            // scan stops at the first '.', so a keyspace-qualified name
+            // (`keyspace.table`) would yield the keyspace, not the table — strip a
+            // leading `keyspace.` prefix here if deltas.cql ever switches to it.
+            let clean: String = name
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !clean.is_empty() {
+                out.insert(clean.to_lowercase());
+            }
+        }
+        search = start;
+    }
+    out
+}
+
+/// AC5 (issue #995): every `delta_scan` scenario's referenced fixture table must
+/// correspond to a table that `test-data/schemas/deltas.cql` actually creates
+/// (and therefore that `generate-deltas.sh` produces). A scenario cannot claim a
+/// delta shape the generator does not emit. Deterministic — no Cassandra/Docker.
+#[test]
+fn delta_scan_fixtures_map_to_generated_tables() {
+    let root = repo_root();
+    let m = Manifest::from_yaml(
+        &std::fs::read_to_string(root.join("test-data/cassandra-parity-manifest.yml")).unwrap(),
+    )
+    .unwrap();
+    let cql = std::fs::read_to_string(root.join("test-data/schemas/deltas.cql"))
+        .expect("deltas.cql exists");
+    let known = cql_table_names(&cql);
+    assert!(
+        !known.is_empty(),
+        "deltas.cql yielded no CREATE TABLE names"
+    );
+
+    let mut problems = Vec::new();
+    for s in m.scenarios.iter().filter(|s| s.capability == "delta_scan") {
+        // `planned` scenarios (e.g. the wide-partition corpus gap) intentionally
+        // carry no test_deltas fixture and are exempt.
+        if s.status == "planned" {
+            continue;
+        }
+        let refs = s
+            .fixtures
+            .references
+            .iter()
+            .chain(s.evidence.reference_paths.iter());
+        for r in refs {
+            if let Some(table) = delta_table_from_ref(r) {
+                if !known.contains(&table) {
+                    problems.push(format!(
+                        "[{}] references test_deltas table '{}' not created by deltas.cql (known: {:?})",
+                        s.id, table, known
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "delta_scan fixture/generator drift:\n{}",
+        problems.join("\n")
     );
 }
 

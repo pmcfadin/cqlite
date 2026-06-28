@@ -3409,9 +3409,119 @@ scenarios:
   # ----------------------------------------------------------------------------
   # delta_scan
   # ----------------------------------------------------------------------------
-  - id: cass.delta_scan.tombstone_liveness_facts
-    title: Delta-scan tombstone/TTL/liveness fact extraction
-    status: partial
+  # Per-shape delta_scan scenarios (issue #995). Each maps one delete/write
+  # shape to its specific test_deltas fixture and per-table parity test. All are
+  # canonical_semantic (scan_delta records compared to sstabledump JSONL deletion
+  # facts) — NOT byte_for_byte. Byte-for-byte Data.db backing for these shapes is
+  # a follow-up under the Data.db decode parity epic #969 (capability
+  # data_db_decode); a delta_scan failure points back to that scenario group.
+  - id: cass.delta_scan.cell_tombstones
+    title: Delta-scan cell tombstones (DELETE col)
+    status: mirrored
+    capability: delta_scan
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - SerializationMirrorTest.java
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/scan_delta_parity_test.rs
+        notes: >-
+          Maps to test_delta_parity_cell_tombstones; scan_delta cell-tombstone
+          facts are compared to the sstabledump JSONL golden.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/cell_tombstones-29f7fbe06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-deltas.sh
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/cell_tombstones-29f7fbe06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+      normalization: >-
+        scan_delta cell-tombstone records are mapped to sstabledump JSONL
+        deletion facts (deleted_at) and compared with a writetime tolerance.
+      known_limitations: >-
+        Canonical-semantic JSONL parity only; byte-for-byte Data.db backing is a
+        follow-up under epic #969 (capability data_db_decode). test_deltas
+        binaries are not yet published/enforced in CI (issue #701).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/delta-roundtrip.yml
+    scope:
+      gap: >-
+        No byte-for-byte Data.db diff yet; backed by canonical-semantic JSONL
+        parity. Byte-for-byte backing tracked by Data.db decode parity epic #969.
+        test_deltas dataset binaries not yet published/enforced in CI (#701).
+      next_step: >-
+        Add a byte-for-byte Data.db cell-tombstone scenario under data_db_decode
+        (#969) and publish/enforce the test_deltas dataset in delta-roundtrip CI (#701).
+
+  - id: cass.delta_scan.row_tombstones
+    title: Delta-scan row tombstones (DELETE FROM ... WHERE pk AND ck)
+    status: mirrored
+    capability: delta_scan
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - SerializationMirrorTest.java
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/scan_delta_parity_test.rs
+        notes: >-
+          Maps to test_delta_parity_row_tombstones; scan_delta row-delete facts
+          are compared to the sstabledump JSONL golden.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/row_tombstones-2a0e91206c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-deltas.sh
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/row_tombstones-2a0e91206c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+      normalization: >-
+        scan_delta row-delete records are mapped to sstabledump JSONL row
+        deletion_info markers and compared with a writetime tolerance.
+      known_limitations: >-
+        Canonical-semantic JSONL parity only; byte-for-byte Data.db backing is a
+        follow-up under epic #969 (capability data_db_decode). test_deltas
+        binaries are not yet published/enforced in CI (issue #701).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/delta-roundtrip.yml
+    scope:
+      gap: >-
+        No byte-for-byte Data.db diff yet; backed by canonical-semantic JSONL
+        parity. Byte-for-byte backing tracked by Data.db decode parity epic #969.
+        test_deltas dataset binaries not yet published/enforced in CI (#701).
+      next_step: >-
+        Add a byte-for-byte Data.db row-tombstone scenario under data_db_decode
+        (#969) and publish/enforce the test_deltas dataset in delta-roundtrip CI (#701).
+
+  - id: cass.delta_scan.range_tombstones
+    title: Delta-scan range tombstones (DELETE ... WHERE ck range)
+    status: mirrored
     capability: delta_scan
     priority: P0
     risk: p1_correctness
@@ -3420,37 +3530,411 @@ scenarios:
       relevance: high
       files:
         - RangeTombstoneTest.java
+        - RangeTombstoneListTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/scan_delta_parity_test.rs
+        notes: >-
+          Maps to test_delta_parity_range_tombstones; scan_delta range-delete
+          start/end bound pairs are compared to the sstabledump JSONL golden.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/range_tombstones-2a1a50f06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-deltas.sh
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/range_tombstones-2a1a50f06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+      normalization: >-
+        scan_delta range-delete records are mapped to consecutive sstabledump
+        JSONL range_tombstone_bound start/end pairs and compared with a writetime
+        tolerance; boundary markers are paired into synthetic end/start bounds.
+      known_limitations: >-
+        Canonical-semantic JSONL parity only; byte-for-byte Data.db backing is a
+        follow-up under epic #969 (capability data_db_decode). test_deltas
+        binaries are not yet published/enforced in CI (issue #701).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/delta-roundtrip.yml
+    scope:
+      gap: >-
+        No byte-for-byte Data.db diff yet; backed by canonical-semantic JSONL
+        parity. Byte-for-byte backing tracked by Data.db decode parity epic #969.
+        test_deltas dataset binaries not yet published/enforced in CI (#701).
+      next_step: >-
+        Add a byte-for-byte Data.db range-tombstone scenario under data_db_decode
+        (#969) and publish/enforce the test_deltas dataset in delta-roundtrip CI (#701).
+
+  - id: cass.delta_scan.partition_tombstones
+    title: Delta-scan partition tombstones (DELETE FROM ... WHERE pk)
+    status: mirrored
+    capability: delta_scan
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - RangeTombstoneTest.java
+        - SerializationMirrorTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/scan_delta_parity_test.rs
+        notes: >-
+          Maps to test_delta_parity_partition_tombstones; scan_delta
+          partition-delete facts are compared to the sstabledump JSONL golden.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/partition_tombstones-2a26fb206c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-deltas.sh
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/partition_tombstones-2a26fb206c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+      normalization: >-
+        scan_delta partition-delete records are mapped to the sstabledump JSONL
+        partition deletion_info marker (marked_deleted) and compared with a
+        writetime tolerance.
+      known_limitations: >-
+        Canonical-semantic JSONL parity only; byte-for-byte Data.db backing is a
+        follow-up under epic #969 (capability data_db_decode). test_deltas
+        binaries are not yet published/enforced in CI (issue #701).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/delta-roundtrip.yml
+    scope:
+      gap: >-
+        No byte-for-byte Data.db diff yet; backed by canonical-semantic JSONL
+        parity. Byte-for-byte backing tracked by Data.db decode parity epic #969.
+        test_deltas dataset binaries not yet published/enforced in CI (#701).
+      next_step: >-
+        Add a byte-for-byte Data.db partition-tombstone scenario under
+        data_db_decode (#969) and publish/enforce the test_deltas dataset (#701).
+
+  - id: cass.delta_scan.ttl_cells
+    title: Delta-scan TTL / expiring cells (INSERT ... USING TTL)
+    status: mirrored
+    capability: delta_scan
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
         - TTLExpiryTest.java
     cqlite:
       coverage:
         suite: sstable_parity_delta_scan
         tests:
           - cqlite-core/tests/scan_delta_parity_test.rs
+        notes: >-
+          Maps to test_delta_parity_ttl_cells; scan_delta cell ttl /
+          local_deletion_time facts are compared to the sstabledump JSONL golden.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_deltas/collection_ops-2a5006f06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/ttl_cells-2a35ef406c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
     evidence:
-      type: partial
+      type: canonical_semantic
       artifacts: [jsonl]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
-        bash test-data/scripts/generate-deltas.sh  # all delete shapes → sstabledump JSONL
+        bash test-data/scripts/generate-deltas.sh
       reference_paths:
-        - test-data/datasets/sstables/test_deltas/collection_ops-2a5006f06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/ttl_cells-2a35ef406c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
       normalization: >-
-        scan_delta records (cell/row/partition/range tombstones, TTL, liveness)
-        are mapped to sstabledump JSONL deletion facts and compared.
+        scan_delta expiring-cell records are mapped to sstabledump JSONL cell
+        ttl / local_deletion_time fields and compared; mixed live + expiring
+        cells in the same fixture exercise both code paths.
       known_limitations: >-
-        test_deltas dataset binaries are not yet published/enforced in CI
-        (issue #701); validated locally only.
+        Canonical-semantic JSONL parity only; byte-for-byte Data.db backing is a
+        follow-up under epic #969 (capability data_db_decode). test_deltas
+        binaries are not yet published/enforced in CI (issue #701).
     ci:
       tier: required_parity
       workflow: .github/workflows/delta-roundtrip.yml
     scope:
-      gap: test_deltas dataset asset not published/enforced (#701).
-      next_step: Publish and enforce the test_deltas dataset in delta-roundtrip CI.
+      gap: >-
+        No byte-for-byte Data.db diff yet; backed by canonical-semantic JSONL
+        parity. Byte-for-byte backing tracked by Data.db decode parity epic #969.
+        test_deltas dataset binaries not yet published/enforced in CI (#701).
+      next_step: >-
+        Add a byte-for-byte Data.db ttl/expiring-cell scenario under
+        data_db_decode (#969) and publish/enforce the test_deltas dataset (#701).
+
+  - id: cass.delta_scan.static_with_rows
+    title: Delta-scan static columns alongside clustered rows
+    status: mirrored
+    capability: delta_scan
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationMirrorTest.java
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/scan_delta_parity_test.rs
+        notes: >-
+          Maps to test_delta_parity_static_with_rows; scan_delta static-cell
+          upserts and clustered-row cells are compared to the sstabledump JSONL
+          golden.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/static_with_rows-2a4299706c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-deltas.sh
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/static_with_rows-2a4299706c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+      normalization: >-
+        scan_delta static-cell upserts are mapped to the sstabledump JSONL static
+        row block and clustered-row cells to their per-row cell lists; both are
+        compared by value and writetime with tolerance.
+      known_limitations: >-
+        Canonical-semantic JSONL parity only; byte-for-byte Data.db backing is a
+        follow-up under epic #969 (capability data_db_decode). test_deltas
+        binaries are not yet published/enforced in CI (issue #701).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/delta-roundtrip.yml
+    scope:
+      gap: >-
+        No byte-for-byte Data.db diff yet; backed by canonical-semantic JSONL
+        parity. Byte-for-byte backing tracked by Data.db decode parity epic #969.
+        test_deltas dataset binaries not yet published/enforced in CI (#701).
+      next_step: >-
+        Add a byte-for-byte Data.db static-with-rows scenario under
+        data_db_decode (#969) and publish/enforce the test_deltas dataset (#701).
+
+  - id: cass.delta_scan.partial_updates
+    title: Delta-scan partial updates (UPDATE-only rows, no row liveness)
+    status: mirrored
+    capability: delta_scan
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationMirrorTest.java
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/scan_delta_parity_test.rs
+        notes: >-
+          Maps to test_delta_parity_partial_updates; scan_delta cell upserts and
+          row-liveness presence/absence are compared to the sstabledump JSONL
+          golden (UPDATE-only rows carry no row liveness token).
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/partial_updates-2a5ed4006c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-deltas.sh
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/partial_updates-2a5ed4006c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+      normalization: >-
+        scan_delta cell upserts are mapped to sstabledump JSONL per-cell records
+        and compared; row-liveness presence (INSERT) vs absence (UPDATE-only) is
+        asserted against the JSONL liveness_info markers.
+      known_limitations: >-
+        Canonical-semantic JSONL parity only; byte-for-byte Data.db backing is a
+        follow-up under epic #969 (capability data_db_decode). test_deltas
+        binaries are not yet published/enforced in CI (issue #701).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/delta-roundtrip.yml
+    scope:
+      gap: >-
+        No byte-for-byte Data.db diff yet; backed by canonical-semantic JSONL
+        parity. Byte-for-byte backing tracked by Data.db decode parity epic #969.
+        test_deltas dataset binaries not yet published/enforced in CI (#701).
+      next_step: >-
+        Add a byte-for-byte Data.db partial-update scenario under data_db_decode
+        (#969) and publish/enforce the test_deltas dataset (#701).
+
+  - id: cass.delta_scan.adjacent_ranges
+    title: Delta-scan adjacent range tombstones (shared boundary markers)
+    status: mirrored
+    capability: delta_scan
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - RangeTombstoneListTest.java
+        - RangeTombstoneTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/scan_delta_parity_test.rs
+        notes: >-
+          Maps to test_delta_parity_adjacent_ranges; scan_delta range-delete
+          bounds across shared excl_end/incl_start boundary markers are compared
+          to the sstabledump JSONL golden.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/adjacent_ranges-972f22806c7811f1a24ff924a65838e2/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-deltas.sh
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/adjacent_ranges-972f22806c7811f1a24ff924a65838e2/nb-1-big-Data.db.jsonl
+      normalization: >-
+        scan_delta range-delete records are reconstructed from sstabledump JSONL
+        boundary markers (excl_end_incl_start / incl_end_excl_start) into
+        synthetic end/start bound pairs and compared with a writetime tolerance.
+      known_limitations: >-
+        Canonical-semantic JSONL parity only; byte-for-byte Data.db backing is a
+        follow-up under epic #969 (capability data_db_decode). test_deltas
+        binaries are not yet published/enforced in CI (issue #701).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/delta-roundtrip.yml
+    scope:
+      gap: >-
+        No byte-for-byte Data.db diff yet; backed by canonical-semantic JSONL
+        parity. Byte-for-byte backing tracked by Data.db decode parity epic #969.
+        test_deltas dataset binaries not yet published/enforced in CI (#701).
+      next_step: >-
+        Add a byte-for-byte Data.db adjacent-range scenario under data_db_decode
+        (#969) and publish/enforce the test_deltas dataset (#701).
+
+  - id: cass.delta_scan.collection_ops
+    title: Delta-scan collection operations (append/overwrite/element delete)
+    status: mirrored
+    capability: delta_scan
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationMirrorTest.java
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/scan_delta_parity_test.rs
+        notes: >-
+          Maps to test_delta_parity_collection_ops; scan_delta collection cell
+          upserts and element/collection tombstones are compared to the
+          sstabledump JSONL golden.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/collection_ops-2a5006f06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-deltas.sh
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/collection_ops-2a5006f06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+      normalization: >-
+        scan_delta collection cell upserts and the complex-cell deletion markers
+        emitted by SET append / overwrite / element removal are mapped to the
+        sstabledump JSONL collection cells and compared with a writetime tolerance.
+      known_limitations: >-
+        Canonical-semantic JSONL parity only; byte-for-byte Data.db backing is a
+        follow-up under epic #969 (capability data_db_decode). test_deltas
+        binaries are not yet published/enforced in CI (issue #701).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/delta-roundtrip.yml
+    scope:
+      gap: >-
+        No byte-for-byte Data.db diff yet; backed by canonical-semantic JSONL
+        parity. Byte-for-byte backing tracked by Data.db decode parity epic #969.
+        test_deltas dataset binaries not yet published/enforced in CI (#701).
+      next_step: >-
+        Add a byte-for-byte Data.db collection-ops scenario under data_db_decode
+        (#969) and publish/enforce the test_deltas dataset (#701).
+
+  - id: cass.delta_scan.wide_partition_corpus
+    title: Delta-scan over wide partitions (planned — no test_deltas fixture yet)
+    status: planned
+    capability: delta_scan
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - SSTableSkippingReadTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+    fixtures: {}
+    evidence:
+      type: canonical_semantic
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      normalization: >-
+        Planned: scan_delta facts over a wide partition (many clustered rows +
+        range/cell tombstones in one partition, exercising index-block skipping)
+        compared to the sstabledump JSONL golden.
+      known_limitations: >-
+        No wide-partition delete fixture exists under test_deltas; wide
+        partitions live in the wide-row corpus (epic #993). No fixture is
+        fabricated here — this is recorded as a gap.
+    ci:
+      tier: exhaustive_regeneration
+      workflow: .github/workflows/delta-roundtrip.yml
+    scope:
+      target_issue: 993
+      target_suite: sstable_parity_delta_scan
+      gap: >-
+        No test_deltas wide-partition delete fixture; wide partitions are
+        produced by the wide-row corpus (epic #993), not generate-deltas.sh.
+        Byte-for-byte backing for delta_scan remains tracked by epic #969.
+      next_step: >-
+        Add a wide-partition delete shape (or reuse a wide-row corpus fixture)
+        and a paired test_delta_parity_wide_partition test under epic #993.
 
   # ----------------------------------------------------------------------------
   # compaction_merge
