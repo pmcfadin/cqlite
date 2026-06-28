@@ -265,6 +265,31 @@ class GhPathTests(unittest.TestCase):
         self.assertEqual(fields["priority"], "P1")
         self.assertEqual(fields["routing"], "oracle")  # explicit label, not inferred
 
+    def test_github_fields_raises_on_multiple_priority_labels(self):
+        def fake_run(argv, **kw):
+            if argv[:3] == ["gh", "issue", "view"]:
+                return _FakeProc(json.dumps({
+                    "createdAt": "2026-06-01T00:00:00Z",
+                    "closedAt": "2026-06-01T02:00:00Z",
+                    "labels": [{"name": "P1"}, {"name": "P2"}],  # invariant violation
+                }))
+            return _FakeProc(json.dumps({
+                "createdAt": "2026-06-01T00:30:00Z", "mergedAt": "2026-06-01T01:30:00Z"}))
+
+        with mock.patch.object(dt.subprocess, "run", fake_run):
+            with self.assertRaises(SystemExit):
+                dt._github_fields(1, 2)
+
+    def test_gh_failure_becomes_clean_systemexit(self):
+        import subprocess as _sp
+
+        def boom(argv, **kw):
+            raise _sp.CalledProcessError(1, argv, stderr="gh: not authenticated")
+
+        with mock.patch.object(dt.subprocess, "run", boom):
+            with self.assertRaises(SystemExit):
+                dt._gh(["gh", "issue", "view", "1"])
+
     def test_retro_file_invokes_gh_issue_create(self):
         calls = []
 

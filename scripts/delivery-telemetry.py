@@ -167,14 +167,27 @@ def _now_iso() -> str:
 
 # ============================================================ record
 
+def _gh(argv: list) -> str:
+    """Run a `gh` command and return stdout; a gh failure is a clean SystemExit.
+
+    Keeps the live network-touching paths consistent with the tool's deliberate
+    SystemExit error style instead of surfacing a raw traceback.
+    """
+    try:
+        return subprocess.run(argv, check=True, capture_output=True, text=True).stdout
+    except FileNotFoundError:
+        raise SystemExit("error: `gh` not found on PATH")
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or "").strip() or str(exc)
+        raise SystemExit(f"error: `{' '.join(argv)}` failed: {detail}")
+
+
 def _github_fields(issue: int, pr: int) -> dict:
     """Pull authoritative timestamps/labels live from `gh` (only when not injected)."""
-    issue_json = json.loads(subprocess.run(
-        ["gh", "issue", "view", str(issue), "--json", "createdAt,closedAt,labels"],
-        check=True, capture_output=True, text=True).stdout)
-    pr_json = json.loads(subprocess.run(
-        ["gh", "pr", "view", str(pr), "--json", "createdAt,mergedAt"],
-        check=True, capture_output=True, text=True).stdout)
+    issue_json = json.loads(_gh(
+        ["gh", "issue", "view", str(issue), "--json", "createdAt,closedAt,labels"]))
+    pr_json = json.loads(_gh(
+        ["gh", "pr", "view", str(pr), "--json", "createdAt,mergedAt"]))
     labels = [l.get("name") for l in issue_json.get("labels", []) if l.get("name")]
     prio_labels = [l for l in labels if re.fullmatch(r"P[0-3]", l)]
     # one-priority invariant: a multi-priority issue is a labeling error — surface it
@@ -277,7 +290,9 @@ def cmd_record(args) -> int:
     ledger = Path(args.ledger)
     # Idempotency: one record per completed issue. A re-run / double finalize must not
     # append a second record (which would double-count that issue in retro). Refuse
-    # unless --allow-duplicate is given.
+    # unless --allow-duplicate is given. This check is best-effort, not atomic — the real
+    # cross-session serializer is the per-issue branch lock (one worktree → one finalize);
+    # `lint` is the after-the-fact backstop that flags any duplicate that slips through.
     if ledger.exists():
         for lineno, raw in enumerate(ledger.read_text().splitlines(), start=1):
             if not raw.strip():
@@ -384,10 +399,9 @@ _FLOW_META_LIMIT = 500
 def _open_flow_meta_issues(args) -> list:
     if args.open_issues_json:
         return json.loads(Path(args.open_issues_json).read_text())
-    issues = json.loads(subprocess.run(
+    issues = json.loads(_gh(
         ["gh", "issue", "list", "--label", "flow-meta", "--state", "open",
-         "--json", "number,title,body", "--limit", str(_FLOW_META_LIMIT)],
-        check=True, capture_output=True, text=True).stdout)
+         "--json", "number,title,body", "--limit", str(_FLOW_META_LIMIT)]))
     # No silent cap: if the lookup hit the limit, dedupe may be incomplete — say so loudly.
     if len(issues) >= _FLOW_META_LIMIT:
         print(f"warning: open flow-meta lookup hit the {_FLOW_META_LIMIT}-issue cap — "
@@ -461,11 +475,9 @@ def cmd_retro(args) -> int:
         print(body)
         return 0
 
-    out = subprocess.run(
-        ["gh", "issue", "create", "--title", title, "--body", body,
-         "--label", "flow-meta", "--label", "P2"],
-        check=True, capture_output=True, text=True)
-    print(f"filed: {out.stdout.strip()}")
+    url = _gh(["gh", "issue", "create", "--title", title, "--body", body,
+               "--label", "flow-meta", "--label", "P2"])
+    print(f"filed: {url.strip()}")
     return 0
 
 
