@@ -272,6 +272,20 @@ class RetroTests(unittest.TestCase):
         self.assertIn("top recurring failure: rework", text)
         self.assertIn("DRY RUN", text)              # default mode files nothing
 
+    def test_retro_dryrun_degrades_when_gh_unavailable(self):
+        # No --open-issues-json -> dedup would hit live gh; a gh failure in dry-run must
+        # warn and still print the preview, not abort.
+        def boom(argv, **kw):
+            raise FileNotFoundError("gh")
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(dt.subprocess, "run", boom):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = dt.main(["retro", "--ledger", str(FIXTURES / "sample-ledger.jsonl")])
+        self.assertEqual(rc, 0)
+        self.assertIn("DRY RUN", out.getvalue())
+        self.assertIn("dedup check skipped", err.getvalue())
+
     def test_retro_dedupes_against_existing_flow_meta_issue(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):

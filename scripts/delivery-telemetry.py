@@ -453,9 +453,17 @@ def cmd_retro(args) -> int:
         return 0
     print(f"\ntop recurring failure: {top_cat} (count={top_cnt}, score={top_score})")
 
-    # dedupe against open flow-meta issues by stable category marker
+    # dedupe against open flow-meta issues by stable category marker. The live lookup
+    # needs gh; in a dry-run a gh failure degrades to a warning (a read-only preview must
+    # not hard-require auth), but at filing time gh is mandatory (we won't file blind).
     marker = _retro_marker(top_cat)
-    existing = [i for i in _open_flow_meta_issues(args) if marker in (i.get("body") or "")]
+    try:
+        existing = [i for i in _open_flow_meta_issues(args) if marker in (i.get("body") or "")]
+    except SystemExit as exc:
+        if args.file:
+            raise
+        print(f"warning: dedup check skipped ({exc}) — dry-run preview only", file=sys.stderr)
+        existing = []
     if existing:
         nums = ", ".join(f"#{i['number']}" for i in existing)
         print(f"already tracked by open flow-meta issue(s): {nums} — skipping filing")
