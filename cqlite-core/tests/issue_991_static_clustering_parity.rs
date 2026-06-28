@@ -502,12 +502,11 @@ fn regular_clustered_row_is_not_static_and_carries_clustering_prefix() {
     let header = read_uvint_loc(&bytes, flags.end());
     fail_vint(header, 0, "single-column clustering header (PRESENT)");
     let ck_off = header.end();
-    let ck_val = i32::from_be_bytes([
-        bytes[ck_off],
-        bytes[ck_off + 1],
-        bytes[ck_off + 2],
-        bytes[ck_off + 3],
-    ]);
+    let ck_val = read_be_i32(
+        &bytes,
+        ck_off,
+        "regular clustered-row clustering value (int)",
+    );
     assert_eq!(
         ck_val, 0x0A0B0C0D,
         "single clustering value must be a 4-byte big-endian int at offset {ck_off}"
@@ -1030,19 +1029,14 @@ fn multi_column_clustering_prefix_byte_parity_writer() {
 
     // c1 int (4B BE) in DECLARED order.
     let c1_off = header.end();
-    let c1 = i32::from_be_bytes([
-        bytes[c1_off],
-        bytes[c1_off + 1],
-        bytes[c1_off + 2],
-        bytes[c1_off + 3],
-    ]);
+    let c1 = read_be_i32(&bytes, c1_off, "clustering c1 (int)");
     assert_eq!(c1, 0x0A0B0C0D, "clustering c1 (int) at offset {c1_off}");
 
     // c2 text: VInt length prefix then bytes.
     let c2_len = read_uvint_loc(&bytes, c1_off + 4);
     fail_vint(c2_len, 3, "clustering c2 (text) length prefix = 3 ('mid')");
     let c2_val_start = c2_len.end();
-    let c2_bytes = &bytes[c2_val_start..c2_val_start + 3];
+    let c2_bytes = read_fixed_loc(&bytes, c2_val_start, 3, "clustering c2 (text) value");
     assert_eq!(
         c2_bytes, b"mid",
         "clustering c2 text value must be 'mid' at offset {c2_val_start}"
@@ -1050,12 +1044,7 @@ fn multi_column_clustering_prefix_byte_parity_writer() {
 
     // c3 int (4B BE), then row_size/prev_size.
     let c3_off = c2_val_start + 3;
-    let c3 = i32::from_be_bytes([
-        bytes[c3_off],
-        bytes[c3_off + 1],
-        bytes[c3_off + 2],
-        bytes[c3_off + 3],
-    ]);
+    let c3 = read_be_i32(&bytes, c3_off, "clustering c3 (int)");
     assert_eq!(c3, 0x11121314, "clustering c3 (int) at offset {c3_off}");
 
     let row_size = read_uvint_loc(&bytes, c3_off + 4);
@@ -1403,14 +1392,40 @@ fn null_vs_empty_clustering_value_byte_distinction() {
          a leaked empty-clustering header/length would shift this"
     );
 
-    // The two encodings are byte-distinct at the position right after the flags:
-    // EMPTY → [header=0][len=0][row_size...]; ABSENT/static → [ext_flags][row_size...].
-    // We have already asserted both shapes; assert the lengths differ to make the
-    // distinction explicit and regression-proof.
+    // The two encodings are byte-distinct: prove it by comparing WHERE row_size
+    // begins relative to the leading flag byte in each layout.
+    //
+    //   EMPTY   → [flags][clustering header=0][len=0][row_size...]
+    //   ABSENT  → [flags][ext_flags][row_size...]   (static row, NO clustering)
+    //
+    // Measure each row_size offset from the byte AFTER the leading flag byte, so
+    // the two partitions (different PK headers) are directly comparable. The EMPTY
+    // layout pushes row_size strictly later because it carries a clustering header
+    // + a zero-length value that the static/absent row omits entirely.
+    let empty_row_size_off_after_flags = row_size.start - flags.end();
+    let absent_row_size_off_after_flags = s_row_size.start - sflags.end();
     assert_ne!(
+        empty_row_size_off_after_flags, absent_row_size_off_after_flags,
+        "EMPTY vs ABSENT clustering must be byte-distinct: in the EMPTY layout \
+         row_size begins {empty_row_size_off_after_flags} byte(s) after the flag byte \
+         (clustering header + zero-length value), but in the static/ABSENT layout it \
+         begins {absent_row_size_off_after_flags} byte(s) after — if these were equal \
+         the EMPTY clustering header/length would have leaked into (or been dropped \
+         from) the static row layout"
+    );
+    // Concretely: EMPTY consumes the clustering header + len VInt the absent row
+    // does not; the static layout's row_size sits exactly one byte (the extended
+    // flags) past the leading flag byte.
+    assert_eq!(
+        empty_row_size_off_after_flags,
         header.len + len.len,
-        0,
-        "the EMPTY clustering consumed a header+length the static (absent) row did not"
+        "EMPTY layout row_size must sit exactly past the clustering header + \
+         zero-length value VInt"
+    );
+    assert_eq!(
+        absent_row_size_off_after_flags, sext.len,
+        "static/ABSENT layout row_size must sit exactly past the extended-flags \
+         byte (no clustering header/length in between)"
     );
 }
 
