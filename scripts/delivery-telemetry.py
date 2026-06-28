@@ -109,6 +109,11 @@ def _validate(value, schema: dict, path: str, errors: list) -> None:
             # date + time + offset so a value like "2026-06-01" is rejected.
             if "T" not in value or parsed.tzinfo is None:
                 errors.append(f"{path}: {value!r} is not a full date-time with offset")
+    if schema.get("type") == "array" and isinstance(value, list):
+        item_schema = schema.get("items")
+        if item_schema:
+            for idx, item in enumerate(value):
+                _validate(item, item_schema, f"{path}[{idx}]", errors)
     if schema.get("type") == "object" and isinstance(value, dict):
         props = schema.get("properties", {})
         for req in schema.get("required", []):
@@ -170,7 +175,7 @@ def _github_fields(issue: int, pr: int) -> dict:
     pr_json = json.loads(subprocess.run(
         ["gh", "pr", "view", str(pr), "--json", "createdAt,mergedAt"],
         check=True, capture_output=True, text=True).stdout)
-    labels = [l["name"] for l in issue_json.get("labels", [])]
+    labels = [l.get("name") for l in issue_json.get("labels", []) if l.get("name")]
     prio_labels = [l for l in labels if re.fullmatch(r"P[0-3]", l)]
     # one-priority invariant: a multi-priority issue is a labeling error — surface it
     # rather than silently picking the first (authoritative-data-only).

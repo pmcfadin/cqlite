@@ -303,6 +303,15 @@ class AggregateTests(unittest.TestCase):
         self.assertEqual(ranked[0][0], "rework")
         self.assertEqual(ranked[0][3], 7 * dt.RETRO_WEIGHTS["rework"])  # 28
 
+    def test_terminal_fail_counts_all_rounds(self):
+        # gate == "fail" counts EVERY run as a failed round (no -1 for a final pass):
+        # gate_runs=3, fail -> 3; the same runs with a terminal pass would be 2.
+        fail_rec = {"gate": "fail", "gate_runs": 3, "claim_collisions": 0,
+                    "rebase_events": 0, "roborev_findings": 0, "rework": 0}
+        pass_rec = {**fail_rec, "gate": "pass"}
+        self.assertEqual(dt.aggregate([fail_rec])["gate_failures"], 3)
+        self.assertEqual(dt.aggregate([pass_rec])["gate_failures"], 2)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
