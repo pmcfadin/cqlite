@@ -50,7 +50,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use aggregation::{build_group_key, finalize_group, find_or_init_group, update_aggregate, AggregationState};
+use aggregation::{
+    build_group_key, finalize_group, find_or_init_group, update_aggregate, AggregationState,
+};
 use lookup::{
     classify_partition_lookup, honest_targeted_path, sort_rows_by_token, PartitionLookupOutcome,
 };

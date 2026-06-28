@@ -8,7 +8,7 @@ use super::collections::{
     parse_list_with_element_type, parse_map_with_types, parse_set_with_element_type,
 };
 use super::{
-    create_empty_value, create_empty_value_for_cql_type, cql_type_to_type_id, parse_cql_value,
+    cql_type_to_type_id, create_empty_value, create_empty_value_for_cql_type, parse_cql_value,
     parse_cql_value_raw,
 };
 use crate::{

@@ -65,7 +65,10 @@ pub(super) fn expression_to_value(
 /// Returns `Error::InvalidInput` for type mismatches or overflow, and
 /// `Error::Parse` for malformed UUID/blob/inet strings.
 #[cfg(feature = "write-support")]
-pub(crate) fn literal_to_value(literal: &CqlLiteral, target_type: &CqlType) -> Result<Value, Error> {
+pub(crate) fn literal_to_value(
+    literal: &CqlLiteral,
+    target_type: &CqlType,
+) -> Result<Value, Error> {
     // Unwrap Frozen – it doesn't affect value representation
     if let CqlType::Frozen(inner) = target_type {
         let inner_value = literal_to_value(literal, inner)?;

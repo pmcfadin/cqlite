@@ -72,11 +72,7 @@ pub(super) fn try_compare_values(a: &Value, b: &Value) -> Result<std::cmp::Order
 /// (no implicit coercion), and division/modulo by zero are reported as
 /// query-execution errors. Float division-by-zero (matching the original
 /// runtime path) yields IEEE inf/NaN rather than an error.
-pub(super) fn eval_arithmetic(
-    op: &ArithmeticOperator,
-    left: Value,
-    right: Value,
-) -> Result<Value> {
+pub(super) fn eval_arithmetic(op: &ArithmeticOperator, left: Value, right: Value) -> Result<Value> {
     use ArithmeticOperator::*;
     macro_rules! int_op {
         ($a:expr, $b:expr, $ctor:expr) => {

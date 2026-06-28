@@ -8,9 +8,9 @@
 
 use crate::types::{CellWriteMetadata, TableId, Value};
 use crate::util::cassandra_murmur3::cassandra_murmur3_token;
-use crate::RowKey;
 #[cfg(not(feature = "tombstones"))]
 use crate::Result;
+use crate::RowKey;
 
 /// A single-column clustering-key restriction pushed down to a within-partition
 /// seek (Issue #954, Epic #951).

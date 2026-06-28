@@ -213,7 +213,9 @@ pub(super) fn validate_token_predicates(
 #[cfg(test)]
 mod tests {
     use super::super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
-    use super::super::test_support::{composite_pk_schema, row_with_int, row_with_key, single_pk_schema};
+    use super::super::test_support::{
+        composite_pk_schema, row_with_int, row_with_key, single_pk_schema,
+    };
     use super::*;
     use crate::types::RowKey;
 
