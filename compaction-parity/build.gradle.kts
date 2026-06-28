@@ -84,7 +84,10 @@ val jvm17Args = listOf(
     "-Dio.netty.tryReflectionSetAccessible=true",
 )
 
-tasks.test {
+// Shared configuration for both parity tiers (issue #1016). The `label` keeps the
+// per-task storage + artifacts dirs distinct so the logical and byte tiers never
+// clobber each other when both run in one CI job.
+fun Test.configureParityHarness(label: String) {
     useJUnit() // Cassandra's test tree is JUnit 4
 
     // Fail fast and loudly if the harness isn't wired up, rather than silently passing.
@@ -102,10 +105,19 @@ tasks.test {
     jvmArgs("-javaagent:${jammAgent.absolutePath}")
 
     systemProperty("cassandra.config", cassandraYaml.toURI().toString())
-    systemProperty("cassandra.storagedir", "${layout.buildDirectory.get()}/cassandra-storage")
+    systemProperty(
+        "cassandra.storagedir",
+        layout.buildDirectory.dir("cassandra-storage-$label").get().asFile.absolutePath,
+    )
     systemProperty("cqlite.bin", cqliteBin)
     systemProperty("cassandra.src", cassandraSrc)
     systemProperty("cassandra.sstabledump", sstabledump.absolutePath)
+    // Where the harness preserves per-scenario artifacts (inputs, both outputs,
+    // schema, command lines, stdout/stderr, JSONL, checksums, byte diff).
+    systemProperty(
+        "parity.artifacts.dir",
+        layout.buildDirectory.dir("parity-artifacts-$label").get().asFile.absolutePath,
+    )
 
     maxParallelForks = 1
 
@@ -114,4 +126,23 @@ tasks.test {
         exceptionFormat = TestExceptionFormat.FULL
         showStandardStreams = true
     }
+}
+
+// LOGICAL tier (hard gate): canonical sstabledump equality. Byte diffs are still
+// computed and preserved as artifacts here, but NOT asserted.
+tasks.test {
+    configureParityHarness("test")
+}
+
+// BYTE tier (#842 north star): same scenarios, but additionally assert every
+// output component is byte-identical with NO allowlist. Non-blocking in CI until
+// the writer is byte-stable; promote by dropping continue-on-error on the
+// workflow step. Invoke with `gradle byteParity`.
+val byteParity by tasks.registering(Test::class) {
+    description = "Byte-for-byte compaction parity tier (per-component cmp, no allowlist)."
+    group = "verification"
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    configureParityHarness("byteParity")
+    systemProperty("parity.tier", "byte")
 }

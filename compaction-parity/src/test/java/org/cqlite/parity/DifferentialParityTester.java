@@ -35,6 +35,9 @@ import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.utils.FBUtilities;
 
+import org.junit.Rule;
+import org.junit.rules.TestName;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -51,10 +54,25 @@ import static org.junit.Assert.fail;
  *       ({@link CqliteCompactionRunner}).</li>
  * </ol>
  *
- * <p>This step implements the LOGICAL tier only: a canonical {@code sstabledump}
- * of every output must match. The same {@code sstabledump} tool is run over both
- * engines' output so the comparison is apples-to-apples. The BYTE tier (#842's
- * north star) lands in a follow-up.
+ * <p>This base runs TWO tiers (issue #1016):
+ *
+ * <ul>
+ *   <li><b>LOGICAL</b> (always asserted — hard gate): a canonical
+ *       {@code sstabledump} of every output must match. The same
+ *       {@code sstabledump} tool is run over both engines' output so the
+ *       comparison is apples-to-apples.</li>
+ *   <li><b>BYTE</b> (#842 north star): every output component file is compared
+ *       byte-for-byte with NO allowlist ({@link ComponentByteComparator}),
+ *       reporting the first byte/offset diff per component. The diff is ALWAYS
+ *       computed and written to the preserved artifacts; it is ASSERTED only when
+ *       the byte tier is enabled via {@code -Dparity.tier=byte} (the
+ *       {@code byteParity} Gradle task), so {@code gradle test} stays a pure
+ *       logical gate while {@code gradle byteParity} adds the byte assertion.</li>
+ * </ul>
+ *
+ * <p>Every run preserves artifacts (inputs, both outputs, schema, exact command
+ * lines, stdout/stderr, normalized JSONL, checksum summary, byte diff) under
+ * {@code -Dparity.artifacts.dir} on success AND failure ({@link ParityArtifacts}).
  *
  * <p>Determinism: inputs are written with explicit {@code USING TIMESTAMP}; the
  * same {@code gcBefore} is passed to both engines. NOTE: cqlite does not yet purge
@@ -66,7 +84,23 @@ public abstract class DifferentialParityTester extends CQLTester
     private static final Pattern EXPIRED_FLAG =
         Pattern.compile("\"expired\"\\s*:\\s*(true|false)");
 
+    @Rule
+    public final TestName testName = new TestName();
+
     private final CqliteCompactionRunner cqlite = CqliteCompactionRunner.fromConfig();
+
+    /** True when the byte tier should be asserted (not just computed + reported). */
+    private static boolean byteTierEnabled()
+    {
+        String tier = System.getProperty("parity.tier", "");
+        return tier.equalsIgnoreCase("byte") || Boolean.getBoolean("parity.byte");
+    }
+
+    private String scenarioLabel()
+    {
+        String method = testName.getMethodName();
+        return getClass().getSimpleName() + "." + (method == null ? "scenario" : method);
+    }
 
     /**
      * Build inputs, compact with both engines over the same files, and assert the
@@ -98,15 +132,20 @@ public abstract class DifferentialParityTester extends CQLTester
         assertEquals("each insert group should flush to its own SSTable",
                      insertGroups.size(), inputs.size());
 
+        // Preserve everything for this scenario, on success AND failure.
+        ParityArtifacts artifacts = ParityArtifacts.forScenario(scenarioLabel());
+
         // ── Snapshot the input SSTables for cqlite BEFORE compaction obsoletes them ──
         Path inputDir = Files.createTempDirectory("parity-inputs");
         for (SSTableReader r : inputs)
             copyAllComponents(r.descriptor, inputDir);
+        artifacts.copyDir(inputDir, "inputs");
 
         // cqlite schema file: the same DDL, but fully qualified and standalone.
         Path schemaFile = Files.createTempFile("parity-schema", ".cql");
         String standaloneDdl = createTableDdl.replace("%s", keyspace() + "." + table) + ";";
         Files.writeString(schemaFile, standaloneDdl);
+        artifacts.write("schema.cql", standaloneDdl + "\n");
 
         // No purging for these scenarios: gcBefore well before any deletion time.
         long gcBefore = FBUtilities.nowInSeconds();
@@ -116,20 +155,58 @@ public abstract class DifferentialParityTester extends CQLTester
         List<SSTableReader> outputs = new ArrayList<>(cfs.getLiveSSTables());
         assertEquals("expected exactly one reference output SSTable", 1, outputs.size());
         Path referenceData = outputs.get(0).descriptor.fileFor(Components.DATA).toPath();
+        Path cassOutDir = artifacts.copyComponentsOf(referenceData, "cassandra-output");
 
         // ── CANDIDATE: cqlite compaction over the SAME inputs ──
         Path outputDir = Files.createTempDirectory("parity-cqlite-out");
         CqliteCompactionRunner.Result res =
             cqlite.compact(inputDir, outputDir, schemaFile, gcBefore, null, 1);
+
+        // Capture the exact command lines + child output BEFORE asserting success,
+        // so a failed compaction still leaves a full forensic trail.
+        String sstabledumpTool = System.getProperty("cassandra.sstabledump", "<unset>");
+        artifacts.write("commands.txt",
+            "# cqlite compact\n" + res.commandLine() + "\n\n"
+            + "# sstabledump (reference)\n" + sstabledumpTool + " -l " + referenceData + "\n\n"
+            + "# sstabledump (candidate)\n" + sstabledumpTool + " -l <cqlite Data.db>\n");
+        artifacts.write("cqlite-compact.stdout", res.stdout);
+        artifacts.write("cqlite-compact.stderr", res.stderr);
+
         assertTrue("cqlite compact failed (exit " + res.exitCode + "):\n" + res.stderr + res.stdout,
                    res.succeeded());
         Path candidateData = findSingleData(outputDir);
+        Path candOutDir = artifacts.copyComponentsOf(candidateData, "cqlite-output");
+
+        // ── BYTE tier: per-component cmp, NO allowlist. Computed + persisted ALWAYS;
+        //    asserted only when the byte tier is enabled (gradle byteParity). ──
+        ComponentByteComparator.Result byteResult =
+            ComponentByteComparator.compare(cassOutDir, candOutDir);
+        artifacts.write("byte-diff.txt", byteResult.render());
+        artifacts.writeChecksums(cassOutDir, candOutDir);
 
         // ── LOGICAL comparison: same sstabledump over both outputs ──
         String referenceJson = normalize(sstabledump(referenceData));
         String candidateJson = normalize(sstabledump(candidateData));
+        artifacts.write("reference.jsonl", referenceJson);
+        artifacts.write("candidate.jsonl", candidateJson);
+
+        System.out.println("[parity] " + scenarioLabel() + " artifacts: " + artifacts.dir());
+
+        // LOGICAL tier is the hard gate.
         assertEquals("logical dump mismatch (cassandra reference vs cqlite candidate)",
                      referenceJson, candidateJson);
+
+        // BYTE tier assertion (opt-in, #842 north star). No allowlist: any
+        // component divergence is a failure.
+        if (byteTierEnabled() && byteResult.hasMismatch())
+        {
+            StringBuilder msg = new StringBuilder("BYTE tier mismatch (no allowlist) — "
+                + "first diff per divergent component:\n");
+            for (ComponentByteComparator.ComponentDiff d : byteResult.mismatches())
+                msg.append("  ").append(d).append('\n');
+            msg.append("Artifacts: ").append(artifacts.dir());
+            fail(msg.toString());
+        }
     }
 
     /** Copy every on-disk file of an SSTable (all components incl. TOC.txt) into {@code dest}. */

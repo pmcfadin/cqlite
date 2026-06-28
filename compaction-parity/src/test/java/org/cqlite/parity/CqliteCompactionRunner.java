@@ -73,17 +73,26 @@ public final class CqliteCompactionRunner
         public final int exitCode;
         public final String stdout;
         public final String stderr;
+        /** The exact argv used to launch the process (for artifact capture). */
+        public final List<String> command;
 
-        Result(int exitCode, String stdout, String stderr)
+        Result(int exitCode, String stdout, String stderr, List<String> command)
         {
             this.exitCode = exitCode;
             this.stdout = stdout;
             this.stderr = stderr;
+            this.command = List.copyOf(command);
         }
 
         public boolean succeeded()
         {
             return exitCode == 0;
+        }
+
+        /** The exact command line as a single shell-style string. */
+        public String commandLine()
+        {
+            return String.join(" ", command);
         }
     }
 
@@ -139,7 +148,8 @@ public final class CqliteCompactionRunner
             }
             return new Result(proc.exitValue(),
                               Files.readString(outFile),
-                              Files.readString(errFile));
+                              Files.readString(errFile),
+                              cmd);
         }
         finally
         {
