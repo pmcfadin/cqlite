@@ -236,8 +236,8 @@ jobs:
           MODULE_COUNT=$(ls artifacts/*.node 2>/dev/null | wc -l)
           echo "Native module count: $MODULE_COUNT"
 
-          if [ "$MODULE_COUNT" -lt 5 ]; then
-            echo "::error::Expected 5 native modules, found $MODULE_COUNT"
+          if [ "$MODULE_COUNT" -ne 5 ]; then
+            echo "::error::Expected exactly 5 native modules (the supported matrix), found $MODULE_COUNT"
             exit 1
           fi
 
