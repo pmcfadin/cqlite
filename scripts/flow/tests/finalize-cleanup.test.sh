@@ -169,6 +169,8 @@ bash "$CLEANUP" --issue 1206 --merged-branch issue-1206-feature \
   --repo-root "$WORK" --worktrees-dir "$T" >/dev/null 2>&1 || rc=$?
 [ "$rc" -eq 4 ] && ok "exit 4 — unmerged origin tip refused without confirmation" || fail "expected exit 4, got $rc"
 remote_branches "$WORK" | grep -qx "issue-1206-feature" && ok "origin branch survives (Guard 4)" || fail "origin branch deleted without confirmation"
+# validate-before-mutate: a refused (exit 4) run must NOT have removed the worktree
+[ -d "$T/wt" ] && ok "worktree intact on refused path (no half-deletion)" || fail "worktree removed on exit-4 path — non-atomic"
 rm -rf "$T"
 
 # ===========================================================================
@@ -180,6 +182,32 @@ bash "$CLEANUP" --issue 1207 --merged-branch issue-1207-feature --confirm-unmerg
   --repo-root "$WORK" --worktrees-dir "$T" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 0 ] && ok "exit 0 with --confirm-unmerged" || fail "expected exit 0, got $rc"
 remote_branches "$WORK" | grep -qx "issue-1207-feature" && fail "origin branch NOT deleted" || ok "origin branch deleted with confirmation"
+rm -rf "$T"
+
+# ===========================================================================
+echo "TEST 10: worktree outside --worktrees-dir → refuse (exit 3), no removal"
+# ===========================================================================
+T=$(mktemp -d); build_sandbox "$T"; WORK="$T/work"
+add_branch_worktree "$WORK" "issue-1208-feature" "$T/wt" ""
+rc=0
+# point --worktrees-dir at a sibling dir that does NOT contain the worktree
+bash "$CLEANUP" --issue 1208 --merged-branch issue-1208-feature --confirm-unmerged \
+  --repo-root "$WORK" --worktrees-dir "$T/elsewhere" >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 3 ] && ok "exit 3 — worktree not under --worktrees-dir" || fail "expected exit 3, got $rc"
+[ -d "$T/wt" ] && ok "out-of-dir worktree survives" || fail "out-of-dir worktree removed"
+rm -rf "$T"
+
+# ===========================================================================
+echo "TEST 11: --dry-run previews without mutating (happy path)"
+# ===========================================================================
+T=$(mktemp -d); build_sandbox "$T"; WORK="$T/work"
+add_branch_worktree "$WORK" "issue-1209-feature" "$T/wt" ""
+out=$(bash "$CLEANUP" --issue 1209 --merged-branch issue-1209-feature --confirm-unmerged --dry-run \
+  --repo-root "$WORK" --worktrees-dir "$T" 2>&1); rc=$?
+[ "$rc" -eq 0 ] && ok "exit 0 on dry-run" || fail "expected exit 0, got $rc"
+[ -d "$T/wt" ] && ok "dry-run did not remove worktree" || fail "dry-run removed worktree"
+remote_branches "$WORK" | grep -qx "issue-1209-feature" && ok "dry-run did not delete origin branch" || fail "dry-run deleted branch"
+echo "$out" | grep -q "DRY-RUN" && ok "dry-run prints planned actions" || fail "no DRY-RUN output"
 rm -rf "$T"
 
 echo ""
