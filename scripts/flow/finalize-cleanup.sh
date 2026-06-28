@@ -104,13 +104,19 @@ run() {
 
 # ---------------------------------------------------------------------------
 # Guard 2: exactly one issue-<N>-* lock on origin (1:1:1:1).
+# FAIL CLOSED: a remote query error (auth/network/rate-limit) must NOT look like
+# "0 locks" — that would bypass the very guard the #1143 incident created. Capture
+# ls-remote in a checked statement and refuse (exit 3) on failure.
 # ---------------------------------------------------------------------------
+if ! locks_raw="$(git_root ls-remote --heads "$REMOTE" "issue-${ISSUE}-*" 2>/dev/null)"; then
+  echo "$prog: REFUSED — cannot query $REMOTE for 'issue-${ISSUE}-*' locks (remote error). Failing closed." >&2
+  exit 3
+fi
 # bash 3.2 compatible (no `mapfile`)
 LOCKS=()
 while IFS= read -r _lock; do
   [ -n "$_lock" ] && LOCKS+=("$_lock")
-done < <(git_root ls-remote --heads "$REMOTE" "issue-${ISSUE}-*" \
-           | awk '{print $2}' | sed 's,^refs/heads/,,')
+done < <(printf '%s\n' "$locks_raw" | awk 'NF{print $2}' | sed 's,^refs/heads/,,')
 note "origin locks for issue #$ISSUE: ${LOCKS[*]:-<none>}"
 
 if [ "${#LOCKS[@]}" -gt 1 ]; then
@@ -142,8 +148,13 @@ while IFS= read -r line; do
   esac
 done < <(git_root worktree list --porcelain)
 
-# Remote state for the merged branch.
-remote_sha="$(git_root ls-remote --heads "$REMOTE" "$MERGED_BRANCH" | awk '{print $1}')"
+# Remote state for the merged branch — also FAIL CLOSED on a remote query error,
+# else a blip would read as "branch already deleted, nothing to do".
+if ! merged_raw="$(git_root ls-remote --heads "$REMOTE" "$MERGED_BRANCH" 2>/dev/null)"; then
+  echo "$prog: REFUSED — cannot query $REMOTE for '$MERGED_BRANCH' (remote error). Failing closed." >&2
+  exit 3
+fi
+remote_sha="$(printf '%s\n' "$merged_raw" | awk 'NF{print $1}')"
 remote_has_branch=0
 [ -n "$remote_sha" ] && remote_has_branch=1
 # tip_in_main: true for ff/merge-commit merges; false for squash (where
@@ -187,7 +198,13 @@ if [ -n "$target_wt" ]; then
   if cmp_sha="$(git -C "$target_wt" rev-parse --verify --quiet '@{u}' 2>/dev/null)"; then
     :
   fi
-  [ -n "$cmp_sha" ] || cmp_sha="$remote_sha"
+  # Fall back to the live origin tip ONLY if that object is present locally — an
+  # ls-remote SHA need not have been fetched, and a missing object would make the
+  # comparison fail. If it's absent we drop to the conservative indeterminate path.
+  if [ -z "$cmp_sha" ] && [ -n "$remote_sha" ] \
+     && git -C "$target_wt" cat-file -e "${remote_sha}^{commit}" 2>/dev/null; then
+    cmp_sha="$remote_sha"
+  fi
   if [ -n "$cmp_sha" ]; then
     ahead="$(git -C "$target_wt" rev-list --count "${cmp_sha}..HEAD" 2>/dev/null || echo "")"
     if [ -z "$ahead" ]; then
@@ -201,9 +218,9 @@ if [ -n "$target_wt" ]; then
   else
     ahead_main="$(git -C "$target_wt" rev-list --count "${MAIN_REF}..HEAD" 2>/dev/null || echo 0)"
     if [ "${ahead_main:-0}" -gt 0 ] && [ "$CONFIRM_UNMERGED" -eq 0 ]; then
-      echo "$prog: REFUSED — worktree '$target_wt' has no resolvable upstream and no origin branch, and" >&2
-      echo "  HEAD is $ahead_main commit(s) ahead of $MAIN_REF — cannot confirm the work was pushed." >&2
-      echo "  Pass --confirm-unmerged only if you have verified the PR is MERGED. Not removing." >&2
+      echo "$prog: REFUSED — worktree '$target_wt' has no locally-resolvable pushed ref (no upstream;" >&2
+      echo "  origin tip absent or unfetched) and HEAD is $ahead_main commit(s) ahead of $MAIN_REF —" >&2
+      echo "  cannot confirm the work was pushed. Pass --confirm-unmerged only if the PR is MERGED. Not removing." >&2
       exit 3
     fi
   fi

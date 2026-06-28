@@ -249,6 +249,21 @@ bash "$CLEANUP" --issue 1212 --merged-branch issue-9999-wrong-issue \
 [ "$rc" -eq 64 ] && ok "exit 64 — issue/branch identity mismatch rejected" || fail "expected exit 64, got $rc"
 rm -rf "$T"
 
+# ===========================================================================
+echo "TEST 15: remote query error → fail closed (exit 3), no mutation"
+# ===========================================================================
+# A transient ls-remote failure must NOT read as '0 locks / branch deleted' and
+# bypass Guard 2. Point at a non-existent remote to force the error.
+T=$(mktemp -d); build_sandbox "$T"; WORK="$T/work"
+add_branch_worktree "$WORK" "issue-1213-feature" "$T/wt" ""
+rc=0
+bash "$CLEANUP" --issue 1213 --merged-branch issue-1213-feature --remote no-such-remote \
+  --repo-root "$WORK" --worktrees-dir "$T" >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 3 ] && ok "exit 3 — fail closed on remote query error" || fail "expected exit 3, got $rc"
+[ -d "$T/wt" ] && ok "worktree intact (no fail-open mutation)" || fail "worktree removed on remote error"
+remote_branches "$WORK" | grep -qx "issue-1213-feature" && ok "origin branch intact" || fail "branch deleted on remote error"
+rm -rf "$T"
+
 echo ""
 echo "================  finalize-cleanup: $PASS passed, $FAIL failed  ================"
 [ "$FAIL" -eq 0 ]
