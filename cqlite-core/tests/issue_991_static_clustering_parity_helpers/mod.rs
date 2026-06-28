@@ -99,7 +99,7 @@ pub fn read_fixed_loc<'a>(data: &'a [u8], pos: usize, len: usize, what: &str) ->
     // usize::MAX cannot wrap `pos + len` (which would silently pass the guard and
     // lose this helper's contextual panic to a raw slice-index panic instead).
     assert!(
-        pos.checked_add(len).is_none_or(|end| end <= data.len()),
+        pos.checked_add(len).is_some_and(|end| end <= data.len()),
         "{what}: fixed-width read of {len} bytes at offset {pos} (0x{pos:02X}) overruns the \
          {}-byte buffer — truncated/malformed fixture",
         data.len()

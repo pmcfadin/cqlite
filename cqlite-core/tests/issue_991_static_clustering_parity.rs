@@ -965,6 +965,7 @@ fn null_vs_empty_clustering_value_byte_distinction() {
          header/length was emitted",
     );
     let body_end = s_prev_size.start + s_row_size.value as usize;
+    assert!(body_end < sbytes.len(), "static row_size overruns body");
     assert_eq!(
         sbytes[body_end], 0x01,
         "absent-clustering static row body must close on END_OF_PARTITION (0x01) @ {body_end}; \
