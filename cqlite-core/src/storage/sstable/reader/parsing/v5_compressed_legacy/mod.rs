@@ -350,9 +350,12 @@ pub struct V5CompressedLegacyParser {
 }
 
 mod block_emit;
+mod block_emit_windowed;
+mod cell_value;
 mod compaction;
 mod complex_column;
 mod frozen;
+mod raw_type_value;
 mod raw_value;
 mod row_data;
 mod row_framing;
