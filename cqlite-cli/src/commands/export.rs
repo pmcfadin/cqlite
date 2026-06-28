@@ -419,8 +419,13 @@ pub async fn export_data(
 
     pb.finish_and_clear();
 
-    // Display statistics only under the same condition as progress
-    // (spec R4: no summary when `--quiet` or when stdout is piped/redirected).
+    // `show_progress` (defined earlier in `export_data` as
+    // `!quiet && std::io::stdout().is_terminal()`) is a dual-purpose gate: it
+    // intentionally controls BOTH the progress display AND this human summary
+    // block. We deliberately reuse the already-computed value rather than
+    // re-checking `is_terminal()` inline so the two cannot drift — a
+    // piped/redirected or `--quiet` run emits neither (spec R4: no summary when
+    // `--quiet` or when stdout is piped/redirected).
     if show_progress {
         let duration = start_time.elapsed();
         let file_size = std::fs::metadata(file)?.len();
@@ -549,9 +554,8 @@ fn make_progress(show: bool, progress: ProgressTotal) -> ProgressBar {
     match progress.total {
         Some(n) => {
             let pb = ProgressBar::new(n);
-            match ProgressStyle::default_bar().template(template) {
-                Ok(style) => pb.set_style(style.progress_chars("##-")),
-                Err(_) => { /* keep indicatif's default bar style */ }
+            if let Ok(style) = ProgressStyle::default_bar().template(template) {
+                pb.set_style(style.progress_chars("##-"));
             }
             pb
         }
