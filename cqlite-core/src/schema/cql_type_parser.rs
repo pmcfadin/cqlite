@@ -132,6 +132,7 @@ impl CqlType {
                 | "timeuuid"
                 | "inet"
                 | "duration"
+                | "varint"
         );
 
         if !is_primitive
@@ -249,5 +250,32 @@ mod tests {
             }
             _ => panic!("Expected Tuple type"),
         }
+    }
+
+    /// Regression for #1160: CQL type names are case-insensitive in Cassandra,
+    /// so mixed/upper-case primitives must resolve to their primitive variant
+    /// rather than leaking through the UDT-detection branch as
+    /// `Custom("udt:...")`. `varint` was previously missing from the
+    /// `is_primitive` guard, so only its upper/mixed-case spellings regressed.
+    #[test]
+    fn test_uppercase_primitives_are_not_udts() {
+        // The exact regression case from #1160.
+        assert_eq!(CqlType::parse("VARINT").unwrap(), CqlType::Varint);
+        assert_eq!(CqlType::parse("Varint").unwrap(), CqlType::Varint);
+        assert_eq!(CqlType::parse("varint").unwrap(), CqlType::Varint);
+
+        // Spot-check other spellings to lock the case-insensitive contract and
+        // guard against future `is_primitive`/`match`-arm drift.
+        assert_eq!(CqlType::parse("INT").unwrap(), CqlType::Int);
+        assert_eq!(CqlType::parse("BigInt").unwrap(), CqlType::BigInt);
+        assert_eq!(CqlType::parse("TEXT").unwrap(), CqlType::Text);
+        assert_eq!(CqlType::parse("UUID").unwrap(), CqlType::Uuid);
+        assert_eq!(CqlType::parse("Duration").unwrap(), CqlType::Duration);
+
+        // A genuine UDT reference must still be treated as one.
+        assert_eq!(
+            CqlType::parse("MyType").unwrap(),
+            CqlType::Custom("udt:MyType".to_string())
+        );
     }
 }
