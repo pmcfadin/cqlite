@@ -336,6 +336,37 @@ class GhPathTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 dt._github_fields(1, 2)
 
+    def test_github_fields_design_label_maps(self):
+        def fake_run(argv, **kw):
+            if argv[:3] == ["gh", "issue", "view"]:
+                return _FakeProc(json.dumps({
+                    "createdAt": "2026-06-01T00:00:00Z",
+                    "closedAt": "2026-06-01T02:00:00Z",
+                    "labels": [{"name": "P2"}, {"name": "design"}],
+                }))
+            return _FakeProc(json.dumps({
+                "createdAt": "2026-06-01T00:30:00Z", "mergedAt": "2026-06-01T01:30:00Z"}))
+
+        with mock.patch.object(dt.subprocess, "run", fake_run):
+            fields = dt._github_fields(1, 2)
+        self.assertEqual(fields["routing"], "design")
+        self.assertEqual(fields["priority"], "P2")
+
+    def test_github_fields_raises_on_conflicting_routing_labels(self):
+        def fake_run(argv, **kw):
+            if argv[:3] == ["gh", "issue", "view"]:
+                return _FakeProc(json.dumps({
+                    "createdAt": "2026-06-01T00:00:00Z",
+                    "closedAt": "2026-06-01T02:00:00Z",
+                    "labels": [{"name": "P2"}, {"name": "oracle"}, {"name": "design"}],
+                }))
+            return _FakeProc(json.dumps({
+                "createdAt": "2026-06-01T00:30:00Z", "mergedAt": "2026-06-01T01:30:00Z"}))
+
+        with mock.patch.object(dt.subprocess, "run", fake_run):
+            with self.assertRaises(SystemExit):
+                dt._github_fields(1, 2)
+
     def test_gh_failure_becomes_clean_systemexit(self):
         import subprocess as _sp
 

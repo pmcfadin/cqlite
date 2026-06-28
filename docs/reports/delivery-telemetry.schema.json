@@ -27,7 +27,7 @@
     "stamped_at"
   ],
   "properties": {
-    "schema": { "const": 1, "description": "Record schema version." },
+    "schema": { "const": 1, "type": "integer", "description": "Record schema version." },
     "issue": { "type": "integer", "minimum": 1, "description": "GitHub issue number." },
     "slug": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$", "description": "Kebab-case change slug (issue-N-<slug>)." },
     "pr": { "type": "integer", "minimum": 1, "description": "GitHub PR number that closed the issue." },

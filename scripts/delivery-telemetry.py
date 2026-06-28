@@ -200,15 +200,14 @@ def _github_fields(issue: int, pr: int) -> dict:
         raise SystemExit(f"error: issue #{issue} has multiple priority labels "
                          f"{prio_labels} (exactly one P0-P3 expected)")
     priority = prio_labels[0] if prio_labels else None
-    # Routing is authoritative, not inferred: set it ONLY from an explicit label. If
-    # neither is present, leave it None so build_record requires --routing rather than
-    # silently guessing "design".
-    if "oracle" in labels:
-        routing = "oracle"
-    elif "design" in labels:
-        routing = "design"
-    else:
-        routing = None
+    # Routing is authoritative, not inferred: set it ONLY from an explicit label. Both
+    # labels at once is a labeling error (mirror the one-priority guard); neither leaves it
+    # None so build_record requires --routing rather than silently guessing "design".
+    has_oracle, has_design = "oracle" in labels, "design" in labels
+    if has_oracle and has_design:
+        raise SystemExit(f"error: issue #{issue} has both 'oracle' and 'design' routing "
+                         f"labels (exactly one expected)")
+    routing = "oracle" if has_oracle else ("design" if has_design else None)
     return {
         "created_at": issue_json["createdAt"],
         "closed_at": issue_json["closedAt"],
