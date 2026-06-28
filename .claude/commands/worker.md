@@ -32,17 +32,36 @@ Your context is for coordination only (claim, manager orders, board/PR/merge, fi
    push is rejected (another worker won), drop it and go back to step 2 for the next item.
 4. **Read manager orders** on the issue: `🧭 MANAGER <!-- MGR:... -->` comments. Note the latest
    `GO` / `HOLD: merge after #N` / `ORDER` + any instructions.
-5. **Run to completion** (`flow-implement <N>`) — **by dispatching subagents, not by hand**: spawn
-   `sstable-developer` (model: opus) to implement TDD and run `agent-gate.sh` to PASS, returning the
-   summary block; spawn `spec-auditor` (design-driven) for **C** PASS; run roborev
-   (`--agent claude-code --model opus`) to clean. You coordinate the loop and read summaries; you do not
-   open the source yourself. Design-driven issues pause at Seam 1 for owner spec approval — wait, then resume.
-6. **Before merging**: re-check for an open `HOLD: merge after #N` → block until #N is merged. Confirm
+5. **Route — spec-first for anything new.** Read the issue's oracle-vs-design routing (set at grooming):
+   - **Design-driven / any new feature or surface with design latitude** → run **`flow-activate <N>` FIRST**.
+     It produces the OpenSpec proposal/design/specs/tasks and **STOPS at Seam 1 for the owner's spec
+     approval**. Do NOT write any code until the owner approves the spec. No new work without an approved spec.
+   - **Oracle-driven bug** (Cassandra/sstabledump source of truth + a pinned parity test) → skip OpenSpec,
+     go straight to implement.
+6. **Run to completion** (`flow-implement <N>`) — **by dispatching subagents, not by hand**: spawn
+   `sstable-developer` (model: opus) to implement TDD against the approved spec and run `agent-gate.sh` to
+   PASS, returning the summary block; spawn `spec-auditor` for **C** PASS (it audits the impl against
+   `openspec/changes/<slug>/specs/**`); run roborev (`--agent claude-code --model opus`) to clean. You
+   coordinate and read summaries; you do not open the source yourself.
+7. **Before merging**: re-check for an open `HOLD: merge after #N` → block until #N is merged. Confirm
    gate PASS + C PASS (design) + roborev clean + CI green. Rebase on `origin/main`; resolve any conflict
    in YOUR worktree.
-7. **Merge + finalize**: `gh pr merge <pr> --squash --delete-branch`, then `flow-finalize <N>` (archive
+8. **Merge + finalize**: `gh pr merge <pr> --squash --delete-branch`, then `flow-finalize <N>` (archive
    OpenSpec if any, remove worktree, delete origin lock, close issue with a traceable comment).
-8. Report `#N: merged (<commit>)` and loop to step 2.
+9. Report `#N: merged (<commit>)` and loop to step 2.
+
+## Discovered bugs & scope (never silently absorb scope creep)
+A bug you find that is **outside the current issue's scope** does not get fixed inline — that bloats the
+diff and breaks 1:1:1:1. Instead:
+- **Non-blocking** (current issue can still finish): dispatch a subagent (model: opus) to **file a new,
+  detailed GitHub issue** (repro, root-cause hypothesis, affected files, oracle-vs-design routing,
+  testable acceptance criteria) and label it for the manager to prioritize. Then continue your issue.
+  Note the new issue # in your PR/issue comment for traceability.
+- **Blocking** (current issue cannot complete until it's fixed): (1) file the new issue as above; (2)
+  post a comment on YOUR issue — "blocked on #<new>: <why>" — and pause; (3) surface it to the manager
+  (it sequences via `HOLD: merge after #<new>` / Ready ordering). If directed to fix it now, claim the
+  blocker as its **own** issue/branch/worktree (keep 1:1:1:1) and dispatch a subagent to fix it, land it,
+  then resume the original. Do not fold an unrelated fix into your current branch.
 
 ## Hard rules
 - Worktrees only; stage explicit paths; the branch push is your lock. Never edit another worker's files.

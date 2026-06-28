@@ -33,11 +33,16 @@ ORDER: k                # queue rank when several are Ready at once
 1. **Pick up**: take the oldest `Ready` issue with **no** `issue-N-*` lock on origin. Claim it
    (branch push = the cross-machine lock); first push wins, losers take the next item.
 2. **Read orders**: read the issue's manager comments. Note any `HOLD` / `ORDER` / instructions.
-3. **Run to completion** (`flow-implement`): design-driven pauses at Seam 1 for owner spec approval, then
-   resumes; oracle/refactor runs straight through.
-4. **Before merging**: re-check for an open `HOLD`. If `HOLD: merge after #N`, block until #N is merged.
+3. **Route — spec-first for new work**: design-driven / any new feature → run **`flow-activate` FIRST**
+   (produces the OpenSpec proposal/design/specs/tasks, STOPS at Seam 1 for owner spec approval); no code
+   until the spec is approved. Oracle-driven bug (Cassandra/sstabledump truth + pinned test) → straight to implement.
+4. **Run to completion** (`flow-implement`) via subagents (worker orchestrates; `sstable-developer` model:opus
+   implements + runs the gate). **Out-of-scope bug found** → a subagent files a new detailed issue (never fix
+   it inline / never grow the diff); if it **blocks** completion, comment "blocked on #<new>" on your issue,
+   pause, and surface to the manager (it sequences via `HOLD`/Ready) — fix it only as its own 1:1:1:1 claim.
+5. **Before merging**: re-check for an open `HOLD`. If `HOLD: merge after #N`, block until #N is merged.
    Merge only on `agent-gate.sh` PASS + spec-auditor C PASS (design) + roborev clean + HOLD cleared.
-5. **Merge + clean up** (`flow-finalize`): squash-merge, archive any OpenSpec change, **stamp the
+6. **Merge + clean up** (`flow-finalize`): squash-merge, archive any OpenSpec change, **stamp the
    telemetry ledger**, remove the worktree, delete the origin claim branch, close the issue with a
    traceable comment. Board → Done (built-in).
 
