@@ -54,6 +54,7 @@ use super::source::ScanCursor;
 use super::SSTableReader;
 use crate::types::{TableId, Value};
 use crate::{Error, Result, RowKey};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -113,10 +114,20 @@ impl SSTableReader {
         // Raw-chunk pipe: I/O half -> blocking parse half (bounded for heap +
         // backpressure). Output backpressure rides on `tx` inside the task.
         let (raw_tx, raw_rx) = mpsc::channel::<Vec<u8>>(RAW_CHUNK_CHANNEL_CAP);
+        // Distinguishes a clean EOF (sender dropped after `Ok(None)`) from a
+        // mid-stream read error (sender dropped after `Err`). On error the parse
+        // half must NOT run its `at_final_chunk = true` terminal drain — a
+        // truncated/partial trailing window would otherwise emit a spurious
+        // partition through `tx` BEFORE this function returns the `Err` (issue
+        // #1143 finding 2; the pre-#1156 path `?`-propagated the read error and
+        // never ran a final drain). Set before `raw_tx` is dropped so the parse
+        // half observes it via the channel-close happens-before.
+        let io_failed = Arc::new(AtomicBool::new(false));
         let reader = Arc::clone(&self);
         let out_tx = tx.clone();
+        let task_io_failed = Arc::clone(&io_failed);
         let parse_task = tokio::task::spawn_blocking(move || {
-            reader.drain_scan_window_blocking(ctx, raw_rx, out_tx)
+            reader.drain_scan_window_blocking(ctx, raw_rx, out_tx, task_io_failed)
         });
 
         // Feed raw compressed chunks to the parse task. The bounded `raw_tx`
@@ -134,12 +145,18 @@ impl SSTableReader {
                 }
                 Ok(None) => break, // EOF
                 Err(e) => {
+                    // Tell the parse half to SKIP the terminal final drain: the
+                    // stream is truncated, so the trailing window is partial and
+                    // must not be emitted. The store is sequenced before the
+                    // `drop(raw_tx)` the parse half synchronizes on.
+                    io_failed.store(true, Ordering::SeqCst);
                     io_err = Some(e);
                     break;
                 }
             }
         }
-        // Drop the sender so the blocking task sees EOF and runs its final drain.
+        // Drop the sender so the blocking task sees EOF and runs its final drain
+        // (only if `io_failed` is still false — see the parse half).
         drop(raw_tx);
 
         // Join the parse task; its Result is the scan's Result. An I/O error
@@ -162,15 +179,19 @@ impl SSTableReader {
     /// Owns the sliding `window: Vec<u8>`; for each raw chunk pulled from
     /// `raw_rx` it applies the incompressible-raw fallback or decompresses,
     /// appends to the window, and drains every confirmed partition via
-    /// [`drain_scan_window`]. On `raw_rx` close (I/O EOF) it runs a final drain
-    /// with `at_final_chunk = true`. Surviving `(RowKey, Value)` entries are sent
-    /// through `tx` with `blocking_send`, mirroring the pre-#1156
-    /// `parse_stitched_stream` backpressure.
+    /// [`drain_scan_window`]. On a CLEAN `raw_rx` close (I/O EOF) it runs a final
+    /// drain with `at_final_chunk = true`; on a close caused by a mid-stream read
+    /// error (`io_failed` set by the I/O half before it dropped the sender) it
+    /// SKIPS that terminal drain so a truncated window cannot emit a spurious
+    /// trailing partition (issue #1143 finding 2). Surviving `(RowKey, Value)`
+    /// entries are sent through `tx` with `blocking_send`, mirroring the
+    /// pre-#1156 `parse_stitched_stream` backpressure.
     fn drain_scan_window_blocking(
         &self,
         ctx: WindowParseCtx,
         mut raw_rx: mpsc::Receiver<Vec<u8>>,
         tx: mpsc::Sender<Result<(RowKey, Value)>>,
+        io_failed: Arc<AtomicBool>,
     ) -> Result<()> {
         use crate::storage::sstable::compression::Compression;
 
@@ -204,9 +225,17 @@ impl SSTableReader {
             }
         }
 
-        // EOF: final drain — a trailing partition with no END_OF_PARTITION marker
-        // is now terminal (Done), not a refill request that will never come.
-        if !broke {
+        // Stream end. On a CLEAN EOF run the final drain — a trailing partition
+        // with no END_OF_PARTITION marker is now terminal (Done), not a refill
+        // request that will never come. But if the I/O half stopped on a read
+        // ERROR (`io_failed`), the trailing window is a truncated fragment of a
+        // partition; running `at_final_chunk = true` here would parse and emit it
+        // as if complete, surfacing a partial/garbage row BEFORE the caller
+        // returns the I/O `Err`. Skip the final drain so a truncated/corrupt
+        // stream yields ONLY the error (issue #1143 finding 2). The store in the
+        // I/O half happens-before the `drop(raw_tx)` that ended `blocking_recv`,
+        // so this load observes it.
+        if !broke && !io_failed.load(Ordering::SeqCst) {
             self.drain_scan_window(&parser, &ctx, &mut window, true, &tx, &mut broke)?;
         }
 
