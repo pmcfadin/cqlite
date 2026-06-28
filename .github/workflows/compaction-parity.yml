@@ -12,10 +12,11 @@ name: "CI: Compaction Parity (differential harness)"
 #     this workflow.
 #   - BYTE tier (per-component `cmp`, no allowlist — the #842 north star) is
 #     implemented in the harness (issue #1016: `gradle byteParity`). Its manifest
-#     CI tier is `nightly_docker`, so the dedicated byteParity ASSERTION run fires
-#     only on workflow_dispatch — NOT per-PR (the per-PR logical `test` run already
-#     computes + persists the byte diff + checksums as artifacts, so PRs lose no
-#     evidence and we avoid doubling the expensive compaction). It is NON-BLOCKING
+#     CI tier is `nightly_docker`, backed by the nightly `schedule:` below, so the
+#     dedicated byteParity ASSERTION run fires nightly + on manual workflow_dispatch
+#     — NOT per-PR (the per-PR logical `test` run already computes + persists the
+#     byte diff + checksums as artifacts, so PRs lose no evidence and we avoid
+#     doubling the expensive compaction). It is NON-BLOCKING
 #     (continue-on-error), promoted to a HARD GATE once the divergence-fix children
 #     (#886 → #844/#887/#888/#846/#848) land — by dropping continue-on-error.
 #
@@ -38,6 +39,13 @@ on:
       - 'cqlite-core/src/schema/**'
       - 'compaction-parity/**'
       - '.github/workflows/compaction-parity.yml'
+  # Nightly run that honors the byte-tier's `nightly_docker` manifest CI tier:
+  # the byteParity assertion (per-component cmp, no allowlist) runs automatically
+  # here, not just on manual dispatch. 05:43 UTC is offset from the other nightly
+  # parity jobs (tombstone/TTL 04:17, cql-type 04:31, compression 05:23) and off
+  # the top-of-hour scheduler rush.
+  schedule:
+    - cron: '43 5 * * *'
   workflow_dispatch:
     inputs:
       run_byte_tier:
@@ -67,10 +75,11 @@ env:
   # `byteParity` assertion run is NOT run on every PR — that would double the
   # expensive Cassandra+cqlite compaction for no new evidence, because the logical
   # `test` run already computes + persists the per-component byte diff + checksums
-  # unconditionally as artifacts. The byteParity ASSERTION runs only on
-  # workflow_dispatch (and is gated below on event != pull_request). It stays
-  # NON-BLOCKING (continue-on-error) until the writer is byte-stable; promote to a
-  # hard gate by dropping continue-on-error. A dispatch run can set this 'false'.
+  # unconditionally as artifacts. The byteParity ASSERTION runs on the nightly
+  # `schedule:` + manual workflow_dispatch (gated below on schedule||dispatch). It
+  # stays NON-BLOCKING (continue-on-error) until the writer is byte-stable; promote
+  # to a hard gate by dropping continue-on-error. A dispatch run can set this
+  # 'false'; on the nightly schedule there are no inputs so it defaults to 'true'.
   RUN_BYTE_TIER: ${{ github.event.inputs.run_byte_tier || 'true' }}
 
 jobs:
@@ -168,14 +177,14 @@ jobs:
       # every output component (Data/Index/Statistics/Summary/Filter/CompressionInfo/
       # Digest/TOC, as present) is byte-identical, reporting the first byte/offset
       # diff per component. This is the `nightly_docker`-tier assertion, so it runs
-      # only on workflow_dispatch — NOT on PRs (the per-PR logical `test` run above
-      # already wrote byte-diff.txt + checksums.txt as artifacts, so PRs lose no
-      # evidence). Kept continue-on-error so it is NON-BLOCKING until the writer is
-      # byte-stable; PROMOTION to a hard gate = drop continue-on-error. Artifacts
-      # are uploaded below on success AND failure.
-      - name: Run byte-tier parity (non-blocking, nightly/dispatch only)
+      # on the nightly schedule + manual workflow_dispatch — NOT on PRs (the per-PR
+      # logical `test` run above already wrote byte-diff.txt + checksums.txt as
+      # artifacts, so PRs lose no evidence). Kept continue-on-error so it is
+      # NON-BLOCKING until the writer is byte-stable; PROMOTION to a hard gate =
+      # drop continue-on-error. Artifacts are uploaded below on success AND failure.
+      - name: Run byte-tier parity (non-blocking, nightly + dispatch)
         id: byte
-        if: env.RUN_BYTE_TIER == 'true' && github.event_name != 'pull_request'
+        if: env.RUN_BYTE_TIER == 'true' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         continue-on-error: true
         working-directory: compaction-parity
         env:

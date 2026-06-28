@@ -138,8 +138,9 @@ tasks.test {
 // output component is byte-identical with NO allowlist. This is the
 // `nightly_docker`-tier assertion run — the per-PR `test` task already computes
 // and persists the same byte diff + checksums as artifacts, so CI runs byteParity
-// only on workflow_dispatch (see .github/workflows/compaction-parity.yml) to avoid
-// doubling the expensive compaction. Non-blocking until the writer is byte-stable;
+// on the nightly schedule + workflow_dispatch (see
+// .github/workflows/compaction-parity.yml) to avoid doubling the expensive
+// compaction on PRs. Non-blocking until the writer is byte-stable;
 // promote by dropping continue-on-error on the workflow step. Invoke with
 // `gradle byteParity`.
 val byteParity by tasks.registering(Test::class) {

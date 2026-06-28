@@ -174,13 +174,15 @@ public abstract class DifferentialParityTester extends CQLTester
 
         assertTrue("cqlite compact failed (exit " + res.exitCode + "):\n" + res.stderr + res.stdout,
                    res.succeeded());
-        // Mirror the reference "exactly one output" assert for the candidate: a writer
-        // regression that emits >1 SSTable generation is a real divergence and must
-        // fail the LOGICAL gate directly, not stay hidden inside the swallowed
-        // byte-tier block (where a duplicate-kind would otherwise be suppressed on PRs).
-        assertEquals("expected exactly one cqlite output SSTable generation",
-                     1, countCandidateGenerations(outputDir));
-        Path candidateData = findSingleData(outputDir);
+        // Single walk for the candidate output. Mirror the reference "exactly one
+        // output" assert for the candidate: a writer regression that emits >1
+        // SSTable generation is a real divergence and must fail the LOGICAL gate
+        // directly, not stay hidden inside the swallowed byte-tier block (where a
+        // duplicate-kind would otherwise be suppressed on PRs).
+        List<Path> candidateDataList = candidateDataFiles(outputDir);
+        assertEquals("expected exactly one cqlite output Data.db (one SSTable generation) under "
+                     + outputDir, 1, candidateDataList.size());
+        Path candidateData = candidateDataList.get(0);
         Path candOutDir = artifacts.copyComponentsOf(candidateData, "cqlite-output");
 
         // ── BYTE tier: per-component cmp, NO allowlist. Computed + persisted ALWAYS;
@@ -272,7 +274,11 @@ public abstract class DifferentialParityTester extends CQLTester
         }
     }
 
-    /** Every {@code -Data.db} under {@code outputDir} — one per output SSTable generation. */
+    /**
+     * Every {@code -Data.db} under {@code outputDir} — one per output SSTable
+     * generation. The caller walks once and asserts exactly one (single-output
+     * guarantee), avoiding a redundant second walk.
+     */
     private static List<Path> candidateDataFiles(Path outputDir) throws IOException
     {
         List<Path> data = new ArrayList<>();
@@ -281,19 +287,6 @@ public abstract class DifferentialParityTester extends CQLTester
             stream.filter(p -> p.getFileName().toString().endsWith("-Data.db")).forEach(data::add);
         }
         return data;
-    }
-
-    /** Number of output SSTable generations cqlite emitted (one Data.db each). */
-    private static int countCandidateGenerations(Path outputDir) throws IOException
-    {
-        return candidateDataFiles(outputDir).size();
-    }
-
-    private static Path findSingleData(Path outputDir) throws IOException
-    {
-        List<Path> data = candidateDataFiles(outputDir);
-        assertEquals("expected exactly one cqlite output Data.db under " + outputDir, 1, data.size());
-        return data.get(0);
     }
 
     /** Run Cassandra's {@code sstabledump -l} over a Data.db and return the JSONL. */
