@@ -79,11 +79,47 @@ class RecordTests(unittest.TestCase):
             self.assertFalse(ledger.exists() and ledger.read_text().strip(),
                              "no record should be written when a counter is missing")
 
+    def test_record_null_timestamp_is_error_not_attribute_crash(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            # an unmerged PR -> merged_at is null; must be a clean SystemExit, not a crash
+            ghfields = tmp / "ghfields.json"
+            ghfields.write_text(json.dumps({
+                "created_at": "2026-06-10T00:00:00Z",
+                "pr_opened_at": "2026-06-10T01:00:00Z",
+                "merged_at": None,
+                "closed_at": "2026-06-10T03:05:00Z",
+                "priority": "P2", "routing": "design",
+            }))
+            with self.assertRaises(SystemExit):
+                dt.main([
+                    "record", "--ledger", str(ledger),
+                    "--issue", "1", "--pr", "2", "--slug", "x",
+                    "--gate", "pass", "--gate-runs", "1",
+                    "--claim-collisions", "0", "--rebase-events", "0",
+                    "--roborev-findings", "0", "--rework", "0",
+                    "--from-json", str(ghfields),
+                ])
+            self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
 
 class LintTests(unittest.TestCase):
     def test_clean_ledger_passes(self):
         rc = dt.main(["lint", "--ledger", str(FIXTURES / "sample-ledger.jsonl")])
         self.assertEqual(rc, 0)
+
+    def test_malformed_timestamp_is_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "ledger.jsonl"
+            rec = json.loads((FIXTURES / "sample-ledger.jsonl").read_text().splitlines()[0])
+            rec["created_at"] = "not-a-timestamp"
+            ledger.write_text(json.dumps(rec) + "\n")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = dt.main(["lint", "--ledger", str(ledger)])
+            self.assertEqual(rc, 1)
+            self.assertIn("date-time", err.getvalue())
 
     def test_malformed_line_fails_with_line_number(self):
         with tempfile.TemporaryDirectory() as d:
@@ -136,7 +172,9 @@ class AggregateTests(unittest.TestCase):
                    (FIXTURES / "sample-ledger.jsonl").read_text().splitlines() if l.strip()]
         tally = dt.aggregate(records)
         self.assertEqual(tally["rework"], 7)
-        self.assertEqual(tally["gate_failures"], 1)
+        # failed gate ROUNDS from authoritative gate_runs: rec2 (fail, runs=2) -> 2;
+        # rec1/rec3 (pass, runs=1) -> 0 each.
+        self.assertEqual(tally["gate_failures"], 2)
         self.assertEqual(tally["claim_collisions"], 1)
         ranked = dt.rank(tally)
         self.assertEqual(ranked[0][0], "rework")

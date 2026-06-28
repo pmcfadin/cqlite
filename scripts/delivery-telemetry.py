@@ -96,6 +96,11 @@ def _validate(value, schema: dict, path: str, errors: list) -> None:
     if "pattern" in schema and isinstance(value, str):
         if not re.search(schema["pattern"], value):
             errors.append(f"{path}: {value!r} does not match /{schema['pattern']}/")
+    if schema.get("format") == "date-time" and isinstance(value, str):
+        try:
+            _parse_ts(value)
+        except ValueError:
+            errors.append(f"{path}: {value!r} is not a valid RFC-3339 date-time")
     if schema.get("type") == "object" and isinstance(value, dict):
         for req in schema.get("required", []):
             if req not in value:
@@ -163,6 +168,15 @@ def build_record(args, gh_fields: dict) -> dict:
                 f"(authoritative-data-only: a counter that was not observed is never defaulted)")
     if args.gate is None:
         raise SystemExit("error: --gate {pass|fail} is required")
+
+    # Authoritative timestamps must all be present — a finalize runs only on a merged,
+    # closed issue. A null here (e.g. an unmerged PR) is an error, not silent arithmetic
+    # on None (which would otherwise raise an opaque AttributeError).
+    for key in ("created_at", "pr_opened_at", "merged_at", "closed_at"):
+        if not gh_fields.get(key):
+            raise SystemExit(
+                f"error: authoritative timestamp '{key}' is missing/null "
+                f"(finalize records only a merged, closed issue)")
 
     created = gh_fields["created_at"]
     pr_opened = gh_fields["pr_opened_at"]
@@ -264,8 +278,13 @@ def aggregate(records: list) -> dict:
         tally["rebase_events"] += r.get("rebase_events", 0)
         tally["roborev_findings"] += r.get("roborev_findings", 0)
         tally["rework"] += r.get("rework", 0)
-        if r.get("gate") == "fail":
-            tally["gate_failures"] += 1
+        # Failed gate ROUNDS, derived from the authoritative run count: every run but
+        # the final pass was a failure. A terminal-fail issue (gate == "fail") failed
+        # every round. gate_runs >= 1 by schema. This counts a 3-run-then-pass issue as
+        # 2 failed rounds, not 0 (matching the weight's "an agent-gate.sh FAIL round").
+        gate_runs = r.get("gate_runs", 1)
+        passed_final = 1 if r.get("gate") == "pass" else 0
+        tally["gate_failures"] += max(0, gate_runs - passed_final)
     return tally
 
 
