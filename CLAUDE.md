@@ -230,6 +230,9 @@ env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
 - `--out` takes precedence over `--format` when both specified
 - `--query` is an alias for `--execute` (`-e`)
 - Environment variable: `CQLITE_OUT` sets default output format
+- `export` shows a determinate progress bar + ETA when `--limit N` is set (the only
+  authoritative total), a spinner otherwise, and emits no progress/summary when
+  `--quiet` or when stdout is piped/redirected (Issue #284).
 
 ### CLI Modes (Issue #242)
 

@@ -143,19 +143,11 @@ pub async fn export_data(
     // Track timing for statistics
     let start_time = Instant::now();
 
-    // Create spinner progress bar (unknown total for streaming)
-    let pb = if show_progress {
-        let pb = ProgressBar::new_spinner();
-        pb.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.green} {msg} ({pos} rows)")
-                .unwrap(),
-        );
-        pb.set_message("Exporting");
-        pb
-    } else {
-        ProgressBar::hidden()
-    };
+    // Resolve the progress total from the CLI `--limit` (spec Option A / R5):
+    // a determinate bar + ETA only when the user supplied an explicit limit,
+    // otherwise the indeterminate spinner. Never infer a total from data shape.
+    let progress_total = resolve_progress_total(limit).total;
+    let pb = make_progress(show_progress, progress_total);
 
     // Chunk size for collecting rows before writing
     let chunk_size = config.chunk_size;
@@ -429,8 +421,9 @@ pub async fn export_data(
 
     pb.finish_and_clear();
 
-    // Display statistics (unless quiet)
-    if !quiet {
+    // Display statistics only under the same condition as progress
+    // (spec R4: no summary when `--quiet` or when stdout is piped/redirected).
+    if show_progress {
         let duration = start_time.elapsed();
         let file_size = std::fs::metadata(file)?.len();
 
@@ -448,6 +441,76 @@ pub async fn export_data(
     }
 
     Ok(())
+}
+
+/// Resolution of the export progress total from the CLI `--limit`.
+///
+/// Per the approved spec (Option A, Requirement R5), the total is known *only*
+/// when the user supplies an explicit `--limit N` — never inferred from data
+/// shape, SSTable metadata, or a pre-count pass. This keeps the one progress
+/// decision encapsulated and terminal-free so it can be unit-tested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProgressTotal {
+    /// The determinate total for the progress bar, if known.
+    total: Option<u64>,
+    /// Whether an ETA may be shown (only when the total is known).
+    eta_eligible: bool,
+}
+
+/// Map the CLI `--limit` to a progress total + ETA-eligibility flag.
+///
+/// `Some(n)` -> determinate total `Some(n)`, ETA-eligible.
+/// `None`    -> unknown total `None` (spinner), not ETA-eligible.
+fn resolve_progress_total(limit: Option<usize>) -> ProgressTotal {
+    match limit {
+        Some(n) => ProgressTotal {
+            total: Some(n as u64),
+            eta_eligible: true,
+        },
+        None => ProgressTotal {
+            total: None,
+            eta_eligible: false,
+        },
+    }
+}
+
+/// Build the export progress bar.
+///
+/// - `!show` -> a hidden bar (no output; used when `--quiet` or piped/non-TTY).
+/// - `Some(n)` -> a determinate bar with percent, `pos/len`, and a live ETA.
+/// - `None` -> the indeterminate spinner with a live row count (no ETA).
+///
+/// The `ProgressStyle::template(...)` result is handled without `unwrap()`/
+/// `expect()`: on a template error we fall back to indicatif's default style so
+/// the export still runs (the bar is cosmetic, never load-bearing).
+#[cfg(feature = "state_machine")]
+fn make_progress(show: bool, total: Option<u64>) -> ProgressBar {
+    if !show {
+        return ProgressBar::hidden();
+    }
+
+    match total {
+        Some(n) => {
+            let pb = ProgressBar::new(n);
+            match ProgressStyle::default_bar()
+                .template("[{bar:40}] {percent}% ({pos}/{len}) ETA: {eta}")
+            {
+                Ok(style) => pb.set_style(style.progress_chars("##-")),
+                Err(_) => { /* keep indicatif's default bar style */ }
+            }
+            pb
+        }
+        None => {
+            let pb = ProgressBar::new_spinner();
+            if let Ok(style) =
+                ProgressStyle::default_spinner().template("{spinner:.green} {msg} ({pos} rows)")
+            {
+                pb.set_style(style);
+            }
+            pb.set_message("Exporting");
+            pb
+        }
+    }
 }
 
 #[cfg(not(feature = "state_machine"))]
@@ -668,4 +731,34 @@ async fn export_to_parquet(
         .map_err(|e| anyhow::anyhow!("Failed to finalize Parquet file: {}", e))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Spec R5 (Total-resolution and ETA-eligibility are independently
+    // verifiable): a present `--limit` resolves to a determinate total and is
+    // ETA-eligible.
+    #[test]
+    fn limit_present_resolves_to_determinate_total() {
+        let resolved = resolve_progress_total(Some(42));
+        assert_eq!(resolved.total, Some(42));
+        assert!(
+            resolved.eta_eligible,
+            "a known total must be ETA-eligible (determinate bar)"
+        );
+    }
+
+    // Spec R5: an absent `--limit` resolves to an unknown total (spinner) and
+    // is not ETA-eligible.
+    #[test]
+    fn limit_absent_resolves_to_unknown_total() {
+        let resolved = resolve_progress_total(None);
+        assert_eq!(resolved.total, None);
+        assert!(
+            !resolved.eta_eligible,
+            "an unknown total must not be ETA-eligible (spinner, no ETA)"
+        );
+    }
 }
