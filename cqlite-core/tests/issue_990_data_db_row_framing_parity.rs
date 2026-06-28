@@ -602,8 +602,7 @@ fn single_cell_flags(stats: StatisticsMetadata, ops: Vec<CellOperation>, ttl: Op
     let bytes = write_one_partition(stats, &schema, 1, &[m]);
     let flags = read_u8_loc(&bytes, INT_PK_HEADER_SIZE);
     let (_f, body_start, _n) = walk_simple_row_header(&bytes, INT_PK_HEADER_SIZE);
-    let loc = first_cell_flag_loc(&bytes, flags.value as u8, body_start);
-    loc
+    first_cell_flag_loc(&bytes, flags.value as u8, body_start)
 }
 
 #[test]
@@ -856,9 +855,7 @@ fn datasets_root() -> PathBuf {
         return PathBuf::from(r);
     }
     // Fall back to the in-repo datasets dir relative to the crate.
-    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let candidate = here.join("../test-data/datasets");
-    candidate
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../test-data/datasets")
 }
 
 /// Read a required fixture file, FAILING CLOSED with a clear message when the
