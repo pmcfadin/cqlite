@@ -155,6 +155,10 @@ def _parse_ts(value: str) -> datetime:
     bare 'Z' shorthand needed pre-normalizing before 3.11). The format validator
     additionally requires a 'T' separator + an offset, so date-only / tz-naive strings
     are rejected regardless of interpreter version.
+
+    By design this enforces the uppercase GitHub canonical form (trailing 'Z', 'T'
+    separator). Lowercase RFC-3339 ('...t...z') is intentionally NOT accepted — every
+    timestamp in this ledger originates from `gh`, which always emits the canonical form.
     """
     if value.endswith("Z"):
         value = value[:-1] + "+00:00"
@@ -219,7 +223,14 @@ def _github_fields(issue: int, pr: int) -> dict:
 
 
 def build_record(args, gh_fields: dict) -> dict:
-    """Assemble a record from supplied counters + authoritative GitHub fields."""
+    """Assemble a record from supplied counters + authoritative GitHub fields.
+
+    Error convention: caller-input / precondition errors (a missing counter, a null
+    timestamp, an undeterminable priority/routing) `raise SystemExit` here — they are bad
+    invocations, like an argparse failure. Ledger-state outcomes (a built record that
+    fails schema validation, a duplicate issue) are reported by `cmd_record` with a stderr
+    message + `return 1`. Both surface as a non-zero exit.
+    """
     for counter in REQUIRED_COUNTERS:
         if getattr(args, counter) is None:
             raise SystemExit(
