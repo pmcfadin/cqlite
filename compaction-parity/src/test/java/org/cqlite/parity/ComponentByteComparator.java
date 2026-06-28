@@ -89,10 +89,20 @@ final class ComponentByteComparator
                 case DIFFER:
                 default:
                     return String.format(
-                        "%-20s MISMATCH at offset %d: cassandra=0x%02X cqlite=0x%02X "
+                        "%-20s MISMATCH at offset %d: cassandra=%s cqlite=%s "
                         + "(lengths cassandra=%d cqlite=%d)",
-                        kind, offset, refByte & 0xFF, candByte & 0xFF, refLen, candLen);
+                        kind, offset, hexOrEof(refByte), hexOrEof(candByte), refLen, candLen);
             }
+        }
+
+        /**
+         * Render a byte as hex, or {@code EOF} when it is the absent-byte sentinel
+         * (-1) used in the equal-prefix / different-length case — so a missing byte
+         * never prints as a real-looking {@code 0xFF}.
+         */
+        private static String hexOrEof(int b)
+        {
+            return b < 0 ? "EOF" : String.format("0x%02X", b & 0xFF);
         }
     }
 
@@ -192,7 +202,17 @@ final class ComponentByteComparator
                 String name = p.getFileName().toString();
                 int dash = name.lastIndexOf('-');
                 String kind = dash >= 0 ? name.substring(dash + 1) : name;
-                map.put(kind, p);
+                Path prev = map.put(kind, p);
+                if (prev != null)
+                    // Two files map to the same component kind => more than one SSTable
+                    // generation is present. The byte tier compares a single output per
+                    // engine, so silently keeping only the last file would violate the
+                    // no-allowlist "compare every component" guarantee. Fail loudly.
+                    throw new IOException(
+                        "duplicate component kind '" + kind + "' in " + dir + " ("
+                        + prev.getFileName() + " and " + p.getFileName()
+                        + "): more than one SSTable generation present; the byte tier "
+                        + "expects exactly one output SSTable per engine");
             }
         }
         return map;

@@ -20,7 +20,11 @@ See the design doc: `docs/plans/2026-06-18-compaction-parity-harness-design.md`.
   `Statistics.db`, `Summary.db`, `Filter.db`, `CompressionInfo.db`,
   `Digest.crc32`, `TOC.txt` as present), reporting the first differing byte/offset
   per component. Run with `gradle byteParity` (or `gradle test -Dparity.tier=byte`).
-  Non-blocking in CI (continue-on-error) until the writer is byte-stable.
+  Non-blocking (continue-on-error) until the writer is byte-stable. This is the
+  `nightly_docker` tier: CI runs the byteParity assertion only on
+  `workflow_dispatch`, not per-PR (the per-PR `gradle test` run already persists
+  the byte diff + checksums as artifacts, so PRs lose no evidence and we avoid
+  doubling the expensive Cassandra compaction).
 
 Both tiers run every scenario. `gradle test` always *computes and preserves* the
 byte diff as an artifact but only *asserts* the logical tier; `gradle byteParity`

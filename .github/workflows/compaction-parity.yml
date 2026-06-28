@@ -10,11 +10,13 @@ name: "CI: Compaction Parity (differential harness)"
 #   - LOGICAL tier (canonical sstabledump of both outputs must match) is
 #     implemented and green. It is a HARD GATE here: logical-tier failures fail
 #     this workflow.
-#   - BYTE tier (per-component `cmp`, no allowlist — the #842 north star) is now
-#     implemented in the harness (issue #1016: `gradle byteParity`). It runs here
-#     as a NON-BLOCKING step (continue-on-error) so per-component byte diffs +
-#     failure artifacts are produced every run without turning the build red. It
-#     is promoted to a HARD GATE once the divergence-fix children
+#   - BYTE tier (per-component `cmp`, no allowlist — the #842 north star) is
+#     implemented in the harness (issue #1016: `gradle byteParity`). Its manifest
+#     CI tier is `nightly_docker`, so the dedicated byteParity ASSERTION run fires
+#     only on workflow_dispatch — NOT per-PR (the per-PR logical `test` run already
+#     computes + persists the byte diff + checksums as artifacts, so PRs lose no
+#     evidence and we avoid doubling the expensive compaction). It is NON-BLOCKING
+#     (continue-on-error), promoted to a HARD GATE once the divergence-fix children
 #     (#886 → #844/#887/#888/#846/#848) land — by dropping continue-on-error.
 #
 # TRIGGERS: PRs that touch the write/merge/compaction paths or this harness, plus
@@ -61,10 +63,14 @@ env:
   # Where bootstrap-cassandra.sh fetches+builds the pinned source. The script
   # uses $HOME/.cache/cqlite/cassandra-src/<ref>; pin the parent here for caching.
   CQLITE_CASSANDRA_CACHE: ${{ github.workspace }}/.cqlite-cache/cassandra-src
-  # Byte tier (issue #1016): now implemented, so it runs every CI run by default
-  # but stays NON-BLOCKING (continue-on-error on the step) until the writer is
-  # byte-stable. Promotion to a hard gate = drop continue-on-error. A
-  # workflow_dispatch run can set this 'false' to skip the byte tier entirely.
+  # Byte tier (issue #1016): manifest CI tier is `nightly_docker`, so the dedicated
+  # `byteParity` assertion run is NOT run on every PR — that would double the
+  # expensive Cassandra+cqlite compaction for no new evidence, because the logical
+  # `test` run already computes + persists the per-component byte diff + checksums
+  # unconditionally as artifacts. The byteParity ASSERTION runs only on
+  # workflow_dispatch (and is gated below on event != pull_request). It stays
+  # NON-BLOCKING (continue-on-error) until the writer is byte-stable; promote to a
+  # hard gate by dropping continue-on-error. A dispatch run can set this 'false'.
   RUN_BYTE_TIER: ${{ github.event.inputs.run_byte_tier || 'true' }}
 
 jobs:
@@ -158,16 +164,18 @@ jobs:
           gradle --no-daemon test
 
       # ── BYTE tier — per-component cmp, NO allowlist (issue #1016, #842). ──
-      # Implemented as the `byteParity` Gradle task: it reruns the scenarios and
-      # additionally asserts every output component (Data/Index/Statistics/Summary/
-      # Filter/CompressionInfo/Digest/TOC, as present) is byte-identical, reporting
-      # the first byte/offset diff per component. Kept continue-on-error so it is
-      # NON-BLOCKING until the writer is byte-stable; PROMOTION to a hard gate =
-      # drop continue-on-error. The artifacts (byte-diff.txt, checksums.txt, both
-      # component dirs) are uploaded below on success AND failure.
-      - name: Run byte-tier parity (non-blocking)
+      # The `byteParity` Gradle task reruns the scenarios and additionally ASSERTS
+      # every output component (Data/Index/Statistics/Summary/Filter/CompressionInfo/
+      # Digest/TOC, as present) is byte-identical, reporting the first byte/offset
+      # diff per component. This is the `nightly_docker`-tier assertion, so it runs
+      # only on workflow_dispatch — NOT on PRs (the per-PR logical `test` run above
+      # already wrote byte-diff.txt + checksums.txt as artifacts, so PRs lose no
+      # evidence). Kept continue-on-error so it is NON-BLOCKING until the writer is
+      # byte-stable; PROMOTION to a hard gate = drop continue-on-error. Artifacts
+      # are uploaded below on success AND failure.
+      - name: Run byte-tier parity (non-blocking, nightly/dispatch only)
         id: byte
-        if: env.RUN_BYTE_TIER == 'true'
+        if: env.RUN_BYTE_TIER == 'true' && github.event_name != 'pull_request'
         continue-on-error: true
         working-directory: compaction-parity
         env:
@@ -227,18 +235,21 @@ jobs:
             echo
             echo "| Tier | Comparison | Gating | Status |"
             echo "|---|---|---|---|"
-            echo "| LOGICAL | canonical sstabledump JSONL equality | HARD GATE | ${{ steps.logical.outcome }} |"
-            echo "| BYTE | per-component cmp, no allowlist | non-blocking | ${{ steps.byte.outcome || 'skipped' }} |"
+            echo "| LOGICAL | canonical sstabledump JSONL equality | HARD GATE (per-PR) | ${{ steps.logical.outcome }} |"
+            echo "| BYTE | per-component cmp, no allowlist | non-blocking (nightly/dispatch) | ${{ steps.byte.outcome || 'skipped' }} |"
             echo
             echo "Cassandra pin: ${{ env.CASSANDRA_REF }} (cache hit: ${{ steps.cassandra-cache.outputs.cache-hit }})"
             echo
-            echo "The LOGICAL tier blocks this workflow. The BYTE tier (issue #1016)"
-            echo "computes per-component byte/offset diffs and uploads them as the"
-            echo "**compaction-parity-reports** artifact (byte-diff.txt, checksums.txt,"
-            echo "and both engines' output component dirs) on success AND failure. It is"
-            echo "the #842 north star and stays non-blocking until the writer is"
-            echo "byte-stable; promote it to a hard gate by dropping continue-on-error"
-            echo "on the byte step."
+            echo "The LOGICAL tier blocks this workflow on every PR and ALSO writes the"
+            echo "per-component byte/offset diff + checksums as artifacts, so byte"
+            echo "evidence is captured on every run. The dedicated BYTE assertion run"
+            echo "(gradle byteParity, issue #1016) is the nightly_docker tier: it fires"
+            echo "only on workflow_dispatch to avoid doubling the expensive compaction"
+            echo "on PRs. Both tiers' artifacts upload as **compaction-parity-reports**"
+            echo "(byte-diff.txt, checksums.txt, both engines' output dirs) on success"
+            echo "AND failure. The byte tier is the #842 north star and stays"
+            echo "non-blocking until the writer is byte-stable; promote it to a hard"
+            echo "gate by dropping continue-on-error on the byte step."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Comment on PR (failure)
