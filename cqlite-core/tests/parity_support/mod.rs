@@ -250,6 +250,18 @@ static SUMMARY_LOCK: Mutex<()> = Mutex::new(());
 /// separate-process lane writes can interleave their read-modify-write and lose
 /// a row. That is acceptable here because summary.json is an artifact-only CI
 /// diagnostic and never gates pass/fail.
+///
+/// LANE-ROW SEMANTICS (artifact-only, NON-GATING): a row is keyed by `lane`
+/// stem, and several distinct tests can legitimately share one stem (e.g. both
+/// `big_index_db_entry_byte_and_field_parity` and
+/// `truncated_big_index_db_is_not_silently_full_or_empty` write `index_db_big`).
+/// Because each call overwrites the existing row, a lane row reflects only the
+/// LAST writer for that stem within a run — NOT the aggregate pass/fail of every
+/// test mapped to it. A `pass` row therefore does NOT prove every test on that
+/// lane passed; a sibling test on the same stem can have failed (and, being a
+/// real `assert!`/`panic!`, that test still fails the build regardless of what
+/// the summary row says). Read summary.json as a per-stem last-write snapshot,
+/// never as the gate of record. The gate is the test outcomes themselves.
 pub fn write_summary(
     lane: &str,
     status: LaneStatus,
@@ -501,6 +513,11 @@ pub fn artifact_hint(lane: &str, body: &str) -> Option<PathBuf> {
     write_diff(lane, body).ok()
 }
 
+// NOTE: because this module is pulled into each strict-parity test binary via
+// `#[path = "parity_support/mod.rs"]`, these unit tests are compiled and run once
+// per including binary (redundant runs). That redundancy is the accepted cost of
+// the shared `#[path]` module pattern; we keep the tests here rather than
+// restructuring the support module into its own crate/binary.
 #[cfg(test)]
 mod tests {
     use super::*;
