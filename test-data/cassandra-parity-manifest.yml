@@ -4457,6 +4457,255 @@ scenarios:
         Add fixture byte comparison once a committed Cassandra-written reference
         fixture exists for the same schema/data.
 
+  - id: cass.write_load_path.cql_sstable_writer.finished_data_db_artifacts
+    title: Finished CQLite-written Data.db / component artifacts (write path)
+    status: partial
+    capability: write_load_path
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: sstable-format
+      relevance: high
+      files:
+        - CQLSSTableWriterTest.java
+        - BigTableWriterTest.java
+    cqlite:
+      coverage:
+        suite: sstable_writer_cassandra_fixture_parity
+        tests:
+          - cqlite-core/tests/issue_821_writer_byte_invariants.rs
+          - cqlite-core/tests/issue_908_bti_canonical_write.rs
+        notes: >-
+          issue_821 anchors the Data.db row framing (previousUnfilteredSize chain,
+          static-row prev_size=0, 64-bit offsets) byte-by-byte against the exact
+          values read out of real Cassandra "nb" SSTables (uncompressed_table,
+          static_columns_table). issue_908 asserts the finished BTI component set
+          and TOC.txt: a da SSTable emits Data.db + Partitions.db + Rows.db + a TOC
+          listing exactly the BTI component set (no Index/Summary) and self-
+          referencing TOC.txt. Together they cover component presence, TOC.txt, and
+          Data.db row-offset byte invariants of the writer output.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets, component_files]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 → flush → component files + TOC.txt
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_821_writer_byte_invariants &&
+        cargo test -p cqlite-core --features write-support --test issue_908_bti_canonical_write
+      known_limitations: >-
+        Proves writer-output byte INVARIANTS (Data.db row framing / prev_size /
+        64-bit offsets anchored to real Cassandra nb bytes) plus BTI component
+        presence and TOC.txt content. It is NOT a whole-artifact file-vs-file
+        byte diff of finished CQLite Data.db against a committed Cassandra-written
+        reference for the same schema/data, and the sstabledump-JSONL parity of
+        CQLite-written output is covered separately by the live-readback scenario.
+    ci:
+      tier: exhaustive_regeneration
+      workflow: .github/workflows/cassandra-parity.yml
+    scope:
+      gap: >-
+        Writer byte invariants + component/TOC presence are asserted, but no
+        committed Cassandra-written reference Data.db exists to diff finished
+        CQLite output (whole-file bytes / row offsets / sstabledump JSONL) against
+        for the same schema/data. Consistent with
+        cass.write_load_path.cassandra_sstable_writer_fixtures.
+      next_step: >-
+        Commit a Cassandra-written reference SSTable for an identical writer
+        schema/data and add a strict file-vs-file byte + offset + sstabledump JSONL
+        diff test, then upgrade this scenario to byte_for_byte (epic #969).
+
+  - id: cass.write_load_path.flush.tombstone_and_ttl_artifacts
+    title: Flush produces tombstone + TTL Data.db / Statistics.db artifacts
+    status: partial
+    capability: write_load_path
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: memtable-flush
+      relevance: high
+      files:
+        - CQLSSTableWriterTest.java
+        - SSTableMetadataTrackingTest.java
+    cqlite:
+      coverage:
+        suite: sstable_writer_cassandra_fixture_parity
+        tests:
+          - cqlite-core/tests/issue_764_explicit_local_deletion_time.rs
+          - cqlite-core/tests/issue_821_writer_byte_invariants.rs
+        notes: >-
+          issue_764 flushes a mutation carrying an explicit local_deletion_time and
+          a TTL through the real WriteEngine, then asserts the WRITTEN Data.db row
+          tombstone flags/local-deletion-time bytes AND the parsed Statistics.db
+          min/max localDeletionTime + minTTL aggregates (writer + reader cannot be
+          wrong in the same way). issue_821 anchors the deletion/TTL-bearing row
+          framing byte invariants. These are the finished tombstone/TTL artifacts a
+          flush emits, not Cassandra memtable accounting internals (AC7).
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, component_files]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 flush → Data.db + Statistics.db
+      comparison_command: >-
+        cargo test -p cqlite-core --features write-support
+        --test issue_764_explicit_local_deletion_time
+      known_limitations: >-
+        Proves the flushed Data.db row-tombstone bytes (deletion flags +
+        local_deletion_time) and the Statistics.db local-deletion-time / TTL
+        aggregate bytes are correct against derived expected values. It is NOT a
+        whole-artifact byte diff of the flushed tombstone/TTL SSTable against a
+        committed Cassandra-written reference; semantic visibility of tombstones
+        and TTLs is covered by the live-readback scenario.
+    ci:
+      tier: exhaustive_regeneration
+      workflow: .github/workflows/cassandra-parity.yml
+    scope:
+      gap: >-
+        Flushed tombstone/TTL bytes are asserted against derived expected values,
+        but no committed Cassandra-written reference for the same flush input
+        exists to diff the finished artifact byte-for-byte.
+      next_step: >-
+        Commit a Cassandra-written tombstone+TTL reference SSTable for an identical
+        flush input and add a strict Data.db + Statistics.db byte diff, then upgrade
+        to byte_for_byte (epic #969).
+
+  - id: cass.write_load_path.flush.partition_boundary_artifacts
+    title: Flush produces partition-boundary artifacts (promoted index / BTI Partitions.db)
+    status: partial
+    capability: write_load_path
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: memtable-flush
+      relevance: high
+      files:
+        - CQLSSTableWriterTest.java
+        - ColumnIndexTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_bti_partitions_rows
+        tests:
+          - cqlite-core/tests/issue_766_bti_partitions_writer.rs
+          - cqlite-core/tests/issue_1013_rt_index_block_parity.rs
+        notes: >-
+          issue_766 flushes via SSTableWriter in BTI mode and proves the written
+          Partitions.db trie round-trips through CQLite's own BTI reader: every
+          partition key (int/bigint/text/uuid/timestamp/blob + composite) resolves
+          to the exact Data.db offset that was written. issue_1013 re-parses a
+          committed Cassandra Index.db promoted index byte-exactly (>1 IndexInfo
+          block, promoted-index byte length consumed exactly) at column-index block
+          boundaries, establishing the partition-boundary layout the writer targets.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets, component_files]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 flush → Index.db / Partitions.db boundaries
+      comparison_command: >-
+        cargo test -p cqlite-core --features write-support
+        --test issue_766_bti_partitions_writer &&
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features "delta-scan write-support" --test issue_1013_rt_index_block_parity
+      known_limitations: >-
+        Proves the written BTI Partitions.db partition-offset entries round-trip
+        through CQLite's reader, and that the Cassandra promoted Index.db boundary
+        layout is decoded byte-exactly. It is NOT a whole-artifact byte diff of the
+        CQLite-written partition-boundary component against a committed Cassandra-
+        written reference for the same flush input.
+    ci:
+      tier: exhaustive_regeneration
+      workflow: .github/workflows/cassandra-parity.yml
+    scope:
+      gap: >-
+        Writer partition-boundary entries round-trip through CQLite's own reader
+        and the Cassandra boundary layout is re-parsed byte-exactly, but no
+        committed Cassandra-written reference exists to diff the finished
+        CQLite-written Partitions.db / promoted Index.db byte-for-byte.
+      next_step: >-
+        Commit a Cassandra-written reference for an identical multi-block /
+        multi-partition flush input and add a strict Partitions.db / Index.db byte
+        diff, then upgrade to byte_for_byte (epic #969).
+
+  - id: cass.write_load_path.live_readback.semantic_only
+    title: Live Cassandra readback of CQLite-written SSTables (semantic-only)
+    status: mirrored
+    capability: write_load_path
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: sstable-format
+      relevance: high
+      files:
+        - CQLSSTableWriterTest.java
+        - SSTableLoaderTest.java
+    cqlite:
+      coverage:
+        suite: sstable_writer_cassandra_fixture_parity
+        tests:
+          - cqlite-core/tests/sstableloader_integration.rs
+        notes: >-
+          CQLite writes/flushes/exports SSTables, loads them into a real Cassandra
+          5.0.2 cluster (sstableloader / nodetool refresh), then verifies via
+          sstabledump on the loaded artifact AND cqlsh SELECT that the written rows
+          are visible. Coverage spans simple/clustering/multi-partition tables, all
+          stage-0 types, static rows + static-only partitions (issue_507), TTL
+          rows (TTL(col) within range), and large/wide partitions. The
+          e2e-cassandra-readback.sh harness additionally drives cell-delete,
+          row-delete, range-tombstone and partition-tombstone labels with structured
+          per-row / absence assertions.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/e2e-cassandra-readback.sh  # cqlite write → sstableloader/refresh → sstabledump + cqlsh SELECT
+      comparison_command: >-
+        cargo test -p cqlite-core --features write-support --test sstableloader_integration
+      normalization: >-
+        CQLite-written artifacts are loaded into Cassandra 5.0.2 and read back; the
+        sstabledump JSON of the loaded SSTable and the cqlsh SELECT rows
+        (including TTL(col), static columns, clustering rows, and tombstone
+        presence/absence) are compared for semantic equivalence to what CQLite
+        wrote. This proves loaded rows, TTLs, tombstones, static rows and clustering
+        rows are semantically visible — NOT a byte comparison of writer output.
+      known_limitations: >-
+        Canonical-semantic round-trip via a live Cassandra cluster. This is NEVER
+        byte_for_byte: a live readback proves semantic visibility, not that the
+        CQLite-written bytes match a Cassandra-written reference. Byte-for-byte
+        writer parity remains tracked under epic #969.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/cassandra-validation.yml
+    scope:
+      gap: >-
+        Semantic readback only; no byte comparison of CQLite writer output.
+      next_step: >-
+        Pair the readback with a committed Cassandra-written byte reference once it
+        exists (epic #969) so semantic visibility is backed by byte parity.
+
   # ----------------------------------------------------------------------------
   # bti_big_version_matrix
   # ----------------------------------------------------------------------------
