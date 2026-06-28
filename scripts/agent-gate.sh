@@ -59,7 +59,7 @@ if ! command -v cargo >/dev/null 2>&1 && [ -d "$HOME/.cargo/bin" ]; then
 fi
 export CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-$REPO_ROOT/test-data/datasets}"
 
-COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard integration-tests format-compat write-tests cli-tests python-bindings minimal-build smoke)
+COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard integration-tests format-compat write-tests cli-tests python-bindings delivery-telemetry minimal-build smoke)
 ONLY=""
 case "${1:-}" in
   --list) printf '%s\n' "${COMPONENTS[@]}"; exit 0 ;;
@@ -126,6 +126,39 @@ run_python_bindings() {
       pip install --quiet maturin pytest
       maturin develop -m bindings/python/Cargo.toml
       pytest bindings/python/tests -q' >"$log" 2>&1; then
+    status=PASS
+  else
+    status=FAIL
+    OVERALL=FAIL
+    echo "--- [$name] FAILED; last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
+# delivery-telemetry: run the delivery-pipeline telemetry tool's unit tests
+# (scripts/tests/test_delivery_telemetry.py) with the stdlib unittest runner.
+# SKIP-aware like python-bindings: no python3 -> SKIP (loud, never silent PASS);
+# any test failure -> hard FAIL. No third-party deps, no datasets, no network.
+run_delivery_telemetry() {
+  local name=delivery-telemetry
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local log="$LOG_DIR/$name.log"
+  local start end status
+  start=$(date +%s)
+  if ! command -v python3 >/dev/null 2>&1; then
+    status=SKIP
+    echo ">>> [$name] SKIP (no python3 on PATH)"
+    NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("0s")
+    return 0
+  fi
+  echo ">>> [$name] python3 scripts/tests/test_delivery_telemetry.py"
+  if python3 "$REPO_ROOT/scripts/tests/test_delivery_telemetry.py" >"$log" 2>&1; then
     status=PASS
   else
     status=FAIL
@@ -283,6 +316,7 @@ run_component write-tests bash -c '
   cargo test --package cqlite-core --features write-support --test compaction_integration'
 run_component cli-tests cargo test --package cqlite-cli --test unit_tests
 run_python_bindings
+run_delivery_telemetry
 run_component minimal-build cargo build --package cqlite-core --no-default-features --features all-compression
 # Pin smoke to a binary built from THIS tree. Left to its own devices the
 # smoke script prefers any existing target/release/cqlite, however stale —

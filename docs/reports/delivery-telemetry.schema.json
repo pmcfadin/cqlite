@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/pmcfadin/cqlite/docs/reports/delivery-telemetry.schema.json",
+  "title": "Delivery telemetry ledger record (v1)",
+  "description": "One record per completed delivery-pipeline issue. Authoritative data only: every field is an observed event (GitHub timestamp/label or a supplied run counter) or arithmetic over authoritative timestamps. No value is inferred, estimated, or guessed.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "issue",
+    "slug",
+    "pr",
+    "routing",
+    "priority",
+    "created_at",
+    "pr_opened_at",
+    "merged_at",
+    "closed_at",
+    "cycle_time_s",
+    "phase_s",
+    "claim_collisions",
+    "rebase_events",
+    "gate",
+    "gate_runs",
+    "roborev_findings",
+    "rework",
+    "stamped_at"
+  ],
+  "properties": {
+    "schema": { "const": 1, "type": "integer", "description": "Record schema version." },
+    "issue": { "type": "integer", "minimum": 1, "description": "GitHub issue number." },
+    "slug": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$", "description": "Kebab-case change slug (issue-N-<slug>)." },
+    "pr": { "type": "integer", "minimum": 1, "description": "GitHub PR number that closed the issue." },
+    "routing": { "enum": ["design", "oracle"], "description": "design = OpenSpec change; oracle = parity/repro bug." },
+    "priority": { "type": "string", "pattern": "^P[0-3]$", "description": "GitHub priority label P0-P3." },
+    "created_at": { "type": "string", "format": "date-time", "description": "GitHub issue createdAt (authoritative)." },
+    "pr_opened_at": { "type": "string", "format": "date-time", "description": "GitHub PR createdAt (authoritative)." },
+    "merged_at": { "type": "string", "format": "date-time", "description": "GitHub PR mergedAt (authoritative)." },
+    "closed_at": { "type": "string", "format": "date-time", "description": "GitHub issue closedAt (authoritative)." },
+    "cycle_time_s": { "type": "integer", "minimum": 0, "description": "closed_at - created_at, in seconds (arithmetic over authoritative timestamps)." },
+    "phase_s": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["to_pr_s", "review_s"],
+      "properties": {
+        "to_pr_s": { "type": "integer", "minimum": 0, "description": "created_at -> pr_opened_at, seconds." },
+        "review_s": { "type": "integer", "minimum": 0, "description": "pr_opened_at -> merged_at, seconds." }
+      }
+    },
+    "claim_collisions": { "type": "integer", "minimum": 0, "description": "Run-observed: number of rejected claim pushes (a competing session won the race)." },
+    "rebase_events": { "type": "integer", "minimum": 0, "description": "Run-observed: number of rebases / merge-conflict resolutions." },
+    "gate": { "enum": ["pass", "fail"], "description": "Run-observed: final agent-gate.sh outcome." },
+    "gate_runs": { "type": "integer", "minimum": 1, "description": "Run-observed: number of agent-gate.sh runs through (and including) the first PASS — runs stop at the first pass, so failed rounds = gate_runs-1 for a terminal pass and gate_runs for a terminal fail. Do not re-run the gate after a pass." },
+    "roborev_findings": { "type": "integer", "minimum": 0, "description": "Run-observed: count of roborev findings raised." },
+    "rework": { "type": "integer", "minimum": 0, "description": "Run-observed: re-open / re-review count." },
+    "stamped_at": { "type": "string", "format": "date-time", "description": "Wall-clock when finalize wrote this record (observed at write time)." }
+  }
+}

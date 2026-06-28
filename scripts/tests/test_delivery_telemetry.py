@@ -1,0 +1,491 @@
+#!/usr/bin/env python3
+"""Unit tests for scripts/delivery-telemetry.py (stdlib unittest, no network/datasets).
+
+Run standalone:   python3 scripts/tests/test_delivery_telemetry.py
+Or via the gate:  scripts/agent-gate.sh --only delivery-telemetry
+"""
+
+import contextlib
+import importlib.util
+import io
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+SCRIPTS = Path(__file__).resolve().parents[1]
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+# The module file name has a hyphen, so load it by path.
+_spec = importlib.util.spec_from_file_location("delivery_telemetry", SCRIPTS / "delivery-telemetry.py")
+dt = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(dt)
+
+SCHEMA = dt.load_schema(dt.DEFAULT_SCHEMA)
+
+
+def _from_json_file(tmp: Path) -> str:
+    """Write a GitHub-derived fields file (the offline seam for `record`)."""
+    p = tmp / "ghfields.json"
+    p.write_text(json.dumps({
+        "created_at": "2026-06-10T00:00:00Z",
+        "pr_opened_at": "2026-06-10T01:00:00Z",
+        "merged_at": "2026-06-10T03:00:00Z",
+        "closed_at": "2026-06-10T03:05:00Z",
+        "priority": "P2",
+        "routing": "design",
+    }))
+    return str(p)
+
+
+class RecordTests(unittest.TestCase):
+    def test_record_from_json_appends_schema_valid_line(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            rc = dt.main([
+                "record", "--ledger", str(ledger),
+                "--issue", "1161", "--pr", "1170", "--slug", "delivery-telemetry-ledger",
+                "--gate", "pass", "--gate-runs", "2",
+                "--claim-collisions", "0", "--rebase-events", "1",
+                "--roborev-findings", "0", "--rework", "0",
+                "--from-json", _from_json_file(tmp),
+            ])
+            self.assertEqual(rc, 0)
+            lines = [l for l in ledger.read_text().splitlines() if l.strip()]
+            self.assertEqual(len(lines), 1)
+            rec = json.loads(lines[0])
+            self.assertEqual(dt.validate_record(rec, SCHEMA), [])
+            # durations are arithmetic over the authoritative timestamps
+            self.assertEqual(rec["cycle_time_s"], 11100)        # 3h05m
+            self.assertEqual(rec["phase_s"]["to_pr_s"], 3600)   # 1h
+            self.assertEqual(rec["phase_s"]["review_s"], 7200)  # 2h
+            self.assertEqual(rec["issue"], 1161)
+            self.assertEqual(rec["routing"], "design")
+
+    def test_record_missing_required_counter_is_error_not_silent_zero(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            with self.assertRaises(SystemExit):
+                dt.main([
+                    "record", "--ledger", str(ledger),
+                    "--issue", "1161", "--pr", "1170", "--slug", "x",
+                    "--gate", "pass", "--gate-runs", "1",
+                    "--claim-collisions", "0", "--rebase-events", "0",
+                    "--roborev-findings", "0",   # --rework deliberately omitted
+                    "--from-json", _from_json_file(tmp),
+                ])
+            self.assertFalse(ledger.exists() and ledger.read_text().strip(),
+                             "no record should be written when a counter is missing")
+
+    def test_record_null_timestamp_is_error_not_attribute_crash(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            # an unmerged PR -> merged_at is null; must be a clean SystemExit, not a crash
+            ghfields = tmp / "ghfields.json"
+            ghfields.write_text(json.dumps({
+                "created_at": "2026-06-10T00:00:00Z",
+                "pr_opened_at": "2026-06-10T01:00:00Z",
+                "merged_at": None,
+                "closed_at": "2026-06-10T03:05:00Z",
+                "priority": "P2", "routing": "design",
+            }))
+            with self.assertRaises(SystemExit):
+                dt.main([
+                    "record", "--ledger", str(ledger),
+                    "--issue", "1", "--pr", "2", "--slug", "x",
+                    "--gate", "pass", "--gate-runs", "1",
+                    "--claim-collisions", "0", "--rebase-events", "0",
+                    "--roborev-findings", "0", "--rework", "0",
+                    "--from-json", str(ghfields),
+                ])
+            self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+
+    def test_record_refuses_duplicate_issue(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            base = ["record", "--ledger", str(ledger),
+                    "--issue", "42", "--pr", "7", "--slug", "x",
+                    "--gate", "pass", "--gate-runs", "1",
+                    "--claim-collisions", "0", "--rebase-events", "0",
+                    "--roborev-findings", "0", "--rework", "0",
+                    "--from-json", _from_json_file(tmp)]
+            self.assertEqual(dt.main(base), 0)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(dt.main(base), 1)         # second stamp refused
+            self.assertIn("already has a ledger record", err.getvalue())
+            self.assertEqual(dt.main(base + ["--allow-duplicate"]), 0)  # explicit override
+            lines = [l for l in ledger.read_text().splitlines() if l.strip()]
+            self.assertEqual(len(lines), 2)
+
+    def test_routing_required_when_not_determinable(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ghfields = tmp / "ghfields.json"
+            ghfields.write_text(json.dumps({
+                "created_at": "2026-06-10T00:00:00Z",
+                "pr_opened_at": "2026-06-10T01:00:00Z",
+                "merged_at": "2026-06-10T03:00:00Z",
+                "closed_at": "2026-06-10T03:05:00Z",
+                "priority": "P2", "routing": None,    # neither label present
+            }))
+            with self.assertRaises(SystemExit):
+                dt.main([
+                    "record", "--ledger", str(tmp / "l.jsonl"),
+                    "--issue", "1", "--pr", "2", "--slug", "x",
+                    "--gate", "pass", "--gate-runs", "1",
+                    "--claim-collisions", "0", "--rebase-events", "0",
+                    "--roborev-findings", "0", "--rework", "0",
+                    "--from-json", str(ghfields),
+                ])
+
+
+    def test_record_rejects_negative_duration(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            ghfields = tmp / "ghfields.json"
+            ghfields.write_text(json.dumps({       # merged BEFORE pr opened -> review_s < 0
+                "created_at": "2026-06-10T00:00:00Z",
+                "pr_opened_at": "2026-06-10T02:00:00Z",
+                "merged_at": "2026-06-10T01:00:00Z",
+                "closed_at": "2026-06-10T03:00:00Z",
+                "priority": "P2", "routing": "design",
+            }))
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = dt.main([
+                    "record", "--ledger", str(ledger),
+                    "--issue", "1", "--pr", "2", "--slug", "x",
+                    "--gate", "pass", "--gate-runs", "1",
+                    "--claim-collisions", "0", "--rebase-events", "0",
+                    "--roborev-findings", "0", "--rework", "0",
+                    "--from-json", str(ghfields),
+                ])
+            self.assertEqual(rc, 1)
+            self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_record_rejects_bad_priority(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            rc = dt.main([
+                "record", "--ledger", str(ledger),
+                "--issue", "1", "--pr", "2", "--slug", "x", "--priority", "high",
+                "--gate", "pass", "--gate-runs", "1",
+                "--claim-collisions", "0", "--rebase-events", "0",
+                "--roborev-findings", "0", "--rework", "0",
+                "--from-json", _from_json_file(tmp),
+            ])
+            self.assertEqual(rc, 1)
+            self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+
+class LintTests(unittest.TestCase):
+    def test_clean_ledger_passes(self):
+        rc = dt.main(["lint", "--ledger", str(FIXTURES / "sample-ledger.jsonl")])
+        self.assertEqual(rc, 0)
+
+    def test_validate_alias_works(self):
+        rc = dt.main(["validate", "--ledger", str(FIXTURES / "sample-ledger.jsonl")])
+        self.assertEqual(rc, 0)
+
+    def test_const_bool_coercion_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "ledger.jsonl"
+            rec = json.loads((FIXTURES / "sample-ledger.jsonl").read_text().splitlines()[0])
+            rec["schema"] = True   # True == 1 but must NOT satisfy const: 1
+            ledger.write_text(json.dumps(rec) + "\n")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = dt.main(["lint", "--ledger", str(ledger)])
+            self.assertEqual(rc, 1)
+
+    def test_malformed_timestamp_is_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "ledger.jsonl"
+            rec = json.loads((FIXTURES / "sample-ledger.jsonl").read_text().splitlines()[0])
+            rec["created_at"] = "not-a-timestamp"
+            ledger.write_text(json.dumps(rec) + "\n")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = dt.main(["lint", "--ledger", str(ledger)])
+            self.assertEqual(rc, 1)
+            self.assertIn("date-time", err.getvalue())
+
+    def test_unknown_field_is_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "ledger.jsonl"
+            rec = json.loads((FIXTURES / "sample-ledger.jsonl").read_text().splitlines()[0])
+            rec["reworkk"] = 9    # typo'd field; intended 'rework' silently absent otherwise
+            ledger.write_text(json.dumps(rec) + "\n")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = dt.main(["lint", "--ledger", str(ledger)])
+            self.assertEqual(rc, 1)
+            self.assertIn("unknown field 'reworkk'", err.getvalue())
+
+    def test_duplicate_issue_is_flagged(self):
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "ledger.jsonl"
+            line = (FIXTURES / "sample-ledger.jsonl").read_text().splitlines()[0]
+            ledger.write_text(line + "\n" + line + "\n")   # same issue twice
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = dt.main(["lint", "--ledger", str(ledger)])
+            self.assertEqual(rc, 1)
+            self.assertIn("duplicate record for issue", err.getvalue())
+
+    def test_non_object_line_is_clean_error_not_crash(self):
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "ledger.jsonl"
+            ledger.write_text("[1, 2, 3]\n42\nnull\n")  # valid JSON, not objects
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = dt.main(["lint", "--ledger", str(ledger)])
+            self.assertEqual(rc, 1)                 # clean failure, no traceback
+
+    def test_malformed_line_fails_with_line_number(self):
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "ledger.jsonl"
+            good = (FIXTURES / "sample-ledger.jsonl").read_text().splitlines()[0]
+            # second line drops the required 'gate' field and uses a negative counter
+            bad = json.loads(good)
+            del bad["gate"]
+            bad["rework"] = -1
+            ledger.write_text(good + "\n" + json.dumps(bad) + "\n")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = dt.main(["lint", "--ledger", str(ledger)])
+            self.assertEqual(rc, 1)
+            self.assertIn("line 2", err.getvalue())
+
+
+class RetroTests(unittest.TestCase):
+    def test_retro_ranks_fixture_to_expected_top_and_files_nothing(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = dt.main([
+                "retro",
+                "--ledger", str(FIXTURES / "sample-ledger.jsonl"),
+                "--open-issues-json", str(FIXTURES / "open-issues-empty.json"),
+            ])
+        self.assertEqual(rc, 0)
+        text = out.getvalue()
+        self.assertIn("top recurring failure: rework", text)
+        self.assertIn("DRY RUN", text)              # default mode files nothing
+
+    def test_retro_dryrun_degrades_when_gh_unavailable(self):
+        # No --open-issues-json -> dedup would hit live gh; a gh failure in dry-run must
+        # warn and still print the preview, not abort.
+        def boom(argv, **kw):
+            raise FileNotFoundError("gh")
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(dt.subprocess, "run", boom):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = dt.main(["retro", "--ledger", str(FIXTURES / "sample-ledger.jsonl")])
+        self.assertEqual(rc, 0)
+        self.assertIn("DRY RUN", out.getvalue())
+        self.assertIn("dedup check skipped", err.getvalue())
+
+    def test_retro_refuses_duplicate_issue_ledger(self):
+        # a duplicate issue would double-count in the tally — retro must refuse (run lint),
+        # mirroring lint's invariant via the shared loader.
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "ledger.jsonl"
+            line = (FIXTURES / "sample-ledger.jsonl").read_text().splitlines()[0]
+            ledger.write_text(line + "\n" + line + "\n")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = dt.main(["retro", "--ledger", str(ledger),
+                              "--open-issues-json", str(FIXTURES / "open-issues-empty.json")])
+            self.assertEqual(rc, 1)
+            self.assertIn("run `lint`", err.getvalue())
+
+    def test_retro_dedupes_against_existing_flow_meta_issue(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = dt.main([
+                "retro",
+                "--ledger", str(FIXTURES / "sample-ledger.jsonl"),
+                "--open-issues-json", str(FIXTURES / "open-issues-rework.json"),
+            ])
+        self.assertEqual(rc, 0)
+        text = out.getvalue()
+        self.assertIn("already tracked", text)
+        self.assertIn("#999", text)
+        self.assertNotIn("DRY RUN", text)
+
+
+class _FakeProc:
+    def __init__(self, stdout):
+        self.stdout = stdout
+
+
+class GhPathTests(unittest.TestCase):
+    """Cover the live `gh`-touching paths offline by monkeypatching subprocess.run."""
+
+    def test_github_fields_builds_argv_and_maps_json(self):
+        def fake_run(argv, **kw):
+            if argv[:3] == ["gh", "issue", "view"]:
+                self.assertIn("createdAt,closedAt,labels", argv)
+                return _FakeProc(json.dumps({
+                    "createdAt": "2026-06-01T00:00:00Z",
+                    "closedAt": "2026-06-01T02:00:00Z",
+                    "labels": [{"name": "P1"}, {"name": "oracle"}],
+                }))
+            if argv[:3] == ["gh", "pr", "view"]:
+                self.assertIn("createdAt,mergedAt", argv)
+                return _FakeProc(json.dumps({
+                    "createdAt": "2026-06-01T00:30:00Z",
+                    "mergedAt": "2026-06-01T01:30:00Z",
+                }))
+            raise AssertionError(f"unexpected argv: {argv}")
+
+        with mock.patch.object(dt.subprocess, "run", fake_run):
+            fields = dt._github_fields(1234, 5678)
+        self.assertEqual(fields["created_at"], "2026-06-01T00:00:00Z")
+        self.assertEqual(fields["closed_at"], "2026-06-01T02:00:00Z")
+        self.assertEqual(fields["pr_opened_at"], "2026-06-01T00:30:00Z")
+        self.assertEqual(fields["merged_at"], "2026-06-01T01:30:00Z")
+        self.assertEqual(fields["priority"], "P1")
+        self.assertEqual(fields["routing"], "oracle")  # explicit label, not inferred
+
+    def test_github_fields_raises_on_multiple_priority_labels(self):
+        def fake_run(argv, **kw):
+            if argv[:3] == ["gh", "issue", "view"]:
+                return _FakeProc(json.dumps({
+                    "createdAt": "2026-06-01T00:00:00Z",
+                    "closedAt": "2026-06-01T02:00:00Z",
+                    "labels": [{"name": "P1"}, {"name": "P2"}],  # invariant violation
+                }))
+            return _FakeProc(json.dumps({
+                "createdAt": "2026-06-01T00:30:00Z", "mergedAt": "2026-06-01T01:30:00Z"}))
+
+        with mock.patch.object(dt.subprocess, "run", fake_run):
+            with self.assertRaises(SystemExit):
+                dt._github_fields(1, 2)
+
+    def test_github_fields_design_label_maps(self):
+        def fake_run(argv, **kw):
+            if argv[:3] == ["gh", "issue", "view"]:
+                return _FakeProc(json.dumps({
+                    "createdAt": "2026-06-01T00:00:00Z",
+                    "closedAt": "2026-06-01T02:00:00Z",
+                    "labels": [{"name": "P2"}, {"name": "design"}],
+                }))
+            return _FakeProc(json.dumps({
+                "createdAt": "2026-06-01T00:30:00Z", "mergedAt": "2026-06-01T01:30:00Z"}))
+
+        with mock.patch.object(dt.subprocess, "run", fake_run):
+            fields = dt._github_fields(1, 2)
+        self.assertEqual(fields["routing"], "design")
+        self.assertEqual(fields["priority"], "P2")
+
+    def test_github_fields_raises_on_conflicting_routing_labels(self):
+        def fake_run(argv, **kw):
+            if argv[:3] == ["gh", "issue", "view"]:
+                return _FakeProc(json.dumps({
+                    "createdAt": "2026-06-01T00:00:00Z",
+                    "closedAt": "2026-06-01T02:00:00Z",
+                    "labels": [{"name": "P2"}, {"name": "oracle"}, {"name": "design"}],
+                }))
+            return _FakeProc(json.dumps({
+                "createdAt": "2026-06-01T00:30:00Z", "mergedAt": "2026-06-01T01:30:00Z"}))
+
+        with mock.patch.object(dt.subprocess, "run", fake_run):
+            with self.assertRaises(SystemExit):
+                dt._github_fields(1, 2)
+
+    def test_gh_failure_becomes_clean_systemexit(self):
+        import subprocess as _sp
+
+        def boom(argv, **kw):
+            raise _sp.CalledProcessError(1, argv, stderr="gh: not authenticated")
+
+        with mock.patch.object(dt.subprocess, "run", boom):
+            with self.assertRaises(SystemExit):
+                dt._gh(["gh", "issue", "view", "1"])
+
+    def test_retro_file_invokes_gh_issue_create(self):
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(argv)
+            return _FakeProc("https://github.com/pmcfadin/cqlite/issues/123")
+
+        with mock.patch.object(dt.subprocess, "run", fake_run):
+            rc = dt.main([
+                "retro",
+                "--ledger", str(FIXTURES / "sample-ledger.jsonl"),
+                "--open-issues-json", str(FIXTURES / "open-issues-empty.json"),
+                "--file",
+            ])
+        self.assertEqual(rc, 0)
+        self.assertTrue(calls, "expected a gh subprocess call")
+        argv = calls[-1]
+        self.assertEqual(argv[:3], ["gh", "issue", "create"])
+        self.assertIn("flow-meta", argv)
+        # the marker for the top category (rework) must be in the body
+        body = argv[argv.index("--body") + 1]
+        self.assertIn("<!-- RETRO:rework -->", body)
+
+
+    def test_retro_empty_ledger(self):
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "ledger.jsonl"
+            ledger.write_text("")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = dt.main(["retro", "--ledger", str(ledger)])
+            self.assertEqual(rc, 0)
+            self.assertIn("ledger is empty", out.getvalue())
+
+    def test_retro_all_zero_files_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "ledger.jsonl"
+            rec = json.loads((FIXTURES / "sample-ledger.jsonl").read_text().splitlines()[0])
+            rec.update({"claim_collisions": 0, "rebase_events": 0, "roborev_findings": 0,
+                        "rework": 0, "gate": "pass", "gate_runs": 1})
+            ledger.write_text(json.dumps(rec) + "\n")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = dt.main(["retro", "--ledger", str(ledger),
+                              "--open-issues-json", str(FIXTURES / "open-issues-empty.json")])
+            self.assertEqual(rc, 0)
+            self.assertIn("no recurring failures", out.getvalue())
+
+
+class AggregateTests(unittest.TestCase):
+    def test_aggregate_and_rank_are_deterministic_tallies(self):
+        records = [json.loads(l) for l in
+                   (FIXTURES / "sample-ledger.jsonl").read_text().splitlines() if l.strip()]
+        tally = dt.aggregate(records)
+        self.assertEqual(tally["rework"], 7)
+        # failed gate ROUNDS from authoritative gate_runs: rec2 (fail, runs=2) -> 2;
+        # rec1/rec3 (pass, runs=1) -> 0 each.
+        self.assertEqual(tally["gate_failures"], 2)
+        self.assertEqual(tally["claim_collisions"], 1)
+        ranked = dt.rank(tally)
+        self.assertEqual(ranked[0][0], "rework")
+        self.assertEqual(ranked[0][3], 7 * dt.RETRO_WEIGHTS["rework"])  # 28
+
+    def test_terminal_fail_counts_all_rounds(self):
+        # gate == "fail" counts EVERY run as a failed round (no -1 for a final pass):
+        # gate_runs=3, fail -> 3; the same runs with a terminal pass would be 2.
+        fail_rec = {"gate": "fail", "gate_runs": 3, "claim_collisions": 0,
+                    "rebase_events": 0, "roborev_findings": 0, "rework": 0}
+        pass_rec = {**fail_rec, "gate": "pass"}
+        self.assertEqual(dt.aggregate([fail_rec])["gate_failures"], 3)
+        self.assertEqual(dt.aggregate([pass_rec])["gate_failures"], 2)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
