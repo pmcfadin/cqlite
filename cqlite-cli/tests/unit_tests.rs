@@ -182,7 +182,9 @@ mod cli_parsing_tests {
                 "{:?} must be rejected, not silently accepted",
                 args
             );
-            res.err().map(|e| e.to_string().to_lowercase()).unwrap_or_default()
+            res.err()
+                .map(|e| e.to_string().to_lowercase())
+                .unwrap_or_default()
         }
 
         // `--out yaml` (OutputMode value-enum). Subcommand is optional, so the
