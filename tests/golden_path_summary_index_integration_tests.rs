@@ -386,31 +386,99 @@ async fn test_golden_path_bloom_summary_index_coordination() -> Result<()> {
         "absent_data_coordination_test",
     ];
 
+    // Behavioral fast-path assertion (issue #1149).
+    //
+    // The fixture's SSTable is `nb` (BIG) format with a Filter.db, so a `get()`
+    // for an absent key runs the bloom pre-check in `SSTableReader::get`: when the
+    // filter reports the key as absent it returns `Ok(None)` immediately, BEFORE
+    // the summary/index lookup and WITHOUT falling through to the sequential
+    // `scan_for_key` path. The previous test asserted this short-circuit
+    // indirectly via an absolute `<100µs` wall-clock threshold, which is
+    // load-sensitive and flaked under machine load (115µs/180µs after a heavy
+    // compile) while passing cleanly when idle.
+    //
+    // We assert the short-circuit *directly*, with two complementary signals that
+    // are immune to CPU load (the wall-clock flake) and highly resistant to
+    // cross-test counter races (the only nondeterminism the counter probe would
+    // otherwise add — see the retry rationale below; the 5-attempt bound is a
+    // strong heuristic, not a mathematical guarantee, but a healthy fast path
+    // contributes zero so a concurrent scan would have to land in all 5 windows
+    // to false-fail):
+    //
+    //  1. STRUCTURAL (fully deterministic): the reader actually loaded a bloom
+    //     filter, so the bloom pre-check branch in `get()` is reachable. Without
+    //     this the "short-circuit" would be vacuous.
+    //
+    //  2. BEHAVIORAL: the existing public probe
+    //     `SSTableReader::scan_for_key_call_count()` (the process-global
+    //     `SCAN_FOR_KEY_CALLS` counter, issue #831) must NOT advance as a result
+    //     of an absent-key `get()`. Because the counter is process-global and the
+    //     integration-test binary runs its tests on multiple threads (other tests
+    //     here call `get()`/`scan()` and can bump it), a single before/after read
+    //     could observe a concurrent test's increment and false-fail. We make the
+    //     check highly resistant to that race by retrying: a genuine regression (bloom no longer
+    //     short-circuits) makes OUR `get()` fall through to `scan_for_key` on
+    //     EVERY attempt, so the delta is `>= 1` every time; a concurrent test's
+    //     scan is sporadic, so at least one attempt sees our call contribute zero.
+    //     Requiring a single zero-delta attempt therefore fails a real regression
+    //     while tolerating concurrent interference. Timing is kept as a
+    //     non-asserting diagnostic print only.
+    let health = reader.get_health_metrics().await?;
+    assert!(
+        health.bloom_filter_enabled,
+        "fixture SSTable must have a bloom filter loaded for the fast-path check to be meaningful"
+    );
+
     for key_str in &non_existent_keys {
         let test_key = RowKey::from(key_str.as_bytes());
 
-        let start_time = Instant::now();
-        let result = reader.get(&table_id, &test_key).await?;
-        let lookup_duration = start_time.elapsed();
+        // Retry to distinguish a true bloom-fast-path regression (our get() scans
+        // on every attempt) from a transient concurrent test bumping the global
+        // counter in our measurement window.
+        let mut observed_zero_delta = false;
+        let mut last_delta = u64::MAX;
+        let mut last_duration = std::time::Duration::ZERO;
+        for _ in 0..5 {
+            let scans_before = SSTableReader::scan_for_key_call_count();
+            let start_time = Instant::now();
+            let result = reader.get(&table_id, &test_key).await?;
+            last_duration = start_time.elapsed();
+            let scans_after = SSTableReader::scan_for_key_call_count();
 
-        // Should be None for non-existent keys
+            // Should be None for non-existent keys — checked on EVERY attempt, not
+            // just the last, so a spurious `Some` from any retry can't be masked by
+            // a later `None` (a `Some` here would be a real correctness bug).
+            assert!(
+                result.is_none(),
+                "Non-existent key should return None: {key_str}"
+            );
+
+            last_delta = scans_after.saturating_sub(scans_before);
+            if last_delta == 0 {
+                observed_zero_delta = true;
+                break;
+            }
+        }
+
+        // Bloom filter must short-circuit: at least one absent-key lookup returned
+        // without invoking the sequential scan fallback (counter delta 0). A
+        // regression that always falls through to scan_for_key never observes a
+        // zero delta and fails here.
         assert!(
-            result.is_none(),
-            "Non-existent key should return None: {key_str}"
+            observed_zero_delta,
+            "Bloom filter should short-circuit absent-key lookup before scan_for_key \
+             for {key_str}; every attempt advanced scan_for_key (last delta {last_delta}), \
+             the bloom fast path regressed"
         );
 
-        // Bloom filter should make this extremely fast
-        // (should skip summary/index lookup entirely)
-        assert!(
-            lookup_duration.as_micros() < 100,
-            "Bloom filter should make non-existent key lookup very fast: {:?}μs for {}",
-            lookup_duration.as_micros(),
-            key_str
-        );
+        // Non-asserting diagnostic: the fast path is also expected to be quick,
+        // but we no longer gate the test on an absolute wall-clock threshold
+        // (issue #1149 — that assertion flaked under load).
+        println!("  absent-key '{key_str}' short-circuited in {last_duration:?} (no scan_for_key)");
     }
 
     println!(
-        "✅ Bloom/summary/index coordination verified - all non-existent lookups were efficient"
+        "✅ Bloom/summary/index coordination verified - all non-existent lookups short-circuited the bloom fast path"
     );
 
     // Test with potentially existing keys (bloom might pass, then use summary/index)
