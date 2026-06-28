@@ -83,8 +83,12 @@ def _type_ok(value, t: str) -> bool:
 
 
 def _validate(value, schema: dict, path: str, errors: list) -> None:
-    if "const" in schema and value != schema["const"]:
-        errors.append(f"{path}: must equal {schema['const']!r}, got {value!r}")
+    if "const" in schema:
+        const = schema["const"]
+        # bool is a subclass of int (True == 1), so guard the coercion: a "schema": true
+        # must not satisfy const: 1.
+        if value != const or isinstance(value, bool) != isinstance(const, bool):
+            errors.append(f"{path}: must equal {const!r}, got {value!r}")
     if "enum" in schema and value not in schema["enum"]:
         errors.append(f"{path}: must be one of {schema['enum']}, got {value!r}")
     if "type" in schema and not _type_ok(value, schema["type"]):

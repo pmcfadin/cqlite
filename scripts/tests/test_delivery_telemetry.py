@@ -146,10 +146,66 @@ class RecordTests(unittest.TestCase):
                 ])
 
 
+    def test_record_rejects_negative_duration(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            ghfields = tmp / "ghfields.json"
+            ghfields.write_text(json.dumps({       # merged BEFORE pr opened -> review_s < 0
+                "created_at": "2026-06-10T00:00:00Z",
+                "pr_opened_at": "2026-06-10T02:00:00Z",
+                "merged_at": "2026-06-10T01:00:00Z",
+                "closed_at": "2026-06-10T03:00:00Z",
+                "priority": "P2", "routing": "design",
+            }))
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = dt.main([
+                    "record", "--ledger", str(ledger),
+                    "--issue", "1", "--pr", "2", "--slug", "x",
+                    "--gate", "pass", "--gate-runs", "1",
+                    "--claim-collisions", "0", "--rebase-events", "0",
+                    "--roborev-findings", "0", "--rework", "0",
+                    "--from-json", str(ghfields),
+                ])
+            self.assertEqual(rc, 1)
+            self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_record_rejects_bad_priority(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            rc = dt.main([
+                "record", "--ledger", str(ledger),
+                "--issue", "1", "--pr", "2", "--slug", "x", "--priority", "high",
+                "--gate", "pass", "--gate-runs", "1",
+                "--claim-collisions", "0", "--rebase-events", "0",
+                "--roborev-findings", "0", "--rework", "0",
+                "--from-json", _from_json_file(tmp),
+            ])
+            self.assertEqual(rc, 1)
+            self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+
 class LintTests(unittest.TestCase):
     def test_clean_ledger_passes(self):
         rc = dt.main(["lint", "--ledger", str(FIXTURES / "sample-ledger.jsonl")])
         self.assertEqual(rc, 0)
+
+    def test_validate_alias_works(self):
+        rc = dt.main(["validate", "--ledger", str(FIXTURES / "sample-ledger.jsonl")])
+        self.assertEqual(rc, 0)
+
+    def test_const_bool_coercion_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "ledger.jsonl"
+            rec = json.loads((FIXTURES / "sample-ledger.jsonl").read_text().splitlines()[0])
+            rec["schema"] = True   # True == 1 but must NOT satisfy const: 1
+            ledger.write_text(json.dumps(rec) + "\n")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = dt.main(["lint", "--ledger", str(ledger)])
+            self.assertEqual(rc, 1)
 
     def test_malformed_timestamp_is_rejected(self):
         with tempfile.TemporaryDirectory() as d:
