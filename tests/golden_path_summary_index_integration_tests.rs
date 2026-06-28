@@ -425,7 +425,8 @@ async fn test_golden_path_bloom_summary_index_coordination() -> Result<()> {
         // ever invoking the sequential scan fallback, so the global
         // `scan_for_key` counter is unchanged across this `get()`.
         assert_eq!(
-            scans_after, scans_before,
+            scans_after,
+            scans_before,
             "Bloom filter should short-circuit absent-key lookup before scan_for_key \
              (counter advanced by {} for key {}); the bloom fast path regressed",
             scans_after - scans_before,
@@ -436,8 +437,7 @@ async fn test_golden_path_bloom_summary_index_coordination() -> Result<()> {
         // but we no longer gate the test on an absolute wall-clock threshold
         // (issue #1149 — that assertion flaked under load).
         println!(
-            "  absent-key '{}' short-circuited in {:?} (no scan_for_key)",
-            key_str, lookup_duration
+            "  absent-key '{key_str}' short-circuited in {lookup_duration:?} (no scan_for_key)"
         );
     }
 
