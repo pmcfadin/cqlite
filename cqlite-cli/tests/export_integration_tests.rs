@@ -559,6 +559,164 @@ fn test_export_with_limit() {
 }
 
 // ============================================================================
+// Progress / Statistics Suppression Tests (Issue #284)
+// ============================================================================
+
+/// Spec R4 (quiet scenario): `--quiet` emits no progress and no summary on
+/// stdout, while the export file is still written.
+#[test]
+fn test_export_quiet_emits_no_stdout_but_writes_file() {
+    let (data_dir, schema_file) = assert_test_data_available();
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let output_file = temp_dir.path().join("quiet_export.csv");
+
+    let output = run_cli_command(&[
+        "--quiet",
+        "--schema",
+        schema_file.to_str().unwrap(),
+        "--data-dir",
+        data_dir.to_str().unwrap(),
+        "export",
+        output_file.to_str().unwrap(),
+        "--format",
+        "csv",
+        "--table",
+        "test_basic.simple_table",
+    ]);
+
+    eprintln!("Exit status: {}", output.status);
+    eprintln!("STDERR:\n{}", String::from_utf8_lossy(&output.stderr));
+
+    assert!(
+        output.status.success(),
+        "Quiet export should succeed. Exit code: {:?}",
+        output.status.code()
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim().is_empty(),
+        "Quiet export must emit no stdout (no progress, no summary). Got:\n{stdout}"
+    );
+
+    assert!(
+        output_file.exists(),
+        "Quiet export must still write the output file"
+    );
+    let csv_content = fs::read_to_string(&output_file).expect("Failed to read CSV");
+    assert!(
+        !csv_content.is_empty(),
+        "Quiet export file should have content"
+    );
+}
+
+/// Spec R4 (piped scenario): without `--quiet` but with stdout not a TTY
+/// (assert/Command capture is inherently non-TTY), the command emits no
+/// progress and no final summary, yet still writes the export file. This is
+/// the wiring-evidence test for the summary-suppression fix (previously the
+/// summary printed whenever `!quiet`, even when piped).
+#[test]
+fn test_export_piped_non_tty_emits_no_progress_or_summary() {
+    let (data_dir, schema_file) = assert_test_data_available();
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let output_file = temp_dir.path().join("piped_export.csv");
+
+    // No --quiet flag; captured stdout via Command is non-TTY (piped).
+    let output = run_cli_command(&[
+        "--schema",
+        schema_file.to_str().unwrap(),
+        "--data-dir",
+        data_dir.to_str().unwrap(),
+        "export",
+        output_file.to_str().unwrap(),
+        "--format",
+        "csv",
+        "--table",
+        "test_basic.simple_table",
+    ]);
+
+    eprintln!("Exit status: {}", output.status);
+    eprintln!("STDERR:\n{}", String::from_utf8_lossy(&output.stderr));
+
+    assert!(
+        output.status.success(),
+        "Piped export should succeed. Exit code: {:?}",
+        output.status.code()
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // No final summary fields and no progress preamble.
+    assert!(
+        !stdout.contains("Export complete:")
+            && !stdout.contains("Rows:")
+            && !stdout.contains("Size:")
+            && !stdout.contains("Time:")
+            && !stdout.contains("Rate:"),
+        "Piped export must emit no summary on stdout. Got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Exporting data from:")
+            && !stdout.contains("Streaming export in progress"),
+        "Piped export must emit no progress preamble on stdout. Got:\n{stdout}"
+    );
+
+    assert!(
+        output_file.exists(),
+        "Piped export must still write the output file"
+    );
+    let csv_content = fs::read_to_string(&output_file).expect("Failed to read CSV");
+    assert!(
+        !csv_content.is_empty(),
+        "Piped export file should have content"
+    );
+}
+
+/// Spec R1/R5 (determinate path executes end-to-end): with `--limit` set the
+/// known-total / determinate-bar code path runs without error and produces
+/// exactly the limited row output.
+#[test]
+fn test_export_with_limit_determinate_path_succeeds() {
+    let (data_dir, schema_file) = assert_test_data_available();
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let output_file = temp_dir.path().join("limit_determinate.csv");
+
+    const LIMIT: usize = 2;
+
+    let output = run_cli_command(&[
+        "--schema",
+        schema_file.to_str().unwrap(),
+        "--data-dir",
+        data_dir.to_str().unwrap(),
+        "export",
+        output_file.to_str().unwrap(),
+        "--format",
+        "csv",
+        "--table",
+        "test_basic.simple_table",
+        "--limit",
+        &LIMIT.to_string(),
+    ]);
+
+    eprintln!("Exit status: {}", output.status);
+    eprintln!("STDERR:\n{}", String::from_utf8_lossy(&output.stderr));
+
+    assert!(
+        output.status.success(),
+        "Determinate (--limit) export should succeed. Exit code: {:?}\nSTDERR: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(output_file.exists(), "Output CSV file should exist");
+    let csv_content = fs::read_to_string(&output_file).expect("Failed to read CSV");
+    let data_row_count = csv_content.lines().count().saturating_sub(1);
+    assert_eq!(
+        data_row_count, LIMIT,
+        "Determinate export should write exactly {LIMIT} rows (got {data_row_count})"
+    );
+}
+
+// ============================================================================
 // Golden File / Determinism Tests
 // ============================================================================
 

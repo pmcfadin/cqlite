@@ -2,8 +2,6 @@
 //!
 //! Extracted verbatim from `commands/mod.rs` during the module split (issue #1126).
 
-#![allow(dead_code)]
-
 #[cfg(feature = "state_machine")]
 use anyhow::Context;
 use anyhow::Result;
@@ -143,19 +141,11 @@ pub async fn export_data(
     // Track timing for statistics
     let start_time = Instant::now();
 
-    // Create spinner progress bar (unknown total for streaming)
-    let pb = if show_progress {
-        let pb = ProgressBar::new_spinner();
-        pb.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.green} {msg} ({pos} rows)")
-                .unwrap(),
-        );
-        pb.set_message("Exporting");
-        pb
-    } else {
-        ProgressBar::hidden()
-    };
+    // Resolve the progress total from the CLI `--limit` (spec Option A / R5):
+    // a determinate bar + ETA only when the user supplied an explicit limit,
+    // otherwise the indeterminate spinner. Never infer a total from data shape.
+    let progress_total = resolve_progress_total(limit);
+    let pb = make_progress(show_progress, progress_total);
 
     // Chunk size for collecting rows before writing
     let chunk_size = config.chunk_size;
@@ -429,8 +419,14 @@ pub async fn export_data(
 
     pb.finish_and_clear();
 
-    // Display statistics (unless quiet)
-    if !quiet {
+    // `show_progress` (defined earlier in `export_data` as
+    // `!quiet && std::io::stdout().is_terminal()`) is a dual-purpose gate: it
+    // intentionally controls BOTH the progress display AND this human summary
+    // block. We deliberately reuse the already-computed value rather than
+    // re-checking `is_terminal()` inline so the two cannot drift — a
+    // piped/redirected or `--quiet` run emits neither (spec R4: no summary when
+    // `--quiet` or when stdout is piped/redirected).
+    if show_progress {
         let duration = start_time.elapsed();
         let file_size = std::fs::metadata(file)?.len();
 
@@ -450,6 +446,130 @@ pub async fn export_data(
     Ok(())
 }
 
+/// Resolution of the export progress total from the CLI `--limit`.
+///
+/// Per the approved spec (Option A, Requirement R5), the total is known *only*
+/// when the user supplies an explicit `--limit N` — never inferred from data
+/// shape, SSTable metadata, or a pre-count pass. This keeps the one progress
+/// decision encapsulated and terminal-free so it can be unit-tested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProgressTotal {
+    /// The determinate total for the progress bar, if known.
+    total: Option<u64>,
+    /// Whether an ETA may be shown (only when the total is known).
+    eta_eligible: bool,
+}
+
+/// Map the CLI `--limit` to a progress total + ETA-eligibility flag.
+///
+/// `Some(n)` -> determinate total `Some(n)`, ETA-eligible.
+/// `None`    -> unknown total `None` (spinner), not ETA-eligible.
+fn resolve_progress_total(limit: Option<usize>) -> ProgressTotal {
+    match limit {
+        Some(n) => ProgressTotal {
+            total: Some(n as u64),
+            eta_eligible: true,
+        },
+        None => ProgressTotal {
+            total: None,
+            eta_eligible: false,
+        },
+    }
+}
+
+/// The kind of progress indicator chosen for a given total (spec R1/R2).
+///
+/// A known total yields a [`BarKind::Determinate`] bar (percent + ETA); an
+/// unknown total yields a [`BarKind::Spinner`] (live row count, no ETA). A plain
+/// enum keeps the choice — and the templates it implies — unit testable without
+/// a TTY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BarKind {
+    /// Determinate bar: total is known, so percent + ETA are meaningful.
+    Determinate,
+    /// Indeterminate spinner: total unknown, live row count only (no ETA).
+    Spinner,
+}
+
+/// Choose the indicator kind from the resolved progress total (spec R5).
+///
+/// ETA-eligibility is the single signal that drives the bar: a determinate bar
+/// (percent + ETA) is shown iff the total is ETA-eligible. This consumes
+/// [`ProgressTotal::eta_eligible`] so the field is load-bearing rather than a
+/// second, drift-prone derivation from `total`. Pure and terminal-free so the
+/// decision is directly assertable in tests.
+fn progress_bar_kind(progress: ProgressTotal) -> BarKind {
+    // Internal-consistency invariant from `resolve_progress_total`: a total is
+    // ETA-eligible exactly when it is known. Assert it so the two facets cannot
+    // silently disagree.
+    debug_assert_eq!(
+        progress.eta_eligible,
+        progress.total.is_some(),
+        "ETA-eligibility must track total-knownness"
+    );
+    if progress.eta_eligible {
+        BarKind::Determinate
+    } else {
+        BarKind::Spinner
+    }
+}
+
+/// Determinate-bar template: `{bar}`/`{percent}`/`{pos}`/`{len}` + live `{eta}`
+/// — the evidence the determinate path promises ETA + percent (spec R1).
+const DETERMINATE_TEMPLATE: &str = "[{bar:40}] {percent}% ({pos}/{len}) ETA: {eta}";
+
+/// Spinner template: `{spinner}` + a live `{pos}` row count, deliberately
+/// omitting `{eta}`/`{percent}` (spec R2).
+const SPINNER_TEMPLATE: &str = "{spinner:.green} {msg} ({pos} rows)";
+
+/// The template string for a given [`BarKind`]. Pure helper so tests can assert
+/// on the chosen template without a terminal-bound `ProgressBar`.
+fn progress_template(kind: BarKind) -> &'static str {
+    match kind {
+        BarKind::Determinate => DETERMINATE_TEMPLATE,
+        BarKind::Spinner => SPINNER_TEMPLATE,
+    }
+}
+
+/// Build the export progress bar.
+///
+/// - `!show` -> a hidden bar (no output; used when `--quiet` or piped/non-TTY).
+/// - ETA-eligible total -> a determinate bar with percent, `pos/len`, and a live ETA.
+/// - not ETA-eligible -> the indeterminate spinner with a live row count (no ETA).
+///
+/// The style/template decision is delegated to [`progress_bar_kind`] +
+/// [`progress_template`] (terminal-free, unit-tested) so there is exactly one
+/// source of truth for which indicator is used.
+///
+/// The `ProgressStyle::template(...)` result is handled without `unwrap()`/
+/// `expect()`: on a template error we fall back to indicatif's default style so
+/// the export still runs (the bar is cosmetic, never load-bearing).
+#[cfg(feature = "state_machine")]
+fn make_progress(show: bool, progress: ProgressTotal) -> ProgressBar {
+    if !show {
+        return ProgressBar::hidden();
+    }
+
+    let template = progress_template(progress_bar_kind(progress));
+    match progress.total {
+        Some(n) => {
+            let pb = ProgressBar::new(n);
+            if let Ok(style) = ProgressStyle::default_bar().template(template) {
+                pb.set_style(style.progress_chars("##-"));
+            }
+            pb
+        }
+        None => {
+            let pb = ProgressBar::new_spinner();
+            if let Ok(style) = ProgressStyle::default_spinner().template(template) {
+                pb.set_style(style);
+            }
+            pb.set_message("Exporting");
+            pb
+        }
+    }
+}
+
 #[cfg(not(feature = "state_machine"))]
 pub async fn export_data(
     _database: &cqlite_core::Database,
@@ -467,205 +587,75 @@ pub async fn export_data(
     ))
 }
 
-/// Export query result to CSV format using streaming writer (Issue #280)
-///
-/// Uses `StreamingCSVWriter` for memory-efficient chunked export.
-/// Rows are written directly to file in chunks.
-#[cfg(feature = "state_machine")]
-async fn export_to_csv(
-    result: &cqlite_core::query::result::QueryResult,
-    file: &Path,
-    _column_names: &[String],
-    pb: &ProgressBar,
-) -> Result<()> {
-    use crate::output::{StreamingCSVWriter, StreamingWriter};
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    // Chunk size for CSV streaming
-    const CHUNK_SIZE: usize = 5_000;
-
-    let output_file = File::create(file)
-        .with_context(|| format!("Failed to create CSV file: {}", file.display()))?;
-
-    // Create streaming CSV writer with buffering for I/O efficiency
-    let buf_writer = BufWriter::new(output_file);
-    let mut writer = StreamingCSVWriter::new(buf_writer);
-
-    // Write header (column names from metadata)
-    writer
-        .write_header(&result.metadata)
-        .map_err(|e| anyhow::anyhow!("Failed to write CSV header: {}", e))?;
-
-    // Process rows in chunks for memory efficiency
-    for chunk in result.rows.chunks(CHUNK_SIZE) {
-        writer
-            .write_chunk(chunk)
-            .map_err(|e| anyhow::anyhow!("Failed to write CSV chunk: {}", e))?;
-        pb.inc(chunk.len() as u64);
+    // Spec R5 (Total-resolution and ETA-eligibility are independently
+    // verifiable): a present `--limit` resolves to a determinate total and is
+    // ETA-eligible.
+    #[test]
+    fn limit_present_resolves_to_determinate_total() {
+        let resolved = resolve_progress_total(Some(42));
+        assert_eq!(resolved.total, Some(42));
+        assert!(
+            resolved.eta_eligible,
+            "a known total must be ETA-eligible (determinate bar)"
+        );
     }
 
-    // Finalize (flush)
-    writer
-        .finalize()
-        .map_err(|e| anyhow::anyhow!("Failed to finalize CSV file: {}", e))?;
-
-    Ok(())
-}
-
-/// Export query result to JSON format using streaming writer (Issue #280)
-///
-/// Uses `StreamingJSONWriter` for memory-efficient chunked export.
-/// Rows are processed in chunks to avoid building entire JSON array in memory.
-#[cfg(feature = "state_machine")]
-async fn export_to_json(
-    result: &cqlite_core::query::result::QueryResult,
-    file: &Path,
-    _column_names: &[String],
-    pb: &ProgressBar,
-) -> Result<()> {
-    use crate::output::{StreamingJSONWriter, StreamingWriter};
-
-    // Chunk size for JSON streaming (smaller than Parquet since JSON is text-heavy)
-    const CHUNK_SIZE: usize = 5_000;
-
-    let output_file = File::create(file)
-        .with_context(|| format!("Failed to create JSON file: {}", file.display()))?;
-    let buf_writer = BufWriter::new(output_file);
-
-    // Create streaming JSON writer with pretty-printing
-    let mut writer = StreamingJSONWriter::new(buf_writer);
-
-    // Write header (opening bracket and store column order)
-    writer
-        .write_header(&result.metadata)
-        .map_err(|e| anyhow::anyhow!("Failed to write JSON header: {}", e))?;
-
-    // Process rows in chunks for memory efficiency
-    for chunk in result.rows.chunks(CHUNK_SIZE) {
-        writer
-            .write_chunk(chunk)
-            .map_err(|e| anyhow::anyhow!("Failed to write JSON chunk: {}", e))?;
-        pb.inc(chunk.len() as u64);
+    // Spec R5: an absent `--limit` resolves to an unknown total (spinner) and
+    // is not ETA-eligible.
+    #[test]
+    fn limit_absent_resolves_to_unknown_total() {
+        let resolved = resolve_progress_total(None);
+        assert_eq!(resolved.total, None);
+        assert!(
+            !resolved.eta_eligible,
+            "an unknown total must not be ETA-eligible (spinner, no ETA)"
+        );
     }
 
-    // Finalize (write closing bracket)
-    writer
-        .finalize()
-        .map_err(|e| anyhow::anyhow!("Failed to finalize JSON file: {}", e))?;
-
-    Ok(())
-}
-
-/// Export query result to CQL INSERT statements
-#[cfg(feature = "state_machine")]
-async fn export_to_cql(
-    result: &cqlite_core::query::result::QueryResult,
-    file: &Path,
-    source: &str,
-    column_names: &[String],
-    pb: &ProgressBar,
-) -> Result<()> {
-    let output_file = File::create(file)
-        .with_context(|| format!("Failed to create CQL file: {}", file.display()))?;
-    let mut writer = BufWriter::new(output_file);
-
-    // Extract table name from source
-    let table_name = if source.to_uppercase().contains("FROM") {
-        // Try to extract table name from SELECT query
-        source
-            .split_whitespace()
-            .skip_while(|&word| word.to_uppercase() != "FROM")
-            .nth(1)
-            .unwrap_or("exported_table")
-    } else {
-        source
-    };
-
-    // Write header comment
-    writeln!(writer, "-- CQL Export from CQLite")?;
-    writeln!(writer, "-- Source: {source}")?;
-    writeln!(writer, "-- Generated: {}", chrono::Utc::now().to_rfc3339())?;
-    writeln!(writer, "-- Rows: {}", result.rows.len())?;
-    writeln!(writer)?;
-
-    // Write INSERT statements
-    for (index, row) in result.rows.iter().enumerate() {
-        pb.set_position(index as u64 + 1);
-
-        let values: Vec<String> = column_names
-            .iter()
-            .map(|col| {
-                row.get(col)
-                    .map(|v| match v {
-                        cqlite_core::Value::Text(s) => format!("'{}'", s.replace("'", "''")),
-                        cqlite_core::Value::Null => "NULL".to_string(),
-                        _ => v.to_string(),
-                    })
-                    .unwrap_or_else(|| "NULL".to_string())
-            })
-            .collect();
-
-        writeln!(
-            writer,
-            "INSERT INTO {} ({}) VALUES ({});",
-            table_name,
-            column_names.join(", "),
-            values.join(", ")
-        )?;
+    // Spec R1/R2/R5: the determinate-vs-spinner choice is driven by the
+    // resolved total's ETA-eligibility (a pure, terminal-free function), so the
+    // `eta_eligible` flag is the load-bearing signal — not a second derivation
+    // from `total`.
+    #[test]
+    fn total_selects_bar_kind() {
+        assert_eq!(
+            progress_bar_kind(resolve_progress_total(Some(100))),
+            BarKind::Determinate
+        );
+        assert_eq!(
+            progress_bar_kind(resolve_progress_total(None)),
+            BarKind::Spinner
+        );
     }
 
-    writer
-        .flush()
-        .with_context(|| "Failed to flush CQL writer")?;
-
-    Ok(())
-}
-
-/// Export query result to Parquet format using streaming writer (Issue #280)
-///
-/// Uses `StreamingParquetWriter` for memory-efficient chunked export.
-/// Rows are processed in chunks (default 10,000) matching Parquet row group size.
-#[cfg(feature = "state_machine")]
-async fn export_to_parquet(
-    result: &cqlite_core::query::result::QueryResult,
-    file: &Path,
-    _column_names: &[String],
-    pb: &ProgressBar,
-) -> Result<()> {
-    use crate::output::{create_streaming_parquet_writer, StreamingWriter};
-
-    // Default chunk size matches Parquet row group size
-    const CHUNK_SIZE: usize = 10_000;
-
-    pb.set_message("Initializing Parquet writer...");
-
-    // Create file for streaming output
-    let output_file = File::create(file)
-        .with_context(|| format!("Failed to create Parquet file: {}", file.display()))?;
-
-    // Create streaming writer with row group size = chunk size
-    let mut writer = create_streaming_parquet_writer(output_file, &result.metadata, CHUNK_SIZE)
-        .map_err(|e| anyhow::anyhow!("Failed to initialize Parquet writer: {}", e))?;
-
-    // Write header (initializes Arrow schema)
-    writer
-        .write_header(&result.metadata)
-        .map_err(|e| anyhow::anyhow!("Failed to write Parquet header: {}", e))?;
-
-    pb.set_message("Streaming rows to Parquet...");
-
-    // Process rows in chunks for memory efficiency
-    for chunk in result.rows.chunks(CHUNK_SIZE) {
-        writer
-            .write_chunk(chunk)
-            .map_err(|e| anyhow::anyhow!("Failed to write Parquet chunk: {}", e))?;
-        pb.inc(chunk.len() as u64);
+    // Spec R1 (determinate bar promises ETA + percent, observable without a
+    // TTY): the determinate template carries `{eta}` and `{percent}` plus the
+    // `{bar}`/`{pos}`/`{len}` evidence of a real bar.
+    #[test]
+    fn determinate_template_contains_eta_and_percent() {
+        let t = progress_template(progress_bar_kind(resolve_progress_total(Some(42))));
+        assert!(t.contains("{eta}"), "must show an ETA: {t:?}");
+        assert!(t.contains("{percent}"), "must show a percent: {t:?}");
+        assert!(t.contains("{bar"), "must render a bar: {t:?}");
+        assert!(
+            t.contains("{pos}") && t.contains("{len}"),
+            "must show pos/len: {t:?}"
+        );
     }
 
-    // Finalize (flush remaining rows, write footer)
-    pb.set_message("Finalizing Parquet file...");
-    writer
-        .finalize()
-        .map_err(|e| anyhow::anyhow!("Failed to finalize Parquet file: {}", e))?;
-
-    Ok(())
+    // Spec R2 (spinner promises no ETA / no percent, observable without a TTY):
+    // the spinner template carries `{spinner}` and a `{pos}` row count but
+    // never `{eta}` or `{percent}`.
+    #[test]
+    fn spinner_template_omits_eta_and_percent() {
+        let t = progress_template(progress_bar_kind(resolve_progress_total(None)));
+        assert!(t.contains("{spinner"), "must render a spinner: {t:?}");
+        assert!(t.contains("{pos}"), "must show a row count: {t:?}");
+        assert!(!t.contains("{eta}"), "must NOT show an ETA: {t:?}");
+        assert!(!t.contains("{percent}"), "must NOT show a percent: {t:?}");
+    }
 }
