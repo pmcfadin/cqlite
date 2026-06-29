@@ -1336,10 +1336,20 @@ pub struct UdtNormalizationPlan {
 /// empty plan (normalize nothing), since the inputs' forms cannot be confirmed.
 pub fn udt_columns_eligible_for_normalization(input_paths: &[PathBuf]) -> UdtNormalizationPlan {
     use std::collections::{HashMap, HashSet};
-    const USERTYPE_PREFIX: &str = "org.apache.cassandra.db.marshal.usertype(";
-    // column -> distinct UserType marshal strings observed (exact, original case)
+    // A column header is "UDT-bearing" when its marshal mentions `UserType(`
+    // ANYWHERE — whether a bare top-level `UserType(...)` (a multicell complex
+    // column) OR a `FrozenType(UserType(...))` / a frozen collection-of-UDT
+    // like `FrozenType(ListType(...UserType(...)...))` (single-cell frozen UDT
+    // collection-of-UDT). All of these MUST carry their exact header marshal to
+    // the compaction output, else re-rendering the bare CQL form collapses the
+    // nested UDT to `BytesType` and CQLite can no longer decode the cell from its
+    // OWN output header (roborev #1020 Finding 3). `is_complex_column` still
+    // decides complex-vs-simple correctly off the copied marshal (a
+    // `FrozenType(...)` stays single-cell).
+    const USERTYPE_MARKER: &str = "org.apache.cassandra.db.marshal.usertype(";
+    // column -> distinct UDT-bearing marshal strings observed (exact, orig case)
     let mut usertype_marshals: HashMap<String, HashSet<String>> = HashMap::new();
-    // columns declared as a non-UserType (simple) form by some input
+    // columns declared as a non-UDT-bearing (plain simple / non-UDT) form
     let mut vetoed: HashSet<String> = HashSet::new();
     for data_path in input_paths {
         let stats_path = stats_path_for(data_path);
@@ -1352,13 +1362,13 @@ pub fn udt_columns_eligible_for_normalization(input_paths: &[PathBuf]) -> UdtNor
         ) {
             Ok((_, sstable_stats)) => {
                 for c in &sstable_stats.serialization_header_columns {
-                    if c.column_type.to_lowercase().starts_with(USERTYPE_PREFIX) {
+                    if c.column_type.to_lowercase().contains(USERTYPE_MARKER) {
                         usertype_marshals
                             .entry(c.name.clone())
                             .or_default()
                             .insert(c.column_type.clone());
                     } else {
-                        // Declared, but not a complex UserType -> a simple cell.
+                        // Declared, but carries no UserType -> a simple/non-UDT cell.
                         vetoed.insert(c.name.clone());
                     }
                 }
