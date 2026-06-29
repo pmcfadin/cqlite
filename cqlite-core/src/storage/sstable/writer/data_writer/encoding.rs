@@ -62,6 +62,36 @@ pub(crate) fn op_cell_local_deletion_time(
     }
 }
 
+/// The write timestamp (microseconds) to stamp on the static cell emitted for
+/// `op` within `mutation` (issue #1018).
+///
+/// A `Write`/`WriteWithTtl`/`Delete` op carries its OWN per-cell write timestamp
+/// when the compaction merge→mutation path recorded one in
+/// [`Mutation::cell_write_timestamps`](crate::storage::write_engine::mutation::Mutation::cell_write_timestamps)
+/// (a surviving live cell's writetime, or a static cell tombstone's
+/// `markedForDeleteAt`). It is resolved via
+/// [`Mutation::cell_write_timestamp`](crate::storage::write_engine::mutation::Mutation::cell_write_timestamp),
+/// which falls back to the mutation's row `timestamp_micros` when no per-cell
+/// override exists. Every other op (and the no-override case) resolves to exactly
+/// `mutation.timestamp_micros`, so the single-writetime behavior is unchanged.
+///
+/// Shared by `collect_static_operations` (the compaction/partition path) and
+/// `DataWriter::write_static_row` (the public single-mutation entry point) so both
+/// resolve per-cell static writetimes IDENTICALLY — without it the public entry
+/// point would rewrite older static cells (live OR cell tombstones) to the row max.
+pub(crate) fn op_cell_write_timestamp(
+    op: &crate::storage::write_engine::mutation::CellOperation,
+    mutation: &Mutation,
+) -> i64 {
+    use crate::storage::write_engine::mutation::CellOperation;
+    match op {
+        CellOperation::Write { column, .. }
+        | CellOperation::WriteWithTtl { column, .. }
+        | CellOperation::Delete { column, .. } => mutation.cell_write_timestamp(column),
+        _ => mutation.timestamp_micros,
+    }
+}
+
 /// Generate a version-1 TimeUUID for use as a list cell path.
 ///
 /// List elements in Cassandra use TimeUUIDs as cell paths to maintain insertion order.
@@ -453,14 +483,7 @@ pub(crate) fn collect_static_operations(
             // statics. For every other op (and for cells with no per-cell override)
             // this is exactly `mutation.timestamp_micros`, so the single-writetime
             // case is unchanged.
-            let candidate_ts = match op {
-                crate::storage::write_engine::mutation::CellOperation::Write { .. }
-                | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl { .. }
-                | crate::storage::write_engine::mutation::CellOperation::Delete { .. } => {
-                    mutation.cell_write_timestamp(&col_name)
-                }
-                _ => mutation.timestamp_micros,
-            };
+            let candidate_ts = op_cell_write_timestamp(op, mutation);
             // Issue #1018 (roborev HIGH): PER-CELL shadow filtering for statics. The
             // mutation-level `shadow_floor` skip above gates on the ROW MAX
             // (`mutation.timestamp_micros`), so a mutation that survives the floor

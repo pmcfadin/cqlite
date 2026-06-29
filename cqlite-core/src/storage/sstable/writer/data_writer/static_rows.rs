@@ -30,8 +30,8 @@ impl DataWriter {
     /// [cell_data...]         ← Static column cells only
     /// ```
     pub fn write_static_row(&mut self, mutation: &Mutation, schema: &TableSchema) -> Result<()> {
-        // Legacy/test entry point: derive per-op metadata from the single
-        // mutation (each op inherits the mutation's timestamp + effective LDT).
+        // Legacy/test/public entry point: derive per-op metadata from the single
+        // mutation (each op inherits the mutation's effective LDT).
         let static_ops: Vec<StaticMergedOp> = mutation
             .operations
             .iter()
@@ -39,8 +39,19 @@ impl DataWriter {
                 // #921 finding 2: a `Delete` cell tombstone keeps its own surfaced
                 // LDT; every other op falls back to the mutation's effective LDT.
                 cell_local_deletion_time: op_cell_local_deletion_time(op, mutation),
+                // #1018: a static `Write`/`WriteWithTtl`/`Delete` cell carries its
+                // OWN per-cell timestamp when the compaction merge→mutation path
+                // recorded one in `Mutation::cell_write_timestamps`. Resolve it the
+                // SAME way `collect_static_operations` (encoding.rs) does so a
+                // caller passing a compacted static mutation through this public
+                // entry point does not rewrite older static cells (live OR cell
+                // tombstones) to the row max. There is no partition tombstone
+                // shadow_floor in the single-mutation entry point, so the per-cell
+                // shadow drop does not apply here; the no-override path resolves to
+                // exactly `mutation.timestamp_micros`, leaving the single-writetime
+                // behavior byte-identical.
+                timestamp_micros: op_cell_write_timestamp(op, mutation),
                 op: op.clone(),
-                timestamp_micros: mutation.timestamp_micros,
                 // #1196: carry statement-level TTL so a static `USING TTL` Write
                 // is emitted as an expiring cell, not a non-expiring one.
                 row_ttl_seconds: mutation.ttl_seconds,
