@@ -10,8 +10,8 @@ Sources: [`docs/cassandra_test_index.md`](../../docs/cassandra_test_index.md) ·
 
 | Status | Scenarios |
 |---|---|
-| `mirrored` | 180 |
-| `partial` | 18 |
+| `mirrored` | 182 |
+| `partial` | 16 |
 | `planned` | 18 |
 | `out_of_scope` | 14 |
 | **total** | **230** |
@@ -20,10 +20,10 @@ Sources: [`docs/cassandra_test_index.md`](../../docs/cassandra_test_index.md) ·
 
 | Evidence | Scenarios |
 |---|---|
-| `byte_for_byte` | 98 |
+| `byte_for_byte` | 100 |
 | `canonical_semantic` | 80 |
 | `smoke` | 7 |
-| `partial` | 29 |
+| `partial` | 27 |
 | `out_of_scope` | 16 |
 
 ## ⚠️ P0 scenarios with weak evidence
@@ -49,8 +49,6 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.tombstone_ttl.range_tombstone_boundaries` — Range tombstone boundary and deletion-time parity (partial)
 - `cass.tombstone_ttl.repaired_unrepaired_purge_gate` — Repaired vs unrepaired purge gate parity (partial)
 - `cass.write_load_path.cassandra_sstable_writer_fixtures` — CQLite-written SSTables load into Cassandra via sstableloader (smoke)
-- `cass.write_load_path.cql_sstable_writer.finished_data_db_artifacts` — Finished CQLite-written Data.db / component artifacts (write path) (partial)
-- `cass.write_load_path.flush.partition_boundary_artifacts` — Flush produces partition-boundary artifacts (promoted index / BTI Partitions.db) (partial)
 - `cass.write_load_path.flush.tombstone_and_ttl_artifacts` — Flush produces tombstone + TTL Data.db / Statistics.db artifacts (partial)
 
 ## P0 scenarios
@@ -212,8 +210,8 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 | `cass.verify.inline_crc_validation` | corruption_verify | mirrored | canonical_semantic | `sstable_parity_corruption_verify` | p0_data_loss |
 | `cass.verify.no_silent_empty_result_on_corruption` | corruption_verify | mirrored | canonical_semantic | `sstable_parity_corruption_verify` | p0_data_loss |
 | `cass.write_load_path.cassandra_sstable_writer_fixtures` | write_load_path | mirrored | smoke | `sstable_writer_cassandra_fixture_parity` | p0_data_loss |
-| `cass.write_load_path.cql_sstable_writer.finished_data_db_artifacts` | write_load_path | partial | partial | `sstable_writer_cassandra_fixture_parity` | p0_data_loss |
-| `cass.write_load_path.flush.partition_boundary_artifacts` | write_load_path | partial | partial | `sstable_parity_bti_partitions_rows` | p1_correctness |
+| `cass.write_load_path.cql_sstable_writer.finished_data_db_artifacts` | write_load_path | mirrored | byte_for_byte | `sstable_writer_cassandra_fixture_parity` | p0_data_loss |
+| `cass.write_load_path.flush.partition_boundary_artifacts` | write_load_path | mirrored | byte_for_byte | `sstable_parity_bti_partitions_rows` | p1_correctness |
 | `cass.write_load_path.flush.tombstone_and_ttl_artifacts` | write_load_path | partial | partial | `sstable_writer_cassandra_fixture_parity` | p0_data_loss |
 | `cass.write_load_path.live_readback.semantic_only` | write_load_path | mirrored | canonical_semantic | `sstable_writer_cassandra_fixture_parity` | p0_data_loss |
 
@@ -335,6 +333,8 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
   - Normalization: TOC.txt component manifests are parsed strictly; format is taken from the descriptor filename, never inferred from contents.
 - `cass.tombstone_ttl.static_row.dropped_static_header_preserved` — Dropped static column SerializationHeader byte parity
   - Normalization: The dropped static column is preserved in the embedded SerializationHeader; its name set and kind are compared byte-equal against the StaticColumns line of the reference Statistics.db dump.
+- `cass.write_load_path.cql_sstable_writer.finished_data_db_artifacts` — Finished CQLite-written Data.db / component artifacts (write path)
+- `cass.write_load_path.flush.partition_boundary_artifacts` — Flush produces partition-boundary artifacts (promoted index / BTI Partitions.db)
 
 ## Canonical-semantic scenarios
 
@@ -553,9 +553,7 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.summary_db.IndexSummaryRedistributionTest.downsampled_summary_entries` (planned): No downsampled (sampling_level < 128) Summary.db fixture exists. → _Publish a redistributed Summary.db fixture and extend the strict suite to assert downsampled offset tables and size_at_full_sampling > entry count._
 - `cass.tombstone_ttl.range_tombstone_boundaries` (partial): test_deltas dataset asset not published/enforced in CI (#701). → _Publish the test_deltas dataset and enforce scan_delta parity in CI._
 - `cass.tombstone_ttl.repaired_unrepaired_purge_gate` (partial): repairedAt / pendingRepair parsing is not implemented (gated on #968/#988), so the repaired-vs-unrepaired purge gate is only partially exercised. → _Parse repairedAt / pendingRepair from Statistics.db and gate purge on repair status (#968/#988)._
-- `cass.write_load_path.cql_sstable_writer.finished_data_db_artifacts` (partial): Writer byte invariants + component/TOC presence are asserted, but no committed Cassandra-written reference Data.db exists to diff finished CQLite output (whole-file bytes / row offsets / sstabledump JSONL) against for the same schema/data. Consistent with cass.write_load_path.cassandra_sstable_writer_fixtures. → _Commit a Cassandra-written reference SSTable for an identical writer schema/data and add a strict file-vs-file byte + offset + sstabledump JSONL diff test, then upgrade this scenario to byte_for_byte (epic #969)._
-- `cass.write_load_path.flush.partition_boundary_artifacts` (partial): Writer partition-boundary entries round-trip through CQLite's own reader and the Cassandra boundary layout is re-parsed byte-exactly, but no committed Cassandra-written reference exists to diff the finished CQLite-written Partitions.db / promoted Index.db byte-for-byte. → _Commit a Cassandra-written reference for an identical multi-block / multi-partition flush input and add a strict Partitions.db / Index.db byte diff, then upgrade to byte_for_byte (epic #969)._
-- `cass.write_load_path.flush.tombstone_and_ttl_artifacts` (partial): Flushed tombstone/TTL bytes are asserted against derived expected values, but no committed Cassandra-written reference for the same flush input exists to diff the finished artifact byte-for-byte. → _Commit a Cassandra-written tombstone+TTL reference SSTable for an identical flush input and add a strict Data.db + Statistics.db byte diff, then upgrade to byte_for_byte (epic #969)._
+- `cass.write_load_path.flush.tombstone_and_ttl_artifacts` (partial): Whole-artifact byte parity is blocked by (1) wall-clock-derived localDeletionTime on TTL/DELETE cells (not reproducible across independent writers) and (2) a CQLite static-row writer gap (row-level HAS_TIMESTAMP / PK liveness wrongly set on a static-only UPDATE), confirmed by the committed test_writeparity.static_clustering_shape reference (issue #1190). → _Fix the static-row liveness writer gap (suppress row-level HAS_TIMESTAMP when the static row carries no PK liveness, matching Cassandra), then add a non-TTL static-tombstone reference + strict Data.db byte diff and upgrade to byte_for_byte. TTL/DELETE cells remain semantic-only by nature._
 
 ## Out-of-scope taxonomy
 
@@ -1075,8 +1073,8 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.verify.inline_crc_validation` | nb | test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl |
 | `cass.verify.no_silent_empty_result_on_corruption` | nb | test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml<br>test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl |
 | `cass.write_load_path.cassandra_sstable_writer_fixtures` | nb | — |
-| `cass.write_load_path.cql_sstable_writer.finished_data_db_artifacts` | nb, da | — |
-| `cass.write_load_path.flush.partition_boundary_artifacts` | nb, da | — |
+| `cass.write_load_path.cql_sstable_writer.finished_data_db_artifacts` | nb | test-data/datasets/sstables/test_writeparity/finished_data-18ca5be0735711f1a757db89184be81f/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_writeparity/finished_data-18ca5be0735711f1a757db89184be81f/nb-1-big-Data.db<br>test-data/datasets/sstables/test_writeparity/finished_data-18ca5be0735711f1a757db89184be81f/nb-1-big-Index.db<br>test-data/datasets/sstables/test_writeparity/finished_data-18ca5be0735711f1a757db89184be81f/nb-1-big-Summary.db<br>test-data/datasets/sstables/test_writeparity/finished_data-18ca5be0735711f1a757db89184be81f/nb-1-big-Digest.crc32<br>_fail:_ panic diff: CQLite-written vs Cassandra-reference component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; TOC component-set delta; JSONL partition-count / per-partition row assertion |
+| `cass.write_load_path.flush.partition_boundary_artifacts` | nb | test-data/datasets/sstables/test_writeparity/partition_boundary-1909d5e0735711f1a757db89184be81f/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_writeparity/partition_boundary-1909d5e0735711f1a757db89184be81f/nb-1-big-Data.db<br>test-data/datasets/sstables/test_writeparity/partition_boundary-1909d5e0735711f1a757db89184be81f/nb-1-big-Index.db<br>test-data/datasets/sstables/test_writeparity/partition_boundary-1909d5e0735711f1a757db89184be81f/nb-1-big-Summary.db<br>test-data/datasets/sstables/test_writeparity/partition_boundary-1909d5e0735711f1a757db89184be81f/nb-1-big-Digest.crc32<br>_fail:_ panic diff: CQLite-written vs Cassandra-reference component (cass len + ours len + first-diff byte index + full hex of both) for Index.db / Data.db / Summary.db / Digest.crc32; TOC component-set delta; JSONL partition-count / per-partition row assertion |
 | `cass.write_load_path.flush.tombstone_and_ttl_artifacts` | nb | — |
 | `cass.write_load_path.live_readback.semantic_only` | nb | — |
 | `cass.zstd_dictionary.dictionary_assisted_decompression` | — | — |
