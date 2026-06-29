@@ -574,13 +574,15 @@ impl SSTableWriter {
         // Update statistics from mutations
         for mutation in &mutations {
             self.stats.update_timestamp(mutation.timestamp_micros);
-            // Issue #1018: simple `Write`/`WriteWithTtl` cells may carry their OWN
-            // (lower) write timestamps in `Mutation::cell_write_timestamps` and are
-            // emitted with an explicit `min_timestamp` delta. On the non-preseeded
-            // (incremental) write path, fold every per-cell timestamp into the stats
-            // BEFORE emitting cells so `min_timestamp` can never exceed an emitted
-            // cell's actual timestamp (which would underflow the unsigned-VInt
-            // delta). Mirrors the pre-pass fold in `compute_mutations_baseline_stats`.
+            // Issue #1018: simple `Write`/`WriteWithTtl`/`Delete` cells may carry
+            // their OWN (lower) per-cell timestamps in
+            // `Mutation::cell_write_timestamps` (a live cell's writetime OR a cell
+            // tombstone's markedForDeleteAt) and are emitted with an explicit
+            // `min_timestamp` delta. On the non-preseeded (incremental) write path,
+            // fold every per-cell timestamp into the stats BEFORE emitting cells so
+            // `min_timestamp` can never exceed an emitted cell's actual timestamp
+            // (which would underflow the unsigned-VInt delta). Mirrors the pre-pass
+            // fold in `compute_mutations_baseline_stats`.
             if let Some(cell_ts) = &mutation.cell_write_timestamps {
                 for ts in cell_ts.values() {
                     self.stats.update_timestamp(*ts);
@@ -835,15 +837,17 @@ impl SSTableWriter {
         for mutation in mutations_slice {
             min_timestamp = min_timestamp.min(mutation.timestamp_micros);
 
-            // Issue #1018: a simple `Write`/`WriteWithTtl` cell may carry its OWN
-            // (lower) write timestamp in `Mutation::cell_write_timestamps` (the
-            // compaction merge→mutation path records it when it differs from the
-            // row's `timestamp_micros`). The DataWriter emits that cell's explicit
-            // timestamp as a `min_timestamp` delta, so the pre-seeded baseline must
-            // cover EVERY per-cell timestamp — otherwise `min_timestamp` could be
-            // pre-seeded ABOVE an emitted cell's actual (lower) timestamp and the
-            // unsigned-VInt delta underflows/wraps. Fold them all in here, mirroring
-            // the per-cell timestamp threading in `rows.rs` / `encoding.rs`.
+            // Issue #1018: a simple `Write`/`WriteWithTtl`/`Delete` cell may carry
+            // its OWN (lower) per-cell timestamp in
+            // `Mutation::cell_write_timestamps` — a live cell's writetime OR a cell
+            // tombstone's markedForDeleteAt (the compaction merge→mutation path
+            // records it when it differs from the row's `timestamp_micros`). The
+            // DataWriter emits that cell's explicit timestamp as a `min_timestamp`
+            // delta, so the pre-seeded baseline must cover EVERY per-cell timestamp
+            // — otherwise `min_timestamp` could be pre-seeded ABOVE an emitted
+            // cell's actual (lower) timestamp and the unsigned-VInt delta
+            // underflows/wraps. Fold them all in here, mirroring the per-cell
+            // timestamp threading in `rows.rs` / `encoding.rs`.
             if let Some(cell_ts) = &mutation.cell_write_timestamps {
                 for ts in cell_ts.values() {
                     min_timestamp = min_timestamp.min(*ts);

@@ -440,19 +440,23 @@ pub(crate) fn collect_static_operations(
                 } => continue,
                 crate::storage::write_engine::mutation::CellOperation::DeleteRow => continue,
             };
-            // Issue #1018: a static `Write`/`WriteWithTtl` cell carries its OWN
-            // write timestamp when the compaction merge→mutation path recorded one
-            // in `Mutation::cell_write_timestamps` (it differs from the row's
-            // `timestamp_micros`). Use it for BOTH the stamped candidate timestamp
-            // AND the last-write-wins comparison below, mirroring the regular-row
-            // path in `rows.rs`. Otherwise a compacted static row with surviving
-            // static siblings at differing writetimes would rewrite older static
-            // cells to the newest static mutation's row max. For every other op (and
-            // for cells with no per-cell override) this is exactly
-            // `mutation.timestamp_micros`, so the single-writetime case is unchanged.
+            // Issue #1018: a static `Write`/`WriteWithTtl`/`Delete` cell carries
+            // its OWN per-cell timestamp when the compaction merge→mutation path
+            // recorded one in `Mutation::cell_write_timestamps` (it differs from
+            // the row's `timestamp_micros`) — a live cell's writetime OR a static
+            // cell tombstone's markedForDeleteAt. Use it for BOTH the stamped
+            // candidate timestamp AND the last-write-wins comparison below,
+            // mirroring the regular-row path in `rows.rs`. Otherwise a compacted
+            // static row with surviving static siblings at differing timestamps
+            // would rewrite older static cells (live OR tombstone) to the newest
+            // static mutation's row max — re-introducing the over-deletion bug for
+            // statics. For every other op (and for cells with no per-cell override)
+            // this is exactly `mutation.timestamp_micros`, so the single-writetime
+            // case is unchanged.
             let candidate_ts = match op {
                 crate::storage::write_engine::mutation::CellOperation::Write { .. }
-                | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl { .. } => {
+                | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl { .. }
+                | crate::storage::write_engine::mutation::CellOperation::Delete { .. } => {
                     mutation.cell_write_timestamp(&col_name)
                 }
                 _ => mutation.timestamp_micros,
@@ -461,23 +465,23 @@ pub(crate) fn collect_static_operations(
             // mutation-level `shadow_floor` skip above gates on the ROW MAX
             // (`mutation.timestamp_micros`), so a mutation that survives the floor
             // (because a recent static sibling keeps its row max high) can still
-            // carry an individual static `Write`/`WriteWithTtl` whose OWN per-cell
-            // writetime is `<= shadow_floor`. That cell is covered by the partition
-            // tombstone and MUST be shadowed exactly as it would have been when every
-            // static cell used the row max. Apply the SAME boundary the row-max skip
-            // uses (`<= floor`) to the resolved `candidate_ts`, dropping the static
-            // write here so it never reaches the LWW map (and so the static
-            // liveness/TTL the partition path derives from the SURVIVING ops below
-            // cannot resurrect it). A static `Delete` tombstone has no per-cell
-            // writetime override (`candidate_ts == mutation.timestamp_micros`), so it
-            // is unaffected; and every cell with no override already has
-            // `candidate_ts == mutation.timestamp_micros > floor`, leaving the
-            // single-writetime case unchanged.
+            // carry an individual static `Write`/`WriteWithTtl`/`Delete` whose OWN
+            // per-cell timestamp is `<= shadow_floor`. That cell is covered by the
+            // partition tombstone and MUST be shadowed exactly as it would have been
+            // when every static cell used the row max. Apply the SAME boundary the
+            // row-max skip uses (`<= floor`) to the resolved `candidate_ts`,
+            // dropping the static op here so it never reaches the LWW map (and so
+            // the static liveness/TTL the partition path derives from the SURVIVING
+            // ops below cannot resurrect it). A static cell tombstone is itself
+            // shadowed on the same floor using its OWN markedForDeleteAt. Every cell
+            // with no override already has `candidate_ts == mutation.timestamp_micros
+            // > floor`, leaving the single-writetime case unchanged.
             if shadow_floor.is_some_and(|floor| candidate_ts <= floor)
                 && matches!(
                     op,
                     crate::storage::write_engine::mutation::CellOperation::Write { .. }
                         | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl { .. }
+                        | crate::storage::write_engine::mutation::CellOperation::Delete { .. }
                 )
             {
                 continue;

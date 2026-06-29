@@ -3354,34 +3354,36 @@ impl KWayMerger {
             RowData::Live { .. } => None,
         };
 
-        // Issue #1018: capture each surviving SIMPLE live cell's OWN write
+        // Issue #1018: capture each surviving SIMPLE cell's OWN per-cell
         // timestamp BEFORE the cells are consumed by `cells_to_cell_operations`
-        // (which turns them into `CellOperation::Write`/`WriteWithTtl` ops that
-        // carry no per-cell timestamp). A reconciled row's `entry.timestamp` is
-        // the MAX surviving cell timestamp; promoting every live sibling to that
-        // max would rewrite a cell's writetime (e.g. live `name`@100 next to a
-        // `score` cell tombstone@300 → `name` wrongly rewritten to 300). Recording
-        // only cells whose own timestamp DIFFERS from `entry.timestamp` keeps the
-        // side-channel empty for the common single-writetime row (zero behavior
-        // change there) and lets the writer emit the differing cells with their
-        // own explicit delta. Complex-element cells already carry their own
-        // timestamp via `WriteComplexElement` and are excluded; cell tombstones
-        // (`Value::Tombstone`) carry their deletion time independently.
+        // (which turns them into `CellOperation::Write`/`WriteWithTtl`/`Delete`
+        // ops that carry no per-cell timestamp). A reconciled row's
+        // `entry.timestamp` is the MAX surviving cell timestamp; promoting every
+        // sibling to that max would rewrite a cell's timestamp:
+        //   * a live `name`@100 next to a `score` cell tombstone@300 → `name`
+        //     wrongly rewritten to 300 (the original fix), AND
+        //   * a `c1` cell tombstone@100 next to a live `c2`@300 → the tombstone's
+        //     marked-for-delete-at wrongly rewritten to 300, so a LATER
+        //     compaction that sees `c1` live@200 would be incorrectly shadowed
+        //     and DROPPED (over-deletion — roborev HIGH).
+        // For a SIMPLE cell tombstone (`Value::Tombstone(CellTombstone)`) the
+        // cell's `timestamp` IS its `markedForDeleteAt` (µs); its GC-clock
+        // `localDeletionTime` is preserved INDEPENDENTLY via
+        // `CellOperation::Delete::local_deletion_time` (#921). Recording any
+        // simple cell (live OR tombstone) whose own timestamp DIFFERS from
+        // `entry.timestamp` keeps the side-channel empty for the common
+        // single-writetime row (zero behavior change there) and lets the writer
+        // emit the differing cell with its own explicit timestamp. The map is
+        // keyed by column name; per-cell reconciliation already collapses each
+        // column to a single surviving op, so one timestamp per column is exact.
+        // Complex-element cells already carry their own timestamp via
+        // `WriteComplexElement` and are excluded (`!c.is_complex_element`).
         let cell_write_timestamps: Option<std::collections::HashMap<String, i64>> =
             match &entry.row_data {
                 RowData::Live { cells } => {
-                    use crate::types::{TombstoneType, Value};
                     let map: std::collections::HashMap<String, i64> = cells
                         .iter()
-                        .filter(|c| {
-                            !c.is_complex_element
-                                && c.timestamp != entry.timestamp
-                                && !matches!(
-                                    &c.value,
-                                    Value::Tombstone(info)
-                                        if info.tombstone_type == TombstoneType::CellTombstone
-                                )
-                        })
+                        .filter(|c| !c.is_complex_element && c.timestamp != entry.timestamp)
                         .map(|c| (c.column.clone(), c.timestamp))
                         .collect();
                     (!map.is_empty()).then_some(map)
@@ -3455,8 +3457,9 @@ impl KWayMerger {
         if let Some(rt) = range_tombstone {
             mutation.range_tombstones.push(rt);
         }
-        // Issue #1018: thread per-cell write timestamps so the writer preserves
-        // each live sibling cell's own writetime instead of the row max.
+        // Issue #1018: thread per-cell timestamps so the writer preserves each
+        // surviving sibling cell's own timestamp instead of the row max — for
+        // BOTH a live cell's writetime AND a cell tombstone's markedForDeleteAt.
         mutation.cell_write_timestamps = cell_write_timestamps;
         Ok(mutation)
     }

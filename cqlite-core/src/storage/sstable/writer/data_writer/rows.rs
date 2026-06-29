@@ -395,19 +395,23 @@ impl DataWriter {
                     continue;
                 }
 
-                // Issue #1018: a simple `Write`/`WriteWithTtl` cell carries its OWN
-                // write timestamp (the compaction merge→mutation path records it in
+                // Issue #1018: a simple `Write`/`WriteWithTtl`/`Delete` cell
+                // carries its OWN per-cell timestamp (the compaction
+                // merge→mutation path records it in
                 // `Mutation::cell_write_timestamps` when it differs from the row's
-                // `timestamp_micros`). Use it for both the row-marker liveness
-                // candidate and the emitted cell so a live sibling of a higher-ts
-                // cell tombstone is NOT rewritten to the row's max writetime. For
-                // every other op (and for cells with no per-cell override) this is
-                // exactly `m.timestamp_micros`, so the common single-writetime row
-                // is unchanged.
+                // `timestamp_micros`). For a live write that is its writetime; for
+                // a `Delete` cell tombstone it is its `markedForDeleteAt`. Use it
+                // for the row-marker liveness candidate, the emitted cell AND the
+                // LWW comparison so neither a live sibling of a higher-ts cell
+                // tombstone NOR a cell tombstone sibling of a higher-ts live cell
+                // is rewritten to the row's max timestamp. For every other op (and
+                // for cells with no per-cell override) this is exactly
+                // `m.timestamp_micros`, so the common single-writetime row is
+                // unchanged.
                 let cell_ts = match op {
-                    CellOperation::Write { .. } | CellOperation::WriteWithTtl { .. } => {
-                        m.cell_write_timestamp(column)
-                    }
+                    CellOperation::Write { .. }
+                    | CellOperation::WriteWithTtl { .. }
+                    | CellOperation::Delete { .. } => m.cell_write_timestamp(column),
                     _ => m.timestamp_micros,
                 };
 
@@ -415,21 +419,24 @@ impl DataWriter {
                 // mutation-level `mutation_shadowed` gate above uses the ROW MAX
                 // (`m.timestamp_micros`), so a mutation whose row max is ABOVE
                 // `deletion_ts` (because a recent sibling cell keeps it live) can
-                // still carry an individual `Write`/`WriteWithTtl` whose OWN
-                // per-cell timestamp is `<= deletion_ts`. Such a cell is covered by
-                // the partition/range/row tombstone and MUST be shadowed exactly as
-                // it would have been when every cell used the row max. Apply the
-                // SAME `<= deletion_ts` boundary the row-max path used (equal-ts
-                // deletion wins, #498) to THIS cell using its resolved `cell_ts`,
-                // dropping both the emitted cell AND its row-marker liveness
-                // candidate. A `Delete` cell tombstone is gated on the mutation row
-                // ts (it has no per-cell writetime override), so this only narrows
-                // live writes — every cell with no per-cell override has
+                // still carry an individual `Write`/`WriteWithTtl`/`Delete` whose
+                // OWN per-cell timestamp is `<= deletion_ts`. Such a cell is
+                // covered by the partition/range/row tombstone and MUST be shadowed
+                // exactly as it would have been when every cell used the row max.
+                // Apply the SAME `<= deletion_ts` boundary the row-max path used
+                // (equal-ts deletion wins, #498) to THIS cell using its resolved
+                // `cell_ts`, dropping both the emitted cell AND its row-marker
+                // liveness candidate. A cell tombstone is itself subject to the
+                // same `<= deletion_ts` shadow floor using its OWN
+                // markedForDeleteAt — a tombstone fully covered by the row/range
+                // deletion is redundant. Every cell with no per-cell override has
                 // `cell_ts == m.timestamp_micros > deletion_ts` already, leaving the
                 // single-writetime row unchanged.
                 if matches!(
                     op,
-                    CellOperation::Write { .. } | CellOperation::WriteWithTtl { .. }
+                    CellOperation::Write { .. }
+                        | CellOperation::WriteWithTtl { .. }
+                        | CellOperation::Delete { .. }
                 ) && deletion_ts.is_some_and(|dts| cell_ts <= dts)
                 {
                     continue;
