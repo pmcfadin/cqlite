@@ -1,0 +1,207 @@
+name: "CI: Nightly Docker Parity (nightly_docker tier)"
+
+# The single dedicated lane that implements the `nightly_docker` parity tier
+# (issue #1025, epic #974). It stands up a real, pinned Cassandra 5.0.2 and runs
+# the heavy live-Cassandra differential checks TOGETHER so the parity release
+# checklist's "recent `nightly_docker` pass" item (docs/development/
+# parity-release-checklist.md) has ONE workflow to cite.
+#
+# It aggregates — it does NOT re-implement any per-leg logic. The runner
+# (test-data/scripts/nightly-docker-parity.sh) invokes the existing machinery:
+#   HARD-FAIL legs (a failure fails this workflow):
+#     1. live read-back semantic   -> test-data/scripts/e2e-cassandra-readback.sh
+#                                      (compose stack docker-compose-cassandra5.yml,
+#                                       image cassandra:5.0.2)
+#     2. BTI (da) sstabledump parity-> cqlite-core issue_911_bti_sstabledump_parity
+#     3. compaction LOGICAL parity  -> compaction-parity/ (gradle test) over the
+#                                      pinned Cassandra source (bootstrap-cassandra.sh)
+#     4. Bloom no-false-negative     -> cqlite-core
+#          filter_db_strict_parameters_and_no_false_negative (P0 data loss; ALWAYS
+#          hard-fail, owner fork F4)
+#   ADVISORY legs (continue-on-error; never fail this workflow on their own):
+#     5. compaction BYTE tier        -> compaction-parity/ (gradle byteParity)
+#          (#842 north star, non-blocking per epic #974 / owner fork F5)
+#     6. statistical Bloom FPR        -> filter_db_statistical_false_positive_rate_slow
+#          (measured FPR vs configured bloom_filter_fp_chance; ADVISORY at first,
+#           owner fork F4)
+#
+# TIER POLICY (docs/development/parity-ci-tiers.md `nightly_docker`):
+#   - Scheduled (NOT per-PR): builds Cassandra source / stands up a container,
+#     too slow for every PR. It NEVER runs on `pull_request`.
+#   - Non-blocking for in-flight PRs; a failure blocks RELEASE via the existing
+#     parity-release-checklist "recent nightly_docker pass" item (this lane is
+#     that citable evidence). No new release-gating machinery is built here.
+#   - Artifacts retained >= 30 days so a release can cite a recent pass.
+#
+# Cassandra is pinned to 5.0.2 ONLY (cassandra-5.0.2 / git f278f677…), the SAME
+# pin the committed corpus and every existing live lane use. No second pin is
+# introduced: the live leg reuses docker-compose-cassandra5.yml (cassandra:5.0.2)
+# and the compaction leg reuses bootstrap-cassandra.sh (CASSANDRA_REF).
+
+on:
+  # Nightly at 06:11 UTC — off the existing nightly rush (e2e-readback 02:30,
+  # tombstone/TTL 04:17, cql-type 04:31, live-cell-compaction 04:xx, compression
+  # 05:23, compaction byte tier 05:43) so a shared Cassandra-source cache is warm.
+  schedule:
+    - cron: '11 6 * * *'
+  # Manual dispatch for on-demand runs / release verification.
+  workflow_dispatch:
+    inputs:
+      skip_compaction:
+        description: 'Skip the compaction legs (no JDK/ant Cassandra-source build)'
+        type: boolean
+        default: false
+
+# This lane is read-only against the repo; it never comments on PRs (it never
+# runs on PRs). issues:write reserved for the future failure-to-issue automation
+# (#1028, out of scope here).
+permissions:
+  contents: read
+
+# Only one nightly run at a time; never cancel an in-flight scheduled run.
+concurrency:
+  group: nightly-docker-parity
+  cancel-in-progress: false
+
+env:
+  # Single source of truth for the pin lives in the reused machinery; restated
+  # here only to hand bootstrap-cassandra.sh the same ref (NOT a second pin).
+  CASSANDRA_REF: cassandra-5.0.2
+  CQLITE_CASSANDRA_CACHE: ${{ github.workspace }}/.cqlite-cache/cassandra-src
+
+jobs:
+  nightly-docker-parity:
+    name: Nightly Docker parity (live read-back + BTI + compaction + Bloom)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      # JDK 17 — drives Gradle, the compaction test JVM, and the Cassandra source
+      # build (Cassandra 5.0 builds on JDK 11 or 17, NOT 21).
+      - name: Setup JDK 17
+        id: setup-java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Ant (required by the Cassandra source build)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ant
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-nightly-docker-parity-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-nightly-docker-parity-
+            ${{ runner.os }}-cargo-
+
+      # Cache the slow Cassandra source build, keyed exactly like
+      # compaction-parity.yml so the two lanes share a warm cache.
+      - name: Cache pinned Cassandra build
+        id: cassandra-cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.CQLITE_CASSANDRA_CACHE }}
+          key: ${{ runner.os }}-cassandra-${{ env.CASSANDRA_REF }}-${{ hashFiles('compaction-parity/scripts/bootstrap-cassandra.sh') }}
+
+      - name: Build pinned Cassandra source (cold cache only)
+        env:
+          CQLITE_CASSANDRA_CACHE: ${{ env.CQLITE_CASSANDRA_CACHE }}
+          CASSANDRA_REF: ${{ env.CASSANDRA_REF }}
+          CASSANDRA_BUILD_JAVA_HOME: ${{ steps.setup-java.outputs.path }}
+        run: |
+          bash compaction-parity/scripts/bootstrap-cassandra.sh
+
+      - name: Build cqlite (write-support) candidate binary
+        run: |
+          cargo build --package cqlite-cli --features write-support
+          test -x target/debug/cqlite
+
+      - name: Setup Gradle (no wrapper in compaction-parity)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      # The aggregating runner drives every leg, classifies hard-fail vs advisory,
+      # writes report.md + the Bloom FPR summary + fixture metadata + per-scenario
+      # diffs, and exits non-zero iff a HARD-FAIL leg failed. It reuses the same
+      # Cassandra source we just built (via CQLITE_CASSANDRA_CACHE -> the leg
+      # re-runs bootstrap, which no-ops on the warm marker).
+      - name: Run nightly docker parity lane
+        id: lane
+        shell: bash
+        env:
+          COMPOSE_CMD: "docker compose"
+          CASSANDRA_REF: ${{ env.CASSANDRA_REF }}
+          CQLITE_CASSANDRA_CACHE: ${{ env.CQLITE_CASSANDRA_CACHE }}
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          # boolean dispatch input (constrained to true/false by GitHub) routed
+          # through env per the workflow-injection guidance — no free-text input.
+          SKIP_COMPACTION: ${{ github.event.inputs.skip_compaction }}
+        run: |
+          EXTRA=""
+          if [[ "$SKIP_COMPACTION" == "true" ]]; then
+            EXTRA="--skip-compaction"
+          fi
+          bash test-data/scripts/nightly-docker-parity.sh \
+            --skip-build \
+            --bin "$(pwd)/target/debug/cqlite" \
+            --report-dir "$(pwd)/target/nightly-docker-parity" \
+            $EXTRA
+
+      # Cassandra container logs for the live read-back leg (best-effort).
+      - name: Collect Cassandra container logs
+        if: always()
+        run: |
+          mkdir -p target/nightly-docker-parity/logs
+          docker compose \
+            -f test-data/docker/docker-compose-cassandra5.yml \
+            logs --no-color cassandra-5-0 \
+            > target/nightly-docker-parity/logs/cassandra.log 2>&1 || true
+
+      # Tear down any leftover Cassandra stack (the script's EXIT trap handles the
+      # happy path; this catches runner-level abrupt termination).
+      - name: Tear down Cassandra stack (cleanup guard)
+        if: always()
+        run: |
+          docker compose \
+            -f test-data/docker/docker-compose-cassandra5.yml \
+            down -v --remove-orphans 2>/dev/null || true
+
+      # Upload the report + all diagnostics on success AND failure, >= 30-day
+      # retention per the nightly_docker tier contract. The bundle carries:
+      # Cassandra logs, CQLite/leg logs, fixture metadata (version + git SHA),
+      # per-scenario JSONL diffs, the Bloom FPR summary, and (in report.md) the
+      # exact reproduction commands.
+      - name: Upload nightly parity report and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: nightly-docker-parity-${{ github.run_id }}
+          path: |
+            target/nightly-docker-parity/report.md
+            target/nightly-docker-parity/fixture-metadata.txt
+            target/nightly-docker-parity/bloom-fpr-summary.txt
+            target/nightly-docker-parity/logs/**
+            target/nightly-docker-parity/diffs/**
+            compaction-parity/build/reports/tests/**
+            compaction-parity/build/test-results/**
+            compaction-parity/build/parity-artifacts-test/**
+            compaction-parity/build/parity-artifacts-byteParity/**
+          if-no-files-found: warn
+          retention-days: 30
