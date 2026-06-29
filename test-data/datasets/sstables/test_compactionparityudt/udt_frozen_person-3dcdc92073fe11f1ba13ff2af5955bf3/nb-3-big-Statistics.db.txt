@@ -1,4 +1,4 @@
-SSTable: /data/test_compactionparityudt/udt_frozen_person-e6e1cf7073d611f196bb098389af4637/nb-3-big
+SSTable: /data/test_compactionparityudt/udt_frozen_person-3dcdc92073fe11f1ba13ff2af5955bf3/nb-3-big
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
 Minimum timestamp: 01/01/1970 00:00:00 (1000)
@@ -9,17 +9,17 @@ SSTable max local deletion time: no tombstones (9223372036854775807)
 Compressor: -
 TTL min: 0
 TTL max: 0
-First token: -4069959284402364209 (1)
+First token: -7509452495886106294 (5)
 Last token: 9010454139840013625 (3)
 Covered clusterings: ALL
 Estimated droppable tombstones: 0.0
 SSTable Level: 0
 Repaired at: 0
-Originating host id: e2339bfc-582c-42ed-8de7-23c386a7b9fe
+Originating host id: 16e59fea-2229-4173-ba0b-d5cc0b7bd524
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1782750168208, position=64388)=CommitLogPosition(segmentId=1782750168208, position=70769)}
-totalColumnsSet: 4
-totalRows: 4
+Replay positions covered: {CommitLogPosition(segmentId=1782767064405, position=64402)=CommitLogPosition(segmentId=1782767064405, position=70860)}
+totalColumnsSet: 5
+totalRows: 5
 Estimated tombstone drop times: 
    Drop Time | Count  (%)  Histogram 
    Percentiles
@@ -32,18 +32,19 @@ Estimated tombstone drop times:
    Max       0 
 Partition Size: 
    Size (bytes) | Count  (%)  Histogram 
-   60 (60 B)    |     4 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   50 (50 B)    |     1 ( 20) OOOOOOO.
+   60 (60 B)    |     4 ( 80) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
    Percentiles
    50th      60 (60 B)
    75th      60 (60 B)
    95th      60 (60 B)
    98th      60 (60 B)
    99th      60 (60 B)
-   Min       51 (51 B)
+   Min       43 (43 B)
    Max       60 (60 B)
 Column Count: 
    Columns | Count  (%)  Histogram 
-   1       |     4 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   1       |     5 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
    Percentiles
    50th      1
    75th      1
@@ -53,7 +54,7 @@ Column Count:
    Min       0
    Max       1
 Local token space coverage: NaN
-Estimated cardinality: 4
+Estimated cardinality: 5
 EncodingStats minTTL: 0
 EncodingStats minLocalDeletionTime: 09/22/2015 00:00:00 (1442880000)
 EncodingStats minTimestamp: 01/01/1970 00:00:00 (1000)

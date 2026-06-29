@@ -1,4 +1,4 @@
-SSTable: /data/test_compactionparityudt/udt_collections-e6f641d073d611f196bb098389af4637/nb-3-big
+SSTable: /data/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big
 Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 Bloom Filter FP chance: 0.01
 Minimum timestamp: 01/01/1970 00:00:00 (1000)
@@ -15,9 +15,9 @@ Covered clusterings: ALL
 Estimated droppable tombstones: 0.0
 SSTable Level: 0
 Repaired at: 0
-Originating host id: e2339bfc-582c-42ed-8de7-23c386a7b9fe
+Originating host id: 16e59fea-2229-4173-ba0b-d5cc0b7bd524
 Pending repair: --
-Replay positions covered: {CommitLogPosition(segmentId=1782750168208, position=69189)=CommitLogPosition(segmentId=1782750168208, position=72077)}
+Replay positions covered: {CommitLogPosition(segmentId=1782767064405, position=69195)=CommitLogPosition(segmentId=1782767064405, position=72168)}
 totalColumnsSet: 12
 totalRows: 3
 Estimated tombstone drop times: 

@@ -313,8 +313,64 @@ fn canonicalize_seq(value: &Value, elem_marshal: &str, kind: SeqKind) -> Result<
     }
     Ok(match kind {
         SeqKind::List => Value::List(out),
-        SeqKind::Set => Value::Set(out),
+        SeqKind::Set => {
+            // A frozen `SetType` is a SORTED collection: Cassandra stores its
+            // elements ordered by the element AbstractType comparator, which for
+            // every CQL type that can be a set element is the UNSIGNED byte order
+            // of the element's serialized form (e.g. UTF8Type/Int32Type/UUIDType
+            // and frozen UDT/tuple elements all compare bytewise on their wire
+            // bytes). The writer's simple-cell path emits set elements in the
+            // value's iteration order, so a multi-element frozen set written with
+            // unsorted elements would produce NON-Cassandra bytes. Sort here using
+            // the SAME `serialize_value` the writer emits for each element, so the
+            // on-disk order matches Cassandra's SetType exactly (issue #1020).
+            sort_by_serialized_bytes(out, |e| e)?
+        }
     })
+}
+
+/// Return `items` reordered by the UNSIGNED byte order of each item's serialized
+/// wire form, using the writer's authoritative [`serialize_value`] (so the sort
+/// key is byte-identical to what is later written). `key` projects the comparable
+/// value out of each item (identity for a set element, the entry KEY for a map).
+/// A stable sort is used so items that serialize identically keep their relative
+/// input order. Returns the matching `Value` collection variant.
+fn sort_by_serialized_bytes<T>(items: Vec<T>, key: impl Fn(&T) -> &Value) -> Result<Value>
+where
+    Value: SortedCollection<T>,
+{
+    // Precompute the serialized bytes once per item: avoids re-serializing on
+    // every comparison and lets a serialization error surface deterministically.
+    let mut keyed: Vec<(Vec<u8>, T)> = Vec::with_capacity(items.len());
+    for item in items {
+        let bytes = serialize_value(key(&item))?;
+        keyed.push((bytes, item));
+    }
+    // Unsigned serialized-byte order == the relevant key/element AbstractType
+    // comparator for every type usable here. `sort_by` is stable.
+    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(Value::from_sorted(
+        keyed.into_iter().map(|(_, item)| item).collect(),
+    ))
+}
+
+/// Maps the sorted item vector back to the right `Value` collection variant so
+/// `sort_by_serialized_bytes` can serve both the frozen-set element path
+/// (`T = Value`) and the frozen-map entry path (`T = (Value, Value)`).
+trait SortedCollection<T> {
+    fn from_sorted(items: Vec<T>) -> Value;
+}
+
+impl SortedCollection<Value> for Value {
+    fn from_sorted(items: Vec<Value>) -> Value {
+        Value::Set(items)
+    }
+}
+
+impl SortedCollection<(Value, Value)> for Value {
+    fn from_sorted(items: Vec<(Value, Value)>) -> Value {
+        Value::Map(items)
+    }
 }
 
 fn canonicalize_map(value: &Value, key_marshal: &str, val_marshal: &str) -> Result<Value> {
@@ -333,7 +389,15 @@ fn canonicalize_map(value: &Value, key_marshal: &str, val_marshal: &str) -> Resu
             canonicalize_value_for_marshal(val_marshal, v)?,
         ));
     }
-    Ok(Value::Map(out))
+    // A frozen `MapType` is a SORTED collection: Cassandra stores its entries
+    // ordered by the KEY's AbstractType comparator, which for every CQL map-key
+    // type is the UNSIGNED byte order of the key's serialized form. The writer's
+    // simple-cell path emits entries in the value's iteration order, so a
+    // multi-entry frozen map written with unsorted keys would produce
+    // NON-Cassandra bytes. Sort by the serialized KEY bytes using the SAME
+    // `serialize_value` the writer emits, so the on-disk order matches
+    // Cassandra's MapType exactly (issue #1020).
+    sort_by_serialized_bytes(out, |(k, _)| k)
 }
 
 fn canonicalize_tuple(value: &Value, components: &[String]) -> Result<Value> {
@@ -845,6 +909,128 @@ mod tests {
             msg.contains("ListType") && msg.contains("Set"),
             "unexpected error: {msg}"
         );
+    }
+
+    // A frozen<map<text, frozen<person>>> marshal: UDT-bearing map value so it
+    // trips the `references_user_type` fast-path gate and exercises key sorting.
+    fn map_text_to_person_marshal() -> String {
+        format!(
+            "{p}FrozenType({p}MapType({p}UTF8Type,{p}FrozenType({p}UserType({KS},706572736f6e,\
+             66697273745f6e616d65:{p}UTF8Type,6c6173745f6e616d65:{p}UTF8Type,616765:{p}Int32Type))))",
+            p = MARSHAL_PREFIX
+        )
+    }
+
+    fn named_person(first: &str) -> Value {
+        Value::Udt(UdtValue {
+            type_name: "person".into(),
+            keyspace: KS.into(),
+            fields: vec![UdtField {
+                name: "first_name".into(),
+                value: Some(Value::Text(first.into())),
+            }],
+        })
+    }
+
+    #[test]
+    fn multi_entry_frozen_map_is_sorted_by_serialized_key_bytes() {
+        // Keys inserted in REVERSED order ("c","b","a"). Cassandra's MapType is a
+        // sorted collection keyed by the key AbstractType comparator (UTF8Type =
+        // unsigned serialized-byte order), so the canonical output must be a < b < c.
+        let v = Value::Frozen(Box::new(Value::Map(vec![
+            (Value::Text("c".into()), named_person("Carol")),
+            (Value::Text("b".into()), named_person("Bob")),
+            (Value::Text("a".into()), named_person("Ada")),
+        ])));
+        let canon = canonicalize_udt_value(&map_text_to_person_marshal(), &v).unwrap();
+        let Value::Frozen(inner) = canon.as_ref() else {
+            panic!("expected frozen map");
+        };
+        let Value::Map(entries) = inner.as_ref() else {
+            panic!("expected map, got {inner:?}");
+        };
+        let keys: Vec<&str> = entries
+            .iter()
+            .map(|(k, _)| match k {
+                Value::Text(s) => s.as_str(),
+                other => panic!("expected text key, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["a", "b", "c"],
+            "map keys must be sorted by serialized bytes"
+        );
+        // Values must stay paired with their keys after the sort, and the nested
+        // UDT must still be canonicalized to declared field order.
+        let first_for = |entries: &[(Value, Value)], want_key: &str| {
+            let (_, person) = entries
+                .iter()
+                .find(|(k, _)| matches!(k, Value::Text(s) if s == want_key))
+                .unwrap();
+            declared_order(person)
+        };
+        assert_eq!(
+            first_for(entries, "a"),
+            vec![
+                ("first_name".into(), Some(Value::Text("Ada".into()))),
+                ("last_name".into(), None),
+                ("age".into(), None),
+            ]
+        );
+    }
+
+    // frozen<set<text>> marshal (no UDT) would skip the fast-path gate, so use a
+    // frozen<set<frozen<person>>> to exercise element sorting through the gate.
+    #[test]
+    fn multi_element_frozen_set_is_sorted_by_serialized_element_bytes() {
+        // Elements inserted in REVERSED first_name order. Set elements sort by the
+        // element AbstractType comparator = unsigned serialized-byte order of the
+        // full frozen-UDT wire bytes (which here begins with the first_name field
+        // length+bytes), so canonical order is Ada < Bob < Carol.
+        let v = Value::Frozen(Box::new(Value::Set(vec![
+            named_person("Carol"),
+            named_person("Bob"),
+            named_person("Ada"),
+        ])));
+        let canon = canonicalize_udt_value(&set_of_person_marshal(), &v).unwrap();
+        let Value::Frozen(inner) = canon.as_ref() else {
+            panic!("expected frozen set");
+        };
+        let Value::Set(items) = inner.as_ref() else {
+            panic!("expected set, got {inner:?}");
+        };
+        let firsts: Vec<String> = items
+            .iter()
+            .map(|p| match declared_order(p).into_iter().next() {
+                Some((_, Some(Value::Text(s)))) => s,
+                other => panic!("unexpected first field: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            firsts,
+            vec!["Ada".to_string(), "Bob".to_string(), "Carol".to_string()],
+            "set elements must be sorted by serialized element bytes"
+        );
+    }
+
+    #[test]
+    fn single_entry_frozen_map_unchanged_by_sort() {
+        // Sorting a single-entry map is a no-op: confirms the existing
+        // single-entry UDT-map scenarios keep byte-identical output.
+        let v = Value::Frozen(Box::new(Value::Map(vec![(
+            Value::Text("only".into()),
+            named_person("Solo"),
+        )])));
+        let canon = canonicalize_udt_value(&map_text_to_person_marshal(), &v).unwrap();
+        let Value::Frozen(inner) = canon.as_ref() else {
+            panic!("expected frozen map");
+        };
+        let Value::Map(entries) = inner.as_ref() else {
+            panic!("expected map");
+        };
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(&entries[0].0, Value::Text(s) if s == "only"));
     }
 
     #[test]
