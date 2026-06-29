@@ -10,6 +10,7 @@ SHA256_EXPECTED="${DATASET_SHA256:-bebc763752c8d68c7fb0483a1b31294b4d1d21343d3f7
 DATASET_ROOT="${CQLITE_DATASETS_ROOT:-test-data/datasets}"
 PIN_FILE="${DATASET_ROOT}/.dataset-pin"
 ASSET_PATH="/tmp/${ASSET}"
+WIDE_PARTITION_GOLDEN="${DATASET_ROOT}/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl"
 
 if [ -z "${DATASET_ROOT}" ] || [ "${DATASET_ROOT}" = "/" ]; then
   echo "ERROR: unsafe CQLITE_DATASETS_ROOT='${DATASET_ROOT}'" >&2
@@ -25,8 +26,33 @@ write_pin() {
   } > "${PIN_FILE}"
 }
 
+restore_ci_tracked_dataset_files() {
+  [ -n "${CI:-}" ] || return 0
+  command -v git >/dev/null 2>&1 || return 0
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+
+  local repo_root dataset_abs dataset_rel tracked_files
+  repo_root="$(git rev-parse --show-toplevel)"
+  case "${DATASET_ROOT}" in
+    /*) dataset_abs="${DATASET_ROOT}" ;;
+    *) dataset_abs="${PWD}/${DATASET_ROOT}" ;;
+  esac
+
+  case "${dataset_abs}" in
+    "${repo_root}"/*) dataset_rel="${dataset_abs#"${repo_root}/"}" ;;
+    *) return 0 ;;
+  esac
+
+  tracked_files="$(git -C "${repo_root}" ls-files -- "${dataset_rel}")"
+  if [ -n "${tracked_files}" ]; then
+    echo "Restoring git-tracked dataset reference files under ${dataset_rel}"
+    git -C "${repo_root}" restore --source=HEAD -- "${dataset_rel}" 2>/dev/null || true
+  fi
+}
+
 has_required_dataset() {
   [ -f "${DATASET_ROOT}/metadata.yml" ] || return 1
+  [ -s "${WIDE_PARTITION_GOLDEN}" ] || return 1
 
   local core_fixture
   core_fixture="$(find "${DATASET_ROOT}/sstables/test_basic" -path '*simple_table-*-Data.db' -print -quit 2>/dev/null || true)"
@@ -49,6 +75,8 @@ has_required_dataset() {
     grep -qx "sha256=${SHA256_EXPECTED}" "${PIN_FILE}" || return 1
   fi
 }
+
+restore_ci_tracked_dataset_files
 
 if has_required_dataset; then
   write_pin
@@ -85,6 +113,7 @@ fi
 
 rm -rf "${DATASET_ROOT}"
 tar -xzf "${ASSET_PATH}" -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
+restore_ci_tracked_dataset_files
 
 # Remove macOS AppleDouble shadow files (`._*`). The archive may contain them
 # when produced on macOS, and they break test helpers that scan for files by
