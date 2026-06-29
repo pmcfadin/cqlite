@@ -212,8 +212,11 @@ jobs:
       - name: Sanity check dataset
         shell: bash
         run: |
+          set -euo pipefail
           test -f test-data/datasets/metadata.yml
-          ls test-data/datasets/sstables/test_basic/ | head -n 1
+          # Issue #1230: assert the full 33-table corpus, not just test_basic, so a
+          # partial extraction reds CI instead of skip-greening the pytest lane.
+          bash test-data/scripts/check-dataset-manifest.sh test-data/datasets
 
       # Issue #331: Pre-build CLI binary for faster CLI parity tests
       - name: Build CLI binary for tests
@@ -225,6 +228,11 @@ jobs:
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
           RUN_SLOW_TESTS: "1"  # Issue #331: Run all tests including CLI parity
+          # Issue #1230: fail-closed. With this flag the conftest skip helper turns
+          # a missing dataset into a FAILURE (not a silent skip), and the
+          # "no tests ran" floor (pytest_sessionfinish) fails the lane if 0 tests
+          # pass — so a dropped table / #773-class path regression reds CI.
+          CQLITE_REQUIRE_FIXTURES: "1"
         shell: bash
         run: |
           pytest bindings/python/tests/ -v --tb=short

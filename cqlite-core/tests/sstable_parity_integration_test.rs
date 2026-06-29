@@ -25,8 +25,8 @@
 
 use cqlite_core::storage::sstable::reader::SSTableReader;
 use cqlite_core::testing::dataset_helpers::{
-    derive_reference_paths_from_data_db, resolve_table_to_sstable_path, should_ignore_file,
-    DatasetError,
+    derive_reference_paths_from_data_db, require_fixtures_strict, resolve_table_to_sstable_path,
+    should_ignore_file, DatasetError,
 };
 use cqlite_core::{Config, Platform, Value};
 use num_bigint::BigInt;
@@ -540,14 +540,68 @@ fn test_data_available() -> bool {
         || resolve_table_to_sstable_path("test_basic", "simple_table").is_ok()
 }
 
+/// Skip-or-fail gate for dataset-dependent tests (issue #1230). When the dataset
+/// is unavailable this PANICS under strict mode (`require_fixtures_strict`) so a
+/// required CI lane cannot false-green on missing data, and otherwise returns
+/// `true` (the caller `return`s) to preserve the local-dev skip-on-absence flow.
+fn skip_when_data_unavailable() -> bool {
+    if test_data_available() {
+        return false;
+    }
+    assert!(
+        !require_fixtures_strict(),
+        "CQLITE_REQUIRE_FIXTURES=1 but dataset unavailable (CQLITE_DATASETS_ROOT \
+         unset or metadata.yml missing) — fetch with bash test-data/scripts/fetch-datasets.sh"
+    );
+    eprintln!("Skipping test: dataset unavailable (set CQLITE_DATASETS_ROOT)");
+    true
+}
+
+/// Handle a `run_parity_test` Err per the fail-closed contract (issue #1230).
+/// A genuine parse failure ALWAYS panics. A missing-fixture error (the data was
+/// not there) PANICS under strict mode and is skipped — with a note — only in
+/// non-strict local-dev mode. The previous code unconditionally swallowed
+/// "not set"/"not found", which let a dropped table or a #773-class path
+/// regression pass green.
+fn handle_parity_error(e: &str) {
+    let missing_fixture = e.contains("not set")
+        || e.contains("not found")
+        || e.contains("No Data.db")
+        || e.contains("metadata.yml missing");
+    assert!(missing_fixture, "parity test failed (genuine error): {e}");
+    assert!(
+        !require_fixtures_strict(),
+        "CQLITE_REQUIRE_FIXTURES=1 but fixture missing: {e} — \
+         fetch with bash test-data/scripts/fetch-datasets.sh"
+    );
+    eprintln!("parity test skipped (fixture absent): {e}");
+}
+
+/// Real presence/content assertion (issue #1230) replacing the thin
+/// `partition_count > 0`. Requires the JSONL golden to be present and non-empty
+/// and the parser to cover at least every reference partition (wide-partition
+/// tables expand to >= reference rows), so a dropped or truncated table FAILS
+/// rather than passing on a single stray partition.
+fn assert_parity_content(r: &ParityResult) {
+    assert!(
+        r.reference_count > 0,
+        "JSONL golden is absent or empty (0 reference partitions)"
+    );
+    assert!(
+        r.partition_count >= r.reference_count,
+        "parsed {} partitions < {} reference partitions — table dropped or truncated?",
+        r.partition_count,
+        r.reference_count
+    );
+}
+
 // ============================================================================
 // test_basic Keyspace Tests
 // ============================================================================
 
 #[tokio::test]
 async fn test_simple_table_key_parsing_parity() {
-    if !test_data_available() {
-        eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set");
+    if skip_when_data_unavailable() {
         return;
     }
 
@@ -563,6 +617,7 @@ async fn test_simple_table_key_parsing_parity() {
                 r.validated_cells,
                 r.total_cells
             );
+            assert_parity_content(&r);
             assert!(
                 r.partition_count >= r.reference_count * 95 / 100,
                 "Partition count too low: {} vs {} expected",
@@ -576,20 +631,13 @@ async fn test_simple_table_key_parsing_parity() {
                 key_match_rate * 100.0
             );
         }
-        Err(e) => {
-            eprintln!("Test skipped or failed: {}", e);
-            // Don't fail test if data unavailable
-            if !e.contains("not set") && !e.contains("not found") {
-                panic!("Test failed: {}", e);
-            }
-        }
+        Err(e) => handle_parity_error(&e),
     }
 }
 
 #[tokio::test]
 async fn test_composite_key_table_parsing_parity() {
-    if !test_data_available() {
-        eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set");
+    if skip_when_data_unavailable() {
         return;
     }
 
@@ -601,23 +649,15 @@ async fn test_composite_key_table_parsing_parity() {
                 "composite_key_table: {} partitions, {}/{} keys matched",
                 r.partition_count, r.matched_keys, r.reference_count
             );
-            assert!(
-                r.partition_count > 0,
-                "Should have parsed at least some partitions"
-            );
+            assert_parity_content(&r);
         }
-        Err(e) => {
-            if !e.contains("not set") && !e.contains("not found") {
-                panic!("Test failed: {}", e);
-            }
-        }
+        Err(e) => handle_parity_error(&e),
     }
 }
 
 #[tokio::test]
 async fn test_static_columns_table_parsing() {
-    if !test_data_available() {
-        eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set");
+    if skip_when_data_unavailable() {
         return;
     }
 
@@ -629,16 +669,9 @@ async fn test_static_columns_table_parsing() {
                 "static_columns_table: {} partitions, {}/{} keys matched",
                 r.partition_count, r.matched_keys, r.reference_count
             );
-            assert!(
-                r.partition_count > 0,
-                "Should have parsed at least some partitions"
-            );
+            assert_parity_content(&r);
         }
-        Err(e) => {
-            if !e.contains("not set") && !e.contains("not found") {
-                panic!("Test failed: {}", e);
-            }
-        }
+        Err(e) => handle_parity_error(&e),
     }
 }
 
@@ -648,8 +681,7 @@ async fn test_static_columns_table_parsing() {
 
 #[tokio::test]
 async fn test_collection_table_list_parsing() {
-    if !test_data_available() {
-        eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set");
+    if skip_when_data_unavailable() {
         return;
     }
 
@@ -661,23 +693,15 @@ async fn test_collection_table_list_parsing() {
                 "collection_table: {} partitions, {}/{} cells validated",
                 r.partition_count, r.validated_cells, r.total_cells
             );
-            assert!(
-                r.partition_count > 0,
-                "Should have parsed at least some partitions"
-            );
+            assert_parity_content(&r);
         }
-        Err(e) => {
-            if !e.contains("not set") && !e.contains("not found") {
-                panic!("Test failed: {}", e);
-            }
-        }
+        Err(e) => handle_parity_error(&e),
     }
 }
 
 #[tokio::test]
 async fn test_collection_table_map_parsing() {
-    if !test_data_available() {
-        eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set");
+    if skip_when_data_unavailable() {
         return;
     }
 
@@ -694,6 +718,7 @@ async fn test_collection_table_map_parsing() {
             // due to the double length-prefix bug and the set path-elements bug.
             // This assertion pins the fix: if either regression is reintroduced, the
             // test will catch it.
+            assert_parity_content(&r);
             assert!(
                 r.partition_count >= 50,
                 "typed_collections_table should have at least 50 partitions (got {}). \
@@ -701,18 +726,13 @@ async fn test_collection_table_map_parsing() {
                 r.partition_count
             );
         }
-        Err(e) => {
-            if !e.contains("not set") && !e.contains("not found") {
-                panic!("Test failed: {}", e);
-            }
-        }
+        Err(e) => handle_parity_error(&e),
     }
 }
 
 #[tokio::test]
 async fn test_nested_collections_parsing() {
-    if !test_data_available() {
-        eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set");
+    if skip_when_data_unavailable() {
         return;
     }
 
@@ -724,23 +744,15 @@ async fn test_nested_collections_parsing() {
                 "nested_collections_table: {} partitions, {}/{} cells validated",
                 r.partition_count, r.validated_cells, r.total_cells
             );
-            assert!(
-                r.partition_count > 0,
-                "Should have parsed at least some partitions"
-            );
+            assert_parity_content(&r);
         }
-        Err(e) => {
-            if !e.contains("not set") && !e.contains("not found") {
-                panic!("Test failed: {}", e);
-            }
-        }
+        Err(e) => handle_parity_error(&e),
     }
 }
 
 #[tokio::test]
 async fn test_collections_with_udts_parsing() {
-    if !test_data_available() {
-        eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set");
+    if skip_when_data_unavailable() {
         return;
     }
 
@@ -752,16 +764,9 @@ async fn test_collections_with_udts_parsing() {
                 "collections_with_udts: {} partitions, {}/{} cells validated",
                 r.partition_count, r.validated_cells, r.total_cells
             );
-            assert!(
-                r.partition_count > 0,
-                "Should have parsed at least some partitions"
-            );
+            assert_parity_content(&r);
         }
-        Err(e) => {
-            if !e.contains("not set") && !e.contains("not found") {
-                panic!("Test failed: {}", e);
-            }
-        }
+        Err(e) => handle_parity_error(&e),
     }
 }
 
@@ -771,8 +776,7 @@ async fn test_collections_with_udts_parsing() {
 
 #[tokio::test]
 async fn test_sensor_data_clustering_key_parsing() {
-    if !test_data_available() {
-        eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set");
+    if skip_when_data_unavailable() {
         return;
     }
 
@@ -784,23 +788,15 @@ async fn test_sensor_data_clustering_key_parsing() {
                 "sensor_data: {} partitions, {}/{} keys matched",
                 r.partition_count, r.matched_keys, r.reference_count
             );
-            assert!(
-                r.partition_count > 0,
-                "Should have parsed at least some partitions"
-            );
+            assert_parity_content(&r);
         }
-        Err(e) => {
-            if !e.contains("not set") && !e.contains("not found") {
-                panic!("Test failed: {}", e);
-            }
-        }
+        Err(e) => handle_parity_error(&e),
     }
 }
 
 #[tokio::test]
 async fn test_stock_prices_bti_format() {
-    if !test_data_available() {
-        eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set");
+    if skip_when_data_unavailable() {
         return;
     }
 
@@ -812,16 +808,9 @@ async fn test_stock_prices_bti_format() {
                 "stock_prices: {} partitions, {}/{} keys matched",
                 r.partition_count, r.matched_keys, r.reference_count
             );
-            assert!(
-                r.partition_count > 0,
-                "Should have parsed at least some partitions"
-            );
+            assert_parity_content(&r);
         }
-        Err(e) => {
-            if !e.contains("not set") && !e.contains("not found") {
-                panic!("Test failed: {}", e);
-            }
-        }
+        Err(e) => handle_parity_error(&e),
     }
 }
 
@@ -831,8 +820,7 @@ async fn test_stock_prices_bti_format() {
 
 #[tokio::test]
 async fn test_wide_partition_table_many_rows() {
-    if !test_data_available() {
-        eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set");
+    if skip_when_data_unavailable() {
         return;
     }
 
@@ -844,23 +832,15 @@ async fn test_wide_partition_table_many_rows() {
                 "wide_partition_table: {} partitions, {}/{} keys matched",
                 r.partition_count, r.matched_keys, r.reference_count
             );
-            assert!(
-                r.partition_count > 0,
-                "Should have parsed at least some partitions"
-            );
+            assert_parity_content(&r);
         }
-        Err(e) => {
-            if !e.contains("not set") && !e.contains("not found") {
-                panic!("Test failed: {}", e);
-            }
-        }
+        Err(e) => handle_parity_error(&e),
     }
 }
 
 #[tokio::test]
 async fn test_chat_messages_frozen_types() {
-    if !test_data_available() {
-        eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set");
+    if skip_when_data_unavailable() {
         return;
     }
 
@@ -872,23 +852,15 @@ async fn test_chat_messages_frozen_types() {
                 "chat_messages: {} partitions, {}/{} cells validated",
                 r.partition_count, r.validated_cells, r.total_cells
             );
-            assert!(
-                r.partition_count > 0,
-                "Should have parsed at least some partitions"
-            );
+            assert_parity_content(&r);
         }
-        Err(e) => {
-            if !e.contains("not set") && !e.contains("not found") {
-                panic!("Test failed: {}", e);
-            }
-        }
+        Err(e) => handle_parity_error(&e),
     }
 }
 
 #[tokio::test]
 async fn test_many_columns_table_sparse_bitmap() {
-    if !test_data_available() {
-        eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set");
+    if skip_when_data_unavailable() {
         return;
     }
 
@@ -900,16 +872,9 @@ async fn test_many_columns_table_sparse_bitmap() {
                 "many_columns_table: {} partitions, {}/{} keys matched",
                 r.partition_count, r.matched_keys, r.reference_count
             );
-            assert!(
-                r.partition_count > 0,
-                "Should have parsed at least some partitions"
-            );
+            assert_parity_content(&r);
         }
-        Err(e) => {
-            if !e.contains("not set") && !e.contains("not found") {
-                panic!("Test failed: {}", e);
-            }
-        }
+        Err(e) => handle_parity_error(&e),
     }
 }
 
@@ -919,8 +884,7 @@ async fn test_many_columns_table_sparse_bitmap() {
 
 #[tokio::test]
 async fn test_all_tables_basic_parity() {
-    if !test_data_available() {
-        eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set");
+    if skip_when_data_unavailable() {
         return;
     }
 
@@ -935,28 +899,24 @@ async fn test_all_tables_basic_parity() {
     ];
 
     let mut passed = 0;
-    let mut failed = 0;
 
     for (keyspace, table) in &test_cases {
         match run_parity_test(keyspace, table).await {
             Ok(r) => {
-                if r.partition_count > 0 {
-                    println!(
-                        "PASS: {}.{} ({} partitions)",
-                        keyspace, table, r.partition_count
-                    );
-                    passed += 1;
-                } else {
-                    println!("FAIL: {}.{} (0 partitions)", keyspace, table);
-                    failed += 1;
-                }
+                // Fail-closed (issue #1230): real content/presence assertion, not
+                // the old `if partition_count > 0 { pass } else { fail }`.
+                assert_parity_content(&r);
+                println!(
+                    "PASS: {}.{} ({} partitions)",
+                    keyspace, table, r.partition_count
+                );
+                passed += 1;
             }
-            Err(e) => {
-                println!("SKIP: {}.{}: {}", keyspace, table, e);
-            }
+            // A genuine parse error always panics; a missing fixture panics under
+            // strict mode and only skips in non-strict local-dev mode.
+            Err(e) => handle_parity_error(&e),
         }
     }
 
-    println!("\nSummary: {} passed, {} failed", passed, failed);
-    assert!(failed == 0, "{} tests failed", failed);
+    println!("\nSummary: {} passed (of {})", passed, test_cases.len());
 }

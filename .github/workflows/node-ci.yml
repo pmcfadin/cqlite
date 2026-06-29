@@ -197,14 +197,20 @@ jobs:
       - name: Sanity check dataset
         shell: bash
         run: |
+          set -euo pipefail
           test -f test-data/datasets/metadata.yml
-          # Verify at least one keyspace directory exists
-          ls -1 test-data/datasets/sstables/test_basic/ 2>/dev/null | head -n 1 || true
+          # Issue #1230: assert the full 33-table corpus (was: a non-failing
+          # `ls ... || true` that passed even on a partial extraction).
+          bash test-data/scripts/check-dataset-manifest.sh test-data/datasets
 
       - name: Run smoke tests
         working-directory: bindings/node
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          # Issue #1230: fail-closed flag for parity with the other CI lanes. The
+          # node helper (skipIfNoDatasets) already throws on missing data; this
+          # documents intent and is honored by the Rust core it calls.
+          CQLITE_REQUIRE_FIXTURES: "1"
         run: npm test
 
       - name: Upload test results on failure
