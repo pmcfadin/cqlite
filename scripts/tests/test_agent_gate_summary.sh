@@ -128,6 +128,26 @@ else
   bad "isolated-tmpdir: no LOG_DIR summary copy produced"
 fi
 
+# 4b. RELATIVE-PATH resolution (#1175 roborev finding 2): a relative
+#     AGENT_GATE_SUMMARY_FILE must resolve against the CALLER's original CWD, not
+#     the repo root (the gate cd's into the repo internally). We cd into a fresh
+#     temp caller dir, run the selftest with a bare relative filename, and assert
+#     the complete summary lands at "$caller_dir/<name>" — and NOT at the repo
+#     root default.
+rel_caller_dir=$(mktemp -d "$tmp/rel-caller.XXXXXX")
+rel_name="rel-summary.txt"
+(
+  cd "$rel_caller_dir" || exit 1
+  AGENT_GATE_SUMMARY_FILE="$rel_name" bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+)
+rel_rc=$?
+assert_exit "relative-path" "$rel_rc" 0
+if [ -f "$rel_caller_dir/$rel_name" ]; then
+  assert_complete "relative-path-caller-cwd" "$rel_caller_dir/$rel_name"
+else
+  bad "relative-path: summary not created at caller CWD ($rel_caller_dir/$rel_name)"
+fi
+
 # 5. STALE-FILE negative case (#1175 roborev findings 1 & 2): a caller-known
 #    summary file left over from a PREVIOUS run holds an OLD complete RESULT: PASS
 #    block with a DIFFERENT run-id. A new gate invocation that fails early (or

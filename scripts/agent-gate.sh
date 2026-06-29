@@ -243,8 +243,28 @@ emit_summary() {
   fi
 
   # Keep a copy in the logs bundle (best-effort; the caller-known file is the
-  # contract).
-  cp "$SUMMARY_FILE" "$LOG_SUMMARY_FILE" 2>/dev/null || true
+  # contract). NEVER copy a stale/failed caller-known file into the log: when the
+  # authoritative write failed, $SUMMARY_FILE may still hold a complete-looking
+  # prior-run block (e.g. an old "RESULT: PASS"), and copying it would produce a
+  # misleading log artifact for THIS run (#1175 finding 1). Only copy the on-disk
+  # file when the write was verified successful; otherwise write THIS run's block
+  # (this run's run-id + real RESULT) directly to the log so the artifact always
+  # reflects the current run, never a stale one.
+  if [ "$SUMMARY_WRITE_FAILED" -eq 0 ]; then
+    cp "$SUMMARY_FILE" "$LOG_SUMMARY_FILE" 2>/dev/null || true
+  else
+    {
+      echo
+      echo "==== AGENT-GATE SUMMARY ===="
+      echo "run-id: $RUN_ID"
+      local line
+      for line in "$@"; do echo "$line"; done
+      echo "logs: $LOG_DIR"
+      echo "summary-file: $SUMMARY_FILE (WRITE FAILED — see stderr)"
+      echo "RESULT: $result"
+      echo "==== END AGENT-GATE SUMMARY ===="
+    } > "$LOG_SUMMARY_FILE" 2>/dev/null || true
+  fi
 
   # Best-effort stream the (already-complete) file to stdout for the
   # foreground/redirect case. If stdout is gone (closed pipe -> SIGPIPE) or a
