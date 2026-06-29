@@ -242,18 +242,34 @@ fn aggregator_guarded_ids(job: &JobYaml) -> std::collections::HashSet<String> {
         let Some(cond) = &step.condition else {
             continue;
         };
-        // Any `steps.<id>.outcome` mentioned in the aggregator's condition is
-        // guarded: a non-success outcome there reaches the failing body.
-        for id in extract_outcome_ids(cond) {
+        // Issue #1228 roborev finding B: only an id whose outcome/conclusion is
+        // PROVEN to fail the build on a non-success result guards a
+        // continue-on-error test. A bare reference, or a POSITIVE
+        // `steps.<id>.outcome == 'success'` check (as in the "Comment on PR
+        // (Success)" step), does NOT make the non-blocking test build-blocking —
+        // failures still pass that condition. We therefore credit only ids that
+        // appear in an explicit NEGATIVE check (`!= 'success'`) in the aggregator
+        // condition.
+        for id in extract_negatively_guarded_ids(cond) {
             guarded.insert(id);
         }
     }
     guarded
 }
 
-/// Extract every `<id>` from `steps.<id>.outcome` / `steps.<id>.conclusion`
-/// references in a GitHub Actions `if:` expression.
-fn extract_outcome_ids(cond: &str) -> Vec<String> {
+/// Extract every `<id>` whose `steps.<id>.outcome` / `steps.<id>.conclusion` is
+/// compared with an explicit NEGATIVE check (`!= 'success'`) in a GitHub Actions
+/// `if:` expression. Only such a reference proves the aggregator FAILS the build
+/// when that step did not succeed (issue #1228 roborev finding B).
+///
+/// We accept the canonical negative form `steps.<id>.outcome != 'success'`
+/// (single OR double quotes around the literal, arbitrary whitespace around the
+/// operator). A reference that is only positively checked
+/// (`== 'success'`), or a bare reference with no comparison, is NOT credited —
+/// the build would still pass when that step failed. Matching is anchored to the
+/// SPECIFIC id (whole-token `outcome`/`conclusion` accessor immediately after the
+/// id), so a reference to a DIFFERENT id never bleeds through.
+fn extract_negatively_guarded_ids(cond: &str) -> Vec<String> {
     let mut ids = Vec::new();
     let needle = "steps.";
     let mut start = 0;
@@ -261,14 +277,22 @@ fn extract_outcome_ids(cond: &str) -> Vec<String> {
         let pos = start + rel + needle.len();
         let rest = &cond[pos..];
         // The id runs until the next `.`; require a following `.outcome` or
-        // `.conclusion` so we only credit a status reference, not e.g.
+        // `.conclusion` accessor so we only consider a status reference, not e.g.
         // `steps.x.outputs.y`.
         if let Some(dot) = rest.find('.') {
             let id = &rest[..dot];
             let after = &rest[dot..];
-            if (after.starts_with(".outcome") || after.starts_with(".conclusion")) && !id.is_empty()
-            {
-                ids.push(id.to_string());
+            let accessor = if after.starts_with(".outcome") {
+                Some(".outcome")
+            } else if after.starts_with(".conclusion") {
+                Some(".conclusion")
+            } else {
+                None
+            };
+            if let Some(acc) = accessor {
+                if !id.is_empty() && comparison_is_negative_success(&after[acc.len()..]) {
+                    ids.push(id.to_string());
+                }
             }
         }
         start = pos;
@@ -277,6 +301,28 @@ fn extract_outcome_ids(cond: &str) -> Vec<String> {
         }
     }
     ids
+}
+
+/// True if the text immediately FOLLOWING a `steps.<id>.outcome`/`.conclusion`
+/// accessor is an explicit negative-success comparison: `!= 'success'` (or
+/// `!= "success"`), allowing arbitrary surrounding whitespace. A positive
+/// `== 'success'` comparison, or no comparison at all, returns false — only the
+/// negative form proves the aggregator fails the build on that step's failure.
+fn comparison_is_negative_success(after_accessor: &str) -> bool {
+    let t = after_accessor.trim_start();
+    let Some(rest) = t.strip_prefix("!=") else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    // Accept a single- or double-quoted `success` literal.
+    let inner = rest
+        .strip_prefix('\'')
+        .and_then(|s| s.split_once('\'').map(|(lit, _)| lit))
+        .or_else(|| {
+            rest.strip_prefix('"')
+                .and_then(|s| s.split_once('"').map(|(lit, _)| lit))
+        });
+    matches!(inner, Some("success"))
 }
 
 /// Parse the workflow YAML into the evaluated `run:` steps we care about. On a

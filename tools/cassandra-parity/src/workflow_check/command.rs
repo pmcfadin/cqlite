@@ -327,16 +327,27 @@ pub fn command_runs_gradle(command: &str) -> bool {
 /// step/job/workflow `env:` map path is handled separately via the parent
 /// module's `EvaluatedStep::scope_fail_closed`.
 pub(crate) fn inline_fail_closed_for_test(command: &str, name: &str) -> bool {
-    let logicals = logical_commands(command);
-    // (b) An `export FOO=<truthy>` anywhere arms the rest of the script.
-    if logicals.iter().any(|l| logical_exports_fail_closed(l)) {
-        return true;
+    // Issue #1228 roborev finding A: a shell `export FOO=<truthy>` only affects
+    // SUBSEQUENT commands, so we must walk the logical commands IN ORDER and only
+    // credit an export seen STRICTLY BEFORE the mapped-test command. An export
+    // that appears only after the test command never reaches the spawned process.
+    let mut exported_fail_closed = false;
+    for logical in logical_commands(command) {
+        // The mapped-test command is credited if the export was armed by a PRIOR
+        // command, OR this same logical command carries an inline / `env`
+        // fail-closed prefix on the test invocation itself.
+        if logical_runs_test(&logical, name)
+            && (exported_fail_closed || logical_inline_prefix_fail_closed(&logical))
+        {
+            return true;
+        }
+        // Arm the running export flag only AT/AFTER an `export FOO=<truthy>`
+        // statement, so it is visible to later commands but not this one.
+        if logical_exports_fail_closed(&logical) {
+            exported_fail_closed = true;
+        }
     }
-    // (c) An inline `FOO=<truthy>` / `env FOO=<truthy>` prefix on the very
-    // logical command that runs the mapped test.
-    logicals
-        .iter()
-        .any(|l| logical_runs_test(l, name) && logical_inline_prefix_fail_closed(l))
+    false
 }
 
 /// True if a single logical command is an `export FOO=<truthy>` statement for a

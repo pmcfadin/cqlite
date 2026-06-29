@@ -622,6 +622,44 @@ fn exported_fail_closed_then_test_counts() {
 }
 
 #[test]
+fn export_after_test_command_does_not_count() {
+    // Issue #1228 roborev finding A: a shell `export` only affects SUBSEQUENT
+    // commands. Here the `cargo test --test foo` runs FIRST and the
+    // `export CQLITE_REQUIRE_FIXTURES=1` comes AFTER it, so the test process
+    // never saw the flag — the scenario is fail-open and must be flagged.
+    let export_after_wf = "jobs:\n  parity:\n    steps:\n      - run: |\n          cargo test --test issue_997_compressioninfo_parity\n          export CQLITE_REQUIRE_FIXTURES=1";
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        export_after_wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings.iter().any(|f| f.message.contains("fail-closed")),
+        "expected a fail-closed finding when export comes AFTER the test, got: {findings:#?}"
+    );
+}
+
+#[test]
+fn export_before_test_command_counts() {
+    // The complement of `export_after_test_command_does_not_count`: an
+    // `export CQLITE_REQUIRE_FIXTURES=1` on a PRIOR logical command arms the test
+    // that runs later in the same script. (Mirrors the real
+    // `exported_fail_closed_then_test_counts`, made explicit for finding A.)
+    let export_before_wf = "jobs:\n  parity:\n    steps:\n      - run: |\n          export CQLITE_REQUIRE_FIXTURES=1\n          echo armed\n          cargo test --test issue_997_compressioninfo_parity";
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        export_before_wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings.is_empty(),
+        "expected clean when export precedes the test command, got: {findings:#?}"
+    );
+}
+
+#[test]
 fn exported_falsey_value_does_not_count() {
     // `export CQLITE_REQUIRE_FIXTURES=0` arms nothing — still fail-open.
     let export_zero_wf = "jobs:\n  parity:\n    steps:\n      - run: |\n          export CQLITE_REQUIRE_FIXTURES=0\n          cargo test --test issue_997_compressioninfo_parity";
@@ -793,5 +831,123 @@ fn unparseable_workflow_is_flagged() {
     assert!(
         !findings.is_empty(),
         "expected the unparseable workflow to be flagged"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #1228 roborev finding B (aggregator outcome polarity): a continue-on-error
+// mapped-test step is only build-blocking when a later blocking `exit 1`
+// aggregator PROVES it fails on a non-success outcome — an explicit
+// `steps.<id>.outcome != 'success'` check. A bare reference or a positive
+// `== 'success'` check must NOT credit it; a reference to a DIFFERENT id must NOT.
+// ---------------------------------------------------------------------------
+
+/// Build a workflow whose mapped test runs in a `continue-on-error: true` step
+/// with `id: parity`, followed by an `exit 1` aggregator gated on `aggregator_if`.
+fn ce_with_aggregator(aggregator_if: &str) -> String {
+    format!(
+        "jobs:\n  parity:\n    env:\n      CQLITE_REQUIRE_FIXTURES: '1'\n    steps:\n      \
+         - id: parity\n        continue-on-error: true\n        run: cargo test --test issue_997_compressioninfo_parity\n      \
+         - name: Fail build on parity differences\n        if: {aggregator_if}\n        run: |\n          exit 1"
+    )
+}
+
+#[test]
+fn aggregator_negative_success_check_credits_continue_on_error_test() {
+    // `steps.parity.outcome != 'success'` in an `exit 1` aggregator proves a
+    // non-success outcome fails the build — the continue-on-error test is gated.
+    let wf = ce_with_aggregator("always() && steps.parity.outcome != 'success'");
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        &wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings.is_empty(),
+        "expected clean for an `!= 'success'` aggregator, got: {findings:#?}"
+    );
+}
+
+#[test]
+fn aggregator_positive_success_check_does_not_credit_continue_on_error_test() {
+    // `steps.parity.outcome == 'success'` does NOT fail the build on failure
+    // (failures fall through the `==`); the continue-on-error test is still
+    // non-blocking and the scenario is overstated.
+    let wf = ce_with_aggregator("always() && steps.parity.outcome == 'success'");
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        &wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.message.contains("continue-on-error")),
+        "expected a continue-on-error finding for a positive `== 'success'` aggregator, got: {findings:#?}"
+    );
+}
+
+#[test]
+fn aggregator_reference_to_different_id_does_not_credit_continue_on_error_test() {
+    // The aggregator negatively checks a DIFFERENT id (`other`), not `parity`, so
+    // the mapped test's continue-on-error step is not gated — overstated.
+    let wf = ce_with_aggregator("always() && steps.other.outcome != 'success'");
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        &wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.message.contains("continue-on-error")),
+        "expected a continue-on-error finding when only a DIFFERENT id is guarded, got: {findings:#?}"
+    );
+}
+
+#[test]
+fn aggregator_bare_reference_does_not_credit_continue_on_error_test() {
+    // A bare reference with no comparison (`if: always() && steps.parity.outcome`)
+    // does not prove the build fails on non-success — overstated.
+    let wf = ce_with_aggregator("always() && steps.parity.outcome");
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        &wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.message.contains("continue-on-error")),
+        "expected a continue-on-error finding for a bare outcome reference, got: {findings:#?}"
+    );
+}
+
+#[test]
+fn real_sstabledump_parity_gate_aggregator_credits_its_tests() {
+    // Confirm against the REAL workflow file: its "Fail build on parity
+    // differences" step is `if: always() && (steps.X.outcome != 'success' || ...)`
+    // with `exit 1`, so each continue-on-error parity step whose id is listed in
+    // that negative aggregator stays credited — e.g. step `compression_info_parity`
+    // (id IS in the `!= 'success'` list) running `sstable_parity_compression_info_test`.
+    let wf = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../.github/workflows/sstabledump-parity-gate.yml"
+    ))
+    .expect("read real sstabledump-parity-gate.yml");
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/sstabledump-parity-gate.yml",
+        &wf,
+        &["cqlite-core/tests/sstable_parity_compression_info_test.rs".to_string()],
+    );
+    assert!(
+        findings.is_empty(),
+        "real sstabledump-parity-gate.yml aggregator must still credit its \
+         continue-on-error parity tests, got: {findings:#?}"
     );
 }
