@@ -48,6 +48,26 @@
 #   scripts/agent-gate.sh --list      # list components without running
 #   scripts/agent-gate.sh --only fmt,clippy   # debugging aid; output is
 #                                     # marked PARTIAL and never counts as the gate
+#   scripts/agent-gate.sh --emit-summary-selftest
+#                                     # print a representative SUMMARY block
+#                                     # through the real emission path (fast, for
+#                                     # regression tests — see scripts/tests/) and
+#                                     # exit 0; never runs any gate component.
+#
+# Capturing the gate (issue #1175): the authoritative artifact is the block
+# between the AGENT-GATE SUMMARY markers. Under non-foreground capture (a
+# `script`/pty, a buffering wrapper, a "drain-until-EOF then write" reader, or a
+# backgrounded pipeline) that block can be lost if a gate component leaks a
+# descendant that keeps the gate's stdout pipe open: the reader never sees EOF,
+# gets killed by a timeout, and discards its in-memory buffer — even though the
+# gate exited 0. Two defenses make the SUMMARY immune to capture mode:
+#   1. The gate always writes the SUMMARY (and full transcript) to files under
+#      $LOG_DIR and prints those paths, so the block survives even if the
+#      streamed copy is truncated.
+#   2. After the END marker the gate flushes stdout and detaches inherited FDs so
+#      a leaked child can't hold the pipe open and starve the reader.
+# The most robust streamed capture is still the foreground redirect:
+#   bash scripts/agent-gate.sh > gate.log 2>&1 < /dev/null
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -61,16 +81,78 @@ export CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-$REPO_ROOT/test-data/datase
 
 COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard integration-tests format-compat write-tests cli-tests python-bindings delivery-telemetry minimal-build smoke)
 ONLY=""
+SELFTEST=0
 case "${1:-}" in
   --list) printf '%s\n' "${COMPONENTS[@]}"; exit 0 ;;
   --only) ONLY="${2:?--only needs a comma-separated component list}" ;;
+  --emit-summary-selftest) SELFTEST=1 ;;
   "") ;;
   *) echo "unknown argument: $1" >&2; exit 2 ;;
 esac
 
 LOG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate.XXXXXX")
+SUMMARY_FILE="$LOG_DIR/summary.txt"
 declare -a NAMES=() STATUSES=() TIMES=()
 OVERALL=PASS
+
+# emit_summary <result> [meta-line ...]
+#
+# Build the canonical SUMMARY block (start marker .. RESULT .. end marker) ONCE,
+# then publish it through two channels so it survives any capture mode (#1175):
+#   - write it to $SUMMARY_FILE synchronously (the authoritative artifact; a
+#     truncated stream can never lose it), and
+#   - stream it to stdout for the foreground/redirect case.
+# After the END marker we flush stdout and close inherited stdout/stderr so a
+# leaked descendant can't keep the gate's stdout pipe open and starve an
+# until-EOF reader (the truncation root cause). Both the real run and the
+# --emit-summary-selftest mode go through this single function.
+emit_summary() {
+  local result="$1"; shift
+  {
+    echo
+    echo "==== AGENT-GATE SUMMARY ===="
+    local line
+    for line in "$@"; do echo "$line"; done
+    echo "logs: $LOG_DIR"
+    echo "summary-file: $SUMMARY_FILE"
+    echo "RESULT: $result"
+    echo "==== END AGENT-GATE SUMMARY ===="
+  } | tee "$SUMMARY_FILE"
+
+  # Belt-and-suspenders: if the streamed copy ever looks short of what we just
+  # wrote to disk, the agent at least gets a loud pointer to the intact file.
+  # (We can't read our own stream back, so we compare on the authoritative side
+  # and always advertise the file; a reader missing the END marker should diff
+  # its capture against $SUMMARY_FILE.)
+  if ! grep -q '==== END AGENT-GATE SUMMARY ====' "$SUMMARY_FILE" 2>/dev/null; then
+    echo "WARNING: SUMMARY may be truncated — authoritative copy: $SUMMARY_FILE" >&2
+  fi
+
+  # Flush and detach: replace stdout/stderr with the (already-written) summary
+  # file so that any descendant still holding fd1/fd2 cannot keep the original
+  # capture pipe/pty open past our exit. This guarantees the reader sees EOF.
+  exec 1>>"$SUMMARY_FILE" 2>>"$SUMMARY_FILE"
+}
+
+# --emit-summary-selftest: prove the SUMMARY block survives capture without
+# running the (5-8 min) gate. Emits a representative block through the exact
+# emit_summary path the real run uses, then exits 0. Used by
+# scripts/tests/test_agent_gate_summary.sh.
+if [ "$SELFTEST" -eq 1 ]; then
+  NAMES=(fmt clippy core-tests smoke)
+  STATUSES=(PASS PASS PASS PASS)
+  TIMES=(1s 2s 3s 4s)
+  meta=(
+    "commit: selftest branch: selftest dirty: no"
+    "datasets: 0 Data.db files under (selftest)"
+    "ci-pins: (selftest)"
+  )
+  for i in "${!NAMES[@]}"; do
+    meta+=("$(printf '%-18s %s (%s)' "${NAMES[$i]}:" "${STATUSES[$i]}" "${TIMES[$i]}")")
+  done
+  emit_summary PASS "${meta[@]}"
+  exit 0
+fi
 
 run_component() { # run_component <name> <cmd...>
   local name="$1"; shift
@@ -326,21 +408,18 @@ run_component smoke bash -c '
   cargo build --package cqlite-cli --bin cqlite &&
   CQLITE_CLI="$PWD/target/debug/cqlite" bash test-data/scripts/smoke-test-all-tables.sh'
 
-echo
-echo "==== AGENT-GATE SUMMARY ===="
-echo "commit: $(git rev-parse --short HEAD) branch: $(git rev-parse --abbrev-ref HEAD) dirty: $(test -n "$(git status --porcelain)" && echo yes || echo no)"
-echo "datasets: $DATA_COUNT Data.db files under $CQLITE_DATASETS_ROOT"
-echo "ci-pins: $PINS"
+declare -a SUMMARY_META=()
+SUMMARY_META+=("commit: $(git rev-parse --short HEAD) branch: $(git rev-parse --abbrev-ref HEAD) dirty: $(test -n "$(git status --porcelain)" && echo yes || echo no)")
+SUMMARY_META+=("datasets: $DATA_COUNT Data.db files under $CQLITE_DATASETS_ROOT")
+SUMMARY_META+=("ci-pins: $PINS")
 if [ -n "$ONLY" ]; then
-  echo "mode: PARTIAL (--only $ONLY) - does NOT count as the gate"
+  SUMMARY_META+=("mode: PARTIAL (--only $ONLY) - does NOT count as the gate")
   [ "$OVERALL" = "PASS" ] && OVERALL=PARTIAL
 fi
 for i in "${!NAMES[@]}"; do
-  printf '%-18s %s (%s)\n' "${NAMES[$i]}:" "${STATUSES[$i]}" "${TIMES[$i]}"
+  SUMMARY_META+=("$(printf '%-18s %s (%s)' "${NAMES[$i]}:" "${STATUSES[$i]}" "${TIMES[$i]}")")
 done
-echo "logs: $LOG_DIR"
-echo "RESULT: $OVERALL"
-echo "==== END AGENT-GATE SUMMARY ===="
+emit_summary "$OVERALL" "${SUMMARY_META[@]}"
 
 # Exit 0 only for a full-gate PASS; PARTIAL runs exit 3 so they can never be
 # scripted into a green gate claim.

@@ -57,6 +57,38 @@ scripts/agent-gate.sh --list
 
 Exit codes: `0` = PASS, `1` = FAIL, `3` = PARTIAL (--only mode).
 
+## Capturing the gate robustly (issue #1175)
+
+The SUMMARY block is the only artifact that counts, so it must survive however
+you capture the run. Use the foreground redirect — it writes each line straight
+to a file descriptor and never buffers:
+
+```bash
+bash scripts/agent-gate.sh > gate.log 2>&1 < /dev/null
+```
+
+Under **non-foreground** capture (a `script`/pty, a buffering wrapper, a
+"drain-until-EOF then write" reader, or a backgrounded pipeline) the streamed
+SUMMARY block could previously be lost: a gate component sometimes leaks a
+descendant (a `cargo`/`rustc` build server, a daemonizing test, etc.) that keeps
+the gate's stdout pipe open, so an until-EOF reader never sees EOF, gets killed
+by a timeout, and discards its in-memory buffer — even though the gate exited 0.
+
+The gate now defends against this:
+
+- It always writes the SUMMARY to an authoritative file and prints the path as a
+  `summary-file:` line. If your streamed capture looks truncated (missing the
+  `==== END AGENT-GATE SUMMARY ====` marker), read that file — it is always
+  complete. Diff your capture against it.
+- After the END marker the gate flushes and detaches its own stdout/stderr so it
+  cannot itself hold the capture pipe open past exit.
+
+A fast regression test for this emission path lives at
+`scripts/tests/test_agent_gate_summary.sh` (run it directly:
+`bash scripts/tests/test_agent_gate_summary.sh`). It exercises
+`scripts/agent-gate.sh --emit-summary-selftest`, which prints a representative
+SUMMARY block through the real emission code without running the 5–8 minute gate.
+
 ## Machine-checkable summary block
 
 The gate emits a block between `==== AGENT-GATE SUMMARY ====` markers. The last
@@ -79,6 +111,7 @@ cli-tests:         PASS|FAIL (<Ns>)
 minimal-build:     PASS|FAIL (<Ns>)
 smoke:             PASS|FAIL (<Ns>)
 logs: /tmp/agent-gate.<random>
+summary-file: /tmp/agent-gate.<random>/summary.txt
 RESULT: PASS
 ==== END AGENT-GATE SUMMARY ====
 ```
@@ -94,6 +127,7 @@ mode: PARTIAL (--only fmt,clippy) - does NOT count as the gate
 fmt:               PASS (<Ns>)
 clippy:            PASS (<Ns>)
 logs: /tmp/agent-gate.<random>
+summary-file: /tmp/agent-gate.<random>/summary.txt
 RESULT: PARTIAL
 ==== END AGENT-GATE SUMMARY ====
 ```
