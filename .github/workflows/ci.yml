@@ -76,27 +76,11 @@ jobs:
           path: test-data/datasets
           key: datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
 
-      - name: Fetch datasets if Data.db fixture missing
-        # Do NOT trust cache-hit alone (#1097): a restored cache can be partial
-        # (JSONL refs without the SSTable Data.db binaries), which makes the
-        # #1080 no-silent-skip guard hard-fail. Gate on the core fixture instead.
-        run: |
-          set -euo pipefail
-          # Capture into a var rather than piping find into grep -q / head: under
-          # `set -o pipefail`, a downstream consumer that closes the pipe early
-          # makes find exit non-zero (SIGPIPE), which would abort the step.
-          CORE_FIXTURE=$(find test-data/datasets/sstables/test_basic -path '*simple_table-*-Data.db' 2>/dev/null || true)
-          if [ -n "$CORE_FIXTURE" ]; then
-            echo "✅ Core Data.db fixture present; skipping download"
-          else
-            echo "📦 Core Data.db fixture missing — fetching ${DATASET_ASSET}..."
-            rm -rf test-data/datasets
-            mkdir -p test-data/datasets
-            curl -fsSL -o /tmp/${DATASET_ASSET} \
-              https://github.com/pmcfadin/cqlite/releases/download/${DATASET_TAG}/${DATASET_ASSET}
-            echo "${DATASET_SHA256}  /tmp/${DATASET_ASSET}" | sha256sum -c -
-            tar -xzf /tmp/${DATASET_ASSET} -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
-          fi
+      - name: Fetch datasets if required fixture data missing
+        # Do NOT trust cache-hit alone (#1097): a restored cache can be partial.
+        # Keep the CI path on the shared fetch script so binary fixtures and
+        # git-tracked JSONL reference files are validated together.
+        run: bash ./test-data/scripts/fetch-datasets.sh
 
       - name: Sanity check dataset
         run: |
@@ -109,7 +93,13 @@ jobs:
             echo "❌ Core fixture test_basic/simple_table-*/*-Data.db missing after fetch" >&2
             exit 1
           fi
+          GOLDEN_JSONL="test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl"
+          if [ ! -s "$GOLDEN_JSONL" ]; then
+            echo "❌ Required JSONL golden missing after fetch: ${GOLDEN_JSONL}" >&2
+            exit 1
+          fi
           echo "✅ Core fixture present: ${CORE_FIXTURE}"
+          echo "✅ Required JSONL golden present: ${GOLDEN_JSONL}"
 
       - name: Validate environment
         run: |
