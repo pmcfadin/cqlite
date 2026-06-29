@@ -387,14 +387,6 @@ pub(crate) fn is_primary_key_column(column: &str, schema: &TableSchema) -> bool 
         || schema.clustering_keys.iter().any(|k| k.name == column)
 }
 
-/// Returns true if this mutation contributes at least one static-column operation.
-pub(crate) fn has_static_operation(mutation: &Mutation, schema: &TableSchema) -> bool {
-    mutation
-        .operations
-        .iter()
-        .any(|op| is_static_operation(op, schema))
-}
-
 /// Collect and merge static-column operations from all mutations in a partition.
 ///
 /// Scans every mutation (regardless of whether it has a clustering key) and
@@ -465,6 +457,31 @@ pub(crate) fn collect_static_operations(
                 }
                 _ => mutation.timestamp_micros,
             };
+            // Issue #1018 (roborev HIGH): PER-CELL shadow filtering for statics. The
+            // mutation-level `shadow_floor` skip above gates on the ROW MAX
+            // (`mutation.timestamp_micros`), so a mutation that survives the floor
+            // (because a recent static sibling keeps its row max high) can still
+            // carry an individual static `Write`/`WriteWithTtl` whose OWN per-cell
+            // writetime is `<= shadow_floor`. That cell is covered by the partition
+            // tombstone and MUST be shadowed exactly as it would have been when every
+            // static cell used the row max. Apply the SAME boundary the row-max skip
+            // uses (`<= floor`) to the resolved `candidate_ts`, dropping the static
+            // write here so it never reaches the LWW map (and so the static
+            // liveness/TTL the partition path derives from the SURVIVING ops below
+            // cannot resurrect it). A static `Delete` tombstone has no per-cell
+            // writetime override (`candidate_ts == mutation.timestamp_micros`), so it
+            // is unaffected; and every cell with no override already has
+            // `candidate_ts == mutation.timestamp_micros > floor`, leaving the
+            // single-writetime case unchanged.
+            if shadow_floor.is_some_and(|floor| candidate_ts <= floor)
+                && matches!(
+                    op,
+                    crate::storage::write_engine::mutation::CellOperation::Write { .. }
+                        | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl { .. }
+                )
+            {
+                continue;
+            }
             let candidate = StaticMergedOp {
                 // #921 finding 2: preserve a `Delete` cell tombstone's own surfaced
                 // LDT; other ops fall back to the mutation's effective LDT.
@@ -489,6 +506,27 @@ pub(crate) fn collect_static_operations(
     }
 
     best.into_values().collect()
+}
+
+/// Derive a static row's liveness timestamp + TTL from the SURVIVING merged
+/// static ops (issue #1018, roborev HIGH).
+///
+/// The static row carries no row-level liveness in the emitted bytes (#1196 —
+/// the writetime rides on each static CELL), but the partition path still
+/// threads a `(latest_ts, ttl)` pair into `write_static_row_with_prev_size`.
+/// That pair MUST be derived from the ops that actually SURVIVED
+/// `collect_static_operations` — each carrying its own per-cell
+/// `timestamp_micros` after the per-cell shadow floor — NOT from the set of
+/// mutations that merely cleared the floor on their ROW MAX. A static `Write`
+/// whose per-cell writetime is `<= shadow_floor` is already dropped from
+/// `merged`, so it cannot contribute liveness/TTL here; deriving from the
+/// mutations' row max could otherwise resurrect a shadowed static cell's
+/// writetime. Returns the max per-cell timestamp and the TTL of the op holding
+/// it (last-write-wins). `None` when there are no surviving ops.
+pub(crate) fn static_liveness_from_ops(ops: &[StaticMergedOp]) -> Option<(i64, Option<u32>)> {
+    ops.iter()
+        .max_by_key(|mop| mop.timestamp_micros)
+        .map(|mop| (mop.timestamp_micros, mop.row_ttl_seconds))
 }
 
 /// Whether a range tombstone's clustering range covers the given clustering key.

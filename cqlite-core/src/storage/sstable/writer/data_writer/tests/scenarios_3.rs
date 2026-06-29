@@ -477,6 +477,179 @@ fn collect_static_operations_preserves_per_cell_writetimes_1018() {
     );
 }
 
+/// Schema with one clustering key and two REGULAR (non-static) text columns, used
+/// by the #1018 per-cell shadow tests for `merge_row_group`.
+fn two_regular_column_schema() -> TableSchema {
+    TableSchema {
+        keyspace: "test_ks".to_string(),
+        table: "test_table".to_string(),
+        partition_keys: vec![KeyColumn {
+            name: "id".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+        }],
+        clustering_keys: vec![ClusteringColumn {
+            name: "ck".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+            order: ClusteringOrder::Asc,
+        }],
+        columns: vec![
+            Column {
+                name: "c1".to_string(),
+                data_type: "text".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "c2".to_string(),
+                data_type: "text".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+        ],
+        comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
+    }
+}
+
+/// Issue #1018 (roborev HIGH — data resurrection past a tombstone): the per-cell
+/// write-timestamp work made each emitted simple `Write`/`WriteWithTtl` cell use
+/// its OWN `cell_write_timestamp(col)` instead of the row max, but tombstone
+/// SHADOWING in `merge_row_group` still gated by the row max (`shadow_floor` vs
+/// `m.timestamp_micros`). So a reconciled row whose row max is ABOVE a tombstone
+/// floor (a recent sibling keeps it live) could still emit another simple cell
+/// whose own per-cell timestamp is `<= floor` — resurrecting data the tombstone
+/// should shadow. The fix applies the `<= deletion_ts` shadow floor PER CELL using
+/// the cell's resolved per-cell timestamp.
+///
+/// This test FAILS before the fix (the low-ts cell survives) and passes after.
+#[test]
+fn merge_row_group_shadows_low_per_cell_ts_simple_cell_1018() {
+    let schema = two_regular_column_schema();
+    let table_id = TableId::new("test_ks", "test_table");
+    let pk = PartitionKey::single("id", Value::Integer(1));
+    let ck = ClusteringKey::single("ck", Value::Integer(1));
+
+    // Partition/range tombstone floor at 4000. The row's max writetime is 5000
+    // (the `c2` sibling, written AFTER the tombstone) so the mutation as a whole
+    // survives the floor. `c1`'s OWN per-cell writetime is 3000 — BELOW the floor —
+    // so it is covered by the tombstone and must be shadowed.
+    let shadow_floor = Some(4000i64);
+    let row_ts = 5000i64;
+    let c1_ts = 3000i64;
+    let mut cell_ts = HashMap::new();
+    cell_ts.insert("c1".to_string(), c1_ts);
+    cell_ts.insert("c2".to_string(), row_ts);
+
+    let mut mutation = Mutation::new(
+        table_id,
+        pk,
+        Some(ck),
+        vec![
+            CellOperation::Write {
+                column: "c1".to_string(),
+                value: Value::Text("shadowed".to_string()),
+            },
+            CellOperation::Write {
+                column: "c2".to_string(),
+                value: Value::Text("survivor".to_string()),
+            },
+        ],
+        row_ts,
+        None,
+    );
+    mutation.cell_write_timestamps = Some(cell_ts);
+
+    let row = DataWriter::merge_row_group(&[&mutation], &schema, false, shadow_floor)
+        .expect("row with a surviving sibling must be emitted");
+
+    let surviving: Vec<&str> = row
+        .ops
+        .iter()
+        .filter_map(|mop| match mop.op {
+            CellOperation::Write { column, .. } => Some(column.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        surviving.contains(&"c2"),
+        "#1018: the recent sibling (per-cell ts > floor) must survive"
+    );
+    assert!(
+        !surviving.contains(&"c1"),
+        "#1018: a simple cell whose per-cell ts ({c1_ts}) is <= the tombstone floor (4000) \
+         must be SHADOWED, not resurrected"
+    );
+}
+
+/// Issue #1018 static analogue: `collect_static_operations` gates a mutation by
+/// the row max (`shadow_floor` vs `mutation.timestamp_micros`). A static row whose
+/// row max is ABOVE a partition tombstone floor (a recent static sibling survives)
+/// could still keep another static cell whose OWN per-cell timestamp is `<= floor`,
+/// resurrecting data the partition tombstone covers. The fix applies the floor
+/// per-cell to the resolved per-cell timestamp.
+///
+/// FAILS before the fix (the low-ts static cell survives), passes after.
+#[test]
+fn collect_static_operations_shadows_low_per_cell_ts_1018() {
+    let schema = two_static_column_schema();
+    let table_id = TableId::new("test_ks", "test_table");
+    let pk = PartitionKey::single("id", Value::Integer(1));
+
+    // Partition tombstone floor at 4000. Row max is 5000 (`s2`, written after the
+    // tombstone) so the mutation survives the floor. `s1`'s OWN per-cell writetime
+    // is 3000 (BELOW the floor), so it is shadowed by the partition tombstone.
+    let shadow_floor = Some(4000i64);
+    let row_ts = 5000i64;
+    let s1_ts = 3000i64;
+    let mut cell_ts = HashMap::new();
+    cell_ts.insert("s1".to_string(), s1_ts);
+    cell_ts.insert("s2".to_string(), row_ts);
+
+    let mut mutation = Mutation::new(
+        table_id,
+        pk,
+        None,
+        vec![
+            CellOperation::Write {
+                column: "s1".to_string(),
+                value: Value::Text("shadowed".to_string()),
+            },
+            CellOperation::Write {
+                column: "s2".to_string(),
+                value: Value::Text("survivor".to_string()),
+            },
+        ],
+        row_ts,
+        None,
+    );
+    mutation.cell_write_timestamps = Some(cell_ts);
+
+    let ops = collect_static_operations(std::slice::from_ref(&mutation), &schema, shadow_floor);
+
+    let surviving: Vec<&str> = ops
+        .iter()
+        .filter_map(|o| match &o.op {
+            CellOperation::Write { column, .. } => Some(column.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        surviving.contains(&"s2"),
+        "#1018: the recent static sibling (per-cell ts > floor) must survive"
+    );
+    assert!(
+        !surviving.contains(&"s1"),
+        "#1018: a static cell whose per-cell ts ({s1_ts}) is <= the partition floor (4000) \
+         must be SHADOWED, not resurrected"
+    );
+}
+
 #[test]
 fn test_write_column_bitmap_zero_when_all_columns_present() {
     let stats = create_test_stats();

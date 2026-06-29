@@ -380,8 +380,15 @@ impl DataWriter {
                         // carry the surfaced clustering cell's OWN write timestamp so
                         // the row marker reflects it, not the row max (which a
                         // higher-ts sibling cell tombstone would otherwise force).
+                        // Issue #1018: a surfaced clustering-only write also
+                        // carries its OWN per-cell writetime, which can be `<=
+                        // deletion_ts` even when the mutation row max survives.
+                        // Shadow it on the same `<= deletion_ts` boundary so it
+                        // cannot resurrect a row marker the tombstone covers.
                         let pk_ts = m.cell_write_timestamp(column);
-                        if pk_write_liveness.is_none_or(|cur| pk_ts >= cur) {
+                        if deletion_ts.is_none_or(|dts| pk_ts > dts)
+                            && pk_write_liveness.is_none_or(|cur| pk_ts >= cur)
+                        {
                             pk_write_liveness = Some(pk_ts);
                         }
                     }
@@ -403,6 +410,30 @@ impl DataWriter {
                     }
                     _ => m.timestamp_micros,
                 };
+
+                // Issue #1018 (roborev HIGH): PER-CELL shadow filtering. The
+                // mutation-level `mutation_shadowed` gate above uses the ROW MAX
+                // (`m.timestamp_micros`), so a mutation whose row max is ABOVE
+                // `deletion_ts` (because a recent sibling cell keeps it live) can
+                // still carry an individual `Write`/`WriteWithTtl` whose OWN
+                // per-cell timestamp is `<= deletion_ts`. Such a cell is covered by
+                // the partition/range/row tombstone and MUST be shadowed exactly as
+                // it would have been when every cell used the row max. Apply the
+                // SAME `<= deletion_ts` boundary the row-max path used (equal-ts
+                // deletion wins, #498) to THIS cell using its resolved `cell_ts`,
+                // dropping both the emitted cell AND its row-marker liveness
+                // candidate. A `Delete` cell tombstone is gated on the mutation row
+                // ts (it has no per-cell writetime override), so this only narrows
+                // live writes — every cell with no per-cell override has
+                // `cell_ts == m.timestamp_micros > deletion_ts` already, leaving the
+                // single-writetime row unchanged.
+                if matches!(
+                    op,
+                    CellOperation::Write { .. } | CellOperation::WriteWithTtl { .. }
+                ) && deletion_ts.is_some_and(|dts| cell_ts <= dts)
+                {
+                    continue;
+                }
 
                 // Issue #921: record the ROW-MARKER liveness candidate for this
                 // regular-column write. Done BEFORE the cells LWW dedup so that a

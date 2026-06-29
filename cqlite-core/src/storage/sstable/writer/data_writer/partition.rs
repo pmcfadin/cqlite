@@ -61,13 +61,6 @@ impl DataWriter {
             // Static cells shadowed by the partition tombstone are dropped.
             let merged = collect_static_operations(mutations, schema, partition_floor);
 
-            // Mutations shadowed by the partition tombstone cannot contribute
-            // the static row's liveness timestamp or TTL either.
-            let unshadowed_static = |m: &&Mutation| {
-                partition_floor.is_none_or(|floor| m.timestamp_micros > floor)
-                    && has_static_operation(m, schema)
-            };
-
             if merged.is_empty() {
                 // Schema declares statics but this partition writes none.
                 // Cassandra still expects the prelude; emit the minimal empty form.
@@ -82,24 +75,17 @@ impl DataWriter {
                 let static_size = self.write_empty_static_row(0, schema)? as u64;
                 prev_unfiltered_size += static_size;
             } else {
-                // Row-level liveness timestamp: the latest timestamp seen across
-                // contributing mutations. `!merged.is_empty()` implies at least
-                // one mutation contributed an unshadowed static op, so `.max()`
-                // is guaranteed `Some`.
-                let latest_ts = mutations
-                    .iter()
-                    .filter(unshadowed_static)
-                    .map(|m| m.timestamp_micros)
-                    .max()
-                    .unwrap_or(mutations.first().map(|m| m.timestamp_micros).unwrap_or(0));
-
-                // Pick the TTL from the mutation with the latest timestamp that
-                // contributed a static op (mirrors Cassandra's last-write-wins).
-                let ttl = mutations
-                    .iter()
-                    .filter(unshadowed_static)
-                    .max_by_key(|m| m.timestamp_micros)
-                    .and_then(|m| m.ttl_seconds);
+                // Issue #1018 (roborev HIGH): derive the static row's liveness
+                // timestamp + TTL from the SURVIVING merged ops (each carrying its
+                // own per-cell writetime after the per-cell shadow floor), NOT from
+                // the mutations that merely cleared the floor on their row max — a
+                // static write whose per-cell ts is `<= partition_floor` is already
+                // dropped from `merged`, so it cannot leak its writetime here.
+                // `!merged.is_empty()` guarantees `Some`.
+                let (latest_ts, ttl) = static_liveness_from_ops(&merged).unwrap_or((
+                    mutations.first().map(|m| m.timestamp_micros).unwrap_or(0),
+                    None,
+                ));
 
                 // Issue #764: pass the per-op merged static ops (each carrying its
                 // own originating timestamp + local_deletion_time) so a surviving
@@ -264,10 +250,6 @@ impl DataWriter {
 
         if schema_has_static {
             let merged = collect_static_operations(mutations, schema, partition_floor);
-            let unshadowed_static = |m: &&Mutation| {
-                partition_floor.is_none_or(|floor| m.timestamp_micros > floor)
-                    && has_static_operation(m, schema)
-            };
 
             if merged.is_empty() {
                 // Issue #821 (finding #2): static row hard-codes prev_size = 0 and
@@ -277,18 +259,14 @@ impl DataWriter {
                 let static_size = self.write_empty_static_row(0, schema)? as u64;
                 prev_unfiltered_size += static_size;
             } else {
-                let latest_ts = mutations
-                    .iter()
-                    .filter(unshadowed_static)
-                    .map(|m| m.timestamp_micros)
-                    .max()
-                    .unwrap_or(mutations.first().map(|m| m.timestamp_micros).unwrap_or(0));
-
-                let ttl = mutations
-                    .iter()
-                    .filter(unshadowed_static)
-                    .max_by_key(|m| m.timestamp_micros)
-                    .and_then(|m| m.ttl_seconds);
+                // Issue #1018 (roborev HIGH): derive liveness/TTL from the SURVIVING
+                // merged ops (per-cell writetimes after the shadow floor), not from
+                // mutations that only cleared the floor on their row max. See the
+                // non-indexed path above for the rationale.
+                let (latest_ts, ttl) = static_liveness_from_ops(&merged).unwrap_or((
+                    mutations.first().map(|m| m.timestamp_micros).unwrap_or(0),
+                    None,
+                ));
 
                 // Issue #764: same per-op LDT preservation as the non-indexed path.
                 // Issue #821 (finding #2): prev_size = 0 for the static row; chain
