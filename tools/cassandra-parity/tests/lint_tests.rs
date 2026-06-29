@@ -802,6 +802,46 @@ fn blocked_claim_without_safe_alternative_is_rejected() {
 }
 
 #[test]
+fn malformed_claim_id_empty_slug_is_rejected() {
+    // Roborev finding (issue #1023): an id with the right prefix but an empty
+    // slug (`claim.safe.`) must FAIL lint — prefix-only validation let it pass.
+    let yaml = wrap_with_claims().replace("claim.safe.selected_fixture_validation", "claim.safe.");
+    let errs = errors(&yaml);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.safe.") && e.contains("claims.id") && e.contains("slug")),
+        "empty-slug claim id must be rejected, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn malformed_claim_id_bad_chars_is_rejected() {
+    // An id with the right prefix but uppercase/hyphen in the slug
+    // (`claim.blocked.Bad-Slug`) violates `[a-z0-9_]+` and must FAIL lint.
+    let yaml = wrap_with_claims().replace(
+        "claim.blocked.same_tests_as_cassandra",
+        "claim.blocked.Bad-Slug",
+    );
+    let errs = errors(&yaml);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.blocked.Bad-Slug") && e.contains("claims.id")),
+        "bad-char claim id must be rejected, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn well_formed_claim_ids_pass() {
+    // The positive counterpart: the well-formed claim ids in `wrap_with_claims`
+    // must NOT trigger any `claims.id` slug error.
+    let errs = errors(&wrap_with_claims());
+    assert!(
+        !errs.iter().any(|e| e.contains("claims.id")),
+        "well-formed claim ids must pass id validation, got: {errs:#?}"
+    );
+}
+
+#[test]
 fn real_manifest_has_the_six_claim_entries() {
     // The six claim entries from issue #1023 must exist and lint clean.
     let root = repo_root();

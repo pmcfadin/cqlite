@@ -178,7 +178,11 @@ fn find_spans(hay: &str, needle: &str) -> Vec<Span> {
         let start = from + rel;
         let end = start + needle.len();
         spans.push(Span { start, end });
-        from = start + 1; // allow overlapping matches
+        // Advance past the first char of the match so overlapping matches are
+        // still found, but always to a valid UTF-8 char boundary: a manifest
+        // claim phrase may begin with a multi-byte char, so `start + 1` could
+        // land mid-character and panic on the next `hay[from..]` slice.
+        from = start + hay[start..].chars().next().map(char::len_utf8).unwrap_or(1);
     }
     spans
 }
@@ -287,3 +291,28 @@ pub const RELEASE_FILES: &[&str] = &[
     "docs/development/parity-release-checklist.md",
     "docs/development/cassandra-parity-manifest.md",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_spans_handles_non_ascii_phrase_without_panic() {
+        // A claim phrase beginning with a multi-byte UTF-8 char must not panic
+        // when `find_spans` advances its cursor, and must still match correctly.
+        let hay = "prefix é… é… tail";
+        let needle = "é…"; // starts with a 2-byte 'é'
+        let spans = find_spans(hay, needle);
+        assert_eq!(spans.len(), 2, "expected both occurrences");
+        for s in &spans {
+            assert_eq!(&hay[s.start..s.end], needle);
+        }
+    }
+
+    #[test]
+    fn find_spans_overlapping_ascii_still_works() {
+        // Regression guard: boundary-aware advance keeps overlapping ASCII matches.
+        let spans = find_spans("aaaa", "aa");
+        assert_eq!(spans.len(), 3);
+    }
+}

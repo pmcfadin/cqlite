@@ -110,6 +110,19 @@ fn lint_claims(m: &Manifest, out: &mut Vec<Finding>) {
                 "claims.id",
                 format!("{} claim id must start with `{expected_prefix}`", c.kind),
             ));
+        } else if matches!(c.kind.as_str(), "safe" | "blocked") && !valid_claim_id(id) {
+            // The prefix is correct but the full id is malformed (empty or
+            // non-`[a-z0-9_]` slug). The schema requires
+            // `^claim\.(safe|blocked)\.[a-z0-9_]+$`; enforce it here so the CI
+            // `lint` gate cannot publish a malformed id.
+            out.push(Finding::error(
+                id,
+                "claims.id",
+                format!(
+                    "claim id must match `^claim\\.(safe|blocked)\\.[a-z0-9_]+$` \
+                     (non-empty lowercase/digit/underscore slug): {id}"
+                ),
+            ));
         }
         if c.phrase.trim().is_empty() {
             out.push(Finding::error(
@@ -522,6 +535,25 @@ fn check_enum(out: &mut Vec<Finding>, id: &str, field: &str, value: &str, allowe
             field,
             format!("invalid value '{value}'; allowed: {}", allowed.join(", ")),
         ));
+    }
+}
+
+/// True if `id` matches the schema pattern `^claim\.(safe|blocked)\.[a-z0-9_]+$`:
+/// a `claim.safe.` / `claim.blocked.` prefix followed by a non-empty slug of
+/// `[a-z0-9_]`. Dependency-free char-class check (no `regex` crate) matching the
+/// existing [`valid_id`] style. Callers should only invoke this once the prefix
+/// is known to be correct; it re-checks the prefix anyway so it is total.
+fn valid_claim_id(id: &str) -> bool {
+    let slug = id
+        .strip_prefix("claim.safe.")
+        .or_else(|| id.strip_prefix("claim.blocked."));
+    match slug {
+        Some(s) => {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        }
+        None => false,
     }
 }
 
