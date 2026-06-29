@@ -1,0 +1,100 @@
+name: "CI: Live-Cell Compaction Byte Parity (issue #1017)"
+
+# Fail-closed byte-parity gate for the two live-cell compaction scenarios
+# (issue #1017, epic #973):
+#   * live_no_clustering: partition-key-only LWW overlap
+#   * live_clustering: clustering LWW overlap with preserved clustering order
+#
+# Why this is a standalone workflow (not compaction-parity.yml)
+# -------------------------------------------------------------
+# compaction-parity.yml runs the Java/Gradle differential harness (logical +
+# byte tiers) that requires a full Cassandra source build + JDK 17 + Ant.
+# This workflow is purely Rust: the reference binaries are committed to git
+# (test-data/datasets/sstables/test_compactionparity/**), so NO Docker
+# regeneration is needed. The test reads CQLITE_DATASETS_ROOT and compares
+# CQLite's compaction output against the committed Cassandra 5.0.2 golden
+# byte-for-byte. CQLITE_REQUIRE_FIXTURES=1 ensures the test PANICS (fails
+# the job) if the committed binaries are absent rather than silently skipping.
+#
+# GATING POLICY: runs on
+#   - pull_request touching the test, its golden fixtures, the manifest, the
+#     compaction write path, or this workflow file itself
+#   - workflow_dispatch (manual)
+#   - schedule (nightly, to catch environment-induced drift early)
+#
+# Manual local run (no Docker needed — fixtures are in git):
+#   env CQLITE_REQUIRE_FIXTURES=1 \
+#     CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
+#     cargo test -p cqlite-core --features write-support \
+#       --test issue_1017_live_cell_compaction_byte_parity \
+#       -- --nocapture
+
+on:
+  workflow_dispatch:
+    inputs:
+      verbose:
+        description: 'Run cargo test with --nocapture'
+        type: boolean
+        default: true
+  schedule:
+    # Nightly at 04:53 UTC (offset from the other nightly parity jobs:
+    # tombstone/TTL 04:17, cql-type 04:31, compression 05:23, compaction-diff 05:43).
+    - cron: '53 4 * * *'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'cqlite-core/tests/issue_1017_live_cell_compaction_byte_parity.rs'
+      - 'cqlite-core/src/storage/write_engine/merge/**'
+      - 'cqlite-core/src/storage/write_engine/mod.rs'
+      - 'cqlite-core/src/storage/sstable/writer/**'
+      - 'test-data/datasets/sstables/test_compactionparity/**'
+      - 'test-data/cassandra-parity-manifest.yml'
+      - '.github/workflows/live-cell-compaction-parity.yml'
+
+env:
+  CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+  CQLITE_REQUIRE_FIXTURES: "1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-cell-compaction-parity-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  live-cell-compaction-byte-parity:
+    name: Live-cell compaction byte parity (require-fixtures)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: live-cell-compaction-parity-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Verify committed reference fixtures are present
+        run: |
+          echo "=== test_compactionparity reference binaries (committed to git) ==="
+          find "$CQLITE_DATASETS_ROOT/sstables/test_compactionparity" \
+            -name '*-Data.db' -not -name '._*' | sort
+          echo ""
+          echo "=== live_no_clustering fixture sizes ==="
+          ls -lh "$CQLITE_DATASETS_ROOT/sstables/test_compactionparity"/live_no_clustering-*/
+          echo ""
+          echo "=== live_clustering fixture sizes ==="
+          ls -lh "$CQLITE_DATASETS_ROOT/sstables/test_compactionparity"/live_clustering-*/
+
+      - name: Run live-cell compaction byte-parity tests (strict, require-fixtures)
+        run: |
+          env CQLITE_REQUIRE_FIXTURES=1 \
+            CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
+            cargo test -p cqlite-core --features write-support \
+              --test issue_1017_live_cell_compaction_byte_parity \
+              -- --nocapture

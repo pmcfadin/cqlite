@@ -5487,13 +5487,13 @@ scenarios:
           Summary.db / Digest.crc32 are byte-identical to the Cassandra reference.
           The newer write wins by timestamp (LWW) on the overlapping keys; partition
           (Murmur3 token) order is preserved.
+          Cross-references the byte-level claim cass.compaction.live_cells_no_clustering.
     fixtures:
       references:
         - test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl
     evidence:
-      type: byte_for_byte
-      strict: true
-      artifacts: [bytes, offsets, checksums, component_files, jsonl, generated_report]
+      type: canonical_semantic
+      artifacts: [jsonl, generated_report]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
@@ -5505,11 +5505,10 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl
       normalization: >-
-        Data.db/Index.db/Summary.db/Digest.crc32 compared whole-file byte-for-byte;
-        CRC.db compared as a prefix (Cassandra's compaction-only trailing
-        empty-chunk CRC32=0 excluded); sstabledump JSONL is a secondary diagnostic.
-      failure_artifacts:
-        - "panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; JSONL partition-count + LWW-survivor assertion"
+        Cassandra-test-class perspective cross-referencing the byte-level claim
+        cass.compaction.live_cells_no_clustering. The JSONL golden pins LWW survivor
+        values semantically (partition count + per-partition v-cell set equality).
+        Byte-level component verification is covered by the real byte_for_byte claim.
       known_limitations: >-
         Statistics.db + Filter.db are present on both sides but NOT byte-diffed
         (impl-specific histograms/HLL/bloom sizing). CRC.db diverges only by
@@ -5518,7 +5517,7 @@ scenarios:
         out of scope for this foundational slice.
     ci:
       tier: required_parity
-      workflow: .github/workflows/cassandra-parity.yml
+      workflow: .github/workflows/live-cell-compaction-parity.yml
     scope: {}
 
   - id: cass.compaction.CompactionIteratorTest.live_partition_merge
@@ -5543,13 +5542,13 @@ scenarios:
           last-write-wins value by timestamp and appearing exactly once. CQLite's
           compacted Data.db/Index.db/Summary.db/Digest.crc32 match Cassandra's
           byte-for-byte; the committed sstabledump JSONL records the LWW survivors.
+          Cross-references the byte-level claim cass.compaction.live_cells_no_clustering.
     fixtures:
       references:
         - test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl
     evidence:
-      type: byte_for_byte
-      strict: true
-      artifacts: [bytes, offsets, checksums, component_files, jsonl, generated_report]
+      type: canonical_semantic
+      artifacts: [jsonl, generated_report]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
@@ -5560,14 +5559,17 @@ scenarios:
         --features write-support --test issue_1017_live_cell_compaction_byte_parity
       reference_paths:
         - test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl
-      failure_artifacts:
-        - "panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; JSONL partition-count + LWW-survivor assertion"
+      normalization: >-
+        Cassandra-test-class perspective cross-referencing the byte-level claim
+        cass.compaction.live_cells_no_clustering. The JSONL golden pins the
+        single-output constraint and LWW survivors semantically. Byte-level
+        component verification is covered by the real byte_for_byte claim.
       known_limitations: >-
         Statistics.db + Filter.db not byte-diffed; CRC.db prefix-parity only
         (Cassandra compaction trailing empty-chunk CRC32=0). Live cells only.
     ci:
       tier: required_parity
-      workflow: .github/workflows/cassandra-parity.yml
+      workflow: .github/workflows/live-cell-compaction-parity.yml
     scope: {}
 
   - id: cass.compaction.CompactionAwareWriterTest.live_row_count_preservation
@@ -5593,14 +5595,14 @@ scenarios:
           once, in clustering order, with LWW applied per (PK, CK). CQLite's compacted
           Data.db/Index.db/Summary.db/Digest.crc32 are byte-identical to Cassandra's,
           which proves both row-count and partition+clustering-order preservation at
-          the byte level.
+          the byte level. Cross-references the byte-level claim
+          cass.compaction.live_cells_clustering_lww.
     fixtures:
       references:
         - test-data/datasets/sstables/test_compactionparity/live_clustering-e094a78073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl
     evidence:
-      type: byte_for_byte
-      strict: true
-      artifacts: [bytes, offsets, checksums, component_files, jsonl, generated_report]
+      type: canonical_semantic
+      artifacts: [jsonl, generated_report]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
@@ -5611,14 +5613,18 @@ scenarios:
         --features write-support --test issue_1017_live_cell_compaction_byte_parity
       reference_paths:
         - test-data/datasets/sstables/test_compactionparity/live_clustering-e094a78073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl
-      failure_artifacts:
-        - "panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; JSONL partition-count + LWW-survivor assertion"
+      normalization: >-
+        Cassandra-test-class perspective cross-referencing the byte-level claim
+        cass.compaction.live_cells_clustering_lww. The JSONL golden pins row-count
+        and clustering-order preservation semantically via the (pk,ck)->v map
+        assertion. Byte-level component verification is covered by the real
+        byte_for_byte claim.
       known_limitations: >-
         Statistics.db + Filter.db not byte-diffed; CRC.db prefix-parity only
         (Cassandra compaction trailing empty-chunk CRC32=0). Live cells only.
     ci:
       tier: required_parity
-      workflow: .github/workflows/cassandra-parity.yml
+      workflow: .github/workflows/live-cell-compaction-parity.yml
     scope: {}
 
   # cqlite.compaction_parity.live_cells.no_clustering (issue identifier)
@@ -5649,6 +5655,7 @@ scenarios:
           writes is emitted by CQLite (the test fails otherwise).
     fixtures:
       references:
+        - test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Data.db
         - test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
@@ -5664,6 +5671,10 @@ scenarios:
         --features write-support --test issue_1017_live_cell_compaction_byte_parity
         no_clustering_compaction_byte_for_byte
       reference_paths:
+        - test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Data.db
+        - test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Index.db
+        - test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Summary.db
+        - test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Digest.crc32
         - test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl
       normalization: >-
         Data.db/Index.db/Summary.db/Digest.crc32 whole-file byte-for-byte; CRC.db
@@ -5675,7 +5686,7 @@ scenarios:
         CRC.db prefix-parity only. Live cells only (the smallest blocking slice).
     ci:
       tier: required_parity
-      workflow: .github/workflows/cassandra-parity.yml
+      workflow: .github/workflows/live-cell-compaction-parity.yml
     scope: {}
 
   # cqlite.compaction_parity.live_cells.clustering_lww (issue identifier)
@@ -5706,6 +5717,7 @@ scenarios:
           overlapping (PK, CK) carries the newer value.
     fixtures:
       references:
+        - test-data/datasets/sstables/test_compactionparity/live_clustering-e094a78073a611f1b17b3da6654e7580/nb-3-big-Data.db
         - test-data/datasets/sstables/test_compactionparity/live_clustering-e094a78073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
@@ -5721,6 +5733,10 @@ scenarios:
         --features write-support --test issue_1017_live_cell_compaction_byte_parity
         clustering_compaction_byte_for_byte
       reference_paths:
+        - test-data/datasets/sstables/test_compactionparity/live_clustering-e094a78073a611f1b17b3da6654e7580/nb-3-big-Data.db
+        - test-data/datasets/sstables/test_compactionparity/live_clustering-e094a78073a611f1b17b3da6654e7580/nb-3-big-Index.db
+        - test-data/datasets/sstables/test_compactionparity/live_clustering-e094a78073a611f1b17b3da6654e7580/nb-3-big-Summary.db
+        - test-data/datasets/sstables/test_compactionparity/live_clustering-e094a78073a611f1b17b3da6654e7580/nb-3-big-Digest.crc32
         - test-data/datasets/sstables/test_compactionparity/live_clustering-e094a78073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl
       normalization: >-
         Data.db/Index.db/Summary.db/Digest.crc32 whole-file byte-for-byte; CRC.db
@@ -5732,7 +5748,7 @@ scenarios:
         CRC.db prefix-parity only. Live cells only (the smallest blocking slice).
     ci:
       tier: required_parity
-      workflow: .github/workflows/cassandra-parity.yml
+      workflow: .github/workflows/live-cell-compaction-parity.yml
     scope: {}
 
   # ----------------------------------------------------------------------------

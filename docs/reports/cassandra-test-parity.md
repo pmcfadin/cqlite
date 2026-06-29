@@ -20,8 +20,8 @@ Sources: [`docs/cassandra_test_index.md`](../../docs/cassandra_test_index.md) ·
 
 | Evidence | Scenarios |
 |---|---|
-| `byte_for_byte` | 114 |
-| `canonical_semantic` | 83 |
+| `byte_for_byte` | 111 |
+| `canonical_semantic` | 86 |
 | `smoke` | 7 |
 | `partial` | 27 |
 | `out_of_scope` | 16 |
@@ -57,11 +57,11 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 |---|---|---|---|---|---|
 | `cass.bti_big_version_matrix.big_nb_oa_read` | bti_big_version_matrix | mirrored | canonical_semantic | `sstable_parity_data_db_jsonl` | p1_correctness |
 | `cass.bti_big_version_matrix.bti_da_write_read` | bti_big_version_matrix | mirrored | canonical_semantic | `sstable_parity_bti_partitions_rows` | p1_correctness |
-| `cass.compaction.CompactionAwareWriterTest.live_row_count_preservation` | compaction_merge | mirrored | byte_for_byte | `compaction_parity_tombstone_ttl` | p1_correctness |
+| `cass.compaction.CompactionAwareWriterTest.live_row_count_preservation` | compaction_merge | mirrored | canonical_semantic | `compaction_parity_tombstone_ttl` | p1_correctness |
 | `cass.compaction.CompactionAwareWriterTest.row_count_and_order_preservation` | compaction_merge | mirrored | canonical_semantic | `compaction_parity_tombstone_ttl` | p1_correctness |
 | `cass.compaction.CompactionIteratorTest.differential_compaction_loop` | compaction_merge | mirrored | canonical_semantic | `compaction_parity_tombstone_ttl` | p0_data_loss |
-| `cass.compaction.CompactionIteratorTest.live_partition_merge` | compaction_merge | mirrored | byte_for_byte | `compaction_parity_tombstone_ttl` | p0_data_loss |
-| `cass.compaction.LongCompactionsTest.live_rows_lww_overlap` | compaction_merge | mirrored | byte_for_byte | `compaction_parity_tombstone_ttl` | p0_data_loss |
+| `cass.compaction.CompactionIteratorTest.live_partition_merge` | compaction_merge | mirrored | canonical_semantic | `compaction_parity_tombstone_ttl` | p0_data_loss |
+| `cass.compaction.LongCompactionsTest.live_rows_lww_overlap` | compaction_merge | mirrored | canonical_semantic | `compaction_parity_tombstone_ttl` | p0_data_loss |
 | `cass.compaction.SSTableRewriterTest.output_component_integrity` | compaction_merge | planned | byte_for_byte | `compaction_parity_tombstone_ttl` | p0_data_loss |
 | `cass.compaction.harness_byte_tier_artifacts` | compaction_merge | planned | byte_for_byte | `compaction_parity_tombstone_ttl` | p0_data_loss |
 | `cass.compaction.harness_logical_tier` | compaction_merge | mirrored | canonical_semantic | `compaction_parity_tombstone_ttl` | p1_correctness |
@@ -234,10 +234,6 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 
 ## Byte-for-byte scenarios
 
-- `cass.compaction.CompactionAwareWriterTest.live_row_count_preservation` — Live row count + clustering order preservation compaction byte parity
-- `cass.compaction.CompactionIteratorTest.live_partition_merge` — Live partition merge compaction byte parity (single-output, LWW survivors)
-- `cass.compaction.LongCompactionsTest.live_rows_lww_overlap` — Live-row last-write-wins overlap compaction byte parity (partition-key-only)
-  - Normalization: Data.db/Index.db/Summary.db/Digest.crc32 compared whole-file byte-for-byte; CRC.db compared as a prefix (Cassandra's compaction-only trailing empty-chunk CRC32=0 excluded); sstabledump JSONL is a secondary diagnostic.
 - `cass.compaction.SSTableRewriterTest.output_component_integrity` — Compaction output components byte-identical to Cassandra SSTableRewriter (the parity claim) _(planned — no evidence yet)_
 - `cass.compaction.harness_byte_tier_artifacts` — Differential harness byte-tier MECHANISM — per-component cmp engine + failure artifacts _(planned — no evidence yet)_
 - `cass.compaction.live_cells_clustering_lww` — Live-cell compaction byte parity — clustering table, LWW overlap (the claim)
@@ -385,10 +381,16 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
   - Normalization: Decoded rows for nb (Cassandra 4-compatible BIG) and oa (Cassandra 5 BIG) datasets are compared against sstabledump JSONL.
 - `cass.bti_big_version_matrix.bti_da_write_read` — BTI da write and read-back parity
   - Normalization: CQLite-written da BTI SSTables are dumped with Cassandra 5 sstabledump and compared for value equivalence; Partitions.db footer shape [firstPos|keyCount|root] is matched against a real Cassandra fixture.
+- `cass.compaction.CompactionAwareWriterTest.live_row_count_preservation` — Live row count + clustering order preservation compaction byte parity
+  - Normalization: Cassandra-test-class perspective cross-referencing the byte-level claim cass.compaction.live_cells_clustering_lww. The JSONL golden pins row-count and clustering-order preservation semantically via the (pk,ck)->v map assertion. Byte-level component verification is covered by the real byte_for_byte claim.
 - `cass.compaction.CompactionAwareWriterTest.row_count_and_order_preservation` — Compaction preserves row count and partition order (logical)
   - Normalization: Compared on the sstabledump JSONL fact model (partition key order, clustering order, surviving cell set); presentation and file layout ignored.
 - `cass.compaction.CompactionIteratorTest.differential_compaction_loop` — Differential compaction loop — same inputs through both engines (logical)
   - Normalization: Both outputs are dumped with Cassandra's own sstabledump (-l) and the wall-clock-derived `expired` flag is normalized out; merged partition/row/cell/timestamp/TTL/deletion facts are compared, file layout and presentation ignored.
+- `cass.compaction.CompactionIteratorTest.live_partition_merge` — Live partition merge compaction byte parity (single-output, LWW survivors)
+  - Normalization: Cassandra-test-class perspective cross-referencing the byte-level claim cass.compaction.live_cells_no_clustering. The JSONL golden pins the single-output constraint and LWW survivors semantically. Byte-level component verification is covered by the real byte_for_byte claim.
+- `cass.compaction.LongCompactionsTest.live_rows_lww_overlap` — Live-row last-write-wins overlap compaction byte parity (partition-key-only)
+  - Normalization: Cassandra-test-class perspective cross-referencing the byte-level claim cass.compaction.live_cells_no_clustering. The JSONL golden pins LWW survivor values semantically (partition count + per-partition v-cell set equality). Byte-level component verification is covered by the real byte_for_byte claim.
 - `cass.compaction.harness_logical_tier` — Differential harness logical tier — canonical sstabledump equality
   - Normalization: sstabledump JSONL of both outputs with the wall-clock `expired` flag normalized out; logical facts compared, layout ignored.
 - `cass.compaction_merge.GcCompactionTest.row_cell_partition_tombstone_gc` — Row/cell/partition tombstone gc through compaction merge (canonical)
@@ -672,16 +674,16 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.bti_big_version_matrix.bti_da_write_read` | nightly_docker | .github/workflows/e2e-readback.yml |
 | `cass.cli_reporting.parity_manifest_lint_and_report` | fast_pr | .github/workflows/cassandra-parity.yml |
 | `cass.commitlog_replay.recovery_out_of_scope` | fast_pr | — |
-| `cass.compaction.CompactionAwareWriterTest.live_row_count_preservation` | required_parity | .github/workflows/cassandra-parity.yml |
+| `cass.compaction.CompactionAwareWriterTest.live_row_count_preservation` | required_parity | .github/workflows/live-cell-compaction-parity.yml |
 | `cass.compaction.CompactionAwareWriterTest.row_count_and_order_preservation` | required_parity | .github/workflows/compaction-parity.yml |
 | `cass.compaction.CompactionIteratorTest.differential_compaction_loop` | required_parity | .github/workflows/compaction-parity.yml |
-| `cass.compaction.CompactionIteratorTest.live_partition_merge` | required_parity | .github/workflows/cassandra-parity.yml |
-| `cass.compaction.LongCompactionsTest.live_rows_lww_overlap` | required_parity | .github/workflows/cassandra-parity.yml |
+| `cass.compaction.CompactionIteratorTest.live_partition_merge` | required_parity | .github/workflows/live-cell-compaction-parity.yml |
+| `cass.compaction.LongCompactionsTest.live_rows_lww_overlap` | required_parity | .github/workflows/live-cell-compaction-parity.yml |
 | `cass.compaction.SSTableRewriterTest.output_component_integrity` | nightly_docker | .github/workflows/compaction-parity.yml |
 | `cass.compaction.harness_byte_tier_artifacts` | nightly_docker | .github/workflows/compaction-parity.yml |
 | `cass.compaction.harness_logical_tier` | required_parity | .github/workflows/compaction-parity.yml |
-| `cass.compaction.live_cells_clustering_lww` | required_parity | .github/workflows/cassandra-parity.yml |
-| `cass.compaction.live_cells_no_clustering` | required_parity | .github/workflows/cassandra-parity.yml |
+| `cass.compaction.live_cells_clustering_lww` | required_parity | .github/workflows/live-cell-compaction-parity.yml |
+| `cass.compaction.live_cells_no_clustering` | required_parity | .github/workflows/live-cell-compaction-parity.yml |
 | `cass.compaction_merge.GcCompactionTest.row_cell_partition_tombstone_gc` | required_parity | .github/workflows/compaction-parity.yml |
 | `cass.compaction_merge.byte_for_byte_output` | manual_debug | — |
 | `cass.compaction_merge.issue_819.differential_input_merge_write_fidelity` | required_parity | .github/workflows/compaction-parity.yml |
@@ -924,16 +926,16 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.bti_big_version_matrix.bti_da_write_read` | da | test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Data.db.jsonl |
 | `cass.cli_reporting.parity_manifest_lint_and_report` | — | — |
 | `cass.commitlog_replay.recovery_out_of_scope` | — | — |
-| `cass.compaction.CompactionAwareWriterTest.live_row_count_preservation` | nb | test-data/datasets/sstables/test_compactionparity/live_clustering-e094a78073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl<br>_fail:_ panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; JSONL partition-count + LWW-survivor assertion |
+| `cass.compaction.CompactionAwareWriterTest.live_row_count_preservation` | nb | test-data/datasets/sstables/test_compactionparity/live_clustering-e094a78073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl |
 | `cass.compaction.CompactionAwareWriterTest.row_count_and_order_preservation` | nb | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
 | `cass.compaction.CompactionIteratorTest.differential_compaction_loop` | nb | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
-| `cass.compaction.CompactionIteratorTest.live_partition_merge` | nb | test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl<br>_fail:_ panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; JSONL partition-count + LWW-survivor assertion |
-| `cass.compaction.LongCompactionsTest.live_rows_lww_overlap` | nb | test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl<br>_fail:_ panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; JSONL partition-count + LWW-survivor assertion |
+| `cass.compaction.CompactionIteratorTest.live_partition_merge` | nb | test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl |
+| `cass.compaction.LongCompactionsTest.live_rows_lww_overlap` | nb | test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl |
 | `cass.compaction.SSTableRewriterTest.output_component_integrity` | nb | compaction-parity/build/parity-artifacts-byteParity/<scenario>/cassandra-output/<br>_fail:_ byte-diff.txt: first byte/offset diff per component (component, offset, ref byte, candidate byte, lengths), checksums.txt: SHA-256 of every component on both sides, cassandra-output/ and cqlite-output/: the full component dirs for offline decoding |
 | `cass.compaction.harness_byte_tier_artifacts` | nb | compaction-parity/build/parity-artifacts-byteParity/<scenario>/cassandra-output/<br>_fail:_ byte-diff.txt: first differing byte/offset per component, checksums.txt: SHA-256 per component, both engines, commands.txt: exact cqlite compact + sstabledump command lines, cqlite-compact.stdout / cqlite-compact.stderr |
 | `cass.compaction.harness_logical_tier` | nb | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
-| `cass.compaction.live_cells_clustering_lww` | nb | test-data/datasets/sstables/test_compactionparity/live_clustering-e094a78073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl<br>_fail:_ panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; JSONL partition-count + LWW-survivor assertion |
-| `cass.compaction.live_cells_no_clustering` | nb | test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl<br>_fail:_ panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; JSONL partition-count + LWW-survivor assertion |
+| `cass.compaction.live_cells_clustering_lww` | nb | test-data/datasets/sstables/test_compactionparity/live_clustering-e094a78073a611f1b17b3da6654e7580/nb-3-big-Data.db<br>test-data/datasets/sstables/test_compactionparity/live_clustering-e094a78073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl<br>test-data/datasets/sstables/test_compactionparity/live_clustering-e094a78073a611f1b17b3da6654e7580/nb-3-big-Index.db<br>test-data/datasets/sstables/test_compactionparity/live_clustering-e094a78073a611f1b17b3da6654e7580/nb-3-big-Summary.db<br>test-data/datasets/sstables/test_compactionparity/live_clustering-e094a78073a611f1b17b3da6654e7580/nb-3-big-Digest.crc32<br>_fail:_ panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; JSONL partition-count + LWW-survivor assertion |
+| `cass.compaction.live_cells_no_clustering` | nb | test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Data.db<br>test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl<br>test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Index.db<br>test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Summary.db<br>test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Digest.crc32<br>_fail:_ panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; JSONL partition-count + LWW-survivor assertion |
 | `cass.compaction_merge.GcCompactionTest.row_cell_partition_tombstone_gc` | nb | test-data/datasets/sstables/test_deltas/cell_tombstones-29733830701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl |
 | `cass.compaction_merge.byte_for_byte_output` | — | — |
 | `cass.compaction_merge.issue_819.differential_input_merge_write_fidelity` | nb | test-data/datasets/sstables/test_deltas/cell_tombstones-29733830701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl |
