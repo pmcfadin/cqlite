@@ -8,7 +8,7 @@
 # `agent-gate.sh --emit-summary-selftest`, never the 5-8 min real gate.
 #
 # Run standalone:   bash scripts/tests/test_agent_gate_summary.sh
-# Or via the gate:  (covered by the delivery-telemetry-style tooling tests)
+# Or via the gate:  scripts/agent-gate.sh runs it as the `tooling-tests` component.
 set -uo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -54,10 +54,12 @@ assert_complete "background" "$tmp/bg.log"
 # 3. Truncation root cause: a leaked descendant inherits the gate's stdout and
 #    keeps the pipe open, so an until-EOF reader would hang/truncate. The
 #    authoritative summary file must still be complete. We discover the file path
-#    from the (possibly truncated) stream and assert the FILE is intact.
+#    from THIS run only (never a newest-wins glob, which could match a stale
+#    summary from an earlier selftest or a concurrent gate) and assert it intact.
 #
-#    Wrap the gate so a backgrounded `sleep` inherits fd1 (the pipe), then read
-#    the stream with a short alarm so the test itself can't hang.
+#    Isolation: the gate derives its LOG_DIR from `mktemp -d "$TMPDIR/agent-gate.*"`,
+#    so we point TMPDIR at a fresh empty dir for this invocation. Any summary.txt
+#    that appears there was written by THIS run.
 leak_runner="$tmp/leak.sh"
 cat >"$leak_runner" <<EOF
 #!/usr/bin/env bash
@@ -66,15 +68,17 @@ exec bash "$GATE" --emit-summary-selftest
 EOF
 chmod +x "$leak_runner"
 
+leak_tmp=$(mktemp -d "$tmp/leak-tmpdir.XXXXXX")
+
 # Reader drains until EOF then writes — but is killed at 4s (EOF never comes
 # because of the leaked sleep). This models the harness that truncates.
 reader='import sys,signal; signal.alarm(4); sys.stdout.buffer.write(sys.stdin.buffer.read())'
-{ bash "$leak_runner" 2>/dev/null | python3 -c "$reader" >"$tmp/leak-stream.log" 2>/dev/null; } 2>/dev/null
+{ TMPDIR="$leak_tmp" bash "$leak_runner" 2>/dev/null | python3 -c "$reader" >"$tmp/leak-stream.log" 2>/dev/null; } 2>/dev/null
 
 # The streamed copy may be empty/truncated (that's the bug we tolerate); recover
-# the authoritative file. Path is deterministic: summary file lives under the
-# LOG_DIR the gate prints. Find the most recent agent-gate.* summary.txt.
-summary_file=$(ls -t "${TMPDIR:-/tmp}"/agent-gate.*/summary.txt 2>/dev/null | head -1)
+# the authoritative file written by THIS run under the isolated TMPDIR. Because
+# leak_tmp started empty, the only summary.txt under it belongs to this gate run.
+summary_file=$(ls -t "$leak_tmp"/agent-gate.*/summary.txt 2>/dev/null | head -1)
 if [ -n "$summary_file" ] && [ -f "$summary_file" ]; then
   assert_complete "leaked-child-summary-file" "$summary_file"
 else

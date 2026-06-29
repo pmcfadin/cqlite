@@ -25,6 +25,13 @@
 #   python-bindings    maturin develop + pytest bindings/python/tests in a throwaway
 #                      venv; SKIPs (never silently PASSes) if python3 is unavailable.
 #                      Set RUN_SLOW_TESTS=1 to also run the CLI-parity suite.
+#   tooling-tests      shell-tooling regression tests (fast, no datasets/network):
+#                      scripts/tests/test_agent_gate_summary.sh — proves the
+#                      SUMMARY block survives non-foreground capture (#1175). It
+#                      only drives `agent-gate.sh --emit-summary-selftest`, which
+#                      exits before running any component, so there is no recursion.
+#                      SKIP-aware: no python3 -> SKIP (the selftest's truncation
+#                      assertion needs a python reader), never silent PASS.
 #   minimal-build      cargo build -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
 #   file-size          campsite-rule ratchet (epic #1116 / #1135): lists changed
@@ -79,7 +86,7 @@ if ! command -v cargo >/dev/null 2>&1 && [ -d "$HOME/.cargo/bin" ]; then
 fi
 export CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-$REPO_ROOT/test-data/datasets}"
 
-COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard integration-tests format-compat write-tests cli-tests python-bindings delivery-telemetry minimal-build smoke)
+COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard integration-tests format-compat write-tests cli-tests python-bindings delivery-telemetry tooling-tests minimal-build smoke)
 ONLY=""
 SELFTEST=0
 case "${1:-}" in
@@ -99,15 +106,22 @@ OVERALL=PASS
 #
 # Build the canonical SUMMARY block (start marker .. RESULT .. end marker) ONCE,
 # then publish it through two channels so it survives any capture mode (#1175):
-#   - write it to $SUMMARY_FILE synchronously (the authoritative artifact; a
-#     truncated stream can never lose it), and
-#   - stream it to stdout for the foreground/redirect case.
+#   - write it to $SUMMARY_FILE synchronously with plain redirection FIRST (the
+#     authoritative artifact; never written through a pipe, so a closed-stdout
+#     SIGPIPE can never truncate the file itself), THEN
+#   - best-effort stream the file to stdout for the foreground/redirect case
+#     (allowed to fail silently if stdout is already gone).
 # After the END marker we flush stdout and close inherited stdout/stderr so a
 # leaked descendant can't keep the gate's stdout pipe open and starve an
 # until-EOF reader (the truncation root cause). Both the real run and the
 # --emit-summary-selftest mode go through this single function.
 emit_summary() {
   local result="$1"; shift
+  # Write the authoritative copy FIRST, with plain redirection (no pipe). This
+  # guarantees $SUMMARY_FILE is complete regardless of stdout state: if we wrote
+  # it through `tee` and the capture reader had already timed out/closed the
+  # pipe, `tee` could take SIGPIPE mid-write and leave the file itself truncated,
+  # defeating the whole fix (#1175).
   {
     echo
     echo "==== AGENT-GATE SUMMARY ===="
@@ -117,13 +131,15 @@ emit_summary() {
     echo "summary-file: $SUMMARY_FILE"
     echo "RESULT: $result"
     echo "==== END AGENT-GATE SUMMARY ===="
-  } | tee "$SUMMARY_FILE"
+  } > "$SUMMARY_FILE"
 
-  # Belt-and-suspenders: if the streamed copy ever looks short of what we just
-  # wrote to disk, the agent at least gets a loud pointer to the intact file.
-  # (We can't read our own stream back, so we compare on the authoritative side
-  # and always advertise the file; a reader missing the END marker should diff
-  # its capture against $SUMMARY_FILE.)
+  # Now best-effort stream the (already-complete) file to stdout for the
+  # foreground/redirect case. If stdout is gone (closed pipe -> SIGPIPE), this is
+  # allowed to fail silently: the authoritative copy already exists on disk.
+  cat "$SUMMARY_FILE" 2>/dev/null || true
+
+  # Belt-and-suspenders: if the authoritative copy ever looks short of what we
+  # intended to write, the agent at least gets a loud pointer to the file.
   if ! grep -q '==== END AGENT-GATE SUMMARY ====' "$SUMMARY_FILE" 2>/dev/null; then
     echo "WARNING: SUMMARY may be truncated — authoritative copy: $SUMMARY_FILE" >&2
   fi
@@ -241,6 +257,42 @@ run_delivery_telemetry() {
   fi
   echo ">>> [$name] python3 scripts/tests/test_delivery_telemetry.py"
   if python3 "$REPO_ROOT/scripts/tests/test_delivery_telemetry.py" >"$log" 2>&1; then
+    status=PASS
+  else
+    status=FAIL
+    OVERALL=FAIL
+    echo "--- [$name] FAILED; last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
+# tooling-tests: fast shell-tooling regression tests that have no Rust target and
+# no dataset/network needs. Currently scripts/tests/test_agent_gate_summary.sh,
+# which verifies the SUMMARY block survives non-foreground capture (#1175). That
+# test only drives `agent-gate.sh --emit-summary-selftest` (which exits before any
+# component runs), so wiring it here cannot cause the gate to recurse. SKIP-aware:
+# the test's truncation case relies on a python3 reader, so with no python3 we
+# record SKIP (loud, never silent PASS); any test failure -> hard FAIL.
+run_tooling_tests() {
+  local name=tooling-tests
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local log="$LOG_DIR/$name.log"
+  local start end status
+  start=$(date +%s)
+  if ! command -v python3 >/dev/null 2>&1; then
+    status=SKIP
+    echo ">>> [$name] SKIP (no python3 on PATH; selftest truncation reader needs it)"
+    NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("0s")
+    return 0
+  fi
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh"
+  if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >"$log" 2>&1; then
     status=PASS
   else
     status=FAIL
@@ -399,6 +451,7 @@ run_component write-tests bash -c '
 run_component cli-tests cargo test --package cqlite-cli --test unit_tests
 run_python_bindings
 run_delivery_telemetry
+run_tooling_tests
 run_component minimal-build cargo build --package cqlite-core --no-default-features --features all-compression
 # Pin smoke to a binary built from THIS tree. Left to its own devices the
 # smoke script prefers any existing target/release/cqlite, however stale —

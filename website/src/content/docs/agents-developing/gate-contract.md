@@ -25,6 +25,7 @@ The gate mirrors the enforced CI gates (`.github/workflows/ci.yml`,
 | `integration-tests` | seven named `--test` targets in `cqlite-integration-tests` |
 | `write-tests` | `cargo test -p cqlite-core --features write-support` (lib + roundtrip + compaction) |
 | `cli-tests` | `cargo test -p cqlite-cli --test unit_tests` |
+| `tooling-tests` | `bash scripts/tests/test_agent_gate_summary.sh` (SUMMARY-capture regression, #1175; SKIP-aware on missing python3) |
 | `minimal-build` | `cargo build -p cqlite-core --no-default-features --features all-compression` |
 | `smoke` | `bash test-data/scripts/smoke-test-all-tables.sh` (against a freshly built debug binary) |
 
@@ -88,6 +89,8 @@ A fast regression test for this emission path lives at
 `bash scripts/tests/test_agent_gate_summary.sh`). It exercises
 `scripts/agent-gate.sh --emit-summary-selftest`, which prints a representative
 SUMMARY block through the real emission code without running the 5–8 minute gate.
+The gate runs this test automatically as the `tooling-tests` component, so the
+capture guarantee is enforced on every gate run.
 
 ## Machine-checkable summary block
 
