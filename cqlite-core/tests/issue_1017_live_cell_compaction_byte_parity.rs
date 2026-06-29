@@ -80,6 +80,7 @@
 
 #![cfg(feature = "write-support")]
 
+use crc32fast::Hasher as Crc32Hasher;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -122,26 +123,116 @@ fn require_fixtures_strict() -> bool {
 }
 
 /// Resolve the committed Cassandra reference directory for `table` under
-/// `test_compactionparity`. Returns `None` (→ clean SKIP) when the dataset root
-/// is unset or the table's compacted reference SSTable has not been fetched.
+/// `test_compactionparity`.
+///
+/// Return semantics — chosen so the three failure modes are distinguishable:
+///   * `CQLITE_DATASETS_ROOT` unset, or the keyspace dir absent   → `None`  (clean SKIP)
+///   * No `{table}-*` directory present at all                     → `None`  (clean SKIP)
+///   * More than one `{table}-*` directory present                 → PANIC  (stale duplicate)
+///   * Exactly one `{table}-*` directory present, Data.db absent   → PANIC  (present-but-incomplete)
+///   * Exactly one `{table}-*` directory present, Data.db present  → `Some` (proceed)
+///
+/// The distinction between "no dir at all" (skip) and "dir exists but Data.db
+/// missing" (panic) enforces the module doctrine that a present-but-broken
+/// fixture is always a FAILURE — never silently passed. A skip is only valid
+/// when the fixture has genuinely never been generated/committed.
 fn reference_dir(table: &str) -> Option<PathBuf> {
     let root = std::env::var("CQLITE_DATASETS_ROOT").ok()?;
     let base = Path::new(&root).join("sstables").join(KEYSPACE);
     let entries = std::fs::read_dir(&base).ok()?;
-    for e in entries.flatten() {
-        let name = e.file_name().to_string_lossy().to_string();
-        if name.starts_with(&format!("{table}-")) {
-            let dir = e.path();
-            // A matching dir that already has its compacted Data.db fetched → use it.
-            if single_data_db(&dir).is_some() {
-                return Some(dir);
+
+    let mut matches: Vec<PathBuf> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with(&format!("{table}-")) {
+                Some(e.path())
+            } else {
+                None
             }
-            // This match lacked a Data.db; keep scanning — another matching dir
-            // (e.g. a different UUID suffix from a re-generation) might have one.
+        })
+        .collect();
+
+    match matches.len() {
+        0 => None, // Genuinely absent — clean SKIP.
+        1 => {
+            let dir = matches.pop().unwrap();
+            // A matching directory EXISTS but its Data.db is absent: this is a
+            // present-but-incomplete fixture (e.g. sidecars committed but .db
+            // binaries not `git add -f`'d). Per module doctrine this is a FAILURE,
+            // not a skip — a half-updated golden must never silently pass.
+            if single_data_db(&dir).is_none() {
+                panic!(
+                    "{KEYSPACE}.{table}: reference directory {dir:?} exists but contains no \
+                     compacted nb-*-big-Data.db. The fixture is PRESENT-BUT-INCOMPLETE — \
+                     sidecars may have been updated without re-running `git add -f` on the .db \
+                     binaries. Regenerate with:\n  \
+                     bash test-data/scripts/generate-compaction-parity.sh\n  \
+                     git -C <repo> add -f \
+                     test-data/datasets/sstables/test_compactionparity/{table}-*/*.db"
+                );
+            }
+            Some(dir)
         }
+        n => panic!(
+            "{KEYSPACE}.{table}: found {n} matching `{table}-*` directories under {base:?} \
+             ({matches:?}). There must be EXACTLY ONE — a stale duplicate from a previous \
+             generation run would cause non-deterministic fixture selection. Remove the old \
+             directory before committing a new generation."
+        ),
     }
-    // No matching dir had a compacted Data.db → genuine absence, clean SKIP.
-    None
+}
+
+/// Assert that the committed `Digest.crc32` sidecar is consistent with the
+/// committed `Data.db` binary.
+///
+/// ## Why this matters
+/// The .db binaries are gitignored and enter via `git add -f`; the sidecars
+/// (Digest.crc32, *.jsonl, etc.) are tracked normally. A future regeneration
+/// that runs `git add -A` would update the sidecars to the new generation but
+/// silently skip the .db binaries, committing a FRESH Digest.crc32 against a
+/// STALE Data.db. This guard catches that before the byte-diff phase.
+///
+/// ## Algorithm
+/// Cassandra stores `Digest.crc32` as the decimal ASCII representation of the
+/// unsigned 32-bit CRC32 (IEEE 802.3 / `java.util.zip.CRC32` / `crc32fast`) of
+/// the raw Data.db bytes, with no trailing newline.
+fn assert_digest_consistent_with_data(table: &str, ref_dir: &Path) {
+    let data_bytes = read_component(ref_dir, "Data.db");
+    let digest_bytes = read_component(ref_dir, "Digest.crc32");
+
+    assert!(
+        !data_bytes.is_empty(),
+        "{table}: committed Data.db is present-but-empty — golden is broken"
+    );
+    assert!(
+        !digest_bytes.is_empty(),
+        "{table}: committed Digest.crc32 is present-but-empty — golden is broken"
+    );
+
+    // Compute CRC32 of Data.db.
+    let mut hasher = Crc32Hasher::new();
+    hasher.update(&data_bytes);
+    let actual_crc32 = hasher.finalize();
+
+    // Parse the decimal ASCII value from Digest.crc32.
+    let digest_str = std::str::from_utf8(&digest_bytes)
+        .unwrap_or_else(|_| panic!("{table}: Digest.crc32 is not valid UTF-8: {digest_bytes:?}"))
+        .trim();
+    let committed_crc32: u32 = digest_str.parse().unwrap_or_else(|e| {
+        panic!("{table}: Digest.crc32 '{digest_str}' is not a decimal u32: {e}")
+    });
+
+    assert_eq!(
+        actual_crc32, committed_crc32,
+        "{table}: committed Digest.crc32 ({committed_crc32}) does not match CRC32 of \
+         committed Data.db ({actual_crc32}). The golden is HALF-UPDATED — a sidecar \
+         was updated for a new generation but the .db binaries were not re-committed. \
+         Regenerate with:\n  \
+         bash test-data/scripts/generate-compaction-parity.sh\n  \
+         git -C <repo> add -f \
+         test-data/datasets/sstables/test_compactionparity/{table}-*/*.db"
+    );
 }
 
 /// Return the single `nb-*-big-Data.db` under `dir`, or `None` if zero. Panics if
@@ -441,6 +532,13 @@ async fn assert_compaction_byte_parity(
         );
         return;
     };
+
+    // ── 0. Stale-golden drift guard ──
+    // Assert that the committed Digest.crc32 sidecar matches the committed
+    // Data.db binary before we do any byte-diff work.  A mismatch here means
+    // the golden is half-updated (sidecars regenerated, .db binaries not
+    // re-committed) and all subsequent byte comparisons would be meaningless.
+    assert_digest_consistent_with_data(table, &ref_dir);
 
     let (_guard, out_dir) = cqlite_compact(&schema, group_a, group_b).await;
 

@@ -37,6 +37,33 @@
 #
 # Prerequisites: Docker (or podman) in PATH; ~4 GB RAM for the container.
 #
+# ============================================================================
+# MANDATORY: committing the .db binaries
+#
+# The *.db binary files produced by this script (Data.db, Index.db, etc.) are
+# listed in .gitignore and will NOT be included by a bare `git add` or
+# `git add -A`. They MUST be force-added with `git add -f` after every
+# regeneration, otherwise the committed Digest.crc32 sidecars will point to a
+# different (stale) Data.db binary and the byte-parity test will FAIL with a
+# "committed Digest.crc32 does not match CRC32 of committed Data.db" error.
+#
+# After running this script, commit the binaries with:
+#
+#   git -C <repo-root> add -f \
+#     test-data/datasets/sstables/test_compactionparity/live_no_clustering-*/*.db \
+#     test-data/datasets/sstables/test_compactionparity/live_clustering-*/*.db
+#   git -C <repo-root> add \
+#     test-data/datasets/sstables/test_compactionparity/live_no_clustering-*/*.jsonl \
+#     test-data/datasets/sstables/test_compactionparity/live_no_clustering-*/TOC.txt \
+#     test-data/datasets/sstables/test_compactionparity/live_no_clustering-*/Digest.crc32 \
+#     test-data/datasets/sstables/test_compactionparity/live_clustering-*/*.jsonl \
+#     test-data/datasets/sstables/test_compactionparity/live_clustering-*/TOC.txt \
+#     test-data/datasets/sstables/test_compactionparity/live_clustering-*/Digest.crc32
+#   git -C <repo-root> commit -m "fixtures(#1017): regenerate compaction-parity golden SSTables"
+#
+# The script prints these exact commands at exit so you can copy-paste them.
+# ============================================================================
+#
 # Backs: issue #1017 (epic #973).
 
 set -euo pipefail
@@ -350,4 +377,35 @@ Major compaction did not collapse the two inputs into one output."
 
   log "=== $KEYSPACE generation COMPLETE ==="
   log "SSTables: $SSTABLES_DIR/$KEYSPACE"
+
+  # ── MANDATORY: commit the .db binaries ──────────────────────────────────
+  # The *.db files are gitignored. They MUST be force-added; otherwise the
+  # Digest.crc32 sidecars will be committed pointing to a stale Data.db and
+  # the byte-parity test will FAIL (stale-golden drift guard).
+  echo ""
+  echo "=============================================================="
+  echo "  NEXT: commit the generated fixtures"
+  echo "=============================================================="
+  echo ""
+  echo "  # Force-add the .db binaries (gitignored — MUST use -f):"
+  echo "  git -C '$REPO_ROOT' add -f \\"
+  echo "    test-data/datasets/sstables/$KEYSPACE/live_no_clustering-*/*.db \\"
+  echo "    test-data/datasets/sstables/$KEYSPACE/live_clustering-*/*.db"
+  echo ""
+  echo "  # Add the sidecars normally (not gitignored):"
+  echo "  git -C '$REPO_ROOT' add \\"
+  echo "    test-data/datasets/sstables/$KEYSPACE/live_no_clustering-*/*.jsonl \\"
+  echo "    test-data/datasets/sstables/$KEYSPACE/live_no_clustering-*/TOC.txt \\"
+  echo "    test-data/datasets/sstables/$KEYSPACE/live_no_clustering-*/Digest.crc32 \\"
+  echo "    test-data/datasets/sstables/$KEYSPACE/live_clustering-*/*.jsonl \\"
+  echo "    test-data/datasets/sstables/$KEYSPACE/live_clustering-*/TOC.txt \\"
+  echo "    test-data/datasets/sstables/$KEYSPACE/live_clustering-*/Digest.crc32"
+  echo ""
+  echo "  # Commit:"
+  echo "  git -C '$REPO_ROOT' commit -m 'fixtures(#1017): regenerate compaction-parity golden SSTables'"
+  echo ""
+  echo "  WARNING: running 'git add -A' or 'git add .' without the explicit"
+  echo "  '-f' step above will silently skip the .db binaries, leaving a"
+  echo "  half-updated golden that breaks the byte-parity test."
+  echo "=============================================================="
 fi
