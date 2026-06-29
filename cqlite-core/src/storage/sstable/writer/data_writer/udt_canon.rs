@@ -82,6 +82,19 @@ fn references_user_type(marshal: &str) -> bool {
 fn canonicalize_value_for_marshal(ty: &str, value: &Value) -> Result<Value> {
     let ty = ty.trim();
 
+    // An already-serialized opaque value (a `Blob` carrying the frozen wire bytes,
+    // or `Null`) is passed through UNCHANGED, regardless of the declared marshal.
+    // This is the COMPACTION read path: a frozen collection/UDT cell decoded from
+    // an input SSTable comes back as a `Value::Blob` of its raw, already-declared-
+    // order wire bytes. It is NOT a structured `List`/`Map`/`Udt` literal to
+    // reorder; re-canonicalizing it is impossible (no fields to reorder) and
+    // wrong (the bytes are already canonical). Only a structured literal from a
+    // direct write needs reordering/padding (no-heuristics: we never reinterpret
+    // opaque bytes — issue #28).
+    if matches!(value, Value::Blob(_) | Value::Null) {
+        return Ok(value.clone());
+    }
+
     // Unwrap a Value::Frozen so the inner value is matched against the inner
     // marshal type, then re-wrap. The marshal may or may not carry an explicit
     // FrozenType wrapper at this level (an inner UDT field is spelled bare), so
@@ -457,6 +470,24 @@ mod tests {
         ])));
         let canon = canonicalize_udt_value("frozen<list<int>>", &v).unwrap();
         assert_eq!(canon, v);
+    }
+
+    #[test]
+    fn opaque_blob_value_passes_through_unchanged_for_udt_marshal() {
+        // COMPACTION path: a frozen<list<frozen<person>>> cell decoded from an
+        // input SSTable comes back as an opaque Value::Blob of its already-
+        // canonical wire bytes. The canonicalizer must pass it through unchanged
+        // even though the declared marshal references a UserType — it has no
+        // structured fields to reorder, and reinterpreting opaque bytes is
+        // forbidden (no-heuristics, issue #28).
+        let list_marshal = format!(
+            "{p}FrozenType({p}ListType({p}UserType({KS},706572736f6e,\
+             66697273745f6e616d65:{p}UTF8Type,6c6173745f6e616d65:{p}UTF8Type,616765:{p}Int32Type)))",
+            p = MARSHAL_PREFIX
+        );
+        let blob = Value::Blob(vec![0, 0, 0, 1, 0, 0, 0, 3, 65, 100, 97]);
+        let canon = canonicalize_udt_value(&list_marshal, &blob).unwrap();
+        assert_eq!(canon, blob, "opaque blob must be byte-identical");
     }
 
     #[test]

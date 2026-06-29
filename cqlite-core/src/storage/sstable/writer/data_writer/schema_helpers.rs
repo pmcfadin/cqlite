@@ -529,6 +529,55 @@ fn resolve_frozen_udt_marshal(
     ))
 }
 
+/// If `data_type` is a FROZEN parameterized CQL type that CONTAINS a UDT
+/// reference (e.g. `frozen<list<frozen<person>>>`,
+/// `frozen<map<text, frozen<address>>>`, `frozen<tuple<int, frozen<person>>>`),
+/// return its full marshal string with every nested UDT expanded to
+/// `UserType(...)` via `registry`; otherwise `None` (issue #1020 column-level
+/// dispatch).
+///
+/// Scope is strictly a TOP-LEVEL `frozen<...>` wrapper whose inner is a
+/// parameterized collection/tuple (contains `<`) that transitively references a
+/// registered UDT. This is deliberately narrow:
+///   * A frozen<bare_udt> is already handled by [`resolve_frozen_udt_marshal`].
+///   * A NON-frozen collection-of-UDT (`list<frozen<person>>`) is a MULTICELL
+///     complex column with a different write path and is NOT rewritten here.
+///   * A frozen collection of PRIMITIVES (`frozen<list<int>>`) references no UDT
+///     and is left to the generic converter (byte-identical output).
+///
+/// The rendered marshal reuses [`render_field_marshal`], which applies the exact
+/// Cassandra field-type rules (a DIRECT `frozen<udt>` element/value drops its
+/// `FrozenType` wrapper to a bare `UserType(...)`; collection/tuple wrappers are
+/// preserved and recursed). When no UDT is referenced, returns `None` so the
+/// generic path keeps producing identical bytes.
+fn resolve_frozen_parameterized_udt_marshal(
+    data_type: &str,
+    keyspace: &str,
+    registry: &UdtRegistry,
+) -> Option<String> {
+    let trimmed = data_type.trim();
+    let lower = trimmed.to_lowercase();
+    // Only a CQL `frozen<...>` short form whose inner is itself parameterized.
+    if !(lower.starts_with("frozen<") && lower.ends_with('>')) {
+        return None;
+    }
+    let inner = trimmed["frozen<".len()..trimmed.len() - 1].trim();
+    // Inner must be a parameterized collection/tuple (contains '<'); a bare
+    // inner name is a frozen UDT already handled by `resolve_frozen_udt_marshal`.
+    if !inner.contains('<') {
+        return None;
+    }
+    // Parse to a structured CqlType so the renderer can expand nested UDTs. A
+    // parse failure leaves the column to the generic path (no silent corruption).
+    let parsed = CqlType::parse(trimmed).ok()?;
+    // Only rewrite when the type actually references a UDT — otherwise the
+    // generic converter already produces the correct (and byte-identical) marshal.
+    if !cql_type_references_udt(&parsed, keyspace, registry) {
+        return None;
+    }
+    Some(render_field_marshal(&parsed, keyspace, registry))
+}
+
 /// If `data_type` is a TOP-LEVEL bare CQL UDT name that resolves in `registry`,
 /// return its rendered `UserType(...)` marshal string; otherwise `None`.
 pub(crate) fn resolve_bare_udt_marshal(
@@ -559,6 +608,24 @@ pub(crate) fn resolve_bare_udt_marshal(
     // frozen collections-of-UDT keep their existing marshal via the converter and
     // are intentionally left to the `<` fallthrough below.
     if let Some(marshal) = resolve_frozen_udt_marshal(trimmed, keyspace, registry) {
+        return Some(marshal);
+    }
+    // Issue #1020 (roborev Finding, column-level dispatch): a FROZEN parameterized
+    // column type that CONTAINS a UDT — e.g. `frozen<list<frozen<person>>>` or
+    // `frozen<map<text, frozen<address>>>` — must advertise the nested UDT as a
+    // full `UserType(...)` in the SerializationHeader (matching Cassandra 5.0.2),
+    // NOT the blob-like `BytesType` the generic CQL→marshal converter would emit
+    // (it has no registry). Without this both the header is wrong AND
+    // `canonicalize_udt_value` skips the column (its marshal carries no
+    // `UserType(` token), so the direct-write value bytes can disagree with the
+    // declared type. Frozen collections-of-UDT are SINGLE-cell (frozen), so this
+    // only widens the advertised marshal and the value canonicalization scope; it
+    // never reaches the multicell/complex write path (`is_complex_column` returns
+    // false for a `FrozenType(...)` marshal). Verified byte-for-byte against the
+    // `udt_collections` fixture's Statistics.db `lp`/`ma` headers:
+    //   FrozenType(ListType(UserType(...))) and
+    //   FrozenType(MapType(UTF8Type,UserType(...))).
+    if let Some(marshal) = resolve_frozen_parameterized_udt_marshal(trimmed, keyspace, registry) {
         return Some(marshal);
     }
     // Parameterized CQL types are not bare names — leave to the existing path.
