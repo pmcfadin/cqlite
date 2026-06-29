@@ -853,7 +853,8 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
       comparison_command: >-
-        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core
         --features write-support --test issue_992_ttl_tombstone_range_parity
         ttl_row_preserves fixture_ttl_row
       reference_paths:
@@ -918,7 +919,8 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
       comparison_command: >-
-        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core
         --features write-support --test issue_992_ttl_tombstone_range_parity
         partition_deletion live_partition fixture_partition_tombstone
       reference_paths:
@@ -982,7 +984,8 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
       comparison_command: >-
-        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core
         --features write-support --test issue_992_ttl_tombstone_range_parity
         row_tombstone fixture_row_tombstone
       reference_paths:
@@ -1043,7 +1046,8 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
       comparison_command: >-
-        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core
         --features write-support --test issue_992_ttl_tombstone_range_parity
         cell_tombstone fixture_cell_tombstone
       reference_paths:
@@ -1107,7 +1111,8 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
       comparison_command: >-
-        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core
         --features write-support --test issue_992_ttl_tombstone_range_parity
         range_bound_markers_exact fixture_range_bound_markers fixture_range_inclusive_end
       reference_paths:
@@ -1172,7 +1177,8 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
       comparison_command: >-
-        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core
         --features write-support --test issue_992_ttl_tombstone_range_parity
         fixture_range_boundary
       reference_paths:
