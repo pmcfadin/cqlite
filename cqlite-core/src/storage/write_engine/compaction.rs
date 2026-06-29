@@ -319,6 +319,11 @@ impl WriteEngine {
         }
         non_toc.push(&tmp_info.stats_path);
         non_toc.push(&tmp_info.digest_path);
+        // CRC.db is emitted for uncompressed BIG output (issue #1197); rename it
+        // when present so the published SSTable keeps its per-chunk CRC file.
+        if let Some(ref p) = tmp_info.crc_path {
+            non_toc.push(p);
+        }
         for src in non_toc {
             renames.push(make_rename(src)?);
         }
@@ -440,6 +445,9 @@ impl WriteEngine {
         }
         byte_paths.push(&tmp_info.stats_path);
         byte_paths.push(&tmp_info.digest_path);
+        if let Some(ref p) = tmp_info.crc_path {
+            byte_paths.push(p);
+        }
         if let Some(ref p) = tmp_info.partitions_path {
             byte_paths.push(p);
         }

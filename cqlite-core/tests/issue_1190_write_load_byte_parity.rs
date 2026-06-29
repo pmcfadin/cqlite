@@ -47,13 +47,13 @@
 //!     both, but their bytes are an implementation detail, not a parity target.
 //!     Their semantic content is covered elsewhere (Filter membership, Statistics
 //!     min/max/EncodingStats are anchored by issue_764 / issue_821).
-//!   * CRC.db → KNOWN WRITER GAP: Cassandra emits an (uncompressed-chunk) CRC.db
-//!     component even for uncompressed BIG SSTables; CQLite's writer does not yet
-//!     emit it (the READ side recognizes it — see
-//!     cass.sstable_format.toc_component_manifest). This is a real
-//!     component-completeness gap recorded as a pinned reference-only assertion
-//!     below (the reference HAS CRC.db, CQLite does NOT). It is tracked as a
-//!     separate writer issue; it does not affect any emitted file's bytes.
+//!   * CRC.db → BYTE-IDENTICAL (issue #1197, gap now closed): Cassandra emits a
+//!     per-chunk CRC.db component for uncompressed BIG SSTables alongside
+//!     Digest.crc32. CQLite's writer now emits it too — a 64 KiB chunk-size
+//!     header (big-endian i32) followed by one big-endian u32 CRC32 per raw-data
+//!     chunk (ChecksummedSequentialWriter / ChecksumWriter). Because Data.db is
+//!     byte-identical and the chunk size matches Cassandra's 64 KiB default, the
+//!     CRC.db bytes match exactly and are diffed byte-for-byte below.
 //!
 //! Dataset-dependency doctrine (issue #719 / parity mandate):
 //!   * If `CQLITE_DATASETS_ROOT` is unset OR the reference Data.db is genuinely
@@ -356,6 +356,9 @@ async fn assert_byte_parity(
         "Statistics.db",
         "Filter.db",
         "TOC.txt",
+        // CRC.db is now emitted by CQLite for uncompressed BIG SSTables
+        // (issue #1197), matching Cassandra. Both sides must carry it.
+        "CRC.db",
     ] {
         assert!(
             ref_components.contains(needed),
@@ -366,25 +369,11 @@ async fn assert_byte_parity(
             "{table}: CQLite output missing component {needed}; have {our_components:?}"
         );
     }
-    // Pinned KNOWN GAP: Cassandra emits CRC.db for uncompressed BIG SSTables;
-    // CQLite's writer does not yet. If this ever flips (CQLite starts emitting
-    // CRC.db), this assertion fails and forces a manifest review — we must never
-    // silently claim component-set parity while a component is missing.
-    assert!(
-        ref_components.contains("CRC.db"),
-        "{table}: reference unexpectedly lacks CRC.db (regenerate fixtures?)"
-    );
-    assert!(
-        !our_components.contains("CRC.db"),
-        "{table}: CQLite now emits CRC.db — the known writer gap is closed; \
-         re-evaluate write_load_path component-set parity in the manifest"
-    );
 
     // No spurious CQLite-only component: every component CQLite emits must be
-    // present in the reference. The CRC.db asymmetry is the OTHER direction
-    // (reference-only), so it does not appear here; if a future carve-out for a
-    // CQLite-only component is ever needed it must be added to this allow-list
-    // (currently empty) with a documented rationale.
+    // present in the reference. With CRC.db now emitted (issue #1197) the
+    // component sets are symmetric for the uncompressed BIG path; the allow-list
+    // stays empty and any CQLite-only component is a regression.
     const CQLITE_ONLY_ALLOWED: &[&str] = &[];
     let spurious: Vec<&String> = our_components
         .difference(&ref_components)
@@ -397,16 +386,18 @@ async fn assert_byte_parity(
          add to CQLITE_ONLY_ALLOWED with a documented rationale"
     );
 
-    // 2. TOC.txt: every component CQLite lists must match the reference TOC; the
-    //    only allowed difference is the known-missing CRC.db line.
+    // 2. TOC.txt: the component SET CQLite lists must match the reference TOC
+    //    exactly. With CRC.db now emitted (issue #1197) there is no longer a
+    //    carve-out — the uncompressed BIG component set is identical.
     let ref_toc = toc_set(&read_component(&ref_dir, "TOC.txt"));
     let our_toc = toc_set(&std::fs::read(out_dir.join("nb-1-big-TOC.txt")).expect("our TOC"));
-    let ref_toc_no_crc: BTreeSet<String> =
-        ref_toc.iter().filter(|c| *c != "CRC.db").cloned().collect();
+    assert!(
+        ref_toc.contains("CRC.db"),
+        "{table}: reference TOC unexpectedly lacks CRC.db (regenerate fixtures?)"
+    );
     assert_eq!(
-        ref_toc_no_crc, our_toc,
-        "{table}: TOC.txt component set differs beyond the known CRC.db gap \
-         (cass-minus-CRC={ref_toc_no_crc:?} ours={our_toc:?})"
+        ref_toc, our_toc,
+        "{table}: TOC.txt component set differs (cass={ref_toc:?} ours={our_toc:?})"
     );
 
     // 3. Data.db: full byte equality (row layout, headers, offsets, cells).
@@ -416,10 +407,15 @@ async fn assert_byte_parity(
     //    the partition/row-offset layout). This is the partition-boundary check.
     assert_component_bytes(table, &ref_dir, &out_dir, "Index.db");
 
-    // 5. Summary.db + Digest.crc32: full byte equality (summary offset index and
-    //    whole-file CRC32). Completes the deterministic byte-parity component set.
+    // 5. Summary.db + Digest.crc32 + CRC.db: full byte equality (summary offset
+    //    index, whole-file CRC32, and the per-chunk CRC32 component). Completes
+    //    the deterministic byte-parity component set. CRC.db (issue #1197) is a
+    //    64 KiB-chunk-size header (big-endian i32) followed by one big-endian u32
+    //    CRC32 per raw-data chunk; since Data.db is byte-identical and the chunk
+    //    size matches Cassandra's 64 KiB default, CRC.db is byte-identical too.
     assert_component_bytes(table, &ref_dir, &out_dir, "Summary.db");
     assert_component_bytes(table, &ref_dir, &out_dir, "Digest.crc32");
+    assert_component_bytes(table, &ref_dir, &out_dir, "CRC.db");
 
     // 6. sstabledump JSONL golden: must exist, be non-empty, and contain exactly
     //    the expected partition count. Present-but-empty / 0-rows is a failure.

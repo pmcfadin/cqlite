@@ -601,6 +601,10 @@ impl WriteEngine {
             "Summary.db",
             "Statistics.db",
             "CompressionInfo.db",
+            // CRC.db is the per-chunk CRC for uncompressed BIG SSTables
+            // (Issue #1197); without it deletion/compaction would leave an
+            // orphan file. Best-effort like the other optional components.
+            "CRC.db",
             "Filter.db",
             "Digest.crc32",
         ];

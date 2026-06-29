@@ -118,7 +118,14 @@ impl ExportReport {
             .sum()
     }
 
-    /// Check if all expected components exist
+    /// Check that all expected components exist.
+    ///
+    /// Two layers of validation:
+    /// 1. The always-required components must have been exported.
+    /// 2. Every component listed in the exported `TOC.txt` must have a matching
+    ///    file in `self.components`. This catches optional components — such as
+    ///    `CRC.db` for uncompressed BIG SSTables (Issue #1197) — that the
+    ///    TOC references but that may have been missed during the copy step.
     pub fn validate_components(&self) -> Result<()> {
         let required_components = [
             "Data.db",
@@ -131,16 +138,59 @@ impl ExportReport {
         ];
 
         for component in &required_components {
-            let exists = self.components.iter().any(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|s| s.ends_with(component))
-                    .unwrap_or(false)
-            });
-
-            if !exists {
+            if !self.has_component(component) {
                 return Err(Error::Storage(format!(
                     "Missing required component: {}",
+                    component
+                )));
+            }
+        }
+
+        self.validate_toc_components()?;
+
+        Ok(())
+    }
+
+    /// Returns true when an exported component path ends with `suffix`.
+    fn has_component(&self, suffix: &str) -> bool {
+        self.components.iter().any(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.ends_with(suffix))
+                .unwrap_or(false)
+        })
+    }
+
+    /// Validate that every component named in the exported `TOC.txt` was
+    /// actually copied. The TOC is the authoritative component manifest, so
+    /// any optional component it lists (e.g. `CRC.db`) must exist on disk.
+    fn validate_toc_components(&self) -> Result<()> {
+        let toc_path = self
+            .components
+            .iter()
+            .find(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.ends_with("TOC.txt"))
+                    .unwrap_or(false)
+            })
+            .ok_or_else(|| Error::Storage("Missing required component: TOC.txt".to_string()))?;
+
+        let toc = std::fs::read_to_string(toc_path).map_err(|e| {
+            Error::Storage(format!(
+                "Failed to read exported TOC.txt at {:?}: {}",
+                toc_path, e
+            ))
+        })?;
+
+        for line in toc.lines() {
+            let component = line.trim();
+            if component.is_empty() {
+                continue;
+            }
+            if !self.has_component(component) {
+                return Err(Error::Storage(format!(
+                    "TOC.txt lists component {} but it was not exported",
                     component
                 )));
             }
@@ -316,8 +366,12 @@ impl crate::storage::write_engine::WriteEngine {
         // Get the source generation number from the SSTable info
         let (source_generation, source_dir) = source_sstable;
 
-        // List of components to copy
-        // CompressionInfo.db is omitted for uncompressed data (Issue #429)
+        // List of components to copy.
+        // CompressionInfo.db is omitted for uncompressed data (Issue #429).
+        // CRC.db is an optional component emitted only for uncompressed BIG
+        // SSTables (Issue #1197) and absent for compressed/BTI tables — the
+        // loop below skips any component whose source file does not exist, so
+        // it is only copied when the source actually has it.
         let components_to_copy = [
             ("Data.db", SSTableComponent::Data),
             ("Index.db", SSTableComponent::Index),
@@ -325,6 +379,7 @@ impl crate::storage::write_engine::WriteEngine {
             ("Filter.db", SSTableComponent::Filter),
             ("Summary.db", SSTableComponent::Summary),
             ("Digest.crc32", SSTableComponent::Digest),
+            ("CRC.db", SSTableComponent::Crc),
             ("TOC.txt", SSTableComponent::TOC),
         ];
 
@@ -981,6 +1036,72 @@ mod tests {
         // Manual validation should pass
         let validation_result = report.validate_components();
         assert!(validation_result.is_ok());
+    }
+
+    /// Issue #1197: uncompressed BIG SSTables now emit a `CRC.db` component
+    /// listed in TOC.txt. The export-copy path must copy it (when the source
+    /// has it) and validation — which now cross-checks every TOC-listed
+    /// component — must pass. This pins both halves of the roborev follow-up
+    /// against an in-process flushed SSTable (no external fixture required).
+    #[tokio::test]
+    async fn test_export_copies_crc_db_when_present() {
+        let temp_dir = TempDir::new().unwrap();
+        let export_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+
+        let mut engine = WriteEngine::new(config).unwrap();
+
+        for i in 0..3 {
+            let mutation = create_test_mutation(i, &format!("User{}", i), 1_000_000 + i as i64);
+            engine.write(mutation).unwrap();
+        }
+        engine.flush().await.unwrap();
+
+        // Confirm the flushed (uncompressed BIG) source actually has a CRC.db;
+        // if a future writer change drops it, this guard makes the intent clear
+        // rather than silently passing.
+        let source = engine.find_most_recent_sstable().await.unwrap();
+        let (source_gen, source_dir) = source;
+        let source_crc = source_dir.join(format!("nb-{}-big-CRC.db", source_gen));
+        assert!(
+            source_crc.exists(),
+            "uncompressed BIG flush should emit CRC.db at {:?}",
+            source_crc
+        );
+
+        // Export WITH validation enabled (default) — exercises both the copy
+        // path and the TOC-aware validate_components().
+        let options = ExportOptions::new("test_ks", "test_table", 1).skip_compaction();
+        let report = engine
+            .export_sstable(export_dir.path(), options)
+            .await
+            .unwrap();
+
+        let crc_file = export_dir
+            .path()
+            .join("test_ks")
+            .join("test_table")
+            .join("nb-1-big-CRC.db");
+        assert!(
+            crc_file.exists(),
+            "export must copy CRC.db when the source SSTable has it"
+        );
+
+        // The copied CRC.db must be among the tracked components.
+        assert!(
+            report.has_component("CRC.db"),
+            "exported component list must include CRC.db"
+        );
+
+        // Validation passed implicitly via validate_after_export default; assert
+        // explicitly too for clarity.
+        report.validate_components().unwrap();
     }
 
     #[tokio::test]
