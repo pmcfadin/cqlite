@@ -41,8 +41,8 @@ env:
   DATASET_SHA256: bebc763752c8d68c7fb0483a1b31294b4d1d21343d3f7d124da069e5073202fa
 
 jobs:
-  core_tests:
-    name: Core tests
+  core_lib_doc_tests:
+    name: Core lib/doc tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -58,6 +58,14 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Enable sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -129,17 +137,123 @@ jobs:
           fi
           echo "::endgroup::"
 
-      - name: Run core tests
+      - name: Run core lib/doc tests with timings
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
           RUST_LOG: debug
           RUST_BACKTRACE: full
+        run: bash scripts/ci/run-core-test-group.sh lib-doc
+
+      - name: Show sccache stats
+        if: always()
+        run: ${SCCACHE_PATH:-sccache} --show-stats
+
+  core_integration_shards:
+    name: Core integration tests shard ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    env:
+      CORE_TEST_SHARD_INDEX: ${{ matrix.shard }}
+      CORE_TEST_SHARD_TOTAL: 3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # Rust test jobs can sit near the standard runner's disk ceiling (issue
+      # #722). Dropping preinstalled toolchains we never use frees ~14 GB.
+      - name: Free disk space (issue #722)
         run: |
-          echo "🧪 Running core tests..."
-          echo "CQLITE_DATASETS_ROOT=$CQLITE_DATASETS_ROOT"
-          echo "Checking dataset files:"
-          ls -la "$CQLITE_DATASETS_ROOT/sstables/test_basic/" || echo "test_basic directory not found"
-          cargo test --package cqlite-core --features cli-helpers -- --skip test_legacy_format_allows_blob_fallback_with_feature
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h / | tail -1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Enable sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Restore dataset cache
+        uses: actions/cache@v5
+        with:
+          path: test-data/datasets
+          key: datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
+
+      - name: Fetch datasets if required fixture data missing
+        run: bash ./test-data/scripts/fetch-datasets.sh
+
+      - name: Sanity check dataset
+        run: |
+          set -euo pipefail
+          test -f test-data/datasets/metadata.yml
+          CORE_FIXTURE=$(find test-data/datasets/sstables/test_basic -path '*simple_table-*-Data.db' 2>/dev/null || true)
+          if [ -z "$CORE_FIXTURE" ]; then
+            echo "❌ Core fixture test_basic/simple_table-*/*-Data.db missing after fetch" >&2
+            exit 1
+          fi
+          GOLDEN_JSONL="test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl"
+          if [ ! -s "$GOLDEN_JSONL" ]; then
+            echo "❌ Required JSONL golden missing after fetch: ${GOLDEN_JSONL}" >&2
+            exit 1
+          fi
+          echo "✅ Core fixture present: ${CORE_FIXTURE}"
+          echo "✅ Required JSONL golden present: ${GOLDEN_JSONL}"
+
+      - name: Run core integration shard with timings
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          RUST_LOG: debug
+          RUST_BACKTRACE: full
+        run: bash scripts/ci/run-core-test-group.sh integration-shard
+
+      - name: Show sccache stats
+        if: always()
+        run: ${SCCACHE_PATH:-sccache} --show-stats
+
+  core_tests:
+    name: Core tests
+    runs-on: ubuntu-latest
+    needs:
+      - core_lib_doc_tests
+      - core_integration_shards
+    if: ${{ always() }}
+    steps:
+      - name: Check core test shards
+        run: |
+          set -euo pipefail
+          failed=0
+
+          check_result() {
+            local job="$1"
+            local result="$2"
+            if [ "$result" != "success" ]; then
+              echo "❌ ${job}: ${result}" >&2
+              failed=1
+            else
+              echo "✅ ${job}: ${result}"
+            fi
+          }
+
+          check_result "core_lib_doc_tests" "${{ needs.core_lib_doc_tests.result }}"
+          check_result "core_integration_shards" "${{ needs.core_integration_shards.result }}"
+          exit "$failed"
 
   integration_tests:
     name: Integration tests
@@ -156,6 +270,14 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Enable sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -210,6 +332,10 @@ jobs:
             --test golden_path_scan_operations_tests \
             --test golden_path_summary_index_integration_tests
 
+      - name: Show sccache stats
+        if: always()
+        run: ${SCCACHE_PATH:-sccache} --show-stats
+
   write_support_tests:
     name: Write-support tests
     runs-on: ubuntu-latest
@@ -225,6 +351,14 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Enable sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -248,6 +382,10 @@ jobs:
           # folded into clustering rows (fully synthetic — no fixtures required).
           cargo test --package cqlite-core --features write-support --test issue_1074_static_write_parity
 
+      - name: Show sccache stats
+        if: always()
+        run: ${SCCACHE_PATH:-sccache} --show-stats
+
   delta_scan_tests:
     name: Delta-scan tests
     runs-on: ubuntu-latest
@@ -257,6 +395,14 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Enable sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -275,6 +421,10 @@ jobs:
           # not require fixture data.
           cargo test --package cqlite-core --features delta-scan --lib
 
+      - name: Show sccache stats
+        if: always()
+        run: ${SCCACHE_PATH:-sccache} --show-stats
+
   cli_smoke_tests:
     name: CLI tests and smoke
     runs-on: ubuntu-latest
@@ -290,6 +440,14 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Enable sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -333,6 +491,19 @@ jobs:
           echo "Running CLI unit tests (Issue #20)..."
           cargo test --package cqlite-cli --test unit_tests
 
+      - name: Run CLI write→read content round-trip tests (issue #1231)
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+        run: |
+          echo "Running CLI write-path content round-trips (issue #1231)..."
+          # Drives the FULL public CLI chain: CQL INSERT/UPDATE/DELETE → WAL →
+          # flush → SSTable → independent reopen → SELECT → assert decoded VALUES,
+          # plus binary-level export-sstable read-back and compact/maintenance/
+          # write-stats subcommand glue. Self-contained: every test builds its own
+          # SSTables in a tempdir, so no fixture corpus is required.
+          cargo test --package cqlite-cli --features write-support \
+            --test write_readback_content_tests
+
       - name: Build CLI for one-shot smoke tests
         run: |
           echo "🔨 Building CLI binary for smoke tests..."
@@ -358,6 +529,10 @@ jobs:
           name: smoke-test-results
           path: test-data/scripts/smoke-test-results/
           retention-days: 7
+
+      - name: Show sccache stats
+        if: always()
+        run: ${SCCACHE_PATH:-sccache} --show-stats
 
   test:
     name: test
@@ -426,6 +601,14 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Enable sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
       - name: Cache cargo
         uses: actions/cache@v5
         with:
@@ -437,6 +620,10 @@ jobs:
 
       - name: cargo publish --dry-run (cqlite-core)
         run: cargo publish --package cqlite-core --dry-run
+
+      - name: Show sccache stats
+        if: always()
+        run: ${SCCACHE_PATH:-sccache} --show-stats
 
   # Guards the delivery-pipeline tooling itself (issue #1162). The flow-finalize
   # cleanup destroyed an unrelated active claim via an issue-<N>-* glob on
