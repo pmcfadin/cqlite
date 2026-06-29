@@ -330,7 +330,18 @@ fn fixture_static_only_partition_jsonl_parity() {
 /// declared order.
 #[test]
 fn fixture_static_with_clustering_rows_byte_parity() {
-    let raw = decompress_fixture(STATIC_TOMB_DIR);
+    // #1208: the test_tomb/static_with_tombstones binary is NOT in the pinned
+    // CI bundle (refs-only), so read it skip-on-presence — the same fixture is
+    // read this way by sibling #1015. Present-but-empty still fails (the
+    // raw.len() > 8 assert in decompress_with_info), and the canonical static +
+    // clustering shape is also covered by deterministic writer tests.
+    let Some(raw) = decompress_local_only_fixture(STATIC_TOMB_DIR) else {
+        eprintln!(
+            "SKIP fixture_static_with_clustering_rows_byte_parity: local-only fixture \
+             {STATIC_TOMB_DIR}/nb-1-big-Data.db absent (not in pinned bundle; covered deterministically)"
+        );
+        return;
+    };
 
     // Derive which PK is at file offset 0 from the golden (token order, not key
     // value), so a dataset regen that reshuffles partition order is reported as a
@@ -1017,7 +1028,18 @@ fn null_vs_empty_clustering_value_byte_distinction() {
 
 #[test]
 fn fixture_static_row_flag_byte_well_formed() {
-    let raw = decompress_fixture(STATIC_TOMB_DIR);
+    // #1208: the test_tomb/static_with_tombstones binary is NOT in the pinned
+    // CI bundle (refs-only), so read it skip-on-presence — the same fixture is
+    // read this way by sibling #1015. Present-but-empty still fails (the
+    // raw.len() > 8 assert in decompress_with_info), and the static row-flag
+    // mask is also anchored by deterministic writer tests.
+    let Some(raw) = decompress_local_only_fixture(STATIC_TOMB_DIR) else {
+        eprintln!(
+            "SKIP fixture_static_row_flag_byte_well_formed: local-only fixture \
+             {STATIC_TOMB_DIR}/nb-1-big-Data.db absent (not in pinned bundle; covered deterministically)"
+        );
+        return;
+    };
 
     // Cassandra UnfilteredSerializer leading-byte sentinels that a LIVE STATIC
     // ROW must NOT carry: 0x01 is the END_OF_PARTITION marker (Unfiltered.Kind),
