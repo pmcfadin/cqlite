@@ -19,7 +19,7 @@ name: "CI: Delta Round-Trip Test (DS11 / Issue #707)"
 # Manual local run:
 #   bash test-data/scripts/generate-delta-roundtrip.sh --out /tmp/delta-roundtrip
 #   export DELTA_ROUNDTRIP_DATA=/tmp/delta-roundtrip
-#   cargo test --package cqlite-cli --features delta-export --test delta_roundtrip_tests -- --nocapture
+#   cargo test --package cqlite-cli --features delta-export,duckdb-tests --test delta_roundtrip_tests -- --nocapture
 
 on:
   push:
@@ -70,7 +70,7 @@ jobs:
   delta-roundtrip:
     name: DS11 Reconciliation Round-Trip
     runs-on: ubuntu-latest
-    # 45 min headroom: the duckdb dev-dependency builds DuckDB (+ parquet
+    # 45 min headroom: the duckdb-tests feature builds DuckDB (+ parquet
     # extension) from source via the `bundled`/`parquet` features (issue #916),
     # which compiles across the build, test, and clippy steps on a cold cargo
     # cache. Warm-cache runs finish in ~10 min.
@@ -117,7 +117,7 @@ jobs:
         run: |
           cargo test \
             --package cqlite-cli \
-            --features delta-export \
+            --features delta-export,duckdb-tests \
             --test delta_roundtrip_tests \
             -- --nocapture 2>&1
         env:
@@ -129,6 +129,6 @@ jobs:
           env RUSTFLAGS="-D warnings" \
             cargo clippy \
               --package cqlite-cli \
-              --features delta-export \
+              --features delta-export,duckdb-tests \
               --tests \
               -- -D warnings

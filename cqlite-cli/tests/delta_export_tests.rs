@@ -10,7 +10,7 @@
 //! 6. --help documents the subcommand.
 //! 7. Element tombstone summary: counter plumbed from ScanSummaryHandle (not hardcoded 0).
 //!
-//! Requires: `cargo test --features delta-export` and SSTable binaries from
+//! Requires: `cargo test --features delta-export,duckdb-tests` and SSTable binaries from
 //! `bash test-data/scripts/fetch-datasets.sh`.
 //!
 //! ## Note on `run_cli` (Finding 3)
