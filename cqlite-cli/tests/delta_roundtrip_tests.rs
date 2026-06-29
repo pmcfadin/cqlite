@@ -36,7 +36,7 @@
 //!
 //! # Step 2: run the round-trip test
 //! export DELTA_ROUNDTRIP_DATA=/tmp/delta-roundtrip
-//! cargo test --package cqlite-cli --features delta-export,duckdb-tests \
+//! cargo test --package cqlite-cli --features delta-export \
 //!     --test delta_roundtrip_tests -- --nocapture
 //! ```
 //!
@@ -81,7 +81,7 @@ fn skip_if_no_data() -> bool {
              Generate the round-trip workload first:\n\
              \n  bash test-data/scripts/generate-delta-roundtrip.sh --out /tmp/delta-roundtrip\
              \n  export DELTA_ROUNDTRIP_DATA=/tmp/delta-roundtrip\
-             \n\nThen rerun: cargo test --features delta-export,duckdb-tests --test delta_roundtrip_tests"
+             \n\nThen rerun: cargo test --features delta-export --test delta_roundtrip_tests"
         );
         true
     } else {

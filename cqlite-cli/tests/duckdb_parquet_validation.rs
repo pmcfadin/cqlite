@@ -21,10 +21,23 @@
 //!
 //! ## Setup Requirements
 //!
-//! These tests compile bundled DuckDB from source, so keep them out of the
-//! default unit-test path and opt in explicitly:
+//! The DuckDB native library must be installed on your system to run these tests:
+//!
+//! **macOS:**
 //! ```bash
-//! cargo test --package cqlite-cli --features duckdb-tests --test duckdb_parquet_validation
+//! brew install duckdb
+//! ```
+//!
+//! **Ubuntu/Debian:**
+//! ```bash
+//! wget https://github.com/duckdb/duckdb/releases/latest/download/libduckdb-linux-amd64.zip
+//! unzip libduckdb-linux-amd64.zip -d /usr/local
+//! ldconfig
+//! ```
+//!
+//! **Alternative:** Use `#[ignore]` attribute if you want to skip these tests:
+//! ```bash
+//! cargo test --package cqlite-cli -- --ignored
 //! ```
 
 #![cfg(feature = "state_machine")]
