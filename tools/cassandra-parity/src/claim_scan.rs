@@ -62,21 +62,38 @@ const SCOPE_MARKERS: &[&str] = &[
 /// (e.g. `we reject stale fixtures and run the <phrase>`, ~34B back) does not.
 const SCOPE_WINDOW_BYTES: usize = 32;
 
-/// Normalize a string for phrase matching: lowercase and collapse runs of
-/// whitespace. Used to canonicalize a manifest phrase before matching it against
-/// the normalized whole-file view (see [`NormalizedFile`]).
+/// Inline Markdown formatting markers (`*` emphasis/strong, `_` emphasis,
+/// `` ` `` code span) that are stripped from the matching view so a phrase
+/// wrapped in emphasis/code (`same **tests** as Cassandra`) normalizes to the
+/// same token stream as the plain phrase. Only these inline markers are removed
+/// — no attempt is made to parse Markdown structure.
+const MD_MARKERS: &[char] = &['*', '_', '`'];
+
+/// Normalize a string for phrase matching: lowercase, drop inline Markdown
+/// emphasis/code markers ([`MD_MARKERS`]), and collapse runs of whitespace. Used
+/// to canonicalize a manifest phrase before matching it against the normalized
+/// whole-file view (see [`NormalizedFile`]). Stripping the markers means a
+/// formatted occurrence in a doc matches the plain manifest phrase.
 fn normalize(s: &str) -> String {
     s.to_lowercase()
         .split_whitespace()
+        .map(|tok| {
+            tok.chars()
+                .filter(|c| !MD_MARKERS.contains(c))
+                .collect::<String>()
+        })
+        .filter(|tok| !tok.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
 }
 
 /// A whole-file view normalized to lowercase with all whitespace runs (including
-/// newlines) collapsed to single spaces, so a phrase split across a soft-wrap
-/// still matches. `offsets[i]` maps byte index `i` of `text` back to the 1-based
-/// source line number it originated from, so a match reports the line where the
-/// phrase starts.
+/// newlines) collapsed to single spaces and inline Markdown emphasis/code markers
+/// ([`MD_MARKERS`]) dropped, so a phrase split across a soft-wrap *and* a phrase
+/// wrapped in `**bold**`/`_em_`/`` `code` `` both still match the plain manifest
+/// phrase. `offsets[i]` maps byte index `i` of `text` back to the 1-based source
+/// line number it originated from, so a match reports the line where the phrase
+/// starts.
 struct NormalizedFile {
     /// Lowercased, whitespace-collapsed text of the whole file.
     text: String,
@@ -89,7 +106,10 @@ impl NormalizedFile {
     /// Build the normalized view of `raw`, recording the source line each emitted
     /// byte came from. A run of whitespace collapses to one space attributed to
     /// the line where the run *started* (so a phrase wrapped across a soft-wrap
-    /// reports its starting line).
+    /// reports its starting line). Inline Markdown markers ([`MD_MARKERS`]) are
+    /// skipped entirely — zero-width, no emitted byte and no offset — without
+    /// disturbing the whitespace state, so `same **tests** as` normalizes to the
+    /// same token stream (and offsets) as `same tests as`.
     fn new(raw: &str) -> Self {
         let lower = raw.to_lowercase();
         let mut text = String::with_capacity(lower.len());
@@ -98,6 +118,12 @@ impl NormalizedFile {
         let mut in_ws = false;
         let mut ws_line = 1usize;
         for ch in lower.chars() {
+            if MD_MARKERS.contains(&ch) {
+                // Drop inline formatting markers from the matching view. They are
+                // not whitespace, so they neither emit a byte nor reset the
+                // whitespace state; the surrounding tokens stay adjacent.
+                continue;
+            }
             if ch.is_whitespace() {
                 if !in_ws {
                     in_ws = true;

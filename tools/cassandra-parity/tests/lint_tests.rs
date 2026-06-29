@@ -718,6 +718,48 @@ fn blocked_phrase_wrapped_across_lines_is_caught() {
 }
 
 #[test]
+fn markdown_emphasis_inside_blocked_phrase_is_caught() {
+    // Roborev finding (issue #1023): Markdown emphasis markers INSIDE a blocked
+    // phrase (`same **tests** as Cassandra`) are semantically the same over-claim
+    // and must FAIL lint at the phrase's start line.
+    let docs = [("README.md", "CQLite runs the same **tests** as Cassandra.")];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.blocked.same_tests_as_cassandra")
+                && e.contains("README.md:1")),
+        "markdown emphasis inside a blocked phrase must be caught, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn markdown_code_span_inside_blocked_phrase_is_caught() {
+    // Roborev finding (issue #1023): a Markdown code span inside a blocked phrase
+    // (`` same `tests` as Cassandra ``) must FAIL lint just like the plain phrase.
+    let docs = [("README.md", "CQLite runs the same `tests` as Cassandra.")];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.blocked.same_tests_as_cassandra")
+                && e.contains("README.md:1")),
+        "markdown code span inside a blocked phrase must be caught, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn markdown_underscore_emphasis_inside_blocked_phrase_is_caught() {
+    // Roborev finding (issue #1023): underscore emphasis inside a blocked phrase
+    // (`same _tests_ as Cassandra`) must FAIL lint.
+    let docs = [("README.md", "CQLite runs the same _tests_ as Cassandra.")];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.blocked.same_tests_as_cassandra")),
+        "markdown underscore emphasis inside a blocked phrase must be caught, got: {errs:#?}"
+    );
+}
+
+#[test]
 fn blocked_finding_names_safe_alternative() {
     let docs = [("README.md", "We have full compaction byte parity.")];
     let errs = claim_findings(&wrap_with_claims(), &docs);
