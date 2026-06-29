@@ -159,11 +159,15 @@ impl WriteEngine {
         // normalized `effective_schema` (for_compaction_output clones columns).
         let write_schema = effective_schema.for_compaction_output(&retained_dropped);
 
-        let merger = KWayMerger::new_with_gc(
+        // Issue #1234: thread the configured UDT registry onto the merge readers so
+        // a top-level `frozen<UDT>` value decodes structurally during background
+        // compaction instead of erroring out and dropping the partition.
+        let merger = KWayMerger::new_with_gc_and_registry(
             input_paths.clone(),
             &effective_schema,
             gc_before_secs,
             Some(now_secs),
+            self.config.udt_registry.clone(),
         )?
         .with_purge_safe(purge_safe)
         // #935: overlap-aware purging for a partial compaction. `purge_safe`
