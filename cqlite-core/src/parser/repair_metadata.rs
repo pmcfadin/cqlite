@@ -30,19 +30,32 @@
 //! storage format (nb / oa / da) without needing the serialization header.
 //!
 //! `pendingRepair` and `isTransient` sit *after* the version-gated
-//! `improvedMinMax` block (oa/da) and the variable `commitLogIntervals` set,
-//! both of which require type-aware / interval-aware skipping to traverse. The
-//! Cassandra 5.0 corpus contains **no** repaired / pending-repair / transient
-//! fixture (every fixture is the unrepaired/null/non-transient state), and this
-//! module does **not** perform that type-aware walk. It therefore reports those
-//! two fields **honestly as `Unparsed`** (an explicit "not yet decoded" state)
-//! rather than fabricating a concrete `null` / `false`, so a real SSTable that
-//! *did* carry a pending-repair UUID or transient flag is never silently
-//! misreported as absent. The strict test lane proves the *reference* state is
-//! null / false across the corpus while asserting CQLite reports those fields as
-//! `Unparsed`, rather than fabricating repaired bytes.
+//! `improvedMinMax` / `legacyMinMax` block and the variable `commitLogIntervals`
+//! set, both of which require version-gated / type-aware skipping to traverse.
+//!
+//! # Full repair-state walk (issue #1021)
+//!
+//! When the caller supplies authoritative [`VersionGates`],
+//! [`parse_repair_metadata`] now performs that version-gated forward walk and
+//! decodes `pendingRepair` (UUID) and `isTransient` **from real bytes** in
+//! addition to `repairedAt`. The walk is driven ENTIRELY by the version gates
+//! (`hasLegacyMinMax` / `hasImprovedMinMax` / `hasUIntDeletionTime` /
+//! `hasPendingRepair` / `hasIsTransient`) read from the parsed descriptor — no
+//! heuristics, no type guessing (#28). Mirrors the exact field order of
+//! cassandra-5.0.0 `StatsMetadata.StatsMetadataSerializer.serialize`, the same
+//! layout the `da` STATS writer emits (`build_stats_component_da`).
+//!
+//! When `gates` is `None` the walk past `repairedAt` is NOT attempted (the
+//! min/max block and the commit-log-interval shape are version-dependent and
+//! cannot be traversed without the descriptor), so `pendingRepair` /
+//! `isTransient` are reported honestly as [`RepairField::Unparsed`] rather than a
+//! fabricated `null` / `false` — a real SSTable that carried a pending-repair
+//! UUID or transient flag is never silently misreported as absent.
 
 use crate::error::{Error, Result};
+use crate::parser::repair_clustering::{
+    resolve_clustering_value_layout, skip_covered_slice, ByteSkip,
+};
 use crate::storage::sstable::version_gate::VersionGates;
 
 /// Cassandra `MetadataType.STATS` ordinal (MetadataType.java).
@@ -96,16 +109,22 @@ pub struct RepairMetadata {
     /// decoded null (`Decoded(None)`), or `Unparsed` when this module did not
     /// decode it from the STATS bytes.
     ///
-    /// This module does NOT currently walk this field (it sits after the
-    /// version-gated `improvedMinMax` block and the variable
-    /// `commitLogIntervals` set), so it is reported as `Unparsed` rather than a
-    /// fabricated `None`. See module docs.
+    /// Decoded from real bytes by the version-gated forward walk when
+    /// authoritative [`VersionGates`] are supplied. `hasPendingRepair` is
+    /// `>= na`, so the field is present and decoded for every Cassandra 5.0
+    /// format CQLite reads (`nb`/`oa`/`da`). `Unparsed` is reserved for "present
+    /// but not safely reachable" (an unmodeled clustering comparator) or when
+    /// `gates` is `None` (the walk past `repairedAt` is not attempted). See
+    /// module docs.
     pub pending_repair: RepairField<Option<[u8; 16]>>,
 
     /// `isTransient` flag (`Decoded(bool)`) or `Unparsed` when not decoded.
     ///
-    /// As with `pending_repair`, this module does not walk this field, so it is
-    /// reported honestly as `Unparsed` rather than a fabricated `false`.
+    /// Decoded from real bytes by the version-gated forward walk when
+    /// authoritative [`VersionGates`] are supplied. `hasIsTransient` is `>= na`,
+    /// so the field is present and decoded for every supported Cassandra 5.0
+    /// format (`nb`/`oa`/`da`). `Unparsed` is reserved for "present but not
+    /// safely reachable" or when `gates` is `None`.
     pub is_transient: RepairField<bool>,
 
     /// `true` when `repaired_at` was decoded from the STATS component bytes;
@@ -160,7 +179,14 @@ struct StatsComponentBounds {
 /// STATS component's end is derived authoritatively from those same offsets —
 /// the next component begins where STATS must end — rather than from the rest of
 /// the file. When STATS is the final component, its end is the start of the
-/// trailing CRC. The returned range is validated `start < end <= file_len`.
+/// trailing CRC.
+///
+/// Every Cassandra 5.0 format CQLite reads (`nb` BIG, `oa` BIG, `da` BTI) is
+/// `>= na`, so `hasMetadataChecksum` is always true and
+/// `MetadataSerializer.serialize` always writes a 4-byte CRC32 after each
+/// component body (`MetadataSerializer.java:110-111,117`). The body bound
+/// therefore always subtracts that CRC. (Pre-`na` BIG versions — `ma`–`me` — are
+/// out of scope: CQLite is a Cassandra 5.0 reader and does not open them.)
 ///
 /// Returns:
 ///   * `Ok(None)` ONLY when the TOC is well-formed but carries NO STATS
@@ -246,12 +272,14 @@ fn stats_component_bounds(input: &[u8]) -> Result<Option<StatsComponentBounds>> 
         return Ok(None);
     };
 
-    // The STATS body ends 4 bytes before the *next* component begins: Cassandra
-    // writes a per-component CRC32 between each component body and the next
-    // component's offset (verified against real fixtures). Use the smallest
-    // component offset strictly greater than `start`, minus that CRC; when STATS
-    // is the last component, bound by the file end minus the trailing CRC. Both
-    // cases exclude the 4-byte CRC so it is never decoded as metadata.
+    // The STATS body ends where the *next* component (or the file) begins. For
+    // The STATS body ends 4 bytes before the *next* component begins: every
+    // supported Cassandra 5.0 format (`nb`/`oa`/`da`, all `>= na`) writes a
+    // per-component CRC32 between each component body and the next component's
+    // offset (`MetadataSerializer.java:110-111`). Use the smallest component
+    // offset strictly greater than `start`, minus that CRC; when STATS is the last
+    // component, bound by the file end minus the trailing CRC. Both cases exclude
+    // the 4-byte CRC so it is never decoded as metadata.
     let next_boundary = offsets
         .iter()
         .copied()
@@ -347,6 +375,85 @@ impl<'a> Cursor<'a> {
         self.pos = end;
         Ok(f64::from_be_bytes(buf))
     }
+
+    fn read_u8(&mut self) -> Result<u8> {
+        let end = self.need(1)?;
+        let v = self.bytes[self.pos];
+        self.pos = end;
+        Ok(v)
+    }
+
+    fn read_u16(&mut self) -> Result<u16> {
+        let end = self.need(2)?;
+        let v = u16::from_be_bytes([self.bytes[self.pos], self.bytes[self.pos + 1]]);
+        self.pos = end;
+        Ok(v)
+    }
+
+    /// Read a 16-byte raw UUID (the two `long`s Cassandra writes via
+    /// `UUIDSerializer`: most-significant then least-significant bits, each BE).
+    fn read_uuid(&mut self) -> Result<[u8; 16]> {
+        let end = self.need(16)?;
+        let mut buf = [0u8; 16];
+        buf.copy_from_slice(&self.bytes[self.pos..end]);
+        self.pos = end;
+        Ok(buf)
+    }
+
+    /// Read an unsigned VInt (Cassandra `VIntCoding.readUnsignedVInt`):
+    /// the first byte's leading 1-bits give the number of EXTRA bytes; the
+    /// remaining low bits of the first byte are the high-order value bits.
+    fn read_unsigned_vint(&mut self) -> Result<u64> {
+        let first = self.read_u8()?;
+        let extra = first.leading_ones() as usize;
+        if extra == 0 {
+            return Ok(first as u64);
+        }
+        if extra > 8 {
+            return Err(Error::Corruption(format!(
+                "invalid unsigned VInt: {extra} extra bytes"
+            )));
+        }
+        let mut value: u64 = 0;
+        for _ in 0..extra {
+            let b = self.read_u8()?;
+            value = (value << 8) | b as u64;
+        }
+        // The first byte contributes `8 - extra` low bits (its bits below the
+        // `extra` leading 1s and the separator 0). For extra == 8 there are no
+        // first-byte value bits.
+        if extra < 8 {
+            let mask = (1u8 << (8 - extra)) as u64;
+            // bits below the separator bit
+            let first_bits = first as u64 & (mask - 1);
+            value |= first_bits << (8 * extra);
+        }
+        Ok(value)
+    }
+
+    /// Read `n` raw bytes as an owned `Vec`, bounded by the cursor (fails closed
+    /// on overrun). Used for the clusteringTypes UTF-8 names.
+    fn read_bytes(&mut self, n: usize) -> Result<Vec<u8>> {
+        let end = self.need(n)?;
+        let v = self.bytes[self.pos..end].to_vec();
+        self.pos = end;
+        Ok(v)
+    }
+}
+
+impl ByteSkip for Cursor<'_> {
+    fn read_u8(&mut self) -> Result<u8> {
+        Cursor::read_u8(self)
+    }
+    fn read_u16(&mut self) -> Result<u16> {
+        Cursor::read_u16(self)
+    }
+    fn read_unsigned_vint(&mut self) -> Result<u64> {
+        Cursor::read_unsigned_vint(self)
+    }
+    fn skip(&mut self, n: usize) -> Result<()> {
+        Cursor::skip(self, n)
+    }
 }
 
 /// Skip an `EstimatedHistogram`: `i32 count`, then `count` × (`i64 offset`,
@@ -399,33 +506,163 @@ fn uses_modern_tombstone_histogram(gates: &VersionGates) -> bool {
     }
 }
 
+/// The version-gate flags the post-`repairedAt` forward walk needs, projected
+/// out of [`VersionGates`] so the walk depends only on the AUTHORITATIVE parsed
+/// descriptor (no heuristics, #28). Every flag mirrors a single Cassandra
+/// `BigFormat`/`BtiFormat` version gate consumed by
+/// `StatsMetadata.StatsMetadataSerializer.serialize`.
+#[derive(Debug, Clone, Copy)]
+struct RepairWalkGates {
+    /// Modern tombstone-histogram entry width (`oa`+/`da`).
+    modern_histogram: bool,
+    /// `hasImprovedMinMax` — emits clusteringTypes + a covered `Slice` in place
+    /// of the legacy min/max clustering-value lists.
+    has_improved_min_max: bool,
+    /// `hasLegacyMinMax` — emits min/max clustering-value lists (each
+    /// `i32 count` then `count` × vint-length value).
+    has_legacy_min_max: bool,
+    /// `hasPendingRepair` (`na`+/`da`) — the `pendingRepair` nullable-UUID field
+    /// is present in the body.
+    has_pending_repair: bool,
+    /// `hasIsTransient` (`na`+/`da`) — the `isTransient` boolean is present.
+    has_is_transient: bool,
+}
+
+impl RepairWalkGates {
+    fn from(gates: &VersionGates) -> Self {
+        match gates {
+            VersionGates::Big(g) => RepairWalkGates {
+                modern_histogram: g.has_uint_deletion_time,
+                has_improved_min_max: g.has_improved_min_max,
+                has_legacy_min_max: g.has_legacy_min_max,
+                has_pending_repair: g.has_pending_repair,
+                has_is_transient: g.has_is_transient,
+            },
+            VersionGates::Bti(g) => RepairWalkGates {
+                modern_histogram: true,
+                has_improved_min_max: g.has_improved_min_max,
+                has_legacy_min_max: g.has_legacy_min_max,
+                has_pending_repair: g.has_pending_repair,
+                has_is_transient: g.has_is_transient,
+            },
+        }
+    }
+}
+
+/// Skip the legacy min/max clustering-value lists (`hasLegacyMinMax`).
+///
+/// Each list is `i32 count` then `count` × a value written with
+/// `ByteBufferUtil.writeWithShortLength` — an UNSIGNED 16-bit length prefix
+/// (`writeShort`) then the raw bytes (cassandra-5.0.0
+/// `StatsMetadata.StatsMetadataSerializer.serialize` legacy branch). Verified
+/// against a real `nb` `system_schema` fixture (clustering values present).
+fn skip_legacy_min_max(c: &mut Cursor) -> Result<()> {
+    for _ in 0..2 {
+        let count = c.read_i32()?;
+        if count < 0 {
+            return Err(Error::Corruption(format!(
+                "negative legacy min/max clustering count {count}"
+            )));
+        }
+        for _ in 0..count {
+            let len = c.read_u16()? as usize;
+            c.skip(len)?;
+        }
+    }
+    Ok(())
+}
+
+/// Attempt to skip the improvedMinMax block (`hasImprovedMinMax`): a
+/// clusteringTypes list (unsigned-VInt count, then each type a vint-length UTF-8
+/// string) followed by the covered `Slice` (two `ClusteringBound`s, each
+/// `byte kind` + `short size` + `size` comparator-encoded values).
+///
+/// The covered-clustering bound VALUES are RAW comparator-encoded (no per-value
+/// length prefix), exactly as cassandra-5.0.0
+/// `ClusteringPrefix.Serializer.serializeValuesWithoutSize` writes them: 32-value
+/// header batches then each present value's bytes via `AbstractType.writeValue`
+/// (fixed-width raw, or `writeWithVIntLength` for variable types). We skip them
+/// authoritatively by resolving each clustering column's `valueLengthIfFixed()`
+/// from the persisted `clusteringTypes` and mirroring
+/// `ClusteringBoundOrBoundary.Serializer.skipValues` (see [`repair_clustering`]).
+///
+/// Returns `Ok(true)` when the whole block (types + covered Slice) was skipped, so
+/// the walk may continue to `pendingRepair`/`isTransient`. Returns `Ok(false)`
+/// ONLY when a clustering type is not modeled (its fixed-vs-variable nature is
+/// unknown) or a bound advertises more values than the types describe — i.e. the
+/// length of some value cannot be computed. In that case the caller reports the
+/// trailing fields honestly as `Unparsed` rather than guessing (#28). Empty
+/// bounds (`Slice.ALL`, the no-clustering shape) skip cleanly to `Ok(true)`.
+fn try_skip_improved_min_max(c: &mut Cursor) -> Result<bool> {
+    // clusteringTypes list → resolved per-column value layouts. The raw UTF-8
+    // type names are read through the same bounded cursor.
+    let layouts = {
+        // Borrow the cursor mutably inside the closure by reading bytes directly;
+        // read_clustering_type_layouts drives both the vint reads and the name
+        // reads through `c`, but the closure also needs `c`, so we inline the
+        // loop here instead of passing a borrow twice.
+        let count = ByteSkip::read_unsigned_vint(c)? as usize;
+        let mut v = Vec::with_capacity(count.min(64));
+        for _ in 0..count {
+            let len = ByteSkip::read_unsigned_vint(c)? as usize;
+            let bytes = c.read_bytes(len)?;
+            let name = std::str::from_utf8(&bytes).map_err(|_| {
+                Error::Corruption("clusteringTypes entry is not valid UTF-8".to_string())
+            })?;
+            v.push(resolve_clustering_value_layout(name));
+        }
+        v
+    };
+    // coveredClustering = Slice: start bound, then end bound, each skipped per the
+    // resolved layouts. A bool result distinguishes "skipped" from "unmodeled".
+    skip_covered_slice(c, &layouts)
+}
+
+/// Skip the `commitLogIntervals` IntervalSet: `i32 size` then `size` × an
+/// interval (`CommitLogPosition` start + end = 2 × (`i64 segmentId` +
+/// `i32 position`) = 24 bytes per interval).
+fn skip_commit_log_intervals(c: &mut Cursor) -> Result<()> {
+    let size = c.read_i32()?;
+    if size < 0 {
+        return Err(Error::Corruption(format!(
+            "negative commitLogIntervals size {size}"
+        )));
+    }
+    let bytes = (size as usize)
+        .checked_mul(24)
+        .ok_or_else(|| Error::Corruption("commitLogIntervals size overflow".to_string()))?;
+    c.skip(bytes)
+}
+
 /// Decode the repair-state metadata from a raw `Statistics.db` buffer.
 ///
 /// `repairedAt` is decoded from the STATS component for every format. When
-/// `gates` is `None`, the legacy (nb) tombstone-histogram width is assumed
-/// (nb-compatible default), matching the rest of the minimal Statistics parser.
-///
-/// `pendingRepair` / `isTransient` are reported honestly as `RepairField::Unparsed`
-/// (this module does not walk them; see module docs); this function never
-/// fabricates a repaired state.
+/// authoritative [`VersionGates`] are supplied, the full version-gated forward
+/// walk continues past `repairedAt` and decodes `pendingRepair` and
+/// `isTransient` from real bytes too (issue #1021). When `gates` is `None`, the
+/// legacy (nb) tombstone-histogram width is assumed to reach `repairedAt`, and
+/// the two later fields are reported honestly as [`RepairField::Unparsed`] (the
+/// min/max block and commit-log-interval shape are version-dependent and cannot
+/// be traversed without the descriptor).
 ///
 /// # Errors
 ///
-/// Returns an error only when the STATS component is present but its leading
-/// (self-describing) fields are truncated/corrupt, OR overrun the STATS
-/// component's authoritative end bound — strict callers can rely on this to fail
-/// closed (a truncated body or an over-long internal length never spills into
-/// the trailing CRC or the following component). A *missing* STATS component is
-/// reported as the unrepaired default with `repaired_at_decoded = false` (the
-/// buffer carried no STATS section to decode). A STATS entry that IS present but
-/// whose derived byte range is invalid (offset past EOF, inverted) is treated as
+/// Returns an error only when the STATS component is present but its fields are
+/// truncated/corrupt, OR overrun the STATS component's authoritative end bound —
+/// strict callers can rely on this to fail closed (a truncated body or an
+/// over-long internal length never spills into the trailing CRC or the following
+/// component). A *missing* STATS component is reported as the unrepaired default
+/// with `repaired_at_decoded = false`. A STATS entry that IS present but whose
+/// derived byte range is invalid (offset past EOF, inverted) is treated as
 /// corruption and fails closed.
 pub fn parse_repair_metadata(input: &[u8], gates: Option<&VersionGates>) -> Result<RepairMetadata> {
+    let walk = gates.map(RepairWalkGates::from);
+
     let Some(bounds) = stats_component_bounds(input)? else {
         return Ok(RepairMetadata::unrepaired_default());
     };
 
-    let modern_histogram = gates.map(uses_modern_tombstone_histogram).unwrap_or(false);
+    let modern_histogram = walk.map(|w| w.modern_histogram).unwrap_or(false);
 
     // Bound the cursor over ONLY the STATS component slice (start..end, with the
     // trailing CRC and following components excluded). Any read past this slice
@@ -460,12 +697,87 @@ pub fn parse_repair_metadata(input: &[u8], gates: Option<&VersionGates>) -> Resu
     let _sstable_level = c.read_i32()?;
     let repaired_at = c.read_i64()?;
 
+    // Without authoritative gates the post-repairedAt min/max block and the
+    // commit-log-interval shape cannot be traversed; report the two later fields
+    // honestly as Unparsed rather than a fabricated null / false.
+    let Some(walk) = walk else {
+        return Ok(RepairMetadata {
+            repaired_at,
+            pending_repair: RepairField::Unparsed,
+            is_transient: RepairField::Unparsed,
+            repaired_at_decoded: true,
+        });
+    };
+
+    // 10. min/max clustering block. Cassandra serializes the improvedMinMax
+    //     variant when present, otherwise the legacy variant; a version that
+    //     carries neither (pre-mb) writes nothing here.
+    //
+    //     The improvedMinMax covered-clustering Slice carries comparator-encoded
+    //     bound VALUES that this repair-only decoder does not model. When those
+    //     values are present (a table with clustering data) the walk cannot
+    //     safely continue, so the two later fields are reported honestly as
+    //     `Unparsed` rather than mis-decoded.
+    if walk.has_improved_min_max {
+        if !try_skip_improved_min_max(&mut c)? {
+            return Ok(RepairMetadata {
+                repaired_at,
+                pending_repair: RepairField::Unparsed,
+                is_transient: RepairField::Unparsed,
+                repaired_at_decoded: true,
+            });
+        }
+    } else if walk.has_legacy_min_max {
+        skip_legacy_min_max(&mut c)?;
+    }
+
+    // 11. hasLegacyCounterShards (bool).
+    c.skip(1)?;
+
+    // 12. totalColumnsSet (long), totalRows (long).
+    c.skip(8 + 8)?;
+
+    // 13. commitLogLowerBound (CommitLogPosition) + commitLogIntervals
+    //     (IntervalSet). `hasCommitLogLowerBound` is `>= mb` and
+    //     `hasCommitLogIntervals` is `>= mc` in Cassandra; both gates are below
+    //     `na`, so every Cassandra 5.0 format CQLite reads (`nb`/`oa`/`da`) always
+    //     carries both fields. Skip them unconditionally. (The pre-`mc` absent
+    //     case is out of scope — CQLite is a Cassandra 5.0 reader.)
+    c.skip(8 + 4)?; // commitLogLowerBound CommitLogPosition: i64 segmentId + i32 position
+    skip_commit_log_intervals(&mut c)?;
+
+    // 14. pendingRepair: a presence byte (writeBoolean), then a 16-byte UUID
+    //     when present. `hasPendingRepair` is `version.compareTo("na") >= 0`
+    //     (cassandra-5.0.0 `BigFormat`/`BtiFormat`), so it is ALWAYS true for
+    //     every Cassandra 5.0 format CQLite reads (`nb`/`oa`/`da`) and the field
+    //     is always present and decoded. The `else` is unreachable for supported
+    //     formats (pre-`na` BIG `ma`–`me` is out of scope — CQLite is a Cassandra
+    //     5.0 reader); it fails closed via `Unparsed` rather than fabricating a
+    //     value, which `classify_inputs` rejects.
+    let pending_repair = if walk.has_pending_repair {
+        let present = c.read_u8()?;
+        if present != 0 {
+            RepairField::Decoded(Some(c.read_uuid()?))
+        } else {
+            RepairField::Decoded(None)
+        }
+    } else {
+        RepairField::Unparsed
+    };
+
+    // 15. isTransient (bool). Same `>= na` gate as pendingRepair, so always
+    //     present and decoded for supported Cassandra 5.0 formats. The `else` is
+    //     unreachable for `nb`/`oa`/`da`; it fails closed (`Unparsed`).
+    let is_transient = if walk.has_is_transient {
+        RepairField::Decoded(c.read_u8()? != 0)
+    } else {
+        RepairField::Unparsed
+    };
+
     Ok(RepairMetadata {
         repaired_at,
-        // Not walked by this module — reported honestly as not-yet-decoded
-        // rather than a fabricated null / false (see module docs).
-        pending_repair: RepairField::Unparsed,
-        is_transient: RepairField::Unparsed,
+        pending_repair,
+        is_transient,
         repaired_at_decoded: true,
     })
 }
@@ -784,6 +1096,212 @@ mod tests {
 
     fn oa_gates() -> VersionGates {
         VersionGates::Big(BigVersionGates::from_version("oa").expect("oa gates"))
+    }
+
+    fn da_gates() -> VersionGates {
+        use crate::storage::sstable::version_gate::BtiVersionGates;
+        VersionGates::Bti(BtiVersionGates::from_version("da").expect("da gates"))
+    }
+
+    /// Append an unsigned VInt (Cassandra `VIntCoding.writeUnsignedVInt`) so the
+    /// full-walk synthetic builders match the bytes [`Cursor::read_unsigned_vint`]
+    /// consumes. Values used by these tests fit in `< 128`, encoded as one byte.
+    fn push_uvint(buf: &mut Vec<u8>, v: u64) {
+        assert!(
+            v < 0x80,
+            "test uvint helper only handles single-byte values"
+        );
+        buf.push(v as u8);
+    }
+
+    /// Build a complete STATS body through `isTransient` for the legacy (`nb`)
+    /// layout (legacy min/max clustering lists; pendingRepair UUID + transient
+    /// flag carried by `na`+). Wrapped in a STATS-last 2-component TOC + CRC.
+    fn synthetic_full_nb(
+        repaired_at: i64,
+        pending_repair: Option<[u8; 16]>,
+        is_transient: bool,
+    ) -> Vec<u8> {
+        let mut stats = Vec::new();
+        stats.extend_from_slice(&0i32.to_be_bytes()); // estimatedPartitionSize
+        stats.extend_from_slice(&0i32.to_be_bytes()); // estimatedCellPerPartitionCount
+        stats.extend_from_slice(&(-1i64).to_be_bytes()); // commitLogUpperBound segmentId
+        stats.extend_from_slice(&0i32.to_be_bytes()); // commitLogUpperBound position
+        stats.extend_from_slice(&100i64.to_be_bytes()); // minTimestamp
+        stats.extend_from_slice(&200i64.to_be_bytes()); // maxTimestamp
+        stats.extend_from_slice(&i32::MAX.to_be_bytes()); // minLocalDeletionTime
+        stats.extend_from_slice(&i32::MAX.to_be_bytes()); // maxLocalDeletionTime
+        stats.extend_from_slice(&0i32.to_be_bytes()); // minTTL
+        stats.extend_from_slice(&0i32.to_be_bytes()); // maxTTL
+        stats.extend_from_slice(&(-1.0f64).to_be_bytes()); // compressionRatio
+        stats.extend_from_slice(&0i32.to_be_bytes()); // TombstoneHistogram maxBinSize
+        stats.extend_from_slice(&0i32.to_be_bytes()); // TombstoneHistogram size
+        stats.extend_from_slice(&0i32.to_be_bytes()); // sstableLevel
+        stats.extend_from_slice(&repaired_at.to_be_bytes()); // repairedAt
+                                                             // legacy min/max clustering lists (both empty: count 0).
+        stats.extend_from_slice(&0i32.to_be_bytes());
+        stats.extend_from_slice(&0i32.to_be_bytes());
+        stats.push(0x00); // hasLegacyCounterShards
+        stats.extend_from_slice(&0u64.to_be_bytes()); // totalColumnsSet
+        stats.extend_from_slice(&0u64.to_be_bytes()); // totalRows
+        stats.extend_from_slice(&(-1i64).to_be_bytes()); // commitLogLowerBound segmentId
+        stats.extend_from_slice(&0i32.to_be_bytes()); // commitLogLowerBound position
+        stats.extend_from_slice(&0i32.to_be_bytes()); // commitLogIntervals size = 0
+                                                      // pendingRepair: presence byte + optional UUID.
+        match pending_repair {
+            Some(uuid) => {
+                stats.push(0x01);
+                stats.extend_from_slice(&uuid);
+            }
+            None => stats.push(0x00),
+        }
+        stats.push(if is_transient { 0x01 } else { 0x00 }); // isTransient
+        wrap_stats_last(stats)
+    }
+
+    /// Build a complete STATS body through `isTransient` for the `da` (BtiFormat)
+    /// layout (improvedMinMax: clusteringTypes + covered Slice). One clustering
+    /// type and an empty covered slice exercise the improved-min/max walk.
+    fn synthetic_full_da(
+        repaired_at: i64,
+        pending_repair: Option<[u8; 16]>,
+        is_transient: bool,
+    ) -> Vec<u8> {
+        let mut stats = Vec::new();
+        stats.extend_from_slice(&0i32.to_be_bytes()); // estimatedPartitionSize
+        stats.extend_from_slice(&0i32.to_be_bytes()); // estimatedCellPerPartitionCount
+        stats.extend_from_slice(&(-1i64).to_be_bytes()); // commitLogUpperBound segmentId
+        stats.extend_from_slice(&0i32.to_be_bytes()); // commitLogUpperBound position
+        stats.extend_from_slice(&100i64.to_be_bytes()); // minTimestamp
+        stats.extend_from_slice(&200i64.to_be_bytes()); // maxTimestamp
+        stats.extend_from_slice(&u32::MAX.to_be_bytes()); // minLocalDeletionTime (uint)
+        stats.extend_from_slice(&u32::MAX.to_be_bytes()); // maxLocalDeletionTime (uint)
+        stats.extend_from_slice(&0i32.to_be_bytes()); // minTTL
+        stats.extend_from_slice(&0i32.to_be_bytes()); // maxTTL
+        stats.extend_from_slice(&(-1.0f64).to_be_bytes()); // compressionRatio
+        stats.extend_from_slice(&0i32.to_be_bytes()); // TombstoneHistogram maxBinSize (modern)
+        stats.extend_from_slice(&0i32.to_be_bytes()); // TombstoneHistogram size (modern)
+        stats.extend_from_slice(&0i32.to_be_bytes()); // sstableLevel
+        stats.extend_from_slice(&repaired_at.to_be_bytes()); // repairedAt
+                                                             // improvedMinMax: clusteringTypes list (1 type) + covered Slice.
+        push_uvint(&mut stats, 1); // clusteringTypes count
+        let ty = b"org.apache.cassandra.db.marshal.Int32Type";
+        push_uvint(&mut stats, ty.len() as u64);
+        stats.extend_from_slice(ty);
+        // covered Slice: start bound (kind=1, size=0), end bound (kind=6, size=0).
+        stats.push(1);
+        stats.extend_from_slice(&0u16.to_be_bytes());
+        stats.push(6);
+        stats.extend_from_slice(&0u16.to_be_bytes());
+        stats.push(0x00); // hasLegacyCounterShards
+        stats.extend_from_slice(&0u64.to_be_bytes()); // totalColumnsSet
+        stats.extend_from_slice(&0u64.to_be_bytes()); // totalRows
+        stats.extend_from_slice(&(-1i64).to_be_bytes()); // commitLogLowerBound segmentId
+        stats.extend_from_slice(&0i32.to_be_bytes()); // commitLogLowerBound position
+        stats.extend_from_slice(&0i32.to_be_bytes()); // commitLogIntervals size = 0
+        match pending_repair {
+            Some(uuid) => {
+                stats.push(0x01);
+                stats.extend_from_slice(&uuid);
+            }
+            None => stats.push(0x00),
+        }
+        stats.push(if is_transient { 0x01 } else { 0x00 }); // isTransient
+        wrap_stats_last(stats)
+    }
+
+    /// Wrap a STATS body in a 2-component TOC (STATS type 2 last by offset) plus a
+    /// trailing 4-byte CRC, so the decoder's end bound is `file_len - CRC`.
+    fn wrap_stats_last(stats: Vec<u8>) -> Vec<u8> {
+        let toc_len = 4 + 4 + 2 * 8;
+        let comp0_off = toc_len;
+        let stats_off = comp0_off + 1;
+        let mut out = Vec::new();
+        out.extend_from_slice(&2u32.to_be_bytes());
+        out.extend_from_slice(&0u32.to_be_bytes());
+        for (ty, off) in [(0u32, comp0_off as u32), (2u32, stats_off as u32)] {
+            out.extend_from_slice(&ty.to_be_bytes());
+            out.extend_from_slice(&off.to_be_bytes());
+        }
+        out.push(0u8); // placeholder body for comp0
+        debug_assert_eq!(out.len(), stats_off);
+        out.extend_from_slice(&stats);
+        out.extend_from_slice(&0u32.to_be_bytes()); // trailing CRC
+        out
+    }
+
+    #[test]
+    fn full_walk_nb_decodes_null_pending_and_transient() {
+        let bytes = synthetic_full_nb(0, None, false);
+        let md = parse_repair_metadata(&bytes, Some(&nb_gates())).expect("decode");
+        assert_eq!(md.repaired_at, 0);
+        assert!(md.repaired_at_decoded);
+        assert_eq!(md.pending_repair, RepairField::Decoded(None));
+        assert_eq!(md.is_transient, RepairField::Decoded(false));
+    }
+
+    #[test]
+    fn full_walk_nb_decodes_pending_uuid_and_transient_true() {
+        let uuid = [
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE,
+            0xFF, 0x00,
+        ];
+        let bytes = synthetic_full_nb(1_700_000_000_000, Some(uuid), true);
+        let md = parse_repair_metadata(&bytes, Some(&nb_gates())).expect("decode");
+        assert_eq!(md.repaired_at, 1_700_000_000_000);
+        assert_eq!(md.pending_repair, RepairField::Decoded(Some(uuid)));
+        assert_eq!(md.is_transient, RepairField::Decoded(true));
+    }
+
+    #[test]
+    fn full_walk_da_decodes_pending_uuid_and_transient() {
+        let uuid = [0xABu8; 16];
+        let bytes = synthetic_full_da(42, Some(uuid), true);
+        let md = parse_repair_metadata(&bytes, Some(&da_gates())).expect("decode");
+        assert_eq!(md.repaired_at, 42);
+        assert_eq!(md.pending_repair, RepairField::Decoded(Some(uuid)));
+        assert_eq!(md.is_transient, RepairField::Decoded(true));
+    }
+
+    #[test]
+    fn full_walk_da_decodes_null_pending_non_transient() {
+        let bytes = synthetic_full_da(0, None, false);
+        let md = parse_repair_metadata(&bytes, Some(&da_gates())).expect("decode");
+        assert_eq!(md.pending_repair, RepairField::Decoded(None));
+        assert_eq!(md.is_transient, RepairField::Decoded(false));
+    }
+
+    #[test]
+    fn full_walk_none_gates_reports_unparsed() {
+        // Without gates the walk past repairedAt is not attempted, so the two
+        // later fields are reported honestly as Unparsed (not fabricated).
+        let bytes = synthetic_full_nb(7, Some([0x01u8; 16]), true);
+        let md = parse_repair_metadata(&bytes, None).expect("decode repairedAt only");
+        assert_eq!(md.repaired_at, 7);
+        assert_eq!(md.pending_repair, RepairField::Unparsed);
+        assert_eq!(md.is_transient, RepairField::Unparsed);
+    }
+
+    #[test]
+    fn full_walk_truncated_pending_fails_closed() {
+        // Drop the trailing CRC + isTransient + part of the UUID so the
+        // pendingRepair UUID read overruns the bounded STATS slice.
+        let mut bytes = synthetic_full_nb(0, Some([0x07u8; 16]), true);
+        bytes.truncate(bytes.len() - (4 + 1 + 8));
+        assert!(
+            parse_repair_metadata(&bytes, Some(&nb_gates())).is_err(),
+            "a truncated pendingRepair UUID must fail closed, not default"
+        );
+    }
+
+    #[test]
+    fn read_unsigned_vint_matches_encode_vuint() {
+        use crate::parser::vint::encode_vuint;
+        for v in [0u64, 1, 63, 127, 128, 255, 300, 16383, 16384, 1_000_000] {
+            let enc = encode_vuint(v);
+            let mut c = Cursor::new(&enc);
+            assert_eq!(c.read_unsigned_vint().expect("decode vint"), v, "v={v}");
+        }
     }
 
     #[test]

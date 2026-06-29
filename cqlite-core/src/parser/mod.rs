@@ -132,6 +132,7 @@ pub mod enhanced_statistics_parser;
 #[cfg(test)]
 pub mod enhanced_statistics_test;
 pub mod header;
+pub(crate) mod repair_clustering;
 pub mod repair_metadata;
 pub mod statistics;
 #[cfg(test)]

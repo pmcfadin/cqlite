@@ -175,6 +175,17 @@ impl WriteEngine {
         // the partial bound unconditionally is safe.
         .with_max_purgeable_timestamp(max_purgeable_timestamp);
 
+        // Repair-state preservation + mixed-state rejection (issue #1021).
+        //
+        // Cassandra partitions compaction candidates by repair state and never
+        // mixes repaired / unrepaired / pending-repair SSTables in one
+        // compaction. CQLite cannot reproduce the repair-boundary tombstone
+        // constraints, so it MUST NOT silently merge across that boundary: read
+        // each input's persisted repair state from its Statistics.db, reject a
+        // mixed set with a typed error, and PRESERVE the single shared state into
+        // the merged output below. Authoritative metadata only (no heuristics).
+        let repair_state = merge::classify_inputs(&input_paths)?;
+
         // Point the SSTableWriter at the tmp root; it will write to
         // tmp_dir/keyspace/table/nb-{gen}-big-*.db. Use the post-drop
         // `write_schema` (NOT `effective_schema`) so fully-purged dropped
@@ -184,6 +195,15 @@ impl WriteEngine {
             output_generation,
             &write_schema,
         )?;
+
+        // Carry the inputs' shared repair state into the merged output's
+        // Statistics.db (issue #1021). For a normal unrepaired corpus this is the
+        // unrepaired default (a no-op vs the previous hardcoded zeros).
+        writer.set_repair_state(
+            repair_state.repaired_at,
+            repair_state.pending_repair,
+            repair_state.is_transient,
+        );
 
         // Two-pass compaction (issue #729): compute output FINAL encoding baselines
         // by reading the minimum values from each input SSTable's Statistics.db.
