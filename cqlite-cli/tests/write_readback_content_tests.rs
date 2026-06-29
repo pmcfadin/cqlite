@@ -339,7 +339,23 @@ fn cli_export_sstable_reopen_exported_asserts_content() {
 // ===========================================================================
 // AC #2: subcommand glue smoke — flags parse, `--writable` gating, output shape
 // for write-stats / maintenance / compact.
+//
+// NOTE: the exact stdout substrings these tests match ("Write Engine
+// Statistics:", "Maintenance complete:", "OK: compacted", "Export complete:",
+// "Flushed:", "OK") are treated as part of the CLI's *output contract*. A
+// deliberate wording change in the CLI must update these strings here so the
+// behavioral coupling stays visible (roborev judged exact-substring matching
+// acceptable for CLI glue smoke). The `--writable` gating checks additionally
+// assert the real gate error phrase on stderr ("requires --writable mode"), so
+// a command that fails for an unrelated reason cannot satisfy the gating tests.
 // ===========================================================================
+
+/// The substring the CLI emits on stderr when a write subcommand is invoked
+/// without `--writable`. Asserting this (not just a non-zero exit) proves the
+/// failure is the gate, not e.g. an empty/invalid data dir. Confirmed against
+/// the real binary: `Error: Write stats requires --writable mode` /
+/// `Error: Maintenance requires --writable mode`.
+const WRITABLE_GATE_MSG: &str = "requires --writable mode";
 
 #[test]
 fn cli_write_stats_subcommand_glue() {
@@ -367,9 +383,14 @@ fn cli_write_stats_subcommand_glue() {
         schema.to_str().unwrap(),
         "write-stats",
     ]);
+    let gated_stderr = String::from_utf8_lossy(&gated.stderr);
     assert!(
         !gated.status.success(),
         "write-stats without --writable must fail (gating)"
+    );
+    assert!(
+        gated_stderr.contains(WRITABLE_GATE_MSG),
+        "write-stats must fail *because of* the --writable gate; expected stderr to contain {WRITABLE_GATE_MSG:?}, got: {gated_stderr}"
     );
 }
 
@@ -400,9 +421,14 @@ fn cli_maintenance_subcommand_glue() {
         "--budget-ms",
         "50",
     ]);
+    let gated_stderr = String::from_utf8_lossy(&gated.stderr);
     assert!(
         !gated.status.success(),
         "maintenance without --writable must fail (gating)"
+    );
+    assert!(
+        gated_stderr.contains(WRITABLE_GATE_MSG),
+        "maintenance must fail *because of* the --writable gate; expected stderr to contain {WRITABLE_GATE_MSG:?}, got: {gated_stderr}"
     );
 }
 
