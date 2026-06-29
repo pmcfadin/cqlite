@@ -317,17 +317,62 @@ pub(crate) fn render_udt_marshal_recursive(
 /// Render a single UDT field's `CqlType` as a Cassandra marshal string,
 /// expanding any UDT reference into `UserType(...)` via `registry` (issue #1020).
 ///
-/// A UDT reference (`CqlType::Udt`, or a `CqlType::Frozen`/`Custom` that resolves
-/// to a registered UDT) becomes a BARE `UserType(...)` — no `FrozenType(...)`
-/// wrapper — matching how Cassandra spells inner UDT fields. All other shapes
-/// fall through to the canonical string converter.
+/// Field-type rule (Cassandra parity, roborev #1020 Finding 2):
+///   * A `FrozenType(...)` wrapper is elided ONLY for a DIRECT UDT field
+///     (`frozen<udt>` → bare `UserType(...)`); Cassandra implies frozen-ness for
+///     an inner UDT field and does not write the wrapper.
+///   * A `frozen<collection/tuple/frozen<...>>` KEEPS its `FrozenType(...)`
+///     wrapper and its inner type is rendered RECURSIVELY, so a nested UDT
+///     ELEMENT/VALUE expands to `UserType(...)` (e.g.
+///     `frozen<list<frozen<address>>>` →
+///     `FrozenType(ListType(UserType(...)))`). The previous implementation
+///     dropped the wrapper whenever the inner TRANSITIVELY referenced a UDT,
+///     mis-spelling such a field as a non-frozen collection and collapsing the
+///     nested UDT to `BytesType`.
+///   * `ListType/SetType/MapType/TupleType` are emitted structurally, recursing
+///     into element/key/value/component types so nested UDTs always expand.
+///   * Everything else (primitives) falls through to the canonical string
+///     converter.
 fn render_field_marshal(ty: &CqlType, keyspace: &str, registry: &UdtRegistry) -> String {
+    let prefix = "org.apache.cassandra.db.marshal.";
     match ty {
-        // A frozen wrapper around a UDT field drops to a bare UserType (Cassandra
-        // implies frozen-ness for inner UDT fields). A frozen wrapper around a
-        // non-UDT keeps its FrozenType(...) marshal via the fallback below.
-        CqlType::Frozen(inner) if cql_type_references_udt(inner, keyspace, registry) => {
+        // DIRECT frozen UDT: drop the FrozenType wrapper, emit bare UserType.
+        CqlType::Frozen(inner) if is_direct_udt(inner, keyspace, registry) => {
             render_field_marshal(inner, keyspace, registry)
+        }
+        // Frozen around a non-UDT (collection / tuple / nested frozen): KEEP the
+        // FrozenType wrapper and recurse so nested UDT elements still expand.
+        CqlType::Frozen(inner) => {
+            format!(
+                "{prefix}FrozenType({})",
+                render_field_marshal(inner, keyspace, registry)
+            )
+        }
+        CqlType::List(inner) => {
+            format!(
+                "{prefix}ListType({})",
+                render_field_marshal(inner, keyspace, registry)
+            )
+        }
+        CqlType::Set(inner) => {
+            format!(
+                "{prefix}SetType({})",
+                render_field_marshal(inner, keyspace, registry)
+            )
+        }
+        CqlType::Map(k, v) => {
+            format!(
+                "{prefix}MapType({},{})",
+                render_field_marshal(k, keyspace, registry),
+                render_field_marshal(v, keyspace, registry)
+            )
+        }
+        CqlType::Tuple(fields) => {
+            let components: Vec<String> = fields
+                .iter()
+                .map(|f| render_field_marshal(f, keyspace, registry))
+                .collect();
+            format!("{prefix}TupleType({})", components.join(","))
         }
         CqlType::Udt(name, inline_fields) => {
             render_udt_reference(name, inline_fields, keyspace, registry)
@@ -345,6 +390,22 @@ fn render_field_marshal(ty: &CqlType, keyspace: &str, registry: &UdtRegistry) ->
             let field_cql = cql_type_to_cql_string(ty);
             crate::storage::sstable::writer::stats_writer::cql_type_to_marshal_type(&field_cql)
         }
+    }
+}
+
+/// True iff `ty` is DIRECTLY a UDT reference — `CqlType::Udt`, or a
+/// `CqlType::Custom` that carries the parser's `udt:` prefix or resolves to a
+/// registered UDT in `keyspace`. A collection/tuple/frozen that merely CONTAINS a
+/// UDT is NOT direct (its `FrozenType` wrapper must be preserved — roborev #1020
+/// Finding 2).
+fn is_direct_udt(ty: &CqlType, keyspace: &str, registry: &UdtRegistry) -> bool {
+    match ty {
+        CqlType::Udt(..) => true,
+        CqlType::Custom(name) => {
+            let clean = name.strip_prefix("udt:").unwrap_or(name);
+            name.starts_with("udt:") || resolve_registered_udt(clean, keyspace, registry).is_some()
+        }
+        _ => false,
     }
 }
 
@@ -595,5 +656,90 @@ pub(crate) fn cql_type_references_udt(
             .iter()
             .any(|f| cql_type_references_udt(f, keyspace, registry)),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const KS: &str = "test_ks";
+
+    fn address_def() -> UdtTypeDef {
+        UdtTypeDef::new(KS.to_string(), "address".to_string())
+            .with_field("street".to_string(), CqlType::Text, true)
+            .with_field("city".to_string(), CqlType::Text, true)
+    }
+
+    fn registry_with_address() -> UdtRegistry {
+        let mut reg = UdtRegistry::new();
+        reg.register_udt(address_def());
+        reg
+    }
+
+    /// roborev #1020 Finding 2: a `frozen<address>` DIRECT UDT field drops the
+    /// FrozenType wrapper and renders as a bare `UserType(...)`.
+    #[test]
+    fn direct_frozen_udt_field_renders_bare_user_type() {
+        let reg = registry_with_address();
+        let ty = CqlType::Frozen(Box::new(CqlType::Custom("address".to_string())));
+        let m = render_field_marshal(&ty, KS, &reg);
+        assert!(
+            m.starts_with("org.apache.cassandra.db.marshal.UserType("),
+            "direct frozen<udt> must be bare UserType, got {m}"
+        );
+        assert!(!m.contains("FrozenType("), "wrapper must be elided: {m}");
+        assert!(m.contains("UTF8Type"), "address fields must expand: {m}");
+    }
+
+    /// roborev #1020 Finding 2: a `frozen<list<frozen<address>>>` field KEEPS its
+    /// FrozenType wrapper and expands the nested UDT element to `UserType(...)` —
+    /// it must NOT collapse to a non-frozen list nor fall back to `BytesType`.
+    /// Asserts the EXACT marshal byte shape.
+    #[test]
+    fn frozen_list_of_frozen_udt_keeps_wrapper_and_expands_udt() {
+        let reg = registry_with_address();
+        let ty = CqlType::Frozen(Box::new(CqlType::List(Box::new(CqlType::Frozen(
+            Box::new(CqlType::Custom("address".to_string())),
+        )))));
+        let m = render_field_marshal(&ty, KS, &reg);
+        // street=737472656574, city=63697479, address=61646472657373.
+        let expected = "org.apache.cassandra.db.marshal.FrozenType(\
+             org.apache.cassandra.db.marshal.ListType(\
+             org.apache.cassandra.db.marshal.UserType(test_ks,61646472657373,\
+             737472656574:org.apache.cassandra.db.marshal.UTF8Type,\
+             63697479:org.apache.cassandra.db.marshal.UTF8Type)))";
+        assert_eq!(m, expected);
+    }
+
+    /// roborev #1020 Finding 2 (precise byte shape): the nested UDT inside a
+    /// frozen collection expands to a full `UserType(...)` (never `BytesType`),
+    /// and the outer `FrozenType`/`ListType` wrappers are preserved.
+    #[test]
+    fn frozen_map_to_frozen_udt_expands_value_udt() {
+        let reg = registry_with_address();
+        // frozen<map<text, frozen<address>>>
+        let ty = CqlType::Frozen(Box::new(CqlType::Map(
+            Box::new(CqlType::Text),
+            Box::new(CqlType::Frozen(Box::new(CqlType::Custom(
+                "address".to_string(),
+            )))),
+        )));
+        let m = render_field_marshal(&ty, KS, &reg);
+        assert!(
+            m.starts_with(
+                "org.apache.cassandra.db.marshal.FrozenType(\
+                 org.apache.cassandra.db.marshal.MapType("
+            ),
+            "outer Frozen+Map wrappers must be preserved: {m}"
+        );
+        assert!(
+            m.contains("org.apache.cassandra.db.marshal.UserType(test_ks,61646472657373,"),
+            "nested address UDT must expand to UserType, not BytesType: {m}"
+        );
+        assert!(
+            !m.contains("BytesType"),
+            "nested UDT must never collapse to BytesType: {m}"
+        );
     }
 }
