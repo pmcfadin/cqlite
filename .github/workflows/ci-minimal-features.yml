@@ -3,8 +3,20 @@ name: Minimal Features CI
 on:
   pull_request:
     branches: [main, develop]
+    paths:
+      - '.github/workflows/ci-minimal-features.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'cqlite-core/**'
   push:
     branches: [main, develop]
+    paths:
+      - '.github/workflows/ci-minimal-features.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'cqlite-core/**'
 
 concurrency:
   group: minimal-features-${{ github.ref }}

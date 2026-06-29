@@ -25,6 +25,13 @@ on:
       # nodetool refresh), so some overlap is intentional — see issue #728.
   push:
     branches: [main]
+    paths:
+      - 'cqlite-core/src/storage/write_engine/**'
+      - 'cqlite-core/src/storage/sstable/writer/**'
+      - 'cqlite-core/src/parser/**'
+      - 'cqlite-core/src/schema/**'
+      - 'cqlite-core/tests/sstableloader_integration.rs'
+      - '.github/workflows/cassandra-validation.yml'
   workflow_dispatch:
     inputs:
       run_stress_tests:
