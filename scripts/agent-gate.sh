@@ -47,8 +47,8 @@
 #
 # All components run even after a failure so one run reports everything.
 # Exit code 0 iff every component passes. Machine-checkable output: the
-# summary block between the AGENT-GATE SUMMARY markers, ending in
-# "RESULT: PASS" or "RESULT: FAIL".
+# summary block between the AGENT-GATE SUMMARY markers, carrying a per-run
+# "run-id:" line and ending in "RESULT: PASS" or "RESULT: FAIL".
 #
 # Usage:
 #   scripts/agent-gate.sh             # full gate (the only run that counts)
@@ -77,6 +77,11 @@
 #     stable repo-root default $PWD/.agent-gate-summary.txt (gitignored). A caller
 #     can ALWAYS `cat` that file for the complete block even if stdout was 100%
 #     lost — no need to parse the stream to learn where the file is.
+#   - That file is INVALIDATED at startup with a "RESULT: INCOMPLETE" sentinel
+#     stamped with this run's run-id, so a stale prior-run summary can never be
+#     read as this run's result if the gate exits early or can't write (#1175).
+#     Each SUMMARY block carries a "run-id:" line; the recovery file is trusted
+#     only when it bears THIS run's run-id, defeating a stale-but-complete file.
 #   - It also keeps a copy under $LOG_DIR for the logs bundle.
 # The streamed copy is best-effort (a plain `cat` of the file). The most robust
 # streamed capture is still the foreground redirect:
@@ -105,6 +110,11 @@ case "${1:-}" in
 esac
 
 LOG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate.XXXXXX")
+# Per-run nonce (#1175 roborev finding 1): the LOG_DIR is a fresh per-run mktemp
+# path, so it uniquely identifies THIS invocation. We stamp it into every SUMMARY
+# block as `run-id:` so completeness can be verified for THIS run, never a stale
+# prior run's file that happens to still contain an old complete block.
+RUN_ID="$LOG_DIR"
 # Caller-known summary path (#1175): the caller may pick the path IN ADVANCE via
 # AGENT_GATE_SUMMARY_FILE; otherwise we use a stable, documented repo-root default
 # the caller can `cat` without parsing stdout. This is THE recovery contract: the
@@ -120,6 +130,23 @@ OVERALL=PASS
 # final exit logic forces a non-zero / FAIL outcome on this so a green gate can
 # never silently lack its promised recovery artifact (#1175 roborev finding 1).
 SUMMARY_WRITE_FAILED=0
+
+# Startup invalidation (#1175 roborev finding 2): a stale .agent-gate-summary.txt
+# from a PREVIOUS run must never survive into THIS run. If the current run exits
+# early (dataset preflight fail, any pre-emit `exit 1`) or can't write later, a
+# caller reading the recovery path would otherwise see an OLD complete PASS block
+# as if it were this run's result. So, as early as possible — before the dataset
+# preflight and before any component — overwrite the caller-known file with an
+# INCOMPLETE sentinel stamped with THIS run's run-id. emit_summary replaces it
+# with the real block on normal completion. Best-effort: if we cannot write the
+# sentinel (unwritable path) we do not abort here; emit_summary's authoritative
+# write guard catches an unwritable path at the end and forces a FAIL.
+{
+  echo "==== AGENT-GATE SUMMARY ===="
+  echo "run-id: $RUN_ID"
+  echo "RESULT: INCOMPLETE (gate did not finish)"
+  echo "==== END AGENT-GATE SUMMARY ===="
+} > "$SUMMARY_FILE" 2>/dev/null || true
 
 # emit_summary <result> [meta-line ...]
 #
@@ -148,11 +175,18 @@ emit_summary() {
   # redirection (no pipe). This is the authoritative artifact and the advertised
   # recovery path. Capture stderr from the redirection so we can report WHY the
   # write failed (e.g. "No such file or directory", "Permission denied").
-  local write_err
+  # Capture BOTH the redirection's exit status and its stderr. The write rc is the
+  # primary signal (#1175 roborev finding 1): a non-zero rc means the `>` could not
+  # open/write the file, so we must NOT trust whatever is on disk — it may be a
+  # stale prior-run block that survives the non-empty/end-marker checks. We grab
+  # the rc of the redirected command group via the trailing `; printf` trick so it
+  # is the redirection's status, not the `$(...)` substitution's.
+  local write_err write_rc
   write_err=$(
     {
       echo
       echo "==== AGENT-GATE SUMMARY ===="
+      echo "run-id: $RUN_ID"
       local line
       for line in "$@"; do echo "$line"; done
       echo "logs: $LOG_DIR"
@@ -160,17 +194,28 @@ emit_summary() {
       echo "RESULT: $result"
       echo "==== END AGENT-GATE SUMMARY ===="
     } > "$SUMMARY_FILE" 2>&1
+    printf '\037rc=%d' "$?"
   ) || true
+  # Split the captured rc sentinel (\037 unit-separator) off the tail.
+  write_rc="${write_err##*$'\037'rc=}"
+  write_err="${write_err%$'\037'rc=*}"
+  case "$write_rc" in (*[!0-9]*|'') write_rc=1 ;; esac
 
-  # Verify the authoritative file actually exists AND contains the COMPLETE block
-  # (end marker present). A failed-to-open redirect leaves no/empty file; a
-  # disk-full / interrupted write leaves a truncated one. Either case is a
-  # contract violation that must not pass silently.
+  # Verify the authoritative file: the WRITE must have succeeded (rc 0) AND the
+  # file must hold the COMPLETE block FOR THIS RUN — non-empty, end marker present,
+  # and stamped with THIS run's run-id. The run-id check is what defeats a stale
+  # prior-run file: an unwritable path with an OLD complete PASS block on disk
+  # would pass the non-empty + end-marker checks, but its run-id is a DIFFERENT
+  # run's, so it is correctly rejected as a failed write (#1175 finding 1).
   local reason=""
-  if [ ! -s "$SUMMARY_FILE" ]; then
+  if [ "$write_rc" -ne 0 ]; then
+    reason="write failed (rc=$write_rc)${write_err:+: $write_err}"
+  elif [ ! -s "$SUMMARY_FILE" ]; then
     reason="${write_err:-file missing or empty}"
   elif ! grep -q '==== END AGENT-GATE SUMMARY ====' "$SUMMARY_FILE" 2>/dev/null; then
     reason="incomplete write (end marker missing)${write_err:+: $write_err}"
+  elif ! grep -qF "run-id: $RUN_ID" "$SUMMARY_FILE" 2>/dev/null; then
+    reason="stale file (run-id of this run not found — write did not land)${write_err:+: $write_err}"
   fi
   if [ -n "$reason" ]; then
     SUMMARY_WRITE_FAILED=1
@@ -195,6 +240,7 @@ emit_summary() {
     {
       echo
       echo "==== AGENT-GATE SUMMARY ===="
+      echo "run-id: $RUN_ID"
       local line
       for line in "$@"; do echo "$line"; done
       echo "logs: $LOG_DIR"
@@ -488,6 +534,13 @@ if selected_needs_datasets; then
   if [ "$DATA_COUNT" -eq 0 ]; then
     echo "agent-gate: no Data.db files under $CQLITE_DATASETS_ROOT/sstables" >&2
     echo "agent-gate: fetch them first: bash test-data/scripts/fetch-datasets.sh" >&2
+    # Overwrite the caller-known recovery file with a FAIL block stamped with this
+    # run's run-id (#1175 finding 2). The startup sentinel already guarantees no
+    # stale PASS survives; this makes the early exit explicit for a caller reading
+    # the recovery path.
+    emit_summary FAIL \
+      "preflight: FAIL (no Data.db files under $CQLITE_DATASETS_ROOT/sstables)" \
+      "hint: bash test-data/scripts/fetch-datasets.sh"
     exit 1
   fi
 else

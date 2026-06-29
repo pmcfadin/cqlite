@@ -111,6 +111,74 @@ else
   bad "isolated-tmpdir: no LOG_DIR summary copy produced"
 fi
 
+# 5. STALE-FILE negative case (#1175 roborev findings 1 & 2): a caller-known
+#    summary file left over from a PREVIOUS run holds an OLD complete RESULT: PASS
+#    block with a DIFFERENT run-id. A new gate invocation that fails early (or
+#    can't write) must NEVER let that stale PASS survive as if it were this run's
+#    result. We assert two failure modes:
+#
+#    5a. Unwritable path: pre-populate, then chmod the file 0444 (read-only) so the
+#        gate's `>` redirection fails. The on-disk content is STILL the old PASS
+#        block (it survives non-empty + end-marker checks), so the run-id guard +
+#        write-rc check are what must catch it: the gate must exit non-zero, warn
+#        loudly on stderr, and the stale PASS must be detected as not-this-run.
+#    5b. Early exit (dataset preflight fail): pre-populate, then run a
+#        dataset-requiring selection (--only core-tests) with an empty datasets
+#        root so the preflight exits 1 BEFORE any component. The caller-known file
+#        must no longer be the stale PASS — it is either the startup INCOMPLETE
+#        sentinel or a preflight FAIL block, both bearing THIS run's run-id.
+STALE_PASS_BLOCK=$'\n==== AGENT-GATE SUMMARY ====\nrun-id: /tmp/agent-gate.STALEOLD\ncommit: deadbeef branch: old dirty: no\nfmt:               PASS (1s)\nlogs: /tmp/agent-gate.STALEOLD\nsummary-file: /stale\nRESULT: PASS\n==== END AGENT-GATE SUMMARY ===='
+
+# 5a. Unwritable caller-known path that already holds a stale PASS block.
+stale_ro="$tmp/stale-readonly.txt"
+printf '%s\n' "$STALE_PASS_BLOCK" >"$stale_ro"
+chmod 0444 "$stale_ro"
+ro_stderr="$tmp/stale-readonly.stderr"
+if AGENT_GATE_SUMMARY_FILE="$stale_ro" \
+     bash "$GATE" --emit-summary-selftest >/dev/null 2>"$ro_stderr"; then
+  bad "stale-readonly: gate exited 0 despite unwritable summary path (should FAIL)"
+else
+  ok "stale-readonly: gate exited non-zero (recovery artifact could not be written)"
+fi
+if grep -q "could not write complete summary file" "$ro_stderr"; then
+  ok "stale-readonly: loud stderr warning emitted"
+else
+  bad "stale-readonly: missing loud stderr warning"
+  echo "------- stderr -------"; cat "$ro_stderr"; echo "----------------------"
+fi
+# The on-disk file is still the OLD read-only block; the gate must NOT have been
+# fooled into treating that stale RESULT: PASS as this run's success — which it
+# proves by exiting non-zero (asserted above). Confirm the stale run-id is what's
+# on disk (the write never landed) so the guard's job is unambiguous.
+if grep -q "run-id: /tmp/agent-gate.STALEOLD" "$stale_ro"; then
+  ok "stale-readonly: on-disk file still bears the OLD run-id (write correctly rejected)"
+else
+  bad "stale-readonly: unexpected on-disk run-id"
+  echo "------- on disk -------"; cat "$stale_ro"; echo "-----------------------"
+fi
+chmod 0644 "$stale_ro" 2>/dev/null || true
+
+# 5b. Stale PASS at a writable caller-known path, then an early-exit gate run.
+stale_early="$tmp/stale-early.txt"
+printf '%s\n' "$STALE_PASS_BLOCK" >"$stale_early"
+empty_ds=$(mktemp -d "$tmp/empty-datasets.XXXXXX")
+# --only core-tests selects a dataset-requiring component, so the preflight runs
+# and (with an empty datasets root) exits 1 before any component executes.
+AGENT_GATE_SUMMARY_FILE="$stale_early" CQLITE_DATASETS_ROOT="$empty_ds" \
+  bash "$GATE" --only core-tests >/dev/null 2>&1 || true
+if grep -q "^RESULT: PASS" "$stale_early" && \
+   grep -q "run-id: /tmp/agent-gate.STALEOLD" "$stale_early"; then
+  bad "stale-early: caller-known file STILL holds the stale RESULT: PASS"
+  echo "------- on disk -------"; cat "$stale_early"; echo "-----------------------"
+else
+  ok "stale-early: stale PASS replaced (INCOMPLETE sentinel or preflight FAIL, this run's run-id)"
+fi
+if grep -q "run-id: /tmp/agent-gate.STALEOLD" "$stale_early"; then
+  bad "stale-early: old run-id still present (stale block survived)"
+else
+  ok "stale-early: old run-id no longer present"
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]
