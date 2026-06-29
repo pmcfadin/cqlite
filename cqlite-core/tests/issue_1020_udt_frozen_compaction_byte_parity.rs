@@ -116,14 +116,13 @@ enum Mode {
 const COLLECTIONS_MODE: Mode = Mode::ByteForByte;
 
 // `udt_frozen_person` / `udt_nested` have a TOP-LEVEL `frozen<UDT>` regular
-// column. CQLite's compaction currently DROPS every partition for such a column
-// (data loss, issue #1234) — so byte parity is NOT achievable yet and these are
-// honestly recorded `canonical_semantic` in the manifest. The active test
-// exercises the real compaction path (must not panic) and asserts the typed
-// sstabledump JSONL decode of the Cassandra reference; the FLIP-READY strict
-// byte-parity variants are the `#[ignore]`'d tests pinned to #1234.
-const FROZEN_PERSON_MODE: Mode = Mode::CanonicalSemantic;
-const NESTED_MODE: Mode = Mode::CanonicalSemantic;
+// column (a frozen SCALAR / NESTED UDT). A frozen UDT is a SINGLE-cell value
+// (like a frozen collection), so once flush advertises the authoritative
+// `FrozenType(UserType(...))` SerializationHeader marshal (issue #1020 fix), the
+// frozen UDT cell round-trips through compaction and the output is byte-identical
+// to the Cassandra 5.0.2 compacted reference → byte_for_byte.
+const FROZEN_PERSON_MODE: Mode = Mode::ByteForByte;
+const NESTED_MODE: Mode = Mode::ByteForByte;
 
 // ════════════════════════════════════════════════════════════════════════════
 // Fixture resolution (skip-on-absence; present-but-broken is a failure)
@@ -940,38 +939,18 @@ const FROZEN_PERSON_EXPECTED: ExpectedRows = &[
     ),
 ];
 
-/// Manifest: `cqlite.compaction_parity.udt.frozen_person` (canonical_semantic).
+/// Manifest: `cqlite.compaction_parity.udt.frozen_person` (byte_for_byte).
 ///
-/// Exercises the real compaction path (must not panic) and asserts the typed
-/// sstabledump JSONL decode of the Cassandra 5.0.2 compacted reference. Byte
-/// parity is NOT claimed: a top-level `frozen<UDT>` column is currently dropped
-/// during CQLite compaction (issue #1234) — see the FLIP-READY ignored byte test.
+/// A top-level `frozen<person>` regular column round-trips through compaction as
+/// exactly ONE frozen single-cell value; the compacted output is byte-identical
+/// to the Cassandra 5.0.2 reference (issue #1020 fix: flush advertises the
+/// authoritative `FrozenType(UserType(...))` header marshal).
 #[tokio::test]
 async fn frozen_person_compaction_parity() {
     let (group_a, group_b) = frozen_person_groups();
     assert_udt_compaction_parity(
         "udt_frozen_person",
         FROZEN_PERSON_MODE,
-        frozen_person_schema(),
-        group_a,
-        group_b,
-        4,
-        FROZEN_PERSON_EXPECTED,
-    )
-    .await;
-}
-
-/// FLIP-READY strict byte-parity variant, pinned to issue #1234 (compaction
-/// drops a top-level `frozen<UDT>` regular column). When #1234 is fixed, remove
-/// `#[ignore]` and flip `FROZEN_PERSON_MODE` (+ the manifest evidence type) to
-/// byte_for_byte.
-#[tokio::test]
-#[ignore = "blocked on #1234: compaction drops a top-level frozen<UDT> regular column (data loss)"]
-async fn frozen_person_compaction_byte_for_byte_blocked_1234() {
-    let (group_a, group_b) = frozen_person_groups();
-    assert_udt_compaction_parity(
-        "udt_frozen_person",
-        Mode::ByteForByte,
         frozen_person_schema(),
         group_a,
         group_b,
@@ -1062,37 +1041,20 @@ const NESTED_EXPECTED: ExpectedRows = &[
     ),
 ];
 
-/// Manifest: `cqlite.compaction_parity.udt.nested_udt` (canonical_semantic).
+/// Manifest: `cqlite.compaction_parity.udt.nested_udt` (byte_for_byte).
 ///
-/// Same posture as `frozen_person_compaction_parity`: the value column is a
-/// top-level `frozen<employee>` (nesting `frozen<address>`), so CQLite compaction
-/// currently drops it (issue #1234). The active test asserts the typed nested-UDT
-/// JSONL decode (incl. the inner null `city` for the gen-A losing row) of the
-/// Cassandra reference; the FLIP-READY byte variant is ignored below.
+/// The value column is a top-level `frozen<employee>` that nests a
+/// `frozen<address>`. The flush header expands to the authoritative
+/// `FrozenType(UserType(...,home:UserType(...),...))` marshal (inner UDT field
+/// spelled as bare `UserType` per Cassandra), so the nested frozen UDT cell
+/// (incl. the inner null `city` for the gen-A losing row) round-trips through
+/// compaction byte-identical to the Cassandra 5.0.2 reference (issue #1020 fix).
 #[tokio::test]
 async fn nested_udt_compaction_parity() {
     let (group_a, group_b) = nested_groups();
     assert_udt_compaction_parity(
         "udt_nested",
         NESTED_MODE,
-        nested_schema(),
-        group_a,
-        group_b,
-        3,
-        NESTED_EXPECTED,
-    )
-    .await;
-}
-
-/// FLIP-READY strict byte-parity variant, pinned to issue #1234. When fixed,
-/// remove `#[ignore]` and flip `NESTED_MODE` (+ manifest evidence) to byte_for_byte.
-#[tokio::test]
-#[ignore = "blocked on #1234: compaction drops a top-level frozen<UDT> regular column (data loss)"]
-async fn nested_udt_compaction_byte_for_byte_blocked_1234() {
-    let (group_a, group_b) = nested_groups();
-    assert_udt_compaction_parity(
-        "udt_nested",
-        Mode::ByteForByte,
         nested_schema(),
         group_a,
         group_b,
