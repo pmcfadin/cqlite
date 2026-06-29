@@ -61,6 +61,17 @@ jobs:
       - name: Ensure Rust target is installed
         run: rustup target add ${{ matrix.target }}
 
+      # Issue #1209: GitHub runner images ship a stable toolchain that already
+      # provides bin/cargo-clippy. When rustup reconciles the toolchain it
+      # intermittently tries to (re)install the 'clippy-preview' component and
+      # fails with "detected conflict: 'bin/cargo-clippy'". This build lane does
+      # not run clippy, so drop the conflicting component up front.
+      # Idempotent: a no-op if clippy is absent.
+      - name: Normalize Rust toolchain (avoid clippy-preview install conflict)
+        shell: bash
+        run: |
+          rustup component remove clippy 2>/dev/null || true
+
       - name: Normalize PATH for macOS (prepend ~/.cargo/bin so real cargo wins over rustup-init)
         if: runner.os == 'macOS'
         shell: bash

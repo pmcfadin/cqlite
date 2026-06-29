@@ -186,6 +186,18 @@ jobs:
           test -f test-data/datasets/metadata.yml
           ls test-data/datasets/sstables/test_basic/ | head -n 1
 
+      # Issue #1209: GitHub runner images ship a stable toolchain that already
+      # provides bin/cargo-clippy. When rustup reconciles the toolchain on the
+      # first cargo invocation it intermittently tries to (re)install the
+      # 'clippy-preview' component and fails with
+      #   "detected conflict: 'bin/cargo-clippy'".
+      # This build-only step does not run clippy, so drop the conflicting
+      # component up front. Idempotent: a no-op if clippy is absent.
+      - name: Normalize Rust toolchain (avoid clippy-preview install conflict)
+        shell: bash
+        run: |
+          rustup component remove clippy 2>/dev/null || true
+
       # Issue #331: Pre-build CLI binary for faster CLI parity tests
       - name: Build CLI binary for tests
         shell: bash
