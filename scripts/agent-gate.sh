@@ -86,6 +86,16 @@
 #     Each SUMMARY block carries a "run-id:" line; the recovery file is trusted
 #     only when it bears THIS run's run-id, defeating a stale-but-complete file.
 #   - It also keeps a copy under $LOG_DIR for the logs bundle.
+#
+# CONCURRENCY (#1175 roborev): the default $PWD/.agent-gate-summary.txt is
+# per-CHECKOUT, not per-run. If you run multiple gates concurrently IN THE SAME
+# CHECKOUT, each MUST set a unique $AGENT_GATE_SUMMARY_FILE or they will clobber
+# each other's recovery artifact. Separate worktrees are already isolated (each
+# has a distinct repo root → a distinct default path); CQLite's normal model
+# runs concurrent gates in separate worktrees, so this is a non-issue there. The
+# `run-id:` line lets a caller that captured the invocation's run-id confirm it
+# is reading the right run; a caller with NO expected run-id whose stream was
+# lost cannot disambiguate two same-checkout runs and so MUST use a unique path.
 # The streamed copy is best-effort (a plain `cat` of the file). The most robust
 # streamed capture is still the foreground redirect:
 #   bash scripts/agent-gate.sh > gate.log 2>&1 < /dev/null
@@ -130,6 +140,10 @@ RUN_ID="$LOG_DIR"
 # AGENT_GATE_SUMMARY_FILE; otherwise we use a stable, documented repo-root default
 # the caller can `cat` without parsing stdout. This is THE recovery contract: the
 # complete SUMMARY is always at this exact path even if the streamed copy is lost.
+# CONCURRENCY (#1175): this default is per-CHECKOUT, shared by every gate run in
+# the same $REPO_ROOT. Concurrent same-checkout runs MUST each set a unique
+# AGENT_GATE_SUMMARY_FILE or they clobber each other's recovery artifact;
+# separate worktrees get distinct repo roots and are already isolated.
 SUMMARY_FILE="${AGENT_GATE_SUMMARY_FILE:-$REPO_ROOT/.agent-gate-summary.txt}"
 # Resolve a caller-provided RELATIVE AGENT_GATE_SUMMARY_FILE against the caller's
 # original CWD, not the repo root we cd'd into (#1175 roborev finding 1). Absolute

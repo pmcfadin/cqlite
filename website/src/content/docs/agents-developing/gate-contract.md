@@ -96,6 +96,15 @@ advance and read it:
   capture looks truncated (missing the `==== END AGENT-GATE SUMMARY ====`
   marker), `cat` that file — it is always complete.
 
+> **Concurrency caveat (#1175):** the default `$PWD/.agent-gate-summary.txt` is
+> per-*checkout*, not per-run. If you run multiple gates concurrently **in the same
+> checkout**, each MUST set a unique `AGENT_GATE_SUMMARY_FILE` or they will clobber
+> each other's recovery artifact. Separate worktrees get distinct repo roots and so
+> distinct default paths — already isolated, which is CQLite's normal model. The
+> `run-id:` line lets a caller that captured the invocation's run-id confirm it is
+> reading the right run; a caller with no expected run-id and a fully-lost stream
+> cannot disambiguate two same-checkout runs, so it must use a unique path.
+
 The path the gate used is also echoed on the `summary-file:` line inside the
 block, and a copy is kept in the `logs:` bundle. The streamed copy is best-effort
 only.

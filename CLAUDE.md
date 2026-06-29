@@ -80,6 +80,9 @@ cat /tmp/gate-summary.txt   # complete SUMMARY, even if gate.log truncated
 # If you did not set AGENT_GATE_SUMMARY_FILE, the gate writes the same complete
 # block to the documented default $PWD/.agent-gate-summary.txt (gitignored); cat
 # that if your stream is missing the `==== END AGENT-GATE SUMMARY ====` marker.
+# CONCURRENCY: that default is per-checkout; if you run multiple gates concurrently
+# IN THE SAME CHECKOUT, give each a unique AGENT_GATE_SUMMARY_FILE or they clobber
+# each other's recovery artifact (separate worktrees are already isolated).
 # Fast self-test of the emission/recovery path:
 bash scripts/tests/test_agent_gate_summary.sh
 
