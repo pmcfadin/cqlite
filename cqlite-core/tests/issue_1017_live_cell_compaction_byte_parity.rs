@@ -41,18 +41,14 @@
 //!     here; any mismatch FAILS. This is the core compaction byte-parity claim:
 //!     the merged data artifact, its partition/row offset table, the summary
 //!     index, and the whole-file CRC32 all match Cassandra's compaction output.
-//!   * CRC.db → CQLite's bytes are a byte-identical PREFIX of Cassandra's: the
-//!     chunk-size header and every REAL per-chunk CRC32 match byte-for-byte. The
-//!     SOLE divergence is that Cassandra's COMPACTION write path appends one
-//!     trailing empty-final-chunk CRC32 = 0 (`00000000`) that its FLUSH path does
-//!     NOT (verified: the #1190 flush goldens carry no trailing chunk, so CQLite's
-//!     unified writer byte-matches flush CRC.db exactly). Replicating this
-//!     compaction-only artifact would require a flush-vs-compaction split in the
-//!     shared CRC writer and risks regressing the passing #1190 flush parity, so
-//!     it is documented + FLAGGED as a follow-up (see `assert_crc_db_prefix_parity`)
-//!     rather than expanded into this minimal slice. The check is STRICT: any
-//!     divergence in the matching bytes, or a trailing group that is NOT an
-//!     empty-chunk CRC32 = 0, FAILS.
+//!   * CRC.db → BYTE-IDENTICAL and diffed here (issue #1222, upgraded from the
+//!     #1017 prefix-only claim). The chunk-size header, every real per-chunk
+//!     CRC32, AND Cassandra's compaction-only trailing empty-final-chunk
+//!     CRC32 = 0 (`00000000`) all match byte-for-byte. CQLite's compaction write
+//!     path now appends that trailing empty-chunk CRC (its data-writer close-time
+//!     zero-length flush) via a flush-vs-compaction split in the shared CRC
+//!     writer (`crc_writer::CrcTrailer`); the FLUSH path is unchanged and stays
+//!     byte-identical to the #1190 flush goldens (regression-guarded there).
 //!   * Statistics.db and Filter.db → present on BOTH sides (asserted), but their
 //!     bytes are an implementation detail that CANNOT byte-match across two
 //!     independent engines (Statistics.db embeds metadata histograms + HyperLogLog
@@ -499,9 +495,15 @@ fn collect(dir: &Path, out: &mut Vec<(u64, PathBuf)>, depth: usize) {
 // ════════════════════════════════════════════════════════════════════════════
 
 /// Components diffed BYTE-FOR-BYTE between the compacted reference and candidate.
-/// CRC.db is handled separately (prefix parity) by [`assert_crc_db_prefix_parity`]
-/// because of Cassandra's compaction-only trailing empty-chunk CRC (see module docs).
-const BYTE_FOR_BYTE_COMPONENTS: &[&str] = &["Data.db", "Index.db", "Summary.db", "Digest.crc32"];
+/// CRC.db is now in this set (issue #1222): CQLite's compaction path emits
+/// Cassandra's trailing empty-final-chunk CRC32 = 0, so the whole CRC.db matches.
+const BYTE_FOR_BYTE_COMPONENTS: &[&str] = &[
+    "Data.db",
+    "Index.db",
+    "Summary.db",
+    "Digest.crc32",
+    "CRC.db",
+];
 
 /// Components present on BOTH sides but INTENTIONALLY NOT byte-diffed (their bytes
 /// are an implementation detail across two independent engines). Documented per
@@ -590,14 +592,15 @@ async fn assert_compaction_byte_parity(
         "{table}: TOC.txt component set differs (cass={ref_toc:?} ours={our_toc:?})"
     );
 
-    // ── 3. Byte-for-byte component set (AC3) ──
+    // ── 3. Byte-for-byte component set (AC3) — now includes CRC.db (#1222) ──
     for suffix in BYTE_FOR_BYTE_COMPONENTS {
         assert_component_bytes(table, &ref_dir, &out_dir, suffix);
     }
 
-    // ── 3b. CRC.db prefix parity (the chunk header + real chunk CRCs match;
-    //        Cassandra's compaction-only trailing empty-chunk CRC is documented) ──
-    assert_crc_db_prefix_parity(table, &ref_dir, &out_dir);
+    // ── 3b. CRC.db: confirm the compacted golden carries Cassandra's trailing
+    //        empty-final-chunk CRC32 = 0, so the byte-for-byte match above is the
+    //        meaningful #1222 upgrade (not a fixture that lost its trailer) ──
+    assert_crc_db_carries_compaction_trailer(table, &ref_dir);
 
     // ── 4. Present-but-not-diffed components: assert presence only (AC6) ──
     for suffix in PRESENT_NOT_DIFFED {
@@ -648,48 +651,38 @@ fn assert_component_bytes(table: &str, ref_dir: &Path, out_dir: &Path, suffix: &
     }
 }
 
-/// CRC.db prefix parity (see module docs). CQLite's CRC.db must be a
-/// byte-identical PREFIX of Cassandra's, and Cassandra's remaining suffix must
-/// consist SOLELY of trailing empty-chunk CRC32 = 0 groups (`00000000`). This
-/// strictly pins: (a) the 4-byte chunk-size header matches, (b) every real
-/// per-chunk CRC32 matches byte-for-byte, (c) the ONLY divergence is Cassandra's
-/// compaction-path trailing empty-chunk CRC. A divergence in the matching bytes,
-/// or a trailing 4-byte group that is not all-zero (i.e. a real data chunk CQLite
-/// dropped), FAILS.
-fn assert_crc_db_prefix_parity(table: &str, ref_dir: &Path, out_dir: &Path) {
+/// Confirm the compacted CRC.db GOLDEN ends with Cassandra's compaction-only
+/// trailing empty-final-chunk CRC32 = 0 (`00000000`) (issue #1222).
+///
+/// The byte-for-byte diff in `assert_component_bytes` already proves CQLite emits
+/// this trailer (its compaction path now appends it). This extra check guards the
+/// FIXTURE: it asserts the golden still carries the trailing zero chunk, so a
+/// future regeneration that somehow dropped it can't make the byte diff trivially
+/// pass against a CQLite output that also dropped it. The CRC.db must be at least
+/// header(4) + 1 real chunk(4) + trailer(4) = 12 bytes and end in `00000000`.
+fn assert_crc_db_carries_compaction_trailer(table: &str, ref_dir: &Path) {
     let cass = read_component(ref_dir, "CRC.db");
-    let ours = read_component(out_dir, "CRC.db");
     assert!(
-        !cass.is_empty() && !ours.is_empty(),
-        "{table}: CRC.db present-but-empty (cass={} ours={} bytes)",
+        cass.len() >= 12 && cass.len() % 4 == 0,
+        "{table}: CRC.db golden too short / misaligned for header + chunk + trailer \
+         (len={}, hex={})",
         cass.len(),
-        ours.len()
+        hex(&cass)
     );
-    // (a)+(b): ours is a byte-identical prefix of Cassandra's.
-    assert!(
-        ours.len() <= cass.len() && cass[..ours.len()] == ours[..],
-        "{table}: CRC.db prefix mismatch (cass={} ours={} bytes)\n  cass={}\n  ours={}",
-        cass.len(),
-        ours.len(),
-        hex(&cass),
-        hex(&ours)
-    );
-    // (c): the divergent suffix is whole 4-byte empty-chunk CRC32 = 0 groups only.
-    let suffix = &cass[ours.len()..];
-    assert!(
-        suffix.len() % 4 == 0 && suffix.iter().all(|&b| b == 0),
-        "{table}: CRC.db divergent suffix is NOT trailing empty-chunk CRC32=0 groups \
-         (a real data chunk was dropped?): suffix={} (cass={} ours={})",
-        hex(suffix),
-        hex(&cass),
-        hex(&ours)
+    let trailer = &cass[cass.len() - 4..];
+    assert_eq!(
+        trailer,
+        &[0u8, 0, 0, 0],
+        "{table}: compacted CRC.db golden must end in the compaction-only trailing \
+         empty-final-chunk CRC32=0 (#1222); got trailer {} (full={})",
+        hex(trailer),
+        hex(&cass)
     );
     eprintln!(
-        "[issue_1017] {table}: CRC.db prefix parity OK — header + {} real chunk CRC(s) \
-         byte-identical; Cassandra appends {} trailing empty-chunk CRC32=0 group(s) on the \
-         compaction path (documented follow-up, not a data divergence).",
-        (ours.len().saturating_sub(4)) / 4,
-        suffix.len() / 4
+        "[issue_1017/#1222] {table}: CRC.db FULL byte parity — header + {} real chunk \
+         CRC(s) + trailing empty-final-chunk CRC32=0, byte-identical to the Cassandra \
+         5.0.2 compacted golden.",
+        (cass.len() - 8) / 4
     );
 }
 
