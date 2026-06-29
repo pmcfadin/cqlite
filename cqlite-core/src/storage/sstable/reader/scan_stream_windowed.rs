@@ -67,14 +67,14 @@
 //!
 //! `scan_stream` documents its live heap as "bounded by `buffer_size` rows". The
 //! batching here adds a SECOND, SMALLER in-flight pool that is NOT sized by the
-//! caller's `buffer_size`: the pending `batch` plus the bounded batch channel can
-//! together hold up to [`MAX_INFLIGHT_BATCH_ROWS`] confirmed rows ahead of the
-//! caller, even when `buffer_size == 1`. That is a deliberate, BOUNDED amount of
-//! read-ahead — a single named constant, not an unbounded or `buffer_size`-scaled
-//! quantity — and it is the price of amortizing the blocking->async wake. The
-//! public `scan_stream` doc states this explicitly so callers relying on the
-//! `buffer_size` backpressure bound know the windowed path's true worst case is
-//! `buffer_size + MAX_INFLIGHT_BATCH_ROWS` rows in flight.
+//! caller's `buffer_size`: against a stalled consumer the bounded batch channel
+//! (`BATCH_CHANNEL_CAP` batches), the one batch the forwarder has `recv()`'d and is
+//! flattening, AND the one batch the producer is parked-in-`blocking_send` holding
+//! can ALL be live at once — up to [`MAX_INFLIGHT_BATCH_ROWS`] confirmed rows ahead
+//! of the caller, even when `buffer_size == 1`. That is a deliberate, BOUNDED
+//! read-ahead (a single named constant) — the price of amortizing the
+//! blocking->async wake. The public `scan_stream` doc states this so callers know
+//! the true worst case is `buffer_size + MAX_INFLIGHT_BATCH_ROWS` rows in flight.
 //!
 //! ## Cancellation (issue #1143 finding 2)
 //!
@@ -189,32 +189,33 @@ const BATCH_CHANNEL_CAP: usize = 2;
 ///
 /// # The bound
 ///
-/// At any instant the batching subsystem owns at most:
-///   - the pending `batch` being built in `drain_scan_window` — `< BATCH_EMIT_ROWS`
-///     (it is flushed the moment it REACHES `BATCH_EMIT_ROWS`), and
-///   - the batch channel — at most `BATCH_CHANNEL_CAP` items of `BATCH_EMIT_ROWS`
-///     rows each.
+/// When the public consumer is stalled, THREE full batches coexist in flight — not
+/// two (each up to `BATCH_EMIT_ROWS` rows):
+///   1. **Forwarder-held.** The async forwarder `recv()`'d one batch and is blocked
+///      flattening it into the caller's full `tx`; it has LEFT the batch channel.
+///   2. **Channel-resident.** The bounded batch channel is FULL —
+///      `BATCH_CHANNEL_CAP` items — because the forwarder (stuck on (1)) stopped draining.
+///   3. **Producer-blocked.** The `spawn_blocking` parse half assembled its NEXT
+///      full batch and is PARKED in `tx.blocking_send`, still OWNING it because the
+///      channel (full, per (2)) has no slot — `blocking_send` moves the value only
+///      on success, so a parked send holds a third, distinct batch.
 ///
-/// A producer that is about to push the row crossing `BATCH_EMIT_ROWS` can only do
-/// so when the channel `blocking_send` succeeds, i.e. the channel had a free slot;
-/// the steady-state worst case is therefore `BATCH_CHANNEL_CAP` full channel items
-/// plus a pending `batch` filling toward (but never exceeding) `BATCH_EMIT_ROWS`.
-/// The forwarder may additionally hold ONE batch it has `recv()`'d and is
-/// flattening, but that batch has LEFT the channel, so it does not add to the
-/// channel-resident count — the channel can refill only as the forwarder drains.
-/// Bounding by `(BATCH_CHANNEL_CAP + 1) * BATCH_EMIT_ROWS` covers the channel,
-/// the in-flight forwarder batch, and the pending tail simultaneously.
+/// All three coexist at one instant; the pending tail in `drain_scan_window` is NOT
+/// a fourth — once it REACHES `BATCH_EMIT_ROWS` it BECOMES (3) via `blocking_send`,
+/// and a producer parked in that send accumulates no further tail. So bounding by
+/// `(BATCH_CHANNEL_CAP + 2) * BATCH_EMIT_ROWS` covers channel + forwarder-held (+1)
+/// + producer-blocked-in-send (+1).
 ///
-/// With the defaults (`256 * 3 = 768`) this is comfortably below every real
+/// With the defaults (`256 * 4 = 1024`) this equals — never exceeds — every real
 /// caller's `buffer_size` (`StreamingConfig::buffer_size` defaults to 1024, the
-/// text-format preset is 512), so batching never pushes in-flight rows past what
-/// callers already request — yet the bound is a CONSTANT, not a function of
-/// `buffer_size`, so it holds even for a degenerate `buffer_size = 1` consumer.
+/// text preset is 512 ≤ this), keeping the documentable
+/// `buffer_size + MAX_INFLIGHT_BATCH_ROWS` worst case sane — yet the bound is a
+/// CONSTANT, not `buffer_size`-scaled, so it holds even for `buffer_size = 1`.
 ///
 /// [`tests::batch_inflight_rows_are_bounded_independent_of_buffer_size`] asserts
 /// the runtime worst case never exceeds this; any sizing change that breaks the
 /// bound must update this constant AND keep that test green.
-pub(super) const MAX_INFLIGHT_BATCH_ROWS: usize = (BATCH_CHANNEL_CAP + 1) * BATCH_EMIT_ROWS;
+pub(super) const MAX_INFLIGHT_BATCH_ROWS: usize = (BATCH_CHANNEL_CAP + 2) * BATCH_EMIT_ROWS;
 
 /// Decide whether the blocking parse half should run its terminal
 /// (`at_final_chunk = true`) drain once the raw-chunk stream has ended.
@@ -356,16 +357,15 @@ impl SSTableReader {
         // per row (issue #1143). The forwarder task flattens each batch into the
         // caller's per-item `tx`, preserving the public stream contract.
         let (batch_tx, batch_rx) = mpsc::channel::<Result<Vec<(RowKey, Value)>>>(BATCH_CHANNEL_CAP);
-        // The batching subsystem (pending batch + this bounded channel + the one
-        // batch the forwarder is flattening) holds at most `MAX_INFLIGHT_BATCH_ROWS`
+        // The batching subsystem (this bounded channel + the forwarder-held batch +
+        // the producer's parked-in-send batch) holds at most `MAX_INFLIGHT_BATCH_ROWS`
         // confirmed rows ahead of a stalled caller, INDEPENDENT of `scan_stream`'s
-        // `buffer_size` (roborev finding, issue #1143). This is the documented,
-        // bounded read-ahead — see `MAX_INFLIGHT_BATCH_ROWS` and the `scan_stream`
-        // doc. The assert ties the runtime channel sizing to that named bound so a
-        // future capacity change cannot silently exceed it.
+        // `buffer_size` (roborev finding, issue #1143). The assert ties the runtime
+        // channel sizing to that named bound so a capacity change cannot exceed it.
         debug_assert!(
-            (BATCH_CHANNEL_CAP + 1) * BATCH_EMIT_ROWS <= MAX_INFLIGHT_BATCH_ROWS,
-            "batch channel sizing must stay within the documented MAX_INFLIGHT_BATCH_ROWS bound"
+            (BATCH_CHANNEL_CAP + 2) * BATCH_EMIT_ROWS <= MAX_INFLIGHT_BATCH_ROWS,
+            "batch channel sizing must stay within the documented MAX_INFLIGHT_BATCH_ROWS bound \
+             (channel-resident BATCH_CHANNEL_CAP + forwarder-held 1 + producer-blocked-in-send 1)"
         );
         // Distinguishes a clean EOF (sender dropped after `Ok(None)`) from a
         // mid-stream read error (sender dropped after `Err`). On error the parse

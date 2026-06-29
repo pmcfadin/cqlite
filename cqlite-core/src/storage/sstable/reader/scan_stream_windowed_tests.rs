@@ -42,12 +42,14 @@ fn terminal_drain_skipped_iff_io_failed() {
 /// which parsing can run ahead of a stalled consumer.
 #[test]
 fn max_inflight_batch_rows_matches_sizing_knobs() {
-    // The pending `batch` (< BATCH_EMIT_ROWS) + the channel (BATCH_CHANNEL_CAP
-    // items) + the one batch the forwarder is flattening = (CAP + 1) batches.
+    // Against a stalled consumer THREE full batches coexist: the channel
+    // (BATCH_CHANNEL_CAP items) + the one batch the forwarder has recv()'d and is
+    // flattening + the one batch the producer is parked-in-blocking_send holding
+    // = (CAP + 2) batches.
     assert_eq!(
         MAX_INFLIGHT_BATCH_ROWS,
-        (BATCH_CHANNEL_CAP + 1) * BATCH_EMIT_ROWS,
-        "MAX_INFLIGHT_BATCH_ROWS must equal (BATCH_CHANNEL_CAP + 1) * BATCH_EMIT_ROWS; \
+        (BATCH_CHANNEL_CAP + 2) * BATCH_EMIT_ROWS,
+        "MAX_INFLIGHT_BATCH_ROWS must equal (BATCH_CHANNEL_CAP + 2) * BATCH_EMIT_ROWS; \
          update the constant AND the scan_stream doc if the sizing knobs change"
     );
     // The bound is a constant, not a function of buffer_size: nothing in its
