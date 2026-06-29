@@ -362,22 +362,30 @@ impl DataWriter {
         let mut current_block_oss50: Option<Option<Vec<u8>>> = None;
 
         for item in items {
-            // Clustering key bytes for this item (serialized as ClusteringPrefix).
+            // Promoted-index `firstName`/`lastName` ClusteringPrefix bytes for this
+            // item (Issue #1186). These are serialized in Cassandra's IndexInfo form
+            // (`ClusteringPrefix.serializer.serialize`), which prepends the
+            // `Kind.ordinal()` byte — NOT the values-only Data.db row form. For a full
+            // clustering key the kind is always CLUSTERING (0x04), so a single `int`
+            // clustering yields the Cassandra-exact 6 bytes `04 00 <int>`. The
+            // fallbacks produce an empty `Clustering` (`04 00`).
             let ck_bytes: Vec<u8> = match &item {
                 PartitionItem::Row(row) => {
                     if let Some(ck) = row.clustering_key {
-                        serialize_clustering_prefix_to_vec(ck, schema)
-                            .unwrap_or_else(|_| vec![0x00])
+                        serialize_clustering_prefix_for_index(ck, schema)
+                            .unwrap_or_else(|_| empty_clustering_prefix_for_index())
                     } else {
-                        vec![0x00] // no clustering key — empty prefix header
+                        empty_clustering_prefix_for_index() // no clustering key
                     }
                 }
                 PartitionItem::Marker { bound, .. } => match bound {
                     ClusteringBound::Inclusive(ck) | ClusteringBound::Exclusive(ck) => {
-                        serialize_clustering_prefix_to_vec(ck, schema)
-                            .unwrap_or_else(|_| vec![0x00])
+                        serialize_clustering_prefix_for_index(ck, schema)
+                            .unwrap_or_else(|_| empty_clustering_prefix_for_index())
                     }
-                    ClusteringBound::Bottom | ClusteringBound::Top => vec![0x00],
+                    ClusteringBound::Bottom | ClusteringBound::Top => {
+                        empty_clustering_prefix_for_index()
+                    }
                 },
             };
 
@@ -453,8 +461,12 @@ impl DataWriter {
             if block_bytes >= COLUMN_INDEX_SIZE_BYTES {
                 // Close this block and start a new one
                 blocks.push(PromotedIndexBlock {
-                    first_name: current_block_first_ck.take().unwrap_or_else(|| vec![0x00]),
-                    last_name: current_block_last_ck.take().unwrap_or_else(|| vec![0x00]),
+                    first_name: current_block_first_ck
+                        .take()
+                        .unwrap_or_else(empty_clustering_prefix_for_index),
+                    last_name: current_block_last_ck
+                        .take()
+                        .unwrap_or_else(empty_clustering_prefix_for_index),
                     offset: block_start_buf_offset as u64,
                     width: block_bytes,
                     oss50_separator: current_block_oss50.take().flatten(),

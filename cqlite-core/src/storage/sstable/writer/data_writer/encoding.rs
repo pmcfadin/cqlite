@@ -687,3 +687,52 @@ pub(super) fn serialize_clustering_prefix_to_vec(
 
     Ok(buf)
 }
+
+/// `ClusteringPrefix.Kind.CLUSTERING.ordinal()` in Cassandra 5.0
+/// (`org.apache.cassandra.db.ClusteringPrefix.Kind`). A row's full clustering key
+/// (a promoted-index `firstName`/`lastName`) is always kind `CLUSTERING`; range
+/// bounds use the other ordinals (e.g. `EXCL_END_INCL_START_BOUNDARY = 2`,
+/// `INCL_END_EXCL_START_BOUNDARY = 5`).
+pub(crate) const CLUSTERING_PREFIX_KIND_CLUSTERING: u8 = 4;
+
+/// Serialize a `ClusteringKey` as the promoted-index (`IndexInfo`) `ClusteringPrefix`
+/// byte sequence (Issue #1186).
+///
+/// This is **NOT** the same as the Data.db row clustering prefix
+/// ([`serialize_clustering_prefix_to_vec`]). Cassandra serializes a Data.db row's
+/// clustering via the values-only `Clustering.serializer` (no kind byte), but it
+/// serializes a promoted-index `firstName`/`lastName` via
+/// `ClusteringPrefix.serializer.serialize`, which prepends a **leading kind byte**
+/// (`Kind.ordinal()`). For a full clustering key that kind is always `CLUSTERING`
+/// (`= 4`). Format:
+///
+/// ```text
+/// [kind: 1 byte = 0x04 (CLUSTERING)]
+/// [header: unsigned VInt]            ← 2 bits per column: 00=present, 10=null
+/// [value bytes…]                     ← type-specific bytes for each PRESENT column
+/// ```
+///
+/// For a single `int` clustering this is the Cassandra-exact 6 bytes
+/// `04 00 <4-byte big-endian int>`, matching the real
+/// `test_big.wide_partition` `Index.db` fixture (verified byte-for-byte).
+///
+/// Returns `Err` if a clustering column type is unknown (the caller falls back to
+/// `[kind, 0x00]` — an empty `Clustering` — in that case).
+pub(super) fn serialize_clustering_prefix_for_index(
+    clustering_key: &ClusteringKey,
+    schema: &TableSchema,
+) -> Result<Vec<u8>> {
+    let values = serialize_clustering_prefix_to_vec(clustering_key, schema)?;
+    let mut buf = Vec::with_capacity(values.len() + 1);
+    buf.push(CLUSTERING_PREFIX_KIND_CLUSTERING);
+    buf.extend_from_slice(&values);
+    Ok(buf)
+}
+
+/// The empty-clustering promoted-index `ClusteringPrefix`: a `Clustering` of kind
+/// `CLUSTERING` with no columns (Issue #1186). Used for no-clustering rows and
+/// range-bound fallbacks where no per-row clustering values are available. Equals
+/// `[0x04 (CLUSTERING)][0x00 (empty values header)]`.
+pub(super) fn empty_clustering_prefix_for_index() -> Vec<u8> {
+    vec![CLUSTERING_PREFIX_KIND_CLUSTERING, 0x00]
+}
