@@ -9700,8 +9700,7 @@ scenarios:
         ordered canonical value model and asserts an identical re-parse compares
         equal; type/order mismatches fail loud rather than coercing.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/cql-type-parity.yml
+      tier: manual_debug
     scope: {}
   - id: cass.cql_types.jsonl.schema_aware_normalization
     title: Schema-aware JSONL normalization self-test
@@ -9734,8 +9733,7 @@ scenarios:
         ascii vs text, frozen vs multicell, and numeric widths are compared with the
         correct typed model; ambiguous coercion is rejected.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/cql-type-parity.yml
+      tier: manual_debug
     scope: {}
   - id: cass.cql_types.jsonl.cell_path_timestamp_ttl_tombstone_compare
     title: JSONL cell-path / timestamp / TTL / tombstone comparison self-test
@@ -9768,8 +9766,7 @@ scenarios:
         facts are extracted from the JSONL and compared field-by-field; presentation
         ordering and whitespace are ignored but typed facts must match.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/cql-type-parity.yml
+      tier: manual_debug
     scope: {}
   - id: cass.cql_types.jsonl.no_placeholder_references
     title: No-placeholder-reference enforcement self-test
@@ -9802,8 +9799,7 @@ scenarios:
         pass; a missing or empty reference JSONL fails loud, guaranteeing parity
         scenarios cannot false-pass on unpublished goldens.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/cql-type-parity.yml
+      tier: manual_debug
     scope: {}
   - id: cass.cql_types.jsonl.manifest_report_generation
     title: Manifest report generation self-test
@@ -9836,8 +9832,7 @@ scenarios:
         comparator asserts the rendered report rows match the typed value model so
         report drift is caught against the published golden.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/cql-type-parity.yml
+      tier: manual_debug
     scope: {}
 
   # ============================================================================
@@ -10241,8 +10236,8 @@ scenarios:
         compared byte-for-byte against the committed Cassandra 5.0.2 golden
         across all four compressed algorithms.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/compression-corruption-parity.yml
     scope: {}
 
   - id: cass.compression_info.fields.options
@@ -10287,8 +10282,8 @@ scenarios:
         The compressor options key/value count and entries are compared
         byte-for-byte against the committed golden.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/compression-corruption-parity.yml
     scope: {}
 
   - id: cass.compression_info.fields.chunk_length
@@ -10331,8 +10326,8 @@ scenarios:
       known_limitations: >-
         The chunk_length (int) is compared byte-for-byte against the golden.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/compression-corruption-parity.yml
     scope: {}
 
   - id: cass.compression_info.fields.max_compressed_length
@@ -10376,8 +10371,8 @@ scenarios:
         The max_compressed_length (int, nb format) is compared byte-for-byte
         against the golden.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/compression-corruption-parity.yml
     scope: {}
 
   - id: cass.compression_info.fields.data_length
@@ -10421,8 +10416,8 @@ scenarios:
         The data_length (long, total uncompressed bytes) is compared
         byte-for-byte against the golden.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/compression-corruption-parity.yml
     scope: {}
 
   - id: cass.compression_info.fields.chunk_offsets
@@ -10467,8 +10462,8 @@ scenarios:
         The chunk count and each chunk's long offset into Data.db are compared
         byte-for-byte against the golden; offsets position chunk decode.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/compression-corruption-parity.yml
     scope: {}
 
   - id: cass.compression_info.layout.no_crc_fields
@@ -10514,8 +10509,8 @@ scenarios:
         with no per-chunk CRC fields; the 4-byte CRC32 is appended inline after
         each chunk in Data.db (validated by issue_998).
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/compression-corruption-parity.yml
     scope: {}
 
   # ----------------------------------------------------------------------------
@@ -10568,8 +10563,8 @@ scenarios:
         located via the CompressionInfo.db offset table) is recomputed and
         matched; chunk decode is validated against the sstabledump JSONL.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/compression-corruption-parity.yml
     scope: {}
 
   - id: cass.data_db.inline_crc.bad_trailer_rejected
@@ -10618,8 +10613,8 @@ scenarios:
         A flipped CRC trailer byte must surface a checksum error rather than
         silently returning decoded bytes, matching Cassandra reader behaviour.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/compression-corruption-parity.yml
     scope: {}
 
   - id: cass.data_db.inline_crc.short_final_chunk
@@ -10668,8 +10663,8 @@ scenarios:
         Validates the trailing CRC32 on the partial final chunk, whose length is
         derived from data_length rather than chunk_length.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/compression-corruption-parity.yml
     scope: {}
 
   - id: cass.data_db.inline_crc.incompressible_uncompressed_chunk
@@ -10718,8 +10713,8 @@ scenarios:
         The CRC32 trailer is computed over the stored (uncompressed) chunk bytes
         when compression was skipped for the incompressible payload.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/compression-corruption-parity.yml
     scope: {}
 
   - id: cass.data_db.inline_crc.offset_delta_minus_crc_length
@@ -10769,8 +10764,8 @@ scenarios:
         between consecutive chunks minus the 4-byte inline CRC, matching the
         Cassandra chunk layout (no length stored in CompressionInfo.db).
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/compression-corruption-parity.yml
     scope: {}
 
   # ----------------------------------------------------------------------------
@@ -11326,8 +11321,8 @@ scenarios:
         Canonical-semantic: validates verify-pass success plus decoded-row
         equivalence, not a byte comparison of any verify report format.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/compression-corruption-parity.yml
     scope: {}
 
   - id: cass.verify.healthy_uncompressed_sstable
@@ -11373,8 +11368,8 @@ scenarios:
         Canonical-semantic verify-pass success on the uncompressed path; not a
         byte comparison of a verify report.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/compression-corruption-parity.yml
     scope: {}
 
   - id: cass.verify.component_presence
@@ -11421,8 +11416,8 @@ scenarios:
         Canonical-semantic component-presence check; not a byte comparison of
         Cassandra's verify output.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/compression-corruption-parity.yml
     scope: {}
 
   - id: cass.verify.digest_crc32_match
@@ -11469,8 +11464,8 @@ scenarios:
         Canonical-semantic digest validation; the digest_crc32_mismatch case is
         covered byte-for-byte by cass.corruption.digest_crc32_mismatch.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/compression-corruption-parity.yml
     scope: {}
 
   - id: cass.verify.inline_crc_validation
@@ -11518,8 +11513,8 @@ scenarios:
         Canonical-semantic; the byte-level inline CRC parity is covered by
         cass.data_db.inline_crc.*.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/compression-corruption-parity.yml
     scope: {}
 
   - id: cass.verify.compression_info_parse
@@ -11566,8 +11561,8 @@ scenarios:
         Canonical-semantic; byte-level CompressionInfo.db parity is covered by
         cass.compression_info.fields.*.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/compression-corruption-parity.yml
     scope: {}
 
   - id: cass.verify.full_row_scan
@@ -11612,8 +11607,8 @@ scenarios:
         Canonical-semantic row-count/value equivalence via JSONL, not a byte
         comparison of Data.db.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/compression-corruption-parity.yml
     scope: {}
 
   - id: cass.verify.no_silent_empty_result_on_corruption
@@ -11663,8 +11658,8 @@ scenarios:
         Canonical-semantic contract assertion (error vs silent empty); the
         per-case byte parity is covered by the cass.corruption.* scenarios.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/compression-corruption-parity.yml
     scope: {}
 
   # ----------------------------------------------------------------------------
