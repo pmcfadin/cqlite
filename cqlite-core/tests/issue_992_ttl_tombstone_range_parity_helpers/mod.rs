@@ -212,16 +212,47 @@ fn decompress_with_info(dir: &str, data: &[u8]) -> Vec<u8> {
     raw
 }
 
+/// `true` when strict fixture mode is requested. Either `CQLITE_REQUIRE_FIXTURES`
+/// (the repo-wide convention used by the #992 manifest `comparison_command`s) or
+/// `CQLITE_PARITY_REQUIRE_DATASETS` (the name in issue #1205) set to a truthy
+/// value ("1"/"true") flips the fixture lanes FAIL-CLOSED: an absent binary
+/// PANICS (test failure) instead of skipping, so a required CI gate cannot
+/// false-green if a `test_deltas/*` fixture ever disappears (issue #1205 AC#2).
+/// When neither is set, the default skip-on-absence behavior is preserved so
+/// local dev without the binaries still works.
+pub fn require_fixtures_strict() -> bool {
+    matches!(
+        std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref(),
+        Ok("1") | Ok("true")
+    ) || matches!(
+        std::env::var("CQLITE_PARITY_REQUIRE_DATASETS").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
 /// Decompress a LOCAL-ONLY fixture's Data.db, returning `None` when the binary
 /// is absent (skip-on-presence). The `test_deltas/*` tombstone/TTL/range
-/// fixtures are local-only (not in the pinned CI dataset), so a missing binary
-/// is SKIPPED — but a fixture that IS present must parse and yield markers, and a
-/// present-but-empty body is a failure (the test asserts this in
-/// `decompress_with_info`). Per the local-only-fixtures doctrine: 0-rows /
-/// 0-markers when present is a failure, never a silent pass.
+/// fixtures ship in the pinned CI dataset, so under strict mode
+/// (`require_fixtures_strict`) a missing binary PANICS instead of skipping — the
+/// required lane must fail-closed, never false-green on missing data (#1205).
+/// In the default (non-strict) local-dev mode a missing binary is SKIPPED.
+/// Either way, a fixture that IS present must parse and yield markers, and a
+/// present-but-empty body is a failure (asserted in `decompress_with_info`).
 pub fn decompress_local_only(dir: &str) -> Option<Vec<u8>> {
     let path = datasets_root().join(format!("{dir}/nb-1-big-Data.db"));
-    let data = std::fs::read(&path).ok()?;
+    let data = match std::fs::read(&path) {
+        Ok(data) => data,
+        Err(_) => {
+            if require_fixtures_strict() {
+                panic!(
+                    "CQLITE_REQUIRE_FIXTURES=1 but fixture {dir} absent — \
+                     fetch with bash test-data/scripts/fetch-datasets.sh (looked for {})",
+                    path.display()
+                );
+            }
+            return None;
+        }
+    };
     Some(decompress_with_info(dir, &data))
 }
 
@@ -250,7 +281,19 @@ pub fn read_jsonl_lines_opt(rel: &str) -> Option<Vec<String>> {
 /// oracle so the two never drift.
 pub fn load_local_only(dir: &str) -> Option<(Vec<u8>, Vec<String>)> {
     let raw = decompress_local_only(dir)?;
-    let jsonl = read_jsonl_lines_opt(&format!("{dir}/nb-1-big-Data.db.jsonl"))?;
+    let jsonl_rel = format!("{dir}/nb-1-big-Data.db.jsonl");
+    let jsonl = match read_jsonl_lines_opt(&jsonl_rel) {
+        Some(jsonl) => jsonl,
+        None => {
+            if require_fixtures_strict() {
+                panic!(
+                    "CQLITE_REQUIRE_FIXTURES=1 but fixture JSONL golden {jsonl_rel} absent \
+                     (binary present) — fetch with bash test-data/scripts/fetch-datasets.sh"
+                );
+            }
+            return None;
+        }
+    };
     Some((raw, jsonl))
 }
 
