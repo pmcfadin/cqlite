@@ -1287,7 +1287,7 @@ scenarios:
 
   - id: cass.index_summary.summary_boundaries
     title: Summary.db sampling boundaries (BIG)
-    status: partial
+    status: mirrored
     capability: index_summary
     priority: P0
     risk: p1_correctness
@@ -1296,36 +1296,46 @@ scenarios:
       relevance: high
       files:
         - SSTableReaderTest.java
+        - IndexSummaryTest.java
     cqlite:
       coverage:
         suite: sstable_parity_summary_db_big
         tests:
           - cqlite-core/tests/sstabledump_parity_summary.rs
+        notes: >-
+          Closed by strict::test_summary_db_strict_byte_parity — the same gated lane
+          that backs cass.summary_db.IndexSummaryTest.first_last_key_boundaries, which
+          is the canonical superseding scenario for this row. It decodes the trailing
+          length-prefixed first/last keys and byte-compares them to SummaryReader, and
+          requires the first sampled entry key to equal the SSTable's first decorated
+          key. This row is retained as a public claim and now mirrors that scenario's
+          real evidence rather than carrying a stale partial gap (issue #1030).
     fixtures:
-      references:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      datasets:
+        - test-data/datasets/sstables
     evidence:
-      type: partial
-      artifacts: [offsets]
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, logs]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
-      storage_format_version: [nb]
+      storage_format_version: [nb, oa, big]
       fixture_generation_command: >-
         bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 flush emits Summary.db
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test sstabledump_parity_summary strict::
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_timeseries/app_metrics-6c87b890a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - validation_artifacts/sstabledump/summary/summary_parity_report.md
       known_limitations: >-
-        Summary.db first/last key boundaries are validated on read, but the
-        Cassandra Summary.db reference dumps are not published for the full
-        dataset (references.yml records summary_txt.present=false), so strict
-        boundary comparison is not enforced.
+        Superseded by cass.summary_db.IndexSummaryTest.first_last_key_boundaries.
+        Skip-on-absence: validated only when the sibling Data.db is present.
     ci:
-      tier: fast_pr
-    scope:
-      gap: Cassandra Summary.db reference dumps not published for all tables.
-      next_step: >-
-        Publish Summary.db reference dumps and enable strict first/last-key
-        boundary comparison in the sstable_parity_summary_db_big suite.
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
 
   # ----------------------------------------------------------------------------
   # index_db — strict Index.db byte parity (issue #983 / epic #968)
@@ -3141,6 +3151,16 @@ scenarios:
         suite: sstable_parity_corruption_verify
         tests:
           - cqlite-core/tests/sstable_parity_integration_test.rs
+        notes: >-
+          The byte-for-byte comparison of a CLEAN Digest.crc32 against the Cassandra
+          reference is covered by cass.sstable_format.toc_component_manifest (its
+          digest_crc32_byte_for_byte_parity lane recomputes and byte-compares the
+          digest payload). That comparison does NOT mutate inputs or prove corruption
+          rejection. The corruption-detection / rejection capability described by this
+          scenario's Cassandra sources (Checksumed* tests) is genuinely unimplemented:
+          CQLite validates inline checksums on read and surfaces mismatches, but there
+          is no gated test that injects corruption and asserts rejection. That gap is
+          tracked by the carved-out scrub/verify issue #1236.
     fixtures:
       references:
         - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Digest.crc32
@@ -3157,16 +3177,22 @@ scenarios:
       failure_artifacts:
         - target/cassandra-parity/checksum-mismatch.log
       known_limitations: >-
-        CQLite validates inline checksums on read and surfaces mismatches, but
-        an exact byte comparison of Digest.crc32 against the Cassandra value is
-        not yet a gated test.
+        Byte-compare of a clean Digest.crc32 is covered by
+        cass.sstable_format.toc_component_manifest. CQLite validates inline checksums
+        on read and surfaces mismatches, but corruption-detection / rejection (the
+        capability this scenario's Cassandra sources exercise) is not yet a gated
+        test. That gap remains open and is tracked by issue #1236.
     ci:
       tier: fast_pr
     scope:
-      gap: No gated byte comparison of Digest.crc32 against the Cassandra reference.
+      gap: >-
+        No gated test injects corruption and asserts rejection; only inline-checksum
+        validation on read is implemented. (Byte-compare of clean Digest.crc32 is
+        already covered by cass.sstable_format.toc_component_manifest.)
       next_step: >-
-        Add a Digest.crc32 byte comparison to the sstable_parity_corruption_verify
-        suite.
+        Byte-compare of clean Digest.crc32 is covered by
+        cass.sstable_format.toc_component_manifest; corruption-detection / rejection
+        remains open and is tracked by the carved-out scrub/verify issue #1236.
 
   - id: cass.compression_info.CompressionMetadataTest.metadata_serialization
     title: CompressionInfo.db metadata byte-for-byte serialization parity
@@ -4101,7 +4127,7 @@ scenarios:
   # ----------------------------------------------------------------------------
   - id: cass.filter_db_bloom.serialization_no_false_negative
     title: Filter.db Bloom filter serialization with no false negatives
-    status: partial
+    status: mirrored
     capability: filter_db_bloom
     priority: P0
     risk: p0_data_loss
@@ -4115,28 +4141,57 @@ scenarios:
       coverage:
         suite: sstable_parity_filter_db_bloom
         tests:
-          - cqlite-core/tests/sstable_parity_integration_test.rs
+          - cqlite-core/tests/sstable_parity_filter_db_test.rs
+        notes: >-
+          Closed by the strict, fail-closed lane
+          filter_db_strict_parameters_and_no_false_negative — the same gated lane
+          that backs cass.filter_db.no_false_negative_membership (issue #987 / epic
+          #968), which is the canonical superseding scenario for this row. For every
+          committed BIG Filter.db it independently re-reads the on-disk header,
+          asserts CQLite's decoded hash_count / bit_count match the bytes, then
+          enumerates every raw partition key Cassandra wrote (from the sibling
+          Index.db key_digest) and asserts the filter reports "maybe present" for all
+          of them; a single false negative fails the lane. This row is retained as a
+          public claim and now mirrors that scenario's real evidence rather than
+          carrying a stale partial gap (issue #1030).
     fixtures:
       datasets:
         - test-data/datasets/sstables
     evidence:
-      type: partial
-      artifacts: [component_files]
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, component_files]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
-      storage_format_version: [nb]
+      # BIG formats only: the no-false-negative membership probe runs over BIG
+      # fixtures whose Index.db exposes the raw partition keys. BTI (da) membership
+      # is a separate open gap, tracked by cass.filter_db.bti_membership.
+      storage_format_version: [nb, oa]
       fixture_generation_command: >-
-        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 emits Filter.db
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 flush emits Filter.db
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test sstable_parity_filter_db_test
+        filter_db_strict_parameters_and_no_false_negative
+      normalization: >-
+        Present keys are the raw partition-key bytes from Index.db (not the decoded
+        CQL values), matching the bytes Cassandra's Murmur3 hashed into Filter.db.
+        The reference_paths point at the committed per-fixture Data.db.jsonl siblings
+        (the binary Filter.db and Index.db are gitignored, fetched on demand).
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/filter-db-false-negative.log
       known_limitations: >-
-        CQLite reads Filter.db, but there is no gated test proving that lookups
-        never produce false negatives against a Cassandra-generated Filter.db.
+        Superseded by cass.filter_db.no_false_negative_membership; the no-false-negative
+        gate runs over BIG fixtures whose Index.db exposes the raw partition keys.
+        BTI (da) membership is tracked separately under
+        cass.filter_db.bti_membership.
     ci:
-      tier: fast_pr
-    scope:
-      gap: No no-false-negative parity assertion against Cassandra Filter.db.
-      next_step: >-
-        Add a Filter.db serialization parity test asserting zero false negatives
-        across the present-key set.
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
 
   # ----------------------------------------------------------------------------
   # filter_db — strict Filter.db Bloom parity (issue #987 / epic #968)
@@ -4425,7 +4480,7 @@ scenarios:
           - cqlite-core/tests/scan_delta_parity_test.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_deltas/adjacent_ranges-972f22806c7811f1a24ff924a65838e2/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/adjacent_ranges-29bdd5c0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
     evidence:
       type: partial
       artifacts: [jsonl]
@@ -4435,7 +4490,7 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh  # cassandra:5.0.2 delete shapes → sstabledump JSONL
       reference_paths:
-        - test-data/datasets/sstables/test_deltas/adjacent_ranges-972f22806c7811f1a24ff924a65838e2/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/adjacent_ranges-29bdd5c0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       normalization: >-
         Range/cell/row tombstone bounds and deletion timestamps are mapped to
         the sstabledump JSONL deletion-fact model and compared.
@@ -4525,7 +4580,7 @@ scenarios:
           facts are compared to the sstabledump JSONL golden.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_deltas/cell_tombstones-29f7fbe06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/cell_tombstones-29733830701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
@@ -4535,7 +4590,7 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
       reference_paths:
-        - test-data/datasets/sstables/test_deltas/cell_tombstones-29f7fbe06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/cell_tombstones-29733830701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       normalization: >-
         scan_delta cell-tombstone records are mapped to sstabledump JSONL
         deletion facts (deleted_at) and compared with a writetime tolerance.
@@ -4577,7 +4632,7 @@ scenarios:
           are compared to the sstabledump JSONL golden.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_deltas/row_tombstones-2a0e91206c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/row_tombstones-297f1f10701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
@@ -4587,7 +4642,7 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
       reference_paths:
-        - test-data/datasets/sstables/test_deltas/row_tombstones-2a0e91206c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/row_tombstones-297f1f10701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       normalization: >-
         scan_delta row-delete records are mapped to sstabledump JSONL row
         deletion_info markers and compared with a writetime tolerance.
@@ -4629,7 +4684,7 @@ scenarios:
           start/end bound pairs are compared to the sstabledump JSONL golden.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_deltas/range_tombstones-2a1a50f06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/range_tombstones-298894f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
@@ -4639,7 +4694,7 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
       reference_paths:
-        - test-data/datasets/sstables/test_deltas/range_tombstones-2a1a50f06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/range_tombstones-298894f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       normalization: >-
         scan_delta range-delete records are mapped to consecutive sstabledump
         JSONL range_tombstone_bound start/end pairs and compared with a writetime
@@ -4682,7 +4737,7 @@ scenarios:
           partition-delete facts are compared to the sstabledump JSONL golden.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_deltas/partition_tombstones-2a26fb206c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/partition_tombstones-299258f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
@@ -4692,7 +4747,7 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
       reference_paths:
-        - test-data/datasets/sstables/test_deltas/partition_tombstones-2a26fb206c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/partition_tombstones-299258f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       normalization: >-
         scan_delta partition-delete records are mapped to the sstabledump JSONL
         partition deletion_info marker (marked_deleted) and compared with a
@@ -4734,7 +4789,7 @@ scenarios:
           local_deletion_time facts are compared to the sstabledump JSONL golden.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_deltas/ttl_cells-2a35ef406c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/ttl_cells-299c9220701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
@@ -4744,7 +4799,7 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
       reference_paths:
-        - test-data/datasets/sstables/test_deltas/ttl_cells-2a35ef406c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/ttl_cells-299c9220701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       normalization: >-
         scan_delta expiring-cell records are mapped to sstabledump JSONL cell
         ttl / local_deletion_time fields and compared; mixed live + expiring
@@ -4896,7 +4951,7 @@ scenarios:
           to the sstabledump JSONL golden.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_deltas/adjacent_ranges-972f22806c7811f1a24ff924a65838e2/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/adjacent_ranges-29bdd5c0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
@@ -4906,7 +4961,7 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
       reference_paths:
-        - test-data/datasets/sstables/test_deltas/adjacent_ranges-972f22806c7811f1a24ff924a65838e2/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/adjacent_ranges-29bdd5c0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       normalization: >-
         scan_delta range-delete records are reconstructed from sstabledump JSONL
         boundary markers (excl_end_incl_start / incl_end_excl_start) into
@@ -7047,7 +7102,7 @@ scenarios:
           - cqlite-core/tests/issue_1010_deletion_markers_parity.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_deltas/adjacent_ranges-972f22806c7811f1a24ff924a65838e2/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/adjacent_ranges-29bdd5c0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
@@ -7061,7 +7116,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features "delta-scan write-support" --test issue_1010_deletion_markers_parity
       reference_paths:
-        - test-data/datasets/sstables/test_deltas/adjacent_ranges-972f22806c7811f1a24ff924a65838e2/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/adjacent_ranges-29bdd5c0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       normalization: >-
         scan_delta adjacent range-tombstone boundary markers (the shared boundary
         between two adjacent ranges) are mapped to the sstabledump JSONL
