@@ -3,8 +3,32 @@ name: CI
 on:
   push:
     branches: [ main ]
+    paths:
+      - '.github/workflows/ci.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'cqlite-core/**'
+      - 'cqlite-cli/**'
+      - 'tests/**'
+      - 'test-data/**'
+      - 'scripts/**'
+      - 'tools/**'
+      - 'examples/**'
   pull_request:
     branches: [ main ]
+    paths:
+      - '.github/workflows/ci.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'cqlite-core/**'
+      - 'cqlite-cli/**'
+      - 'tests/**'
+      - 'test-data/**'
+      - 'scripts/**'
+      - 'tools/**'
+      - 'examples/**'
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -268,4 +292,3 @@ jobs:
 
       - name: Run flow-finalize cleanup guardrail tests (${{ matrix.os }} /bin/bash)
         run: /bin/bash scripts/flow/tests/finalize-cleanup.test.sh
-

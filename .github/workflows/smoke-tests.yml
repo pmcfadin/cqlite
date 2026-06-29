@@ -20,8 +20,26 @@ name: Smoke Tests - All Tables
 on:
   push:
     branches: [main]
+    paths:
+      - '.github/workflows/smoke-tests.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'cqlite-core/**'
+      - 'cqlite-cli/**'
+      - 'test-data/**'
+      - 'scripts/**'
   pull_request:
     branches: [main]
+    paths:
+      - '.github/workflows/smoke-tests.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'cqlite-core/**'
+      - 'cqlite-cli/**'
+      - 'test-data/**'
+      - 'scripts/**'
 
 concurrency:
   group: smoke-tests-${{ github.ref }}
