@@ -5178,10 +5178,11 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/generate-write-load-parity.sh  # cassandra:5.0.2 flush → static_clustering_shape nb reference (Data.db + JSONL)
       comparison_command: >-
-        cargo test -p cqlite-core --features write-support
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support
         --test issue_764_explicit_local_deletion_time &&
-        cargo test -p cqlite-core --features write-support
-        --test issue_1190_write_load_byte_parity
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_1190_write_load_byte_parity
         static_row_timestamp_flags_gap_pinned_1196
       known_limitations: >-
         Proves the flushed Data.db row-tombstone bytes (deletion flags +
