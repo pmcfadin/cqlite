@@ -403,12 +403,13 @@ jobs:
         exit "$failed"
 
   # SSTableDump Parity Harness
+  # Run independently from the core aggregate to avoid adding an avoidable
+  # post-validation tail to the M1 workflow. This remains a blocking job.
   sstabledump-parity-m1:
     name: 🔄 SSTableDump Parity Harness
     runs-on: ubuntu-latest
     timeout-minutes: 35
     continue-on-error: false
-    needs: [m1-core-validation]
     
     steps:
     - name: Checkout code
@@ -777,12 +778,13 @@ jobs:
       run: ${SCCACHE_PATH:-sccache} --show-stats
 
   # Coverage Analysis (informational)
+  # Non-blocking and independent from core validation, so start it immediately
+  # instead of waiting for the aggregate core gate.
   m1-coverage-analysis:
     name: 📊 Coverage Analysis (informational)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     continue-on-error: true  # Non-blocking for M1
-    needs: [m1-core-validation]
     
     steps:
     - name: Checkout code
