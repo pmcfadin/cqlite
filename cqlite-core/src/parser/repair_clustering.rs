@@ -58,9 +58,24 @@ pub(crate) enum ClusteringValueLayout {
 /// The fixed lengths come straight from each type's `valueLengthIfFixed()`
 /// override in cassandra-5.0.0 `org.apache.cassandra.db.marshal.*`. `ReversedType`
 /// delegates to its base type, and frozen-collection / tuple / UDT comparators are
-/// variable. Types that do NOT override `valueLengthIfFixed()` (e.g. `ByteType`,
-/// `ShortType`, `TimeType`, `SimpleDateType`, all string/blob/number/collection
-/// comparators) inherit `VARIABLE_LENGTH` and so are `Variable` here.
+/// variable. Types that do NOT override `valueLengthIfFixed()` (all string/blob/
+/// number/collection comparators) inherit `VARIABLE_LENGTH` and so are `Variable`
+/// here.
+///
+/// AUTHORITY NOTE — do NOT "fix" the tinyint/smallint/date/time entries to fixed
+/// widths. The serialization layer (`AbstractType.writeValue` / `writtenLength` /
+/// `skipValue`) branches PURELY on `valueLengthIfFixed()`, NOT on the CQL type's
+/// logical byte width. Verified against cassandra-5.0.0 (and 5.0.2) marshal source,
+/// none of `ByteType` (tinyint) / `ShortType` (smallint) — both extending
+/// `NumberType` — nor `SimpleDateType` (date) / `TimeType` (time) — both extending
+/// `TemporalType` — override `valueLengthIfFixed()`. `NumberType`/`TemporalType` do
+/// not override it either, so all four inherit `AbstractType.VARIABLE_LENGTH == -1`
+/// and are written/skipped via `writeWithVIntLength` (unsigned-VInt length prefix +
+/// bytes) — i.e. genuinely `Variable`. Classifying them as `Fixed(1/2/4/8)` would
+/// read the first VALUE byte as the VInt length and misalign the cursor before
+/// `pendingRepair`/`isTransient`. (`TimeUUIDType` is the inverse case: no direct
+/// override but its parent `AbstractTimeUUIDType.valueLengthIfFixed()` returns 16,
+/// hence `Fixed(16)`.)
 pub(crate) fn resolve_clustering_value_layout(type_name: &str) -> Option<ClusteringValueLayout> {
     // Strip a `ReversedType(...)` wrapper: it delegates valueLengthIfFixed to the
     // wrapped base type (ReversedType.valueLengthIfFixed -> baseType...).
@@ -101,6 +116,9 @@ pub(crate) fn resolve_clustering_value_layout(type_name: &str) -> Option<Cluster
             | "IntegerType"
             | "DecimalType"
             | "InetAddressType"
+            // tinyint / smallint / date / time: VARIABLE per cassandra-5.0.0 (no
+            // valueLengthIfFixed() override — see AUTHORITY NOTE above). They are
+            // vint-length-prefixed, NOT fixed 1/2/4/8.
             | "ByteType"
             | "ShortType"
             | "TimeType"
@@ -401,6 +419,77 @@ mod tests {
         bytes.extend_from_slice(&2u16.to_be_bytes()); // size 2 > 1 type
         let mut c = Buf { b: &bytes, p: 0 };
         assert!(!skip_covered_slice(&mut c, &layouts).unwrap());
+    }
+
+    /// tinyint / smallint / date / time clustering values are VARIABLE-length in
+    /// cassandra-5.0.0 (they do not override `valueLengthIfFixed()`), so each is
+    /// serialized with an unsigned-VInt length prefix even though its natural CQL
+    /// width is 1/2/4/8. These tests pin that the covered-slice skip advances by
+    /// `1 (header) + 1 (vint len) + width` per present value and lands exactly at
+    /// the byte where `pendingRepair`/`isTransient` would begin — guarding against
+    /// the misclassification that would read the first VALUE byte as a VInt length.
+    fn assert_variable_covered_skip(type_name: &str, natural_width: usize) {
+        // Confirm the authoritative classification first.
+        assert_eq!(
+            resolve_clustering_value_layout(type_name),
+            Some(ClusteringValueLayout::Variable),
+            "type {type_name} must resolve Variable (no valueLengthIfFixed override)"
+        );
+        let layouts = vec![Some(ClusteringValueLayout::Variable)];
+        let value: Vec<u8> = (0..natural_width as u8).collect();
+        let mut bytes = Vec::new();
+        // start bound: kind, size=1, header (present), vint len, value bytes.
+        bytes.push(1u8);
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.push(0x00); // value 0 present
+        bytes.push(natural_width as u8); // single-byte unsigned vint length
+        bytes.extend_from_slice(&value);
+        let start_len = bytes.len();
+        // end bound: empty.
+        bytes.push(6u8);
+        bytes.extend_from_slice(&0u16.to_be_bytes());
+        // A trailing sentinel standing in for pendingRepair's first byte: the walk
+        // must STOP before it.
+        bytes.push(0xAB);
+
+        let mut c = Buf { b: &bytes, p: 0 };
+        assert!(
+            skip_covered_slice(&mut c, &layouts).unwrap(),
+            "covered slice for {type_name} should skip cleanly"
+        );
+        // Cursor lands at the end bound's terminator, just before the sentinel.
+        assert_eq!(
+            c.p,
+            bytes.len() - 1,
+            "type {type_name}: skip must advance past kind+size+header+vint+{natural_width}B value \
+             and the empty end bound, stopping before pendingRepair"
+        );
+        // And specifically the start bound consumed kind+size+header+vint+width.
+        assert_eq!(start_len, 1 + 2 + 1 + 1 + natural_width);
+    }
+
+    #[test]
+    fn skip_slice_tinyint_clustering_advances_vint_prefixed() {
+        // ByteType (tinyint) natural width 1 — but vint-length-prefixed.
+        assert_variable_covered_skip("org.apache.cassandra.db.marshal.ByteType", 1);
+    }
+
+    #[test]
+    fn skip_slice_smallint_clustering_advances_vint_prefixed() {
+        // ShortType (smallint) natural width 2 — vint-length-prefixed.
+        assert_variable_covered_skip("org.apache.cassandra.db.marshal.ShortType", 2);
+    }
+
+    #[test]
+    fn skip_slice_date_clustering_advances_vint_prefixed() {
+        // SimpleDateType (date) natural width 4 — vint-length-prefixed.
+        assert_variable_covered_skip("org.apache.cassandra.db.marshal.SimpleDateType", 4);
+    }
+
+    #[test]
+    fn skip_slice_time_clustering_advances_vint_prefixed() {
+        // TimeType (time) natural width 8 — vint-length-prefixed.
+        assert_variable_covered_skip("org.apache.cassandra.db.marshal.TimeType", 8);
     }
 
     #[test]
