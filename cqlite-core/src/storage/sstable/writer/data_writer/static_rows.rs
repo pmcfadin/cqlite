@@ -374,8 +374,8 @@ impl DataWriter {
                         // against the column's declared marshal before serialization
                         // (declared order / `-1` padding / unknown-field reject). A
                         // non-UDT static column is returned unchanged.
-                        let value = canonicalize_static_value(schema, column, value)?;
-                        let value = &value;
+                        let canon = canonicalize_static_value(schema, column, value)?;
+                        let value = canon.as_ref();
                         // Issue #1196: a static row carries NO row-level liveness
                         // (HAS_TIMESTAMP is never set on the static block — see
                         // write_static_row_with_prev_size). There is therefore no
@@ -419,11 +419,11 @@ impl DataWriter {
                     if static_column_names.contains(column) && !matches!(value, Value::Null) {
                         cells_written += 1;
                         // roborev #1020 Finding 1: schema-aware frozen-UDT value.
-                        let value = canonicalize_static_value(schema, column, value)?;
+                        let canon = canonicalize_static_value(schema, column, value)?;
                         self.write_cell_with_ttl(
                             buf,
                             column,
-                            &value,
+                            canon.as_ref(),
                             mop.timestamp_micros,
                             *ttl_seconds,
                         )?;

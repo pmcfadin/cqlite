@@ -1598,8 +1598,9 @@ fn frozen_list_of_udt_value_is_canonicalized_after_normalization() {
 
     let canon = canonicalize_udt_value(&schema.columns[0].data_type, &v)
         .expect("frozen<list<frozen<person>>> value must canonicalize after normalization");
+    let canon = canon.as_ref();
 
-    let Value::Frozen(inner) = &canon else {
+    let Value::Frozen(inner) = canon else {
         panic!("expected frozen list, got {canon:?}");
     };
     let Value::List(items) = inner.as_ref() else {

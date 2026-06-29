@@ -27,6 +27,7 @@
 
 use super::*;
 use crate::types::{UdtField, UdtValue};
+use std::borrow::Cow;
 
 const MARSHAL_PREFIX: &str = "org.apache.cassandra.db.marshal.";
 
@@ -34,34 +35,41 @@ const MARSHAL_PREFIX: &str = "org.apache.cassandra.db.marshal.";
 /// against the column's authoritative `data_type` marshal (roborev #1020
 /// Finding 1).
 ///
-/// Returns a `Value` whose every UDT — at any depth reachable through
+/// Returns a `Cow<Value>` whose every UDT — at any depth reachable through
 /// `FrozenType`/`ListType`/`SetType`/`MapType`/`TupleType` — has its fields in
 /// DECLARED order, missing declared fields padded with `None`, and any unknown
 /// literal field rejected with an error. When `data_type` does NOT reference a
 /// UDT (a primitive, or a frozen collection of primitives), or is not a marshal
-/// string, the value is returned UNCHANGED (cheap, allocation-free clone of the
-/// borrow via `Cow`-free passthrough) — the existing serialization path is
-/// byte-identical for those.
-pub(crate) fn canonicalize_udt_value(data_type: &str, value: &Value) -> Result<Value> {
+/// string, the BORROW is returned UNCHANGED (`Cow::Borrowed`, no clone) — the
+/// existing serialization path is byte-identical for those (roborev #1020
+/// Finding 2: the previous owned-`Value` return cloned every non-UDT cell on
+/// the write/compaction hot path).
+pub(crate) fn canonicalize_udt_value<'a>(
+    data_type: &str,
+    value: &'a Value,
+) -> Result<Cow<'a, Value>> {
     // Fast path: no UDT anywhere in the declared type → nothing to canonicalize.
     if !references_user_type(data_type) {
-        return Ok(value.clone());
+        return Ok(Cow::Borrowed(value));
     }
-    canonicalize_value_for_marshal(data_type.trim(), value)
+    Ok(Cow::Owned(canonicalize_value_for_marshal(
+        data_type.trim(),
+        value,
+    )?))
 }
 
 /// Canonicalize a STATIC column's value against the column's declared
 /// `data_type` resolved from `schema` by name (roborev #1020 Finding 1, static
 /// path). A column not found in `schema` (defensive) or a non-UDT column returns
-/// the value unchanged.
-pub(crate) fn canonicalize_static_value(
+/// the BORROW unchanged (`Cow::Borrowed`, no clone — roborev #1020 Finding 2).
+pub(crate) fn canonicalize_static_value<'a>(
     schema: &TableSchema,
     column: &str,
-    value: &Value,
-) -> Result<Value> {
+    value: &'a Value,
+) -> Result<Cow<'a, Value>> {
     match schema.columns.iter().find(|c| c.name == column) {
         Some(col) => canonicalize_udt_value(&col.data_type, value),
-        None => Ok(value.clone()),
+        None => Ok(Cow::Borrowed(value)),
     }
 }
 
@@ -112,10 +120,10 @@ fn canonicalize_value_for_marshal(ty: &str, value: &Value) -> Result<Value> {
         return canonicalize_udt(ty, value);
     }
     if let Some(elem) = collection_element_marshal(ty, "ListType") {
-        return canonicalize_seq(value, elem, Value::List);
+        return canonicalize_seq(value, elem, SeqKind::List);
     }
     if let Some(elem) = collection_element_marshal(ty, "SetType") {
-        return canonicalize_seq(value, elem, Value::Set);
+        return canonicalize_seq(value, elem, SeqKind::Set);
     }
     if let Some((k, v)) = map_kv_marshal(ty) {
         return canonicalize_map(value, k, v);
@@ -124,8 +132,97 @@ fn canonicalize_value_for_marshal(ty: &str, value: &Value) -> Result<Value> {
         return canonicalize_tuple(value, &components);
     }
 
-    // Primitive (or a type with no UDT inside): leave the value untouched.
+    // Primitive (or a type with no UDT inside) LEAF. roborev #1020 Finding 1:
+    // validate the Value variant against the declared marshal before letting it
+    // flow into serialization. A `frozen<person>` header declares e.g.
+    // `age:Int32Type`; without this check a `Value::BigInt` in that slot would be
+    // serialized with inferred 8-byte LongType bytes, producing a cell whose bytes
+    // disagree with the advertised `UserType(...)` header. We REJECT (never coerce
+    // — no-heuristics, issue #28).
+    validate_primitive_leaf(ty, value)?;
     Ok(value.clone())
+}
+
+/// Whether a list/set value being canonicalized is declared as a `ListType` or
+/// `SetType`, so a `Value::List` in a `SetType` slot (and vice versa) is
+/// rejected rather than silently re-tagged (roborev #1020 Finding 1).
+#[derive(Clone, Copy)]
+enum SeqKind {
+    List,
+    Set,
+}
+
+/// Validate a PRIMITIVE leaf `value` against its declared primitive marshal
+/// `ty` (roborev #1020 Finding 1). The accepted `Value` variant(s) per marshal
+/// mirror the authoritative `TypeSerializer` mapping in
+/// `storage/serialization/types.rs` (`serialize_primitive`/`serialize_text`/…),
+/// so a value that passes here is exactly one that serializer will accept with
+/// the bytes the declared on-disk type expects. An unknown / non-primitive
+/// marshal (a collection/tuple/UDT is handled by the recursive callers before
+/// this point) is left unvalidated — there is no primitive-byte mismatch to
+/// guard. A `Value::Null` never reaches here (the UDT/collection callers map a
+/// null field to absence first).
+fn validate_primitive_leaf(ty: &str, value: &Value) -> Result<()> {
+    let Some(name) = primitive_marshal_name(ty) else {
+        // Not a known primitive marshal (e.g. a bare CQL type string, or a marshal
+        // this mapping does not enumerate): nothing to validate here.
+        return Ok(());
+    };
+    let ok = match name {
+        // 4-byte BE signed int.
+        "Int32Type" => matches!(value, Value::Integer(_)),
+        // 8-byte BE signed long; counter shares the LongType representation.
+        "LongType" => matches!(value, Value::BigInt(_) | Value::Counter(_)),
+        "CounterColumnType" => matches!(value, Value::Counter(_) | Value::BigInt(_)),
+        // 1-byte signed (tinyint) / 2-byte BE signed (smallint).
+        "ByteType" => matches!(value, Value::TinyInt(_)),
+        "ShortType" => matches!(value, Value::SmallInt(_)),
+        // IEEE-754 4-byte (float) / 8-byte (double).
+        "FloatType" => matches!(value, Value::Float32(_)),
+        "DoubleType" => matches!(value, Value::Float(_)),
+        "BooleanType" => matches!(value, Value::Boolean(_)),
+        // Text family — all carry a UTF-8 `Value::Text`.
+        "UTF8Type" | "AsciiType" => matches!(value, Value::Text(_)),
+        // blob.
+        "BytesType" => matches!(value, Value::Blob(_)),
+        // 16-byte UUID family.
+        "UUIDType" | "TimeUUIDType" | "LexicalUUIDType" => matches!(value, Value::Uuid(_)),
+        // 8-byte BE millis-since-epoch.
+        "TimestampType" => matches!(value, Value::Timestamp(_)),
+        // 4-byte day count (SimpleDateType is the `date` CQL type).
+        "SimpleDateType" => matches!(value, Value::Date(_)),
+        // 8-byte BE nanos-since-midnight.
+        "TimeType" => matches!(value, Value::Time(_)),
+        // months/days/nanos vints.
+        "DurationType" => matches!(value, Value::Duration { .. }),
+        // arbitrary-precision integer (CQL `varint`).
+        "IntegerType" => matches!(value, Value::Varint(_)),
+        "DecimalType" => matches!(value, Value::Decimal { .. }),
+        "InetAddressType" => matches!(value, Value::Inet(_)),
+        // A primitive marshal not in this table: do not guess.
+        _ => return Ok(()),
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::InvalidInput(format!(
+            "frozen-UDT leaf value {value:?} does not match declared marshal type \
+             {MARSHAL_PREFIX}{name}; value/type mismatch is rejected (no coercion, issue #28)"
+        )))
+    }
+}
+
+/// The bare marshal type name (e.g. `Int32Type`) iff `ty` is exactly a
+/// `org.apache.cassandra.db.marshal.<Name>` with NO parenthesized arguments
+/// (i.e. a primitive). A parameterized marshal (`ListType(...)`, `UserType(...)`,
+/// etc.) returns `None` — those are structural types handled by the recursion.
+fn primitive_marshal_name(ty: &str) -> Option<&str> {
+    let ty = ty.trim();
+    let rest = ty.strip_prefix(MARSHAL_PREFIX)?;
+    if rest.is_empty() || rest.contains('(') || rest.contains(')') {
+        return None;
+    }
+    Some(rest)
 }
 
 /// Canonicalize a UDT value against a `UserType(...)` marshal: emit fields in
@@ -180,14 +277,31 @@ fn canonicalize_udt(user_type_marshal: &str, value: &Value) -> Result<Value> {
     }))
 }
 
-fn canonicalize_seq(
-    value: &Value,
-    elem_marshal: &str,
-    wrap: impl Fn(Vec<Value>) -> Value,
-) -> Result<Value> {
-    let elems = match value {
-        Value::List(e) | Value::Set(e) => e,
-        other => {
+fn canonicalize_seq(value: &Value, elem_marshal: &str, kind: SeqKind) -> Result<Value> {
+    // roborev #1020 Finding 1: a `ListType` marshal must carry a `Value::List`
+    // and a `SetType` marshal a `Value::Set`. A list/set are NOT
+    // interchangeable on the wire — a `Value::Set` written into a `ListType`
+    // column (or vice versa) sorts/structures differently from what the declared
+    // type advertises. REJECT the kind mismatch rather than re-tag (no-heuristics,
+    // issue #28).
+    let elems = match (kind, value) {
+        (SeqKind::List, Value::List(e)) => e,
+        (SeqKind::Set, Value::Set(e)) => e,
+        (SeqKind::List, Value::Set(_)) => {
+            return Err(Error::InvalidInput(
+                "declared ListType but value is a Set; list/set kind mismatch is rejected \
+                 (no coercion, issue #28)"
+                    .to_string(),
+            ))
+        }
+        (SeqKind::Set, Value::List(_)) => {
+            return Err(Error::InvalidInput(
+                "declared SetType but value is a List; list/set kind mismatch is rejected \
+                 (no coercion, issue #28)"
+                    .to_string(),
+            ))
+        }
+        (_, other) => {
             return Err(Error::InvalidInput(format!(
                 "expected a list/set value for a collection type, got {other:?}"
             )))
@@ -197,7 +311,10 @@ fn canonicalize_seq(
     for e in elems {
         out.push(canonicalize_value_for_marshal(elem_marshal, e)?);
     }
-    Ok(wrap(out))
+    Ok(match kind {
+        SeqKind::List => Value::List(out),
+        SeqKind::Set => Value::Set(out),
+    })
 }
 
 fn canonicalize_map(value: &Value, key_marshal: &str, val_marshal: &str) -> Result<Value> {
@@ -430,7 +547,7 @@ mod tests {
             ("first_name", Some(Value::Text("Ada".into()))),
         ]);
         let canon = canonicalize_udt_value(&person_marshal(), &v).unwrap();
-        let order = declared_order(&canon);
+        let order = declared_order(canon.as_ref());
         assert_eq!(
             order,
             vec![
@@ -447,7 +564,7 @@ mod tests {
         // (serialize_udt then writes the `-1` absent marker for them).
         let v = udt(vec![("age", Some(Value::Integer(85)))]);
         let canon = canonicalize_udt_value(&person_marshal(), &v).unwrap();
-        let order = declared_order(&canon);
+        let order = declared_order(canon.as_ref());
         assert_eq!(
             order,
             vec![
@@ -482,7 +599,9 @@ mod tests {
             Value::Integer(2),
         ])));
         let canon = canonicalize_udt_value("frozen<list<int>>", &v).unwrap();
-        assert_eq!(canon, v);
+        // Finding 2: the non-UDT fast path borrows (no clone).
+        assert!(matches!(canon, Cow::Borrowed(_)));
+        assert_eq!(canon.as_ref(), &v);
     }
 
     #[test]
@@ -500,7 +619,7 @@ mod tests {
         );
         let blob = Value::Blob(vec![0, 0, 0, 1, 0, 0, 0, 3, 65, 100, 97]);
         let canon = canonicalize_udt_value(&list_marshal, &blob).unwrap();
-        assert_eq!(canon, blob, "opaque blob must be byte-identical");
+        assert_eq!(canon.as_ref(), &blob, "opaque blob must be byte-identical");
     }
 
     #[test]
@@ -575,7 +694,7 @@ mod tests {
         });
         let v = Value::Frozen(Box::new(Value::Tuple(vec![Value::Integer(1), person])));
         let canon = canonicalize_udt_value(&tuple_marshal, &v).unwrap();
-        let Value::Frozen(inner) = &canon else {
+        let Value::Frozen(inner) = canon.as_ref() else {
             panic!("expected frozen tuple");
         };
         let Value::Tuple(items) = inner.as_ref() else {
@@ -620,7 +739,7 @@ mod tests {
         });
         let v = Value::Frozen(Box::new(Value::List(vec![element])));
         let canon = canonicalize_udt_value(&list_marshal, &v).unwrap();
-        let Value::Frozen(inner) = &canon else {
+        let Value::Frozen(inner) = canon.as_ref() else {
             panic!("expected frozen list");
         };
         let Value::List(items) = inner.as_ref() else {
@@ -633,6 +752,119 @@ mod tests {
                 ("first_name".into(), Some(Value::Text("Alan".into()))),
                 ("last_name".into(), None),
                 ("age".into(), Some(Value::Integer(41))),
+            ]
+        );
+    }
+
+    #[test]
+    fn wrong_primitive_field_type_is_rejected() {
+        // person.age declares Int32Type. A BigInt in that slot would serialize as
+        // 8-byte LongType bytes, disagreeing with the declared header. roborev
+        // #1020 Finding 1: reject the leaf-type mismatch (no coercion).
+        let v = udt(vec![
+            ("first_name", Some(Value::Text("Ada".into()))),
+            ("age", Some(Value::BigInt(36))), // wrong: BigInt in an Int32Type slot
+        ]);
+        let err = canonicalize_udt_value(&person_marshal(), &v).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Int32Type") && msg.contains("does not match declared marshal"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn correct_primitive_field_types_canonicalize() {
+        // The matching variants (Text for UTF8Type, Integer for Int32Type) pass
+        // leaf validation and canonicalize to declared order.
+        let v = udt(vec![
+            ("age", Some(Value::Integer(36))),
+            ("first_name", Some(Value::Text("Ada".into()))),
+            ("last_name", Some(Value::Text("Lovelace".into()))),
+        ]);
+        let canon = canonicalize_udt_value(&person_marshal(), &v).unwrap();
+        let order = declared_order(canon.as_ref());
+        assert_eq!(
+            order,
+            vec![
+                ("first_name".into(), Some(Value::Text("Ada".into()))),
+                ("last_name".into(), Some(Value::Text("Lovelace".into()))),
+                ("age".into(), Some(Value::Integer(36))),
+            ]
+        );
+    }
+
+    // A frozen<set<frozen<person>>> marshal — used to exercise the list/set kind
+    // guard while still tripping the `references_user_type` fast-path gate.
+    fn set_of_person_marshal() -> String {
+        format!(
+            "{p}FrozenType({p}SetType({p}UserType({KS},706572736f6e,\
+             66697273745f6e616d65:{p}UTF8Type,6c6173745f6e616d65:{p}UTF8Type,616765:{p}Int32Type)))",
+            p = MARSHAL_PREFIX
+        )
+    }
+
+    fn list_of_person_marshal() -> String {
+        format!(
+            "{p}FrozenType({p}ListType({p}UserType({KS},706572736f6e,\
+             66697273745f6e616d65:{p}UTF8Type,6c6173745f6e616d65:{p}UTF8Type,616765:{p}Int32Type)))",
+            p = MARSHAL_PREFIX
+        )
+    }
+
+    fn person_value() -> Value {
+        Value::Udt(UdtValue {
+            type_name: "person".into(),
+            keyspace: KS.into(),
+            fields: vec![UdtField {
+                name: "first_name".into(),
+                value: Some(Value::Text("Ada".into())),
+            }],
+        })
+    }
+
+    #[test]
+    fn list_value_in_set_type_slot_is_rejected() {
+        // A SetType marshal carrying a Value::List must error (roborev #1020
+        // Finding 1: list/set kind mismatch is rejected, not silently re-tagged).
+        let v = Value::Frozen(Box::new(Value::List(vec![person_value()])));
+        let err = canonicalize_udt_value(&set_of_person_marshal(), &v).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("SetType") && msg.contains("List"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn set_value_in_list_type_slot_is_rejected() {
+        let v = Value::Frozen(Box::new(Value::Set(vec![person_value()])));
+        let err = canonicalize_udt_value(&list_of_person_marshal(), &v).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("ListType") && msg.contains("Set"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn matching_collection_kind_canonicalizes() {
+        // A SetType marshal with a Value::Set (and its nested UDT) canonicalizes.
+        let v = Value::Frozen(Box::new(Value::Set(vec![person_value()])));
+        let canon = canonicalize_udt_value(&set_of_person_marshal(), &v).unwrap();
+        let Value::Frozen(inner) = canon.as_ref() else {
+            panic!("expected frozen set");
+        };
+        let Value::Set(items) = inner.as_ref() else {
+            panic!("expected set, got {inner:?}");
+        };
+        let order = declared_order(&items[0]);
+        assert_eq!(
+            order,
+            vec![
+                ("first_name".into(), Some(Value::Text("Ada".into()))),
+                ("last_name".into(), None),
+                ("age".into(), None),
             ]
         );
     }

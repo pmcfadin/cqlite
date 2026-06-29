@@ -119,8 +119,8 @@ impl DataWriter {
                     // field bytes follow declared order / `-1` padding and match the
                     // advertised `FrozenType(UserType(...))` header. A non-UDT column
                     // is returned unchanged (byte-identical path).
-                    let value = canonicalize_udt_value(&col.data_type, value)?;
-                    let value = &value;
+                    let canon = canonicalize_udt_value(&col.data_type, value)?;
+                    let value = canon.as_ref();
                     if let Some(ttl_seconds) = mop.row_ttl_seconds {
                         if row.ttl_seconds == Some(ttl_seconds)
                             && row.liveness_ts == Some(mop.timestamp_micros)
@@ -168,11 +168,11 @@ impl DataWriter {
                     )?;
                 } else {
                     // roborev #1020 Finding 1: schema-aware frozen-UDT value.
-                    let value = canonicalize_udt_value(&col.data_type, value)?;
+                    let canon = canonicalize_udt_value(&col.data_type, value)?;
                     self.write_cell_with_ttl(
                         buf,
                         column,
-                        &value,
+                        canon.as_ref(),
                         mop.timestamp_micros,
                         *ttl_seconds,
                     )?;
