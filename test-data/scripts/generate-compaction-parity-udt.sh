@@ -165,14 +165,19 @@ flush_ks() {
 # ----------------------------------------------------------------------------
 
 # udt_frozen_person: frozen<person> LWW overlap.
-#   A (T_A): id 1 full, id 2 null-middle, id 3 empty-first
+#   A (T_A): id 1 full, id 2 null-middle, id 3 empty-first, id 5 null-middle (NEVER overridden)
 #   B (T_B): id 2 override (full), id 3 unchanged-shape override, id 4 new
-# Surviving: 1=A, 2=B, 3=B, 4=B.
+# Surviving: 1=A, 2=B, 3=B, 4=B, 5=A.
+# id 5 is written ONLY in group A and never overwritten, so a SURVIVING value
+# carrying a null middle field (last_name:null) is verified in the COMPACTED
+# output — exercising the `-1` absent-field encoding on the winning side
+# (roborev #1020 Finding 2: the prior null-field rows were all overwritten).
 insert_frozen_person() {
   log "=== udt_frozen_person: group A (USING TIMESTAMP $T_A) ==="
   cql "INSERT INTO udt_frozen_person (id, p) VALUES (1, {first_name:'Ada', last_name:'Lovelace', age:36}) USING TIMESTAMP $T_A"
   cql "INSERT INTO udt_frozen_person (id, p) VALUES (2, {first_name:'Grace', last_name:null, age:85}) USING TIMESTAMP $T_A"
   cql "INSERT INTO udt_frozen_person (id, p) VALUES (3, {first_name:'', last_name:'Turing', age:41}) USING TIMESTAMP $T_A"
+  cql "INSERT INTO udt_frozen_person (id, p) VALUES (5, {first_name:'Edsger', last_name:null, age:75}) USING TIMESTAMP $T_A"
   flush_ks
   log "=== udt_frozen_person: group B (USING TIMESTAMP $T_B) ==="
   cql "INSERT INTO udt_frozen_person (id, p) VALUES (2, {first_name:'Grace', last_name:'Hopper', age:85}) USING TIMESTAMP $T_B"

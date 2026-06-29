@@ -11,9 +11,11 @@
 //! `compact_sstables_with_registry`, and the two COMPACTED outputs are diffed.
 //!
 //! ## Three scenarios (issue #1020 AC1) — each: 2 overlapping SSTables -> 1 output
-//!   * `udt_frozen_person`  — `frozen<person>` with a fully-populated value, a
-//!     NULL-middle-field value, and an empty-string-field value, exercising UDT
-//!     field ORDER + null-field encoding + frozen value boundaries.
+//!   * `udt_frozen_person`  — `frozen<person>` with a fully-populated value, an
+//!     empty-string-field value, and a SURVIVING null-middle-field value (id 5,
+//!     written only at T_A and never overwritten), exercising UDT field ORDER +
+//!     the `-1` null-field encoding ON THE WINNING SIDE of compaction + frozen
+//!     value boundaries.
 //!     → `cqlite.compaction_parity.udt.frozen_person`
 //!   * `udt_nested`         — `frozen<employee>` which CONTAINS a `frozen<address>`,
 //!     exercising NESTED UDT field decoding + the inner frozen value boundary
@@ -1008,6 +1010,13 @@ fn frozen_person_groups() -> (Vec<Mutation>, Vec<Mutation>) {
         ),
         write_one(t, 2, "p", person(Some("Grace"), None, Some(85)), T_A),
         write_one(t, 3, "p", person(Some(""), Some("Turing"), Some(41)), T_A),
+        // id 5 is written ONLY in group A and never overwritten, so a SURVIVING
+        // value carrying a NULL middle field (last_name) reaches the compacted
+        // output. This verifies the `-1` absent-field encoding on the WINNING
+        // side of compaction (roborev #1020 Finding 2: every prior null-field
+        // row was overwritten by a group-B full-field write, so the surviving
+        // null-field encoding was never byte-verified).
+        write_one(t, 5, "p", person(Some("Edsger"), None, Some(75)), T_A),
     ];
     let group_b = vec![
         write_one(
@@ -1064,6 +1073,14 @@ const FROZEN_PERSON_EXPECTED: ExpectedRows = &[
             r#"{"first_name":"Katherine","last_name":"Johnson","age":101}"#,
         )],
     ),
+    // roborev #1020 Finding 2: a SURVIVING null-middle-field value. id 5 is
+    // written only at T_A and never overwritten, so its `last_name:null` field
+    // (the `-1` absent-field marker) reaches the compacted output and is
+    // byte-verified here, unlike every prior null-field row (all overwritten).
+    (
+        "5",
+        &[("p", r#"{"first_name":"Edsger","last_name":null,"age":75}"#)],
+    ),
 ];
 
 /// Manifest: `cqlite.compaction_parity.udt.frozen_person` (byte_for_byte).
@@ -1081,7 +1098,7 @@ async fn frozen_person_compaction_parity() {
         frozen_person_schema(),
         group_a,
         group_b,
-        4,
+        5,
         FROZEN_PERSON_EXPECTED,
     )
     .await;
