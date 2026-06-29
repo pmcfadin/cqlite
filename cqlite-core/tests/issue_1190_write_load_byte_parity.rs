@@ -477,6 +477,187 @@ async fn finished_data_db_artifacts_byte_for_byte() {
 }
 
 // ---------------------------------------------------------------------------
+// Pinned writer gap (issue #1196): static-row flags byte cass 0xa0 vs CQLite 0xa4
+// ---------------------------------------------------------------------------
+//
+// The `static_clustering_shape` table (id INT, ck INT, sdata TEXT STATIC, rdata
+// TEXT, PRIMARY KEY (id, ck)) is written by Cassandra as a static-only UPDATE
+// (`SET sdata WHERE id=1`, no clustering key) followed by a clustering INSERT
+// (`(id, ck, rdata) VALUES (1, 7, 'row-val')`). Cassandra emits the resulting
+// STATIC ROW with flags byte `0xa0` = HAS_EXTENDED_FLAGS (0x80) | HAS_ALL_COLUMNS
+// (0x20): the static block carries NO row-level liveness, so HAS_TIMESTAMP is
+// NOT set (the writetime lives on the static cell only).
+//
+// CQLite's writer has a known gap (issue #1196): it sets a row-level
+// HAS_TIMESTAMP (0x04) + PK liveness on the static row, emitting `0xa4`
+// (0x80 | 0x20 | 0x04). This is the documented divergence that keeps the
+// `tombstone_and_ttl_artifacts` scenario `partial` and blocks whole-artifact
+// byte parity for static-row shapes.
+//
+// This test PINS that divergence: it asserts the Cassandra reference static-row
+// flags byte is exactly `0xa0` AND the CQLite-written static-row flags byte is
+// exactly `0xa4`. If a future writer change closes the gap (CQLite stops setting
+// the spurious row-level timestamp), this test FAILS LOUDLY and forces a review
+// of the `tombstone_and_ttl_artifacts` manifest claim + issue #1196.
+
+const KS_STATIC_TABLE: &str = "static_clustering_shape";
+
+/// Row flags (Cassandra `nb` `UnfilteredSerializer`): HAS_EXTENDED_FLAGS,
+/// HAS_TIMESTAMP, HAS_ALL_COLUMNS.
+const ROW_HAS_EXTENDED_FLAGS: u8 = 0x80;
+const ROW_HAS_TIMESTAMP: u8 = 0x04;
+
+/// Documented (#1196) static-row flags bytes for `static_clustering_shape`.
+const CASS_STATIC_ROW_FLAGS: u8 = 0xa0; // EXTENDED | HAS_ALL_COLUMNS (no timestamp)
+const CQLITE_STATIC_ROW_FLAGS: u8 = 0xa4; // EXTENDED | HAS_ALL_COLUMNS | HAS_TIMESTAMP (gap)
+
+/// Int-PK partition-header byte size: 2 (u16 key-length) plus 4 (key) plus 4
+/// (LDT i32) plus 8 (marked-for-delete-at i64). The static row's flags byte is
+/// the first unfiltered byte immediately after this header.
+const INT_PK_HEADER_SIZE: usize = 2 + 4 + 4 + 8;
+
+fn static_clustering_schema() -> TableSchema {
+    TableSchema {
+        keyspace: KEYSPACE.into(),
+        table: KS_STATIC_TABLE.into(),
+        partition_keys: vec![KeyColumn {
+            name: "id".into(),
+            data_type: "int".into(),
+            position: 0,
+        }],
+        clustering_keys: vec![ClusteringColumn {
+            name: "ck".into(),
+            data_type: "int".into(),
+            position: 0,
+            order: ClusteringOrder::Asc,
+        }],
+        columns: vec![
+            Column {
+                name: "sdata".into(),
+                data_type: "text".into(),
+                nullable: true,
+                default: None,
+                is_static: true,
+            },
+            Column {
+                name: "rdata".into(),
+                data_type: "text".into(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+        ],
+        comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
+    }
+}
+
+/// Reproduce the Cassandra fixture's two writes for `static_clustering_shape`:
+/// a static-only UPDATE (`SET sdata WHERE id=1`, no clustering) plus a clustering
+/// INSERT (`(1, 7, 'row-val')`), both at the fixed writetime.
+fn static_clustering_mutations() -> Vec<Mutation> {
+    vec![
+        Mutation::new(
+            TableId::new(KEYSPACE, KS_STATIC_TABLE),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![CellOperation::Write {
+                column: "sdata".into(),
+                value: Value::Text("static-val".into()),
+            }],
+            T_WRITE,
+            None,
+        ),
+        Mutation::new(
+            TableId::new(KEYSPACE, KS_STATIC_TABLE),
+            PartitionKey::single("id", Value::Integer(1)),
+            Some(ClusteringKey::single("ck", Value::Integer(7))),
+            vec![CellOperation::Write {
+                column: "rdata".into(),
+                value: Value::Text("row-val".into()),
+            }],
+            T_WRITE,
+            None,
+        ),
+    ]
+}
+
+/// Pinned writer-gap regression guard for issue #1196: the static-row flags
+/// byte differs between the Cassandra 5.0.2 reference (`0xa0`) and CQLite's
+/// writer (`0xa4`, spurious row-level HAS_TIMESTAMP). Backs the documented gap
+/// in `cass.write_load_path.flush.tombstone_and_ttl_artifacts`.
+///
+/// Skips on genuine absence of the committed reference; with the fixture
+/// committed (issue #1190) it RUNS. If CQLite ever stops emitting the spurious
+/// timestamp (closing #1196), this test FAILS and forces a manifest-claim review.
+#[tokio::test]
+async fn static_row_timestamp_flags_gap_pinned_1196() {
+    let Some(ref_dir) = reference_dir(KS_STATIC_TABLE) else {
+        eprintln!(
+            "[issue_1190] reference for {KEYSPACE}.{KS_STATIC_TABLE} absent \
+             (dataset not fetched); skipping #1196 static-row-flags pin"
+        );
+        return;
+    };
+
+    // Cassandra reference: static row is the first unfiltered after the header.
+    let cass_data = read_component(&ref_dir, "Data.db");
+    assert!(
+        cass_data.len() > INT_PK_HEADER_SIZE,
+        "{KS_STATIC_TABLE}: reference Data.db too short ({} bytes) — broken fixture",
+        cass_data.len()
+    );
+    let cass_flags = cass_data[INT_PK_HEADER_SIZE];
+    assert_eq!(
+        cass_flags, CASS_STATIC_ROW_FLAGS,
+        "#1196: Cassandra static-row flags byte changed (got {cass_flags:#04x}, \
+         expected {CASS_STATIC_ROW_FLAGS:#04x}); regenerate fixtures / review the gap"
+    );
+    assert_eq!(
+        cass_flags & ROW_HAS_TIMESTAMP,
+        0,
+        "#1196: Cassandra static row must NOT carry row-level HAS_TIMESTAMP"
+    );
+
+    // CQLite writer: re-emit the identical static-only UPDATE + clustering INSERT.
+    let (_guard, out_dir) =
+        cqlite_write(&static_clustering_schema(), static_clustering_mutations()).await;
+    let our_data = std::fs::read(out_dir.join("nb-1-big-Data.db"))
+        .unwrap_or_else(|e| panic!("{KS_STATIC_TABLE}: CQLite Data.db unreadable: {e}"));
+    assert!(
+        our_data.len() > INT_PK_HEADER_SIZE,
+        "{KS_STATIC_TABLE}: CQLite Data.db too short ({} bytes)",
+        our_data.len()
+    );
+    let our_flags = our_data[INT_PK_HEADER_SIZE];
+    assert_eq!(
+        our_flags & ROW_HAS_EXTENDED_FLAGS,
+        ROW_HAS_EXTENDED_FLAGS,
+        "#1196: CQLite static row must set HAS_EXTENDED_FLAGS (static block)"
+    );
+    assert_eq!(
+        our_flags, CQLITE_STATIC_ROW_FLAGS,
+        "#1196 PIN: CQLite static-row flags byte is no longer {CQLITE_STATIC_ROW_FLAGS:#04x} \
+         (got {our_flags:#04x}). If this is {CASS_STATIC_ROW_FLAGS:#04x}, the writer gap \
+         (spurious row-level HAS_TIMESTAMP on a static-only UPDATE) is CLOSED — update the \
+         tombstone_and_ttl_artifacts manifest claim and resolve issue #1196."
+    );
+
+    // The whole point of the gap: ours differs from cass exactly at the timestamp bit.
+    assert_ne!(
+        our_flags, cass_flags,
+        "#1196: expected the documented static-row flags divergence (cass \
+         {CASS_STATIC_ROW_FLAGS:#04x} vs CQLite {CQLITE_STATIC_ROW_FLAGS:#04x})"
+    );
+    assert_eq!(
+        our_flags ^ cass_flags,
+        ROW_HAS_TIMESTAMP,
+        "#1196: the only flag-byte difference must be the spurious row-level \
+         HAS_TIMESTAMP bit (0x04); got cass {cass_flags:#04x} vs CQLite {our_flags:#04x}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Scenario 2: partition_boundary_artifacts — partition/row offset layout.
 // ---------------------------------------------------------------------------
 
