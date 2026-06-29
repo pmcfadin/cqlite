@@ -94,7 +94,14 @@ pub(super) enum CrcTrailer {
 /// flush. [`CrcTrailer::None`] (the flush path) appends nothing.
 ///
 /// An empty `Data.db` yields just the 4-byte header (zero chunks), matching
-/// Cassandra's behaviour when no data buffer is ever flushed.
+/// Cassandra's behaviour when no data buffer is ever flushed. This empty-file
+/// behaviour is preserved for BOTH trailers: the compaction trailing
+/// empty-final-chunk `CRC32 = 0` is appended only when at least one real data
+/// chunk was checksummed (non-empty `Data.db`). A compaction that purges all
+/// partitions and finalizes an empty BIG SSTable therefore still gets the
+/// documented header-only `CRC.db`, never a lone trailing `00000000` after the
+/// header — the trailing zero only makes sense after a real chunk, and we have
+/// no Cassandra golden for the empty-compaction case (issue #1222 roborev).
 pub(super) async fn build_crc_bytes(data_path: &Path, trailer: CrcTrailer) -> Result<Vec<u8>> {
     use tokio::io::AsyncReadExt;
 
@@ -105,6 +112,10 @@ pub(super) async fn build_crc_bytes(data_path: &Path, trailer: CrcTrailer) -> Re
     let mut file = tokio::fs::File::open(data_path).await?;
     let mut buffer = vec![0u8; CRC_CHUNK_SIZE];
     let mut filled = 0usize;
+    // Track whether any real data-chunk CRC was emitted (non-empty Data.db). The
+    // compaction trailer is gated on this so an empty Data.db keeps the
+    // documented header-only output for both trailers (issue #1222).
+    let mut emitted_real_chunk = false;
     loop {
         // Fill up to a full chunk before checksumming so each CRC covers a
         // complete CRC_CHUNK_SIZE block (except the final, short chunk), exactly
@@ -116,6 +127,7 @@ pub(super) async fn build_crc_bytes(data_path: &Path, trailer: CrcTrailer) -> Re
                 let mut hasher = crc32fast::Hasher::new();
                 hasher.update(&buffer[..filled]);
                 out.extend_from_slice(&hasher.finalize().to_be_bytes());
+                emitted_real_chunk = true;
             }
             break;
         }
@@ -124,6 +136,7 @@ pub(super) async fn build_crc_bytes(data_path: &Path, trailer: CrcTrailer) -> Re
             let mut hasher = crc32fast::Hasher::new();
             hasher.update(&buffer[..filled]);
             out.extend_from_slice(&hasher.finalize().to_be_bytes());
+            emitted_real_chunk = true;
             filled = 0;
         }
     }
@@ -131,8 +144,12 @@ pub(super) async fn build_crc_bytes(data_path: &Path, trailer: CrcTrailer) -> Re
     // Compaction-only trailing empty-final-chunk CRC32 (issue #1222). Cassandra's
     // compaction close flushes the data writer once more over a zero-length
     // buffer; CRC32 of zero bytes is 0, so emit one trailing `00000000`. The
-    // flush path (CrcTrailer::None) never reaches this.
-    if matches!(trailer, CrcTrailer::EmptyFinalChunk) {
+    // flush path (CrcTrailer::None) never reaches this. Gated on a real chunk
+    // having been emitted: an empty Data.db keeps the documented header-only
+    // output even on the compaction path (the trailing zero only makes sense
+    // after at least one real data chunk, and there is no empty-compaction
+    // golden to match).
+    if matches!(trailer, CrcTrailer::EmptyFinalChunk) && emitted_real_chunk {
         let empty_crc = crc32fast::Hasher::new().finalize();
         out.extend_from_slice(&empty_crc.to_be_bytes());
     }
@@ -173,6 +190,36 @@ mod tests {
             .await
             .expect("crc bytes");
         assert_eq!(bytes, (CRC_CHUNK_SIZE as i32).to_be_bytes().to_vec());
+    }
+
+    #[tokio::test]
+    async fn empty_data_with_compaction_trailer_stays_header_only() {
+        // Issue #1222 (roborev): the compaction trailing empty-final-chunk
+        // CRC32 = 0 must be gated on a real data chunk having been emitted. An
+        // empty Data.db (e.g. a compaction that purges all partitions and
+        // finalizes an empty BIG SSTable) keeps the documented header-only
+        // CRC.db — NO trailing 00000000 — for BOTH trailers.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data = dir.path().join("Data.db");
+        tokio::fs::write(&data, b"").await.expect("write data");
+
+        let header_only = (CRC_CHUNK_SIZE as i32).to_be_bytes().to_vec();
+
+        let flush = build_crc_bytes(&data, CrcTrailer::None)
+            .await
+            .expect("flush crc bytes");
+        let compaction = build_crc_bytes(&data, CrcTrailer::EmptyFinalChunk)
+            .await
+            .expect("compaction crc bytes");
+
+        assert_eq!(
+            flush, header_only,
+            "empty Data.db on the flush path is header-only"
+        );
+        assert_eq!(
+            compaction, header_only,
+            "empty Data.db on the compaction path stays header-only (no trailing 00000000)"
+        );
     }
 
     #[tokio::test]
