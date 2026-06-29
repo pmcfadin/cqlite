@@ -64,17 +64,24 @@
 # Capturing the gate (issue #1175): the authoritative artifact is the block
 # between the AGENT-GATE SUMMARY markers. Under non-foreground capture (a
 # `script`/pty, a buffering wrapper, a "drain-until-EOF then write" reader, or a
-# backgrounded pipeline) that block can be lost if a gate component leaks a
-# descendant that keeps the gate's stdout pipe open: the reader never sees EOF,
-# gets killed by a timeout, and discards its in-memory buffer — even though the
-# gate exited 0. Two defenses make the SUMMARY immune to capture mode:
-#   1. The gate always writes the SUMMARY (and full transcript) to files under
-#      $LOG_DIR and prints those paths, so the block survives even if the
-#      streamed copy is truncated.
-#   2. After the END marker the gate flushes stdout and detaches inherited FDs so
-#      a leaked child can't hold the pipe open and starve the reader.
-# The most robust streamed capture is still the foreground redirect:
+# backgrounded pipeline) that streamed block can be lost if a gate component
+# leaks a descendant that keeps the gate's stdout pipe open: the reader never
+# sees EOF, gets killed by a timeout, and discards its in-memory buffer — even
+# though the gate exited 0. (Detaching the gate's OWN stdout cannot fix this: a
+# leaked child still holds its inherited copy of the pipe write-end open.)
+#
+# The defense is therefore a recovery path the caller can use WITHOUT reading the
+# (possibly-lost) stream:
+#   - The gate always writes the complete SUMMARY to a CALLER-KNOWN file whose
+#     path the caller chose IN ADVANCE: $AGENT_GATE_SUMMARY_FILE if set, else the
+#     stable repo-root default $PWD/.agent-gate-summary.txt (gitignored). A caller
+#     can ALWAYS `cat` that file for the complete block even if stdout was 100%
+#     lost — no need to parse the stream to learn where the file is.
+#   - It also keeps a copy under $LOG_DIR for the logs bundle.
+# The streamed copy is best-effort (a plain `cat` of the file). The most robust
+# streamed capture is still the foreground redirect:
 #   bash scripts/agent-gate.sh > gate.log 2>&1 < /dev/null
+# but if that stream truncates, read the caller-known file — it is always complete.
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -98,30 +105,33 @@ case "${1:-}" in
 esac
 
 LOG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate.XXXXXX")
-SUMMARY_FILE="$LOG_DIR/summary.txt"
+# Caller-known summary path (#1175): the caller may pick the path IN ADVANCE via
+# AGENT_GATE_SUMMARY_FILE; otherwise we use a stable, documented repo-root default
+# the caller can `cat` without parsing stdout. This is THE recovery contract: the
+# complete SUMMARY is always at this exact path even if the streamed copy is lost.
+SUMMARY_FILE="${AGENT_GATE_SUMMARY_FILE:-$REPO_ROOT/.agent-gate-summary.txt}"
+# Keep a copy under the logs bundle for archival.
+LOG_SUMMARY_FILE="$LOG_DIR/summary.txt"
 declare -a NAMES=() STATUSES=() TIMES=()
 OVERALL=PASS
 
 # emit_summary <result> [meta-line ...]
 #
-# Build the canonical SUMMARY block (start marker .. RESULT .. end marker) ONCE,
-# then publish it through two channels so it survives any capture mode (#1175):
-#   - write it to $SUMMARY_FILE synchronously with plain redirection FIRST (the
-#     authoritative artifact; never written through a pipe, so a closed-stdout
-#     SIGPIPE can never truncate the file itself), THEN
-#   - best-effort stream the file to stdout for the foreground/redirect case
-#     (allowed to fail silently if stdout is already gone).
-# After the END marker we flush stdout and close inherited stdout/stderr so a
-# leaked descendant can't keep the gate's stdout pipe open and starve an
-# until-EOF reader (the truncation root cause). Both the real run and the
+# Build the canonical SUMMARY block (start marker .. RESULT .. end marker) ONCE
+# and write it to the CALLER-KNOWN file with plain redirection (no pipe), so it is
+# complete regardless of stdout state — a closed-stdout SIGPIPE can never truncate
+# a file written by `>`. The caller chose this path in advance (or knows the
+# documented default), so it can recover the complete block without ever reading
+# the stream (#1175). After writing, best-effort `cat` it to stdout for the
+# foreground/redirect case. That is the whole emission: there is no stdout
+# fd-detach, because detaching the gate's own stdout cannot close the pipe copy a
+# leaked descendant already inherited. Both the real run and the
 # --emit-summary-selftest mode go through this single function.
 emit_summary() {
   local result="$1"; shift
-  # Write the authoritative copy FIRST, with plain redirection (no pipe). This
-  # guarantees $SUMMARY_FILE is complete regardless of stdout state: if we wrote
-  # it through `tee` and the capture reader had already timed out/closed the
-  # pipe, `tee` could take SIGPIPE mid-write and leave the file itself truncated,
-  # defeating the whole fix (#1175).
+  # Write the complete block to the caller-known file FIRST, with plain
+  # redirection (no pipe). This is the authoritative artifact and the advertised
+  # recovery path.
   {
     echo
     echo "==== AGENT-GATE SUMMARY ===="
@@ -133,21 +143,21 @@ emit_summary() {
     echo "==== END AGENT-GATE SUMMARY ===="
   } > "$SUMMARY_FILE"
 
-  # Now best-effort stream the (already-complete) file to stdout for the
-  # foreground/redirect case. If stdout is gone (closed pipe -> SIGPIPE), this is
-  # allowed to fail silently: the authoritative copy already exists on disk.
+  # Keep a copy in the logs bundle (best-effort; the caller-known file is the
+  # contract).
+  cp "$SUMMARY_FILE" "$LOG_SUMMARY_FILE" 2>/dev/null || true
+
+  # Best-effort stream the (already-complete) file to stdout for the
+  # foreground/redirect case. If stdout is gone (closed pipe -> SIGPIPE) or a
+  # leaked child has starved an until-EOF reader, this may be lost — that is
+  # fine: the caller-known file above is always complete.
   cat "$SUMMARY_FILE" 2>/dev/null || true
 
-  # Belt-and-suspenders: if the authoritative copy ever looks short of what we
-  # intended to write, the agent at least gets a loud pointer to the file.
+  # If the authoritative copy ever looks short of what we intended to write, the
+  # agent at least gets a loud pointer to the file on stderr.
   if ! grep -q '==== END AGENT-GATE SUMMARY ====' "$SUMMARY_FILE" 2>/dev/null; then
     echo "WARNING: SUMMARY may be truncated — authoritative copy: $SUMMARY_FILE" >&2
   fi
-
-  # Flush and detach: replace stdout/stderr with the (already-written) summary
-  # file so that any descendant still holding fd1/fd2 cannot keep the original
-  # capture pipe/pty open past our exit. This guarantees the reader sees EOF.
-  exec 1>>"$SUMMARY_FILE" 2>>"$SUMMARY_FILE"
 }
 
 # --emit-summary-selftest: prove the SUMMARY block survives capture without

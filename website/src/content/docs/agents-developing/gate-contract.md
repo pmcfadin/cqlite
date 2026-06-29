@@ -70,19 +70,35 @@ bash scripts/agent-gate.sh > gate.log 2>&1 < /dev/null
 
 Under **non-foreground** capture (a `script`/pty, a buffering wrapper, a
 "drain-until-EOF then write" reader, or a backgrounded pipeline) the streamed
-SUMMARY block could previously be lost: a gate component sometimes leaks a
-descendant (a `cargo`/`rustc` build server, a daemonizing test, etc.) that keeps
-the gate's stdout pipe open, so an until-EOF reader never sees EOF, gets killed
-by a timeout, and discards its in-memory buffer — even though the gate exited 0.
+SUMMARY block can be lost entirely: a gate component sometimes leaks a descendant
+(a `cargo`/`rustc` build server, a daemonizing test, etc.) that keeps the gate's
+stdout pipe open, so an until-EOF reader never sees EOF, gets killed by a
+timeout, and discards its in-memory buffer — even though the gate exited 0.
+(Detaching the gate's *own* stdout cannot fix this: the leaked child still holds
+its inherited copy of the pipe write-end.)
 
-The gate now defends against this:
+The recovery contract does not depend on the stream at all — pick the path in
+advance and read it:
 
-- It always writes the SUMMARY to an authoritative file and prints the path as a
-  `summary-file:` line. If your streamed capture looks truncated (missing the
-  `==== END AGENT-GATE SUMMARY ====` marker), read that file — it is always
-  complete. Diff your capture against it.
-- After the END marker the gate flushes and detaches its own stdout/stderr so it
-  cannot itself hold the capture pipe open past exit.
+- **Set `AGENT_GATE_SUMMARY_FILE=/path` before running.** The gate writes the
+  complete SUMMARY to that exact path with plain redirection, so the file is
+  complete no matter what happens to stdout. `cat` it afterward; it always
+  contains the full block (start marker → `RESULT:` → end marker).
+
+  ```bash
+  AGENT_GATE_SUMMARY_FILE=/tmp/gate-summary.txt \
+    bash scripts/agent-gate.sh > gate.log 2>&1 < /dev/null
+  cat /tmp/gate-summary.txt   # complete SUMMARY, even if gate.log truncated
+  ```
+
+- **If you don't set it,** the gate writes the same complete block to the
+  documented default `$PWD/.agent-gate-summary.txt` (gitignored). If your streamed
+  capture looks truncated (missing the `==== END AGENT-GATE SUMMARY ====`
+  marker), `cat` that file — it is always complete.
+
+The path the gate used is also echoed on the `summary-file:` line inside the
+block, and a copy is kept in the `logs:` bundle. The streamed copy is best-effort
+only.
 
 A fast regression test for this emission path lives at
 `scripts/tests/test_agent_gate_summary.sh` (run it directly:
@@ -114,7 +130,7 @@ cli-tests:         PASS|FAIL (<Ns>)
 minimal-build:     PASS|FAIL (<Ns>)
 smoke:             PASS|FAIL (<Ns>)
 logs: /tmp/agent-gate.<random>
-summary-file: /tmp/agent-gate.<random>/summary.txt
+summary-file: <AGENT_GATE_SUMMARY_FILE or $PWD/.agent-gate-summary.txt>
 RESULT: PASS
 ==== END AGENT-GATE SUMMARY ====
 ```
@@ -130,7 +146,7 @@ mode: PARTIAL (--only fmt,clippy) - does NOT count as the gate
 fmt:               PASS (<Ns>)
 clippy:            PASS (<Ns>)
 logs: /tmp/agent-gate.<random>
-summary-file: /tmp/agent-gate.<random>/summary.txt
+summary-file: <AGENT_GATE_SUMMARY_FILE or $PWD/.agent-gate-summary.txt>
 RESULT: PARTIAL
 ==== END AGENT-GATE SUMMARY ====
 ```
