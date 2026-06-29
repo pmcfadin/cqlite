@@ -5794,14 +5794,21 @@ scenarios:
         notes: >-
           Map/list/set elements reconcile by cell_path (per-element last-write-
           wins), NOT whole-column LWW: per-element ts/ttl/ldt/is_deleted survive a
-          CQLite compaction byte-faithfully, and merging two overlapping copies of
-          the real collection_table reconciles to exactly the same surviving
-          element set with no duplicated or resurrected cell_path. Complex
-          deletion markers shadow older covered elements following Cassandra
-          timestamp rules without resurrecting them.
+          CQLite compaction of the real collection_table fixture byte-faithfully.
+          Complex-deletion-marker shadowing is proven over the genuine Cassandra
+          test_deltas.collection_ops OVERWRITE partition (pk=2: INSERT
+          tags={old_a,old_b} then UPDATE SET tags={only_this}): Cassandra emits a
+          per-column `tags` complex deletion marker at the overwrite timestamp T
+          that shadows the older old_a/old_b elements (ts < T) while the only_this
+          element (ts > T) survives. A CQLite compaction RE-EMITS that marker
+          (compacted output still carries the `tags` ComplexDeletion at the same
+          marked_for_delete_at = T), the only surviving `tags` element is
+          only_this (ts > T), and no shadowed (ts <= T) element is resurrected —
+          including across a second idempotent compaction pass.
     fixtures:
       datasets:
         - test-data/datasets/sstables/test_collections
+        - test-data/datasets/sstables/test_deltas
     evidence:
       type: canonical_semantic
       strict: false
@@ -5810,19 +5817,24 @@ scenarios:
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
-        bash test-data/scripts/regenerate-datasets.sh  # collection_table fixture (non-frozen collections)
+        bash test-data/scripts/regenerate-datasets.sh  # collection_table fixture (non-frozen collections); bash test-data/scripts/generate-deltas.sh  # collection_ops overwrite fixture (complex deletion marker)
       comparison_command: >-
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets CQLITE_REQUIRE_FIXTURES=1 cargo test -p cqlite-core --features write-support --test issue_1019_static_dropped_collection_compaction_parity
       reference_paths:
         - test-data/datasets/sstables/test_collections
+        - test-data/datasets/sstables/test_deltas/collection_ops-2a5006f06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
       normalization: >-
-        Per-element complex cells (column, cell_path, ts, ttl, ldt, is_deleted)
-        are read back via the compaction KWayMerger and compared input-vs-output
-        and across a two-input merge; element identity (pk, column, cell_path)
-        must be unique in the merged output.
+        Per-element survival: complex cells (column, cell_path, ts, ttl, ldt,
+        is_deleted) are read back via the compaction KWayMerger and compared
+        input-vs-output. Complex-deletion-marker shadowing: the `tags`
+        ComplexDeletion marker and surviving `tags` elements for the overwrite
+        partition are read back from the compacted output via KWayMerger and
+        asserted against the Cassandra timestamp rule (marker re-emitted at T;
+        only the ts > T element survives; no ts <= T element resurrected; stable
+        across a second compaction pass).
       known_limitations: >-
-        Canonical-semantic per-element reconciliation; whole-component byte
-        identity is the separate byte tier.
+        Canonical-semantic per-element reconciliation and marker shadowing;
+        whole-component byte identity is the separate byte tier.
     ci:
       tier: required_parity
       workflow: .github/workflows/compaction-parity.yml

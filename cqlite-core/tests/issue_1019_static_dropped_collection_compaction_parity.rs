@@ -28,13 +28,19 @@
 //!
 //!  3. **AC3 — non-frozen collection elements reconcile by `cell_path`, not
 //!     whole-column last-write-wins, and a complex deletion marker does NOT
-//!     resurrect older elements.** Proven two ways over the real `collection_table`
-//!     fixture: (a) per-element substrate (column, cell_path, ts, ttl, ldt,
-//!     is_deleted) survives a CQLite compaction byte-faithfully; (b) a SECOND,
-//!     newer input carrying a whole-column complex-deletion marker at a higher
-//!     timestamp SHADOWS the older elements it covers — they must NOT survive
-//!     (no resurrection) — while a still-newer element written above the marker
-//!     DOES survive.
+//!     resurrect older elements.** Proven two ways: (a) per-element substrate
+//!     (column, cell_path, ts, ttl, ldt, is_deleted) survives a CQLite compaction
+//!     of the real `test_collections.collection_table` fixture byte-faithfully;
+//!     (b) the genuine complex-deletion-marker shadowing the real Cassandra
+//!     `test_deltas.collection_ops` OVERWRITE scenario (pk=2:
+//!     `INSERT tags={old_a,old_b}` then `UPDATE SET tags={only_this}`) produces:
+//!     Cassandra emits a per-column `tags` complex deletion marker at the
+//!     overwrite timestamp `T` that shadows the older `old_a`/`old_b` elements
+//!     (written at `ts < T`) while the `only_this` element (`ts > T`) survives.
+//!     After a CQLite compaction the marker is re-emitted (`complex_deletions`
+//!     still carries `tags` at `marked_for_delete_at = T`), the covered older
+//!     elements stay ABSENT (no resurrection), and only `only_this` (above the
+//!     marker) survives — exactly Cassandra's complex-deletion timestamp rule.
 //!
 //! ## Discipline (project doctrine, no-heuristics #28)
 //!  * Decode facts (static/dropped column identity, drop time) come from the
@@ -62,7 +68,9 @@ use std::path::{Path, PathBuf};
 use cqlite_core::parser::enhanced_statistics_parser::parse_statistics_with_fallback;
 use cqlite_core::schema::cql_parser::parse_create_table;
 use cqlite_core::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema};
-use cqlite_core::storage::write_engine::merge::{compact_sstables, CellData, MergeStep, RowData};
+use cqlite_core::storage::write_engine::merge::{
+    compact_sstables, CellData, ComplexDeletion, MergeStep, RowData,
+};
 use cqlite_core::storage::write_engine::KWayMerger;
 use cqlite_core::types::Value;
 use tempfile::TempDir;
@@ -271,6 +279,42 @@ const COLLECTION_TABLE_DDL: &str = "CREATE TABLE test_collections.collection_tab
 fn collection_schema() -> TableSchema {
     let (_rest, s) = parse_create_table(COLLECTION_TABLE_DDL).expect("parse collection_table DDL");
     s
+}
+
+/// DDL for the real `test_deltas.collection_ops` overwrite fixture (matches
+/// `test-data/schemas/deltas.cql`). pk=2 is the OVERWRITE scenario that emits a
+/// non-frozen `tags` complex deletion marker shadowing the older elements.
+const COLLECTION_OPS_DDL: &str = "CREATE TABLE test_deltas.collection_ops (\
+    pk INT,\
+    ck INT,\
+    tags SET<TEXT>,\
+    vals LIST<INT>,\
+    props MAP<TEXT,TEXT>,\
+    PRIMARY KEY (pk, ck)\
+)";
+
+fn collection_ops_schema() -> TableSchema {
+    let (_rest, s) = parse_create_table(COLLECTION_OPS_DDL).expect("parse collection_ops DDL");
+    s
+}
+
+/// Locate the `test_deltas.collection_ops` fixture generation that actually
+/// carries a binary `nb-1-big-Data.db` (several digest-only generations exist).
+fn collection_ops_input() -> Option<PathBuf> {
+    let root = datasets_root()?;
+    let ks = root.join("sstables").join("test_deltas");
+    for entry in fs::read_dir(ks).ok()?.flatten() {
+        let path = entry.path();
+        let n = entry.file_name();
+        let name = n.to_str().unwrap_or("");
+        if name.starts_with("collection_ops-") {
+            let data = path.join("nb-1-big-Data.db");
+            if data.is_file() {
+                return Some(data);
+            }
+        }
+    }
+    None
 }
 
 /// Parse an ISO-8601 `Z` instant to epoch microseconds (drop time derivation).
@@ -705,99 +749,183 @@ fn collection_per_element_metadata_reconciles_by_cell_path_survives_compaction()
     );
 }
 
-/// **AC3 (b) — complex deletion marker must NOT resurrect older covered elements.**
+/// The `tags`-column complex-deletion marker + surviving `tags` elements observed
+/// for the OVERWRITE partition (pk=2) after a compaction.
+#[derive(Debug, Default)]
+struct OverwriteView {
+    /// The `tags` complex deletion marker's `marked_for_delete_at` (µs), if any.
+    tags_marker: Option<i64>,
+    /// Surviving `tags` element `(utf8 cell_path, timestamp, is_deleted)`.
+    tags_elements: Vec<(String, i64, bool)>,
+}
+
+/// Walk a single compaction output and capture the `tags` complex-deletion marker
+/// and surviving `tags` elements for the partition whose `int` pk == `want_pk`.
+fn overwrite_view(data: &Path, schema: &TableSchema, want_pk: i32) -> OverwriteView {
+    let mut merger = KWayMerger::new(vec![data.to_path_buf()], schema).expect("KWayMerger::new");
+    let want_key = want_pk.to_be_bytes().to_vec();
+    let mut view = OverwriteView::default();
+    loop {
+        match merger.step().expect("merger step") {
+            MergeStep::Complete => break,
+            MergeStep::Partition { key, rows } => {
+                if key.key != want_key {
+                    continue;
+                }
+                for entry in &rows {
+                    if let Some(cd) = entry
+                        .complex_deletions
+                        .iter()
+                        .find(|c: &&ComplexDeletion| c.column == "tags")
+                    {
+                        view.tags_marker = Some(cd.marked_for_delete_at);
+                    }
+                    if let RowData::Live { cells } = &entry.row_data {
+                        for c in cells {
+                            if c.column != "tags" {
+                                continue;
+                            }
+                            if let Some(path) = &c.cell_path {
+                                let p = String::from_utf8_lossy(path).into_owned();
+                                view.tags_elements.push((p, c.timestamp, c.is_deleted));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    view.tags_elements.sort();
+    view
+}
+
+/// **AC3 (b) — a non-frozen-collection COMPLEX DELETION MARKER follows Cassandra's
+/// timestamp rule and does NOT resurrect older covered elements
+/// (`cqlite.issue_899.collection_complex_deletion_marker` /
+/// `cass.compaction.GcCompactionTest` complex-deletion half).**
 ///
-/// Build a TWO-input compaction over the real `collection_table`:
-///   * OLD (oldest) = the genuine Cassandra `collection_table` Data.db.
-///   * NEW (newest) = CQLite re-compacts the SAME input to a fresh generation,
-///     so both inputs carry IDENTICAL per-element state.
+/// Driven by the genuine Cassandra `test_deltas.collection_ops` OVERWRITE
+/// partition (pk=2): `INSERT tags={'old_a','old_b'}` at `T_ins` then
+/// `UPDATE SET tags={'only_this'}` at `T > T_ins`. Cassandra writes a per-column
+/// `tags` COMPLEX DELETION MARKER at `marked_for_delete_at = T` that shadows every
+/// `tags` element with `ts < T` (the `old_a`/`old_b` elements), while the
+/// `only_this` element (`ts > T`) survives. The fixture already encodes the marker
+/// (the oracle); this test pins that a CQLite COMPACTION preserves it:
 ///
-/// Compacting them must NOT duplicate or resurrect elements: each surviving
-/// `(pk, column, cell_path)` appears EXACTLY ONCE in the output with the winning
-/// (highest-timestamp) state — last-write-wins reconciliation is per-element, and
-/// the older copy of each element is reconciled away rather than resurrected.
+///   * the marker is RE-EMITTED — the compacted output still carries a `tags`
+///     `ComplexDeletion` at the same `marked_for_delete_at = T`;
+///   * `only_this` (`ts > T`) SURVIVES as the sole `tags` element;
+///   * NO element with `ts <= T` is resurrected (the covered older elements stay
+///     absent and `only_this` is the only `tags` cell_path present).
 ///
-/// This pins the "no resurrection / per-element LWW, not whole-column" half of
-/// AC3 with two overlapping inputs (the single-input survival test above cannot
-/// exercise cross-input reconciliation).
+/// Compaction is idempotent here, so we also re-compact the output and assert the
+/// view is unchanged — the marker keeps shadowing across a second pass (no
+/// resurrection on repeated compaction).
 #[test]
-fn collection_complex_deletion_does_not_resurrect_older_elements() {
-    let Some(input) = collection_table_input() else {
+fn collection_complex_deletion_marker_does_not_resurrect_older_elements() {
+    let Some(input) = collection_ops_input() else {
         skip_or_panic(
-            "collection_table fixture",
-            "CQLITE_DATASETS_ROOT unset / collection_table nb-1 Data.db absent",
+            "collection_ops fixture",
+            "CQLITE_DATASETS_ROOT unset / test_deltas.collection_ops nb-1 Data.db absent",
         );
         return;
     };
-    let schema = collection_schema();
+    let schema = collection_ops_schema();
+    const PK: i32 = 2; // the OVERWRITE partition
 
-    // First compact the genuine input to a fresh generation (NEW). Both NEW and
-    // OLD then carry identical per-element state; compacting them together must
-    // reconcile per element (no duplicate cell_paths, no resurrected element).
-    let new_dir = TempDir::new().expect("new dir");
-    let new_report = block_on(compact_sstables(
+    // Fixture invariant (oracle): pk=2's INPUT already carries the `tags` complex
+    // deletion marker, the surviving `only_this` element above it, and NO older
+    // covered element. If the dataset is present but this is false, FAIL loudly.
+    let input_view = overwrite_view(&input, &schema, PK);
+    let input_marker = input_view.tags_marker.unwrap_or_else(|| {
+        panic!(
+            "fixture invariant: collection_ops pk={PK} INPUT must carry a `tags` complex \
+             deletion marker (the overwrite); got tags_elements={:?}",
+            input_view.tags_elements
+        )
+    });
+    assert_eq!(
+        input_view.tags_elements,
+        vec![("only_this".to_string(), input_marker + 1, false)],
+        "fixture invariant: collection_ops pk={PK} input must expose ONLY the `only_this` \
+         element written 1µs ABOVE the marker (Cassandra's overwrite); the older old_a/old_b \
+         elements (ts < marker) must already be shadowed (absent)"
+    );
+
+    // Compact pk=2 (the whole fixture) through CQLite.
+    let out_dir = TempDir::new().expect("out dir");
+    let report = block_on(compact_sstables(
         vec![input.clone()],
-        new_dir.path(),
+        out_dir.path(),
         &schema,
         10_193,
         None,
         None,
         true,
     ))
-    .expect("first compaction must succeed");
+    .expect("collection_ops compaction must succeed");
 
-    let merged_dir = TempDir::new().expect("merged dir");
-    let merged_report = block_on(compact_sstables(
-        // newest first, then the original.
-        vec![new_report.output.data_path.clone(), input.clone()],
-        merged_dir.path(),
+    // ── AC3(b) assertion (1): the `tags` complex deletion marker is RE-EMITTED at
+    //    the SAME timestamp — the compaction did not drop the marker.
+    let out_view = overwrite_view(&report.output.data_path, &schema, PK);
+    assert_eq!(
+        out_view.tags_marker,
+        Some(input_marker),
+        "AC3(b) (#899): the compacted output for pk={PK} must RE-EMIT the `tags` complex \
+         deletion marker at marked_for_delete_at={input_marker} (Cassandra overwrite rule); \
+         dropping it would let older covered elements resurrect"
+    );
+
+    // ── AC3(b) assertion (2): ONLY the element written ABOVE the marker survives;
+    //    NO element with ts <= marker is resurrected, and `only_this` is the sole
+    //    surviving `tags` cell_path.
+    assert_eq!(
+        out_view.tags_elements,
+        vec![("only_this".to_string(), input_marker + 1, false)],
+        "AC3(b) no-resurrection: after compaction the ONLY surviving `tags` element must be \
+         `only_this` (ts={} > marker={input_marker}); the older old_a/old_b elements \
+         (ts < marker) must NOT be resurrected",
+        input_marker + 1
+    );
+    for (path, ts, _) in &out_view.tags_elements {
+        assert!(
+            *ts > input_marker,
+            "AC3(b) no-resurrection: surviving `tags` element {path:?} has ts={ts} which is \
+             NOT strictly above the complex deletion marker {input_marker} — a shadowed \
+             (ts <= marker) element was resurrected"
+        );
+    }
+
+    // ── AC3(b) assertion (3): idempotence — re-compacting the output keeps the
+    //    marker shadowing; the view is identical (no resurrection on a 2nd pass).
+    let out2_dir = TempDir::new().expect("out2 dir");
+    let report2 = block_on(compact_sstables(
+        vec![report.output.data_path.clone()],
+        out2_dir.path(),
         &schema,
         10_194,
         None,
         None,
         true,
     ))
-    .expect("two-input compaction must succeed");
-
-    let single = per_element_facts(vec![input.clone()], &schema);
-    let merged = per_element_facts(vec![merged_report.output.data_path.clone()], &schema);
-
-    // No element identity (pk, column, cell_path) may appear more than once in the
-    // merged output — a duplicate would be a resurrected/un-reconciled element.
-    let mut seen: BTreeSet<(Vec<u8>, String, Vec<u8>)> = BTreeSet::new();
-    for f in &merged {
-        let id = (
-            f.partition_key.clone(),
-            f.column.clone(),
-            f.cell_path.clone(),
-        );
-        assert!(
-            seen.insert(id.clone()),
-            "AC3 no-resurrection: element {:?} cell_path={:?} appears MORE THAN ONCE in the \
-             merged output — per-element reconciliation failed (resurrected/duplicated element)",
-            (&id.0, &id.1),
-            id.2
-        );
-    }
-
-    // The merged element set must equal the single-input set: reconciling two
-    // identical copies yields exactly the same surviving elements (no loss, no
-    // resurrection, no whole-column collapse).
+    .expect("re-compaction must succeed");
+    let out2_view = overwrite_view(&report2.output.data_path, &schema, PK);
     assert_eq!(
-        merged, single,
-        "AC3 no-resurrection: merging two identical per-element copies must yield the SAME \
-         surviving element set as one copy (per-element LWW reconciliation), not a resurrected \
-         or collapsed set"
+        out2_view.tags_marker,
+        Some(input_marker),
+        "AC3(b): the `tags` complex deletion marker must survive a SECOND compaction pass"
     );
-    assert!(
-        !merged.is_empty(),
-        "fixture invariant: the merged per-element set must be non-empty (dataset present)"
+    assert_eq!(
+        out2_view.tags_elements, out_view.tags_elements,
+        "AC3(b) no-resurrection: a second compaction pass must keep exactly the same surviving \
+         `tags` element set (idempotent marker shadowing, no resurrection)"
     );
 
     eprintln!(
-        "collection_complex_deletion_does_not_resurrect_older_elements PASSED: \
-         merging two identical copies reconciled to {} unique per-element cells (no \
-         resurrection / duplicate cell_path)",
-        merged.len()
+        "collection_complex_deletion_marker_does_not_resurrect_older_elements PASSED: \
+         pk={PK} `tags` complex deletion marker (marked_for_delete_at={input_marker}) re-emitted \
+         through compaction; only `only_this` (ts={}) survived; older shadowed elements stayed \
+         absent across two compaction passes (no resurrection)",
+        input_marker + 1
     );
 }
