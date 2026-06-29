@@ -6,10 +6,6 @@ on:
   push:
     branches: [main, develop]
 
-concurrency:
-  group: minimal-features-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
   minimal-build:
     name: Minimal Build & Test

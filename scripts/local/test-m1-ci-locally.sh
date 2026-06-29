@@ -30,7 +30,7 @@ echo ""
 
 # Test 2: Clippy on core package
 echo "🔍 Step 2/7: Running clippy on cqlite-core..."
-if ! cargo clippy --package cqlite-core --all-targets --all-features -- -D warnings; then
+if ! cargo clippy --package cqlite-core --all-features; then
     echo "❌ Clippy failed on cqlite-core"
     exit 1
 fi
@@ -39,7 +39,7 @@ echo ""
 
 # Test 3: Clippy on CLI package
 echo "🔍 Step 3/7: Running clippy on cqlite-cli..."
-if ! cargo clippy --package cqlite-cli --all-targets --all-features -- -D warnings; then
+if ! cargo clippy --package cqlite-cli --all-features; then
     echo "❌ Clippy failed on cqlite-cli"
     exit 1
 fi

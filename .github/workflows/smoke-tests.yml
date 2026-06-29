@@ -23,10 +23,6 @@ on:
   pull_request:
     branches: [main]
 
-concurrency:
-  group: smoke-tests-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 env:
   CARGO_TERM_COLOR: always
   DATASET_TAG: datasets-v3

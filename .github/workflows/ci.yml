@@ -6,10 +6,6 @@ on:
   pull_request:
     branches: [ main ]
 
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 env:
   CARGO_TERM_COLOR: always
   DATASET_TAG: datasets-v3
@@ -268,4 +264,5 @@ jobs:
 
       - name: Run flow-finalize cleanup guardrail tests (${{ matrix.os }} /bin/bash)
         run: /bin/bash scripts/flow/tests/finalize-cleanup.test.sh
+
 

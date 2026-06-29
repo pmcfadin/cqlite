@@ -32,10 +32,6 @@ on:
 permissions:
   contents: write
 
-concurrency:
-  group: docs-site-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 env:
   DATASET_TAG: datasets-v3
   DATASET_ASSET: cassandra5-small-full-v3.2.tar.gz

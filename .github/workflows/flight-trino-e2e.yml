@@ -25,10 +25,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: flight-trino-e2e-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
   e2e:
     name: docker-compose integration
