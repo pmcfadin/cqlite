@@ -5,6 +5,10 @@ on:
     paths:
       - 'cqlite-core/src/**'
 
+concurrency:
+  group: coverage-baseline-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   coverage:
     name: Code Coverage Check

@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [ main, develop ]
 
+concurrency:
+  group: m1-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -135,14 +139,14 @@ jobs:
         echo "🔍 Running clippy on M1-scoped packages (core library and CLI)..."
 
         # Check cqlite-core (the main M1 focus)
-        if ! cargo clippy --package cqlite-core --all-features; then
+        if ! cargo clippy --package cqlite-core --all-targets --all-features -- -D warnings; then
           echo "❌ Core library code quality issues detected"
           echo "::error::Clippy found issues in cqlite-core."
           exit 1
         fi
 
         # Check cqlite-cli
-        if ! cargo clippy --package cqlite-cli --all-features; then
+        if ! cargo clippy --package cqlite-cli --all-targets --all-features -- -D warnings; then
           echo "❌ CLI code quality issues detected"
           echo "::error::Clippy found issues in cqlite-cli."
           exit 1
