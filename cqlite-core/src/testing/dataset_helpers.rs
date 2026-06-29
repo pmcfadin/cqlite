@@ -73,6 +73,25 @@ fn get_datasets_root() -> PathBuf {
     }
 }
 
+/// `true` when strict fixture mode is requested (issue #1230). Either
+/// `CQLITE_REQUIRE_FIXTURES` (the repo-wide convention used by the newer
+/// `issue_10xx`/`issue_99x` parity tests) or `CQLITE_PARITY_REQUIRE_DATASETS`
+/// (issue #1205) set to a truthy value ("1"/"true") flips dataset-dependent
+/// tests FAIL-CLOSED: an absent/empty fixture PANICS (test failure) instead of
+/// skipping, so a required CI lane cannot false-green when a table is dropped or
+/// a #773-class path regression hides the data. When neither is set, the default
+/// skip-on-absence behavior is preserved so local dev without the binaries still
+/// works. This is the single shared definition — do NOT fork a parallel copy.
+pub fn require_fixtures_strict() -> bool {
+    matches!(
+        std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref(),
+        Ok("1") | Ok("true")
+    ) || matches!(
+        std::env::var("CQLITE_PARITY_REQUIRE_DATASETS").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
 /// Load metadata.yml from datasets root
 pub fn load_metadata() -> Result<Metadata, DatasetError> {
     load_metadata_at(&get_datasets_root())

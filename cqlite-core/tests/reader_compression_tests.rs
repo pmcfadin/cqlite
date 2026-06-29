@@ -8,7 +8,29 @@ use std::sync::Arc;
 
 use cqlite_core::storage::sstable::compression_info::CompressionInfo;
 use cqlite_core::storage::sstable::reader::{extract_sstable_base_name, SSTableReader};
+use cqlite_core::testing::dataset_helpers::require_fixtures_strict;
 use cqlite_core::{Config, Platform};
+
+/// Tables that the pinned `test_basic` keyspace fixture is expected to ship
+/// (issue #1230). Under strict mode (`require_fixtures_strict`) every one of
+/// these MUST be present and openable, so a dropped table or a partial dataset
+/// extraction reds CI instead of silently passing on whatever survived.
+///
+/// SINGLE SOURCE OF TRUTH (intent): this 8-table list is hand-duplicated from
+/// the full corpus manifest. Keep it in sync with the `test_basic` block in
+/// `test-data/scripts/check-dataset-manifest.sh` and `test-data/validation-matrix.md`.
+/// A future change should derive all three from metadata.yml / validation-matrix.md
+/// so a table add/rename updates everything at once.
+const EXPECTED_TEST_BASIC_TABLES: &[&str] = &[
+    "composite_key_table",
+    "compression_test_table",
+    "counters",
+    "multi_partition_table",
+    "simple_table",
+    "static_columns_table",
+    "ttl_test_table",
+    "uncompressed_table",
+];
 
 /// Helper to get test datasets root
 fn get_test_datasets_root() -> Option<std::path::PathBuf> {
@@ -358,13 +380,27 @@ async fn test_compression_info_file_sizes() {
 
 #[tokio::test]
 async fn test_open_all_test_basic_tables_with_compression() {
+    // Fail-closed gate (issue #1230): if the dataset root is unset/absent, a
+    // strict CI lane must FAIL rather than silently pass on missing data; local
+    // dev without the fixtures still skips.
     let Some(datasets_root) = get_test_datasets_root() else {
+        assert!(
+            !require_fixtures_strict(),
+            "CQLITE_REQUIRE_FIXTURES=1 but CQLITE_DATASETS_ROOT is unset — \
+             fetch with bash test-data/scripts/fetch-datasets.sh"
+        );
         eprintln!("CQLITE_DATASETS_ROOT not set, skipping test");
         return;
     };
 
     let keyspace_dir = datasets_root.join("sstables").join("test_basic");
     if !keyspace_dir.exists() {
+        assert!(
+            !require_fixtures_strict(),
+            "CQLITE_REQUIRE_FIXTURES=1 but test_basic keyspace is absent under {} — \
+             fetch with bash test-data/scripts/fetch-datasets.sh",
+            keyspace_dir.display()
+        );
         eprintln!("test_basic keyspace not found, skipping test");
         return;
     }
@@ -376,53 +412,70 @@ async fn test_open_all_test_basic_tables_with_compression() {
             .expect("Failed to create platform"),
     );
 
-    let entries: Vec<_> = std::fs::read_dir(&keyspace_dir)
-        .expect("Should read keyspace dir")
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_dir())
-        .collect();
+    let strict = require_fixtures_strict();
+    let mut opened: Vec<&str> = Vec::new();
 
-    let mut success_count = 0;
-    let mut fail_count = 0;
+    for &table in EXPECTED_TEST_BASIC_TABLES {
+        // Resolve the <table>-<uuid> directory, then its Data.db.
+        let data_file = find_table_dir(&datasets_root, "test_basic", &format!("{table}-"))
+            .as_deref()
+            .and_then(find_data_file);
 
-    for entry in entries {
-        let table_dir = entry.path();
-        let table_name = table_dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown");
-
-        let Some(data_file) = find_data_file(&table_dir) else {
-            eprintln!("  {} - No Data.db found", table_name);
+        let Some(data_file) = data_file else {
+            // A missing expected table is a hard failure under strict mode so a
+            // dropped table or a partial extraction reds CI (was: silent
+            // `continue` that still let `success_count > 0` pass).
+            assert!(
+                !strict,
+                "CQLITE_REQUIRE_FIXTURES=1 but expected table test_basic.{table} \
+                 has no Data.db under {} — dropped table or partial dataset?",
+                keyspace_dir.display()
+            );
+            eprintln!("  {table} - No Data.db found (skipped, non-strict)");
             continue;
         };
 
-        match SSTableReader::open(&data_file, &config, platform.clone()).await {
-            Ok(reader) => {
-                eprintln!(
-                    "  ✓ {} - Opened successfully (version: {:?})",
-                    table_name,
-                    reader.header().cassandra_version
-                );
-                success_count += 1;
-            }
-            Err(e) => {
-                eprintln!("  ✗ {} - Failed: {}", table_name, e);
-                fail_count += 1;
-            }
-        }
+        let reader = SSTableReader::open(&data_file, &config, platform.clone())
+            .await
+            .unwrap_or_else(|e| panic!("test_basic.{table} failed to open: {e}"));
+
+        // Real content assertion (not just "opened without error"): the on-disk
+        // Data.db is non-empty and the reader parsed a header.
+        let version = reader.header().cassandra_version;
+        let data_len = std::fs::metadata(&data_file)
+            .map(|m| m.len())
+            .unwrap_or_else(|e| panic!("test_basic.{table} Data.db metadata: {e}"));
+        assert!(
+            data_len > 0,
+            "test_basic.{table} Data.db is present but empty (0 bytes)"
+        );
+        eprintln!("  ✓ {table} - Opened (version: {version:?}, {data_len} bytes)");
+        opened.push(table);
     }
 
     eprintln!(
-        "\nResults: {} succeeded, {} failed",
-        success_count, fail_count
+        "\nResults: {}/{} expected test_basic tables opened",
+        opened.len(),
+        EXPECTED_TEST_BASIC_TABLES.len()
     );
 
-    // Most tables should open successfully
-    assert!(
-        success_count > 0,
-        "Expected at least some tables to open successfully"
-    );
+    if strict {
+        // Under strict mode every expected table must be present and openable.
+        assert_eq!(
+            opened.len(),
+            EXPECTED_TEST_BASIC_TABLES.len(),
+            "strict mode: only {:?} of the expected {:?} tables opened",
+            opened,
+            EXPECTED_TEST_BASIC_TABLES
+        );
+    } else {
+        // Non-strict local dev: at least the core table must be readable so the
+        // test still proves the read path works when any fixtures are present.
+        assert!(
+            !opened.is_empty(),
+            "Expected at least one test_basic table to open successfully"
+        );
+    }
 }
 
 /// Helper: find any nb-1-big-CompressionInfo.db under the datasets root.
