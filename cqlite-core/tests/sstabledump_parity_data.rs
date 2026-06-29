@@ -34,6 +34,12 @@ use tempfile::TempDir;
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
 
+#[path = "parity_support/mod.rs"]
+mod parity_support;
+use parity_support::{
+    jsonl_diff, parity_datasets_required, scenario, write_summary, LaneStatus, ParityFailure,
+};
+
 /// Test configuration for Data.db parity validation
 #[derive(Debug, Clone)]
 struct DataParityConfig {
@@ -360,10 +366,27 @@ async fn test_data_db_timestamp_delta_encoding() -> CqliteResult<()> {
 async fn test_data_db_jsonl_reference_parity() -> CqliteResult<()> {
     let config = DataParityConfig::default();
 
-    // Load available tables - skip if test data not available
+    // Load available tables - skip if test data not available (fail-closed in CI).
     let _metadata = match load_metadata() {
         Ok(m) => m,
         Err(e) => {
+            if parity_datasets_required() {
+                ParityFailure::new(scenario::DATA_DB_JSONL)
+                    .lane("data_db_jsonl")
+                    .cassandra_source("sstabledump JSONL (Data.db row/cell decode)")
+                    .components(["Data.db", "Data.db.jsonl"])
+                    .repro(
+                        "bash test-data/scripts/fetch-datasets.sh && \
+                         CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core \
+                         --features write-support --test sstabledump_parity_data \
+                         test_data_db_jsonl_reference_parity -- --nocapture",
+                    )
+                    .detail(format!(
+                        "CQLITE_PARITY_REQUIRE_DATASETS=1 but datasets metadata could not be \
+                         loaded ({e}) — required parity gate must not skip when datasets are mandated"
+                    ))
+                    .panic();
+            }
             println!("⏭️ Skipping JSONL reference parity test: test data not available ({e})");
             return Ok(());
         }
@@ -372,6 +395,23 @@ async fn test_data_db_jsonl_reference_parity() -> CqliteResult<()> {
     let available_tables = match list_tables(None) {
         Ok(t) => t,
         Err(e) => {
+            if parity_datasets_required() {
+                ParityFailure::new(scenario::DATA_DB_JSONL)
+                    .lane("data_db_jsonl")
+                    .cassandra_source("sstabledump JSONL (Data.db row/cell decode)")
+                    .components(["Data.db", "Data.db.jsonl"])
+                    .repro(
+                        "bash test-data/scripts/fetch-datasets.sh && \
+                         CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core \
+                         --features write-support --test sstabledump_parity_data \
+                         test_data_db_jsonl_reference_parity -- --nocapture",
+                    )
+                    .detail(format!(
+                        "CQLITE_PARITY_REQUIRE_DATASETS=1 but tables could not be listed ({e}) — \
+                         required parity gate must not skip when datasets are mandated"
+                    ))
+                    .panic();
+            }
             println!("⏭️ Skipping JSONL reference parity test: cannot list tables ({e})");
             return Ok(());
         }
@@ -420,12 +460,60 @@ async fn test_data_db_jsonl_reference_parity() -> CqliteResult<()> {
         results.len(),
         config.target_tables.len()
     );
-    assert_eq!(
-        passed,
-        results.len(),
-        "Data.db JSONL parity failures detected; see validation artifacts for details"
-    );
+    // PRIMARY jsonl_diff wiring (issue #1024 criterion f): on a Data.db JSONL
+    // value/row parity failure, emit a structured normalized-JSONL diff to
+    // `target/cassandra-parity/data_db_jsonl.diff` (+ a Fail summary row) before
+    // aborting, instead of a bare assert_eq!. The comparison semantics are
+    // unchanged (every validated table must reach perfect_parity). The diff lines
+    // are the per-table parity verdicts: expected "<ks>.<table>: parity=true",
+    // actual the observed verdict (with the recorded errors when it failed).
+    if passed != results.len() {
+        // Build both sides from ONLY the failing rows so `jsonl_diff` (which
+        // returns at the first differing line) pinpoints a *genuine* failure
+        // rather than line 0. Using all rows would make every line diverge —
+        // the `expected` "parity=true" verdict never carries the rows=…/errors=…
+        // suffix that `actual` always appends — so the first divergence would
+        // land on an arbitrary (often passing) table. Restricting to the
+        // failures keeps each side's formatting aligned per-table while
+        // guaranteeing the first divergence names a real failure.
+        let failures: Vec<&DataValidationResult> =
+            results.iter().filter(|r| !r.perfect_parity).collect();
+        let expected: Vec<String> = failures
+            .iter()
+            .map(|r| {
+                format!(
+                    "{}.{}: parity=true rows={} errors=[]",
+                    r.keyspace, r.table, r.jsonl_row_count
+                )
+            })
+            .collect();
+        let actual: Vec<String> = failures
+            .iter()
+            .map(|r| {
+                format!(
+                    "{}.{}: parity={} rows={} errors={:?}",
+                    r.keyspace, r.table, r.perfect_parity, r.jsonl_row_count, r.errors
+                )
+            })
+            .collect();
+        let diff = jsonl_diff("data_db_jsonl row/value parity", &expected, &actual);
+        ParityFailure::new(scenario::DATA_DB_JSONL)
+            .lane("data_db_jsonl")
+            .cassandra_source("sstabledump JSONL (Data.db row/cell decode)")
+            .components(["Data.db", "Data.db.jsonl"])
+            .detail(format!(
+                "Data.db JSONL parity failures detected ({passed}/{} tables passed)\n{diff}",
+                results.len(),
+            ))
+            .panic();
+    }
 
+    let _ = write_summary(
+        "data_db_jsonl",
+        LaneStatus::Pass,
+        scenario::DATA_DB_JSONL,
+        &[],
+    );
     Ok(())
 }
 

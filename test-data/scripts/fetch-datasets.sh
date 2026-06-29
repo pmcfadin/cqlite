@@ -18,7 +18,21 @@ elif command -v shasum >/dev/null 2>&1; then
   ACTUAL="$(shasum -a 256 /tmp/${ASSET} | awk '{print $1}')"
   test "${ACTUAL}" = "${SHA256_EXPECTED}" || { echo "SHA256 mismatch"; exit 1; }
 else
-  echo "Warning: no sha256 checker found; skipping verification" >&2
+  # Fail closed in CI (issue #1024): a missing checksum tool must NOT let an
+  # unverified asset through where parity is gated. When CQLITE_PARITY_REQUIRE_DATASETS
+  # (exported by the parity workflow) or the generic CI signal is set, an
+  # unverifiable dataset is a gate failure — there is no safe way to admit the
+  # asset without confirming its provenance against the pinned SHA256.
+  #
+  # On a local/dev machine that simply lacks both tools, fall through with a
+  # loud warning so iteration is not blocked; the operator can opt back into
+  # fail-closed behavior with CQLITE_PARITY_REQUIRE_DATASETS=1.
+  if [ "${CQLITE_PARITY_REQUIRE_DATASETS:-}" = "1" ] || [ -n "${CI:-}" ]; then
+    echo "ERROR: no sha256 checker found (need sha256sum or shasum) — cannot verify dataset provenance" >&2
+    exit 1
+  else
+    echo "WARNING: no sha256 tool; skipping checksum verification (set CQLITE_PARITY_REQUIRE_DATASETS=1 to enforce)" >&2
+  fi
 fi
 
 tar -xzf /tmp/${ASSET} -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'

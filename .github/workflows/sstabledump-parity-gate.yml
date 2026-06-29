@@ -16,6 +16,10 @@ env:
   DATASET_ASSET: cassandra5-small-full-v3.2.tar.gz
   DATASET_SHA256: bebc763752c8d68c7fb0483a1b31294b4d1d21343d3f7d124da069e5073202fa
   CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+  # Fail-closed switch (issue #1024): strict parity lanes must PANIC instead of
+  # skipping when dataset binaries are absent. A vanished/unfetched dataset can
+  # never silently green the required parity gate.
+  CQLITE_PARITY_REQUIRE_DATASETS: '1'
 
 jobs:
   sstabledump-parity:
@@ -75,10 +79,25 @@ jobs:
           echo "Summary.db count: ${summary_count}"
           echo "Statistics.db count: ${statistics_count}"
 
-          test "${data_count}" -gt 0
-          test "${index_count}" -gt 0
-          test "${summary_count}" -gt 0
-          test "${statistics_count}" -gt 0
+          # Fail closed (issue #1024): a dataset root that resolves to ZERO of any
+          # required component is a hard gate failure, never a silent pass. The
+          # explicit messages make the cause unambiguous in the job log.
+          if [ "${data_count}" -eq 0 ]; then
+            echo "❌ FAIL-CLOSED: zero *-Data.db under ${CQLITE_DATASETS_ROOT} — datasets missing/unfetched" >&2
+            exit 1
+          fi
+          if [ "${index_count}" -eq 0 ]; then
+            echo "❌ FAIL-CLOSED: zero *-Index.db under ${CQLITE_DATASETS_ROOT}" >&2
+            exit 1
+          fi
+          if [ "${summary_count}" -eq 0 ]; then
+            echo "❌ FAIL-CLOSED: zero *-Summary.db under ${CQLITE_DATASETS_ROOT}" >&2
+            exit 1
+          fi
+          if [ "${statistics_count}" -eq 0 ]; then
+            echo "❌ FAIL-CLOSED: zero *-Statistics.db under ${CQLITE_DATASETS_ROOT}" >&2
+            exit 1
+          fi
 
       - name: Setup Java 17
         uses: actions/setup-java@v5
@@ -278,6 +297,7 @@ jobs:
             parity_summary.md
             cqlite-core/validation_artifacts/
             validation_artifacts/
+            target/cassandra-parity/**
           retention-days: 30
 
       - name: Comment on PR (Success)

@@ -43,6 +43,13 @@ use cqlite_core::storage::sstable::index_reader::IndexReader;
 use cqlite_core::storage::sstable::version_gate::{SsTableDescriptor, SsTableFormat};
 use cqlite_core::Config;
 
+#[path = "parity_support/mod.rs"]
+mod parity_support;
+use parity_support::{
+    byte_diff, offset_delta_diff, parity_datasets_required, scenario, write_summary, LaneStatus,
+    ParityFailure,
+};
+
 // ============================================================================
 // Fixture discovery
 // ============================================================================
@@ -354,14 +361,29 @@ async fn big_index_db_entry_byte_and_field_parity() {
             raw_entries.len(),
         );
         for (n, (got, raw)) in entries.iter().zip(raw_entries.iter()).enumerate() {
-            assert_eq!(
-                got.key_digest.as_ref(),
-                raw.key.as_slice(),
-                "{}: entry {n} raw key bytes mismatch (reader {:02x?} vs disk {:02x?})",
-                fx.name(),
-                got.key_digest.as_ref(),
-                raw.key,
-            );
+            // PRIMARY byte_diff wiring (issue #1024 criterion f): on a raw-key byte
+            // discrepancy, emit a structured byte diff to
+            // `target/cassandra-parity/index_db_big.diff` (+ a Fail summary row)
+            // before aborting, instead of a bare assert_eq!. The comparison
+            // semantics are unchanged (reader key bytes must equal the on-disk key).
+            if got.key_digest.as_ref() != raw.key.as_slice() {
+                let diff = byte_diff(
+                    "reader_key",
+                    got.key_digest.as_ref(),
+                    "disk_key",
+                    raw.key.as_slice(),
+                );
+                ParityFailure::new(scenario::INDEX_DB_BIG)
+                    .lane("index_db_big")
+                    .cassandra_source("RowIndexEntryTest.java (BIG Index.db entry bytes)")
+                    .fixture(index_path.clone())
+                    .components(["Index.db", "Data.db"])
+                    .detail(format!(
+                        "{}: entry {n} raw key bytes mismatch\n{diff}",
+                        fx.name()
+                    ))
+                    .panic();
+            }
             assert_eq!(
                 got.raw_key.as_deref(),
                 Some(raw.key.as_slice()),
@@ -460,13 +482,29 @@ async fn big_index_db_entry_byte_and_field_parity() {
             for n in 1..entries.len() {
                 let off_delta = entries[n].data_offset - entries[n - 1].data_offset;
                 let pos_delta = parts[n].position - parts[n - 1].position;
-                assert_eq!(
-                    off_delta,
-                    pos_delta,
-                    "{}: offset delta {off_delta} != JSONL position delta {pos_delta} at \
-                     partition {n}",
-                    fx.name(),
-                );
+                // PRIMARY offset_delta_diff wiring (issue #1024 criterion f): on an
+                // offset-delta discrepancy vs the JSONL position deltas, emit a
+                // structured offset-delta diff to
+                // `target/cassandra-parity/index_db_big.diff` (+ a Fail summary row)
+                // before aborting. Comparison semantics unchanged (the JSONL position
+                // delta is the expected, the Index.db offset delta is the actual).
+                if off_delta != pos_delta {
+                    let diff = offset_delta_diff(
+                        &format!("{} partition {n} (expected=JSONL pos delta)", fx.name()),
+                        &[(pos_delta as i64, off_delta as i64)],
+                    );
+                    ParityFailure::new(scenario::INDEX_DB_BIG)
+                        .lane("index_db_big")
+                        .cassandra_source("RowIndexEntryTest.java (BIG Index.db data offsets)")
+                        .fixture(index_path.clone())
+                        .components(["Index.db", "Data.db.jsonl"])
+                        .detail(format!(
+                            "{}: offset delta {off_delta} != JSONL position delta {pos_delta} at \
+                             partition {n}\n{diff}",
+                            fx.name(),
+                        ))
+                        .panic();
+                }
             }
             delta_checked += 1;
         }
@@ -533,6 +571,25 @@ async fn big_index_db_entry_byte_and_field_parity() {
     // was counted as unfetched and the test SKIPS cleanly. When binaries ARE present the
     // strict coverage assertions below must hold (UUID-keyed + delta lanes proven).
     if big_checked == 0 {
+        if parity_datasets_required() {
+            ParityFailure::new(scenario::INDEX_DB_BIG)
+                .lane("index_db_big")
+                .cassandra_source("RowIndexEntryTest.java (BIG Index.db entry bytes)")
+                .fixture(datasets_sstables_root())
+                .components(["Index.db", "Data.db"])
+                .repro(
+                    "bash test-data/scripts/fetch-datasets.sh && \
+                     CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core \
+                     --features write-support --test sstable_parity_index_db_test \
+                     big_index_db_entry_byte_and_field_parity -- --nocapture",
+                )
+                .detail(format!(
+                    "CQLITE_PARITY_REQUIRE_DATASETS=1 but no BIG Index.db binaries were present \
+                     ({skipped_unfetched} unfetched generations) — required parity gate must not \
+                     skip when datasets are mandated"
+                ))
+                .panic();
+        }
         eprintln!(
             "big_index_db_entry_byte_and_field_parity: SKIP — no BIG Index.db binaries \
              present ({skipped_unfetched} unfetched generations); fetch the dataset to \
@@ -553,6 +610,12 @@ async fn big_index_db_entry_byte_and_field_parity() {
          ({uuid_key_checked} UUID-keyed, {delta_checked} delta-verified, \
          {wide_partition_entries} wide-partition entries / {promoted_bytes_total} \
          promoted bytes); {skipped_unfetched} unfetched reference-only generations skipped"
+    );
+    let _ = write_summary(
+        "index_db_big",
+        LaneStatus::Pass,
+        scenario::INDEX_DB_BIG,
+        &[],
     );
 }
 
@@ -645,19 +708,26 @@ async fn bti_index_component_discovery() {
         bti_checked += 1;
     }
 
-    assert!(
-        bti_checked > 0 || bti_skipped_unfetched > 0,
-        "no BTI fixtures discovered — BTI index-component classification unproven"
-    );
-    // In a fresh checkout with no fetched dataset, every BTI fixture is skipped (its
-    // Data.db is absent); the test must SKIP cleanly rather than fail. When binaries are
-    // present (fetched dataset / CI corpus) we keep real coverage: at least one BTI
-    // fixture must have been fully verified above.
+    // Skip-on-absent (UNCONDITIONAL, even under CQLITE_PARITY_REQUIRE_DATASETS=1):
+    // the `test_da/*` BTI fixtures (da-*-bti, Partitions.db/Rows.db) are LOCAL-ONLY —
+    // they are generated by gen-wide-bti.sh and are NOT shipped in the pinned CI dataset
+    // (cassandra5-small-full-v3.2.tar.gz). BTI binaries are therefore not part of the
+    // mandated CI corpus, so this lane must NOT fail-closed on the CI require-datasets
+    // switch; an absent BTI fixture is always a legitimate skip. (The BIG-format lanes
+    // below DO fail-closed because their binaries ARE in the pinned dataset.)
+    //
+    // This covers BOTH "no BTI fixtures discovered at all" (the pinned CI dataset has no
+    // `test_da` tree: both counters 0) and "BTI references present but binaries unfetched"
+    // (bti_checked == 0, bti_skipped_unfetched > 0) — neither is a failure here.
+    //
+    // When binaries ARE present (local gen-wide-bti.sh run / fetched dataset) we keep real
+    // coverage: at least one BTI fixture must have been fully verified above.
     if bti_checked == 0 {
         eprintln!(
             "bti_index_component_discovery: SKIP — no BTI binaries present \
-             ({bti_skipped_unfetched} unfetched fixtures); fetch the dataset to exercise \
-             BTI discovery parity"
+             ({bti_skipped_unfetched} unfetched fixtures); BTI fixtures are local-only \
+             (gen-wide-bti.sh), not in the pinned CI dataset — run gen-wide-bti.sh to \
+             exercise BTI discovery parity"
         );
         return;
     }
@@ -758,6 +828,24 @@ async fn truncated_big_index_db_is_not_silently_full_or_empty() {
     // Index.db to truncate, so the test SKIPS cleanly. When binaries ARE present we keep
     // real coverage above (at least one representative BIG fixture is exercised).
     if checked == 0 {
+        if parity_datasets_required() {
+            ParityFailure::new(scenario::INDEX_DB_BIG)
+                .lane("index_db_big")
+                .cassandra_source("CorruptPrimaryIndexTest.java (truncated BIG Index.db)")
+                .fixture(datasets_sstables_root())
+                .components(["Index.db", "Data.db"])
+                .repro(
+                    "bash test-data/scripts/fetch-datasets.sh && \
+                     CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core \
+                     --features write-support --test sstable_parity_index_db_test \
+                     truncated_big_index_db_is_not_silently_full_or_empty -- --nocapture",
+                )
+                .detail(
+                    "CQLITE_PARITY_REQUIRE_DATASETS=1 but no BIG Index.db binaries were present \
+                     to truncate — required parity gate must not skip when datasets are mandated",
+                )
+                .panic();
+        }
         eprintln!(
             "truncated_big_index_db_is_not_silently_full_or_empty: SKIP — no BIG Index.db \
              binaries present; fetch the dataset to exercise the truncation path"
