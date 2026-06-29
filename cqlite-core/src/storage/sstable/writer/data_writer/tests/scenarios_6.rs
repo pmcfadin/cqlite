@@ -1200,8 +1200,28 @@ fn resolve_bare_udt_marshal_scope() {
             .as_str()
         )
     );
-    // A frozen COLLECTION (inner contains `<`) is NOT a frozen-UDT — left untouched.
-    assert!(resolve_bare_udt_marshal("frozen<list<person>>", "test_ks", &reg).is_none());
+    // Issue #1020 (column-level dispatch): a FROZEN collection that CONTAINS a UDT
+    // now resolves to the full marshal with the nested UDT expanded to
+    // `UserType(...)` (the inner UDT element of a frozen collection is implicitly
+    // frozen and rendered bare, matching Cassandra). Frozen collections are
+    // single-cell, so this only changes the advertised header — never multicell.
+    assert_eq!(
+        resolve_bare_udt_marshal("frozen<list<person>>", "test_ks", &reg).as_deref(),
+        Some(
+            format!(
+                "org.apache.cassandra.db.marshal.FrozenType(\
+                 org.apache.cassandra.db.marshal.ListType({}))",
+                person_udt_marshal()
+            )
+            .as_str()
+        )
+    );
+    // A frozen collection of PRIMITIVES references no UDT — left untouched (the
+    // generic converter renders the identical header at write time).
+    assert!(resolve_bare_udt_marshal("frozen<list<int>>", "test_ks", &reg).is_none());
+    // A NON-frozen collection-of-UDT is a MULTICELL complex column, NOT rewritten
+    // by this frozen-only dispatch.
+    assert!(resolve_bare_udt_marshal("list<frozen<person>>", "test_ks", &reg).is_none());
 
     // An already-marshalled type is left untouched.
     assert!(resolve_bare_udt_marshal(&person_udt_marshal(), "test_ks", &reg).is_none());
@@ -1419,4 +1439,190 @@ fn bare_udt_without_registry_is_single_simple_cell() {
         "bare-name fallback write must succeed as a simple cell: {res:?}"
     );
     assert!(!buf.is_empty(), "a simple cell must have been written");
+}
+
+/// `address { street text, city text, zip text }` registry def, matching the
+/// `udt_collections` fixture's `address` UDT (declared field order).
+fn address_udt_def() -> UdtTypeDef {
+    UdtTypeDef::new(
+        "test_compactionparityudt".to_string(),
+        "address".to_string(),
+    )
+    .with_field("street".to_string(), CqlType::Text, true)
+    .with_field("city".to_string(), CqlType::Text, true)
+    .with_field("zip".to_string(), CqlType::Text, true)
+}
+
+/// `person { first_name text, last_name text, age int }` registry def, matching
+/// the `udt_collections` fixture's `person` UDT (declared field order).
+fn collections_person_def() -> UdtTypeDef {
+    UdtTypeDef::new("test_compactionparityudt".to_string(), "person".to_string())
+        .with_field("first_name".to_string(), CqlType::Text, true)
+        .with_field("last_name".to_string(), CqlType::Text, true)
+        .with_field("age".to_string(), CqlType::Int, true)
+}
+
+/// Registry with both `person` and `address`, as the `udt_collections` parity
+/// fixture declares them.
+fn collections_registry() -> UdtRegistry {
+    let mut reg = UdtRegistry::new();
+    reg.register_udt(collections_person_def());
+    reg.register_udt(address_udt_def());
+    reg
+}
+
+/// roborev #1020 (column-level dispatch): a direct write of the `udt_collections`
+/// schema (a `frozen<list<frozen<person>>>` column `lp` and a
+/// `frozen<map<text, frozen<address>>>` column `ma`) WITH a registry must, after
+/// schema normalization, advertise the EXACT Cassandra 5.0.2 header marshal —
+/// the nested UDT expanded to `UserType(...)`, never `BytesType`. The expected
+/// strings are copied from the fixture's Statistics.db `RegularColumns` line
+/// (test_compactionparityudt/udt_collections-.../nb-3-big-Statistics.db.txt).
+#[test]
+fn frozen_collection_of_udt_column_advertises_user_type_header() {
+    let mut schema = TableSchema {
+        keyspace: "test_compactionparityudt".to_string(),
+        table: "udt_collections".to_string(),
+        partition_keys: vec![KeyColumn {
+            name: "id".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+        }],
+        clustering_keys: vec![],
+        columns: vec![
+            udt_column("fl", "frozen<list<int>>"),
+            udt_column("fm", "frozen<map<text,int>>"),
+            udt_column("lp", "frozen<list<frozen<person>>>"),
+            udt_column("ma", "frozen<map<text, frozen<address>>>"),
+        ],
+        comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
+    };
+
+    normalize_schema_udts(&mut schema, &collections_registry());
+
+    // person = 706572736f6e; first_name=66697273745f6e616d65,
+    // last_name=6c6173745f6e616d65, age=616765.
+    let expected_lp = "org.apache.cassandra.db.marshal.FrozenType(\
+         org.apache.cassandra.db.marshal.ListType(\
+         org.apache.cassandra.db.marshal.UserType(test_compactionparityudt,706572736f6e,\
+         66697273745f6e616d65:org.apache.cassandra.db.marshal.UTF8Type,\
+         6c6173745f6e616d65:org.apache.cassandra.db.marshal.UTF8Type,\
+         616765:org.apache.cassandra.db.marshal.Int32Type)))";
+    // address = 61646472657373; street=737472656574, city=63697479, zip=7a6970.
+    let expected_ma = "org.apache.cassandra.db.marshal.FrozenType(\
+         org.apache.cassandra.db.marshal.MapType(\
+         org.apache.cassandra.db.marshal.UTF8Type,\
+         org.apache.cassandra.db.marshal.UserType(test_compactionparityudt,61646472657373,\
+         737472656574:org.apache.cassandra.db.marshal.UTF8Type,\
+         63697479:org.apache.cassandra.db.marshal.UTF8Type,\
+         7a6970:org.apache.cassandra.db.marshal.UTF8Type)))";
+
+    // Plain frozen-collection-of-PRIMITIVE columns reference no UDT and are left
+    // UNCHANGED by normalization (the generic `cql_type_to_marshal_type` converts
+    // them to the identical `FrozenType(ListType(Int32Type))` header at write
+    // time — byte-identical to before this fix).
+    assert_eq!(schema.columns[0].data_type, "frozen<list<int>>");
+    assert_eq!(schema.columns[1].data_type, "frozen<map<text,int>>");
+    assert_eq!(
+        crate::storage::sstable::writer::stats_writer::cql_type_to_marshal_type(
+            &schema.columns[0].data_type
+        ),
+        "org.apache.cassandra.db.marshal.FrozenType(\
+         org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.Int32Type))",
+    );
+    assert_eq!(
+        crate::storage::sstable::writer::stats_writer::cql_type_to_marshal_type(
+            &schema.columns[1].data_type
+        ),
+        "org.apache.cassandra.db.marshal.FrozenType(\
+         org.apache.cassandra.db.marshal.MapType(\
+         org.apache.cassandra.db.marshal.UTF8Type,org.apache.cassandra.db.marshal.Int32Type))",
+    );
+    // The UDT-bearing frozen collections expand the nested UDT to UserType(...).
+    assert_eq!(
+        schema.columns[2].data_type, expected_lp,
+        "frozen<list<frozen<person>>> header must expand the nested UDT"
+    );
+    assert_eq!(
+        schema.columns[3].data_type, expected_ma,
+        "frozen<map<text, frozen<address>>> header must expand the nested UDT"
+    );
+    assert!(
+        !schema.columns[2].data_type.contains("BytesType"),
+        "nested person must never collapse to BytesType: {}",
+        schema.columns[2].data_type
+    );
+    assert!(
+        !schema.columns[3].data_type.contains("BytesType"),
+        "nested address must never collapse to BytesType: {}",
+        schema.columns[3].data_type
+    );
+
+    // These frozen single-cell columns must NOT be treated as multicell complex.
+    assert!(!is_complex_column(&schema.columns[2].data_type));
+    assert!(!is_complex_column(&schema.columns[3].data_type));
+}
+
+/// roborev #1020: once the `frozen<list<frozen<person>>>` column carries the
+/// expanded `UserType(...)` marshal, the VALUE canonicalization path reorders an
+/// out-of-order / sparse nested-UDT element to DECLARED order and pads the
+/// missing field — proving the header and the simple-cell value bytes agree.
+#[test]
+fn frozen_list_of_udt_value_is_canonicalized_after_normalization() {
+    let mut schema = TableSchema {
+        keyspace: "test_compactionparityudt".to_string(),
+        table: "udt_collections".to_string(),
+        partition_keys: vec![KeyColumn {
+            name: "id".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+        }],
+        clustering_keys: vec![],
+        columns: vec![udt_column("lp", "frozen<list<frozen<person>>>")],
+        comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
+    };
+    normalize_schema_udts(&mut schema, &collections_registry());
+
+    // Out-of-order element fields (age, first_name), last_name omitted.
+    let element = Value::Udt(UdtValue {
+        type_name: "person".to_string(),
+        keyspace: "test_compactionparityudt".to_string(),
+        fields: vec![
+            udt_field("age", Some(Value::Integer(41))),
+            udt_field("first_name", Some(Value::Text("Alan".to_string()))),
+        ],
+    });
+    let v = Value::Frozen(Box::new(Value::List(vec![element])));
+
+    let canon = canonicalize_udt_value(&schema.columns[0].data_type, &v)
+        .expect("frozen<list<frozen<person>>> value must canonicalize after normalization");
+
+    let Value::Frozen(inner) = &canon else {
+        panic!("expected frozen list, got {canon:?}");
+    };
+    let Value::List(items) = inner.as_ref() else {
+        panic!("expected list, got {inner:?}");
+    };
+    let Value::Udt(out) = &items[0] else {
+        panic!("expected UDT element, got {:?}", items[0]);
+    };
+    let order: Vec<(String, Option<Value>)> = out
+        .fields
+        .iter()
+        .map(|f| (f.name.clone(), f.value.clone()))
+        .collect();
+    assert_eq!(
+        order,
+        vec![
+            (
+                "first_name".to_string(),
+                Some(Value::Text("Alan".to_string()))
+            ),
+            ("last_name".to_string(), None),
+            ("age".to_string(), Some(Value::Integer(41))),
+        ],
+        "nested UDT element must be reordered to declared order and padded"
+    );
 }
