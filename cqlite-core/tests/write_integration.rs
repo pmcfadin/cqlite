@@ -1461,6 +1461,7 @@ async fn test_write_throughput() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "perf-only: wall-clock flush throughput; load-sensitive, excluded from the correctness gate (run via `cargo test -- --ignored`). See #1188"]
 async fn test_flush_throughput() -> Result<()> {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_simple_schema("perf_ks", "flush_test");
