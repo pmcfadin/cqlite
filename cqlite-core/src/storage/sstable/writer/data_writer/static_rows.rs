@@ -93,13 +93,25 @@ impl DataWriter {
             flags |= ROW_HAS_DELETION;
         }
 
-        // Timestamp is always present for static rows
-        flags |= ROW_HAS_TIMESTAMP;
+        // Issue #1196: a static row carries NO row-level primary-key liveness.
+        // Cassandra's static block is the pseudo-row keyed on the empty
+        // clustering; PK/row liveness lives on regular (clustering) rows, never
+        // on the static row. Every committed Cassandra 5.0.2 golden confirms
+        // this — no `static_block` ever has a `liveness_info`, so the static-row
+        // flags byte never sets ROW_HAS_TIMESTAMP (e.g. a static-only UPDATE
+        // emits `0xa0`, not `0xa4`). The writetime instead rides on each static
+        // CELL (see `write_static_cells`, which writes explicit per-cell
+        // timestamps below). We therefore never set ROW_HAS_TIMESTAMP here and
+        // never write a row-level timestamp delta in the body.
 
-        // TTL if present (not applicable to row tombstones)
-        if !is_row_tombstone && ttl_seconds.is_some() {
-            flags |= ROW_HAS_TTL;
-        }
+        // TTL: a static row has no row-level liveness timestamp, so a row-level
+        // TTL/expiring marker would be meaningless without it (Cassandra never
+        // sets ROW_HAS_TTL on the static block). Per-cell TTL rides on the static
+        // cell via `write_cell_with_ttl` (which is self-describing: explicit
+        // timestamp + LDT + TTL deltas, no USE_ROW_* borrowing). We therefore
+        // never set ROW_HAS_TTL here; `ttl_seconds` is threaded through to
+        // `build_static_row_body` only so the (now-unreached) row-TTL body branch
+        // stays consistent.
 
         // Check if all static columns are present
         if !is_row_tombstone {
@@ -343,16 +355,16 @@ impl DataWriter {
                     // Only write if it's a static column
                     if static_column_names.contains(column) && !matches!(value, Value::Null) {
                         cells_written += 1;
-                        // Issue #764: mirror the regular-row path — only borrow the
-                        // row liveness timestamp (CELL_USE_ROW_TIMESTAMP) when this
-                        // op actually originated at that timestamp; otherwise write
-                        // the cell's own timestamp so an older surviving static write
-                        // is not promoted to a newer mutation's timestamp.
-                        if mop.timestamp_micros == liveness_ts {
-                            self.write_cell(buf, column, value, mop.timestamp_micros)?;
-                        } else {
-                            self.write_cell_explicit_ts(buf, column, value, mop.timestamp_micros)?;
-                        }
+                        // Issue #1196: a static row carries NO row-level liveness
+                        // (HAS_TIMESTAMP is never set on the static block — see
+                        // write_static_row_with_prev_size). There is therefore no
+                        // row timestamp to borrow: every static cell must carry its
+                        // OWN explicit timestamp delta (cell flags WITHOUT
+                        // CELL_USE_ROW_TIMESTAMP), matching Cassandra 5.0.2 (a
+                        // static-only UPDATE writes the static cell with flags 0x00
+                        // + an explicit timestamp delta, not 0x08/USE_ROW_TIMESTAMP).
+                        let _ = liveness_ts; // static cells never use row timestamp
+                        self.write_cell_explicit_ts(buf, column, value, mop.timestamp_micros)?;
                     }
                 }
                 crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
