@@ -195,6 +195,10 @@ impl WriteEngine {
             output_generation,
             &write_schema,
         )?;
+        // Compaction output (issue #1222): emit the uncompressed-BIG CRC.db with
+        // Cassandra's compaction-only trailing empty-final-chunk CRC32 = 0. The
+        // flush path leaves this unset, keeping its CRC.db byte-identical.
+        writer.mark_compaction_output();
 
         // Carry the inputs' shared repair state into the merged output's
         // Statistics.db (issue #1021). For a normal unrepaired corpus this is the
