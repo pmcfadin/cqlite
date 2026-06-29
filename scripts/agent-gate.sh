@@ -115,6 +115,12 @@ LOG_SUMMARY_FILE="$LOG_DIR/summary.txt"
 declare -a NAMES=() STATUSES=() TIMES=()
 OVERALL=PASS
 
+# Set to 1 by emit_summary if the authoritative caller-known summary file could
+# NOT be written completely (bad path, perms, disk full, truncated write). The
+# final exit logic forces a non-zero / FAIL outcome on this so a green gate can
+# never silently lack its promised recovery artifact (#1175 roborev finding 1).
+SUMMARY_WRITE_FAILED=0
+
 # emit_summary <result> [meta-line ...]
 #
 # Build the canonical SUMMARY block (start marker .. RESULT .. end marker) ONCE
@@ -127,21 +133,51 @@ OVERALL=PASS
 # fd-detach, because detaching the gate's own stdout cannot close the pipe copy a
 # leaked descendant already inherited. Both the real run and the
 # --emit-summary-selftest mode go through this single function.
+#
+# Authoritative-write guard (#1175 roborev finding 1): if the caller-known file
+# cannot be opened/written (bad path, missing parent dir, perms, disk full) or
+# ends up incomplete (no end marker), that MUST NOT pass silently — the recovery
+# artifact is the whole contract. We still compute and print the correctness
+# verdict (least surprising), but we set SUMMARY_WRITE_FAILED=1 and print a LOUD
+# warning to STDERR (more likely to survive than stdout under a leaked-child/pty
+# capture). The caller's exit logic turns SUMMARY_WRITE_FAILED into a non-zero
+# exit so a green gate never silently lacks its summary file.
 emit_summary() {
   local result="$1"; shift
   # Write the complete block to the caller-known file FIRST, with plain
   # redirection (no pipe). This is the authoritative artifact and the advertised
-  # recovery path.
-  {
-    echo
-    echo "==== AGENT-GATE SUMMARY ===="
-    local line
-    for line in "$@"; do echo "$line"; done
-    echo "logs: $LOG_DIR"
-    echo "summary-file: $SUMMARY_FILE"
-    echo "RESULT: $result"
-    echo "==== END AGENT-GATE SUMMARY ===="
-  } > "$SUMMARY_FILE"
+  # recovery path. Capture stderr from the redirection so we can report WHY the
+  # write failed (e.g. "No such file or directory", "Permission denied").
+  local write_err
+  write_err=$(
+    {
+      echo
+      echo "==== AGENT-GATE SUMMARY ===="
+      local line
+      for line in "$@"; do echo "$line"; done
+      echo "logs: $LOG_DIR"
+      echo "summary-file: $SUMMARY_FILE"
+      echo "RESULT: $result"
+      echo "==== END AGENT-GATE SUMMARY ===="
+    } > "$SUMMARY_FILE" 2>&1
+  ) || true
+
+  # Verify the authoritative file actually exists AND contains the COMPLETE block
+  # (end marker present). A failed-to-open redirect leaves no/empty file; a
+  # disk-full / interrupted write leaves a truncated one. Either case is a
+  # contract violation that must not pass silently.
+  local reason=""
+  if [ ! -s "$SUMMARY_FILE" ]; then
+    reason="${write_err:-file missing or empty}"
+  elif ! grep -q '==== END AGENT-GATE SUMMARY ====' "$SUMMARY_FILE" 2>/dev/null; then
+    reason="incomplete write (end marker missing)${write_err:+: $write_err}"
+  fi
+  if [ -n "$reason" ]; then
+    SUMMARY_WRITE_FAILED=1
+    # LOUD, on STDERR (survives better than stdout under non-foreground capture).
+    echo "⚠️ agent-gate: could not write complete summary file $SUMMARY_FILE ($reason)" >&2
+    echo "⚠️ agent-gate: recovery artifact is MISSING — gate result forced to FAIL (#1175)" >&2
+  fi
 
   # Keep a copy in the logs bundle (best-effort; the caller-known file is the
   # contract).
@@ -150,13 +186,22 @@ emit_summary() {
   # Best-effort stream the (already-complete) file to stdout for the
   # foreground/redirect case. If stdout is gone (closed pipe -> SIGPIPE) or a
   # leaked child has starved an until-EOF reader, this may be lost — that is
-  # fine: the caller-known file above is always complete.
-  cat "$SUMMARY_FILE" 2>/dev/null || true
-
-  # If the authoritative copy ever looks short of what we intended to write, the
-  # agent at least gets a loud pointer to the file on stderr.
-  if ! grep -q '==== END AGENT-GATE SUMMARY ====' "$SUMMARY_FILE" 2>/dev/null; then
-    echo "WARNING: SUMMARY may be truncated — authoritative copy: $SUMMARY_FILE" >&2
+  # fine: the caller-known file above is always complete. If the file itself is
+  # bad we already warned on stderr; fall back to streaming the intended block so
+  # the verdict still reaches a foreground caller.
+  if [ "$SUMMARY_WRITE_FAILED" -eq 0 ]; then
+    cat "$SUMMARY_FILE" 2>/dev/null || true
+  else
+    {
+      echo
+      echo "==== AGENT-GATE SUMMARY ===="
+      local line
+      for line in "$@"; do echo "$line"; done
+      echo "logs: $LOG_DIR"
+      echo "summary-file: $SUMMARY_FILE (WRITE FAILED — see stderr)"
+      echo "RESULT: $result"
+      echo "==== END AGENT-GATE SUMMARY ===="
+    } 2>/dev/null || true
   fi
 }
 
@@ -177,6 +222,9 @@ if [ "$SELFTEST" -eq 1 ]; then
     meta+=("$(printf '%-18s %s (%s)' "${NAMES[$i]}:" "${STATUSES[$i]}" "${TIMES[$i]}")")
   done
   emit_summary PASS "${meta[@]}"
+  # Even the selftest must not exit 0 if it could not write its summary file —
+  # the whole point of the selftest is to prove the recovery artifact is produced.
+  [ "$SUMMARY_WRITE_FAILED" -eq 0 ] || exit 1
   exit 0
 fi
 
@@ -405,13 +453,45 @@ run_file_size() {
 # preflight (which exits early when data is missing).
 run_file_size
 
+# Components that actually read SSTable datasets (Data.db) at run time. These are
+# the only ones the dataset preflight must guard. format-compat is included
+# conservatively: the preflight is only a guard, so over-running it is harmless,
+# whereas wrongly skipping it for a dataset-dependent component is the #646 hazard.
+# Dataset-free components (fmt, clippy, cli-tests, python-bindings,
+# delivery-telemetry, tooling-tests, minimal-build, file-size, format-compat*)
+# need no preflight. (*format-compat reads no datasets today but is kept in the
+# needs-datasets set as a belt-and-suspenders default; remove if it ever proves
+# noisy.)
+DATASET_COMPONENTS="core-tests tombstones-scan scan-offload-guard integration-tests write-tests format-compat smoke"
+
+# selected_needs_datasets: true iff at least one SELECTED component reads datasets.
+# With no --only, every component runs, so it's always true. With --only, it's true
+# only when the selection intersects DATASET_COMPONENTS — so e.g. `--only
+# tooling-tests` or `--only fmt` skips the (dataset-requiring) preflight entirely.
+selected_needs_datasets() {
+  [ -z "$ONLY" ] && return 0
+  local sel comp
+  for sel in ${ONLY//,/ }; do
+    for comp in $DATASET_COMPONENTS; do
+      [ "$sel" = "$comp" ] && return 0
+    done
+  done
+  return 1
+}
+
 # Dataset preflight: dataset-dependent components must FAIL loudly when data is
-# missing, never silently pass on a skipped suite (the #646 failure mode).
+# missing, never silently pass on a skipped suite (the #646 failure mode). Run it
+# only when the selected component set actually needs datasets (#1175 finding 2),
+# so dataset-free selections like `--only tooling-tests` are not blocked by it.
 DATA_COUNT=$(find "$CQLITE_DATASETS_ROOT/sstables" -name "*-Data.db" 2>/dev/null | wc -l | tr -d ' ')
-if [ "$DATA_COUNT" -eq 0 ]; then
-  echo "agent-gate: no Data.db files under $CQLITE_DATASETS_ROOT/sstables" >&2
-  echo "agent-gate: fetch them first: bash test-data/scripts/fetch-datasets.sh" >&2
-  exit 1
+if selected_needs_datasets; then
+  if [ "$DATA_COUNT" -eq 0 ]; then
+    echo "agent-gate: no Data.db files under $CQLITE_DATASETS_ROOT/sstables" >&2
+    echo "agent-gate: fetch them first: bash test-data/scripts/fetch-datasets.sh" >&2
+    exit 1
+  fi
+else
+  echo ">>> dataset preflight: skipped (no selected component needs datasets: --only $ONLY)"
 fi
 
 # CI dataset pins, for the CI-parity check (issue #719): local validation must
@@ -483,6 +563,14 @@ for i in "${!NAMES[@]}"; do
   SUMMARY_META+=("$(printf '%-18s %s (%s)' "${NAMES[$i]}:" "${STATUSES[$i]}" "${TIMES[$i]}")")
 done
 emit_summary "$OVERALL" "${SUMMARY_META[@]}"
+
+# If we could not produce the authoritative recovery artifact, never report
+# green (#1175 finding 1): the correctness verdict above is still printed, but a
+# missing summary file forces a non-zero exit so the failure cannot pass silently.
+if [ "$SUMMARY_WRITE_FAILED" -ne 0 ]; then
+  echo "agent-gate: exiting non-zero because the summary file could not be written (#1175)" >&2
+  exit 1
+fi
 
 # Exit 0 only for a full-gate PASS; PARTIAL runs exit 3 so they can never be
 # scripted into a green gate claim.
