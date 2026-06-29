@@ -207,9 +207,12 @@ jobs:
         working-directory: bindings/node
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
-          # Issue #1230: fail-closed flag for parity with the other CI lanes. The
-          # node helper (skipIfNoDatasets) already throws on missing data; this
-          # documents intent and is honored by the Rust core it calls.
+          # Issue #1230: for the node lane this flag is DOCUMENTARY only — it is a
+          # cqlite-core TEST-ONLY helper and is NOT consulted by the node binding
+          # runtime. Actual fail-closed coverage here comes from the
+          # check-dataset-manifest.sh step above (hard-fails on a partial/dropped
+          # corpus) plus the JS skipIfNoDatasets throw on missing data. The flag
+          # is set for parity of intent with the Rust/Python lanes.
           CQLITE_REQUIRE_FIXTURES: "1"
         run: npm test
 

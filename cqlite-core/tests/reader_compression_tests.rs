@@ -15,6 +15,12 @@ use cqlite_core::{Config, Platform};
 /// (issue #1230). Under strict mode (`require_fixtures_strict`) every one of
 /// these MUST be present and openable, so a dropped table or a partial dataset
 /// extraction reds CI instead of silently passing on whatever survived.
+///
+/// SINGLE SOURCE OF TRUTH (intent): this 8-table list is hand-duplicated from
+/// the full corpus manifest. Keep it in sync with the `test_basic` block in
+/// `test-data/scripts/check-dataset-manifest.sh` and `test-data/validation-matrix.md`.
+/// A future change should derive all three from metadata.yml / validation-matrix.md
+/// so a table add/rename updates everything at once.
 const EXPECTED_TEST_BASIC_TABLES: &[&str] = &[
     "composite_key_table",
     "compression_test_table",

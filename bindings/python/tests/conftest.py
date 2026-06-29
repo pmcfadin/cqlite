@@ -418,13 +418,20 @@ def pytest_collection_modifyitems(config, items):
 
 
 # =============================================================================
-# "No tests ran" floor (issue #1230)
+# Whole-session no-op floor (issue #1230)
 # =============================================================================
 
-# Count of tests that actually PASSED their call phase. Under strict mode a lane
-# in which 0 tests pass (everything skipped, or nothing collected) is a failure,
-# not a green run — this catches the degenerate case where the whole dataset
-# lane silently no-ops.
+# Count of tests that actually PASSED their call phase. Under strict mode a
+# session in which 0 tests pass (everything skipped, or nothing collected) is a
+# failure, not a green run.
+#
+# SCOPE (be honest): this is a whole-session no-op guard ONLY. It fires solely
+# when the ENTIRE session has zero passing call-phase tests. Because this lane
+# also runs many passing NON-dataset tests, the floor does NOT catch "the
+# dataset tests all skipped while the rest passed" — i.e. it will NOT catch a
+# dropped/renamed table or a #773-class path regression on its own. Those are
+# covered by check-dataset-manifest.sh (hard-fails on a partial corpus) and by
+# skip_if_no_datasets() failing closed under strict mode.
 _PASSED_CALLS = 0
 
 

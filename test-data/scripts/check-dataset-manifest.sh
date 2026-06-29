@@ -16,9 +16,14 @@ set -euo pipefail
 ROOT="${1:-test-data/datasets}"
 SSTABLES="${ROOT}/sstables"
 
-# Expected user-keyspace tables (33 total). Keep in sync with the validation
-# matrix (test-data/validation-matrix.md) and the test_basic manifest in
-# cqlite-core/tests/reader_compression_tests.rs.
+# Expected user-keyspace tables (33 total).
+#
+# SINGLE SOURCE OF TRUTH (intent): this list is hand-duplicated from the corpus
+# definition. Keep it in sync with test-data/validation-matrix.md and the
+# 8-table EXPECTED_TEST_BASIC_TABLES const in
+# cqlite-core/tests/reader_compression_tests.rs. A future change should derive
+# all of these from metadata.yml / validation-matrix.md so a table add/rename
+# updates every copy at once.
 EXPECTED=(
   # test_basic (8)
   "test_basic/composite_key_table"

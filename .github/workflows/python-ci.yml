@@ -229,9 +229,13 @@ jobs:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
           RUN_SLOW_TESTS: "1"  # Issue #331: Run all tests including CLI parity
           # Issue #1230: fail-closed. With this flag the conftest skip helper turns
-          # a missing dataset into a FAILURE (not a silent skip), and the
-          # "no tests ran" floor (pytest_sessionfinish) fails the lane if 0 tests
-          # pass — so a dropped table / #773-class path regression reds CI.
+          # a missing dataset into a FAILURE (not a silent skip). What catches a
+          # dropped/renamed table or a #773-class path regression is the
+          # check-dataset-manifest.sh step above (full 33-table corpus) plus that
+          # strict skip-helper failure. The pytest_sessionfinish "no tests ran"
+          # floor is only a whole-session no-op guard (it reds when 0 tests pass
+          # at all); it does NOT detect dataset tests skipping while non-dataset
+          # tests still pass.
           CQLITE_REQUIRE_FIXTURES: "1"
         shell: bash
         run: |
