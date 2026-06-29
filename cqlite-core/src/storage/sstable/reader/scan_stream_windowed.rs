@@ -38,6 +38,14 @@
 //!     times across the blocking-pool ↔ async-worker boundary; samply attributed
 //!     ~31.5% of read wall time under `mixed.read_while_write` conc=8 to that one
 //!     `parking_lot` condvar. Batching amortizes the wake ~`BATCH_EMIT_ROWS`×.
+//!     To keep that win WITHOUT regressing incremental delivery, the pending
+//!     batch is flushed at a BOUNDED CADENCE — at each chunk/window drain
+//!     boundary (after the per-chunk drain returns NeedMore / empties the
+//!     window) as well as on reaching `BATCH_EMIT_ROWS` — so a sparse or
+//!     sub-`BATCH_EMIT_ROWS` scan (e.g. a `LIMIT`) still delivers its confirmed
+//!     rows promptly instead of waiting for the whole scan to finish. The wake
+//!     rate is thus ~one-per-chunk (plus one-per-full-batch in dense windows),
+//!     far below PR #1156's one-per-row.
 //!   - **Async forwarder task** (in `run_scan_stream_windowed`): flattens each
 //!     `Vec` batch back into the caller's per-item `tx`, preserving the public
 //!     `scan_stream` contract (item type, order, backpressure) unchanged. Runs on
@@ -141,8 +149,9 @@ const RAW_CHUNK_CHANNEL_CAP: usize = 8;
 /// ([`BATCH_CHANNEL_CAP`]) so a slow consumer still stops the parse loop, which
 /// still stops draining raw chunks, which still stops disk reads. Order is
 /// preserved (entries are pushed and drained FIFO, batches sent in order). A
-/// modest value keeps the per-batch heap small and bounds end-to-end latency for
-/// tiny result sets (a partial batch is flushed at end-of-partition stream).
+/// modest value keeps the per-batch heap small; tiny / sparse result sets do not
+/// wait for a full batch because the pending tail is flushed at every chunk/window
+/// drain boundary (and at stream end), preserving incremental first-row delivery.
 const BATCH_EMIT_ROWS: usize = 256;
 
 /// Bound on the batched-row channel feeding the async forwarder. Small: the
@@ -433,6 +442,27 @@ impl SSTableReader {
                 )?;
                 if broke {
                     return Ok(());
+                }
+
+                // Per-chunk flush cadence (roborev finding, issue #1143). The
+                // drain above stopped because no further partition can be
+                // confirmed until the NEXT raw chunk arrives (NeedMore / empty
+                // window), so any rows still buffered in `batch` are FULLY
+                // confirmed — they will not be amended or joined by a same-chunk
+                // partition. Flushing the pending tail here (a no-op when empty)
+                // restores `scan_stream`'s incremental-delivery contract and
+                // first-row latency for sparse / sub-`BATCH_EMIT_ROWS` result
+                // sets, which the pure-batching change regressed (those emitted
+                // nothing until full scan completion). Dense windows still hit
+                // the full-batch flush inside `drain_scan_window`, so we wake the
+                // forwarder at most ~once per chunk PLUS once per full batch —
+                // far below PR #1156's one-wake-per-ROW, preserving the perf win.
+                if !batch.is_empty() {
+                    if tx.blocking_send(Ok(std::mem::take(&mut batch))).is_err() {
+                        broke = true; // consumer dropped
+                        return Ok(());
+                    }
+                    batch.reserve(BATCH_EMIT_ROWS);
                 }
             }
 

@@ -161,10 +161,23 @@ mod fixture_drain {
         }
     }
 
-    /// Drain `chunks` (a CLEAN, non-failed stream) and return the number of
-    /// confirmed `(RowKey, Value)` rows emitted across batches.
-    fn clean_row_count(reader: &SSTableReader, chunks: &[Vec<u8>]) -> usize {
-        drain_count(reader, chunks, false)
+    /// Drain `chunks` and return the number of `(RowKey, Value)` rows confirmed
+    /// WITHOUT the terminal (`at_final_chunk = true`) drain — i.e. only the rows
+    /// the parse half would have flushed by the time MORE input is required
+    /// (NeedMore at a chunk boundary). Implemented by reusing `drain_count` with
+    /// `io_failed = true`, which is the documented "skip terminal drain" gate
+    /// (`should_run_terminal_drain(true) == false`).
+    ///
+    /// Why not the CLEAN (`io_failed = false`) count: a clean drain of a prefix
+    /// runs the terminal drain and so counts the prefix's trailing partition,
+    /// which in `drain_with_trailing_corrupt` is NOT confirmed before the corrupt
+    /// chunk arrives (that partition is held at NeedMore awaiting bytes that turn
+    /// out to be the corrupt chunk). Using the clean count as `expected_pending`
+    /// therefore over-counts for some fixtures and makes the assertion flaky
+    /// (roborev finding, issue #1143). The skip-terminal count matches exactly the
+    /// rows the real flow confirms before the error.
+    fn pending_before_more_input(reader: &SSTableReader, chunks: &[Vec<u8>]) -> usize {
+        drain_count(reader, chunks, true)
     }
 
     /// Run the blocking parse half over `chunks` followed by ONE deliberately
@@ -245,21 +258,26 @@ mod fixture_drain {
             chunks.len()
         );
 
-        // Choose the smallest real-chunk prefix whose CLEAN drain confirms at
-        // least one row but fewer than BATCH_EMIT_ROWS, so those rows sit in the
-        // pending batch (not an already-flushed full batch) when the corrupt
-        // chunk errors. This makes the assertion specifically about the
-        // flush-on-error of the *pending* batch (the regression), not earlier
-        // full batches.
+        // Choose the smallest real-chunk prefix that confirms at least one row
+        // but fewer than BATCH_EMIT_ROWS BEFORE more input is required, so those
+        // rows sit in the pending batch (not an already-flushed full batch) when
+        // the corrupt chunk errors. We count with the SKIP-terminal-drain path
+        // (`pending_before_more_input`), not a clean terminal drain: in the
+        // corrupt-trailing flow the prefix's last partition is held at NeedMore
+        // awaiting the next chunk (which turns out corrupt), so it is NOT
+        // confirmed; counting it via a clean terminal drain would over-count and
+        // make the assertion flaky (roborev finding, issue #1143). This makes the
+        // assertion specifically about the flush-on-error of the *pending* batch
+        // (the regression), not earlier full batches or the unconfirmed tail.
         let reader = Arc::new(reader);
         let mut chosen: Option<(Vec<Vec<u8>>, usize)> = None;
         for n in 1..chunks.len() {
             let prefix = chunks[..n].to_vec();
             let r = Arc::clone(&reader);
             let p = prefix.clone();
-            let cnt = tokio::task::spawn_blocking(move || clean_row_count(&r, &p))
+            let cnt = tokio::task::spawn_blocking(move || pending_before_more_input(&r, &p))
                 .await
-                .expect("clean count task");
+                .expect("pending count task");
             if (1..BATCH_EMIT_ROWS).contains(&cnt) {
                 chosen = Some((prefix, cnt));
                 break;
