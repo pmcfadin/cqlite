@@ -101,10 +101,15 @@ fn is_truthy_value(raw: &str) -> bool {
 /// inline shell assignments (`CQLITE_REQUIRE_FIXTURES=1 cargo`, `env FOO=1 cargo`)
 /// and YAML-style `KEY: value` lines that may appear in folded text. A flag
 /// declared but disabled (`=0`, empty, `false`) does NOT count.
+///
+/// Per-line shell comments are stripped first (same [`strip_shell_comment`] helper
+/// the command-RUN detection uses), so a commented-out `# CQLITE_REQUIRE_FIXTURES=1`
+/// does NOT make a genuinely fail-open step look fail-closed.
 pub fn workflow_is_fail_closed(text: &str) -> bool {
+    let stripped = strip_shell_comments(text);
     FAIL_CLOSED_FLAGS
         .iter()
-        .any(|flag| flag_set_truthy_in_text(text, flag))
+        .any(|flag| flag_set_truthy_in_text(&stripped, flag))
 }
 
 /// True if `flag` appears in `text` with an assignment separator (`=` for a
@@ -162,6 +167,16 @@ fn strip_shell_comment(line: &str) -> &str {
         i += 1;
     }
     line
+}
+
+/// Strip per-line shell comments from a multi-line block, reusing the single-line
+/// [`strip_shell_comment`] helper. Newlines are preserved so downstream line/value
+/// scanning (e.g. [`flag_set_truthy_in_text`]) keeps its line boundaries.
+fn strip_shell_comments(text: &str) -> String {
+    text.lines()
+        .map(strip_shell_comment)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// True if any executable (comment-stripped) line in `command` invokes the cargo

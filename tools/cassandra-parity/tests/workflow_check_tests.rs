@@ -166,6 +166,42 @@ fn inline_fail_closed_zero_in_step_command_does_not_count() {
 }
 
 #[test]
+fn inline_fail_closed_ignores_commented_out_assignment() {
+    // A `CQLITE_REQUIRE_FIXTURES=1` that appears ONLY inside a shell comment must
+    // NOT make a fail-open step look fail-closed (consistency with the
+    // command-RUN detection, which already strips per-line comments).
+    assert!(!workflow_is_fail_closed(
+        "# CQLITE_REQUIRE_FIXTURES=1 was here\ncargo test --test foo"
+    ));
+    // A trailing comment on an otherwise fail-open command line is also stripped.
+    assert!(!workflow_is_fail_closed(
+        "cargo test --test foo  # CQLITE_REQUIRE_FIXTURES=1 once"
+    ));
+    // A real, uncommented inline assignment still counts.
+    assert!(workflow_is_fail_closed(
+        "CQLITE_REQUIRE_FIXTURES=1 cargo test --test foo"
+    ));
+}
+
+#[test]
+fn commented_inline_fail_closed_flags_required_scenario_as_overstated() {
+    // End-to-end: the workflow's ONLY arming of CQLITE_REQUIRE_FIXTURES is inside
+    // a `#` comment on the run line, so the step is genuinely fail-open and the
+    // required_parity scenario must be flagged as overstated.
+    let commented_wf = "jobs:\n  parity:\n    steps:\n      - run: |\n          # CQLITE_REQUIRE_FIXTURES=1 cargo test --test issue_997_compressioninfo_parity\n          cargo test --package cqlite-core --test issue_997_compressioninfo_parity";
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        commented_wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings.iter().any(|f| f.message.contains("fail-closed")),
+        "expected a fail-closed finding when the only arming is commented out, got: {findings:#?}"
+    );
+}
+
+#[test]
 fn command_runs_test_matches_whole_token_across_line_continuations() {
     let cmd = "          cargo test -p cqlite-core \\\n            --test issue_997_compressioninfo_parity \\\n            --test issue_998_inline_crc_trailers";
     assert!(command_runs_test(cmd, "issue_997_compressioninfo_parity"));
