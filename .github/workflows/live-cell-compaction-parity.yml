@@ -1,16 +1,21 @@
-name: "CI: Live-Cell Compaction Byte Parity (issue #1017)"
+name: "CI: Live-Cell Compaction Byte Parity (issue #1017, #1020)"
 
-# Fail-closed byte-parity gate for the two live-cell compaction scenarios
+# Fail-closed byte-parity gate for the live-cell compaction scenarios
 # (issue #1017, epic #973):
 #   * live_no_clustering: partition-key-only LWW overlap
 #   * live_clustering: clustering LWW overlap with preserved clustering order
+# and the frozen-UDT compaction scenarios (issue #1020):
+#   * udt_frozen_person: a frozen<udt> regular column
+#   * udt_nested:        a frozen<udt> with a nested frozen<udt> field
+#   * udt_collections:   frozen UDTs inside frozen list/map collection values
 #
 # Why this is a standalone workflow (not compaction-parity.yml)
 # -------------------------------------------------------------
 # compaction-parity.yml runs the Java/Gradle differential harness (logical +
 # byte tiers) that requires a full Cassandra source build + JDK 17 + Ant.
 # This workflow is purely Rust: the reference binaries are committed to git
-# (test-data/datasets/sstables/test_compactionparity/**), so NO Docker
+# (test-data/datasets/sstables/test_compactionparity/** and
+# test-data/datasets/sstables/test_compactionparityudt/**), so NO Docker
 # regeneration is needed. The test reads CQLITE_DATASETS_ROOT and compares
 # CQLite's compaction output against the committed Cassandra 5.0.2 golden
 # byte-for-byte. CQLITE_REQUIRE_FIXTURES=1 ensures the test PANICS (fails
@@ -27,6 +32,11 @@ name: "CI: Live-Cell Compaction Byte Parity (issue #1017)"
 #     CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
 #     cargo test -p cqlite-core --features write-support \
 #       --test issue_1017_live_cell_compaction_byte_parity \
+#       -- --nocapture
+#   env CQLITE_REQUIRE_FIXTURES=1 \
+#     CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
+#     cargo test -p cqlite-core --features write-support \
+#       --test issue_1020_udt_frozen_compaction_byte_parity \
 #       -- --nocapture
 
 on:
@@ -50,6 +60,7 @@ on:
     # or serialization change merged on a non-path PR will be caught within 24 h.
     paths:
       - 'cqlite-core/tests/issue_1017_live_cell_compaction_byte_parity.rs'
+      - 'cqlite-core/tests/issue_1020_udt_frozen_compaction_byte_parity.rs'
       # Primary compaction + SSTable write paths (already covered)
       - 'cqlite-core/src/storage/write_engine/merge/**'
       - 'cqlite-core/src/storage/write_engine/mod.rs'
@@ -64,6 +75,7 @@ on:
       - 'cqlite-core/src/storage/partition_key_codec.rs'
       # Committed reference fixtures, manifest, and this workflow file
       - 'test-data/datasets/sstables/test_compactionparity/**'
+      - 'test-data/datasets/sstables/test_compactionparityudt/**'
       - 'test-data/cassandra-parity-manifest.yml'
       - '.github/workflows/live-cell-compaction-parity.yml'
 
@@ -95,7 +107,7 @@ jobs:
         with:
           key: live-cell-compaction-parity-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Verify committed reference fixtures are present
+      - name: Verify committed reference fixtures are present (issue #1017)
         run: |
           echo "=== test_compactionparity reference binaries (committed to git) ==="
           find "$CQLITE_DATASETS_ROOT/sstables/test_compactionparity" \
@@ -106,6 +118,39 @@ jobs:
           echo ""
           echo "=== live_clustering fixture sizes ==="
           ls -lh "$CQLITE_DATASETS_ROOT/sstables/test_compactionparity"/live_clustering-*/
+          # Fail-closed: the test reads these committed binaries; if a fixture is
+          # missing the test PANICS under CQLITE_REQUIRE_FIXTURES, but assert their
+          # presence up front for a clear, early failure signal.
+          for d in live_no_clustering live_clustering; do
+            count=$(find "$CQLITE_DATASETS_ROOT/sstables/test_compactionparity"/$d-*/ \
+              -name '*-Data.db' -not -name '._*' 2>/dev/null | wc -l)
+            if [ "$count" -eq 0 ]; then
+              echo "::error::missing committed fixture: test_compactionparity/$d-* (-Data.db)"
+              exit 1
+            fi
+          done
+
+      - name: Verify committed reference fixtures are present (issue #1020 UDT)
+        run: |
+          echo "=== test_compactionparityudt reference binaries (committed to git) ==="
+          find "$CQLITE_DATASETS_ROOT/sstables/test_compactionparityudt" \
+            -name '*-Data.db' -not -name '._*' | sort
+          echo ""
+          for d in udt_frozen_person udt_nested udt_collections; do
+            echo "=== $d fixture sizes ==="
+            ls -lh "$CQLITE_DATASETS_ROOT/sstables/test_compactionparityudt"/$d-*/
+            echo ""
+          done
+          # Fail-closed mirror of the #1017 check: the issue_1020 test reads these
+          # committed binaries; assert each frozen-UDT scenario's -Data.db is present.
+          for d in udt_frozen_person udt_nested udt_collections; do
+            count=$(find "$CQLITE_DATASETS_ROOT/sstables/test_compactionparityudt"/$d-*/ \
+              -name '*-Data.db' -not -name '._*' 2>/dev/null | wc -l)
+            if [ "$count" -eq 0 ]; then
+              echo "::error::missing committed fixture: test_compactionparityudt/$d-* (-Data.db)"
+              exit 1
+            fi
+          done
 
       - name: Run live-cell compaction byte-parity tests (strict, require-fixtures)
         run: |
@@ -113,4 +158,12 @@ jobs:
             CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
             cargo test -p cqlite-core --features write-support \
               --test issue_1017_live_cell_compaction_byte_parity \
+              -- --nocapture
+
+      - name: Run frozen-UDT compaction byte-parity tests (strict, require-fixtures)
+        run: |
+          env CQLITE_REQUIRE_FIXTURES=1 \
+            CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
+            cargo test -p cqlite-core --features write-support \
+              --test issue_1020_udt_frozen_compaction_byte_parity \
               -- --nocapture
