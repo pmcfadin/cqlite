@@ -7,10 +7,8 @@
 
 use super::*;
 
-use crate::storage::write_engine::reconcile_rules;
-// `ReconcileCell` is imported for its methods (`is_tombstone`) used by the
-// shared `Cells#reconcile` tie-break in `merge_row_group` (issue #947).
-use crate::storage::write_engine::reconcile_rules::ReconcileCell;
+// Shared reconcile rules (issue #947); `ReconcileCell` in scope for `.is_tombstone()`.
+use crate::storage::write_engine::reconcile_rules::{self, ReconcileCell};
 
 impl DataWriter {
     /// Write a single row
@@ -413,21 +411,14 @@ impl DataWriter {
                     std::collections::hash_map::Entry::Occupied(mut entry) => {
                         let existing = entry.get();
                         // Per-cell winner resolution. The SHARED Cassandra
-                        // `Cells#reconcile` tie-break (issue #947,
-                        // `reconcile_rules::cell_wins`) decides the load-bearing
-                        // axes — higher timestamp wins, and at EQUAL timestamp a
-                        // cell DELETION (`Delete` tombstone) beats a LIVE/EXPIRING
-                        // write BEFORE any localDeletionTime compare (#848/#498;
-                        // `WriteWithTtl` is LIVE, not a tombstone).
-                        //
-                        // The writer overlays a WRITER-ONLY, order-dependent
-                        // last-write-wins tie-break for the one case the shared
-                        // rule leaves to the caller: at EQUAL timestamp with EQUAL
-                        // liveness the later-applied mutation wins (keep-last).
-                        // Cassandra's reconcile is order-independent and the merge
-                        // path keeps first-seen there; this overlay reproduces the
-                        // writer's historical convention exactly and is NOT part of
-                        // the shared rule.
+                        // `Cells#reconcile` tie-break (`reconcile_rules::cell_wins`,
+                        // issue #947) decides the load-bearing axes (#848/#498). The
+                        // writer then overlays its WRITER-ONLY, order-dependent
+                        // last-write-wins for the one case the shared rule leaves to
+                        // the caller — EQUAL timestamp + EQUAL liveness keeps the
+                        // later-applied mutation (Cassandra's reconcile is
+                        // order-independent and the merge path keeps first-seen). The
+                        // overlay reproduces the writer's historical bytes exactly.
                         let wins = reconcile_rules::cell_wins(&candidate, existing)
                             || (candidate.timestamp_micros == existing.timestamp_micros
                                 && candidate.is_tombstone() == existing.is_tombstone());

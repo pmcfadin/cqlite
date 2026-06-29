@@ -260,7 +260,11 @@ fn collect(dir: &Path, out: &mut Vec<(u64, PathBuf)>, depth: usize) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         if name.starts_with("nb-") && name.ends_with("-big-Data.db") {
             let base = name.trim_end_matches("-Data.db");
             if !path.with_file_name(format!("{base}-TOC.txt")).exists() {
@@ -281,7 +285,11 @@ fn collect(dir: &Path, out: &mut Vec<(u64, PathBuf)>, depth: usize) {
 /// Read every partition of an output dir into a stable `pk_bytes -> rendered`
 /// map. The rendered string is the debug form of the row value; if two write
 /// paths reconcile identically, these maps are equal.
-fn read_back(rt: &tokio::runtime::Runtime, dir: &Path, schema: &TableSchema) -> BTreeMap<Vec<u8>, String> {
+fn read_back(
+    rt: &tokio::runtime::Runtime,
+    dir: &Path,
+    schema: &TableSchema,
+) -> BTreeMap<Vec<u8>, String> {
     let cqlite_config = Config::default();
     let manager = rt.block_on(async {
         let platform = Arc::new(Platform::new(&cqlite_config).await.expect("platform"));
@@ -318,10 +326,14 @@ fn flush_path(rt: &tokio::runtime::Runtime, schema: &TableSchema) -> BTreeMap<Ve
         // Old edits first, then New — mirrors the compaction generation order;
         // for these boundary cases the winner is order-independent.
         for edit in edits.iter().filter(|e| e.gen == Gen::Old) {
-            engine.write(mutation(id, edit.ops.clone(), edit.ts)).expect("write");
+            engine
+                .write(mutation(id, edit.ops.clone(), edit.ts))
+                .expect("write");
         }
         for edit in edits.iter().filter(|e| e.gen == Gen::New) {
-            engine.write(mutation(id, edit.ops.clone(), edit.ts)).expect("write");
+            engine
+                .write(mutation(id, edit.ops.clone(), edit.ts))
+                .expect("write");
         }
     }
     rt.block_on(engine.flush()).expect("flush").expect("info");
@@ -331,7 +343,10 @@ fn flush_path(rt: &tokio::runtime::Runtime, schema: &TableSchema) -> BTreeMap<Ve
 
 /// COMPACTION path: flush the Old edits into one SSTable and the New edits into
 /// another, compact the two, read the merged output back.
-fn compaction_path(rt: &tokio::runtime::Runtime, schema: &TableSchema) -> BTreeMap<Vec<u8>, String> {
+fn compaction_path(
+    rt: &tokio::runtime::Runtime,
+    schema: &TableSchema,
+) -> BTreeMap<Vec<u8>, String> {
     let temp = TempDir::new().unwrap();
     let data_dir = temp.path().join("data");
     let wal_dir = temp.path().join("wal");
@@ -342,18 +357,26 @@ fn compaction_path(rt: &tokio::runtime::Runtime, schema: &TableSchema) -> BTreeM
     // Generation 1 (older): all Old edits.
     for (id, edits) in scenarios() {
         for edit in edits.iter().filter(|e| e.gen == Gen::Old) {
-            engine.write(mutation(id, edit.ops.clone(), edit.ts)).expect("write old");
+            engine
+                .write(mutation(id, edit.ops.clone(), edit.ts))
+                .expect("write old");
         }
     }
-    rt.block_on(engine.flush()).expect("flush old").expect("info old");
+    rt.block_on(engine.flush())
+        .expect("flush old")
+        .expect("info old");
 
     // Generation 2 (newer): all New edits.
     for (id, edits) in scenarios() {
         for edit in edits.iter().filter(|e| e.gen == Gen::New) {
-            engine.write(mutation(id, edit.ops.clone(), edit.ts)).expect("write new");
+            engine
+                .write(mutation(id, edit.ops.clone(), edit.ts))
+                .expect("write new");
         }
     }
-    rt.block_on(engine.flush()).expect("flush new").expect("info new");
+    rt.block_on(engine.flush())
+        .expect("flush new")
+        .expect("info new");
     drop(engine);
 
     let inputs = discover_inputs(&data_dir);
@@ -397,21 +420,37 @@ fn dump_compaction_output_for_byte_identity() {
     let mut engine = WriteEngine::new(config).expect("engine");
     for (id, edits) in scenarios() {
         for edit in edits.iter().filter(|e| e.gen == Gen::Old) {
-            engine.write(mutation(id, edit.ops.clone(), edit.ts)).expect("write old");
+            engine
+                .write(mutation(id, edit.ops.clone(), edit.ts))
+                .expect("write old");
         }
     }
-    rt.block_on(engine.flush()).expect("flush old").expect("info old");
+    rt.block_on(engine.flush())
+        .expect("flush old")
+        .expect("info old");
     for (id, edits) in scenarios() {
         for edit in edits.iter().filter(|e| e.gen == Gen::New) {
-            engine.write(mutation(id, edit.ops.clone(), edit.ts)).expect("write new");
+            engine
+                .write(mutation(id, edit.ops.clone(), edit.ts))
+                .expect("write new");
         }
     }
-    rt.block_on(engine.flush()).expect("flush new").expect("info new");
+    rt.block_on(engine.flush())
+        .expect("flush new")
+        .expect("info new");
     drop(engine);
 
     let inputs = discover_inputs(&data_dir);
-    rt.block_on(compact_sstables(inputs, &output_dir, &schema, 9, None, None, true))
-        .expect("compaction");
+    rt.block_on(compact_sstables(
+        inputs,
+        &output_dir,
+        &schema,
+        9,
+        None,
+        None,
+        true,
+    ))
+    .expect("compaction");
     eprintln!("dumped compaction output under {output_dir:?}");
 }
 
@@ -438,17 +477,32 @@ fn flush_and_compaction_reconcile_boundaries_identically() {
 
     // id=1 strict-greater live wins.
     let r1 = by_id(&flushed, 1);
-    assert!(r1.contains("new") && !r1.contains("old"), "id=1: strict-greater live wins, got {r1}");
+    assert!(
+        r1.contains("new") && !r1.contains("old"),
+        "id=1: strict-greater live wins, got {r1}"
+    );
     // id=2 live > older tombstone.
-    assert!(by_id(&flushed, 2).contains("live"), "id=2: live beats older tombstone");
+    assert!(
+        by_id(&flushed, 2).contains("live"),
+        "id=2: live beats older tombstone"
+    );
     // id=4 live@HI beats newer-gen tombstone@LO.
-    assert!(by_id(&flushed, 4).contains("keep"), "id=4: live ts wins over lower-ts tombstone");
+    assert!(
+        by_id(&flushed, 4).contains("keep"),
+        "id=4: live ts wins over lower-ts tombstone"
+    );
     // id=5 EQUAL-ts tombstone beats live: column a gone, witness b survives.
     let r5 = by_id(&flushed, 5);
     assert!(r5.contains("w5"), "id=5: witness b must survive, got {r5}");
-    assert!(!r5.contains("\"x\""), "id=5: equal-ts tombstone must delete a, got {r5}");
+    assert!(
+        !r5.contains("\"x\""),
+        "id=5: equal-ts tombstone must delete a, got {r5}"
+    );
     // id=6 EQUAL-ts tombstone beats expiring: a gone, witness b survives.
     let r6 = by_id(&flushed, 6);
     assert!(r6.contains("w6"), "id=6: witness b must survive, got {r6}");
-    assert!(!r6.contains("\"e\""), "id=6: equal-ts tombstone must delete expiring a, got {r6}");
+    assert!(
+        !r6.contains("\"e\""),
+        "id=6: equal-ts tombstone must delete expiring a, got {r6}"
+    );
 }
