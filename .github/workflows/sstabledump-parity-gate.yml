@@ -3,8 +3,26 @@ name: "CI: SSTableDump Parity Gate"
 on:
   pull_request:
     branches: [main, develop]
+    paths:
+      - '.github/workflows/sstabledump-parity-gate.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'cqlite-core/**'
+      - 'tests/**'
+      - 'test-data/**'
+      - 'scripts/**'
   push:
     branches: [main, develop]
+    paths:
+      - '.github/workflows/sstabledump-parity-gate.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'cqlite-core/**'
+      - 'tests/**'
+      - 'test-data/**'
+      - 'scripts/**'
 
 permissions:
   issues: write
