@@ -70,7 +70,98 @@ pub fn lint(m: &Manifest, repo_root: Option<&Path>) -> Vec<Finding> {
         lint_scenario(s, repo_root, &mut out);
     }
 
+    lint_claims(m, &mut out);
+
     out
+}
+
+/// Validate the public-claim entries (issue #1023): closed `kind`, well-formed
+/// ids, non-empty phrase/rationale, `safe` claims must cite real scenario ids,
+/// and `blocked` claims should point at a `claim.safe.*` alternative.
+fn lint_claims(m: &Manifest, out: &mut Vec<Finding>) {
+    let scenario_ids: std::collections::HashSet<&str> =
+        m.scenarios.iter().map(|s| s.id.as_str()).collect();
+    let safe_ids: std::collections::HashSet<&str> = m
+        .claims
+        .iter()
+        .filter(|c| c.kind == "safe")
+        .map(|c| c.id.as_str())
+        .collect();
+
+    let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for c in &m.claims {
+        *seen.entry(c.id.as_str()).or_insert(0) += 1;
+    }
+
+    for c in &m.claims {
+        let id = c.id.as_str();
+        if seen.get(id).copied().unwrap_or(0) > 1 {
+            out.push(Finding::error(id, "claims.id", "duplicate claim id"));
+        }
+        check_enum(out, id, "claims.kind", &c.kind, enums::CLAIM_KIND);
+        let expected_prefix = match c.kind.as_str() {
+            "safe" => "claim.safe.",
+            "blocked" => "claim.blocked.",
+            _ => "claim.",
+        };
+        if !id.starts_with(expected_prefix) {
+            out.push(Finding::error(
+                id,
+                "claims.id",
+                format!("{} claim id must start with `{expected_prefix}`", c.kind),
+            ));
+        }
+        if c.phrase.trim().is_empty() {
+            out.push(Finding::error(
+                id,
+                "claims.phrase",
+                "claim phrase is required",
+            ));
+        }
+        if c.rationale.trim().is_empty() {
+            out.push(Finding::error(
+                id,
+                "claims.rationale",
+                "claim rationale is required",
+            ));
+        }
+        match c.kind.as_str() {
+            "safe" => {
+                if c.evidence_scenarios.is_empty() {
+                    out.push(Finding::error(
+                        id,
+                        "claims.evidence_scenarios",
+                        "safe claims must cite at least one backing scenario id",
+                    ));
+                }
+                for sid in &c.evidence_scenarios {
+                    if !scenario_ids.contains(sid.as_str()) {
+                        out.push(Finding::error(
+                            id,
+                            "claims.evidence_scenarios",
+                            format!("references unknown scenario id: {sid}"),
+                        ));
+                    }
+                }
+            }
+            "blocked" => match &c.safe_alternative {
+                Some(alt) if !safe_ids.contains(alt.as_str()) => {
+                    out.push(Finding::error(
+                        id,
+                        "claims.safe_alternative",
+                        format!("references unknown claim.safe.* id: {alt}"),
+                    ));
+                }
+                Some(_) => {}
+                None => out.push(Finding::error(
+                    id,
+                    "claims.safe_alternative",
+                    "blocked claims must name a claim.safe.* alternative",
+                )),
+            },
+            _ => {}
+        }
+    }
 }
 
 fn lint_scenario(s: &Scenario, repo_root: Option<&Path>, out: &mut Vec<Finding>) {

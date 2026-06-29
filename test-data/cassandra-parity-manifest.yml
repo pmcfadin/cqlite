@@ -11063,3 +11063,79 @@ scenarios:
       related_in_scope_scenarios:
         - cass.compression.fixture_matrix.zstd_no_dictionary
         - cass.compression.registry.known_zstd
+
+# ==============================================================================
+# Public/release-facing parity claims (issue #1023).
+#
+# `claim.safe.*`  — the manifest-backed wording the project is allowed to publish,
+#                   each cited to the scenarios that supply its evidence.
+# `claim.blocked.*` — unqualified absolute over-claims the claim-scan lint rejects
+#                   in release-facing docs unless the line explicitly scopes them
+#                   as a counter-example. Each names the safe wording to use.
+# ==============================================================================
+claims:
+  - id: claim.safe.selected_fixture_validation
+    kind: safe
+    phrase: >-
+      validated against selected Apache Cassandra 5.0 SSTable fixtures
+    rationale: >-
+      CQLite is validated against the specific Cassandra-generated fixtures and
+      datasets recorded in this manifest, not against every possible SSTable. The
+      wording scopes the claim to the covered corpus rather than implying
+      exhaustive coverage.
+    evidence_scenarios:
+      - cass.sstable_format.toc_component_manifest
+      - cass.data_db_decode.row_cell_flags_and_vint
+      - cass.compression_info.lz4.real_fixture_chunks
+
+  - id: claim.safe.rust_byte_level_coverage
+    kind: safe
+    phrase: >-
+      byte-for-byte parity is proven only where this manifest records byte_for_byte evidence
+    rationale: >-
+      Byte-level equivalence is asserted only for scenarios carrying explicit
+      byte_for_byte evidence (bytes/offsets/checksums/component files with a
+      strict comparison). The wording forbids generalizing byte parity beyond
+      those scenarios.
+    evidence_scenarios:
+      - cass.compaction_merge.byte_for_byte_output
+      - cass.compaction.harness_byte_tier_artifacts
+
+  - id: claim.safe.traceable_cassandra_parity_suite
+    kind: safe
+    phrase: >-
+      a traceable parity suite mapping CQLite tests to specific Cassandra scenarios
+    rationale: >-
+      The parity manifest maps each CQLite test/fixture to the Cassandra
+      scenario it mirrors, so claims are traceable to named evidence. This is
+      distinct from running Cassandra's own JVM test suite.
+    evidence_scenarios:
+      - cass.compaction.CompactionIteratorTest.differential_compaction_loop
+      - cass.data_db_decode.serialization_mirror.multi_clustering_column_order
+
+  - id: claim.blocked.same_tests_as_cassandra
+    kind: blocked
+    phrase: same tests as Cassandra
+    rationale: >-
+      CQLite does not run Apache Cassandra's JVM test suite; it runs its own
+      Rust parity suite against recorded fixtures. Claiming the "same tests"
+      overstates coverage and implies node-behavior parity CQLite never asserts.
+    safe_alternative: claim.safe.traceable_cassandra_parity_suite
+
+  - id: claim.blocked.full_compaction_byte_parity
+    kind: blocked
+    phrase: full compaction byte parity
+    rationale: >-
+      Byte-for-byte compaction parity is proven only for the scenarios that
+      carry byte_for_byte evidence, not for all compaction inputs/strategies.
+      "Full" generalizes byte parity beyond the manifest's evidence.
+    safe_alternative: claim.safe.rust_byte_level_coverage
+
+  - id: claim.blocked.zero_diff_sstabledump_all_datasets
+    kind: blocked
+    phrase: zero-diff sstabledump across every dataset
+    rationale: >-
+      sstabledump parity is validated for the selected fixtures in this manifest,
+      not for every conceivable dataset. "Across every dataset" claims exhaustive
+      coverage the evidence does not support.
+    safe_alternative: claim.safe.selected_fixture_validation

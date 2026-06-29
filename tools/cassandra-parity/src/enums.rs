@@ -119,3 +119,8 @@ pub const OUT_OF_SCOPE_CATEGORY: &[&str] = &[
 
 /// Artifacts that count as byte-level evidence for a `byte_for_byte` claim.
 pub const BYTE_LEVEL_ARTIFACTS: &[&str] = &["bytes", "offsets", "checksums", "component_files"];
+
+/// Closed set of public-claim kinds (issue #1023). `safe` = manifest-backed
+/// wording the project may publish; `blocked` = unqualified over-claim phrase the
+/// claim-scan lint rejects in release-facing docs unless explicitly scoped.
+pub const CLAIM_KIND: &[&str] = &["safe", "blocked"];

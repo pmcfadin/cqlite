@@ -33,9 +33,41 @@
       "type": "array",
       "minItems": 1,
       "items": { "$ref": "#/$defs/scenario" }
+    },
+    "claims": {
+      "type": "array",
+      "description": "Public/release-facing parity claims (issue #1023). `claim.safe.*` entries record manifest-backed wording; `claim.blocked.*` entries record unqualified over-claims the claim-scan lint rejects in release docs unless explicitly scoped.",
+      "items": { "$ref": "#/$defs/claim" }
     }
   },
   "$defs": {
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "phrase", "rationale"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^claim\\.(safe|blocked)\\.[a-z0-9_]+$",
+          "description": "claim.safe.<slug> or claim.blocked.<slug>."
+        },
+        "kind": { "enum": ["safe", "blocked"] },
+        "phrase": { "type": "string", "minLength": 1 },
+        "rationale": { "type": "string", "minLength": 1 },
+        "evidence_scenarios": { "type": "array", "items": { "type": "string" } },
+        "safe_alternative": { "type": "string" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "safe" } } },
+          "then": { "required": ["evidence_scenarios"], "properties": { "evidence_scenarios": { "minItems": 1 } } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "blocked" } } },
+          "then": { "required": ["safe_alternative"] }
+        }
+      ]
+    },
     "scenario": {
       "type": "object",
       "additionalProperties": false,

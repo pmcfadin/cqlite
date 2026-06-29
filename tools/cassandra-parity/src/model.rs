@@ -13,6 +13,33 @@ pub struct Manifest {
     pub cassandra_source: CassandraSource,
     pub program: Program,
     pub scenarios: Vec<Scenario>,
+    /// Public/release-facing parity claims. `claim.safe.*` entries record the
+    /// manifest-backed wording the project is allowed to publish; `claim.blocked.*`
+    /// entries record the unqualified over-claim phrases the claim-scan lint must
+    /// reject in release-facing docs unless explicitly scoped (issue #1023).
+    #[serde(default)]
+    pub claims: Vec<Claim>,
+}
+
+/// A single public parity claim. Drives both the report's claim-language section
+/// and the claim-scan lint over release-facing docs.
+#[derive(Debug, Deserialize)]
+pub struct Claim {
+    /// `claim.safe.<slug>` or `claim.blocked.<slug>`.
+    pub id: String,
+    /// `safe` or `blocked` (closed set, enforced by the linter).
+    pub kind: String,
+    /// The literal phrase. For `blocked`, the unqualified over-claim the scan
+    /// rejects; for `safe`, the release-safe wording the project may publish.
+    pub phrase: String,
+    /// Why this wording is safe (for `safe`) or why it is rejected (for `blocked`).
+    pub rationale: String,
+    /// Scenario ids that back a `safe` claim's evidence. Required for `safe`.
+    #[serde(default)]
+    pub evidence_scenarios: Vec<String>,
+    /// For a `blocked` claim, the `claim.safe.*` id that should be used instead.
+    #[serde(default)]
+    pub safe_alternative: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

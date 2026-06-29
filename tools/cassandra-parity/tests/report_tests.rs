@@ -81,6 +81,31 @@ fn wide_partition_corpus_is_a_planned_gap() {
 }
 
 #[test]
+fn report_has_manifest_driven_claim_language_section() {
+    // AC6 (issue #1023): the report summarizes release-safe claim language from
+    // the manifest's claims section — safe wordings (with backing scenarios) and
+    // blocked phrases (with the safe alternative to use instead).
+    let r = rendered();
+    let header = "## Release-safe claim language";
+    let start = r.find(header).expect("claim-language section present");
+    let section = &r[start..];
+    assert!(section.contains("### Safe wordings"));
+    assert!(section.contains("### Blocked phrases"));
+    for id in [
+        "claim.safe.selected_fixture_validation",
+        "claim.safe.rust_byte_level_coverage",
+        "claim.safe.traceable_cassandra_parity_suite",
+        "claim.blocked.same_tests_as_cassandra",
+        "claim.blocked.full_compaction_byte_parity",
+        "claim.blocked.zero_diff_sstabledump_all_datasets",
+    ] {
+        assert!(section.contains(id), "claim section must list {id}");
+    }
+    // A blocked phrase must name its safe alternative.
+    assert!(section.contains("Use instead: `claim.safe."));
+}
+
+#[test]
 fn planned_scenario_in_evidence_group_is_marked_no_evidence_yet() {
     let r = rendered();
     let header = "## Canonical-semantic scenarios";

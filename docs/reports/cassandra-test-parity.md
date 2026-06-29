@@ -1086,9 +1086,31 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.zstd_dictionary.dictionary_serialization` | — | — |
 | `cass.zstd_dictionary.invalid_dictionary_rejected` | — | — |
 
-## Claim language
+## Release-safe claim language
 
-**Safe:** CQLite reads and writes Cassandra 5.0 SSTables and is validated for canonical-semantic equivalence against `sstabledump` for the covered dataset, with byte-for-byte parity proven only where this report records `byte_for_byte` evidence.
+Public/release-facing parity claims are enforced by the claim-scan lint. Safe wordings below are manifest-backed; the blocked phrases are unqualified over-claims rejected unless explicitly scoped as a counter-example.
 
-**Unsafe:** "CQLite passes the same tests as Cassandra" or "CQLite is byte-for-byte identical to Cassandra" — these overclaim node behavior and byte parity the manifest does not support.
+### Safe wordings
+
+- **claim.safe.rust_byte_level_coverage** — byte-for-byte parity is proven only where this manifest records byte_for_byte evidence
+  - Why safe: Byte-level equivalence is asserted only for scenarios carrying explicit byte_for_byte evidence (bytes/offsets/checksums/component files with a strict comparison). The wording forbids generalizing byte parity beyond those scenarios.
+  - Backed by: `cass.compaction_merge.byte_for_byte_output`, `cass.compaction.harness_byte_tier_artifacts`
+- **claim.safe.selected_fixture_validation** — validated against selected Apache Cassandra 5.0 SSTable fixtures
+  - Why safe: CQLite is validated against the specific Cassandra-generated fixtures and datasets recorded in this manifest, not against every possible SSTable. The wording scopes the claim to the covered corpus rather than implying exhaustive coverage.
+  - Backed by: `cass.sstable_format.toc_component_manifest`, `cass.data_db_decode.row_cell_flags_and_vint`, `cass.compression_info.lz4.real_fixture_chunks`
+- **claim.safe.traceable_cassandra_parity_suite** — a traceable parity suite mapping CQLite tests to specific Cassandra scenarios
+  - Why safe: The parity manifest maps each CQLite test/fixture to the Cassandra scenario it mirrors, so claims are traceable to named evidence. This is distinct from running Cassandra's own JVM test suite.
+  - Backed by: `cass.compaction.CompactionIteratorTest.differential_compaction_loop`, `cass.data_db_decode.serialization_mirror.multi_clustering_column_order`
+
+### Blocked phrases (rejected unless explicitly scoped)
+
+- **claim.blocked.full_compaction_byte_parity** — "full compaction byte parity"
+  - Why blocked: Byte-for-byte compaction parity is proven only for the scenarios that carry byte_for_byte evidence, not for all compaction inputs/strategies. "Full" generalizes byte parity beyond the manifest's evidence.
+  - Use instead: `claim.safe.rust_byte_level_coverage`
+- **claim.blocked.same_tests_as_cassandra** — "same tests as Cassandra"
+  - Why blocked: CQLite does not run Apache Cassandra's JVM test suite; it runs its own Rust parity suite against recorded fixtures. Claiming the "same tests" overstates coverage and implies node-behavior parity CQLite never asserts.
+  - Use instead: `claim.safe.traceable_cassandra_parity_suite`
+- **claim.blocked.zero_diff_sstabledump_all_datasets** — "zero-diff sstabledump across every dataset"
+  - Why blocked: sstabledump parity is validated for the selected fixtures in this manifest, not for every conceivable dataset. "Across every dataset" claims exhaustive coverage the evidence does not support.
+  - Use instead: `claim.safe.selected_fixture_validation`
 

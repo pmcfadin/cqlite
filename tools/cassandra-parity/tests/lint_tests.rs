@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+use cassandra_parity::claim_scan::{scan_docs, ScanInput};
 use cassandra_parity::lint::{lint, Level};
 use cassandra_parity::model::Manifest;
 use cassandra_parity::{coverage, enums, report};
@@ -517,6 +518,200 @@ fn delta_scan_fixtures_map_to_generated_tables() {
         "delta_scan fixture/generator drift:\n{}",
         problems.join("\n")
     );
+}
+
+// ----------------------------------------------------------------------------
+// Public-claim scan + manifest claim validation (issue #1023).
+// ----------------------------------------------------------------------------
+
+/// A manifest with one mirrored scenario plus the claim entries the claim-scan
+/// lint needs. `VALID_SCENARIO` supplies a real scenario id for `safe` claims to
+/// cite, so manifest-level claim lint stays clean.
+fn wrap_with_claims() -> String {
+    format!(
+        "{}claims:
+  - id: claim.safe.selected_fixture_validation
+    kind: safe
+    phrase: validated against selected Apache Cassandra 5.0 SSTable fixtures
+    rationale: scoped to the covered corpus, not exhaustive
+    evidence_scenarios:
+      - cass.sstable_format.example_mirrored
+  - id: claim.blocked.same_tests_as_cassandra
+    kind: blocked
+    phrase: same tests as Cassandra
+    rationale: CQLite does not run Cassandra's JVM test suite
+    safe_alternative: claim.safe.selected_fixture_validation
+  - id: claim.blocked.full_compaction_byte_parity
+    kind: blocked
+    phrase: full compaction byte parity
+    rationale: byte parity only where the manifest records byte_for_byte
+    safe_alternative: claim.safe.selected_fixture_validation
+  - id: claim.blocked.zero_diff_sstabledump_all_datasets
+    kind: blocked
+    phrase: zero-diff sstabledump across every dataset
+    rationale: only selected fixtures are validated
+    safe_alternative: claim.safe.selected_fixture_validation
+",
+        wrap(VALID_SCENARIO)
+    )
+}
+
+fn claim_findings(yaml: &str, files: &[(&str, &str)]) -> Vec<String> {
+    let m = Manifest::from_yaml(yaml).expect("manifest parses");
+    let inputs: Vec<ScanInput<'_>> = files
+        .iter()
+        .map(|(p, t)| ScanInput { path: p, text: t })
+        .collect();
+    scan_docs(&m, &inputs)
+        .into_iter()
+        .filter(|f| f.level == Level::Error)
+        .map(|f| format!("[{}] {}: {}", f.id, f.field, f.message))
+        .collect()
+}
+
+#[test]
+fn manifest_supports_all_four_statuses() {
+    // AC1: the closed status set is exactly these four.
+    assert_eq!(
+        enums::STATUS,
+        ["mirrored", "partial", "planned", "out_of_scope"]
+    );
+}
+
+#[test]
+fn unqualified_same_tests_claim_fails() {
+    let docs = [("README.md", "CQLite runs the same tests as Cassandra.")];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.blocked.same_tests_as_cassandra")),
+        "got: {errs:#?}"
+    );
+}
+
+#[test]
+fn unqualified_full_compaction_byte_parity_fails() {
+    let docs = [("README.md", "We ship full compaction byte parity today.")];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.blocked.full_compaction_byte_parity")),
+        "got: {errs:#?}"
+    );
+}
+
+#[test]
+fn unqualified_zero_diff_all_datasets_fails() {
+    let docs = [(
+        "CHANGELOG.md",
+        "Now with zero-diff sstabledump across every dataset.",
+    )];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.blocked.zero_diff_sstabledump_all_datasets")),
+        "got: {errs:#?}"
+    );
+}
+
+#[test]
+fn explicitly_scoped_blocked_phrase_passes() {
+    // AC5: a blocked phrase framed as a counter-example is allowed.
+    let docs = [(
+        "docs/development/parity-release-checklist.md",
+        "Do not claim the same tests as Cassandra; scope every parity claim.",
+    )];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(errs.is_empty(), "scoped phrase should pass, got: {errs:#?}");
+}
+
+#[test]
+fn unsafe_marked_blocked_phrase_passes() {
+    let docs = [(
+        "README.md",
+        "Unsafe: \"full compaction byte parity\" — overclaims byte parity.",
+    )];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(
+        errs.is_empty(),
+        "unsafe-marked phrase should pass: {errs:#?}"
+    );
+}
+
+#[test]
+fn manifest_backed_safe_wording_passes() {
+    // AC4: a claim that uses the manifest-backed safe wording passes even though
+    // it mentions parity, because it is the recorded safe phrase.
+    let docs = [(
+        "README.md",
+        "CQLite is validated against selected Apache Cassandra 5.0 SSTable fixtures.",
+    )];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(errs.is_empty(), "safe wording should pass, got: {errs:#?}");
+}
+
+#[test]
+fn blocked_finding_names_safe_alternative() {
+    let docs = [("README.md", "We have full compaction byte parity.")];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.safe.selected_fixture_validation")),
+        "finding must point at the safe alternative, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn safe_claim_with_unknown_scenario_is_rejected() {
+    // Manifest-level claim lint: a safe claim citing a missing scenario fails.
+    let yaml = wrap_with_claims().replace(
+        "      - cass.sstable_format.example_mirrored",
+        "      - cass.does.not_exist",
+    );
+    let errs = errors(&yaml);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.safe.selected_fixture_validation")
+                && e.contains("unknown scenario id")),
+        "got: {errs:#?}"
+    );
+}
+
+#[test]
+fn blocked_claim_without_safe_alternative_is_rejected() {
+    let yaml = wrap_with_claims().replace(
+        "    safe_alternative: claim.safe.selected_fixture_validation\n  - id: claim.blocked.full_compaction_byte_parity",
+        "  - id: claim.blocked.full_compaction_byte_parity",
+    );
+    let errs = errors(&yaml);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.blocked.same_tests_as_cassandra")
+                && e.contains("safe_alternative")),
+        "got: {errs:#?}"
+    );
+}
+
+#[test]
+fn real_manifest_has_the_six_claim_entries() {
+    // The six claim entries from issue #1023 must exist and lint clean.
+    let root = repo_root();
+    let text =
+        std::fs::read_to_string(root.join("test-data/cassandra-parity-manifest.yml")).unwrap();
+    let m = Manifest::from_yaml(&text).expect("real manifest parses");
+    for id in [
+        "claim.safe.selected_fixture_validation",
+        "claim.safe.rust_byte_level_coverage",
+        "claim.safe.traceable_cassandra_parity_suite",
+        "claim.blocked.same_tests_as_cassandra",
+        "claim.blocked.full_compaction_byte_parity",
+        "claim.blocked.zero_diff_sstabledump_all_datasets",
+    ] {
+        assert!(
+            m.claims.iter().any(|c| c.id == id),
+            "manifest missing claim entry {id}"
+        );
+    }
 }
 
 #[test]

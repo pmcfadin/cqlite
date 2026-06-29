@@ -14,6 +14,7 @@ use std::process::ExitCode;
 
 use anyhow::{bail, Context, Result};
 
+use cassandra_parity::claim_scan::{self, ScanInput};
 use cassandra_parity::lint::Level;
 use cassandra_parity::model::Manifest;
 use cassandra_parity::{coverage, enums, lint, report, tier_contract};
@@ -130,7 +131,28 @@ fn run() -> Result<ExitCode> {
 fn cmd_lint(args: &Args) -> Result<ExitCode> {
     let m = load(&args.manifest)?;
     let root = repo_root(&args.manifest);
-    let findings = lint::lint(&m, Some(&root));
+    let mut findings = lint::lint(&m, Some(&root));
+
+    // Claim-scan over release-facing docs (issue #1023): a file that is absent
+    // from this checkout is skipped rather than failing, so the lint stays usable
+    // from sub-trees; the curated file set lives in `claim_scan::RELEASE_FILES`.
+    let texts: Vec<(String, String)> = claim_scan::RELEASE_FILES
+        .iter()
+        .filter_map(|rel| {
+            std::fs::read_to_string(root.join(rel))
+                .ok()
+                .map(|t| ((*rel).to_string(), t))
+        })
+        .collect();
+    let inputs: Vec<ScanInput<'_>> = texts
+        .iter()
+        .map(|(p, t)| ScanInput {
+            path: p.as_str(),
+            text: t.as_str(),
+        })
+        .collect();
+    findings.extend(claim_scan::scan_docs(&m, &inputs));
+
     let errors = findings.iter().filter(|f| f.level == Level::Error).count();
     let warns = findings.iter().filter(|f| f.level == Level::Warn).count();
     for f in &findings {
