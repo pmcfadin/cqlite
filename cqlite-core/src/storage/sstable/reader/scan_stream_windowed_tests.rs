@@ -143,6 +143,161 @@ mod fixture_drain {
         n
     }
 
+    /// Build the same `WindowParseCtx` the I/O half resolves for this fixture.
+    fn ctx_for(reader: &SSTableReader) -> WindowParseCtx {
+        WindowParseCtx {
+            table_id: TableId::new(format!(
+                "{}.{}",
+                reader.header.keyspace, reader.header.table_name
+            )),
+            start_key: None,
+            end_key: None,
+            schema: reader.get_table_schema(None),
+            max_compressed_length: reader
+                .compression_info
+                .as_ref()
+                .map(|ci| ci.max_compressed_length as usize)
+                .unwrap_or(usize::MAX),
+        }
+    }
+
+    /// Drain `chunks` (a CLEAN, non-failed stream) and return the number of
+    /// confirmed `(RowKey, Value)` rows emitted across batches.
+    fn clean_row_count(reader: &SSTableReader, chunks: &[Vec<u8>]) -> usize {
+        drain_count(reader, chunks, false)
+    }
+
+    /// Run the blocking parse half over `chunks` followed by ONE deliberately
+    /// corrupt compressed chunk that fails to decompress mid-stream, returning
+    /// `(result, rows_received_before_error)`. The corrupt chunk is short enough
+    /// (`< max_compressed_length`) that the parse half routes it through
+    /// `Compression::decompress`, which errors — exercising the mid-stream
+    /// decompress-error path AFTER `chunks` already produced confirmed rows.
+    fn drain_with_trailing_corrupt(
+        reader: &SSTableReader,
+        chunks: &[Vec<u8>],
+    ) -> (Result<()>, usize) {
+        let ctx = ctx_for(reader);
+        // Capacity for the real chunks + the corrupt one.
+        let (raw_tx, raw_rx) = mpsc::channel::<Vec<u8>>(chunks.len() + 1);
+        for c in chunks {
+            raw_tx.try_send(c.clone()).expect("prefill raw chunk");
+        }
+        // A short, non-raw, non-decompressible chunk: 8 bytes that no supported
+        // codec accepts. Strictly shorter than any real `max_compressed_length`,
+        // so it is NOT treated as an incompressible-raw chunk and goes through
+        // `decompress`, which returns Err.
+        raw_tx
+            .try_send(vec![0xFFu8; 8])
+            .expect("prefill corrupt chunk");
+        drop(raw_tx);
+
+        // Large output channel so `blocking_send` never blocks; we count rows
+        // delivered ACROSS batches BEFORE the terminal error.
+        let (out_tx, mut out_rx) = mpsc::channel::<Result<Vec<(RowKey, Value)>>>(4096);
+        let flag = Arc::new(AtomicBool::new(false));
+        let result = reader.drain_scan_window_blocking(ctx, raw_rx, out_tx, flag);
+
+        let mut received = 0usize;
+        while let Ok(item) = out_rx.try_recv() {
+            if let Ok(rows) = item {
+                received += rows.len();
+            }
+        }
+        (result, received)
+    }
+
+    /// Roborev finding (issue #1143): the row-batching change must NOT silently
+    /// drop confirmed rows when the stream errors mid-flight. A scan that emits
+    /// some rows (fewer than `BATCH_EMIT_ROWS`, so they sit in the pending batch)
+    /// and THEN hits a decompression error must still deliver those confirmed
+    /// rows to the consumer ahead of the terminal `Err` — matching the
+    /// pre-batching per-row send contract.
+    ///
+    /// Dataset-dependent: skips when the fixture is absent. The invariant is
+    /// asserted at the smallest real seam — drive the private blocking parse
+    /// half directly with a real-chunk prefix + a corrupt trailing chunk.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mid_stream_error_still_delivers_confirmed_pending_rows() {
+        let Some(data_db) = fixture_data_db() else {
+            eprintln!("Skipping {KEYSPACE}.{TABLE}: no Data.db present (run fetch-datasets.sh).");
+            return;
+        };
+
+        let cfg = crate::Config::default();
+        let platform = Arc::new(
+            crate::platform::Platform::new(&cfg)
+                .await
+                .expect("platform"),
+        );
+        let reader = SSTableReader::open(&data_db, &cfg, platform)
+            .await
+            .expect("open reader");
+        assert!(
+            reader.compression_info.is_some(),
+            "fixture must be compressed so the corrupt chunk hits the decompress-error path"
+        );
+
+        let chunks = collect_raw_chunks(&reader).await;
+        assert!(
+            chunks.len() > 1,
+            "Issue #1143: need a multi-chunk fixture ({} chunk(s))",
+            chunks.len()
+        );
+
+        // Choose the smallest real-chunk prefix whose CLEAN drain confirms at
+        // least one row but fewer than BATCH_EMIT_ROWS, so those rows sit in the
+        // pending batch (not an already-flushed full batch) when the corrupt
+        // chunk errors. This makes the assertion specifically about the
+        // flush-on-error of the *pending* batch (the regression), not earlier
+        // full batches.
+        let reader = Arc::new(reader);
+        let mut chosen: Option<(Vec<Vec<u8>>, usize)> = None;
+        for n in 1..chunks.len() {
+            let prefix = chunks[..n].to_vec();
+            let r = Arc::clone(&reader);
+            let p = prefix.clone();
+            let cnt = tokio::task::spawn_blocking(move || clean_row_count(&r, &p))
+                .await
+                .expect("clean count task");
+            if (1..BATCH_EMIT_ROWS).contains(&cnt) {
+                chosen = Some((prefix, cnt));
+                break;
+            }
+        }
+        let Some((prefix, expected_pending)) = chosen else {
+            eprintln!(
+                "Skipping: no chunk prefix of {KEYSPACE}.{TABLE} yields 1..{BATCH_EMIT_ROWS} \
+                 confirmed rows; cannot stage a partial pending batch for this fixture."
+            );
+            return;
+        };
+
+        let r = Arc::clone(&reader);
+        let (result, received) =
+            tokio::task::spawn_blocking(move || drain_with_trailing_corrupt(&r, &prefix))
+                .await
+                .expect("corrupt drain task");
+
+        eprintln!(
+            "Issue #1143 flush-on-error guard: expected_pending={expected_pending}, \
+             received_before_error={received}, result_is_err={}",
+            result.is_err()
+        );
+
+        assert!(
+            result.is_err(),
+            "the trailing corrupt chunk must make the parse half return Err"
+        );
+        assert_eq!(
+            received, expected_pending,
+            "Issue #1143 REGRESSION: confirmed rows produced before the mid-stream \
+             decompress error were DROPPED. Expected the consumer to receive all \
+             {expected_pending} pending rows before the terminal Err, got {received}. \
+             The batching change must flush the pending batch before propagating an error."
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn io_failed_skips_terminal_drain_on_truncated_window() {
         let Some(data_db) = fixture_data_db() else {

@@ -172,6 +172,28 @@ fn should_run_terminal_drain(io_failed: bool) -> bool {
     !io_failed
 }
 
+/// Flush any rows already buffered in `batch` to the batched-row channel as one
+/// item, draining `batch`. Used at EVERY error-exit of the blocking parse half
+/// so confirmed rows produced before a mid-stream parse/decompress error are
+/// delivered to the consumer ahead of the terminal `Err` — matching the
+/// pre-#1156 per-row send contract (the consumer must see all confirmed rows up
+/// to the failure, not just the earlier full batches).
+///
+/// Returns the send result; the caller propagates the original error regardless
+/// (a failed flush means the consumer already dropped `rx`, so there is nobody
+/// left to receive the rows OR the error — the scan is terminating either way).
+/// A no-op when `batch` is empty. Roborev finding (issue #1143): the batching
+/// change must not silently drop confirmed-up-to-error rows.
+#[inline]
+fn flush_pending(
+    batch: &mut Vec<(RowKey, Value)>,
+    tx: &mpsc::Sender<Result<Vec<(RowKey, Value)>>>,
+) {
+    if !batch.is_empty() {
+        let _ = tx.blocking_send(Ok(std::mem::take(batch)));
+    }
+}
+
 /// Inputs the blocking parse half needs that the I/O half resolves once up front
 /// (so the blocking task does not have to touch the async runtime).
 struct WindowParseCtx {
@@ -347,6 +369,12 @@ impl SSTableReader {
     /// through `tx` (a `Vec`-batched channel) with `blocking_send`, mirroring the
     /// pre-#1156 `parse_stitched_stream` backpressure but amortizing the
     /// blocking→async wake one-per-batch instead of one-per-row (issue #1143).
+    ///
+    /// On a mid-stream decompress/parse `Err`, any rows already buffered in the
+    /// pending batch are flushed to `tx` BEFORE the error is propagated (via
+    /// [`flush_pending`]), so the consumer receives every confirmed-up-to-error
+    /// row ahead of the terminal `Err` — preserving the pre-batching per-row
+    /// send contract (roborev finding, issue #1143).
     fn drain_scan_window_blocking(
         &self,
         ctx: WindowParseCtx,
@@ -367,64 +395,82 @@ impl SSTableReader {
         // bound.
         let mut batch: Vec<(RowKey, Value)> = Vec::with_capacity(BATCH_EMIT_ROWS);
 
-        while let Some(compressed_chunk) = raw_rx.blocking_recv() {
-            let decompressed_chunk = if compressed_chunk.len() >= ctx.max_compressed_length {
-                compressed_chunk
-            } else if let Some(compression_reader) = &self.compression_reader {
-                let compression = Compression::new(*compression_reader.algorithm())?;
-                compression.decompress(&compressed_chunk).map_err(|e| {
-                    Error::corruption(format!(
-                        "drain_scan_window_blocking: Failed to decompress chunk {}: {}",
-                        chunk_count, e
-                    ))
-                })?
-            } else {
-                compressed_chunk
-            };
-            window.extend_from_slice(&decompressed_chunk);
-            chunk_count += 1;
+        // The parse loop + terminal drain are fallible; on ANY `Err` we must
+        // first deliver the rows already buffered in `batch` (confirmed rows
+        // produced before the failure) so the consumer sees them ahead of the
+        // terminal error — the pre-#1156 per-row send delivered every
+        // confirmed-up-to-error row, and batching must preserve that (roborev
+        // finding, issue #1143). Run the fallible work in a closure and flush
+        // `batch` before propagating any error it returns.
+        let drained: Result<()> = (|| {
+            while let Some(compressed_chunk) = raw_rx.blocking_recv() {
+                let decompressed_chunk = if compressed_chunk.len() >= ctx.max_compressed_length {
+                    compressed_chunk
+                } else if let Some(compression_reader) = &self.compression_reader {
+                    let compression = Compression::new(*compression_reader.algorithm())?;
+                    compression.decompress(&compressed_chunk).map_err(|e| {
+                        Error::corruption(format!(
+                            "drain_scan_window_blocking: Failed to decompress chunk {}: {}",
+                            chunk_count, e
+                        ))
+                    })?
+                } else {
+                    compressed_chunk
+                };
+                window.extend_from_slice(&decompressed_chunk);
+                chunk_count += 1;
 
-            // Not the final chunk yet: drain confirmed partitions; NeedMore means
-            // "await more bytes" (a partition straddles this chunk boundary).
-            self.drain_scan_window(
-                &parser,
-                &ctx,
-                &mut window,
-                false,
-                &tx,
-                &mut batch,
-                &mut broke,
-            )?;
-            if broke {
-                return Ok(());
+                // Not the final chunk yet: drain confirmed partitions; NeedMore
+                // means "await more bytes" (a partition straddles this boundary).
+                self.drain_scan_window(
+                    &parser,
+                    &ctx,
+                    &mut window,
+                    false,
+                    &tx,
+                    &mut batch,
+                    &mut broke,
+                )?;
+                if broke {
+                    return Ok(());
+                }
             }
-        }
 
-        // Stream end. On a CLEAN EOF run the final drain — a trailing partition
-        // with no END_OF_PARTITION marker is now terminal (Done), not a refill
-        // request that will never come. But if the I/O half stopped on a read
-        // ERROR (`io_failed`), the trailing window is a truncated fragment of a
-        // partition; running `at_final_chunk = true` here would parse and emit it
-        // as if complete, surfacing a partial/garbage row BEFORE the caller
-        // returns the I/O `Err`. Skip the final drain so a truncated/corrupt
-        // stream yields ONLY the error (issue #1143 finding 2). The store in the
-        // I/O half happens-before the `drop(raw_tx)` that ended `blocking_recv`,
-        // so this load observes it.
-        if !broke && should_run_terminal_drain(io_failed.load(Ordering::SeqCst)) {
-            self.drain_scan_window(
-                &parser,
-                &ctx,
-                &mut window,
-                true,
-                &tx,
-                &mut batch,
-                &mut broke,
-            )?;
+            // Stream end. On a CLEAN EOF run the final drain — a trailing
+            // partition with no END_OF_PARTITION marker is now terminal (Done),
+            // not a refill request that will never come. But if the I/O half
+            // stopped on a read ERROR (`io_failed`), the trailing window is a
+            // truncated fragment of a partition; running `at_final_chunk = true`
+            // here would parse and emit it as if complete, surfacing a
+            // partial/garbage row BEFORE the caller returns the I/O `Err`. Skip
+            // the final drain so a truncated/corrupt stream yields ONLY the error
+            // (issue #1143 finding 2). The store in the I/O half happens-before
+            // the `drop(raw_tx)` that ended `blocking_recv`, so this load
+            // observes it.
+            if !broke && should_run_terminal_drain(io_failed.load(Ordering::SeqCst)) {
+                self.drain_scan_window(
+                    &parser,
+                    &ctx,
+                    &mut window,
+                    true,
+                    &tx,
+                    &mut batch,
+                    &mut broke,
+                )?;
+            }
+            Ok(())
+        })();
+
+        if let Err(e) = drained {
+            // Deliver confirmed rows produced before the failure ahead of the
+            // terminal error (roborev finding, issue #1143), then propagate.
+            flush_pending(&mut batch, &tx);
+            return Err(e);
         }
 
         // Flush the trailing partial batch so the last rows reach the consumer.
-        if !broke && !batch.is_empty() {
-            let _ = tx.blocking_send(Ok(std::mem::take(&mut batch)));
+        if !broke {
+            flush_pending(&mut batch, &tx);
         }
 
         // Test-only probe (issue #1143 regression guard): record the thread that
