@@ -63,7 +63,7 @@
 
 #![cfg(feature = "write-support")]
 
-use cqlite_core::schema::{Column, ClusteringColumn, ClusteringOrder, KeyColumn, TableSchema};
+use cqlite_core::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema};
 use cqlite_core::storage::sstable::writer::{SSTableFormat, SSTableWriter};
 use cqlite_core::storage::write_engine::mutation::{
     CellOperation, ClusteringKey, DecoratedKey, Mutation, PartitionKey, TableId,
@@ -145,11 +145,7 @@ async fn cqlite_write(schema: &TableSchema, mutations: Vec<Mutation>) -> (TempDi
         writer.write_partition(k, ms).expect("write_partition");
     }
     let info = writer.finish().await.expect("finish");
-    let table_dir = info
-        .data_path
-        .parent()
-        .expect("data parent")
-        .to_path_buf();
+    let table_dir = info.data_path.parent().expect("data parent").to_path_buf();
     (dir, table_dir)
 }
 
@@ -351,7 +347,15 @@ async fn assert_byte_parity(
         !ref_components.is_empty(),
         "{table}: reference component set is empty (broken fixture)"
     );
-    for needed in ["Data.db", "Index.db", "Summary.db", "Digest.crc32", "Statistics.db", "Filter.db", "TOC.txt"] {
+    for needed in [
+        "Data.db",
+        "Index.db",
+        "Summary.db",
+        "Digest.crc32",
+        "Statistics.db",
+        "Filter.db",
+        "TOC.txt",
+    ] {
         assert!(
             ref_components.contains(needed),
             "{table}: reference missing required component {needed}; have {ref_components:?}"
