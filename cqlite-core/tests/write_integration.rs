@@ -1497,12 +1497,36 @@ async fn test_flush_throughput() -> Result<()> {
         mb_per_sec, info.data_size, elapsed
     );
 
-    // Target: 5 MB/sec (conservative for CI, accounts for index/statistics overhead)
-    assert!(
-        mb_per_sec >= 5.0,
-        "Flush throughput {:.1} MB/sec below target of 5 MB/sec",
-        mb_per_sec
+    // Behavioral correctness (issue #1188, mirrors #1149 -> PR #1168): replace the
+    // load-flaky `mb_per_sec >= 5.0` wall-clock assert with a deterministic check
+    // that the flush produced a valid SSTable holding all 1000 rows.
+    assert_eq!(
+        info.partition_count, 1_000,
+        "flush should persist all 1000 partitions, got {}",
+        info.partition_count
     );
+    assert!(
+        info.data_size > 0,
+        "flush should write a non-empty Data.db, got {} bytes",
+        info.data_size
+    );
+    assert!(
+        info.data_path.exists(),
+        "flushed Data.db should exist on disk at {:?}",
+        info.data_path
+    );
+
+    // Optional throughput floor — opt-in only via RUN_PERF_TESTS=1, so it never
+    // runs in `scripts/agent-gate.sh` core-tests and cannot false-RED the gate
+    // under load. Run `RUN_PERF_TESTS=1 cargo test ... test_flush_throughput` to
+    // exercise it on an idle host.
+    if std::env::var("RUN_PERF_TESTS").as_deref() == Ok("1") {
+        assert!(
+            mb_per_sec >= 5.0,
+            "Flush throughput {:.1} MB/sec below target of 5 MB/sec",
+            mb_per_sec
+        );
+    }
 
     Ok(())
 }
