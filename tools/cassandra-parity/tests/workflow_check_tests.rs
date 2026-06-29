@@ -951,3 +951,107 @@ fn real_sstabledump_parity_gate_aggregator_credits_its_tests() {
          continue-on-error parity tests, got: {findings:#?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #1228 roborev finding A: the aggregator step's OWN `if:` must be gate-eligible.
+// A `negative-success` aggregator only credits its continue-on-error test when the
+// aggregator can actually RUN — `always() && …` and no-`if:` run; `false && …`
+// (static-false / unprovable) does NOT.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn always_aggregator_if_credits_continue_on_error_test() {
+    // Matches the real sstabledump-parity-gate.yml form:
+    // `if: always() && (steps.parity.outcome != 'success')`.
+    let wf = ce_with_aggregator("always() && steps.parity.outcome != 'success'");
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        &wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings.is_empty(),
+        "an `always() &&` aggregator must still credit its test, got: {findings:#?}"
+    );
+}
+
+#[test]
+fn false_and_aggregator_if_does_not_credit_continue_on_error_test() {
+    // A static-false-prefixed aggregator (`if: false && …`) never runs, so it
+    // cannot convert the continue-on-error test's failure into a build failure —
+    // the scenario stays overstated.
+    let wf = ce_with_aggregator("false && steps.parity.outcome != 'success'");
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        &wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.message.contains("continue-on-error")),
+        "an `if: false && …` aggregator must NOT credit its test, got: {findings:#?}"
+    );
+}
+
+#[test]
+fn no_if_aggregator_with_body_negative_check_credits_continue_on_error_test() {
+    // A no-`if:` aggregator (always runs) whose RUN BODY branches on the recorded
+    // outcome and `exit 1`s on non-success still converts a failure into a build
+    // failure, so the continue-on-error test is credited (issue #1228 finding A,
+    // third TDD case).
+    let wf = "jobs:\n  parity:\n    env:\n      CQLITE_REQUIRE_FIXTURES: '1'\n    steps:\n      - id: parity\n        continue-on-error: true\n        run: cargo test --test issue_997_compressioninfo_parity\n      - name: Fail build on parity differences\n        run: |\n          echo \"parity outcome guard: ${{ steps.parity.outcome != 'success' }}\"\n          exit 1";
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings.is_empty(),
+        "a no-`if:` aggregator with a body negative-success check must credit its test, got: {findings:#?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #1228 roborev finding B: a JVM-harness gradle test task must run UNRESTRICTED.
+// A test-selection / task-exclusion flag that could skip the mapped harness must
+// NOT credit it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn gradle_unrestricted_harness_task_counts() {
+    // The real compaction-parity.yml invocations carry only `--no-daemon`.
+    assert!(command_runs_gradle("gradle test"));
+    assert!(command_runs_gradle("./gradlew byteParity"));
+    assert!(command_runs_gradle("gradle --no-daemon test"));
+    assert!(command_runs_gradle("gradle --no-daemon byteParity"));
+}
+
+#[test]
+fn gradle_test_selection_or_exclusion_flag_does_not_count() {
+    // A JUnit class/method selector restricts the run to OTHER tests.
+    assert!(!command_runs_gradle("gradle test --tests OtherTest"));
+    assert!(!command_runs_gradle("gradle test --test OtherTest"));
+    assert!(!command_runs_gradle("gradle test --tests=OtherTest"));
+    // Excluding the very task we credited skips the harness.
+    assert!(!command_runs_gradle("gradle test -x test"));
+    assert!(!command_runs_gradle("gradle test --exclude-task test"));
+    assert!(!command_runs_gradle("gradle test --exclude-task=test"));
+    assert!(!command_runs_gradle("gradle test -xtest"));
+    // A `-Dtest=` style system-property filter restricts the test set.
+    assert!(!command_runs_gradle("gradle test -Dtest=Other"));
+    assert!(!command_runs_gradle("gradle test -Dtest.single=Other"));
+}
+
+#[test]
+fn gradle_exclude_of_unrelated_task_still_counts() {
+    // Excluding a DIFFERENT task (not an accepted harness task) does not skip the
+    // harness, so a named harness task still runs unrestricted and counts.
+    assert!(command_runs_gradle("gradle test -x check"));
+    assert!(command_runs_gradle(
+        "gradle test --exclude-task spotlessCheck"
+    ));
+}

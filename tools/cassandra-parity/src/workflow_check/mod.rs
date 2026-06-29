@@ -113,6 +113,11 @@ struct StepYaml {
 ///     `${{ true }}`)                     → [`StepGate::Eligible`].
 ///   - STATICALLY-false `if:` (`false`,
 ///     `${{ false }}`)                    → [`StepGate::Disabled`] (never runs).
+///   - `always()` / `always() && <cond>`
+///     (the canonical fail-build aggregator
+///     form)                              → [`StepGate::Eligible`]: `always()`
+///     forces the step to run in the gate context, so an `exit 1` aggregator
+///     guarded this way genuinely fails the build on a non-success outcome.
 ///   - any OTHER (non-trivial / unprovable)
 ///     `if:`                             → [`StepGate::Unprovable`] — we cannot
 ///     prove it runs in the gate context, so we do NOT credit it for a
@@ -150,16 +155,51 @@ fn normalize_if(cond: &str) -> String {
     inner.to_string()
 }
 
+/// Classify a normalized `if:` expression per [`StepGate`].
+///
+/// Beyond the static `true` / `false` literals, we recognize the
+/// `always()`-prefixed aggregator form the real parity gates use
+/// (`always() && (steps.<id>.outcome != 'success' || …)`): `always()` forces the
+/// step to execute regardless of prior failures, so an aggregator guarded this
+/// way GENUINELY runs in the gate context and can convert a non-success outcome
+/// into a build failure. We treat a leading `always() &&` as eligible (the rest
+/// of the condition is a per-run outcome predicate we cannot statically evaluate,
+/// but `always()` guarantees the step is not skipped). A bare `always()` (no
+/// trailing `&&`) is likewise eligible. A leading `false &&` (or any static-false)
+/// is [`StepGate::Disabled`]; everything else stays [`StepGate::Unprovable`]
+/// (no-overclaim default) — issue #1228 roborev finding A.
+fn classify_if(cond: &str) -> StepGate {
+    let norm = normalize_if(cond);
+    match norm.as_str() {
+        "true" => return StepGate::Eligible,
+        "false" => return StepGate::Disabled,
+        _ => {}
+    }
+    // A leading `false &&` short-circuits to never-run, regardless of the rest.
+    if let Some(rest) = norm.strip_prefix("false") {
+        if rest.trim_start().starts_with("&&") {
+            return StepGate::Disabled;
+        }
+    }
+    // A leading `always()` (alone, or as `always() && <outcome-predicate>`) forces
+    // the step to run in the gate context — the canonical fail-build aggregator
+    // form. Match `always()` as a whole leading token followed by end-of-string or
+    // a `&&` conjunction.
+    if let Some(rest) = norm.strip_prefix("always()") {
+        let rest = rest.trim_start();
+        if rest.is_empty() || rest.starts_with("&&") {
+            return StepGate::Eligible;
+        }
+    }
+    StepGate::Unprovable
+}
+
 impl StepYaml {
-    /// Classify this step's `if:` per [`StepGate`] (issue #1228 finding B).
+    /// Classify this step's `if:` per [`StepGate`] (issue #1228 finding A/B).
     fn gate(&self) -> StepGate {
         match &self.condition {
             None => StepGate::Eligible,
-            Some(cond) => match normalize_if(cond).as_str() {
-                "true" => StepGate::Eligible,
-                "false" => StepGate::Disabled,
-                _ => StepGate::Unprovable,
-            },
+            Some(cond) => classify_if(cond),
         }
     }
 
@@ -231,7 +271,7 @@ fn aggregator_guarded_ids(job: &JobYaml) -> std::collections::HashSet<String> {
     let mut guarded = std::collections::HashSet::new();
     for step in &job.steps {
         // An aggregator is a BLOCKING step (not continue-on-error) whose body
-        // can fail the build and whose `if:` gates on some step outcome.
+        // can fail the build and whose `if:`/body gates on some step outcome.
         if step.is_continue_on_error() {
             continue;
         }
@@ -239,18 +279,31 @@ fn aggregator_guarded_ids(job: &JobYaml) -> std::collections::HashSet<String> {
         if !command_fails_build(run) {
             continue;
         }
-        let Some(cond) = &step.condition else {
+        // Issue #1228 roborev finding A: the aggregator step's OWN gate must be
+        // eligible, or it never runs and cannot convert a recorded failure into a
+        // build failure. Reuse the [`StepGate`] classifier: no-`if:`, static-true,
+        // or an `always()`-style `if:` is eligible (the real
+        // `if: always() && (steps.<id>.outcome != 'success' || …)` form runs
+        // unconditionally); a static-false (`if: false && …`) or otherwise
+        // unprovable aggregator `if:` must NOT credit the guarded step.
+        if !matches!(step.gate(), StepGate::Eligible) {
             continue;
-        };
+        }
         // Issue #1228 roborev finding B: only an id whose outcome/conclusion is
         // PROVEN to fail the build on a non-success result guards a
         // continue-on-error test. A bare reference, or a POSITIVE
         // `steps.<id>.outcome == 'success'` check (as in the "Comment on PR
         // (Success)" step), does NOT make the non-blocking test build-blocking —
         // failures still pass that condition. We therefore credit only ids that
-        // appear in an explicit NEGATIVE check (`!= 'success'`) in the aggregator
-        // condition.
-        for id in extract_negatively_guarded_ids(cond) {
+        // appear in an explicit NEGATIVE check (`!= 'success'`). The check may live
+        // in the aggregator's `if:` condition (the real-gate form) OR in its run
+        // body (a no-`if:` aggregator that branches on the outcome and `exit 1`s).
+        if let Some(cond) = &step.condition {
+            for id in extract_negatively_guarded_ids(cond) {
+                guarded.insert(id);
+            }
+        }
+        for id in extract_negatively_guarded_ids(run) {
             guarded.insert(id);
         }
     }

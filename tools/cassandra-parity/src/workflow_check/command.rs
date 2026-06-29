@@ -270,9 +270,15 @@ const GRADLE_HARNESS_TEST_TASKS: &[&str] = &["test", "byteParity"];
 /// **executable** (the command head, possibly after `env VAR=val` / `sudo`
 /// prefixes — not merely the substring `gradle` in an argument or comment) AND
 /// names a known harness test task ([`GRADLE_HARNESS_TEST_TASKS`]) as a whole
-/// argument token. Requiring the task token prevents a non-test invocation
-/// (`gradle --version`, `gradle assemble`) from being credited with running the
-/// mapped Java test.
+/// argument token, AND that task runs UNRESTRICTED (no selector/exclusion flag
+/// that could skip the mapped harness — issue #1228 roborev finding B).
+///
+/// Requiring the task token prevents a non-test invocation (`gradle --version`,
+/// `gradle assemble`) from being credited. Requiring it UNRESTRICTED prevents a
+/// `gradle test --tests OtherTest` / `gradle test -x test` / `gradle test
+/// -Dtest=Other` from claiming to run the mapped harness when it would in fact
+/// skip it. The accepted real invocations (`gradle --no-daemon test`,
+/// `gradle --no-daemon byteParity`) carry no such flag and still count.
 fn logical_runs_gradle(logical: &str) -> bool {
     let mut toks = logical.split_whitespace().peekable();
     // Skip leading command prefixes that precede the real executable.
@@ -293,11 +299,84 @@ fn logical_runs_gradle(logical: &str) -> bool {
     if !is_gradle_head {
         return false;
     }
-    // The remaining whitespace tokens are the gradle args (flags + tasks). At
-    // least one must be a recognized harness test task as a whole token; a flag
-    // like `--no-daemon` is skipped, and a substring match (`byteParityFoo`)
+    // The remaining whitespace tokens are the gradle args (flags + tasks).
+    let args: Vec<&str> = toks.collect();
+    // At least one arg must be a recognized harness test task as a whole token; a
+    // flag like `--no-daemon` is skipped, and a substring match (`byteParityFoo`)
     // does not count because we compare whole tokens.
-    toks.any(|tok| GRADLE_HARNESS_TEST_TASKS.contains(&tok))
+    let names_harness_task = args
+        .iter()
+        .any(|tok| GRADLE_HARNESS_TEST_TASKS.contains(tok));
+    if !names_harness_task {
+        return false;
+    }
+    // Reject any test-selection / task-exclusion flag that could skip the mapped
+    // harness even though an accepted task is named.
+    if gradle_args_restrict_harness(&args) {
+        return false;
+    }
+    true
+}
+
+/// True if `args` (the gradle invocation's args, with the `gradle`/`gradlew` head
+/// already stripped) carry a test-selection or task-exclusion flag that could
+/// skip the mapped JVM harness — so a named harness task is NOT run unrestricted
+/// (issue #1228 roborev finding B).
+///
+/// REJECTED flags (whole-token match unless noted):
+///   - `--tests` / `--test`            — JUnit test-class/method selector
+///     (`gradle test --tests OtherTest` runs only the named class).
+///   - `-x <task>` / `--exclude-task <task>` where `<task>` is an accepted
+///     harness task — explicitly excludes the very task we credited
+///     (`gradle test -x test`).
+///   - `-Dtest=…` / `--tests=…` / `-Dtest.single=…` — a `-D` system-property or
+///     `=`-glued selector that filters the test set (prefix match because the
+///     value is glued: `-Dtest=Other`).
+///
+/// We deliberately do NOT derive the mapped Java class name (that would be a
+/// fragile heuristic, per the no-heuristics mandate); we only reject invocations
+/// whose flags PROVE the run is restricted. A plain `gradle --no-daemon test`
+/// carries none of these and is accepted.
+fn gradle_args_restrict_harness(args: &[&str]) -> bool {
+    let mut i = 0;
+    while i < args.len() {
+        let tok = args[i];
+        // Whole-token JUnit selectors that take a following value.
+        if tok == "--tests" || tok == "--test" {
+            return true;
+        }
+        // `-x <task>` / `--exclude-task <task>` excluding an accepted harness task.
+        if tok == "-x" || tok == "--exclude-task" {
+            if let Some(next) = args.get(i + 1) {
+                if GRADLE_HARNESS_TEST_TASKS.contains(next) {
+                    return true;
+                }
+            }
+            // Skip the value token so it is not mistaken for a task name.
+            i += 2;
+            continue;
+        }
+        // Glued forms: `-xtest`, `--exclude-task=test`.
+        if let Some(task) = tok
+            .strip_prefix("--exclude-task=")
+            .or_else(|| tok.strip_prefix("-x"))
+            .filter(|_| tok != "-x")
+        {
+            if GRADLE_HARNESS_TEST_TASKS.contains(&task) {
+                return true;
+            }
+        }
+        // `=`-glued / `-D` selectors that filter the test set.
+        if tok.starts_with("--tests=")
+            || tok.starts_with("--test=")
+            || tok.starts_with("-Dtest=")
+            || tok.starts_with("-Dtest.single=")
+        {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// True if any executable line in `command` invokes `gradle`.
