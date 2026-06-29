@@ -228,9 +228,22 @@ fn canonicalize_tuple(value: &Value, components: &[String]) -> Result<Value> {
             )))
         }
     };
+    // Reject arity mismatch (no-heuristics, issue #28): a tuple value with fewer
+    // elements than the declared TupleType would omit trailing components (and
+    // never write their `-1` absent markers); more elements would emit field
+    // bytes with no matching declared component type → malformed wire bytes for a
+    // UDT-bearing frozen tuple column. The typed tuple serializer
+    // (serialization/types.rs `serialize_tuple`) rejects the same mismatch, so we
+    // reject here too rather than pad/truncate.
+    if fields.len() != components.len() {
+        return Err(Error::InvalidInput(format!(
+            "tuple field count mismatch for a TupleType: expected {}, got {}",
+            components.len(),
+            fields.len()
+        )));
+    }
     let mut out = Vec::with_capacity(fields.len());
-    for (i, f) in fields.iter().enumerate() {
-        let comp = components.get(i).map(String::as_str).unwrap_or("");
+    for (f, comp) in fields.iter().zip(components.iter()) {
         out.push(canonicalize_value_for_marshal(comp, f)?);
     }
     Ok(Value::Tuple(out))
@@ -488,6 +501,97 @@ mod tests {
         let blob = Value::Blob(vec![0, 0, 0, 1, 0, 0, 0, 3, 65, 100, 97]);
         let canon = canonicalize_udt_value(&list_marshal, &blob).unwrap();
         assert_eq!(canon, blob, "opaque blob must be byte-identical");
+    }
+
+    #[test]
+    fn tuple_wrong_arity_is_rejected() {
+        // A frozen<tuple<int, text>> declared as a 2-component TupleType. A value
+        // with 1 element (missing) and a value with 3 elements (extra) must BOTH
+        // error rather than silently truncating/padding to malformed wire bytes.
+        let tuple_marshal = format!(
+            "{p}FrozenType({p}TupleType({p}Int32Type,{p}UTF8Type))",
+            p = MARSHAL_PREFIX
+        );
+
+        let too_few = Value::Frozen(Box::new(Value::Tuple(vec![Value::Integer(7)])));
+        let err = canonicalize_udt_value(&tuple_marshal, &too_few);
+        // Fast path: a primitive-only tuple has no `UserType(` marker, so
+        // canonicalize_udt_value short-circuits and returns Ok unchanged. Drive
+        // the marshal recursion directly to exercise the arity guard.
+        let _ = err;
+        let components = vec![
+            format!("{MARSHAL_PREFIX}Int32Type"),
+            format!("{MARSHAL_PREFIX}UTF8Type"),
+        ];
+        let too_few_inner = Value::Tuple(vec![Value::Integer(7)]);
+        let msg = format!(
+            "{}",
+            canonicalize_tuple(&too_few_inner, &components).unwrap_err()
+        );
+        assert!(
+            msg.contains("expected 2, got 1") && msg.contains("mismatch"),
+            "unexpected error: {msg}"
+        );
+
+        let too_many_inner = Value::Tuple(vec![
+            Value::Integer(7),
+            Value::Text("x".into()),
+            Value::Text("extra".into()),
+        ]);
+        let msg = format!(
+            "{}",
+            canonicalize_tuple(&too_many_inner, &components).unwrap_err()
+        );
+        assert!(
+            msg.contains("expected 2, got 3") && msg.contains("mismatch"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn udt_bearing_frozen_tuple_correct_arity_canonicalizes() {
+        // A frozen<tuple<int, frozen<person>>>: the nested UDT component (2nd
+        // element) must be reordered to declared order, and the correct-arity
+        // tuple canonicalizes without error.
+        let tuple_marshal = format!(
+            "{p}FrozenType({p}TupleType({p}Int32Type,{p}UserType({KS},706572736f6e,\
+             66697273745f6e616d65:{p}UTF8Type,6c6173745f6e616d65:{p}UTF8Type,616765:{p}Int32Type)))",
+            p = MARSHAL_PREFIX
+        );
+        let person = Value::Udt(UdtValue {
+            type_name: "person".into(),
+            keyspace: KS.into(),
+            // out-of-order fields
+            fields: vec![
+                UdtField {
+                    name: "age".into(),
+                    value: Some(Value::Integer(28)),
+                },
+                UdtField {
+                    name: "first_name".into(),
+                    value: Some(Value::Text("Grace".into())),
+                },
+            ],
+        });
+        let v = Value::Frozen(Box::new(Value::Tuple(vec![Value::Integer(1), person])));
+        let canon = canonicalize_udt_value(&tuple_marshal, &v).unwrap();
+        let Value::Frozen(inner) = &canon else {
+            panic!("expected frozen tuple");
+        };
+        let Value::Tuple(items) = inner.as_ref() else {
+            panic!("expected tuple");
+        };
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0], Value::Integer(1));
+        let order = declared_order(&items[1]);
+        assert_eq!(
+            order,
+            vec![
+                ("first_name".into(), Some(Value::Text("Grace".into()))),
+                ("last_name".into(), None),
+                ("age".into(), Some(Value::Integer(28))),
+            ]
+        );
     }
 
     #[test]
