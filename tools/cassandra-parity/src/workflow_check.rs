@@ -81,11 +81,70 @@ pub fn is_java_test(path: &str) -> bool {
 /// panic-on-missing-fixtures.
 const FAIL_CLOSED_FLAGS: &[&str] = &["CQLITE_REQUIRE_FIXTURES", "CQLITE_PARITY_REQUIRE_DATASETS"];
 
-/// True if `text` mentions at least one fail-closed flag. Used against the
-/// effective env scope of a step (step + job + workflow `env` plus any inline
-/// `env FOO=1` / `FOO=1 cargo` in the step's own command).
+/// Truthy rule for a fail-closed flag VALUE (issue #1228, roborev follow-up).
+///
+/// Merely DECLARING a fail-closed flag is not enough — `CQLITE_REQUIRE_FIXTURES=0`
+/// (or `""`, or `false`) leaves the lane able to skip-clean, so it must NOT count
+/// as fail-closed. We accept only an explicitly-enabling value:
+///   truthy  ⇔ (case-insensitive) one of `1`, `true`, `yes`, `on`
+/// and reject everything else (notably `0`, ``, `false`, `no`, `off`). Surrounding
+/// quotes/whitespace are stripped first so YAML `'1'` / `"true"` are honored. This
+/// matches the conventional shell/CI boolean convention and is conservative: an
+/// unrecognized value is treated as NOT fail-closed (no-overclaim default).
+fn is_truthy_value(raw: &str) -> bool {
+    let v = raw.trim().trim_matches(['\'', '"']).trim();
+    matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+}
+
+/// True if `text` mentions at least one fail-closed flag SET TO A TRUTHY VALUE.
+/// Used against the effective env scope of a step's own command, recognizing both
+/// inline shell assignments (`CQLITE_REQUIRE_FIXTURES=1 cargo`, `env FOO=1 cargo`)
+/// and YAML-style `KEY: value` lines that may appear in folded text. A flag
+/// declared but disabled (`=0`, empty, `false`) does NOT count.
 pub fn workflow_is_fail_closed(text: &str) -> bool {
-    FAIL_CLOSED_FLAGS.iter().any(|f| text.contains(f))
+    FAIL_CLOSED_FLAGS
+        .iter()
+        .any(|flag| flag_set_truthy_in_text(text, flag))
+}
+
+/// True if `flag` appears in `text` with an assignment separator (`=` for a
+/// shell inline `FOO=val`, `:` for a YAML `FOO: val`) and a TRUTHY value, at ANY
+/// occurrence. We scan every occurrence so a later truthy assignment is honored
+/// even if an earlier (or substring-only) one is not.
+fn flag_set_truthy_in_text(text: &str, flag: &str) -> bool {
+    let mut search_from = 0;
+    while let Some(rel) = text[search_from..].find(flag) {
+        let pos = search_from + rel;
+        let after = &text[pos + flag.len()..];
+        // The character immediately after the flag name must be an assignment
+        // separator (`=` for shell, `:` for YAML) — guards against a substring
+        // match like `CQLITE_REQUIRE_FIXTURES_LOG`.
+        let sep = after.chars().next();
+        if matches!(sep, Some('=') | Some(':')) {
+            // Slice the value to end-of-line, then let `is_truthy_value` strip
+            // quotes/whitespace.
+            let value_part = &after[1..];
+            let line_end = value_part.find('\n').unwrap_or(value_part.len());
+            let value = &value_part[..line_end];
+            // For an inline shell `FOO=val cmd`, the value ends at the first
+            // whitespace (and may be empty: `FOO= cmd`); for YAML `FOO: val` we
+            // keep the whole (trimmed) line.
+            let value = if sep == Some('=') {
+                let end = value.find(char::is_whitespace).unwrap_or(value.len());
+                &value[..end]
+            } else {
+                value
+            };
+            if is_truthy_value(value) {
+                return true;
+            }
+        }
+        search_from = pos + flag.len();
+        if search_from >= text.len() {
+            break;
+        }
+    }
+    false
 }
 
 /// Strip a shell line of trailing comments so a commented-out token (e.g.
@@ -261,9 +320,25 @@ impl StepYaml {
     }
 }
 
-/// Whether an env map contains a fail-closed flag.
+/// Whether an env map sets a fail-closed flag to a TRUTHY value. A flag declared
+/// but set to `0`/empty/`false` (etc.) does NOT count — the lane can still
+/// skip-clean (issue #1228, roborev follow-up). The YAML value may be a string
+/// (`'1'`, `"true"`), a bool (`true`), or an integer (`1`); all are normalized to
+/// text and run through [`is_truthy_value`].
 fn env_is_fail_closed(env: &BTreeMap<String, serde_yaml::Value>) -> bool {
-    env.keys().any(|k| FAIL_CLOSED_FLAGS.contains(&k.as_str()))
+    env.iter()
+        .any(|(k, v)| FAIL_CLOSED_FLAGS.contains(&k.as_str()) && yaml_value_is_truthy(v))
+}
+
+/// Normalize a YAML env value to text and apply the [`is_truthy_value`] rule.
+fn yaml_value_is_truthy(v: &serde_yaml::Value) -> bool {
+    match v {
+        serde_yaml::Value::Bool(b) => *b,
+        serde_yaml::Value::String(s) => is_truthy_value(s),
+        serde_yaml::Value::Number(n) => is_truthy_value(&n.to_string()),
+        // Null / sequence / mapping are not meaningful enabling values.
+        _ => false,
+    }
 }
 
 /// A flattened, evaluated view of a single `run:` step with the context needed

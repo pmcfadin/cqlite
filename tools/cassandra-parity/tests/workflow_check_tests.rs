@@ -46,6 +46,126 @@ fn fail_closed_flag_detection() {
 }
 
 #[test]
+fn inline_fail_closed_requires_truthy_value() {
+    // A truthy inline assignment counts...
+    assert!(workflow_is_fail_closed(
+        "CQLITE_REQUIRE_FIXTURES=1 cargo test --test foo"
+    ));
+    assert!(workflow_is_fail_closed(
+        "env CQLITE_REQUIRE_FIXTURES=true cargo test"
+    ));
+    assert!(workflow_is_fail_closed(
+        "CQLITE_PARITY_REQUIRE_DATASETS=yes cargo test"
+    ));
+    // ...but a falsey / disabled / empty value MUST NOT count as fail-closed.
+    assert!(!workflow_is_fail_closed(
+        "CQLITE_REQUIRE_FIXTURES=0 cargo test --test foo"
+    ));
+    assert!(!workflow_is_fail_closed(
+        "env CQLITE_REQUIRE_FIXTURES=false cargo test"
+    ));
+    assert!(!workflow_is_fail_closed(
+        "CQLITE_REQUIRE_FIXTURES=no cargo test"
+    ));
+    assert!(!workflow_is_fail_closed(
+        "CQLITE_REQUIRE_FIXTURES= cargo test"
+    ));
+}
+
+#[test]
+fn yaml_inline_fail_closed_requires_truthy_value() {
+    // YAML `KEY: value` lines that appear in a folded `run:` block / env text.
+    assert!(workflow_is_fail_closed(
+        "CQLITE_PARITY_REQUIRE_DATASETS: '1'"
+    ));
+    assert!(workflow_is_fail_closed("CQLITE_REQUIRE_FIXTURES: true"));
+    assert!(!workflow_is_fail_closed("CQLITE_REQUIRE_FIXTURES: '0'"));
+    assert!(!workflow_is_fail_closed("CQLITE_REQUIRE_FIXTURES: \"\""));
+    assert!(!workflow_is_fail_closed("CQLITE_REQUIRE_FIXTURES: false"));
+}
+
+#[test]
+fn fail_closed_env_map_value_zero_does_not_count() {
+    // A workflow-level env that DECLARES the flag but sets it to "0" must NOT be
+    // treated as fail-closed: the lane can still skip-clean.
+    let zero_wf = "env:\n  CQLITE_REQUIRE_FIXTURES: '0'\njobs:\n  parity:\n    steps:\n      - run: cargo test --test issue_997_compressioninfo_parity";
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        zero_wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings.iter().any(|f| f.message.contains("fail-closed")),
+        "expected a fail-closed finding for CQLITE_REQUIRE_FIXTURES=0, got: {findings:#?}"
+    );
+}
+
+#[test]
+fn fail_closed_env_map_empty_value_does_not_count() {
+    // An empty value is not fail-closed either.
+    let empty_wf = "jobs:\n  parity:\n    env:\n      CQLITE_REQUIRE_FIXTURES: ''\n    steps:\n      - run: cargo test --test issue_997_compressioninfo_parity";
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        empty_wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings.iter().any(|f| f.message.contains("fail-closed")),
+        "expected a fail-closed finding for empty CQLITE_REQUIRE_FIXTURES, got: {findings:#?}"
+    );
+}
+
+#[test]
+fn fail_closed_env_map_false_value_does_not_count() {
+    let false_wf = "jobs:\n  parity:\n    steps:\n      - run: cargo test --test issue_997_compressioninfo_parity\n        env:\n          CQLITE_REQUIRE_FIXTURES: 'false'";
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        false_wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings.iter().any(|f| f.message.contains("fail-closed")),
+        "expected a fail-closed finding for false CQLITE_REQUIRE_FIXTURES, got: {findings:#?}"
+    );
+}
+
+#[test]
+fn fail_closed_env_map_truthy_value_counts() {
+    // A bool-typed `true` (not a quoted string) must still count.
+    let true_wf = "env:\n  CQLITE_REQUIRE_FIXTURES: true\njobs:\n  parity:\n    steps:\n      - run: cargo test --test issue_997_compressioninfo_parity";
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        true_wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings.is_empty(),
+        "expected clean for CQLITE_REQUIRE_FIXTURES: true, got: {findings:#?}"
+    );
+}
+
+#[test]
+fn inline_fail_closed_zero_in_step_command_does_not_count() {
+    // `CQLITE_REQUIRE_FIXTURES=0 cargo test --test foo` inline on the run line
+    // must NOT satisfy fail-closed.
+    let inline_zero_wf = "jobs:\n  parity:\n    steps:\n      - run: CQLITE_REQUIRE_FIXTURES=0 cargo test --test issue_997_compressioninfo_parity";
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        inline_zero_wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings.iter().any(|f| f.message.contains("fail-closed")),
+        "expected a fail-closed finding for inline =0, got: {findings:#?}"
+    );
+}
+
+#[test]
 fn command_runs_test_matches_whole_token_across_line_continuations() {
     let cmd = "          cargo test -p cqlite-core \\\n            --test issue_997_compressioninfo_parity \\\n            --test issue_998_inline_crc_trailers";
     assert!(command_runs_test(cmd, "issue_997_compressioninfo_parity"));
