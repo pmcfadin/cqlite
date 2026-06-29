@@ -35,6 +35,8 @@ pub mod merge_policy;
 #[cfg(feature = "write-support")]
 pub mod mutation;
 #[cfg(feature = "write-support")]
+pub(crate) mod reconcile_rules;
+#[cfg(feature = "write-support")]
 pub mod wal;
 
 #[cfg(feature = "write-support")]

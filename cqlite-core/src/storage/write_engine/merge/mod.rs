@@ -59,6 +59,8 @@ use crate::schema::TableSchema;
 #[cfg(feature = "write-support")]
 use crate::storage::write_engine::mutation::{ClusteringKey, DecoratedKey, RangeTombstone};
 #[cfg(feature = "write-support")]
+use crate::storage::write_engine::reconcile_rules;
+#[cfg(feature = "write-support")]
 use crate::types::Value;
 
 #[cfg(feature = "write-support")]
@@ -78,6 +80,22 @@ pub use model::{CellData, ComplexDeletion, MergeEntry, MergeStats, MergeStep, Ro
 /// (issue #945). See [`reconcile::ReconcileState`].
 #[cfg(feature = "write-support")]
 mod reconcile;
+
+/// Adapt a merge-path [`CellData`] into the shared [`ReconcileCell`] view
+/// (issue #947) so per-cell winner resolution calls
+/// [`reconcile_rules::cell_wins`] — the one shared `Cells#reconcile` tie-break —
+/// instead of a hand-synced copy. How a tombstone is RECOGNIZED stays here
+/// (`Value::Tombstone` payload / IS_DELETED via [`KWayMerger::is_cell_tombstone`]),
+/// since that is genuinely type-specific.
+#[cfg(feature = "write-support")]
+impl reconcile_rules::ReconcileCell for CellData {
+    fn timestamp(&self) -> i64 {
+        self.timestamp
+    }
+    fn is_tombstone(&self) -> bool {
+        KWayMerger::is_cell_tombstone(self)
+    }
+}
 
 /// A cut position on the clustering axis, used to coalesce range tombstones
 /// into a NON-OVERLAPPING canonical sequence (issue #933 / roborev #959 High
@@ -3020,35 +3038,6 @@ impl KWayMerger {
             // future element representation that sets the flag without the wrapped
             // value still counts as a deletion for the tie-break.
             || cell.is_deleted
-    }
-
-    /// Per-cell winner resolution mirroring Cassandra `Cells#reconcile`
-    /// (parity commit `a62c749`): returns `true` when `candidate` should replace
-    /// the current `existing` winner.
-    ///
-    /// Ordering (decided IN THIS ORDER, short-circuiting):
-    /// 1. **timestamp** — a strictly higher write timestamp always wins.
-    /// 2. **deletion vs live/expiring at EQUAL timestamp** — a cell DELETION
-    ///    (tombstone) beats a LIVE or EXPIRING (TTL) cell. This is decided
-    ///    *before* any `localDeletionTime` comparison, so an expiring cell can
-    ///    never resurrect data over a same-timestamp tombstone just because its
-    ///    TTL expiry instant is later (issue #848 / #498). `is_cell_tombstone`
-    ///    treats an expiring cell as LIVE (it carries a real value + a TTL, not a
-    ///    `CellTombstone`), so this single rule subsumes both
-    ///    tombstone-beats-live and tombstone-beats-expiring.
-    /// 3. **equal timestamp + equal liveness** — keep the first-seen (newer file)
-    ///    winner. `reconcile_cluster` only calls this for a later-seen candidate,
-    ///    so returning `false` preserves first-seen order deterministically.
-    ///    `localDeletionTime` is intentionally NOT a discriminator here: at equal
-    ///    ts + equal deletion-status the cells are equivalent and first-seen order
-    ///    is the stable choice.
-    fn cell_reconcile_replace(candidate: &CellData, existing: &CellData) -> bool {
-        if candidate.timestamp != existing.timestamp {
-            return candidate.timestamp > existing.timestamp;
-        }
-        // Equal timestamp: deletion wins over a live/expiring cell, BEFORE any
-        // localDeletionTime compare (parity `a62c749`).
-        Self::is_cell_tombstone(candidate) && !Self::is_cell_tombstone(existing)
     }
 
     /// Reconcile all entries for a single clustering-key group into at most one
