@@ -83,11 +83,28 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// Bound on the raw-compressed-chunk channel feeding the blocking parse task.
-/// Small: the parse half consumes chunks roughly as fast as the I/O half
-/// produces them, so a tiny buffer absorbs scheduling jitter without unbounding
-/// heap. Combined with the sliding window this keeps live heap at
-/// `max_partition_size + (RAW_CHUNK_CHANNEL_CAP + 1) * one_chunk`.
-const RAW_CHUNK_CHANNEL_CAP: usize = 2;
+///
+/// This is the I/O-half → parse-half hand-off depth. It must stay small enough
+/// to bound live heap (combined with the sliding window: live heap is
+/// `max_partition_size + (RAW_CHUNK_CHANNEL_CAP + 1) * one_chunk`), but a value
+/// of 2 (PR #1156's original) makes the two halves ping-pong: the I/O half fills
+/// the channel, parks on `raw_tx.send().await`, and is unparked again after the
+/// parse half drains essentially every chunk. Under concurrent write load (issue
+/// #1143, `mixed.read_while_write` conc=8) samply showed ~42% of read wall time
+/// parked on futexes, dominated by this channel's park/unpark, roughly doubling
+/// read p99 vs the pre-windowing baseline.
+///
+/// Raising the depth to 8 lets the I/O half read ahead up to 8 compressed chunks
+/// before it has to park, amortizing the wake round-trips ~4x while preserving
+/// the bounded-heap intent of PR #1156. The chunks are RAW COMPRESSED data
+/// (~`one_chunk` = the SSTable's compression chunk length, typically 16–64 KiB),
+/// so the added buffer is at most `(8 - 2) * one_chunk` ≈ 384 KiB per scan at
+/// 64 KiB chunks. At the issue #1143 concurrency of 8 readers that is < 3 MiB of
+/// channel buffers total — negligible against the < 128 MiB budget, and far
+/// smaller than the O(file) stitch buffer PR #1156 eliminated. Backpressure is
+/// unchanged: a full channel still blocks the I/O half, which still blocks disk
+/// reads, so nothing buffers the whole file.
+const RAW_CHUNK_CHANNEL_CAP: usize = 8;
 
 /// Decide whether the blocking parse half should run its terminal
 /// (`at_final_chunk = true`) drain once the raw-chunk stream has ended.
