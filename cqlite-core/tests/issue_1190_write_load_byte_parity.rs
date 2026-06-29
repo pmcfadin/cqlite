@@ -495,7 +495,7 @@ async fn finished_data_db_artifacts_byte_for_byte() {
 }
 
 // ---------------------------------------------------------------------------
-// Pinned writer gap (issue #1196): static-row flags byte cass 0xa0 vs CQLite 0xa4
+// Static-row byte parity (issue #1196): static block must NOT carry row liveness
 // ---------------------------------------------------------------------------
 //
 // The `static_clustering_shape` table (id INT, ck INT, sdata TEXT STATIC, rdata
@@ -504,19 +504,19 @@ async fn finished_data_db_artifacts_byte_for_byte() {
 // (`(id, ck, rdata) VALUES (1, 7, 'row-val')`). Cassandra emits the resulting
 // STATIC ROW with flags byte `0xa0` = HAS_EXTENDED_FLAGS (0x80) | HAS_ALL_COLUMNS
 // (0x20): the static block carries NO row-level liveness, so HAS_TIMESTAMP is
-// NOT set (the writetime lives on the static cell only).
+// NOT set (the writetime lives on the static cell only). This is universal in
+// every committed Cassandra golden — no `static_block` ever has a
+// `liveness_info` (the static block is keyed on the empty clustering; PK/row
+// liveness lives on regular rows, never on the static pseudo-row).
 //
-// CQLite's writer has a known gap (issue #1196): it sets a row-level
-// HAS_TIMESTAMP (0x04) + PK liveness on the static row, emitting `0xa4`
-// (0x80 | 0x20 | 0x04). This is the documented divergence that keeps the
-// `tombstone_and_ttl_artifacts` scenario `partial` and blocks whole-artifact
-// byte parity for static-row shapes.
-//
-// This test PINS that divergence: it asserts the Cassandra reference static-row
-// flags byte is exactly `0xa0` AND the CQLite-written static-row flags byte is
-// exactly `0xa4`. If a future writer change closes the gap (CQLite stops setting
-// the spurious row-level timestamp), this test FAILS LOUDLY and forces a review
-// of the `tombstone_and_ttl_artifacts` manifest claim + issue #1196.
+// Issue #1196 fixed a writer gap: CQLite used to set a spurious row-level
+// HAS_TIMESTAMP (0x04) on the static row (emitting `0xa4`) plus
+// `CELL_USE_ROW_TIMESTAMP` on the static cell. This test now asserts BYTE PARITY
+// of the whole static-row shape (flags, body, static cell) against the Cassandra
+// 5.0.2 reference: the static row's flags byte must be exactly `0xa0` (no
+// row-level HAS_TIMESTAMP) and the static cell must carry its own explicit
+// timestamp delta, matching the reference bytes. If CQLite ever re-introduces a
+// row-level static timestamp, this test FAILS LOUDLY.
 
 const KS_STATIC_TABLE: &str = "static_clustering_shape";
 
@@ -525,9 +525,9 @@ const KS_STATIC_TABLE: &str = "static_clustering_shape";
 const ROW_HAS_EXTENDED_FLAGS: u8 = 0x80;
 const ROW_HAS_TIMESTAMP: u8 = 0x04;
 
-/// Documented (#1196) static-row flags bytes for `static_clustering_shape`.
-const CASS_STATIC_ROW_FLAGS: u8 = 0xa0; // EXTENDED | HAS_ALL_COLUMNS (no timestamp)
-const CQLITE_STATIC_ROW_FLAGS: u8 = 0xa4; // EXTENDED | HAS_ALL_COLUMNS | HAS_TIMESTAMP (gap)
+/// Cassandra (#1196) static-row flags byte for `static_clustering_shape`:
+/// EXTENDED | HAS_ALL_COLUMNS, with NO row-level timestamp.
+const CASS_STATIC_ROW_FLAGS: u8 = 0xa0;
 
 /// Int-PK partition-header byte size: 2 (u16 key-length) plus 4 (key) plus 4
 /// (LDT i32) plus 8 (marked-for-delete-at i64). The static row's flags byte is
@@ -600,20 +600,21 @@ fn static_clustering_mutations() -> Vec<Mutation> {
     ]
 }
 
-/// Pinned writer-gap regression guard for issue #1196: the static-row flags
-/// byte differs between the Cassandra 5.0.2 reference (`0xa0`) and CQLite's
-/// writer (`0xa4`, spurious row-level HAS_TIMESTAMP). Backs the documented gap
-/// in `cass.write_load_path.flush.tombstone_and_ttl_artifacts`.
+/// Static-row byte-parity guard for issue #1196: CQLite must emit the static
+/// block with flags `0xa0` (no row-level HAS_TIMESTAMP) and the static cell
+/// carrying its own explicit timestamp, byte-identical to the Cassandra 5.0.2
+/// reference. Backs the resolved static-row divergence in
+/// `cass.write_load_path.flush.tombstone_and_ttl_artifacts`.
 ///
 /// Skips on genuine absence of the committed reference; with the fixture
-/// committed (issue #1190) it RUNS. If CQLite ever stops emitting the spurious
-/// timestamp (closing #1196), this test FAILS and forces a manifest-claim review.
+/// committed (issue #1190) it RUNS. If CQLite ever re-introduces the spurious
+/// row-level static timestamp (regressing #1196), this test FAILS.
 #[tokio::test]
 async fn static_row_timestamp_flags_gap_pinned_1196() {
     let Some(ref_dir) = reference_dir(KS_STATIC_TABLE) else {
         eprintln!(
             "[issue_1190] reference for {KEYSPACE}.{KS_STATIC_TABLE} absent \
-             (dataset not fetched); skipping #1196 static-row-flags pin"
+             (dataset not fetched); skipping #1196 static-row-parity check"
         );
         return;
     };
@@ -629,7 +630,7 @@ async fn static_row_timestamp_flags_gap_pinned_1196() {
     assert_eq!(
         cass_flags, CASS_STATIC_ROW_FLAGS,
         "#1196: Cassandra static-row flags byte changed (got {cass_flags:#04x}, \
-         expected {CASS_STATIC_ROW_FLAGS:#04x}); regenerate fixtures / review the gap"
+         expected {CASS_STATIC_ROW_FLAGS:#04x}); regenerate fixtures"
     );
     assert_eq!(
         cass_flags & ROW_HAS_TIMESTAMP,
@@ -653,26 +654,35 @@ async fn static_row_timestamp_flags_gap_pinned_1196() {
         ROW_HAS_EXTENDED_FLAGS,
         "#1196: CQLite static row must set HAS_EXTENDED_FLAGS (static block)"
     );
+
+    // The fix: CQLite static-row flags must now MATCH Cassandra exactly (0xa0).
+    // No spurious row-level HAS_TIMESTAMP (0x04).
     assert_eq!(
-        our_flags, CQLITE_STATIC_ROW_FLAGS,
-        "#1196 PIN: CQLite static-row flags byte is no longer {CQLITE_STATIC_ROW_FLAGS:#04x} \
-         (got {our_flags:#04x}). If this is {CASS_STATIC_ROW_FLAGS:#04x}, the writer gap \
-         (spurious row-level HAS_TIMESTAMP on a static-only UPDATE) is CLOSED — update the \
-         tombstone_and_ttl_artifacts manifest claim and resolve issue #1196."
+        our_flags, CASS_STATIC_ROW_FLAGS,
+        "#1196: CQLite static-row flags byte must match Cassandra {CASS_STATIC_ROW_FLAGS:#04x} \
+         (got {our_flags:#04x}); a spurious row-level HAS_TIMESTAMP (0x04) regressed #1196"
+    );
+    assert_eq!(
+        our_flags & ROW_HAS_TIMESTAMP,
+        0,
+        "#1196: CQLite static row must NOT carry row-level HAS_TIMESTAMP"
     );
 
-    // The whole point of the gap: ours differs from cass exactly at the timestamp bit.
-    assert_ne!(
-        our_flags, cass_flags,
-        "#1196: expected the documented static-row flags divergence (cass \
-         {CASS_STATIC_ROW_FLAGS:#04x} vs CQLite {CQLITE_STATIC_ROW_FLAGS:#04x})"
-    );
-    assert_eq!(
-        our_flags ^ cass_flags,
-        ROW_HAS_TIMESTAMP,
-        "#1196: the only flag-byte difference must be the spurious row-level \
-         HAS_TIMESTAMP bit (0x04); got cass {cass_flags:#04x} vs CQLite {our_flags:#04x}"
-    );
+    // Whole-artifact byte parity: this table is deterministic (fixed writetime,
+    // no TTL/DELETE), so the entire Data.db — static row header, static cell with
+    // its own explicit timestamp, AND the following clustering row — must be
+    // byte-identical to the Cassandra reference.
+    if cass_data != our_data {
+        let at = first_diff(&cass_data, &our_data);
+        panic!(
+            "#1196: {KS_STATIC_TABLE} Data.db byte mismatch (cass={} ours={} bytes, \
+             first diff at {at:?})\n  cass={}\n  ours={}",
+            cass_data.len(),
+            our_data.len(),
+            hex(&cass_data),
+            hex(&our_data),
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

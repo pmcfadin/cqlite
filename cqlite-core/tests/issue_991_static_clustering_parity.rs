@@ -1112,12 +1112,16 @@ fn fixture_static_row_flag_byte_well_formed() {
     );
 }
 
-/// Anchor: the deterministic writer's live single cell flag is USE_ROW_TIMESTAMP,
-/// confirming the cell-flag constant used elsewhere is the on-disk value (keeps
-/// this file self-consistent with #990's cell-flag family without duplicating it).
+/// Anchor (issue #1196): a static row carries NO row-level liveness, so its live
+/// static cell does NOT reuse a row timestamp — it carries its OWN explicit
+/// timestamp (cell flag with CELL_USE_ROW_TIMESTAMP CLEAR), matching Cassandra
+/// 5.0.2 (a static-only UPDATE writes the static cell with flags 0x00 + an
+/// explicit timestamp delta). This stays consistent with the read-side static-row
+/// flag assertion in this file (static row flags = 0xA0, no HAS_TIMESTAMP).
 #[test]
 fn writer_live_static_cell_uses_row_timestamp_flag() {
-    // A static-only write: the static cell reuses the static row's liveness.
+    // A static-only write: the static row has no liveness, so the static cell
+    // carries its own explicit timestamp.
     let schema = static_schema();
     let m = Mutation::new(
         TableId::new("issue991", "s"),
@@ -1129,8 +1133,16 @@ fn writer_live_static_cell_uses_row_timestamp_flag() {
     );
     let bytes = write_one_partition(det_stats(), &schema, 1, &[m]);
     let flags = read_u8_loc(&bytes, INT_PK_HEADER_SIZE);
+    // Issue #1196: static row must NOT carry a row-level liveness timestamp.
+    assert_eq!(
+        flags.value as u8 & ROW_HAS_TIMESTAMP,
+        0,
+        "static row must NOT carry HAS_TIMESTAMP (#1196); flags 0x{:02X} @ {}",
+        flags.value,
+        flags.start
+    );
     let ext = read_u8_loc(&bytes, flags.end());
-    // Walk: [flags][ext][row_size][prev_size][ts delta][bitmap?][cell flag].
+    // Walk: [flags][ext][row_size][prev_size][ts delta?][bitmap?][cell flag].
     let row_size = read_uvint_loc(&bytes, ext.end());
     let prev_size = read_uvint_loc(&bytes, row_size.end());
     let mut pos = prev_size.end();
@@ -1143,8 +1155,9 @@ fn writer_live_static_cell_uses_row_timestamp_flag() {
     let cell = read_u8_loc(&bytes, pos);
     assert_eq!(
         cell.value as u8 & CELL_USE_ROW_TIMESTAMP,
-        CELL_USE_ROW_TIMESTAMP,
-        "live static cell must reuse the row timestamp (flag 0x{:02X} @ {})",
+        0,
+        "live static cell must carry its own explicit timestamp, not reuse a row \
+         timestamp (#1196): flag 0x{:02X} @ {}",
         cell.value,
         cell.start
     );
