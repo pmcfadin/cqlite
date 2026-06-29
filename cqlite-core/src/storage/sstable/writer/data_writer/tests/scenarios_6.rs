@@ -1184,10 +1184,20 @@ fn resolve_bare_udt_marshal_scope() {
     assert!(resolve_bare_udt_marshal("unknown", "test_ks", &reg).is_none());
     assert!(resolve_bare_udt_marshal("person", "other_ks", &reg).is_none());
 
-    // Primitives and parameterized types are not bare UDT names.
+    // Primitives and non-frozen parameterized types are not bare UDT names.
     assert!(resolve_bare_udt_marshal("text", "test_ks", &reg).is_none());
     assert!(resolve_bare_udt_marshal("list<person>", "test_ks", &reg).is_none());
-    assert!(resolve_bare_udt_marshal("frozen<person>", "test_ks", &reg).is_none());
+    // A top-level `frozen<UDT>` IS expanded to FrozenType(UserType(...)) (#1239).
+    assert_eq!(
+        resolve_bare_udt_marshal("frozen<person>", "test_ks", &reg).as_deref(),
+        Some(
+            format!(
+                "org.apache.cassandra.db.marshal.FrozenType({})",
+                person_udt_marshal()
+            )
+            .as_str()
+        )
+    );
 
     // An already-marshalled type is left untouched.
     assert!(resolve_bare_udt_marshal(&person_udt_marshal(), "test_ks", &reg).is_none());
@@ -1267,6 +1277,82 @@ fn resolve_bare_udt_marshal_scope() {
     assert!(
         resolve_bare_udt_marshal("text", "test_ks", &shadow).is_none(),
         "primitive keyword must never resolve to a UDT marshal"
+    );
+}
+
+/// Issue #1239: a TOP-LEVEL `frozen<UDT>` column's serialization-header marshal
+/// type must render as `FrozenType(UserType(...))` — Cassandra's reference form
+/// — NOT `FrozenType(BytesType)` (which loses the inner UDT). Before the fix,
+/// `resolve_bare_udt_marshal` rejected anything containing `<`, so `frozen<UDT>`
+/// fell through to `cql_type_to_marshal_type("frozen<person>")`, whose inner
+/// bare name `person` then hit the `_ => BytesType` arm.
+///
+/// This asserts the exact byte string Apache Cassandra 5.0 wrote into the
+/// committed reference fixture
+/// `test_compactionparityudt/udt_frozen_person-…/nb-3-big-Statistics.db`
+/// (RegularColumns `p`):
+///   FrozenType(UserType(test_compactionparityudt,706572736f6e,
+///     66697273745f6e616d65:UTF8Type,6c6173745f6e616d65:UTF8Type,616765:Int32Type))
+/// where 706572736f6e="person", 66697273745f6e616d65="first_name",
+/// 6c6173745f6e616d65="last_name", 616765="age".
+#[test]
+fn frozen_udt_column_renders_frozentype_usertype_cassandra_parity() {
+    // The `person` UDT exactly as defined for the committed Cassandra fixture.
+    let mut reg = UdtRegistry::new();
+    reg.register_udt(
+        UdtTypeDef::new("test_compactionparityudt".to_string(), "person".to_string())
+            .with_field("first_name".to_string(), CqlType::Text, true)
+            .with_field("last_name".to_string(), CqlType::Text, true)
+            .with_field("age".to_string(), CqlType::Int, true),
+    );
+
+    // The exact marshal string Cassandra 5.0 wrote for the `frozen<person>`
+    // regular column `p` (nb-3-big-Statistics.db, verified via sstabledump).
+    let cassandra_reference = "org.apache.cassandra.db.marshal.FrozenType(\
+org.apache.cassandra.db.marshal.UserType(test_compactionparityudt,706572736f6e,\
+66697273745f6e616d65:org.apache.cassandra.db.marshal.UTF8Type,\
+6c6173745f6e616d65:org.apache.cassandra.db.marshal.UTF8Type,\
+616765:org.apache.cassandra.db.marshal.Int32Type))";
+
+    let rendered = resolve_bare_udt_marshal("frozen<person>", "test_compactionparityudt", &reg)
+        .expect("frozen<person> must resolve to a FrozenType(UserType(...)) marshal");
+
+    assert_eq!(
+        rendered, cassandra_reference,
+        "frozen<UDT> header marshal must match Cassandra's FrozenType(UserType(...)) byte-for-byte"
+    );
+    assert!(
+        !rendered.contains("BytesType"),
+        "frozen<UDT> must NOT degrade the inner UDT to BytesType, got: {rendered}"
+    );
+
+    // Case-insensitivity of the `frozen` keyword and the bare UDT name.
+    assert_eq!(
+        resolve_bare_udt_marshal("FROZEN<Person>", "test_compactionparityudt", &reg).as_deref(),
+        Some(cassandra_reference)
+    );
+
+    // End-to-end: a schema column declared `frozen<person>` normalizes to the
+    // FrozenType(UserType(...)) marshal. A frozen UDT is a single-cell frozen
+    // type, so it is NOT a complex column (matches is_complex_column).
+    let mut schema = TableSchema {
+        keyspace: "test_compactionparityudt".to_string(),
+        table: "udt_frozen_person".to_string(),
+        partition_keys: vec![KeyColumn {
+            name: "id".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+        }],
+        clustering_keys: vec![],
+        columns: vec![udt_column("p", "frozen<person>")],
+        comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
+    };
+    normalize_schema_udts(&mut schema, &reg);
+    assert_eq!(schema.columns[0].data_type, cassandra_reference);
+    assert!(
+        !is_complex_column(&schema.columns[0].data_type),
+        "a frozen UDT is a single-cell frozen type, not a complex column"
     );
 }
 

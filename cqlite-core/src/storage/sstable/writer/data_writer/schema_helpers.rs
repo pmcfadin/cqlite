@@ -305,6 +305,44 @@ pub(crate) fn normalize_schema_udts(schema: &mut TableSchema, registry: &UdtRegi
     }
 }
 
+/// If `data_type` is a TOP-LEVEL `frozen<...>` wrapper (case-insensitive
+/// keyword), return the trimmed inner type string; otherwise `None`. The whole
+/// string must be the wrapper (the matching `>` is the final char) so a type
+/// like `map<frozen<x>, int>` is NOT mistaken for a top-level frozen.
+fn strip_top_level_frozen(data_type: &str) -> Option<&str> {
+    let lower = data_type.to_lowercase();
+    let rest = lower.strip_prefix("frozen<")?;
+    // The closing '>' that matches this leading 'frozen<' must be the LAST char.
+    if !rest.ends_with('>') {
+        return None;
+    }
+    let mut depth = 1usize;
+    for (i, ch) in rest.char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    // The matching close must be the final char for this to be a
+                    // single top-level `frozen<...>` wrapper.
+                    if i != rest.len() - 1 {
+                        return None;
+                    }
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+    // Slice the ORIGINAL (case-preserving) string: skip `frozen<` (7 bytes,
+    // ASCII) and the trailing `>`.
+    let inner = &data_type[7..data_type.len() - 1];
+    Some(inner.trim())
+}
+
 /// If `data_type` is a TOP-LEVEL bare CQL UDT name that resolves in `registry`,
 /// return its rendered `UserType(...)` marshal string; otherwise `None`.
 pub(crate) fn resolve_bare_udt_marshal(
@@ -321,6 +359,22 @@ pub(crate) fn resolve_bare_udt_marshal(
     // Already a marshal string (incl. UserType / frozen marshal) — leave as-is.
     if lower.starts_with("org.apache.cassandra.db.marshal.") {
         return None;
+    }
+    // A TOP-LEVEL `frozen<UDT>` must expand the inner bare UDT name to its
+    // `UserType(...)` marshal, wrapped in `FrozenType(...)` — Cassandra's
+    // reference serialization-header form. Without this branch the `<` guard
+    // below rejected `frozen<person>`, which then fell through
+    // `cql_type_to_marshal_type("frozen<person>")` whose inner bare name hit the
+    // `BytesType` fallback, advertising `FrozenType(BytesType)` and losing the
+    // UDT (issue #1239). Scope mirrors the bare-name case: only the inner UDT's
+    // own `UserType(...)` is expanded (via `resolve_bare_udt_marshal` recursion,
+    // which applies the same fully-representable / primitive-collision guards);
+    // a non-UDT or unresolvable inner is left untouched (returns None).
+    if let Some(inner) = strip_top_level_frozen(trimmed) {
+        let inner_marshal = resolve_bare_udt_marshal(inner, keyspace, registry)?;
+        return Some(format!(
+            "org.apache.cassandra.db.marshal.FrozenType({inner_marshal})"
+        ));
     }
     // Parameterized CQL types are not bare names — leave to the existing path.
     if lower.contains('<') {
