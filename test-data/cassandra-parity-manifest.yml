@@ -1434,8 +1434,7 @@ scenarios:
         promoted-offset/bounds assertions are NOT in the required lane because they
         depend on local-only binaries absent from the pinned CI dataset.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: manual_debug
     scope:
       gap: >-
         Byte-level promoted-index parity (Index.db offsets, widths, clustering
@@ -1699,8 +1698,7 @@ scenarios:
         promoted-offset/bounds assertions are NOT in the required lane because they
         depend on local-only binaries absent from the pinned CI dataset.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: manual_debug
     scope:
       gap: >-
         Byte-level promoted-index parity (Index.db offsets, widths, clustering
@@ -1757,8 +1755,7 @@ scenarios:
         promoted-offset/bounds assertions are NOT in the required lane because they
         depend on local-only binaries absent from the pinned CI dataset.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: manual_debug
     scope:
       gap: >-
         Byte-level promoted-index parity (Index.db offsets, widths, clustering
@@ -1814,8 +1811,7 @@ scenarios:
         promoted-offset/bounds assertions are NOT in the required lane because they
         depend on local-only binaries absent from the pinned CI dataset.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: manual_debug
     scope:
       gap: >-
         Byte-level promoted-index parity (Index.db offsets, widths, clustering
@@ -1873,8 +1869,7 @@ scenarios:
         promoted-offset/bounds assertions are NOT in the required lane because they
         depend on local-only binaries absent from the pinned CI dataset.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: manual_debug
     scope:
       gap: >-
         Byte-level promoted-index parity (Index.db offsets, widths, clustering
@@ -1932,8 +1927,7 @@ scenarios:
         promoted-offset/bounds assertions are NOT in the required lane because they
         depend on local-only binaries absent from the pinned CI dataset.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: manual_debug
     scope:
       gap: >-
         Byte-level promoted-index parity (Index.db offsets, widths, clustering
@@ -1984,8 +1978,7 @@ scenarios:
         Only forward-scan completeness is proven. Local-only fixture
         (gen-wide-big.sh) pending dataset re-pin; test skips-on-absence.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: manual_debug
     scope:
       gap: >-
         Reverse SSTable iteration is not implemented for BIG wide partitions; only
@@ -3119,8 +3112,7 @@ scenarios:
         (cass.compression_info.* / sstable_parity_compression_info_db_strict_test,
         issue #986).
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: manual_debug
     scope: {}
 
   - id: cass.compression_checksum.checksum_trailer_detection
@@ -4443,8 +4435,7 @@ scenarios:
         The test_deltas dataset asset is not yet published/enforced in CI
         (issue #701), so this scenario is validated locally only.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/delta-roundtrip.yml
+      tier: manual_debug
     scope:
       gap: test_deltas dataset asset not published/enforced in CI (#701).
       next_step: Publish the test_deltas dataset and enforce scan_delta parity in CI.
@@ -4490,8 +4481,7 @@ scenarios:
         Canonical-semantic equivalence of liveness fields; not a Data.db byte
         comparison.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: manual_debug
     scope: {}
 
   # ----------------------------------------------------------------------------
@@ -4544,8 +4534,7 @@ scenarios:
         follow-up under epic #969 (capability data_db_decode). test_deltas
         binaries are not yet published/enforced in CI (issue #701).
     ci:
-      tier: required_parity
-      workflow: .github/workflows/delta-roundtrip.yml
+      tier: manual_debug
     scope:
       gap: >-
         No byte-for-byte Data.db diff yet; backed by canonical-semantic JSONL
@@ -4596,8 +4585,7 @@ scenarios:
         follow-up under epic #969 (capability data_db_decode). test_deltas
         binaries are not yet published/enforced in CI (issue #701).
     ci:
-      tier: required_parity
-      workflow: .github/workflows/delta-roundtrip.yml
+      tier: manual_debug
     scope:
       gap: >-
         No byte-for-byte Data.db diff yet; backed by canonical-semantic JSONL
@@ -4649,8 +4637,7 @@ scenarios:
         follow-up under epic #969 (capability data_db_decode). test_deltas
         binaries are not yet published/enforced in CI (issue #701).
     ci:
-      tier: required_parity
-      workflow: .github/workflows/delta-roundtrip.yml
+      tier: manual_debug
     scope:
       gap: >-
         No byte-for-byte Data.db diff yet; backed by canonical-semantic JSONL
@@ -4702,8 +4689,7 @@ scenarios:
         follow-up under epic #969 (capability data_db_decode). test_deltas
         binaries are not yet published/enforced in CI (issue #701).
     ci:
-      tier: required_parity
-      workflow: .github/workflows/delta-roundtrip.yml
+      tier: manual_debug
     scope:
       gap: >-
         No byte-for-byte Data.db diff yet; backed by canonical-semantic JSONL
@@ -4754,8 +4740,7 @@ scenarios:
         follow-up under epic #969 (capability data_db_decode). test_deltas
         binaries are not yet published/enforced in CI (issue #701).
     ci:
-      tier: required_parity
-      workflow: .github/workflows/delta-roundtrip.yml
+      tier: manual_debug
     scope:
       gap: >-
         No byte-for-byte Data.db diff yet; backed by canonical-semantic JSONL
@@ -4808,8 +4793,7 @@ scenarios:
         follow-up under epic #969 (capability data_db_decode). test_deltas
         binaries are not yet published/enforced in CI (issue #701).
     ci:
-      tier: required_parity
-      workflow: .github/workflows/delta-roundtrip.yml
+      tier: manual_debug
     scope:
       gap: >-
         No byte-for-byte Data.db diff yet; backed by canonical-semantic JSONL
@@ -4862,8 +4846,7 @@ scenarios:
         follow-up under epic #969 (capability data_db_decode). test_deltas
         binaries are not yet published/enforced in CI (issue #701).
     ci:
-      tier: required_parity
-      workflow: .github/workflows/delta-roundtrip.yml
+      tier: manual_debug
     scope:
       gap: >-
         No byte-for-byte Data.db diff yet; backed by canonical-semantic JSONL
@@ -4916,8 +4899,7 @@ scenarios:
         follow-up under epic #969 (capability data_db_decode). test_deltas
         binaries are not yet published/enforced in CI (issue #701).
     ci:
-      tier: required_parity
-      workflow: .github/workflows/delta-roundtrip.yml
+      tier: manual_debug
     scope:
       gap: >-
         No byte-for-byte Data.db diff yet; backed by canonical-semantic JSONL
@@ -4970,8 +4952,7 @@ scenarios:
         follow-up under epic #969 (capability data_db_decode). test_deltas
         binaries are not yet published/enforced in CI (issue #701).
     ci:
-      tier: required_parity
-      workflow: .github/workflows/delta-roundtrip.yml
+      tier: manual_debug
     scope:
       gap: >-
         No byte-for-byte Data.db diff yet; backed by canonical-semantic JSONL
@@ -5071,8 +5052,7 @@ scenarios:
         Logical / canonical-semantic equivalence only; byte-for-byte compaction
         output parity is debug-only and non-gated (north-star issue #842).
     ci:
-      tier: required_parity
-      workflow: .github/workflows/compaction-parity.yml
+      tier: manual_debug
     scope: {}
 
   - id: cass.compaction_merge.load_path_validity
@@ -5107,8 +5087,7 @@ scenarios:
         Digest.crc32 and correct partition ordering. This is load-path validity,
         not byte parity.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/compaction-parity.yml
+      tier: fast_pr
     scope:
       gap: Load-path validity does not assert byte or canonical-semantic parity.
       next_step: >-
@@ -6185,8 +6164,7 @@ scenarios:
         return the written rows (round-trip success). This is load/round-trip
         validity, not a byte comparison of writer output.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/cassandra-validation.yml
+      tier: fast_pr
     scope:
       gap: Round-trip query verification, not byte/JSONL parity of writer output.
       next_step: >-
@@ -6538,8 +6516,7 @@ scenarios:
         BIG) datasets are compared against sstabledump JSONL.
       known_limitations: Canonical-semantic equivalence; not a Data.db byte comparison.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: manual_debug
     scope: {}
 
   - id: cass.bti_big_version_matrix.bti_da_write_read
@@ -9208,8 +9185,7 @@ scenarios:
         loud with a specific parse error and emits no partial row; crafted in-test,
         no Cassandra fixture (no corrupt-row golden exists)
     ci:
-      tier: required_parity
-      workflow: .github/workflows/cql-type-parity.yml
+      tier: fast_pr
     scope: {}
 
   # ---- #1007 ----
@@ -10266,7 +10242,7 @@ scenarios:
         across all four compressed algorithms.
     ci:
       tier: required_parity
-      workflow: .github/workflows/cassandra-parity.yml
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   - id: cass.compression_info.fields.options
@@ -10312,7 +10288,7 @@ scenarios:
         byte-for-byte against the committed golden.
     ci:
       tier: required_parity
-      workflow: .github/workflows/cassandra-parity.yml
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   - id: cass.compression_info.fields.chunk_length
@@ -10356,7 +10332,7 @@ scenarios:
         The chunk_length (int) is compared byte-for-byte against the golden.
     ci:
       tier: required_parity
-      workflow: .github/workflows/cassandra-parity.yml
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   - id: cass.compression_info.fields.max_compressed_length
@@ -10401,7 +10377,7 @@ scenarios:
         against the golden.
     ci:
       tier: required_parity
-      workflow: .github/workflows/cassandra-parity.yml
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   - id: cass.compression_info.fields.data_length
@@ -10446,7 +10422,7 @@ scenarios:
         byte-for-byte against the golden.
     ci:
       tier: required_parity
-      workflow: .github/workflows/cassandra-parity.yml
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   - id: cass.compression_info.fields.chunk_offsets
@@ -10492,7 +10468,7 @@ scenarios:
         byte-for-byte against the golden; offsets position chunk decode.
     ci:
       tier: required_parity
-      workflow: .github/workflows/cassandra-parity.yml
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   - id: cass.compression_info.layout.no_crc_fields
@@ -10539,7 +10515,7 @@ scenarios:
         each chunk in Data.db (validated by issue_998).
     ci:
       tier: required_parity
-      workflow: .github/workflows/cassandra-parity.yml
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   # ----------------------------------------------------------------------------
@@ -10593,7 +10569,7 @@ scenarios:
         matched; chunk decode is validated against the sstabledump JSONL.
     ci:
       tier: required_parity
-      workflow: .github/workflows/cassandra-parity.yml
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   - id: cass.data_db.inline_crc.bad_trailer_rejected
@@ -10643,7 +10619,7 @@ scenarios:
         silently returning decoded bytes, matching Cassandra reader behaviour.
     ci:
       tier: required_parity
-      workflow: .github/workflows/cassandra-parity.yml
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   - id: cass.data_db.inline_crc.short_final_chunk
@@ -10693,7 +10669,7 @@ scenarios:
         derived from data_length rather than chunk_length.
     ci:
       tier: required_parity
-      workflow: .github/workflows/cassandra-parity.yml
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   - id: cass.data_db.inline_crc.incompressible_uncompressed_chunk
@@ -10743,7 +10719,7 @@ scenarios:
         when compression was skipped for the incompressible payload.
     ci:
       tier: required_parity
-      workflow: .github/workflows/cassandra-parity.yml
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   - id: cass.data_db.inline_crc.offset_delta_minus_crc_length
@@ -10794,7 +10770,7 @@ scenarios:
         Cassandra chunk layout (no length stored in CompressionInfo.db).
     ci:
       tier: required_parity
-      workflow: .github/workflows/cassandra-parity.yml
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   # ----------------------------------------------------------------------------
@@ -11351,7 +11327,7 @@ scenarios:
         equivalence, not a byte comparison of any verify report format.
     ci:
       tier: required_parity
-      workflow: .github/workflows/cassandra-parity.yml
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   - id: cass.verify.healthy_uncompressed_sstable
@@ -11398,7 +11374,7 @@ scenarios:
         byte comparison of a verify report.
     ci:
       tier: required_parity
-      workflow: .github/workflows/cassandra-parity.yml
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   - id: cass.verify.component_presence
@@ -11446,7 +11422,7 @@ scenarios:
         Cassandra's verify output.
     ci:
       tier: required_parity
-      workflow: .github/workflows/cassandra-parity.yml
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   - id: cass.verify.digest_crc32_match
@@ -11494,7 +11470,7 @@ scenarios:
         covered byte-for-byte by cass.corruption.digest_crc32_mismatch.
     ci:
       tier: required_parity
-      workflow: .github/workflows/cassandra-parity.yml
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   - id: cass.verify.inline_crc_validation
@@ -11543,7 +11519,7 @@ scenarios:
         cass.data_db.inline_crc.*.
     ci:
       tier: required_parity
-      workflow: .github/workflows/cassandra-parity.yml
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   - id: cass.verify.compression_info_parse
@@ -11591,7 +11567,7 @@ scenarios:
         cass.compression_info.fields.*.
     ci:
       tier: required_parity
-      workflow: .github/workflows/cassandra-parity.yml
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   - id: cass.verify.full_row_scan
@@ -11637,7 +11613,7 @@ scenarios:
         comparison of Data.db.
     ci:
       tier: required_parity
-      workflow: .github/workflows/cassandra-parity.yml
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   - id: cass.verify.no_silent_empty_result_on_corruption
@@ -11688,7 +11664,7 @@ scenarios:
         per-case byte parity is covered by the cass.corruption.* scenarios.
     ci:
       tier: required_parity
-      workflow: .github/workflows/cassandra-parity.yml
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   # ----------------------------------------------------------------------------
@@ -12503,8 +12479,7 @@ scenarios:
         Logical / canonical-semantic equivalence; byte-for-byte compaction output
         parity is the separate non-gated byte tier (north-star issue #842).
     ci:
-      tier: required_parity
-      workflow: .github/workflows/compaction-parity.yml
+      tier: manual_debug
     scope: {}
 
   - id: cass.compaction_merge.issue_819.differential_row_tombstone_wide_partition_regression
@@ -12555,8 +12530,7 @@ scenarios:
         Logical equivalence only; byte-for-byte compaction output parity is the
         separate non-gated byte tier (north-star issue #842).
     ci:
-      tier: required_parity
-      workflow: .github/workflows/compaction-parity.yml
+      tier: manual_debug
     scope: {}
 
   - id: cass.compaction_merge.issue_819.differential_input_merge_write_fidelity
@@ -12610,8 +12584,7 @@ scenarios:
         Logical equivalence of per-cell writetimes; byte-for-byte compaction
         output parity is the separate non-gated byte tier (north-star #842).
     ci:
-      tier: required_parity
-      workflow: .github/workflows/compaction-parity.yml
+      tier: manual_debug
     scope: {}
 
 # ==============================================================================

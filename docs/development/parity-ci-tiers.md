@@ -90,7 +90,14 @@ P0 data-loss path without a recorded gap is a contract violation.
   `required_parity` is treated as a failure for release purposes (see the
   release checklist).
 - **Failure policy.** Blocking. Every `required_parity` scenario MUST name a
-  workflow (`ci.workflow`); a missing workflow is a lint error.
+  workflow (`ci.workflow`); a missing workflow is a lint error. The named
+  workflow MUST also *actually run* the scenario's mapped test under a
+  fail-closed flag (`CQLITE_REQUIRE_FIXTURES` / `CQLITE_PARITY_REQUIRE_DATASETS`),
+  or — for a JVM harness scenario — invoke `gradle`. This is machine-enforced by
+  `cassandra-parity lint` (issue #1228): it parses the named workflow YAML and
+  fails the lint if none of the scenario's `cqlite.coverage.tests` targets are
+  invoked there, so a `required_parity` claim can never point at a workflow that
+  does not exercise it (e.g. a manifest-lint-only workflow).
 - **Artifact retention.** On failure, retain the diff/failure artifacts named in
   `evidence.failure_artifacts` long enough to triage (>= 14 days recommended).
 - **Promotion.** A `canonical_semantic` `required_parity` scenario is promoted
