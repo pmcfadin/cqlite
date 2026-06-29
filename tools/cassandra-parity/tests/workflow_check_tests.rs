@@ -505,6 +505,134 @@ fn java_harness_workflow_requires_blocking_gradle() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Issue #1228 roborev finding B: inert text must NOT count as fail-closed. Only
+// a flag genuinely shell-visible to the mapped test process counts:
+//   (a) a workflow/job/step `env:` map value (covered by the tests above),
+//   (b) an `export CQLITE_REQUIRE_FIXTURES=<truthy>` shell statement, or
+//   (c) an inline prefix on the ACTUAL mapped test command.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn echoed_fail_closed_assignment_does_not_count() {
+    // `echo CQLITE_REQUIRE_FIXTURES=1` only PRINTS the text; it never exports the
+    // variable, so the cargo subprocess never sees it. The scenario is fail-open.
+    let echo_wf = "jobs:\n  parity:\n    steps:\n      - run: |\n          echo CQLITE_REQUIRE_FIXTURES=1\n          cargo test --test issue_997_compressioninfo_parity";
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        echo_wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings.iter().any(|f| f.message.contains("fail-closed")),
+        "expected a fail-closed finding for `echo CQLITE_REQUIRE_FIXTURES=1`, got: {findings:#?}"
+    );
+}
+
+#[test]
+fn standalone_unexported_assignment_does_not_count() {
+    // A bare `CQLITE_REQUIRE_FIXTURES=1` line on its own (NOT exported, NOT
+    // prefixing the test command) does not export the variable to the cargo
+    // subprocess in bash — the scenario is fail-open.
+    let standalone_wf = "jobs:\n  parity:\n    steps:\n      - run: |\n          CQLITE_REQUIRE_FIXTURES=1\n          cargo test --test issue_997_compressioninfo_parity";
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        standalone_wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings.iter().any(|f| f.message.contains("fail-closed")),
+        "expected a fail-closed finding for a standalone unexported assignment, got: {findings:#?}"
+    );
+}
+
+#[test]
+fn exported_fail_closed_then_test_counts() {
+    // `export CQLITE_REQUIRE_FIXTURES=1` then a LATER `cargo test --test foo` —
+    // the export persists for the rest of the script, so the test sees it.
+    let export_wf = "jobs:\n  parity:\n    steps:\n      - run: |\n          export CQLITE_REQUIRE_FIXTURES=1\n          cargo test --test issue_997_compressioninfo_parity";
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        export_wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings.is_empty(),
+        "expected clean for `export CQLITE_REQUIRE_FIXTURES=1` + cargo test, got: {findings:#?}"
+    );
+}
+
+#[test]
+fn exported_falsey_value_does_not_count() {
+    // `export CQLITE_REQUIRE_FIXTURES=0` arms nothing — still fail-open.
+    let export_zero_wf = "jobs:\n  parity:\n    steps:\n      - run: |\n          export CQLITE_REQUIRE_FIXTURES=0\n          cargo test --test issue_997_compressioninfo_parity";
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        export_zero_wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings.iter().any(|f| f.message.contains("fail-closed")),
+        "expected a fail-closed finding for `export CQLITE_REQUIRE_FIXTURES=0`, got: {findings:#?}"
+    );
+}
+
+#[test]
+fn inline_prefix_on_test_command_counts() {
+    // `CQLITE_REQUIRE_FIXTURES=1 cargo test --test foo` — inline prefix directly
+    // on the mapped test command (the cargo subprocess inherits it).
+    let inline_wf = "jobs:\n  parity:\n    steps:\n      - run: CQLITE_REQUIRE_FIXTURES=1 cargo test --test issue_997_compressioninfo_parity";
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        inline_wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings.is_empty(),
+        "expected clean for inline prefix on the test command, got: {findings:#?}"
+    );
+}
+
+#[test]
+fn inline_env_prefix_on_test_command_counts() {
+    // The real parity workflows use `env CQLITE_REQUIRE_FIXTURES=1 <more=vars> \`
+    // continued onto the cargo test line. The folded logical command carries the
+    // inline prefix onto the same `--test` invocation.
+    let env_prefix_wf = "jobs:\n  parity:\n    steps:\n      - run: |\n          env CQLITE_REQUIRE_FIXTURES=1 \\\n            CQLITE_DATASETS_ROOT=\"$CQLITE_DATASETS_ROOT\" \\\n            cargo test -p cqlite-core \\\n              --test issue_997_compressioninfo_parity";
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        env_prefix_wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings.is_empty(),
+        "expected clean for `env CQLITE_REQUIRE_FIXTURES=1 ... cargo test --test foo`, got: {findings:#?}"
+    );
+}
+
+#[test]
+fn inline_prefix_on_wrong_command_does_not_count() {
+    // The fail-closed assignment prefixes a DIFFERENT command (an echo), not the
+    // mapped test command. The test command itself runs fail-open.
+    let wrong_cmd_wf = "jobs:\n  parity:\n    steps:\n      - run: |\n          CQLITE_REQUIRE_FIXTURES=1 echo armed\n          cargo test --test issue_997_compressioninfo_parity";
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        wrong_cmd_wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings.iter().any(|f| f.message.contains("fail-closed")),
+        "expected a fail-closed finding when the prefix is on a different command, got: {findings:#?}"
+    );
+}
+
 #[test]
 fn unparseable_workflow_is_flagged() {
     // A workflow that does not parse as jobs/steps cannot be proven to run the

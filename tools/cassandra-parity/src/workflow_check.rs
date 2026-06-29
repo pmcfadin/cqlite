@@ -384,12 +384,108 @@ fn yaml_value_is_truthy(v: &serde_yaml::Value) -> bool {
 }
 
 /// A flattened, evaluated view of a single `run:` step with the context needed
-/// to judge it: its command, whether it can fail the build, and whether it (or
-/// an enclosing scope) is fail-closed.
+/// to judge it: its command, whether it can fail the build, and whether an
+/// enclosing scope (workflow/job/step `env:` map) is fail-closed.
+///
+/// `scope_fail_closed` is the only fail-closed signal that is unconditionally
+/// visible to *every* command in the step (a GitHub Actions `env:` map exports
+/// the variable into the step's shell process). An inline shell assignment in
+/// the `run:` text is NOT recorded here — it is judged per mapped command in
+/// [`inline_fail_closed_for_test`] / [`inline_fail_closed_for_gradle`], because
+/// only an assignment that is genuinely shell-visible to the mapped test process
+/// (an `export`, or an inline prefix on the test command itself) actually arms
+/// the lane. See issue #1228 roborev finding B.
 struct EvaluatedStep {
     command: String,
     can_fail_build: bool,
-    fail_closed: bool,
+    scope_fail_closed: bool,
+}
+
+/// True if a fail-closed flag is **genuinely shell-visible** to the cargo
+/// integration target `name` when run from the `run:` block `command`.
+///
+/// Per issue #1228 (roborev finding B) a flag counts ONLY when it actually
+/// reaches the spawned test process. Within a `run:` script that means one of:
+///
+///   (b) an `export CQLITE_REQUIRE_FIXTURES=<truthy>` shell statement on any
+///       earlier logical command (exports persist for the rest of the script), OR
+///   (c) an inline prefix `CQLITE_REQUIRE_FIXTURES=<truthy> cargo test --test name`
+///       (or `env CQLITE_REQUIRE_FIXTURES=<truthy> cargo test --test name`) on the
+///       SAME logical command that runs the mapped test — the assignment prefixes
+///       the command-token sequence whose target is `name`.
+///
+/// Explicitly NOT fail-closed: `echo CQLITE_REQUIRE_FIXTURES=1` (printed, never
+/// exported), a bare standalone `CQLITE_REQUIRE_FIXTURES=1` line that neither
+/// exports nor prefixes the test command (bash does not export it to the cargo
+/// subprocess), and any mention inside a shell comment (stripped first). The
+/// step/job/workflow `env:` map path is handled separately via
+/// [`EvaluatedStep::scope_fail_closed`].
+fn inline_fail_closed_for_test(command: &str, name: &str) -> bool {
+    let logicals = logical_commands(command);
+    // (b) An `export FOO=<truthy>` anywhere arms the rest of the script.
+    if logicals.iter().any(|l| logical_exports_fail_closed(l)) {
+        return true;
+    }
+    // (c) An inline `FOO=<truthy>` / `env FOO=<truthy>` prefix on the very
+    // logical command that runs the mapped test.
+    logicals
+        .iter()
+        .any(|l| logical_runs_test(l, name) && logical_inline_prefix_fail_closed(l))
+}
+
+/// True if a single logical command is an `export FOO=<truthy>` statement for a
+/// fail-closed flag (optionally with a leading bare `export` of several names —
+/// we only credit `export FOO=<truthy>`, not a bare `export FOO` referencing an
+/// already-set value, which we cannot prove truthy from the text). The command
+/// has already had shell comments stripped by [`logical_commands`].
+fn logical_exports_fail_closed(logical: &str) -> bool {
+    let toks: Vec<&str> = logical.split_whitespace().collect();
+    let Some(first) = toks.first() else {
+        return false;
+    };
+    if *first != "export" {
+        return false;
+    }
+    // `export A=1 B=2 ...` — any assignment token that arms a fail-closed flag
+    // to a truthy value counts.
+    toks[1..].iter().any(|tok| assignment_is_fail_closed(tok))
+}
+
+/// True if `logical` begins with one or more inline assignment prefixes
+/// (`FOO=val` / `env FOO=val ...`) and at least one of those prefixes arms a
+/// fail-closed flag to a truthy value. Only the leading run of assignment tokens
+/// (the inline-prefix region that precedes the real command) is inspected, so a
+/// `FOO=1` that appears as a later *argument* (not a prefix) does not count.
+fn logical_inline_prefix_fail_closed(logical: &str) -> bool {
+    let mut toks = logical.split_whitespace().peekable();
+    // An optional leading `env` introduces an inline-assignment prefix region.
+    if matches!(toks.peek(), Some(&"env")) {
+        toks.next();
+    }
+    let mut armed = false;
+    for tok in toks {
+        if tok.contains('=') && !tok.starts_with('=') {
+            // Still inside the leading assignment-prefix region.
+            if assignment_is_fail_closed(tok) {
+                armed = true;
+            }
+        } else {
+            // First non-assignment token: the prefix region is over (this is the
+            // command head, e.g. `cargo`). Any later `FOO=1` is an argument.
+            break;
+        }
+    }
+    armed
+}
+
+/// True if a single `KEY=VALUE` shell token assigns a fail-closed flag to a
+/// truthy value (`CQLITE_REQUIRE_FIXTURES=1`). The value is everything after the
+/// first `=`; it is run through [`is_truthy_value`].
+fn assignment_is_fail_closed(tok: &str) -> bool {
+    let Some((key, value)) = tok.split_once('=') else {
+        return false;
+    };
+    FAIL_CLOSED_FLAGS.contains(&key) && is_truthy_value(value)
 }
 
 /// True if a logical command contains a build-failing token (`exit 1` or a bare
@@ -484,11 +580,12 @@ fn evaluate_steps(workflow_text: &str) -> Option<Vec<EvaluatedStep>> {
         let guarded = aggregator_guarded_ids(job);
         for step in &job.steps {
             let Some(run) = &step.run else { continue };
-            // A step's effective fail-closed status: workflow/job env, the
-            // step's own `env:` map, OR an inline `env FOO=1 ... ` / `FOO=1 cmd`
-            // in the command text itself.
-            let fail_closed =
-                job_fail_closed || env_is_fail_closed(&step.env) || workflow_is_fail_closed(run);
+            // A step's SCOPE fail-closed status: workflow/job env, or the step's
+            // own `env:` map. These export the flag into the step's shell process
+            // unconditionally. An inline shell assignment in the `run:` text is
+            // judged per mapped command in `check_scenario` (it only arms the lane
+            // when exported or inline-prefixing the test command — issue #1228).
+            let scope_fail_closed = job_fail_closed || env_is_fail_closed(&step.env);
             // A step can fail the build if it is itself blocking, OR it is a
             // continue-on-error step whose outcome is guarded by a blocking
             // aggregator (`exit 1` gated on `steps.<id>.outcome`).
@@ -501,7 +598,7 @@ fn evaluate_steps(workflow_text: &str) -> Option<Vec<EvaluatedStep>> {
             out.push(EvaluatedStep {
                 command: run.clone(),
                 can_fail_build,
-                fail_closed,
+                scope_fail_closed,
             });
         }
     }
@@ -575,8 +672,13 @@ pub fn check_scenario(
             if !command_runs_test(&step.command, name) {
                 continue;
             }
-            // This step runs the target as a real test (not --no-run).
-            match (step.can_fail_build, step.fail_closed) {
+            // This step runs the target as a real test (not --no-run). It is
+            // fail-closed iff a scope `env:` map arms the flag OR the run block
+            // genuinely makes it shell-visible to THIS test command (export, or
+            // an inline prefix on the test command) — issue #1228 finding B.
+            let fail_closed =
+                step.scope_fail_closed || inline_fail_closed_for_test(&step.command, name);
+            match (step.can_fail_build, fail_closed) {
                 (true, true) => {
                     rust_satisfied = true;
                 }
@@ -589,6 +691,9 @@ pub fn check_scenario(
         }
     }
 
+    // The JVM harness brings up a real Cassandra container and fails the job on
+    // absence, so (unlike the Rust dataset lanes) we do not require a fail-closed
+    // flag — a blocking `gradle <harness task>` step is sufficient.
     let java_satisfied = has_java
         && steps
             .iter()

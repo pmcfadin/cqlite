@@ -15,7 +15,14 @@ on:
       - 'tools/cassandra-parity/**'
       - 'docs/reports/cassandra-test-parity*.md'
       - 'docs/cassandra_test_index.md'
-      - '.github/workflows/cassandra-parity.yml'
+      # ANY workflow under .github/workflows is a potential `ci.workflow` target
+      # of a required_parity scenario; the lint's anti-overstatement check
+      # (workflow_check) reads those files to prove the mapped test runs
+      # blocking + fail-closed. Editing a referenced parity workflow MUST re-run
+      # this lint, so scope the whole directory (not just this file). Without
+      # this the machine enforcement could be silently bypassed by a workflow
+      # edit. (issue #1228 roborev finding A)
+      - '.github/workflows/**'
       # Release-facing docs the public-claim scanner (`lint`) reads — must stay in
       # sync with `claim_scan::RELEASE_FILES` so an over-claim added to one of
       # these still triggers the lint job. (issue #1023)
@@ -32,7 +39,14 @@ on:
       - 'tools/cassandra-parity/**'
       - 'docs/reports/cassandra-test-parity*.md'
       - 'docs/cassandra_test_index.md'
-      - '.github/workflows/cassandra-parity.yml'
+      # ANY workflow under .github/workflows is a potential `ci.workflow` target
+      # of a required_parity scenario; the lint's anti-overstatement check
+      # (workflow_check) reads those files to prove the mapped test runs
+      # blocking + fail-closed. Editing a referenced parity workflow MUST re-run
+      # this lint, so scope the whole directory (not just this file). Without
+      # this the machine enforcement could be silently bypassed by a workflow
+      # edit. (issue #1228 roborev finding A)
+      - '.github/workflows/**'
       # Release-facing docs the public-claim scanner (`lint`) reads — must stay in
       # sync with `claim_scan::RELEASE_FILES` so an over-claim added to one of
       # these still triggers the lint job. (issue #1023)
