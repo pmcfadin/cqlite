@@ -28,6 +28,7 @@
 use super::*;
 use crate::types::{UdtField, UdtValue};
 use std::borrow::Cow;
+use std::cmp::Ordering;
 
 const MARSHAL_PREFIX: &str = "org.apache.cassandra.db.marshal.";
 
@@ -315,47 +316,175 @@ fn canonicalize_seq(value: &Value, elem_marshal: &str, kind: SeqKind) -> Result<
         SeqKind::List => Value::List(out),
         SeqKind::Set => {
             // A frozen `SetType` is a SORTED collection: Cassandra stores its
-            // elements ordered by the element AbstractType comparator, which for
-            // every CQL type that can be a set element is the UNSIGNED byte order
-            // of the element's serialized form (e.g. UTF8Type/Int32Type/UUIDType
-            // and frozen UDT/tuple elements all compare bytewise on their wire
-            // bytes). The writer's simple-cell path emits set elements in the
-            // value's iteration order, so a multi-element frozen set written with
-            // unsorted elements would produce NON-Cassandra bytes. Sort here using
-            // the SAME `serialize_value` the writer emits for each element, so the
-            // on-disk order matches Cassandra's SetType exactly (issue #1020).
-            sort_by_serialized_bytes(out, |e| e)?
+            // elements ordered by the element AbstractType comparator. That
+            // comparator is type-dependent and is NOT unsigned-byte order for
+            // every type (notably SIGNED integers: Int32Type/LongType/ByteType/
+            // ShortType compare as signed, so `-1` sorts before `0`). The writer's
+            // simple-cell path emits set elements in iteration order, so a
+            // multi-element frozen set written unsorted would produce NON-Cassandra
+            // bytes. Sort using the comparator DERIVED FROM `elem_marshal` (issue
+            // #1020 roborev follow-up; #28 no-heuristics — fail-closed on any
+            // element type whose comparator we cannot implement confidently).
+            sort_sorted_collection(out, elem_marshal, |e| e)?
         }
     })
 }
 
-/// Return `items` reordered by the UNSIGNED byte order of each item's serialized
-/// wire form, using the writer's authoritative [`serialize_value`] (so the sort
-/// key is byte-identical to what is later written). `key` projects the comparable
-/// value out of each item (identity for a set element, the entry KEY for a map).
-/// A stable sort is used so items that serialize identically keep their relative
-/// input order. Returns the matching `Value` collection variant.
-fn sort_by_serialized_bytes<T>(items: Vec<T>, key: impl Fn(&T) -> &Value) -> Result<Value>
+/// Return `items` reordered by the element/key AbstractType comparator DERIVED
+/// FROM `key_marshal`, so the on-disk order of a frozen SORTED collection
+/// (`SetType` elements, `MapType` keys) matches Cassandra exactly. `key` projects
+/// the comparable value out of each item (identity for a set element, the entry
+/// KEY for a map).
+///
+/// The comparator is type-aware (see [`compare_for_marshal`]): SIGNED integer
+/// marshals compare as signed numerics (so `-1 < 0`), byte-ordered marshals
+/// compare by their unsigned serialized bytes, and any type whose comparator we
+/// cannot implement confidently is FAIL-CLOSED with an error (no-heuristics, issue
+/// #28). The serialized bytes are precomputed once per item (so a serialization
+/// error surfaces deterministically and we never re-serialize per comparison); the
+/// comparator receives both the live `Value` and its bytes. A stable sort keeps
+/// the relative input order of items that compare equal.
+fn sort_sorted_collection<T>(
+    items: Vec<T>,
+    key_marshal: &str,
+    key: impl Fn(&T) -> &Value,
+) -> Result<Value>
 where
     Value: SortedCollection<T>,
 {
-    // Precompute the serialized bytes once per item: avoids re-serializing on
-    // every comparison and lets a serialization error surface deterministically.
     let mut keyed: Vec<(Vec<u8>, T)> = Vec::with_capacity(items.len());
     for item in items {
         let bytes = serialize_value(key(&item))?;
         keyed.push((bytes, item));
     }
-    // Unsigned serialized-byte order == the relevant key/element AbstractType
-    // comparator for every type usable here. `sort_by` is stable.
-    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    // Surface any unsupported-comparator error BEFORE sorting (sort_by cannot
+    // return an error). A single representative probe is insufficient — collection
+    // elements can mix variants — so the byte/value comparator is invoked for every
+    // pair; instead, validate the comparator is implementable for this marshal up
+    // front against each item's value.
+    for (_, item) in &keyed {
+        comparator_supported_for(key_marshal, key(item))?;
+    }
+    let mut sort_err: Option<Error> = None;
+    keyed.sort_by(|a, b| {
+        match compare_for_marshal(key_marshal, key(&a.1), &a.0, key(&b.1), &b.0) {
+            Ok(ord) => ord,
+            Err(e) => {
+                if sort_err.is_none() {
+                    sort_err = Some(e);
+                }
+                Ordering::Equal
+            }
+        }
+    });
+    if let Some(e) = sort_err {
+        return Err(e);
+    }
     Ok(Value::from_sorted(
         keyed.into_iter().map(|(_, item)| item).collect(),
     ))
 }
 
+/// Comparator family for a frozen sorted-collection key/element marshal.
+enum CompareKind {
+    /// Compare by the UNSIGNED order of the serialized wire bytes. Correct for
+    /// byte-ordered Cassandra `AbstractType`s (UTF8Type/AsciiType/BytesType,
+    /// InetAddressType, SimpleDateType — whose epoch is shifted so byte order is
+    /// value order — BooleanType) AND for composite frozen UDT/tuple/collection
+    /// elements (Cassandra orders those by their serialized bytes here too).
+    UnsignedBytes,
+    /// Compare as a SIGNED numeric of the given width: Int32Type→i32, LongType/
+    /// CounterColumnType/TimestampType/TimeType→i64, ByteType→i8, ShortType→i16.
+    /// Unsigned big-endian byte order disagrees with the Cassandra comparator for
+    /// these (e.g. `-1` = 0xFFFFFFFF would sort AFTER `0`), so they are compared on
+    /// the decoded signed value.
+    SignedInt,
+}
+
+/// Classify the comparator for a key/element marshal `ty`. A non-primitive marshal
+/// (UDT/tuple/list/set/map element of a sorted collection) is byte-ordered. A
+/// primitive marshal maps to its AbstractType comparator family; a primitive whose
+/// comparator we cannot implement confidently returns `None` (caller fails closed).
+fn classify_comparator(ty: &str) -> Option<CompareKind> {
+    let Some(name) = primitive_marshal_name(ty) else {
+        // Composite frozen element (UDT/tuple/collection): byte-ordered.
+        return Some(CompareKind::UnsignedBytes);
+    };
+    match name {
+        // Signed integers — Cassandra compares the decoded signed value.
+        "Int32Type" | "LongType" | "ByteType" | "ShortType" | "CounterColumnType"
+        | "TimestampType" | "TimeType" => Some(CompareKind::SignedInt),
+        // Byte-ordered AbstractTypes: unsigned serialized-byte order == comparator.
+        // SimpleDateType is byte-ordered (epoch shifted by 2^31 at serialization).
+        "UTF8Type" | "AsciiType" | "BytesType" | "InetAddressType" | "BooleanType"
+        | "SimpleDateType" => Some(CompareKind::UnsignedBytes),
+        // FAIL-CLOSED (no-heuristics, issue #28; tracked for #1254): types whose
+        // Cassandra comparator is non-trivial and NOT plain unsigned-byte order:
+        //   UUIDType/TimeUUIDType/LexicalUUIDType — version- and time-field-aware,
+        //     not raw byte order;
+        //   IntegerType (varint) / DecimalType — sign+magnitude/scale aware;
+        //   FloatType/DoubleType — total-order with NaN/sign handling;
+        //   DurationType — not a sortable AbstractType.
+        _ => None,
+    }
+}
+
+/// Ensure the comparator for `ty` can be applied to `value` (fail-closed up front).
+fn comparator_supported_for(ty: &str, value: &Value) -> Result<()> {
+    match classify_comparator(ty) {
+        Some(CompareKind::UnsignedBytes) => Ok(()),
+        Some(CompareKind::SignedInt) => {
+            // Confirm the live value is one of the signed-int variants we decode.
+            signed_value(value).map(|_| ())
+        }
+        None => Err(unsupported_comparator_err(ty)),
+    }
+}
+
+fn unsupported_comparator_err(ty: &str) -> Error {
+    Error::InvalidInput(format!(
+        "frozen sorted-collection key/element type '{ty}' has no comparator implemented in the \
+         canonicalizer; ordering it by raw serialized bytes could produce NON-Cassandra bytes, so \
+         it is rejected rather than guessed (no-heuristics, issue #28; tracked for follow-up #1254)"
+    ))
+}
+
+/// Decode the SIGNED i128 value of a signed-integer `Value`, or an error if the
+/// variant is not one of the signed-int variants (Integer/BigInt/Counter/TinyInt/
+/// SmallInt). Widening to `i128` makes all four widths comparable in one ordering.
+fn signed_value(value: &Value) -> Result<i128> {
+    match value {
+        Value::Integer(n) => Ok(*n as i128),
+        Value::BigInt(n) | Value::Counter(n) | Value::Timestamp(n) | Value::Time(n) => {
+            Ok(*n as i128)
+        }
+        Value::TinyInt(n) => Ok(*n as i128),
+        Value::SmallInt(n) => Ok(*n as i128),
+        other => Err(Error::InvalidInput(format!(
+            "expected a signed-integer value for a signed-comparator key/element type, got {other:?}"
+        ))),
+    }
+}
+
+/// Compare two key/element values for the marshal `ty`, given each value and its
+/// precomputed serialized bytes. SIGNED-int marshals compare the decoded signed
+/// values; byte-ordered marshals compare the unsigned serialized bytes.
+fn compare_for_marshal(
+    ty: &str,
+    a_val: &Value,
+    a_bytes: &[u8],
+    b_val: &Value,
+    b_bytes: &[u8],
+) -> Result<Ordering> {
+    match classify_comparator(ty) {
+        Some(CompareKind::UnsignedBytes) => Ok(a_bytes.cmp(b_bytes)),
+        Some(CompareKind::SignedInt) => Ok(signed_value(a_val)?.cmp(&signed_value(b_val)?)),
+        None => Err(unsupported_comparator_err(ty)),
+    }
+}
+
 /// Maps the sorted item vector back to the right `Value` collection variant so
-/// `sort_by_serialized_bytes` can serve both the frozen-set element path
+/// `sort_sorted_collection` can serve both the frozen-set element path
 /// (`T = Value`) and the frozen-map entry path (`T = (Value, Value)`).
 trait SortedCollection<T> {
     fn from_sorted(items: Vec<T>) -> Value;
@@ -390,14 +519,15 @@ fn canonicalize_map(value: &Value, key_marshal: &str, val_marshal: &str) -> Resu
         ));
     }
     // A frozen `MapType` is a SORTED collection: Cassandra stores its entries
-    // ordered by the KEY's AbstractType comparator, which for every CQL map-key
-    // type is the UNSIGNED byte order of the key's serialized form. The writer's
-    // simple-cell path emits entries in the value's iteration order, so a
-    // multi-entry frozen map written with unsorted keys would produce
-    // NON-Cassandra bytes. Sort by the serialized KEY bytes using the SAME
-    // `serialize_value` the writer emits, so the on-disk order matches
-    // Cassandra's MapType exactly (issue #1020).
-    sort_by_serialized_bytes(out, |(k, _)| k)
+    // ordered by the KEY's AbstractType comparator. That comparator is type-
+    // dependent and is NOT unsigned-byte order for every key type (notably SIGNED
+    // integers, where `-1` must sort before `0`). The writer's simple-cell path
+    // emits entries in iteration order, so a multi-entry frozen map written with
+    // unsorted keys would produce NON-Cassandra bytes. Sort by the comparator
+    // DERIVED FROM `key_marshal` (issue #1020 roborev follow-up; #28 no-heuristics
+    // — fail-closed on any key type whose comparator we cannot implement
+    // confidently).
+    sort_sorted_collection(out, key_marshal, |(k, _)| k)
 }
 
 fn canonicalize_tuple(value: &Value, components: &[String]) -> Result<Value> {
@@ -1011,6 +1141,123 @@ mod tests {
             firsts,
             vec!["Ada".to_string(), "Bob".to_string(), "Carol".to_string()],
             "set elements must be sorted by serialized element bytes"
+        );
+    }
+
+    // A frozen<map<int, frozen<person>>> marshal: an Int32Type KEY (a SIGNED
+    // integer) exercises the type-aware comparator. Negative keys MUST sort before
+    // 0 by signed-numeric order, NOT by unsigned big-endian byte order.
+    fn map_int_to_person_marshal() -> String {
+        format!(
+            "{p}FrozenType({p}MapType({p}Int32Type,{p}FrozenType({p}UserType({KS},706572736f6e,\
+             66697273745f6e616d65:{p}UTF8Type,6c6173745f6e616d65:{p}UTF8Type,616765:{p}Int32Type))))",
+            p = MARSHAL_PREFIX
+        )
+    }
+
+    #[test]
+    fn frozen_map_with_negative_int_keys_sorts_signed_not_unsigned() {
+        // Keys inserted OUT OF ORDER, mixing negatives and positives. Cassandra's
+        // Int32Type comparator is SIGNED: -5 < -1 < 0 < 2 < 7. Unsigned big-endian
+        // byte order would WRONGLY put 0,2,7 (0x00.., 0x02.., 0x07..) before -5,-1
+        // (0xFF..) — this test guards against that regression.
+        let v = Value::Frozen(Box::new(Value::Map(vec![
+            (Value::Integer(7), named_person("Seven")),
+            (Value::Integer(-1), named_person("MinusOne")),
+            (Value::Integer(0), named_person("Zero")),
+            (Value::Integer(-5), named_person("MinusFive")),
+            (Value::Integer(2), named_person("Two")),
+        ])));
+        let canon = canonicalize_udt_value(&map_int_to_person_marshal(), &v).unwrap();
+        let Value::Frozen(inner) = canon.as_ref() else {
+            panic!("expected frozen map");
+        };
+        let Value::Map(entries) = inner.as_ref() else {
+            panic!("expected map, got {inner:?}");
+        };
+        let keys: Vec<i32> = entries
+            .iter()
+            .map(|(k, _)| match k {
+                Value::Integer(n) => *n,
+                other => panic!("expected int key, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            keys,
+            vec![-5, -1, 0, 2, 7],
+            "int map keys must be sorted by SIGNED numeric order (-N..-1,0,1..N), not unsigned bytes"
+        );
+    }
+
+    // frozen<set<int>> is not UDT-bearing, so it skips the references_user_type
+    // fast-path gate; exercise the signed-int SET element comparator by driving
+    // canonicalize_seq directly (the same path canonicalize_udt_value reaches for a
+    // UDT-bearing set whose elements are signed ints would use).
+    #[test]
+    fn frozen_set_with_negative_int_elements_sorts_signed_not_unsigned() {
+        let elem_marshal = format!("{MARSHAL_PREFIX}Int32Type");
+        let set = Value::Set(vec![
+            Value::Integer(3),
+            Value::Integer(-2),
+            Value::Integer(0),
+            Value::Integer(-10),
+            Value::Integer(1),
+        ]);
+        let canon = canonicalize_seq(&set, &elem_marshal, SeqKind::Set).unwrap();
+        let Value::Set(items) = canon else {
+            panic!("expected set, got {canon:?}");
+        };
+        let elems: Vec<i32> = items
+            .iter()
+            .map(|e| match e {
+                Value::Integer(n) => *n,
+                other => panic!("expected int element, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            elems,
+            vec![-10, -2, 0, 1, 3],
+            "int set elements must be sorted by SIGNED numeric order, not unsigned bytes"
+        );
+    }
+
+    #[test]
+    fn frozen_set_bigint_negative_elements_sort_signed() {
+        // LongType is also signed; -1i64 (0xFFFF..) must sort before 0.
+        let elem_marshal = format!("{MARSHAL_PREFIX}LongType");
+        let set = Value::Set(vec![
+            Value::BigInt(5),
+            Value::BigInt(-1),
+            Value::BigInt(-100),
+            Value::BigInt(0),
+        ]);
+        let canon = canonicalize_seq(&set, &elem_marshal, SeqKind::Set).unwrap();
+        let Value::Set(items) = canon else {
+            panic!("expected set");
+        };
+        let elems: Vec<i64> = items
+            .iter()
+            .map(|e| match e {
+                Value::BigInt(n) => *n,
+                other => panic!("expected bigint, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(elems, vec![-100, -1, 0, 5]);
+    }
+
+    #[test]
+    fn frozen_set_unsupported_key_type_is_fail_closed() {
+        // UUIDType has a version/time-aware comparator we do NOT implement; the
+        // canonicalizer must REJECT (fail-closed) rather than sort by raw bytes
+        // (no-heuristics, issue #28; tracked for #1254). Two elements are required
+        // so the sort path actually evaluates the comparator.
+        let elem_marshal = format!("{MARSHAL_PREFIX}UUIDType");
+        let set = Value::Set(vec![Value::Uuid([1u8; 16]), Value::Uuid([2u8; 16])]);
+        let err = canonicalize_seq(&set, &elem_marshal, SeqKind::Set).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("UUIDType") && msg.contains("no comparator implemented"),
+            "unexpected error: {msg}"
         );
     }
 
