@@ -49,7 +49,8 @@ const SCOPE_MARKERS: &[&str] = &[
 ];
 
 /// Normalize a string for phrase matching: lowercase and collapse runs of
-/// whitespace (so a phrase split across a soft-wrap still matches).
+/// whitespace. Used to canonicalize a manifest phrase before matching it against
+/// the normalized whole-file view (see [`NormalizedFile`]).
 fn normalize(s: &str) -> String {
     s.to_lowercase()
         .split_whitespace()
@@ -57,18 +58,112 @@ fn normalize(s: &str) -> String {
         .join(" ")
 }
 
-/// True if the line frames the phrase as a scoped/negated counter-example.
-fn line_is_scoped(line_lower: &str) -> bool {
-    SCOPE_MARKERS.iter().any(|m| line_lower.contains(m))
+/// A whole-file view normalized to lowercase with all whitespace runs (including
+/// newlines) collapsed to single spaces, so a phrase split across a soft-wrap
+/// still matches. `offsets[i]` maps byte index `i` of `text` back to the 1-based
+/// source line number it originated from, so a match reports the line where the
+/// phrase starts.
+struct NormalizedFile {
+    /// Lowercased, whitespace-collapsed text of the whole file.
+    text: String,
+    /// Per-byte source-line map: `offsets[i]` is the 1-based source line that the
+    /// byte at `text[i]` came from. Length always equals `text.len()`.
+    offsets: Vec<usize>,
+}
+
+impl NormalizedFile {
+    /// Build the normalized view of `raw`, recording the source line each emitted
+    /// byte came from. A run of whitespace collapses to one space attributed to
+    /// the line where the run *started* (so a phrase wrapped across a soft-wrap
+    /// reports its starting line).
+    fn new(raw: &str) -> Self {
+        let lower = raw.to_lowercase();
+        let mut text = String::with_capacity(lower.len());
+        let mut offsets = Vec::with_capacity(lower.len());
+        let mut line = 1usize;
+        let mut in_ws = false;
+        let mut ws_line = 1usize;
+        for ch in lower.chars() {
+            if ch.is_whitespace() {
+                if !in_ws {
+                    in_ws = true;
+                    ws_line = line;
+                }
+                if ch == '\n' {
+                    line += 1;
+                }
+            } else {
+                if in_ws {
+                    // Emit a single collapsing space if it sits between tokens.
+                    if !text.is_empty() {
+                        for _ in 0..' '.len_utf8() {
+                            offsets.push(ws_line);
+                        }
+                        text.push(' ');
+                    }
+                    in_ws = false;
+                }
+                let start = text.len();
+                text.push(ch);
+                for _ in start..text.len() {
+                    offsets.push(line);
+                }
+            }
+        }
+        debug_assert_eq!(text.len(), offsets.len());
+        Self { text, offsets }
+    }
+
+    /// 1-based source line for the byte at `idx` in [`Self::text`].
+    fn line_at(&self, idx: usize) -> usize {
+        self.offsets.get(idx).copied().unwrap_or(1)
+    }
+}
+
+/// A half-open byte span `[start, end)` within a [`NormalizedFile`].
+#[derive(Clone, Copy)]
+struct Span {
+    start: usize,
+    end: usize,
+}
+
+/// All occurrences of `needle` within `hay`, as byte spans.
+fn find_spans(hay: &str, needle: &str) -> Vec<Span> {
+    let mut spans = Vec::new();
+    if needle.is_empty() {
+        return spans;
+    }
+    let mut from = 0;
+    while let Some(rel) = hay[from..].find(needle) {
+        let start = from + rel;
+        let end = start + needle.len();
+        spans.push(Span { start, end });
+        from = start + 1; // allow overlapping matches
+    }
+    spans
+}
+
+/// True if `inner` is fully contained within any span in `outer`.
+fn covered_by(inner: Span, outer: &[Span]) -> bool {
+    outer
+        .iter()
+        .any(|s| s.start <= inner.start && inner.end <= s.end)
 }
 
 /// Scan the given release-facing files for unqualified public-claim phrases.
 ///
-/// For each `claim.blocked.*` entry, every release file is searched for the
-/// claim phrase. An occurrence is a lint error unless the line it appears on is
-/// explicitly scoped (see [`SCOPE_MARKERS`]) or is the verbatim wording of a
-/// `claim.safe.*` entry. Findings name the file, line, claim id, and the safe
-/// alternative to use instead.
+/// Each file is normalized to a single whitespace-collapsed lowercase view (see
+/// [`NormalizedFile`]) so a phrase split across a soft-wrap is still detected,
+/// while a per-byte line map lets findings report the source line where the
+/// phrase starts. For each `claim.blocked.*` entry, every occurrence is a lint
+/// error unless either:
+///   * that specific occurrence's span falls inside a `claim.safe.*` phrase span
+///     (span-based exemption — a safe phrase elsewhere on the line does not
+///     exempt a separate over-claim), or
+///   * the source line the occurrence starts on is explicitly scoped (see
+///     [`SCOPE_MARKERS`]; scope markers remain line-level).
+///
+/// Findings name the file, line, claim id, and the safe alternative to use.
 pub fn scan_docs(m: &Manifest, files: &[ScanInput<'_>]) -> Vec<Finding> {
     let mut out = Vec::new();
 
@@ -79,23 +174,32 @@ pub fn scan_docs(m: &Manifest, files: &[ScanInput<'_>]) -> Vec<Finding> {
         .iter()
         .filter(|c| c.kind == "safe")
         .map(|c| normalize(&c.phrase))
+        .filter(|p| !p.is_empty())
         .collect();
 
     for f in files {
-        for (lineno, raw) in f.text.lines().enumerate() {
-            let line_norm = normalize(raw);
-            if line_norm.is_empty() {
-                continue;
-            }
-            // A line that is (or contains) a verbatim safe wording is allowed
-            // even if a blocked substring overlaps it.
-            let is_safe_wording = safe_phrases.iter().any(|p| line_norm.contains(p.as_str()));
-            for c in &blocked {
-                let phrase = normalize(&c.phrase);
-                if phrase.is_empty() || !line_norm.contains(&phrase) {
+        let nf = NormalizedFile::new(f.text);
+        if nf.text.is_empty() {
+            continue;
+        }
+        // Spans covered by manifest-backed safe wording — a blocked occurrence is
+        // exempt only when *its own* span sits inside one of these.
+        let safe_spans: Vec<Span> = safe_phrases
+            .iter()
+            .flat_map(|p| find_spans(&nf.text, p))
+            .collect();
+        // Source lines explicitly framing a counter-example/negation. Scope
+        // markers stay line-level, keyed by the 1-based source line they sit on.
+        let scoped_lines = scoped_source_lines(f.text);
+
+        for c in &blocked {
+            let phrase = normalize(&c.phrase);
+            for occ in find_spans(&nf.text, &phrase) {
+                if covered_by(occ, &safe_spans) {
                     continue;
                 }
-                if is_safe_wording || line_is_scoped(&line_norm) {
+                let lineno = nf.line_at(occ.start);
+                if scoped_lines.contains(&lineno) {
                     continue;
                 }
                 let alt = c
@@ -106,7 +210,7 @@ pub fn scan_docs(m: &Manifest, files: &[ScanInput<'_>]) -> Vec<Finding> {
                 out.push(Finding {
                     level: Level::Error,
                     id: c.id.clone(),
-                    field: format!("{}:{}", f.path, lineno + 1),
+                    field: format!("{}:{}", f.path, lineno),
                     message: format!(
                         "unqualified public parity claim \"{}\" — must be explicitly scoped or dropped.{alt}",
                         c.phrase.trim()
@@ -117,6 +221,20 @@ pub fn scan_docs(m: &Manifest, files: &[ScanInput<'_>]) -> Vec<Finding> {
     }
 
     out
+}
+
+/// 1-based source line numbers that contain an explicit scope/negation marker.
+fn scoped_source_lines(raw: &str) -> std::collections::HashSet<usize> {
+    raw.lines()
+        .enumerate()
+        .filter_map(|(i, line)| {
+            let lower = line.to_lowercase();
+            SCOPE_MARKERS
+                .iter()
+                .any(|mk| lower.contains(mk))
+                .then_some(i + 1)
+        })
+        .collect()
 }
 
 /// The curated, conservative set of release-facing files the claim scan reads,

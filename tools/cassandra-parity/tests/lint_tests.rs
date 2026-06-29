@@ -651,6 +651,41 @@ fn manifest_backed_safe_wording_passes() {
 }
 
 #[test]
+fn same_line_safe_phrase_does_not_exempt_separate_blocked_phrase() {
+    // Roborev finding 1: a line that contains a manifest-backed safe phrase AND a
+    // separate unqualified over-claim must still FAIL — the safe wording only
+    // exempts the span it covers, not the whole line.
+    let docs = [(
+        "README.md",
+        "CQLite is validated against selected Apache Cassandra 5.0 SSTable fixtures \
+         and runs the same tests as Cassandra.",
+    )];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.blocked.same_tests_as_cassandra")),
+        "separate blocked phrase on a safe-wording line must be caught, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn blocked_phrase_wrapped_across_lines_is_caught() {
+    // Roborev finding 2: a blocked phrase split across a soft-wrap must still be
+    // detected, with the finding reporting the line where the phrase starts.
+    let docs = [(
+        "README.md",
+        "CQLite runs the same tests as\nCassandra in every build.",
+    )];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.blocked.same_tests_as_cassandra")
+                && e.contains("README.md:1")),
+        "wrapped blocked phrase must be caught at its start line, got: {errs:#?}"
+    );
+}
+
+#[test]
 fn blocked_finding_names_safe_alternative() {
     let docs = [("README.md", "We have full compaction byte parity.")];
     let errs = claim_findings(&wrap_with_claims(), &docs);
