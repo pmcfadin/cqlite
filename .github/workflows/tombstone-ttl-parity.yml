@@ -50,6 +50,7 @@ on:
     branches: [main]
     paths:
       - 'cqlite-core/tests/issue_101*_*.rs'
+      - 'cqlite-core/tests/issue_1019_static_dropped_collection_compaction_parity.rs'
       - 'test-data/cassandra-parity-manifest.yml'
       - 'test-data/scripts/generate-tombstone-parity.sh'
       - 'test-data/scripts/generate-deltas.sh'
@@ -107,6 +108,12 @@ jobs:
           find "$CQLITE_DATASETS_ROOT/sstables/test_deltas" -name '*-Data.db' | sort
 
       - name: Run tombstone / TTL parity tests (strict, require-fixtures)
+        # The #1019 static/dropped-column/collection compaction test (epic #973)
+        # reads the same fixture families generated/fetched above — test_tomb
+        # (dropped_static_col, dropped_regular_col), test_deltas (collection_ops),
+        # and the published test_collections (collection_table). It is the
+        # fail-closed enforcer for the seven #1019 manifest scenarios, so run it
+        # here under CQLITE_REQUIRE_FIXTURES=1 too.
         run: |
           env CQLITE_REQUIRE_FIXTURES=1 \
             CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
@@ -117,4 +124,5 @@ jobs:
               --test issue_1013_rt_index_block_parity \
               --test issue_1014_resurrection_safety_parity \
               --test issue_1015_dropped_static_parity \
+              --test issue_1019_static_dropped_collection_compaction_parity \
               -- --nocapture

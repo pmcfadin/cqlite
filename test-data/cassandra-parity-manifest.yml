@@ -5501,7 +5501,7 @@ scenarios:
         the separate byte tier (cass.compaction.harness_byte_tier_artifacts).
     ci:
       tier: required_parity
-      workflow: .github/workflows/compaction-parity.yml
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope: {}
 
   - id: cass.serialization.SerializationMirrorTest.schema_evolution_ordering
@@ -5553,7 +5553,7 @@ scenarios:
         evolution, not a byte comparison of the header layout itself.
     ci:
       tier: required_parity
-      workflow: .github/workflows/compaction-parity.yml
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope: {}
 
   - id: cass.compaction.CompactionSimpleValueMergeTest.static_row_merge
@@ -5604,7 +5604,7 @@ scenarios:
         of the static prelude is the separate byte tier.
     ci:
       tier: required_parity
-      workflow: .github/workflows/compaction-parity.yml
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope: {}
 
   - id: cass.compaction.GcCompactionTest.static_and_complex_columns_survive_gc
@@ -5659,7 +5659,7 @@ scenarios:
         the separate byte tier.
     ci:
       tier: required_parity
-      workflow: .github/workflows/compaction-parity.yml
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope: {}
 
   # cqlite.issue_847.dropped_column_filter (issue identifier)
@@ -5715,7 +5715,7 @@ scenarios:
         SSTable files; canonical-semantic, not a header byte comparison.
     ci:
       tier: required_parity
-      workflow: .github/workflows/compaction-parity.yml
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope: {}
 
   # cqlite.issue_850.static_presence (issue identifier)
@@ -5769,7 +5769,7 @@ scenarios:
         the separate byte tier.
     ci:
       tier: required_parity
-      workflow: .github/workflows/compaction-parity.yml
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope: {}
 
   # cqlite.issue_899.per_element_collection_compaction (issue identifier)
@@ -5837,7 +5837,7 @@ scenarios:
         whole-component byte identity is the separate byte tier.
     ci:
       tier: required_parity
-      workflow: .github/workflows/compaction-parity.yml
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope: {}
 
   # ----------------------------------------------------------------------------

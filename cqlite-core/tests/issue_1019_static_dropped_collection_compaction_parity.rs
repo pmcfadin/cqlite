@@ -264,6 +264,25 @@ fn dropped_regular_schema(drop_time_micros: Option<i64>) -> TableSchema {
     }
 }
 
+/// Post-drop READ-BACK schema for `dropped_regular_col`: the CURRENT schema once
+/// `drop_col` has been fully purged and stripped from the compacted output header.
+/// It declares ONLY `keep_col` (plus the key columns) — `drop_col` is ABSENT, not
+/// merely listed in `dropped_columns`. Reading the compacted output with this
+/// schema genuinely proves the surviving `keep_col` cells decode at the correct
+/// clustering positions with `drop_col` gone (no header/bitmap misalignment),
+/// rather than relying on the read schema still knowing about `drop_col`.
+fn dropped_regular_post_drop_read_schema() -> TableSchema {
+    TableSchema {
+        keyspace: "test_tomb".to_string(),
+        table: "dropped_regular_col".to_string(),
+        partition_keys: vec![key_col("pk", "int")],
+        clustering_keys: vec![ck_col("ck", "int")],
+        columns: vec![col("keep_col", "text", false)],
+        comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
+    }
+}
+
 /// DDL for the real `test_collections.collection_table` (matches
 /// `test-data/schemas/collections.cql`).
 const COLLECTION_TABLE_DDL: &str = "CREATE TABLE test_collections.collection_table (\
@@ -559,7 +578,12 @@ fn dropped_column_fully_purged_absent_from_output_header_no_misalign() {
 
     // ── AC2 assertion (b): keep_col survivors read back at the right clustering
     //    positions — proving the dropped-column strip did not misalign columns.
-    let read_schema = dropped_regular_schema(None);
+    //    Read the compacted output with the CURRENT post-drop schema, which
+    //    declares ONLY keep_col (drop_col is ABSENT, not just in dropped_columns).
+    //    This genuinely proves keep_col reads back aligned with drop_col gone from
+    //    both the output header and the schema, rather than the read schema still
+    //    knowing about drop_col.
+    let read_schema = dropped_regular_post_drop_read_schema();
     let mut merger = KWayMerger::new(vec![report.output.data_path.clone()], &read_schema)
         .expect("merger over compacted output");
     let mut keep_survivors: Vec<(String, String)> = Vec::new();
@@ -591,7 +615,9 @@ fn dropped_column_fully_purged_absent_from_output_header_no_misalign() {
 
     assert!(
         drop_survivors.is_empty(),
-        "AC2: every drop_col cell was pre-drop and MUST be purged; survived: {drop_survivors:?}"
+        "AC2: every drop_col cell was pre-drop and MUST be purged — and reading the compacted \
+         output with the post-drop schema (drop_col absent) surfaces no drop_col cell; \
+         survived: {drop_survivors:?}"
     );
     keep_survivors.sort();
     let mut expected = vec![
