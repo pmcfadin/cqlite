@@ -45,6 +45,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+concurrency:
+  group: cassandra-parity-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   parity-manifest:
     runs-on: ubuntu-latest
