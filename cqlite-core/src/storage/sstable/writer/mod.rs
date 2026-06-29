@@ -822,6 +822,23 @@ impl SSTableWriter {
         self.baselines_locked = true;
     }
 
+    /// Preserve the persisted repair state (`repairedAt`, `pendingRepair`,
+    /// `isTransient`) into this writer's output `Statistics.db` (issue #1021).
+    ///
+    /// Called by the compaction merge path with the single shared repair state of
+    /// the (compatible) inputs so the merged SSTable carries the inputs' repair
+    /// metadata forward. A fresh memtable flush never calls this, so the output
+    /// stays unrepaired (`repaired_at = 0`, no pending repair, non-transient).
+    pub fn set_repair_state(
+        &mut self,
+        repaired_at: i64,
+        pending_repair: Option<[u8; 16]>,
+        is_transient: bool,
+    ) {
+        self.stats
+            .set_repair_state(repaired_at, pending_repair, is_transient);
+    }
+
     /// Compute the encoding baseline stats (min values only) from a slice of mutations.
     ///
     /// Used for the pre-pass before `write_partition` is called (issue #729

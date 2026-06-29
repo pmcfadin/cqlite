@@ -76,6 +76,14 @@ mod model;
 #[cfg(feature = "write-support")]
 pub use model::{CellData, ComplexDeletion, MergeEntry, MergeStats, MergeStep, RowData};
 
+/// Repair-state classification + mixed-state rejection for compaction
+/// (issue #1021). Reads each input's persisted repair state from `Statistics.db`
+/// and either returns the shared state to preserve or rejects a mixed-state set.
+#[cfg(feature = "write-support")]
+pub mod repair_state;
+#[cfg(feature = "write-support")]
+pub use repair_state::{classify_inputs, RepairState};
+
 /// Clustering-group reconciliation kernel, decomposed into named steps
 /// (issue #945). See [`reconcile::ReconcileState`].
 #[cfg(feature = "write-support")]
@@ -1783,11 +1791,21 @@ pub async fn compact_sstables_with_registry(
     )?
     .with_purge_safe(purge_safe);
 
+    // Repair-state preservation + mixed-state rejection (issue #1021): reject a
+    // mixed repaired/unrepaired/pending-repair input set (Cassandra never mixes
+    // them in one compaction) and otherwise carry the shared state forward.
+    let repair_state = classify_inputs(&input_paths)?;
+
     let mut writer = crate::storage::sstable::writer::SSTableWriter::new(
         output_dir.to_path_buf(),
         generation,
         &write_schema,
     )?;
+    writer.set_repair_state(
+        repair_state.repaired_at,
+        repair_state.pending_repair,
+        repair_state.is_transient,
+    );
 
     // Two-pass compaction (issue #729): seed the output's encoding baselines from
     // the inputs' Statistics.db before writing any partition.
