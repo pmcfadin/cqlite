@@ -5110,13 +5110,19 @@ scenarios:
       failure_artifacts:
         - "panic diff: CQLite-written vs Cassandra-reference component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; TOC component-set delta; JSONL partition-count / per-partition row assertion"
       known_limitations: >-
-        Whole-artifact byte diff of finished CQLite Data.db / Index.db / Summary.db
-        / Digest.crc32 against a committed Cassandra 5.0.2 reference for identical
-        schema/data + the sstabledump JSONL golden. Filter.db and Statistics.db are
-        NOT byte-compared (implementation-specific bloom-filter sizing / metadata
-        histograms / HyperLogLog); their semantics are anchored elsewhere. CRC.db
-        is a known writer gap (Cassandra emits it for uncompressed BIG; CQLite does
-        not yet — the READ side already recognizes it, see
+        SCOPE OF component_files EVIDENCE: this is NOT unqualified full
+        component-set parity. The `component_files` artifact is scoped to the
+        component set CQLite actually emits; the test asserts CQLite emits no
+        spurious component absent from the reference AND that the byte-compared
+        components match, but CRC.db is a known reference-only component that
+        Cassandra emits for uncompressed BIG and CQLite's writer does not yet
+        (writer gap tracked in #1197). Whole-artifact byte diff of finished CQLite
+        Data.db / Index.db / Summary.db / Digest.crc32 against a committed
+        Cassandra 5.0.2 reference for identical schema/data + the sstabledump JSONL
+        golden. Filter.db and Statistics.db are NOT byte-compared
+        (implementation-specific bloom-filter sizing / metadata histograms /
+        HyperLogLog); their semantics are anchored elsewhere. CRC.db is the known
+        writer gap (the READ side already recognizes it, see
         cass.sstable_format.toc_component_manifest); the test pins this as a
         reference-only component so closing the gap forces a manifest review.
         Dataset-dependent: the test skips when the binary reference is not fetched
@@ -5253,11 +5259,16 @@ scenarios:
       failure_artifacts:
         - "panic diff: CQLite-written vs Cassandra-reference component (cass len + ours len + first-diff byte index + full hex of both) for Index.db / Data.db / Summary.db / Digest.crc32; TOC component-set delta; JSONL partition-count / per-partition row assertion"
       known_limitations: >-
-        Whole-artifact byte diff of the finished CQLite-written partition-boundary
-        SSTable (Index.db partition/row-offset table + Data.db / Summary.db /
-        Digest.crc32) against a committed Cassandra 5.0.2 reference for identical
-        multi-partition / multi-clustering-row flush input, plus the sstabledump
-        JSONL golden. Filter.db / Statistics.db are not byte-compared
+        SCOPE OF component_files EVIDENCE: this is NOT unqualified full
+        component-set parity. The `component_files` artifact is scoped to the
+        component set CQLite actually emits; the test asserts CQLite emits no
+        spurious component absent from the reference, while CRC.db remains a known
+        reference-only component CQLite's writer does not yet emit (writer gap
+        tracked in #1197). Whole-artifact byte diff of the finished CQLite-written
+        partition-boundary SSTable (Index.db partition/row-offset table + Data.db /
+        Summary.db / Digest.crc32) against a committed Cassandra 5.0.2 reference for
+        identical multi-partition / multi-clustering-row flush input, plus the
+        sstabledump JSONL golden. Filter.db / Statistics.db are not byte-compared
         (implementation-specific); CRC.db is the same known writer gap as the
         finished-Data scenario (pinned in the test). Dataset-dependent: skips when
         the binary reference is not fetched and FAILS on present-but-empty.

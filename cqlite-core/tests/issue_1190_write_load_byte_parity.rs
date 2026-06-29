@@ -380,6 +380,23 @@ async fn assert_byte_parity(
          re-evaluate write_load_path component-set parity in the manifest"
     );
 
+    // No spurious CQLite-only component: every component CQLite emits must be
+    // present in the reference. The CRC.db asymmetry is the OTHER direction
+    // (reference-only), so it does not appear here; if a future carve-out for a
+    // CQLite-only component is ever needed it must be added to this allow-list
+    // (currently empty) with a documented rationale.
+    const CQLITE_ONLY_ALLOWED: &[&str] = &[];
+    let spurious: Vec<&String> = our_components
+        .difference(&ref_components)
+        .filter(|c| !CQLITE_ONLY_ALLOWED.contains(&c.as_str()))
+        .collect();
+    assert!(
+        spurious.is_empty(),
+        "{table}: CQLite emitted spurious component(s) absent from the reference: \
+         {spurious:?} (ours={our_components:?} ref={ref_components:?}); if intentional, \
+         add to CQLITE_ONLY_ALLOWED with a documented rationale"
+    );
+
     // 2. TOC.txt: every component CQLite lists must match the reference TOC; the
     //    only allowed difference is the known-missing CRC.db line.
     let ref_toc = toc_set(&read_component(&ref_dir, "TOC.txt"));
