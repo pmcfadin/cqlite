@@ -1021,6 +1021,7 @@ fn ref_sstable_info(data_path: &Path) -> cqlite_core::storage::sstable::writer::
         rows_path: opt("Rows.db"),
         toc_path: comp("TOC.txt"),
         digest_path: comp("Digest.crc32"),
+        crc_path: opt("CRC.db"),
         partition_count: 0,
         data_size,
     }

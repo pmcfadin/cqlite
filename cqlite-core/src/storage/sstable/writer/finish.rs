@@ -160,6 +160,21 @@ impl SSTableWriter {
         let crc32_value = Self::compute_crc32(&data_path).await?;
         digest_writer.write(crc32_value)?;
 
+        // 6.5. Write CRC.db — per-chunk CRC32 for uncompressed BIG (issue #1197).
+        // Cassandra 5.0 writes a CRC.db for every uncompressed BIG (`nb`)
+        // SSTable, alongside Digest.crc32 (ChecksummedSequentialWriter). The
+        // layout is a big-endian i32 chunk-size header (64 KiB) followed by one
+        // big-endian u32 CRC32 per raw-data chunk. BTI (`da`) tables emit no
+        // CRC.db (verified against the Cassandra-written `da` fixtures), and the
+        // compressed path carries per-chunk CRCs inline (CompressionInfo.db),
+        // so this is gated on the BIG + uncompressed write path only.
+        let crc_path = if is_bti {
+            None
+        } else {
+            use crate::storage::sstable::writer::crc_writer;
+            Some(crc_writer::write_crc_db(&data_path, cpath("CRC.db")).await?)
+        };
+
         // 7. Write TOC.txt (LAST - publication barrier).
         //
         // The TOC lists exactly the component set actually written. BIG lists
@@ -180,6 +195,10 @@ impl SSTableWriter {
             ComponentEntry::new(SSTableComponent::Statistics),
             ComponentEntry::new(SSTableComponent::Digest),
         ]);
+        // CRC.db is listed for uncompressed BIG tables (issue #1197).
+        if crc_path.is_some() {
+            components.push(ComponentEntry::new(SSTableComponent::Crc));
+        }
         // BIG lists Index.db + Summary.db; BTI (issue #908) omits both.
         if index_path.is_some() {
             components.push(ComponentEntry::new(SSTableComponent::Index));
@@ -216,6 +235,7 @@ impl SSTableWriter {
             rows_path,
             toc_path,
             digest_path,
+            crc_path,
             partition_count: self.partition_count,
             data_size,
         })

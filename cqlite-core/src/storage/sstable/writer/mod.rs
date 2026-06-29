@@ -35,6 +35,8 @@ pub mod compressed_data_writer;
 #[cfg(feature = "write-support")]
 pub mod compression_info_writer;
 #[cfg(feature = "write-support")]
+pub mod crc_writer;
+#[cfg(feature = "write-support")]
 pub mod data_writer;
 #[cfg(feature = "write-support")]
 pub mod digest_writer;
@@ -179,6 +181,14 @@ pub struct SSTableInfo {
     pub toc_path: PathBuf,
     /// Path to the Digest.crc32 file
     pub digest_path: PathBuf,
+    /// Path to the `CRC.db` per-chunk checksum file.
+    ///
+    /// `Some` for uncompressed BIG (`nb`) SSTables, which Cassandra 5.0 always
+    /// emits alongside `Digest.crc32` (issue #1197). `None` for BTI (`da`)
+    /// tables and for the compressed path (compressed tables carry per-chunk
+    /// CRCs inline and describe them in `CompressionInfo.db`, so they have no
+    /// `CRC.db`).
+    pub crc_path: Option<PathBuf>,
     /// Number of partitions written
     pub partition_count: usize,
     /// Total size of Data.db file in bytes
