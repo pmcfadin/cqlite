@@ -5752,6 +5752,390 @@ scenarios:
     scope: {}
 
   # ----------------------------------------------------------------------------
+  # UDT / frozen-value compaction byte parity (issue #1020, epic #973)
+  #
+  # The UDT/frozen extension of the live-cell compaction slice (#1017). Three
+  # committed Cassandra 5.0.2 COMPACTED reference SSTables under
+  # test_compactionparityudt/{udt_frozen_person,udt_nested,udt_collections} are
+  # diffed against CQLite's own compact_sstables_with_registry output by the
+  # pinned Rust test
+  # cqlite-core/tests/issue_1020_udt_frozen_compaction_byte_parity.rs. Every
+  # complex value is FROZEN (single value cell) and the same UdtRegistry built
+  # from schemas/compaction-parity-udt.cql drives both engines.
+  #
+  # HONEST CLASSIFICATION (issue #1020 AC7):
+  #   * udt_collections (frozen collections incl. collections-of-UDT) achieves
+  #     byte_for_byte parity TODAY (Data.db/Index.db/Summary.db/Digest.crc32
+  #     byte-identical; CRC.db prefix; Statistics.db+Filter.db present-not-diffed).
+  #   * udt_frozen_person / udt_nested have a TOP-LEVEL frozen<UDT> regular column,
+  #     which CQLite's compaction currently DROPS entirely (data loss, issue
+  #     #1234). They are recorded canonical_semantic: the active test exercises the
+  #     real compaction path and asserts the typed sstabledump JSONL decode of the
+  #     Cassandra reference (UDT field order, null fields, nested fields), and a
+  #     FLIP-READY #[ignore]'d strict byte-parity test is pinned to #1234.
+  #
+  # NOTE on ids: the manifest id grammar requires a `cass.<group>...` prefix, so
+  # the three cqlite-conceptual scenarios use `cass.compaction.udt_*`. They map to
+  # `cqlite.compaction_parity.udt.frozen_person`,
+  # `cqlite.compaction_parity.udt.nested_udt`, and
+  # `cqlite.compaction_parity.udt.collections_with_udts` respectively.
+  # ----------------------------------------------------------------------------
+
+  # cqlite.compaction_parity.udt.collections_with_udts (issue identifier) — the
+  # byte_for_byte claim.
+  - id: cass.compaction.udt_collections_with_udts
+    title: Frozen-collection + collections-of-UDT compaction byte parity (the claim)
+    status: mirrored
+    capability: compaction_merge
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - LegacySSTableTest.java
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_1020_udt_frozen_compaction_byte_parity.rs
+        notes: >-
+          THE CLAIM: two overlapping SSTables of a table with frozen<list<int>>,
+          frozen<map<text,int>>, frozen<list<frozen<person>>>, and
+          frozen<map<text,frozen<address>>> columns are major-compacted by Cassandra
+          into one reference; CQLite's compact_sstables_with_registry merges the SAME
+          two inputs and its Data.db/Index.db/Summary.db/Digest.crc32 are
+          byte-identical to the Cassandra 5.0.2 compacted reference. Frozen UDT values
+          nested inside frozen collections decode to typed UDTs in the JSONL
+          cross-check. Newer write wins by timestamp (LWW); Murmur3 token order
+          preserved.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-e6f641d073d611f196bb098389af4637/nb-3-big-Data.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-e6f641d073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, checksums, component_files, jsonl, generated_report]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-compaction-parity-udt.sh  # cassandra:5.0.2 → 2 flushes → nodetool compact → compacted SSTable
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_1020_udt_frozen_compaction_byte_parity
+        collections_with_udts_compaction_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-e6f641d073d611f196bb098389af4637/nb-3-big-Data.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-e6f641d073d611f196bb098389af4637/nb-3-big-Index.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-e6f641d073d611f196bb098389af4637/nb-3-big-Summary.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-e6f641d073d611f196bb098389af4637/nb-3-big-Digest.crc32
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-e6f641d073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
+      normalization: >-
+        Data.db/Index.db/Summary.db/Digest.crc32 whole-file byte-for-byte; CRC.db
+        prefix (compaction-only trailing empty-chunk CRC32=0 excluded); typed JSONL
+        (frozen collections + collections-of-UDT field decode) cross-check.
+      failure_artifacts:
+        - "panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; typed JSONL (pk,cell)->value map mismatch"
+      known_limitations: >-
+        Statistics.db + Filter.db present on both but not byte-diffed (impl detail).
+        CRC.db prefix-parity only. Frozen values only (multicell UDT/collection
+        cell-path ownership is a separate complex-collection issue).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/live-cell-compaction-parity.yml
+    scope: {}
+
+  - id: cass.sstable_format.LegacySSTableTest.complex_udt_frozen_non_frozen
+    title: Complex frozen UDT inside frozen collections survives compaction (mirror)
+    status: mirrored
+    capability: compaction_merge
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - LegacySSTableTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_1020_udt_frozen_compaction_byte_parity.rs
+        notes: >-
+          Cassandra-test-class perspective cross-referencing the byte-level claim
+          cass.compaction.udt_collections_with_udts. A complex column carrying frozen
+          UDTs inside frozen list/map values round-trips byte-for-byte through
+          compaction; the typed JSONL pins per-field UDT decode of the collection
+          elements.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-e6f641d073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, component_files, jsonl, generated_report]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-compaction-parity-udt.sh
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_1020_udt_frozen_compaction_byte_parity
+        collections_with_udts_compaction_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-e6f641d073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
+      normalization: >-
+        Cross-references the byte-level claim cass.compaction.udt_collections_with_udts.
+      failure_artifacts:
+        - "panic diff: CQLite-compacted vs Cassandra-compacted Data.db/Index.db/Summary.db/Digest.crc32 byte mismatch (full hex of both); typed JSONL (pk,cell)->value map mismatch for the collection-element UDT decode"
+      known_limitations: >-
+        Non-frozen (multicell) UDT/collection cell-path ownership is a separate
+        complex-collection issue, out of scope here.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/live-cell-compaction-parity.yml
+    scope: {}
+
+  # cqlite.compaction_parity.udt.frozen_person (issue identifier) —
+  # canonical_semantic (blocked on #1234 for byte parity).
+  - id: cass.compaction.udt_frozen_person
+    title: Frozen-UDT (person) value compaction parity — typed survivors
+    status: partial
+    capability: compaction_merge
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_1020_udt_frozen_compaction_byte_parity.rs
+        notes: >-
+          frozen<person> values (full / null-middle-field / empty-first-field)
+          across two overlapping SSTables. The Cassandra 5.0.2 compacted reference
+          decodes to typed UDTs preserving field ORDER, null fields, and frozen value
+          boundaries; the active test asserts this typed JSONL after running CQLite's
+          real compaction path. Byte parity is NOT yet claimed: a TOP-LEVEL
+          frozen<UDT> regular column is currently dropped during CQLite compaction
+          (data loss, issue #1234). A FLIP-READY #[ignore]'d strict byte-parity test
+          is pinned to #1234.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-e6e1cf7073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      artifacts: [jsonl, generated_report]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-compaction-parity-udt.sh
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_1020_udt_frozen_compaction_byte_parity
+        frozen_person_compaction_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-e6e1cf7073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
+      normalization: >-
+        Typed sstabledump JSONL: per-(pk,cell) canonical UDT JSON equality pins
+        field order + null-field + empty-string-field decode of the LWW survivors.
+      known_limitations: >-
+        Byte parity blocked on #1234 (CQLite compaction drops a top-level
+        frozen<UDT> regular column). Recorded canonical_semantic until fixed; the
+        committed Cassandra reference is byte_for_byte-ready and the ignored byte
+        test flips on fix.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/live-cell-compaction-parity.yml
+    scope:
+      gap: >-
+        CQLite compaction drops a top-level frozen<UDT> regular column entirely
+        (output_partitions=0), so byte/JSONL parity of CQLite's OWN compacted output
+        is not yet achievable; only the Cassandra reference's typed decode is pinned.
+      next_step: >-
+        Fix #1234, then remove #[ignore] on
+        frozen_person_compaction_byte_for_byte_blocked_1234 and flip the evidence
+        type to byte_for_byte.
+      target_issue: 1234
+
+  # cqlite.compaction_parity.udt.nested_udt (issue identifier) —
+  # canonical_semantic (blocked on #1234 for byte parity).
+  - id: cass.compaction.udt_nested
+    title: Nested frozen-UDT (employee→address) compaction parity — typed survivors
+    status: partial
+    capability: compaction_merge
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CQLSSTableWriterTest.java
+        - SerializationHeaderTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_1020_udt_frozen_compaction_byte_parity.rs
+        notes: >-
+          frozen<employee> values that CONTAIN a frozen<address> (nested UDT),
+          including an inner null `city` field. The Cassandra 5.0.2 compacted
+          reference decodes to typed nested UDTs (inner + outer field order, nested
+          field decode, inner frozen value boundary); the active test asserts this
+          typed JSONL after CQLite's real compaction path. Byte parity blocked on
+          #1234 (top-level frozen<UDT> column dropped); FLIP-READY ignored byte test
+          pinned to #1234.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-e6eddd6073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      artifacts: [jsonl, generated_report]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-compaction-parity-udt.sh
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_1020_udt_frozen_compaction_byte_parity
+        nested_udt_compaction_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-e6eddd6073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
+      normalization: >-
+        Typed sstabledump JSONL: per-(pk,cell) canonical nested-UDT JSON equality
+        pins inner+outer field order, nested field decode, and the inner null field.
+      known_limitations: >-
+        Byte parity blocked on #1234 (top-level frozen<UDT> regular column dropped
+        during CQLite compaction). Recorded canonical_semantic; ignored byte test
+        flips on fix.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/live-cell-compaction-parity.yml
+    scope:
+      gap: >-
+        Same #1234 top-level frozen<UDT> compaction drop as udt_frozen_person; only
+        the Cassandra reference's typed nested-UDT decode is pinned for now.
+      next_step: >-
+        Fix #1234, then remove #[ignore] on
+        nested_udt_compaction_byte_for_byte_blocked_1234 and flip to byte_for_byte.
+      target_issue: 1234
+
+  - id: cass.sstable_format.CQLSSTableWriterTest.frozen_udt_roundtrip
+    title: Frozen-UDT round-trip through compaction (typed-decode mirror)
+    status: partial
+    capability: compaction_merge
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_1020_udt_frozen_compaction_byte_parity.rs
+        notes: >-
+          Cassandra-test-class perspective cross-referencing
+          cass.compaction.udt_frozen_person: a frozen UDT written via the CQL writer,
+          flushed, and compacted retains its typed value (field order, null fields).
+          Byte parity blocked on #1234.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-e6e1cf7073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      artifacts: [jsonl, generated_report]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-compaction-parity-udt.sh
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_1020_udt_frozen_compaction_byte_parity
+        frozen_person_compaction_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-e6e1cf7073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
+      normalization: >-
+        Cross-references cass.compaction.udt_frozen_person (typed JSONL survivor map).
+      known_limitations: >-
+        Byte parity blocked on #1234. canonical_semantic until fixed.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/live-cell-compaction-parity.yml
+    scope:
+      gap: Byte parity of CQLite's compacted output blocked on #1234.
+      next_step: Fix #1234, then flip cass.compaction.udt_frozen_person to byte_for_byte.
+      target_issue: 1234
+
+  - id: cass.serialization.SerializationHeaderTest.udt_schema_resolution
+    title: UDT schema resolution through compaction (fail-loud, no blob fallback)
+    status: mirrored
+    capability: compaction_merge
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationHeaderTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_1020_udt_frozen_compaction_byte_parity.rs
+        notes: >-
+          The compaction is driven by a UdtRegistry built from the DDL UDT
+          definitions in schemas/compaction-parity-udt.cql (person/address/employee,
+          incl. the nested frozen<address>) and passed to both the input writers and
+          compact_sstables_with_registry. The input SSTable headers advertise the
+          column as FrozenType(UserType(...)) (verified), proving schema-driven UDT
+          resolution rather than a blob fallback. The collections scenario's
+          byte_for_byte parity is the strongest evidence the resolution is exact; the
+          frozen-UDT-column scenarios pin the typed decode of the Cassandra reference.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-e6f641d073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-e6eddd6073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      artifacts: [jsonl, generated_report]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-compaction-parity-udt.sh
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_1020_udt_frozen_compaction_byte_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-e6f641d073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-e6eddd6073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
+      normalization: >-
+        Schema-driven UDT resolution: a missing/incorrect registry would degrade the
+        frozen-UDT column to a bare BytesType cell that would not decode to a typed
+        UDT (test fails) — no silent blob fallback (issue #28).
+      known_limitations: >-
+        Byte parity of the top-level frozen<UDT> column scenarios is blocked on
+        #1234; resolution correctness is fully exercised (byte_for_byte for the
+        collections scenario, typed-decode for the rest).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/live-cell-compaction-parity.yml
+    scope: {}
+
+  # ----------------------------------------------------------------------------
   # write_load_path
   # ----------------------------------------------------------------------------
   - id: cass.write_load_path.cassandra_sstable_writer_fixtures
