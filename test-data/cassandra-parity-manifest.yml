@@ -809,6 +809,408 @@ scenarios:
     scope: {}
 
   # ----------------------------------------------------------------------------
+  # data_db_decode — TTL / tombstone / range-marker byte parity (issue #992 / epic #969)
+  # ----------------------------------------------------------------------------
+  - id: cass.data_db_decode.ttl.local_deletion_time_delta
+    title: Data.db TTL cell local-deletion-time / TTL delta parity
+    status: mirrored
+    capability: tombstone_ttl
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - UnfilteredSerializer.java
+        - TTLExpiryTest.java
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+        notes: >-
+          A TTL row sets HAS_TIMESTAMP | HAS_TTL and writes
+          `[ts delta][ttl delta][localDeletionTime delta]` (all UNSIGNED VInt from
+          the EncodingStats minima); the derived expiration second is the LDT. The
+          deterministic lane (`ttl_row_preserves_ttl_and_derived_ldt_deltas`) uses
+          NON-ZERO minTTL/minLocalDeletionTime so the TTL delta = ttl-minTTL is an
+          exact byte value and asserts the expiring cell reuses row ts+ttl
+          (IS_EXPIRING | USE_ROW_TIMESTAMP | USE_ROW_TTL). The fixture lane
+          (`fixture_ttl_row_byte_parity`) walks the real ttl_cells nb Data.db,
+          reconstructs ttl=3600 and expires_at from the on-disk delta + minTTL /
+          minLocalDeletionTime, and uses the `notll` partition as a no-TTL control.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/ttl_cells-299c9220701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_992_ttl_tombstone_range_parity
+        ttl_row_preserves fixture_ttl_row
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/ttl_cells-299c9220701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/data-db-ttl-delta-diff.log
+      normalization: >-
+        TTL and localDeletionTime are decoded as UNSIGNED VInt deltas at exact
+        wire offsets and reconstructed against the Statistics.db EncodingStats
+        minTTL / minLocalDeletionTime; the fixture lane is local-only and SKIPS
+        when the binary is absent (the deterministic lane runs everywhere), but
+        FAILS on a present-but-empty body or 0 rows.
+      known_limitations: >-
+        STRICT BYTE parity is asserted for the row TTL/LDT delta encoding and the
+        expiring-cell reuse flags; per-cell explicit-TTL whole-file byte identity
+        is covered by the broader sstable_writer_cassandra_fixture_parity suite.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.data_db_decode.tombstone.partition_deletion_time
+    title: Data.db partition deletion-time (fixed header form) parity
+    status: mirrored
+    capability: tombstone_ttl
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - DeletionTime.java
+        - ColumnIndex.java
+        - UnfilteredSerializer.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+        notes: >-
+          A partition deletion is written in the partition HEADER as a FIXED
+          `[i32 localDeletionTime BE][i64 markedForDeleteAt BE]` immediately after
+          the key — NOT the unsigned-VInt delta form used inside rows/markers; LIVE
+          is the (Integer.MAX_VALUE, Long.MIN_VALUE) sentinel. The deterministic
+          lanes (`partition_deletion_uses_fixed_header_form_not_delta`,
+          `live_partition_header_uses_live_sentinel_in_same_fixed_slots`) assert the
+          exact fixed bytes/offsets and that the first row's prev_size equals the
+          fixed 18-byte header size even WITH a deletion. The fixture lane
+          (`fixture_partition_tombstone_fixed_header_byte_parity`) walks the real
+          partition_tombstones nb Data.db PK=2 header and reconstructs the golden
+          mfda µs / LDT secs from the FIXED i64/i32 (not a delta).
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/partition_tombstones-299258f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_992_ttl_tombstone_range_parity
+        partition_deletion live_partition fixture_partition_tombstone
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/partition_tombstones-299258f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/data-db-partition-deletion-diff.log
+      normalization: >-
+        The partition deletion is compared as a FIXED big-endian i32 LDT + i64 mfda
+        at their exact header offsets (NOT a VInt delta); the fixture lane is
+        local-only and SKIPS when the binary is absent (deterministic lanes cover
+        the fixed-form shape everywhere) but FAILS on a present-but-empty body.
+      known_limitations: >-
+        STRICT BYTE parity for the partition-header fixed deletion-time slots. The
+        token ordering of which partition lands first on disk is derived from the
+        golden (a regen that reshuffles murmur3 order is reported as a clear PK
+        mismatch).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.data_db_decode.tombstone.row_deletion_time
+    title: Data.db row deletion-time (own delta fields, no value bytes) parity
+    status: mirrored
+    capability: tombstone_ttl
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - UnfilteredSerializer.java
+        - DeletionTime.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+        notes: >-
+          A HAS_DELETION row writes `[markedForDeleteAt delta][localDeletionTime
+          delta]` (both UNSIGNED VInt) after the clustering prefix + row_size /
+          prev_size, and a PURE row tombstone has NO surviving cells (no value
+          bytes). The deterministic lane
+          (`row_tombstone_carries_own_deltas_and_no_value_bytes`) asserts the row
+          flag (HAS_DELETION, NOT HAS_TIMESTAMP), the two own deltas at exact
+          offsets, and that the framed body closes right after the column bitmap on
+          END_OF_PARTITION. The fixture lane (`fixture_row_tombstone_byte_parity`)
+          walks the real row_tombstones nb Data.db PK=1 ck=3 row tombstone,
+          reconstructs the golden marked_deleted µs from the row's OWN delta, and
+          confirms NO cell value bytes were consumed.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/row_tombstones-297f1f10701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_992_ttl_tombstone_range_parity
+        row_tombstone fixture_row_tombstone
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/row_tombstones-297f1f10701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/data-db-row-deletion-diff.log
+      normalization: >-
+        Row deletion mfda/ldt are decoded as UNSIGNED VInt deltas at exact
+        offsets; the "no value bytes" claim is asserted as the framed body ending
+        exactly after the column bitmap. The fixture lane is local-only and SKIPS
+        when absent but FAILS on a present-but-empty body / 0 rows.
+      known_limitations: >-
+        STRICT BYTE parity for the row deletion-time delta fields and the
+        no-value-bytes framing of a pure row tombstone.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.data_db_decode.tombstone.cell_deletion_time
+    title: Data.db cell deletion-time (own delta fields, no value bytes) parity
+    status: mirrored
+    capability: tombstone_ttl
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - Cell.java
+        - UnfilteredSerializer.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+        notes: >-
+          A deleted cell sets IS_DELETED | HAS_EMPTY_VALUE, writes its OWN
+          `[timestamp delta][localDeletionTime delta]` (UNSIGNED VInt, NOT
+          USE_ROW_TIMESTAMP), and consumes NO value length / value bytes. The
+          deterministic lane (`cell_tombstone_carries_own_deltas_and_no_value_bytes`)
+          builds a row with a live col_a + deleted col_b and asserts the deleted
+          cell's flag byte, its own ts/ldt deltas at exact offsets, and that the
+          framed body ends right after the cell's ldt. The fixture lane
+          (`fixture_cell_tombstone_byte_parity`) walks the real cell_tombstones nb
+          Data.db PK=1 ck=2 col_b cell tombstone and reconstructs the golden cell
+          deletion µs from the cell's OWN delta.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/cell_tombstones-29733830701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_992_ttl_tombstone_range_parity
+        cell_tombstone fixture_cell_tombstone
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/cell_tombstones-29733830701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/data-db-cell-deletion-diff.log
+      normalization: >-
+        Cell tombstone flag byte (IS_DELETED | HAS_EMPTY_VALUE) and own ts/ldt
+        deltas are compared at exact offsets; the no-value-bytes claim is asserted
+        as the framed body ending exactly after the cell's ldt delta. Local-only
+        fixture: SKIP when absent, FAIL on present-but-empty.
+      known_limitations: >-
+        STRICT BYTE parity for the cell deletion-time fields and the no-value-bytes
+        cell-tombstone framing inside a live row.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.data_db_decode.range_tombstone.bound_markers
+    title: Data.db range-tombstone bound-marker parity
+    status: mirrored
+    capability: tombstone_ttl
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - ClusteringBoundOrBoundary.java
+        - RangeTombstoneTest.java
+        - RangeTombstoneListTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+        notes: >-
+          A range-tombstone BOUND marker is
+          `[IS_MARKER 0x02][kind ordinal u8][cluster_count u16 BE][clustering prefix]
+          [marker_body_size VInt][prev_size VInt][mfda delta][ldt delta]` — ONE
+          deletion-time pair; the kind ordinal encodes side (start/end) AND
+          inclusivity (INCL_START 1, EXCL_END 0, INCL_END 6, EXCL_START 7). The
+          deterministic lane (`range_bound_markers_exact_grammar_writer`) drives the
+          public DataWriter and asserts the full marker grammar at exact offsets for
+          an inclusive-start / exclusive-end pair. The fixture lanes
+          (`fixture_range_bound_markers_byte_parity`,
+          `fixture_range_inclusive_end_bound_kind`) walk the real range_tombstones nb
+          Data.db, assert kind ordinals + the prefix clustering value, and
+          reconstruct the golden marked_deleted µs from the single delta.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/range_tombstones-298894f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_992_ttl_tombstone_range_parity
+        range_bound_markers_exact fixture_range_bound_markers fixture_range_inclusive_end
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/range_tombstones-298894f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/data-db-range-bound-diff.log
+      normalization: >-
+        The bound-marker grammar is compared field-by-field at exact offsets: the
+        IS_MARKER flag, the ClusteringPrefix.Kind ordinal, the u16 cluster count,
+        the prefix clustering value (a PREFIX shorter than the full arity is
+        expected for `[ck1,*]` deletes), the marker_body_size/prev_size framing, and
+        the single mfda/ldt delta. Local-only fixture: SKIP when absent (the
+        deterministic writer lane runs everywhere), FAIL on present-but-empty / 0
+        markers.
+      known_limitations: >-
+        STRICT BYTE parity for the bound-marker grammar and the single
+        deletion-time pair; the two-deletion-time BOUNDARY form is a SEPARATE entry
+        (cass.data_db_decode.range_tombstone.boundary_markers).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.data_db_decode.range_tombstone.boundary_markers
+    title: Data.db range-tombstone boundary-marker (two deletion times) parity
+    status: partial
+    capability: tombstone_ttl
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - ClusteringBoundOrBoundary.java
+        - RangeTombstoneListTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+        notes: >-
+          A range-tombstone BOUNDARY marker (kind 2 = EXCL_END_INCL_START_BOUNDARY
+          or 5 = INCL_END_EXCL_START_BOUNDARY) closes one range and opens the next
+          at the SAME clustering point; its body carries TWO deletion-time pairs
+          (primary = end of the previous range, secondary = start of the next). The
+          fixture lanes (`fixture_range_boundary_marker_byte_parity`,
+          `fixture_range_boundary_kind5_byte_parity`) walk the real adjacent_ranges
+          nb Data.db, assert IS_MARKER + the kind-2 / kind-5 ordinal + the prefix
+          clustering value at exact offsets, and reconstruct BOTH deletion-time µs
+          (primary end + secondary start) from the two delta pairs against the
+          golden start/end marked_deleted timestamps.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/adjacent_ranges-29bdd5c0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_992_ttl_tombstone_range_parity
+        fixture_range_boundary
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/adjacent_ranges-29bdd5c0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/data-db-range-boundary-diff.log
+      normalization: >-
+        The boundary-marker grammar is compared field-by-field at exact offsets:
+        IS_MARKER, the kind-2/kind-5 ordinal, the u16 cluster count, the prefix
+        clustering value, and BOTH deletion-time pairs (primary then secondary)
+        reconstructed against the golden end/start marked_deleted µs.
+      known_limitations: >-
+        PARTIAL (read-side strict byte parity only): CQLite's WRITER never EMITS a
+        boundary marker — it emits separate start/end BOUND pairs — so there is no
+        deterministic writer round-trip lane for the two-deletion-time boundary
+        form. Byte parity is asserted against the real Cassandra adjacent_ranges
+        fixture (kind 2 AND kind 5). The fixture is local-only: the test SKIPS when
+        the binary is absent, so this case has NO CI-resident deterministic lane —
+        hence `partial`. Generating a CI-pinned boundary fixture (or a writer that
+        emits boundaries) would promote this to a strict-byte CI-resident `mirrored`.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope:
+      gap: >-
+        Boundary-marker (kind 2 / kind 5, two deletion-time pairs) byte parity is
+        asserted ONLY against the local-only adjacent_ranges fixture; there is no
+        CI-resident lane because (a) the fixture binary is not in the pinned CI
+        dataset (the test SKIPS when absent) and (b) CQLite's writer never EMITS a
+        boundary marker (it writes separate start/end BOUND pairs), so no
+        deterministic writer round-trip can cover the two-deletion-time body.
+      next_step: >-
+        Promote to strict-byte CI-resident `mirrored` by EITHER pinning the
+        adjacent_ranges boundary fixture into the CI dataset OR teaching the writer
+        to coalesce adjacent ranges into a boundary marker (then add a deterministic
+        writer round-trip lane that emits + re-decodes the two-deletion-time form).
+
+  # ----------------------------------------------------------------------------
   # index_summary
   # ----------------------------------------------------------------------------
   - id: cass.index_summary.big_index_offsets
