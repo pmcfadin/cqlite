@@ -644,6 +644,14 @@ async fn assert_udt_compaction_parity(
     // CanonicalSemantic, a cross-check for ByteForByte.
     assert_jsonl_typed(table, &ref_dir, expected_partitions, expected);
 
+    // roborev #1020 Finding 3: the JSONL assertion above only reads the Cassandra
+    // REFERENCE. Decode CQLITE'S COMPACTED OUTPUT too and assert its typed
+    // (pk, cell) -> Value map equals the typed map decoded from the Cassandra
+    // reference with the SAME reader. This validates CQLite's output is a real,
+    // typed, decodable SSTable (UDT/frozen field decoding survived) rather than a
+    // blob fallback — the previous test validated nothing about CQLite's output.
+    assert_cqlite_output_decodes_like_reference(table, &schema, &ref_dir, &out_dir).await;
+
     if mode == Mode::CanonicalSemantic {
         eprintln!(
             "[issue_1020] {KEYSPACE}.{table}: CANONICAL-SEMANTIC parity PASS — typed sstabledump \
@@ -859,6 +867,125 @@ fn assert_jsonl_typed(
          unexpected: {unexpected:?}\n  \
          full seen={seen:?}\n  full expected={expected_map:?}"
     );
+}
+
+/// roborev #1020 Finding 3: decode CQLite's compacted OUTPUT and the Cassandra
+/// REFERENCE through the SAME `SSTableReader` + schema, then assert the typed
+/// `(pk, cell) -> Value` maps are EQUAL.
+///
+/// The reader decodes a `frozen<udt>` column STRUCTURALLY from the on-disk
+/// SerializationHeader marshal (issue #1080), so the bare `frozen<person>` schema
+/// suffices. If CQLite emitted a blob fallback (the failure mode this slice
+/// guards against), the decoded values would differ from the typed reference
+/// values and FAIL here — not silently pass. Frozen wrappers are peeled before
+/// comparison so a `Value::Frozen(Value::Udt)` and a bare `Value::Udt` of the
+/// same content compare equal.
+async fn assert_cqlite_output_decodes_like_reference(
+    table: &str,
+    schema: &TableSchema,
+    ref_dir: &Path,
+    out_dir: &Path,
+) {
+    let reference = decode_typed_cell_map(table, schema, ref_dir).await;
+    let ours = decode_typed_cell_map(table, schema, out_dir).await;
+
+    assert!(
+        !ours.is_empty(),
+        "{table}: CQLite compacted output decoded to ZERO typed cells — likely a \
+         blob fallback or unreadable output (Finding 3 guard)"
+    );
+
+    let wrong_or_missing: Vec<_> = reference
+        .iter()
+        .filter(|(k, v)| ours.get(*k) != Some(*v))
+        .collect();
+    let unexpected: Vec<_> = ours
+        .iter()
+        .filter(|(k, v)| reference.get(*k) != Some(*v))
+        .collect();
+    assert!(
+        wrong_or_missing.is_empty() && unexpected.is_empty(),
+        "{table}: CQLite output typed (pk,cell)->Value map does not match the \
+         Cassandra reference decoded by the same reader\n  \
+         wrong or missing (ref side): {wrong_or_missing:?}\n  \
+         unexpected (ours side): {unexpected:?}\n  \
+         ours={ours:?}\n  reference={reference:?}"
+    );
+
+    eprintln!(
+        "[issue_1020] {KEYSPACE}.{table}: CQLite OUTPUT decode parity PASS — \
+         {} typed cells decode identically from CQLite's output and the Cassandra \
+         reference (Finding 3).",
+        ours.len()
+    );
+}
+
+/// Decode a compacted SSTable directory into a typed `(pk_repr, cell_name) ->
+/// Value` map via the public `SSTableReader` compaction iterator. `Value::Frozen`
+/// wrappers are peeled so comparison is wrapper-shape-insensitive.
+async fn decode_typed_cell_map(
+    table: &str,
+    schema: &TableSchema,
+    dir: &Path,
+) -> BTreeMap<(String, String), Value> {
+    use cqlite_core::platform::Platform;
+    use cqlite_core::storage::sstable::reader::compaction_row::CompactionRowData;
+    use cqlite_core::storage::sstable::reader::SSTableReader;
+    use cqlite_core::Config;
+    use std::sync::Arc;
+
+    let data_path =
+        single_data_db(dir).unwrap_or_else(|| panic!("{table}: no compacted Data.db in {dir:?}"));
+
+    let config = Config::default();
+    let platform = Arc::new(
+        Platform::new(&config)
+            .await
+            .expect("platform init for output decode"),
+    );
+    let reader = SSTableReader::open(&data_path, &config, platform)
+        .await
+        .unwrap_or_else(|e| panic!("{table}: open {data_path:?} for decode failed: {e}"));
+    let rows = reader
+        .iterate_all_partitions_for_compaction(Some(schema))
+        .await
+        .unwrap_or_else(|e| panic!("{table}: compaction iterate of {data_path:?} failed: {e}"));
+
+    let mut map: BTreeMap<(String, String), Value> = BTreeMap::new();
+    for row in &rows {
+        let pk = pk_repr(&row.key.0);
+        if let CompactionRowData::Live { simple, .. } = &row.row_data {
+            for cell in simple {
+                // Skip the partition-key column surfaced as a cell (pk is the map
+                // key already) and any cell tombstones.
+                if matches!(cell.value, Value::Tombstone(_)) {
+                    continue;
+                }
+                map.insert((pk.clone(), cell.column.clone()), peel_frozen(&cell.value));
+            }
+        }
+    }
+    map
+}
+
+/// Render a partition-key byte slice as the int `id` string used by the
+/// `expected`/JSONL pk repr (the #1020 tables all use an `int` PK). Falls back to
+/// hex for any non-4-byte key.
+fn pk_repr(bytes: &[u8]) -> String {
+    if bytes.len() == 4 {
+        i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]).to_string()
+    } else {
+        hex(bytes)
+    }
+}
+
+/// Recursively peel `Value::Frozen` wrappers so a frozen and a bare value of the
+/// same content compare equal.
+fn peel_frozen(v: &Value) -> Value {
+    match v {
+        Value::Frozen(inner) => peel_frozen(inner),
+        other => other.clone(),
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
