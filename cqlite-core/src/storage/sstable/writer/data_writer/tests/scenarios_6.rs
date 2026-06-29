@@ -1184,10 +1184,24 @@ fn resolve_bare_udt_marshal_scope() {
     assert!(resolve_bare_udt_marshal("unknown", "test_ks", &reg).is_none());
     assert!(resolve_bare_udt_marshal("person", "other_ks", &reg).is_none());
 
-    // Primitives and parameterized types are not bare UDT names.
+    // Primitives and (non-frozen-UDT) parameterized types are not bare UDT names.
     assert!(resolve_bare_udt_marshal("text", "test_ks", &reg).is_none());
     assert!(resolve_bare_udt_marshal("list<person>", "test_ks", &reg).is_none());
-    assert!(resolve_bare_udt_marshal("frozen<person>", "test_ks", &reg).is_none());
+    // Issue #1020: a `frozen<bare_udt>` SCALAR UDT column now resolves to the full
+    // `FrozenType(UserType(...))` marshal (frozen is single-cell, so this only
+    // changes the advertised header type — never flips to multicell/complex).
+    assert_eq!(
+        resolve_bare_udt_marshal("frozen<person>", "test_ks", &reg).as_deref(),
+        Some(
+            format!(
+                "org.apache.cassandra.db.marshal.FrozenType({})",
+                person_udt_marshal()
+            )
+            .as_str()
+        )
+    );
+    // A frozen COLLECTION (inner contains `<`) is NOT a frozen-UDT — left untouched.
+    assert!(resolve_bare_udt_marshal("frozen<list<person>>", "test_ks", &reg).is_none());
 
     // An already-marshalled type is left untouched.
     assert!(resolve_bare_udt_marshal(&person_udt_marshal(), "test_ks", &reg).is_none());
