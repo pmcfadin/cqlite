@@ -90,7 +90,25 @@ P0 data-loss path without a recorded gap is a contract violation.
   `required_parity` is treated as a failure for release purposes (see the
   release checklist).
 - **Failure policy.** Blocking. Every `required_parity` scenario MUST name a
-  workflow (`ci.workflow`); a missing workflow is a lint error.
+  workflow (`ci.workflow`); a missing workflow is a lint error. The named
+  workflow MUST also *actually run* the scenario's mapped test in a step that
+  **can fail the build** and is **fail-closed**. This is machine-enforced by
+  `cassandra-parity lint` (issue #1228): it parses the named workflow YAML into
+  its jobs → steps structure and fails the lint unless SOME step:
+  1. invokes a mapped `cqlite.coverage.tests` target as `--test <name>` in a real
+     test RUN — a `--no-run` (compile-only) invocation or a commented-out token
+     does NOT count — or, for a JVM harness scenario, invokes `gradle`;
+  2. can fail the build: either the step is not `continue-on-error: true`, or it
+     is a `continue-on-error` step whose recorded `steps.<id>.outcome` is checked
+     by a later BLOCKING aggregator step that runs `exit 1` (the standard
+     run-then-aggregate fail-closed pattern); and
+  3. is fail-closed — it arms `CQLITE_REQUIRE_FIXTURES` /
+     `CQLITE_PARITY_REQUIRE_DATASETS` at the step, job, or workflow level — so a
+     vanished/unfetched dataset PANICS instead of silently green-passing.
+
+  So a `required_parity` claim can never point at a workflow that does not
+  exercise it (e.g. a manifest-lint-only workflow), nor at one that runs the test
+  only in a non-blocking informational step or only as a compile-only `--no-run`.
 - **Artifact retention.** On failure, retain the diff/failure artifacts named in
   `evidence.failure_artifacts` long enough to triage (>= 14 days recommended).
 - **Promotion.** A `canonical_semantic` `required_parity` scenario is promoted

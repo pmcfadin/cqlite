@@ -18,6 +18,8 @@ Sources: [`docs/cassandra_test_index.md`](../../docs/cassandra_test_index.md) ·
 
 ## Evidence counts
 
+_Counts are per scenario; see [Distinct test backing](#distinct-test-backing-dedup) for the deduplicated test view (issue #1228)._
+
 | Evidence | Scenarios |
 |---|---|
 | `byte_for_byte` | 113 |
@@ -597,6 +599,62 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.sstable_format.descriptor_component_resolution` — Descriptor and on-disk version/component resolution
 - `cass.write_load_path.cassandra_sstable_writer_fixtures` — CQLite-written SSTables load into Cassandra via sstableloader
 
+## Distinct test backing (dedup)
+
+Scenario counts above can overstate distinct proof: one backing test may exercise many scenario ids. The dedup view below counts unique test targets so the program is not read as more independent tests than exist (issue #1228).
+
+- Distinct backing tests: **60** across **238** scenarios that name a test.
+
+### Tests backing more than one scenario
+
+| Backing test | Scenarios backed |
+|---|---|
+| `cqlite-core/tests/issue_1000_verifier.rs` | 18 |
+| `cqlite-core/tests/issue_997_compressioninfo_parity.rs` | 15 |
+| `cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs` | 10 |
+| `cqlite-core/tests/scan_delta_parity_test.rs` | 10 |
+| `cqlite-core/tests/sstable_parity_compression_info_test.rs` | 10 |
+| `compaction-parity/src/test/java/org/cqlite/parity/BasicDifferentialTest.java` | 9 |
+| `cqlite-core/tests/sstable_parity_compression_info_db_strict_test.rs` | 9 |
+| `cqlite-core/tests/issue_1015_dropped_static_parity.rs` | 8 |
+| `cqlite-core/tests/issue_1001_reject_unknown_compression.rs` | 7 |
+| `cqlite-core/tests/issue_1019_static_dropped_collection_compaction_parity.rs` | 7 |
+| `cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs` | 7 |
+| `cqlite-core/tests/issue_998_inline_crc_trailers.rs` | 7 |
+| `cqlite-core/tests/issue_1003_schema_evolution_header_parity.rs` | 6 |
+| `cqlite-core/tests/issue_1004_primitive_codec_vectors.rs` | 6 |
+| `cqlite-core/tests/issue_1005_collection_serializer_vectors.rs` | 6 |
+| `cqlite-core/tests/issue_1007_complex_type_parity.rs` | 6 |
+| `cqlite-core/tests/sstable_parity_filter_db_test.rs` | 6 |
+| `cqlite-core/tests/sstable_parity_index_db_test.rs` | 6 |
+| `cqlite-core/tests/sstable_parity_repaired_metadata_test.rs` | 6 |
+| `cqlite-core/tests/sstabledump_parity_summary.rs` | 6 |
+| `cqlite-core/tests/issue_1008_counter_final_value_parity.rs` | 5 |
+| `cqlite-core/tests/issue_1009_canonical_jsonl_comparator.rs` | 5 |
+| `cqlite-core/tests/issue_1010_deletion_markers_parity.rs` | 5 |
+| `cqlite-core/tests/issue_1011_ttl_local_deletion_parity.rs` | 5 |
+| `cqlite-core/tests/issue_1012_skipped_sstable_parity.rs` | 5 |
+| `cqlite-core/tests/issue_1013_rt_index_block_parity.rs` | 5 |
+| `cqlite-core/tests/issue_1014_resurrection_safety_parity.rs` | 5 |
+| `cqlite-core/tests/issue_1017_live_cell_compaction_byte_parity.rs` | 5 |
+| `cqlite-core/tests/issue_819_differential_compaction.rs` | 5 |
+| `cqlite-core/tests/issue_991_static_clustering_parity.rs` | 5 |
+| `cqlite-core/tests/sstable_parity_statistics_db_strict_test.rs` | 5 |
+| `cqlite-core/tests/issue_1006_null_empty_boundary_parity.rs` | 4 |
+| `cqlite-core/tests/issue_1021_repaired_metadata_compaction_parity.rs` | 4 |
+| `cqlite-core/tests/issue_990_data_db_row_framing_parity.rs` | 4 |
+| `cqlite-core/tests/issue_1190_write_load_byte_parity.rs` | 3 |
+| `compaction-parity/src/test/java/org/cqlite/parity/ComponentByteComparatorTest.java` | 2 |
+| `compaction-parity/src/test/java/org/cqlite/parity/DifferentialParityTester.java` | 2 |
+| `cqlite-core/tests/issue_1073_statistics_max_ldt_tombstone_histogram_parity.rs` | 2 |
+| `cqlite-core/tests/issue_1082_deflate_zlib.rs` | 2 |
+| `cqlite-core/tests/issue_766_bti_partitions_writer.rs` | 2 |
+| `cqlite-core/tests/issue_821_writer_byte_invariants.rs` | 2 |
+| `cqlite-core/tests/issue_899_per_element_survives_compaction.rs` | 2 |
+| `cqlite-core/tests/issue_921_background_compaction_dropped_column_header.rs` | 2 |
+| `cqlite-core/tests/sstable_parity_integration_test.rs` | 2 |
+| `cqlite-core/tests/sstableloader_integration.rs` | 2 |
+
 ## Gaps and next steps
 
 - `cass.compaction.SSTableRewriterTest.output_component_integrity` (planned): Byte-for-byte compaction output parity is computed and reported but not gated; the writer is not yet byte-identical to Cassandra. → _Land the divergence-fix children (#844/#846/#848 …), then drop continue-on-error on the byte step to promote it to a hard gate._
@@ -698,7 +756,7 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 
 | Scenario | CI tier | Workflow |
 |---|---|---|
-| `cass.bti_big_version_matrix.big_nb_oa_read` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.bti_big_version_matrix.big_nb_oa_read` | manual_debug | — |
 | `cass.bti_big_version_matrix.bti_da_write_read` | nightly_docker | .github/workflows/e2e-readback.yml |
 | `cass.cli_reporting.parity_manifest_lint_and_report` | fast_pr | .github/workflows/cassandra-parity.yml |
 | `cass.commitlog_replay.recovery_out_of_scope` | fast_pr | — |
@@ -716,16 +774,16 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.compaction.issue_899_per_element_collection_compaction` | required_parity | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.compaction.live_cells_clustering_lww` | required_parity | .github/workflows/live-cell-compaction-parity.yml |
 | `cass.compaction.live_cells_no_clustering` | required_parity | .github/workflows/live-cell-compaction-parity.yml |
-| `cass.compaction_merge.GcCompactionTest.row_cell_partition_tombstone_gc` | required_parity | .github/workflows/compaction-parity.yml |
+| `cass.compaction_merge.GcCompactionTest.row_cell_partition_tombstone_gc` | manual_debug | — |
 | `cass.compaction_merge.byte_for_byte_output` | manual_debug | — |
-| `cass.compaction_merge.issue_819.differential_input_merge_write_fidelity` | required_parity | .github/workflows/compaction-parity.yml |
-| `cass.compaction_merge.issue_819.differential_row_tombstone_wide_partition_regression` | required_parity | .github/workflows/compaction-parity.yml |
-| `cass.compaction_merge.load_path_validity` | required_parity | .github/workflows/compaction-parity.yml |
+| `cass.compaction_merge.issue_819.differential_input_merge_write_fidelity` | manual_debug | — |
+| `cass.compaction_merge.issue_819.differential_row_tombstone_wide_partition_regression` | manual_debug | — |
+| `cass.compaction_merge.load_path_validity` | fast_pr | — |
 | `cass.compaction_merge.partial_source_retains_tombstones` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.compaction_merge.partition_delete_shadowing_across_skipped_sources` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.compaction_merge.resurrection_safety.overlapping_sources` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.compaction_merge.static_row.survives_tombstone_gc` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
-| `cass.compaction_merge.tombstone_ttl_shadowing` | required_parity | .github/workflows/compaction-parity.yml |
+| `cass.compaction_merge.tombstone_ttl_shadowing` | manual_debug | — |
 | `cass.compaction_parity.statistics.repaired_metadata_preserve` | required_parity | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.compression.fixture_matrix.deflate` | exhaustive_regeneration | .github/workflows/compression-corruption-parity.yml |
 | `cass.compression.fixture_matrix.incompressible_uncompressed_chunk` | exhaustive_regeneration | .github/workflows/compression-corruption-parity.yml |
@@ -742,7 +800,7 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.compression.registry.unknown_algorithm_rejected` | fast_pr | — |
 | `cass.compression.registry.unsupported_options_rejected` | fast_pr | — |
 | `cass.compression_checksum.checksum_trailer_detection` | fast_pr | — |
-| `cass.compression_checksum.chunk_offsets_and_crc` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.compression_checksum.chunk_offsets_and_crc` | manual_debug | — |
 | `cass.compression_info.CompressedInputStreamTest.truncated_chunk_detection` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.compression_info.CompressedInputStreamTest.truncated_chunk_detection.strict` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.compression_info.CompressedRandomAccessReaderTest.chunk_offsets` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
@@ -756,13 +814,13 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.compression_info.StandardCompressedChunkReaderTest.round_trip_chunk_bytes` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.compression_info.deflate.real_fixture_chunks` | manual_debug | — |
 | `cass.compression_info.deflate.real_fixture_chunks.strict` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.compression_info.fields.algorithm_name` | required_parity | .github/workflows/cassandra-parity.yml |
-| `cass.compression_info.fields.chunk_length` | required_parity | .github/workflows/cassandra-parity.yml |
-| `cass.compression_info.fields.chunk_offsets` | required_parity | .github/workflows/cassandra-parity.yml |
-| `cass.compression_info.fields.data_length` | required_parity | .github/workflows/cassandra-parity.yml |
-| `cass.compression_info.fields.max_compressed_length` | required_parity | .github/workflows/cassandra-parity.yml |
-| `cass.compression_info.fields.options` | required_parity | .github/workflows/cassandra-parity.yml |
-| `cass.compression_info.layout.no_crc_fields` | required_parity | .github/workflows/cassandra-parity.yml |
+| `cass.compression_info.fields.algorithm_name` | nightly_docker | .github/workflows/compression-corruption-parity.yml |
+| `cass.compression_info.fields.chunk_length` | nightly_docker | .github/workflows/compression-corruption-parity.yml |
+| `cass.compression_info.fields.chunk_offsets` | nightly_docker | .github/workflows/compression-corruption-parity.yml |
+| `cass.compression_info.fields.data_length` | nightly_docker | .github/workflows/compression-corruption-parity.yml |
+| `cass.compression_info.fields.max_compressed_length` | nightly_docker | .github/workflows/compression-corruption-parity.yml |
+| `cass.compression_info.fields.options` | nightly_docker | .github/workflows/compression-corruption-parity.yml |
+| `cass.compression_info.layout.no_crc_fields` | nightly_docker | .github/workflows/compression-corruption-parity.yml |
 | `cass.compression_info.lz4.real_fixture_chunks` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.compression_info.lz4.real_fixture_chunks.strict` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.compression_info.snappy.real_fixture_chunks` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
@@ -801,29 +859,29 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.cql_types.counters.deleted_counter_shadowing` | nightly_docker | .github/workflows/cql-type-parity.yml |
 | `cass.cql_types.counters.multi_sstable_increment_decrement_merge` | nightly_docker | .github/workflows/cql-type-parity.yml |
 | `cass.cql_types.counters.single_sstable_context_decode` | nightly_docker | .github/workflows/cql-type-parity.yml |
-| `cass.cql_types.jsonl.canonical_value_comparator` | required_parity | .github/workflows/cql-type-parity.yml |
-| `cass.cql_types.jsonl.cell_path_timestamp_ttl_tombstone_compare` | required_parity | .github/workflows/cql-type-parity.yml |
-| `cass.cql_types.jsonl.manifest_report_generation` | required_parity | .github/workflows/cql-type-parity.yml |
-| `cass.cql_types.jsonl.no_placeholder_references` | required_parity | .github/workflows/cql-type-parity.yml |
-| `cass.cql_types.jsonl.schema_aware_normalization` | required_parity | .github/workflows/cql-type-parity.yml |
+| `cass.cql_types.jsonl.canonical_value_comparator` | manual_debug | — |
+| `cass.cql_types.jsonl.cell_path_timestamp_ttl_tombstone_compare` | manual_debug | — |
+| `cass.cql_types.jsonl.manifest_report_generation` | manual_debug | — |
+| `cass.cql_types.jsonl.no_placeholder_references` | manual_debug | — |
+| `cass.cql_types.jsonl.schema_aware_normalization` | manual_debug | — |
 | `cass.cql_types.primitives.fixed_width_vectors` | fast_pr | — |
 | `cass.cql_types.primitives.invalid_length_rejection` | fast_pr | — |
 | `cass.cql_types.primitives.temporal_vectors` | fast_pr | — |
 | `cass.cql_types.primitives.text_blob_ascii_vectors` | fast_pr | — |
 | `cass.cql_types.primitives.uuid_inet_vectors` | fast_pr | — |
 | `cass.cql_types.primitives.varint_decimal_duration_vectors` | fast_pr | — |
-| `cass.data_db.inline_crc.bad_trailer_rejected` | required_parity | .github/workflows/cassandra-parity.yml |
-| `cass.data_db.inline_crc.incompressible_uncompressed_chunk` | required_parity | .github/workflows/cassandra-parity.yml |
-| `cass.data_db.inline_crc.offset_delta_minus_crc_length` | required_parity | .github/workflows/cassandra-parity.yml |
-| `cass.data_db.inline_crc.short_final_chunk` | required_parity | .github/workflows/cassandra-parity.yml |
-| `cass.data_db.inline_crc.valid_trailer` | required_parity | .github/workflows/cassandra-parity.yml |
+| `cass.data_db.inline_crc.bad_trailer_rejected` | nightly_docker | .github/workflows/compression-corruption-parity.yml |
+| `cass.data_db.inline_crc.incompressible_uncompressed_chunk` | nightly_docker | .github/workflows/compression-corruption-parity.yml |
+| `cass.data_db.inline_crc.offset_delta_minus_crc_length` | nightly_docker | .github/workflows/compression-corruption-parity.yml |
+| `cass.data_db.inline_crc.short_final_chunk` | nightly_docker | .github/workflows/compression-corruption-parity.yml |
+| `cass.data_db.inline_crc.valid_trailer` | nightly_docker | .github/workflows/compression-corruption-parity.yml |
 | `cass.data_db_decode.clustering_bounds.desc_order` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.data_db_decode.clustering_bounds.multi_column_prefix` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.data_db_decode.clustering_bounds.null_vs_empty` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.data_db_decode.range_tombstone.bound_markers` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.data_db_decode.range_tombstone.boundary_markers` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.data_db_decode.row_cell_flags_and_vint` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.data_db_decode.row_preamble_size_mismatch` | required_parity | .github/workflows/cql-type-parity.yml |
+| `cass.data_db_decode.row_preamble_size_mismatch` | fast_pr | — |
 | `cass.data_db_decode.serialization_header.timestamp_ttl_ldt_deltas` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.data_db_decode.serialization_mirror.multi_clustering_column_order` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.data_db_decode.static_rows.static_only_partition` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
@@ -834,16 +892,16 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.data_db_decode.ttl.local_deletion_time_delta` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.data_db_decode.unfiltered_serializer.row_and_cell_flags` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.data_db_decode.unfiltered_serializer.row_size_vints` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.data_db_decode.wide_partition.row_boundaries` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.delta_scan.adjacent_ranges` | required_parity | .github/workflows/delta-roundtrip.yml |
-| `cass.delta_scan.cell_tombstones` | required_parity | .github/workflows/delta-roundtrip.yml |
-| `cass.delta_scan.collection_ops` | required_parity | .github/workflows/delta-roundtrip.yml |
-| `cass.delta_scan.partial_updates` | required_parity | .github/workflows/delta-roundtrip.yml |
-| `cass.delta_scan.partition_tombstones` | required_parity | .github/workflows/delta-roundtrip.yml |
-| `cass.delta_scan.range_tombstones` | required_parity | .github/workflows/delta-roundtrip.yml |
-| `cass.delta_scan.row_tombstones` | required_parity | .github/workflows/delta-roundtrip.yml |
-| `cass.delta_scan.static_with_rows` | required_parity | .github/workflows/delta-roundtrip.yml |
-| `cass.delta_scan.ttl_cells` | required_parity | .github/workflows/delta-roundtrip.yml |
+| `cass.data_db_decode.wide_partition.row_boundaries` | manual_debug | — |
+| `cass.delta_scan.adjacent_ranges` | manual_debug | — |
+| `cass.delta_scan.cell_tombstones` | manual_debug | — |
+| `cass.delta_scan.collection_ops` | manual_debug | — |
+| `cass.delta_scan.partial_updates` | manual_debug | — |
+| `cass.delta_scan.partition_tombstones` | manual_debug | — |
+| `cass.delta_scan.range_tombstones` | manual_debug | — |
+| `cass.delta_scan.row_tombstones` | manual_debug | — |
+| `cass.delta_scan.static_with_rows` | manual_debug | — |
+| `cass.delta_scan.ttl_cells` | manual_debug | — |
 | `cass.delta_scan.wide_partition_corpus` | exhaustive_regeneration | .github/workflows/delta-roundtrip.yml |
 | `cass.distributed_consensus.paxos_accord_out_of_scope` | fast_pr | — |
 | `cass.filter_db.bti_membership` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
@@ -854,15 +912,15 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.filter_db_bloom.serialization_no_false_negative` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.index_db.CorruptPrimaryIndexTest.big_primary_index_corruption` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.index_db.RowIndexEntryTest.partition_offsets` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.index_db.RowIndexEntryTest.promoted_index_entries` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.index_db.RowIndexEntryTest.promoted_index_entries` | manual_debug | — |
 | `cass.index_db.SSTableReaderTest.point_lookup_offsets` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.index_db.SSTableScannerTest.range_boundaries` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.index_db.big.raw_partition_keys_and_offsets` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.index_db.big.wide_partition_promoted_entries` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.index_db.big.wide_partition_promoted_entries` | manual_debug | — |
 | `cass.index_db.bti.index_component_discovery` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.index_db.promoted_index.clustering_bounds` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.index_db.promoted_index.index_info_offsets` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.index_db.promoted_index.range_tombstone_boundary_at_block_edge` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.index_db.promoted_index.clustering_bounds` | manual_debug | — |
+| `cass.index_db.promoted_index.index_info_offsets` | manual_debug | — |
+| `cass.index_db.promoted_index.range_tombstone_boundary_at_block_edge` | manual_debug | — |
 | `cass.index_summary.big_index_offsets` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.index_summary.column_index.range_tombstone_boundary_big_bti` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.index_summary.summary_boundaries` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
@@ -893,7 +951,7 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.sstable_format.toc_component_manifest` | fast_pr | — |
 | `cass.sstable_io.reader.tombstone_only_partition` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.sstable_io.scanner.tombstone_only_partition_ranges` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
-| `cass.sstable_scan.wide_partition.forward_reverse_bounds` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.sstable_scan.wide_partition.forward_reverse_bounds` | manual_debug | — |
 | `cass.statistics_db.MetadataSerializerTest.metadata_components` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.statistics_db.SSTableMetadataTest.max_local_deletion_time` | manual_debug | — |
 | `cass.statistics_db.SSTableMetadataTrackingTest.timestamp_and_ttl_metadata` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
@@ -928,25 +986,25 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.tombstone_ttl.range_tombstone.index_block_first_marker` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.tombstone_ttl.range_tombstone.index_block_last_marker` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.tombstone_ttl.range_tombstone.open_ended_middle_block` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
-| `cass.tombstone_ttl.range_tombstone_boundaries` | required_parity | .github/workflows/delta-roundtrip.yml |
+| `cass.tombstone_ttl.range_tombstone_boundaries` | manual_debug | — |
 | `cass.tombstone_ttl.repaired_unrepaired_purge_gate` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.tombstone_ttl.skipped_sstable.partition_delete_reincluded` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.tombstone_ttl.skipped_sstable.partition_delete_shadows_older_rows` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.tombstone_ttl.static_row.dropped_static_header_preserved` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.tombstone_ttl.static_row.with_row_cell_range_tombstones` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
-| `cass.tombstone_ttl.ttl_and_local_deletion_time` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.tombstone_ttl.ttl_and_local_deletion_time` | manual_debug | — |
 | `cass.tombstone_ttl.ttl_cells.local_deletion_time` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.tombstone_ttl.ttl_cells.mixed_expiring_and_live` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.tombstone_ttl.ttl_expiry.gc_before_boundary` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
-| `cass.verify.component_presence` | required_parity | .github/workflows/cassandra-parity.yml |
-| `cass.verify.compression_info_parse` | required_parity | .github/workflows/cassandra-parity.yml |
-| `cass.verify.digest_crc32_match` | required_parity | .github/workflows/cassandra-parity.yml |
-| `cass.verify.full_row_scan` | required_parity | .github/workflows/cassandra-parity.yml |
-| `cass.verify.healthy_compressed_sstable` | required_parity | .github/workflows/cassandra-parity.yml |
-| `cass.verify.healthy_uncompressed_sstable` | required_parity | .github/workflows/cassandra-parity.yml |
-| `cass.verify.inline_crc_validation` | required_parity | .github/workflows/cassandra-parity.yml |
-| `cass.verify.no_silent_empty_result_on_corruption` | required_parity | .github/workflows/cassandra-parity.yml |
-| `cass.write_load_path.cassandra_sstable_writer_fixtures` | required_parity | .github/workflows/cassandra-validation.yml |
+| `cass.verify.component_presence` | nightly_docker | .github/workflows/compression-corruption-parity.yml |
+| `cass.verify.compression_info_parse` | nightly_docker | .github/workflows/compression-corruption-parity.yml |
+| `cass.verify.digest_crc32_match` | nightly_docker | .github/workflows/compression-corruption-parity.yml |
+| `cass.verify.full_row_scan` | nightly_docker | .github/workflows/compression-corruption-parity.yml |
+| `cass.verify.healthy_compressed_sstable` | nightly_docker | .github/workflows/compression-corruption-parity.yml |
+| `cass.verify.healthy_uncompressed_sstable` | nightly_docker | .github/workflows/compression-corruption-parity.yml |
+| `cass.verify.inline_crc_validation` | nightly_docker | .github/workflows/compression-corruption-parity.yml |
+| `cass.verify.no_silent_empty_result_on_corruption` | nightly_docker | .github/workflows/compression-corruption-parity.yml |
+| `cass.write_load_path.cassandra_sstable_writer_fixtures` | fast_pr | — |
 | `cass.write_load_path.cql_sstable_writer.finished_data_db_artifacts` | exhaustive_regeneration | .github/workflows/cassandra-parity.yml |
 | `cass.write_load_path.flush.partition_boundary_artifacts` | exhaustive_regeneration | .github/workflows/cassandra-parity.yml |
 | `cass.write_load_path.flush.tombstone_and_ttl_artifacts` | exhaustive_regeneration | .github/workflows/cassandra-parity.yml |
