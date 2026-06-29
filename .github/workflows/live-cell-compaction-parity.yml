@@ -42,11 +42,27 @@ on:
     - cron: '53 4 * * *'
   pull_request:
     branches: [main]
+    # PR-trigger is best-effort: it covers the primary write/merge/writer paths
+    # and the two additional subsystems (murmur3 partitioner, CQL serializers)
+    # whose changes would silently break byte parity without triggering any
+    # already-listed path. It cannot enumerate every transitive dependency, so
+    # the nightly `schedule` run is the authoritative backstop — a partitioner
+    # or serialization change merged on a non-path PR will be caught within 24 h.
     paths:
       - 'cqlite-core/tests/issue_1017_live_cell_compaction_byte_parity.rs'
+      # Primary compaction + SSTable write paths (already covered)
       - 'cqlite-core/src/storage/write_engine/merge/**'
       - 'cqlite-core/src/storage/write_engine/mod.rs'
       - 'cqlite-core/src/storage/sstable/writer/**'
+      # Murmur3Partitioner token logic: controls partition ordering in
+      # Data.db/Index.db/Summary.db — a bug here silently reorders partitions.
+      - 'cqlite-core/src/util/**'
+      # CQL int/text value + cell/row serializers: a change here alters the
+      # raw bytes written into Data.db cells.
+      - 'cqlite-core/src/storage/serialization/**'
+      # Partition-key codec: controls the raw key bytes in Data.db/Index.db.
+      - 'cqlite-core/src/storage/partition_key_codec.rs'
+      # Committed reference fixtures, manifest, and this workflow file
       - 'test-data/datasets/sstables/test_compactionparity/**'
       - 'test-data/cassandra-parity-manifest.yml'
       - '.github/workflows/live-cell-compaction-parity.yml'
