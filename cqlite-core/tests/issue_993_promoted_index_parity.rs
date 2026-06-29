@@ -117,22 +117,25 @@ async fn wide_partition_emits_capturable_promoted_index() {
         "wide partition must produce >=2 IndexInfo blocks, got {count}"
     );
 
-    // Full decode: clustering key is a single `int` (4 fixed bytes) → each
-    // serialized ClusteringPrefix is `[header VInt (1 byte)][4 value bytes]` = 5.
-    // NOTE: this 5 reflects CQLite's OWN writer encoding (1-byte clustering-prefix
-    // header). The real Cassandra 5.0 NB fixture uses a 2-byte header → 6 bytes
-    // (see CK_PREFIX_LEN in issue_993_wide_partition_promoted_index_parity.rs).
-    // So this round-trip proves CQLite-writer ↔ CQLite-reader self-consistency,
-    // NOT byte-for-byte writer parity with Cassandra; that divergence is tracked
-    // by #1186. The read path is independently validated against the real
-    // Cassandra bytes in the wide-partition byte-level parity tier.
+    // Full decode: clustering key is a single `int` (4 fixed bytes). Each promoted-
+    // index `ClusteringPrefix` is serialized in Cassandra's `IndexInfo` form
+    // (`ClusteringPrefix.serializer.serialize`), which prepends the `Kind.ordinal()`
+    // byte: `[kind 0x04 CLUSTERING][values-header 0x00][4 value bytes]` = **6 bytes**.
+    // This matches the real Cassandra 5.0 NB wide-partition fixture byte-for-byte
+    // (see CK_PREFIX_LEN == 6 in issue_993_wide_partition_promoted_index_parity.rs).
+    // Issue #1186 reconciled the writer to emit this 6-byte form — previously it
+    // emitted only the 5-byte values-only Data.db row prefix (missing the leading
+    // 0x04 CLUSTERING kind byte), making CQLite-written promoted indexes byte-
+    // incompatible with Cassandra. This round-trip now proves writer↔reader self-
+    // consistency AT THE CASSANDRA WIDTH; byte-for-byte writer parity with Cassandra
+    // is asserted in issue_1186_promoted_index_clustering_prefix_parity.rs.
     let prefix_len = |slice: &[u8]| -> cqlite_core::Result<usize> {
-        if slice.len() < 5 {
+        if slice.len() < 6 {
             return Err(cqlite_core::error::Error::Corruption(
                 "short int clustering prefix".to_string(),
             ));
         }
-        Ok(5)
+        Ok(6)
     };
     let decoded = promoted.decode(&prefix_len).expect("decode promoted index");
 

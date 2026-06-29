@@ -687,3 +687,10 @@ pub(super) fn serialize_clustering_prefix_to_vec(
 
     Ok(buf)
 }
+
+// Promoted-index (`IndexInfo`) `ClusteringPrefix` serialization lives in the
+// `index_prefix` submodule (Issue #1186 / epic #1116 file-size split). The helpers
+// are re-exported from `mod.rs` so existing `use super::*` callers (`partition.rs`)
+// resolve `serialize_clustering_prefix_for_index`, `empty_clustering_prefix_for_index`,
+// `serialize_marker_bound_prefix_for_index`, and `marker_bound_prefix_for_index`
+// unchanged.

@@ -100,11 +100,11 @@ pub const INDEX_INFO_WIDTH_BASE: u64 = 64 * 1024;
 /// (`RowIndexEntry.create()` lines 227-239).
 #[derive(Debug, Clone, Default)]
 pub struct PromotedIndexBlock {
-    /// Serialized `ClusteringPrefix` for the first unfiltered in this block.
-    ///
-    /// Format: `[header: unsigned VInt (2 bits per CK col)][value bytes…]`
-    /// Same encoding as the clustering prefix in Data.db rows.
-    /// Empty `Vec` for tables without clustering keys or for empty-clustering rows.
+    /// Promoted-index `ClusteringPrefix` for the first unfiltered, Cassandra
+    /// `IndexInfo` form (Issue #1186): `[kind 0x04 CLUSTERING][values-header VInt]
+    /// [value bytes…]` — prepends the `Kind.ordinal()` byte (NOT the values-only
+    /// Data.db row form). A single `int` clustering is the Cassandra-exact 6 bytes
+    /// `04 00 <int>`; `[0x04,0x00]` (empty `Clustering`) for no-clustering rows.
     pub first_name: Vec<u8>,
 
     /// Serialized `ClusteringPrefix` for the last unfiltered in this block.

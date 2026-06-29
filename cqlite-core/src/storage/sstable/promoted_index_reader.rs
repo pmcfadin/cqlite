@@ -31,11 +31,15 @@
 //! # Format ambiguity resolved against the oracle (Issue #993)
 //!
 //! `firstName` / `lastName` are serialized `ClusteringPrefix` byte sequences with the
-//! shape `[header VInt][value bytes…]`. Fixed-width clustering values carry **no**
-//! per-value length prefix, so a `ClusteringPrefix` is only self-delimiting when the
-//! decoder knows the clustering column types (the table's serialization header).
-//! Cassandra's `IndexInfo.Serializer.deserialize()` likewise threads a
-//! `ClusteringComparator` + `SerializationHeader` to split the names.
+//! shape `[kind 1 byte][header VInt][value bytes…]` (Cassandra
+//! `ClusteringPrefix.serializer.serialize` — the IndexInfo form prepends the
+//! `Kind.ordinal()` byte; a full clustering key is kind `CLUSTERING = 0x04`, Issue
+//! #1186). Fixed-width clustering values carry **no** per-value length prefix, so a
+//! `ClusteringPrefix` is only self-delimiting when the decoder knows the clustering
+//! column types (the table's serialization header). Cassandra's
+//! `IndexInfo.Serializer.deserialize()` likewise threads a `ClusteringComparator` +
+//! `SerializationHeader` to split the names. For a single `int` clustering the prefix
+//! is the Cassandra-exact 6 bytes `04 00 <4-byte int>`.
 //!
 //! Mirroring the writer, this decoder therefore takes a caller-supplied
 //! [`PrefixLen`] callback that returns the byte length of one serialized
