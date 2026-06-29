@@ -80,6 +80,19 @@ sysinfo = "0.30"
 # Line editing for REPL
 rustyline = "14.0"
 
+# E2E validation: DuckDB reads Parquet exports to validate data integrity.
+#
+# This stays optional and off the normal dev-dependency path because `bundled`
+# compiles DuckDB from source via libduckdb-sys. The main CI unit-test job does
+# not need it and has historically hit runner disk limits when it is pulled into
+# every CLI test target. DuckDB-backed tests opt in through `duckdb-tests`.
+#
+# `bundled` keeps test binaries from linking against a system `-lduckdb`, which
+# is absent on ubuntu-latest runners (issue #916). `parquet` statically links the
+# parquet extension so read_parquet() never auto-installs it into
+# ~/.duckdb/extensions at runtime.
+duckdb = { version = "1.1", features = ["bundled", "parquet"], optional = true }
+
 # Development dependencies
 [dev-dependencies]
 # Arrow/Parquet readers for Parquet output validation tests (the writer itself
@@ -123,14 +136,20 @@ escargot = "0.5"                # Cargo subprocess management
 cargo-llvm-cov = "0.5"          # LLVM coverage
 trybuild = "1.0"                # Compile-fail testing
 
-# E2E validation: DuckDB reads Parquet exports to validate data integrity.
-# `bundled` compiles DuckDB from source via libduckdb-sys so the test binary does
-# not link against a system `-lduckdb`, which is absent on ubuntu-latest CI
-# runners (issue #916). `parquet` statically links the parquet extension so
-# read_parquet() never auto-installs it into ~/.duckdb/extensions at runtime —
-# that autoload races across parallel test threads and fails on CI runners. Both
-# features together keep the delta round-trip suite fully hermetic.
-duckdb = { version = "1.1", features = ["bundled", "parquet"] }
+[[test]]
+name = "delta_export_tests"
+path = "tests/delta_export_tests.rs"
+required-features = ["delta-export", "duckdb-tests"]
+
+[[test]]
+name = "delta_roundtrip_tests"
+path = "tests/delta_roundtrip_tests.rs"
+required-features = ["delta-export", "duckdb-tests"]
+
+[[test]]
+name = "duckdb_parquet_validation"
+path = "tests/duckdb_parquet_validation.rs"
+required-features = ["state_machine", "duckdb-tests"]
 
 [features]
 # M2+ production defaults: Interactive REPL with query engine
@@ -152,6 +171,9 @@ write-support = ["state_machine", "cqlite-core/write-support"]
 # Enables cqlite-core/delta-scan (DeltaRecord types, scan_delta API) and
 # cqlite-core/parquet (DeltaParquetWriter, arrow/parquet crates).
 delta-export = ["state_machine", "cqlite-core/delta-scan", "cqlite-core/parquet"]
+# Expensive, source-built DuckDB validation tests. Keep this out of default
+# and main PR unit-test CI; focused E2E/parity workflows opt in explicitly.
+duckdb-tests = ["dep:duckdb"]
 # Issue #1033 / Epic #1031: OpenTelemetry wiring for the CLI.
 # Enables cqlite-core/observability so cqlite_core::observability::tracing_layer()
 # and the OTel exporter/runtime are available. NOT in default features; when off

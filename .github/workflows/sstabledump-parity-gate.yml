@@ -11,6 +11,10 @@ permissions:
   pull-requests: write
   contents: read
 
+concurrency:
+  group: sstabledump-parity-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   DATASET_TAG: datasets-v3
   DATASET_ASSET: cassandra5-small-full-v3.2.tar.gz
