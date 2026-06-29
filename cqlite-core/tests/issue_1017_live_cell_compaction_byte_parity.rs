@@ -132,13 +132,15 @@ fn reference_dir(table: &str) -> Option<PathBuf> {
         let name = e.file_name().to_string_lossy().to_string();
         if name.starts_with(&format!("{table}-")) {
             let dir = e.path();
-            // Genuine absence = no compacted Data.db committed/fetched yet.
+            // A matching dir that already has its compacted Data.db fetched → use it.
             if single_data_db(&dir).is_some() {
                 return Some(dir);
             }
-            return None;
+            // This match lacked a Data.db; keep scanning — another matching dir
+            // (e.g. a different UUID suffix from a re-generation) might have one.
         }
     }
+    // No matching dir had a compacted Data.db → genuine absence, clean SKIP.
     None
 }
 
@@ -646,12 +648,22 @@ fn assert_jsonl_secondary(
             }
         }
     }
-    for (label, val) in expected_survivors {
-        assert!(
-            seen.contains(*val),
-            "{table}: LWW survivor {label} -> {val:?} missing from JSONL golden; saw {seen:?}"
-        );
-    }
+    // Assert EXACT set equality: every expected survivor must be present AND no
+    // loser (e.g. "a-2", "a-3", "a-1-1") may appear. A superset would mean an
+    // overwritten value survived compaction — that is a LWW regression.
+    let expected_v_set: BTreeSet<String> = expected_survivors
+        .iter()
+        .map(|(_, v)| v.to_string())
+        .collect();
+    let missing: Vec<&String> = expected_v_set.difference(&seen).collect();
+    let unexpected: Vec<&String> = seen.difference(&expected_v_set).collect();
+    assert!(
+        missing.is_empty() && unexpected.is_empty(),
+        "{table}: JSONL v values do not exactly match expected LWW survivors\n  \
+         missing (expected but absent): {missing:?}\n  \
+         unexpected (losers that survived or spurious): {unexpected:?}\n  \
+         full seen={seen:?}\n  full expected={expected_v_set:?}"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════

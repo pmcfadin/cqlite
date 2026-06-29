@@ -308,8 +308,15 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   # survives, the explicit compaction did not run (or autocompaction interfered):
   # fail loudly rather than commit an ambiguous, non-compacted fixture.
   for table in live_no_clustering live_clustering; do
-    tdir="$SSTABLES_DIR/$KEYSPACE/$table"*
-    cnt=$(find $tdir -name "*-Data.db" -not -name "._*" 2>/dev/null | wc -l | tr -d ' ')
+    # Use an explicit array so an unmatched glob never silently passes through as
+    # a literal string to find (which would make the -ne 1 guard misfire with a
+    # confusing "no such file" message instead of a clear export-failure message).
+    tdirs=( "$SSTABLES_DIR/$KEYSPACE/$table"* )
+    if [[ ! -d "${tdirs[0]}" ]]; then
+      fail "$table: no table directory matched under $SSTABLES_DIR/$KEYSPACE/ \
+(glob '$SSTABLES_DIR/$KEYSPACE/$table*' did not expand); export failed"
+    fi
+    cnt=$(find "${tdirs[@]}" -name "*-Data.db" -not -name "._*" 2>/dev/null | wc -l | tr -d ' ')
     if [[ "$cnt" -ne 1 ]]; then
       fail "$table: expected exactly ONE compacted Data.db, found $cnt. \
 Major compaction did not collapse the two inputs into one output."
