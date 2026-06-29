@@ -68,6 +68,24 @@ Subagents in `.claude/agents/` for specialized tasks:
 # reporting validation; ad-hoc cargo runs do not count as "the gate passed".
 scripts/agent-gate.sh
 
+# Capture the gate ROBUSTLY (issue #1175). The SUMMARY block is the only
+# artifact that counts. The foreground redirect never buffers — prefer it:
+bash scripts/agent-gate.sh > gate.log 2>&1 < /dev/null
+# Under tee / a pty / background capture, a leaked build-server or test daemon
+# can hold the gate's stdout pipe open and truncate (even fully lose) a streamed
+# SUMMARY even though the gate exited 0. RECOVERY (no need to parse stdout): pick
+# the path in advance and read it — it is ALWAYS the complete block.
+AGENT_GATE_SUMMARY_FILE=/tmp/gate-summary.txt bash scripts/agent-gate.sh > gate.log 2>&1 < /dev/null
+cat /tmp/gate-summary.txt   # complete SUMMARY, even if gate.log truncated
+# If you did not set AGENT_GATE_SUMMARY_FILE, the gate writes the same complete
+# block to the documented default $PWD/.agent-gate-summary.txt (gitignored); cat
+# that if your stream is missing the `==== END AGENT-GATE SUMMARY ====` marker.
+# CONCURRENCY: that default is per-checkout; if you run multiple gates concurrently
+# IN THE SAME CHECKOUT, give each a unique AGENT_GATE_SUMMARY_FILE or they clobber
+# each other's recovery artifact (separate worktrees are already isolated).
+# Fast self-test of the emission/recovery path:
+bash scripts/tests/test_agent_gate_summary.sh
+
 # Build
 cargo build
 

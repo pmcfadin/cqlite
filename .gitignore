@@ -198,3 +198,6 @@ docs/cassandra-5.0-src/
 docs/sstable-guide-audit/
 # roborev snapshots
 /.roborev/
+
+# agent-gate caller-known summary (default recovery path, issue #1175)
+/.agent-gate-summary.txt
