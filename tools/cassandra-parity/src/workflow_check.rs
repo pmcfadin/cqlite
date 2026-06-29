@@ -221,7 +221,18 @@ fn logical_commands(command: &str) -> Vec<String> {
 }
 
 /// True if a single logical command runs `--test <name>` and is not `--no-run`.
+///
+/// Issue #1228 roborev finding A: a bare `--test <name>` token pair is NOT enough.
+/// `echo cargo test --test foo` (or `printf`, `:`, a comment, any non-test command
+/// that merely MENTIONS the tokens) used to satisfy this check. We therefore first
+/// require the logical command's executable HEAD to be a real cargo test
+/// invocation (`cargo test` / `cargo nextest run`) — mirroring the gradle
+/// command-head approach in [`logical_runs_gradle`] — before accepting the
+/// `--test <name>` pair.
 fn logical_runs_test(logical: &str, name: &str) -> bool {
+    if !logical_head_is_cargo_test(logical) {
+        return false;
+    }
     if !has_test_flag(logical, name) {
         return false;
     }
@@ -235,6 +246,42 @@ fn logical_runs_test(logical: &str, name: &str) -> bool {
         return false;
     }
     true
+}
+
+/// True if a single logical command invokes `cargo` as the **executable** command
+/// head (possibly after the usual `env VAR=val` / `VAR=val` / `sudo` prefixes we
+/// strip elsewhere) AND its first cargo subcommand is a real test RUNNER —
+/// `cargo test` or `cargo nextest run`. This rejects a command that merely MENTIONS
+/// the `--test <name>` tokens as arguments to some OTHER program (`echo cargo test
+/// --test foo`, `printf ...`, `:`, etc.). Subcommands are matched as whole tokens.
+fn logical_head_is_cargo_test(logical: &str) -> bool {
+    let mut toks = logical.split_whitespace().peekable();
+    // Skip leading inline-assignment / `env` / `sudo` prefixes that precede the
+    // real executable (same prefix shapes [`logical_runs_gradle`] strips).
+    while let Some(&tok) = toks.peek() {
+        if tok == "sudo" || tok == "env" || (tok.contains('=') && !tok.starts_with('=')) {
+            toks.next();
+        } else {
+            break;
+        }
+    }
+    // The executable head must be `cargo` (whole token, optional `./` prefix is not
+    // conventional for cargo so we do not strip it here).
+    if toks.next() != Some("cargo") {
+        return false;
+    }
+    // The first non-flag token after `cargo` is the subcommand. Accept `test`, or
+    // `nextest run` (cargo-nextest's run subcommand). Flags between `cargo` and the
+    // subcommand (e.g. `cargo +nightly test`) are skipped.
+    let mut sub = toks.by_ref().find(|t| !t.starts_with('-'));
+    match sub.take() {
+        Some("test") => true,
+        Some("nextest") => {
+            // `cargo nextest run` — the next non-flag token must be `run`.
+            toks.find(|t| !t.starts_with('-')) == Some("run")
+        }
+        _ => false,
+    }
 }
 
 /// True if `logical` contains a `--test <name>` token pair (whole-token match on
@@ -342,7 +389,70 @@ struct StepYaml {
     env: BTreeMap<String, serde_yaml::Value>,
 }
 
+/// Whether a step's `if:` condition lets us PROVE the step runs in the PR/push
+/// gate context (issue #1228 roborev finding B).
+///
+/// `evaluate_steps` used to credit a `run:` step regardless of its `if:`, so a
+/// mapped-test step guarded by `if: false` (or any condition that skips on
+/// PR/push) was still treated as machine-enforced. We refuse to evaluate
+/// arbitrary GitHub Actions expressions (that would itself be a fragile
+/// heuristic) and instead apply a CONSERVATIVE, NON-HEURISTIC rule:
+///
+///   - NO `if:`                          → [`StepGate::Eligible`] (runs always).
+///   - STATICALLY-true `if:` (`true`,
+///     `${{ true }}`)                     → [`StepGate::Eligible`].
+///   - STATICALLY-false `if:` (`false`,
+///     `${{ false }}`)                    → [`StepGate::Disabled`] (never runs).
+///   - any OTHER (non-trivial / unprovable)
+///     `if:`                             → [`StepGate::Unprovable`] — we cannot
+///     prove it runs in the gate context, so we do NOT credit it for a
+///     required_parity scenario (no-overclaim default).
+///
+/// We checked every workflow referenced by a `required_parity` scenario
+/// (compaction-parity, cql-type-parity, live-cell-compaction-parity,
+/// sstabledump-parity-gate, tombstone-ttl-parity): NO mapped-test `run:` step
+/// (the `cargo test --test <name>` / `gradle <task>` steps) carries an `if:` —
+/// the only `if:`-bearing steps are aggregators / summaries / PR-comments
+/// (`if: always()`, `if: failure()`, `if: always() && steps.*.outcome != …`),
+/// which are handled by the separate aggregator path and are NOT mapped-test
+/// steps. So no allowlist of "known-gate-running" conditions is needed; the
+/// static-true / static-false / conservative-reject rule keeps the 254 green.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepGate {
+    /// Proven to run (no `if:`, or a statically-true `if:`).
+    Eligible,
+    /// Proven NOT to run (a statically-false `if:`).
+    Disabled,
+    /// Cannot prove whether it runs (any non-trivial `if:`); treated as
+    /// not-proven-to-run for required_parity crediting.
+    Unprovable,
+}
+
+/// Normalize an `if:` expression by trimming whitespace and unwrapping a single
+/// surrounding `${{ ... }}` so `${{ false }}` reduces to `false`.
+fn normalize_if(cond: &str) -> String {
+    let t = cond.trim();
+    let inner = t
+        .strip_prefix("${{")
+        .and_then(|s| s.strip_suffix("}}"))
+        .map(str::trim)
+        .unwrap_or(t);
+    inner.to_string()
+}
+
 impl StepYaml {
+    /// Classify this step's `if:` per [`StepGate`] (issue #1228 finding B).
+    fn gate(&self) -> StepGate {
+        match &self.condition {
+            None => StepGate::Eligible,
+            Some(cond) => match normalize_if(cond).as_str() {
+                "true" => StepGate::Eligible,
+                "false" => StepGate::Disabled,
+                _ => StepGate::Unprovable,
+            },
+        }
+    }
+
     /// `continue-on-error: true` (literal bool or the string "true"). An
     /// expression-valued `continue-on-error` is conservatively treated as
     /// potentially-true (cannot be relied on to fail the build).
@@ -594,7 +704,16 @@ fn evaluate_steps(workflow_text: &str) -> Option<Vec<EvaluatedStep>> {
                 .as_ref()
                 .map(|i| guarded.contains(i))
                 .unwrap_or(false);
-            let can_fail_build = !step.is_continue_on_error() || id_guarded;
+            // Issue #1228 finding B: a step we cannot PROVE runs in the gate
+            // context (statically-false `if:`, or any non-trivial/unprovable
+            // `if:`) must NOT be credited as able to fail the build for a
+            // required_parity scenario — a conditionally-skipped mapped-test step
+            // is not machine-enforced. A statically-true / absent `if:` is
+            // eligible. (The aggregator path that consumes `steps.<id>.outcome`
+            // is evaluated separately and intentionally credits `always()`
+            // aggregators; this gate is only for the mapped-test step itself.)
+            let proven_to_run = matches!(step.gate(), StepGate::Eligible);
+            let can_fail_build = proven_to_run && (!step.is_continue_on_error() || id_guarded);
             out.push(EvaluatedStep {
                 command: run.clone(),
                 can_fail_build,

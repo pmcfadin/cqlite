@@ -212,6 +212,62 @@ fn command_runs_test_matches_whole_token_across_line_continuations() {
 }
 
 #[test]
+fn command_runs_test_requires_real_cargo_test_head() {
+    // Issue #1228 roborev finding A: a command that merely MENTIONS the
+    // `--test <name>` tokens (e.g. `echo cargo test --test foo`) must NOT count —
+    // only a real `cargo test` / `cargo nextest run` invocation does.
+    assert!(!command_runs_test(
+        "echo cargo test --test issue_997_compressioninfo_parity",
+        "issue_997_compressioninfo_parity"
+    ));
+    assert!(!command_runs_test(
+        "printf '%s' --test issue_997_compressioninfo_parity",
+        "issue_997_compressioninfo_parity"
+    ));
+    assert!(!command_runs_test(
+        ": cargo test --test issue_997_compressioninfo_parity",
+        "issue_997_compressioninfo_parity"
+    ));
+    // A real `cargo test --test foo` DOES count.
+    assert!(command_runs_test(
+        "cargo test --test issue_997_compressioninfo_parity",
+        "issue_997_compressioninfo_parity"
+    ));
+    // `cargo nextest run --test foo` also counts.
+    assert!(command_runs_test(
+        "cargo nextest run --test issue_997_compressioninfo_parity",
+        "issue_997_compressioninfo_parity"
+    ));
+    // The real workflow prefix form `env VAR=val cargo test --test foo` counts.
+    assert!(command_runs_test(
+        "env CQLITE_REQUIRE_FIXTURES=1 cargo test --test issue_997_compressioninfo_parity",
+        "issue_997_compressioninfo_parity"
+    ));
+    // A bare `cargo nextest` without `run` is not a test runner here.
+    assert!(!command_runs_test(
+        "cargo nextest --test issue_997_compressioninfo_parity",
+        "issue_997_compressioninfo_parity"
+    ));
+}
+
+#[test]
+fn echoed_test_command_does_not_satisfy_required_parity() {
+    // End-to-end finding A: the workflow's only mention of the mapped test is an
+    // `echo` of the command (never actually executed) — overstated.
+    let echo_wf = "env:\n  CQLITE_REQUIRE_FIXTURES: '1'\njobs:\n  parity:\n    steps:\n      - run: echo cargo test --test issue_997_compressioninfo_parity";
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        echo_wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings.iter().any(|f| f.message.contains("overstated")),
+        "expected an overstated finding for an echoed test command, got: {findings:#?}"
+    );
+}
+
+#[test]
 fn command_runs_test_rejects_no_run_compile_only() {
     // A `--no-run` invocation only COMPILES the target; it must NOT count as
     // running it (this is the `Build parity test targets` step pattern).
@@ -630,6 +686,96 @@ fn inline_prefix_on_wrong_command_does_not_count() {
     assert!(
         findings.iter().any(|f| f.message.contains("fail-closed")),
         "expected a fail-closed finding when the prefix is on a different command, got: {findings:#?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #1228 roborev finding B: a conditional/skipped mapped-test step must not
+// be credited. A step with no `if:` (or a statically-true `if:`) is eligible; a
+// statically-false `if:` (or any non-trivial/unprovable `if:`) is not.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn if_false_mapped_test_step_does_not_count() {
+    // The mapped test runs in a fail-closed, blocking step — but `if: false`
+    // means it never runs, so the scenario is overstated.
+    let if_false_wf = "jobs:\n  parity:\n    env:\n      CQLITE_REQUIRE_FIXTURES: '1'\n    steps:\n      - if: false\n        run: cargo test --test issue_997_compressioninfo_parity";
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        if_false_wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings.iter().any(|f| f.message.contains("overstated")),
+        "expected an overstated finding for `if: false`, got: {findings:#?}"
+    );
+}
+
+#[test]
+fn if_expression_false_mapped_test_step_does_not_count() {
+    // `${{ false }}` is the GitHub-expression spelling of a statically-false `if:`.
+    let wf = "jobs:\n  parity:\n    env:\n      CQLITE_REQUIRE_FIXTURES: '1'\n    steps:\n      - if: ${{ false }}\n        run: cargo test --test issue_997_compressioninfo_parity";
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings.iter().any(|f| f.message.contains("overstated")),
+        "expected an overstated finding for `if: ${{{{ false }}}}`, got: {findings:#?}"
+    );
+}
+
+#[test]
+fn nontrivial_if_mapped_test_step_is_not_proven_to_run() {
+    // A non-trivial / unprovable `if:` (e.g. event-name guard) cannot be proven
+    // to run in the gate context, so a mapped-test step carrying it is NOT
+    // credited (no-overclaim default). No allowlist condition was observed on any
+    // real mapped-test step, so this stays a reject.
+    let wf = "jobs:\n  parity:\n    env:\n      CQLITE_REQUIRE_FIXTURES: '1'\n    steps:\n      - if: github.event_name == 'schedule'\n        run: cargo test --test issue_997_compressioninfo_parity";
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings.iter().any(|f| f.message.contains("overstated")),
+        "expected an overstated finding for a non-trivial `if:`, got: {findings:#?}"
+    );
+}
+
+#[test]
+fn no_if_mapped_test_step_still_counts() {
+    // A mapped-test step with NO `if:` is eligible (unchanged behavior).
+    let wf = "jobs:\n  parity:\n    env:\n      CQLITE_REQUIRE_FIXTURES: '1'\n    steps:\n      - run: cargo test --test issue_997_compressioninfo_parity";
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings.is_empty(),
+        "expected clean for a mapped-test step with no `if:`, got: {findings:#?}"
+    );
+}
+
+#[test]
+fn if_true_mapped_test_step_counts() {
+    // A statically-true `if:` is eligible.
+    let wf = "jobs:\n  parity:\n    env:\n      CQLITE_REQUIRE_FIXTURES: '1'\n    steps:\n      - if: true\n        run: cargo test --test issue_997_compressioninfo_parity";
+    let findings = check_scenario(
+        "cass.compression_info.fields.algorithm_name",
+        ".github/workflows/x.yml",
+        wf,
+        &["cqlite-core/tests/issue_997_compressioninfo_parity.rs".to_string()],
+    );
+    assert!(
+        findings.is_empty(),
+        "expected clean for `if: true`, got: {findings:#?}"
     );
 }
 
