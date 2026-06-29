@@ -5150,14 +5150,22 @@ scenarios:
         tests:
           - cqlite-core/tests/issue_764_explicit_local_deletion_time.rs
           - cqlite-core/tests/issue_821_writer_byte_invariants.rs
+          - cqlite-core/tests/issue_1190_write_load_byte_parity.rs
         notes: >-
           issue_764 flushes a mutation carrying an explicit local_deletion_time and
           a TTL through the real WriteEngine, then asserts the WRITTEN Data.db row
           tombstone flags/local-deletion-time bytes AND the parsed Statistics.db
           min/max localDeletionTime + minTTL aggregates (writer + reader cannot be
           wrong in the same way). issue_821 anchors the deletion/TTL-bearing row
-          framing byte invariants. These are the finished tombstone/TTL artifacts a
-          flush emits, not Cassandra memtable accounting internals (AC7).
+          framing byte invariants. issue_1190's
+          static_row_timestamp_flags_gap_pinned_1196 pins the static-row writer gap
+          file-vs-file against the committed test_writeparity reference: it asserts
+          the Cassandra reference static-row flags byte is 0xa0 (no row-level
+          HAS_TIMESTAMP) while CQLite emits 0xa4, so the gap text below is exercised
+          by a listed test (if CQLite stops emitting the spurious timestamp the test
+          fails and forces this manifest claim to be reviewed). These are the
+          finished tombstone/TTL artifacts a flush emits, not Cassandra memtable
+          accounting internals (AC7).
     fixtures:
       datasets:
         - test-data/datasets/sstables
@@ -5171,7 +5179,10 @@ scenarios:
         bash test-data/scripts/generate-write-load-parity.sh  # cassandra:5.0.2 flush → static_clustering_shape nb reference (Data.db + JSONL)
       comparison_command: >-
         cargo test -p cqlite-core --features write-support
-        --test issue_764_explicit_local_deletion_time
+        --test issue_764_explicit_local_deletion_time &&
+        cargo test -p cqlite-core --features write-support
+        --test issue_1190_write_load_byte_parity
+        static_row_timestamp_flags_gap_pinned_1196
       known_limitations: >-
         Proves the flushed Data.db row-tombstone bytes (deletion flags +
         local_deletion_time) and the Statistics.db local-deletion-time / TTL
