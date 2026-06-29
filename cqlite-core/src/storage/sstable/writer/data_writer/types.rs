@@ -67,6 +67,14 @@ pub(crate) struct StaticMergedOp {
     /// Local deletion time (s) for a `Delete` tombstone, honoring the
     /// originating mutation's explicit `local_deletion_time` when set.
     pub(crate) cell_local_deletion_time: i32,
+    /// Statement-level TTL (`Mutation::ttl_seconds`) of the originating mutation
+    /// (issue #1196 regression fix). Cassandra encodes a static `USING TTL`
+    /// write as an EXPIRING CELL (per-cell TTL), never as row-level liveness on
+    /// the static block. A plain `Write` carrying this TTL must therefore be
+    /// emitted via `write_cell_with_ttl`, not as a non-expiring cell; a per-cell
+    /// `WriteWithTtl` keeps its own TTL (which takes precedence, matching the
+    /// regular-row path where per-cell TTL is honored verbatim).
+    pub(crate) row_ttl_seconds: Option<u32>,
 }
 
 /// The exact rows and cells `DataWriter` emitted to Data.db for one partition.

@@ -70,6 +70,7 @@ fn test_column_subset_65_static_columns_uses_missing_indexes_when_present_majori
             op: op.clone(),
             timestamp_micros: mutation.timestamp_micros,
             cell_local_deletion_time: mutation.effective_local_deletion_time(),
+            row_ttl_seconds: mutation.ttl_seconds,
         })
         .collect();
 
@@ -235,6 +236,144 @@ fn test_static_columns_sort_simple_before_complex() {
     assert_eq!(
         names,
         vec!["m_static_simple", "z_static_simple", "a_static_complex"]
+    );
+}
+
+/// Build a one-static-column schema: `id` (pk) / `ck` (clustering) / `s` (static text).
+fn single_static_column_schema() -> TableSchema {
+    TableSchema {
+        keyspace: "test_ks".to_string(),
+        table: "test_table".to_string(),
+        partition_keys: vec![KeyColumn {
+            name: "id".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+        }],
+        clustering_keys: vec![ClusteringColumn {
+            name: "ck".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+            order: ClusteringOrder::Asc,
+        }],
+        columns: vec![Column {
+            name: "s".to_string(),
+            data_type: "text".to_string(),
+            nullable: true,
+            default: None,
+            is_static: true,
+        }],
+        comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
+    }
+}
+
+/// Regression guard for the #1196 TTL regression (PR #1211, roborev HIGH).
+///
+/// A static column written with statement-level `USING TTL` arrives as a plain
+/// `CellOperation::Write` with the TTL in `Mutation::ttl_seconds`. Cassandra
+/// encodes that TTL on the static CELL (an expiring cell), never as row-level
+/// liveness on the static block (#1196: the static row keeps flags `0xa0`, no
+/// `ROW_HAS_TTL`). The original #1196 fix routed EVERY static `Write` through the
+/// non-TTL `write_cell_explicit_ts`, silently DROPPING the statement TTL so the
+/// cell lived forever — a data-liveness correctness regression.
+///
+/// This asserts the static `Write` + `row_ttl_seconds` now serializes as an
+/// EXPIRING cell (`CELL_IS_EXPIRING` set). Fails before the routing fix (cell
+/// flags `0x00`), passes after (`0x02`). BYTE-level static-cell TTL parity vs
+/// Cassandra is the follow-up byte-golden (#1210); this is the functional guard.
+#[test]
+fn static_using_ttl_write_emits_expiring_cell_1196() {
+    let mut stats = create_test_stats();
+    stats.min_timestamp = 1_000_000;
+    stats.min_local_deletion_time = 0;
+    stats.min_ttl = 0;
+    let writer = DataWriter::new(stats);
+    let schema = single_static_column_schema();
+
+    // Statement-level TTL: ttl_seconds carried on the Mutation, op is a plain
+    // Write (this is exactly how the CQL builders shape `UPDATE ... USING TTL`).
+    let ttl = 3_600u32;
+    let static_op = StaticMergedOp {
+        op: CellOperation::Write {
+            column: "s".to_string(),
+            value: Value::Text("v".to_string()),
+        },
+        timestamp_micros: 1_001_000,
+        cell_local_deletion_time: 0,
+        row_ttl_seconds: Some(ttl),
+    };
+
+    let mut buf = Vec::new();
+    let cells = writer
+        .write_static_cells(
+            &mut buf,
+            std::slice::from_ref(&static_op),
+            1_001_000,
+            &schema,
+        )
+        .unwrap();
+
+    assert_eq!(cells, 1, "exactly one static cell written");
+    assert!(!buf.is_empty(), "static cell must produce bytes");
+    // First byte is the cell flags. The expiring-cell encoding sets
+    // CELL_IS_EXPIRING and must NOT borrow row timestamp/TTL (the static block
+    // has none).
+    let flags = buf[0];
+    assert_eq!(
+        flags & CELL_IS_EXPIRING,
+        CELL_IS_EXPIRING,
+        "#1196 regression: static USING TTL write must be an EXPIRING cell, \
+         not a non-expiring (lives-forever) cell (flags={flags:#04x})"
+    );
+    assert_eq!(
+        flags & CELL_USE_ROW_TIMESTAMP,
+        0,
+        "#1196: static cell must carry its own timestamp, not USE_ROW_TIMESTAMP"
+    );
+}
+
+/// Companion guard: a static `Write` with NO TTL stays a plain non-expiring
+/// cell with its own explicit timestamp (flags `0x00`) — the #1196 fix that
+/// removed the spurious row-level static HAS_TIMESTAMP must remain intact. This
+/// is the unit-level mirror of the byte-parity test
+/// `static_row_timestamp_flags_gap_pinned_1196` (which pins the `0xa0` block).
+#[test]
+fn static_write_without_ttl_stays_non_expiring_1196() {
+    let mut stats = create_test_stats();
+    stats.min_timestamp = 1_000_000;
+    let writer = DataWriter::new(stats);
+    let schema = single_static_column_schema();
+
+    let static_op = StaticMergedOp {
+        op: CellOperation::Write {
+            column: "s".to_string(),
+            value: Value::Text("v".to_string()),
+        },
+        timestamp_micros: 1_001_000,
+        cell_local_deletion_time: 0,
+        row_ttl_seconds: None,
+    };
+
+    let mut buf = Vec::new();
+    writer
+        .write_static_cells(
+            &mut buf,
+            std::slice::from_ref(&static_op),
+            1_001_000,
+            &schema,
+        )
+        .unwrap();
+
+    let flags = buf[0];
+    assert_eq!(
+        flags & CELL_IS_EXPIRING,
+        0,
+        "#1196: a no-TTL static write must NOT be expiring (flags={flags:#04x})"
+    );
+    assert_eq!(
+        flags & CELL_USE_ROW_TIMESTAMP,
+        0,
+        "#1196: static cell carries its own explicit timestamp (no row liveness)"
     );
 }
 

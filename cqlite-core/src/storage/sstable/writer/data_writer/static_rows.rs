@@ -41,6 +41,9 @@ impl DataWriter {
                 cell_local_deletion_time: op_cell_local_deletion_time(op, mutation),
                 op: op.clone(),
                 timestamp_micros: mutation.timestamp_micros,
+                // #1196: carry statement-level TTL so a static `USING TTL` Write
+                // is emitted as an expiring cell, not a non-expiring one.
+                row_ttl_seconds: mutation.ttl_seconds,
             })
             .collect();
         self.write_static_row_with_prev_size(
@@ -364,7 +367,29 @@ impl DataWriter {
                         // static-only UPDATE writes the static cell with flags 0x00
                         // + an explicit timestamp delta, not 0x08/USE_ROW_TIMESTAMP).
                         let _ = liveness_ts; // static cells never use row timestamp
-                        self.write_cell_explicit_ts(buf, column, value, mop.timestamp_micros)?;
+                                             // Issue #1196 (regression fix): a static `USING TTL` write
+                                             // arrives as a plain `Write` with the statement TTL in
+                                             // `row_ttl_seconds`. Cassandra encodes that TTL on the CELL
+                                             // (an expiring cell), never as row-level liveness on the
+                                             // static block. Without this routing the TTL would be
+                                             // dropped and the cell serialized as non-expiring (lives
+                                             // forever) — a data-liveness regression. The no-TTL path
+                                             // stays byte-identical (explicit-ts, flags 0x00).
+                        match mop.row_ttl_seconds {
+                            Some(ttl) => self.write_cell_with_ttl(
+                                buf,
+                                column,
+                                value,
+                                mop.timestamp_micros,
+                                ttl,
+                            )?,
+                            None => self.write_cell_explicit_ts(
+                                buf,
+                                column,
+                                value,
+                                mop.timestamp_micros,
+                            )?,
+                        }
                     }
                 }
                 crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {

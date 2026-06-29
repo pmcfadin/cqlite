@@ -454,6 +454,9 @@ pub(crate) fn collect_static_operations(
                 cell_local_deletion_time: op_cell_local_deletion_time(op, mutation),
                 op: op.clone(),
                 timestamp_micros: mutation.timestamp_micros,
+                // #1196: carry statement-level TTL so a static `USING TTL` Write
+                // is emitted as an expiring cell, not a non-expiring one.
+                row_ttl_seconds: mutation.ttl_seconds,
             };
             match best.entry(col_name) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
