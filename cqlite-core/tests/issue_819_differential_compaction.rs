@@ -1683,21 +1683,15 @@ fn differential_vs_live_cassandra_env_gated() {
 /// framing is corrupted (garbage clustering values, wrong partition keys).
 ///
 /// This is exactly the "write-side issue only the next merge observes" that the
-/// two-generation check (AC2) is designed to catch. The harness catches it; the
-/// underlying writer/reader fix is OUT OF SCOPE for #819 (it belongs to the
-/// compaction-fidelity epic #817's writer work).
+/// two-generation check (AC2) is designed to catch.
 ///
-/// The test is `#[ignore]`d so the default `cargo test` run stays green (and does
-/// not fabricate a pass), while preserving a runnable, documented reproduction:
-/// ```text
-/// cargo test --package cqlite-core --features write-support \
-///   --test issue_819_differential_compaction \
-///   -- --ignored differential_row_tombstone_wide_partition_regression
-/// ```
-/// When the writer/reader round-trips a clustering-table row tombstone correctly,
-/// this test will PASS and the `#[ignore]` can be removed.
+/// HISTORY (issue #1018): this was `#[ignore]`d while the clustering-table
+/// row-tombstone compaction round-trip was defective (epic #817 writer scope).
+/// That underlying defect was fixed by #899 / #972, so the test now PASSES and
+/// serves as a standing regression guard: it asserts that compacting a wide
+/// partition containing a clustering-row tombstone round-trips the marker
+/// correctly through gen1 read-back.
 #[test]
-#[ignore = "pins a real clustering-table row-tombstone compaction round-trip defect (epic #817 writer scope)"]
 fn differential_row_tombstone_wide_partition_regression() {
     let (_temp, inputs, schema) = build_inputs_with_row_tombstone();
 
@@ -1721,16 +1715,15 @@ fn differential_row_tombstone_wide_partition_regression() {
 /// compacted output must match the tuples observed when *merging the inputs* —
 /// i.e. the writer must persist every input cell's write timestamp exactly.
 ///
-/// Today this FAILS for a row that carries a cell tombstone: the live sibling
-/// cells (`ck`, `name`) of that row are rewritten with the row's max timestamp
-/// (the tombstone's ts) instead of their original write timestamp. The gen1-vs-
-/// gen2 gate does not catch this because BOTH generations exhibit the same
-/// rewrite (it is stable), so it is pinned separately here.
-///
-/// `#[ignore]`d to keep the default run green without fabricating a pass; run on
-/// demand with `-- --ignored differential_input_merge_write_fidelity`.
+/// HISTORY (issue #1018): this previously FAILED for a row carrying a cell
+/// tombstone — the live sibling cells (`ck`, `name`) of that row were rewritten
+/// with the row's max timestamp (the tombstone's ts) instead of their original
+/// write timestamp. The gen1-vs-gen2 gate did not catch it because BOTH
+/// generations exhibited the same stable rewrite, so it was pinned separately
+/// here. Issue #1018 threads each surviving cell's OWN write timestamp through
+/// the merge→mutation→writer path (`Mutation::cell_write_timestamps`), so every
+/// live cell now keeps its writetime and this test PASSES as a regression guard.
 #[test]
-#[ignore = "pins a real cell-timestamp rewrite on cell-tombstone sibling cells (epic #817 writer scope)"]
 fn differential_input_merge_write_fidelity() {
     let (_temp, inputs, schema) = build_three_inputs();
     let g1_dir = TempDir::new().expect("g1 dir");

@@ -4,6 +4,11 @@
 //! holds one `impl DataWriter` block. `use super::*` pulls the shared writer
 //! types, serialization/schema helpers, flag constants, and crate imports
 //! re-exported from `data_writer/mod.rs`. No emitted bytes change.
+//!
+//! Issue #1018 added per-cell write-timestamp threading inside
+//! `merge_row_group` (a small, cohesive growth of the existing liveness/cell
+//! reconciliation logic); a further responsibility split of this over-threshold
+//! file is tracked by epic #1116 rather than done inline here.
 
 use super::*;
 
@@ -262,7 +267,11 @@ impl DataWriter {
             // from. Such a clustering-only write must still keep the row live, so
             // record its contribution inline (it can never be shadowed by a complex
             // marker — primary-key columns are never complex).
-            let mut pk_write_liveness = false;
+            // Issue #1018: track the clustering-only write's OWN write timestamp
+            // (not the mutation row max) so a row whose only liveness source is a
+            // surfaced clustering cell sibling of a higher-ts cell tombstone keeps
+            // the cell's writetime as the row marker. `None` = no such write.
+            let mut pk_write_liveness: Option<i64> = None;
             for op in &m.operations {
                 let column = match op {
                     CellOperation::Write { column, .. }
@@ -367,11 +376,33 @@ impl DataWriter {
                         CellOperation::Write { .. } | CellOperation::WriteWithTtl { .. }
                     ) {
                         // A clustering-only write keeps the row live even though it
-                        // produces no cell survivor (see note above).
-                        pk_write_liveness = true;
+                        // produces no cell survivor (see note above). Issue #1018:
+                        // carry the surfaced clustering cell's OWN write timestamp so
+                        // the row marker reflects it, not the row max (which a
+                        // higher-ts sibling cell tombstone would otherwise force).
+                        let pk_ts = m.cell_write_timestamp(column);
+                        if pk_write_liveness.is_none_or(|cur| pk_ts >= cur) {
+                            pk_write_liveness = Some(pk_ts);
+                        }
                     }
                     continue;
                 }
+
+                // Issue #1018: a simple `Write`/`WriteWithTtl` cell carries its OWN
+                // write timestamp (the compaction merge→mutation path records it in
+                // `Mutation::cell_write_timestamps` when it differs from the row's
+                // `timestamp_micros`). Use it for both the row-marker liveness
+                // candidate and the emitted cell so a live sibling of a higher-ts
+                // cell tombstone is NOT rewritten to the row's max writetime. For
+                // every other op (and for cells with no per-cell override) this is
+                // exactly `m.timestamp_micros`, so the common single-writetime row
+                // is unchanged.
+                let cell_ts = match op {
+                    CellOperation::Write { .. } | CellOperation::WriteWithTtl { .. } => {
+                        m.cell_write_timestamp(column)
+                    }
+                    _ => m.timestamp_micros,
+                };
 
                 // Issue #921: record the ROW-MARKER liveness candidate for this
                 // regular-column write. Done BEFORE the cells LWW dedup so that a
@@ -383,11 +414,11 @@ impl DataWriter {
                 ) {
                     match whole_col_liveness.entry(column) {
                         std::collections::hash_map::Entry::Vacant(entry) => {
-                            entry.insert((m.timestamp_micros, m.ttl_seconds));
+                            entry.insert((cell_ts, m.ttl_seconds));
                         }
                         std::collections::hash_map::Entry::Occupied(mut entry) => {
-                            if m.timestamp_micros >= entry.get().0 {
-                                entry.insert((m.timestamp_micros, m.ttl_seconds));
+                            if cell_ts >= entry.get().0 {
+                                entry.insert((cell_ts, m.ttl_seconds));
                             }
                         }
                     }
@@ -395,7 +426,7 @@ impl DataWriter {
 
                 let candidate = MergedOp {
                     op,
-                    timestamp_micros: m.timestamp_micros,
+                    timestamp_micros: cell_ts,
                     row_ttl_seconds: m.ttl_seconds,
                     // #921 finding 2: a surviving `Delete` cell tombstone keeps its
                     // OWN surfaced LDT; other ops fall back to the mutation's LDT.
@@ -444,10 +475,19 @@ impl DataWriter {
             // Issue #921: only the cell-less liveness sources are folded inline here
             // — a pure-PK insert and a clustering-only write. Whole-column writes
             // that DO produce a `cells` survivor are derived after reconcile.
-            if (pk_write_liveness || pure_pk_insert)
-                && liveness.is_none_or(|(ts, _)| m.timestamp_micros >= ts)
-            {
-                liveness = Some((m.timestamp_micros, m.ttl_seconds));
+            //
+            // Issue #1018: a clustering-only write contributes its surfaced cell's
+            // OWN write timestamp (`pk_write_liveness`); a pure-PK insert has no
+            // cell and contributes the mutation row timestamp as before.
+            let pk_liveness_ts = pk_write_liveness.or(if pure_pk_insert {
+                Some(m.timestamp_micros)
+            } else {
+                None
+            });
+            if let Some(pk_ts) = pk_liveness_ts {
+                if liveness.is_none_or(|(ts, _)| pk_ts >= ts) {
+                    liveness = Some((pk_ts, m.ttl_seconds));
+                }
             }
         }
 

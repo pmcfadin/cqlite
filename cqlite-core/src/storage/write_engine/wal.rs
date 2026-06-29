@@ -282,6 +282,8 @@ impl From<LegacyMutation> for Mutation {
             local_deletion_time: None,
             // Pre-#932 records had no coexisting row tombstone field.
             row_tombstone: None,
+            // Pre-#1018 records had no per-cell write-timestamp side-channel.
+            cell_write_timestamps: None,
         }
     }
 }
@@ -336,6 +338,8 @@ impl From<LegacyMutationWithLdt> for Mutation {
             local_deletion_time: m.local_deletion_time,
             // Layout (B) predates #932; no coexisting row tombstone field.
             row_tombstone: None,
+            // Layout (B) predates #1018; no per-cell write-timestamp side-channel.
+            cell_write_timestamps: None,
         }
     }
 }
@@ -381,6 +385,55 @@ impl From<PreRowTombstoneMutation> for Mutation {
             local_deletion_time: m.local_deletion_time,
             // Pre-#932 records carry no coexisting row tombstone.
             row_tombstone: None,
+            // Pre-#1018 records carry no per-cell write-timestamp side-channel.
+            cell_write_timestamps: None,
+        }
+    }
+}
+
+/// On-disk `Mutation` layout post-Issue #932, pre-Issue #1018.
+///
+/// Issue #1018 appended a trailing `cell_write_timestamps:
+/// Option<HashMap<String, i64>>` field to [`Mutation`]. Because the WAL has no
+/// per-record version field and bincode is positional, a record written by a
+/// #932-era binary (layout (D): current op shapes, mutation LDT AND
+/// `row_tombstone`, but NO trailing `cell_write_timestamps`) has no bytes for
+/// the new field, so decoding it as the current [`Mutation`] runs out of bytes.
+/// This mirror reproduces the EXACT layout-(D) field order so such records still
+/// replay, upgrading `cell_write_timestamps` to `None` (historical behavior:
+/// every cell inherits the row timestamp).
+///
+/// The field order MUST stay in lockstep with [`Mutation`], with only the
+/// trailing `cell_write_timestamps` omitted.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PreCellWriteTimestampsMutation {
+    table: TableId,
+    partition_key: PartitionKey,
+    clustering_key: Option<ClusteringKey>,
+    operations: Vec<CellOperation>,
+    timestamp_micros: i64,
+    ttl_seconds: Option<u32>,
+    partition_tombstone: Option<PartitionTombstone>,
+    range_tombstones: Vec<RangeTombstone>,
+    local_deletion_time: Option<i32>,
+    row_tombstone: Option<(i64, i32)>,
+}
+
+impl From<PreCellWriteTimestampsMutation> for Mutation {
+    fn from(m: PreCellWriteTimestampsMutation) -> Self {
+        Mutation {
+            table: m.table,
+            partition_key: m.partition_key,
+            clustering_key: m.clustering_key,
+            operations: m.operations,
+            timestamp_micros: m.timestamp_micros,
+            ttl_seconds: m.ttl_seconds,
+            partition_tombstone: m.partition_tombstone,
+            range_tombstones: m.range_tombstones,
+            local_deletion_time: m.local_deletion_time,
+            row_tombstone: m.row_tombstone,
+            // Pre-#1018 records carry no per-cell write-timestamp side-channel.
+            cell_write_timestamps: None,
         }
     }
 }
@@ -399,6 +452,13 @@ fn decode_mutation(bytes: &[u8]) -> std::result::Result<Mutation, bincode::Error
     match bincode::deserialize::<Mutation>(bytes) {
         Ok(mutation) => Ok(mutation),
         Err(current_err) => {
+            // Layout (D): post-#932, pre-#1018 — current op shapes + mutation LDT
+            // + `row_tombstone` but no trailing `cell_write_timestamps`. Tried
+            // first so a #932-era record decodes correctly rather than misaligning
+            // under the older mirrors below.
+            if let Ok(m) = bincode::deserialize::<PreCellWriteTimestampsMutation>(bytes) {
+                return Ok(Mutation::from(m));
+            }
             // Layout (C): post-#921, pre-#932 — current op shapes + mutation LDT
             // but no trailing `row_tombstone`. Tried first so a #921-era record
             // with current `Delete { column, local_deletion_time }` ops decodes
