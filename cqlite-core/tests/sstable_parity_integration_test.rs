@@ -591,12 +591,7 @@ const DEFAULT_PARITY_MIN_PERCENT: u64 = 95;
 /// Ratio-based presence/content assertion (issue #1230). Requires the JSONL
 /// golden to be present and non-empty and the parser to cover at least
 /// `min_percent`% of the reference partitions. The tolerance is an explicit
-/// parameter and is the single source of truth for the RATIO threshold. A call
-/// site MAY additionally pin a separate ABSOLUTE partition-count floor (a
-/// regression pin distinct from this ratio check — e.g.
-/// `test_collection_table_map_parsing`'s `>= 50`); that is permitted because it
-/// is not a second, conflicting expression of the same ratio. What is forbidden
-/// is restating the ratio as a different percentage.
+/// parameter and is the single source of truth for the RATIO threshold.
 ///
 /// This helper is used ONLY at the call site that had a 95% tolerance BEFORE
 /// #1230 (`test_simple_table_key_parsing_parity`). #1230 preserves that 95%
@@ -753,12 +748,16 @@ async fn test_collection_table_map_parsing() {
                 "typed_collections_table: {} partitions, {}/{} cells validated",
                 r.partition_count, r.validated_cells, r.total_cells
             );
+            // Fail-closed-on-empty guard: the JSONL golden must be present and
+            // non-empty (a missing/empty fixture fails rather than silently
+            // passing). This site's pre-#1230 baseline was the lenient
+            // `partition_count > 0`, so it uses assert_parity_present (not the
+            // 95% ratio helper, which is reserved for simple_table).
+            assert_parity_present(&r);
             // Issue #481 fix: typed_collections_table has 50 partitions.
             // Before the fix, the V5CompressedLegacy reader returned only 1 partition
             // due to the double length-prefix bug and the set path-elements bug.
-            // This assertion pins the fix: if either regression is reintroduced, the
-            // test will catch it.
-            assert_parity_content(&r, DEFAULT_PARITY_MIN_PERCENT);
+            // This absolute regression pin catches reintroduction of either bug.
             assert!(
                 r.partition_count >= 50,
                 "typed_collections_table should have at least 50 partitions (got {}). \
