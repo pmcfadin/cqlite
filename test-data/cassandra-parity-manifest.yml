@@ -11600,7 +11600,7 @@ scenarios:
       comparison_command: >-
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features write-support --test issue_992_ttl_tombstone_range_parity
-        ttl_row_preserves fixture_ttl_row
+        ttl_row
       reference_paths:
         - test-data/datasets/sstables/test_deltas/ttl_cells-299c9220701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       failure_artifacts:
@@ -11724,7 +11724,7 @@ scenarios:
       comparison_command: >-
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features write-support --test issue_992_ttl_tombstone_range_parity
-        range_bound fixture_range
+        range
       reference_paths:
         - test-data/datasets/sstables/test_deltas/range_tombstones-298894f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       failure_artifacts:
