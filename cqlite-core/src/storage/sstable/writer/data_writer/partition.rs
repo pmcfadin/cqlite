@@ -365,10 +365,16 @@ impl DataWriter {
             // Promoted-index `firstName`/`lastName` ClusteringPrefix bytes for this
             // item (Issue #1186). These are serialized in Cassandra's IndexInfo form
             // (`ClusteringPrefix.serializer.serialize`), which prepends the
-            // `Kind.ordinal()` byte — NOT the values-only Data.db row form. For a full
-            // clustering key the kind is always CLUSTERING (0x04), so a single `int`
-            // clustering yields the Cassandra-exact 6 bytes `04 00 <int>`. The
-            // fallbacks produce an empty `Clustering` (`04 00`).
+            // `Kind.ordinal()` byte — NOT the values-only Data.db row form.
+            //
+            // The kind byte differs by unfiltered type:
+            // - A ROW clustering name is always kind CLUSTERING (0x04); a single
+            //   `int` clustering yields the Cassandra-exact 6 bytes `04 00 <int>`.
+            // - A range-tombstone MARKER name carries its actual BOUND kind ordinal
+            //   (INCL_START_BOUND=1 / EXCL_END_BOUND=0 / INCL_END_BOUND=6 /
+            //   EXCL_START_BOUND=7), computed identically to `write_range_bound`,
+            //   NOT 0x04 (roborev MEDIUM). The fallbacks produce an empty values
+            //   header of the correct kind.
             let ck_bytes: Vec<u8> = match &item {
                 PartitionItem::Row(row) => {
                     if let Some(ck) = row.clustering_key {
@@ -378,15 +384,10 @@ impl DataWriter {
                         empty_clustering_prefix_for_index() // no clustering key
                     }
                 }
-                PartitionItem::Marker { bound, .. } => match bound {
-                    ClusteringBound::Inclusive(ck) | ClusteringBound::Exclusive(ck) => {
-                        serialize_clustering_prefix_for_index(ck, schema)
-                            .unwrap_or_else(|_| empty_clustering_prefix_for_index())
-                    }
-                    ClusteringBound::Bottom | ClusteringBound::Top => {
-                        empty_clustering_prefix_for_index()
-                    }
-                },
+                PartitionItem::Marker { bound, is_open, .. } => {
+                    serialize_marker_bound_prefix_for_index(bound, *is_open, schema)
+                        .unwrap_or_else(|_| marker_bound_prefix_for_index(bound, *is_open))
+                }
             };
 
             if current_block_first_ck.is_none() {

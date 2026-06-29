@@ -736,3 +736,65 @@ pub(super) fn serialize_clustering_prefix_for_index(
 pub(super) fn empty_clustering_prefix_for_index() -> Vec<u8> {
     vec![CLUSTERING_PREFIX_KIND_CLUSTERING, 0x00]
 }
+
+/// Serialize a range-tombstone **marker** bound as its promoted-index
+/// (`IndexInfo`) `ClusteringPrefix` byte sequence (Issue #1186 roborev MEDIUM).
+///
+/// A row clustering name is always kind `CLUSTERING` (`0x04`), but a marker is an
+/// *unfiltered* too: when a range-tombstone marker becomes an IndexInfo block's
+/// `firstName`/`lastName`, Cassandra serializes its **actual bound kind** ordinal,
+/// NOT `CLUSTERING`. Cassandra's `ClusteringBoundOrBoundary.Serializer.serialize`
+/// (the same writer behind on-disk markers) prepends `Kind.ordinal()`:
+///
+/// ```text
+/// [kind: 1 byte]   ← INCL_START_BOUND=1 / EXCL_END_BOUND=0 / INCL_END_BOUND=6 / EXCL_START_BOUND=7
+/// [header: VInt]   ← 2 bits per column: 00=present, 10=null
+/// [value bytes…]   ← type-specific bytes for each PRESENT column
+/// ```
+///
+/// The kind selection is **identical** to [`DataWriter::write_range_bound`]:
+/// open/close × inclusive/exclusive, with the `Bottom`/`Top` sentinels mapping to
+/// the open/close inclusive ordinal and carrying zero clustering values (an empty
+/// `ClusteringBound`). This guarantees the promoted-index name's kind byte matches
+/// the on-disk marker's kind byte byte-for-byte.
+///
+/// Returns `Err` only if a clustering column type is unknown (the caller falls back
+/// to an empty prefix of the correct kind via [`marker_bound_prefix_for_index`]).
+pub(super) fn serialize_marker_bound_prefix_for_index(
+    bound: &ClusteringBound,
+    is_open: bool,
+    schema: &TableSchema,
+) -> Result<Vec<u8>> {
+    let (kind, clustering) = marker_bound_kind(bound, is_open);
+    let mut buf = Vec::new();
+    buf.push(kind);
+    match clustering {
+        Some(ck) => buf.extend_from_slice(&serialize_clustering_prefix_to_vec(ck, schema)?),
+        None => buf.push(0x00), // empty values header (no clustering columns)
+    }
+    Ok(buf)
+}
+
+/// The bound-kind-aware empty-prefix fallback for a marker (Issue #1186): the
+/// marker's correct `Kind.ordinal()` byte followed by an empty values header
+/// (`0x00`). Used when the marker's clustering values cannot be encoded.
+pub(super) fn marker_bound_prefix_for_index(bound: &ClusteringBound, is_open: bool) -> Vec<u8> {
+    let (kind, _) = marker_bound_kind(bound, is_open);
+    vec![kind, 0x00]
+}
+
+/// Select the `ClusteringPrefix.Kind` ordinal and clustering values for a marker
+/// bound — the SINGLE source of truth shared by the serializer and the fallback.
+///
+/// Mirrors the `(is_open, bound)` match in [`DataWriter::write_range_bound`]
+/// exactly so the promoted-index kind byte equals the on-disk marker kind byte.
+fn marker_bound_kind(bound: &ClusteringBound, is_open: bool) -> (u8, Option<&ClusteringKey>) {
+    match (is_open, bound) {
+        (true, ClusteringBound::Inclusive(ck)) => (INCL_START_BOUND, Some(ck)),
+        (true, ClusteringBound::Exclusive(ck)) => (EXCL_START_BOUND, Some(ck)),
+        (false, ClusteringBound::Inclusive(ck)) => (INCL_END_BOUND, Some(ck)),
+        (false, ClusteringBound::Exclusive(ck)) => (EXCL_END_BOUND, Some(ck)),
+        (true, ClusteringBound::Bottom | ClusteringBound::Top) => (INCL_START_BOUND, None),
+        (false, ClusteringBound::Bottom | ClusteringBound::Top) => (INCL_END_BOUND, None),
+    }
+}
