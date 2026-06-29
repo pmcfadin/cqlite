@@ -52,6 +52,20 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # Issue #1209: GitHub runner images ship a stable toolchain that already
+      # provides bin/cargo-clippy. When rustup reconciles the toolchain on the
+      # first cargo invocation it intermittently tries to (re)install the
+      # 'clippy-preview' component and fails with
+      #   "detected conflict: 'bin/cargo-clippy'".
+      # This wheel build does not run clippy, so drop the conflicting component
+      # FIRST — before any other rustup/cargo invocation (the macOS Verify step's
+      # `cargo --version`, the rust-cache step, and the maturin Build wheel).
+      # Idempotent: a no-op if clippy is absent.
+      - name: Normalize Rust toolchain (avoid clippy-preview install conflict)
+        shell: bash
+        run: |
+          rustup component remove clippy 2>/dev/null || true
+
       - name: Normalize PATH for macOS (prepend ~/.cargo/bin so real cargo wins over rustup-init)
         if: runner.os == 'macOS'
         shell: bash
@@ -71,19 +85,6 @@ jobs:
         with:
           workspaces: "bindings/python -> target"
           key: ${{ matrix.os }}-${{ matrix.target }}
-
-      # Issue #1209: GitHub runner images ship a stable toolchain that already
-      # provides bin/cargo-clippy. When rustup reconciles the toolchain on the
-      # first cargo invocation it intermittently tries to (re)install the
-      # 'clippy-preview' component and fails with
-      #   "detected conflict: 'bin/cargo-clippy'".
-      # This wheel build does not run clippy, so drop the conflicting component
-      # up front, BEFORE the first rustup/cargo invocation (maturin Build wheel).
-      # Idempotent: a no-op if clippy is absent.
-      - name: Normalize Rust toolchain (avoid clippy-preview install conflict)
-        shell: bash
-        run: |
-          rustup component remove clippy 2>/dev/null || true
 
       - name: Build wheel
         uses: PyO3/maturin-action@v1
