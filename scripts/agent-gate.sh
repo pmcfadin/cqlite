@@ -550,14 +550,28 @@ run_file_size
 # Components that actually read SSTable datasets (Data.db) at run time. These are
 # the only ones the dataset preflight must guard. Wrongly skipping the preflight
 # for a dataset-dependent component is the #646 hazard, so this set must stay
-# complete. Dataset-free components (fmt, clippy, cli-tests, python-bindings,
-# delivery-telemetry, tooling-tests, minimal-build, file-size, format-compat)
-# need no preflight. format-compat is excluded (#1175 finding 1): its sole test
-# target (cargo test -p format-compatibility-tests, tests/format-compatibility)
-# is pure in-memory byte-level format-compliance assertions with hardcoded
-# vectors — it reads no CQLITE_DATASETS_ROOT and no Data.db — so guarding it just
-# made `--only format-compat` falsely fail the preflight when datasets are absent.
-DATASET_COMPONENTS="core-tests tombstones-scan scan-offload-guard integration-tests write-tests smoke"
+# complete.
+#   needs datasets: core-tests, tombstones-scan, scan-offload-guard,
+#     integration-tests, write-tests, smoke (read Data.db / golden fixtures), and
+#     python-bindings — the pytest suite resolves CQLITE_DATASETS_ROOT and calls
+#     skip_if_no_datasets() (bindings/python/tests/conftest.py), so with data
+#     absent its dataset-backed coverage *silently skips* and the suite can still
+#     report PASS. python-bindings is therefore in this set (#1175 finding 2): the
+#     preflight must FAIL loudly rather than let a skipped suite pass green — the
+#     same #646 failure mode that motivated guarding the Rust dataset suites.
+#   dataset-free (deliberately NOT guarded): fmt, clippy, file-size (operate on
+#     source text), cli-tests (only the unit_tests.rs target: tempfile-based
+#     config/parsing/output tests, no CQLITE_DATASETS_ROOT, no Data.db),
+#     delivery-telemetry + tooling-tests (pure shell/stdlib tool tests; the lone
+#     CQLITE_DATASETS_ROOT in test_agent_gate_summary.sh *sets an empty* root to
+#     exercise the preflight, it consumes no real data), minimal-build (a cargo
+#     build, no tests run), and format-compat. format-compat is excluded (#1175
+#     finding 1): its sole target (cargo test -p format-compatibility-tests,
+#     tests/format-compatibility) is pure in-memory byte-level format-compliance
+#     assertions with hardcoded vectors — it reads no CQLITE_DATASETS_ROOT and no
+#     Data.db — so guarding it just made `--only format-compat` falsely fail the
+#     preflight when datasets are absent.
+DATASET_COMPONENTS="core-tests tombstones-scan scan-offload-guard integration-tests write-tests python-bindings smoke"
 
 # selected_needs_datasets: true iff at least one SELECTED component reads datasets.
 # With no --only, every component runs, so it's always true. With --only, it's true
