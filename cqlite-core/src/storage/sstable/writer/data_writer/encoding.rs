@@ -448,12 +448,29 @@ pub(crate) fn collect_static_operations(
                 } => continue,
                 crate::storage::write_engine::mutation::CellOperation::DeleteRow => continue,
             };
+            // Issue #1018: a static `Write`/`WriteWithTtl` cell carries its OWN
+            // write timestamp when the compaction merge→mutation path recorded one
+            // in `Mutation::cell_write_timestamps` (it differs from the row's
+            // `timestamp_micros`). Use it for BOTH the stamped candidate timestamp
+            // AND the last-write-wins comparison below, mirroring the regular-row
+            // path in `rows.rs`. Otherwise a compacted static row with surviving
+            // static siblings at differing writetimes would rewrite older static
+            // cells to the newest static mutation's row max. For every other op (and
+            // for cells with no per-cell override) this is exactly
+            // `mutation.timestamp_micros`, so the single-writetime case is unchanged.
+            let candidate_ts = match op {
+                crate::storage::write_engine::mutation::CellOperation::Write { .. }
+                | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl { .. } => {
+                    mutation.cell_write_timestamp(&col_name)
+                }
+                _ => mutation.timestamp_micros,
+            };
             let candidate = StaticMergedOp {
                 // #921 finding 2: preserve a `Delete` cell tombstone's own surfaced
                 // LDT; other ops fall back to the mutation's effective LDT.
                 cell_local_deletion_time: op_cell_local_deletion_time(op, mutation),
                 op: op.clone(),
-                timestamp_micros: mutation.timestamp_micros,
+                timestamp_micros: candidate_ts,
                 // #1196: carry statement-level TTL so a static `USING TTL` Write
                 // is emitted as an expiring cell, not a non-expiring one.
                 row_ttl_seconds: mutation.ttl_seconds,

@@ -377,6 +377,106 @@ fn static_write_without_ttl_stays_non_expiring_1196() {
     );
 }
 
+/// Schema with two static columns (`s1`, `s2`) plus a clustering column, for the
+/// per-cell static-writetime test below.
+fn two_static_column_schema() -> TableSchema {
+    TableSchema {
+        keyspace: "test_ks".to_string(),
+        table: "test_table".to_string(),
+        partition_keys: vec![KeyColumn {
+            name: "id".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+        }],
+        clustering_keys: vec![ClusteringColumn {
+            name: "ck".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+            order: ClusteringOrder::Asc,
+        }],
+        columns: vec![
+            Column {
+                name: "s1".to_string(),
+                data_type: "text".to_string(),
+                nullable: true,
+                default: None,
+                is_static: true,
+            },
+            Column {
+                name: "s2".to_string(),
+                data_type: "text".to_string(),
+                nullable: true,
+                default: None,
+                is_static: true,
+            },
+        ],
+        comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
+    }
+}
+
+/// Issue #1018 (roborev finding 2): a compacted STATIC row whose surviving static
+/// cells were last written at DIFFERENT writetimes must keep each cell's own
+/// timestamp. The compaction merge→mutation path records those per-cell writetimes
+/// in `Mutation::cell_write_timestamps`; `collect_static_operations` must thread
+/// each into the `StaticMergedOp.timestamp_micros` (and use it for the LWW
+/// comparison), mirroring the regular-row path. Before the fix, every static cell
+/// inherited the row-level `timestamp_micros` (the row max), so an older static
+/// sibling was rewritten to a higher writetime — the same bug class the
+/// regular-row fix addressed.
+#[test]
+fn collect_static_operations_preserves_per_cell_writetimes_1018() {
+    let schema = two_static_column_schema();
+    let table_id = TableId::new("test_ks", "test_table");
+    let pk = PartitionKey::single("id", Value::Integer(1));
+
+    // Row marker timestamp is the MAX of the two static cells (5000). The cell `s1`
+    // genuinely survives from an OLDER write at 3000; only `s2` was written at 5000.
+    let row_ts = 5000i64;
+    let s1_ts = 3000i64;
+    let mut cell_ts = HashMap::new();
+    cell_ts.insert("s1".to_string(), s1_ts);
+    cell_ts.insert("s2".to_string(), row_ts);
+
+    let mut mutation = Mutation::new(
+        table_id,
+        pk,
+        None,
+        vec![
+            CellOperation::Write {
+                column: "s1".to_string(),
+                value: Value::Text("old".to_string()),
+            },
+            CellOperation::Write {
+                column: "s2".to_string(),
+                value: Value::Text("new".to_string()),
+            },
+        ],
+        row_ts,
+        None,
+    );
+    mutation.cell_write_timestamps = Some(cell_ts);
+
+    let ops = collect_static_operations(std::slice::from_ref(&mutation), &schema, None);
+
+    let find_ts = |col: &str| {
+        ops.iter()
+            .find(|o| matches!(&o.op, CellOperation::Write { column, .. } if column == col))
+            .map(|o| o.timestamp_micros)
+    };
+
+    assert_eq!(
+        find_ts("s1"),
+        Some(s1_ts),
+        "#1018: surviving older static cell must keep its OWN writetime, not the row max"
+    );
+    assert_eq!(
+        find_ts("s2"),
+        Some(row_ts),
+        "#1018: newest static cell keeps its own (row-max) writetime"
+    );
+}
+
 #[test]
 fn test_write_column_bitmap_zero_when_all_columns_present() {
     let stats = create_test_stats();
