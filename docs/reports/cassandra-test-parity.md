@@ -10,17 +10,17 @@ Sources: [`docs/cassandra_test_index.md`](../../docs/cassandra_test_index.md) ·
 
 | Status | Scenarios |
 |---|---|
-| `mirrored` | 182 |
-| `partial` | 16 |
+| `mirrored` | 187 |
+| `partial` | 17 |
 | `planned` | 18 |
 | `out_of_scope` | 14 |
-| **total** | **230** |
+| **total** | **236** |
 
 ## Evidence counts
 
 | Evidence | Scenarios |
 |---|---|
-| `byte_for_byte` | 100 |
+| `byte_for_byte` | 106 |
 | `canonical_semantic` | 80 |
 | `smoke` | 7 |
 | `partial` | 27 |
@@ -124,11 +124,17 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 | `cass.data_db_decode.clustering_bounds.desc_order` | data_db_decode | mirrored | byte_for_byte | `sstable_parity_data_db_jsonl` | p1_correctness |
 | `cass.data_db_decode.clustering_bounds.multi_column_prefix` | data_db_decode | mirrored | byte_for_byte | `sstable_parity_data_db_jsonl` | p1_correctness |
 | `cass.data_db_decode.clustering_bounds.null_vs_empty` | data_db_decode | mirrored | byte_for_byte | `sstable_parity_data_db_jsonl` | p1_correctness |
+| `cass.data_db_decode.range_tombstone.bound_markers` | tombstone_ttl | mirrored | byte_for_byte | `compaction_parity_tombstone_ttl` | p1_correctness |
+| `cass.data_db_decode.range_tombstone.boundary_markers` | tombstone_ttl | partial | byte_for_byte | `compaction_parity_tombstone_ttl` | p1_correctness |
 | `cass.data_db_decode.row_cell_flags_and_vint` | data_db_decode | mirrored | canonical_semantic | `sstable_parity_data_db_jsonl` | p1_correctness |
 | `cass.data_db_decode.serialization_header.timestamp_ttl_ldt_deltas` | data_db_decode | mirrored | byte_for_byte | `schema_parity_serialization_header` | p1_correctness |
 | `cass.data_db_decode.serialization_mirror.multi_clustering_column_order` | data_db_decode | mirrored | byte_for_byte | `sstable_parity_data_db_jsonl` | p1_correctness |
 | `cass.data_db_decode.static_rows.static_only_partition` | data_db_decode | mirrored | byte_for_byte | `sstable_parity_data_db_jsonl` | p1_correctness |
 | `cass.data_db_decode.static_rows.static_with_clustering_rows` | data_db_decode | mirrored | byte_for_byte | `sstable_parity_data_db_jsonl` | p1_correctness |
+| `cass.data_db_decode.tombstone.cell_deletion_time` | tombstone_ttl | mirrored | byte_for_byte | `compaction_parity_tombstone_ttl` | p1_correctness |
+| `cass.data_db_decode.tombstone.partition_deletion_time` | tombstone_ttl | mirrored | byte_for_byte | `compaction_parity_tombstone_ttl` | p1_correctness |
+| `cass.data_db_decode.tombstone.row_deletion_time` | tombstone_ttl | mirrored | byte_for_byte | `compaction_parity_tombstone_ttl` | p1_correctness |
+| `cass.data_db_decode.ttl.local_deletion_time_delta` | tombstone_ttl | mirrored | byte_for_byte | `compaction_parity_tombstone_ttl` | p1_correctness |
 | `cass.data_db_decode.unfiltered_serializer.row_and_cell_flags` | data_db_decode | mirrored | byte_for_byte | `sstable_parity_data_db_jsonl` | p1_correctness |
 | `cass.data_db_decode.unfiltered_serializer.row_size_vints` | data_db_decode | mirrored | byte_for_byte | `sstable_parity_data_db_jsonl` | p1_correctness |
 | `cass.data_db_decode.wide_partition.row_boundaries` | data_db_decode | partial | partial | `sstable_parity_data_db_jsonl` | p1_correctness |
@@ -282,6 +288,10 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
   - Normalization: The deterministic writer lane asserts the FULL multi-column prefix → row_size framing byte-for-byte; the wide fixture lane asserts the first four real-Cassandra clustering values' widths/values at exact offsets (the 5th DATE column's on-disk offset is NOT byte-asserted — see known_limitations) and the JSONL lane asserts the full 5-tuple semantically. FAIL CLOSED on a missing fixture.
 - `cass.data_db_decode.clustering_bounds.null_vs_empty` — Data.db null-vs-empty clustering value distinction parity
   - Normalization: Pure BYTE-level distinction: the EMPTY clustering's PRESENT header + zero-length value VInt vs the static (absent) row's omitted prefix (prev_size=0), both asserted at exact offsets via the public DataWriter encode surface and re-decoded through the reader's parse_vuint. The ABSENT/static byte shape is additionally observed in the pinned static_columns_table fixture (`fixture_static_columns_marker_byte_parity`).
+- `cass.data_db_decode.range_tombstone.bound_markers` — Data.db range-tombstone bound-marker parity
+  - Normalization: The bound-marker grammar is compared field-by-field at exact offsets: the IS_MARKER flag, the ClusteringPrefix.Kind ordinal, the u16 cluster count, the prefix clustering value (a PREFIX shorter than the full arity is expected for `[ck1,*]` deletes), the marker_body_size/prev_size framing, and the single mfda/ldt delta. Local-only fixture: SKIP when absent (the deterministic writer lane runs everywhere), FAIL on present-but-empty / 0 markers.
+- `cass.data_db_decode.range_tombstone.boundary_markers` — Data.db range-tombstone boundary-marker (two deletion times) parity
+  - Normalization: The boundary-marker grammar is compared field-by-field at exact offsets: IS_MARKER, the kind-2/kind-5 ordinal, the u16 cluster count, the prefix clustering value, and BOTH deletion-time pairs (primary then secondary) reconstructed against the golden end/start marked_deleted µs.
 - `cass.data_db_decode.serialization_header.timestamp_ttl_ldt_deltas` — Data.db timestamp / TTL / local-deletion-time delta parity
   - Normalization: Deltas are decoded as unsigned VInts and reconstructed against the Statistics.db EncodingStats minima; the fixture lane compares the reconstructed absolute timestamp to the JSONL golden in microseconds (FAIL CLOSED on a missing fixture). Wall-clock-derived LDT bytes are asserted only for sign/magnitude, not an exact constant.
 - `cass.data_db_decode.serialization_mirror.multi_clustering_column_order` — Data.db multi-clustering-column order parity
@@ -290,6 +300,14 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
   - Normalization: Two distinct assertion families: (1) STATIC-ROW BYTE parity — the row flag byte, extended IS_STATIC bit, hard-coded prev_size=0, and the omitted clustering prefix are compared at exact offsets in the decompressed Data.db; (2) SEMANTIC/JSONL parity — the decoded static cell value and the static structure are compared against the sstabledump golden. These are asserted separately. The pinned fixture is decompressed first (FAIL CLOSED on a missing pinned fixture); the truly static-ONLY partition shape is covered deterministically (always) plus the local-only static_with_rows lane (skip-on-presence).
 - `cass.data_db_decode.static_rows.static_with_clustering_rows` — Data.db static cells + clustering rows in one partition parity
   - Normalization: STATIC-ROW + clustering BYTE parity (static marker, then clustered-row clustering header + value offsets) is asserted separately from SEMANTIC JSONL parity (static value + static/clustering coexistence). The pinned fixture is decompressed first (FAIL CLOSED on a missing pinned fixture).
+- `cass.data_db_decode.tombstone.cell_deletion_time` — Data.db cell deletion-time (own delta fields, no value bytes) parity
+  - Normalization: Cell tombstone flag byte (IS_DELETED | HAS_EMPTY_VALUE) and own ts/ldt deltas are compared at exact offsets; the no-value-bytes claim is asserted as the framed body ending exactly after the cell's ldt delta. Local-only fixture: SKIP when absent, FAIL on present-but-empty.
+- `cass.data_db_decode.tombstone.partition_deletion_time` — Data.db partition deletion-time (fixed header form) parity
+  - Normalization: The partition deletion is compared as a FIXED big-endian i32 LDT + i64 mfda at their exact header offsets (NOT a VInt delta); the fixture lane is local-only and SKIPS when the binary is absent (deterministic lanes cover the fixed-form shape everywhere) but FAILS on a present-but-empty body.
+- `cass.data_db_decode.tombstone.row_deletion_time` — Data.db row deletion-time (own delta fields, no value bytes) parity
+  - Normalization: Row deletion mfda/ldt are decoded as UNSIGNED VInt deltas at exact offsets; the "no value bytes" claim is asserted as the framed body ending exactly after the column bitmap. The fixture lane is local-only and SKIPS when absent but FAILS on a present-but-empty body / 0 rows.
+- `cass.data_db_decode.ttl.local_deletion_time_delta` — Data.db TTL cell local-deletion-time / TTL delta parity
+  - Normalization: TTL and localDeletionTime are decoded as UNSIGNED VInt deltas at exact wire offsets and reconstructed against the Statistics.db EncodingStats minTTL / minLocalDeletionTime; the fixture lane is local-only and SKIPS when the binary is absent (the deterministic lane runs everywhere), but FAILS on a present-but-empty body or 0 rows.
 - `cass.data_db_decode.unfiltered_serializer.row_and_cell_flags` — Data.db row and cell flag-byte parity
   - Normalization: Flag bytes are compared as raw u8 values at their exact wire offset; the fixture lane additionally checks every leading flag byte stays within the known UnfilteredSerializer row-flag mask (FAIL CLOSED on a missing fixture).
 - `cass.data_db_decode.unfiltered_serializer.row_size_vints` — Data.db row-size and previous-size VInt framing parity
@@ -531,6 +549,7 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.corruption.bti_partitions_footer_bit_flip` (planned): Clean BTI source (test_da/wide_table Partitions.db) is not git-tracked, so the corrupted fixture cannot be regenerated by CI. → _Commit the clean test_da/wide_table BTI components (or add them to the published dataset bundle) so generate-corruption-corpus.sh can emit the corrupted Partitions.db, then flip status to mirrored._
 - `cass.corruption.bti_rows_truncation` (planned): Clean BTI source (test_da/wide_table Rows.db) is not git-tracked, so the truncated fixture cannot be regenerated by CI. → _Commit the clean test_da/wide_table BTI components so generate-corruption-corpus.sh can emit the truncated Rows.db, then flip status to mirrored._
 - `cass.corruption_verify.component_corruption_detection` (planned): No scrub/verify parity pass implemented. → _Implement a verify pass and compare detected-corruption outcomes against Cassandra VerifyTest/ScrubTest scenarios._
+- `cass.data_db_decode.range_tombstone.boundary_markers` (partial): Boundary-marker (kind 2 / kind 5, two deletion-time pairs) byte parity is asserted ONLY against the local-only adjacent_ranges fixture; there is no CI-resident lane because (a) the fixture binary is not in the pinned CI dataset (the test SKIPS when absent) and (b) CQLite's writer never EMITS a boundary marker (it writes separate start/end BOUND pairs), so no deterministic writer round-trip can cover the two-deletion-time body. → _Promote to strict-byte CI-resident `mirrored` by EITHER pinning the adjacent_ranges boundary fixture into the CI dataset OR teaching the writer to coalesce adjacent ranges into a boundary marker (then add a deterministic writer round-trip lane that emits + re-decodes the two-deletion-time form)._
 - `cass.data_db_decode.wide_partition.row_boundaries` (partial): Byte-level promoted-index parity (Index.db offsets, widths, clustering bounds) runs only against local-only binaries that are not in the pinned CI dataset; the required lane enforces only the committed-JSONL canonical-semantic facts. → _Add the test_big.wide_partition binaries to the dataset release pin (regenerate the tarball + update DATASET_SHA256) to promote these scenarios to byte_for_byte enforced in the required_parity lane._
 - `cass.delta_scan.wide_partition_corpus` (planned): No test_deltas wide-partition delete fixture; wide partitions are produced by the wide-row corpus (epic #993), not generate-deltas.sh. Byte-for-byte backing for delta_scan remains tracked by epic #969. → _Add a wide-partition delete shape (or reuse a wide-row corpus fixture) and a paired test_delta_parity_wide_partition test under epic #993._
 - `cass.filter_db.bti_membership` (partial): No raw-partition-key source for BTI fixtures, so the no-false-negative probe cannot run against da Filter.db. → _Recover raw BTI partition keys (e.g. by decoding partitions during a Data.db scan) and extend the no-false-negative gate to cover da fixtures._
@@ -727,12 +746,18 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.data_db_decode.clustering_bounds.desc_order` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.data_db_decode.clustering_bounds.multi_column_prefix` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.data_db_decode.clustering_bounds.null_vs_empty` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.data_db_decode.range_tombstone.bound_markers` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.data_db_decode.range_tombstone.boundary_markers` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.data_db_decode.row_cell_flags_and_vint` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.data_db_decode.row_preamble_size_mismatch` | required_parity | .github/workflows/cql-type-parity.yml |
 | `cass.data_db_decode.serialization_header.timestamp_ttl_ldt_deltas` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.data_db_decode.serialization_mirror.multi_clustering_column_order` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.data_db_decode.static_rows.static_only_partition` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.data_db_decode.static_rows.static_with_clustering_rows` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.data_db_decode.tombstone.cell_deletion_time` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.data_db_decode.tombstone.partition_deletion_time` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.data_db_decode.tombstone.row_deletion_time` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.data_db_decode.ttl.local_deletion_time_delta` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.data_db_decode.unfiltered_serializer.row_and_cell_flags` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.data_db_decode.unfiltered_serializer.row_size_vints` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.data_db_decode.wide_partition.row_boundaries` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
@@ -962,12 +987,18 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.data_db_decode.clustering_bounds.desc_order` | nb, oa | test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-desc-clustering-diff.log |
 | `cass.data_db_decode.clustering_bounds.multi_column_prefix` | nb, oa | test-data/datasets/sstables/test_wide_rows/wide_partition_table-6d6d0f80a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-multi-clustering-diff.log |
 | `cass.data_db_decode.clustering_bounds.null_vs_empty` | nb, oa | test-data/datasets/sstables/test_basic/static_columns_table-6b0425d0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-null-empty-clustering-diff.log |
+| `cass.data_db_decode.range_tombstone.bound_markers` | nb, oa | test-data/datasets/sstables/test_deltas/range_tombstones-298894f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-range-bound-diff.log |
+| `cass.data_db_decode.range_tombstone.boundary_markers` | nb, oa | test-data/datasets/sstables/test_deltas/adjacent_ranges-29bdd5c0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-range-boundary-diff.log |
 | `cass.data_db_decode.row_cell_flags_and_vint` | nb, oa | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
 | `cass.data_db_decode.row_preamble_size_mismatch` | nb | — |
 | `cass.data_db_decode.serialization_header.timestamp_ttl_ldt_deltas` | nb, oa | test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-delta-diff.log |
 | `cass.data_db_decode.serialization_mirror.multi_clustering_column_order` | nb, oa | test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-clustering-order-diff.log |
 | `cass.data_db_decode.static_rows.static_only_partition` | nb, oa | test-data/datasets/sstables/test_basic/static_columns_table-6b0425d0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-static-row-diff.log |
 | `cass.data_db_decode.static_rows.static_with_clustering_rows` | nb, oa | test-data/datasets/sstables/test_tomb/static_with_tombstones-4cdb9780702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-static-clustering-diff.log |
+| `cass.data_db_decode.tombstone.cell_deletion_time` | nb, oa | test-data/datasets/sstables/test_deltas/cell_tombstones-29733830701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-cell-deletion-diff.log |
+| `cass.data_db_decode.tombstone.partition_deletion_time` | nb, oa | test-data/datasets/sstables/test_deltas/partition_tombstones-299258f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-partition-deletion-diff.log |
+| `cass.data_db_decode.tombstone.row_deletion_time` | nb, oa | test-data/datasets/sstables/test_deltas/row_tombstones-297f1f10701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-row-deletion-diff.log |
+| `cass.data_db_decode.ttl.local_deletion_time_delta` | nb, oa | test-data/datasets/sstables/test_deltas/ttl_cells-299c9220701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-ttl-delta-diff.log |
 | `cass.data_db_decode.unfiltered_serializer.row_and_cell_flags` | nb, oa | test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-flag-diff.log |
 | `cass.data_db_decode.unfiltered_serializer.row_size_vints` | nb, oa | test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/data-db-row-framing-diff.log |
 | `cass.data_db_decode.wide_partition.row_boundaries` | nb | test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl |
