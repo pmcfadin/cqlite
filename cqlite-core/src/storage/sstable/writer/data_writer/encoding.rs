@@ -62,6 +62,36 @@ pub(crate) fn op_cell_local_deletion_time(
     }
 }
 
+/// The write timestamp (microseconds) to stamp on the static cell emitted for
+/// `op` within `mutation` (issue #1018).
+///
+/// A `Write`/`WriteWithTtl`/`Delete` op carries its OWN per-cell write timestamp
+/// when the compaction merge→mutation path recorded one in
+/// [`Mutation::cell_write_timestamps`](crate::storage::write_engine::mutation::Mutation::cell_write_timestamps)
+/// (a surviving live cell's writetime, or a static cell tombstone's
+/// `markedForDeleteAt`). It is resolved via
+/// [`Mutation::cell_write_timestamp`](crate::storage::write_engine::mutation::Mutation::cell_write_timestamp),
+/// which falls back to the mutation's row `timestamp_micros` when no per-cell
+/// override exists. Every other op (and the no-override case) resolves to exactly
+/// `mutation.timestamp_micros`, so the single-writetime behavior is unchanged.
+///
+/// Shared by `collect_static_operations` (the compaction/partition path) and
+/// `DataWriter::write_static_row` (the public single-mutation entry point) so both
+/// resolve per-cell static writetimes IDENTICALLY — without it the public entry
+/// point would rewrite older static cells (live OR cell tombstones) to the row max.
+pub(crate) fn op_cell_write_timestamp(
+    op: &crate::storage::write_engine::mutation::CellOperation,
+    mutation: &Mutation,
+) -> i64 {
+    use crate::storage::write_engine::mutation::CellOperation;
+    match op {
+        CellOperation::Write { column, .. }
+        | CellOperation::WriteWithTtl { column, .. }
+        | CellOperation::Delete { column, .. } => mutation.cell_write_timestamp(column),
+        _ => mutation.timestamp_micros,
+    }
+}
+
 /// Generate a version-1 TimeUUID for use as a list cell path.
 ///
 /// List elements in Cassandra use TimeUUIDs as cell paths to maintain insertion order.
@@ -387,14 +417,6 @@ pub(crate) fn is_primary_key_column(column: &str, schema: &TableSchema) -> bool 
         || schema.clustering_keys.iter().any(|k| k.name == column)
 }
 
-/// Returns true if this mutation contributes at least one static-column operation.
-pub(crate) fn has_static_operation(mutation: &Mutation, schema: &TableSchema) -> bool {
-    mutation
-        .operations
-        .iter()
-        .any(|op| is_static_operation(op, schema))
-}
-
 /// Collect and merge static-column operations from all mutations in a partition.
 ///
 /// Scans every mutation (regardless of whether it has a clustering key) and
@@ -448,12 +470,51 @@ pub(crate) fn collect_static_operations(
                 } => continue,
                 crate::storage::write_engine::mutation::CellOperation::DeleteRow => continue,
             };
+            // Issue #1018: a static `Write`/`WriteWithTtl`/`Delete` cell carries
+            // its OWN per-cell timestamp when the compaction merge→mutation path
+            // recorded one in `Mutation::cell_write_timestamps` (it differs from
+            // the row's `timestamp_micros`) — a live cell's writetime OR a static
+            // cell tombstone's markedForDeleteAt. Use it for BOTH the stamped
+            // candidate timestamp AND the last-write-wins comparison below,
+            // mirroring the regular-row path in `rows.rs`. Otherwise a compacted
+            // static row with surviving static siblings at differing timestamps
+            // would rewrite older static cells (live OR tombstone) to the newest
+            // static mutation's row max — re-introducing the over-deletion bug for
+            // statics. For every other op (and for cells with no per-cell override)
+            // this is exactly `mutation.timestamp_micros`, so the single-writetime
+            // case is unchanged.
+            let candidate_ts = op_cell_write_timestamp(op, mutation);
+            // Issue #1018 (roborev HIGH): PER-CELL shadow filtering for statics. The
+            // mutation-level `shadow_floor` skip above gates on the ROW MAX
+            // (`mutation.timestamp_micros`), so a mutation that survives the floor
+            // (because a recent static sibling keeps its row max high) can still
+            // carry an individual static `Write`/`WriteWithTtl`/`Delete` whose OWN
+            // per-cell timestamp is `<= shadow_floor`. That cell is covered by the
+            // partition tombstone and MUST be shadowed exactly as it would have been
+            // when every static cell used the row max. Apply the SAME boundary the
+            // row-max skip uses (`<= floor`) to the resolved `candidate_ts`,
+            // dropping the static op here so it never reaches the LWW map (and so
+            // the static liveness/TTL the partition path derives from the SURVIVING
+            // ops below cannot resurrect it). A static cell tombstone is itself
+            // shadowed on the same floor using its OWN markedForDeleteAt. Every cell
+            // with no override already has `candidate_ts == mutation.timestamp_micros
+            // > floor`, leaving the single-writetime case unchanged.
+            if shadow_floor.is_some_and(|floor| candidate_ts <= floor)
+                && matches!(
+                    op,
+                    crate::storage::write_engine::mutation::CellOperation::Write { .. }
+                        | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl { .. }
+                        | crate::storage::write_engine::mutation::CellOperation::Delete { .. }
+                )
+            {
+                continue;
+            }
             let candidate = StaticMergedOp {
                 // #921 finding 2: preserve a `Delete` cell tombstone's own surfaced
                 // LDT; other ops fall back to the mutation's effective LDT.
                 cell_local_deletion_time: op_cell_local_deletion_time(op, mutation),
                 op: op.clone(),
-                timestamp_micros: mutation.timestamp_micros,
+                timestamp_micros: candidate_ts,
                 // #1196: carry statement-level TTL so a static `USING TTL` Write
                 // is emitted as an expiring cell, not a non-expiring one.
                 row_ttl_seconds: mutation.ttl_seconds,
@@ -472,6 +533,27 @@ pub(crate) fn collect_static_operations(
     }
 
     best.into_values().collect()
+}
+
+/// Derive a static row's liveness timestamp + TTL from the SURVIVING merged
+/// static ops (issue #1018, roborev HIGH).
+///
+/// The static row carries no row-level liveness in the emitted bytes (#1196 —
+/// the writetime rides on each static CELL), but the partition path still
+/// threads a `(latest_ts, ttl)` pair into `write_static_row_with_prev_size`.
+/// That pair MUST be derived from the ops that actually SURVIVED
+/// `collect_static_operations` — each carrying its own per-cell
+/// `timestamp_micros` after the per-cell shadow floor — NOT from the set of
+/// mutations that merely cleared the floor on their ROW MAX. A static `Write`
+/// whose per-cell writetime is `<= shadow_floor` is already dropped from
+/// `merged`, so it cannot contribute liveness/TTL here; deriving from the
+/// mutations' row max could otherwise resurrect a shadowed static cell's
+/// writetime. Returns the max per-cell timestamp and the TTL of the op holding
+/// it (last-write-wins). `None` when there are no surviving ops.
+pub(crate) fn static_liveness_from_ops(ops: &[StaticMergedOp]) -> Option<(i64, Option<u32>)> {
+    ops.iter()
+        .max_by_key(|mop| mop.timestamp_micros)
+        .map(|mop| (mop.timestamp_micros, mop.row_ttl_seconds))
 }
 
 /// Whether a range tombstone's clustering range covers the given clustering key.

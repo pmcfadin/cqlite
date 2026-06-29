@@ -3343,6 +3343,43 @@ impl KWayMerger {
             RowData::Live { .. } => None,
         };
 
+        // Issue #1018: capture each surviving SIMPLE cell's OWN per-cell
+        // timestamp BEFORE the cells are consumed by `cells_to_cell_operations`
+        // (which turns them into `CellOperation::Write`/`WriteWithTtl`/`Delete`
+        // ops that carry no per-cell timestamp). A reconciled row's
+        // `entry.timestamp` is the MAX surviving cell timestamp; promoting every
+        // sibling to that max would rewrite a cell's timestamp:
+        //   * a live `name`@100 next to a `score` cell tombstone@300 → `name`
+        //     wrongly rewritten to 300 (the original fix), AND
+        //   * a `c1` cell tombstone@100 next to a live `c2`@300 → the tombstone's
+        //     marked-for-delete-at wrongly rewritten to 300, so a LATER
+        //     compaction that sees `c1` live@200 would be incorrectly shadowed
+        //     and DROPPED (over-deletion — roborev HIGH).
+        // For a SIMPLE cell tombstone (`Value::Tombstone(CellTombstone)`) the
+        // cell's `timestamp` IS its `markedForDeleteAt` (µs); its GC-clock
+        // `localDeletionTime` is preserved INDEPENDENTLY via
+        // `CellOperation::Delete::local_deletion_time` (#921). Recording any
+        // simple cell (live OR tombstone) whose own timestamp DIFFERS from
+        // `entry.timestamp` keeps the side-channel empty for the common
+        // single-writetime row (zero behavior change there) and lets the writer
+        // emit the differing cell with its own explicit timestamp. The map is
+        // keyed by column name; per-cell reconciliation already collapses each
+        // column to a single surviving op, so one timestamp per column is exact.
+        // Complex-element cells already carry their own timestamp via
+        // `WriteComplexElement` and are excluded (`!c.is_complex_element`).
+        let cell_write_timestamps: Option<std::collections::HashMap<String, i64>> =
+            match &entry.row_data {
+                RowData::Live { cells } => {
+                    let map: std::collections::HashMap<String, i64> = cells
+                        .iter()
+                        .filter(|c| !c.is_complex_element && c.timestamp != entry.timestamp)
+                        .map(|c| (c.column.clone(), c.timestamp))
+                        .collect();
+                    (!map.is_empty()).then_some(map)
+                }
+                RowData::Tombstone { .. } => None,
+            };
+
         let mut operations = match entry.row_data {
             RowData::Live { cells } => Self::cells_to_cell_operations(cells),
             RowData::Tombstone { .. } => vec![CellOperation::DeleteRow],
@@ -3409,6 +3446,10 @@ impl KWayMerger {
         if let Some(rt) = range_tombstone {
             mutation.range_tombstones.push(rt);
         }
+        // Issue #1018: thread per-cell timestamps so the writer preserves each
+        // surviving sibling cell's own timestamp instead of the row max — for
+        // BOTH a live cell's writetime AND a cell tombstone's markedForDeleteAt.
+        mutation.cell_write_timestamps = cell_write_timestamps;
         Ok(mutation)
     }
 }
@@ -4770,6 +4811,127 @@ mod tests {
         });
         assert!(has_write, "Expected Write operation for 'name'");
         assert!(has_ttl_write, "Expected WriteWithTtl operation for 'age'");
+    }
+
+    /// Issue #1018: a reconciled row whose surviving cells carry DIFFERENT write
+    /// timestamps must preserve each cell's OWN writetime through the
+    /// merge→mutation step. The row's `timestamp_micros` is the MAX surviving
+    /// timestamp; cells whose timestamp differs from that max must be recorded in
+    /// `Mutation::cell_write_timestamps` so the writer does not promote them to
+    /// the row max. Cells at the row max are NOT recorded (they correctly inherit
+    /// the row timestamp), keeping the side-channel empty for single-writetime
+    /// rows.
+    #[test]
+    fn merge_entry_preserves_per_cell_write_timestamps() {
+        use crate::schema::{KeyColumn, TableSchema};
+        use crate::storage::write_engine::mutation::DecoratedKey;
+        use std::collections::HashMap;
+
+        let schema = TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![],
+            comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
+        };
+
+        let cell = |column: &str, ts: i64| CellData {
+            column: column.to_string(),
+            value: Value::Text(column.to_string()),
+            timestamp: ts,
+            ttl: None,
+            cell_path: None,
+            local_deletion_time: None,
+            is_complex_element: false,
+            is_deleted: false,
+            has_empty_value: false,
+        };
+
+        // Row max writetime is 300 (the `late` cell); `early`@100 is a live
+        // sibling that must keep its own writetime.
+        let entry = MergeEntry::new(
+            0,
+            DecoratedKey::new(1000, 42i32.to_be_bytes().to_vec()),
+            None,
+            300,
+            RowData::Live {
+                cells: vec![cell("early", 100), cell("late", 300)],
+            },
+        );
+
+        let mutation =
+            KWayMerger::merge_entry_to_mutation(entry, &schema).expect("conversion should succeed");
+
+        assert_eq!(mutation.timestamp_micros, 300);
+        let cwt = mutation
+            .cell_write_timestamps
+            .as_ref()
+            .expect("per-cell write timestamps must be recorded for a mixed-writetime row");
+        // Only the cell whose ts differs from the row max is recorded.
+        assert_eq!(cwt.get("early"), Some(&100));
+        assert_eq!(cwt.get("late"), None);
+        // The lookup helper falls back to the row timestamp for unrecorded cells.
+        assert_eq!(mutation.cell_write_timestamp("early"), 100);
+        assert_eq!(mutation.cell_write_timestamp("late"), 300);
+    }
+
+    /// Issue #1018: a single-writetime row leaves the per-cell side-channel unset
+    /// (zero behavior change for the common case).
+    #[test]
+    fn merge_entry_single_writetime_row_has_no_per_cell_overrides() {
+        use crate::schema::{KeyColumn, TableSchema};
+        use crate::storage::write_engine::mutation::DecoratedKey;
+        use std::collections::HashMap;
+
+        let schema = TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![],
+            comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
+        };
+
+        let cell = |column: &str| CellData {
+            column: column.to_string(),
+            value: Value::Text(column.to_string()),
+            timestamp: 555,
+            ttl: None,
+            cell_path: None,
+            local_deletion_time: None,
+            is_complex_element: false,
+            is_deleted: false,
+            has_empty_value: false,
+        };
+
+        let entry = MergeEntry::new(
+            0,
+            DecoratedKey::new(1000, 7i32.to_be_bytes().to_vec()),
+            None,
+            555,
+            RowData::Live {
+                cells: vec![cell("a"), cell("b")],
+            },
+        );
+
+        let mutation =
+            KWayMerger::merge_entry_to_mutation(entry, &schema).expect("conversion should succeed");
+        assert!(
+            mutation.cell_write_timestamps.is_none(),
+            "single-writetime row must not record any per-cell overrides"
+        );
+        assert_eq!(mutation.cell_write_timestamp("a"), 555);
     }
 
     #[test]

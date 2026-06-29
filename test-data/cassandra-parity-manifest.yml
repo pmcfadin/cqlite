@@ -11548,6 +11548,363 @@ scenarios:
         - cass.compression.fixture_matrix.zstd_no_dictionary
         - cass.compression.registry.known_zstd
 
+  # ============================================================================
+  # Issue #1018 — tombstone/TTL + compaction byte-parity scenarios. The two
+  # cass.compaction_merge.issue_819.* entries anchor the differential
+  # write-fidelity regression guards (un-ignored once the per-cell write-
+  # timestamp writer defect was fixed); the cass.tombstone_ttl.* and
+  # cass.compaction_merge.GcCompactionTest.* entries anchor the deterministic +
+  # fixture TTL / partition-tombstone / range-marker delta parity covered by
+  # issue_992_ttl_tombstone_range_parity.rs. (The issue listed two ids under a
+  # cqlite.issue_819.* namespace; remapped here to schema-conforming cass.* ids
+  # with existing capability enum values — there is no `compaction` capability.)
+  # ============================================================================
+  - id: cass.tombstone_ttl.TTLExpiryTest.gc_boundary
+    title: TTL expiry / gc-boundary delta parity (deterministic + fixture)
+    status: mirrored
+    capability: tombstone_ttl
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - TTLExpiryTest.java
+        - UnfilteredSerializer.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+        notes: >-
+          A TTL row sets HAS_TIMESTAMP | HAS_TTL and writes
+          `[ts delta][ttl delta][localDeletionTime delta]` (all UNSIGNED VInt
+          from the EncodingStats minima); the derived expiration second is the
+          LDT, which fixes the gc-boundary at which the cell becomes purgeable.
+          `ttl_row_preserves_ttl_and_derived_ldt_deltas` asserts the exact byte
+          deltas with NON-ZERO minTTL/minLocalDeletionTime; `fixture_ttl_row_byte_parity`
+          walks the real ttl_cells nb Data.db and reconstructs ttl=3600 +
+          expires_at against the on-disk delta + minima.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/ttl_cells-299c9220701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_992_ttl_tombstone_range_parity
+        ttl_row
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/ttl_cells-299c9220701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/ttl-gc-boundary-delta-diff.log
+      normalization: >-
+        TTL and localDeletionTime are decoded as UNSIGNED VInt deltas at exact
+        wire offsets and reconstructed against the Statistics.db EncodingStats
+        minTTL / minLocalDeletionTime; the fixture lane is local-only and SKIPS
+        when the binary is absent (the deterministic lane runs everywhere) but
+        FAILS on a present-but-empty body or 0 rows.
+      known_limitations: >-
+        Strict byte parity is asserted for the row TTL/LDT delta encoding and the
+        derived gc-boundary expiration second.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.tombstone_ttl.NeverPurgeTest.preserve_all_tombstone_types
+    title: Preserve all tombstone types under never-purge (partition/row/cell/range)
+    status: mirrored
+    capability: tombstone_ttl
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - NeverPurgeTest.java
+        - UnfilteredSerializer.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+        notes: >-
+          The four tombstone families each write their own deltas with no value
+          bytes: partition deletion uses the FIXED-header form (not a delta), and
+          row / cell / range-bound markers carry their own
+          `markedForDeleteAt` + `localDeletionTime` deltas. The deterministic
+          lanes (`partition_deletion_uses_fixed_header_form_not_delta`,
+          `row_tombstone_carries_own_deltas_and_no_value_bytes`,
+          `cell_tombstone_carries_own_deltas_and_no_value_bytes`,
+          `range_bound_markers_exact_grammar_writer`) and their `fixture_*` peers
+          assert each type is preserved verbatim — none promoted/dropped.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/partition_tombstones-299258f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/row_tombstones-297f1f10701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/cell_tombstones-29733830701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_992_ttl_tombstone_range_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/partition_tombstones-299258f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/row_tombstones-297f1f10701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/cell_tombstones-29733830701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/tombstone-types-delta-diff.log
+      normalization: >-
+        Deletion times decoded as deltas / fixed-header at exact wire offsets and
+        reconstructed against EncodingStats minima; fixture lanes are local-only
+        and SKIP when the binary is absent (deterministic lanes run everywhere)
+        but FAIL on a present-but-empty body or 0 rows.
+      known_limitations: >-
+        Asserts each tombstone family round-trips its own deltas with no value
+        bytes; full never-purge gc-grace coordination across compaction tiers is
+        covered by the compaction_merge entries below.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.tombstone_ttl.RangeTombstoneTest.marker_merge_and_persistence
+    title: Range-tombstone bound-marker grammar merge and persistence
+    status: mirrored
+    capability: tombstone_ttl
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - RangeTombstoneTest.java
+        - UnfilteredSerializer.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+        notes: >-
+          Range-tombstone bound markers follow an exact on-disk grammar (bound
+          kind byte + clustering prefix + `markedForDeleteAt`/`localDeletionTime`
+          deltas) and must persist through write/compaction. The deterministic
+          lane (`range_bound_markers_exact_grammar_writer`) and fixture lanes
+          (`fixture_range_bound_markers_byte_parity`,
+          `fixture_range_inclusive_end_bound_kind`,
+          `fixture_range_boundary_marker_byte_parity`) assert the grammar and
+          bound-kind bytes match Cassandra.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/range_tombstones-298894f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_992_ttl_tombstone_range_parity
+        range
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/range_tombstones-298894f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/range-marker-grammar-diff.log
+      normalization: >-
+        Bound-marker grammar and deltas decoded at exact wire offsets; fixture
+        lanes are local-only and SKIP when the binary is absent (the
+        deterministic lane runs everywhere) but FAIL on 0 markers.
+      known_limitations: >-
+        Asserts bound-marker grammar / bound-kind / delta byte parity; the
+        harness `raw_clustering_order_walk` reports Unsupported for range markers
+        (Tier-1 raw sub-check skips; Tier-2 logical equivalence still gates).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.compaction_merge.GcCompactionTest.row_cell_partition_tombstone_gc
+    title: Row/cell/partition tombstone gc through compaction merge (canonical)
+    status: mirrored
+    capability: compaction_merge
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - GcCompactionTest.java
+        - CompactionsPurgeTest.java
+        - UnfilteredSerializer.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_819_differential_compaction.rs
+          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+        notes: >-
+          Compacting overlapping inputs that carry partition / row / cell
+          tombstones must preserve each tombstone's deletion time and shadow only
+          the cells it covers (timestamp <= markedForDeleteAt), without rewriting
+          surviving sibling cells. The #819 differential harness asserts the
+          merged partition/cell/timestamp facts round-trip through a real
+          compaction, and the #992 deterministic + fixture lanes pin each
+          tombstone family's delta encoding.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/cell_tombstones-29733830701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        compaction-parity/scripts/bootstrap-cassandra.sh  # builds cassandra-5.0.2, runs reference compaction
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_819_differential_compaction
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/cell_tombstones-29733830701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+      normalization: >-
+        Tier-2 logical equivalence: merged partition/cell/timestamp/TTL/local
+        deletion time/is_deleted facts compared against Cassandra compaction
+        output; presentation/file layout ignored.
+      known_limitations: >-
+        Logical / canonical-semantic equivalence; byte-for-byte compaction output
+        parity is the separate non-gated byte tier (north-star issue #842).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/compaction-parity.yml
+    scope: {}
+
+  - id: cass.compaction_merge.issue_819.differential_row_tombstone_wide_partition_regression
+    title: Differential compaction — row tombstone in a wide partition round-trips
+    status: mirrored
+    capability: compaction_merge
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - GcCompactionTest.java
+        - CompactionIteratorTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_819_differential_compaction.rs
+        notes: >-
+          Regression guard (un-ignored in #1018): compacting a wide partition
+          that contains a clustering-row tombstone must round-trip the row
+          tombstone marker correctly through the next read-back. The underlying
+          mis-decode was fixed by #899 / #972; this asserts gen1 read-back of the
+          compacted output is Tier-2 equivalent to merging the inputs.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/row_tombstones-297f1f10701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        compaction-parity/scripts/bootstrap-cassandra.sh  # builds cassandra-5.0.2, runs reference compaction
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_819_differential_compaction
+        differential_row_tombstone_wide_partition_regression
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/row_tombstones-297f1f10701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+      normalization: >-
+        Tier-2 logical equivalence of merged partition/row/cell/deletion facts;
+        presentation/file layout ignored.
+      known_limitations: >-
+        Logical equivalence only; byte-for-byte compaction output parity is the
+        separate non-gated byte tier (north-star issue #842).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/compaction-parity.yml
+    scope: {}
+
+  - id: cass.compaction_merge.issue_819.differential_input_merge_write_fidelity
+    title: Differential compaction — per-cell write timestamps preserved (write fidelity)
+    status: mirrored
+    capability: compaction_merge
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CompactionIteratorTest.java
+        - UnfilteredSerializer.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_819_differential_compaction.rs
+        notes: >-
+          Strictest write-fidelity guard (un-ignored in #1018): a reconciled row
+          carrying a cell tombstone alongside live sibling cells must persist
+          each surviving cell's OWN write timestamp, NOT the row's max writetime.
+          #1018 threads per-cell write timestamps through the merge->mutation->
+          writer path (`Mutation::cell_write_timestamps`); this asserts the
+          gen1 read-back is Tier-2 equivalent to merging the inputs (live cells
+          keep ts=100 next to a cell tombstone at ts=300).
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/cell_tombstones-29733830701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        compaction-parity/scripts/bootstrap-cassandra.sh  # builds cassandra-5.0.2, runs reference compaction
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_819_differential_compaction
+        differential_input_merge_write_fidelity
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/cell_tombstones-29733830701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+      normalization: >-
+        Tier-2 logical equivalence: every surviving cell's timestamp/TTL/local
+        deletion time/is_deleted compared against the merge-from-inputs facts;
+        presentation/file layout ignored.
+      known_limitations: >-
+        Logical equivalence of per-cell writetimes; byte-for-byte compaction
+        output parity is the separate non-gated byte tier (north-star #842).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/compaction-parity.yml
+    scope: {}
+
 # ==============================================================================
 # Public/release-facing parity claims (issue #1023).
 #

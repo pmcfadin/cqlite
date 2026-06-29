@@ -112,6 +112,26 @@ pub struct Mutation {
     /// present, rides as `CellOperation::DeleteRow` at `timestamp_micros`.
     #[serde(default)]
     pub row_tombstone: Option<(i64, i32)>,
+    /// Per-column write timestamps (microseconds) for the simple-cell
+    /// `Write`/`WriteWithTtl` operations of this mutation (issue #1018).
+    ///
+    /// `CellOperation::Write`/`WriteWithTtl` carry no per-cell timestamp — every
+    /// such cell historically inherits the row's single `timestamp_micros`. On
+    /// the compaction merge→mutation path a reconciled row can hold sibling cells
+    /// at DIFFERENT writetimes (e.g. live `name`@100 alongside a `score` cell
+    /// tombstone@300). Promoting every live cell to the row's MAX writetime would
+    /// rewrite `name`'s writetime to 300, losing fidelity. This side-channel maps
+    /// a regular column name → that cell's OWN write timestamp so the writer emits
+    /// it verbatim (clearing `USE_ROW_TIMESTAMP` when it differs from the row
+    /// marker).
+    ///
+    /// `None` / absent column (the default) preserves historical behavior: the
+    /// cell inherits `timestamp_micros`. Populated only by
+    /// `merge_entry_to_mutation`; the WAL / CQL-INSERT paths leave it unset (their
+    /// cells genuinely share one writetime). `#[serde(default)]` keeps backward
+    /// compatibility with mutations serialized before this field existed.
+    #[serde(default)]
+    pub cell_write_timestamps: Option<std::collections::HashMap<String, i64>>,
 }
 
 impl Mutation {
@@ -135,7 +155,19 @@ impl Mutation {
             range_tombstones: Vec::new(),
             local_deletion_time: None,
             row_tombstone: None,
+            cell_write_timestamps: None,
         }
+    }
+
+    /// Per-cell write timestamp (microseconds) for `column`, falling back to the
+    /// mutation's row `timestamp_micros` when no per-cell override was supplied
+    /// (issue #1018). Used by the writer to decide whether a simple cell keeps
+    /// `USE_ROW_TIMESTAMP` or carries its own explicit delta.
+    pub fn cell_write_timestamp(&self, column: &str) -> i64 {
+        self.cell_write_timestamps
+            .as_ref()
+            .and_then(|m| m.get(column).copied())
+            .unwrap_or(self.timestamp_micros)
     }
 
     /// Attach a row-level deletion that coexists with this mutation's live cells

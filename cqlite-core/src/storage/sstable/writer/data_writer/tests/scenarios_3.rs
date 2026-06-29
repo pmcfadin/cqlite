@@ -377,6 +377,503 @@ fn static_write_without_ttl_stays_non_expiring_1196() {
     );
 }
 
+/// Schema with two static columns (`s1`, `s2`) plus a clustering column, for the
+/// per-cell static-writetime test below.
+fn two_static_column_schema() -> TableSchema {
+    TableSchema {
+        keyspace: "test_ks".to_string(),
+        table: "test_table".to_string(),
+        partition_keys: vec![KeyColumn {
+            name: "id".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+        }],
+        clustering_keys: vec![ClusteringColumn {
+            name: "ck".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+            order: ClusteringOrder::Asc,
+        }],
+        columns: vec![
+            Column {
+                name: "s1".to_string(),
+                data_type: "text".to_string(),
+                nullable: true,
+                default: None,
+                is_static: true,
+            },
+            Column {
+                name: "s2".to_string(),
+                data_type: "text".to_string(),
+                nullable: true,
+                default: None,
+                is_static: true,
+            },
+        ],
+        comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
+    }
+}
+
+/// Issue #1018 (roborev finding 2): a compacted STATIC row whose surviving static
+/// cells were last written at DIFFERENT writetimes must keep each cell's own
+/// timestamp. The compaction merge→mutation path records those per-cell writetimes
+/// in `Mutation::cell_write_timestamps`; `collect_static_operations` must thread
+/// each into the `StaticMergedOp.timestamp_micros` (and use it for the LWW
+/// comparison), mirroring the regular-row path. Before the fix, every static cell
+/// inherited the row-level `timestamp_micros` (the row max), so an older static
+/// sibling was rewritten to a higher writetime — the same bug class the
+/// regular-row fix addressed.
+#[test]
+fn collect_static_operations_preserves_per_cell_writetimes_1018() {
+    let schema = two_static_column_schema();
+    let table_id = TableId::new("test_ks", "test_table");
+    let pk = PartitionKey::single("id", Value::Integer(1));
+
+    // Row marker timestamp is the MAX of the two static cells (5000). The cell `s1`
+    // genuinely survives from an OLDER write at 3000; only `s2` was written at 5000.
+    let row_ts = 5000i64;
+    let s1_ts = 3000i64;
+    let mut cell_ts = HashMap::new();
+    cell_ts.insert("s1".to_string(), s1_ts);
+    cell_ts.insert("s2".to_string(), row_ts);
+
+    let mut mutation = Mutation::new(
+        table_id,
+        pk,
+        None,
+        vec![
+            CellOperation::Write {
+                column: "s1".to_string(),
+                value: Value::Text("old".to_string()),
+            },
+            CellOperation::Write {
+                column: "s2".to_string(),
+                value: Value::Text("new".to_string()),
+            },
+        ],
+        row_ts,
+        None,
+    );
+    mutation.cell_write_timestamps = Some(cell_ts);
+
+    let ops = collect_static_operations(std::slice::from_ref(&mutation), &schema, None);
+
+    let find_ts = |col: &str| {
+        ops.iter()
+            .find(|o| matches!(&o.op, CellOperation::Write { column, .. } if column == col))
+            .map(|o| o.timestamp_micros)
+    };
+
+    assert_eq!(
+        find_ts("s1"),
+        Some(s1_ts),
+        "#1018: surviving older static cell must keep its OWN writetime, not the row max"
+    );
+    assert_eq!(
+        find_ts("s2"),
+        Some(row_ts),
+        "#1018: newest static cell keeps its own (row-max) writetime"
+    );
+}
+
+/// Read one unsigned VInt (Cassandra encoding) from `buf` at `pos`.
+fn read_uvint_at(buf: &[u8], pos: &mut usize) -> u64 {
+    let first = buf[*pos];
+    *pos += 1;
+    if first == 0xFF {
+        let mut v = 0u64;
+        for _ in 0..8 {
+            v = (v << 8) | buf[*pos] as u64;
+            *pos += 1;
+        }
+        return v;
+    }
+    let extra = first.leading_ones() as usize;
+    let mask = 0xFF_u8.wrapping_shr((extra + 1) as u32);
+    let mut v = (first & mask) as u64;
+    for _ in 0..extra {
+        v = (v << 8) | buf[*pos] as u64;
+        *pos += 1;
+    }
+    v
+}
+
+/// Issue #1018 (roborev Medium): the PUBLIC `DataWriter::write_static_row` entry
+/// point was the last writer path that ignored the per-cell write-timestamp
+/// side-channel — it stamped EVERY static op with `mutation.timestamp_micros`
+/// (the row max). A caller passing a compacted/static mutation that carries
+/// per-cell overrides in `Mutation::cell_write_timestamps` would therefore
+/// rewrite older surviving static cells (live OR cell tombstones) up to the row
+/// max, the same over-deletion bug class already fixed in
+/// `collect_static_operations`.
+///
+/// This drives `write_static_row` END-TO-END (not the lower-level
+/// `write_static_cells`) and decodes the emitted static-cell timestamp deltas,
+/// asserting each static cell keeps its OWN per-cell writetime — and a static
+/// cell tombstone keeps its OWN `markedForDeleteAt` — rather than the row max.
+///
+/// Pre-fix: `write_static_row` did not consult `cell_write_timestamps`, so the
+/// `s1` cell would be stamped at the row max (5000) instead of its own 3000 —
+/// this test fails. Post-fix (resolving via `op_cell_write_timestamp`, exactly
+/// as `collect_static_operations` does) it passes. The no-override case is
+/// covered by the existing `static_write_without_ttl_stays_non_expiring_1196`
+/// (single writetime, byte-identical).
+#[test]
+fn write_static_row_preserves_per_cell_writetimes_1018() {
+    let mut stats = create_test_stats();
+    stats.min_timestamp = 1_000;
+    stats.min_local_deletion_time = 0;
+    stats.min_ttl = 0;
+    let min_ts = stats.min_timestamp;
+    let mut writer = DataWriter::new(stats);
+    let schema = two_static_column_schema();
+    let table_id = TableId::new("test_ks", "test_table");
+    let pk = PartitionKey::single("id", Value::Integer(1));
+
+    // Row max is 5000 (`s2`); `s1` genuinely survives from an OLDER write at 3000.
+    let row_ts = 5000i64;
+    let s1_ts = 3000i64;
+    let mut cell_ts = HashMap::new();
+    cell_ts.insert("s1".to_string(), s1_ts);
+    cell_ts.insert("s2".to_string(), row_ts);
+
+    let mut mutation = Mutation::new(
+        table_id,
+        pk,
+        None,
+        vec![
+            CellOperation::Write {
+                column: "s1".to_string(),
+                value: Value::Text("old".to_string()),
+            },
+            CellOperation::Write {
+                column: "s2".to_string(),
+                value: Value::Text("new".to_string()),
+            },
+        ],
+        row_ts,
+        None,
+    );
+    mutation.cell_write_timestamps = Some(cell_ts);
+
+    writer.write_static_row(&mutation, &schema).unwrap();
+    let buf = &writer.buffer;
+
+    // Decode the static-row body. Layout (#1196: no row-level liveness, ALL columns
+    // present → no subset bitmap): [flags][ext=0x01][row_size uvint][prev_size uvint]
+    // then cells in static-column order (s1, s2), each simple cell:
+    // [cell_flags][ts_delta uvint][value_len uvint][value].
+    assert_eq!(buf[0], ROW_HAS_EXTENDED_FLAGS | ROW_HAS_ALL_COLUMNS);
+    assert_eq!(buf[1], EXTENDED_IS_STATIC);
+    let mut pos = 2usize;
+    let _row_size = read_uvint_at(buf, &mut pos);
+    let _prev_size = read_uvint_at(buf, &mut pos);
+
+    let read_cell_ts = |buf: &[u8], pos: &mut usize| -> i64 {
+        let flags = buf[*pos];
+        *pos += 1;
+        assert_eq!(
+            flags & CELL_USE_ROW_TIMESTAMP,
+            0,
+            "static cell must carry its own explicit timestamp (no row liveness)"
+        );
+        let ts_delta = read_uvint_at(buf, pos) as i64;
+        // skip value (length-prefixed text)
+        let len = read_uvint_at(buf, pos) as usize;
+        *pos += len;
+        min_ts + ts_delta
+    };
+
+    // Sorted static order: s1 then s2.
+    let s1_decoded = read_cell_ts(buf, &mut pos);
+    let s2_decoded = read_cell_ts(buf, &mut pos);
+
+    assert_eq!(
+        s1_decoded, s1_ts,
+        "#1018: write_static_row must keep the surviving older static cell's OWN \
+         writetime ({s1_ts}), not rewrite it to the row max ({row_ts})"
+    );
+    assert_eq!(
+        s2_decoded, row_ts,
+        "#1018: the newest static cell keeps its own (row-max) writetime"
+    );
+}
+
+/// Issue #1018 (roborev Medium) companion: `write_static_row` must also preserve a
+/// static CELL TOMBSTONE's own `markedForDeleteAt` (per-cell write timestamp), not
+/// rewrite it to the row max. A compacted static row can hold a live static cell
+/// alongside an older static cell tombstone at a DIFFERENT (lower) writetime.
+///
+/// Pre-fix the `Delete` op was stamped at the row max; post-fix it carries its own
+/// per-cell timestamp resolved via `op_cell_write_timestamp`.
+#[test]
+fn write_static_row_preserves_cell_tombstone_writetime_1018() {
+    let mut stats = create_test_stats();
+    stats.min_timestamp = 1_000;
+    stats.min_local_deletion_time = 0;
+    stats.min_ttl = 0;
+    let min_ts = stats.min_timestamp;
+    let min_ldt = stats.min_local_deletion_time as i64;
+    let mut writer = DataWriter::new(stats);
+    let schema = two_static_column_schema();
+    let table_id = TableId::new("test_ks", "test_table");
+    let pk = PartitionKey::single("id", Value::Integer(1));
+
+    // `s2` is a live write at the row max (5000); `s1` is an older static cell
+    // tombstone whose own markedForDeleteAt is 3000 and explicit LDT is 1234.
+    let row_ts = 5000i64;
+    let tomb_ts = 3000i64;
+    let tomb_ldt = 1234i32;
+    let mut cell_ts = HashMap::new();
+    cell_ts.insert("s1".to_string(), tomb_ts);
+    cell_ts.insert("s2".to_string(), row_ts);
+
+    let mut mutation = Mutation::new(
+        table_id,
+        pk,
+        None,
+        vec![
+            CellOperation::Delete {
+                column: "s1".to_string(),
+                local_deletion_time: Some(tomb_ldt),
+            },
+            CellOperation::Write {
+                column: "s2".to_string(),
+                value: Value::Text("new".to_string()),
+            },
+        ],
+        row_ts,
+        None,
+    );
+    mutation.cell_write_timestamps = Some(cell_ts);
+
+    writer.write_static_row(&mutation, &schema).unwrap();
+    let buf = &writer.buffer;
+
+    // NOT all-writes (one Delete) → ROW_HAS_ALL_COLUMNS unset, a column subset
+    // bitmap precedes the cells. Both columns present → subset is a single 0x00.
+    assert_eq!(buf[0] & ROW_HAS_ALL_COLUMNS, 0);
+    assert_eq!(buf[1], EXTENDED_IS_STATIC);
+    let mut pos = 2usize;
+    let _row_size = read_uvint_at(buf, &mut pos);
+    let _prev_size = read_uvint_at(buf, &mut pos);
+    let subset = read_uvint_at(buf, &mut pos);
+    assert_eq!(
+        subset, 0,
+        "both static columns present → empty missing subset"
+    );
+
+    // Sorted static order: s1 (tombstone) then s2 (live write).
+    // Tombstone cell: [flags(CELL_IS_DELETED|CELL_HAS_EMPTY_VALUE)][ts_delta][ldt_delta]
+    let s1_flags = buf[pos];
+    pos += 1;
+    assert_eq!(
+        s1_flags & CELL_IS_DELETED,
+        CELL_IS_DELETED,
+        "s1 must be a cell tombstone"
+    );
+    assert_eq!(s1_flags & CELL_USE_ROW_TIMESTAMP, 0);
+    let s1_ts_delta = read_uvint_at(buf, &mut pos) as i64;
+    let s1_ldt_delta = read_uvint_at(buf, &mut pos) as i64;
+    let s1_marked_for_delete = min_ts + s1_ts_delta;
+    let s1_ldt = min_ldt + s1_ldt_delta;
+
+    assert_eq!(
+        s1_marked_for_delete, tomb_ts,
+        "#1018: static cell tombstone must keep its OWN markedForDeleteAt ({tomb_ts}), \
+         not the row max ({row_ts})"
+    );
+    assert_eq!(
+        s1_ldt, tomb_ldt as i64,
+        "#1018: static cell tombstone keeps its own explicit localDeletionTime"
+    );
+
+    // Live cell s2 keeps the row max.
+    let s2_flags = buf[pos];
+    pos += 1;
+    assert_eq!(s2_flags & CELL_IS_DELETED, 0);
+    let s2_ts_delta = read_uvint_at(buf, &mut pos) as i64;
+    assert_eq!(
+        min_ts + s2_ts_delta,
+        row_ts,
+        "#1018: the live static cell keeps its own (row-max) writetime"
+    );
+}
+
+/// Schema with one clustering key and two REGULAR (non-static) text columns, used
+/// by the #1018 per-cell shadow tests for `merge_row_group`.
+fn two_regular_column_schema() -> TableSchema {
+    TableSchema {
+        keyspace: "test_ks".to_string(),
+        table: "test_table".to_string(),
+        partition_keys: vec![KeyColumn {
+            name: "id".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+        }],
+        clustering_keys: vec![ClusteringColumn {
+            name: "ck".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+            order: ClusteringOrder::Asc,
+        }],
+        columns: vec![
+            Column {
+                name: "c1".to_string(),
+                data_type: "text".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "c2".to_string(),
+                data_type: "text".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+        ],
+        comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
+    }
+}
+
+/// Issue #1018 (roborev HIGH — data resurrection past a tombstone): the per-cell
+/// write-timestamp work made each emitted simple `Write`/`WriteWithTtl` cell use
+/// its OWN `cell_write_timestamp(col)` instead of the row max, but tombstone
+/// SHADOWING in `merge_row_group` still gated by the row max (`shadow_floor` vs
+/// `m.timestamp_micros`). So a reconciled row whose row max is ABOVE a tombstone
+/// floor (a recent sibling keeps it live) could still emit another simple cell
+/// whose own per-cell timestamp is `<= floor` — resurrecting data the tombstone
+/// should shadow. The fix applies the `<= deletion_ts` shadow floor PER CELL using
+/// the cell's resolved per-cell timestamp.
+///
+/// This test FAILS before the fix (the low-ts cell survives) and passes after.
+#[test]
+fn merge_row_group_shadows_low_per_cell_ts_simple_cell_1018() {
+    let schema = two_regular_column_schema();
+    let table_id = TableId::new("test_ks", "test_table");
+    let pk = PartitionKey::single("id", Value::Integer(1));
+    let ck = ClusteringKey::single("ck", Value::Integer(1));
+
+    // Partition/range tombstone floor at 4000. The row's max writetime is 5000
+    // (the `c2` sibling, written AFTER the tombstone) so the mutation as a whole
+    // survives the floor. `c1`'s OWN per-cell writetime is 3000 — BELOW the floor —
+    // so it is covered by the tombstone and must be shadowed.
+    let shadow_floor = Some(4000i64);
+    let row_ts = 5000i64;
+    let c1_ts = 3000i64;
+    let mut cell_ts = HashMap::new();
+    cell_ts.insert("c1".to_string(), c1_ts);
+    cell_ts.insert("c2".to_string(), row_ts);
+
+    let mut mutation = Mutation::new(
+        table_id,
+        pk,
+        Some(ck),
+        vec![
+            CellOperation::Write {
+                column: "c1".to_string(),
+                value: Value::Text("shadowed".to_string()),
+            },
+            CellOperation::Write {
+                column: "c2".to_string(),
+                value: Value::Text("survivor".to_string()),
+            },
+        ],
+        row_ts,
+        None,
+    );
+    mutation.cell_write_timestamps = Some(cell_ts);
+
+    let row = DataWriter::merge_row_group(&[&mutation], &schema, false, shadow_floor)
+        .expect("row with a surviving sibling must be emitted");
+
+    let surviving: Vec<&str> = row
+        .ops
+        .iter()
+        .filter_map(|mop| match mop.op {
+            CellOperation::Write { column, .. } => Some(column.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        surviving.contains(&"c2"),
+        "#1018: the recent sibling (per-cell ts > floor) must survive"
+    );
+    assert!(
+        !surviving.contains(&"c1"),
+        "#1018: a simple cell whose per-cell ts ({c1_ts}) is <= the tombstone floor (4000) \
+         must be SHADOWED, not resurrected"
+    );
+}
+
+/// Issue #1018 static analogue: `collect_static_operations` gates a mutation by
+/// the row max (`shadow_floor` vs `mutation.timestamp_micros`). A static row whose
+/// row max is ABOVE a partition tombstone floor (a recent static sibling survives)
+/// could still keep another static cell whose OWN per-cell timestamp is `<= floor`,
+/// resurrecting data the partition tombstone covers. The fix applies the floor
+/// per-cell to the resolved per-cell timestamp.
+///
+/// FAILS before the fix (the low-ts static cell survives), passes after.
+#[test]
+fn collect_static_operations_shadows_low_per_cell_ts_1018() {
+    let schema = two_static_column_schema();
+    let table_id = TableId::new("test_ks", "test_table");
+    let pk = PartitionKey::single("id", Value::Integer(1));
+
+    // Partition tombstone floor at 4000. Row max is 5000 (`s2`, written after the
+    // tombstone) so the mutation survives the floor. `s1`'s OWN per-cell writetime
+    // is 3000 (BELOW the floor), so it is shadowed by the partition tombstone.
+    let shadow_floor = Some(4000i64);
+    let row_ts = 5000i64;
+    let s1_ts = 3000i64;
+    let mut cell_ts = HashMap::new();
+    cell_ts.insert("s1".to_string(), s1_ts);
+    cell_ts.insert("s2".to_string(), row_ts);
+
+    let mut mutation = Mutation::new(
+        table_id,
+        pk,
+        None,
+        vec![
+            CellOperation::Write {
+                column: "s1".to_string(),
+                value: Value::Text("shadowed".to_string()),
+            },
+            CellOperation::Write {
+                column: "s2".to_string(),
+                value: Value::Text("survivor".to_string()),
+            },
+        ],
+        row_ts,
+        None,
+    );
+    mutation.cell_write_timestamps = Some(cell_ts);
+
+    let ops = collect_static_operations(std::slice::from_ref(&mutation), &schema, shadow_floor);
+
+    let surviving: Vec<&str> = ops
+        .iter()
+        .filter_map(|o| match &o.op {
+            CellOperation::Write { column, .. } => Some(column.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        surviving.contains(&"s2"),
+        "#1018: the recent static sibling (per-cell ts > floor) must survive"
+    );
+    assert!(
+        !surviving.contains(&"s1"),
+        "#1018: a static cell whose per-cell ts ({s1_ts}) is <= the partition floor (4000) \
+         must be SHADOWED, not resurrected"
+    );
+}
+
 #[test]
 fn test_write_column_bitmap_zero_when_all_columns_present() {
     let stats = create_test_stats();

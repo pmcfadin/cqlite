@@ -1683,21 +1683,15 @@ fn differential_vs_live_cassandra_env_gated() {
 /// framing is corrupted (garbage clustering values, wrong partition keys).
 ///
 /// This is exactly the "write-side issue only the next merge observes" that the
-/// two-generation check (AC2) is designed to catch. The harness catches it; the
-/// underlying writer/reader fix is OUT OF SCOPE for #819 (it belongs to the
-/// compaction-fidelity epic #817's writer work).
+/// two-generation check (AC2) is designed to catch.
 ///
-/// The test is `#[ignore]`d so the default `cargo test` run stays green (and does
-/// not fabricate a pass), while preserving a runnable, documented reproduction:
-/// ```text
-/// cargo test --package cqlite-core --features write-support \
-///   --test issue_819_differential_compaction \
-///   -- --ignored differential_row_tombstone_wide_partition_regression
-/// ```
-/// When the writer/reader round-trips a clustering-table row tombstone correctly,
-/// this test will PASS and the `#[ignore]` can be removed.
+/// HISTORY (issue #1018): this was `#[ignore]`d while the clustering-table
+/// row-tombstone compaction round-trip was defective (epic #817 writer scope).
+/// That underlying defect was fixed by #899 / #972, so the test now PASSES and
+/// serves as a standing regression guard: it asserts that compacting a wide
+/// partition containing a clustering-row tombstone round-trips the marker
+/// correctly through gen1 read-back.
 #[test]
-#[ignore = "pins a real clustering-table row-tombstone compaction round-trip defect (epic #817 writer scope)"]
 fn differential_row_tombstone_wide_partition_regression() {
     let (_temp, inputs, schema) = build_inputs_with_row_tombstone();
 
@@ -1721,16 +1715,15 @@ fn differential_row_tombstone_wide_partition_regression() {
 /// compacted output must match the tuples observed when *merging the inputs* —
 /// i.e. the writer must persist every input cell's write timestamp exactly.
 ///
-/// Today this FAILS for a row that carries a cell tombstone: the live sibling
-/// cells (`ck`, `name`) of that row are rewritten with the row's max timestamp
-/// (the tombstone's ts) instead of their original write timestamp. The gen1-vs-
-/// gen2 gate does not catch this because BOTH generations exhibit the same
-/// rewrite (it is stable), so it is pinned separately here.
-///
-/// `#[ignore]`d to keep the default run green without fabricating a pass; run on
-/// demand with `-- --ignored differential_input_merge_write_fidelity`.
+/// HISTORY (issue #1018): this previously FAILED for a row carrying a cell
+/// tombstone — the live sibling cells (`ck`, `name`) of that row were rewritten
+/// with the row's max timestamp (the tombstone's ts) instead of their original
+/// write timestamp. The gen1-vs-gen2 gate did not catch it because BOTH
+/// generations exhibited the same stable rewrite, so it was pinned separately
+/// here. Issue #1018 threads each surviving cell's OWN write timestamp through
+/// the merge→mutation→writer path (`Mutation::cell_write_timestamps`), so every
+/// live cell now keeps its writetime and this test PASSES as a regression guard.
 #[test]
-#[ignore = "pins a real cell-timestamp rewrite on cell-tombstone sibling cells (epic #817 writer scope)"]
 fn differential_input_merge_write_fidelity() {
     let (_temp, inputs, schema) = build_three_inputs();
     let g1_dir = TempDir::new().expect("g1 dir");
@@ -1743,5 +1736,218 @@ fn differential_input_merge_write_fidelity() {
         "wf-inputs-merge-vs-gen1-readback",
         &merged_from_inputs,
         &read_back_g1,
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SECTION 8 — Issue #1018 (roborev HIGH): cell-tombstone timestamp rewrite →
+//             later over-deletion
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Find the single cell named `column` in the (id, ck) tuple of `tuples`, or
+/// `None` if the tuple/cell is absent.
+fn find_cell<'a>(
+    tuples: &'a [CanonicalTuple],
+    id: i32,
+    ck: i32,
+    column: &str,
+) -> Option<&'a CanonicalCell> {
+    // The canonical tuple carries the RAW on-disk partition-key bytes
+    // (`entry.key.key`) — for a single `int` partition key that is the 4-byte
+    // big-endian value, NOT the tagged `value_to_bytes` form.
+    let want_pk = id.to_be_bytes().to_vec();
+    // Clustering bytes for `ck` as produced by `canonical_clustering_bytes`.
+    let want_ck = {
+        let ck_key = ClusteringKey::single("ck", Value::Integer(ck));
+        canonical_clustering_bytes(&ck_key)
+    };
+    tuples
+        .iter()
+        .find(|t| {
+            t.kind == RowKind::Live
+                && t.partition_key == want_pk
+                && t.clustering_key.as_deref() == Some(want_ck.as_slice())
+        })
+        .and_then(|t| t.cells.iter().find(|c| c.column == column))
+}
+
+/// Build gen-1 inputs that reconcile `score`(=c1) as a CELL TOMBSTONE@100 next to
+/// a live `name`(=c2)@300 on the SAME row (id=1 ck=1). The row's MAX timestamp is
+/// 300, so before the fix the writer rewrote the surviving `score` cell
+/// tombstone's markedForDeleteAt from 100 to 300. Returns inputs newest-first.
+fn build_cell_tombstone_sibling_inputs() -> (TempDir, Vec<PathBuf>, TableSchema) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let temp = TempDir::new().expect("tempdir");
+    let data_dir = temp.path().join("inputs");
+    let wal_dir = temp.path().join("wal");
+    let schema = make_schema();
+
+    let config = WriteEngineConfig::new(data_dir.clone(), wal_dir.clone(), schema.clone());
+    let mut engine = WriteEngine::new(config).expect("engine");
+
+    // SSTable A (ts=100): cell-delete `score` on id=1 ck=1 (markedForDeleteAt=100).
+    engine
+        .write(delete_score_cell(1, 1, 100))
+        .expect("cell delete A");
+    rt.block_on(engine.flush())
+        .expect("flush A")
+        .expect("info A");
+
+    // SSTable B (ts=300): write only `name` on id=1 ck=1 (live@300), the
+    // higher-ts sibling that drives the reconciled row's MAX timestamp to 300.
+    engine
+        .write(write_name_only(1, 1, "live-name", 300))
+        .expect("write B name");
+    rt.block_on(engine.flush())
+        .expect("flush B")
+        .expect("info B");
+
+    rt.block_on(engine.close()).expect("close engine");
+
+    let inputs = discover_inputs(&data_dir);
+    assert!(inputs.len() >= 2, "expected >=2 inputs");
+    (temp, inputs, schema)
+}
+
+/// A mutation writing ONLY the `name` column (no `score`), so it cannot mask the
+/// sibling `score` cell tombstone's own timestamp.
+fn write_name_only(id: i32, ck: i32, name: &str, ts: i64) -> Mutation {
+    Mutation::new(
+        TableId::new("diff_ks", "items"),
+        PartitionKey::single("id", Value::Integer(id)),
+        Some(ClusteringKey::single("ck", Value::Integer(ck))),
+        vec![CellOperation::Write {
+            column: "name".to_string(),
+            value: Value::Text(name.to_string()),
+        }],
+        ts,
+        None,
+    )
+}
+
+/// A mutation writing ONLY the `score` column live at `ts`.
+fn write_score_only(id: i32, ck: i32, score: i32, ts: i64) -> Mutation {
+    Mutation::new(
+        TableId::new("diff_ks", "items"),
+        PartitionKey::single("id", Value::Integer(id)),
+        Some(ClusteringKey::single("ck", Value::Integer(ck))),
+        vec![CellOperation::Write {
+            column: "score".to_string(),
+            value: Value::Integer(score),
+        }],
+        ts,
+        None,
+    )
+}
+
+/// **Pinned over-deletion regression (issue #1018, roborev HIGH).**
+///
+/// A simple cell tombstone reconciled next to a higher-ts live sibling must keep
+/// its OWN markedForDeleteAt through compaction; otherwise a LATER compaction sees
+/// the tombstone rewritten to the row max and incorrectly shadows + DROPS a newer
+/// value (over-deletion / data loss).
+///
+/// Two generations:
+///   GEN 1: compact `score`-tombstone@100 + `name`-live@300 → assert the emitted
+///          `score` cell tombstone RETAINS timestamp 100 (NOT 300).
+///   GEN 2: compact gen-1 against a fresh `score`-live@200 → assert `score`=200
+///          SURVIVES (the @100 tombstone must NOT shadow it).
+///
+/// PRE-FIX behavior (the bug this guards): gen-1 rewrites the tombstone to 300,
+/// then gen-2 shadows the @200 write (300 >= 200) and drops it — so `score` is
+/// absent from gen-2. This test FAILS pre-fix at the gen-1 timestamp assertion
+/// (100 != 300) and again at the gen-2 survival assertion, and PASSES post-fix.
+#[test]
+fn differential_cell_tombstone_no_over_deletion_two_generations() {
+    let (_temp, inputs, schema) = build_cell_tombstone_sibling_inputs();
+
+    // ── GEN 1: reconcile the cell tombstone@100 with the live sibling@300. ──
+    let g1_dir = TempDir::new().expect("g1 dir");
+    let g1 = cqlite_compact(inputs.clone(), g1_dir.path(), &schema, 1801);
+    assert_tier1_valid("ct-gen1-output", &load_path_report(&g1, &schema));
+
+    let read_back_g1 = canonical_tuples_from_sstables(vec![g1.data_path.clone()], &schema);
+
+    // The live `name`@300 survives at its own writetime.
+    let name_g1 = find_cell(&read_back_g1, 1, 1, "name").expect("name must survive gen-1");
+    assert_eq!(
+        name_g1.timestamp, 300,
+        "live `name` sibling must keep its own writetime 300"
+    );
+
+    // The surviving `score` cell tombstone must keep markedForDeleteAt=100, NOT
+    // the row max 300. (Cell-tombstone deletion time rides in `value_bytes`; its
+    // surfaced per-cell `timestamp` IS the markedForDeleteAt.)
+    let score_g1 =
+        find_cell(&read_back_g1, 1, 1, "score").expect("score cell tombstone must survive gen-1");
+    assert_eq!(
+        score_g1.timestamp, 100,
+        "BUG (#1018 roborev HIGH): cell tombstone rewritten from 100 to the row \
+         max — got {}",
+        score_g1.timestamp
+    );
+
+    // ── GEN 2: compact gen-1 against a fresh `score` live write@200. ──
+    //
+    // A correct system keeps the @200 write: the surviving tombstone's true
+    // markedForDeleteAt is 100 < 200, so it does NOT shadow the newer value. If
+    // gen-1 had rewritten the tombstone to 300, the @200 write would be shadowed
+    // (300 >= 200) and DROPPED — over-deletion.
+    let temp2 = TempDir::new().expect("tempdir2");
+    let data_dir2 = temp2.path().join("inputs2");
+    let wal_dir2 = temp2.path().join("wal2");
+    {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let config = WriteEngineConfig::new(data_dir2.clone(), wal_dir2.clone(), schema.clone());
+        let mut engine = WriteEngine::new(config).expect("engine2");
+        engine
+            .write(write_score_only(1, 1, 4242, 200))
+            .expect("write score@200");
+        rt.block_on(engine.flush())
+            .expect("flush score@200")
+            .expect("info score@200");
+        rt.block_on(engine.close()).expect("close engine2");
+    }
+    let new_input = discover_inputs(&data_dir2);
+    assert_eq!(new_input.len(), 1, "expected one new input SSTable");
+
+    // Inputs newest-first: the fresh @200 write, then gen-1's output.
+    let gen2_inputs = vec![new_input[0].clone(), g1.data_path.clone()];
+    let g2_dir = TempDir::new().expect("g2 dir");
+    let g2 = cqlite_compact(gen2_inputs, g2_dir.path(), &schema, 1802);
+    assert_tier1_valid("ct-gen2-output", &load_path_report(&g2, &schema));
+
+    let read_back_g2 = canonical_tuples_from_sstables(vec![g2.data_path.clone()], &schema);
+
+    let score_g2 = find_cell(&read_back_g2, 1, 1, "score").unwrap_or_else(|| {
+        panic!(
+            "OVER-DELETION (#1018 roborev HIGH): the `score`@200 write was \
+             incorrectly shadowed by a rewritten cell tombstone and DROPPED"
+        )
+    });
+    assert!(
+        !score_g2.is_deleted,
+        "the surviving `score` must be the LIVE @200 write, not a tombstone"
+    );
+    assert_eq!(
+        score_g2.timestamp, 200,
+        "the newer `score`@200 write must survive gen-2"
+    );
+    assert_eq!(
+        score_g2.value_bytes,
+        value_to_bytes(&Value::Integer(4242)),
+        "the surviving `score` value must be the @200 write's value"
+    );
+
+    eprintln!(
+        "differential_cell_tombstone_no_over_deletion_two_generations PASSED: \
+         cell tombstone kept markedForDeleteAt=100 through gen-1 and the later \
+         score@200 write survived gen-2 (no over-deletion)"
     );
 }

@@ -10,18 +10,18 @@ Sources: [`docs/cassandra_test_index.md`](../../docs/cassandra_test_index.md) ·
 
 | Status | Scenarios |
 |---|---|
-| `mirrored` | 187 |
+| `mirrored` | 193 |
 | `partial` | 17 |
 | `planned` | 18 |
 | `out_of_scope` | 14 |
-| **total** | **236** |
+| **total** | **242** |
 
 ## Evidence counts
 
 | Evidence | Scenarios |
 |---|---|
-| `byte_for_byte` | 106 |
-| `canonical_semantic` | 80 |
+| `byte_for_byte` | 109 |
+| `canonical_semantic` | 83 |
 | `smoke` | 7 |
 | `partial` | 27 |
 | `out_of_scope` | 16 |
@@ -62,7 +62,10 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 | `cass.compaction.SSTableRewriterTest.output_component_integrity` | compaction_merge | planned | byte_for_byte | `compaction_parity_tombstone_ttl` | p0_data_loss |
 | `cass.compaction.harness_byte_tier_artifacts` | compaction_merge | planned | byte_for_byte | `compaction_parity_tombstone_ttl` | p0_data_loss |
 | `cass.compaction.harness_logical_tier` | compaction_merge | mirrored | canonical_semantic | `compaction_parity_tombstone_ttl` | p1_correctness |
+| `cass.compaction_merge.GcCompactionTest.row_cell_partition_tombstone_gc` | compaction_merge | mirrored | canonical_semantic | `compaction_parity_tombstone_ttl` | p0_data_loss |
 | `cass.compaction_merge.byte_for_byte_output` | compaction_merge | planned | partial | `compaction_parity_tombstone_ttl` | p0_data_loss |
+| `cass.compaction_merge.issue_819.differential_input_merge_write_fidelity` | compaction_merge | mirrored | canonical_semantic | `compaction_parity_tombstone_ttl` | p0_data_loss |
+| `cass.compaction_merge.issue_819.differential_row_tombstone_wide_partition_regression` | compaction_merge | mirrored | canonical_semantic | `compaction_parity_tombstone_ttl` | p0_data_loss |
 | `cass.compaction_merge.load_path_validity` | compaction_merge | mirrored | smoke | `compaction_parity_tombstone_ttl` | p1_correctness |
 | `cass.compaction_merge.partial_source_retains_tombstones` | compaction_merge | mirrored | canonical_semantic | `compaction_parity_tombstone_ttl` | p0_data_loss |
 | `cass.compaction_merge.partition_delete_shadowing_across_skipped_sources` | compaction_merge | mirrored | canonical_semantic | `compaction_parity_tombstone_ttl` | p0_data_loss |
@@ -188,6 +191,9 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 | `cass.summary_db.IndexSummaryTest.serialization_round_trip` | index_summary | mirrored | byte_for_byte | `sstable_parity_summary_db_big` | p1_correctness |
 | `cass.summary_db.big.index_offset_references` | index_summary | mirrored | byte_for_byte | `sstable_parity_summary_db_big` | p1_correctness |
 | `cass.summary_db.bti.summary_discovery_classification` | index_summary | mirrored | byte_for_byte | `sstable_parity_summary_db_big` | p1_correctness |
+| `cass.tombstone_ttl.NeverPurgeTest.preserve_all_tombstone_types` | tombstone_ttl | mirrored | byte_for_byte | `compaction_parity_tombstone_ttl` | p0_data_loss |
+| `cass.tombstone_ttl.RangeTombstoneTest.marker_merge_and_persistence` | tombstone_ttl | mirrored | byte_for_byte | `compaction_parity_tombstone_ttl` | p1_correctness |
+| `cass.tombstone_ttl.TTLExpiryTest.gc_boundary` | tombstone_ttl | mirrored | byte_for_byte | `compaction_parity_tombstone_ttl` | p1_correctness |
 | `cass.tombstone_ttl.deletion_markers.cell_delete` | tombstone_ttl | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p0_data_loss |
 | `cass.tombstone_ttl.deletion_markers.partition_delete` | tombstone_ttl | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p0_data_loss |
 | `cass.tombstone_ttl.deletion_markers.range_delete_bounds` | tombstone_ttl | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p0_data_loss |
@@ -349,6 +355,12 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
   - Normalization: Sampled positions are decoded little-endian (the on-disk truth verified against Index.db) and matched to be16-length-prefixed Index.db keys.
 - `cass.summary_db.bti.summary_discovery_classification` — BTI SSTables carry no Summary.db (trie Partitions.db replaces it)
   - Normalization: TOC.txt component manifests are parsed strictly; format is taken from the descriptor filename, never inferred from contents.
+- `cass.tombstone_ttl.NeverPurgeTest.preserve_all_tombstone_types` — Preserve all tombstone types under never-purge (partition/row/cell/range)
+  - Normalization: Deletion times decoded as deltas / fixed-header at exact wire offsets and reconstructed against EncodingStats minima; fixture lanes are local-only and SKIP when the binary is absent (deterministic lanes run everywhere) but FAIL on a present-but-empty body or 0 rows.
+- `cass.tombstone_ttl.RangeTombstoneTest.marker_merge_and_persistence` — Range-tombstone bound-marker grammar merge and persistence
+  - Normalization: Bound-marker grammar and deltas decoded at exact wire offsets; fixture lanes are local-only and SKIP when the binary is absent (the deterministic lane runs everywhere) but FAIL on 0 markers.
+- `cass.tombstone_ttl.TTLExpiryTest.gc_boundary` — TTL expiry / gc-boundary delta parity (deterministic + fixture)
+  - Normalization: TTL and localDeletionTime are decoded as UNSIGNED VInt deltas at exact wire offsets and reconstructed against the Statistics.db EncodingStats minTTL / minLocalDeletionTime; the fixture lane is local-only and SKIPS when the binary is absent (the deterministic lane runs everywhere) but FAILS on a present-but-empty body or 0 rows.
 - `cass.tombstone_ttl.static_row.dropped_static_header_preserved` — Dropped static column SerializationHeader byte parity
   - Normalization: The dropped static column is preserved in the embedded SerializationHeader; its name set and kind are compared byte-equal against the StaticColumns line of the reference Statistics.db dump.
 - `cass.write_load_path.cql_sstable_writer.finished_data_db_artifacts` — Finished CQLite-written Data.db / component artifacts (write path)
@@ -366,6 +378,12 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
   - Normalization: Both outputs are dumped with Cassandra's own sstabledump (-l) and the wall-clock-derived `expired` flag is normalized out; merged partition/row/cell/timestamp/TTL/deletion facts are compared, file layout and presentation ignored.
 - `cass.compaction.harness_logical_tier` — Differential harness logical tier — canonical sstabledump equality
   - Normalization: sstabledump JSONL of both outputs with the wall-clock `expired` flag normalized out; logical facts compared, layout ignored.
+- `cass.compaction_merge.GcCompactionTest.row_cell_partition_tombstone_gc` — Row/cell/partition tombstone gc through compaction merge (canonical)
+  - Normalization: Tier-2 logical equivalence: merged partition/cell/timestamp/TTL/local deletion time/is_deleted facts compared against Cassandra compaction output; presentation/file layout ignored.
+- `cass.compaction_merge.issue_819.differential_input_merge_write_fidelity` — Differential compaction — per-cell write timestamps preserved (write fidelity)
+  - Normalization: Tier-2 logical equivalence: every surviving cell's timestamp/TTL/local deletion time/is_deleted compared against the merge-from-inputs facts; presentation/file layout ignored.
+- `cass.compaction_merge.issue_819.differential_row_tombstone_wide_partition_regression` — Differential compaction — row tombstone in a wide partition round-trips
+  - Normalization: Tier-2 logical equivalence of merged partition/row/cell/deletion facts; presentation/file layout ignored.
 - `cass.compaction_merge.partial_source_retains_tombstones` — Partial-source compaction retains row/cell tombstones
   - Normalization: When only a subset of the overlapping sources is compacted, row/cell tombstones that may still shadow data in the un-compacted sources are retained; deletion facts are mapped to the sstabledump JSONL and compared.
 - `cass.compaction_merge.partition_delete_shadowing_across_skipped_sources` — Compaction partition-delete shadowing across skipped sources
@@ -646,7 +664,10 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.compaction.SSTableRewriterTest.output_component_integrity` | nightly_docker | .github/workflows/compaction-parity.yml |
 | `cass.compaction.harness_byte_tier_artifacts` | nightly_docker | .github/workflows/compaction-parity.yml |
 | `cass.compaction.harness_logical_tier` | required_parity | .github/workflows/compaction-parity.yml |
+| `cass.compaction_merge.GcCompactionTest.row_cell_partition_tombstone_gc` | required_parity | .github/workflows/compaction-parity.yml |
 | `cass.compaction_merge.byte_for_byte_output` | manual_debug | — |
+| `cass.compaction_merge.issue_819.differential_input_merge_write_fidelity` | required_parity | .github/workflows/compaction-parity.yml |
+| `cass.compaction_merge.issue_819.differential_row_tombstone_wide_partition_regression` | required_parity | .github/workflows/compaction-parity.yml |
 | `cass.compaction_merge.load_path_validity` | required_parity | .github/workflows/compaction-parity.yml |
 | `cass.compaction_merge.partial_source_retains_tombstones` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.compaction_merge.partition_delete_shadowing_across_skipped_sources` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
@@ -833,6 +854,9 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.summary_db.IndexSummaryTest.serialization_round_trip` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.summary_db.big.index_offset_references` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.summary_db.bti.summary_discovery_classification` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.tombstone_ttl.NeverPurgeTest.preserve_all_tombstone_types` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.tombstone_ttl.RangeTombstoneTest.marker_merge_and_persistence` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.tombstone_ttl.TTLExpiryTest.gc_boundary` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.tombstone_ttl.deletion_markers.cell_delete` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.tombstone_ttl.deletion_markers.partition_delete` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.tombstone_ttl.deletion_markers.range_delete_bounds` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
@@ -887,7 +911,10 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.compaction.SSTableRewriterTest.output_component_integrity` | nb | compaction-parity/build/parity-artifacts-byteParity/<scenario>/cassandra-output/<br>_fail:_ byte-diff.txt: first byte/offset diff per component (component, offset, ref byte, candidate byte, lengths), checksums.txt: SHA-256 of every component on both sides, cassandra-output/ and cqlite-output/: the full component dirs for offline decoding |
 | `cass.compaction.harness_byte_tier_artifacts` | nb | compaction-parity/build/parity-artifacts-byteParity/<scenario>/cassandra-output/<br>_fail:_ byte-diff.txt: first differing byte/offset per component, checksums.txt: SHA-256 per component, both engines, commands.txt: exact cqlite compact + sstabledump command lines, cqlite-compact.stdout / cqlite-compact.stderr |
 | `cass.compaction.harness_logical_tier` | nb | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
+| `cass.compaction_merge.GcCompactionTest.row_cell_partition_tombstone_gc` | nb | test-data/datasets/sstables/test_deltas/cell_tombstones-29733830701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl |
 | `cass.compaction_merge.byte_for_byte_output` | — | — |
+| `cass.compaction_merge.issue_819.differential_input_merge_write_fidelity` | nb | test-data/datasets/sstables/test_deltas/cell_tombstones-29733830701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl |
+| `cass.compaction_merge.issue_819.differential_row_tombstone_wide_partition_regression` | nb | test-data/datasets/sstables/test_deltas/row_tombstones-297f1f10701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl |
 | `cass.compaction_merge.load_path_validity` | nb | — |
 | `cass.compaction_merge.partial_source_retains_tombstones` | nb | test-data/datasets/sstables/test_tomb/resurrection_gc0-4cb523c0702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_tomb/resurrection_gc0-4cb523c0702011f1b8f419c9a388d558/nb-2-big-Data.db.jsonl |
 | `cass.compaction_merge.partition_delete_shadowing_across_skipped_sources` | nb | test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-2-big-Data.db.jsonl |
@@ -1074,6 +1101,9 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.summary_db.IndexSummaryTest.serialization_round_trip` | nb, oa, big | test-data/datasets/sstables/test_timeseries/app_metrics-6c87b890a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ validation_artifacts/sstabledump/summary/summary_parity_report.md |
 | `cass.summary_db.big.index_offset_references` | nb, oa, big | test-data/datasets/sstables/test_timeseries/app_metrics-6c87b890a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ validation_artifacts/sstabledump/summary/summary_parity_report.md |
 | `cass.summary_db.bti.summary_discovery_classification` | nb, oa, da, big, bti | test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-TOC.txt<br>_fail:_ validation_artifacts/sstabledump/summary/summary_parity_report.md |
+| `cass.tombstone_ttl.NeverPurgeTest.preserve_all_tombstone_types` | nb, oa | test-data/datasets/sstables/test_deltas/partition_tombstones-299258f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_deltas/row_tombstones-297f1f10701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_deltas/cell_tombstones-29733830701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/tombstone-types-delta-diff.log |
+| `cass.tombstone_ttl.RangeTombstoneTest.marker_merge_and_persistence` | nb, oa | test-data/datasets/sstables/test_deltas/range_tombstones-298894f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/range-marker-grammar-diff.log |
+| `cass.tombstone_ttl.TTLExpiryTest.gc_boundary` | nb, oa | test-data/datasets/sstables/test_deltas/ttl_cells-299c9220701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/ttl-gc-boundary-delta-diff.log |
 | `cass.tombstone_ttl.deletion_markers.cell_delete` | nb | test-data/datasets/sstables/test_deltas/cell_tombstones-88c7bde06c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl |
 | `cass.tombstone_ttl.deletion_markers.partition_delete` | nb | test-data/datasets/sstables/test_deltas/partition_tombstones-88f66f006c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl |
 | `cass.tombstone_ttl.deletion_markers.range_delete_bounds` | nb | test-data/datasets/sstables/test_deltas/range_tombstones-88e928906c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl |

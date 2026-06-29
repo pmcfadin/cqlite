@@ -574,6 +574,20 @@ impl SSTableWriter {
         // Update statistics from mutations
         for mutation in &mutations {
             self.stats.update_timestamp(mutation.timestamp_micros);
+            // Issue #1018: simple `Write`/`WriteWithTtl`/`Delete` cells may carry
+            // their OWN (lower) per-cell timestamps in
+            // `Mutation::cell_write_timestamps` (a live cell's writetime OR a cell
+            // tombstone's markedForDeleteAt) and are emitted with an explicit
+            // `min_timestamp` delta. On the non-preseeded (incremental) write path,
+            // fold every per-cell timestamp into the stats BEFORE emitting cells so
+            // `min_timestamp` can never exceed an emitted cell's actual timestamp
+            // (which would underflow the unsigned-VInt delta). Mirrors the pre-pass
+            // fold in `compute_mutations_baseline_stats`.
+            if let Some(cell_ts) = &mutation.cell_write_timestamps {
+                for ts in cell_ts.values() {
+                    self.stats.update_timestamp(*ts);
+                }
+            }
             if let Some(ttl) = mutation.ttl_seconds {
                 self.stats.update_ttl(ttl as i32);
                 let now_seconds = std::time::SystemTime::now()
@@ -822,6 +836,23 @@ impl SSTableWriter {
 
         for mutation in mutations_slice {
             min_timestamp = min_timestamp.min(mutation.timestamp_micros);
+
+            // Issue #1018: a simple `Write`/`WriteWithTtl`/`Delete` cell may carry
+            // its OWN (lower) per-cell timestamp in
+            // `Mutation::cell_write_timestamps` — a live cell's writetime OR a cell
+            // tombstone's markedForDeleteAt (the compaction merge→mutation path
+            // records it when it differs from the row's `timestamp_micros`). The
+            // DataWriter emits that cell's explicit timestamp as a `min_timestamp`
+            // delta, so the pre-seeded baseline must cover EVERY per-cell timestamp
+            // — otherwise `min_timestamp` could be pre-seeded ABOVE an emitted
+            // cell's actual (lower) timestamp and the unsigned-VInt delta
+            // underflows/wraps. Fold them all in here, mirroring the per-cell
+            // timestamp threading in `rows.rs` / `encoding.rs`.
+            if let Some(cell_ts) = &mutation.cell_write_timestamps {
+                for ts in cell_ts.values() {
+                    min_timestamp = min_timestamp.min(*ts);
+                }
+            }
 
             for op in &mutation.operations {
                 match op {
@@ -1792,6 +1823,93 @@ mod tests {
             min_ttl, 600,
             "baseline min_ttl must reflect the per-element TTL"
         );
+    }
+
+    /// Issue #1018 (roborev finding 1): a simple `Write` cell may carry its OWN
+    /// (lower) write timestamp in `Mutation::cell_write_timestamps`. The DataWriter
+    /// emits that cell with an explicit `min_timestamp` delta, so the PRE-SEEDED
+    /// baseline path (`compute_mutations_baseline_stats`, issue #729 two-pass flush)
+    /// must fold every per-cell timestamp into `min_timestamp`. RED before the fix:
+    /// the baseline only saw the row `timestamp_micros` (the row max), so it could
+    /// be locked ABOVE the surviving cell's lower timestamp and the delta underflows.
+    #[test]
+    fn test_compute_baseline_folds_per_cell_write_timestamps_1018() {
+        let table_id = TableId::new("test_ks", "test_table");
+        let pk = PartitionKey::single("id", Value::Integer(1));
+
+        const ROW_TS: i64 = 5_000_000;
+        const CELL_TS: i64 = 3_000_000;
+
+        let mut mutation = Mutation::new(
+            table_id,
+            pk,
+            None,
+            vec![CellOperation::Write {
+                column: "name".to_string(),
+                value: Value::Text("survivor".to_string()),
+            }],
+            ROW_TS,
+            None,
+        );
+        let mut cell_ts = HashMap::new();
+        cell_ts.insert("name".to_string(), CELL_TS);
+        mutation.cell_write_timestamps = Some(cell_ts);
+
+        let (min_ts, _min_ldt, _min_ttl) =
+            SSTableWriter::compute_mutations_baseline_stats(std::slice::from_ref(&mutation));
+
+        assert_eq!(
+            min_ts, CELL_TS,
+            "#1018: baseline min_timestamp must cover the per-cell write timestamp, \
+             not just the row max — else the locked delta underflows on the cell"
+        );
+    }
+
+    /// Issue #1018 (roborev finding 1): the NON-preseeded (incremental)
+    /// `write_partition` stats path must also fold per-cell write timestamps before
+    /// emitting cells, so `min_timestamp` never exceeds an emitted cell's own
+    /// (lower) timestamp. RED before the fix: the write underflows the unsigned-VInt
+    /// timestamp delta (cell ts below the row-max baseline) and errors.
+    #[tokio::test]
+    async fn test_per_cell_write_timestamp_no_underflow_on_write_1018() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let mut writer = SSTableWriter::new(temp_dir.path().to_path_buf(), 1, &schema).unwrap();
+
+        const ROW_TS: i64 = 5_000_000;
+        const CELL_TS: i64 = 3_000_000;
+
+        let table_id = TableId::new("test_ks", "test_table");
+        let pk = PartitionKey::single("id", Value::Integer(7));
+        let mut mutation = Mutation::new(
+            table_id,
+            pk,
+            None,
+            vec![CellOperation::Write {
+                column: "name".to_string(),
+                value: Value::Text("survivor".to_string()),
+            }],
+            ROW_TS,
+            None,
+        );
+        let mut cell_ts = HashMap::new();
+        cell_ts.insert("name".to_string(), CELL_TS);
+        mutation.cell_write_timestamps = Some(cell_ts);
+        let key = mutation.decorated_key(&schema).unwrap();
+
+        // The write must SUCCEED: the per-cell ts (3_000_000) is below the row max
+        // (5_000_000), so if stats only recorded the row ts the cell-ts delta
+        // underflows.
+        writer
+            .write_partition(key, vec![mutation])
+            .expect("#1018: per-cell write ts below the row ts must not underflow the baseline");
+
+        assert_eq!(
+            writer.stats.min_timestamp, CELL_TS,
+            "#1018: min_timestamp must reflect the lower per-cell write timestamp"
+        );
+
+        let _info = writer.finish().await.unwrap();
     }
 
     /// #921 finding 2 (roborev Medium): a `CellOperation::Delete` carrying an
