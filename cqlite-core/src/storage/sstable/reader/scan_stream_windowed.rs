@@ -17,29 +17,43 @@
 //!      concurrent write load. The pre-#1156 path ran the whole parse under a
 //!      dedicated `spawn_blocking` thread — restore that.
 //!
-//! Both are achievable together. This driver splits the work across two halves
-//! of one bounded pipeline:
+//! Both are achievable together. This driver splits the work across THREE stages
+//! of one bounded pipeline (issue #1143 contention fix):
 //!
 //!   - **Async I/O half** (`run_scan_stream_windowed`): the only thing that must
 //!     touch the async runtime is the chunk read (`read_next_block().await`
 //!     awaits the per-scan cursor's async file lock). It does ONLY I/O: read the
 //!     next raw compressed chunk and hand it to the parse half over a small
-//!     bounded channel (`raw` channel, capacity [`RAW_CHUNK_CHANNEL_CAP`]).
+//!     bounded channel (`raw` channel, capacity [`RAW_CHUNK_CHANNEL_CAP`] = 8 so
+//!     the I/O half can read ahead instead of ping-ponging on every chunk).
 //!   - **Blocking parse half** (`drain_scan_window_blocking`): a single
 //!     `spawn_blocking` task owns the parser, the schema, and the sliding
-//!     window. It pulls raw chunks with `blocking_recv`, decompresses, appends
-//!     to the window, drains every confirmed partition, and emits each surviving
-//!     `(RowKey, Value)` via `tx.blocking_send` — exactly the pre-#1156
-//!     backpressure shape. ALL decompress+parse CPU runs here, off the async
-//!     worker pool.
+//!     window. It pulls raw chunks with `blocking_recv`, decompresses, appends to
+//!     the window, drains every confirmed partition, and accumulates surviving
+//!     `(RowKey, Value)` entries into a BATCH of up to [`BATCH_EMIT_ROWS`], which
+//!     it hands across the blocking→async seam via `tx.blocking_send` as ONE
+//!     `Vec` item. ALL decompress+parse CPU runs here, off the async worker pool.
+//!     Batching is the key contention fix: PR #1156 `blocking_send`'d one row at
+//!     a time, so a `SELECT *` full scan woke the consuming async task O(rows)
+//!     times across the blocking-pool ↔ async-worker boundary; samply attributed
+//!     ~31.5% of read wall time under `mixed.read_while_write` conc=8 to that one
+//!     `parking_lot` condvar. Batching amortizes the wake ~`BATCH_EMIT_ROWS`×.
+//!   - **Async forwarder task** (in `run_scan_stream_windowed`): flattens each
+//!     `Vec` batch back into the caller's per-item `tx`, preserving the public
+//!     `scan_stream` contract (item type, order, backpressure) unchanged. Runs on
+//!     the async runtime concurrently with the I/O half (both are needed at once;
+//!     running them sequentially would deadlock), so its wakes are cheap
+//!     async-worker wakes, not blocking-pool condvar wakes.
 //!
 //! ## Backpressure (preserved end-to-end)
 //!
-//! A slow consumer blocks `tx.blocking_send` in the parse half, which stops the
-//! parse loop, which stops draining the `raw` channel, which (being bounded)
-//! blocks `raw_tx.send().await` in the I/O half, which stops reading from disk.
-//! Nothing buffers the whole file; live heap stays `window +
-//! RAW_CHUNK_CHANNEL_CAP` chunks.
+//! A slow consumer blocks the forwarder's `tx.send().await`, which stops draining
+//! the bounded batch channel, which blocks the parse half's `tx.blocking_send`,
+//! which stops the parse loop, which stops draining the `raw` channel, which
+//! (being bounded) blocks `raw_tx.send().await` in the I/O half, which stops
+//! reading from disk. Nothing buffers the whole file; live heap stays
+//! `window + RAW_CHUNK_CHANNEL_CAP` raw chunks + at most
+//! `BATCH_CHANNEL_CAP * BATCH_EMIT_ROWS` buffered rows.
 //!
 //! ## Cancellation (issue #1143 finding 2)
 //!
@@ -50,20 +64,21 @@
 //! way to interrupt a running blocking thread). The detached parse task keeps
 //! running: `raw_rx.blocking_recv()` observes the dropped `raw_tx`, and because a
 //! clean cancellation leaves `io_failed == false`, it proceeds to a final drain
-//! and `tx.blocking_send`s into `out_tx`.
+//! and `tx.blocking_send`s its trailing batch into the batch channel.
 //!
 //! This is harmless in practice and needs no abort machinery: on cancellation
 //! the consumer drops the `mpsc::Receiver` (`rx`) returned by `scan_stream`, so
-//! the very first `tx.blocking_send` fails (`*broke = true`), the parse loop
-//! returns immediately, and the task — and the `reader: Arc<Self>` it holds —
-//! are released. The only window in which it can still emit is when a chunk was
-//! already in flight AND the consumer's `rx` has not yet dropped, i.e. the
-//! consumer is still reading; those rows are valid scan output, not garbage.
-//! Worst case the task lingers for one partition's parse before its
-//! `blocking_send` fails, keeping `Arc<Self>` alive only that long. Pre-#1156
-//! the parse ran inline on the cancellable async task, so this detach window is
-//! new to the offload split; it is bounded and self-terminating, so we document
-//! it rather than add abort plumbing.
+//! the forwarder's next `fwd_tx.send` fails, the forwarder returns and drops the
+//! batch receiver, so the parse half's next `tx.blocking_send` fails
+//! (`*broke = true`), the parse loop returns immediately, and the task — and the
+//! `reader: Arc<Self>` it holds — are released. The only window in which it can
+//! still emit is when a batch was already in flight AND the consumer's `rx` has
+//! not yet dropped, i.e. the consumer is still reading; those rows are valid scan
+//! output, not garbage. Worst case the task lingers for one partition's parse
+//! before its `blocking_send` fails, keeping `Arc<Self>` alive only that long.
+//! Pre-#1156 the parse ran inline on the cancellable async task, so this detach
+//! window is new to the offload split; it is bounded and self-terminating, so we
+//! document it rather than add abort plumbing.
 //!
 //! ## Parity
 //!
