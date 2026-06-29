@@ -62,9 +62,7 @@ use std::path::{Path, PathBuf};
 use cqlite_core::parser::enhanced_statistics_parser::parse_statistics_with_fallback;
 use cqlite_core::schema::cql_parser::parse_create_table;
 use cqlite_core::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema};
-use cqlite_core::storage::write_engine::merge::{
-    compact_sstables, CellData, MergeStep, RowData,
-};
+use cqlite_core::storage::write_engine::merge::{compact_sstables, CellData, MergeStep, RowData};
 use cqlite_core::storage::write_engine::KWayMerger;
 use cqlite_core::types::Value;
 use tempfile::TempDir;
@@ -94,7 +92,9 @@ fn skip_or_panic(fixture: &str, reason: &str) -> bool {
 }
 
 fn datasets_root() -> Option<PathBuf> {
-    std::env::var("CQLITE_DATASETS_ROOT").ok().map(PathBuf::from)
+    std::env::var("CQLITE_DATASETS_ROOT")
+        .ok()
+        .map(PathBuf::from)
 }
 
 /// Find the single fixture dir under `<root>/sstables/<keyspace>` whose name
@@ -132,7 +132,10 @@ fn isolate_generation(dir: &Path, gen: &str) -> TempDir {
     for entry in fs::read_dir(dir).expect("read fixture dir").flatten() {
         let n = entry.file_name();
         let name = n.to_str().unwrap_or("");
-        if name.starts_with(&format!("{gen}-big-")) && !name.ends_with(".jsonl") && !name.ends_with(".txt") {
+        if name.starts_with(&format!("{gen}-big-"))
+            && !name.ends_with(".jsonl")
+            && !name.ends_with(".txt")
+        {
             fs::copy(entry.path(), tmp.path().join(name)).expect("copy component");
         }
     }
@@ -244,7 +247,10 @@ fn dropped_regular_schema(drop_time_micros: Option<i64>) -> TableSchema {
         clustering_keys: vec![ck_col("ck", "int")],
         // `drop_col` must remain declared so its cells decode and can be purged
         // (validate_dropped_columns / #847 decode contract).
-        columns: vec![col("keep_col", "text", false), col("drop_col", "text", false)],
+        columns: vec![
+            col("keep_col", "text", false),
+            col("drop_col", "text", false),
+        ],
         comments: HashMap::new(),
         dropped_columns: dropped,
     }
@@ -462,8 +468,8 @@ fn dropped_column_fully_purged_absent_from_output_header_no_misalign() {
     }
 
     // Fixture invariant (oracle): gen-1 header declares drop_col, gen-2 does not.
-    let g1_header = decode_header_columns(&dir.join("nb-1-big-Statistics.db"))
-        .expect("decode gen-1 header");
+    let g1_header =
+        decode_header_columns(&dir.join("nb-1-big-Statistics.db")).expect("decode gen-1 header");
     assert!(
         g1_header.regular.contains("drop_col") && g1_header.regular.contains("keep_col"),
         "fixture invariant: gen-1 header must carry drop_col + keep_col; got {:?}",
@@ -484,12 +490,7 @@ fn dropped_column_fully_purged_absent_from_output_header_no_misalign() {
 
     let out_dir = g1_only.path().join("out");
     let report = block_on(compact_sstables(
-        inputs,
-        &out_dir,
-        &schema,
-        10_191,
-        None,
-        None,
+        inputs, &out_dir, &schema, 10_191, None, None,
         // purge_safe=true: the full set is compacted, so the dropped-cell predicate
         // is applied and the column can be stripped from the output header.
         true,
@@ -662,7 +663,9 @@ fn collection_per_element_metadata_reconciles_by_cell_path_survives_compaction()
     // Prove multi-element granularity exists (else equality is vacuous).
     let mut per_col: BTreeMap<(Vec<u8>, String), usize> = BTreeMap::new();
     for f in &input_facts {
-        *per_col.entry((f.partition_key.clone(), f.column.clone())).or_default() += 1;
+        *per_col
+            .entry((f.partition_key.clone(), f.column.clone()))
+            .or_default() += 1;
     }
     let max_elems = per_col.values().copied().max().unwrap_or(0);
     assert!(
@@ -708,8 +711,9 @@ fn collection_per_element_metadata_reconciles_by_cell_path_survives_compaction()
 ///   * OLD (oldest) = the genuine Cassandra `collection_table` Data.db.
 ///   * NEW (newest) = CQLite re-compacts the SAME input to a fresh generation,
 ///     so both inputs carry IDENTICAL per-element state.
+///
 /// Compacting them must NOT duplicate or resurrect elements: each surviving
-/// (pk, column, cell_path) appears EXACTLY ONCE in the output with the winning
+/// `(pk, column, cell_path)` appears EXACTLY ONCE in the output with the winning
 /// (highest-timestamp) state — last-write-wins reconciliation is per-element, and
 /// the older copy of each element is reconciled away rather than resurrected.
 ///
@@ -762,7 +766,11 @@ fn collection_complex_deletion_does_not_resurrect_older_elements() {
     // merged output — a duplicate would be a resurrected/un-reconciled element.
     let mut seen: BTreeSet<(Vec<u8>, String, Vec<u8>)> = BTreeSet::new();
     for f in &merged {
-        let id = (f.partition_key.clone(), f.column.clone(), f.cell_path.clone());
+        let id = (
+            f.partition_key.clone(),
+            f.column.clone(),
+            f.cell_path.clone(),
+        );
         assert!(
             seen.insert(id.clone()),
             "AC3 no-resurrection: element {:?} cell_path={:?} appears MORE THAN ONCE in the \
