@@ -251,10 +251,29 @@ fn has_test_flag(logical: &str, name: &str) -> bool {
     false
 }
 
-/// True if a single logical command invokes `gradle` as the **executable** (the
-/// command head: a leading `gradle`/`gradlew`/`./gradlew` token, possibly after
-/// `env VAR=val` / `sudo` prefixes), not merely the substring `gradle` appearing
-/// as an argument (`echo 'gradle docs'`) or inside a comment.
+/// The set of Gradle task tokens that actually EXECUTE the JVM parity harness.
+///
+/// Grounded in the real JVM-harness workflow (`.github/workflows/compaction-parity.yml`):
+///   - `test`      — the built-in JUnit `Test` task that runs the logical-tier
+///     parity scenarios (`gradle --no-daemon test`, line 173).
+///   - `byteParity`— the custom `Test`-typed task asserting byte-identical output
+///     (`gradle --no-daemon byteParity`, line 194; registered in
+///     `compaction-parity/build.gradle.kts:146`).
+///
+/// A `gradle`/`gradlew` invocation that names NONE of these tasks (e.g. bare
+/// `gradle`, `gradle --version`, `gradle assemble`, `gradle build`, `gradle clean`)
+/// does NOT run the harness, so it must not satisfy a JVM-harness required_parity
+/// scenario (#1228 roborev follow-up). Add a task here only when a real parity
+/// workflow invokes it to execute the harness.
+const GRADLE_HARNESS_TEST_TASKS: &[&str] = &["test", "byteParity"];
+
+/// True if a single logical command invokes `gradle`/`gradlew` as the
+/// **executable** (the command head, possibly after `env VAR=val` / `sudo`
+/// prefixes — not merely the substring `gradle` in an argument or comment) AND
+/// names a known harness test task ([`GRADLE_HARNESS_TEST_TASKS`]) as a whole
+/// argument token. Requiring the task token prevents a non-test invocation
+/// (`gradle --version`, `gradle assemble`) from being credited with running the
+/// mapped Java test.
 fn logical_runs_gradle(logical: &str) -> bool {
     let mut toks = logical.split_whitespace().peekable();
     // Skip leading command prefixes that precede the real executable.
@@ -265,13 +284,21 @@ fn logical_runs_gradle(logical: &str) -> bool {
             break;
         }
     }
-    match toks.next() {
+    let is_gradle_head = match toks.next() {
         Some(head) => {
             let t = head.trim_start_matches("./");
             t == "gradle" || t == "gradlew"
         }
         None => false,
+    };
+    if !is_gradle_head {
+        return false;
     }
+    // The remaining whitespace tokens are the gradle args (flags + tasks). At
+    // least one must be a recognized harness test task as a whole token; a flag
+    // like `--no-daemon` is skipped, and a substring match (`byteParityFoo`)
+    // does not count because we compare whole tokens.
+    toks.any(|tok| GRADLE_HARNESS_TEST_TASKS.contains(&tok))
 }
 
 /// True if any executable line in `command` invokes `gradle`.

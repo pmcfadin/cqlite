@@ -253,6 +253,76 @@ fn command_runs_gradle_requires_executable_token() {
 }
 
 #[test]
+fn command_runs_gradle_requires_a_known_harness_test_task() {
+    // The accepted parity-harness Gradle tasks are exactly the ones the real
+    // JVM-harness workflow invokes (compaction-parity.yml): the built-in `test`
+    // task and the custom `byteParity` Test task (build.gradle.kts:146).
+    assert!(command_runs_gradle("gradle --no-daemon test"));
+    assert!(command_runs_gradle("gradle --no-daemon byteParity"));
+    assert!(command_runs_gradle("./gradlew test"));
+    assert!(command_runs_gradle("./gradlew --no-daemon byteParity"));
+
+    // A gradle invocation that does NOT name a harness test task must NOT count
+    // as running the mapped Java test — it never executes the parity harness.
+    assert!(!command_runs_gradle("gradle --version"));
+    assert!(!command_runs_gradle("gradle assemble"));
+    assert!(!command_runs_gradle("gradle --no-daemon assemble"));
+    assert!(!command_runs_gradle("gradle build"));
+    assert!(!command_runs_gradle("./gradlew clean"));
+    assert!(!command_runs_gradle("gradle"));
+    // `byteParity` must match as a WHOLE token, not a substring.
+    assert!(!command_runs_gradle("gradle byteParityCheckStuff"));
+    assert!(!command_runs_gradle("gradle testReport"));
+}
+
+#[test]
+fn java_harness_non_test_gradle_task_does_not_satisfy_required_parity() {
+    // Regression for #1228 roborev follow-up: a BLOCKING, FAIL-CLOSED gradle
+    // step that runs a NON-test task (`--version`, `assemble`) must NOT satisfy
+    // a JVM-harness required_parity scenario — it does not run the Java test.
+    let java = [
+        "compaction-parity/src/test/java/org/cqlite/parity/BasicDifferentialTest.java".to_string(),
+    ];
+
+    let version_wf = "jobs:\n  c:\n    env:\n      CQLITE_PARITY_REQUIRE_DATASETS: '1'\n    steps:\n      - run: gradle --version";
+    let version = check_scenario(
+        "cass.compaction.harness_logical_tier",
+        ".github/workflows/compaction-parity.yml",
+        version_wf,
+        &java,
+    );
+    assert!(
+        version.iter().any(|f| f.message.contains("overstated")),
+        "expected `gradle --version` to be overstated, got: {version:#?}"
+    );
+
+    let assemble_wf = "jobs:\n  c:\n    env:\n      CQLITE_PARITY_REQUIRE_DATASETS: '1'\n    steps:\n      - run: gradle assemble";
+    let assemble = check_scenario(
+        "cass.compaction.harness_logical_tier",
+        ".github/workflows/compaction-parity.yml",
+        assemble_wf,
+        &java,
+    );
+    assert!(
+        assemble.iter().any(|f| f.message.contains("overstated")),
+        "expected `gradle assemble` to be overstated, got: {assemble:#?}"
+    );
+
+    // The real task DOES satisfy it.
+    let test_wf = "jobs:\n  c:\n    env:\n      CQLITE_PARITY_REQUIRE_DATASETS: '1'\n    steps:\n      - run: gradle --no-daemon test";
+    let ok = check_scenario(
+        "cass.compaction.harness_logical_tier",
+        ".github/workflows/compaction-parity.yml",
+        test_wf,
+        &java,
+    );
+    assert!(
+        ok.is_empty(),
+        "expected `gradle --no-daemon test` to satisfy it, got: {ok:#?}"
+    );
+}
+
+#[test]
 fn lint_only_workflow_fails_byte_scenario() {
     // A scenario mapping to a real Rust test, pointed at a workflow that only
     // lints the manifest (no --test, no fail-closed flag) must be flagged.
