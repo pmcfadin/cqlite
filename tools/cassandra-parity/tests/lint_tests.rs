@@ -669,6 +669,38 @@ fn same_line_safe_phrase_does_not_exempt_separate_blocked_phrase() {
 }
 
 #[test]
+fn unrelated_scope_marker_on_same_line_does_not_exempt_blocked_phrase() {
+    // Roborev finding (issue #1023): a scope marker (`reject`) that is unrelated to
+    // and far from the over-claim must NOT exempt it. Scope detection is tied to the
+    // blocked-phrase occurrence, not the whole line.
+    let docs = [(
+        "README.md",
+        "We reject stale fixtures and run the same tests as Cassandra.",
+    )];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.blocked.same_tests_as_cassandra")),
+        "unrelated scope marker must not exempt the over-claim, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn scope_marker_adjacent_to_blocked_phrase_still_exempts() {
+    // The positive counterpart: a scope marker in the bounded window immediately
+    // preceding the blocked phrase still scopes (exempts) the occurrence.
+    let docs = [(
+        "docs/development/parity-release-checklist.md",
+        "Reviewers must reject any \"same tests as Cassandra\" wording.",
+    )];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(
+        errs.is_empty(),
+        "adjacent scope marker should still exempt, got: {errs:#?}"
+    );
+}
+
+#[test]
 fn blocked_phrase_wrapped_across_lines_is_caught() {
     // Roborev finding 2: a blocked phrase split across a soft-wrap must still be
     // detected, with the finding reporting the line where the phrase starts.

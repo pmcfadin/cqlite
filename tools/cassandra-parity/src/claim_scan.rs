@@ -11,10 +11,13 @@
 //! supply the literal over-claim phrases to scan for, and `claim.safe.*` entries
 //! supply the manifest-backed wording that is allowed to appear verbatim.
 //!
-//! A blocked phrase occurrence is allowed only when its line is **explicitly
-//! scoped** — i.e. it is framed as a counter-example ("unsafe", "do not claim",
-//! "reject", quoted as a negative) or it is the manifest-anchored safe wording.
-//! A bare assertion of a blocked phrase fails lint.
+//! A blocked phrase occurrence is allowed only when that **specific occurrence**
+//! is **explicitly scoped** — i.e. a scope marker ("unsafe", "do not claim",
+//! "reject", quoted as a negative) appears within a bounded window immediately
+//! preceding the phrase (so `do not claim <phrase>` / `unsafe: "<phrase>"` count,
+//! but an unrelated `reject` elsewhere on the line does not) — or it is the
+//! manifest-anchored safe wording. A bare assertion of a blocked phrase fails
+//! lint.
 
 use crate::lint::{Finding, Level};
 use crate::model::Manifest;
@@ -25,8 +28,9 @@ pub struct ScanInput<'a> {
     pub text: &'a str,
 }
 
-/// Lowercased markers that, when present on the same line as a blocked phrase,
-/// indicate the phrase is being explicitly scoped/negated rather than asserted.
+/// Lowercased markers that, when present in the bounded window immediately
+/// preceding a blocked phrase (see [`SCOPE_WINDOW_BYTES`]), indicate the phrase is
+/// being explicitly scoped/negated rather than asserted.
 const SCOPE_MARKERS: &[&str] = &[
     "unsafe",
     "do not",
@@ -47,6 +51,16 @@ const SCOPE_MARKERS: &[&str] = &[
     "counter-example",
     "anti-pattern",
 ];
+
+/// How many normalized bytes immediately before a blocked-phrase occurrence are
+/// searched for a [`SCOPE_MARKERS`] entry. A scope marker must *start* within this
+/// bounded prefix window for the occurrence to count as explicitly scoped, so an
+/// unrelated marker elsewhere on the same line does not exempt the over-claim.
+/// 32 bytes covers direct framings: `do not claim <phrase>` (marker ~17B back),
+/// `unsafe: "<phrase>"` (~9B), `reviewers must reject any "<phrase>"` (~12B) —
+/// while staying local enough that a marker in an unrelated earlier clause
+/// (e.g. `we reject stale fixtures and run the <phrase>`, ~34B back) does not.
+const SCOPE_WINDOW_BYTES: usize = 32;
 
 /// Normalize a string for phrase matching: lowercase and collapse runs of
 /// whitespace. Used to canonicalize a manifest phrase before matching it against
@@ -160,8 +174,9 @@ fn covered_by(inner: Span, outer: &[Span]) -> bool {
 ///   * that specific occurrence's span falls inside a `claim.safe.*` phrase span
 ///     (span-based exemption — a safe phrase elsewhere on the line does not
 ///     exempt a separate over-claim), or
-///   * the source line the occurrence starts on is explicitly scoped (see
-///     [`SCOPE_MARKERS`]; scope markers remain line-level).
+///   * a [`SCOPE_MARKERS`] entry appears within [`SCOPE_WINDOW_BYTES`] of
+///     normalized text immediately preceding the occurrence (occurrence-bounded
+///     exemption — an unrelated marker elsewhere on the line does not exempt it).
 ///
 /// Findings name the file, line, claim id, and the safe alternative to use.
 pub fn scan_docs(m: &Manifest, files: &[ScanInput<'_>]) -> Vec<Finding> {
@@ -188,20 +203,16 @@ pub fn scan_docs(m: &Manifest, files: &[ScanInput<'_>]) -> Vec<Finding> {
             .iter()
             .flat_map(|p| find_spans(&nf.text, p))
             .collect();
-        // Source lines explicitly framing a counter-example/negation. Scope
-        // markers stay line-level, keyed by the 1-based source line they sit on.
-        let scoped_lines = scoped_source_lines(f.text);
-
         for c in &blocked {
             let phrase = normalize(&c.phrase);
             for occ in find_spans(&nf.text, &phrase) {
                 if covered_by(occ, &safe_spans) {
                     continue;
                 }
-                let lineno = nf.line_at(occ.start);
-                if scoped_lines.contains(&lineno) {
+                if occurrence_is_scoped(&nf.text, occ.start) {
                     continue;
                 }
+                let lineno = nf.line_at(occ.start);
                 let alt = c
                     .safe_alternative
                     .as_deref()
@@ -223,18 +234,20 @@ pub fn scan_docs(m: &Manifest, files: &[ScanInput<'_>]) -> Vec<Finding> {
     out
 }
 
-/// 1-based source line numbers that contain an explicit scope/negation marker.
-fn scoped_source_lines(raw: &str) -> std::collections::HashSet<usize> {
-    raw.lines()
-        .enumerate()
-        .filter_map(|(i, line)| {
-            let lower = line.to_lowercase();
-            SCOPE_MARKERS
-                .iter()
-                .any(|mk| lower.contains(mk))
-                .then_some(i + 1)
-        })
-        .collect()
+/// True if a [`SCOPE_MARKERS`] entry appears within the bounded prefix window
+/// ([`SCOPE_WINDOW_BYTES`]) immediately preceding the blocked-phrase occurrence
+/// that starts at `occ_start` in the normalized (lowercased, whitespace-collapsed)
+/// `norm` text. Tying scope detection to the occurrence — not the whole line —
+/// means an unrelated marker elsewhere on the line does not exempt the over-claim.
+fn occurrence_is_scoped(norm: &str, occ_start: usize) -> bool {
+    let window_start = occ_start.saturating_sub(SCOPE_WINDOW_BYTES);
+    // `norm` is already lowercased; snap the window start onto a char boundary so
+    // slicing never splits a multi-byte char.
+    let window_start = (window_start..=occ_start)
+        .find(|&i| norm.is_char_boundary(i))
+        .unwrap_or(occ_start);
+    let prefix = &norm[window_start..occ_start];
+    SCOPE_MARKERS.iter().any(|mk| prefix.contains(mk))
 }
 
 /// The curated, conservative set of release-facing files the claim scan reads,

@@ -15,8 +15,15 @@ on:
       - 'tools/cassandra-parity/**'
       - 'docs/reports/cassandra-test-parity*.md'
       - 'docs/cassandra_test_index.md'
-      - 'docs/development/parity-ci-tiers.md'
       - '.github/workflows/cassandra-parity.yml'
+      # Release-facing docs the public-claim scanner (`lint`) reads — must stay in
+      # sync with `claim_scan::RELEASE_FILES` so an over-claim added to one of
+      # these still triggers the lint job. (issue #1023)
+      - 'README.md'
+      - 'CHANGELOG.md'
+      - 'docs/development/parity-ci-tiers.md'
+      - 'docs/development/parity-release-checklist.md'
+      - 'docs/development/cassandra-parity-manifest.md'
   pull_request:
     branches: [ main ]
     paths:
@@ -25,8 +32,15 @@ on:
       - 'tools/cassandra-parity/**'
       - 'docs/reports/cassandra-test-parity*.md'
       - 'docs/cassandra_test_index.md'
-      - 'docs/development/parity-ci-tiers.md'
       - '.github/workflows/cassandra-parity.yml'
+      # Release-facing docs the public-claim scanner (`lint`) reads — must stay in
+      # sync with `claim_scan::RELEASE_FILES` so an over-claim added to one of
+      # these still triggers the lint job. (issue #1023)
+      - 'README.md'
+      - 'CHANGELOG.md'
+      - 'docs/development/parity-ci-tiers.md'
+      - 'docs/development/parity-release-checklist.md'
+      - 'docs/development/cassandra-parity-manifest.md'
 
 env:
   CARGO_TERM_COLOR: always
