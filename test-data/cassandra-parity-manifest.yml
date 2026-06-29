@@ -4718,6 +4718,301 @@ scenarios:
         once writer output is byte-stable.
 
   # ----------------------------------------------------------------------------
+  # compaction differential harness (issue #1016, epic #973)
+  # Scenarios for the compaction-parity/ differential harness. The first three are
+  # anchored to Apache Cassandra compaction test sources; the last two describe the
+  # harness's own two tiers. NOTE on ids: the manifest id grammar requires a
+  # `cass.<group>...` prefix (schema + cassandra-parity lint), so the two harness
+  # scenarios use `cass.compaction.harness_*`. They correspond to the issue's
+  # conceptual identifiers `cqlite.compaction_parity.harness.logical_tier` and
+  # `cqlite.compaction_parity.harness.byte_tier_artifacts` respectively.
+  # ----------------------------------------------------------------------------
+  - id: cass.compaction.CompactionIteratorTest.differential_compaction_loop
+    title: Differential compaction loop — same inputs through both engines (logical)
+    status: mirrored
+    capability: compaction_merge
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CompactionIteratorTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - compaction-parity/src/test/java/org/cqlite/parity/DifferentialParityTester.java
+          - compaction-parity/src/test/java/org/cqlite/parity/BasicDifferentialTest.java
+        notes: >-
+          The differential harness builds the SAME input SSTables, runs Apache
+          Cassandra's maximal compaction in-JVM (reference) and the external
+          `cqlite compact` binary (candidate) over identical input files, then
+          asserts a canonical `sstabledump` JSONL of both outputs matches. The
+          same sstabledump tool runs over both engines' output so the comparison
+          is apples-to-apples. This is the LOGICAL tier and is the hard gate.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        compaction-parity/scripts/bootstrap-cassandra.sh  # builds cassandra-5.0.2; harness runs reference + candidate compaction in CI
+      comparison_command: >-
+        cd compaction-parity && gradle --no-daemon test  # logical-tier sstabledump JSONL equality
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      normalization: >-
+        Both outputs are dumped with Cassandra's own sstabledump (-l) and the
+        wall-clock-derived `expired` flag is normalized out; merged
+        partition/row/cell/timestamp/TTL/deletion facts are compared, file
+        layout and presentation ignored.
+      known_limitations: >-
+        Logical / canonical-semantic equivalence only; byte-for-byte output
+        parity is the separate (non-gated) byte tier — see
+        cass.compaction.SSTableRewriterTest.output_component_integrity.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/compaction-parity.yml
+    scope: {}
+
+  - id: cass.compaction.SSTableRewriterTest.output_component_integrity
+    title: Compaction output components byte-identical to Cassandra SSTableRewriter (the parity claim)
+    status: planned
+    capability: compaction_merge
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - SSTableRewriterTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - compaction-parity/src/test/java/org/cqlite/parity/BasicDifferentialTest.java
+          - compaction-parity/src/test/java/org/cqlite/parity/ComponentByteComparatorTest.java
+        notes: >-
+          THE CLAIM (Cassandra-source-anchored): cqlite's compacted output
+          components must be byte-identical to what Cassandra's SSTableRewriter
+          emits for the same inputs (Data.db, Index.db, Statistics.db, Summary.db,
+          Filter.db, CompressionInfo.db, Digest.crc32, TOC.txt as present). Driven
+          by BasicDifferentialTest under `gradle byteParity`; the unit-level diff
+          semantics are covered by ComponentByteComparatorTest. The harness
+          MECHANISM that performs this comparison + preserves artifacts is the
+          separate cass.compaction.harness_byte_tier_artifacts scenario (utilities
+          ComponentByteComparator.java / ParityArtifacts.java). Non-blocking until
+          the writer is byte-stable (#842 north star).
+    fixtures: {}
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, component_files]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      comparison_command: >-
+        cd compaction-parity && gradle --no-daemon byteParity  # per-component cmp, no allowlist
+      reference_paths:
+        - compaction-parity/build/parity-artifacts-byteParity/<scenario>/cassandra-output/
+      failure_artifacts:
+        - "byte-diff.txt: first byte/offset diff per component (component, offset, ref byte, candidate byte, lengths)"
+        - "checksums.txt: SHA-256 of every component on both sides"
+        - "cassandra-output/ and cqlite-output/: the full component dirs for offline decoding"
+      known_limitations: >-
+        The byte tier is implemented and runs in CI, but is non-blocking
+        (continue-on-error) and has no committed reference fixtures — the
+        reference output is regenerated in CI from the pinned Cassandra build, so
+        this scenario is `planned` (target named, not yet a gated claim). Promote
+        to a hard gate once compaction output is byte-stable.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/compaction-parity.yml
+    scope:
+      target_issue: 842
+      gap: >-
+        Byte-for-byte compaction output parity is computed and reported but not
+        gated; the writer is not yet byte-identical to Cassandra.
+      next_step: >-
+        Land the divergence-fix children (#844/#846/#848 …), then drop
+        continue-on-error on the byte step to promote it to a hard gate.
+
+  - id: cass.compaction.CompactionAwareWriterTest.row_count_and_order_preservation
+    title: Compaction preserves row count and partition order (logical)
+    status: mirrored
+    capability: compaction_merge
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CompactionAwareWriterTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - compaction-parity/src/test/java/org/cqlite/parity/BasicDifferentialTest.java
+          - cqlite-core/tests/compact_command.rs
+        notes: >-
+          Last-write-wins overlap scenarios assert that the merged output retains
+          every surviving row exactly once, in Cassandra's partition order, with
+          no phantom or dropped rows (the regression that motivated #857). The
+          canonical sstabledump JSONL of cqlite's output must equal Cassandra's.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        compaction-parity/scripts/bootstrap-cassandra.sh  # builds cassandra-5.0.2; harness runs reference + candidate compaction in CI
+      comparison_command: >-
+        cd compaction-parity && gradle --no-daemon test  # row count + partition order via sstabledump JSONL
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      normalization: >-
+        Compared on the sstabledump JSONL fact model (partition key order,
+        clustering order, surviving cell set); presentation and file layout
+        ignored.
+      known_limitations: >-
+        Row-count and ordering preservation is canonical-semantic, not a Data.db
+        byte comparison.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/compaction-parity.yml
+    scope: {}
+
+  # cqlite.compaction_parity.harness.logical_tier (issue identifier)
+  - id: cass.compaction.harness_logical_tier
+    title: Differential harness logical tier — canonical sstabledump equality
+    status: mirrored
+    capability: compaction_merge
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CompactionTask.java
+        - CQLTester.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - compaction-parity/src/test/java/org/cqlite/parity/DifferentialParityTester.java
+          - compaction-parity/src/test/java/org/cqlite/parity/BasicDifferentialTest.java
+        notes: >-
+          The harness capability itself: drive Cassandra's in-JVM CompactionTask
+          (reference) and the cqlite binary (candidate) over identical inputs and
+          assert canonical sstabledump JSONL equality. Every run preserves
+          artifacts (inputs, both outputs, schema, exact command lines,
+          stdout/stderr, normalized JSONL, checksum summary) under a known
+          artifacts dir uploaded by CI, on success AND failure. Missing binary /
+          sstabledump / Cassandra checkout / input set / output files all fail
+          loudly — there is no Assume-based silent skip.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        compaction-parity/scripts/bootstrap-cassandra.sh  # builds the pinned cassandra-5.0.2 source the harness compiles against
+      comparison_command: >-
+        cd compaction-parity && gradle --no-daemon test
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      normalization: >-
+        sstabledump JSONL of both outputs with the wall-clock `expired` flag
+        normalized out; logical facts compared, layout ignored.
+      known_limitations: >-
+        The logical tier proves canonical-semantic equivalence; byte identity is
+        the separate byte tier (cass.compaction.harness_byte_tier_artifacts).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/compaction-parity.yml
+    scope: {}
+
+  # cqlite.compaction_parity.harness.byte_tier_artifacts (issue identifier)
+  - id: cass.compaction.harness_byte_tier_artifacts
+    title: Differential harness byte-tier MECHANISM — per-component cmp engine + failure artifacts
+    status: planned
+    capability: compaction_merge
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - SSTableRewriter.java
+        - Descriptor.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - compaction-parity/src/test/java/org/cqlite/parity/ComponentByteComparatorTest.java
+          - compaction-parity/src/test/java/org/cqlite/parity/BasicDifferentialTest.java
+        notes: >-
+          THE MECHANISM (harness self-capability), distinct from the parity CLAIM
+          in cass.compaction.SSTableRewriterTest.output_component_integrity: this
+          scenario asserts the harness itself does the right thing — the
+          ComponentByteComparator engine (unit-tested by ComponentByteComparatorTest)
+          compares every component byte-for-byte with no allowlist, flags
+          one-sided components, fails loudly on duplicate component kinds, and the
+          ParityArtifacts utility preserves byte-diff.txt + SHA-256 checksums +
+          command lines + stdout/stderr on success AND failure. Run via
+          `gradle byteParity` / `-Dparity.tier=byte` (BasicDifferentialTest
+          scenarios). Utilities: ComponentByteComparator.java, ParityArtifacts.java.
+    fixtures: {}
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, checksums, component_files]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      comparison_command: >-
+        cd compaction-parity && gradle --no-daemon byteParity
+      reference_paths:
+        - compaction-parity/build/parity-artifacts-byteParity/<scenario>/cassandra-output/
+      failure_artifacts:
+        - "byte-diff.txt: first differing byte/offset per component"
+        - "checksums.txt: SHA-256 per component, both engines"
+        - "commands.txt: exact cqlite compact + sstabledump command lines"
+        - "cqlite-compact.stdout / cqlite-compact.stderr"
+      known_limitations: >-
+        Byte tier is implemented and runs non-blocking in CI with full failure
+        artifacts, but has no committed reference fixtures (reference output is
+        regenerated in CI) and the writer is not yet byte-identical — hence
+        `planned`, not a gated byte-for-byte claim.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/compaction-parity.yml
+    scope:
+      target_issue: 842
+      gap: >-
+        No gated byte-for-byte comparison; the tier reports diffs + artifacts but
+        does not fail the build yet.
+      next_step: >-
+        Promote to a hard gate (drop continue-on-error) once compaction output is
+        byte-stable across the scenario matrix.
+
+  # ----------------------------------------------------------------------------
   # write_load_path
   # ----------------------------------------------------------------------------
   - id: cass.write_load_path.cassandra_sstable_writer_fixtures

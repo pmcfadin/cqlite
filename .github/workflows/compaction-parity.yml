@@ -6,15 +6,19 @@ name: "CI: Compaction Parity (differential harness)"
 #   1. REFERENCE  — Apache Cassandra's compaction, in-JVM via CQLTester.
 #   2. CANDIDATE  — the external `cqlite compact` binary (--features write-support).
 #
-# TIER POLICY (issue #889, follow-up to #842):
+# TIER POLICY (issue #889/#1016, follow-up to #842):
 #   - LOGICAL tier (canonical sstabledump of both outputs must match) is
 #     implemented and green. It is a HARD GATE here: logical-tier failures fail
 #     this workflow.
-#   - BYTE tier (per-component `cmp`, the #842 north star) is NOT implemented in
-#     the harness yet. It is wired here as a NON-BLOCKING, opt-in step (see
-#     RUN_BYTE_TIER below) so it can be promoted to a hard gate once the
-#     divergence-fix children (#886 → #844/#887/#888/#846/#848) land. Until then
-#     the byte step never fails the build.
+#   - BYTE tier (per-component `cmp`, no allowlist — the #842 north star) is
+#     implemented in the harness (issue #1016: `gradle byteParity`). Its manifest
+#     CI tier is `nightly_docker`, backed by the nightly `schedule:` below, so the
+#     dedicated byteParity ASSERTION run fires nightly + on manual workflow_dispatch
+#     — NOT per-PR (the per-PR logical `test` run already computes + persists the
+#     byte diff + checksums as artifacts, so PRs lose no evidence and we avoid
+#     doubling the expensive compaction). It is NON-BLOCKING
+#     (continue-on-error), promoted to a HARD GATE once the divergence-fix children
+#     (#886 → #844/#887/#888/#846/#848) land — by dropping continue-on-error.
 #
 # TRIGGERS: PRs that touch the write/merge/compaction paths or this harness, plus
 # manual workflow_dispatch. The pinned Cassandra source build (ant jar build-test)
@@ -35,12 +39,19 @@ on:
       - 'cqlite-core/src/schema/**'
       - 'compaction-parity/**'
       - '.github/workflows/compaction-parity.yml'
+  # Nightly run that honors the byte-tier's `nightly_docker` manifest CI tier:
+  # the byteParity assertion (per-component cmp, no allowlist) runs automatically
+  # here, not just on manual dispatch. 05:43 UTC is offset from the other nightly
+  # parity jobs (tombstone/TTL 04:17, cql-type 04:31, compression 05:23) and off
+  # the top-of-hour scheduler rush.
+  schedule:
+    - cron: '43 5 * * *'
   workflow_dispatch:
     inputs:
       run_byte_tier:
         description: 'Also run the (non-blocking) byte-equality tier'
         type: boolean
-        default: false
+        default: true
 
 permissions:
   contents: read
@@ -60,10 +71,16 @@ env:
   # Where bootstrap-cassandra.sh fetches+builds the pinned source. The script
   # uses $HOME/.cache/cqlite/cassandra-src/<ref>; pin the parent here for caching.
   CQLITE_CASSANDRA_CACHE: ${{ github.workspace }}/.cqlite-cache/cassandra-src
-  # Byte-tier promotion hook: defaults to off (non-blocking). When the harness's
-  # byte tier lands and stabilises, set this to 'true' (or make the step a hard
-  # gate) to promote it. workflow_dispatch can also opt in per-run.
-  RUN_BYTE_TIER: ${{ github.event.inputs.run_byte_tier || 'false' }}
+  # Byte tier (issue #1016): manifest CI tier is `nightly_docker`, so the dedicated
+  # `byteParity` assertion run is NOT run on every PR — that would double the
+  # expensive Cassandra+cqlite compaction for no new evidence, because the logical
+  # `test` run already computes + persists the per-component byte diff + checksums
+  # unconditionally as artifacts. The byteParity ASSERTION runs on the nightly
+  # `schedule:` + manual workflow_dispatch (gated below on schedule||dispatch). It
+  # stays NON-BLOCKING (continue-on-error) until the writer is byte-stable; promote
+  # to a hard gate by dropping continue-on-error. A dispatch run can set this
+  # 'false'; on the nightly schedule there are no inputs so it defaults to 'true'.
+  RUN_BYTE_TIER: ${{ github.event.inputs.run_byte_tier || 'true' }}
 
 jobs:
   compaction-parity:
@@ -155,26 +172,26 @@ jobs:
         run: |
           gradle --no-daemon test
 
-      # ── BYTE tier — NON-BLOCKING promotion hook (issue #842 north star). ──
-      # The harness does not yet implement a separate byte-equality tier, so this
-      # is intentionally a no-op-tolerant placeholder gated on RUN_BYTE_TIER and
-      # kept continue-on-error: it can never turn the build red today. PROMOTION:
-      # once the byte tier lands (e.g. a `byteParity` Gradle task or a JUnit
-      # category/system-property the harness honours), wire it below, default
-      # RUN_BYTE_TIER to 'true', and drop continue-on-error to make it a hard gate.
-      - name: Run byte-tier parity (non-blocking, opt-in)
+      # ── BYTE tier — per-component cmp, NO allowlist (issue #1016, #842). ──
+      # The `byteParity` Gradle task reruns the scenarios and additionally ASSERTS
+      # every output component (Data/Index/Statistics/Summary/Filter/CompressionInfo/
+      # Digest/TOC, as present) is byte-identical, reporting the first byte/offset
+      # diff per component. This is the `nightly_docker`-tier assertion, so it runs
+      # on the nightly schedule + manual workflow_dispatch — NOT on PRs (the per-PR
+      # logical `test` run above already wrote byte-diff.txt + checksums.txt as
+      # artifacts, so PRs lose no evidence). Kept continue-on-error so it is
+      # NON-BLOCKING until the writer is byte-stable; PROMOTION to a hard gate =
+      # drop continue-on-error. Artifacts are uploaded below on success AND failure.
+      - name: Run byte-tier parity (non-blocking, nightly + dispatch)
         id: byte
-        if: env.RUN_BYTE_TIER == 'true'
+        if: env.RUN_BYTE_TIER == 'true' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         continue-on-error: true
         working-directory: compaction-parity
         env:
           CQLITE_CASSANDRA_SRC: ${{ env.CQLITE_CASSANDRA_CACHE }}/${{ env.CASSANDRA_REF }}
           CQLITE_BIN: ${{ github.workspace }}/target/debug/cqlite
         run: |
-          echo "Byte tier is not yet implemented in the harness (issue #842)."
-          echo "This step is a documented, non-blocking promotion hook (issue #889)."
-          echo "When the byte tier lands, invoke it here, e.g.:"
-          echo "  gradle --no-daemon byteParity   # or: gradle test -Dparity.tier=byte"
+          gradle --no-daemon byteParity
 
       # ── Surface a readable per-scenario / per-component diff on failure. ──
       # The harness asserts on a canonical sstabledump (JSONL) of each output, so
@@ -202,6 +219,10 @@ jobs:
           find build/reports/tests -name '*.txt' -print -exec cat {} \; 2>/dev/null || true
           echo "::endgroup::"
 
+      # Upload on success AND failure (issue #1016 AC3/AC5): JUnit reports plus the
+      # harness's preserved per-scenario artifacts (inputs, both engines' output
+      # components, schema, exact command lines, stdout/stderr, normalized JSONL,
+      # checksum summary, and the first byte/offset diff per component).
       - name: Upload parity reports and diffs
         if: always()
         uses: actions/upload-artifact@v6
@@ -210,6 +231,8 @@ jobs:
           path: |
             compaction-parity/build/reports/tests/**
             compaction-parity/build/test-results/**
+            compaction-parity/build/parity-artifacts-test/**
+            compaction-parity/build/parity-artifacts-byteParity/**
           if-no-files-found: ignore
           retention-days: 14
 
@@ -219,14 +242,24 @@ jobs:
           {
             echo "# Compaction Parity Results"
             echo
-            echo "- Logical tier (HARD GATE): ${{ steps.logical.outcome }}"
-            echo "- Byte tier (non-blocking, opt-in): ${{ steps.byte.outcome || 'skipped' }}"
+            echo "| Tier | Comparison | Gating | Status |"
+            echo "|---|---|---|---|"
+            echo "| LOGICAL | canonical sstabledump JSONL equality | HARD GATE (per-PR) | ${{ steps.logical.outcome }} |"
+            echo "| BYTE | per-component cmp, no allowlist | non-blocking (nightly/dispatch) | ${{ steps.byte.outcome || 'skipped' }} |"
             echo
             echo "Cassandra pin: ${{ env.CASSANDRA_REF }} (cache hit: ${{ steps.cassandra-cache.outputs.cache-hit }})"
             echo
-            echo "Byte-tier is the #842 north star and stays non-blocking until the"
-            echo "divergence-fix children land; promote it by enabling RUN_BYTE_TIER"
-            echo "and dropping continue-on-error on the byte step."
+            echo "The LOGICAL tier blocks this workflow on every PR and ALSO writes the"
+            echo "per-component byte/offset diff + checksums as artifacts, so byte"
+            echo "evidence is captured on every run. The dedicated BYTE assertion run"
+            echo "(gradle byteParity, issue #1016) is the nightly_docker tier: it fires"
+            echo "on the nightly schedule + manual workflow_dispatch (not on PRs), to"
+            echo "avoid doubling the expensive compaction on PRs. Both tiers' artifacts"
+            echo "upload as **compaction-parity-reports**"
+            echo "(byte-diff.txt, checksums.txt, both engines' output dirs) on success"
+            echo "AND failure. The byte tier is the #842 north star and stays"
+            echo "non-blocking until the writer is byte-stable; promote it to a hard"
+            echo "gate by dropping continue-on-error on the byte step."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Comment on PR (failure)
