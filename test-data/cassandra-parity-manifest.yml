@@ -12669,6 +12669,332 @@ scenarios:
       workflow: .github/workflows/compaction-parity.yml
     scope: {}
 
+  # ----------------------------------------------------------------------------
+  # Repair-metadata parse / preserve / classify through compaction (issue #1021,
+  # epic #973). CQLite parses repairedAt/pendingRepair/isTransient from the
+  # Statistics.db STATS component, PRESERVES them through compaction of compatible
+  # inputs, and REJECTS a compaction that mixes repair states (Cassandra never
+  # compacts across a repair boundary). SCOPE: parse + preserve + classify +
+  # reject ONLY — this establishes NOTHING about repair-aware tombstone purging
+  # (out of scope; a separate correctness concern), and makes no repair / read-
+  # repair / coordinator-behavior claim.
+  # ----------------------------------------------------------------------------
+  - id: cass.repair.RepairedDataInfoTest.repaired_metadata_roundtrip
+    title: repairedAt / pendingRepair / isTransient round-trip through the Statistics.db read+write path
+    status: mirrored
+    capability: statistics_metadata
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: repair
+      relevance: high
+      files:
+        - StatsMetadata.java
+        - RepairedDataInfoTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_statistics_db
+        tests:
+          - cqlite-core/tests/sstable_parity_repaired_metadata_test.rs
+        notes: >-
+          The read path decodes repairedAt from the STATS component for every
+          fixture (nb/oa/da) and — with authoritative version gates — performs the
+          full version-gated forward walk past the min/max-clustering block +
+          commitLogIntervals to decode pendingRepair (nullable UUID) and isTransient
+          from real bytes. The strict corpus lane asserts each decoded field equals
+          the authoritative sstablemetadata reference (Repaired at: / Pending repair:
+          / IsTransient:), or — for the oa/da improved-min/max layout whose covered-
+          clustering Slice carries comparator-encoded values this repair-only decoder
+          does not model — reports the two later fields honestly as Unparsed (never a
+          fabricated value). A write->read round-trip writes a non-default repaired /
+          pending-UUID / transient state via the real Statistics.db writer and
+          re-decodes it field-exact.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [bytes, component_files, jsonl, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # unrepaired corpus only; repaired fixtures need a live cluster (see partial scenarios)
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features write-support
+        --test sstable_parity_repaired_metadata_test
+      reference_paths:
+        - test-data/datasets/sstables/system_schema/column_masks-738cc5ed01683268b9d1853d4bc278af/nb-45-big-Statistics.db.txt
+      normalization: >-
+        Each repair field decoded byte-derived from the STATS component is compared
+        to the authoritative sstablemetadata reference line (Repaired at:, Pending
+        repair:, IsTransient:); the non-default repaired/pending/transient state is
+        covered by a writer write->read round-trip (the corpus has no such fixture).
+      known_limitations: >-
+        Canonical-semantic over the three repair fields + a writer round-trip of the
+        non-default state. The corpus is entirely unrepaired, so repairedAt>0 /
+        pendingRepair-UUID / transient are proven via the writer round-trip rather
+        than a real Cassandra repaired fixture. For the oa/da improved-min/max layout
+        with NON-empty covered clustering the decoder reports pendingRepair/isTransient
+        as Unparsed (the Slice value encoding is comparator-driven and not modeled
+        here); the legacy (nb) layout decodes all three fully.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  - id: cass.compaction.CompactionTaskTest.reject_mixed_repair_state
+    title: Compaction rejects a mixed repaired / unrepaired / pending-repair input set
+    status: mirrored
+    capability: compaction_merge
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CompactionTask.java
+        - CompactionTaskTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_1021_repaired_metadata_compaction_parity.rs
+        notes: >-
+          Cassandra partitions compaction candidates by (repairedAt, pendingRepair,
+          isTransient) and never mixes them in one compaction. CQLite reads each
+          input's persisted repair state from its Statistics.db (classify_inputs),
+          and both compaction paths (start_merge + compact_sstables_with_registry)
+          reject a mixed set with a typed Error::Compaction naming the repair boundary
+          BEFORE writing any output — never a silent merge. The tests construct inputs
+          with controlled repair states via the real SSTableWriter and assert mixed
+          repaired/unrepaired and mixed pending-repair sets are rejected and publish
+          no output, while compatible inputs succeed.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [component_files, jsonl, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        # inputs are constructed in-test via SSTableWriter::set_repair_state (no fixture)
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features write-support
+        --test issue_1021_repaired_metadata_compaction_parity
+      reference_paths:
+        - cqlite-core/tests/issue_1021_repaired_metadata_compaction_parity.rs
+      normalization: >-
+        The rejection is asserted behaviorally: a mixed-state compaction returns a
+        typed repair-boundary error and publishes zero output components; a
+        same-state compaction succeeds. (Cassandra's candidate partitioning is not
+        byte-comparable; the constraint — never merge across the boundary — is.)
+      known_limitations: >-
+        Canonical-semantic (behavioral): proves CQLite refuses to merge across a
+        repair boundary, matching Cassandra's CompactionTask candidate partitioning.
+        Inputs carry SSTableWriter-set repair states (the corpus has no repaired
+        fixture); the byte shape of the preserved metadata is covered by
+        cqlite.compaction_parity.statistics.repaired_metadata_preserve.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  - id: cass.compaction_parity.statistics.repaired_metadata_preserve
+    title: Compaction preserves the shared repair state of compatible inputs into the output Statistics.db
+    status: mirrored
+    capability: compaction_merge
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - StatsMetadata.java
+        - CompactionTask.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_1021_repaired_metadata_compaction_parity.rs
+        notes: >-
+          Compacting inputs that share a repair state carries repairedAt /
+          pendingRepair / isTransient forward into the merged output's Statistics.db
+          (StatisticsMetadata::set_repair_state, emitted by both the nb and da STATS
+          builders). The tests compact compatible inputs (repaired + pending-UUID +
+          transient, and the unrepaired baseline) and decode the output Statistics.db
+          repair fields back through the full version-gated walk, asserting they
+          equal the inputs' shared state.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [bytes, component_files, jsonl, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        # compatible inputs constructed in-test via SSTableWriter::set_repair_state
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features write-support
+        --test issue_1021_repaired_metadata_compaction_parity
+      reference_paths:
+        - cqlite-core/tests/issue_1021_repaired_metadata_compaction_parity.rs
+      normalization: >-
+        The output Statistics.db repair fields are decoded byte-derived through the
+        full version-gated read walk and compared field-exact to the inputs' shared
+        repair state.
+      known_limitations: >-
+        Canonical-semantic over the three preserved repair fields of the merged
+        output. Inputs carry SSTableWriter-set repair states (the corpus has no
+        repaired fixture), which is the same byte-level mechanism the merge path
+        uses; whole-Statistics.db byte identity vs a Cassandra-compacted repaired
+        output is blocked on the absent live-cluster repaired fixture.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  - id: cass.tombstone_ttl.RepairedDataTombstonesTest.repair_metadata_gates_purge
+    title: Repaired-metadata gating of tombstone purge across a repair boundary
+    status: partial
+    capability: tombstone_ttl
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: repair
+      relevance: high
+      files:
+        - RepairedDataTombstonesTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_1021_repaired_metadata_compaction_parity.rs
+        notes: >-
+          PREREQUISITE ONLY. CQLite now parses + preserves repair metadata and
+          rejects mixed-repair-state compaction, which is the prerequisite for any
+          repair-aware tombstone-purge claim. CQLite does NOT implement repair-aware
+          tombstone gating (it does not retain/drop tombstones with respect to a
+          repair boundary), and this issue (#1021) explicitly makes no such claim.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      strict: false
+      artifacts: [logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        # BLOCKED: requires a live Cassandra cluster (nodetool repair / anticompaction)
+        # to produce a repaired SSTable (repairedAt != 0) plus an unrepaired SSTable
+        # holding a shadowing tombstone, then sstabledump/sstablemetadata goldens.
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features write-support
+        --test issue_1021_repaired_metadata_compaction_parity
+      normalization: >-
+        N/A — repair-aware purge gating is not implemented; only the parse/preserve/
+        reject prerequisite is covered.
+      known_limitations: >-
+        PARTIAL: repair-aware tombstone-purge gating is NOT implemented and not
+        claimed by #1021. The metadata prerequisite (parse + preserve + reject mixed)
+        IS done. Promoting requires (1) a live-cluster repaired+unrepaired fixture
+        with a cross-boundary shadowing tombstone and (2) a separate repair-aware
+        purge implementation + tombstone-purge parity test — tracked as a follow-up.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope:
+      gap: >-
+        Repair-aware tombstone purge gating is unimplemented (and out of scope for
+        #1021); only the parse/preserve/reject-mixed prerequisite exists. No real
+        repaired fixture exists in the corpus (the published Cassandra 5.0 datasets
+        are all unrepaired; a repaired SSTable requires a live cluster + nodetool
+        repair / anticompaction).
+      next_step: >-
+        File a follow-up to (1) commission a live-cluster repaired+unrepaired fixture
+        with a cross-repair-boundary shadowing tombstone (nodetool repair /
+        sstablerepairedset + sstabledump/sstablemetadata goldens), and (2) implement
+        + test repair-aware tombstone purge gating against it.
+
+  - id: cass.repair.PendingAntiCompactionTest.pending_repair_metadata
+    title: pendingRepair session metadata written by anticompaction
+    status: partial
+    capability: statistics_metadata
+    priority: P2
+    risk: p2_coverage
+    cassandra:
+      category: repair
+      relevance: med
+      files:
+        - PendingAntiCompactionTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_statistics_db
+        tests:
+          - cqlite-core/tests/sstable_parity_repaired_metadata_test.rs
+          - cqlite-core/tests/issue_1021_repaired_metadata_compaction_parity.rs
+        notes: >-
+          CQLite decodes a pendingRepair UUID from the STATS component (legacy nb
+          layout and empty-clustering oa/da) and preserves/rejects on it through
+          compaction. The pendingRepair-UUID DISTINCT state is covered via synthetic
+          STATS bytes + a writer round-trip (parse exact, preserve exact, reject on
+          mismatch), since the corpus has no pending-repair fixture.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      strict: false
+      artifacts: [bytes, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        # BLOCKED: a pendingRepair UUID is written only by an in-flight incremental
+        # repair / PendingAntiCompaction on a live cluster — not reproducible here.
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features write-support
+        --test sstable_parity_repaired_metadata_test
+        --test issue_1021_repaired_metadata_compaction_parity
+      normalization: >-
+        The pendingRepair UUID is decoded byte-derived from the STATS component and
+        compared exact (synthetic + writer round-trip), since no real pending-repair
+        fixture exists.
+      known_limitations: >-
+        PARTIAL (no real fixture): the pendingRepair-UUID state is proven via
+        synthetic STATS bytes + a writer round-trip rather than a Cassandra
+        anticompaction-produced SSTable. Anticompaction execution / repair session
+        coordination is explicitly OUT OF SCOPE. Promoting to mirrored requires a
+        live-cluster PendingAntiCompaction fixture (an SSTable carrying a real
+        pendingRepair session UUID) plus sstablemetadata goldens.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope:
+      gap: >-
+        No SSTable carrying a real pendingRepair session UUID exists in the corpus;
+        such a file is produced only by an in-flight incremental repair /
+        PendingAntiCompaction on a live cluster. The UUID parse/preserve/reject path
+        is proven via synthetic bytes + a writer round-trip.
+      next_step: >-
+        Commission a live-cluster PendingAntiCompaction fixture (an SSTable with a
+        real pendingRepair UUID) + sstablemetadata goldens, then assert the decoded
+        UUID against the reference to promote to mirrored.
+
 # ==============================================================================
 # Public/release-facing parity claims (issue #1023).
 #

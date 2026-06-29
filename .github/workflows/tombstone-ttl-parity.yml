@@ -125,4 +125,6 @@ jobs:
               --test issue_1014_resurrection_safety_parity \
               --test issue_1015_dropped_static_parity \
               --test issue_1019_static_dropped_collection_compaction_parity \
+              --test issue_1021_repaired_metadata_compaction_parity \
+              --test sstable_parity_repaired_metadata_test \
               -- --nocapture

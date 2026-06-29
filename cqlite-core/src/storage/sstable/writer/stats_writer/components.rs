@@ -11,6 +11,25 @@ use crate::parser::vint::encode_vuint;
 use crate::schema::TableSchema;
 use std::io::Write;
 
+/// Serialise the STATS `pendingRepair` nullable field: a single presence byte
+/// (`0x01` present, `0x00` null) followed by the raw 16-byte UUID when present.
+///
+/// Mirrors cassandra-5.0.0 `StatsMetadata.StatsMetadataSerializer.serialize`:
+/// `out.writeBoolean(pendingRepair != null)` then, if present,
+/// `UUIDSerializer.serialize` (the two `long`s, MSB then LSB, big-endian — which
+/// is exactly the 16 raw bytes). Used by both the `nb`/`oa` and `da` builders so
+/// a preserved pending-repair UUID round-trips through the read-path walk.
+fn write_pending_repair(buffer: &mut Vec<u8>, pending_repair: Option<[u8; 16]>) -> Result<()> {
+    match pending_repair {
+        Some(uuid) => {
+            buffer.write_all(&[0x01])?;
+            buffer.write_all(&uuid)?;
+        }
+        None => buffer.write_all(&[0x00])?,
+    }
+    Ok(())
+}
+
 impl StatisticsWriter {
     /// Build VALIDATION component (MetadataType ordinal 0)
     ///
@@ -130,8 +149,9 @@ impl StatisticsWriter {
         // 12. int sstableLevel
         buffer.write_all(&0i32.to_be_bytes())?;
 
-        // 13. long repairedAt
-        buffer.write_all(&0i64.to_be_bytes())?;
+        // 13. long repairedAt — preserved from the (compatible) compaction
+        // inputs (issue #1021); 0 for an unrepaired SSTable / fresh flush.
+        buffer.write_all(&metadata.repaired_at.to_be_bytes())?;
 
         // 14. int minClusteringCount (no clustering = 0)
         buffer.write_all(&0i32.to_be_bytes())?;
@@ -159,11 +179,12 @@ impl StatisticsWriter {
         // 22. IntervalSet<CommitLogPosition> commitLogIntervals (empty set: size=0)
         buffer.write_all(&0i32.to_be_bytes())?;
 
-        // 23. byte pendingRepair (0 = null, no pending repair)
-        buffer.write_all(&[0x00])?;
+        // 23. pendingRepair (nullable): presence byte, then the 16-byte UUID
+        // when present. Preserved from compatible compaction inputs (#1021).
+        write_pending_repair(&mut buffer, metadata.pending_repair)?;
 
-        // 24. boolean isTransient
-        buffer.write_all(&[0x00])?; // false
+        // 24. boolean isTransient — preserved from compatible inputs (#1021).
+        buffer.write_all(&[if metadata.is_transient { 0x01 } else { 0x00 }])?;
 
         // 25. byte originatingHostId (0 = null)
         buffer.write_all(&[0x00])?;
@@ -255,9 +276,10 @@ impl StatisticsWriter {
         // subsequent `coveredClustering` Slice deserialization in Cassandra.
         self.write_tombstone_histogram_modern(&mut buffer, &metadata.tombstone_histogram)?;
 
-        // 9. sstableLevel, repairedAt
+        // 9. sstableLevel, repairedAt (repairedAt preserved from compatible
+        // compaction inputs, issue #1021).
         buffer.write_all(&0i32.to_be_bytes())?;
-        buffer.write_all(&0i64.to_be_bytes())?;
+        buffer.write_all(&metadata.repaired_at.to_be_bytes())?;
 
         // 10. improvedMinMax: clusteringTypes list + coveredClustering Slice.
         //
@@ -300,11 +322,12 @@ impl StatisticsWriter {
         buffer.write_all(&0i32.to_be_bytes())?; // position
         buffer.write_all(&0i32.to_be_bytes())?; // interval set size = 0
 
-        // 14. pendingRepair (null)
-        buffer.write_all(&[0x00])?;
+        // 14. pendingRepair (nullable): presence byte + optional UUID, preserved
+        // from compatible compaction inputs (#1021).
+        write_pending_repair(&mut buffer, metadata.pending_repair)?;
 
-        // 15. isTransient
-        buffer.write_all(&[0x00])?;
+        // 15. isTransient — preserved from compatible inputs (#1021).
+        buffer.write_all(&[if metadata.is_transient { 0x01 } else { 0x00 }])?;
 
         // 16. originatingHostId (null)
         buffer.write_all(&[0x00])?;
