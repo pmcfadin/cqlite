@@ -53,13 +53,14 @@ env:
   CASSANDRA_IMAGE: cassandra:5.0.2
 
 jobs:
-  # Core validation - Ubuntu Only
-  m1-core-validation:
-    name: 🎯 Core Validation (Ubuntu)
+  # Core validation split into independent lanes. Keep the aggregate
+  # m1-core-validation job name stable for downstream workflow semantics.
+  m1-format-check:
+    name: 📝 M1 format check
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 10
     continue-on-error: false
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v5
@@ -69,47 +70,7 @@ jobs:
     - name: Setup Rust toolchain
       uses: dtolnay/rust-toolchain@1.88.0
       with:
-        components: rustfmt, clippy
-
-    - name: Cache Rust dependencies
-      uses: Swatinem/rust-cache@v2
-      with:
-        cache-on-failure: true
-        key: m1-core-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          m1-core-
-
-    # Dataset cache and download for integration tests
-    - name: Restore datasets-v3 cache
-      uses: actions/cache/restore@v5
-      with:
-        path: |
-          test-data/datasets/
-        key: datasets-v3-bebc763752c8d68c7fb0483a1b31294b4d1d21343d3f7d124da069e5073202fa-${{ hashFiles('test-data/**/*.md') }}
-        restore-keys: |
-          datasets-v3-bebc763752c8d68c7fb0483a1b31294b4d1d21343d3f7d124da069e5073202fa-
-
-    - name: Download Cassandra 5 Datasets (if cache miss)
-      run: |
-        # Gate the download on the SSTable Data.db core fixture, NOT the JSONL
-        # reference count (#1097). A partial/stale cache can restore the 135 JSONL
-        # refs without the Data.db binaries; gating on JSONL count then skips the
-        # re-download and the #1080 no-silent-skip guard hard-fails mid-test.
-        CORE_FIXTURE_COUNT=$(find test-data/datasets/sstables/test_basic -path '*simple_table-*-Data.db' 2>/dev/null | wc -l)
-        if [ "$CORE_FIXTURE_COUNT" -eq 0 ]; then
-          echo "📦 Core Data.db fixture missing — downloading real Cassandra 5 datasets from release (datasets-v3, includes oa+da fixtures)..."
-          mkdir -p test-data
-          gh release download datasets-v3 --pattern "cassandra5-small-full-v3.2.tar.gz" --dir /tmp
-          echo "bebc763752c8d68c7fb0483a1b31294b4d1d21343d3f7d124da069e5073202fa  /tmp/cassandra5-small-full-v3.2.tar.gz" | sha256sum -c -
-          rm -rf test-data/datasets
-          tar -xzf /tmp/cassandra5-small-full-v3.2.tar.gz -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
-          DATA_COUNT=$(find test-data/datasets/sstables -name '*-Data.db' 2>/dev/null | wc -l)
-          echo "✅ Downloaded datasets for M1 CI ($DATA_COUNT Data.db fixtures)"
-        else
-          echo "✅ Using cached datasets (core Data.db fixture present)"
-        fi
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        components: rustfmt
 
     # Pre-flight Environment Health Check
     - name: 🏥 Environment Health Check
@@ -156,6 +117,42 @@ jobs:
         echo "✅ Code formatting check passed"
         echo "::endgroup::"
 
+  m1-quality-checks:
+    name: 🔍 M1 quality checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: false
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+
+    - name: Setup Rust toolchain
+      uses: dtolnay/rust-toolchain@1.88.0
+      with:
+        components: clippy
+
+    - name: Setup sccache
+      uses: mozilla-actions/sccache-action@v0.0.10
+
+    - name: Enable sccache
+      run: |
+        echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
+    - name: Cache Rust dependencies
+      uses: Swatinem/rust-cache@v2
+      with:
+        cache-on-failure: true
+        key: m1-quality-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Install cargo-deny
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-deny
+
     # Required Check 2: clippy with -D warnings (M1-scoped packages only)
     - name: 🔍 Lint code quality (clippy -D warnings)
       run: |
@@ -183,13 +180,7 @@ jobs:
     - name: 🛡️ Validate licenses and security (cargo-deny)
       run: |
         echo "::group::License and Security Validation"
-        
-        # Install cargo-deny if not cached
-        if ! command -v cargo-deny &> /dev/null; then
-          echo "📦 Installing cargo-deny..."
-          cargo install cargo-deny --locked
-        fi
-        
+
         # Run all cargo-deny checks
         echo "📋 Checking licenses..."
         cargo deny check licenses || { echo "❌ License validation failed"; exit 1; }
@@ -205,6 +196,73 @@ jobs:
         
         echo "✅ All license and security checks passed"
         echo "::endgroup::"
+
+    - name: Show sccache stats
+      if: always()
+      run: ${SCCACHE_PATH:-sccache} --show-stats
+
+  m1-core-tests:
+    name: 🧪 M1 core tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    continue-on-error: false
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+
+    - name: Setup Rust toolchain
+      uses: dtolnay/rust-toolchain@1.88.0
+      with:
+        components: rustfmt, clippy
+
+    - name: Setup sccache
+      uses: mozilla-actions/sccache-action@v0.0.10
+
+    - name: Enable sccache
+      run: |
+        echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
+    - name: Cache Rust dependencies
+      uses: Swatinem/rust-cache@v2
+      with:
+        cache-on-failure: true
+        key: m1-tests-${{ hashFiles('**/Cargo.lock') }}
+
+    # Dataset cache and download for integration tests
+    - name: Restore datasets-v3 cache
+      uses: actions/cache/restore@v5
+      with:
+        path: |
+          test-data/datasets/
+        key: datasets-v3-bebc763752c8d68c7fb0483a1b31294b4d1d21343d3f7d124da069e5073202fa-${{ hashFiles('test-data/**/*.md') }}
+        restore-keys: |
+          datasets-v3-bebc763752c8d68c7fb0483a1b31294b4d1d21343d3f7d124da069e5073202fa-
+
+    - name: Download Cassandra 5 Datasets (if cache miss)
+      run: |
+        # Gate the download on the SSTable Data.db core fixture, NOT the JSONL
+        # reference count (#1097). A partial/stale cache can restore the 135 JSONL
+        # refs without the Data.db binaries; gating on JSONL count then skips the
+        # re-download and the #1080 no-silent-skip guard hard-fails mid-test.
+        CORE_FIXTURE_COUNT=$(find test-data/datasets/sstables/test_basic -path '*simple_table-*-Data.db' 2>/dev/null | wc -l)
+        if [ "$CORE_FIXTURE_COUNT" -eq 0 ]; then
+          echo "📦 Core Data.db fixture missing — downloading real Cassandra 5 datasets from release (datasets-v3, includes oa+da fixtures)..."
+          mkdir -p test-data
+          gh release download datasets-v3 --pattern "cassandra5-small-full-v3.2.tar.gz" --dir /tmp
+          echo "bebc763752c8d68c7fb0483a1b31294b4d1d21343d3f7d124da069e5073202fa  /tmp/cassandra5-small-full-v3.2.tar.gz" | sha256sum -c -
+          rm -rf test-data/datasets
+          tar -xzf /tmp/cassandra5-small-full-v3.2.tar.gz -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
+          DATA_COUNT=$(find test-data/datasets/sstables -name '*-Data.db' 2>/dev/null | wc -l)
+          echo "✅ Downloaded datasets for M1 CI ($DATA_COUNT Data.db fixtures)"
+        else
+          echo "✅ Using cached datasets (core Data.db fixture present)"
+        fi
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     # Required Check 4: Unit tests (core crates only)
     - name: 🧪 Run unit tests (core crates)
@@ -257,6 +315,39 @@ jobs:
         echo "✅ Core crate unit tests passed"
         echo "::endgroup::"
 
+    - name: Show sccache stats
+      if: always()
+      run: ${SCCACHE_PATH:-sccache} --show-stats
+
+  m1-core-build:
+    name: 🔨 M1 core build
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    continue-on-error: false
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+
+    - name: Setup Rust toolchain
+      uses: dtolnay/rust-toolchain@1.88.0
+
+    - name: Setup sccache
+      uses: mozilla-actions/sccache-action@v0.0.10
+
+    - name: Enable sccache
+      run: |
+        echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
+    - name: Cache Rust dependencies
+      uses: Swatinem/rust-cache@v2
+      with:
+        cache-on-failure: true
+        key: m1-build-${{ hashFiles('**/Cargo.lock') }}
+
     # Required Check 5: Build verification
     - name: 🔨 Build core library
       run: |
@@ -273,6 +364,43 @@ jobs:
         
         echo "✅ Core library build passed"
         echo "::endgroup::"
+
+    - name: Show sccache stats
+      if: always()
+      run: ${SCCACHE_PATH:-sccache} --show-stats
+
+  m1-core-validation:
+    name: 🎯 Core Validation (Ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - m1-format-check
+      - m1-quality-checks
+      - m1-core-tests
+      - m1-core-build
+    if: ${{ always() }}
+    steps:
+    - name: Check M1 validation lanes
+      run: |
+        set -euo pipefail
+        failed=0
+
+        check_result() {
+          local job="$1"
+          local result="$2"
+          if [ "$result" != "success" ]; then
+            echo "❌ ${job}: ${result}" >&2
+            failed=1
+          else
+            echo "✅ ${job}: ${result}"
+          fi
+        }
+
+        check_result "m1-format-check" "${{ needs.m1-format-check.result }}"
+        check_result "m1-quality-checks" "${{ needs.m1-quality-checks.result }}"
+        check_result "m1-core-tests" "${{ needs.m1-core-tests.result }}"
+        check_result "m1-core-build" "${{ needs.m1-core-build.result }}"
+        exit "$failed"
 
   # SSTableDump Parity Harness
   sstabledump-parity-m1:
@@ -293,13 +421,19 @@ jobs:
       with:
         components: rustfmt, clippy
 
+    - name: Setup sccache
+      uses: mozilla-actions/sccache-action@v0.0.10
+
+    - name: Enable sccache
+      run: |
+        echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
     - name: Cache Rust dependencies
       uses: Swatinem/rust-cache@v2
       with:
         cache-on-failure: true
         key: m1-parity-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          m1-parity-
 
     # Dataset cache and download for parity validation
     - name: Restore datasets-v3 cache
@@ -638,6 +772,10 @@ jobs:
         
         echo "::endgroup::"
 
+    - name: Show sccache stats
+      if: always()
+      run: ${SCCACHE_PATH:-sccache} --show-stats
+
   # Coverage Analysis (informational)
   m1-coverage-analysis:
     name: 📊 Coverage Analysis (informational)
@@ -657,13 +795,19 @@ jobs:
       with:
         components: rustfmt, clippy, llvm-tools-preview
 
+    - name: Setup sccache
+      uses: mozilla-actions/sccache-action@v0.0.10
+
+    - name: Enable sccache
+      run: |
+        echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
     - name: Cache Rust dependencies
       uses: Swatinem/rust-cache@v2
       with:
         cache-on-failure: true
         key: m1-coverage-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          m1-coverage-
 
     - name: Install cargo-llvm-cov
       uses: taiki-e/install-action@v2
@@ -811,78 +955,6 @@ jobs:
         
         echo "::endgroup::"
 
-  # Pipeline Summary
-  m1-pipeline-summary:
-    name: 🎉 Pipeline Summary  
-    runs-on: ubuntu-latest
-    needs: [m1-core-validation, sstabledump-parity-m1, m1-coverage-analysis]
-    if: always()
-    
-    steps:
-    - name: 📋 M1 Pipeline Results
-      run: |
-        echo "::group::M1 Minimal CI Pipeline Results"
-        
-        CORE_STATUS="${{ needs.m1-core-validation.result }}"
-        PARITY_STATUS="${{ needs.sstabledump-parity-m1.result }}"
-        COVERAGE_STATUS="${{ needs.m1-coverage-analysis.result }}"
-        
-        echo "🎯 **M1 Core Reading Library CI Pipeline**"
-        echo ""
-        echo "📊 **Required Checks Status:**"
-        echo "  🏗️  Core Validation: $CORE_STATUS"
-        echo "  🔄 SSTableDump Parity: $PARITY_STATUS"
-        echo "  📊 Coverage Analysis: $COVERAGE_STATUS (informational)"
-        echo ""
-        
-        if [ "$CORE_STATUS" = "success" ] && [ "$PARITY_STATUS" = "success" ]; then
-          echo "🎉 **M1 PIPELINE PASSED**"
-          echo ""
-          echo "✅ **All M1 requirements satisfied:**"
-          echo "  ✅ Environment health check passed"
-          echo "  ✅ Ubuntu build completed successfully"
-          echo "  ✅ Code formatting (rustfmt) validation passed" 
-          echo "  ✅ Code quality (clippy -D warnings) validation passed"
-          echo "  ✅ Core crate unit tests executed successfully"
-          echo "  ✅ Core library build verification completed"
-          echo "  ✅ SSTableDump parity harness executed successfully"
-          echo "  ✅ Coverage analysis running (informational only)"
-          echo ""
-          echo "🚀 **This change is ready for M1 milestone integration!**"
-          echo "📫 All critical path requirements have been validated"
-        else
-          echo "❌ **M1 PIPELINE FAILED**"
-          echo ""
-          echo "🚫 **Required fixes needed:**"
-          if [ "$CORE_STATUS" != "success" ]; then
-            echo "  ❌ Core validation issues detected"
-            echo "      💡 Check rustfmt, clippy, unit tests, and build steps above"
-            echo "      💡 Run locally: cargo fmt && cargo clippy --fix && cargo test"
-          fi
-          if [ "$PARITY_STATUS" != "success" ]; then
-            echo "  ❌ SSTableDump parity validation issues detected"
-            echo "      💡 Check SSTableDump validator output above"
-            echo "      💡 Verify tools/sstabledump-validator builds correctly"
-          fi
-          echo ""
-          echo "🔧 **Next Steps:**"
-          echo "  1. Address the specific failures listed above"
-          echo "  2. Test fixes locally using the suggested commands"
-          echo "  3. Push updated changes to re-trigger validation"
-          echo "  4. Ensure all checks pass before requesting review"
-        fi
-        
-        echo ""
-        echo "📝 **Gated Off (Post-M1):**"
-        echo "  ⏸️ Windows/macOS build matrices"
-        echo "  ⏸️ FFI build jobs"
-        echo "  ⏸️ WASM build jobs" 
-        echo "  ⏸️ Performance benchmarks"
-        echo "  ⏸️ Mutation tests"
-        echo "  ⏸️ Code metrics dashboards"
-        echo "  ⏸️ Phase validation workflows"
-        echo ""
-        echo "::endgroup::"
-
-    # Note: Status check creation removed - GitHub Actions automatically reports job status
-    # The workflow status (success/failure) is already reported to GitHub without explicit check creation
+    - name: Show sccache stats
+      if: always()
+      run: ${SCCACHE_PATH:-sccache} --show-stats
