@@ -481,6 +481,14 @@ mod fixture_drain {
     /// backpressure), this test would see MORE than `BATCH_CHANNEL_CAP` items or a
     /// completed (non-blocked) drain and fail.
     ///
+    /// Scope: this bounds the BATCHING subsystem (channel-resident batches) ONLY —
+    /// the name's "independent of `buffer_size`" means the batching pool is NOT
+    /// sized by the caller's channel, not that it is the whole pipeline's resident
+    /// bound. The full resident-row worst case ALSO includes the inherent
+    /// `max_partition_size` term (the one confirmed partition `drain_scan_window`
+    /// materializes in `surviving` before batching — pre-existing #1156 behavior);
+    /// that term is documented on the constant and NOT asserted here.
+    ///
     /// Dataset-dependent: skips when the fixture is absent. The pure
     /// `max_inflight_batch_rows_matches_sizing_knobs` test above runs in every gate.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -61,20 +61,34 @@
 //! (being bounded) blocks `raw_tx.send().await` in the I/O half, which stops
 //! reading from disk. Nothing buffers the whole file; live heap stays
 //! `window + RAW_CHUNK_CHANNEL_CAP` raw chunks + at most
-//! [`MAX_INFLIGHT_BATCH_ROWS`] buffered rows.
+//! [`MAX_INFLIGHT_BATCH_ROWS`] buffered rows ahead of the caller.
 //!
-//! ## Batching vs the documented `buffer_size` bound (issue #1143, roborev)
+//! ## Worst-case resident rows (issue #1143, roborev)
 //!
-//! `scan_stream` documents its live heap as "bounded by `buffer_size` rows". The
-//! batching here adds a SECOND, SMALLER in-flight pool that is NOT sized by the
-//! caller's `buffer_size`: against a stalled consumer the bounded batch channel
-//! (`BATCH_CHANNEL_CAP` batches), the one batch the forwarder has `recv()`'d and is
-//! flattening, AND the one batch the producer is parked-in-`blocking_send` holding
-//! can ALL be live at once — up to [`MAX_INFLIGHT_BATCH_ROWS`] confirmed rows ahead
-//! of the caller, even when `buffer_size == 1`. That is a deliberate, BOUNDED
-//! read-ahead (a single named constant) — the price of amortizing the
-//! blocking->async wake. The public `scan_stream` doc states this so callers know
-//! the true worst case is `buffer_size + MAX_INFLIGHT_BATCH_ROWS` rows in flight.
+//! Be honest and COMPLETE: against a stalled consumer the resident `(RowKey, Value)`
+//! count is the SUM of three inherent terms, not one constant —
+//! `buffer_size + max_partition_size + MAX_INFLIGHT_BATCH_ROWS`:
+//!
+//! - **`buffer_size`** — the public per-item channel, sized from the caller's
+//!   `StreamingConfig::buffer_size`.
+//! - **`max_partition_size`** — INHERENT to any row-materializing partition scan and
+//!   PRE-DATES this change: `drain_scan_window` parses one CONFIRMED partition fully
+//!   into a `surviving: Vec<(RowKey, Value)>` before batching (the parser's `FnMut`
+//!   emit is synchronous, so a partition's rows cannot stream out mid-parse), so if
+//!   `blocking_send` stalls mid-iteration the producer still owns that Vec's
+//!   not-yet-batched tail. This is the pre-existing #1156 windowed-scan heap term
+//!   (heap was always `~max_partition_size + one_chunk`); this PR neither introduced
+//!   it nor restructures emission to observe backpressure mid-partition — that is a
+//!   separate #1156 redesign, deliberately out of scope here.
+//! - **`MAX_INFLIGHT_BATCH_ROWS`** — the *additional* bound this PR's batching adds:
+//!   a SECOND in-flight pool NOT sized by `buffer_size`. The bounded batch channel
+//!   (`BATCH_CHANNEL_CAP` batches), the one batch the forwarder `recv()`'d and is
+//!   flattening, AND the one batch the producer is parked-in-`blocking_send` holding
+//!   can ALL be live at once — even when `buffer_size == 1`: a deliberate, BOUNDED
+//!   read-ahead, the price of amortizing the blocking->async wake. It bounds the
+//!   BATCHING subsystem ALONE; it does NOT — and is not claimed to — cover the
+//!   `max_partition_size` term. The public `scan_stream` doc states the full
+//!   three-term sum so callers know the true worst case.
 //!
 //! ## Cancellation (issue #1143 finding 2)
 //!
@@ -174,20 +188,23 @@ const BATCH_EMIT_ROWS: usize = 256;
 /// ~512 small `(RowKey, Value)` entries — negligible against the <128MB budget.
 const BATCH_CHANNEL_CAP: usize = 2;
 
-/// SINGLE documented bound on the rows the windowed scan's batching subsystem may
-/// hold in flight ahead of the caller, INDEPENDENT of `scan_stream`'s
-/// `buffer_size` (roborev finding, issue #1143).
+/// Documented bound on the rows the windowed scan's BATCHING SUBSYSTEM may hold in
+/// flight ahead of the caller, INDEPENDENT of `scan_stream`'s `buffer_size`
+/// (roborev finding, issue #1143).
 ///
-/// # Why this exists
+/// # Scope (read this first)
 ///
-/// `scan_stream` documents live heap as "bounded by `buffer_size` rows". The
-/// windowed path's blocking→async batching (issue #1143) adds a SECOND in-flight
-/// pool — the pending `batch` plus the bounded batch channel — that is NOT sized
-/// by `buffer_size`. Without a stated bound a future tweak to `BATCH_EMIT_ROWS` /
-/// `BATCH_CHANNEL_CAP` could let parsing run arbitrarily far ahead of a stalled
-/// consumer. This constant names the worst case so it is enforced and tested.
+/// This bounds the BATCHING subsystem ALONE — the pending `batch`, the bounded batch
+/// channel, and the parked-in-`blocking_send` batch — the *additional* in-flight pool
+/// issue-#1143 batching adds, NOT sized by `buffer_size`. It is NOT the whole-pipeline
+/// resident-row bound: the complete worst case (module doc) is
+/// `buffer_size + max_partition_size + MAX_INFLIGHT_BATCH_ROWS`, and this constant
+/// does NOT cover the inherent pre-existing-#1156 `max_partition_size` term (the one
+/// confirmed partition `drain_scan_window` materializes in `surviving` before
+/// batching). It is named/tested so a future `BATCH_EMIT_ROWS`/`BATCH_CHANNEL_CAP`
+/// tweak cannot silently let batching run arbitrarily far ahead of a stalled consumer.
 ///
-/// # The bound
+/// # The bound (batching subsystem)
 ///
 /// When the public consumer is stalled, THREE full batches coexist in flight — not
 /// two (each up to `BATCH_EMIT_ROWS` rows):
@@ -208,13 +225,14 @@ const BATCH_CHANNEL_CAP: usize = 2;
 ///
 /// With the defaults (`256 * 4 = 1024`) this equals — never exceeds — every real
 /// caller's `buffer_size` (`StreamingConfig::buffer_size` defaults to 1024, the
-/// text preset is 512 ≤ this), keeping the documentable
-/// `buffer_size + MAX_INFLIGHT_BATCH_ROWS` worst case sane — yet the bound is a
-/// CONSTANT, not `buffer_size`-scaled, so it holds even for `buffer_size = 1`.
+/// text preset is 512 ≤ this), keeping this batching term comparable to the
+/// channel term — yet the bound is a CONSTANT, not `buffer_size`-scaled, so it
+/// holds even for `buffer_size = 1`. (The full resident-row worst case adds the
+/// `max_partition_size` term on top; see the module doc.)
 ///
 /// [`tests::batch_inflight_rows_are_bounded_independent_of_buffer_size`] asserts
-/// the runtime worst case never exceeds this; any sizing change that breaks the
-/// bound must update this constant AND keep that test green.
+/// the batching subsystem's runtime worst case never exceeds this; any sizing
+/// change that breaks the bound must update this constant AND keep that test green.
 pub(super) const MAX_INFLIGHT_BATCH_ROWS: usize = (BATCH_CHANNEL_CAP + 2) * BATCH_EMIT_ROWS;
 
 /// Decide whether the blocking parse half should run its terminal

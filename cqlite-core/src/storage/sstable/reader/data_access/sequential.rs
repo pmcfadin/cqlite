@@ -232,13 +232,18 @@ impl SSTableReader {
     /// falls behind and stops entirely if the consumer is dropped.
     ///
     /// In-flight bound (chunk-stitching SSTables): the windowed pipeline (issue
-    /// #1143) batches rows to amortize the cross-thread wake, so it may run a
-    /// FIXED, BOUNDED amount ahead of a stalled consumer regardless of
-    /// `buffer_size` — up to
+    /// #1143) materializes one confirmed partition at a time and batches its rows to
+    /// amortize the cross-thread wake, so against a stalled consumer the resident
+    /// `(RowKey, Value)` count is the SUM of three inherent terms, not one constant:
+    /// `buffer_size` (this channel) `+ max_partition_size` (the one fully-materialized
+    /// confirmed partition — a pre-existing #1156 windowed-scan term, inherent to any
+    /// row-materializing partition scan) `+`
     /// [`MAX_INFLIGHT_BATCH_ROWS`](super::super::scan_stream_windowed::MAX_INFLIGHT_BATCH_ROWS)
-    /// confirmed rows beyond the `buffer_size` channel (true worst case
-    /// `buffer_size + MAX_INFLIGHT_BATCH_ROWS`, holding even for `buffer_size == 1`).
-    /// Non-stitching SSTables honour `buffer_size` exactly.
+    /// (the FIXED, BOUNDED amount the issue-#1143 batching subsystem may run ahead,
+    /// regardless of `buffer_size`, holding even for `buffer_size == 1`).
+    /// `MAX_INFLIGHT_BATCH_ROWS` bounds the batching subsystem alone, NOT the
+    /// `max_partition_size` materialization term. Non-stitching SSTables honour
+    /// `buffer_size` exactly.
     pub fn scan_stream(
         self: std::sync::Arc<Self>,
         table_id: TableId,
