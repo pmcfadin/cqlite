@@ -166,8 +166,10 @@ async fn promoted_index_clustering_prefix_is_cassandra_6_byte_form() {
 
     // Byte-for-byte: every firstName/lastName is exactly `[04][00][4-byte int]`.
     for (n, block) in decoded.entries.iter().enumerate() {
-        for (which, name) in [("first_name", &block.first_name), ("last_name", &block.last_name)]
-        {
+        for (which, name) in [
+            ("first_name", &block.first_name),
+            ("last_name", &block.last_name),
+        ] {
             assert_eq!(
                 name.len(),
                 6,
