@@ -349,8 +349,8 @@ async fn cqlite_compact(
         schema,
         OUT_GENERATION,
         Some(FIXED_GC_BEFORE),
-        None,        // now-sec: irrelevant for live cells
-        true,        // purge_safe: full compaction (#921 finding 1)
+        None, // now-sec: irrelevant for live cells
+        true, // purge_safe: full compaction (#921 finding 1)
     )
     .await
     .expect("compaction must succeed");
@@ -379,7 +379,11 @@ fn collect(dir: &Path, out: &mut Vec<(u64, PathBuf)>, depth: usize) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         if name.starts_with("nb-") && name.ends_with("-big-Data.db") {
             let base = name.trim_end_matches("-Data.db");
             if !path.with_file_name(format!("{base}-TOC.txt")).exists() {
@@ -508,7 +512,12 @@ async fn assert_compaction_byte_parity(
     }
 
     // ── 5. Secondary diagnostic (AC4): committed sstabledump JSONL golden ──
-    assert_jsonl_secondary(table, &ref_dir, expected_jsonl_partitions, expected_survivors);
+    assert_jsonl_secondary(
+        table,
+        &ref_dir,
+        expected_jsonl_partitions,
+        expected_survivors,
+    );
 
     eprintln!(
         "[issue_1017] {KEYSPACE}.{table}: COMPACTION byte parity PASS — \
@@ -596,7 +605,11 @@ fn assert_jsonl_secondary(
     let jsonl = ref_dir.join(format!("{}Data.db.jsonl", descriptor_prefix(&data)));
     let text = std::fs::read_to_string(&jsonl)
         .unwrap_or_else(|e| panic!("{table}: committed JSONL golden {jsonl:?} unreadable: {e}"));
-    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
     assert!(
         !lines.is_empty(),
         "{table}: committed JSONL golden is present-but-empty (0 partitions) — parity failure"
@@ -670,7 +683,12 @@ async fn no_clustering_compaction_byte_for_byte() {
         group_a,
         group_b,
         4,
-        &[("id=1", "a-1"), ("id=2", "b-2"), ("id=3", "b-3"), ("id=4", "b-4")],
+        &[
+            ("id=1", "a-1"),
+            ("id=2", "b-2"),
+            ("id=3", "b-3"),
+            ("id=4", "b-4"),
+        ],
     )
     .await;
 }
