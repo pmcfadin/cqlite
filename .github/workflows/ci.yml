@@ -491,6 +491,19 @@ jobs:
           echo "Running CLI unit tests (Issue #20)..."
           cargo test --package cqlite-cli --test unit_tests
 
+      - name: Run CLI write→read content round-trip tests (issue #1231)
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+        run: |
+          echo "Running CLI write-path content round-trips (issue #1231)..."
+          # Drives the FULL public CLI chain: CQL INSERT/UPDATE/DELETE → WAL →
+          # flush → SSTable → independent reopen → SELECT → assert decoded VALUES,
+          # plus binary-level export-sstable read-back and compact/maintenance/
+          # write-stats subcommand glue. Self-contained: every test builds its own
+          # SSTables in a tempdir, so no fixture corpus is required.
+          cargo test --package cqlite-cli --features write-support \
+            --test write_readback_content_tests
+
       - name: Build CLI for one-shot smoke tests
         run: |
           echo "🔨 Building CLI binary for smoke tests..."
