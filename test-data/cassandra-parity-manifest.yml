@@ -5442,6 +5442,405 @@ scenarios:
         byte-stable across the scenario matrix.
 
   # ----------------------------------------------------------------------------
+  # static-row / dropped-column / non-frozen-collection compaction (issue #1019,
+  # epic #973). Compaction paths where correctness depends on schema headers and
+  # complex cell identity. Validated by the differential compaction harness
+  # (#819/#1224) over real Cassandra 5.0 `nb` fixtures (the oracle).
+  # ----------------------------------------------------------------------------
+  - id: cass.serialization.SerializationHeaderTest.static_and_dropped_columns
+    title: Compaction preserves static + strips fully-purged dropped columns in the output SerializationHeader
+    status: mirrored
+    capability: schema_evolution
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationHeaderTest.java
+    cqlite:
+      coverage:
+        suite: schema_parity_serialization_header
+        tests:
+          - cqlite-core/tests/issue_1019_static_dropped_collection_compaction_parity.rs
+          - cqlite-core/tests/issue_1015_dropped_static_parity.rs
+        notes: >-
+          Two halves over real test_tomb fixtures. STATIC: compacting
+          dropped_static_col gen-1 with a schema that OMITS the static column
+          (effective_compaction_schema #850 re-adds it from the input header)
+          re-declares stat_col AS STATIC in the compacted output Statistics.db
+          SerializationHeader and surfaces the static cell. DROPPED: compacting
+          both dropped_regular_col generations with drop_col dropped strictly
+          after every drop_col cell's writetime purges drop_col entirely and
+          STRIPS it from the output header (for_compaction_output #847) while
+          keep_col survives as a regular column with no misalignment.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables/test_tomb
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl, component_files, logs, generated_report]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-tombstone-parity.sh  # dropped_static_col + dropped_regular_col fixtures
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets CQLITE_REQUIRE_FIXTURES=1 cargo test -p cqlite-core --features write-support --test issue_1019_static_dropped_collection_compaction_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_tomb/dropped_static_col-4cd18560702011f1b8f419c9a388d558/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_tomb/dropped_regular_col-4cc79a50702011f1b8f419c9a388d558/nb-2-big-Statistics.db.txt
+      normalization: >-
+        The compacted output Statistics.db SerializationHeader column sets
+        (regular / static) are decoded byte-derived and compared to the oracle's
+        committed sstablemetadata golden dumps; presentation ignored.
+      known_limitations: >-
+        Canonical-semantic over the SerializationHeader column sets + surviving
+        cells; whole-component byte identity of the compacted Statistics.db is
+        the separate byte tier (cass.compaction.harness_byte_tier_artifacts).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  - id: cass.serialization.SerializationMirrorTest.schema_evolution_ordering
+    title: Serialization-header column ordering survives compaction across schema evolution
+    status: mirrored
+    capability: schema_evolution
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationMirrorTest.java
+    cqlite:
+      coverage:
+        suite: schema_parity_serialization_header
+        tests:
+          - cqlite-core/tests/issue_1019_static_dropped_collection_compaction_parity.rs
+          - cqlite-core/tests/issue_921_background_compaction_dropped_column_header.rs
+        notes: >-
+          After a static-column re-add (#850) and a dropped-column strip (#847),
+          the compacted output header must keep its column set internally
+          consistent so surviving regular cells read back at the correct
+          clustering positions (no header/bitmap misalignment). The #1019 lane
+          asserts keep_col survivors land at the right clustering keys after
+          drop_col is stripped, and that the re-added static column is emitted
+          static (not demoted), proving the surviving column ordering mirrors
+          the cells actually written.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables/test_tomb
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl, component_files, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-tombstone-parity.sh  # dropped_static_col + dropped_regular_col fixtures
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets CQLITE_REQUIRE_FIXTURES=1 cargo test -p cqlite-core --features write-support --test issue_1019_static_dropped_collection_compaction_parity
+      normalization: >-
+        Surviving regular cells read back via KWayMerger are compared at the
+        clustering-key granularity to the expected oracle positions; the output
+        header column set is decoded byte-derived.
+      known_limitations: >-
+        Asserts surviving-column consistency / read-back alignment after schema
+        evolution, not a byte comparison of the header layout itself.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  - id: cass.compaction.CompactionSimpleValueMergeTest.static_row_merge
+    title: Static row survives compaction with a Cassandra-compatible static prelude
+    status: mirrored
+    capability: compaction_merge
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CompactionSimpleValueMergeTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_1019_static_dropped_collection_compaction_parity.rs
+          - cqlite-core/tests/issue_1015_dropped_static_parity.rs
+        notes: >-
+          Compacting an SSTable carrying a live static cell preserves the static
+          row: the merger decodes the static block (using the header-derived
+          static column when absent from the supplied schema, #850), the writer
+          emits the static prelude, and the static cell survives gc. The #1019
+          lane proves the static survives even when the supplied schema omits the
+          static column entirely; issue_1015 proves static survival under a
+          tombstone GC compaction when the static is declared.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables/test_tomb
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl, component_files, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-tombstone-parity.sh  # dropped_static_col + static_with_tombstones fixtures
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets CQLITE_REQUIRE_FIXTURES=1 cargo test -p cqlite-core --features write-support --test issue_1019_static_dropped_collection_compaction_parity
+      normalization: >-
+        Static-cell presence + static kind are read back via KWayMerger and the
+        output Statistics.db static-column set is decoded byte-derived; layout
+        ignored.
+      known_limitations: >-
+        Canonical-semantic static-prelude survival; whole-Data.db byte identity
+        of the static prelude is the separate byte tier.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  - id: cass.compaction.GcCompactionTest.static_and_complex_columns_survive_gc
+    title: Static and non-frozen-collection columns survive a GC compaction by cell identity
+    status: mirrored
+    capability: compaction_merge
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - GcCompactionTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_1019_static_dropped_collection_compaction_parity.rs
+          - cqlite-core/tests/issue_899_per_element_survives_compaction.rs
+        notes: >-
+          A GC compaction must not drop live static cells nor collapse non-frozen
+          collection elements. Over the real collection_table fixture, every
+          per-element complex cell (column + cell_path + per-element
+          ts/ttl/ldt/is_deleted) survives a CQLite compaction byte-faithfully
+          (#899 Phase C per-element emit) rather than being promoted to a single
+          whole-column value at the row timestamp; static survival is covered by
+          the static_row_merge scenario.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables/test_collections
+        - test-data/datasets/sstables/test_tomb
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl, component_files, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # collection_table fixture (non-frozen collections)
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets CQLITE_REQUIRE_FIXTURES=1 cargo test -p cqlite-core --features write-support --test issue_1019_static_dropped_collection_compaction_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_collections
+      normalization: >-
+        Per-element complex cells are read back via the compaction KWayMerger and
+        the full (column, cell_path, ts, ttl, ldt, is_deleted) substrate is
+        compared input-vs-output; the input is genuine Cassandra output so this
+        is a faithful round-trip against the on-disk layout.
+      known_limitations: >-
+        Canonical-semantic per-element survival; whole-component byte identity is
+        the separate byte tier.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  # cqlite.issue_847.dropped_column_filter (issue identifier)
+  - id: cass.schema_evolution.issue_847_dropped_column_filter
+    title: Dropped-column cells purged by per-cell timestamp and stripped from the output header
+    status: mirrored
+    capability: schema_evolution
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationHeaderTest.java
+        - GcCompactionTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_1019_static_dropped_collection_compaction_parity.rs
+          - cqlite-core/tests/issue_1015_dropped_static_parity.rs
+        notes: >-
+          A column dropped between flushes: cells at timestamp <= drop_time are
+          purged by EACH cell's own writetime, later (re-added) cells survive,
+          and a fully-purged dropped column is removed from the compacted output
+          SerializationHeader (for_compaction_output #847) so a natural post-drop
+          reader is not misaligned. Proven over the real dropped_regular_col
+          fixture: every pre-drop drop_col cell purged, drop_col absent from the
+          output header, all six keep_col survivors aligned.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables/test_tomb
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl, component_files, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-tombstone-parity.sh  # dropped_regular_col two-generation fixture
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets CQLITE_REQUIRE_FIXTURES=1 cargo test -p cqlite-core --features write-support --test issue_1019_static_dropped_collection_compaction_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_tomb/dropped_regular_col-4cc79a50702011f1b8f419c9a388d558/nb-2-big-Statistics.db.txt
+      normalization: >-
+        Surviving keep_col cells read back via KWayMerger are compared by
+        (clustering, value) to the oracle positions; the output header is decoded
+        byte-derived and must not list the purged drop_col.
+      known_limitations: >-
+        Drop time is supplied as authoritative schema metadata
+        (system_schema.dropped_columns equivalent), not recovered from local
+        SSTable files; canonical-semantic, not a header byte comparison.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  # cqlite.issue_850.static_presence (issue identifier)
+  - id: cass.schema_evolution.issue_850_static_presence
+    title: Static column declared in input header but absent from schema is re-added on compaction
+    status: mirrored
+    capability: schema_evolution
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationHeaderTest.java
+        - CompactionSimpleValueMergeTest.java
+    cqlite:
+      coverage:
+        suite: schema_parity_serialization_header
+        tests:
+          - cqlite-core/tests/issue_1019_static_dropped_collection_compaction_parity.rs
+        notes: >-
+          When a static column is absent from the schema handed to
+          compact_sstables but an input SSTable's Statistics.db SerializationHeader
+          still declares it static (effective_compaction_schema #850), compaction
+          re-adds it from the header so the merger decodes the static cell, the
+          writer emits the static prelude, and the compacted output header
+          re-declares the column AS STATIC. Proven over dropped_static_col gen-1
+          compacted with a static-less schema.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables/test_tomb
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl, component_files, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-tombstone-parity.sh  # dropped_static_col fixture
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets CQLITE_REQUIRE_FIXTURES=1 cargo test -p cqlite-core --features write-support --test issue_1019_static_dropped_collection_compaction_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_tomb/dropped_static_col-4cd18560702011f1b8f419c9a388d558/nb-1-big-Statistics.db.txt
+      normalization: >-
+        The compacted output static-column set is decoded byte-derived and must
+        contain the re-added column as static (never demoted to regular); the
+        static cell presence is read back via KWayMerger.
+      known_limitations: >-
+        Canonical-semantic re-add behavior; whole-Statistics.db byte identity is
+        the separate byte tier.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  # cqlite.issue_899.per_element_collection_compaction (issue identifier)
+  - id: cass.compaction.issue_899_per_element_collection_compaction
+    title: Non-frozen collection elements reconcile by cell_path with no resurrection
+    status: mirrored
+    capability: compaction_merge
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - GcCompactionTest.java
+        - CompactionSimpleValueMergeTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_1019_static_dropped_collection_compaction_parity.rs
+          - cqlite-core/tests/issue_899_per_element_survives_compaction.rs
+        notes: >-
+          Map/list/set elements reconcile by cell_path (per-element last-write-
+          wins), NOT whole-column LWW: per-element ts/ttl/ldt/is_deleted survive a
+          CQLite compaction of the real collection_table fixture byte-faithfully.
+          Complex-deletion-marker shadowing is proven over the genuine Cassandra
+          test_deltas.collection_ops OVERWRITE partition (pk=2: INSERT
+          tags={old_a,old_b} then UPDATE SET tags={only_this}): Cassandra emits a
+          per-column `tags` complex deletion marker at the overwrite timestamp T
+          that shadows the older old_a/old_b elements (ts < T) while the only_this
+          element (ts > T) survives. A CQLite compaction RE-EMITS that marker
+          (compacted output still carries the `tags` ComplexDeletion at the same
+          marked_for_delete_at = T), the only surviving `tags` element is
+          only_this (ts > T), and no shadowed (ts <= T) element is resurrected —
+          including across a second idempotent compaction pass.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables/test_collections
+        - test-data/datasets/sstables/test_deltas
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl, component_files, logs, generated_report]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # collection_table fixture (non-frozen collections); bash test-data/scripts/generate-deltas.sh  # collection_ops overwrite fixture (complex deletion marker)
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets CQLITE_REQUIRE_FIXTURES=1 cargo test -p cqlite-core --features write-support --test issue_1019_static_dropped_collection_compaction_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_collections
+        - test-data/datasets/sstables/test_deltas/collection_ops-2a5006f06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+      normalization: >-
+        Per-element survival: complex cells (column, cell_path, ts, ttl, ldt,
+        is_deleted) are read back via the compaction KWayMerger and compared
+        input-vs-output. Complex-deletion-marker shadowing: the `tags`
+        ComplexDeletion marker and surviving `tags` elements for the overwrite
+        partition are read back from the compacted output via KWayMerger and
+        asserted against the Cassandra timestamp rule (marker re-emitted at T;
+        only the ts > T element survives; no ts <= T element resurrected; stable
+        across a second compaction pass).
+      known_limitations: >-
+        Canonical-semantic per-element reconciliation and marker shadowing;
+        whole-component byte identity is the separate byte tier.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  # ----------------------------------------------------------------------------
   # live-cell compaction byte parity (issue #1017, epic #973)
   #
   # The FOUNDATIONAL strict byte-for-byte COMPACTION parity slice: live cells
