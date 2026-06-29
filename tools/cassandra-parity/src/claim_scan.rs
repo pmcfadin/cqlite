@@ -284,12 +284,26 @@ fn occurrence_is_scoped(norm: &str, occ_start: usize) -> bool {
 /// expressed as repo-relative paths. These are the public/marketing-adjacent
 /// surfaces where an over-claim would actually ship; the giant generated indices
 /// under `docs/` are intentionally excluded.
+///
+/// RELEASE_FILES ↔ CI path-filter sync (issue #1023): the `cassandra-parity`
+/// GitHub workflow (`.github/workflows/cassandra-parity.yml`) runs `lint` for
+/// changes to these same files, plus the glob `docs/reports/cassandra-test-parity*.md`.
+/// That glob matches BOTH the generated `docs/reports/cassandra-test-parity.md`
+/// (regenerated, claim-language-free by construction) AND the hand-written
+/// `docs/reports/cassandra-test-parity-assessment.md`, which is release-facing and
+/// contains parity claim language. The invariant: every release-facing file the CI
+/// lint job triggers on is actually scanned here, and vice-versa — so the assessment
+/// report below is in the scanned set, closing the guardrail hole where an over-claim
+/// in it would trigger CI but escape the lint. The generated report is *not* listed:
+/// it is produced from the manifest by `report` and re-checked by `report --check`,
+/// so it cannot accrue an unreviewed over-claim.
 pub const RELEASE_FILES: &[&str] = &[
     "README.md",
     "CHANGELOG.md",
     "docs/development/parity-ci-tiers.md",
     "docs/development/parity-release-checklist.md",
     "docs/development/cassandra-parity-manifest.md",
+    "docs/reports/cassandra-test-parity-assessment.md",
 ];
 
 #[cfg(test)]

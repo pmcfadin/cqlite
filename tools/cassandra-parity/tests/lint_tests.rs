@@ -418,6 +418,17 @@ fn schema_enums_match_lint_enums() {
         schema_enum(&props["scope"]["properties"]["out_of_scope_category"]),
         expect(enums::OUT_OF_SCOPE_CATEGORY)
     );
+
+    // Issue #1023 (roborev): the claim-kind enum lives under `$defs.claim`, not
+    // `$defs.scenario`, so it was missed by the loop above. Assert it too, so
+    // drift between `enums::CLAIM_KIND` and the schema's `claim.kind` enum can't
+    // slip through.
+    let claim_props = &schema["$defs"]["claim"]["properties"];
+    assert_eq!(
+        schema_enum(&claim_props["kind"]),
+        expect(enums::CLAIM_KIND),
+        "enums::CLAIM_KIND must match $defs.claim.properties.kind.enum"
+    );
 }
 
 /// Extract the `test_deltas` table name from a fixture reference path of the
@@ -861,6 +872,38 @@ fn real_manifest_has_the_six_claim_entries() {
             "manifest missing claim entry {id}"
         );
     }
+}
+
+#[test]
+fn assessment_report_is_in_release_files() {
+    // Roborev finding 1 (issue #1023): the CI path filter for the cassandra-parity
+    // lint job uses the glob `docs/reports/cassandra-test-parity*.md`, which matches
+    // the hand-written, release-facing assessment report. `RELEASE_FILES` must list
+    // that file so the lint actually scans it — otherwise an over-claim there would
+    // trigger CI but escape the scanner (a guardrail hole).
+    assert!(
+        cassandra_parity::claim_scan::RELEASE_FILES
+            .contains(&"docs/reports/cassandra-test-parity-assessment.md"),
+        "assessment report must be in RELEASE_FILES (CI glob covers it), got: {:?}",
+        cassandra_parity::claim_scan::RELEASE_FILES
+    );
+}
+
+#[test]
+fn blocked_claim_in_assessment_report_path_fails() {
+    // Roborev finding 1 (issue #1023): a blocked over-claim placed in the assessment
+    // report's path must be caught by the claim scan, proving that path is scanned.
+    let docs = [(
+        "docs/reports/cassandra-test-parity-assessment.md",
+        "CQLite runs the same tests as Cassandra.",
+    )];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.blocked.same_tests_as_cassandra")
+                && e.contains("docs/reports/cassandra-test-parity-assessment.md")),
+        "over-claim in the assessment report path must be caught, got: {errs:#?}"
+    );
 }
 
 #[test]
