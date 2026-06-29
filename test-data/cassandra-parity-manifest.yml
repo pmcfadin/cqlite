@@ -853,7 +853,8 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
       comparison_command: >-
-        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core
         --features write-support --test issue_992_ttl_tombstone_range_parity
         ttl_row_preserves fixture_ttl_row
       reference_paths:
@@ -863,9 +864,11 @@ scenarios:
       normalization: >-
         TTL and localDeletionTime are decoded as UNSIGNED VInt deltas at exact
         wire offsets and reconstructed against the Statistics.db EncodingStats
-        minTTL / minLocalDeletionTime; the fixture lane is local-only and SKIPS
-        when the binary is absent (the deterministic lane runs everywhere), but
-        FAILS on a present-but-empty body or 0 rows.
+        minTTL / minLocalDeletionTime. Under `CQLITE_REQUIRE_FIXTURES=1` (as the
+        comparison_command sets) the fixture lane is fail-closed — a missing
+        fixture is a hard failure; skip-on-absence applies only to non-strict
+        local runs. The deterministic lane runs everywhere, and the fixture lane
+        also FAILS on a present-but-empty body or 0 rows.
       known_limitations: >-
         STRICT BYTE parity is asserted for the row TTL/LDT delta encoding and the
         expiring-cell reuse flags; per-cell explicit-TTL whole-file byte identity
@@ -918,7 +921,8 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
       comparison_command: >-
-        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core
         --features write-support --test issue_992_ttl_tombstone_range_parity
         partition_deletion live_partition fixture_partition_tombstone
       reference_paths:
@@ -927,9 +931,12 @@ scenarios:
         - target/cassandra-parity/data-db-partition-deletion-diff.log
       normalization: >-
         The partition deletion is compared as a FIXED big-endian i32 LDT + i64 mfda
-        at their exact header offsets (NOT a VInt delta); the fixture lane is
-        local-only and SKIPS when the binary is absent (deterministic lanes cover
-        the fixed-form shape everywhere) but FAILS on a present-but-empty body.
+        at their exact header offsets (NOT a VInt delta). Under
+        `CQLITE_REQUIRE_FIXTURES=1` (as the comparison_command sets) the fixture
+        lane is fail-closed — a missing fixture is a hard failure; skip-on-absence
+        applies only to non-strict local runs. The deterministic lanes cover the
+        fixed-form shape everywhere, and the fixture lane also FAILS on a
+        present-but-empty body.
       known_limitations: >-
         STRICT BYTE parity for the partition-header fixed deletion-time slots. The
         token ordering of which partition lands first on disk is derived from the
@@ -982,7 +989,8 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
       comparison_command: >-
-        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core
         --features write-support --test issue_992_ttl_tombstone_range_parity
         row_tombstone fixture_row_tombstone
       reference_paths:
@@ -992,8 +1000,11 @@ scenarios:
       normalization: >-
         Row deletion mfda/ldt are decoded as UNSIGNED VInt deltas at exact
         offsets; the "no value bytes" claim is asserted as the framed body ending
-        exactly after the column bitmap. The fixture lane is local-only and SKIPS
-        when absent but FAILS on a present-but-empty body / 0 rows.
+        exactly after the column bitmap. Under `CQLITE_REQUIRE_FIXTURES=1` (as the
+        comparison_command sets) the fixture lane is fail-closed — a missing
+        fixture is a hard failure; skip-on-absence applies only to non-strict
+        local runs. The fixture lane also FAILS on a present-but-empty body / 0
+        rows.
       known_limitations: >-
         STRICT BYTE parity for the row deletion-time delta fields and the
         no-value-bytes framing of a pure row tombstone.
@@ -1043,7 +1054,8 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
       comparison_command: >-
-        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core
         --features write-support --test issue_992_ttl_tombstone_range_parity
         cell_tombstone fixture_cell_tombstone
       reference_paths:
@@ -1053,8 +1065,11 @@ scenarios:
       normalization: >-
         Cell tombstone flag byte (IS_DELETED | HAS_EMPTY_VALUE) and own ts/ldt
         deltas are compared at exact offsets; the no-value-bytes claim is asserted
-        as the framed body ending exactly after the cell's ldt delta. Local-only
-        fixture: SKIP when absent, FAIL on present-but-empty.
+        as the framed body ending exactly after the cell's ldt delta. Under
+        `CQLITE_REQUIRE_FIXTURES=1` (as the comparison_command sets) the fixture
+        lane is fail-closed — a missing fixture is a hard failure; skip-on-absence
+        applies only to non-strict local runs. The fixture lane also FAILS on a
+        present-but-empty body.
       known_limitations: >-
         STRICT BYTE parity for the cell deletion-time fields and the no-value-bytes
         cell-tombstone framing inside a live row.
@@ -1107,7 +1122,8 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
       comparison_command: >-
-        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core
         --features write-support --test issue_992_ttl_tombstone_range_parity
         range_bound_markers_exact fixture_range_bound_markers fixture_range_inclusive_end
       reference_paths:
@@ -1119,9 +1135,11 @@ scenarios:
         IS_MARKER flag, the ClusteringPrefix.Kind ordinal, the u16 cluster count,
         the prefix clustering value (a PREFIX shorter than the full arity is
         expected for `[ck1,*]` deletes), the marker_body_size/prev_size framing, and
-        the single mfda/ldt delta. Local-only fixture: SKIP when absent (the
-        deterministic writer lane runs everywhere), FAIL on present-but-empty / 0
-        markers.
+        the single mfda/ldt delta. Under `CQLITE_REQUIRE_FIXTURES=1` (as the
+        comparison_command sets) the fixture lane is fail-closed — a missing
+        fixture is a hard failure; skip-on-absence applies only to non-strict
+        local runs. The deterministic writer lane runs everywhere, and the fixture
+        lane also FAILS on present-but-empty / 0 markers.
       known_limitations: >-
         STRICT BYTE parity for the bound-marker grammar and the single
         deletion-time pair; the two-deletion-time BOUNDARY form is a SEPARATE entry
@@ -1172,7 +1190,8 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
       comparison_command: >-
-        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core
         --features write-support --test issue_992_ttl_tombstone_range_parity
         fixture_range_boundary
       reference_paths:
@@ -1188,27 +1207,35 @@ scenarios:
         PARTIAL (read-side strict byte parity only): CQLite's WRITER never EMITS a
         boundary marker — it emits separate start/end BOUND pairs — so there is no
         deterministic writer round-trip lane for the two-deletion-time boundary
-        form. Byte parity is asserted against the real Cassandra adjacent_ranges
-        fixture (kind 2 AND kind 5). The fixture is local-only: the test SKIPS when
-        the binary is absent, so this case has NO CI-resident deterministic lane —
-        hence `partial`. Generating a CI-pinned boundary fixture (or a writer that
-        emits boundaries) would promote this to a strict-byte CI-resident `mirrored`.
+        form. Read-side byte parity IS asserted against the real Cassandra
+        adjacent_ranges fixture (kind 2 AND kind 5), which is now PINNED in the CI
+        dataset (v3.2); under `CQLITE_REQUIRE_FIXTURES=1` /
+        `CQLITE_PARITY_REQUIRE_DATASETS=1` the fixture lanes fail-closed (issue
+        #1205), so the READ lane is CI-resident and cannot false-green. The only
+        remaining gap is the absent WRITER lane: promoting to `mirrored` requires
+        teaching the writer to coalesce adjacent ranges into a boundary marker and
+        adding a deterministic writer round-trip that emits + re-decodes the
+        two-deletion-time form. The dataset-absence reason that previously also
+        justified `partial` is resolved.
     ci:
       tier: required_parity
       workflow: .github/workflows/sstabledump-parity-gate.yml
     scope:
       gap: >-
         Boundary-marker (kind 2 / kind 5, two deletion-time pairs) byte parity is
-        asserted ONLY against the local-only adjacent_ranges fixture; there is no
-        CI-resident lane because (a) the fixture binary is not in the pinned CI
-        dataset (the test SKIPS when absent) and (b) CQLite's writer never EMITS a
-        boundary marker (it writes separate start/end BOUND pairs), so no
-        deterministic writer round-trip can cover the two-deletion-time body.
+        asserted on the READ side against the real adjacent_ranges fixture, which is
+        now PINNED in the CI dataset (v3.2) and fail-closed under
+        `CQLITE_REQUIRE_FIXTURES=1` / `CQLITE_PARITY_REQUIRE_DATASETS=1` (issue
+        #1205), so the read lane IS CI-resident. The remaining gap is solely a
+        WRITER lane: CQLite's writer never EMITS a boundary marker (it writes
+        separate start/end BOUND pairs), so no deterministic writer round-trip can
+        cover the two-deletion-time body — hence `partial`, not `mirrored`.
       next_step: >-
-        Promote to strict-byte CI-resident `mirrored` by EITHER pinning the
-        adjacent_ranges boundary fixture into the CI dataset OR teaching the writer
-        to coalesce adjacent ranges into a boundary marker (then add a deterministic
-        writer round-trip lane that emits + re-decodes the two-deletion-time form).
+        Promote to strict-byte `mirrored` by teaching the writer to coalesce
+        adjacent ranges into a boundary marker, then add a deterministic writer
+        round-trip lane that emits + re-decodes the two-deletion-time form. (The
+        former dataset-absence blocker is resolved — the fixture is pinned and the
+        read lane fail-closes.)
 
   # ----------------------------------------------------------------------------
   # index_summary
