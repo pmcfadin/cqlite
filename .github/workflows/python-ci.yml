@@ -47,6 +47,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      # Issue #1209: GitHub runner images ship a stable toolchain that already
+      # provides bin/cargo-clippy. The dtolnay/rust-toolchain@stable action is
+      # invoked with `targets:`, so it performs a rustup reconcile that can
+      # intermittently try to (re)install the 'clippy-preview' component and
+      # fail with "detected conflict: 'bin/cargo-clippy'". Remove the conflicting
+      # component FIRST — before the toolchain action runs any rustup work — so
+      # the @stable setup (which defaults to the minimal profile, no clippy)
+      # cannot reinstall clippy-preview. The runner ships a working rustup, so
+      # this `run:` step before the action has rustup available.
+      # This wheel build does not run clippy. Idempotent: a no-op if clippy is absent.
+      - name: Remove preinstalled clippy (avoid clippy-preview install conflict)
+        shell: bash
+        run: rustup component remove clippy 2>/dev/null || true
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -130,6 +144,17 @@ jobs:
         run: |
           pip install pytest>=7.0
           pip install dist/*.whl
+
+      # Issue #1209: drop the conflicting clippy-preview component BEFORE the
+      # dtolnay/rust-toolchain@stable action runs any rustup work, so the @stable
+      # setup (minimal profile, no clippy) cannot reinstall clippy-preview and
+      # hit "detected conflict: 'bin/cargo-clippy'". The runner ships a working
+      # rustup, so this `run:` step before the action has rustup available.
+      # This test job does not run clippy. Idempotent: a no-op if clippy is absent.
+      - name: Remove preinstalled clippy (avoid clippy-preview install conflict)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: rustup component remove clippy 2>/dev/null || true
 
       - name: Setup Rust (for CLI build)
         if: runner.os == 'macOS'
