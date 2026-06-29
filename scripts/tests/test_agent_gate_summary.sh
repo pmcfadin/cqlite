@@ -154,11 +154,14 @@ fi
 #    can't write) must NEVER let that stale PASS survive as if it were this run's
 #    result. We assert two failure modes:
 #
-#    5a. Unwritable path: pre-populate, then chmod the file 0444 (read-only) so the
-#        gate's `>` redirection fails. The on-disk content is STILL the old PASS
-#        block (it survives non-empty + end-marker checks), so the run-id guard +
-#        write-rc check are what must catch it: the gate must exit non-zero, warn
-#        loudly on stderr, and the stale PASS must be detected as not-this-run.
+#    5a. Unwritable path: point AGENT_GATE_SUMMARY_FILE at a DIRECTORY so the
+#        gate's `>` redirection fails with "Is a directory". This is
+#        privilege-independent — it fails even as root (UID 0), unlike `chmod 0444`
+#        which root ignores — so tooling-tests stays green in root/container CI
+#        (#1175 roborev finding 2). A pre-placed stale complete PASS block at a
+#        SEPARATE readable path exercises the run-id guard: the gate must exit
+#        non-zero, warn loudly on stderr, and that stale PASS must be detected as
+#        not-this-run.
 #    5b. Early exit (dataset preflight fail): pre-populate, then run a
 #        dataset-requiring selection (--only core-tests) with an empty datasets
 #        root so the preflight exits 1 BEFORE any component. The caller-known file
@@ -166,14 +169,18 @@ fi
 #        sentinel or a preflight FAIL block, both bearing THIS run's run-id.
 STALE_PASS_BLOCK=$'\n==== AGENT-GATE SUMMARY ====\nrun-id: /tmp/agent-gate.STALEOLD\ncommit: deadbeef branch: old dirty: no\nfmt:               PASS (1s)\nlogs: /tmp/agent-gate.STALEOLD\nsummary-file: /stale\nRESULT: PASS\n==== END AGENT-GATE SUMMARY ===='
 
-# 5a. Unwritable caller-known path that already holds a stale PASS block.
+# 5a. Unwritable caller-known path: a DIRECTORY target makes `>` fail even as root
+#     (privilege-independent, #1175 roborev finding 2). A stale complete PASS block
+#     pre-placed at a SEPARATE readable path lets us still confirm the run-id guard
+#     would reject a not-this-run block.
+stale_dir="$tmp/stale-blocked-dir"
+mkdir -p "$stale_dir"
 stale_ro="$tmp/stale-readonly.txt"
 printf '%s\n' "$STALE_PASS_BLOCK" >"$stale_ro"
-chmod 0444 "$stale_ro"
 ro_stderr="$tmp/stale-readonly.stderr"
-if AGENT_GATE_SUMMARY_FILE="$stale_ro" \
+if AGENT_GATE_SUMMARY_FILE="$stale_dir" \
      bash "$GATE" --emit-summary-selftest >/dev/null 2>"$ro_stderr"; then
-  bad "stale-readonly: gate exited 0 despite unwritable summary path (should FAIL)"
+  bad "stale-readonly: gate exited 0 despite unwritable (directory) summary path (should FAIL)"
 else
   ok "stale-readonly: gate exited non-zero (recovery artifact could not be written)"
 fi
@@ -183,17 +190,29 @@ else
   bad "stale-readonly: missing loud stderr warning"
   echo "------- stderr -------"; cat "$ro_stderr"; echo "----------------------"
 fi
-# The on-disk file is still the OLD read-only block; the gate must NOT have been
-# fooled into treating that stale RESULT: PASS as this run's success — which it
-# proves by exiting non-zero (asserted above). Confirm the stale run-id is what's
-# on disk (the write never landed) so the guard's job is unambiguous.
-if grep -q "run-id: /tmp/agent-gate.STALEOLD" "$stale_ro"; then
-  ok "stale-readonly: on-disk file still bears the OLD run-id (write correctly rejected)"
+# RESULT-consistency (#1175 roborev finding 1): when the authoritative write fails
+# the fallback block streamed to stdout MUST say RESULT: FAIL — never the computed
+# PASS — so a consumer parsing it never sees a FALSE GREEN against a non-zero exit.
+ro_stdout="$tmp/stale-readonly.stdout"
+AGENT_GATE_SUMMARY_FILE="$stale_dir" \
+  bash "$GATE" --emit-summary-selftest >"$ro_stdout" 2>/dev/null || true
+if grep -q "^RESULT: FAIL" "$ro_stdout" && ! grep -q "^RESULT: PASS" "$ro_stdout"; then
+  ok "stale-readonly: stdout fallback block shows RESULT: FAIL (matches non-zero exit)"
 else
-  bad "stale-readonly: unexpected on-disk run-id"
+  bad "stale-readonly: stdout fallback block must show RESULT: FAIL, not PASS"
+  echo "------- stdout -------"; cat "$ro_stdout"; echo "----------------------"
+fi
+# The directory target means nothing was written there; the separate stale file
+# still bears the OLD run-id. The gate must NOT have been fooled into treating any
+# stale RESULT: PASS as this run's success — it proves that by exiting non-zero
+# (asserted above). Confirm the stale block's run-id is foreign so the guard's job
+# is unambiguous.
+if grep -q "run-id: /tmp/agent-gate.STALEOLD" "$stale_ro"; then
+  ok "stale-readonly: stale block still bears the OLD run-id (would be rejected as not-this-run)"
+else
+  bad "stale-readonly: unexpected stale-block run-id"
   echo "------- on disk -------"; cat "$stale_ro"; echo "-----------------------"
 fi
-chmod 0644 "$stale_ro" 2>/dev/null || true
 
 # 5b. Stale PASS at a writable caller-known path, then an early-exit gate run.
 stale_early="$tmp/stale-early.txt"

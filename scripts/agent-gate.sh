@@ -242,6 +242,16 @@ emit_summary() {
     echo "⚠️ agent-gate: recovery artifact is MISSING — gate result forced to FAIL (#1175)" >&2
   fi
 
+  # The RESULT printed in any fallback block MUST match the process exit. Once the
+  # authoritative write failed, the gate's exit logic forces a non-zero exit, so
+  # the fallback blocks (log + stdout) must say RESULT: FAIL — never the computed
+  # PASS — otherwise a consumer parsing the machine-checkable block sees a FALSE
+  # GREEN while the process exits non-zero (#1175 roborev finding 1).
+  local emit_result="$result"
+  if [ "$SUMMARY_WRITE_FAILED" -ne 0 ]; then
+    emit_result=FAIL
+  fi
+
   # Keep a copy in the logs bundle (best-effort; the caller-known file is the
   # contract). NEVER copy a stale/failed caller-known file into the log: when the
   # authoritative write failed, $SUMMARY_FILE may still hold a complete-looking
@@ -261,7 +271,7 @@ emit_summary() {
       for line in "$@"; do echo "$line"; done
       echo "logs: $LOG_DIR"
       echo "summary-file: $SUMMARY_FILE (WRITE FAILED — see stderr)"
-      echo "RESULT: $result"
+      echo "RESULT: $emit_result"
       echo "==== END AGENT-GATE SUMMARY ===="
     } > "$LOG_SUMMARY_FILE" 2>/dev/null || true
   fi
@@ -283,7 +293,7 @@ emit_summary() {
       for line in "$@"; do echo "$line"; done
       echo "logs: $LOG_DIR"
       echo "summary-file: $SUMMARY_FILE (WRITE FAILED — see stderr)"
-      echo "RESULT: $result"
+      echo "RESULT: $emit_result"
       echo "==== END AGENT-GATE SUMMARY ===="
     } 2>/dev/null || true
   fi
