@@ -76,7 +76,10 @@
 #     path the caller chose IN ADVANCE: $AGENT_GATE_SUMMARY_FILE if set, else the
 #     stable repo-root default $PWD/.agent-gate-summary.txt (gitignored). A caller
 #     can ALWAYS `cat` that file for the complete block even if stdout was 100%
-#     lost — no need to parse the stream to learn where the file is.
+#     lost — no need to parse the stream to learn where the file is. A RELATIVE
+#     $AGENT_GATE_SUMMARY_FILE resolves against the caller's CURRENT directory
+#     (the gate captures it before it cd's to the repo root); an ABSOLUTE path is
+#     used verbatim.
 #   - That file is INVALIDATED at startup with a "RESULT: INCOMPLETE" sentinel
 #     stamped with this run's run-id, so a stale prior-run summary can never be
 #     read as this run's result if the gate exits early or can't write (#1175).
@@ -88,6 +91,14 @@
 #   bash scripts/agent-gate.sh > gate.log 2>&1 < /dev/null
 # but if that stream truncates, read the caller-known file — it is always complete.
 set -uo pipefail
+
+# Capture the caller's invocation CWD BEFORE we cd to the repo root (#1175
+# roborev finding 1). A caller-provided RELATIVE AGENT_GATE_SUMMARY_FILE must
+# resolve against the directory the caller ran us from — otherwise the caller
+# reads ./gate.summary in its own CWD while the gate wrote <repo>/gate.summary,
+# breaking the recovery contract. We resolve the relative path against this
+# captured CWD just below, before any further directory change.
+INVOCATION_CWD="$PWD"
 
 cd "$(dirname "$0")/.."
 REPO_ROOT="$PWD"
@@ -120,6 +131,13 @@ RUN_ID="$LOG_DIR"
 # the caller can `cat` without parsing stdout. This is THE recovery contract: the
 # complete SUMMARY is always at this exact path even if the streamed copy is lost.
 SUMMARY_FILE="${AGENT_GATE_SUMMARY_FILE:-$REPO_ROOT/.agent-gate-summary.txt}"
+# Resolve a caller-provided RELATIVE AGENT_GATE_SUMMARY_FILE against the caller's
+# original CWD, not the repo root we cd'd into (#1175 roborev finding 1). Absolute
+# paths are used verbatim; the unset default above is already absolute.
+case "$SUMMARY_FILE" in
+  /*) ;; # absolute (incl. the repo-root default) -> use verbatim
+  *)  SUMMARY_FILE="$INVOCATION_CWD/$SUMMARY_FILE" ;;
+esac
 # Keep a copy under the logs bundle for archival.
 LOG_SUMMARY_FILE="$LOG_DIR/summary.txt"
 declare -a NAMES=() STATUSES=() TIMES=()

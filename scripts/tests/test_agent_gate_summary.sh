@@ -48,16 +48,32 @@ trap 'rm -rf "$tmp"' EXIT
 # scratch dir, so (a) we never write the repo-root default during the test, and
 # (b) we can assert the EXACT caller-provided path is complete — the contract.
 
+# assert_exit <label> <actual-rc> <expected-rc>: assert a captured exit status.
+# Positive selftest cases must exit 0; a regression that emits a complete summary
+# but exits non-zero would otherwise sail through assert_complete unnoticed.
+assert_exit() {
+  local label="$1" actual="$2" expected="$3"
+  if [ "$actual" -eq "$expected" ]; then
+    ok "$label: exit status $actual (expected $expected)"
+  else
+    bad "$label: exit status $actual (expected $expected)"
+  fi
+}
+
 # 1. Through a tee pipe (the streamed copy must be complete; no leaked child).
+#    Use ${PIPESTATUS[0]} to capture the GATE's status, not tee's.
 AGENT_GATE_SUMMARY_FILE="$tmp/case1.txt" \
   bash "$GATE" --emit-summary-selftest 2>&1 | tee "$tmp/tee.log" >/dev/null
+assert_exit "tee-pipe" "${PIPESTATUS[0]}" 0
 assert_complete "tee-pipe" "$tmp/tee.log"
 assert_complete "tee-pipe-caller-file" "$tmp/case1.txt"
 
 # 2. Backgrounded capture + wait (streamed copy must be complete).
 AGENT_GATE_SUMMARY_FILE="$tmp/case2.txt" \
   bash "$GATE" --emit-summary-selftest >"$tmp/bg.log" 2>&1 &
-wait
+bg_pid=$!
+wait "$bg_pid"; bg_rc=$?
+assert_exit "background" "$bg_rc" 0
 assert_complete "background" "$tmp/bg.log"
 assert_complete "background-caller-file" "$tmp/case2.txt"
 
@@ -104,6 +120,7 @@ fi
 iso_tmp=$(mktemp -d "$tmp/iso-tmpdir.XXXXXX")
 AGENT_GATE_SUMMARY_FILE="$tmp/iso-default.txt" TMPDIR="$iso_tmp" \
   bash "$GATE" --emit-summary-selftest >/dev/null 2>&1
+assert_exit "isolated-tmpdir" "$?" 0
 log_summary=$(ls -t "$iso_tmp"/agent-gate.*/summary.txt 2>/dev/null | head -1)
 if [ -n "$log_summary" ] && [ -f "$log_summary" ]; then
   assert_complete "isolated-tmpdir-log-copy" "$log_summary"
