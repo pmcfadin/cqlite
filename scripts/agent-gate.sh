@@ -500,15 +500,16 @@ run_file_size() {
 run_file_size
 
 # Components that actually read SSTable datasets (Data.db) at run time. These are
-# the only ones the dataset preflight must guard. format-compat is included
-# conservatively: the preflight is only a guard, so over-running it is harmless,
-# whereas wrongly skipping it for a dataset-dependent component is the #646 hazard.
-# Dataset-free components (fmt, clippy, cli-tests, python-bindings,
-# delivery-telemetry, tooling-tests, minimal-build, file-size, format-compat*)
-# need no preflight. (*format-compat reads no datasets today but is kept in the
-# needs-datasets set as a belt-and-suspenders default; remove if it ever proves
-# noisy.)
-DATASET_COMPONENTS="core-tests tombstones-scan scan-offload-guard integration-tests write-tests format-compat smoke"
+# the only ones the dataset preflight must guard. Wrongly skipping the preflight
+# for a dataset-dependent component is the #646 hazard, so this set must stay
+# complete. Dataset-free components (fmt, clippy, cli-tests, python-bindings,
+# delivery-telemetry, tooling-tests, minimal-build, file-size, format-compat)
+# need no preflight. format-compat is excluded (#1175 finding 1): its sole test
+# target (cargo test -p format-compatibility-tests, tests/format-compatibility)
+# is pure in-memory byte-level format-compliance assertions with hardcoded
+# vectors — it reads no CQLITE_DATASETS_ROOT and no Data.db — so guarding it just
+# made `--only format-compat` falsely fail the preflight when datasets are absent.
+DATASET_COMPONENTS="core-tests tombstones-scan scan-offload-guard integration-tests write-tests smoke"
 
 # selected_needs_datasets: true iff at least one SELECTED component reads datasets.
 # With no --only, every component runs, so it's always true. With --only, it's true
@@ -529,8 +530,14 @@ selected_needs_datasets() {
 # missing, never silently pass on a skipped suite (the #646 failure mode). Run it
 # only when the selected component set actually needs datasets (#1175 finding 2),
 # so dataset-free selections like `--only tooling-tests` are not blocked by it.
-DATA_COUNT=$(find "$CQLITE_DATASETS_ROOT/sstables" -name "*-Data.db" 2>/dev/null | wc -l | tr -d ' ')
+#
+# The find/wc over the dataset mount is computed INSIDE this branch (#1175
+# finding 2): a dataset-free selection must not traverse $CQLITE_DATASETS_ROOT at
+# all (it can be slow or hang on an unavailable mount). When the preflight is
+# skipped, DATA_COUNT stays the placeholder below and feeds the summary directly.
+DATA_COUNT="(preflight skipped — no dataset-dependent component selected)"
 if selected_needs_datasets; then
+  DATA_COUNT=$(find "$CQLITE_DATASETS_ROOT/sstables" -name "*-Data.db" 2>/dev/null | wc -l | tr -d ' ')
   if [ "$DATA_COUNT" -eq 0 ]; then
     echo "agent-gate: no Data.db files under $CQLITE_DATASETS_ROOT/sstables" >&2
     echo "agent-gate: fetch them first: bash test-data/scripts/fetch-datasets.sh" >&2
@@ -606,7 +613,11 @@ run_component smoke bash -c '
 
 declare -a SUMMARY_META=()
 SUMMARY_META+=("commit: $(git rev-parse --short HEAD) branch: $(git rev-parse --abbrev-ref HEAD) dirty: $(test -n "$(git status --porcelain)" && echo yes || echo no)")
-SUMMARY_META+=("datasets: $DATA_COUNT Data.db files under $CQLITE_DATASETS_ROOT")
+if selected_needs_datasets; then
+  SUMMARY_META+=("datasets: $DATA_COUNT Data.db files under $CQLITE_DATASETS_ROOT")
+else
+  SUMMARY_META+=("datasets: $DATA_COUNT")
+fi
 SUMMARY_META+=("ci-pins: $PINS")
 if [ -n "$ONLY" ]; then
   SUMMARY_META+=("mode: PARTIAL (--only $ONLY) - does NOT count as the gate")
