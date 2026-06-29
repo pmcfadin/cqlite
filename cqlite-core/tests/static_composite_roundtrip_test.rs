@@ -101,10 +101,13 @@ fn test_static_row_flags() {
         ROW_HAS_EXTENDED_FLAGS,
         "Static row must have HAS_EXTENDED_FLAGS"
     );
+    // Issue #1196: a static row carries NO row-level liveness timestamp
+    // (Cassandra's static block has no primary-key liveness; the writetime rides
+    // on the static cell). HAS_TIMESTAMP (0x04) must NOT be set.
     assert_eq!(
         flags & ROW_HAS_TIMESTAMP,
-        ROW_HAS_TIMESTAMP,
-        "Static row should have timestamp"
+        0,
+        "Static row must NOT carry a row-level liveness timestamp (#1196)"
     );
 
     // Verify extended flags
@@ -173,7 +176,16 @@ fn test_static_row_with_ttl() {
     let bytes = writer.finish().unwrap();
 
     let flags = bytes[0];
-    assert_eq!(flags & ROW_HAS_TTL, ROW_HAS_TTL, "Should have TTL flag");
+    // Issue #1196: a static row carries no row-level liveness, so it never sets a
+    // row-level TTL/expiring marker (ROW_HAS_TTL). A per-cell TTL rides on the
+    // static cell itself (CELL_IS_EXPIRING with explicit timestamp/TTL/LDT) when
+    // the op is a WriteWithTtl; a row-level `USING TTL` does not surface as a
+    // row-level flag on the static block.
+    assert_eq!(
+        flags & ROW_HAS_TTL,
+        0,
+        "Static row must NOT carry a row-level TTL flag (#1196)"
+    );
 }
 
 #[test]

@@ -361,9 +361,11 @@ fn static_schema() -> TableSchema {
 /// Decode the two static-cell tombstone localDeletionTimes from a
 /// single-partition Data.db whose static row deletes BOTH static columns.
 ///
-/// Static row layout (flags = HAS_EXTENDED_FLAGS|HAS_TIMESTAMP, extended = IS_STATIC):
+/// Static row layout (issue #1196: a static row carries NO row-level liveness,
+/// so flags = HAS_EXTENDED_FLAGS only — no HAS_TIMESTAMP, no liveness_ts delta;
+/// extended = IS_STATIC):
 ///   flags(1) + extended(1) + row_size(vint) + prev_size(vint)
-///   + liveness_ts(vint) + [columns_subset(vint) if !HAS_ALL_COLUMNS]
+///   + [columns_subset(vint) if !HAS_ALL_COLUMNS]
 ///   + two tombstone cells in static-column order.
 ///
 /// Static columns sort simple-before-complex then by name, so the cell order is
@@ -391,10 +393,11 @@ fn decode_static_cell_tombstone_ldts(data: &[u8], stats_min_ldt: i32) -> (i32, i
         ROW_HAS_EXTENDED_FLAGS,
         "static row must have extended flags"
     );
+    // Issue #1196: a static row carries NO row-level liveness timestamp.
     assert_eq!(
         flags & ROW_HAS_TIMESTAMP,
-        ROW_HAS_TIMESTAMP,
-        "static row carries a liveness timestamp"
+        0,
+        "static row must NOT carry a row-level liveness timestamp (#1196)"
     );
     assert_eq!(flags & ROW_HAS_DELETION, 0, "this is not a row tombstone");
     pos += 1;
@@ -408,9 +411,7 @@ fn decode_static_cell_tombstone_ldts(data: &[u8], stats_min_ldt: i32) -> (i32, i
     pos = p;
     let (_prev, p) = read_vuint(data, pos);
     pos = p;
-    // liveness timestamp delta
-    let (_ts, p) = read_vuint(data, pos);
-    pos = p;
+    // No row-level liveness timestamp delta (#1196): the next bytes are the
     // columns subset (both columns deleted, none "all present").
     assert_eq!(
         flags & ROW_HAS_ALL_COLUMNS,
@@ -523,7 +524,12 @@ fn decode_static_live_cell_flags(data: &[u8]) -> (u8, u8) {
 
     let flags = data[pos];
     assert_eq!(flags & ROW_HAS_EXTENDED_FLAGS, ROW_HAS_EXTENDED_FLAGS);
-    assert_eq!(flags & ROW_HAS_TIMESTAMP, ROW_HAS_TIMESTAMP);
+    // Issue #1196: a static row carries NO row-level liveness timestamp.
+    assert_eq!(
+        flags & ROW_HAS_TIMESTAMP,
+        0,
+        "static row must NOT carry a row-level liveness timestamp (#1196)"
+    );
     assert_eq!(
         flags & ROW_HAS_DELETION,
         0,
@@ -536,8 +542,7 @@ fn decode_static_live_cell_flags(data: &[u8]) -> (u8, u8) {
     pos = p;
     let (_prev, p) = read_vuint(data, pos);
     pos = p;
-    let (_ts, p) = read_vuint(data, pos); // liveness timestamp delta
-    pos = p;
+    // No row-level liveness timestamp delta (#1196).
     assert_eq!(
         flags & ROW_HAS_ALL_COLUMNS,
         ROW_HAS_ALL_COLUMNS,
@@ -606,17 +611,20 @@ async fn older_static_live_write_keeps_its_own_timestamp() {
     let (data, _stats) = flush_mutations(&schema, vec![older, newer]).await;
     let (s_new_flags, s_old_flags) = decode_static_live_cell_flags(&data);
 
-    // s_new originated at the liveness timestamp ⇒ borrows the row timestamp.
+    // Issue #1196: a static row carries NO row-level liveness timestamp, so there
+    // is no row timestamp for any static cell to borrow — EVERY static cell must
+    // carry its OWN explicit timestamp (CELL_USE_ROW_TIMESTAMP clear). This still
+    // satisfies the finding's intent: the older s_old write is never promoted to
+    // the newer mutation's timestamp.
     assert_eq!(
         s_new_flags & CELL_USE_ROW_TIMESTAMP,
-        CELL_USE_ROW_TIMESTAMP,
-        "newest static write should use the row liveness timestamp"
+        0,
+        "static cells carry their own timestamp; no row liveness to borrow (#1196)"
     );
-    // s_old originated earlier ⇒ must carry its OWN timestamp (the bug set this).
     assert_eq!(
         s_old_flags & CELL_USE_ROW_TIMESTAMP,
         0,
-        "older static write must not be promoted to the newer liveness timestamp"
+        "older static write must carry its own timestamp, not be promoted (#1196)"
     );
 }
 
