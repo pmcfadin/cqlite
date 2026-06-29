@@ -864,9 +864,11 @@ scenarios:
       normalization: >-
         TTL and localDeletionTime are decoded as UNSIGNED VInt deltas at exact
         wire offsets and reconstructed against the Statistics.db EncodingStats
-        minTTL / minLocalDeletionTime; the fixture lane is local-only and SKIPS
-        when the binary is absent (the deterministic lane runs everywhere), but
-        FAILS on a present-but-empty body or 0 rows.
+        minTTL / minLocalDeletionTime. Under `CQLITE_REQUIRE_FIXTURES=1` (as the
+        comparison_command sets) the fixture lane is fail-closed — a missing
+        fixture is a hard failure; skip-on-absence applies only to non-strict
+        local runs. The deterministic lane runs everywhere, and the fixture lane
+        also FAILS on a present-but-empty body or 0 rows.
       known_limitations: >-
         STRICT BYTE parity is asserted for the row TTL/LDT delta encoding and the
         expiring-cell reuse flags; per-cell explicit-TTL whole-file byte identity
@@ -929,9 +931,12 @@ scenarios:
         - target/cassandra-parity/data-db-partition-deletion-diff.log
       normalization: >-
         The partition deletion is compared as a FIXED big-endian i32 LDT + i64 mfda
-        at their exact header offsets (NOT a VInt delta); the fixture lane is
-        local-only and SKIPS when the binary is absent (deterministic lanes cover
-        the fixed-form shape everywhere) but FAILS on a present-but-empty body.
+        at their exact header offsets (NOT a VInt delta). Under
+        `CQLITE_REQUIRE_FIXTURES=1` (as the comparison_command sets) the fixture
+        lane is fail-closed — a missing fixture is a hard failure; skip-on-absence
+        applies only to non-strict local runs. The deterministic lanes cover the
+        fixed-form shape everywhere, and the fixture lane also FAILS on a
+        present-but-empty body.
       known_limitations: >-
         STRICT BYTE parity for the partition-header fixed deletion-time slots. The
         token ordering of which partition lands first on disk is derived from the
@@ -995,8 +1000,11 @@ scenarios:
       normalization: >-
         Row deletion mfda/ldt are decoded as UNSIGNED VInt deltas at exact
         offsets; the "no value bytes" claim is asserted as the framed body ending
-        exactly after the column bitmap. The fixture lane is local-only and SKIPS
-        when absent but FAILS on a present-but-empty body / 0 rows.
+        exactly after the column bitmap. Under `CQLITE_REQUIRE_FIXTURES=1` (as the
+        comparison_command sets) the fixture lane is fail-closed — a missing
+        fixture is a hard failure; skip-on-absence applies only to non-strict
+        local runs. The fixture lane also FAILS on a present-but-empty body / 0
+        rows.
       known_limitations: >-
         STRICT BYTE parity for the row deletion-time delta fields and the
         no-value-bytes framing of a pure row tombstone.
@@ -1057,8 +1065,11 @@ scenarios:
       normalization: >-
         Cell tombstone flag byte (IS_DELETED | HAS_EMPTY_VALUE) and own ts/ldt
         deltas are compared at exact offsets; the no-value-bytes claim is asserted
-        as the framed body ending exactly after the cell's ldt delta. Local-only
-        fixture: SKIP when absent, FAIL on present-but-empty.
+        as the framed body ending exactly after the cell's ldt delta. Under
+        `CQLITE_REQUIRE_FIXTURES=1` (as the comparison_command sets) the fixture
+        lane is fail-closed — a missing fixture is a hard failure; skip-on-absence
+        applies only to non-strict local runs. The fixture lane also FAILS on a
+        present-but-empty body.
       known_limitations: >-
         STRICT BYTE parity for the cell deletion-time fields and the no-value-bytes
         cell-tombstone framing inside a live row.
@@ -1124,9 +1135,11 @@ scenarios:
         IS_MARKER flag, the ClusteringPrefix.Kind ordinal, the u16 cluster count,
         the prefix clustering value (a PREFIX shorter than the full arity is
         expected for `[ck1,*]` deletes), the marker_body_size/prev_size framing, and
-        the single mfda/ldt delta. Local-only fixture: SKIP when absent (the
-        deterministic writer lane runs everywhere), FAIL on present-but-empty / 0
-        markers.
+        the single mfda/ldt delta. Under `CQLITE_REQUIRE_FIXTURES=1` (as the
+        comparison_command sets) the fixture lane is fail-closed — a missing
+        fixture is a hard failure; skip-on-absence applies only to non-strict
+        local runs. The deterministic writer lane runs everywhere, and the fixture
+        lane also FAILS on present-but-empty / 0 markers.
       known_limitations: >-
         STRICT BYTE parity for the bound-marker grammar and the single
         deletion-time pair; the two-deletion-time BOUNDARY form is a SEPARATE entry
