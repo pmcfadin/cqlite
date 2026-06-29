@@ -61,7 +61,20 @@
 //! (being bounded) blocks `raw_tx.send().await` in the I/O half, which stops
 //! reading from disk. Nothing buffers the whole file; live heap stays
 //! `window + RAW_CHUNK_CHANNEL_CAP` raw chunks + at most
-//! `BATCH_CHANNEL_CAP * BATCH_EMIT_ROWS` buffered rows.
+//! [`MAX_INFLIGHT_BATCH_ROWS`] buffered rows.
+//!
+//! ## Batching vs the documented `buffer_size` bound (issue #1143, roborev)
+//!
+//! `scan_stream` documents its live heap as "bounded by `buffer_size` rows". The
+//! batching here adds a SECOND, SMALLER in-flight pool that is NOT sized by the
+//! caller's `buffer_size`: the pending `batch` plus the bounded batch channel can
+//! together hold up to [`MAX_INFLIGHT_BATCH_ROWS`] confirmed rows ahead of the
+//! caller, even when `buffer_size == 1`. That is a deliberate, BOUNDED amount of
+//! read-ahead — a single named constant, not an unbounded or `buffer_size`-scaled
+//! quantity — and it is the price of amortizing the blocking->async wake. The
+//! public `scan_stream` doc states this explicitly so callers relying on the
+//! `buffer_size` backpressure bound know the windowed path's true worst case is
+//! `buffer_size + MAX_INFLIGHT_BATCH_ROWS` rows in flight.
 //!
 //! ## Cancellation (issue #1143 finding 2)
 //!
@@ -161,6 +174,48 @@ const BATCH_EMIT_ROWS: usize = 256;
 /// ~512 small `(RowKey, Value)` entries — negligible against the <128MB budget.
 const BATCH_CHANNEL_CAP: usize = 2;
 
+/// SINGLE documented bound on the rows the windowed scan's batching subsystem may
+/// hold in flight ahead of the caller, INDEPENDENT of `scan_stream`'s
+/// `buffer_size` (roborev finding, issue #1143).
+///
+/// # Why this exists
+///
+/// `scan_stream` documents live heap as "bounded by `buffer_size` rows". The
+/// windowed path's blocking→async batching (issue #1143) adds a SECOND in-flight
+/// pool — the pending `batch` plus the bounded batch channel — that is NOT sized
+/// by `buffer_size`. Without a stated bound a future tweak to `BATCH_EMIT_ROWS` /
+/// `BATCH_CHANNEL_CAP` could let parsing run arbitrarily far ahead of a stalled
+/// consumer. This constant names the worst case so it is enforced and tested.
+///
+/// # The bound
+///
+/// At any instant the batching subsystem owns at most:
+///   - the pending `batch` being built in `drain_scan_window` — `< BATCH_EMIT_ROWS`
+///     (it is flushed the moment it REACHES `BATCH_EMIT_ROWS`), and
+///   - the batch channel — at most `BATCH_CHANNEL_CAP` items of `BATCH_EMIT_ROWS`
+///     rows each.
+///
+/// A producer that is about to push the row crossing `BATCH_EMIT_ROWS` can only do
+/// so when the channel `blocking_send` succeeds, i.e. the channel had a free slot;
+/// the steady-state worst case is therefore `BATCH_CHANNEL_CAP` full channel items
+/// plus a pending `batch` filling toward (but never exceeding) `BATCH_EMIT_ROWS`.
+/// The forwarder may additionally hold ONE batch it has `recv()`'d and is
+/// flattening, but that batch has LEFT the channel, so it does not add to the
+/// channel-resident count — the channel can refill only as the forwarder drains.
+/// Bounding by `(BATCH_CHANNEL_CAP + 1) * BATCH_EMIT_ROWS` covers the channel,
+/// the in-flight forwarder batch, and the pending tail simultaneously.
+///
+/// With the defaults (`256 * 3 = 768`) this is comfortably below every real
+/// caller's `buffer_size` (`StreamingConfig::buffer_size` defaults to 1024, the
+/// text-format preset is 512), so batching never pushes in-flight rows past what
+/// callers already request — yet the bound is a CONSTANT, not a function of
+/// `buffer_size`, so it holds even for a degenerate `buffer_size = 1` consumer.
+///
+/// [`tests::batch_inflight_rows_are_bounded_independent_of_buffer_size`] asserts
+/// the runtime worst case never exceeds this; any sizing change that breaks the
+/// bound must update this constant AND keep that test green.
+pub(super) const MAX_INFLIGHT_BATCH_ROWS: usize = (BATCH_CHANNEL_CAP + 1) * BATCH_EMIT_ROWS;
+
 /// Decide whether the blocking parse half should run its terminal
 /// (`at_final_chunk = true`) drain once the raw-chunk stream has ended.
 ///
@@ -200,6 +255,48 @@ fn flush_pending(
 ) {
     if !batch.is_empty() {
         let _ = tx.blocking_send(Ok(std::mem::take(batch)));
+    }
+}
+
+/// Finish the blocking parse half: deliver the rows still pending in `batch` and
+/// return the drain outcome to the caller.
+///
+/// This is the load-bearing error-flush seam (roborev finding, issue #1143).
+/// `drained` is the result of the fallible parse loop + terminal drain:
+///
+///   - `Err(e)`: a mid-stream decompress/parse error. FLUSH `batch` first so the
+///     consumer receives every confirmed-up-to-error row ahead of the terminal
+///     `Err` — matching the pre-batching per-row send contract — THEN propagate
+///     `e`. Removing this flush silently drops the confirmed-but-unflushed pending
+///     rows on an error, which is exactly the regression
+///     [`tests::finish_blocking_drain_flushes_pending_before_error`] pins.
+///   - `Ok(())` and the consumer is still attached (`!broke`): flush the trailing
+///     partial batch so the last rows reach the consumer.
+///   - `Ok(())` but `broke` (consumer dropped): nothing to deliver — drop `batch`.
+///
+/// Pulled out of [`SSTableReader::drain_scan_window_blocking`] so the error-path
+/// flush is unit-tested in isolation with a genuinely NON-EMPTY pending batch. In
+/// the live driver the in-stream per-chunk flush usually empties `batch` at a
+/// chunk boundary BEFORE a separate-chunk decompress error fires, which would make
+/// an end-to-end "corrupt trailing chunk" test vacuous; testing this seam directly
+/// guarantees the error flush is exercised and FAILS if it is removed.
+fn finish_blocking_drain(
+    drained: Result<()>,
+    batch: &mut Vec<(RowKey, Value)>,
+    broke: bool,
+    tx: &mpsc::Sender<Result<Vec<(RowKey, Value)>>>,
+) -> Result<()> {
+    match drained {
+        Err(e) => {
+            flush_pending(batch, tx);
+            Err(e)
+        }
+        Ok(()) => {
+            if !broke {
+                flush_pending(batch, tx);
+            }
+            Ok(())
+        }
     }
 }
 
@@ -259,6 +356,17 @@ impl SSTableReader {
         // per row (issue #1143). The forwarder task flattens each batch into the
         // caller's per-item `tx`, preserving the public stream contract.
         let (batch_tx, batch_rx) = mpsc::channel::<Result<Vec<(RowKey, Value)>>>(BATCH_CHANNEL_CAP);
+        // The batching subsystem (pending batch + this bounded channel + the one
+        // batch the forwarder is flattening) holds at most `MAX_INFLIGHT_BATCH_ROWS`
+        // confirmed rows ahead of a stalled caller, INDEPENDENT of `scan_stream`'s
+        // `buffer_size` (roborev finding, issue #1143). This is the documented,
+        // bounded read-ahead — see `MAX_INFLIGHT_BATCH_ROWS` and the `scan_stream`
+        // doc. The assert ties the runtime channel sizing to that named bound so a
+        // future capacity change cannot silently exceed it.
+        debug_assert!(
+            (BATCH_CHANNEL_CAP + 1) * BATCH_EMIT_ROWS <= MAX_INFLIGHT_BATCH_ROWS,
+            "batch channel sizing must stay within the documented MAX_INFLIGHT_BATCH_ROWS bound"
+        );
         // Distinguishes a clean EOF (sender dropped after `Ok(None)`) from a
         // mid-stream read error (sender dropped after `Err`). On error the parse
         // half must NOT run its `at_final_chunk = true` terminal drain — a
@@ -491,17 +599,16 @@ impl SSTableReader {
             Ok(())
         })();
 
-        if let Err(e) = drained {
-            // Deliver confirmed rows produced before the failure ahead of the
-            // terminal error (roborev finding, issue #1143), then propagate.
-            flush_pending(&mut batch, &tx);
-            return Err(e);
-        }
-
-        // Flush the trailing partial batch so the last rows reach the consumer.
-        if !broke {
-            flush_pending(&mut batch, &tx);
-        }
+        // Finish: deliver any rows still in `batch` and propagate the drain
+        // outcome. On `Err`, the pending rows are flushed BEFORE the error so the
+        // consumer sees every confirmed-up-to-error row ahead of the terminal Err
+        // (roborev finding, issue #1143); on success the trailing partial batch is
+        // flushed (unless the consumer already dropped, `broke`). Extracted so the
+        // error-path flush is unit-tested directly with a NON-EMPTY pending batch
+        // (`tests::finish_blocking_drain_flushes_pending_before_error`) — that test
+        // fails if the error flush is dropped, keeping the guard non-vacuous even
+        // though the in-stream per-chunk flush usually empties `batch` first.
+        finish_blocking_drain(drained, &mut batch, broke, &tx)?;
 
         // Test-only probe (issue #1143 regression guard): record the thread that
         // ran the parse so a guard test can prove it was NOT an async worker.

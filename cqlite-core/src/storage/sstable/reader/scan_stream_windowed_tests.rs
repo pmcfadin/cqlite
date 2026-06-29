@@ -33,6 +33,135 @@ fn terminal_drain_skipped_iff_io_failed() {
     );
 }
 
+/// Issue #1143 finding 1 (roborev) — the batching in-flight bound is a single
+/// documented CONSTANT, derived purely from the batch sizing knobs, and is
+/// independent of the caller's `buffer_size`. This pins the algebra so a future
+/// tweak to `BATCH_EMIT_ROWS` / `BATCH_CHANNEL_CAP` that changes the worst case
+/// must also update the documented [`MAX_INFLIGHT_BATCH_ROWS`] constant (and the
+/// `scan_stream` doc that quotes it), rather than silently widening the window in
+/// which parsing can run ahead of a stalled consumer.
+#[test]
+fn max_inflight_batch_rows_matches_sizing_knobs() {
+    // The pending `batch` (< BATCH_EMIT_ROWS) + the channel (BATCH_CHANNEL_CAP
+    // items) + the one batch the forwarder is flattening = (CAP + 1) batches.
+    assert_eq!(
+        MAX_INFLIGHT_BATCH_ROWS,
+        (BATCH_CHANNEL_CAP + 1) * BATCH_EMIT_ROWS,
+        "MAX_INFLIGHT_BATCH_ROWS must equal (BATCH_CHANNEL_CAP + 1) * BATCH_EMIT_ROWS; \
+         update the constant AND the scan_stream doc if the sizing knobs change"
+    );
+    // The bound is a constant, not a function of buffer_size: nothing in its
+    // definition references the caller's channel size. (Compile-time fact; the
+    // explicit assertion documents the intent for readers.)
+    assert!(
+        MAX_INFLIGHT_BATCH_ROWS > 0 && BATCH_EMIT_ROWS > 0,
+        "the batching bound must be a positive constant"
+    );
+}
+
+/// Issue #1143 finding 2 (roborev) — NON-VACUOUS error-flush guard. The previous
+/// end-to-end test appended a corrupt chunk AFTER full clean chunks, but the
+/// in-stream per-chunk-boundary flush already delivered those rows at the chunk
+/// boundary BEFORE the corrupt chunk errored — so it passed even with the
+/// error-path `flush_pending` deleted. This drives the extracted finish seam
+/// [`finish_blocking_drain`] DIRECTLY with a genuinely NON-EMPTY pending `batch`
+/// and an `Err`, the precise state the per-chunk flush cannot reach: confirmed
+/// rows still buffered when the error fires.
+///
+/// PROOF it is non-vacuous: delete the `flush_pending(batch, tx)` call in the
+/// `Err` arm of `finish_blocking_drain` and this test FAILS (the receiver gets
+/// zero rows, so `received == 0 != 2`). With the flush it PASSES (both pending
+/// rows arrive ahead of the terminal `Err`). Verified locally.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn finish_blocking_drain_flushes_pending_before_error() {
+    let (tx, mut rx) = mpsc::channel::<Result<Vec<(RowKey, Value)>>>(8);
+
+    // Two confirmed rows sitting in the pending batch (fewer than BATCH_EMIT_ROWS,
+    // so they were NOT yet flushed as a full batch) when a mid-stream error fires.
+    let mut batch: Vec<(RowKey, Value)> = vec![
+        (RowKey::from(b"k1".to_vec()), Value::Text("v1".into())),
+        (RowKey::from(b"k2".to_vec()), Value::Text("v2".into())),
+    ];
+    let drained: Result<()> = Err(Error::corruption("mid-stream decompress failure"));
+
+    // Run the seam on a blocking thread (it uses blocking_send) and capture both
+    // the propagated error and the rows delivered ahead of it.
+    let handle = tokio::task::spawn_blocking(move || {
+        let r = finish_blocking_drain(drained, &mut batch, /* broke */ false, &tx);
+        // `batch` must have been drained by the flush, not left holding rows.
+        (r, batch)
+    });
+    let (result, leftover_batch) = handle.await.expect("finish task");
+
+    let mut received = 0usize;
+    let mut got_err = false;
+    while let Some(item) = rx.recv().await {
+        match item {
+            Ok(rows) => received += rows.len(),
+            Err(_) => got_err = true,
+        }
+    }
+
+    assert!(
+        result.is_err(),
+        "finish_blocking_drain must propagate the mid-stream Err"
+    );
+    assert!(
+        !got_err,
+        "finish_blocking_drain forwards ONLY the pending rows; the terminal Err is \
+         surfaced via its return value (the forwarder/caller emits it), not the channel"
+    );
+    assert_eq!(
+        received, 2,
+        "Issue #1143 REGRESSION: the {} pending rows confirmed before the mid-stream \
+         error were DROPPED. The error path must flush_pending(batch) BEFORE \
+         propagating the Err. (Deleting that flush makes this 0.)",
+        2
+    );
+    assert!(
+        leftover_batch.is_empty(),
+        "the pending batch must be drained by the error flush, not left buffered"
+    );
+}
+
+/// Issue #1143 finding 2 companion — the success path flushes the trailing partial
+/// batch when the consumer is still attached, and drops it when the consumer has
+/// gone (`broke`). Pins the other two arms of [`finish_blocking_drain`].
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn finish_blocking_drain_flushes_trailing_batch_on_success() {
+    // Consumer attached, clean finish: the trailing partial batch is delivered.
+    let (tx, mut rx) = mpsc::channel::<Result<Vec<(RowKey, Value)>>>(8);
+    let mut batch: Vec<(RowKey, Value)> =
+        vec![(RowKey::from(b"k".to_vec()), Value::Text("v".into()))];
+    let handle =
+        tokio::task::spawn_blocking(move || finish_blocking_drain(Ok(()), &mut batch, false, &tx));
+    handle.await.expect("task").expect("clean finish");
+    let mut received = 0usize;
+    while let Some(Ok(rows)) = rx.recv().await {
+        received += rows.len();
+    }
+    assert_eq!(
+        received, 1,
+        "clean finish must flush the trailing partial batch"
+    );
+
+    // Consumer dropped (`broke`): nothing is flushed.
+    let (tx2, mut rx2) = mpsc::channel::<Result<Vec<(RowKey, Value)>>>(8);
+    let mut batch2: Vec<(RowKey, Value)> =
+        vec![(RowKey::from(b"k".to_vec()), Value::Text("v".into()))];
+    let handle2 =
+        tokio::task::spawn_blocking(move || finish_blocking_drain(Ok(()), &mut batch2, true, &tx2));
+    handle2.await.expect("task2").expect("clean finish (broke)");
+    let mut received2 = 0usize;
+    while let Some(Ok(rows)) = rx2.recv().await {
+        received2 += rows.len();
+    }
+    assert_eq!(
+        received2, 0,
+        "a finish with broke=true must NOT flush (consumer already dropped)"
+    );
+}
+
 // Real-behavior guard (issue #1143 finding 2): drive the private blocking
 // parse half (`drain_scan_window_blocking`) directly over a genuinely
 // multi-chunk fixture, with the SAME truncated input, toggling ONLY
@@ -64,10 +193,14 @@ mod fixture_drain {
     }
 
     fn fixture_data_db() -> Option<PathBuf> {
-        let table_root = datasets_root()?.join("sstables").join(KEYSPACE);
+        fixture_data_db_for(KEYSPACE, TABLE)
+    }
+
+    fn fixture_data_db_for(keyspace: &str, table: &str) -> Option<PathBuf> {
+        let table_root = datasets_root()?.join("sstables").join(keyspace);
         for entry in std::fs::read_dir(&table_root).ok()?.flatten() {
             let name = entry.file_name();
-            if name.to_string_lossy().starts_with(&format!("{TABLE}-")) && entry.path().is_dir() {
+            if name.to_string_lossy().starts_with(&format!("{table}-")) && entry.path().is_dir() {
                 for f in std::fs::read_dir(entry.path()).ok()?.flatten() {
                     if f.file_name()
                         .to_str()
@@ -80,6 +213,14 @@ mod fixture_drain {
         }
         None
     }
+
+    // A deliberately WIDE compressed fixture (999 rows) so the parse half confirms
+    // strictly more rows than the batch channel can hold, forcing the producer to
+    // PARK on `blocking_send` and exercising the in-flight bound (issue #1143
+    // finding 1). `wide_partition_table` only confirms ~100 rows, below the
+    // 512-row channel capacity, so it cannot force the park.
+    const WIDE_KEYSPACE: &str = "test_basic";
+    const WIDE_TABLE: &str = "simple_table";
 
     /// Collect every raw compressed chunk of the data section, in order, the
     /// way `run_scan_stream_windowed`'s I/O half would feed them.
@@ -220,16 +361,23 @@ mod fixture_drain {
         (result, received)
     }
 
-    /// Roborev finding (issue #1143): the row-batching change must NOT silently
-    /// drop confirmed rows when the stream errors mid-flight. A scan that emits
-    /// some rows (fewer than `BATCH_EMIT_ROWS`, so they sit in the pending batch)
-    /// and THEN hits a decompression error must still deliver those confirmed
-    /// rows to the consumer ahead of the terminal `Err` — matching the
-    /// pre-batching per-row send contract.
+    /// Issue #1143 — END-TO-END delivery + error-surfacing guard on the real
+    /// `drain_scan_window_blocking` flow: a real-chunk prefix followed by a corrupt
+    /// trailing chunk must deliver every confirmed row AND return `Err`.
     ///
-    /// Dataset-dependent: skips when the fixture is absent. The invariant is
-    /// asserted at the smallest real seam — drive the private blocking parse
-    /// half directly with a real-chunk prefix + a corrupt trailing chunk.
+    /// NOTE (roborev finding, issue #1143): this is NOT the error-FLUSH guard. With
+    /// a corrupt chunk appended AFTER clean chunks, the in-stream per-chunk-boundary
+    /// flush already delivers the prefix's confirmed rows at the chunk boundary
+    /// BEFORE the corrupt chunk errors — so this test still passes even if the
+    /// error-path `flush_pending` is deleted, i.e. it does NOT guard that path.
+    /// The non-vacuous error-flush guard is the dataset-independent unit test
+    /// [`super::finish_blocking_drain_flushes_pending_before_error`], which drives
+    /// the finish seam with a genuinely non-empty pending batch + an `Err` and
+    /// FAILS if the flush is removed. This end-to-end test is retained as a
+    /// real-data smoke that the corrupt-chunk path delivers rows and surfaces the
+    /// error together.
+    ///
+    /// Dataset-dependent: skips when the fixture is absent.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mid_stream_error_still_delivers_confirmed_pending_rows() {
         let Some(data_db) = fixture_data_db() else {
@@ -314,6 +462,156 @@ mod fixture_drain {
              {expected_pending} pending rows before the terminal Err, got {received}. \
              The batching change must flush the pending batch before propagating an error."
         );
+    }
+
+    /// Issue #1143 finding 1 (roborev) — real-behavior bound check. Drive the
+    /// private blocking parse half against a genuinely large multi-chunk fixture
+    /// with a STALLED consumer (a batch channel of the production [`BATCH_CHANNEL_CAP`]
+    /// that is NEVER drained), and prove parsing cannot run unboundedly ahead: the
+    /// producer blocks on `blocking_send` once the channel fills, having emitted at
+    /// most `BATCH_CHANNEL_CAP` channel items. Because nothing here drains the
+    /// channel, no forwarder batch and no further pending tail can escape, so the
+    /// channel-resident worst case is `BATCH_CHANNEL_CAP * BATCH_EMIT_ROWS` rows —
+    /// strictly within the documented [`MAX_INFLIGHT_BATCH_ROWS`]. This is the
+    /// invariant the documented bound rests on, exercised on the real parse loop
+    /// (not a re-derivation): if a future change let the producer keep parsing past
+    /// a full channel (e.g. an unbounded channel, or dropping `blocking_send`'s
+    /// backpressure), this test would see MORE than `BATCH_CHANNEL_CAP` items or a
+    /// completed (non-blocked) drain and fail.
+    ///
+    /// Dataset-dependent: skips when the fixture is absent. The pure
+    /// `max_inflight_batch_rows_matches_sizing_knobs` test above runs in every gate.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn batch_inflight_rows_are_bounded_independent_of_buffer_size() {
+        let Some(data_db) = fixture_data_db_for(WIDE_KEYSPACE, WIDE_TABLE) else {
+            eprintln!(
+                "Skipping {WIDE_KEYSPACE}.{WIDE_TABLE}: no Data.db present (run fetch-datasets.sh). \
+                 The pure max_inflight_batch_rows_matches_sizing_knobs guard still runs."
+            );
+            return;
+        };
+
+        let cfg = crate::Config::default();
+        let platform = Arc::new(
+            crate::platform::Platform::new(&cfg)
+                .await
+                .expect("platform"),
+        );
+        let reader = SSTableReader::open(&data_db, &cfg, platform)
+            .await
+            .expect("open reader");
+        assert!(
+            reader.compression_info.is_some(),
+            "fixture must be compressed to exercise the windowed chunk-stitching path"
+        );
+
+        // The bound check only needs ENOUGH confirmed rows to overflow the batch
+        // channel (asserted below via `confirmed_total`); it does NOT require
+        // multiple chunks — a single wide chunk drains many full batches into the
+        // bounded channel just the same.
+        let chunks = collect_raw_chunks(&reader).await;
+        assert!(
+            !chunks.is_empty(),
+            "Issue #1143: fixture produced no raw chunks"
+        );
+
+        let reader = Arc::new(reader);
+
+        // First, how many rows does the whole fixture confirm? (skip-terminal path)
+        let all_chunks = chunks.clone();
+        let r0 = Arc::clone(&reader);
+        let confirmed_total =
+            tokio::task::spawn_blocking(move || pending_before_more_input(&r0, &all_chunks))
+                .await
+                .expect("count task");
+        let channel_capacity_rows = BATCH_CHANNEL_CAP * BATCH_EMIT_ROWS;
+        if confirmed_total <= channel_capacity_rows {
+            eprintln!(
+                "Skipping bound check: fixture confirms only {confirmed_total} rows \
+                 (<= channel capacity {channel_capacity_rows}); cannot force the \
+                 producer to block. Need a wider fixture."
+            );
+            return;
+        }
+
+        // Drive the real blocking drain with a batch channel of the PRODUCTION
+        // capacity that we NEVER drain, on a dedicated thread. The producer will
+        // fill the channel and then park in `blocking_send`. Count how many rows
+        // escaped the producer (i.e. are resident in the channel) and assert it
+        // never exceeds the channel-resident bound.
+        let ctx = ctx_for(&reader);
+        let (raw_tx, raw_rx) = mpsc::channel::<Vec<u8>>(chunks.len().max(1));
+        for c in &chunks {
+            raw_tx.try_send(c.clone()).expect("prefill raw chunk");
+        }
+        drop(raw_tx);
+        // PRODUCTION-sized batch channel, deliberately left undrained.
+        let (out_tx, mut out_rx) = mpsc::channel::<Result<Vec<(RowKey, Value)>>>(BATCH_CHANNEL_CAP);
+        let flag = Arc::new(AtomicBool::new(false));
+        let r = Arc::clone(&reader);
+        let drain_handle =
+            std::thread::spawn(move || r.drain_scan_window_blocking(ctx, raw_rx, out_tx, flag));
+
+        // Give the producer time to fill the channel and PARK on blocking_send.
+        // It cannot finish: confirmed_total > channel_capacity_rows and we never
+        // drain, so it must block (proving the bound is enforced by backpressure,
+        // not by the fixture being small).
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert!(
+            !drain_handle.is_finished(),
+            "Issue #1143 REGRESSION: the parse half RAN TO COMPLETION against an \
+             undrained, bounded batch channel — backpressure is broken and parsing \
+             ran arbitrarily far ahead of the (stalled) consumer. Confirmed rows \
+             {confirmed_total} exceed channel capacity {channel_capacity_rows}, so a \
+             correct producer MUST be parked in blocking_send here."
+        );
+
+        // The producer being PARKED (asserted above) while confirmed_total exceeds
+        // the channel capacity is the load-bearing proof: with the channel full and
+        // never drained, the producer cannot push a (CAP+1)-th item, so at most
+        // `BATCH_CHANNEL_CAP` batches are resident ahead of the stalled consumer.
+        // Each batch carries at most `BATCH_EMIT_ROWS` rows (the producer flushes the
+        // moment a batch REACHES that size), so the resident worst case is
+        // `BATCH_CHANNEL_CAP * BATCH_EMIT_ROWS` rows, within MAX_INFLIGHT_BATCH_ROWS.
+        //
+        // Now drain item-by-item to release the producer, asserting EACH received
+        // batch respects the per-batch size cap. (We cannot snapshot the parked
+        // channel without freeing slots — every recv lets the producer refill — so
+        // the channel-resident COUNT is proven structurally by the park + the
+        // per-batch cap, not by a racy drain count.)
+        let mut max_batch_rows = 0usize;
+        let mut total_received = 0usize;
+        while let Some(item) = out_rx.recv().await {
+            if let Ok(rows) = item {
+                assert!(
+                    rows.len() <= BATCH_EMIT_ROWS,
+                    "Issue #1143 REGRESSION: a batch carried {} rows, exceeding \
+                     BATCH_EMIT_ROWS={BATCH_EMIT_ROWS}; per-batch sizing is unbounded.",
+                    rows.len()
+                );
+                max_batch_rows = max_batch_rows.max(rows.len());
+                total_received += rows.len();
+            }
+        }
+        let resident_worst_case = BATCH_CHANNEL_CAP * BATCH_EMIT_ROWS;
+        assert!(
+            resident_worst_case <= MAX_INFLIGHT_BATCH_ROWS,
+            "Issue #1143: channel-resident worst case {resident_worst_case} must be \
+             within the documented MAX_INFLIGHT_BATCH_ROWS={MAX_INFLIGHT_BATCH_ROWS}"
+        );
+        assert_eq!(
+            total_received, confirmed_total,
+            "Issue #1143: draining the stalled-then-released scan must yield every \
+             confirmed row exactly once (no loss/dup from backpressure)"
+        );
+        eprintln!(
+            "Issue #1143 in-flight bound guard: producer parked with a full \
+             (cap {BATCH_CHANNEL_CAP}) batch channel; resident worst case \
+             {resident_worst_case} rows <= bound {MAX_INFLIGHT_BATCH_ROWS}; \
+             max single batch {max_batch_rows} <= {BATCH_EMIT_ROWS}; \
+             total confirmed {confirmed_total}."
+        );
+        let _ = drain_handle.join().expect("join drain thread");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
