@@ -102,6 +102,15 @@ fn all_statistics_txt() -> Vec<PathBuf> {
     out
 }
 
+/// Lower-hex of a raw 16-byte UUID, for failure messages.
+fn hex(uuid: &[u8; 16]) -> String {
+    let mut s = String::with_capacity(32);
+    for b in uuid {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
 /// Derive the binary `*-Statistics.db` path from its `*-Statistics.db.txt` dump.
 fn binary_for(txt: &Path) -> PathBuf {
     let name = txt
@@ -247,39 +256,45 @@ fn repaired_metadata_strict_parity() {
             reference.repaired_at,
         );
 
-        // pendingRepair / isTransient: this module does NOT walk these fields,
-        // so the read path must report them honestly as `Unparsed` rather than a
-        // fabricated null / false. The authoritative reference confirms the
-        // corpus is in the null / non-transient state, but CQLite does not CLAIM
-        // to have decoded that — it reports `Unparsed` (no silent misreport).
+        // pendingRepair / isTransient: with authoritative version gates the read
+        // path performs the version-gated walk (issue #1021). The walk decodes
+        // these two fields FROM REAL BYTES whenever it can safely traverse the
+        // min/max-clustering block — always for the legacy (`nb`) layout, and for
+        // the improved (`oa`/`da`) layout only when the covered-clustering Slice
+        // is empty (no clustering values). When the improved Slice carries
+        // comparator-encoded values this decoder does not model, the walk stops
+        // and reports the two fields honestly as `Unparsed`.
+        //
+        // So the valid outcomes are: the reference value DECODED, or `Unparsed`.
+        // A fabricated NON-reference decoded value (e.g. a pending UUID or
+        // isTransient=true when the reference is null/false) must FAIL.
         assert!(
             reference.pending_repair_is_null,
-            "{}: reference Pending repair is NOT null; extend the lane (and the \
-             decoder) before adding pending-repair fixtures",
+            "{}: reference Pending repair is NOT null — the corpus is expected \
+             unrepaired; extend the lane before adding pending-repair fixtures",
             db.display(),
         );
-        assert_eq!(
-            decoded.pending_repair,
-            RepairField::Unparsed,
-            "{}: pendingRepair must be reported as Unparsed (not a fabricated \
-             value), got {:?}",
-            db.display(),
-            decoded.pending_repair,
-        );
-        assert!(
-            !reference.is_transient,
-            "{}: reference IsTransient is NOT false; extend the lane (and the \
-             decoder) before adding transient fixtures",
-            db.display(),
-        );
-        assert_eq!(
-            decoded.is_transient,
-            RepairField::Unparsed,
-            "{}: isTransient must be reported as Unparsed (not a fabricated \
-             value), got {:?}",
-            db.display(),
-            decoded.is_transient,
-        );
+        match decoded.pending_repair {
+            RepairField::Unparsed => {}
+            RepairField::Decoded(None) => {} // matches reference null
+            RepairField::Decoded(Some(uuid)) => panic!(
+                "{}: pendingRepair decoded a UUID {} but reference is null (--) — \
+                 a fabricated/mis-decoded value",
+                db.display(),
+                hex(&uuid),
+            ),
+        }
+        match decoded.is_transient {
+            RepairField::Unparsed => {}
+            RepairField::Decoded(v) => assert_eq!(
+                v,
+                reference.is_transient,
+                "{}: isTransient decoded {} but reference is {}",
+                db.display(),
+                v,
+                reference.is_transient,
+            ),
+        }
 
         // Idempotent re-decode: the read-side metadata API is stable across
         // repeated reads of the same bytes (read -> report preservation).
@@ -487,14 +502,94 @@ fn repaired_metadata_writer_roundtrip_preserves_unrepaired_state() {
         RepairMetadata {
             repaired_at: 0,
             // The writer's persisted null / false state is NOT walked by the
-            // read path, so it is reported honestly as Unparsed rather than a
-            // fabricated decoded value.
+            // read path WITHOUT gates, so it is reported honestly as Unparsed
+            // rather than a fabricated decoded value.
             pending_repair: RepairField::Unparsed,
             is_transient: RepairField::Unparsed,
             repaired_at_decoded: true,
         },
         "writer-persisted unrepaired repair state must round-trip field-exact \
          (repairedAt decoded; pending_repair / is_transient reported as Unparsed)"
+    );
+
+    // With authoritative nb gates the full walk decodes the writer's persisted
+    // null / false state from real bytes (issue #1021).
+    let gates = VersionGates::Big(
+        cqlite_core::storage::sstable::version_gate::BigVersionGates::from_version("nb")
+            .expect("nb gates"),
+    );
+    let decoded_full =
+        parse_repair_metadata(&written, Some(&gates)).expect("decode written repair metadata");
+    assert_eq!(
+        decoded_full,
+        RepairMetadata {
+            repaired_at: 0,
+            pending_repair: RepairField::Decoded(None),
+            is_transient: RepairField::Decoded(false),
+            repaired_at_decoded: true,
+        },
+        "writer-persisted unrepaired state must decode null / false through the \
+         full version-gated walk"
+    );
+
+    let _ = std::fs::remove_file(&stats_path);
+}
+
+/// Compaction-preservation round-trip (issue #1021 AC2): a `StatisticsMetadata`
+/// carrying a NON-default repair state (repairedAt != 0, a pendingRepair UUID,
+/// isTransient = true — the state the compaction merge path preserves from
+/// compatible inputs) is written by the real Statistics.db writer and decoded
+/// back through the full version-gated read walk field-exact.
+///
+/// This proves the writer→read repair-state round-trip for the repaired /
+/// pending / transient DISTINCT states for which the Cassandra 5.0 corpus has NO
+/// fixture (so this is the provable, honest coverage of those states), and it is
+/// the byte-level mechanism the compaction output relies on to carry repair
+/// metadata forward.
+#[cfg(feature = "write-support")]
+#[test]
+fn repaired_state_writer_roundtrip_preserves_repaired_pending_transient() {
+    use cqlite_core::storage::sstable::writer::{StatisticsMetadata, StatisticsWriter};
+
+    let dir = std::env::temp_dir().join("cqlite-1021-repaired-preserve");
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let stats_path = dir.join("nb-1-big-Statistics.db");
+
+    let repaired_at: i64 = 1_700_000_000_000;
+    let pending_uuid: [u8; 16] = [
+        0x9a, 0x1b, 0x2c, 0x3d, 0x4e, 0x5f, 0x60, 0x71, 0x82, 0x93, 0xa4, 0xb5, 0xc6, 0xd7, 0xe8,
+        0xf9,
+    ];
+
+    let mut meta = StatisticsMetadata::new();
+    meta.update_timestamp(1_000_000);
+    meta.update_timestamp(2_000_000);
+    meta.increment_partition_count();
+    meta.row_count = 3;
+    meta.set_repair_state(repaired_at, Some(pending_uuid), true);
+
+    let writer = StatisticsWriter::new(stats_path.clone());
+    writer.write(&meta, None).expect("write Statistics.db");
+
+    let written = std::fs::read(&stats_path).expect("read written Statistics.db");
+
+    let gates = VersionGates::Big(
+        cqlite_core::storage::sstable::version_gate::BigVersionGates::from_version("nb")
+            .expect("nb gates"),
+    );
+    let decoded =
+        parse_repair_metadata(&written, Some(&gates)).expect("decode preserved repair state");
+
+    assert_eq!(
+        decoded,
+        RepairMetadata {
+            repaired_at,
+            pending_repair: RepairField::Decoded(Some(pending_uuid)),
+            is_transient: RepairField::Decoded(true),
+            repaired_at_decoded: true,
+        },
+        "the writer must preserve a non-default repair state (repairedAt / \
+         pendingRepair UUID / isTransient) byte-exact through a write→read round-trip"
     );
 
     let _ = std::fs::remove_file(&stats_path);

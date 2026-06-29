@@ -157,6 +157,23 @@ pub struct StatisticsMetadata {
     /// contributes a `partition_tombstone`. Ignored by the legacy BIG (nb/oa)
     /// STATS body, which never serialises this field.
     pub has_partition_level_deletions: bool,
+
+    /// `repairedAt` repair timestamp (`0` = unrepaired). Serialised verbatim
+    /// into the STATS component `repairedAt` field. Preserved through compaction
+    /// from the (compatible) input SSTables (issue #1021); a fresh memtable flush
+    /// leaves it `0`.
+    pub repaired_at: i64,
+
+    /// `pendingRepair` incremental-repair session UUID (`None` = no pending
+    /// repair). Serialised as the STATS `pendingRepair` nullable field (presence
+    /// byte then 16-byte UUID). Preserved through compaction from compatible
+    /// inputs (issue #1021); a fresh flush leaves it `None`.
+    pub pending_repair: Option<[u8; 16]>,
+
+    /// `isTransient` flag (transiently-replicated data). Serialised as the STATS
+    /// `isTransient` boolean. Preserved through compaction from compatible inputs
+    /// (issue #1021); a fresh flush leaves it `false`.
+    pub is_transient: bool,
 }
 
 impl Default for StatisticsMetadata {
@@ -176,6 +193,9 @@ impl Default for StatisticsMetadata {
             first_key: None,
             last_key: None,
             has_partition_level_deletions: false,
+            repaired_at: 0,
+            pending_repair: None,
+            is_transient: false,
         }
     }
 }
@@ -270,6 +290,25 @@ impl StatisticsMetadata {
     /// `partition_tombstone`.
     pub fn mark_partition_level_deletion(&mut self) {
         self.has_partition_level_deletions = true;
+    }
+
+    /// Set the persisted repair state (`repairedAt`, `pendingRepair`,
+    /// `isTransient`) carried into the output STATS component.
+    ///
+    /// Used by the compaction merge path to preserve the repair metadata of
+    /// compatible inputs through to the merged output (issue #1021). A fresh
+    /// memtable flush never calls this, so the default unrepaired state
+    /// (`repaired_at = 0`, `pending_repair = None`, `is_transient = false`) is
+    /// retained.
+    pub fn set_repair_state(
+        &mut self,
+        repaired_at: i64,
+        pending_repair: Option<[u8; 16]>,
+        is_transient: bool,
+    ) {
+        self.repaired_at = repaired_at;
+        self.pending_repair = pending_repair;
+        self.is_transient = is_transient;
     }
 
     /// Increment row count

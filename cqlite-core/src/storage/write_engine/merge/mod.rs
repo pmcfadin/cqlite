@@ -76,6 +76,14 @@ mod model;
 #[cfg(feature = "write-support")]
 pub use model::{CellData, ComplexDeletion, MergeEntry, MergeStats, MergeStep, RowData};
 
+/// Repair-state classification + mixed-state rejection for compaction
+/// (issue #1021). Reads each input's persisted repair state from `Statistics.db`
+/// and either returns the shared state to preserve or rejects a mixed-state set.
+#[cfg(feature = "write-support")]
+pub mod repair_state;
+#[cfg(feature = "write-support")]
+pub use repair_state::{classify_inputs, RepairState};
+
 /// Clustering-group reconciliation kernel, decomposed into named steps
 /// (issue #945). See [`reconcile::ReconcileState`].
 #[cfg(feature = "write-support")]
@@ -448,7 +456,12 @@ impl SSTableRowIteratorAdapter {
     /// and stored on `MergeEntry.clustering_key` so `merge_partition_rows` groups
     /// and reconciles distinct clustering rows correctly. The clustering columns
     /// are left in the cells as well, since the read-back path expects them there.
-    fn open(path: &Path, run_index: usize, schema: &TableSchema) -> Result<Self> {
+    fn open(
+        path: &Path,
+        run_index: usize,
+        schema: &TableSchema,
+        udt_registry: Option<crate::schema::UdtRegistry>,
+    ) -> Result<Self> {
         let path_buf = path.to_path_buf();
         let schema = schema.clone();
 
@@ -457,7 +470,7 @@ impl SSTableRowIteratorAdapter {
         // Spawn the producer thread. It owns a fresh Tokio runtime so it never
         // collides with any runtime on the calling thread (Issue #587).
         let producer = std::thread::spawn(move || {
-            Self::producer_thread(path_buf, run_index, schema, sender);
+            Self::producer_thread(path_buf, run_index, schema, udt_registry, sender);
         });
 
         Ok(Self {
@@ -482,6 +495,7 @@ impl SSTableRowIteratorAdapter {
         path_buf: PathBuf,
         run_index: usize,
         schema: TableSchema,
+        udt_registry: Option<crate::schema::UdtRegistry>,
         sender: std::sync::mpsc::SyncSender<std::result::Result<MergeEntry, String>>,
     ) {
         // Drive the streaming read on an owned Tokio runtime (Issue #587): the
@@ -519,10 +533,19 @@ impl SSTableRowIteratorAdapter {
 
             rt.block_on(async move {
                 let platform = Arc::new(Platform::new(&config).await?);
-                let reader = crate::storage::sstable::reader::SSTableReader::open(
+                let mut reader = crate::storage::sstable::reader::SSTableReader::open(
                     &path_buf, &config, platform,
                 )
                 .await?;
+
+                // Issue #1234: wire the authoritative UDT registry onto the reader
+                // so the compaction read path decodes a top-level `frozen<UDT>`
+                // value structurally. Without it the value decode errors
+                // (`UDT not found in registry`), the row reconciles to empty, and
+                // the partition is dropped — silent data loss during compaction.
+                if let Some(registry) = udt_registry {
+                    reader.set_udt_registry(registry);
+                }
 
                 // Pass the schema so the parser uses the real clustering column
                 // names; the header-inferred fallback uses generic names like
@@ -1746,19 +1769,33 @@ pub async fn compact_sstables_with_registry(
     // normalized `effective_schema` (for_compaction_output clones columns).
     let write_schema = effective_schema.for_compaction_output(&retained_dropped);
 
-    let merger = KWayMerger::new_with_gc(
+    // Issue #1234: thread the registry onto the merge readers so a top-level
+    // `frozen<UDT>` value decodes structurally instead of erroring out and
+    // dropping the partition. Cloned because the merger owns its readers.
+    let merger = KWayMerger::new_with_gc_and_registry(
         input_paths.clone(),
         &effective_schema,
         gc_before_secs,
         now_secs,
+        udt_registry.cloned(),
     )?
     .with_purge_safe(purge_safe);
+
+    // Repair-state preservation + mixed-state rejection (issue #1021): reject a
+    // mixed repaired/unrepaired/pending-repair input set (Cassandra never mixes
+    // them in one compaction) and otherwise carry the shared state forward.
+    let repair_state = classify_inputs(&input_paths)?;
 
     let mut writer = crate::storage::sstable::writer::SSTableWriter::new(
         output_dir.to_path_buf(),
         generation,
         &write_schema,
     )?;
+    writer.set_repair_state(
+        repair_state.repaired_at,
+        repair_state.pending_repair,
+        repair_state.is_transient,
+    );
 
     // Two-pass compaction (issue #729): seed the output's encoding baselines from
     // the inputs' Statistics.db before writing any partition.
@@ -1859,6 +1896,23 @@ impl KWayMerger {
         gc_before_secs: Option<i64>,
         now_secs: Option<i64>,
     ) -> Result<Self> {
+        Self::new_with_gc_and_registry(input_paths, schema, gc_before_secs, now_secs, None)
+    }
+
+    /// Like [`KWayMerger::new_with_gc`], but threads an authoritative
+    /// [`UdtRegistry`](crate::schema::UdtRegistry) onto every input SSTable reader
+    /// so the compaction read path can decode a top-level `frozen<UDT>` cell
+    /// structurally (issue #1234). The one-shot `compact_sstables_with_registry`
+    /// and the WriteEngine background compaction pass their configured registry
+    /// here; the registry-free `new`/`new_with_gc` paths pass `None`.
+    #[tracing::instrument(name = "merger.new_registry", skip(input_paths, schema, gc_before_secs, now_secs, udt_registry), fields(inputs = input_paths.len()))]
+    pub fn new_with_gc_and_registry(
+        input_paths: Vec<PathBuf>,
+        schema: &TableSchema,
+        gc_before_secs: Option<i64>,
+        now_secs: Option<i64>,
+        udt_registry: Option<crate::schema::UdtRegistry>,
+    ) -> Result<Self> {
         if input_paths.is_empty() {
             return Err(Error::InvalidInput(
                 "K-way merge requires at least one input file".to_string(),
@@ -1871,10 +1925,14 @@ impl KWayMerger {
         // entry) for programmatically-built schemas that bypass `validate()`.
         schema.validate_dropped_columns()?;
 
-        // Create run readers for each input SSTable (ordered newest to oldest)
+        // Create run readers for each input SSTable (ordered newest to oldest).
+        // The registry (when supplied) is cloned onto each reader so a frozen UDT
+        // value decodes structurally instead of erroring out and dropping the row
+        // (issue #1234).
         let mut runs = Vec::with_capacity(input_paths.len());
         for (run_index, path) in input_paths.iter().enumerate() {
-            let adapter = SSTableRowIteratorAdapter::open(path, run_index, schema)?;
+            let adapter =
+                SSTableRowIteratorAdapter::open(path, run_index, schema, udt_registry.clone())?;
             runs.push(RunReader::new(Box::new(adapter)));
         }
 

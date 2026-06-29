@@ -1,0 +1,93 @@
+name: Workflow Config Validation
+
+on:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - '.github/workflows/**'
+  push:
+    branches: [main, develop]
+    paths:
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+concurrency:
+  group: workflow-config-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  validate:
+    name: YAML and trigger policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Validate workflow YAML parses
+        run: |
+          ruby <<'RUBY'
+          require "yaml"
+
+          files = Dir[".github/workflows/*.{yml,yaml}"].sort
+          abort "No workflow files found" if files.empty?
+
+          files.each do |file|
+            YAML.load_file(file)
+            puts "ok #{file}"
+          end
+          RUBY
+
+      - name: Validate workflow trigger policy
+        run: |
+          ruby <<'RUBY'
+          require "yaml"
+
+          missing_concurrency = []
+          unscoped_branch_triggers = []
+
+          Dir[".github/workflows/*.{yml,yaml}"].sort.each do |file|
+            workflow = YAML.load_file(file)
+            triggers = workflow["on"] || workflow[true]
+            next unless triggers.is_a?(Hash)
+
+            if triggers.key?("pull_request") && !workflow.key?("concurrency")
+              missing_concurrency << file
+            end
+
+            %w[pull_request push].each do |event|
+              next unless triggers.key?(event)
+
+              config = triggers[event]
+              if config.nil?
+                unscoped_branch_triggers << "#{file}: #{event}"
+                next
+              end
+
+              unless config.is_a?(Hash)
+                unscoped_branch_triggers << "#{file}: #{event}"
+                next
+              end
+
+              # Tag-only release workflows are not branch CI and do not need path filters.
+              next if event == "push" && config.key?("tags") && !config.key?("branches")
+
+              unless config.key?("paths") || config.key?("paths-ignore")
+                unscoped_branch_triggers << "#{file}: #{event}"
+              end
+            end
+          end
+
+          unless missing_concurrency.empty?
+            warn "PR workflows missing concurrency:"
+            missing_concurrency.each { |entry| warn "  - #{entry}" }
+          end
+
+          unless unscoped_branch_triggers.empty?
+            warn "Branch-based workflow triggers missing paths or paths-ignore:"
+            unscoped_branch_triggers.each { |entry| warn "  - #{entry}" }
+          end
+
+          exit 1 if missing_concurrency.any? || unscoped_branch_triggers.any?
+
+          puts "Workflow trigger policy validated"
+          RUBY

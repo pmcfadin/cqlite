@@ -1287,7 +1287,7 @@ scenarios:
 
   - id: cass.index_summary.summary_boundaries
     title: Summary.db sampling boundaries (BIG)
-    status: partial
+    status: mirrored
     capability: index_summary
     priority: P0
     risk: p1_correctness
@@ -1296,36 +1296,46 @@ scenarios:
       relevance: high
       files:
         - SSTableReaderTest.java
+        - IndexSummaryTest.java
     cqlite:
       coverage:
         suite: sstable_parity_summary_db_big
         tests:
           - cqlite-core/tests/sstabledump_parity_summary.rs
+        notes: >-
+          Closed by strict::test_summary_db_strict_byte_parity — the same gated lane
+          that backs cass.summary_db.IndexSummaryTest.first_last_key_boundaries, which
+          is the canonical superseding scenario for this row. It decodes the trailing
+          length-prefixed first/last keys and byte-compares them to SummaryReader, and
+          requires the first sampled entry key to equal the SSTable's first decorated
+          key. This row is retained as a public claim and now mirrors that scenario's
+          real evidence rather than carrying a stale partial gap (issue #1030).
     fixtures:
-      references:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      datasets:
+        - test-data/datasets/sstables
     evidence:
-      type: partial
-      artifacts: [offsets]
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, logs]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
-      storage_format_version: [nb]
+      storage_format_version: [nb, oa, big]
       fixture_generation_command: >-
         bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 flush emits Summary.db
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test sstabledump_parity_summary strict::
       reference_paths:
-        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_timeseries/app_metrics-6c87b890a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - validation_artifacts/sstabledump/summary/summary_parity_report.md
       known_limitations: >-
-        Summary.db first/last key boundaries are validated on read, but the
-        Cassandra Summary.db reference dumps are not published for the full
-        dataset (references.yml records summary_txt.present=false), so strict
-        boundary comparison is not enforced.
+        Superseded by cass.summary_db.IndexSummaryTest.first_last_key_boundaries.
+        Skip-on-absence: validated only when the sibling Data.db is present.
     ci:
-      tier: fast_pr
-    scope:
-      gap: Cassandra Summary.db reference dumps not published for all tables.
-      next_step: >-
-        Publish Summary.db reference dumps and enable strict first/last-key
-        boundary comparison in the sstable_parity_summary_db_big suite.
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
 
   # ----------------------------------------------------------------------------
   # index_db — strict Index.db byte parity (issue #983 / epic #968)
@@ -3133,6 +3143,16 @@ scenarios:
         suite: sstable_parity_corruption_verify
         tests:
           - cqlite-core/tests/sstable_parity_integration_test.rs
+        notes: >-
+          The byte-for-byte comparison of a CLEAN Digest.crc32 against the Cassandra
+          reference is covered by cass.sstable_format.toc_component_manifest (its
+          digest_crc32_byte_for_byte_parity lane recomputes and byte-compares the
+          digest payload). That comparison does NOT mutate inputs or prove corruption
+          rejection. The corruption-detection / rejection capability described by this
+          scenario's Cassandra sources (Checksumed* tests) is genuinely unimplemented:
+          CQLite validates inline checksums on read and surfaces mismatches, but there
+          is no gated test that injects corruption and asserts rejection. That gap is
+          tracked by the carved-out scrub/verify issue #1236.
     fixtures:
       references:
         - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Digest.crc32
@@ -3149,16 +3169,22 @@ scenarios:
       failure_artifacts:
         - target/cassandra-parity/checksum-mismatch.log
       known_limitations: >-
-        CQLite validates inline checksums on read and surfaces mismatches, but
-        an exact byte comparison of Digest.crc32 against the Cassandra value is
-        not yet a gated test.
+        Byte-compare of a clean Digest.crc32 is covered by
+        cass.sstable_format.toc_component_manifest. CQLite validates inline checksums
+        on read and surfaces mismatches, but corruption-detection / rejection (the
+        capability this scenario's Cassandra sources exercise) is not yet a gated
+        test. That gap remains open and is tracked by issue #1236.
     ci:
       tier: fast_pr
     scope:
-      gap: No gated byte comparison of Digest.crc32 against the Cassandra reference.
+      gap: >-
+        No gated test injects corruption and asserts rejection; only inline-checksum
+        validation on read is implemented. (Byte-compare of clean Digest.crc32 is
+        already covered by cass.sstable_format.toc_component_manifest.)
       next_step: >-
-        Add a Digest.crc32 byte comparison to the sstable_parity_corruption_verify
-        suite.
+        Byte-compare of clean Digest.crc32 is covered by
+        cass.sstable_format.toc_component_manifest; corruption-detection / rejection
+        remains open and is tracked by the carved-out scrub/verify issue #1236.
 
   - id: cass.compression_info.CompressionMetadataTest.metadata_serialization
     title: CompressionInfo.db metadata byte-for-byte serialization parity
@@ -4093,7 +4119,7 @@ scenarios:
   # ----------------------------------------------------------------------------
   - id: cass.filter_db_bloom.serialization_no_false_negative
     title: Filter.db Bloom filter serialization with no false negatives
-    status: partial
+    status: mirrored
     capability: filter_db_bloom
     priority: P0
     risk: p0_data_loss
@@ -4107,28 +4133,57 @@ scenarios:
       coverage:
         suite: sstable_parity_filter_db_bloom
         tests:
-          - cqlite-core/tests/sstable_parity_integration_test.rs
+          - cqlite-core/tests/sstable_parity_filter_db_test.rs
+        notes: >-
+          Closed by the strict, fail-closed lane
+          filter_db_strict_parameters_and_no_false_negative — the same gated lane
+          that backs cass.filter_db.no_false_negative_membership (issue #987 / epic
+          #968), which is the canonical superseding scenario for this row. For every
+          committed BIG Filter.db it independently re-reads the on-disk header,
+          asserts CQLite's decoded hash_count / bit_count match the bytes, then
+          enumerates every raw partition key Cassandra wrote (from the sibling
+          Index.db key_digest) and asserts the filter reports "maybe present" for all
+          of them; a single false negative fails the lane. This row is retained as a
+          public claim and now mirrors that scenario's real evidence rather than
+          carrying a stale partial gap (issue #1030).
     fixtures:
       datasets:
         - test-data/datasets/sstables
     evidence:
-      type: partial
-      artifacts: [component_files]
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, component_files]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
-      storage_format_version: [nb]
+      # BIG formats only: the no-false-negative membership probe runs over BIG
+      # fixtures whose Index.db exposes the raw partition keys. BTI (da) membership
+      # is a separate open gap, tracked by cass.filter_db.bti_membership.
+      storage_format_version: [nb, oa]
       fixture_generation_command: >-
-        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 emits Filter.db
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 flush emits Filter.db
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test sstable_parity_filter_db_test
+        filter_db_strict_parameters_and_no_false_negative
+      normalization: >-
+        Present keys are the raw partition-key bytes from Index.db (not the decoded
+        CQL values), matching the bytes Cassandra's Murmur3 hashed into Filter.db.
+        The reference_paths point at the committed per-fixture Data.db.jsonl siblings
+        (the binary Filter.db and Index.db are gitignored, fetched on demand).
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/filter-db-false-negative.log
       known_limitations: >-
-        CQLite reads Filter.db, but there is no gated test proving that lookups
-        never produce false negatives against a Cassandra-generated Filter.db.
+        Superseded by cass.filter_db.no_false_negative_membership; the no-false-negative
+        gate runs over BIG fixtures whose Index.db exposes the raw partition keys.
+        BTI (da) membership is tracked separately under
+        cass.filter_db.bti_membership.
     ci:
-      tier: fast_pr
-    scope:
-      gap: No no-false-negative parity assertion against Cassandra Filter.db.
-      next_step: >-
-        Add a Filter.db serialization parity test asserting zero false negatives
-        across the present-key set.
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
 
   # ----------------------------------------------------------------------------
   # filter_db — strict Filter.db Bloom parity (issue #987 / epic #968)
@@ -4417,7 +4472,7 @@ scenarios:
           - cqlite-core/tests/scan_delta_parity_test.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_deltas/adjacent_ranges-972f22806c7811f1a24ff924a65838e2/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/adjacent_ranges-29bdd5c0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
     evidence:
       type: partial
       artifacts: [jsonl]
@@ -4427,7 +4482,7 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh  # cassandra:5.0.2 delete shapes → sstabledump JSONL
       reference_paths:
-        - test-data/datasets/sstables/test_deltas/adjacent_ranges-972f22806c7811f1a24ff924a65838e2/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/adjacent_ranges-29bdd5c0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       normalization: >-
         Range/cell/row tombstone bounds and deletion timestamps are mapped to
         the sstabledump JSONL deletion-fact model and compared.
@@ -4515,7 +4570,7 @@ scenarios:
           facts are compared to the sstabledump JSONL golden.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_deltas/cell_tombstones-29f7fbe06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/cell_tombstones-29733830701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
@@ -4525,7 +4580,7 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
       reference_paths:
-        - test-data/datasets/sstables/test_deltas/cell_tombstones-29f7fbe06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/cell_tombstones-29733830701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       normalization: >-
         scan_delta cell-tombstone records are mapped to sstabledump JSONL
         deletion facts (deleted_at) and compared with a writetime tolerance.
@@ -4566,7 +4621,7 @@ scenarios:
           are compared to the sstabledump JSONL golden.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_deltas/row_tombstones-2a0e91206c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/row_tombstones-297f1f10701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
@@ -4576,7 +4631,7 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
       reference_paths:
-        - test-data/datasets/sstables/test_deltas/row_tombstones-2a0e91206c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/row_tombstones-297f1f10701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       normalization: >-
         scan_delta row-delete records are mapped to sstabledump JSONL row
         deletion_info markers and compared with a writetime tolerance.
@@ -4617,7 +4672,7 @@ scenarios:
           start/end bound pairs are compared to the sstabledump JSONL golden.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_deltas/range_tombstones-2a1a50f06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/range_tombstones-298894f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
@@ -4627,7 +4682,7 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
       reference_paths:
-        - test-data/datasets/sstables/test_deltas/range_tombstones-2a1a50f06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/range_tombstones-298894f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       normalization: >-
         scan_delta range-delete records are mapped to consecutive sstabledump
         JSONL range_tombstone_bound start/end pairs and compared with a writetime
@@ -4669,7 +4724,7 @@ scenarios:
           partition-delete facts are compared to the sstabledump JSONL golden.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_deltas/partition_tombstones-2a26fb206c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/partition_tombstones-299258f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
@@ -4679,7 +4734,7 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
       reference_paths:
-        - test-data/datasets/sstables/test_deltas/partition_tombstones-2a26fb206c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/partition_tombstones-299258f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       normalization: >-
         scan_delta partition-delete records are mapped to the sstabledump JSONL
         partition deletion_info marker (marked_deleted) and compared with a
@@ -4720,7 +4775,7 @@ scenarios:
           local_deletion_time facts are compared to the sstabledump JSONL golden.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_deltas/ttl_cells-2a35ef406c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/ttl_cells-299c9220701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
@@ -4730,7 +4785,7 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
       reference_paths:
-        - test-data/datasets/sstables/test_deltas/ttl_cells-2a35ef406c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/ttl_cells-299c9220701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       normalization: >-
         scan_delta expiring-cell records are mapped to sstabledump JSONL cell
         ttl / local_deletion_time fields and compared; mixed live + expiring
@@ -4879,7 +4934,7 @@ scenarios:
           to the sstabledump JSONL golden.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_deltas/adjacent_ranges-972f22806c7811f1a24ff924a65838e2/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/adjacent_ranges-29bdd5c0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       artifacts: [jsonl]
@@ -4889,7 +4944,7 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/generate-deltas.sh
       reference_paths:
-        - test-data/datasets/sstables/test_deltas/adjacent_ranges-972f22806c7811f1a24ff924a65838e2/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/adjacent_ranges-29bdd5c0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       normalization: >-
         scan_delta range-delete records are reconstructed from sstabledump JSONL
         boundary markers (excl_end_incl_start / incl_end_excl_start) into
@@ -7024,7 +7079,7 @@ scenarios:
           - cqlite-core/tests/issue_1010_deletion_markers_parity.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_deltas/adjacent_ranges-972f22806c7811f1a24ff924a65838e2/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/adjacent_ranges-29bdd5c0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
@@ -7038,7 +7093,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features "delta-scan write-support" --test issue_1010_deletion_markers_parity
       reference_paths:
-        - test-data/datasets/sstables/test_deltas/adjacent_ranges-972f22806c7811f1a24ff924a65838e2/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/adjacent_ranges-29bdd5c0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       normalization: >-
         scan_delta adjacent range-tombstone boundary markers (the shared boundary
         between two adjacent ranges) are mapped to the sstabledump JSONL
@@ -12581,6 +12636,332 @@ scenarios:
     ci:
       tier: manual_debug
     scope: {}
+
+  # ----------------------------------------------------------------------------
+  # Repair-metadata parse / preserve / classify through compaction (issue #1021,
+  # epic #973). CQLite parses repairedAt/pendingRepair/isTransient from the
+  # Statistics.db STATS component, PRESERVES them through compaction of compatible
+  # inputs, and REJECTS a compaction that mixes repair states (Cassandra never
+  # compacts across a repair boundary). SCOPE: parse + preserve + classify +
+  # reject ONLY — this establishes NOTHING about repair-aware tombstone purging
+  # (out of scope; a separate correctness concern), and makes no repair / read-
+  # repair / coordinator-behavior claim.
+  # ----------------------------------------------------------------------------
+  - id: cass.repair.RepairedDataInfoTest.repaired_metadata_roundtrip
+    title: repairedAt / pendingRepair / isTransient round-trip through the Statistics.db read+write path
+    status: mirrored
+    capability: statistics_metadata
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: repair
+      relevance: high
+      files:
+        - StatsMetadata.java
+        - RepairedDataInfoTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_statistics_db
+        tests:
+          - cqlite-core/tests/sstable_parity_repaired_metadata_test.rs
+        notes: >-
+          The read path decodes repairedAt from the STATS component for every
+          fixture (nb/oa/da) and — with authoritative version gates — performs the
+          full version-gated forward walk past the min/max-clustering block +
+          commitLogIntervals to decode pendingRepair (nullable UUID) and isTransient
+          from real bytes. The strict corpus lane asserts each decoded field equals
+          the authoritative sstablemetadata reference (Repaired at: / Pending repair:
+          / IsTransient:), or — for the oa/da improved-min/max layout whose covered-
+          clustering Slice carries comparator-encoded values this repair-only decoder
+          does not model — reports the two later fields honestly as Unparsed (never a
+          fabricated value). A write->read round-trip writes a non-default repaired /
+          pending-UUID / transient state via the real Statistics.db writer and
+          re-decodes it field-exact.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [bytes, component_files, jsonl, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # unrepaired corpus only; repaired fixtures need a live cluster (see partial scenarios)
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features write-support
+        --test sstable_parity_repaired_metadata_test
+      reference_paths:
+        - test-data/datasets/sstables/system_schema/column_masks-738cc5ed01683268b9d1853d4bc278af/nb-45-big-Statistics.db.txt
+      normalization: >-
+        Each repair field decoded byte-derived from the STATS component is compared
+        to the authoritative sstablemetadata reference line (Repaired at:, Pending
+        repair:, IsTransient:); the non-default repaired/pending/transient state is
+        covered by a writer write->read round-trip (the corpus has no such fixture).
+      known_limitations: >-
+        Canonical-semantic over the three repair fields + a writer round-trip of the
+        non-default state. The corpus is entirely unrepaired, so repairedAt>0 /
+        pendingRepair-UUID / transient are proven via the writer round-trip rather
+        than a real Cassandra repaired fixture. For the oa/da improved-min/max layout
+        with NON-empty covered clustering the decoder reports pendingRepair/isTransient
+        as Unparsed (the Slice value encoding is comparator-driven and not modeled
+        here); the legacy (nb) layout decodes all three fully.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  - id: cass.compaction.CompactionTaskTest.reject_mixed_repair_state
+    title: Compaction rejects a mixed repaired / unrepaired / pending-repair input set
+    status: mirrored
+    capability: compaction_merge
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CompactionTask.java
+        - CompactionTaskTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_1021_repaired_metadata_compaction_parity.rs
+        notes: >-
+          Cassandra partitions compaction candidates by (repairedAt, pendingRepair,
+          isTransient) and never mixes them in one compaction. CQLite reads each
+          input's persisted repair state from its Statistics.db (classify_inputs),
+          and both compaction paths (start_merge + compact_sstables_with_registry)
+          reject a mixed set with a typed Error::Compaction naming the repair boundary
+          BEFORE writing any output — never a silent merge. The tests construct inputs
+          with controlled repair states via the real SSTableWriter and assert mixed
+          repaired/unrepaired and mixed pending-repair sets are rejected and publish
+          no output, while compatible inputs succeed.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [component_files, jsonl, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        # inputs are constructed in-test via SSTableWriter::set_repair_state (no fixture)
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features write-support
+        --test issue_1021_repaired_metadata_compaction_parity
+      reference_paths:
+        - cqlite-core/tests/issue_1021_repaired_metadata_compaction_parity.rs
+      normalization: >-
+        The rejection is asserted behaviorally: a mixed-state compaction returns a
+        typed repair-boundary error and publishes zero output components; a
+        same-state compaction succeeds. (Cassandra's candidate partitioning is not
+        byte-comparable; the constraint — never merge across the boundary — is.)
+      known_limitations: >-
+        Canonical-semantic (behavioral): proves CQLite refuses to merge across a
+        repair boundary, matching Cassandra's CompactionTask candidate partitioning.
+        Inputs carry SSTableWriter-set repair states (the corpus has no repaired
+        fixture); the byte shape of the preserved metadata is covered by
+        cqlite.compaction_parity.statistics.repaired_metadata_preserve.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  - id: cass.compaction_parity.statistics.repaired_metadata_preserve
+    title: Compaction preserves the shared repair state of compatible inputs into the output Statistics.db
+    status: mirrored
+    capability: compaction_merge
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - StatsMetadata.java
+        - CompactionTask.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_1021_repaired_metadata_compaction_parity.rs
+        notes: >-
+          Compacting inputs that share a repair state carries repairedAt /
+          pendingRepair / isTransient forward into the merged output's Statistics.db
+          (StatisticsMetadata::set_repair_state, emitted by both the nb and da STATS
+          builders). The tests compact compatible inputs (repaired + pending-UUID +
+          transient, and the unrepaired baseline) and decode the output Statistics.db
+          repair fields back through the full version-gated walk, asserting they
+          equal the inputs' shared state.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [bytes, component_files, jsonl, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        # compatible inputs constructed in-test via SSTableWriter::set_repair_state
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features write-support
+        --test issue_1021_repaired_metadata_compaction_parity
+      reference_paths:
+        - cqlite-core/tests/issue_1021_repaired_metadata_compaction_parity.rs
+      normalization: >-
+        The output Statistics.db repair fields are decoded byte-derived through the
+        full version-gated read walk and compared field-exact to the inputs' shared
+        repair state.
+      known_limitations: >-
+        Canonical-semantic over the three preserved repair fields of the merged
+        output. Inputs carry SSTableWriter-set repair states (the corpus has no
+        repaired fixture), which is the same byte-level mechanism the merge path
+        uses; whole-Statistics.db byte identity vs a Cassandra-compacted repaired
+        output is blocked on the absent live-cluster repaired fixture.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  - id: cass.tombstone_ttl.RepairedDataTombstonesTest.repair_metadata_gates_purge
+    title: Repaired-metadata gating of tombstone purge across a repair boundary
+    status: partial
+    capability: tombstone_ttl
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: repair
+      relevance: high
+      files:
+        - RepairedDataTombstonesTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_1021_repaired_metadata_compaction_parity.rs
+        notes: >-
+          PREREQUISITE ONLY. CQLite now parses + preserves repair metadata and
+          rejects mixed-repair-state compaction, which is the prerequisite for any
+          repair-aware tombstone-purge claim. CQLite does NOT implement repair-aware
+          tombstone gating (it does not retain/drop tombstones with respect to a
+          repair boundary), and this issue (#1021) explicitly makes no such claim.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      strict: false
+      artifacts: [logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        # BLOCKED: requires a live Cassandra cluster (nodetool repair / anticompaction)
+        # to produce a repaired SSTable (repairedAt != 0) plus an unrepaired SSTable
+        # holding a shadowing tombstone, then sstabledump/sstablemetadata goldens.
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features write-support
+        --test issue_1021_repaired_metadata_compaction_parity
+      normalization: >-
+        N/A — repair-aware purge gating is not implemented; only the parse/preserve/
+        reject prerequisite is covered.
+      known_limitations: >-
+        PARTIAL: repair-aware tombstone-purge gating is NOT implemented and not
+        claimed by #1021. The metadata prerequisite (parse + preserve + reject mixed)
+        IS done. Promoting requires (1) a live-cluster repaired+unrepaired fixture
+        with a cross-boundary shadowing tombstone and (2) a separate repair-aware
+        purge implementation + tombstone-purge parity test — tracked as a follow-up.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope:
+      gap: >-
+        Repair-aware tombstone purge gating is unimplemented (and out of scope for
+        #1021); only the parse/preserve/reject-mixed prerequisite exists. No real
+        repaired fixture exists in the corpus (the published Cassandra 5.0 datasets
+        are all unrepaired; a repaired SSTable requires a live cluster + nodetool
+        repair / anticompaction).
+      next_step: >-
+        File a follow-up to (1) commission a live-cluster repaired+unrepaired fixture
+        with a cross-repair-boundary shadowing tombstone (nodetool repair /
+        sstablerepairedset + sstabledump/sstablemetadata goldens), and (2) implement
+        + test repair-aware tombstone purge gating against it.
+
+  - id: cass.repair.PendingAntiCompactionTest.pending_repair_metadata
+    title: pendingRepair session metadata written by anticompaction
+    status: partial
+    capability: statistics_metadata
+    priority: P2
+    risk: p2_coverage
+    cassandra:
+      category: repair
+      relevance: med
+      files:
+        - PendingAntiCompactionTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_statistics_db
+        tests:
+          - cqlite-core/tests/sstable_parity_repaired_metadata_test.rs
+          - cqlite-core/tests/issue_1021_repaired_metadata_compaction_parity.rs
+        notes: >-
+          CQLite decodes a pendingRepair UUID from the STATS component (legacy nb
+          layout and empty-clustering oa/da) and preserves/rejects on it through
+          compaction. The pendingRepair-UUID DISTINCT state is covered via synthetic
+          STATS bytes + a writer round-trip (parse exact, preserve exact, reject on
+          mismatch), since the corpus has no pending-repair fixture.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      strict: false
+      artifacts: [bytes, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        # BLOCKED: a pendingRepair UUID is written only by an in-flight incremental
+        # repair / PendingAntiCompaction on a live cluster — not reproducible here.
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features write-support
+        --test sstable_parity_repaired_metadata_test
+        --test issue_1021_repaired_metadata_compaction_parity
+      normalization: >-
+        The pendingRepair UUID is decoded byte-derived from the STATS component and
+        compared exact (synthetic + writer round-trip), since no real pending-repair
+        fixture exists.
+      known_limitations: >-
+        PARTIAL (no real fixture): the pendingRepair-UUID state is proven via
+        synthetic STATS bytes + a writer round-trip rather than a Cassandra
+        anticompaction-produced SSTable. Anticompaction execution / repair session
+        coordination is explicitly OUT OF SCOPE. Promoting to mirrored requires a
+        live-cluster PendingAntiCompaction fixture (an SSTable carrying a real
+        pendingRepair session UUID) plus sstablemetadata goldens.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope:
+      gap: >-
+        No SSTable carrying a real pendingRepair session UUID exists in the corpus;
+        such a file is produced only by an in-flight incremental repair /
+        PendingAntiCompaction on a live cluster. The UUID parse/preserve/reject path
+        is proven via synthetic bytes + a writer round-trip.
+      next_step: >-
+        Commission a live-cluster PendingAntiCompaction fixture (an SSTable with a
+        real pendingRepair UUID) + sstablemetadata goldens, then assert the decoded
+        UUID against the reference to promote to mirrored.
 
 # ==============================================================================
 # Public/release-facing parity claims (issue #1023).

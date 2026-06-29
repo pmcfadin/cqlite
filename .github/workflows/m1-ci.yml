@@ -3,8 +3,32 @@ name: "CI: Core Library (minimal)"
 on:
   push:
     branches: [ main, develop ]
+    paths:
+      - '.github/workflows/m1-ci.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'cqlite-core/**'
+      - 'cqlite-cli/**'
+      - 'tests/**'
+      - 'test-data/**'
+      - 'scripts/**'
+      - 'tools/**'
+      - 'examples/**'
   pull_request:
     branches: [ main, develop ]
+    paths:
+      - '.github/workflows/m1-ci.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'cqlite-core/**'
+      - 'cqlite-cli/**'
+      - 'tests/**'
+      - 'test-data/**'
+      - 'scripts/**'
+      - 'tools/**'
+      - 'examples/**'
 
 concurrency:
   group: m1-ci-${{ github.ref }}
