@@ -267,9 +267,12 @@ fi
 apply_schema "$ROOT/schemas/compaction-parity.cql"
 
 # Disable autocompaction so the two freshly-flushed generations are NOT compacted
-# before the single explicit major compaction below.
+# before the single explicit major compaction below. The || true was removed: if
+# disable fails, autocompaction could silently merge the two flushed generations
+# into a differently-ordered output that the post-export "exactly one Data.db"
+# guard would not catch, committing an incorrect fixture.
 log "Disabling autocompaction for $KEYSPACE..."
-run $ENGINE exec "$CONTAINER_NAME" nodetool disableautocompaction "$KEYSPACE" || true
+run $ENGINE exec "$CONTAINER_NAME" nodetool disableautocompaction "$KEYSPACE"
 
 insert_no_clustering
 insert_clustering

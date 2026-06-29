@@ -80,7 +80,7 @@
 
 #![cfg(feature = "write-support")]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use cqlite_core::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema};
@@ -426,7 +426,7 @@ async fn assert_compaction_byte_parity(
     group_a: Vec<Mutation>,
     group_b: Vec<Mutation>,
     expected_jsonl_partitions: usize,
-    expected_survivors: &[(&str, &str)],
+    expected_survivors: &[(&str, &str, &str)],
 ) {
     let Some(ref_dir) = reference_dir(table) else {
         if require_fixtures_strict() {
@@ -596,12 +596,24 @@ fn assert_crc_db_prefix_parity(table: &str, ref_dir: &Path, out_dir: &Path) {
 }
 
 /// Secondary diagnostic: the committed JSONL golden must exist, be non-empty,
-/// carry exactly `expected_partitions` partitions, and record the LWW survivors.
+/// carry exactly `expected_partitions` partitions, and record the LWW survivors
+/// keyed by `(pk_repr, ck_repr) -> expected_v`.
+///
+/// `expected_survivors` is `(pk, ck, expected_v)` where:
+///   * `pk` is the comma-joined partition-key representation from sstabledump
+///     (e.g. `"1"` for an int PK of 1, matching `partition.key[0]`).
+///   * `ck` is the comma-joined clustering-key representation (e.g. `"0"` for
+///     int CK of 0, matching `clustering[0]`), or `""` for tables with no
+///     clustering column (where `clustering` is absent from the row JSON).
+///   * `expected_v` is the expected `v` cell value at that position.
+///
+/// Keying by position detects duplicates and misplaced survivors that a flat value
+/// set would miss — a loser landing under the wrong (pk, ck) position fails here.
 fn assert_jsonl_secondary(
     table: &str,
     ref_dir: &Path,
     expected_partitions: usize,
-    expected_survivors: &[(&str, &str)],
+    expected_survivors: &[(&str, &str, &str)],
 ) {
     let data = single_data_db(ref_dir).expect("compacted Data.db");
     let jsonl = ref_dir.join(format!("{}Data.db.jsonl", descriptor_prefix(&data)));
@@ -623,24 +635,62 @@ fn assert_jsonl_secondary(
         lines.len()
     );
 
-    // Collect every (text-value) survivor across all partitions/rows so we can
-    // assert the last-write-wins outcomes are present (e.g. id=2 -> 'b-2').
-    let mut seen: BTreeSet<String> = BTreeSet::new();
+    // Collect (pk_repr, ck_repr) -> v from every row in every partition so the
+    // assertion pins value AT position, not just value existence. A loser landing
+    // under any (pk, ck) pair causes a mismatch on that key.
+    let mut seen: BTreeMap<(String, String), String> = BTreeMap::new();
     for (i, line) in lines.iter().enumerate() {
-        let v: serde_json::Value = serde_json::from_str(line)
+        let jv: serde_json::Value = serde_json::from_str(line)
             .unwrap_or_else(|e| panic!("{table}: JSONL partition {i} is not valid JSON: {e}"));
-        let rows = v.get("rows").and_then(|r| r.as_array());
+
+        let pk = jv
+            .get("partition")
+            .and_then(|p| p.get("key"))
+            .and_then(|k| k.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .map(|x| {
+                        x.as_str()
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| x.to_string())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_default();
+
+        let rows = jv.get("rows").and_then(|r| r.as_array());
         assert!(
             rows.is_some_and(|r| !r.is_empty()),
-            "{table}: JSONL partition {i} has no rows — parity failure"
+            "{table}: JSONL partition {i} (pk={pk:?}) has no rows — parity failure"
         );
         if let Some(rows) = rows {
             for row in rows {
+                // `clustering` is absent for partition-key-only tables.
+                let ck = row
+                    .get("clustering")
+                    .and_then(|c| c.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|x| {
+                                if let Some(n) = x.as_i64() {
+                                    n.to_string()
+                                } else if let Some(s) = x.as_str() {
+                                    s.to_string()
+                                } else {
+                                    x.to_string()
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .unwrap_or_default(); // "" when no clustering column
+
                 if let Some(cells) = row.get("cells").and_then(|c| c.as_array()) {
                     for cell in cells {
                         if cell.get("name").and_then(|n| n.as_str()) == Some("v") {
                             if let Some(val) = cell.get("value").and_then(|v| v.as_str()) {
-                                seen.insert(val.to_string());
+                                seen.insert((pk.clone(), ck.clone()), val.to_string());
                             }
                         }
                     }
@@ -648,21 +698,27 @@ fn assert_jsonl_secondary(
             }
         }
     }
-    // Assert EXACT set equality: every expected survivor must be present AND no
-    // loser (e.g. "a-2", "a-3", "a-1-1") may appear. A superset would mean an
-    // overwritten value survived compaction — that is a LWW regression.
-    let expected_v_set: BTreeSet<String> = expected_survivors
+
+    // Assert EXACT placement equality: every expected (pk,ck)->v must match AND no
+    // unexpected position (loser or spurious) may appear.
+    let expected_map: BTreeMap<(String, String), String> = expected_survivors
         .iter()
-        .map(|(_, v)| v.to_string())
+        .map(|(pk, ck, v)| ((pk.to_string(), ck.to_string()), v.to_string()))
         .collect();
-    let missing: Vec<&String> = expected_v_set.difference(&seen).collect();
-    let unexpected: Vec<&String> = seen.difference(&expected_v_set).collect();
+    let wrong_or_missing: Vec<_> = expected_map
+        .iter()
+        .filter(|(k, v)| seen.get(*k).map(String::as_str) != Some(v.as_str()))
+        .collect();
+    let unexpected_or_loser: Vec<_> = seen
+        .iter()
+        .filter(|(k, v)| expected_map.get(*k).map(String::as_str) != Some(v.as_str()))
+        .collect();
     assert!(
-        missing.is_empty() && unexpected.is_empty(),
-        "{table}: JSONL v values do not exactly match expected LWW survivors\n  \
-         missing (expected but absent): {missing:?}\n  \
-         unexpected (losers that survived or spurious): {unexpected:?}\n  \
-         full seen={seen:?}\n  full expected={expected_v_set:?}"
+        wrong_or_missing.is_empty() && unexpected_or_loser.is_empty(),
+        "{table}: JSONL (pk,ck)->v map does not exactly match expected LWW survivors\n  \
+         wrong or missing (expected but absent/wrong): {wrong_or_missing:?}\n  \
+         unexpected/losers (present but not expected): {unexpected_or_loser:?}\n  \
+         full seen={seen:?}\n  full expected={expected_map:?}"
     );
 }
 
@@ -696,10 +752,12 @@ async fn no_clustering_compaction_byte_for_byte() {
         group_b,
         4,
         &[
-            ("id=1", "a-1"),
-            ("id=2", "b-2"),
-            ("id=3", "b-3"),
-            ("id=4", "b-4"),
+            // (pk_repr, ck_repr, expected_v): pk from sstabledump partition.key[0],
+            // ck "" because live_no_clustering has no clustering column.
+            ("1", "", "a-1"),
+            ("2", "", "b-2"),
+            ("3", "", "b-3"),
+            ("4", "", "b-4"),
         ],
     )
     .await;
@@ -736,12 +794,14 @@ async fn clustering_compaction_byte_for_byte() {
         group_b,
         4,
         &[
-            ("1/0", "a-1-0"),
-            ("1/1", "b-1-1"),
-            ("1/2", "b-1-2"),
-            ("2/0", "a-2-0"),
-            ("3/0", "a-3-0"),
-            ("4/0", "b-4-0"),
+            // (pk_repr, ck_repr, expected_v): pk from sstabledump partition.key[0],
+            // ck from sstabledump clustering[0] (integer rendered as decimal string).
+            ("1", "0", "a-1-0"),
+            ("1", "1", "b-1-1"),
+            ("1", "2", "b-1-2"),
+            ("2", "0", "a-2-0"),
+            ("3", "0", "a-3-0"),
+            ("4", "0", "b-4-0"),
         ],
     )
     .await;
