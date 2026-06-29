@@ -1,0 +1,71 @@
+name: Publish Trino Connector
+
+# Publishes the Java Trino connector (in.mcfad:cqlite-trino) to Maven Central on
+# every v* release tag, so the connector releases in lockstep with the crate and
+# the cqlite-flight image. The version is derived from the tag (v0.13.0 → 0.13.0).
+#
+# The publish is GATED on the Maven Central + GPG signing secrets being present:
+# a tag pushed before those secrets land must NOT fail the release run. Secrets
+# are not addressable in a job-level `if:`, so a guard step checks them and
+# exposes a boolean output that the publish step keys off; when absent the job
+# logs a notice and succeeds without publishing.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: publishToMavenCentral
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup JDK 25 (runs Gradle and matches the toolchain)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: gradle
+          cache-dependency-path: trino-connector/*.gradle.kts
+
+      - name: Derive version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # Secrets cannot be referenced in a job/step-level `if:`. Read them here and
+      # publish a boolean output the publish step gates on.
+      - name: Check publishing secrets
+        id: guard
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+        run: |
+          if [ -n "$MAVEN_CENTRAL_USERNAME" ] && [ -n "$MAVEN_CENTRAL_PASSWORD" ] \
+             && [ -n "$SIGNING_KEY" ] && [ -n "$SIGNING_PASSWORD" ]; then
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to Maven Central
+        if: steps.guard.outputs.should_publish == 'true'
+        working-directory: trino-connector
+        env:
+          # vanniktech reads Central credentials + the in-memory GPG key from
+          # these Gradle properties (ORG_GRADLE_PROJECT_* env override).
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_PASSWORD }}
+        run: ./gradlew --no-daemon publishToMavenCentral -Pversion=${{ steps.version.outputs.version }}
+
+      - name: Skip notice (secrets absent)
+        if: steps.guard.outputs.should_publish != 'true'
+        run: echo "::notice::Maven Central secrets absent — skipping connector publish"
