@@ -175,6 +175,7 @@ pub struct DataWriter {
 mod cells;
 mod complex;
 mod encoding;
+mod index_prefix;
 mod partition;
 mod rows;
 mod schema_helpers;
@@ -196,6 +197,7 @@ pub use types::PartitionEmitCounts;
 // `...::data_writer::<name>` paths. Flag/marker constants stay private items of
 // this `mod.rs` and reach the submodules as ancestor privates.
 pub(crate) use encoding::*;
+pub(crate) use index_prefix::*;
 pub(crate) use schema_helpers::*;
 pub(crate) use types::*;
 

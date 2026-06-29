@@ -115,18 +115,51 @@ fn range_tombstone_mutation(start: i32, end: i32, ts: i64) -> Mutation {
     m
 }
 
-/// Authoritative 6-byte promoted-index prefix length for a single `int` bound:
-/// `[kind 1B][values-header 1B][int 4B]`. Same framing for a CLUSTERING row name
-/// and a single-value bound name — only the kind byte differs.
+/// Authoritative, kind-aware promoted-index `ClusteringPrefix` length for this
+/// single-`int` schema, mirroring Cassandra `ClusteringPrefix.serializer.serialize`
+/// (`ClusteringPrefix.java:462-475`):
+///
+/// - A CLUSTERING (row) name is `Clustering.serializer` form:
+///   `[kind 1B][values-without-size]` = `[0x04][header 1B][int 4B]` = **6 bytes**.
+/// - A BOUND name (range-tombstone marker) is `ClusteringBoundOrBoundary.serializer`
+///   form (`ClusteringBoundOrBoundary.java:103-108`):
+///   `[kind 1B][size 2B BE][values-without-size]`. For a single-`int` bound that is
+///   `[kind][00 01][header 1B][int 4B]` = **8 bytes**; for an empty bound (size 0)
+///   it is `[kind][00 00]` = **3 bytes** (no header/values follow).
+///
+/// This is the schema-driven length a production caller computes — there is no
+/// heuristic fallback (Issue #28). It dispatches on the leading kind byte exactly
+/// as Cassandra's `IndexInfo.Serializer.deserialize` does.
 fn cassandra_prefix_len(slice: &[u8]) -> cqlite_core::Result<usize> {
-    const LEN: usize = 6;
-    if slice.len() < LEN {
-        return Err(cqlite_core::error::Error::Corruption(format!(
-            "promoted-index prefix needs {LEN} bytes, slice has {}",
+    let corrupt = |need: usize| {
+        cqlite_core::error::Error::Corruption(format!(
+            "promoted-index prefix needs {need} bytes, slice has {}",
             slice.len()
-        )));
+        ))
+    };
+    let &kind = slice.first().ok_or_else(|| corrupt(1))?;
+    if kind == CLUSTERING_KIND_BYTE {
+        // [kind][header 1B][int 4B]
+        const LEN: usize = 6;
+        if slice.len() < LEN {
+            return Err(corrupt(LEN));
+        }
+        return Ok(LEN);
     }
-    Ok(LEN)
+    // Bound: [kind][size 2B BE][...]
+    if slice.len() < 3 {
+        return Err(corrupt(3));
+    }
+    let size = u16::from_be_bytes([slice[1], slice[2]]);
+    if size == 0 {
+        return Ok(3); // empty bound: kind + size short only
+    }
+    // One int value: header 1B + int 4B follow the size short.
+    let len = 3 + 1 + 4 * size as usize;
+    if slice.len() < len {
+        return Err(corrupt(len));
+    }
+    Ok(len)
 }
 
 #[tokio::test]
@@ -183,11 +216,20 @@ async fn promoted_index_marker_name_uses_bound_kind_not_clustering() {
     );
 
     // Block 0's firstName is the inclusive-START range-tombstone marker bound.
+    // Cassandra serializes a BOUND name via `ClusteringBoundOrBoundary.serializer`
+    // (`ClusteringBoundOrBoundary.java:103-108`): the kind byte, then a 2-byte
+    // big-endian `size` short (number of clustering values), then the
+    // values-without-size blob. For a single-`int` bound that is the 8 bytes
+    // `[kind 1B][size 2B][header 1B][int 4B]` — NOT the 6-byte
+    // CLUSTERING/`Clustering.serializer` form (kind + header + int, no size short).
+    // The 2-byte size short is the roborev MEDIUM fix: the pre-fix writer emitted
+    // the Clustering form (no size short) for bound names, one short too few.
     let first_name = &decoded.entries[0].first_name;
     assert_eq!(
         first_name.len(),
-        6,
-        "block 0 firstName (marker bound) must be 6 bytes [kind][header][int], got {}: {first_name:02x?}",
+        8,
+        "block 0 firstName (single-int marker bound) must be 8 bytes \
+         [kind][size 2B][header][int], got {}: {first_name:02x?}",
         first_name.len()
     );
     assert_ne!(
@@ -202,12 +244,20 @@ async fn promoted_index_marker_name_uses_bound_kind_not_clustering() {
          {first_name:02x?}",
         first_name[0]
     );
+    let size = u16::from_be_bytes([first_name[1], first_name[2]]);
     assert_eq!(
-        first_name[1], 0x00,
+        size, 1,
+        "block 0 firstName bound size short must be 1 (one clustering value): {first_name:02x?}"
+    );
+    assert_eq!(
+        first_name[3], 0x00,
         "block 0 firstName values header must be 0x00 (single PRESENT column): {first_name:02x?}"
     );
-    let v = i32::from_be_bytes([first_name[2], first_name[3], first_name[4], first_name[5]]);
-    assert_eq!(v, 0, "block 0 firstName bound value must be ck=0, got {v}");
+    let value = i32::from_be_bytes([first_name[4], first_name[5], first_name[6], first_name[7]]);
+    assert_eq!(
+        value, 0,
+        "block 0 firstName bound value must be ck=0, got {value}"
+    );
 
     engine.close().await.ok();
 }
