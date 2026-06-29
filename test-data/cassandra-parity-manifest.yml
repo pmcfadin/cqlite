@@ -6267,8 +6267,8 @@ scenarios:
           preserved.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-e6f641d073d611f196bb098389af4637/nb-3-big-Data.db
-        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-e6f641d073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -6283,11 +6283,11 @@ scenarios:
         --features write-support --test issue_1020_udt_frozen_compaction_byte_parity
         collections_with_udts_compaction_parity
       reference_paths:
-        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-e6f641d073d611f196bb098389af4637/nb-3-big-Data.db
-        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-e6f641d073d611f196bb098389af4637/nb-3-big-Index.db
-        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-e6f641d073d611f196bb098389af4637/nb-3-big-Summary.db
-        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-e6f641d073d611f196bb098389af4637/nb-3-big-Digest.crc32
-        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-e6f641d073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Index.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Summary.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Digest.crc32
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
       normalization: >-
         Data.db/Index.db/Summary.db/Digest.crc32 whole-file byte-for-byte; CRC.db
         prefix (compaction-only trailing empty-chunk CRC32=0 excluded); typed JSONL
@@ -6327,7 +6327,7 @@ scenarios:
           elements.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-e6f641d073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -6342,7 +6342,7 @@ scenarios:
         --features write-support --test issue_1020_udt_frozen_compaction_byte_parity
         collections_with_udts_compaction_parity
       reference_paths:
-        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-e6f641d073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
       normalization: >-
         Cross-references the byte-level claim cass.compaction.udt_collections_with_udts.
       failure_artifacts:
@@ -6384,8 +6384,8 @@ scenarios:
           pins the per-field UDT decode of the LWW survivors.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-e6e1cf7073d611f196bb098389af4637/nb-3-big-Data.db
-        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-e6e1cf7073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-3dcdc92073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-3dcdc92073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -6400,11 +6400,11 @@ scenarios:
         --features write-support --test issue_1020_udt_frozen_compaction_byte_parity
         frozen_person_compaction_parity
       reference_paths:
-        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-e6e1cf7073d611f196bb098389af4637/nb-3-big-Data.db
-        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-e6e1cf7073d611f196bb098389af4637/nb-3-big-Index.db
-        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-e6e1cf7073d611f196bb098389af4637/nb-3-big-Summary.db
-        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-e6e1cf7073d611f196bb098389af4637/nb-3-big-Digest.crc32
-        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-e6e1cf7073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-3dcdc92073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-3dcdc92073fe11f1ba13ff2af5955bf3/nb-3-big-Index.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-3dcdc92073fe11f1ba13ff2af5955bf3/nb-3-big-Summary.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-3dcdc92073fe11f1ba13ff2af5955bf3/nb-3-big-Digest.crc32
+        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-3dcdc92073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
       normalization: >-
         Data.db/Index.db/Summary.db/Digest.crc32 whole-file byte-for-byte; CRC.db
         prefix (compaction-only trailing empty-chunk CRC32=0 excluded); typed JSONL
@@ -6450,8 +6450,8 @@ scenarios:
           dropped. Typed JSONL cross-check pins the nested decode.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-e6eddd6073d611f196bb098389af4637/nb-3-big-Data.db
-        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-e6eddd6073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-3dda9a6073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-3dda9a6073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -6466,11 +6466,11 @@ scenarios:
         --features write-support --test issue_1020_udt_frozen_compaction_byte_parity
         nested_udt_compaction_parity
       reference_paths:
-        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-e6eddd6073d611f196bb098389af4637/nb-3-big-Data.db
-        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-e6eddd6073d611f196bb098389af4637/nb-3-big-Index.db
-        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-e6eddd6073d611f196bb098389af4637/nb-3-big-Summary.db
-        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-e6eddd6073d611f196bb098389af4637/nb-3-big-Digest.crc32
-        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-e6eddd6073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-3dda9a6073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-3dda9a6073fe11f1ba13ff2af5955bf3/nb-3-big-Index.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-3dda9a6073fe11f1ba13ff2af5955bf3/nb-3-big-Summary.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-3dda9a6073fe11f1ba13ff2af5955bf3/nb-3-big-Digest.crc32
+        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-3dda9a6073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
       normalization: >-
         Data.db/Index.db/Summary.db/Digest.crc32 whole-file byte-for-byte; CRC.db
         prefix (compaction-only trailing empty-chunk CRC32=0 excluded); typed JSONL
@@ -6509,7 +6509,7 @@ scenarios:
           and is byte-identical to the Cassandra 5.0.2 compacted reference.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-e6e1cf7073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-3dcdc92073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -6524,7 +6524,7 @@ scenarios:
         --features write-support --test issue_1020_udt_frozen_compaction_byte_parity
         frozen_person_compaction_parity
       reference_paths:
-        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-e6e1cf7073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-3dcdc92073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
       normalization: >-
         Cross-references cass.compaction.udt_frozen_person (byte-for-byte components +
         typed JSONL survivor map).
@@ -6565,8 +6565,8 @@ scenarios:
           typed-decode JSONL cross-check.
     fixtures:
       references:
-        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-e6f641d073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
-        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-e6eddd6073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-3dda9a6073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       artifacts: [jsonl, generated_report]
@@ -6579,8 +6579,8 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features write-support --test issue_1020_udt_frozen_compaction_byte_parity
       reference_paths:
-        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-e6f641d073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
-        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-e6eddd6073d611f196bb098389af4637/nb-3-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-3dda9a6073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
       normalization: >-
         Schema-driven UDT resolution: a missing/incorrect registry would degrade the
         frozen-UDT column to a bare BytesType cell that would not decode to a typed
