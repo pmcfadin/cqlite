@@ -373,6 +373,48 @@ fn compaction_path(rt: &tokio::runtime::Runtime, schema: &TableSchema) -> BTreeM
     read_back(rt, &output_dir, schema)
 }
 
+/// Byte-identity dump helper (issue #947, manual). Runs the deterministic
+/// compaction into the dir named by `CQLITE_947_DUMP` so an external `sha256sum`
+/// can compare the emitted Data.db before vs. after the refactor. Ignored by
+/// default (it has external side effects and no assertions); not part of the
+/// gate.
+#[test]
+#[ignore = "manual byte-identity dump; set CQLITE_947_DUMP"]
+fn dump_compaction_output_for_byte_identity() {
+    let Ok(dump) = std::env::var("CQLITE_947_DUMP") else {
+        eprintln!("CQLITE_947_DUMP not set; nothing to dump");
+        return;
+    };
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let schema = make_schema();
+    let dump_dir = PathBuf::from(dump);
+    let data_dir = dump_dir.join("data");
+    let wal_dir = dump_dir.join("wal");
+    let output_dir = dump_dir.join("out");
+    let _ = std::fs::remove_dir_all(&dump_dir);
+
+    let config = WriteEngineConfig::new(data_dir.clone(), wal_dir, schema.clone());
+    let mut engine = WriteEngine::new(config).expect("engine");
+    for (id, edits) in scenarios() {
+        for edit in edits.iter().filter(|e| e.gen == Gen::Old) {
+            engine.write(mutation(id, edit.ops.clone(), edit.ts)).expect("write old");
+        }
+    }
+    rt.block_on(engine.flush()).expect("flush old").expect("info old");
+    for (id, edits) in scenarios() {
+        for edit in edits.iter().filter(|e| e.gen == Gen::New) {
+            engine.write(mutation(id, edit.ops.clone(), edit.ts)).expect("write new");
+        }
+    }
+    rt.block_on(engine.flush()).expect("flush new").expect("info new");
+    drop(engine);
+
+    let inputs = discover_inputs(&data_dir);
+    rt.block_on(compact_sstables(inputs, &output_dir, &schema, 9, None, None, true))
+        .expect("compaction");
+    eprintln!("dumped compaction output under {output_dir:?}");
+}
+
 #[test]
 fn flush_and_compaction_reconcile_boundaries_identically() {
     let rt = tokio::runtime::Runtime::new().expect("runtime");

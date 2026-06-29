@@ -28,6 +28,24 @@ pub(crate) struct MergedOp<'a> {
     pub(crate) cell_local_deletion_time: i32,
 }
 
+/// Adapt a writer-path [`MergedOp`] into the shared
+/// [`ReconcileCell`](crate::storage::write_engine::reconcile_rules::ReconcileCell)
+/// view (issue #947) so the per-column cell tie-break in `merge_row_group` calls
+/// the one shared `Cells#reconcile` rule. A whole-column op is a tombstone iff it
+/// is a `CellOperation::Delete` (a `WriteWithTtl` is an EXPIRING — live — cell,
+/// not a tombstone), matching the merge path's `Value::Tombstone` recognition.
+impl crate::storage::write_engine::reconcile_rules::ReconcileCell for MergedOp<'_> {
+    fn timestamp(&self) -> i64 {
+        self.timestamp_micros
+    }
+    fn is_tombstone(&self) -> bool {
+        matches!(
+            self.op,
+            crate::storage::write_engine::mutation::CellOperation::Delete { .. }
+        )
+    }
+}
+
 /// One element to emit inside a per-element complex column (epic #899, Phase B).
 ///
 /// Carries the element's OWN write metadata and its PRESERVED source cell path

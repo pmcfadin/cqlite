@@ -7,6 +7,11 @@
 
 use super::*;
 
+use crate::storage::write_engine::reconcile_rules;
+// `ReconcileCell` is imported for its methods (`is_tombstone`) used by the
+// shared `Cells#reconcile` tie-break in `merge_row_group` (issue #947).
+use crate::storage::write_engine::reconcile_rules::ReconcileCell;
+
 impl DataWriter {
     /// Write a single row
     ///
@@ -407,28 +412,25 @@ impl DataWriter {
                     }
                     std::collections::hash_map::Entry::Occupied(mut entry) => {
                         let existing = entry.get();
-                        // Per-cell winner resolution mirroring Cassandra
-                        // `Cells#reconcile` (parity `a62c749`; issue #848 / #498),
-                        // kept CONSISTENT with `KWayMerger::cell_reconcile_replace`:
-                        //   1. higher timestamp always wins;
-                        //   2. at EQUAL timestamp a cell DELETION (a `Delete`
-                        //      tombstone) beats a LIVE/EXPIRING write — decided
-                        //      BEFORE any localDeletionTime compare, so an expiring
-                        //      (TTL) write at equal ts can never resurrect data over
-                        //      a same-ts cell tombstone (`WriteWithTtl` is LIVE here,
-                        //      NOT a tombstone). `local_deletion_time` is never used
-                        //      as a tie-break.
-                        // The writer keeps its existing convention for equal-ts
-                        // live-vs-live (later mutation wins) via `!existing_is_tomb`;
-                        // only the tombstone-vs-live/expiring axis is load-bearing
-                        // for #848 and matches reconcile.
-                        let candidate_is_tombstone =
-                            matches!(candidate.op, CellOperation::Delete { .. });
-                        let existing_is_tombstone =
-                            matches!(existing.op, CellOperation::Delete { .. });
-                        let wins = candidate.timestamp_micros > existing.timestamp_micros
+                        // Per-cell winner resolution. The SHARED Cassandra
+                        // `Cells#reconcile` tie-break (issue #947,
+                        // `reconcile_rules::cell_wins`) decides the load-bearing
+                        // axes — higher timestamp wins, and at EQUAL timestamp a
+                        // cell DELETION (`Delete` tombstone) beats a LIVE/EXPIRING
+                        // write BEFORE any localDeletionTime compare (#848/#498;
+                        // `WriteWithTtl` is LIVE, not a tombstone).
+                        //
+                        // The writer overlays a WRITER-ONLY, order-dependent
+                        // last-write-wins tie-break for the one case the shared
+                        // rule leaves to the caller: at EQUAL timestamp with EQUAL
+                        // liveness the later-applied mutation wins (keep-last).
+                        // Cassandra's reconcile is order-independent and the merge
+                        // path keeps first-seen there; this overlay reproduces the
+                        // writer's historical convention exactly and is NOT part of
+                        // the shared rule.
+                        let wins = reconcile_rules::cell_wins(&candidate, existing)
                             || (candidate.timestamp_micros == existing.timestamp_micros
-                                && (candidate_is_tombstone || !existing_is_tombstone));
+                                && candidate.is_tombstone() == existing.is_tombstone());
                         if wins {
                             entry.insert(candidate);
                         }
@@ -559,7 +561,12 @@ impl DataWriter {
                     let col = column.as_str();
                     match active_mfda.get(col) {
                         // STRICTLY GREATER supersedes; equal/lesser does NOT.
-                        Some(existing) if marked_for_delete_at <= existing => {}
+                        // Shared strict-supersede rule (issue #947).
+                        Some(existing)
+                            if !reconcile_rules::complex_deletion_supersedes(
+                                *marked_for_delete_at,
+                                *existing,
+                            ) => {}
                         _ => {
                             active_mfda.insert(col, *marked_for_delete_at);
                         }
@@ -574,9 +581,10 @@ impl DataWriter {
                         column,
                         timestamp_micros: elem_ts,
                         ..
-                    } => active_mfda
-                        .get(column.as_str())
-                        .is_none_or(|mfda| *elem_ts > *mfda),
+                    } => active_mfda.get(column.as_str()).is_none_or(|mfda| {
+                        // Shared shadow-before-purge boundary (issue #947).
+                        reconcile_rules::element_survives_complex_deletion(*elem_ts, *mfda)
+                    }),
                     _ => true,
                 });
             }

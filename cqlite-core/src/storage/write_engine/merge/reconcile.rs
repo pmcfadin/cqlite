@@ -32,6 +32,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::storage::write_engine::mutation::{ClusteringKey, DecoratedKey, RangeTombstone};
+use crate::storage::write_engine::reconcile_rules;
 
 use super::{CellData, ComplexDeletion, KWayMerger, MergeEntry, PurgeCounts, RowData};
 
@@ -176,7 +177,7 @@ impl ReconcileState {
     /// `cluster_rows` is in heap-routing order (run_index ascending within equal
     /// keys), so when two cells tie on both timestamp and liveness the
     /// first-seen (newer file) is kept (see
-    /// [`KWayMerger::cell_reconcile_replace`]).
+    /// [`reconcile_rules::cell_wins`], the shared tie-break rule).
     pub(super) fn resolve_cell_winners(&mut self, cluster_rows: &[MergeEntry]) {
         for entry in cluster_rows {
             if let RowData::Live { cells } = &entry.row_data {
@@ -194,8 +195,10 @@ impl ReconcileState {
                             // compare (parity Cassandra `a62c749`,
                             // `Cells#reconcile`; issue #848 / #498). At equal ts
                             // + equal deletion-status, keep the first-seen
-                            // (newer file) winner. See `cell_reconcile_replace`.
-                            if KWayMerger::cell_reconcile_replace(cell, existing) {
+                            // (newer file) winner. The tie-break is the SHARED
+                            // [`reconcile_rules::cell_wins`] rule (issue #947),
+                            // also used by the flush/write path.
+                            if reconcile_rules::cell_wins(cell, existing) {
                                 self.winners.insert(cell_key, cell.clone());
                             }
                         }
@@ -238,8 +241,14 @@ impl ReconcileState {
                         active_order.push(cd.column.clone());
                         active.insert(cd.column.clone(), cd);
                     }
-                    // STRICTLY GREATER supersedes; equal/lesser does NOT (bd244649).
-                    Some(existing) if cd.marked_for_delete_at > existing.marked_for_delete_at => {
+                    // STRICTLY GREATER supersedes; equal/lesser does NOT
+                    // (bd244649). Shared rule (issue #947).
+                    Some(existing)
+                        if reconcile_rules::complex_deletion_supersedes(
+                            cd.marked_for_delete_at,
+                            existing.marked_for_delete_at,
+                        ) =>
+                    {
                         *existing = cd;
                     }
                     Some(_) => {}
@@ -262,7 +271,15 @@ impl ReconcileState {
                         }
                         match winners.get(cell_key) {
                             // ts > mfda survives; ts <= mfda is shadowed (purged).
-                            Some(cell) if cell.timestamp > mfda => true,
+                            // Shared shadow-before-purge boundary (issue #947).
+                            Some(cell)
+                                if reconcile_rules::element_survives_complex_deletion(
+                                    cell.timestamp,
+                                    mfda,
+                                ) =>
+                            {
+                                true
+                            }
                             Some(_) => {
                                 winners.remove(cell_key);
                                 false
