@@ -5158,14 +5158,15 @@ scenarios:
           min/max localDeletionTime + minTTL aggregates (writer + reader cannot be
           wrong in the same way). issue_821 anchors the deletion/TTL-bearing row
           framing byte invariants. issue_1190's
-          static_row_timestamp_flags_gap_pinned_1196 pins the static-row writer gap
-          file-vs-file against the committed test_writeparity reference: it asserts
-          the Cassandra reference static-row flags byte is 0xa0 (no row-level
-          HAS_TIMESTAMP) while CQLite emits 0xa4, so the gap text below is exercised
-          by a listed test (if CQLite stops emitting the spurious timestamp the test
-          fails and forces this manifest claim to be reviewed). These are the
-          finished tombstone/TTL artifacts a flush emits, not Cassandra memtable
-          accounting internals (AC7).
+          static_row_timestamp_flags_gap_pinned_1196 now BYTE-DIFFS the
+          static-only-UPDATE static row file-vs-file against the committed
+          test_writeparity reference: it asserts the CQLite-written static-row flags
+          byte is 0xa0 (no row-level HAS_TIMESTAMP) AND that the whole Data.db is
+          byte-identical to Cassandra (the static cell carries its own explicit
+          timestamp). The #1196 static-row writer divergence is RESOLVED; the test
+          fails if CQLite ever re-introduces the spurious row-level timestamp. These
+          are the finished tombstone/TTL artifacts a flush emits, not Cassandra
+          memtable accounting internals (AC7).
     fixtures:
       datasets:
         - test-data/datasets/sstables
@@ -5187,33 +5188,39 @@ scenarios:
       known_limitations: >-
         Proves the flushed Data.db row-tombstone bytes (deletion flags +
         local_deletion_time) and the Statistics.db local-deletion-time / TTL
-        aggregate bytes are correct against derived expected values. It STAYS
-        partial — whole-artifact byte parity is blocked by TWO real gaps confirmed
-        against the committed test_writeparity reference (issue #1190): (1) a TTL
-        cell's / DELETE's localDeletionTime is wall-clock-derived (nowInSeconds),
-        so it can never byte-match an independent writer; (2) a CQLite WRITER GAP —
-        a populated static row from a static-only UPDATE is emitted with a
-        row-level HAS_TIMESTAMP + primary-key-liveness timestamp that Cassandra
-        does NOT set (Cassandra's static_block has no row liveness_info; the
-        timestamp lives on the static cell only). The byte diff of
-        static_clustering_shape against the Cassandra reference fails at the static
-        row's flags byte (cass 0xa0 vs CQLite 0xa4). Semantic visibility of
-        tombstones/TTLs is covered by the live-readback scenario.
+        aggregate bytes are correct against derived expected values. The #1196
+        static-row writer divergence is now RESOLVED (see issue #1196): a populated
+        static row from a static-only UPDATE is written with flags 0xa0 (no
+        row-level HAS_TIMESTAMP / primary-key liveness) and the static cell carries
+        its own explicit timestamp, byte-identical to Cassandra — issue_1190's
+        static_row_timestamp_flags_gap_pinned_1196 now passes the whole Data.db
+        byte diff for static_clustering_shape. It STILL STAYS partial because
+        whole-artifact byte parity for the broader tombstone/TTL shape remains
+        blocked by ONE real gap confirmed against the committed test_writeparity
+        reference (issue #1190): a TTL cell's / DELETE's localDeletionTime is
+        wall-clock-derived (nowInSeconds), so it can never byte-match an
+        independent writer. Semantic visibility of tombstones/TTLs is covered by
+        the live-readback scenario.
     ci:
       tier: exhaustive_regeneration
       workflow: .github/workflows/cassandra-parity.yml
     scope:
       gap: >-
-        Whole-artifact byte parity is blocked by (1) wall-clock-derived
-        localDeletionTime on TTL/DELETE cells (not reproducible across independent
-        writers) and (2) a CQLite static-row writer gap (row-level HAS_TIMESTAMP /
-        PK liveness wrongly set on a static-only UPDATE), confirmed by the
-        committed test_writeparity.static_clustering_shape reference (issue #1190).
+        The static-row writer gap (row-level HAS_TIMESTAMP / PK liveness wrongly
+        set on a static-only UPDATE) is now RESOLVED (issue #1196): CQLite emits the
+        static block byte-identical to Cassandra (flags 0xa0, static cell carries
+        its own explicit timestamp), verified file-vs-file against the committed
+        test_writeparity.static_clustering_shape reference. Whole-artifact byte
+        parity for the broader tombstone/TTL shape REMAINS blocked by
+        wall-clock-derived localDeletionTime on TTL/DELETE cells (nowInSeconds, not
+        reproducible across independent writers).
       next_step: >-
-        Fix the static-row liveness writer gap (suppress row-level HAS_TIMESTAMP
-        when the static row carries no PK liveness, matching Cassandra), then add a
-        non-TTL static-tombstone reference + strict Data.db byte diff and upgrade
-        to byte_for_byte. TTL/DELETE cells remain semantic-only by nature.
+        The remaining blocker is intrinsic: TTL/DELETE cells carry a
+        wall-clock-derived localDeletionTime (nowInSeconds) that cannot byte-match
+        an independent writer, so they stay semantic-only by nature. A future
+        upgrade to byte_for_byte would require a non-TTL static-tombstone reference
+        whose deletion time is deterministic (explicit localDeletionTime) plus a
+        strict Data.db byte diff.
 
   - id: cass.write_load_path.flush.partition_boundary_artifacts
     title: Flush produces partition-boundary artifacts (promoted index / BTI Partitions.db)
