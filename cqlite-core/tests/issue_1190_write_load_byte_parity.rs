@@ -157,10 +157,11 @@ fn component_suffixes(dir: &Path) -> BTreeSet<String> {
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
+            // Every committed/emitted component carries the `nb-1-big-` descriptor
+            // prefix (including `nb-1-big-TOC.txt`), so the `-big-` split handles
+            // all of them; anything without it is not an SSTable component.
             if let Some(idx) = name.find("-big-") {
                 set.insert(name[idx + 5..].to_string());
-            } else if name.contains("TOC") {
-                set.insert("TOC.txt".to_string());
             }
         }
     }
