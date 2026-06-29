@@ -6,11 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::model::{Manifest, Scenario};
-
-const SAFE_CLAIM: &str = "CQLite reads and writes Cassandra 5.0 SSTables and is validated for canonical-semantic equivalence against `sstabledump` for the covered dataset, with byte-for-byte parity proven only where this report records `byte_for_byte` evidence.";
-
-const UNSAFE_CLAIM: &str = "\"CQLite passes the same tests as Cassandra\" or \"CQLite is byte-for-byte identical to Cassandra\" — these overclaim node behavior and byte parity the manifest does not support.";
+use crate::model::{Claim, Manifest, Scenario};
 
 pub fn render(m: &Manifest, manifest_path: &str) -> String {
     let mut scenarios: Vec<&Scenario> = m.scenarios.iter().collect();
@@ -233,15 +229,71 @@ pub fn render(m: &Manifest, manifest_path: &str) -> String {
     }
     line("");
 
-    // --- claim language ---
-    line("## Claim language");
-    line("");
-    line(&format!("**Safe:** {SAFE_CLAIM}"));
-    line("");
-    line(&format!("**Unsafe:** {UNSAFE_CLAIM}"));
-    line("");
+    // --- release-safe claim language (manifest-driven, issue #1023) ---
+    render_claim_language(&mut s, m);
 
     s
+}
+
+/// Render the release-safe / blocked public-claim language from the manifest's
+/// `claims:` section (issue #1023). Safe wordings cite their backing scenarios;
+/// blocked phrases name the safe alternative to use instead. Sorted by id for a
+/// deterministic, `report --check`-stable render.
+fn render_claim_language(s: &mut String, m: &Manifest) {
+    let mut line = |text: &str| {
+        s.push_str(text);
+        s.push('\n');
+    };
+    line("## Release-safe claim language");
+    line("");
+    line(
+        "Public/release-facing parity claims are enforced by the claim-scan lint. \
+         Safe wordings below are manifest-backed; the blocked phrases are unqualified \
+         over-claims rejected unless explicitly scoped as a counter-example.",
+    );
+    line("");
+
+    let mut safe: Vec<&Claim> = m.claims.iter().filter(|c| c.kind == "safe").collect();
+    safe.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut blocked: Vec<&Claim> = m.claims.iter().filter(|c| c.kind == "blocked").collect();
+    blocked.sort_by(|a, b| a.id.cmp(&b.id));
+
+    line("### Safe wordings");
+    line("");
+    if safe.is_empty() {
+        line("_None._");
+    } else {
+        for c in &safe {
+            line(&format!("- **{}** — {}", c.id, c.phrase.trim()));
+            line(&format!("  - Why safe: {}", c.rationale.trim()));
+            if !c.evidence_scenarios.is_empty() {
+                line(&format!(
+                    "  - Backed by: {}",
+                    c.evidence_scenarios
+                        .iter()
+                        .map(|e| format!("`{e}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
+    }
+    line("");
+
+    line("### Blocked phrases (rejected unless explicitly scoped)");
+    line("");
+    if blocked.is_empty() {
+        line("_None._");
+    } else {
+        for c in &blocked {
+            line(&format!("- **{}** — \"{}\"", c.id, c.phrase.trim()));
+            line(&format!("  - Why blocked: {}", c.rationale.trim()));
+            if let Some(alt) = &c.safe_alternative {
+                line(&format!("  - Use instead: `{alt}`"));
+            }
+        }
+    }
+    line("");
 }
 
 fn render_evidence_group(

@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+use cassandra_parity::claim_scan::{scan_docs, ScanInput};
 use cassandra_parity::lint::{lint, Level};
 use cassandra_parity::model::Manifest;
 use cassandra_parity::{coverage, enums, report};
@@ -417,6 +418,17 @@ fn schema_enums_match_lint_enums() {
         schema_enum(&props["scope"]["properties"]["out_of_scope_category"]),
         expect(enums::OUT_OF_SCOPE_CATEGORY)
     );
+
+    // Issue #1023 (roborev): the claim-kind enum lives under `$defs.claim`, not
+    // `$defs.scenario`, so it was missed by the loop above. Assert it too, so
+    // drift between `enums::CLAIM_KIND` and the schema's `claim.kind` enum can't
+    // slip through.
+    let claim_props = &schema["$defs"]["claim"]["properties"];
+    assert_eq!(
+        schema_enum(&claim_props["kind"]),
+        expect(enums::CLAIM_KIND),
+        "enums::CLAIM_KIND must match $defs.claim.properties.kind.enum"
+    );
 }
 
 /// Extract the `test_deltas` table name from a fixture reference path of the
@@ -516,6 +528,381 @@ fn delta_scan_fixtures_map_to_generated_tables() {
         problems.is_empty(),
         "delta_scan fixture/generator drift:\n{}",
         problems.join("\n")
+    );
+}
+
+// ----------------------------------------------------------------------------
+// Public-claim scan + manifest claim validation (issue #1023).
+// ----------------------------------------------------------------------------
+
+/// A manifest with one mirrored scenario plus the claim entries the claim-scan
+/// lint needs. `VALID_SCENARIO` supplies a real scenario id for `safe` claims to
+/// cite, so manifest-level claim lint stays clean.
+fn wrap_with_claims() -> String {
+    format!(
+        "{}claims:
+  - id: claim.safe.selected_fixture_validation
+    kind: safe
+    phrase: validated against selected Apache Cassandra 5.0 SSTable fixtures
+    rationale: scoped to the covered corpus, not exhaustive
+    evidence_scenarios:
+      - cass.sstable_format.example_mirrored
+  - id: claim.blocked.same_tests_as_cassandra
+    kind: blocked
+    phrase: same tests as Cassandra
+    rationale: CQLite does not run Cassandra's JVM test suite
+    safe_alternative: claim.safe.selected_fixture_validation
+  - id: claim.blocked.full_compaction_byte_parity
+    kind: blocked
+    phrase: full compaction byte parity
+    rationale: byte parity only where the manifest records byte_for_byte
+    safe_alternative: claim.safe.selected_fixture_validation
+  - id: claim.blocked.zero_diff_sstabledump_all_datasets
+    kind: blocked
+    phrase: zero-diff sstabledump across every dataset
+    rationale: only selected fixtures are validated
+    safe_alternative: claim.safe.selected_fixture_validation
+",
+        wrap(VALID_SCENARIO)
+    )
+}
+
+fn claim_findings(yaml: &str, files: &[(&str, &str)]) -> Vec<String> {
+    let m = Manifest::from_yaml(yaml).expect("manifest parses");
+    let inputs: Vec<ScanInput<'_>> = files
+        .iter()
+        .map(|(p, t)| ScanInput { path: p, text: t })
+        .collect();
+    scan_docs(&m, &inputs)
+        .into_iter()
+        .filter(|f| f.level == Level::Error)
+        .map(|f| format!("[{}] {}: {}", f.id, f.field, f.message))
+        .collect()
+}
+
+#[test]
+fn manifest_supports_all_four_statuses() {
+    // AC1: the closed status set is exactly these four.
+    assert_eq!(
+        enums::STATUS,
+        ["mirrored", "partial", "planned", "out_of_scope"]
+    );
+}
+
+#[test]
+fn unqualified_same_tests_claim_fails() {
+    let docs = [("README.md", "CQLite runs the same tests as Cassandra.")];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.blocked.same_tests_as_cassandra")),
+        "got: {errs:#?}"
+    );
+}
+
+#[test]
+fn unqualified_full_compaction_byte_parity_fails() {
+    let docs = [("README.md", "We ship full compaction byte parity today.")];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.blocked.full_compaction_byte_parity")),
+        "got: {errs:#?}"
+    );
+}
+
+#[test]
+fn unqualified_zero_diff_all_datasets_fails() {
+    let docs = [(
+        "CHANGELOG.md",
+        "Now with zero-diff sstabledump across every dataset.",
+    )];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.blocked.zero_diff_sstabledump_all_datasets")),
+        "got: {errs:#?}"
+    );
+}
+
+#[test]
+fn explicitly_scoped_blocked_phrase_passes() {
+    // AC5: a blocked phrase framed as a counter-example is allowed.
+    let docs = [(
+        "docs/development/parity-release-checklist.md",
+        "Do not claim the same tests as Cassandra; scope every parity claim.",
+    )];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(errs.is_empty(), "scoped phrase should pass, got: {errs:#?}");
+}
+
+#[test]
+fn unsafe_marked_blocked_phrase_passes() {
+    let docs = [(
+        "README.md",
+        "Unsafe: \"full compaction byte parity\" — overclaims byte parity.",
+    )];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(
+        errs.is_empty(),
+        "unsafe-marked phrase should pass: {errs:#?}"
+    );
+}
+
+#[test]
+fn manifest_backed_safe_wording_passes() {
+    // AC4: a claim that uses the manifest-backed safe wording passes even though
+    // it mentions parity, because it is the recorded safe phrase.
+    let docs = [(
+        "README.md",
+        "CQLite is validated against selected Apache Cassandra 5.0 SSTable fixtures.",
+    )];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(errs.is_empty(), "safe wording should pass, got: {errs:#?}");
+}
+
+#[test]
+fn same_line_safe_phrase_does_not_exempt_separate_blocked_phrase() {
+    // Roborev finding 1: a line that contains a manifest-backed safe phrase AND a
+    // separate unqualified over-claim must still FAIL — the safe wording only
+    // exempts the span it covers, not the whole line.
+    let docs = [(
+        "README.md",
+        "CQLite is validated against selected Apache Cassandra 5.0 SSTable fixtures \
+         and runs the same tests as Cassandra.",
+    )];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.blocked.same_tests_as_cassandra")),
+        "separate blocked phrase on a safe-wording line must be caught, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn unrelated_scope_marker_on_same_line_does_not_exempt_blocked_phrase() {
+    // Roborev finding (issue #1023): a scope marker (`reject`) that is unrelated to
+    // and far from the over-claim must NOT exempt it. Scope detection is tied to the
+    // blocked-phrase occurrence, not the whole line.
+    let docs = [(
+        "README.md",
+        "We reject stale fixtures and run the same tests as Cassandra.",
+    )];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.blocked.same_tests_as_cassandra")),
+        "unrelated scope marker must not exempt the over-claim, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn scope_marker_adjacent_to_blocked_phrase_still_exempts() {
+    // The positive counterpart: a scope marker in the bounded window immediately
+    // preceding the blocked phrase still scopes (exempts) the occurrence.
+    let docs = [(
+        "docs/development/parity-release-checklist.md",
+        "Reviewers must reject any \"same tests as Cassandra\" wording.",
+    )];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(
+        errs.is_empty(),
+        "adjacent scope marker should still exempt, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn blocked_phrase_wrapped_across_lines_is_caught() {
+    // Roborev finding 2: a blocked phrase split across a soft-wrap must still be
+    // detected, with the finding reporting the line where the phrase starts.
+    let docs = [(
+        "README.md",
+        "CQLite runs the same tests as\nCassandra in every build.",
+    )];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.blocked.same_tests_as_cassandra")
+                && e.contains("README.md:1")),
+        "wrapped blocked phrase must be caught at its start line, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn markdown_emphasis_inside_blocked_phrase_is_caught() {
+    // Roborev finding (issue #1023): Markdown emphasis markers INSIDE a blocked
+    // phrase (`same **tests** as Cassandra`) are semantically the same over-claim
+    // and must FAIL lint at the phrase's start line.
+    let docs = [("README.md", "CQLite runs the same **tests** as Cassandra.")];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.blocked.same_tests_as_cassandra")
+                && e.contains("README.md:1")),
+        "markdown emphasis inside a blocked phrase must be caught, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn markdown_code_span_inside_blocked_phrase_is_caught() {
+    // Roborev finding (issue #1023): a Markdown code span inside a blocked phrase
+    // (`` same `tests` as Cassandra ``) must FAIL lint just like the plain phrase.
+    let docs = [("README.md", "CQLite runs the same `tests` as Cassandra.")];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.blocked.same_tests_as_cassandra")
+                && e.contains("README.md:1")),
+        "markdown code span inside a blocked phrase must be caught, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn markdown_underscore_emphasis_inside_blocked_phrase_is_caught() {
+    // Roborev finding (issue #1023): underscore emphasis inside a blocked phrase
+    // (`same _tests_ as Cassandra`) must FAIL lint.
+    let docs = [("README.md", "CQLite runs the same _tests_ as Cassandra.")];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.blocked.same_tests_as_cassandra")),
+        "markdown underscore emphasis inside a blocked phrase must be caught, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn blocked_finding_names_safe_alternative() {
+    let docs = [("README.md", "We have full compaction byte parity.")];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.safe.selected_fixture_validation")),
+        "finding must point at the safe alternative, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn safe_claim_with_unknown_scenario_is_rejected() {
+    // Manifest-level claim lint: a safe claim citing a missing scenario fails.
+    let yaml = wrap_with_claims().replace(
+        "      - cass.sstable_format.example_mirrored",
+        "      - cass.does.not_exist",
+    );
+    let errs = errors(&yaml);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.safe.selected_fixture_validation")
+                && e.contains("unknown scenario id")),
+        "got: {errs:#?}"
+    );
+}
+
+#[test]
+fn blocked_claim_without_safe_alternative_is_rejected() {
+    let yaml = wrap_with_claims().replace(
+        "    safe_alternative: claim.safe.selected_fixture_validation\n  - id: claim.blocked.full_compaction_byte_parity",
+        "  - id: claim.blocked.full_compaction_byte_parity",
+    );
+    let errs = errors(&yaml);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.blocked.same_tests_as_cassandra")
+                && e.contains("safe_alternative")),
+        "got: {errs:#?}"
+    );
+}
+
+#[test]
+fn malformed_claim_id_empty_slug_is_rejected() {
+    // Roborev finding (issue #1023): an id with the right prefix but an empty
+    // slug (`claim.safe.`) must FAIL lint — prefix-only validation let it pass.
+    let yaml = wrap_with_claims().replace("claim.safe.selected_fixture_validation", "claim.safe.");
+    let errs = errors(&yaml);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.safe.") && e.contains("claims.id") && e.contains("slug")),
+        "empty-slug claim id must be rejected, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn malformed_claim_id_bad_chars_is_rejected() {
+    // An id with the right prefix but uppercase/hyphen in the slug
+    // (`claim.blocked.Bad-Slug`) violates `[a-z0-9_]+` and must FAIL lint.
+    let yaml = wrap_with_claims().replace(
+        "claim.blocked.same_tests_as_cassandra",
+        "claim.blocked.Bad-Slug",
+    );
+    let errs = errors(&yaml);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.blocked.Bad-Slug") && e.contains("claims.id")),
+        "bad-char claim id must be rejected, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn well_formed_claim_ids_pass() {
+    // The positive counterpart: the well-formed claim ids in `wrap_with_claims`
+    // must NOT trigger any `claims.id` slug error.
+    let errs = errors(&wrap_with_claims());
+    assert!(
+        !errs.iter().any(|e| e.contains("claims.id")),
+        "well-formed claim ids must pass id validation, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn real_manifest_has_the_six_claim_entries() {
+    // The six claim entries from issue #1023 must exist and lint clean.
+    let root = repo_root();
+    let text =
+        std::fs::read_to_string(root.join("test-data/cassandra-parity-manifest.yml")).unwrap();
+    let m = Manifest::from_yaml(&text).expect("real manifest parses");
+    for id in [
+        "claim.safe.selected_fixture_validation",
+        "claim.safe.rust_byte_level_coverage",
+        "claim.safe.traceable_cassandra_parity_suite",
+        "claim.blocked.same_tests_as_cassandra",
+        "claim.blocked.full_compaction_byte_parity",
+        "claim.blocked.zero_diff_sstabledump_all_datasets",
+    ] {
+        assert!(
+            m.claims.iter().any(|c| c.id == id),
+            "manifest missing claim entry {id}"
+        );
+    }
+}
+
+#[test]
+fn assessment_report_is_in_release_files() {
+    // Roborev finding 1 (issue #1023): the CI path filter for the cassandra-parity
+    // lint job uses the glob `docs/reports/cassandra-test-parity*.md`, which matches
+    // the hand-written, release-facing assessment report. `RELEASE_FILES` must list
+    // that file so the lint actually scans it — otherwise an over-claim there would
+    // trigger CI but escape the scanner (a guardrail hole).
+    assert!(
+        cassandra_parity::claim_scan::RELEASE_FILES
+            .contains(&"docs/reports/cassandra-test-parity-assessment.md"),
+        "assessment report must be in RELEASE_FILES (CI glob covers it), got: {:?}",
+        cassandra_parity::claim_scan::RELEASE_FILES
+    );
+}
+
+#[test]
+fn blocked_claim_in_assessment_report_path_fails() {
+    // Roborev finding 1 (issue #1023): a blocked over-claim placed in the assessment
+    // report's path must be caught by the claim scan, proving that path is scanned.
+    let docs = [(
+        "docs/reports/cassandra-test-parity-assessment.md",
+        "CQLite runs the same tests as Cassandra.",
+    )];
+    let errs = claim_findings(&wrap_with_claims(), &docs);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("claim.blocked.same_tests_as_cassandra")
+                && e.contains("docs/reports/cassandra-test-parity-assessment.md")),
+        "over-claim in the assessment report path must be caught, got: {errs:#?}"
     );
 }
 
