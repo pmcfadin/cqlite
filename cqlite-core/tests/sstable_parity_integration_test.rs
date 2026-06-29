@@ -588,15 +588,21 @@ fn handle_parity_error(e: &str) {
 /// that legitimately parses to 95–99% of reference partitions stays green.
 const DEFAULT_PARITY_MIN_PERCENT: u64 = 95;
 
-/// Real presence/content assertion (issue #1230) replacing the thin
-/// `partition_count > 0`. Requires the JSONL golden to be present and non-empty
-/// and the parser to cover at least `min_percent`% of the reference partitions,
-/// so a dropped or truncated table FAILS rather than passing on a single stray
-/// partition. The tolerance is an explicit parameter (call sites pass
-/// [`DEFAULT_PARITY_MIN_PERCENT`]) and is the SINGLE source of truth for the
-/// pass/fail threshold — call sites must not stack a second, conflicting
-/// partition-count check. #1230 only adds the fail-closed-on-empty guard; it
-/// deliberately does NOT tighten the established lenient ratio to 100%.
+/// Ratio-based presence/content assertion (issue #1230). Requires the JSONL
+/// golden to be present and non-empty and the parser to cover at least
+/// `min_percent`% of the reference partitions. The tolerance is an explicit
+/// parameter and is the single source of truth for the RATIO threshold. A call
+/// site MAY additionally pin a separate ABSOLUTE partition-count floor (a
+/// regression pin distinct from this ratio check — e.g.
+/// `test_collection_table_map_parsing`'s `>= 50`); that is permitted because it
+/// is not a second, conflicting expression of the same ratio. What is forbidden
+/// is restating the ratio as a different percentage.
+///
+/// This helper is used ONLY at the call site that had a 95% tolerance BEFORE
+/// #1230 (`test_simple_table_key_parsing_parity`). #1230 preserves that 95%
+/// exactly — it does not tighten it to 100%. Call sites whose pre-#1230 baseline
+/// was the lenient `partition_count > 0` use [`assert_parity_present`] instead,
+/// so #1230 leaves their pass criteria unchanged.
 fn assert_parity_content(r: &ParityResult, min_percent: u64) {
     assert!(
         r.reference_count > 0,
@@ -610,6 +616,25 @@ fn assert_parity_content(r: &ParityResult, min_percent: u64) {
         min_partitions,
         min_percent,
         r.reference_count
+    );
+}
+
+/// Fail-closed-on-empty presence assertion (issue #1230) for the call sites
+/// whose pre-#1230 baseline was the lenient `partition_count > 0`. It preserves
+/// that exact lenient pass criterion (any non-zero partition count passes) while
+/// ADDING only the fail-closed guarantee: the JSONL golden must be present and
+/// non-empty, so a dropped table or a #773-class missing-fixture regression
+/// FAILS rather than silently passing on absent reference data. It deliberately
+/// does NOT impose a ratio floor — that would tighten these tables' criteria,
+/// which is out of scope for #1230.
+fn assert_parity_present(r: &ParityResult) {
+    assert!(
+        r.reference_count > 0,
+        "JSONL golden is absent or empty (0 reference partitions)"
+    );
+    assert!(
+        r.partition_count > 0,
+        "parsed 0 partitions (expected > 0) — table dropped or truncated?"
     );
 }
 
@@ -664,7 +689,7 @@ async fn test_composite_key_table_parsing_parity() {
                 "composite_key_table: {} partitions, {}/{} keys matched",
                 r.partition_count, r.matched_keys, r.reference_count
             );
-            assert_parity_content(&r, DEFAULT_PARITY_MIN_PERCENT);
+            assert_parity_present(&r);
         }
         Err(e) => handle_parity_error(&e),
     }
@@ -684,7 +709,7 @@ async fn test_static_columns_table_parsing() {
                 "static_columns_table: {} partitions, {}/{} keys matched",
                 r.partition_count, r.matched_keys, r.reference_count
             );
-            assert_parity_content(&r, DEFAULT_PARITY_MIN_PERCENT);
+            assert_parity_present(&r);
         }
         Err(e) => handle_parity_error(&e),
     }
@@ -708,7 +733,7 @@ async fn test_collection_table_list_parsing() {
                 "collection_table: {} partitions, {}/{} cells validated",
                 r.partition_count, r.validated_cells, r.total_cells
             );
-            assert_parity_content(&r, DEFAULT_PARITY_MIN_PERCENT);
+            assert_parity_present(&r);
         }
         Err(e) => handle_parity_error(&e),
     }
@@ -759,7 +784,7 @@ async fn test_nested_collections_parsing() {
                 "nested_collections_table: {} partitions, {}/{} cells validated",
                 r.partition_count, r.validated_cells, r.total_cells
             );
-            assert_parity_content(&r, DEFAULT_PARITY_MIN_PERCENT);
+            assert_parity_present(&r);
         }
         Err(e) => handle_parity_error(&e),
     }
@@ -779,7 +804,7 @@ async fn test_collections_with_udts_parsing() {
                 "collections_with_udts: {} partitions, {}/{} cells validated",
                 r.partition_count, r.validated_cells, r.total_cells
             );
-            assert_parity_content(&r, DEFAULT_PARITY_MIN_PERCENT);
+            assert_parity_present(&r);
         }
         Err(e) => handle_parity_error(&e),
     }
@@ -803,7 +828,7 @@ async fn test_sensor_data_clustering_key_parsing() {
                 "sensor_data: {} partitions, {}/{} keys matched",
                 r.partition_count, r.matched_keys, r.reference_count
             );
-            assert_parity_content(&r, DEFAULT_PARITY_MIN_PERCENT);
+            assert_parity_present(&r);
         }
         Err(e) => handle_parity_error(&e),
     }
@@ -823,7 +848,7 @@ async fn test_stock_prices_bti_format() {
                 "stock_prices: {} partitions, {}/{} keys matched",
                 r.partition_count, r.matched_keys, r.reference_count
             );
-            assert_parity_content(&r, DEFAULT_PARITY_MIN_PERCENT);
+            assert_parity_present(&r);
         }
         Err(e) => handle_parity_error(&e),
     }
@@ -847,7 +872,7 @@ async fn test_wide_partition_table_many_rows() {
                 "wide_partition_table: {} partitions, {}/{} keys matched",
                 r.partition_count, r.matched_keys, r.reference_count
             );
-            assert_parity_content(&r, DEFAULT_PARITY_MIN_PERCENT);
+            assert_parity_present(&r);
         }
         Err(e) => handle_parity_error(&e),
     }
@@ -867,7 +892,7 @@ async fn test_chat_messages_frozen_types() {
                 "chat_messages: {} partitions, {}/{} cells validated",
                 r.partition_count, r.validated_cells, r.total_cells
             );
-            assert_parity_content(&r, DEFAULT_PARITY_MIN_PERCENT);
+            assert_parity_present(&r);
         }
         Err(e) => handle_parity_error(&e),
     }
@@ -887,7 +912,7 @@ async fn test_many_columns_table_sparse_bitmap() {
                 "many_columns_table: {} partitions, {}/{} keys matched",
                 r.partition_count, r.matched_keys, r.reference_count
             );
-            assert_parity_content(&r, DEFAULT_PARITY_MIN_PERCENT);
+            assert_parity_present(&r);
         }
         Err(e) => handle_parity_error(&e),
     }
@@ -918,9 +943,11 @@ async fn test_all_tables_basic_parity() {
     for (keyspace, table) in &test_cases {
         match run_parity_test(keyspace, table).await {
             Ok(r) => {
-                // Fail-closed (issue #1230): real content/presence assertion, not
-                // the old `if partition_count > 0 { pass } else { fail }`.
-                assert_parity_content(&r, DEFAULT_PARITY_MIN_PERCENT);
+                // Fail-closed (issue #1230): presence assertion, not the old
+                // `if partition_count > 0 { pass } else { fail }`. Preserves the
+                // pre-#1230 lenient `> 0` pass criterion (no ratio floor added)
+                // while failing closed when the golden is absent/empty.
+                assert_parity_present(&r);
                 println!(
                     "PASS: {}.{} ({} partitions)",
                     keyspace, table, r.partition_count

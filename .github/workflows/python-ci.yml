@@ -214,8 +214,9 @@ jobs:
         run: |
           set -euo pipefail
           test -f test-data/datasets/metadata.yml
-          # Issue #1230: assert the full 33-table corpus, not just test_basic, so a
-          # partial extraction reds CI instead of skip-greening the pytest lane.
+          # Issue #1230: assert the full 39-table enforced corpus (33 nb + 6
+          # test_oa), not just test_basic, so a partial extraction reds CI
+          # instead of skip-greening the pytest lane.
           bash test-data/scripts/check-dataset-manifest.sh test-data/datasets
 
       # Issue #331: Pre-build CLI binary for faster CLI parity tests
@@ -231,7 +232,7 @@ jobs:
           # Issue #1230: fail-closed. With this flag the conftest skip helper turns
           # a missing dataset into a FAILURE (not a silent skip). What catches a
           # dropped/renamed table or a #773-class path regression is the
-          # check-dataset-manifest.sh step above (full 33-table corpus) plus that
+          # check-dataset-manifest.sh step above (full 39-table corpus) plus that
           # strict skip-helper failure. The pytest_sessionfinish "no tests ran"
           # floor is only a whole-session no-op guard (it reds when 0 tests pass
           # at all); it does NOT detect dataset tests skipping while non-dataset

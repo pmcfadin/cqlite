@@ -108,9 +108,9 @@ jobs:
           echo "✅ Core fixture present: ${CORE_FIXTURE}"
           echo "✅ Required JSONL golden present: ${GOLDEN_JSONL}"
           # Issue #1230: broaden the sanity check beyond the single core fixture —
-          # assert the WHOLE 33-table validation corpus is present so a partial
-          # extraction or a dropped table reds CI here instead of letting the
-          # dataset-dependent lanes skip-and-pass.
+          # assert the WHOLE 39-table enforced corpus (33 nb + 6 test_oa) is
+          # present so a partial extraction or a dropped table reds CI here
+          # instead of letting the dataset-dependent lanes skip-and-pass.
           bash test-data/scripts/check-dataset-manifest.sh test-data/datasets
 
       - name: Validate environment
