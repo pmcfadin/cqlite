@@ -238,8 +238,14 @@ impl BulletproofReader {
 
         match &self.info.format {
             SSTableFormat::V4x(_) | SSTableFormat::V5x(_) => self.parse_modern_format(&data),
-            SSTableFormat::V3x(_) => self.parse_v3_format(&data),
-            SSTableFormat::V2x(_) => self.parse_v2_format(&data),
+            // #1249: pre-`na` (Cassandra 3.x BIG, `ma`–`me`) and 2.x are below
+            // the supported floor. There is no correctness-modeling read path
+            // for them; reject with the typed version error naming the floor
+            // instead of routing into a stub parser.
+            SSTableFormat::V3x(v) | SSTableFormat::V2x(v) => Err(Error::UnsupportedVersion {
+                version: v.clone(),
+                floor: "na".to_string(),
+            }),
             SSTableFormat::Unknown(version) => Err(Error::UnsupportedFormat(format!(
                 "Unknown SSTable version: {}",
                 version
@@ -512,20 +518,6 @@ impl BulletproofReader {
 
         Ok((result, bytes_read))
     }
-    /// Parse V3.x format
-    fn parse_v3_format(&self, _data: &[u8]) -> Result<Vec<SSTableEntry>> {
-        debug!("Parsing V3.x SSTable format");
-        // TODO: Implement V3.x specific parsing
-        Ok(Vec::new())
-    }
-
-    /// Parse V2.x format
-    fn parse_v2_format(&self, _data: &[u8]) -> Result<Vec<SSTableEntry>> {
-        debug!("Parsing V2.x SSTable format");
-        // TODO: Implement V2.x specific parsing
-        Ok(Vec::new())
-    }
-
     /// Get information about the SSTable
     pub fn info(&self) -> &SSTableInfo {
         &self.info
