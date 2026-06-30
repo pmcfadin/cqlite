@@ -207,11 +207,39 @@ if [[ -z "$CQLITE_BIN" ]]; then
 fi
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
   log "Building cqlite-cli (write-support) candidate binary…"
+  # A failed candidate build is a HARD failure: continuing would run the legs
+  # against a STALE target/debug/cqlite from a previous build and report a
+  # misleading pass (issue #1025). --skip-build is the ONLY path that tolerates a
+  # pre-existing binary (the user opted in), and even then we verify it exists
+  # below. Abort the whole lane non-zero here so a build break never hides behind
+  # a stale binary. (A successful `cargo build` is, by definition, up to date with
+  # the sources — exit 0 + the existence check below is the "produced by this run"
+  # guarantee; a no-op rebuild of an already-current binary is legitimately fine.)
   if ! ( cd "$ROOT" && cargo build --package cqlite-cli --features write-support ) \
         >"$LOG_DIR/build-cqlite.log" 2>&1; then
-    warn "candidate binary build FAILED — see logs/build-cqlite.log"
+    log "[ERROR] candidate binary build FAILED — see logs/build-cqlite.log. Aborting the lane \
+(use --skip-build only to deliberately reuse a pre-existing binary)."
+    exit 1
   fi
 fi
+
+# Verify the binary the legs will actually run exists and is executable BEFORE
+# running any leg. A missing binary — e.g. --skip-build with nothing built, or a
+# build that wrote nowhere we expect — is a HARD failure, never a leg run against
+# a stale/absent binary (issue #1025). With --skip-build this is the ONLY
+# tolerated path and even then the binary must exist; without it, a successful
+# build must have produced the binary or something is wrong.
+if [[ ! -x "$CQLITE_BIN" ]]; then
+  if [[ "$SKIP_BUILD" -eq 1 ]]; then
+    detail='--skip-build was supplied but no usable binary exists (build it first, or drop --skip-build).'
+  else
+    detail='the candidate build reported success but did not produce it.'
+  fi
+  log "[ERROR] selected cqlite binary not found or not executable: $CQLITE_BIN. $detail \
+Aborting the lane rather than running legs against a stale/absent binary."
+  exit 1
+fi
+log "Using cqlite binary: $CQLITE_BIN"
 
 # ===========================================================================
 # Leg 1 — live read-back semantic equivalence (HARD)

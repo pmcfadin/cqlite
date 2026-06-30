@@ -67,26 +67,71 @@ fn require_live_strict() -> bool {
     )
 }
 
-/// Resolve a usable `cassandra:5.0*` image, returning the image tag and the
-/// reason it is unavailable when it is not. `None` means a clean local SKIP.
-fn try_cassandra_5_image() -> Result<String, &'static str> {
+/// Single source of truth for the Cassandra image the BTI leg validates against.
+/// The `nightly_docker` workflow sets `CASSANDRA_IMAGE` (and pulls exactly that
+/// tag) so the hard BTI leg can never validate against a DIFFERENT image than the
+/// stated pin. Defaults to the corpus pin `cassandra:5.0.2` when unset (matching
+/// docker-compose-cassandra5.yml / the committed corpus — NOT a second pin).
+fn pinned_cassandra_image() -> String {
+    std::env::var("CASSANDRA_IMAGE")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "cassandra:5.0.2".to_string())
+}
+
+/// Return `true` if the exact image tag is present locally.
+fn image_present_locally(listing: &str, image: &str) -> bool {
+    listing.lines().any(|line| line.trim() == image)
+}
+
+/// Resolve a usable Cassandra 5 image, returning the image tag and the reason it
+/// is unavailable when it is not. `None` (an `Err`) means a clean local SKIP
+/// outside strict mode.
+///
+/// In strict mode (`CQLITE_REQUIRE_FIXTURES=1`, the `nightly_docker` HARD leg) we
+/// REQUIRE the EXACT pinned image (`CASSANDRA_IMAGE`, default `cassandra:5.0.2`):
+/// we do NOT fall back to a looser `cassandra:5.0` (or any other `5.0.*`) tag, so
+/// the hard leg validates against the stated pin and never a different image that
+/// merely happens to be on the runner. Outside strict mode we keep the lenient
+/// local-tag discovery (exact pin, then `cassandra:5.0`, then any `cassandra:5.0.*`)
+/// for dev convenience.
+fn try_cassandra_5_image() -> Result<String, String> {
+    let pinned = pinned_cassandra_image();
     // 1. Docker daemon reachable?
     let info = Command::new("docker").arg("info").output();
     match info {
         Ok(out) if out.status.success() => {}
-        Ok(_) => return Err("docker daemon not reachable (`docker info` failed)"),
-        Err(_) => return Err("docker binary not available"),
+        Ok(_) => return Err("docker daemon not reachable (`docker info` failed)".to_string()),
+        Err(_) => return Err("docker binary not available".to_string()),
     }
-    // 2. A cassandra:5.0* image present locally? (We do not pull — CI provisions it.)
+    // 2. List images present locally. (We do not pull — CI provisions the pin.)
     let images = Command::new("docker")
         .args(["images", "--format", "{{.Repository}}:{{.Tag}}"])
         .output();
     let images = match images {
         Ok(out) if out.status.success() => out,
-        _ => return Err("`docker images` failed"),
+        _ => return Err("`docker images` failed".to_string()),
     };
     let listing = String::from_utf8_lossy(&images.stdout);
-    // Prefer an exact "cassandra:5.0", else any "cassandra:5.0.*".
+
+    // STRICT: the exact pinned image MUST be present. No looser fallback — the
+    // hard leg must validate against the stated pin, not a different local tag.
+    if require_live_strict() {
+        if image_present_locally(&listing, &pinned) {
+            return Ok(pinned);
+        }
+        return Err(format!(
+            "strict mode requires the EXACT pinned image '{pinned}' (CASSANDRA_IMAGE) but it is \
+             not present locally; the lane must pull '{pinned}' before this leg (no fallback to a \
+             looser cassandra:5.0 tag)"
+        ));
+    }
+
+    // Non-strict (dev convenience): prefer the exact pin, then "cassandra:5.0",
+    // then any "cassandra:5.0.*".
+    if image_present_locally(&listing, &pinned) {
+        return Ok(pinned);
+    }
     let mut candidate: Option<String> = None;
     for line in listing.lines() {
         let line = line.trim();
@@ -97,7 +142,9 @@ fn try_cassandra_5_image() -> Result<String, &'static str> {
             candidate = Some(line.to_string());
         }
     }
-    candidate.ok_or("no cassandra:5.0* image present locally")
+    candidate.ok_or_else(|| {
+        format!("no usable Cassandra 5 image present locally (looked for '{pinned}', cassandra:5.0, cassandra:5.0.*)")
+    })
 }
 
 /// Pick a usable `cassandra:5.0*` image, or `None` if Docker is unavailable or no

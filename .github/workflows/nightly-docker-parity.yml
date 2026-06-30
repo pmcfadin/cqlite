@@ -67,6 +67,13 @@ env:
   # Single source of truth for the pin lives in the reused machinery; restated
   # here only to hand bootstrap-cassandra.sh the same ref (NOT a second pin).
   CASSANDRA_REF: cassandra-5.0.2
+  # Single source of truth for the DOCKER IMAGE the live + BTI legs validate
+  # against. The "Ensure pinned image" step pulls exactly this tag, and the BTI
+  # sstabledump test honors it (CASSANDRA_IMAGE) — in strict mode it REQUIRES this
+  # exact image (no fallback to a looser cassandra:5.0 tag that might be on the
+  # runner). Matches docker-compose-cassandra5.yml / the committed corpus (5.0.2);
+  # NOT a second pin.
+  CASSANDRA_IMAGE: cassandra:5.0.2
   CQLITE_CASSANDRA_CACHE: ${{ github.workspace }}/.cqlite-cache/cassandra-src
   # Canonical dataset pin — the SAME tag/asset/sha the other fixture-backed
   # parity lanes use (sstabledump-parity-gate.yml). The fixture-dependent HARD
@@ -208,17 +215,20 @@ jobs:
           cargo build --package cqlite-cli --features write-support
           test -x target/debug/cqlite
 
-      # Ensure the pinned cassandra:5.0.2 image is present BEFORE the lane runs.
-      # The live read-back leg AND the BTI sstabledump leg need a local 5.0 image;
-      # the BTI test only discovers images already on the host (it never pulls). In
-      # strict mode an absent image would FAIL the BTI HARD leg, so pull it up front
-      # so the leg genuinely exercises Cassandra rather than failing on a missing
-      # image (issue #1025 run-or-fail). Pin matches docker-compose-cassandra5.yml /
-      # the committed corpus (5.0.2) — NOT a second pin.
-      - name: Ensure pinned Cassandra 5.0.2 image (live + BTI legs)
+      # Ensure the pinned image (CASSANDRA_IMAGE) is present BEFORE the lane runs.
+      # The live read-back leg AND the BTI sstabledump leg need it locally; the BTI
+      # test only discovers images already on the host (it never pulls) and, in
+      # strict mode, REQUIRES this EXACT pinned tag (no fallback to a looser
+      # cassandra:5.0 tag). So pull exactly $CASSANDRA_IMAGE up front so the hard
+      # BTI leg validates against the stated pin and never a different local image
+      # (issue #1025 run-or-fail + image single-source-of-truth). Pin matches
+      # docker-compose-cassandra5.yml / the committed corpus — NOT a second pin.
+      - name: Ensure pinned Cassandra image (live + BTI legs)
+        env:
+          CASSANDRA_IMAGE: ${{ env.CASSANDRA_IMAGE }}
         run: |
-          docker pull cassandra:5.0.2
-          docker image inspect cassandra:5.0.2 >/dev/null
+          docker pull "$CASSANDRA_IMAGE"
+          docker image inspect "$CASSANDRA_IMAGE" >/dev/null
 
       - name: Setup Gradle (no wrapper in compaction-parity)
         if: github.event.inputs.skip_compaction != 'true'
@@ -237,6 +247,10 @@ jobs:
         env:
           COMPOSE_CMD: "docker compose"
           CASSANDRA_REF: ${{ env.CASSANDRA_REF }}
+          # Image single source of truth: the BTI sstabledump test (run by the
+          # runner) honors CASSANDRA_IMAGE and, under strict mode, REQUIRES this
+          # exact pinned tag — never a looser cassandra:5.0 tag (issue #1025).
+          CASSANDRA_IMAGE: ${{ env.CASSANDRA_IMAGE }}
           CQLITE_CASSANDRA_CACHE: ${{ env.CQLITE_CASSANDRA_CACHE }}
           CQLITE_DATASETS_ROOT: ${{ env.CQLITE_DATASETS_ROOT }}
           # Fail-closed switch (issue #1025): the runner's fixture-backed HARD legs
