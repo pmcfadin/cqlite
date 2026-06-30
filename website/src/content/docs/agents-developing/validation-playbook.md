@@ -131,6 +131,29 @@ normalization logic.
 4. Add table to the relevant parity test file
 5. Run gate: `scripts/agent-gate.sh`
 
+## Fail-closed guards vs non-deterministically-regenerated sources
+
+A fail-closed guard must key on something the source actually reproduces. CI regenerates
+clean SSTables from a live `cassandra:5.0.2` container on every run, and several
+components are **not byte-reproducible** between runs:
+
+- the **BTI (`da`) trie** — `Partitions.db` / `Rows.db`
+- **`Statistics.db`** — embeds wall-clock, host, and repair metadata
+
+**Rule (L1):** when a source is regenerated non-deterministically, gate on the
+**semantic verdict**, not on a whole-file byte identity. For corruption/verify corpora,
+assert that *CQLite detects the corruption the same way Cassandra does on whatever bytes
+are present* (the parity TEST) — never bind a captured verdict to the `sha256` of the
+whole fixture. Keep the *authoring* check (empty/missing verdict) fail-closed; that part
+IS reproducible. Per-component / full-directory binding is the proper future form
+(tracked in #1294).
+
+Why this matters: a whole-file-sha guard added in #1236 passed locally every run (the
+local gate uses pre-existing, non-regenerated datasets) but tripped in CI on a
+*different* regenerated fixture each round (first the BTI trie, then
+`statistics_db_header_damage`) — three CI-failure root-cause cycles *after* the local
+gate reported PASS. Origin: flow-meta #1310.
+
 ## Row count 0 — silent-pass trap
 
 If parity tests pass but show 0 rows, `CQLITE_DATASETS_ROOT` is unset or points to a
