@@ -24,12 +24,12 @@ pub mod work_counters;
 pub use reader::SSTableReader;
 pub mod schema_aware_reader;
 pub use schema_aware_reader::SchemaAwareReader;
+mod reverse_scan; // BIG reverse partition iteration (issue #1184); file is tombstones-gated.
 pub mod row_cell_state_machine;
 pub mod statistics_reader;
 #[cfg(feature = "tombstones")]
 pub mod tombstone_merger;
 pub mod validation;
-mod reverse_scan; // BIG reverse partition iteration (issue #1184); file is tombstones-gated.
 pub mod verify; // Verifier contract for compressed + corrupted SSTables (epic #970, issue #1000).
 pub use verify::{verify_sstable, VerifyErrorClass, VerifyFinding, VerifyMode, VerifyReport};
 
@@ -217,7 +217,7 @@ pub struct SSTableManager {
 
     /// Table name to SSTable readers mapping
     /// Maps table names (e.g., "simple_table") to their corresponding SSTable readers
-    pub(in crate::storage::sstable) table_readers: Arc<RwLock<HashMap<String, Vec<Arc<reader::SSTableReader>>>>>,
+    pub(crate) table_readers: Arc<RwLock<HashMap<String, Vec<Arc<reader::SSTableReader>>>>>,
 
     /// Platform abstraction
     platform: Arc<Platform>,

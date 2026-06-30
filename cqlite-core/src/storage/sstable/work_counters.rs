@@ -153,7 +153,8 @@ impl Counters {
 
     #[cfg(not(feature = "tombstones"))]
     fn observe_reverse_block_rows(&self, rows: u64) {
-        self.reverse_peak_block_rows.fetch_max(rows, Ordering::Relaxed);
+        self.reverse_peak_block_rows
+            .fetch_max(rows, Ordering::Relaxed);
     }
 
     fn reverse_blocks_decoded(&self) -> u64 {

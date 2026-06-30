@@ -374,7 +374,7 @@ impl SSTableReader {
             )?;
             // Per-iteration memory high-water mark + block-walk evidence (#1184).
             crate::storage::sstable::work_counters::observe_reverse_block_rows(
-                block_rows.len() as u64,
+                block_rows.len() as u64
             );
             crate::storage::sstable::work_counters::add_reverse_block_decoded();
             // Within a block rows are ascending; reverse to descending, then append.

@@ -76,7 +76,9 @@ fn schema_cql() -> String {
 }
 
 fn live_cks() -> Vec<i32> {
-    (0..N_CK).filter(|c| !(GAP_LO..GAP_HI).contains(c)).collect()
+    (0..N_CK)
+        .filter(|c| !(GAP_LO..GAP_HI).contains(c))
+        .collect()
 }
 
 fn write_row(pk: i32, ck: i32, payload: &str, ts: i64) -> Mutation {
@@ -187,7 +189,9 @@ async fn forward_clustering_slice_seeks_via_promoted_index() {
 
     // Sanity: the wide partition read back in full.
     let full = db
-        .execute(&format!("SELECT pk, ck, payload FROM {KS}.{TBL} WHERE pk = 1"))
+        .execute(&format!(
+            "SELECT pk, ck, payload FROM {KS}.{TBL} WHERE pk = 1"
+        ))
         .await
         .expect("full partition read");
     assert_eq!(
@@ -244,7 +248,9 @@ async fn ranged_read_across_clustering_gap_keeps_adjacent_rows() {
         .expect("boundary slice query");
 
     let returned = cks(&res.rows);
-    let expected: Vec<i32> = (25..=45).filter(|c| !(GAP_LO..GAP_HI).contains(c)).collect();
+    let expected: Vec<i32> = (25..=45)
+        .filter(|c| !(GAP_LO..GAP_HI).contains(c))
+        .collect();
     assert_eq!(
         returned, expected,
         "Issue #1184: ck in [25,45] must return 25..29 and 40..45 (gap 30..39 absent), \
@@ -315,16 +321,15 @@ async fn reverse_order_by_desc_matches_forward_via_block_walk() {
 // are local-only until a dataset re-pin, so this skips (does not fail) when absent;
 // the CI-runnable proof is the write-engine fixture tests above.
 
-const REAL_FIXTURE_REL: &str =
-    "sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294";
+const REAL_FIXTURE_REL: &str = "sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294";
 const REAL_PK1_LIVE_ROWS: usize = 290;
 
 fn real_fixture_data_dir() -> Option<std::path::PathBuf> {
     let root = std::env::var("CQLITE_DATASETS_ROOT").ok()?;
     let dir = std::path::PathBuf::from(&root).join(REAL_FIXTURE_REL);
-    dir.join("nb-2-big-Data.db").exists().then(|| {
-        std::path::PathBuf::from(root).join("sstables")
-    })
+    dir.join("nb-2-big-Data.db")
+        .exists()
+        .then(|| std::path::PathBuf::from(root).join("sstables"))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -358,7 +363,9 @@ async fn real_fixture_forward_equals_reverse_290_rows() {
         .await
         .expect("asc query");
     let desc = db
-        .execute("SELECT pk, ck, payload FROM test_big.wide_partition WHERE pk = 1 ORDER BY ck DESC")
+        .execute(
+            "SELECT pk, ck, payload FROM test_big.wide_partition WHERE pk = 1 ORDER BY ck DESC",
+        )
         .await
         .expect("desc query");
 
