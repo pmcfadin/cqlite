@@ -41,6 +41,14 @@ pub enum Error {
     #[error("Unsupported format: {0}")]
     UnsupportedFormat(String),
 
+    /// SSTable version below the supported Cassandra 5.0 floor.
+    ///
+    /// CQLite targets Cassandra 5.0 (`na`+/`nb` BIG, `oa`/`da` BTI). A
+    /// pre-`na` (`ma`–`me`, Cassandra 3.x) BIG version, or a non-`da` BTI
+    /// version, is out of scope and rejected at version-parse time.
+    #[error("Unsupported SSTable version {version:?}: below supported floor {floor:?}")]
+    UnsupportedVersion { version: String, floor: String },
+
     /// Timeout error
     #[error("Operation timeout: {0}")]
     Timeout(String),
@@ -337,6 +345,7 @@ impl Error {
             Error::InvalidInput(_) => false,
             Error::InvalidFormat(_) => false,
             Error::UnsupportedFormat(_) => false,
+            Error::UnsupportedVersion { .. } => false,
             Error::InvalidPath(_) => false,
             Error::InvalidState(_) => false,
             Error::Timeout(_) => false,
@@ -380,6 +389,7 @@ impl Error {
             Error::InvalidInput(_) => ErrorCategory::Data,
             Error::InvalidFormat(_) => ErrorCategory::Data,
             Error::UnsupportedFormat(_) => ErrorCategory::Data,
+            Error::UnsupportedVersion { .. } => ErrorCategory::Data,
             Error::InvalidPath(_) => ErrorCategory::System,
             Error::InvalidState(_) => ErrorCategory::Logic,
             Error::Timeout(_) => ErrorCategory::System,

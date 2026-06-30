@@ -119,7 +119,8 @@ pub(crate) fn classify(err: &Error) -> ErrorCategory {
         Error::Parse(_)
         | Error::CqlParse(_)
         | Error::InvalidFormat(_)
-        | Error::UnsupportedFormat(_) => ErrorCategory::Parsing,
+        | Error::UnsupportedFormat(_)
+        | Error::UnsupportedVersion { .. } => ErrorCategory::Parsing,
 
         Error::Storage(_)
         | Error::Memory(_)

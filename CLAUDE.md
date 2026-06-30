@@ -371,6 +371,14 @@ Use authoritative metadata only — no type guessing. Schema-aware decoding when
 present. Legacy heuristics behind opt-in `experimental` feature flag only.
 See canonical doctrine: [no-heuristics mandate](https://pmcfadin.github.io/cqlite/agents-developing/no-heuristics/)
 
+### Supported formats (version floor)
+CQLite targets Cassandra 5.0 — `na`+/`nb` BIG and `oa`/`da` BTI are in scope; pre-`na`
+(`ma`–`me`, Cassandra 3.x) is out of scope and SHALL NOT be introduced, supported, or
+reviewed for correctness (this guidance is for reviewers incl. roborev too). The floor is
+enforced in code: `BigVersionGates::from_version` rejects `< na` and `BtiVersionGates::from_version`
+rejects non-`da`, both with `Error::UnsupportedVersion`; `SSTableReader::open` propagates that
+error rather than falling back. Do not re-litigate pre-`na` "regressions."
+
 ### Code Quality
 - `RUSTFLAGS="-D warnings"` must pass
 - No `unwrap()`/`expect()` in library code

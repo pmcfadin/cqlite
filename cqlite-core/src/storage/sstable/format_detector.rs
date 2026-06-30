@@ -1,8 +1,19 @@
 //! SSTable format detection and version identification
 //!
-//! This module provides bulletproof detection of SSTable format versions
-//! across all Cassandra versions (2.x, 3.x, 4.x, 5.x) with automatic
-//! format-specific parser selection.
+//! This module *classifies* SSTable version letters into format families for
+//! diagnostics and routing. Classification (recognition) is deliberately
+//! broader than the **supported** read floor: a pre-`na` (`ma`–`me`,
+//! Cassandra 3.x) or pre-3.0 (`ic`/`jb`) version is still *recognized* so we
+//! can name it in errors, but it is NOT *supported*.
+//!
+//! ## Supported floor (#1249)
+//!
+//! "Supported" means CQLite has a real read path for the version: `na`/`nb`
+//! BIG (Cassandra 4.0 / 5.0 compat mode) and `oa`/`da` (Cassandra 5.0 BIG /
+//! BTI). Anything below `na` is recognized-but-unsupported so this preflight
+//! API agrees with `SSTableReader::open` / `StatisticsReader::open`, which
+//! reject below-floor SSTables outright. "Known" never implies "supported":
+//! `is_supported("ma")` is `false`.
 
 use crate::{Error, Result};
 use std::collections::HashMap;
@@ -67,6 +78,26 @@ impl SSTableFormat {
             SSTableFormat::Unknown(_) => "LZ4Compressor",
         }
     }
+
+    /// Whether CQLite *supports reading* this classified format (#1249).
+    ///
+    /// Supported = the na+ version floor: `na`/`nb` BIG (V4x) and `oa`/`da`
+    /// (V5x). Pre-`na` BIG (`ma`–`me`, V3x) and Cassandra 2.x (V2x) are
+    /// *recognized* by classification but are NOT supported, matching the
+    /// reject-at-open behaviour of `SSTableReader`/`StatisticsReader`.
+    pub fn is_supported(&self) -> bool {
+        match self {
+            // Exactly the four versions with a real read path — matching
+            // `supported_versions()`. A future/typo'd letter in the same family
+            // (e.g. `V4x("nc")`, `V5x("ob")`) is NOT a supported version and
+            // must return false (#1249).
+            SSTableFormat::V4x(v) => matches!(v.as_str(), "na" | "nb"),
+            SSTableFormat::V5x(v) => matches!(v.as_str(), "oa" | "da"),
+            // Pre-`na` (Cassandra 3.x) and 2.x are below the floor.
+            SSTableFormat::V2x(_) | SSTableFormat::V3x(_) => false,
+            SSTableFormat::Unknown(_) => false,
+        }
+    }
 }
 
 /// SSTable format detector with comprehensive version support
@@ -76,15 +107,20 @@ pub struct FormatDetector {
 }
 
 impl FormatDetector {
-    /// Create a new format detector with all known versions
+    /// Create a new format detector with all *known* (recognizable) versions.
+    ///
+    /// The map is the recognition set, NOT the supported set: it includes
+    /// pre-`na` (`ma`–`me`) and 2.x letters so they can be classified and named
+    /// in diagnostics. Use [`FormatDetector::is_supported`] /
+    /// [`FormatDetector::supported_versions`] for the na+ supported floor.
     pub fn new() -> Self {
         let mut format_map = HashMap::new();
 
-        // Cassandra 2.x formats
+        // Cassandra 2.x formats (recognized for diagnostics; NOT supported)
         format_map.insert("ic".to_string(), SSTableFormat::V2x("ic".to_string()));
         format_map.insert("jb".to_string(), SSTableFormat::V2x("jb".to_string()));
 
-        // Cassandra 3.x formats
+        // Cassandra 3.x formats (recognized for diagnostics; NOT supported — #1249)
         format_map.insert("ma".to_string(), SSTableFormat::V3x("ma".to_string()));
         format_map.insert("mb".to_string(), SSTableFormat::V3x("mb".to_string()));
         format_map.insert("mc".to_string(), SSTableFormat::V3x("mc".to_string()));
@@ -161,14 +197,30 @@ impl FormatDetector {
         ))
     }
 
-    /// Get all supported format versions
+    /// Get all *supported* format versions (na+ floor, #1249).
+    ///
+    /// Returns only versions CQLite can actually read: `na`/`nb` BIG and
+    /// `oa`/`da` (V4x/V5x). Pre-`na` (`ma`–`me`) and 2.x letters are
+    /// recognizable via [`FormatDetector::detect_from_version`] but are
+    /// deliberately absent here.
     pub fn supported_versions(&self) -> Vec<String> {
-        self.format_map.keys().cloned().collect()
+        self.format_map
+            .iter()
+            .filter(|(_, fmt)| fmt.is_supported())
+            .map(|(v, _)| v.clone())
+            .collect()
     }
 
-    /// Check if a format version is supported
+    /// Check if a format version is *supported* (has a read path).
+    ///
+    /// This is the na+ floor (#1249), NOT mere recognition: a recognized but
+    /// below-floor version such as `ma` returns `false`, so preflighting with
+    /// this API agrees with `SSTableReader::open`, which rejects it.
     pub fn is_supported(&self, version: &str) -> bool {
-        self.format_map.contains_key(version)
+        self.format_map
+            .get(version)
+            .map(SSTableFormat::is_supported)
+            .unwrap_or(false)
     }
 }
 
@@ -383,7 +435,8 @@ mod tests {
     fn test_format_detection() {
         let detector = FormatDetector::new();
 
-        // Test various format versions
+        // detect_from_version *classifies* (recognizes) a version; this is
+        // distinct from whether it is supported (see floor tests below).
         assert_eq!(
             detector.detect_from_version("nb").unwrap(),
             SSTableFormat::V4x("nb".to_string())
@@ -395,6 +448,92 @@ mod tests {
         assert_eq!(
             detector.detect_from_version("oa").unwrap(),
             SSTableFormat::V5x("oa".to_string())
+        );
+    }
+
+    /// #1249 R3: `is_supported` reflects the na+ read floor, NOT recognition.
+    /// Pre-`na` (`ma`–`me`, Cassandra 3.x) and 2.x letters MUST be unsupported,
+    /// while `na`/`nb`/`oa`/`da` MUST be supported. This keeps the preflight
+    /// API consistent with `SSTableReader`/`StatisticsReader::open`.
+    #[test]
+    fn test_is_supported_respects_na_floor() {
+        let detector = FormatDetector::new();
+
+        // Pre-`na` BIG (Cassandra 3.x) and 2.x: recognized but NOT supported.
+        for v in &["ma", "mb", "mc", "md", "me", "ic", "jb"] {
+            assert!(
+                !detector.is_supported(v),
+                "{} is below the na floor and must NOT be supported",
+                v
+            );
+            // Still recognizable/classifiable for diagnostics.
+            assert!(
+                detector.detect_from_version(v).is_ok(),
+                "{} must still be recognized (classified) for diagnostics",
+                v
+            );
+        }
+
+        // na+ floor: BIG na/nb and BIG/BTI oa/da are supported.
+        for v in &["na", "nb", "oa", "da"] {
+            assert!(detector.is_supported(v), "{} must be supported", v);
+        }
+
+        // Completely unknown letters are neither recognized nor supported.
+        assert!(!detector.is_supported("zz"));
+    }
+
+    /// #1249 R3: `supported_versions` enumerates ONLY the na+ floor and never
+    /// advertises any pre-`na` / 2.x version.
+    #[test]
+    fn test_supported_versions_excludes_pre_na() {
+        let detector = FormatDetector::new();
+        let supported = detector.supported_versions();
+
+        for v in &["ma", "mb", "mc", "md", "me", "ic", "jb"] {
+            assert!(
+                !supported.contains(&v.to_string()),
+                "supported_versions must NOT list pre-`na`/2.x version {}",
+                v
+            );
+        }
+        for v in &["na", "nb", "oa", "da"] {
+            assert!(
+                supported.contains(&v.to_string()),
+                "supported_versions must list na+ version {}",
+                v
+            );
+        }
+        // Exactly the four na+ versions, nothing else.
+        assert_eq!(
+            supported.len(),
+            4,
+            "supported set must be exactly {{na, nb, oa, da}}, got {:?}",
+            supported
+        );
+    }
+
+    /// `SSTableFormat::is_supported` family-level mapping (#1249).
+    #[test]
+    fn test_format_family_is_supported() {
+        assert!(SSTableFormat::V4x("na".to_string()).is_supported());
+        assert!(SSTableFormat::V4x("nb".to_string()).is_supported());
+        assert!(SSTableFormat::V5x("oa".to_string()).is_supported());
+        assert!(SSTableFormat::V5x("da".to_string()).is_supported());
+        assert!(!SSTableFormat::V3x("ma".to_string()).is_supported());
+        assert!(!SSTableFormat::V2x("jb".to_string()).is_supported());
+        assert!(!SSTableFormat::Unknown("zz".to_string()).is_supported());
+
+        // #1249: the predicate must match EXACT version letters, not whole
+        // families — a future/typo'd letter in a supported family is NOT
+        // supported. `is_supported` is exactly {na, nb, oa, da}.
+        assert!(
+            !SSTableFormat::V4x("nc".to_string()).is_supported(),
+            "V4x(\"nc\") is not in the supported set and must be unsupported"
+        );
+        assert!(
+            !SSTableFormat::V5x("ob".to_string()).is_supported(),
+            "V5x(\"ob\") is not in the supported set and must be unsupported"
         );
     }
 

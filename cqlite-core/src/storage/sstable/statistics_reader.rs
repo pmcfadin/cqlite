@@ -46,20 +46,6 @@ pub struct StatisticsReader {
 impl StatisticsReader {
     /// Open and parse a Statistics.db file
     pub async fn open(path: &Path, platform: Arc<Platform>) -> Result<Self> {
-        if !platform.fs().exists(path).await? {
-            return Err(Error::not_found(format!(
-                "Statistics.db file not found: {}",
-                path.display()
-            )));
-        }
-
-        // Read the entire file (Statistics.db files are typically small)
-        let mut file = File::open(path).await?;
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer).await?;
-
-        // Parse the statistics data using enhanced parser with fallback.
-        //
         // Derive the format gates from the component filename (e.g.
         // `da-1-bti-Statistics.db` vs `nb-1-big-Statistics.db`) so the best-effort
         // STATS-extras decode (max local deletion time + tombstone-drop histogram,
@@ -67,7 +53,45 @@ impl StatisticsReader {
         // (oa/da) `u32::MAX` no-deletion sentinel and the 12-byte modern histogram
         // bin width differ from the legacy (nb) signed-i32 / 16-byte forms. When the
         // filename does not parse, fall back to None (nb-compatible defaults).
-        let gates = crate::storage::sstable::version_gate::VersionGates::from_path(path).ok();
+        //
+        // #1249 (spec R1): reject below-floor versions BEFORE *any* filesystem
+        // access. Gates derive solely from the filename string (no file I/O), so
+        // this is the earliest point the na+ floor can be enforced: a parsed-but-
+        // below-floor version is propagated as a FATAL `Error::UnsupportedVersion`
+        // here — before the existence check, `File::open`, and `read_to_end` —
+        // instead of returning `NotFound` after touching the filesystem or
+        // silently degrading to nb-compatible defaults (mirrors
+        // `SSTableReader::open_inner` in reader/mod.rs, which gates before
+        // `tokio::fs::metadata`). Only a genuinely unparseable / structurally-
+        // malformed descriptor falls back to None and proceeds to the FS checks.
+        let gates = match crate::storage::sstable::version_gate::VersionGates::from_path(path) {
+            Ok(gates) => Some(gates),
+            Err(e @ Error::UnsupportedVersion { .. }) => return Err(e),
+            Err(e) => {
+                log::debug!(
+                    "StatisticsReader::open: could not derive VersionGates from {:?} ({}); \
+                     defaulting to nb-compatible behaviour",
+                    path,
+                    e
+                );
+                None
+            }
+        };
+
+        if !platform.fs().exists(path).await? {
+            return Err(Error::not_found(format!(
+                "Statistics.db file not found: {}",
+                path.display()
+            )));
+        }
+
+        // Read the entire file (Statistics.db files are typically small).
+        // Reached only for at-or-above-floor (or structurally-unparseable)
+        // descriptors — a below-floor version was already rejected above.
+        let mut file = File::open(path).await?;
+        let mut buffer = Vec::new();
+        file.read_to_end(&mut buffer).await?;
+
         let statistics = match parse_statistics_with_fallback(&buffer, gates.as_ref()) {
             Ok((_, stats)) => stats,
             Err(e) => {
@@ -469,6 +493,127 @@ mod tests {
                     assert_eq!(stats_name, "users-123abc-Statistics.db");
                 }
             }
+        }
+    }
+
+    /// #1249 (roborev finding 1): a below-floor `*-Statistics.db` descriptor
+    /// MUST make `StatisticsReader::open` fail with a typed
+    /// `Error::UnsupportedVersion` rather than silently degrading to
+    /// nb-compatible defaults and proceeding to parse. Drives the public
+    /// `StatisticsReader::open` surface against a real on-disk file whose
+    /// version (`ma`, a pre-`na` BIG version) is below the floor.
+    #[tokio::test]
+    async fn test_open_below_floor_statistics_rejected() {
+        use crate::error::Error;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("create tempdir");
+        // `ma` is a pre-`na` BIG version, below the version floor (#1249).
+        let path = dir.path().join("ma-1-big-Statistics.db");
+        // A present-but-below-floor file must still be rejected with the typed
+        // floor error rather than parsed; this exercises the gate-floor branch
+        // for an on-disk file.
+        std::fs::write(&path, b"not really a valid statistics file").expect("write fixture");
+
+        let config = crate::Config::default();
+        let platform = Arc::new(
+            crate::Platform::new(&config)
+                .await
+                .expect("create platform"),
+        );
+
+        let result = super::StatisticsReader::open(&path, platform).await;
+
+        match result {
+            Err(Error::UnsupportedVersion { version, floor }) => {
+                assert_eq!(version, "ma", "error must name the offending version");
+                assert_eq!(floor, "na", "error must name the na BIG floor");
+            }
+            Err(other) => panic!(
+                "expected UnsupportedVersion for below-floor Statistics.db, got {:?}",
+                other
+            ),
+            Ok(_) => panic!("below-floor Statistics.db must NOT open on nb-compatible defaults"),
+        }
+    }
+
+    /// #1249 R1 (roborev finding 1): the version-floor check fires BEFORE the
+    /// file body is read/parsed. A below-floor `*-Statistics.db` with an empty
+    /// (0-byte) body must STILL fail with `UnsupportedVersion` rather than a
+    /// parse/corruption error — proving `read_to_end` + the enhanced parser are
+    /// never reached for a below-floor descriptor.
+    #[tokio::test]
+    async fn test_open_below_floor_statistics_rejected_before_body_read() {
+        use crate::error::Error;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("ma-1-big-Statistics.db");
+        // Empty body: if the gate ran AFTER read_to_end/parse, an empty file
+        // would surface as a parse/corruption error, not UnsupportedVersion.
+        std::fs::write(&path, b"").expect("write empty fixture");
+
+        let config = crate::Config::default();
+        let platform = Arc::new(
+            crate::Platform::new(&config)
+                .await
+                .expect("create platform"),
+        );
+
+        match super::StatisticsReader::open(&path, platform).await {
+            Err(Error::UnsupportedVersion { version, floor }) => {
+                assert_eq!(version, "ma");
+                assert_eq!(floor, "na");
+            }
+            Err(other) => panic!(
+                "expected UnsupportedVersion before body read for empty below-floor \
+                 Statistics.db, got {:?}",
+                other
+            ),
+            Ok(_) => {
+                panic!("below-floor Statistics.db with empty body must be rejected before parse")
+            }
+        }
+    }
+
+    /// #1249 R1: the version-floor check fires BEFORE *any* filesystem access.
+    /// A below-floor `*-Statistics.db` descriptor whose path does NOT exist on
+    /// disk must STILL fail with the typed `Error::UnsupportedVersion`, NOT a
+    /// `NotFound`/I/O error. This proves the floor is enforced from the filename
+    /// alone, before the existence check, `File::open`, and `read_to_end`
+    /// (mirrors `SSTableReader::open_inner` gating before `tokio::fs::metadata`).
+    #[tokio::test]
+    async fn test_open_below_floor_statistics_rejected_before_fs_access() {
+        use crate::error::Error;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("create tempdir");
+        // `ma` is below the `na` BIG floor. Deliberately DO NOT create the file:
+        // if the existence check ran first, this would surface as NotFound.
+        let path = dir.path().join("ma-1-big-Statistics.db");
+        assert!(
+            !path.exists(),
+            "fixture path must not exist on disk for this test"
+        );
+
+        let config = crate::Config::default();
+        let platform = Arc::new(
+            crate::Platform::new(&config)
+                .await
+                .expect("create platform"),
+        );
+
+        match super::StatisticsReader::open(&path, platform).await {
+            Err(Error::UnsupportedVersion { version, floor }) => {
+                assert_eq!(version, "ma", "error must name the offending version");
+                assert_eq!(floor, "na", "error must name the na BIG floor");
+            }
+            Err(other) => panic!(
+                "expected UnsupportedVersion before any FS access for a nonexistent \
+                 below-floor Statistics.db, got {:?}",
+                other
+            ),
+            Ok(_) => panic!("below-floor Statistics.db must NOT open even when absent"),
         }
     }
 }
