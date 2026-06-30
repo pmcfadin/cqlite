@@ -168,8 +168,21 @@ async fn sstable_parity_corruption_verify_matches_cassandra_per_fixture() {
         }
         let dir = corrupt_root.join(&fx.name);
         if !dir.is_dir() || !has_data_db(&dir) {
+            // An active fixture must be materialized. In strict mode
+            // (CQLITE_REQUIRE_FIXTURES=1) a partially-generated corpus must NOT
+            // false-pass on the strength of the other fixtures — fail closed
+            // immediately so every active fixture's parity coverage is enforced
+            // (roborev #1236 Finding 1). Non-strict: clean per-fixture skip.
+            if require_fixtures_strict() {
+                panic!(
+                    "CQLITE_REQUIRE_FIXTURES=1 but active fixture '{}' is absent: \
+                     missing dir or Data.db at {} (binaries not regenerated)",
+                    fx.name,
+                    dir.display()
+                );
+            }
             // BTI fixtures depend on a test_da source; if the corrupt dir was
-            // not materialized, skip it (clean skip unless strict mode).
+            // not materialized, skip it (clean skip in non-strict mode).
             eprintln!(
                 "[skip-fixture] {} has no Data.db (binaries not regenerated)",
                 fx.name
