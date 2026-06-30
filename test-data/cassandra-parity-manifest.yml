@@ -1402,7 +1402,7 @@ scenarios:
 
   - id: cass.index_db.RowIndexEntryTest.promoted_index_entries
     title: BIG Index.db promoted-index (wide-partition) boundary metadata
-    status: partial
+    status: mirrored
     capability: index_summary
     priority: P0
     risk: p1_correctness
@@ -1426,39 +1426,31 @@ scenarios:
       references:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
     evidence:
-      type: partial
+      type: byte_for_byte
+      strict: true
       artifacts: [bytes, offsets]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
+      comparison_command: >-
+        env CQLITE_PARITY_REQUIRE_DATASETS=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_993_wide_partition_promoted_index_parity
+        row_boundaries_index_info_offsets
       reference_paths:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/wide-partition-promoted-index-diff.log
       known_limitations: >-
-        The BIG promoted IndexInfo[] decode is implemented and proven byte-for-byte
-        LOCALLY against the real Cassandra wide-partition fixture (see
-        cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs). The
-        committed-JSONL canonical-semantic checks (3 partitions, live counts
-        290/300/300, pk=1 missing exactly ck 30..39, ascending clustering) ARE
-        enforced in the required CI lane on every run; the byte-level Index.db
-        promoted-offset/bounds assertions are NOT in the required lane because they
-        depend on local-only binaries absent from the pinned CI dataset.
+        Byte-level promoted-index parity now runs fail-closed in the required lane:
+        issue #1185 pins the test_big.wide_partition binaries into the CI dataset.
+        Validation is scoped to the single-int clustering schema, where the on-disk
+        clustering prefix length (6 bytes) is unambiguous.
     ci:
-      tier: manual_debug
-    scope:
-      gap: >-
-        This scenario's proving evidence is the byte-level Index.db promoted-index
-        decode (offsets, widths, clustering bounds), which SKIPS in CI because the
-        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
-        in progress). Marking it required_parity would report coverage for a check
-        that does not run; the only CI-running assertion in this test binary is the
-        JSONL canonical-semantic check, which does not decode the promoted index and
-        so does not satisfy this scenario's evidence on its own.
-      next_step: >-
-        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
-        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
-        so the byte-level promoted-index assertions actually run fail-closed.
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
 
   - id: cass.index_db.SSTableReaderTest.point_lookup_offsets
     title: BIG Index.db point/absent-key lookup offsets
@@ -1667,7 +1659,7 @@ scenarios:
 
   - id: cass.index_db.big.wide_partition_promoted_entries
     title: BIG Index.db wide-partition promoted entries
-    status: partial
+    status: mirrored
     capability: index_summary
     priority: P1
     risk: p1_correctness
@@ -1693,43 +1685,35 @@ scenarios:
       references:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
     evidence:
-      type: partial
+      type: byte_for_byte
+      strict: true
       artifacts: [bytes, offsets]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
+      comparison_command: >-
+        env CQLITE_PARITY_REQUIRE_DATASETS=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_993_wide_partition_promoted_index_parity
+        row_boundaries_index_info_offsets
       reference_paths:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/wide-partition-promoted-index-diff.log
       known_limitations: >-
-        The BIG promoted IndexInfo[] decode is implemented and proven byte-for-byte
-        LOCALLY against the real Cassandra wide-partition fixture (see
-        cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs). The
-        committed-JSONL canonical-semantic checks (3 partitions, live counts
-        290/300/300, pk=1 missing exactly ck 30..39, ascending clustering) ARE
-        enforced in the required CI lane on every run; the byte-level Index.db
-        promoted-offset/bounds assertions are NOT in the required lane because they
-        depend on local-only binaries absent from the pinned CI dataset.
+        Byte-level promoted-index parity now runs fail-closed in the required lane:
+        issue #1185 pins the test_big.wide_partition binaries into the CI dataset.
+        Validation is scoped to the single-int clustering schema, where the on-disk
+        clustering prefix length (6 bytes) is unambiguous.
     ci:
-      tier: manual_debug
-    scope:
-      gap: >-
-        This scenario's proving evidence is the byte-level Index.db promoted-index
-        decode (offsets, widths, clustering bounds), which SKIPS in CI because the
-        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
-        in progress). Marking it required_parity would report coverage for a check
-        that does not run; the only CI-running assertion in this test binary is the
-        JSONL canonical-semantic check, which does not decode the promoted index and
-        so does not satisfy this scenario's evidence on its own.
-      next_step: >-
-        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
-        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
-        so the byte-level promoted-index assertions actually run fail-closed.
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
 
   - id: cass.data_db_decode.wide_partition.row_boundaries
     title: Wide-partition Data.db row boundaries align with promoted-index offsets
-    status: partial
+    status: mirrored
     capability: data_db_decode
     priority: P0
     risk: p1_correctness
@@ -1753,43 +1737,35 @@ scenarios:
       references:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
     evidence:
-      type: partial
+      type: byte_for_byte
+      strict: true
       artifacts: [bytes, offsets, jsonl]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
+      comparison_command: >-
+        env CQLITE_PARITY_REQUIRE_DATASETS=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_993_wide_partition_promoted_index_parity
+        row_boundaries_index_info_offsets
       reference_paths:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/wide-partition-promoted-index-diff.log
       known_limitations: >-
-        The BIG promoted IndexInfo[] decode is implemented and proven byte-for-byte
-        LOCALLY against the real Cassandra wide-partition fixture (see
-        cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs). The
-        committed-JSONL canonical-semantic checks (3 partitions, live counts
-        290/300/300, pk=1 missing exactly ck 30..39, ascending clustering) ARE
-        enforced in the required CI lane on every run; the byte-level Index.db
-        promoted-offset/bounds assertions are NOT in the required lane because they
-        depend on local-only binaries absent from the pinned CI dataset.
+        Byte-level promoted-index parity now runs fail-closed in the required lane:
+        issue #1185 pins the test_big.wide_partition binaries into the CI dataset.
+        Validation is scoped to the single-int clustering schema, where the on-disk
+        clustering prefix length (6 bytes) is unambiguous.
     ci:
-      tier: manual_debug
-    scope:
-      gap: >-
-        This scenario's proving evidence is the byte-level Index.db promoted-index
-        decode (offsets, widths, clustering bounds), which SKIPS in CI because the
-        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
-        in progress). Marking it required_parity would report coverage for a check
-        that does not run; the only CI-running assertion in this test binary is the
-        JSONL canonical-semantic check, which does not decode the promoted index and
-        so does not satisfy this scenario's evidence on its own.
-      next_step: >-
-        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
-        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
-        so the byte-level promoted-index assertions actually run fail-closed.
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
 
   - id: cass.index_db.promoted_index.index_info_offsets
     title: BIG promoted-index IndexInfo Data.db offsets and width chain
-    status: partial
+    status: mirrored
     capability: index_summary
     priority: P0
     risk: p1_correctness
@@ -1812,43 +1788,35 @@ scenarios:
       references:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
     evidence:
-      type: partial
+      type: byte_for_byte
+      strict: true
       artifacts: [bytes, offsets]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
+      comparison_command: >-
+        env CQLITE_PARITY_REQUIRE_DATASETS=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_993_wide_partition_promoted_index_parity
+        row_boundaries_index_info_offsets
       reference_paths:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/wide-partition-promoted-index-diff.log
       known_limitations: >-
-        The BIG promoted IndexInfo[] decode is implemented and proven byte-for-byte
-        LOCALLY against the real Cassandra wide-partition fixture (see
-        cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs). The
-        committed-JSONL canonical-semantic checks (3 partitions, live counts
-        290/300/300, pk=1 missing exactly ck 30..39, ascending clustering) ARE
-        enforced in the required CI lane on every run; the byte-level Index.db
-        promoted-offset/bounds assertions are NOT in the required lane because they
-        depend on local-only binaries absent from the pinned CI dataset.
+        Byte-level promoted-index parity now runs fail-closed in the required lane:
+        issue #1185 pins the test_big.wide_partition binaries into the CI dataset.
+        Validation is scoped to the single-int clustering schema, where the on-disk
+        clustering prefix length (6 bytes) is unambiguous.
     ci:
-      tier: manual_debug
-    scope:
-      gap: >-
-        This scenario's proving evidence is the byte-level Index.db promoted-index
-        decode (offsets, widths, clustering bounds), which SKIPS in CI because the
-        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
-        in progress). Marking it required_parity would report coverage for a check
-        that does not run; the only CI-running assertion in this test binary is the
-        JSONL canonical-semantic check, which does not decode the promoted index and
-        so does not satisfy this scenario's evidence on its own.
-      next_step: >-
-        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
-        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
-        so the byte-level promoted-index assertions actually run fail-closed.
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
 
   - id: cass.index_db.promoted_index.clustering_bounds
     title: BIG promoted-index IndexInfo clustering bounds ordering and coverage
-    status: partial
+    status: mirrored
     capability: index_summary
     priority: P0
     risk: p1_correctness
@@ -1873,43 +1841,35 @@ scenarios:
       references:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
     evidence:
-      type: partial
+      type: byte_for_byte
+      strict: true
       artifacts: [bytes, offsets]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
+      comparison_command: >-
+        env CQLITE_PARITY_REQUIRE_DATASETS=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_993_wide_partition_promoted_index_parity
+        clustering_bounds
       reference_paths:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/wide-partition-promoted-index-diff.log
       known_limitations: >-
-        The BIG promoted IndexInfo[] decode is implemented and proven byte-for-byte
-        LOCALLY against the real Cassandra wide-partition fixture (see
-        cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs). The
-        committed-JSONL canonical-semantic checks (3 partitions, live counts
-        290/300/300, pk=1 missing exactly ck 30..39, ascending clustering) ARE
-        enforced in the required CI lane on every run; the byte-level Index.db
-        promoted-offset/bounds assertions are NOT in the required lane because they
-        depend on local-only binaries absent from the pinned CI dataset.
+        Byte-level promoted-index parity now runs fail-closed in the required lane:
+        issue #1185 pins the test_big.wide_partition binaries into the CI dataset.
+        Validation is scoped to the single-int clustering schema, where the on-disk
+        clustering prefix length (6 bytes) is unambiguous.
     ci:
-      tier: manual_debug
-    scope:
-      gap: >-
-        This scenario's proving evidence is the byte-level Index.db promoted-index
-        decode across the range-tombstone block edge, which SKIPS in CI because the
-        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
-        in progress). The CI-running JSONL canonical-semantic check does assert pk=1
-        is missing exactly ck 30..39 (the range-tombstone fact), but it does NOT
-        decode the promoted index across the block boundary — the headline claim of
-        this scenario — so the running part alone does not justify required_parity.
-      next_step: >-
-        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
-        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
-        so the byte-level promoted-index block-edge assertions actually run fail-closed.
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
 
   - id: cass.index_db.promoted_index.range_tombstone_boundary_at_block_edge
     title: BIG promoted-index decode across a range-tombstone block boundary
-    status: partial
+    status: mirrored
     capability: index_summary
     priority: P0
     risk: p1_correctness
@@ -1934,39 +1894,31 @@ scenarios:
       references:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
     evidence:
-      type: partial
+      type: byte_for_byte
+      strict: true
       artifacts: [bytes, offsets, jsonl]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
+      comparison_command: >-
+        env CQLITE_PARITY_REQUIRE_DATASETS=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_993_wide_partition_promoted_index_parity
+        range_tombstone_boundary_at_block_edge
       reference_paths:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/wide-partition-promoted-index-diff.log
       known_limitations: >-
-        The BIG promoted IndexInfo[] decode is implemented and proven byte-for-byte
-        LOCALLY against the real Cassandra wide-partition fixture (see
-        cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs). The
-        committed-JSONL canonical-semantic checks (3 partitions, live counts
-        290/300/300, pk=1 missing exactly ck 30..39, ascending clustering) ARE
-        enforced in the required CI lane on every run; the byte-level Index.db
-        promoted-offset/bounds assertions are NOT in the required lane because they
-        depend on local-only binaries absent from the pinned CI dataset.
+        Byte-level promoted-index parity now runs fail-closed in the required lane:
+        issue #1185 pins the test_big.wide_partition binaries into the CI dataset.
+        Validation is scoped to the single-int clustering schema, where the on-disk
+        clustering prefix length (6 bytes) is unambiguous.
     ci:
-      tier: manual_debug
-    scope:
-      gap: >-
-        This scenario's proving evidence is the byte-level Index.db promoted-index
-        decode (offsets, widths, clustering bounds), which SKIPS in CI because the
-        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
-        in progress). Marking it required_parity would report coverage for a check
-        that does not run; the only CI-running assertion in this test binary is the
-        JSONL canonical-semantic check, which does not decode the promoted index and
-        so does not satisfy this scenario's evidence on its own.
-      next_step: >-
-        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
-        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
-        so the byte-level promoted-index assertions actually run fail-closed.
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
 
   - id: cass.sstable_scan.wide_partition.forward_reverse_bounds
     title: Wide-partition forward and reverse scan boundary parity
