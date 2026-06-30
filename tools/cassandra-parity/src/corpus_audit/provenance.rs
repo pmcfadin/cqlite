@@ -51,15 +51,17 @@ impl Provenance {
 /// - `cassandra_version` MUST be the version implied by `cassandra_source.ref`
 ///   (e.g. `cassandra-5.0.2` → `5.0.2`) or appear in some
 ///   `evidence.cassandra_version`.
-/// - `docker_image` MUST carry a parseable semver tag whose version is one of
-///   the manifest's declared versions. This field is the ONE provenance value
-///   sourced independently of the manifest in the lane (it is grepped from
-///   `regenerate-datasets.sh`'s `CASSANDRA_IMAGE=`, while version/ref/sha are
-///   parsed from the manifest itself), so it is the only field that can catch a
-///   silent image bump (e.g. `cassandra:5.0.2` → `5.0.3`) that was not mirrored
-///   into the manifest pin (issue #1026). A tag that is absent or not a parseable
-///   `MAJOR[.MINOR[.PATCH…]]` semver (e.g. `latest`) is itself a mismatch: an
-///   unverifiable image cannot be trusted against the pin.
+/// - `docker_image` MUST carry a tag whose leading `MAJOR[.MINOR[.PATCH…]]`
+///   version is one of the manifest's declared versions. This field is the ONE
+///   provenance value sourced independently of the manifest in the lane (it is
+///   grepped from `regenerate-datasets.sh`'s `CASSANDRA_IMAGE=`, while
+///   version/ref/sha are parsed from the manifest itself), so it is the only
+///   field that can catch a silent image bump (e.g. `cassandra:5.0.2` → `5.0.3`)
+///   that was not mirrored into the manifest pin (issue #1026). A legitimately
+///   pinned variant image (`cassandra:5.0.2-jdk11`, `cassandra:5.0.2-jammy`)
+///   compares by its numeric lead `5.0.2`, so the build/variant tail never reds
+///   the lane. A tag with no numeric lead (e.g. `latest`, empty) is itself a
+///   mismatch: an unverifiable image cannot be trusted against the pin.
 pub fn check_provenance(prov: &Provenance, manifest: &Manifest) -> Vec<AuditFinding> {
     let mut out = Vec::new();
     let src = &manifest.cassandra_source;
@@ -146,10 +148,13 @@ fn version_from_ref(git_ref: &str) -> Option<String> {
 /// Handles a registry/namespace prefix and an optional `@sha256:<digest>` suffix:
 /// `docker.io/library/cassandra:5.0.3@sha256:abc…` → `5.0.3`. The tag is the
 /// portion after the last `:` of the final path segment (so a registry-host port
-/// like `registry:5000/cassandra:5.0.3` is not mistaken for a tag). Returns the
-/// version string on success; `Err(reason)` when there is no tag or the tag is not
-/// a parseable `MAJOR[.MINOR[.PATCH…]]` semver (e.g. `latest`) — an unverifiable
-/// image must be treated as a mismatch, never silently trusted.
+/// like `registry:5000/cassandra:5.0.3` is not mistaken for a tag). The returned
+/// version is the tag's leading `MAJOR[.MINOR[.PATCH…]]` numeric component, with
+/// an optional leading `v` and a `-<suffix>` build/variant tail ignored, so a
+/// pinned variant image (`cassandra:5.0.2-jdk11`) compares as `5.0.2`. Returns
+/// `Err(reason)` when there is no tag or the tag has no numeric lead (e.g.
+/// `latest`) — an unverifiable image must be treated as a mismatch, never
+/// silently trusted.
 fn version_from_image(image: &str) -> Result<String, String> {
     // Drop an `@sha256:…` content digest if present.
     let no_digest = image.split('@').next().unwrap_or(image);
@@ -164,26 +169,39 @@ fn version_from_image(image: &str) -> Result<String, String> {
             ))
         }
     };
-    if is_semver_tag(tag) {
-        Ok(tag.strip_prefix('v').unwrap_or(tag).to_string())
+    semver_lead(tag).ok_or_else(|| {
+        format!("image tag `{tag}` has no parseable MAJOR[.MINOR[.PATCH]] semver lead")
+    })
+}
+
+/// Parse the leading `MAJOR[.MINOR[.PATCH…]]` numeric version from a Docker tag,
+/// ignoring an optional leading `v` and a trailing `-<suffix>` build/variant tail.
+/// So `5`, `5.0`, `5.0.2`, `v5.0.2`, `5.0.2-jdk11`, and `5.0.2-jammy` all yield
+/// `5.0.2`-style numeric leads (the last three → `5.0.2`), while `latest`, ``,
+/// `5.`, and `-jdk11` have no numeric lead and yield `None` — a genuinely
+/// unverifiable tag stays a mismatch. The numeric lead must be a non-empty run of
+/// digits and dots with at least one digit and no leading/trailing or doubled dot.
+fn semver_lead(tag: &str) -> Option<String> {
+    let t = tag.strip_prefix('v').unwrap_or(tag);
+    // Ignore a build/variant suffix (`-jdk11`, `-jammy`, `-alpine`, …).
+    let lead = t.split('-').next().unwrap_or(t);
+    if is_dotted_numeric(lead) {
+        Some(lead.to_string())
     } else {
-        Err(format!(
-            "image tag `{tag}` is not a parseable MAJOR[.MINOR[.PATCH]] semver"
-        ))
+        None
     }
 }
 
-/// A tag is a usable semver pin when (ignoring an optional leading `v`) it is a
-/// non-empty run of digits and dots with at least one digit and no leading/trailing
-/// or doubled dot (so `5`, `5.0`, `5.0.2`, `v5.0.2` parse; `latest`, ``, `5.` do not).
-fn is_semver_tag(tag: &str) -> bool {
-    let t = tag.strip_prefix('v').unwrap_or(tag);
-    !t.is_empty()
-        && !t.starts_with('.')
-        && !t.ends_with('.')
-        && !t.contains("..")
-        && t.chars().all(|c| c.is_ascii_digit() || c == '.')
-        && t.chars().any(|c| c.is_ascii_digit())
+/// True when `s` is a non-empty run of digits and dots with at least one digit
+/// and no leading/trailing or doubled dot (so `5`, `5.0`, `5.0.2` qualify; ``,
+/// `5.`, `.5`, `5..0`, `latest` do not).
+fn is_dotted_numeric(s: &str) -> bool {
+    !s.is_empty()
+        && !s.starts_with('.')
+        && !s.ends_with('.')
+        && !s.contains("..")
+        && s.chars().all(|c| c.is_ascii_digit() || c == '.')
+        && s.chars().any(|c| c.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -224,6 +242,20 @@ mod tests {
     }
 
     #[test]
+    fn version_from_image_ignores_variant_build_suffix() {
+        // A legitimately pinned variant image compares by its numeric lead, so a
+        // `-jdk11` / `-jammy` build tail must not be mistaken for a non-semver tag.
+        assert_eq!(
+            version_from_image("cassandra:5.0.2-jdk11").as_deref(),
+            Ok("5.0.2")
+        );
+        assert_eq!(
+            version_from_image("cassandra:5.0.2-jammy").as_deref(),
+            Ok("5.0.2")
+        );
+    }
+
+    #[test]
     fn version_from_image_rejects_latest() {
         assert!(version_from_image("cassandra:latest").is_err());
     }
@@ -234,14 +266,21 @@ mod tests {
     }
 
     #[test]
-    fn is_semver_tag_edge_cases() {
-        assert!(is_semver_tag("5"));
-        assert!(is_semver_tag("5.0"));
-        assert!(is_semver_tag("5.0.2"));
-        assert!(!is_semver_tag(""));
-        assert!(!is_semver_tag("latest"));
-        assert!(!is_semver_tag("5."));
-        assert!(!is_semver_tag(".5"));
-        assert!(!is_semver_tag("5..0"));
+    fn semver_lead_edge_cases() {
+        assert_eq!(semver_lead("5").as_deref(), Some("5"));
+        assert_eq!(semver_lead("5.0").as_deref(), Some("5.0"));
+        assert_eq!(semver_lead("5.0.2").as_deref(), Some("5.0.2"));
+        assert_eq!(semver_lead("v5.0.2").as_deref(), Some("5.0.2"));
+        // Build/variant suffix is ignored, leaving the numeric lead.
+        assert_eq!(semver_lead("5.0.2-jdk11").as_deref(), Some("5.0.2"));
+        assert_eq!(semver_lead("5.0.2-jammy").as_deref(), Some("5.0.2"));
+        assert_eq!(semver_lead("v5.0.2-alpine").as_deref(), Some("5.0.2"));
+        // No numeric lead -> unverifiable -> None.
+        assert!(semver_lead("").is_none());
+        assert!(semver_lead("latest").is_none());
+        assert!(semver_lead("-jdk11").is_none());
+        assert!(semver_lead("5.").is_none());
+        assert!(semver_lead(".5").is_none());
+        assert!(semver_lead("5..0").is_none());
     }
 }

@@ -376,6 +376,36 @@ fn provenance_mismatch_fails_on_unpinned_latest_image() {
     assert!(findings[0].subject.contains("cassandra:latest"));
 }
 
+/// Regression for issue #1026 (roborev LOW 1): a legitimately pinned VARIANT
+/// image carries a `-<suffix>` build/variant tail (`-jdk11`, `-jammy`). Its
+/// numeric lead still matches the manifest pin (`5.0.2`), so the audit must be
+/// clean — the variant tail must NOT be treated as a non-semver tag and red the
+/// lane. Before the fix `is_semver_tag` required the WHOLE tag to be digits+dots,
+/// so any future variant pin spuriously hard-failed PROVENANCE-MISMATCH.
+#[test]
+fn provenance_clean_on_variant_docker_image() {
+    for image in ["cassandra:5.0.2-jdk11", "cassandra:5.0.2-jammy"] {
+        let prov = manifest_derived_provenance(image);
+        let findings = corpus_audit::provenance::check_provenance(&prov, &manifest());
+        assert!(
+            findings.is_empty(),
+            "variant image {image} (numeric lead 5.0.2) must match the manifest pin, got: {findings:?}"
+        );
+    }
+}
+
+/// A divergent VARIANT image is still caught: a `5.0.3-jdk11` build whose numeric
+/// lead (`5.0.3`) is not the manifest pin (`5.0.2`) must hard-fail just like a
+/// bare `5.0.3` — the suffix does not launder a silent image bump.
+#[test]
+fn provenance_mismatch_fails_on_divergent_variant_docker_image() {
+    let prov = manifest_derived_provenance("cassandra:5.0.3-jdk11");
+    let findings = corpus_audit::provenance::check_provenance(&prov, &manifest());
+    assert_eq!(findings.len(), 1, "got: {findings:?}");
+    assert_eq!(findings[0].kind, FindingKind::ProvenanceMismatch);
+    assert!(findings[0].subject.contains("cassandra:5.0.3-jdk11"));
+}
+
 #[test]
 fn corruption_coverage_gap_fails_and_names_missing_component() {
     let mut components = all_corruption_components();
