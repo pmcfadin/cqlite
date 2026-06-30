@@ -1448,14 +1448,17 @@ scenarios:
       tier: manual_debug
     scope:
       gap: >-
-        Byte-level promoted-index parity (Index.db offsets, widths, clustering
-        bounds) runs only against local-only binaries that are not in the pinned CI
-        dataset; the required lane enforces only the committed-JSONL
-        canonical-semantic facts.
+        This scenario's proving evidence is the byte-level Index.db promoted-index
+        decode (offsets, widths, clustering bounds), which SKIPS in CI because the
+        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
+        in progress). Marking it required_parity would report coverage for a check
+        that does not run; the only CI-running assertion in this test binary is the
+        JSONL canonical-semantic check, which does not decode the promoted index and
+        so does not satisfy this scenario's evidence on its own.
       next_step: >-
-        Add the test_big.wide_partition binaries to the dataset release pin
-        (regenerate the tarball + update DATASET_SHA256) to promote these scenarios
-        to byte_for_byte enforced in the required_parity lane.
+        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
+        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
+        so the byte-level promoted-index assertions actually run fail-closed.
 
   - id: cass.index_db.SSTableReaderTest.point_lookup_offsets
     title: BIG Index.db point/absent-key lookup offsets
@@ -1712,14 +1715,17 @@ scenarios:
       tier: manual_debug
     scope:
       gap: >-
-        Byte-level promoted-index parity (Index.db offsets, widths, clustering
-        bounds) runs only against local-only binaries that are not in the pinned CI
-        dataset; the required lane enforces only the committed-JSONL
-        canonical-semantic facts.
+        This scenario's proving evidence is the byte-level Index.db promoted-index
+        decode (offsets, widths, clustering bounds), which SKIPS in CI because the
+        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
+        in progress). Marking it required_parity would report coverage for a check
+        that does not run; the only CI-running assertion in this test binary is the
+        JSONL canonical-semantic check, which does not decode the promoted index and
+        so does not satisfy this scenario's evidence on its own.
       next_step: >-
-        Add the test_big.wide_partition binaries to the dataset release pin
-        (regenerate the tarball + update DATASET_SHA256) to promote these scenarios
-        to byte_for_byte enforced in the required_parity lane.
+        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
+        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
+        so the byte-level promoted-index assertions actually run fail-closed.
 
   - id: cass.data_db_decode.wide_partition.row_boundaries
     title: Wide-partition Data.db row boundaries align with promoted-index offsets
@@ -1769,14 +1775,17 @@ scenarios:
       tier: manual_debug
     scope:
       gap: >-
-        Byte-level promoted-index parity (Index.db offsets, widths, clustering
-        bounds) runs only against local-only binaries that are not in the pinned CI
-        dataset; the required lane enforces only the committed-JSONL
-        canonical-semantic facts.
+        This scenario's proving evidence is the byte-level Index.db promoted-index
+        decode (offsets, widths, clustering bounds), which SKIPS in CI because the
+        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
+        in progress). Marking it required_parity would report coverage for a check
+        that does not run; the only CI-running assertion in this test binary is the
+        JSONL canonical-semantic check, which does not decode the promoted index and
+        so does not satisfy this scenario's evidence on its own.
       next_step: >-
-        Add the test_big.wide_partition binaries to the dataset release pin
-        (regenerate the tarball + update DATASET_SHA256) to promote these scenarios
-        to byte_for_byte enforced in the required_parity lane.
+        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
+        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
+        so the byte-level promoted-index assertions actually run fail-closed.
 
   - id: cass.index_db.promoted_index.index_info_offsets
     title: BIG promoted-index IndexInfo Data.db offsets and width chain
@@ -1825,14 +1834,17 @@ scenarios:
       tier: manual_debug
     scope:
       gap: >-
-        Byte-level promoted-index parity (Index.db offsets, widths, clustering
-        bounds) runs only against local-only binaries that are not in the pinned CI
-        dataset; the required lane enforces only the committed-JSONL
-        canonical-semantic facts.
+        This scenario's proving evidence is the byte-level Index.db promoted-index
+        decode (offsets, widths, clustering bounds), which SKIPS in CI because the
+        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
+        in progress). Marking it required_parity would report coverage for a check
+        that does not run; the only CI-running assertion in this test binary is the
+        JSONL canonical-semantic check, which does not decode the promoted index and
+        so does not satisfy this scenario's evidence on its own.
       next_step: >-
-        Add the test_big.wide_partition binaries to the dataset release pin
-        (regenerate the tarball + update DATASET_SHA256) to promote these scenarios
-        to byte_for_byte enforced in the required_parity lane.
+        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
+        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
+        so the byte-level promoted-index assertions actually run fail-closed.
 
   - id: cass.index_db.promoted_index.clustering_bounds
     title: BIG promoted-index IndexInfo clustering bounds ordering and coverage
@@ -1883,14 +1895,17 @@ scenarios:
       tier: manual_debug
     scope:
       gap: >-
-        Byte-level promoted-index parity (Index.db offsets, widths, clustering
-        bounds) runs only against local-only binaries that are not in the pinned CI
-        dataset; the required lane enforces only the committed-JSONL
-        canonical-semantic facts.
+        This scenario's proving evidence is the byte-level Index.db promoted-index
+        decode across the range-tombstone block edge, which SKIPS in CI because the
+        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
+        in progress). The CI-running JSONL canonical-semantic check does assert pk=1
+        is missing exactly ck 30..39 (the range-tombstone fact), but it does NOT
+        decode the promoted index across the block boundary — the headline claim of
+        this scenario — so the running part alone does not justify required_parity.
       next_step: >-
-        Add the test_big.wide_partition binaries to the dataset release pin
-        (regenerate the tarball + update DATASET_SHA256) to promote these scenarios
-        to byte_for_byte enforced in the required_parity lane.
+        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
+        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
+        so the byte-level promoted-index block-edge assertions actually run fail-closed.
 
   - id: cass.index_db.promoted_index.range_tombstone_boundary_at_block_edge
     title: BIG promoted-index decode across a range-tombstone block boundary
@@ -1941,14 +1956,17 @@ scenarios:
       tier: manual_debug
     scope:
       gap: >-
-        Byte-level promoted-index parity (Index.db offsets, widths, clustering
-        bounds) runs only against local-only binaries that are not in the pinned CI
-        dataset; the required lane enforces only the committed-JSONL
-        canonical-semantic facts.
+        This scenario's proving evidence is the byte-level Index.db promoted-index
+        decode (offsets, widths, clustering bounds), which SKIPS in CI because the
+        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
+        in progress). Marking it required_parity would report coverage for a check
+        that does not run; the only CI-running assertion in this test binary is the
+        JSONL canonical-semantic check, which does not decode the promoted index and
+        so does not satisfy this scenario's evidence on its own.
       next_step: >-
-        Add the test_big.wide_partition binaries to the dataset release pin
-        (regenerate the tarball + update DATASET_SHA256) to promote these scenarios
-        to byte_for_byte enforced in the required_parity lane.
+        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
+        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
+        so the byte-level promoted-index assertions actually run fail-closed.
 
   - id: cass.sstable_scan.wide_partition.forward_reverse_bounds
     title: Wide-partition forward and reverse scan boundary parity
@@ -1992,15 +2010,22 @@ scenarios:
       tier: manual_debug
     scope:
       gap: >-
-        Reverse SSTable iteration is not implemented for BIG wide partitions; only
-        a post-fetch in-memory ORDER BY DESC sort exists, which does not exercise
-        reverse promoted-index block decoding.
+        Forward-scan completeness is backed by forward_bounds_completeness, which
+        reads the binary Data.db and therefore SKIPS in CI because the
+        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
+        in progress); the CI-running JSONL canonical-semantic check proves live
+        counts but not scan completeness across promoted-index block boundaries.
+        Reverse SSTable iteration is additionally not implemented for BIG wide
+        partitions (only a post-fetch in-memory ORDER BY DESC sort exists, which
+        does not exercise reverse promoted-index block decoding).
       next_step: >-
-        Implement a BIG-format reverse partition iterator that uses the promoted
-        IndexInfo blocks to seek/decode blocks back-to-front (mirroring Cassandra
-        SSTableReversedIterator), then assert forward and reverse scans of pk=1
-        return the identical 290-row clustering set with no rows lost adjacent to
-        the deleted block.
+        First re-promote to required_parity once issue #1185 pins the
+        test_big.wide_partition binaries into the CI dataset so forward-scan
+        completeness runs fail-closed; then implement a BIG-format reverse partition
+        iterator that uses the promoted IndexInfo blocks to seek/decode blocks
+        back-to-front (mirroring Cassandra SSTableReversedIterator) and assert
+        forward and reverse scans of pk=1 return the identical 290-row clustering set
+        with no rows lost adjacent to the deleted block.
 
   - id: cass.index_db.bti.index_component_discovery
     title: BTI index-component discovery and classification
@@ -2052,9 +2077,24 @@ scenarios:
         non-mixing; byte parity of the BTI Partitions.db/Rows.db trie payloads is a
         separate scenario.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
-    scope: {}
+      tier: manual_debug
+    scope:
+      target_issue: 1205
+      gap: >-
+        The wired lane bti_index_component_discovery skips UNCONDITIONALLY in CI
+        (even under CQLITE_PARITY_REQUIRE_DATASETS=1): the test_da/* BTI (da)
+        binaries — Data.db / Partitions.db / Rows.db — are LOCAL-ONLY and are NOT
+        shipped in the pinned CI dataset (cassandra5-small-full-v3.2.tar.gz), so
+        the BTI-discovery assertion never runs on the required gate and the
+        scenario would green-pass on a pure skip. Demoted from required_parity
+        (issue #1242 finding 1 / final audit) to stop overclaiming a parity check
+        that does not execute in CI.
+      next_step: >-
+        Re-promote to required_parity only after the BTI (da) Partitions.db/Rows.db
+        binaries are added to the pinned CI dataset tarball AND the
+        bti_index_component_discovery lane is made fail-closed under
+        CQLITE_PARITY_REQUIRE_DATASETS=1 (mirroring the test_deltas #1205 fix), so
+        the discovery assertion actually executes on the gate (fixture work).
 
   # ---- Strict Summary.db byte parity (epic #968 / issue #984) ----------------
   - id: cass.summary_db.IndexSummaryTest.serialization_round_trip
@@ -3097,7 +3137,8 @@ scenarios:
           - cqlite-core/tests/v5_compressed_legacy_row_count_parity.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_collections/collection_table-6b8c8fb0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
@@ -3109,21 +3150,25 @@ scenarios:
         bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
       comparison_command: >-
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test v5_compressed_legacy_parity_test
         --test v5_compressed_legacy_row_count_parity
       reference_paths:
-        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_collections/collection_table-6b8c8fb0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       normalization: >-
         Decompressed chunk payloads are decoded to rows and compared (row count
         and values) against sstabledump JSONL; chunk offset tables are used for
         positioning.
       known_limitations: >-
-        Validates decompressed content equivalence (row count + values). The
-        byte-level CompressionInfo.db chunk-offset table and per-chunk inline-CRC
-        parity is gated separately by the strict lane below
-        (cass.compression_info.* / sstable_parity_compression_info_db_strict_test,
-        issue #986).
+        Validates decompressed content equivalence (row count + values) against
+        the simple_table and collection_table V5CompressedLegacy fixtures actually
+        exercised by the wired tests. The byte-level CompressionInfo.db
+        chunk-offset table and per-chunk inline-CRC parity is gated separately by
+        the strict lane below (cass.compression_info.* /
+        sstable_parity_compression_info_db_strict_test, issue #986).
     ci:
-      tier: manual_debug
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   - id: cass.compression_checksum.checksum_trailer_detection
@@ -4527,7 +4572,7 @@ scenarios:
         bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
       comparison_command: >-
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
-        --test issue_694_writetime_ttl_parity
+        --features write-support,cli-helpers --test issue_694_writetime_ttl_parity
       reference_paths:
         - test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       normalization: >-
@@ -4537,7 +4582,8 @@ scenarios:
         Canonical-semantic equivalence of liveness fields; not a Data.db byte
         comparison.
     ci:
-      tier: manual_debug
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   # ----------------------------------------------------------------------------
@@ -5109,7 +5155,23 @@ scenarios:
         output parity is debug-only and non-gated (north-star issue #842).
     ci:
       tier: manual_debug
-    scope: {}
+    scope:
+      target_issue: 819
+      gap: >-
+        The CI-wired tests (issue_819_differential_compaction /
+        issue_933_range_tombstone_compaction) only run CQLite SELF-CONSISTENCY
+        (gen1-vs-gen2, one-shot-vs-hand-driven merge, resurrection safety) by
+        default. The Cassandra-reference comparison
+        (differential_vs_live_cassandra_env_gated) is env-gated behind
+        CQLITE_DIFFERENTIAL_CASSANDRA=1 and is NOT set by
+        sstabledump-parity-gate.yml, so no committed Cassandra-compacted
+        reference is actually diffed in CI. Demoted from required_parity (issue
+        #1242 roborev finding 1) to stop overclaiming Cassandra parity.
+      next_step: >-
+        Re-promote to required_parity only after a follow-up sets
+        CQLITE_DIFFERENTIAL_CASSANDRA=1 in the gating workflow AND commits a
+        CI-pinned Cassandra-5.0.2-compacted reference SSTable the harness diffs
+        against (fixture work, out of scope for #1242).
 
   - id: cass.compaction_merge.load_path_validity
     title: Compaction output load-path validity (Tier-1)
@@ -12531,7 +12593,20 @@ scenarios:
         parity is the separate non-gated byte tier (north-star issue #842).
     ci:
       tier: manual_debug
-    scope: {}
+    scope:
+      target_issue: 819
+      gap: >-
+        The CI-wired issue_819_differential_compaction / issue_992 tests run
+        CQLite SELF-CONSISTENCY merge round-trips only; the Cassandra-reference
+        diff (differential_vs_live_cassandra_env_gated) is env-gated behind
+        CQLITE_DIFFERENTIAL_CASSANDRA=1, which sstabledump-parity-gate.yml does
+        NOT set, so no committed Cassandra-compacted reference is diffed in CI.
+        Demoted from required_parity (issue #1242 roborev finding 1).
+      next_step: >-
+        Re-promote to required_parity only after a follow-up sets
+        CQLITE_DIFFERENTIAL_CASSANDRA=1 in the gating workflow AND commits a
+        CI-pinned Cassandra-5.0.2-compacted reference SSTable the harness diffs
+        against (fixture work, out of scope for #1242).
 
   - id: cass.compaction_merge.issue_819.differential_row_tombstone_wide_partition_regression
     title: Differential compaction — row tombstone in a wide partition round-trips
@@ -12582,7 +12657,21 @@ scenarios:
         separate non-gated byte tier (north-star issue #842).
     ci:
       tier: manual_debug
-    scope: {}
+    scope:
+      target_issue: 819
+      gap: >-
+        The CI-wired issue_819_differential_compaction test runs CQLite
+        SELF-CONSISTENCY (gen1 read-back vs merge-from-inputs) only; the
+        Cassandra-reference diff (differential_vs_live_cassandra_env_gated) is
+        env-gated behind CQLITE_DIFFERENTIAL_CASSANDRA=1, which
+        sstabledump-parity-gate.yml does NOT set, so the row-tombstone
+        wide-partition regression is not diffed against a committed Cassandra
+        reference in CI. Demoted from required_parity (issue #1242 finding 1).
+      next_step: >-
+        Re-promote to required_parity only after a follow-up sets
+        CQLITE_DIFFERENTIAL_CASSANDRA=1 in the gating workflow AND commits a
+        CI-pinned Cassandra-5.0.2-compacted reference SSTable the harness diffs
+        against (fixture work, out of scope for #1242).
 
   - id: cass.compaction_merge.issue_819.differential_input_merge_write_fidelity
     title: Differential compaction — per-cell write timestamps preserved (write fidelity)
@@ -12636,7 +12725,21 @@ scenarios:
         output parity is the separate non-gated byte tier (north-star #842).
     ci:
       tier: manual_debug
-    scope: {}
+    scope:
+      target_issue: 819
+      gap: >-
+        The CI-wired issue_819_differential_compaction test runs CQLite
+        SELF-CONSISTENCY (gen1 read-back vs merge-from-inputs) only; the
+        Cassandra-reference diff (differential_vs_live_cassandra_env_gated) is
+        env-gated behind CQLITE_DIFFERENTIAL_CASSANDRA=1, which
+        sstabledump-parity-gate.yml does NOT set, so per-cell write-timestamp
+        fidelity is not diffed against a committed Cassandra reference in CI.
+        Demoted from required_parity (issue #1242 finding 1).
+      next_step: >-
+        Re-promote to required_parity only after a follow-up sets
+        CQLITE_DIFFERENTIAL_CASSANDRA=1 in the gating workflow AND commits a
+        CI-pinned Cassandra-5.0.2-compacted reference SSTable the harness diffs
+        against (fixture work, out of scope for #1242).
 
   # ----------------------------------------------------------------------------
   # Repair-metadata parse / preserve / classify through compaction (issue #1021,

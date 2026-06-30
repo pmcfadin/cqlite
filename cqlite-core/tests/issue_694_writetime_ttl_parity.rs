@@ -25,7 +25,12 @@
 //! tables are tested here; see validation-matrix.md for the documented gap.
 //!
 //! Skips cleanly (no failure) when datasets are absent (`CQLITE_DATASETS_ROOT`
-//! not set or the Data.db files have not been fetched).
+//! not set or the Data.db files have not been fetched) — UNLESS
+//! `CQLITE_PARITY_REQUIRE_DATASETS=1` is set (the `sstabledump-parity-gate.yml`
+//! workflow sets it and treats this as a REQUIRED gate step), in which case a
+//! missing dataset / missing golden / zero matched rows is a hard failure
+//! (fail-closed, issue #1242) so the required gate can never green-pass without
+//! actually running. WRITETIME-on-collection feature gaps remain a clean skip.
 
 #![cfg(all(feature = "state_machine", feature = "cli-helpers"))]
 
@@ -35,6 +40,34 @@ use std::path::{Path, PathBuf};
 use cqlite_core::ingestion::{ingest, IngestionConfig};
 use cqlite_core::types::Value;
 use cqlite_core::Database;
+
+// ---------------------------------------------------------------------------
+// Fail-closed gate (issue #1242)
+// ---------------------------------------------------------------------------
+
+/// CI fail-closed switch. The `sstabledump-parity-gate.yml` workflow sets
+/// `CQLITE_PARITY_REQUIRE_DATASETS=1` and treats this test's step as a REQUIRED
+/// gate. In that mode a missing dataset, missing golden, or zero matched rows
+/// must PANIC (the gate enforces real coverage) rather than silently skip and
+/// green-pass. Locally (env unset) the test keeps its skip-on-absence behavior.
+fn parity_datasets_required() -> bool {
+    std::env::var("CQLITE_PARITY_REQUIRE_DATASETS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Skip when local (flag unset), but FAIL-CLOSED (panic) when
+/// `CQLITE_PARITY_REQUIRE_DATASETS=1` is set. `test_name` and `reason` are
+/// surfaced both in the local skip log and in the CI panic message.
+fn skip_or_fail_closed(test_name: &str, reason: &str) {
+    if parity_datasets_required() {
+        panic!(
+            "{test_name}: CQLITE_PARITY_REQUIRE_DATASETS=1 but {reason} — \
+             required parity gate cannot green-pass without running fail-closed (issue #1242)"
+        );
+    }
+    eprintln!("{test_name}: SKIPPED ({reason})");
+}
 
 // ---------------------------------------------------------------------------
 // Infrastructure helpers
@@ -307,17 +340,17 @@ async fn writetime_parity_test_basic_ttl_test_table() {
     let test_name = "writetime_parity_test_basic_ttl_test_table";
 
     let Some(db) = open_db("/test_basic/", &["basic-types.cql"]).await else {
-        eprintln!("{}: SKIPPED (no datasets or schema)", test_name);
+        skip_or_fail_closed(test_name, "no datasets or schema");
         return;
     };
 
     let Some((_jsonl_path, golden_rows)) = load_golden("test_basic", "ttl_test_table-") else {
-        eprintln!("{}: SKIPPED (no JSONL golden)", test_name);
+        skip_or_fail_closed(test_name, "no JSONL golden");
         return;
     };
 
     if golden_rows.is_empty() {
-        eprintln!("{}: SKIPPED (empty golden)", test_name);
+        skip_or_fail_closed(test_name, "empty golden");
         return;
     }
 
@@ -338,7 +371,7 @@ async fn writetime_parity_test_basic_ttl_test_table() {
         .expect("WRITETIME/TTL query should succeed");
 
     if result.rows.is_empty() {
-        eprintln!("{}: SKIPPED (0 rows — Data.db absent?)", test_name);
+        skip_or_fail_closed(test_name, "0 rows — Data.db absent?");
         return;
     }
 
@@ -474,18 +507,18 @@ async fn writetime_parity_test_collections_collection_table() {
     let test_name = "writetime_parity_test_collections_collection_table";
 
     let Some(db) = open_db("/test_collections/", &["collections.cql"]).await else {
-        eprintln!("{}: SKIPPED (no datasets or schema)", test_name);
+        skip_or_fail_closed(test_name, "no datasets or schema");
         return;
     };
 
     let Some((_jsonl_path, golden_rows)) = load_golden("test_collections", "collection_table-")
     else {
-        eprintln!("{}: SKIPPED (no JSONL golden)", test_name);
+        skip_or_fail_closed(test_name, "no JSONL golden");
         return;
     };
 
     if golden_rows.is_empty() {
-        eprintln!("{}: SKIPPED (empty golden)", test_name);
+        skip_or_fail_closed(test_name, "empty golden");
         return;
     }
 
@@ -514,6 +547,10 @@ async fn writetime_parity_test_collections_collection_table() {
 
     match result {
         Err(e) => {
+            // WRITETIME on a SET<TEXT> collection column may not be supported by
+            // the query engine yet; that is a real, documented limitation rather
+            // than a missing/vanished dataset, so it stays a clean skip even under
+            // the fail-closed flag (the gate is about datasets, not feature gaps).
             eprintln!(
                 "{}: query error (WRITETIME on SET may not be supported): {} — SKIPPED",
                 test_name, e
@@ -522,7 +559,7 @@ async fn writetime_parity_test_collections_collection_table() {
         }
         Ok(result) => {
             if result.rows.is_empty() {
-                eprintln!("{}: SKIPPED (0 rows)", test_name);
+                skip_or_fail_closed(test_name, "0 rows");
                 return;
             }
 
@@ -619,17 +656,17 @@ async fn writetime_parity_test_timeseries_sensor_data() {
     let test_name = "writetime_parity_test_timeseries_sensor_data";
 
     let Some(db) = open_db("/test_timeseries/", &["time-series.cql"]).await else {
-        eprintln!("{}: SKIPPED (no datasets or schema)", test_name);
+        skip_or_fail_closed(test_name, "no datasets or schema");
         return;
     };
 
     let Some((_jsonl_path, golden_rows)) = load_golden("test_timeseries", "sensor_data-") else {
-        eprintln!("{}: SKIPPED (no JSONL golden)", test_name);
+        skip_or_fail_closed(test_name, "no JSONL golden");
         return;
     };
 
     if golden_rows.is_empty() {
-        eprintln!("{}: SKIPPED (empty golden)", test_name);
+        skip_or_fail_closed(test_name, "empty golden");
         return;
     }
 
@@ -656,7 +693,7 @@ async fn writetime_parity_test_timeseries_sensor_data() {
         .expect("WRITETIME query should succeed");
 
     if result.rows.is_empty() {
-        eprintln!("{}: SKIPPED (0 rows)", test_name);
+        skip_or_fail_closed(test_name, "0 rows");
         return;
     }
 
@@ -771,17 +808,17 @@ async fn writetime_parity_test_wide_rows_product_catalog() {
     let test_name = "writetime_parity_test_wide_rows_product_catalog";
 
     let Some(db) = open_db("/test_wide_rows/", &["wide-rows.cql"]).await else {
-        eprintln!("{}: SKIPPED (no datasets or schema)", test_name);
+        skip_or_fail_closed(test_name, "no datasets or schema");
         return;
     };
 
     let Some((_jsonl_path, golden_rows)) = load_golden("test_wide_rows", "product_catalog-") else {
-        eprintln!("{}: SKIPPED (no JSONL golden)", test_name);
+        skip_or_fail_closed(test_name, "no JSONL golden");
         return;
     };
 
     if golden_rows.is_empty() {
-        eprintln!("{}: SKIPPED (empty golden)", test_name);
+        skip_or_fail_closed(test_name, "empty golden");
         return;
     }
 
@@ -808,7 +845,7 @@ async fn writetime_parity_test_wide_rows_product_catalog() {
         .expect("WRITETIME query should succeed");
 
     if result.rows.is_empty() {
-        eprintln!("{}: SKIPPED (0 rows)", test_name);
+        skip_or_fail_closed(test_name, "0 rows");
         return;
     }
 
