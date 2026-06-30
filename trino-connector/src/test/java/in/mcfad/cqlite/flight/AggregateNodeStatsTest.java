@@ -183,10 +183,12 @@ class AggregateNodeStatsTest {
     }
 
     @Test
-    void replicaHostsScopedToKeyspaceReplicasOnly() {
+    void replicaHostsScopedToLocalDatacenterReplicas() {
         // replicaHosts must derive the target set from the keyspace's read replicas
-        // (ports stripped, de-duplicated across ranges/DCs) — NOT from the whole ring.
-        // A non-hosting ring node never appears here, so it is never queried.
+        // (ports stripped, de-duplicated across ranges) AND, like split selection
+        // (CqliteFlightSplitManager.buildSplits/pickReplica), read each range only from
+        // the LOCAL datacenter when that DC has replicas for the range. The remote-DC
+        // node (10.0.0.3) is never read by the query, so stats must not fan out to it.
         TokenRangeReplicasResponse replicas = new TokenRangeReplicasResponse(
                 List.of(),
                 List.of(
@@ -198,8 +200,46 @@ class AggregateNodeStatsTest {
 
         Set<String> hosts = CqliteFlightMetadata.replicaHosts(replicas, "dc1");
 
+        assertEquals(Set.of("10.0.0.1", "10.0.0.2"), hosts,
+                "only local-DC replica hosts (ports stripped, de-duped) are targeted; "
+                        + "the remote-DC replica the query never reads is excluded");
+    }
+
+    @Test
+    void replicaHostsFallBackToAllDcsWhenLocalDcHasNoReplicasForRange() {
+        // Per range, when the local DC has NO replicas, fall back to every DC's replicas
+        // for that range — mirroring pickReplica's any-DC fallback. Here range 1 has a
+        // local (dc1) replica, but range 2 is hosted only in dc2: that range must still
+        // be covered via its dc2 replica.
+        TokenRangeReplicasResponse replicas = new TokenRangeReplicasResponse(
+                List.of(),
+                List.of(
+                        new ReplicaInfo("-100", "0", Map.of(
+                                "dc1", List.of("10.0.0.1:7000"))),
+                        new ReplicaInfo("0", "100", Map.of(
+                                "dc2", List.of("10.0.0.3:7000")))));
+
+        Set<String> hosts = CqliteFlightMetadata.replicaHosts(replicas, "dc1");
+
+        assertEquals(Set.of("10.0.0.1", "10.0.0.3"), hosts,
+                "a range with no local-DC replica falls back to its remote-DC replica");
+    }
+
+    @Test
+    void replicaHostsFallBackToAllDcsWhenLocalDatacenterUnset() {
+        // localDatacenter null/unset: no DC preference, so fan out to every DC's replicas
+        // (de-duped, ports stripped) — matching pickReplica's null-localDatacenter branch.
+        TokenRangeReplicasResponse replicas = new TokenRangeReplicasResponse(
+                List.of(),
+                List.of(
+                        new ReplicaInfo("-100", "0", Map.of(
+                                "dc1", List.of("10.0.0.1:7000", "10.0.0.2:7000"),
+                                "dc2", List.of("10.0.0.3:7000")))));
+
+        Set<String> hosts = CqliteFlightMetadata.replicaHosts(replicas, null);
+
         assertEquals(Set.of("10.0.0.1", "10.0.0.2", "10.0.0.3"), hosts,
-                "only distinct keyspace-replica hosts (ports stripped) are targeted");
+                "with no local DC configured, all DCs' distinct replica hosts are targeted");
     }
 
     @Test

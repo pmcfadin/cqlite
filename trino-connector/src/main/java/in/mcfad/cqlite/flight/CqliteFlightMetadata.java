@@ -653,11 +653,16 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
      * Distinct replica HOSTS that own a keyspace, derived from its token-range read
      * replicas (issue #944). The Sidecar returns replicas as {@code "ip:storage_port"}
      * grouped by datacenter; we strip the port (the flight server listens on the
-     * configured flight port at the same host) and de-duplicate across all ranges and
-     * datacenters. Scoping the stats fan-out to these hosts — instead of the cluster
-     * ring — keeps a node that does not host this keyspace out of the completeness
-     * calculation entirely. Static and package-private for unit testing without a live
-     * Sidecar.
+     * configured flight port at the same host) and de-duplicate across ranges.
+     *
+     * <p>The datacenter selection MUST match {@link CqliteFlightSplitManager#buildSplits}
+     * (via {@link CqliteFlightSplitManager#pickReplica}): split selection reads each range
+     * ONLY from the configured {@code localDatacenter} when that DC has replicas for the
+     * range, falling back to all DCs only when the local DC has none (or no local DC is
+     * configured). Fanning {@code table_stats} out to remote-DC replicas that the query
+     * would never read adds planning-time timeouts and can wrongly taint completeness
+     * against unreachable remote nodes — so this method applies the same per-range
+     * DC scoping. Static and package-private for unit testing without a live Sidecar.
      */
     static Set<String> replicaHosts(
             in.mcfad.cqlite.flight.sidecar.SidecarModels.TokenRangeReplicasResponse replicas,
@@ -667,21 +672,34 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
             return hosts;
         }
         for (var range : replicas.readReplicas()) {
-            if (range.replicasByDatacenter() == null) {
+            Map<String, List<String>> byDc = range.replicasByDatacenter();
+            if (byDc == null) {
                 continue;
             }
-            for (List<String> dcReplicas : range.replicasByDatacenter().values()) {
-                if (dcReplicas == null) {
-                    continue;
-                }
-                for (String replica : dcReplicas) {
-                    if (replica != null && !replica.isBlank()) {
-                        hosts.add(CqliteFlightSplitManager.hostOnly(replica));
-                    }
+            // Mirror buildSplits/pickReplica DC scoping: use the local DC's replicas for
+            // this range when present, else fall back to every DC's replicas.
+            List<String> local =
+                    localDatacenter != null ? byDc.get(localDatacenter) : null;
+            if (local != null && !local.isEmpty()) {
+                addHosts(hosts, local);
+            } else {
+                for (List<String> dcReplicas : byDc.values()) {
+                    addHosts(hosts, dcReplicas);
                 }
             }
         }
         return hosts;
+    }
+
+    private static void addHosts(Set<String> hosts, List<String> replicas) {
+        if (replicas == null) {
+            return;
+        }
+        for (String replica : replicas) {
+            if (replica != null && !replica.isBlank()) {
+                hosts.add(CqliteFlightSplitManager.hostOnly(replica));
+            }
+        }
     }
 
     /**
