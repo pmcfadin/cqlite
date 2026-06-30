@@ -139,10 +139,16 @@ is_skip_pending_keyspace() {
 # unavailable / not a work tree, COMMITTED_KEYSPACES_OK stays 0 and callers fall
 # back to treating every discovered keyspace as committed (guard not neutered).
 COMMITTED_KEYSPACES=()
+# Committed table directories at TABLE granularity (#1319): each entry is
+# "keyspace/table-dir" for a dir that owns at least one git-tracked golden. Used
+# so an untracked WIP table dir under an ALREADY-tracked keyspace is IGNORED,
+# not enumerated/enforced. Newline-separated for bash 3.x grep lookups.
+COMMITTED_TABLE_DIRS=""
 COMMITTED_KEYSPACES_OK=0
 
 compute_committed_keyspaces() {
     COMMITTED_KEYSPACES=()
+    COMMITTED_TABLE_DIRS=""
     COMMITTED_KEYSPACES_OK=0
     # The committed corpus is owned by THIS source tree (the repo that contains
     # this script + the corpus-coverage policy), NOT by whatever checkout
@@ -158,10 +164,12 @@ compute_committed_keyspaces() {
         return
     fi
     COMMITTED_KEYSPACES_OK=1
-    local path ks seen=""
-    # Single git ls-files call rooted at the source tree; first path segment is
-    # the keyspace. -z keeps it NUL-delimited (newline-safe); read NUL records
-    # straight from the pipe — capturing NUL output in $(...) strips the NULs.
+    local path ks tabledir seen="" tdseen=""
+    # Single git ls-files call rooted at the source tree. Path layout is
+    # <keyspace>/<table-dir>/<golden>; first segment is the keyspace, first two
+    # are the committed table dir. -z keeps it NUL-delimited (newline-safe);
+    # read NUL records straight from the pipe — capturing NUL output in $(...)
+    # strips the NULs.
     while IFS= read -r -d '' path; do
         ks="${path%%/*}"
         [[ -z "${ks}" ]] && continue
@@ -169,6 +177,15 @@ compute_committed_keyspaces() {
             *" ${ks} "*) ;;
             *) seen="${seen} ${ks}"; COMMITTED_KEYSPACES+=("${ks}");;
         esac
+        # "keyspace/table-dir" = strip the trailing "/golden" segment.
+        tabledir="${path%/*}"
+        # Only count it if there were >=2 segments (keyspace + table dir).
+        if [[ "${tabledir}" == */* ]]; then
+            case $'\n'"${tdseen}"$'\n' in
+                *$'\n'"${tabledir}"$'\n'*) ;;
+                *) tdseen="${tdseen}${tabledir}"$'\n'; COMMITTED_TABLE_DIRS="${COMMITTED_TABLE_DIRS}${tabledir}"$'\n';;
+            esac
+        fi
     done < <(git -C "${src}" ls-files -z -- '*-Data.db.jsonl' 2>/dev/null)
 }
 
@@ -181,6 +198,19 @@ is_committed_keyspace() {
         [[ "$k" == "$ks" ]] && return 0
     done
     return 1
+}
+
+# Return 0 if "keyspace/table-dir" ($1) owns a git-tracked golden (TABLE
+# granularity, #1319), or if git was unavailable (COMMITTED_KEYSPACES_OK=0 =>
+# fall back to treating every discovered table dir as committed). An untracked
+# WIP table dir under an already-tracked keyspace returns 1 (IGNORED).
+is_committed_table_dir() {
+    [[ ${COMMITTED_KEYSPACES_OK} -eq 0 ]] && return 0
+    local td="$1"
+    case $'\n'"${COMMITTED_TABLE_DIRS}" in
+        *$'\n'"${td}"$'\n'*) return 0;;
+        *) return 1;;
+    esac
 }
 
 # Discover the enforced keyspace set by walking the committed corpus.
@@ -397,10 +427,14 @@ discover_tables() {
             continue
         fi
 
-        # Find all table directories (directories containing Data.db files)
+        # Find all table directories (directories containing Data.db files).
+        # Filter to the COMMITTED corpus at TABLE granularity (#1319): an
+        # untracked WIP <table>-<uuid>/ dir (no git-tracked golden) under an
+        # already-tracked keyspace is IGNORED, not enforced.
         while IFS= read -r table_dir; do
             local table_dir_name
             table_dir_name=$(basename "${table_dir}")
+            is_committed_table_dir "${keyspace}/${table_dir_name}" || continue
             tables+=("${keyspace}/${table_dir_name}")
         done < <(find "${keyspace_dir}" -maxdepth 1 -type d -name "*-*" | sort)
     done
@@ -538,6 +572,8 @@ register_skip_pending_tables() {
         while IFS= read -r table_dir; do
             local table_dir_name
             table_dir_name=$(basename "${table_dir}")
+            # Ignore untracked WIP table dirs (no git-tracked golden) — #1319.
+            is_committed_table_dir "${keyspace}/${table_dir_name}" || continue
             local table_name
             table_name=$(extract_table_name "${table_dir_name}")
             local qualified_name="${keyspace}.${table_name}"

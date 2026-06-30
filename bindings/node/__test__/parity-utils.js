@@ -704,7 +704,13 @@ function discoverKeyspaces() {
     .sort();
 }
 
-/** Discover table names (UUID suffix stripped) for one keyspace. */
+/**
+ * Discover table names (UUID suffix stripped) for one keyspace.
+ *
+ * Filtered to the COMMITTED corpus at TABLE granularity (#1319): an untracked
+ * WIP `<table>-<uuid>/` dir (no git-tracked golden) under an already-tracked
+ * keyspace is IGNORED, not enumerated into ALL_TABLES/OA_TABLES.
+ */
 function discoverTables(keyspace) {
   const dir = path.join(global.testPaths.SSTABLES_DIR, keyspace);
   if (!fs.existsSync(dir)) return [];
@@ -712,12 +718,12 @@ function discoverTables(keyspace) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const m = TABLE_DIR_RE.exec(entry.name);
-    if (m) tables.push(m[1]);
+    if (m && isCommittedTableDir(keyspace, entry.name)) tables.push(m[1]);
   }
   return tables.sort();
 }
 
-let _trackedGoldenCache = null;
+let _trackedGoldenTableDirsCache = null;
 
 // The committed corpus is owned by THIS source tree (the repo that contains
 // this harness + the corpus-coverage policy), NOT by whatever checkout
@@ -737,25 +743,27 @@ const SOURCE_TREE_SSTABLES = path.resolve(
 );
 
 /**
- * Keyspaces with at least one git-tracked `*-Data.db.jsonl` golden (Issue #1319).
+ * `"<keyspace>/<table-dir>"` for each dir owning a git-tracked golden (#1319).
  *
  * The classification/enforcement set is the COMMITTED corpus, NOT raw live-disk
- * enumeration: a keyspace counts as "committed" iff git tracks at least one
- * `<table>-<uuid>/*-Data.db.jsonl` golden under it. This ignores untracked WIP
- * keyspaces a concurrent session may have dropped into the live
- * CQLITE_DATASETS_ROOT (e.g. `test_signed_coll`, goldens not committed on this
- * branch) so they neither get enforced nor red the integrity guard.
+ * enumeration: a table DIRECTORY counts as "committed" iff git tracks at least
+ * one `<keyspace>/<table>-<uuid>/*-Data.db.jsonl` golden inside it. This ignores
+ * untracked WIP fixtures a concurrent session may have dropped into the live
+ * CQLITE_DATASETS_ROOT — at either keyspace granularity (a whole new keyspace,
+ * e.g. `test_signed_coll`) OR table granularity (a new untracked
+ * `<table>-<uuid>/` dir under an already-tracked keyspace) — so neither gets
+ * enforced nor reds the integrity guard.
  *
  * Tracked-ness is measured against THIS source tree's
  * `test-data/datasets/sstables` (the repo that owns this harness + the policy),
  * NOT the live SSTABLES_DIR — the live datasets root may be a *different*
  * checkout whose index already contains a concurrent session's WIP. Single
- * `git ls-files` call, parsed into first-level keyspace dir names.
+ * `git ls-files` call, parsed into `keyspace/table-dir` (first two segments).
  *
- * @returns {Set<string>} tracked-golden keyspace names (empty if git unavailable)
+ * @returns {Set<string>} tracked-golden `keyspace/table-dir` (empty if git unavailable)
  */
-function gitTrackedGoldenKeyspaces() {
-  if (_trackedGoldenCache) return _trackedGoldenCache;
+function gitTrackedGoldenTableDirs() {
+  if (_trackedGoldenTableDirsCache) return _trackedGoldenTableDirsCache;
   const out = new Set();
   try {
     const stdout = execFileSync(
@@ -765,23 +773,55 @@ function gitTrackedGoldenKeyspaces() {
     );
     for (const raw of stdout.toString('utf8').split('\0')) {
       if (!raw) continue;
-      const head = raw.split('/', 1)[0];
-      if (head) out.add(head);
+      const parts = raw.split('/');
+      if (parts.length >= 3 && parts[0] && parts[1]) out.add(`${parts[0]}/${parts[1]}`);
     }
   } catch (_err) {
     // git unavailable / not a work tree: fall back (empty => treat all as committed).
   }
-  _trackedGoldenCache = out;
+  _trackedGoldenTableDirsCache = out;
   return out;
+}
+
+/**
+ * Keyspaces with at least one git-tracked golden (#1319).
+ *
+ * Derived from the table-granular tracked set (gitTrackedGoldenTableDirs): a
+ * keyspace is committed iff it owns at least one tracked table dir. Empty when
+ * git is unavailable (callers then fall back to treating all as committed).
+ *
+ * @returns {Set<string>} tracked-golden keyspace names (empty if git unavailable)
+ */
+function gitTrackedGoldenKeyspaces() {
+  const out = new Set();
+  for (const td of gitTrackedGoldenTableDirs()) out.add(td.split('/', 1)[0]);
+  return out;
+}
+
+/**
+ * True if `<keyspace>/<tableDirName>` owns a git-tracked golden (#1319).
+ *
+ * Graceful fallback: if git reports NO tracked goldens (git unavailable / not a
+ * work tree), every discovered table dir is treated as committed so the guard
+ * is not silently neutered.
+ *
+ * @returns {boolean}
+ */
+function isCommittedTableDir(keyspace, tableDirName) {
+  const tracked = gitTrackedGoldenTableDirs();
+  if (tracked.size === 0) return true;
+  return tracked.has(`${keyspace}/${tableDirName}`);
 }
 
 /**
  * Discovered keyspaces restricted to the COMMITTED (git-tracked) corpus (#1319).
  *
  * Untracked-on-disk WIP keyspaces are excluded — neither enforced nor flagged.
- * Graceful fallback: if git reports NO tracked goldens (git unavailable / not a
- * work tree), every discovered keyspace is treated as committed so the guard is
- * not silently neutered. In CI and local dev `.git` is present.
+ * Untracked table dirs UNDER a tracked keyspace are filtered at table
+ * granularity by discoverTables(). Graceful fallback: if git reports NO tracked
+ * goldens (git unavailable / not a work tree), every discovered keyspace is
+ * treated as committed so the guard is not silently neutered. In CI and local
+ * dev `.git` is present.
  *
  * @returns {string[]} committed keyspace names
  */
@@ -897,7 +937,9 @@ module.exports = {
   EXECUTABLE_KEYSPACES,
   isSystemKeyspace,
   discoverKeyspaces,
+  gitTrackedGoldenTableDirs,
   gitTrackedGoldenKeyspaces,
+  isCommittedTableDir,
   committedKeyspaces,
   discoverTables,
   inScopeKeyspaces,

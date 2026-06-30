@@ -116,16 +116,19 @@ _SOURCE_TREE_SSTABLES = (
 
 
 @lru_cache(maxsize=8)
-def _git_tracked_golden_keyspaces(sstables_dir: Path) -> frozenset[str]:
-    """Keyspaces with at least one git-tracked ``*-Data.db.jsonl`` golden.
+def _git_tracked_golden_table_dirs(sstables_dir: Path) -> frozenset[str]:
+    """``"<keyspace>/<table-dir>"`` for each dir owning a git-tracked golden.
 
-    Issue #1319: the classification/enforcement set is the COMMITTED corpus,
-    NOT raw live-disk enumeration. A keyspace counts as "committed" iff git
-    tracks at least one ``<table>-<uuid>/*-Data.db.jsonl`` golden under it.
-    This ignores untracked WIP keyspaces that a concurrent session may have
-    dropped into the live ``CQLITE_DATASETS_ROOT`` (e.g. ``test_signed_coll``,
-    whose goldens are not committed on this branch) so they neither get
-    enforced nor red the integrity guard.
+    Issue #1319 (table granularity): the classification/enforcement set is the
+    COMMITTED corpus, NOT raw live-disk enumeration. A table DIRECTORY counts
+    as "committed" iff git tracks at least one
+    ``<keyspace>/<table>-<uuid>/*-Data.db.jsonl`` golden inside it. This
+    ignores untracked WIP fixtures a concurrent session may have dropped into
+    the live ``CQLITE_DATASETS_ROOT`` — at either keyspace granularity (a whole
+    new keyspace, e.g. ``test_signed_coll``) OR table granularity (a new
+    untracked ``<table>-<uuid>/`` dir under an ALREADY-tracked keyspace, e.g. a
+    WIP table under ``test_basic``) — so neither gets enforced nor reds the
+    integrity guard.
 
     Tracked-ness is measured against THIS source tree's
     ``test-data/datasets/sstables`` (the repo that owns this harness + the
@@ -136,10 +139,11 @@ def _git_tracked_golden_keyspaces(sstables_dir: Path) -> frozenset[str]:
     at the source tree.
 
     Determined with a single ``git ls-files`` call, parsed into the set of
-    first-level keyspace dir names that own a tracked golden. If ``git`` is
-    unavailable / this is not a work tree, returns an empty set and callers
-    fall back to treating all discovered keyspaces as committed (see
-    :func:`committed_keyspaces`). In CI and local dev ``.git`` is present.
+    ``keyspace/table-dir`` (first two path segments) that own a tracked golden.
+    If ``git`` is unavailable / this is not a work tree, returns an empty set
+    and callers fall back to treating everything discovered as committed (see
+    :func:`committed_keyspaces` / :func:`_is_committed_table_dir`). In CI and
+    local dev ``.git`` is present.
     """
     src = _SOURCE_TREE_SSTABLES
     if not src.exists():
@@ -154,16 +158,42 @@ def _git_tracked_golden_keyspaces(sstables_dir: Path) -> frozenset[str]:
         return frozenset()
     if proc.returncode != 0:
         return frozenset()
-    keyspaces: set[str] = set()
+    table_dirs: set[str] = set()
     for raw in proc.stdout.split(b"\0"):
         if not raw:
             continue
-        # Paths are relative to ``src``; first segment is the keyspace.
+        # Paths are relative to ``src``: ``<keyspace>/<table-dir>/<golden>``.
         rel = raw.decode("utf-8", "surrogateescape")
-        head = rel.split("/", 1)[0]
-        if head:
-            keyspaces.add(head)
-    return frozenset(keyspaces)
+        parts = rel.split("/")
+        if len(parts) >= 3 and parts[0] and parts[1]:
+            table_dirs.add(f"{parts[0]}/{parts[1]}")
+    return frozenset(table_dirs)
+
+
+def _git_tracked_golden_keyspaces(sstables_dir: Path) -> frozenset[str]:
+    """Keyspaces with at least one git-tracked ``*-Data.db.jsonl`` golden.
+
+    Derived from the table-granular tracked set
+    (:func:`_git_tracked_golden_table_dirs`): a keyspace is committed iff it
+    owns at least one tracked table dir. Empty when git is unavailable (callers
+    then fall back to treating all discovered keyspaces as committed).
+    """
+    return frozenset(
+        td.split("/", 1)[0] for td in _git_tracked_golden_table_dirs(sstables_dir)
+    )
+
+
+def _is_committed_table_dir(sstables_dir: Path, keyspace: str, table_dir_name: str) -> bool:
+    """True if ``<keyspace>/<table_dir_name>`` owns a git-tracked golden.
+
+    Graceful fallback: if git reports NO tracked goldens (git unavailable / not
+    a work tree), every discovered table dir is treated as committed so the
+    guard is not silently neutered. In CI and local dev ``.git`` is present.
+    """
+    tracked = _git_tracked_golden_table_dirs(sstables_dir)
+    if not tracked:
+        return True
+    return f"{keyspace}/{table_dir_name}" in tracked
 
 
 def committed_keyspaces(sstables_dir: Path) -> list[str]:
@@ -173,7 +203,8 @@ def committed_keyspaces(sstables_dir: Path) -> list[str]:
     ``*-Data.db.jsonl`` golden (see :func:`_git_tracked_golden_keyspaces`).
     Untracked-on-disk keyspaces (WIP fixtures a concurrent session dropped in)
     are excluded — they are neither enforced nor flagged as unclassified
-    (#1319).
+    (#1319). Untracked table dirs UNDER a tracked keyspace are filtered out at
+    table granularity by :func:`discover_table_dirs` / :func:`discover_tables`.
 
     Graceful fallback: if git reports NO tracked goldens (git unavailable, not
     a work tree, or a pure dataset asset checked out without ``.git``), every
@@ -190,7 +221,10 @@ def committed_keyspaces(sstables_dir: Path) -> list[str]:
 def discover_tables(sstables_dir: Path, keyspace: str) -> list[str]:
     """Return the table names (UUID suffix stripped) for one keyspace.
 
-    Discovered from committed ``<table>-<uuid>/`` directories.
+    Discovered from committed ``<table>-<uuid>/`` directories. Filtered to the
+    COMMITTED corpus at TABLE granularity (#1319): an untracked WIP
+    ``<table>-<uuid>/`` dir (no git-tracked golden) under an already-tracked
+    keyspace is IGNORED, not enumerated.
     """
     keyspace_dir = sstables_dir / keyspace
     if not keyspace_dir.exists():
@@ -200,7 +234,7 @@ def discover_tables(sstables_dir: Path, keyspace: str) -> list[str]:
         if not d.is_dir():
             continue
         m = _TABLE_DIR_RE.match(d.name)
-        if m:
+        if m and _is_committed_table_dir(sstables_dir, keyspace, d.name):
             tables.append(m.group("table"))
     return sorted(tables)
 
@@ -227,6 +261,10 @@ def discover_table_dirs(sstables_dir: Path, keyspace: str) -> list[tuple[str, Pa
     ``test_deltas`` ships three UUID dirs per table). Each physical directory
     is returned separately so its golden is verified individually — collapsing
     by table name silently drops the later generations' JSONL files (#1229).
+
+    Filtered to the COMMITTED corpus at TABLE granularity (#1319): an untracked
+    WIP ``<table>-<uuid>/`` dir (no git-tracked golden) under an already-tracked
+    keyspace is IGNORED.
     """
     keyspace_dir = sstables_dir / keyspace
     if not keyspace_dir.exists():
@@ -236,7 +274,7 @@ def discover_table_dirs(sstables_dir: Path, keyspace: str) -> list[tuple[str, Pa
         if not d.is_dir():
             continue
         m = _TABLE_DIR_RE.match(d.name)
-        if m:
+        if m and _is_committed_table_dir(sstables_dir, keyspace, d.name):
             entries.append((m.group("table"), d))
     return sorted(entries, key=lambda e: e[1].name)
 
