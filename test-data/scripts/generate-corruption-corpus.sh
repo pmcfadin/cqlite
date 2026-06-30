@@ -270,22 +270,32 @@ print(f"{s} {mut}")
 PY
 }
 
-# Render a path relative to REPO_ROOT when it lives under it; otherwise tag it
-# as an out-of-tree source (keeps the committed manifest machine-independent and
-# deterministic). BTI sources resolved from a sibling main-repo checkout are
-# recorded by their stable datasets-relative tail so they are reproducible.
+# Normalize a clean-source path to a STABLE, machine-independent value for the
+# committed manifest (Finding 3 / issue #1236). The reproducibility contract is
+# datasets-relative: any datasets root (a repo checkout's test-data/datasets, a
+# sibling main-repo checkout, or an out-of-tree generation dir like
+# /tmp/cqlite-1236-gen/datasets) collapses to the same `datasets/sstables/...`
+# tail, so the committed manifest never records a machine-specific absolute path.
 rel_path() {
   local p="$1"
+  # Prefer the OUT_DIR-relative form when the path lives under the datasets root
+  # actually in use (covers --out and CQLITE_DATASETS_ROOT generation dirs).
+  if [[ -n "${OUT_DIR:-}" && "$p" == "$OUT_DIR/"* ]]; then
+    echo "datasets/${p#"$OUT_DIR"/}"
+    return
+  fi
+  # Otherwise collapse on the stable ".../datasets/sstables/..." tail (handles
+  # sibling checkouts and out-of-tree /tmp/.../datasets/sstables generation
+  # roots identically). Match the longest-known tails first.
   case "$p" in
-    "$REPO_ROOT/"*) echo "${p#"$REPO_ROOT"/}" ;;
+    *"/test-data/datasets/sstables/"*)
+      echo "datasets/sstables/${p#*"/test-data/datasets/sstables/"}" ;;
+    *"/datasets/sstables/"*)
+      echo "datasets/sstables/${p#*"/datasets/sstables/"}" ;;
+    "$REPO_ROOT/"*)
+      echo "${p#"$REPO_ROOT"/}" ;;
     *)
-      # Keep the stable "<...>/test-data/datasets/sstables/..." tail if present.
-      if [[ "$p" == *"/test-data/datasets/sstables/"* ]]; then
-        echo "<out-of-tree>/test-data/datasets/sstables/${p#*"/test-data/datasets/sstables/"}"
-      else
-        echo "$p"
-      fi
-      ;;
+      echo "$p" ;;
   esac
 }
 
