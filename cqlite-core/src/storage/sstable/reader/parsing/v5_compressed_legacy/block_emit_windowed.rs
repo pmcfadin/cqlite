@@ -54,6 +54,9 @@ impl V5CompressedLegacyParser {
             ))
         })?;
 
+        // Issue #1046: build the header→schema column resolution ONCE per block.
+        let resolution = RowColumnResolution::build(schema, reader);
+
         log::debug!(
             "V5CompressedLegacy: Parsing block for {}.{} ({} bytes)",
             self.keyspace,
@@ -290,6 +293,7 @@ impl V5CompressedLegacyParser {
                             Some(schema),
                             reader,
                             false,
+                            &resolution,
                         ) {
                             Ok((
                                 mut cells,
@@ -704,6 +708,11 @@ impl V5CompressedLegacyParser {
             ))
         })?;
 
+        // Issue #1046: per-PARTITION resolution build (this driver is re-entered once
+        // per partition by the sliding-window caller; allocations scale with partition
+        // count, not row count). Borrows header strings + schema columns for the loop.
+        let resolution = RowColumnResolution::build(schema, reader);
+
         let table_id = TableId::new(format!("{}.{}", self.keyspace, self.table_name));
 
         const CASSANDRA_MAX_KEY_SIZE: usize = 65536;
@@ -816,7 +825,14 @@ impl V5CompressedLegacyParser {
                 }
             }
 
-            match self.parse_row_data_with_offset(data, offset, Some(schema), reader, false) {
+            match self.parse_row_data_with_offset(
+                data,
+                offset,
+                Some(schema),
+                reader,
+                false,
+                &resolution,
+            ) {
                 Ok((
                     mut cells,
                     _row_cell_meta,

@@ -343,6 +343,11 @@ impl V5CompressedLegacyParser {
             ))
         })?;
 
+        // Issue #1046: per-PARTITION resolution build (this driver is re-entered once
+        // per partition by the sliding-window compaction caller). Allocations scale
+        // with partition count, not row count.
+        let resolution = RowColumnResolution::build(schema, reader);
+
         const CASSANDRA_MAX_KEY_SIZE: usize = 65536;
         const FORMAT_MAX_KEY_SIZE: usize = 255;
 
@@ -564,6 +569,7 @@ impl V5CompressedLegacyParser {
                 reader,
                 true,
                 Some(&mut complex_capture),
+                &resolution,
             ) {
                 Ok((
                     cells,

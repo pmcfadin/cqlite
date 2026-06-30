@@ -69,6 +69,10 @@ impl V5CompressedLegacyParser {
             ))
         })?;
 
+        // Issue #1046: build the header→schema column resolution ONCE per block,
+        // reused across every partition/row below — zero per-row schema-lookup alloc.
+        let resolution = RowColumnResolution::build(schema, reader);
+
         let mut offset = 0;
         let mut partition_index = 0;
 
@@ -104,7 +108,14 @@ impl V5CompressedLegacyParser {
                     }
                 }
 
-                match self.parse_row_data_with_offset(data, offset, Some(schema), reader, true) {
+                match self.parse_row_data_with_offset(
+                    data,
+                    offset,
+                    Some(schema),
+                    reader,
+                    true,
+                    &resolution,
+                ) {
                     Ok((
                         mut cells,
                         row_cell_meta_opt,
@@ -270,6 +281,9 @@ impl V5CompressedLegacyParser {
                 self.keyspace, self.table_name
             ))
         })?;
+
+        // Issue #1046: build the header→schema column resolution ONCE per block.
+        let resolution = RowColumnResolution::build(schema, reader);
 
         let mut offset = 0;
         let mut partition_index = 0;
@@ -490,7 +504,14 @@ impl V5CompressedLegacyParser {
                     continue;
                 }
 
-                match self.parse_row_data_with_offset(data, offset, Some(schema), reader, true) {
+                match self.parse_row_data_with_offset(
+                    data,
+                    offset,
+                    Some(schema),
+                    reader,
+                    true,
+                    &resolution,
+                ) {
                     Ok((
                         cells,
                         row_cell_meta_opt,
