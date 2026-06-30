@@ -54,6 +54,13 @@ fn parity_datasets_required() -> bool {
 const WIDE_PARTITION_DATA_REL: &str =
     "test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db";
 
+/// Relative path (under `datasets/sstables`) of the wide_partition `Digest.crc32`
+/// reference whose payload is now pinned `byte_for_byte` and shipped in the CI
+/// dataset (v3.4). Under `CQLITE_PARITY_REQUIRE_DATASETS=1` its absence — or its
+/// absence from the digest comparison set — is a gate failure.
+const WIDE_PARTITION_DIGEST_REL: &str =
+    "test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Digest.crc32";
+
 /// Resolve the committed datasets root (env override first, else workspace tree).
 fn datasets_sstables_root() -> PathBuf {
     let root = if let Ok(root) = std::env::var("CQLITE_DATASETS_ROOT") {
@@ -349,9 +356,14 @@ fn render_digest_payload(crc32: u32) -> Vec<u8> {
 #[test]
 fn digest_crc32_byte_for_byte_parity() {
     let digests = all_digest_files();
+    let wide_digest = datasets_sstables_root().join(WIDE_PARTITION_DIGEST_REL);
 
     let mut compared = 0usize;
     let mut skipped_no_data = 0usize;
+    // Track whether a real digest comparison ran for the pinned wide_partition
+    // reference (FINDING 2): a present Data.db alone is not enough — the comparison
+    // must actually execute for that exact fixture.
+    let mut wide_partition_compared = false;
 
     for digest_path in &digests {
         let digest_name = digest_path
@@ -391,6 +403,9 @@ fn digest_crc32_byte_for_byte_parity() {
         );
 
         compared += 1;
+        if digest_path == &wide_digest {
+            wide_partition_compared = true;
+        }
     }
 
     // Fail-closed on the PINNED wide_partition fixture (issue #1185): its
@@ -408,6 +423,29 @@ fn digest_crc32_byte_for_byte_parity() {
              pinned CI dataset (v3.4); the required digest-parity lane must FAIL CLOSED here, \
              not skip. Fetch the dataset: bash test-data/scripts/fetch-datasets.sh",
             wide_data.display(),
+        );
+        // The Digest.crc32 reference itself must be present: if it is absent,
+        // `all_digest_files()` never sees it and no comparison runs for the pinned
+        // fixture, so strict mode would false-green on the very component being
+        // promoted `byte_for_byte` (FINDING 2).
+        assert!(
+            wide_digest.exists(),
+            "CQLITE_PARITY_REQUIRE_DATASETS=1 but the pinned wide_partition Digest.crc32 \
+             reference is absent at {} — it is promoted `byte_for_byte` and shipped in the \
+             pinned CI dataset (v3.4); without it no digest comparison runs for this fixture. \
+             The required digest-parity lane must FAIL CLOSED here, not skip. Fetch the \
+             dataset: bash test-data/scripts/fetch-datasets.sh",
+            wide_digest.display(),
+        );
+        // Both the Data.db and the Digest.crc32 exist ⇒ the comparison loop MUST
+        // have actually run a byte-for-byte digest comparison for this exact
+        // fixture. Assert it ran (not merely that the files are on disk).
+        assert!(
+            wide_partition_compared,
+            "CQLITE_PARITY_REQUIRE_DATASETS=1: the pinned wide_partition Digest.crc32 ({}) and \
+             its Data.db are both present, yet no digest comparison ran for it — the required \
+             digest-parity lane must compare the pinned fixture, not skip it.",
+            wide_digest.display(),
         );
     }
 

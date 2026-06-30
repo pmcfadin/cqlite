@@ -195,19 +195,33 @@ fn missing_required_components() -> Vec<String> {
 /// binaries) the byte-level checks skip cleanly while the JSONL canonical-semantic
 /// tier still runs.
 fn require_or_skip_binaries(test: &str) -> bool {
-    if binaries_present() {
+    // Strict CI lane: enforce the FULL required-component set, not just the
+    // Data.db+Index.db subset that `binaries_present()` checks. A partial fixture
+    // (e.g. missing Digest.crc32 or CompressionInfo.db) must turn the required
+    // lane red, never skip-and-green. Invariant: strict mode passing ⇒ every
+    // component in REQUIRED_BINARY_COMPONENTS was present.
+    if parity_datasets_required() {
+        let missing = missing_required_components();
+        if !missing.is_empty() {
+            panic!(
+                "{test}: CQLITE_PARITY_REQUIRE_DATASETS=1 but the wide_partition byte-parity \
+                 reference is incomplete at {} (missing {} of {} required component(s): {:?}) — \
+                 these scenarios are pinned `byte_for_byte` in \
+                 test-data/cassandra-parity-manifest.yml and the fixture is in the pinned CI \
+                 dataset (v3.4). The required parity gate must FAIL CLOSED here, not skip. \
+                 Fetch the dataset: bash test-data/scripts/fetch-datasets.sh",
+                fixture_dir().display(),
+                missing.len(),
+                REQUIRED_BINARY_COMPONENTS.len(),
+                missing,
+            );
+        }
         return true;
     }
-    if parity_datasets_required() {
-        panic!(
-            "{test}: CQLITE_PARITY_REQUIRE_DATASETS=1 but the wide_partition byte-parity \
-             reference binaries are absent at {} (missing: {:?}) — these scenarios are pinned \
-             `byte_for_byte` in test-data/cassandra-parity-manifest.yml and the fixture is in \
-             the pinned CI dataset (v3.4). The required parity gate must FAIL CLOSED here, not \
-             skip. Fetch the dataset: bash test-data/scripts/fetch-datasets.sh",
-            fixture_dir().display(),
-            missing_required_components(),
-        );
+    // Local dev (env unset): the byte-level decode only needs Data.db+Index.db;
+    // skip cleanly when those are absent while the JSONL semantic tier still runs.
+    if binaries_present() {
+        return true;
     }
     byte_level_skip(test);
     false
