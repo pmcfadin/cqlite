@@ -140,39 +140,47 @@ impl SSTableReader {
 
         let schema_opt = self.get_table_schema(schema);
 
-        // Issue #954: when a single-column clustering slice is requested AND this
-        // is a BTI (`da`) reader, consult the target partition's authoritative
-        // row index to bound BOTH the decode and the decompression to the
-        // row-index block(s) covering the requested clustering range. Returns the
-        // row-body byte window (relative to the partition start, the same domain
-        // the parser sees when it parses `window[within..]`) plus a tightened
-        // decompression end. `clustering_engaged` is `true` only when the row
-        // index actually narrowed the decode.
-        let mut clustering_engaged = false;
-        let mut row_body_window: Option<(usize, usize)> = None;
-        let mut decode_end_bound = end_bound;
-        if is_bti {
-            if let Some(slice) = clustering {
-                if let Some(narrow) =
-                    self.bti_clustering_row_window(partition_key, slice, schema_opt.as_ref())?
-                {
-                    // `narrow.body_end_rel` is relative to the partition start; the
-                    // absolute Data.db decompression end is `offset + body_end_rel`,
-                    // clamped to the authoritative partition end (`end_bound`). A
-                    // `usize::MAX` end means "to the partition end" (the last block),
-                    // so we leave `decode_end_bound` at the partition bound and only
-                    // tighten the decompression for a bounded end (the common
-                    // `ck < b` / two-bound case) — `saturating_add` guards overflow.
-                    if narrow.body_end_rel != usize::MAX {
-                        let abs_end = (offset as usize).saturating_add(narrow.body_end_rel);
-                        decode_end_bound = Some(match end_bound {
-                            Some(e) => abs_end.min(e),
-                            None => abs_end,
-                        });
-                    }
-                    row_body_window = Some((narrow.body_start_rel, narrow.body_end_rel));
-                    clustering_engaged = true;
+        // Issue #954 / #1184: when a single-column clustering slice is requested,
+        // consult the target partition's authoritative index (BTI `Rows.db` trie or
+        // BIG promoted `IndexInfo` blocks) to bound BOTH the decode and the
+        // decompression to the block(s) covering the requested clustering range. The
+        // unified resolver (`big_promoted.rs`) returns the row-body byte window
+        // (relative to the partition start, the same domain the parser sees for
+        // `window[within..]`), a tightened decompression end, and whether the
+        // narrowing engaged. Kept out of this (over-threshold) file per the campsite
+        // rule — `bti_clustering_row_window` is the BTI half it dispatches to.
+        let (row_body_window, decode_end_bound, clustering_engaged) = self
+            .resolve_clustering_seek_window(
+                is_bti,
+                partition_key,
+                offset,
+                clustering,
+                schema_opt.as_ref(),
+                end_bound,
+            )?;
+
+        // Issue #1184: when the BIG (`nb`) promoted-index clustering narrowing
+        // engaged, decode the selected block window via the BIG-specific decoder
+        // (`big_promoted.rs`). It uses the format-agnostic table-id match + a
+        // partition-key-bytes guard rather than the BTI `get()`-path strict table-id
+        // match (which rejects SSTables whose serialization header keyspace/table
+        // differ from a fully-qualified query id), and reuses the windowed parser so
+        // only the slice's blocks are decoded. BTI keeps its existing decoder below.
+        if !is_bti && clustering_engaged {
+            if let Some(rows) = self
+                .big_decode_clustering_window(
+                    partition_key,
+                    offset,
+                    decode_end_bound,
+                    row_body_window,
+                    schema_opt.as_ref(),
+                )
+                .await?
+            {
+                if !rows.is_empty() {
+                    super::super::super::work_counters::add_partition_decoded();
                 }
+                return Ok(Some((rows, true)));
             }
         }
 
@@ -284,7 +292,7 @@ impl SSTableReader {
     /// fallback: correctness is preserved by decoding the full partition and
     /// letting the post-scan backstop filter.
     #[cfg(not(feature = "tombstones"))]
-    fn bti_clustering_row_window(
+    pub(super) fn bti_clustering_row_window(
         &self,
         partition_key: &[u8],
         slice: &ClusteringSlice,

@@ -17,6 +17,11 @@
 //! delta-scan bridge), plus the public-surface re-exports.
 
 mod bti;
+// BIG ("nb") promoted-index forward seek + reverse iterator (Issue #1184). The
+// seek/reverse paths exist only on the default build, so the whole module is
+// `not(tombstones)` gated.
+#[cfg(not(feature = "tombstones"))]
+mod big_promoted;
 mod compaction;
 mod model;
 mod sequential;

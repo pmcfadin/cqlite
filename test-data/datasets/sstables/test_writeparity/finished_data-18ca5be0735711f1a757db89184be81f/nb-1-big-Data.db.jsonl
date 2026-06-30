@@ -1,6 +1,0 @@
-{"table kind":"REGULAR","partition":{"key":["5"],"position":0},"rows":[{"type":"row","position":18,"liveness_info":{"tstamp":"2023-11-14T22:13:20Z"},"cells":[{"name":"name","value":"name5"}]}]}
-{"table kind":"REGULAR","partition":{"key":["1"],"position":30},"rows":[{"type":"row","position":48,"liveness_info":{"tstamp":"2023-11-14T22:13:20Z"},"cells":[{"name":"name","value":"name1"}]}]}
-{"table kind":"REGULAR","partition":{"key":["0"],"position":60},"rows":[{"type":"row","position":78,"liveness_info":{"tstamp":"2023-11-14T22:13:20Z"},"cells":[{"name":"name","value":"name0"}]}]}
-{"table kind":"REGULAR","partition":{"key":["2"],"position":90},"rows":[{"type":"row","position":108,"liveness_info":{"tstamp":"2023-11-14T22:13:20Z"},"cells":[{"name":"name","value":"name2"}]}]}
-{"table kind":"REGULAR","partition":{"key":["4"],"position":120},"rows":[{"type":"row","position":138,"liveness_info":{"tstamp":"2023-11-14T22:13:20Z"},"cells":[{"name":"name","value":"name4"}]}]}
-{"table kind":"REGULAR","partition":{"key":["3"],"position":150},"rows":[{"type":"row","position":168,"liveness_info":{"tstamp":"2023-11-14T22:13:20Z"},"cells":[{"name":"name","value":"name3"}]}]}

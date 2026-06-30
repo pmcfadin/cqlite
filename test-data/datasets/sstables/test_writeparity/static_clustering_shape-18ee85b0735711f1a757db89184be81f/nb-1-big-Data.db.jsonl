@@ -1,1 +1,0 @@
-{"table kind":"REGULAR","partition":{"key":["1"],"position":0},"rows":[{"type":"static_block","position":35,"cells":[{"name":"sdata","value":"static-val","tstamp":"2023-11-14T22:13:20Z"}]},{"type":"row","position":35,"clustering":[7],"liveness_info":{"tstamp":"2023-11-14T22:13:20Z"},"cells":[{"name":"rdata","value":"row-val"}]}]}

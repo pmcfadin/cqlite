@@ -1,4 +1,0 @@
-{"table kind":"REGULAR","partition":{"key":["1"],"position":0},"rows":[{"type":"row","position":18,"liveness_info":{"tstamp":"1970-01-01T00:00:00.001Z"},"cells":[{"name":"v","value":"a-1"}]}]}
-{"table kind":"REGULAR","partition":{"key":["2"],"position":28},"rows":[{"type":"row","position":46,"liveness_info":{"tstamp":"1970-01-01T00:00:00.002Z"},"cells":[{"name":"v","value":"b-2"}]}]}
-{"table kind":"REGULAR","partition":{"key":["4"],"position":57},"rows":[{"type":"row","position":75,"liveness_info":{"tstamp":"1970-01-01T00:00:00.002Z"},"cells":[{"name":"v","value":"b-4"}]}]}
-{"table kind":"REGULAR","partition":{"key":["3"],"position":86},"rows":[{"type":"row","position":104,"liveness_info":{"tstamp":"1970-01-01T00:00:00.002Z"},"cells":[{"name":"v","value":"b-3"}]}]}
