@@ -4572,7 +4572,7 @@ scenarios:
         bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
       comparison_command: >-
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
-        --test issue_694_writetime_ttl_parity
+        --features write-support,cli-helpers --test issue_694_writetime_ttl_parity
       reference_paths:
         - test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       normalization: >-
