@@ -88,7 +88,7 @@ jobs:
       # This lane does not run clippy. Idempotent: a no-op if clippy is absent.
       - name: Remove preinstalled clippy (avoid clippy-preview install conflict)
         shell: bash
-        run: rustup component remove clippy 2>/dev/null || true
+        run: rustup component remove clippy --toolchain stable 2>/dev/null || true
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
