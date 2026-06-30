@@ -56,6 +56,11 @@ on:
       - 'cqlite-core/tests/issue_998_inline_crc_trailers.rs'
       - 'cqlite-core/tests/issue_1000_verifier.rs'
       - 'cqlite-core/tests/sstable_parity_corruption_verify.rs'
+      # Committed corruption metadata the verify-parity test consumes: a PR that
+      # only edits the captured Cassandra verdicts in the corruption manifest or
+      # the SHA-256 sums must re-trigger this strict parity lane (roborev #1236
+      # Finding 2).
+      - 'test-data/datasets/corruption/**'
       - 'test-data/scripts/capture-cassandra-verify-verdicts.sh'
       - 'cqlite-core/tests/issue_1001_reject_unknown_compression.rs'
       - 'cqlite-core/tests/issue_1082_deflate_zlib.rs'
