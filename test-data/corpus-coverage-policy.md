@@ -22,10 +22,45 @@ plus this explicit skip-set fixes that: a newly-committed keyspace is
 
 ## The rule
 
-Every keyspace directory present in `test-data/datasets/sstables/` is
+Every **committed** keyspace directory under `test-data/datasets/sstables/` is
 **in-scope for the comprehensive read-parity corpus** UNLESS it appears in
-the skip-set below. The enumeration code fails loudly if a discovered
-keyspace is neither covered nor listed here.
+the skip-set below. The enumeration code fails loudly if a committed keyspace
+is neither covered nor listed here.
+
+### The classification/enforcement set is the COMMITTED corpus (Issue #1319)
+
+Classification and enforcement are scoped to the **committed corpus** — a
+keyspace counts only if git tracks at least one `*-Data.db.jsonl` golden under
+`test-data/datasets/sstables/<keyspace>/`. They are **NOT** derived from raw
+live-disk enumeration of `CQLITE_DATASETS_ROOT`.
+
+Rationale: the dataset asset (and a concurrent session's WIP) can drop a
+keyspace onto disk whose JSONL goldens are **not yet git-tracked** (e.g.
+`test_signed_coll`). Enumerating raw live disk would flag such an untracked WIP
+keyspace as "unclassified" and red the integrity guard on every PR, even though
+it is not a coverage gap in the committed corpus. So:
+
+- A keyspace present on disk but with **no git-tracked golden** is **IGNORED** —
+  neither enforced nor flagged as unclassified.
+- A genuinely-**committed** keyspace (has git-tracked goldens) that is
+  unclassified **still reds** the guard — the integrity check is not neutered.
+
+Tracked-ness is computed via a single `git ls-files -- '*-Data.db.jsonl'`,
+parsed into the set of first-level keyspace dir names, in each harness
+(`committed_keyspaces`/`_git_tracked_golden_keyspaces` in `corpus.py`,
+`committedKeyspaces`/`gitTrackedGoldenKeyspaces` in `parity-utils.js`,
+`compute_committed_keyspaces`/`is_committed_keyspace` in
+`smoke-test-all-tables.sh`). The query is rooted at **this source tree's**
+`test-data/datasets/sstables` (the repo that owns the harness + this policy),
+**NOT** at the live `CQLITE_DATASETS_ROOT`: the datasets root can be a *different*
+checkout whose index already contains a concurrent session's WIP fixtures that
+this branch has not adopted, so measuring tracked-ness there would mis-classify
+that WIP as committed. The guard must reflect what **this branch** considers
+committed. Disk *enumeration* still uses the live datasets root; only the
+git-tracked *filter* is rooted at the source tree. If `git` is unavailable /
+this is not a work tree (no `.git`), every harness **falls back** to treating all
+discovered keyspaces as committed so the guard is not silently disabled. In CI
+and local dev `.git` is always present.
 
 ## Skip-set (intentionally excluded keyspaces)
 

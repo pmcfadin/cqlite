@@ -16,6 +16,8 @@ The skip-set + rationale is the policy decision documented in
 from __future__ import annotations
 
 import re
+import subprocess
+from functools import lru_cache
 from pathlib import Path
 
 # UUID suffix appended to every table directory: ``<table>-<32 hex>``.
@@ -101,6 +103,90 @@ def discover_keyspaces(sstables_dir: Path) -> list[str]:
     )
 
 
+# The committed corpus is owned by THIS source tree (the repo that contains
+# this harness + the corpus-coverage policy), NOT by whatever checkout
+# ``CQLITE_DATASETS_ROOT`` happens to point at. A concurrent session can commit
+# WIP fixtures into a *different* checkout's index (e.g. the main repo the
+# datasets root points at) while this branch has not adopted them yet; the
+# classification guard must reflect what THIS branch considers committed.
+# corpus.py lives at <repo>/bindings/python/tests/corpus.py.
+_SOURCE_TREE_SSTABLES = (
+    Path(__file__).resolve().parents[3] / "test-data" / "datasets" / "sstables"
+)
+
+
+@lru_cache(maxsize=8)
+def _git_tracked_golden_keyspaces(sstables_dir: Path) -> frozenset[str]:
+    """Keyspaces with at least one git-tracked ``*-Data.db.jsonl`` golden.
+
+    Issue #1319: the classification/enforcement set is the COMMITTED corpus,
+    NOT raw live-disk enumeration. A keyspace counts as "committed" iff git
+    tracks at least one ``<table>-<uuid>/*-Data.db.jsonl`` golden under it.
+    This ignores untracked WIP keyspaces that a concurrent session may have
+    dropped into the live ``CQLITE_DATASETS_ROOT`` (e.g. ``test_signed_coll``,
+    whose goldens are not committed on this branch) so they neither get
+    enforced nor red the integrity guard.
+
+    Tracked-ness is measured against THIS source tree's
+    ``test-data/datasets/sstables`` (the repo that owns this harness + the
+    corpus-coverage policy), NOT against ``sstables_dir`` — the live datasets
+    root may be a *different* checkout whose index already contains a
+    concurrent session's WIP. The ``sstables_dir`` argument is retained so the
+    result keys on the (cached) live root for callers, but the query is rooted
+    at the source tree.
+
+    Determined with a single ``git ls-files`` call, parsed into the set of
+    first-level keyspace dir names that own a tracked golden. If ``git`` is
+    unavailable / this is not a work tree, returns an empty set and callers
+    fall back to treating all discovered keyspaces as committed (see
+    :func:`committed_keyspaces`). In CI and local dev ``.git`` is present.
+    """
+    src = _SOURCE_TREE_SSTABLES
+    if not src.exists():
+        return frozenset()
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(src), "ls-files", "-z", "--", "*-Data.db.jsonl"],
+            capture_output=True,
+            check=False,
+        )
+    except (OSError, ValueError):
+        return frozenset()
+    if proc.returncode != 0:
+        return frozenset()
+    keyspaces: set[str] = set()
+    for raw in proc.stdout.split(b"\0"):
+        if not raw:
+            continue
+        # Paths are relative to ``src``; first segment is the keyspace.
+        rel = raw.decode("utf-8", "surrogateescape")
+        head = rel.split("/", 1)[0]
+        if head:
+            keyspaces.add(head)
+    return frozenset(keyspaces)
+
+
+def committed_keyspaces(sstables_dir: Path) -> list[str]:
+    """Discovered keyspaces restricted to the COMMITTED (git-tracked) corpus.
+
+    A keyspace is "committed" iff it has at least one git-tracked
+    ``*-Data.db.jsonl`` golden (see :func:`_git_tracked_golden_keyspaces`).
+    Untracked-on-disk keyspaces (WIP fixtures a concurrent session dropped in)
+    are excluded — they are neither enforced nor flagged as unclassified
+    (#1319).
+
+    Graceful fallback: if git reports NO tracked goldens (git unavailable, not
+    a work tree, or a pure dataset asset checked out without ``.git``), every
+    discovered keyspace is treated as committed so the guard is not silently
+    neutered in those environments. In CI and local dev ``.git`` is present.
+    """
+    discovered = discover_keyspaces(sstables_dir)
+    tracked = _git_tracked_golden_keyspaces(sstables_dir)
+    if not tracked:
+        return discovered
+    return [k for k in discovered if k in tracked]
+
+
 def discover_tables(sstables_dir: Path, keyspace: str) -> list[str]:
     """Return the table names (UUID suffix stripped) for one keyspace.
 
@@ -120,10 +206,15 @@ def discover_tables(sstables_dir: Path, keyspace: str) -> list[str]:
 
 
 def in_scope_keyspaces(sstables_dir: Path) -> list[str]:
-    """Discovered keyspaces minus the documented skip-set and ``system*``."""
+    """Committed keyspaces minus the documented skip-set and ``system*``.
+
+    Enumerates the COMMITTED corpus (git-tracked goldens), NOT raw live-disk
+    enumeration (#1319), so an untracked WIP keyspace dropped into
+    ``CQLITE_DATASETS_ROOT`` is never enforced.
+    """
     return [
         k
-        for k in discover_keyspaces(sstables_dir)
+        for k in committed_keyspaces(sstables_dir)
         if k not in SKIP_KEYSPACES and not is_system_keyspace(k)
     ]
 
@@ -224,12 +315,19 @@ def unclassified_keyspaces(sstables_dir: Path) -> list[str]:
     newly-committed keyspace that nobody added to either explicit set is
     returned here, so the enumeration test reds the suite instead of silently
     absorbing it as in-scope.
+
+    The guard enumerates the COMMITTED corpus (keyspaces with git-tracked
+    goldens), NOT raw live-disk enumeration (#1319): an untracked WIP keyspace
+    a concurrent session dropped into ``CQLITE_DATASETS_ROOT`` (e.g.
+    ``test_signed_coll``, goldens not yet committed) is IGNORED — neither
+    enforced nor flagged. A genuinely-committed keyspace that is unclassified
+    is still returned (the guard still reds).
     """
     classified = set(IN_SCOPE_KEYSPACES) | set(SKIP_KEYSPACES) | set(SKIP_PENDING_KEYSPACES)
     # system* keyspaces are classified by prefix (Cassandra-internal metadata),
     # not enumerated in any explicit set.
     return [
         k
-        for k in discover_keyspaces(sstables_dir)
+        for k in committed_keyspaces(sstables_dir)
         if k not in classified and not is_system_keyspace(k)
     ]

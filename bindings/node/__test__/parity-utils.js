@@ -11,6 +11,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('child_process');
 
 // =============================================================================
 // Caches for Performance (matching Python's @lru_cache pattern)
@@ -716,9 +717,84 @@ function discoverTables(keyspace) {
   return tables.sort();
 }
 
-/** In-scope keyspaces = discovered minus the documented skip-set + system*. */
+let _trackedGoldenCache = null;
+
+// The committed corpus is owned by THIS source tree (the repo that contains
+// this harness + the corpus-coverage policy), NOT by whatever checkout
+// CQLITE_DATASETS_ROOT points at. A concurrent session can commit WIP fixtures
+// into a *different* checkout's index (e.g. the main repo the datasets root
+// points at) while this branch has not adopted them yet; the classification
+// guard must reflect what THIS branch considers committed. parity-utils.js
+// lives at <repo>/bindings/node/__test__/parity-utils.js.
+const SOURCE_TREE_SSTABLES = path.resolve(
+  __dirname,
+  '..',
+  '..',
+  '..',
+  'test-data',
+  'datasets',
+  'sstables',
+);
+
+/**
+ * Keyspaces with at least one git-tracked `*-Data.db.jsonl` golden (Issue #1319).
+ *
+ * The classification/enforcement set is the COMMITTED corpus, NOT raw live-disk
+ * enumeration: a keyspace counts as "committed" iff git tracks at least one
+ * `<table>-<uuid>/*-Data.db.jsonl` golden under it. This ignores untracked WIP
+ * keyspaces a concurrent session may have dropped into the live
+ * CQLITE_DATASETS_ROOT (e.g. `test_signed_coll`, goldens not committed on this
+ * branch) so they neither get enforced nor red the integrity guard.
+ *
+ * Tracked-ness is measured against THIS source tree's
+ * `test-data/datasets/sstables` (the repo that owns this harness + the policy),
+ * NOT the live SSTABLES_DIR — the live datasets root may be a *different*
+ * checkout whose index already contains a concurrent session's WIP. Single
+ * `git ls-files` call, parsed into first-level keyspace dir names.
+ *
+ * @returns {Set<string>} tracked-golden keyspace names (empty if git unavailable)
+ */
+function gitTrackedGoldenKeyspaces() {
+  if (_trackedGoldenCache) return _trackedGoldenCache;
+  const out = new Set();
+  try {
+    const stdout = execFileSync(
+      'git',
+      ['-C', SOURCE_TREE_SSTABLES, 'ls-files', '-z', '--', '*-Data.db.jsonl'],
+      { encoding: 'buffer' },
+    );
+    for (const raw of stdout.toString('utf8').split('\0')) {
+      if (!raw) continue;
+      const head = raw.split('/', 1)[0];
+      if (head) out.add(head);
+    }
+  } catch (_err) {
+    // git unavailable / not a work tree: fall back (empty => treat all as committed).
+  }
+  _trackedGoldenCache = out;
+  return out;
+}
+
+/**
+ * Discovered keyspaces restricted to the COMMITTED (git-tracked) corpus (#1319).
+ *
+ * Untracked-on-disk WIP keyspaces are excluded — neither enforced nor flagged.
+ * Graceful fallback: if git reports NO tracked goldens (git unavailable / not a
+ * work tree), every discovered keyspace is treated as committed so the guard is
+ * not silently neutered. In CI and local dev `.git` is present.
+ *
+ * @returns {string[]} committed keyspace names
+ */
+function committedKeyspaces() {
+  const discovered = discoverKeyspaces();
+  const tracked = gitTrackedGoldenKeyspaces();
+  if (tracked.size === 0) return discovered;
+  return discovered.filter((k) => tracked.has(k));
+}
+
+/** In-scope keyspaces = committed minus the documented skip-set + system* (#1319). */
 function inScopeKeyspaces() {
-  return discoverKeyspaces().filter((k) => !(k in SKIP_KEYSPACES) && !isSystemKeyspace(k));
+  return committedKeyspaces().filter((k) => !(k in SKIP_KEYSPACES) && !isSystemKeyspace(k));
 }
 
 /**
@@ -731,6 +807,11 @@ function inScopeKeyspaces() {
  * unclassified by construction — the tautology #1229 exists to kill). A
  * newly-committed keyspace nobody added to either explicit set is returned
  * here so the classification test reds the suite instead of absorbing it.
+ *
+ * The guard enumerates the COMMITTED corpus (git-tracked goldens), NOT raw
+ * live-disk enumeration (#1319): an untracked WIP keyspace a concurrent session
+ * dropped into CQLITE_DATASETS_ROOT (e.g. `test_signed_coll`, goldens not yet
+ * committed) is IGNORED. A genuinely-committed unclassified keyspace still reds.
  */
 function unclassifiedKeyspaces() {
   const classified = new Set([
@@ -740,7 +821,7 @@ function unclassifiedKeyspaces() {
   ]);
   // system* keyspaces are classified by prefix (Cassandra-internal metadata),
   // not enumerated in any explicit set.
-  return discoverKeyspaces().filter((k) => !classified.has(k) && !isSystemKeyspace(k));
+  return committedKeyspaces().filter((k) => !classified.has(k) && !isSystemKeyspace(k));
 }
 
 /**
@@ -816,6 +897,8 @@ module.exports = {
   EXECUTABLE_KEYSPACES,
   isSystemKeyspace,
   discoverKeyspaces,
+  gitTrackedGoldenKeyspaces,
+  committedKeyspaces,
   discoverTables,
   inScopeKeyspaces,
   unclassifiedKeyspaces,

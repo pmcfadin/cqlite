@@ -130,15 +130,70 @@ is_skip_pending_keyspace() {
     return 1
 }
 
+# Committed keyspaces: those with at least one git-tracked *-Data.db.jsonl
+# golden (Issue #1319). The classification/enforcement set is the COMMITTED
+# corpus, NOT raw live-disk enumeration — an untracked WIP keyspace a concurrent
+# session dropped into CQLITE_DATASETS_ROOT (e.g. test_signed_coll, goldens not
+# yet committed) is IGNORED here so it is neither enforced nor flagged by the
+# integrity guard. Populated by compute_committed_keyspaces(); if git is
+# unavailable / not a work tree, COMMITTED_KEYSPACES_OK stays 0 and callers fall
+# back to treating every discovered keyspace as committed (guard not neutered).
+COMMITTED_KEYSPACES=()
+COMMITTED_KEYSPACES_OK=0
+
+compute_committed_keyspaces() {
+    COMMITTED_KEYSPACES=()
+    COMMITTED_KEYSPACES_OK=0
+    # The committed corpus is owned by THIS source tree (the repo that contains
+    # this script + the corpus-coverage policy), NOT by whatever checkout
+    # CQLITE_DATASETS_ROOT points at. A concurrent session can commit WIP
+    # fixtures into a *different* checkout's index (e.g. the main repo the
+    # datasets root points at) while this branch has not adopted them yet; the
+    # classification guard must reflect what THIS branch considers committed.
+    # WORKSPACE_ROOT is this script's repo (SCRIPT_DIR/../..).
+    local src="${WORKSPACE_ROOT}/test-data/datasets/sstables"
+    # Probe that this is a git work tree (a non-repo / missing git is the
+    # documented graceful fallback, not an empty committed set).
+    if ! git -C "${src}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        return
+    fi
+    COMMITTED_KEYSPACES_OK=1
+    local path ks seen=""
+    # Single git ls-files call rooted at the source tree; first path segment is
+    # the keyspace. -z keeps it NUL-delimited (newline-safe); read NUL records
+    # straight from the pipe — capturing NUL output in $(...) strips the NULs.
+    while IFS= read -r -d '' path; do
+        ks="${path%%/*}"
+        [[ -z "${ks}" ]] && continue
+        case " ${seen} " in
+            *" ${ks} "*) ;;
+            *) seen="${seen} ${ks}"; COMMITTED_KEYSPACES+=("${ks}");;
+        esac
+    done < <(git -C "${src}" ls-files -z -- '*-Data.db.jsonl' 2>/dev/null)
+}
+
+# Return 0 if $1 is a committed keyspace (git-tracked golden), or if git was
+# unavailable (COMMITTED_KEYSPACES_OK=0 => fall back to "all discovered count").
+is_committed_keyspace() {
+    [[ ${COMMITTED_KEYSPACES_OK} -eq 0 ]] && return 0
+    local ks="$1" k
+    for k in "${COMMITTED_KEYSPACES[@]}"; do
+        [[ "$k" == "$ks" ]] && return 0
+    done
+    return 1
+}
+
 # Discover the enforced keyspace set by walking the committed corpus.
-# In-scope = every keyspace dir minus SKIP_KEYSPACE_NAMES minus SKIP_PENDING.
-# Based on directory structure (committed), independent of Data.db presence.
+# In-scope = every COMMITTED keyspace dir (git-tracked golden, #1319) minus
+# SKIP_KEYSPACE_NAMES minus SKIP_PENDING. Based on directory structure
+# (committed), independent of Data.db presence.
 discover_keyspaces() {
     KEYSPACES=()
     local dir ks
     while IFS= read -r dir; do
         ks="$(basename "${dir}")"
         is_system_keyspace "${ks}" && continue
+        is_committed_keyspace "${ks}" || continue
         is_skip_keyspace "${ks}" && continue
         is_skip_pending_keyspace "${ks}" && continue
         KEYSPACES+=("${ks}")
@@ -198,6 +253,10 @@ validate_environment() {
         exit 1
     fi
 
+    # Issue #1319: compute the COMMITTED keyspace set (git-tracked goldens) so
+    # discovery + the integrity guard ignore untracked WIP keyspaces.
+    compute_committed_keyspaces
+
     # Issue #1229: discover the enforced keyspace set from disk.
     discover_keyspaces
 
@@ -207,10 +266,13 @@ validate_environment() {
         exit 1
     fi
 
-    # Integrity guard: every discovered keyspace must be classified — either
+    # Integrity guard: every COMMITTED keyspace must be classified — either
     # in-scope (enforced), skip-pending, or in the documented skip-set. A new
-    # keyspace that is none of these reds the smoke test loudly instead of
-    # being silently uncovered while CI reports "100%".
+    # committed keyspace that is none of these reds the smoke test loudly
+    # instead of being silently uncovered while CI reports "100%". Issue #1319:
+    # the guard enumerates the COMMITTED corpus (git-tracked goldens), NOT raw
+    # live-disk enumeration, so an untracked WIP keyspace (e.g. test_signed_coll,
+    # goldens not yet committed) is IGNORED — neither enforced nor flagged.
     local unclassified=()
     local dir ks
     while IFS= read -r dir; do
@@ -218,6 +280,8 @@ validate_environment() {
         if is_system_keyspace "${ks}" || is_skip_keyspace "${ks}" || is_skip_pending_keyspace "${ks}"; then
             continue
         fi
+        # Ignore untracked WIP keyspaces (no git-tracked golden) — #1319.
+        is_committed_keyspace "${ks}" || continue
         # in-scope (enforced) keyspaces are exactly KEYSPACES by construction
         local found=0 k
         for k in "${KEYSPACES[@]}"; do
