@@ -81,10 +81,13 @@ pub(crate) fn compare_collection_elements(a: &Value, b: &Value) -> Ordering {
         // bottoms out at this same dispatcher, reusing the scalar leaves above.
         (Value::Tuple(x), Value::Tuple(y)) => composite::compare_tuple(x, y),
         (Value::Udt(x), Value::Udt(y)) => composite::compare_udt(x, y),
-        // frozen<set<T>> arrives as Set, frozen<list<T>> as List; both compare
-        // element-by-element with a shorter-first length tiebreak.
-        (Value::Set(x), Value::Set(y)) => composite::compare_list_or_set(x, y),
-        (Value::List(x), Value::List(y)) => composite::compare_list_or_set(x, y),
+        // frozen<set<T>> arrives as Set: compare the SORTED element sequences
+        // (Cassandra stores set elements sorted; sorting first canonicalizes nested
+        // inner sets BOTTOM-UP before the outer orders by them, #1296).
+        (Value::Set(x), Value::Set(y)) => composite::compare_set(x, y),
+        // frozen<list<T>> arrives as List: compare in INSERTION order (no sort),
+        // shorter-first tiebreak.
+        (Value::List(x), Value::List(y)) => composite::compare_list(x, y),
         // frozen<map<K,V>> — per entry compare key then value.
         (Value::Map(x), Value::Map(y)) => composite::compare_map(x, y),
         // Frozen wrappers: compare the inner values by the same rule (a

@@ -14,10 +14,16 @@
 //!     at the same position are equal and comparison continues. The first
 //!     non-equal field decides. When one tuple runs out of fields first (a
 //!     prefix), the shorter sorts first.
-//!   * `SetType`/`ListType.compareCustom` (frozen): element-by-element using the
-//!     element type's comparator, then the shorter collection sorts first.
-//!   * `MapType.compareCustom` (frozen): per entry compare KEY then VALUE using
-//!     their respective comparators, then the shorter map sorts first.
+//!   * `SetType.compareCustom` (frozen): a frozen set is stored element-SORTED, so
+//!     we compare the SORTED element sequences (sort each side with the same
+//!     recursive comparator FIRST), then the shorter collection sorts first. The
+//!     sort-first step is what canonicalizes nested inner sets BOTTOM-UP so the
+//!     outer ordering matches the (sorted) inner bytes actually written (#1296).
+//!   * `ListType.compareCustom` (frozen): INSERTION order preserved — element-by-
+//!     element with NO sort, then the shorter list sorts first.
+//!   * `MapType.compareCustom` (frozen): a frozen map is stored KEY-SORTED, so we
+//!     compare the KEY-SORTED entry sequences (sort each side by key FIRST), then
+//!     per entry compare KEY then VALUE, then the shorter map sorts first.
 //!
 //! The decision is driven ENTIRELY by the `Value` variant — which carries the
 //! authoritative CQL type metadata (a `Value::Tuple`/`Value::Udt`/nested
@@ -91,16 +97,15 @@ pub(super) fn compare_udt(a: &UdtValue, b: &UdtValue) -> Ordering {
     a.fields.len().cmp(&b.fields.len())
 }
 
-/// `SetType`/`ListType.compareCustom` (frozen): compare two collections
-/// element-by-element using the element comparator, then the shorter sorts first.
-/// A `frozen<set<T>>` arrives as a `Value::Set` (sorted at serialize time) and a
-/// `frozen<list<T>>` as a `Value::List` (insertion order); both compare the same
-/// way here.
-pub(super) fn compare_list_or_set(a: &[Value], b: &[Value]) -> Ordering {
+/// Element-wise compare of two ALREADY-ORDERED ref sequences: the first non-equal
+/// element decides; otherwise the shorter (prefix) sequence sorts first.
+fn compare_ordered_seq(a: &[&Value], b: &[&Value]) -> Ordering {
     let common = a.len().min(b.len());
     for i in 0..common {
-        let ea = a.get(i).unwrap_or(&Value::Null);
-        let eb = b.get(i).unwrap_or(&Value::Null);
+        // `i < common <= len` so `get` is always Some; fall back to Null to stay
+        // panic-free without an unwrap if that invariant ever changes.
+        let ea = a.get(i).copied().unwrap_or(&Value::Null);
+        let eb = b.get(i).copied().unwrap_or(&Value::Null);
         match compare_collection_elements(ea, eb) {
             Ordering::Equal => continue,
             other => return other,
@@ -109,16 +114,50 @@ pub(super) fn compare_list_or_set(a: &[Value], b: &[Value]) -> Ordering {
     a.len().cmp(&b.len())
 }
 
-/// `MapType.compareCustom` (frozen): per entry compare KEY then VALUE with their
-/// respective comparators, in stored (key-sorted) order; the shorter map first.
+/// `SetType.compareCustom` (frozen): a `frozen<set<T>>` serializes its elements in
+/// the element-type comparator's order (see `encoding.rs` Set arm), so its
+/// canonical on-disk form is element-SORTED. We therefore compare the SORTED
+/// element sequences: sort each side with the SAME recursive comparator FIRST,
+/// then element-by-element with a shorter-first tiebreak. Sorting first is what
+/// makes nested frozen sets order correctly BOTTOM-UP — the inner set is
+/// canonicalized before the outer set orders by it — even when the in-memory
+/// `Value::Set` is provided with its elements in a non-canonical order (#1296).
+pub(super) fn compare_set(a: &[Value], b: &[Value]) -> Ordering {
+    let mut sa: Vec<&Value> = a.iter().collect();
+    let mut sb: Vec<&Value> = b.iter().collect();
+    sa.sort_by(|x, y| compare_collection_elements(x, y));
+    sb.sort_by(|x, y| compare_collection_elements(x, y));
+    compare_ordered_seq(&sa, &sb)
+}
+
+/// `ListType.compareCustom` (frozen): a `frozen<list<T>>` serializes its elements
+/// in INSERTION order (no sort), so compare element-by-element in stored order
+/// with a shorter-first tiebreak — NEVER sorted.
+pub(super) fn compare_list(a: &[Value], b: &[Value]) -> Ordering {
+    let sa: Vec<&Value> = a.iter().collect();
+    let sb: Vec<&Value> = b.iter().collect();
+    compare_ordered_seq(&sa, &sb)
+}
+
+/// `MapType.compareCustom` (frozen): a `frozen<map<K,V>>` serializes its entries in
+/// the KEY-type comparator's order (see `encoding.rs` Map arm), so its canonical
+/// on-disk form is KEY-SORTED. We compare the KEY-SORTED entry sequences: sort each
+/// side's entries by key with the SAME recursive comparator FIRST, then per entry
+/// compare KEY then VALUE, with a shorter-first tiebreak. Sorting first makes
+/// nested frozen maps order correctly BOTTOM-UP even when the in-memory
+/// `Value::Map` is provided with its entries in a non-canonical order (#1296).
 pub(super) fn compare_map(a: &[(Value, Value)], b: &[(Value, Value)]) -> Ordering {
-    let common = a.len().min(b.len());
+    let mut sa: Vec<&(Value, Value)> = a.iter().collect();
+    let mut sb: Vec<&(Value, Value)> = b.iter().collect();
+    sa.sort_by(|x, y| compare_collection_elements(&x.0, &y.0));
+    sb.sort_by(|x, y| compare_collection_elements(&x.0, &y.0));
+    let common = sa.len().min(sb.len());
     for i in 0..common {
-        let (ka, val_a) = match a.get(i) {
+        let (ka, val_a) = match sa.get(i) {
             Some(e) => (&e.0, &e.1),
             None => (&Value::Null, &Value::Null),
         };
-        let (kb, val_b) = match b.get(i) {
+        let (kb, val_b) = match sb.get(i) {
             Some(e) => (&e.0, &e.1),
             None => (&Value::Null, &Value::Null),
         };
@@ -131,7 +170,7 @@ pub(super) fn compare_map(a: &[(Value, Value)], b: &[(Value, Value)]) -> Orderin
             other => return other,
         }
     }
-    a.len().cmp(&b.len())
+    sa.len().cmp(&sb.len())
 }
 
 #[cfg(test)]
@@ -261,6 +300,63 @@ mod tests {
         assert_eq!(compare_collection_elements(&m_1_1, &m_1_2), Ordering::Less);
         // Key -1 < 1 (signed) decides regardless of value.
         assert_eq!(compare_collection_elements(&m_neg1, &m_1_1), Ordering::Less);
+    }
+
+    /// `compare_map` length/prefix tiebreak (DIRECT): when one map's entries are a
+    /// prefix of another's, the SHORTER map sorts first. `{1:1}` < `{1:1, 2:2}`.
+    #[test]
+    fn map_shorter_sorts_first_on_length_tiebreak() {
+        let short = vec![(Value::Integer(1), Value::Integer(1))];
+        let long = vec![
+            (Value::Integer(1), Value::Integer(1)),
+            (Value::Integer(2), Value::Integer(2)),
+        ];
+        assert_eq!(compare_map(&short, &long), Ordering::Less);
+        assert_eq!(compare_map(&long, &short), Ordering::Greater);
+        assert_eq!(compare_map(&short, &short), Ordering::Equal);
+    }
+
+    /// `map<int, frozen<list<int>>>`: the VALUE side must RECURSE into the dispatcher.
+    /// With keys equal, the list values decide: `[-1]` < `[1]` orders by the SIGNED
+    /// int leaf (not raw two's-complement bytes, where `0xFFFF_FFFF` would sort
+    /// last), and `[1]` < `[1,2]` is the value-length (prefix) tiebreak.
+    #[test]
+    fn map_composite_value_recurses_into_dispatcher() {
+        // Equal key 7 → value list decides by signed int: [-1] < [1].
+        let v_neg = vec![(Value::Integer(7), Value::List(vec![Value::Integer(-1)]))];
+        let v_pos = vec![(Value::Integer(7), Value::List(vec![Value::Integer(1)]))];
+        assert_eq!(compare_map(&v_neg, &v_pos), Ordering::Less);
+        assert_eq!(compare_map(&v_pos, &v_neg), Ordering::Greater);
+
+        // Equal key 7 → value-length tiebreak: [1] is a prefix of [1,2] → shorter first.
+        let v_one = vec![(Value::Integer(7), Value::List(vec![Value::Integer(1)]))];
+        let v_one_two = vec![(
+            Value::Integer(7),
+            Value::List(vec![Value::Integer(1), Value::Integer(2)]),
+        )];
+        assert_eq!(compare_map(&v_one, &v_one_two), Ordering::Less);
+    }
+
+    /// Bottom-up canonicalization at the comparator level: `set<frozen<set<int>>>`
+    /// whose inner sets are provided UNSORTED still orders the OUTER correctly,
+    /// because `compare_set` canonicalizes (sorts) each inner set before comparing.
+    /// Inner `{2,1}` canonicalizes to `{1,2}`; `{1,2}` < `{1,3}` on element 1.
+    #[test]
+    fn nested_frozen_set_canonicalizes_unsorted_inner_before_outer() {
+        let s_2_1 = Value::Frozen(Box::new(Value::Set(vec![
+            Value::Integer(2),
+            Value::Integer(1),
+        ])));
+        let s_1_3 = Value::Frozen(Box::new(Value::Set(vec![
+            Value::Integer(1),
+            Value::Integer(3),
+        ])));
+        // Canonical inner: {1,2} vs {1,3} → element 1 decides (2 < 3).
+        assert_eq!(compare_collection_elements(&s_2_1, &s_1_3), Ordering::Less);
+        assert_eq!(
+            compare_collection_elements(&s_1_3, &s_2_1),
+            Ordering::Greater
+        );
     }
 
     /// UDT element: compare field-by-field in DECLARED order, each field by its own
