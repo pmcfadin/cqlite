@@ -19,10 +19,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * row; a grouped aggregate's group count is unknown. These tests pin that the
  * optimizer-facing stats reflect the output, not the underlying SSTable rows.
  *
- * <p>The aggregated branch of {@code getTableStatistics} returns before touching
- * Sidecar/Flight, so a {@code new CqliteFlightMetadata(null, null, null)} suffices
- * to exercise it. The non-aggregated branch (base-table stats from {@code
- * table_stats}) is covered end-to-end by the connector's Flight tests.
+ * <p>A NON-aggregated handle now reports {@link TableStatistics#empty()} (unknown):
+ * the {@code table_stats} row total is summed across ALL keyspace replicas (≈ RF ×
+ * logical cardinality) and is not de-duplicated to one copy of the token space, so
+ * we deliberately do not expose it as an optimizer row count (issue #944). Both
+ * branches of {@code getTableStatistics} now return before touching Sidecar/Flight,
+ * so a {@code new CqliteFlightMetadata(null, null, null)} suffices to exercise them.
  */
 class CqliteFlightTableStatisticsTest {
 
@@ -88,6 +90,22 @@ class CqliteFlightTableStatisticsTest {
         CqliteFlightTableHandle plain = new CqliteFlightTableHandle("ks", "t", "ddl");
         assertFalse(plain.isAggregated());
         assertFalse(plain.hasGroupBy());
+    }
+
+    @Test
+    void nonAggregatedHandleReportsUnknownRowCount() {
+        // The table_stats row total is replica-summed (≈ RF × logical cardinality)
+        // and not de-duplicated to one copy of the token space, so we do NOT expose
+        // it as an optimizer row count (issue #944) — report unknown so Trino
+        // estimates instead of trusting a knowably-wrong physical-replica total.
+        CqliteFlightTableHandle plain = new CqliteFlightTableHandle("ks", "t", "ddl");
+        assertFalse(plain.isAggregated());
+
+        TableStatistics stats = metadata.getTableStatistics(null, plain);
+        assertEquals(TableStatistics.empty(), stats,
+                "non-aggregated row count is replica-summed → empty (not exposed)");
+        assertTrue(stats.getRowCount().isUnknown(),
+                "non-aggregated row count must be unknown (replica-summed, not logical)");
     }
 
     @Test

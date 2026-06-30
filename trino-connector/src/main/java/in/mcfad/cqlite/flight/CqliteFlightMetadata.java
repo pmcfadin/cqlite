@@ -832,15 +832,7 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
     }
 
     /**
-     * Surface the AUTHORITATIVE per-table row count to the Trino optimizer (issue
-     * #944). The cqlite-flight {@code table_stats} action returns Σ {@code totalRows}
-     * across the table's SSTables (an upper bound; see {@link TableStats}); we report
-     * it as the table's row-count estimate. Column-level stats are left unknown —
-     * Cassandra 5.0 stores no reliable per-regular-column NDV, so reporting any would
-     * be a heuristic (#28). A failed, zero, or INCOMPLETE fetch (some node's
-     * {@code Statistics.db} failed to decode → {@code !stats.complete()}) yields
-     * {@link TableStatistics#empty()} (unknown), which is always a safe input for
-     * the optimizer — we never report a row count derived from incomplete data.
+     * Surface optimizer row-count statistics to Trino (issue #944).
      *
      * <p>For an <em>aggregated</em> handle the scan's OUTPUT cardinality is the
      * aggregate-result cardinality, NOT the base-table row count (issue #944): a
@@ -848,6 +840,22 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
      * ROW_COUNT = 1}; a grouped aggregate's output group count is not authoritatively
      * known, so we return {@link TableStatistics#empty()} and let Trino estimate
      * rather than fabricate (#28).
+     *
+     * <p>For a <em>non-aggregated</em> handle we intentionally report {@link
+     * TableStatistics#empty()} (unknown) rather than {@code stats.liveRows()}. The
+     * cqlite-flight {@code table_stats} action sums whole-table {@code Statistics.db}
+     * counts across ALL replica hosts of the keyspace, so on a replicated keyspace
+     * (e.g. RF=3) {@code liveRows()} is the PHYSICAL replica row total (≈ RF × the
+     * logical table cardinality), NOT the logical number of rows a scan emits. It is
+     * not authoritatively de-duplicated to a single copy of the token space, so
+     * exposing it would mislead Trino's cost optimizer. RF-correct / token-range-scoped
+     * optimizer row counts are deferred to a follow-up issue; until then we report no
+     * row-count estimate and let Trino fall back to its own. Note this does NOT affect
+     * the GROUP BY pushdown gate ({@link #estimateGroupRatio}), which uses an
+     * RF-invariant ratio ({@code partition_count / live_rows}) where replica
+     * over-counting cancels in numerator and denominator. Column-level stats are left
+     * unknown — Cassandra 5.0 stores no reliable per-regular-column NDV, so reporting
+     * any would be a heuristic (#28).
      */
     @Override
     public TableStatistics getTableStatistics(ConnectorSession session, ConnectorTableHandle table) {
@@ -857,25 +865,17 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
                 // Grouped aggregate: output group count is unknown — do not guess.
                 return TableStatistics.empty();
             }
-            // Global aggregate (e.g. count(*) with no GROUP BY): exactly one row.
+            // Global aggregate (e.g. count(*) with no GROUP BY): exactly one row,
+            // regardless of replication factor.
             return TableStatistics.builder().setRowCount(Estimate.of(1)).build();
         }
-        TableStats stats;
-        try {
-            stats = fetchTableStats(handle);
-        } catch (RuntimeException e) {
-            return TableStatistics.empty();
-        }
-        // Fail closed to "unknown" when the counts are INCOMPLETE (a node's
-        // Statistics.db failed to decode; issue #944, #28): an under-counted
-        // row total is NOT authoritative, so report no estimate rather than a
-        // biased one. Empty is always a safe optimizer input.
-        if (!stats.complete() || stats.liveRows() <= 0) {
-            return TableStatistics.empty();
-        }
-        return TableStatistics.builder()
-                .setRowCount(Estimate.of(stats.liveRows()))
-                .build();
+        // Non-aggregated scan: stats.liveRows() is the replica-summed PHYSICAL row
+        // total (≈ RF × logical cardinality), not the logical rows a scan emits, and
+        // is not authoritatively de-duplicated to one copy of the token space. Do not
+        // expose a knowably-wrong number to the optimizer — report unknown and let
+        // Trino estimate. (RF-correct row counts are deferred to a follow-up issue;
+        // the GROUP BY gate is unaffected — see estimateGroupRatio.)
+        return TableStatistics.empty();
     }
 
     /** Resolve the table's Arrow schema by asking any flight node's GetSchema. */

@@ -2,7 +2,6 @@ package in.mcfad.cqlite.flight;
 
 import in.mcfad.cqlite.flight.sidecar.SidecarModels.ReplicaInfo;
 import in.mcfad.cqlite.flight.sidecar.SidecarModels.TokenRangeReplicasResponse;
-import io.trino.spi.statistics.TableStatistics;
 import org.apache.arrow.flight.CallStatus;
 import org.junit.jupiter.api.Test;
 
@@ -229,10 +228,11 @@ class AggregateNodeStatsTest {
     }
 
     @Test
-    void incompleteAggregateYieldsEmptyTableStatistics() {
-        // The optimizer-facing path: getTableStatistics on a non-aggregated handle
-        // returns empty when the underlying counts are incomplete. We invoke the same
-        // completeness guard getTableStatistics uses (!complete -> empty).
+    void unreachableReplicaTaintsAggregateIncomplete() {
+        // A down replica taints the cross-ring aggregate INCOMPLETE so its partial
+        // peers' totals are not treated as authoritative (issue #944). This feeds the
+        // RF-invariant group-ratio gate; the absolute optimizer row count is reported
+        // unknown regardless (see CqliteFlightTableStatisticsTest).
         List<String> hosts = List.of("10.0.0.1", "10.0.0.2");
         Function<String, TableStats> fetch = address -> {
             if (address.equals("10.0.0.2")) {
@@ -243,14 +243,7 @@ class AggregateNodeStatsTest {
 
         TableStats agg = CqliteFlightMetadata.aggregateNodeStats(hosts, fetch);
 
-        TableStatistics result =
-                (!agg.complete() || agg.liveRows() <= 0)
-                        ? TableStatistics.empty()
-                        : TableStatistics.builder()
-                                .setRowCount(io.trino.spi.statistics.Estimate.of(agg.liveRows()))
-                                .build();
-        assertEquals(TableStatistics.empty(), result,
-                "incomplete cross-ring stats must yield empty table statistics");
-        assertTrue(result.getRowCount().isUnknown());
+        assertFalse(agg.complete(),
+                "an unreachable replica must taint the cross-ring aggregate incomplete");
     }
 }
