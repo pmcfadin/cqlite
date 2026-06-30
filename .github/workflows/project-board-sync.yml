@@ -67,8 +67,10 @@ jobs:
           PR_MERGED: ${{ github.event.pull_request.merged }}
         run: |
           set -euo pipefail
-          # Find this PR's item in OUR project.
-          item_id=$(gh api graphql -f query='
+          # Find this PR's item in OUR project. Capture the raw GraphQL response
+          # FIRST so a gh/auth/GraphQL failure fails the step (set -e), instead
+          # of being swallowed by `|| true` and masquerading as "not on board".
+          resp=$(gh api graphql -f query='
             query($id: ID!) {
               node(id: $id) {
                 ... on PullRequest {
@@ -83,8 +85,13 @@ jobs:
                   }
                 }
               }
-            }' -f id="$PR_NODE_ID" \
-            --jq ".data.node.projectItems.nodes[] | select(.project.id==\"$PROJECT_ID\") | select((.fieldValueByName.name // \"\") != \"Done\") | .id" || true)
+            }' -f id="$PR_NODE_ID")
+
+          # Run jq against the captured response. A jq PARSE failure fails the
+          # step; only an EMPTY result is the benign no-match (PR legitimately
+          # not on the board, or already Done) -> exit 0 below.
+          item_id=$(echo "$resp" | jq -r \
+            ".data.node.projectItems.nodes[] | select(.project.id==\"$PROJECT_ID\") | select((.fieldValueByName.name // \"\") != \"Done\") | .id")
 
           if [ -z "${item_id:-}" ]; then
             echo "PR #$PR_NUMBER: not on the board or already Done — nothing to do."
