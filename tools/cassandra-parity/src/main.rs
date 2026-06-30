@@ -463,7 +463,12 @@ fn read_corruption_fixtures(path: &Path) -> Result<Vec<CorruptionFixture>> {
     for line in text.lines() {
         let line = line.trim();
         if line.starts_with("- name:") {
-            flush(&mut fixtures, &mut component, &mut corrupted_path, &mut status);
+            flush(
+                &mut fixtures,
+                &mut component,
+                &mut corrupted_path,
+                &mut status,
+            );
         } else if let Some(rest) = line.strip_prefix("expected_failing_component:") {
             let v = rest.trim().trim_matches('"');
             if !v.is_empty() {
@@ -481,7 +486,12 @@ fn read_corruption_fixtures(path: &Path) -> Result<Vec<CorruptionFixture>> {
             }
         }
     }
-    flush(&mut fixtures, &mut component, &mut corrupted_path, &mut status);
+    flush(
+        &mut fixtures,
+        &mut component,
+        &mut corrupted_path,
+        &mut status,
+    );
     Ok(fixtures)
 }
 
