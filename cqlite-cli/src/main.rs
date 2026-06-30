@@ -523,12 +523,25 @@ async fn run_main() -> Result<()> {
         result.display();
     }
 
-    // Issue #392: Handle --flush flag
+    // Issue #392: Handle --flush flag.
+    //
+    // Issue #1253: defer the flush when this same invocation also carries a DML
+    // `--execute` statement. That write runs later (in the --execute block), so
+    // flushing here would flush an empty memtable. The --execute DML branch
+    // performs the flush itself after the write so the row reaches the SSTable.
     #[cfg(feature = "write-support")]
-    if cli.flush {
-        if let Some(engine) = write_engine.as_mut() {
-            let info = commands::write::handle_flush(engine).await?;
-            commands::write::display_flush_result(info.as_ref());
+    {
+        let defer_flush_to_execute = cli
+            .execute
+            .as_deref()
+            .map(is_dml_statement)
+            .unwrap_or(false);
+
+        if cli.flush && !defer_flush_to_execute {
+            if let Some(engine) = write_engine.as_mut() {
+                let info = commands::write::handle_flush(engine).await?;
+                commands::write::display_flush_result(info.as_ref());
+            }
         }
     }
 
@@ -561,6 +574,18 @@ async fn run_main() -> Result<()> {
                     .map_err(|e| anyhow::anyhow!("DML execution failed: {}", e))?;
 
                 println!("OK");
+
+                // Issue #1253: when `--flush` is combined with `--execute` in a
+                // single invocation, the standalone `--flush` block above runs
+                // BEFORE this DML executes, so it would flush an empty memtable
+                // (the row would only reach the WAL, never Data.db). Flush here,
+                // after the write, so the inserted row is persisted to the
+                // SSTable within this one invocation.
+                if cli.flush {
+                    let info = commands::write::handle_flush(engine).await?;
+                    commands::write::display_flush_result(info.as_ref());
+                }
+
                 return Ok(());
             }
         }
