@@ -1445,18 +1445,20 @@ scenarios:
         promoted-offset/bounds assertions are NOT in the required lane because they
         depend on local-only binaries absent from the pinned CI dataset.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: manual_debug
     scope:
       gap: >-
-        Byte-level promoted-index parity (Index.db offsets, widths, clustering
-        bounds) runs only against local-only binaries that are not in the pinned CI
-        dataset; the required lane enforces only the committed-JSONL
-        canonical-semantic facts.
+        This scenario's proving evidence is the byte-level Index.db promoted-index
+        decode (offsets, widths, clustering bounds), which SKIPS in CI because the
+        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
+        in progress). Marking it required_parity would report coverage for a check
+        that does not run; the only CI-running assertion in this test binary is the
+        JSONL canonical-semantic check, which does not decode the promoted index and
+        so does not satisfy this scenario's evidence on its own.
       next_step: >-
-        Add the test_big.wide_partition binaries to the dataset release pin
-        (regenerate the tarball + update DATASET_SHA256) to promote these scenarios
-        to byte_for_byte enforced in the required_parity lane.
+        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
+        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
+        so the byte-level promoted-index assertions actually run fail-closed.
 
   - id: cass.index_db.SSTableReaderTest.point_lookup_offsets
     title: BIG Index.db point/absent-key lookup offsets
@@ -1710,18 +1712,20 @@ scenarios:
         promoted-offset/bounds assertions are NOT in the required lane because they
         depend on local-only binaries absent from the pinned CI dataset.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: manual_debug
     scope:
       gap: >-
-        Byte-level promoted-index parity (Index.db offsets, widths, clustering
-        bounds) runs only against local-only binaries that are not in the pinned CI
-        dataset; the required lane enforces only the committed-JSONL
-        canonical-semantic facts.
+        This scenario's proving evidence is the byte-level Index.db promoted-index
+        decode (offsets, widths, clustering bounds), which SKIPS in CI because the
+        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
+        in progress). Marking it required_parity would report coverage for a check
+        that does not run; the only CI-running assertion in this test binary is the
+        JSONL canonical-semantic check, which does not decode the promoted index and
+        so does not satisfy this scenario's evidence on its own.
       next_step: >-
-        Add the test_big.wide_partition binaries to the dataset release pin
-        (regenerate the tarball + update DATASET_SHA256) to promote these scenarios
-        to byte_for_byte enforced in the required_parity lane.
+        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
+        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
+        so the byte-level promoted-index assertions actually run fail-closed.
 
   - id: cass.data_db_decode.wide_partition.row_boundaries
     title: Wide-partition Data.db row boundaries align with promoted-index offsets
@@ -1768,18 +1772,20 @@ scenarios:
         promoted-offset/bounds assertions are NOT in the required lane because they
         depend on local-only binaries absent from the pinned CI dataset.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: manual_debug
     scope:
       gap: >-
-        Byte-level promoted-index parity (Index.db offsets, widths, clustering
-        bounds) runs only against local-only binaries that are not in the pinned CI
-        dataset; the required lane enforces only the committed-JSONL
-        canonical-semantic facts.
+        This scenario's proving evidence is the byte-level Index.db promoted-index
+        decode (offsets, widths, clustering bounds), which SKIPS in CI because the
+        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
+        in progress). Marking it required_parity would report coverage for a check
+        that does not run; the only CI-running assertion in this test binary is the
+        JSONL canonical-semantic check, which does not decode the promoted index and
+        so does not satisfy this scenario's evidence on its own.
       next_step: >-
-        Add the test_big.wide_partition binaries to the dataset release pin
-        (regenerate the tarball + update DATASET_SHA256) to promote these scenarios
-        to byte_for_byte enforced in the required_parity lane.
+        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
+        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
+        so the byte-level promoted-index assertions actually run fail-closed.
 
   - id: cass.index_db.promoted_index.index_info_offsets
     title: BIG promoted-index IndexInfo Data.db offsets and width chain
@@ -1825,18 +1831,20 @@ scenarios:
         promoted-offset/bounds assertions are NOT in the required lane because they
         depend on local-only binaries absent from the pinned CI dataset.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: manual_debug
     scope:
       gap: >-
-        Byte-level promoted-index parity (Index.db offsets, widths, clustering
-        bounds) runs only against local-only binaries that are not in the pinned CI
-        dataset; the required lane enforces only the committed-JSONL
-        canonical-semantic facts.
+        This scenario's proving evidence is the byte-level Index.db promoted-index
+        decode (offsets, widths, clustering bounds), which SKIPS in CI because the
+        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
+        in progress). Marking it required_parity would report coverage for a check
+        that does not run; the only CI-running assertion in this test binary is the
+        JSONL canonical-semantic check, which does not decode the promoted index and
+        so does not satisfy this scenario's evidence on its own.
       next_step: >-
-        Add the test_big.wide_partition binaries to the dataset release pin
-        (regenerate the tarball + update DATASET_SHA256) to promote these scenarios
-        to byte_for_byte enforced in the required_parity lane.
+        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
+        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
+        so the byte-level promoted-index assertions actually run fail-closed.
 
   - id: cass.index_db.promoted_index.clustering_bounds
     title: BIG promoted-index IndexInfo clustering bounds ordering and coverage
@@ -1884,18 +1892,20 @@ scenarios:
         promoted-offset/bounds assertions are NOT in the required lane because they
         depend on local-only binaries absent from the pinned CI dataset.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: manual_debug
     scope:
       gap: >-
-        Byte-level promoted-index parity (Index.db offsets, widths, clustering
-        bounds) runs only against local-only binaries that are not in the pinned CI
-        dataset; the required lane enforces only the committed-JSONL
-        canonical-semantic facts.
+        This scenario's proving evidence is the byte-level Index.db promoted-index
+        decode across the range-tombstone block edge, which SKIPS in CI because the
+        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
+        in progress). The CI-running JSONL canonical-semantic check does assert pk=1
+        is missing exactly ck 30..39 (the range-tombstone fact), but it does NOT
+        decode the promoted index across the block boundary — the headline claim of
+        this scenario — so the running part alone does not justify required_parity.
       next_step: >-
-        Add the test_big.wide_partition binaries to the dataset release pin
-        (regenerate the tarball + update DATASET_SHA256) to promote these scenarios
-        to byte_for_byte enforced in the required_parity lane.
+        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
+        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
+        so the byte-level promoted-index block-edge assertions actually run fail-closed.
 
   - id: cass.index_db.promoted_index.range_tombstone_boundary_at_block_edge
     title: BIG promoted-index decode across a range-tombstone block boundary
@@ -1943,18 +1953,20 @@ scenarios:
         promoted-offset/bounds assertions are NOT in the required lane because they
         depend on local-only binaries absent from the pinned CI dataset.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: manual_debug
     scope:
       gap: >-
-        Byte-level promoted-index parity (Index.db offsets, widths, clustering
-        bounds) runs only against local-only binaries that are not in the pinned CI
-        dataset; the required lane enforces only the committed-JSONL
-        canonical-semantic facts.
+        This scenario's proving evidence is the byte-level Index.db promoted-index
+        decode (offsets, widths, clustering bounds), which SKIPS in CI because the
+        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
+        in progress). Marking it required_parity would report coverage for a check
+        that does not run; the only CI-running assertion in this test binary is the
+        JSONL canonical-semantic check, which does not decode the promoted index and
+        so does not satisfy this scenario's evidence on its own.
       next_step: >-
-        Add the test_big.wide_partition binaries to the dataset release pin
-        (regenerate the tarball + update DATASET_SHA256) to promote these scenarios
-        to byte_for_byte enforced in the required_parity lane.
+        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
+        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
+        so the byte-level promoted-index assertions actually run fail-closed.
 
   - id: cass.sstable_scan.wide_partition.forward_reverse_bounds
     title: Wide-partition forward and reverse scan boundary parity
@@ -1995,19 +2007,25 @@ scenarios:
         Only forward-scan completeness is proven. Local-only fixture
         (gen-wide-big.sh) pending dataset re-pin; test skips-on-absence.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: manual_debug
     scope:
       gap: >-
-        Reverse SSTable iteration is not implemented for BIG wide partitions; only
-        a post-fetch in-memory ORDER BY DESC sort exists, which does not exercise
-        reverse promoted-index block decoding.
+        Forward-scan completeness is backed by forward_bounds_completeness, which
+        reads the binary Data.db and therefore SKIPS in CI because the
+        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
+        in progress); the CI-running JSONL canonical-semantic check proves live
+        counts but not scan completeness across promoted-index block boundaries.
+        Reverse SSTable iteration is additionally not implemented for BIG wide
+        partitions (only a post-fetch in-memory ORDER BY DESC sort exists, which
+        does not exercise reverse promoted-index block decoding).
       next_step: >-
-        Implement a BIG-format reverse partition iterator that uses the promoted
-        IndexInfo blocks to seek/decode blocks back-to-front (mirroring Cassandra
-        SSTableReversedIterator), then assert forward and reverse scans of pk=1
-        return the identical 290-row clustering set with no rows lost adjacent to
-        the deleted block.
+        First re-promote to required_parity once issue #1185 pins the
+        test_big.wide_partition binaries into the CI dataset so forward-scan
+        completeness runs fail-closed; then implement a BIG-format reverse partition
+        iterator that uses the promoted IndexInfo blocks to seek/decode blocks
+        back-to-front (mirroring Cassandra SSTableReversedIterator) and assert
+        forward and reverse scans of pk=1 return the identical 290-row clustering set
+        with no rows lost adjacent to the deleted block.
 
   - id: cass.index_db.bti.index_component_discovery
     title: BTI index-component discovery and classification
