@@ -87,7 +87,12 @@ set -uo pipefail
 # bootstrap-cassandra.sh (CASSANDRA_REF=cassandra-5.0.2).
 # ---------------------------------------------------------------------------
 CASSANDRA_REF="${CASSANDRA_REF:-cassandra-5.0.2}"
-CASSANDRA_IMAGE="cassandra:5.0.2"
+# Single-source pin, but DON'T clobber a caller/workflow-provided value: the
+# workflow exports the image it pulled, and the BTI child leg must inherit the
+# SAME pin. Default to 5.0.2 only when unset, and keep it exported so child
+# cargo processes see the identical image (issue #1025).
+CASSANDRA_IMAGE="${CASSANDRA_IMAGE:-cassandra:5.0.2}"
+export CASSANDRA_IMAGE
 CASSANDRA_GIT_SHA="f278f6774fc76465c182041e081982105c3e7dbb"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -105,6 +110,15 @@ STRICT=0
 case "${NIGHTLY_DOCKER_STRICT:-0}" in
   1|true|TRUE|yes|on) STRICT=1 ;;
 esac
+
+# STRICT implies require-fixtures (issue #1025): the workflow happens to set both,
+# but a standalone strict run must NOT let the BTI/Bloom cargo legs internally
+# skip-to-PASS for want of fixtures. Force CQLITE_REQUIRE_FIXTURES=1 so the Rust
+# skip-to-panic strict checks fire (run-or-fail). Non-strict runs are unaffected
+# (the local agent-gate runs this runner non-strict and stays green).
+if [[ "$STRICT" -eq 1 ]]; then
+  export CQLITE_REQUIRE_FIXTURES=1
+fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
