@@ -828,7 +828,7 @@ scenarios:
       coverage:
         suite: compaction_parity_tombstone_ttl
         tests:
-          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+          - cqlite-core/tests/issue_992_ttl_tombstone_parity.rs
         notes: >-
           A TTL row sets HAS_TIMESTAMP | HAS_TTL and writes
           `[ts delta][ttl delta][localDeletionTime delta]` (all UNSIGNED VInt from
@@ -855,7 +855,7 @@ scenarios:
       comparison_command: >-
         env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
         cargo test -p cqlite-core
-        --features write-support --test issue_992_ttl_tombstone_range_parity
+        --features write-support --test issue_992_ttl_tombstone_parity
         ttl_row_preserves fixture_ttl_row
       reference_paths:
         - test-data/datasets/sstables/test_deltas/ttl_cells-299c9220701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
@@ -895,7 +895,7 @@ scenarios:
       coverage:
         suite: compaction_parity_tombstone_ttl
         tests:
-          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+          - cqlite-core/tests/issue_992_ttl_tombstone_parity.rs
         notes: >-
           A partition deletion is written in the partition HEADER as a FIXED
           `[i32 localDeletionTime BE][i64 markedForDeleteAt BE]` immediately after
@@ -923,7 +923,7 @@ scenarios:
       comparison_command: >-
         env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
         cargo test -p cqlite-core
-        --features write-support --test issue_992_ttl_tombstone_range_parity
+        --features write-support --test issue_992_ttl_tombstone_parity
         partition_deletion live_partition fixture_partition_tombstone
       reference_paths:
         - test-data/datasets/sstables/test_deltas/partition_tombstones-299258f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
@@ -963,7 +963,7 @@ scenarios:
       coverage:
         suite: compaction_parity_tombstone_ttl
         tests:
-          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+          - cqlite-core/tests/issue_992_ttl_tombstone_parity.rs
         notes: >-
           A HAS_DELETION row writes `[markedForDeleteAt delta][localDeletionTime
           delta]` (both UNSIGNED VInt) after the clustering prefix + row_size /
@@ -991,7 +991,7 @@ scenarios:
       comparison_command: >-
         env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
         cargo test -p cqlite-core
-        --features write-support --test issue_992_ttl_tombstone_range_parity
+        --features write-support --test issue_992_ttl_tombstone_parity
         row_tombstone fixture_row_tombstone
       reference_paths:
         - test-data/datasets/sstables/test_deltas/row_tombstones-297f1f10701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
@@ -1029,7 +1029,7 @@ scenarios:
       coverage:
         suite: compaction_parity_tombstone_ttl
         tests:
-          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+          - cqlite-core/tests/issue_992_ttl_tombstone_parity.rs
         notes: >-
           A deleted cell sets IS_DELETED | HAS_EMPTY_VALUE, writes its OWN
           `[timestamp delta][localDeletionTime delta]` (UNSIGNED VInt, NOT
@@ -1056,7 +1056,7 @@ scenarios:
       comparison_command: >-
         env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
         cargo test -p cqlite-core
-        --features write-support --test issue_992_ttl_tombstone_range_parity
+        --features write-support --test issue_992_ttl_tombstone_parity
         cell_tombstone fixture_cell_tombstone
       reference_paths:
         - test-data/datasets/sstables/test_deltas/cell_tombstones-29733830701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
@@ -1095,7 +1095,7 @@ scenarios:
       coverage:
         suite: compaction_parity_tombstone_ttl
         tests:
-          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+          - cqlite-core/tests/issue_992_range_boundary_grammar.rs
         notes: >-
           A range-tombstone BOUND marker is
           `[IS_MARKER 0x02][kind ordinal u8][cluster_count u16 BE][clustering prefix]
@@ -1124,7 +1124,7 @@ scenarios:
       comparison_command: >-
         env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
         cargo test -p cqlite-core
-        --features write-support --test issue_992_ttl_tombstone_range_parity
+        --features write-support --test issue_992_range_boundary_grammar
         range_bound_markers_exact fixture_range_bound_markers fixture_range_inclusive_end
       reference_paths:
         - test-data/datasets/sstables/test_deltas/range_tombstones-298894f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
@@ -1165,7 +1165,7 @@ scenarios:
       coverage:
         suite: compaction_parity_tombstone_ttl
         tests:
-          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+          - cqlite-core/tests/issue_992_range_boundary_grammar.rs
         notes: >-
           A range-tombstone BOUNDARY marker (kind 2 = EXCL_END_INCL_START_BOUNDARY
           or 5 = INCL_END_EXCL_START_BOUNDARY) closes one range and opens the next
@@ -1202,7 +1202,7 @@ scenarios:
       comparison_command: >-
         env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
         cargo test -p cqlite-core
-        --features write-support --test issue_992_ttl_tombstone_range_parity
+        --features write-support --test issue_992_range_boundary_grammar
         range_boundary
       reference_paths:
         - test-data/datasets/sstables/test_deltas/adjacent_ranges-29bdd5c0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
@@ -12801,7 +12801,7 @@ scenarios:
   # timestamp writer defect was fixed); the cass.tombstone_ttl.* and
   # cass.compaction_merge.GcCompactionTest.* entries anchor the deterministic +
   # fixture TTL / partition-tombstone / range-marker delta parity covered by
-  # issue_992_ttl_tombstone_range_parity.rs. (The issue listed two ids under a
+  # issue_992_ttl_tombstone_parity.rs + issue_992_range_boundary_grammar.rs. (The issue listed two ids under a
   # cqlite.issue_819.* namespace; remapped here to schema-conforming cass.* ids
   # with existing capability enum values — there is no `compaction` capability.)
   # ============================================================================
@@ -12821,7 +12821,7 @@ scenarios:
       coverage:
         suite: compaction_parity_tombstone_ttl
         tests:
-          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+          - cqlite-core/tests/issue_992_ttl_tombstone_parity.rs
         notes: >-
           A TTL row sets HAS_TIMESTAMP | HAS_TTL and writes
           `[ts delta][ttl delta][localDeletionTime delta]` (all UNSIGNED VInt
@@ -12845,7 +12845,7 @@ scenarios:
         bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
       comparison_command: >-
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
-        --features write-support --test issue_992_ttl_tombstone_range_parity
+        --features write-support --test issue_992_ttl_tombstone_parity
         ttl_row
       reference_paths:
         - test-data/datasets/sstables/test_deltas/ttl_cells-299c9220701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
@@ -12881,7 +12881,8 @@ scenarios:
       coverage:
         suite: compaction_parity_tombstone_ttl
         tests:
-          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+          - cqlite-core/tests/issue_992_ttl_tombstone_parity.rs
+          - cqlite-core/tests/issue_992_range_boundary_grammar.rs
         notes: >-
           The four tombstone families each write their own deltas with no value
           bytes: partition deletion uses the FIXED-header form (not a delta), and
@@ -12908,7 +12909,7 @@ scenarios:
         bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
       comparison_command: >-
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
-        --features write-support --test issue_992_ttl_tombstone_range_parity
+        --features write-support --test issue_992_ttl_tombstone_parity --test issue_992_range_boundary_grammar
       reference_paths:
         - test-data/datasets/sstables/test_deltas/partition_tombstones-299258f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
         - test-data/datasets/sstables/test_deltas/row_tombstones-297f1f10701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
@@ -12945,7 +12946,7 @@ scenarios:
       coverage:
         suite: compaction_parity_tombstone_ttl
         tests:
-          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+          - cqlite-core/tests/issue_992_range_boundary_grammar.rs
         notes: >-
           Range-tombstone bound markers follow an exact on-disk grammar (bound
           kind byte + clustering prefix + `markedForDeleteAt`/`localDeletionTime`
@@ -12969,7 +12970,7 @@ scenarios:
         bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
       comparison_command: >-
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
-        --features write-support --test issue_992_ttl_tombstone_range_parity
+        --features write-support --test issue_992_range_boundary_grammar
         range
       reference_paths:
         - test-data/datasets/sstables/test_deltas/range_tombstones-298894f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
@@ -13006,7 +13007,7 @@ scenarios:
         suite: compaction_parity_tombstone_ttl
         tests:
           - cqlite-core/tests/issue_819_differential_compaction.rs
-          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+          - cqlite-core/tests/issue_992_ttl_tombstone_parity.rs
         notes: >-
           Compacting overlapping inputs that carry partition / row / cell
           tombstones must preserve each tombstone's deletion time and shadow only
