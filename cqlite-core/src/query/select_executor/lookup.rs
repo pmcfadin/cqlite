@@ -432,11 +432,16 @@ impl super::SelectExecutor {
                     .scan_partition_clustering_reverse(table, pk_bytes, Some(schema))
                     .await?
                 {
-                    let path = if clustering.is_some() {
-                        AccessPath::ClusteringSlice
-                    } else {
-                        AccessPath::PartitionLookup
-                    };
+                    // HONEST access path (Finding 1, roborev #1184): the reverse
+                    // iterator (`big_reverse_partition_rows`) walks EVERY promoted-index
+                    // block back-to-front — it is NOT narrowed by the clustering slice
+                    // (it is only passed `(table, pk_bytes, schema)`). So even when a
+                    // clustering predicate is present this is a full-partition read, and
+                    // reporting `ClusteringSlice` would dishonestly claim a pruned path.
+                    // Record `PartitionLookup`; correctness for a bounded reverse query
+                    // (`WHERE ck<N ORDER BY ck DESC`) comes from the post-scan predicate
+                    // backstop the caller applies to every returned row.
+                    let path = AccessPath::PartitionLookup;
                     context.access_path = Some(path.clone());
                     crate::query::access_path::record(path);
                     context.reverse_served = true;
