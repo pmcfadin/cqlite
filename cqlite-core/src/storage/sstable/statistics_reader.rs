@@ -537,6 +537,42 @@ mod tests {
         }
     }
 
+    /// #1297: an unknown ABOVE-floor BIG version (`nc`, outside the exact
+    /// `{na, nb, oa}` allowlist) must make `StatisticsReader::open` fail with a
+    /// typed `Error::UnsupportedVersion` rather than parse an unvalidated layout
+    /// on nb-compatible gates. Drives the public `StatisticsReader::open`
+    /// surface (wiring evidence for the ceiling, not just the gate helper).
+    #[tokio::test]
+    async fn test_open_above_floor_unknown_statistics_rejected() {
+        use crate::error::Error;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("create tempdir");
+        // `nc` is above the `na` floor but NOT in the supported allowlist.
+        let path = dir.path().join("nc-1-big-Statistics.db");
+        std::fs::write(&path, b"not really a valid statistics file").expect("write fixture");
+
+        let config = crate::Config::default();
+        let platform = Arc::new(
+            crate::Platform::new(&config)
+                .await
+                .expect("create platform"),
+        );
+
+        match super::StatisticsReader::open(&path, platform).await {
+            Err(Error::UnsupportedVersion { version, .. }) => {
+                assert_eq!(version, "nc", "error must name the offending version");
+            }
+            Err(other) => panic!(
+                "expected UnsupportedVersion for above-allowlist Statistics.db, got {:?}",
+                other
+            ),
+            Ok(_) => {
+                panic!("above-allowlist Statistics.db must NOT open on nb-compatible defaults")
+            }
+        }
+    }
+
     /// #1249 R1 (roborev finding 1): the version-floor check fires BEFORE the
     /// file body is read/parsed. A below-floor `*-Statistics.db` with an empty
     /// (0-byte) body must STILL fail with `UnsupportedVersion` rather than a

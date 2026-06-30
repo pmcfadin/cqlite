@@ -321,6 +321,25 @@ impl BigVersionGates {
             });
         }
 
+        // #1297: the supported set is an EXACT allowlist, not just a floor.
+        // CQLite targets Cassandra 5.0 ONLY. The BIG-format versions in scope
+        // are exactly `na`, `nb`, and `oa` (the latter is written with the
+        // `big` filename segment in Cassandra 5.0 `storage_compatibility_mode =
+        // NONE`). Any other above-floor BIG version (`nc`, a typo like `nz`, a
+        // hypothetical future `pa`, …) has NO validated read path, so we reject
+        // it here rather than parse an unvalidated layout with nb-compatible
+        // gates (no-heuristics). This keeps the reader in agreement with
+        // `FormatDetector::is_supported()` / `supported_versions()`, which
+        // already advertise exactly `{na, nb, oa, da}`. A genuine future format
+        // would be added deliberately, once validated. The `< na` floor above
+        // is preserved; this ceiling is purely additive.
+        if !matches!(v, "na" | "nb" | "oa") {
+            return Err(Error::UnsupportedVersion {
+                version: version.to_string(),
+                floor: "na".to_string(),
+            });
+        }
+
         // BigFormat.java:397-398. Both predicates match only `n[a-z]` once the
         // pre-`na` arms are gone: `m[d-z]`/`m[a-z]` are unreachable below the
         // floor, and `oa` (first letter `o`) matches neither (both deprecated
@@ -732,8 +751,10 @@ mod tests {
             "na: hasOriginatingHostId must be FALSE (na < nb)"
         );
 
-        // nb and above: TRUE
-        for v in &["nb", "nc", "oa"] {
+        // nb and above (within the supported allowlist): TRUE. `nc` is no
+        // longer constructible (#1297 ceiling), so only in-scope versions are
+        // exercised here.
+        for v in &["nb", "oa"] {
             let g = BigVersionGates::from_version(v).unwrap();
             assert!(
                 g.has_originating_host_id,
@@ -796,6 +817,76 @@ mod tests {
             assert!(
                 BigVersionGates::from_version(v).is_ok(),
                 "{} must still construct gates",
+                v
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Exact allowlist ceiling (#1297): unknown ABOVE-floor BIG versions are
+    // rejected. The supported BIG set is exactly {na, nb, oa}; anything else
+    // in the n/o/p… space (nc, typos, hypothetical future letters) has no
+    // validated read path and yields a typed `UnsupportedVersion`.
+    // -----------------------------------------------------------------------
+
+    /// #1297 R1: an above-floor but out-of-allowlist BIG version (`nc`, a typo
+    /// `nz`, a hypothetical `pa`/`ob`) yields `UnsupportedVersion`, never gates.
+    #[test]
+    fn test_big_above_floor_unknown_rejected_with_typed_error() {
+        for v in &["nc", "nz", "pa", "ob", "zz"] {
+            let err = match BigVersionGates::from_version(v) {
+                Ok(_) => panic!(
+                    "{} is outside the supported allowlist and must be rejected",
+                    v
+                ),
+                Err(e) => e,
+            };
+            match err {
+                Error::UnsupportedVersion { version, floor } => {
+                    assert_eq!(version, *v, "error must name the offending version");
+                    assert_eq!(floor, "na", "error must name the na floor");
+                }
+                other => panic!("{}: expected UnsupportedVersion, got {:?}", v, other),
+            }
+        }
+    }
+
+    /// #1297: exactly the in-scope BIG allowlist constructs gates; the ceiling
+    /// is additive over the `< na` floor (both below-floor and above-allowlist
+    /// versions are rejected, the three supported versions still succeed).
+    #[test]
+    fn test_big_exact_allowlist_only() {
+        for v in &["na", "nb", "oa"] {
+            assert!(
+                BigVersionGates::from_version(v).is_ok(),
+                "{} is in the supported BIG allowlist and must construct gates",
+                v
+            );
+        }
+        // Below the floor (additive ceiling did not remove the floor):
+        assert!(
+            BigVersionGates::from_version("me").is_err(),
+            "below-floor still rejected"
+        );
+        // Above the floor but outside the allowlist:
+        assert!(
+            BigVersionGates::from_version("nc").is_err(),
+            "above-allowlist rejected"
+        );
+    }
+
+    /// #1297: reader-side allowlist now agrees with `FormatDetector::is_supported`
+    /// for these BIG cases — both accept exactly {na, nb, oa} and reject `nc`.
+    #[test]
+    fn test_big_gate_matches_format_detector_is_supported() {
+        use super::super::format_detector::FormatDetector;
+        let detector = FormatDetector::new();
+        for v in &["na", "nb", "oa", "nc", "me"] {
+            let gate_ok = BigVersionGates::from_version(v).is_ok();
+            let detector_ok = detector.is_supported(v);
+            assert_eq!(
+                gate_ok, detector_ok,
+                "{}: BigVersionGates::from_version and FormatDetector::is_supported must agree",
                 v
             );
         }
@@ -957,6 +1048,57 @@ mod tests {
             }
             VersionGates::Bti(_) => panic!("Expected Big"),
         }
+    }
+
+    /// #1297: an unknown BTI version is rejected through the combined
+    /// `VersionGates::from_descriptor` entry point (the public derivation used
+    /// by readers), not just the `BtiVersionGates` helper. The BTI allowlist is
+    /// exactly `{da}`.
+    #[test]
+    fn test_version_gates_from_descriptor_rejects_unknown_bti() {
+        for v in &["db", "ea", "dz", "zz"] {
+            let desc = SsTableDescriptor {
+                version: v.to_string(),
+                sstable_id: "1".to_string(),
+                format: SsTableFormat::Bti,
+                component: "Data.db".to_string(),
+            };
+            match VersionGates::from_descriptor(&desc) {
+                Err(Error::UnsupportedVersion { version, floor }) => {
+                    assert_eq!(version, *v, "error must name the offending BTI version");
+                    assert_eq!(floor, "da", "error must name the da floor");
+                }
+                other => panic!("{}: expected UnsupportedVersion, got {:?}", v, other),
+            }
+        }
+        // The single supported BTI version still constructs gates via the
+        // combined entry point.
+        let da_desc = SsTableDescriptor {
+            version: "da".to_string(),
+            sstable_id: "1".to_string(),
+            format: SsTableFormat::Bti,
+            component: "Data.db".to_string(),
+        };
+        assert!(matches!(
+            VersionGates::from_descriptor(&da_desc),
+            Ok(VersionGates::Bti(_))
+        ));
+    }
+
+    /// #1297: an unknown above-floor BIG version is rejected through
+    /// `VersionGates::from_descriptor` (the reader's derivation path).
+    #[test]
+    fn test_version_gates_from_descriptor_rejects_unknown_big() {
+        let desc = SsTableDescriptor {
+            version: "nc".to_string(),
+            sstable_id: "1".to_string(),
+            format: SsTableFormat::Big,
+            component: "Data.db".to_string(),
+        };
+        assert!(matches!(
+            VersionGates::from_descriptor(&desc),
+            Err(Error::UnsupportedVersion { .. })
+        ));
     }
 
     #[test]
