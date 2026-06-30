@@ -377,6 +377,188 @@ fn static_write_without_ttl_stays_non_expiring_1196() {
     );
 }
 
+/// BYTE-level static-cell TTL parity for issue #1210 (follow-up to the #1196
+/// functional guard `static_using_ttl_write_emits_expiring_cell_1196`).
+///
+/// Ground truth (Cassandra 5.0 `BufferCell` / `Cell.Serializer.serialize`): a
+/// static column written with statement-level `USING TTL` is an EXPIRING cell —
+/// the TTL rides on the CELL (cell-level `CELL_IS_EXPIRING` flag, an unsigned
+/// VInt `ttl` delta from `min_ttl`, and an unsigned VInt `localDeletionTime`
+/// delta = `now + ttl` from `min_local_deletion_time`), NEVER as row-level
+/// liveness/`ROW_HAS_TTL` on the static block. The cell carries its OWN explicit
+/// timestamp (no `CELL_USE_ROW_TIMESTAMP`/`CELL_USE_ROW_TTL`), because a static
+/// block emits no row liveness to borrow (#1196).
+///
+/// This decodes the FULL emitted cell wire-format and pins:
+///   * flags = `CELL_IS_EXPIRING`, no row-timestamp/row-ttl borrowing,
+///   * the on-wire `ttl` == the requested TTL (via `min_ttl == 0`),
+///   * the on-wire `localDeletionTime` is consistent with `now + ttl`,
+///   * the cell's explicit timestamp delta == `timestamp - min_timestamp`.
+///
+/// It also cross-checks byte-equivalence against the per-cell
+/// `CellOperation::WriteWithTtl` reference path: a row-level `USING TTL` static
+/// `Write` and an equivalent per-cell `WriteWithTtl` must produce equivalent
+/// cell encodings (identical except for the wall-clock LDT, which is bounded).
+///
+/// Fail-before (pre-#1196 routing): the static `Write` was serialized via the
+/// non-TTL `write_cell_explicit_ts`, so byte 0 would be `0x00` (non-expiring,
+/// lives forever) and there would be no ttl/LDT fields — the decode below would
+/// not find `CELL_IS_EXPIRING`. Pass-after: the cell is expiring with the TTL.
+#[test]
+fn static_using_ttl_write_byte_parity_1210() {
+    let min_timestamp = 1_000_000i64;
+    let mut stats = create_test_stats();
+    stats.min_timestamp = min_timestamp;
+    stats.min_local_deletion_time = 0; // so LDT delta == absolute localDeletionTime
+    stats.min_ttl = 0; // so ttl delta == absolute ttl
+    let writer = DataWriter::new(stats);
+    let schema = single_static_column_schema();
+
+    let ttl = 3_600u32;
+    let timestamp = 1_001_000i64;
+    let value = Value::Text("v".to_string());
+
+    // Capture a tight wall-clock window around the write for the LDT bound.
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    // Path under test: row-level USING TTL arrives as a plain `Write` carrying
+    // the statement TTL in `row_ttl_seconds` (how the CQL builders shape it).
+    let row_ttl_op = StaticMergedOp {
+        op: CellOperation::Write {
+            column: "s".to_string(),
+            value: value.clone(),
+        },
+        timestamp_micros: timestamp,
+        cell_local_deletion_time: 0,
+        row_ttl_seconds: Some(ttl),
+    };
+    let mut row_ttl_buf = Vec::new();
+    let cells = writer
+        .write_static_cells(
+            &mut row_ttl_buf,
+            std::slice::from_ref(&row_ttl_op),
+            timestamp,
+            &schema,
+        )
+        .unwrap();
+
+    assert_eq!(cells, 1, "exactly one static cell written");
+
+    // Decode the full cell wire format:
+    //   [flags: u8][ts_delta: uvint][ldt_delta: uvint][ttl_delta: uvint]
+    //   [value_len: uvint][value bytes]   (text is length-prefixed)
+    let mut pos = 0usize;
+    let flags = row_ttl_buf[pos];
+    pos += 1;
+
+    assert_eq!(
+        flags & CELL_IS_EXPIRING,
+        CELL_IS_EXPIRING,
+        "#1210: static USING TTL write must be an EXPIRING cell (flags={flags:#04x})"
+    );
+    assert_eq!(
+        flags & CELL_USE_ROW_TIMESTAMP,
+        0,
+        "#1210: static cell must carry its own timestamp, not USE_ROW_TIMESTAMP"
+    );
+    assert_eq!(
+        flags & CELL_USE_ROW_TTL,
+        0,
+        "#1210: static cell must carry its own TTL, not USE_ROW_TTL"
+    );
+
+    let ts_delta = read_uvint_at(&row_ttl_buf, &mut pos);
+    assert_eq!(
+        ts_delta as i64,
+        timestamp - min_timestamp,
+        "#1210: cell timestamp delta must be (timestamp - min_timestamp)"
+    );
+
+    // min_local_deletion_time == 0, so the decoded delta IS the absolute
+    // localDeletionTime; it must equal `now + ttl`. The bound is checked below
+    // against a single `[before, after]` window captured around BOTH writes.
+    let ldt = read_uvint_at(&row_ttl_buf, &mut pos) as i64;
+
+    // min_ttl == 0, so the decoded delta IS the absolute ttl.
+    let ttl_on_wire = read_uvint_at(&row_ttl_buf, &mut pos);
+    assert_eq!(
+        ttl_on_wire, ttl as u64,
+        "#1210: on-wire ttl must equal the statement TTL"
+    );
+
+    // Cross-check: an equivalent per-cell `WriteWithTtl` static cell (the
+    // reference TTL path) must produce equivalent cell encoding. The only
+    // permitted difference is the wall-clock LDT field, so compare the prefix
+    // up to and including the flags + ts_delta + ttl, and assert the LDT of the
+    // reference cell falls in the same bound.
+    let ref_op = StaticMergedOp {
+        op: CellOperation::WriteWithTtl {
+            column: "s".to_string(),
+            value: value.clone(),
+            ttl_seconds: ttl,
+        },
+        timestamp_micros: timestamp,
+        cell_local_deletion_time: 0,
+        row_ttl_seconds: None,
+    };
+    let mut ref_buf = Vec::new();
+    writer
+        .write_static_cells(
+            &mut ref_buf,
+            std::slice::from_ref(&ref_op),
+            timestamp,
+            &schema,
+        )
+        .unwrap();
+
+    // Close the wall-clock window only after BOTH writes have run, so each
+    // cell's LDT (now + ttl, sampled at its own write) is covered by the same
+    // `[before, after]` bound regardless of one-second boundary crossings.
+    let after = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    // Both cells' localDeletionTime must be now + ttl within the shared window.
+    let lower = before + ttl as i64;
+    let upper = after + ttl as i64;
+    assert!(
+        (lower..=upper).contains(&ldt),
+        "#1210: localDeletionTime ({ldt}) must be now + ttl \
+         (expected in [{lower}, {upper}])"
+    );
+
+    // Flags + timestamp delta must be byte-identical between the two paths.
+    let mut rpos = 0usize;
+    assert_eq!(
+        ref_buf[rpos], flags,
+        "#1210: WriteWithTtl flags must match row-TTL Write"
+    );
+    rpos += 1;
+    let ref_ts_delta = read_uvint_at(&ref_buf, &mut rpos);
+    assert_eq!(ref_ts_delta, ts_delta, "#1210: timestamp deltas must match");
+    let ref_ldt = read_uvint_at(&ref_buf, &mut rpos) as i64;
+    assert!(
+        (lower..=upper).contains(&ref_ldt),
+        "#1210: WriteWithTtl LDT must also be now + ttl"
+    );
+    let ref_ttl = read_uvint_at(&ref_buf, &mut rpos);
+    assert_eq!(
+        ref_ttl, ttl_on_wire,
+        "#1210: on-wire ttl must match the reference path"
+    );
+
+    // The value tail (length-prefix + bytes) must be byte-identical.
+    assert_eq!(
+        &row_ttl_buf[pos..],
+        &ref_buf[rpos..],
+        "#1210: value encoding must match the WriteWithTtl reference path"
+    );
+}
+
 /// Schema with two static columns (`s1`, `s2`) plus a clustering column, for the
 /// per-cell static-writetime test below.
 fn two_static_column_schema() -> TableSchema {
