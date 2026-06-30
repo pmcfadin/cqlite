@@ -523,12 +523,12 @@ fn static_using_ttl_write_byte_parity_1210() {
         .as_secs() as i64;
 
     // Both cells' localDeletionTime must be now + ttl within the shared window.
+    let lower = before + ttl as i64;
+    let upper = after + ttl as i64;
     assert!(
-        ldt >= before + ttl as i64 && ldt <= after + ttl as i64,
+        (lower..=upper).contains(&ldt),
         "#1210: localDeletionTime ({ldt}) must be now + ttl \
-         (expected in [{}, {}])",
-        before + ttl as i64,
-        after + ttl as i64
+         (expected in [{lower}, {upper}])"
     );
 
     // Flags + timestamp delta must be byte-identical between the two paths.
@@ -542,7 +542,7 @@ fn static_using_ttl_write_byte_parity_1210() {
     assert_eq!(ref_ts_delta, ts_delta, "#1210: timestamp deltas must match");
     let ref_ldt = read_uvint_at(&ref_buf, &mut rpos) as i64;
     assert!(
-        ref_ldt >= before + ttl as i64 && ref_ldt <= after + ttl as i64,
+        (lower..=upper).contains(&ref_ldt),
         "#1210: WriteWithTtl LDT must also be now + ttl"
     );
     let ref_ttl = read_uvint_at(&ref_buf, &mut rpos);
