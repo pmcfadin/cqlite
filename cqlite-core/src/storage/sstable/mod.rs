@@ -1166,6 +1166,16 @@ impl SSTableManager {
             return Ok((Vec::new(), false));
         };
 
+        // Did resolution match the FULLY-QUALIFIED `keyspace.table` key exactly, or
+        // fall back to the bare table name? An unqualified query is treated as an
+        // exact match (no keyspace to mismatch). This authoritative signal gates
+        // the seek's table-consistency guard: only an exact FQ match may relax to a
+        // name-only check across a header-keyspace divergence; a fully-qualified
+        // query resolved via the bare-name fallback keeps strict keyspace matching
+        // so it never returns another keyspace's same-named rows (#1284 review).
+        let fully_qualified_match =
+            !table_name.contains('.') || table_readers.contains_key(table_name);
+
         // Prune: keep only SSTables whose bloom filter / BTI trie admit the key.
         let candidates: Vec<Arc<reader::SSTableReader>> = reader_list
             .iter()
@@ -1247,7 +1257,13 @@ impl SSTableManager {
                 // index. `engaged` records whether the clustering narrowing
                 // actually bounded the decode (vs a full-partition decode).
                 match reader
-                    .scan_single_partition_clustering(table_id, partition_key, clustering, schema)
+                    .scan_single_partition_clustering(
+                        table_id,
+                        partition_key,
+                        clustering,
+                        fully_qualified_match,
+                        schema,
+                    )
                     .await
                 {
                     // Seek resolved authoritatively: use its rows directly. They

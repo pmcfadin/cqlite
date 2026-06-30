@@ -20,7 +20,10 @@ use tokio::io::AsyncSeekExt;
 #[cfg(not(feature = "tombstones"))]
 use super::super::source::ScanCursor;
 #[cfg(not(feature = "tombstones"))]
-use super::model::{physical_byte_bounds_for_slice, ClusteringRowWindow, ClusteringSlice};
+use super::model::{
+    physical_byte_bounds_for_slice, table_header_consistent_for_seek, ClusteringRowWindow,
+    ClusteringSlice,
+};
 
 impl SSTableReader {
     /// Current value of the test-only `scan_for_key` invocation counter.
@@ -97,6 +100,12 @@ impl SSTableReader {
         table_id: &TableId,
         partition_key: &[u8],
         clustering: Option<&ClusteringSlice>,
+        // `true` iff the manager resolved this reader by an EXACT fully-qualified
+        // `keyspace.table` match (or the query is unqualified). `false` means a
+        // fully-qualified query reached this reader via the bare-name fallback, in
+        // which case the seek guard keeps STRICT keyspace matching so it can never
+        // return rows from a different keyspace whose table name collides (#1284).
+        fully_qualified_match: bool,
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Option<(Vec<(RowKey, Value)>, bool)>> {
         // 1. Resolve the partition's uncompressed Data.db offset, and record
@@ -201,6 +210,7 @@ impl SSTableReader {
                 row_body_window,
                 &key,
                 table_id,
+                fully_qualified_match,
                 schema_opt.as_ref(),
                 &parser,
             )
@@ -791,6 +801,10 @@ impl SSTableReader {
         row_body_window: Option<(usize, usize)>,
         key: &RowKey,
         table_id: &TableId,
+        // See `bti_collect_partition_rows`: `true` iff the manager resolved this
+        // reader by an exact fully-qualified `keyspace.table` match (or the query
+        // was unqualified). Threaded into the seek table-consistency guard (#1284).
+        fully_qualified_match: bool,
         schema_opt: Option<&crate::schema::TableSchema>,
         parser: &crate::storage::sstable::reader::parsing::V5CompressedLegacyParser,
     ) -> Result<Option<Vec<Value>>> {
@@ -937,6 +951,7 @@ impl SSTableReader {
                     row_body_window,
                     key,
                     table_id,
+                    fully_qualified_match,
                     schema_opt,
                     parser,
                 )
@@ -958,6 +973,7 @@ impl SSTableReader {
             row_body_window,
             key,
             table_id,
+            fully_qualified_match,
             schema_opt,
             parser,
         )
@@ -1040,6 +1056,11 @@ impl SSTableReader {
         row_body_window: Option<(usize, usize)>,
         key: &RowKey,
         table_id: &TableId,
+        // Whether the manager resolved this reader by an EXACT fully-qualified
+        // `keyspace.table` match (or an unqualified query). When `false` a
+        // fully-qualified query reached this reader via the bare-name fallback, so
+        // the seek guard keeps STRICT keyspace matching (#1284 review).
+        fully_qualified_match: bool,
         schema_opt: Option<&crate::schema::TableSchema>,
         parser: &crate::storage::sstable::reader::parsing::V5CompressedLegacyParser,
     ) -> Result<(Vec<Value>, bool)> {
@@ -1059,9 +1080,12 @@ impl SSTableReader {
             clamped_window,
             |(tid, entry_key, entry_value)| {
                 if entry_key.as_bytes() == key.as_bytes() {
-                    // A row of the TARGET partition. Verify the table id matches
-                    // (a wrong-table query never returns a row, issue #831).
-                    if table_ids_match_strict(&tid, table_id) {
+                    // Header-authoritative table consistency: wrong-table rejected
+                    // (#831); a keyspace-divergent same-table query is served ONLY
+                    // when resolution was an exact fully-qualified match — a
+                    // fallback-resolved query keeps strict keyspace matching so it
+                    // never returns another keyspace's same-named rows (#1284).
+                    if table_header_consistent_for_seek(&tid, table_id, fully_qualified_match) {
                         rows.push(entry_value);
                     }
                     Ok(std::ops::ControlFlow::Continue(()))
