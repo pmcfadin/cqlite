@@ -270,22 +270,32 @@ print(f"{s} {mut}")
 PY
 }
 
-# Render a path relative to REPO_ROOT when it lives under it; otherwise tag it
-# as an out-of-tree source (keeps the committed manifest machine-independent and
-# deterministic). BTI sources resolved from a sibling main-repo checkout are
-# recorded by their stable datasets-relative tail so they are reproducible.
+# Normalize a clean-source path to a STABLE, machine-independent value for the
+# committed manifest (Finding 3 / issue #1236). The reproducibility contract is
+# datasets-relative: any datasets root (a repo checkout's test-data/datasets, a
+# sibling main-repo checkout, or an out-of-tree generation dir like
+# /tmp/cqlite-1236-gen/datasets) collapses to the same `datasets/sstables/...`
+# tail, so the committed manifest never records a machine-specific absolute path.
 rel_path() {
   local p="$1"
+  # Prefer the OUT_DIR-relative form when the path lives under the datasets root
+  # actually in use (covers --out and CQLITE_DATASETS_ROOT generation dirs).
+  if [[ -n "${OUT_DIR:-}" && "$p" == "$OUT_DIR/"* ]]; then
+    echo "datasets/${p#"$OUT_DIR"/}"
+    return
+  fi
+  # Otherwise collapse on the stable ".../datasets/sstables/..." tail (handles
+  # sibling checkouts and out-of-tree /tmp/.../datasets/sstables generation
+  # roots identically). Match the longest-known tails first.
   case "$p" in
-    "$REPO_ROOT/"*) echo "${p#"$REPO_ROOT"/}" ;;
+    *"/test-data/datasets/sstables/"*)
+      echo "datasets/sstables/${p#*"/test-data/datasets/sstables/"}" ;;
+    *"/datasets/sstables/"*)
+      echo "datasets/sstables/${p#*"/datasets/sstables/"}" ;;
+    "$REPO_ROOT/"*)
+      echo "${p#"$REPO_ROOT"/}" ;;
     *)
-      # Keep the stable "<...>/test-data/datasets/sstables/..." tail if present.
-      if [[ "$p" == *"/test-data/datasets/sstables/"* ]]; then
-        echo "<out-of-tree>/test-data/datasets/sstables/${p#*"/test-data/datasets/sstables/"}"
-      else
-        echo "$p"
-      fi
-      ;;
+      echo "$p" ;;
   esac
 }
 
@@ -335,7 +345,7 @@ log "BTI Rows source:       ${BTI_ROWS_SRC:-<none found -> planned>}"
 
 # ---------------------------------------------------------------------------
 # Fixed mutation table.
-#   name|manifest_key|src_dir|component|mutation_type|param1|param2|expected_component|error_class|rationale
+#   name|manifest_key|src_dir|component|mutation_type|param1|param2|expected_component|error_class|rationale|cassandra_verdict|verdict_parity|verdict_note|verdict_captured_for_sha256|verdict_byte_stable
 # mutation_type:
 #   bitflip   param1=offset param2=bitmask
 #   setbyte   param1=offset param2=newval
@@ -343,6 +353,65 @@ log "BTI Rows source:       ${BTI_ROWS_SRC:-<none found -> planned>}"
 #   tocdrop   param1=line
 #   digest    (no params)
 # A blank src_dir => planned (no source available).
+#
+# cassandra_verdict / verdict_parity / verdict_note (issue #1236)
+# ---------------------------------------------------------------
+# `cassandra_verdict` is the ACTUAL Apache Cassandra 5.0.2 `sstableverify
+# --extended --force` outcome captured by running each fixture's exact bytes
+# through a cassandra:5.0.2 container (cassandra_git_sha f278f677...; capture
+# tool test-data/scripts/capture-cassandra-verify-verdicts.sh). It is the
+# parity oracle for the sstable_parity_corruption_verify test — NOT hand-encoded
+# from reading Cassandra source.
+#   * verdict_parity=equivalent : CQLite's corrupt/clean verdict matches Cassandra's.
+#   * verdict_parity=divergent  : CQLite is intentionally STRICTER than Cassandra on
+#     this byte mutation; verdict_note records why. The parity test asserts the
+#     expected_error_class for ALL active fixtures but asserts verdict equivalence
+#     only for verdict_parity=equivalent fixtures, and asserts the recorded
+#     divergence for verdict_parity=divergent ones (so a regression in either
+#     direction is caught).
+# Captured verdicts are committed (not re-derived per CI run); regeneration of the
+# corrupted binaries is deterministic and does not require live Cassandra.
+#
+# verdict_captured_for_sha256 (stale-verdict guard, issue #1236 roborev Finding 1)
+# --------------------------------------------------------------------------------
+# Each captured `cassandra_verdict` is BOUND to the exact corrupted bytes it was
+# observed against, recorded here as the `verdict_captured_for_sha256` (the
+# corrupted-fixture SHA-256 the verdict was captured for). During generation, after
+# freshly recomputing `corrupted_sha256`, the script FAILS CLOSED (naming the
+# fixture) if the bound sha does NOT equal the freshly-regenerated sha. That means
+# the moment a mutation parameter or a clean-source byte changes — which yields a
+# DIFFERENT corrupted sha — generation aborts rather than silently reattaching the
+# OLD (now-wrong) Cassandra verdict to new bytes. The verdict must then be
+# re-captured (capture-cassandra-verify-verdicts.sh) and this table updated to the
+# new sha. The committed fixtures are unchanged, so each bound sha below equals the
+# committed `corrupted_sha256` and normal regeneration succeeds.
+#
+# verdict sha-binding is ADVISORY GLOBALLY (issue #1236 / follow-up #1294)
+# --------------------------------------------------------------------------------
+# A whole-file sha over the CORRUPTED file is NOT a meaningful drift invariant: the
+# CI lane regenerates the clean SOURCES from a live cassandra:5.0.2 container every
+# run (generate-compression-parity.sh -> test_comp; gen-wide-bti.sh ->
+# test_da/wide_table), and several SSTable components are not byte-reproducible
+# across regenerations — Statistics.db (wall-clock/host/repair metadata), the BTI
+# `da` trie components (non-deterministic serialization), and potentially others
+# (Summary.db, ...). The same deterministic mutation therefore yields a different
+# corrupted sha on every regeneration, so a corrupted_sha256 vs
+# verdict_captured_for_sha256 MISMATCH is ADVISORY for EVERY fixture (::notice:: +
+# proceed, emitting the captured cassandra_verdict unchanged). Classifying fixtures
+# byte-stable yes/no was guesswork that kept surfacing new drifting components
+# (whack-a-mole); the verdict sha-binding does not gate the build.
+#
+# Verdict-CORRECTNESS is enforced by the parity test
+# cqlite-core/tests/sstable_parity_corruption_verify.rs (CI step 10 under
+# CQLITE_REQUIRE_FIXTURES=1): it asserts CQLite's verdict + VerifyErrorClass match
+# the captured Cassandra verdict on whatever bytes are present. A mutation that
+# stopped being corrupt would fail THAT test. The only thing kept fail-closed here
+# is the AUTHORING check: a fixture missing a captured verdict (empty
+# cassandra_verdict or verdict_captured_for_sha256) aborts.
+#
+# `verdict_byte_stable` is retained as a documentation-only column (yes/no describes
+# whether the clean source is byte-reproducible); it NO LONGER gates fatal-vs-advisory.
+# Full per-component sha binding is tracked by follow-up #1294.
 # ---------------------------------------------------------------------------
 
 PART_DIR_BTI="${BTI_PART_SRC:-}"
@@ -363,16 +432,16 @@ ROWS_DIR_BTI="${BTI_ROWS_SRC:-}"
 #     root/trie footer word; XOR 0x01 corrupts the root pointer.
 
 FIXTURES=()
-FIXTURES+=("data_db_bit_flip|cass.corruption.data_db.bit_flip|$SRC_LZ4|nb-1-big-Data.db|bitflip|64|1|Data.db|ChunkDecompressionError/CrcMismatch|Single-bit flip inside the first compressed chunk payload corrupts the LZ4 chunk so decompression / inline CRC check fails.")
-FIXTURES+=("data_db_truncation|cass.corruption.data_db.truncation|$SRC_LZ4|nb-1-big-Data.db|truncate|4096||Data.db|ChunkOffsetOutOfBounds/DigestMismatch|Tail truncated so CompressionInfo.db chunk offsets now point past the shortened Data.db (ChunkOffsetOutOfBounds) and the Data.db digest no longer matches (DigestMismatch); the row scan then fails.")
-FIXTURES+=("compression_info_bad_offset|cass.corruption.compression_info.bad_offset|$SRC_LZ4|nb-1-big-CompressionInfo.db|setbyte|47|128|CompressionInfo.db|CompressionInfoCorrupt/ChunkOffsetOutOfBounds|chunk[1] offset MSB set -> caught as CompressionInfoCorrupt (parse rejects the out-of-range/non-ascending offset) or ChunkOffsetOutOfBounds (offset-vs-Data.db bounds check), depending on which guard trips first; either way the bad offset is surfaced, never silently read.")
-FIXTURES+=("index_db_bit_flip_big|cass.corruption.index_db.bit_flip_big|$SRC_LZ4|nb-1-big-Index.db|bitflip|7|64|Index.db|IndexEntryCorrupt|Single-bit flip in the first Index.db partition entry corrupts the promoted index / position.")
-FIXTURES+=("bti_partitions_footer_flip|cass.corruption.bti_partitions_footer_bit_flip|$PART_DIR_BTI|__BTI_PART__|bitflip|__LAST__|1|Partitions.db|BtiRootPointerCorrupt|Footer (root pointer) bit flip in the BTI Partitions.db trie -> root node seek lands at the wrong byte.")
-FIXTURES+=("bti_rows_truncation|cass.corruption.bti_rows_truncation|$ROWS_DIR_BTI|__BTI_ROWS__|truncate|256||Rows.db|BtiTrieCorrupt|Rows.db trie truncated mid-node so per-partition row-trie traversal fails (BtiTrieCorrupt).")
-FIXTURES+=("statistics_db_header_damage|cass.corruption.statistics_db.header_damage|$SRC_LZ4|nb-1-big-Statistics.db|setbyte|0|255|Statistics.db|StatisticsHeaderCorrupt|MetadataSerializer component-count high byte set to 0xFF -> count ~4.28e9, header parse fails.")
-FIXTURES+=("summary_db_truncation|cass.corruption.summary_db_truncation|$SRC_LZ4|nb-1-big-Summary.db|truncate|16||Summary.db|SummaryCorrupt|Summary.db truncated inside the index-samples block so the summary cannot be deserialized (SummaryCorrupt).")
-FIXTURES+=("toc_missing_component|cass.corruption.toc_missing_component|$SRC_LZ4|nb-1-big-TOC.txt|tocdrop|Statistics.db||TOC.txt|MissingComponent|TOC.txt no longer lists Statistics.db -> component discovery reports a missing mandatory component.")
-FIXTURES+=("digest_crc32_mismatch|cass.corruption.digest_crc32_mismatch|$SRC_LZ4|nb-1-big-Digest.crc32|digest|||Digest.crc32|DigestMismatch|Recorded whole-file CRC no longer matches Data.db -> digest verification fails.")
+FIXTURES+=("data_db_bit_flip|cass.corruption.data_db.bit_flip|$SRC_LZ4|nb-1-big-Data.db|bitflip|64|1|Data.db|ChunkDecompressionError/CrcMismatch|Single-bit flip inside the first compressed chunk payload corrupts the LZ4 chunk so decompression / inline CRC check fails.|corrupt|equivalent|Cassandra 5.0.2 sstableverify -e: Data.db digest integrity check failed (1177334624 != 1237888564) -> Invalid SSTable.|4e1cdb2f32629770f9bb0611ec2240a62b37aab82226d75ad92c839b118e7cd7|yes")
+FIXTURES+=("data_db_truncation|cass.corruption.data_db.truncation|$SRC_LZ4|nb-1-big-Data.db|truncate|4096||Data.db|ChunkOffsetOutOfBounds/DigestMismatch|Tail truncated so CompressionInfo.db chunk offsets now point past the shortened Data.db (ChunkOffsetOutOfBounds) and the Data.db digest no longer matches (DigestMismatch); the row scan then fails.|corrupt|equivalent|Cassandra 5.0.2 sstableverify -e: Data.db digest integrity check failed (1177334624 != 2621715426) -> Invalid SSTable.|c65b976244faf0b38f5dc08211aa495723acbc42d88fa1d6e1a2a0a27a8ca893|yes")
+FIXTURES+=("compression_info_bad_offset|cass.corruption.compression_info.bad_offset|$SRC_LZ4|nb-1-big-CompressionInfo.db|setbyte|47|128|CompressionInfo.db|CompressionInfoCorrupt/ChunkOffsetOutOfBounds|chunk[1] offset MSB set -> caught as CompressionInfoCorrupt (parse rejects the out-of-range/non-ascending offset) or ChunkOffsetOutOfBounds (offset-vs-Data.db bounds check), depending on which guard trips first; either way the bad offset is surfaced, never silently read.|corrupt|equivalent|Cassandra 5.0.2 sstableverify -e: extended verify failed reading values via the corrupt chunk offsets -> Invalid SSTable.|5600275ab1ae62b60d1c0183183f71d456c82b7329caa26911c5d6c6eb0c01d1|yes")
+FIXTURES+=("index_db_bit_flip_big|cass.corruption.index_db.bit_flip_big|$SRC_LZ4|nb-1-big-Index.db|bitflip|7|64|Index.db|IndexEntryCorrupt|Single-bit flip in the first Index.db partition entry corrupts the promoted index / position.|corrupt|equivalent|Cassandra 5.0.2 sstableverify -e: EOF after 62 bytes out of 1024 reading the corrupt Index.db entry -> Invalid SSTable.|d92731ebec124f46fbf51b83bba9da680aa7850bf39874c1a60710d0fa246c32|yes")
+FIXTURES+=("bti_partitions_footer_flip|cass.corruption.bti_partitions_footer_bit_flip|$PART_DIR_BTI|__BTI_PART__|bitflip|__LAST__|1|Partitions.db|BtiRootPointerCorrupt|Footer (root pointer) bit flip in the BTI Partitions.db trie -> root node seek lands at the wrong byte.|corrupt|equivalent|Cassandra 5.0.2 sstableverify -e: Error Loading da-2-bti: Corrupted (Partitions.db trie root).|e93871d0b753546cf6abaf0b0208f2689d1cb8970d8efcca98dab0bb7ee135ef|no")
+FIXTURES+=("bti_rows_truncation|cass.corruption.bti_rows_truncation|$ROWS_DIR_BTI|__BTI_ROWS__|truncate|256||Rows.db|BtiTrieCorrupt|Rows.db trie truncated mid-node so per-partition row-trie traversal fails (BtiTrieCorrupt).|corrupt|equivalent|Cassandra 5.0.2 sstableverify -e: Error Loading da-2-bti: Corrupted (Rows.db trie truncated).|8cdddaa6df572b3a233b84d91453c6f3c4ef3e0414a4ea117a69b081ebd92007|no")
+FIXTURES+=("statistics_db_header_damage|cass.corruption.statistics_db.header_damage|$SRC_LZ4|nb-1-big-Statistics.db|setbyte|0|255|Statistics.db|StatisticsHeaderCorrupt|MetadataSerializer component-count high byte set to 0xFF -> count ~4.28e9, header parse fails.|corrupt|equivalent|Cassandra 5.0.2 sstableverify -e: Error Loading nb-1-big: Corrupted Statistics.db.|9e225cc2d2500249be98d06bf3c3814ab58ff470de9034449b7fbfac38e78a00|yes")
+FIXTURES+=("summary_db_truncation|cass.corruption.summary_db_truncation|$SRC_LZ4|nb-1-big-Summary.db|truncate|16||Summary.db|SummaryCorrupt|Summary.db truncated inside the index-samples block so the summary cannot be deserialized (SummaryCorrupt).|corrupt|equivalent|Cassandra 5.0.2 sstableverify -e: Index summary is corrupt / Summary.db missing -> Invalid SSTable.|f9339a82b91eeb5ea41a1a8672c015e0f42539f5206e3ec07ec609a1fbb987eb|yes")
+FIXTURES+=("toc_missing_component|cass.corruption.toc_missing_component|$SRC_LZ4|nb-1-big-TOC.txt|tocdrop|Statistics.db||TOC.txt|MissingComponent|TOC.txt no longer lists Statistics.db -> component discovery reports a missing mandatory component.|clean|divergent|Cassandra 5.0.2 sstableverify -e verifies CLEAN: the standalone verifier scans on-disk components and rebuilds the TOC, so a dropped TOC.txt line does NOT trip its verify. CQLite is intentionally STRICTER and reports MissingComponent (it treats TOC.txt as authoritative). Recorded divergence, not a CQLite bug; out-of-band of strict verdict parity.|7989bb984960f1b552ca339295c192ffd976aae36db3135db71418e0ef3e71bc|yes")
+FIXTURES+=("digest_crc32_mismatch|cass.corruption.digest_crc32_mismatch|$SRC_LZ4|nb-1-big-Digest.crc32|digest|||Digest.crc32|DigestMismatch|Recorded whole-file CRC no longer matches Data.db -> digest verification fails.|corrupt|equivalent|Cassandra 5.0.2 sstableverify -e: Data.db digest integrity check failed (1177334620 != 1177334624) -> Invalid SSTable.|3babd7a8e7d27188858449d00dbdbb413d75419a97b9fa4c43f0fb7af9b1e1c6|yes")
 
 # ---------------------------------------------------------------------------
 # Dry-run plan
@@ -380,7 +449,7 @@ FIXTURES+=("digest_crc32_mismatch|cass.corruption.digest_crc32_mismatch|$SRC_LZ4
 if [[ "$DRY_RUN" -eq 1 ]]; then
   log "DRY RUN — planned corrupted corpus under $CORRUPT_DIR"
   for spec in "${FIXTURES[@]}"; do
-    IFS='|' read -r name key src comp mtype p1 p2 exp errc rationale <<<"$spec"
+    IFS='|' read -r name key src comp mtype p1 p2 exp errc rationale cass_verdict verdict_parity verdict_note verdict_sha verdict_byte_stable <<<"$spec"
     if [[ -z "$src" ]]; then
       echo "  [PLANNED-NO-SOURCE] $name ($key) -> $comp $mtype (no clean source available)"
     else
@@ -409,9 +478,18 @@ trap 'rm -f "$MANIFEST_TMP" "$REPORT_TMP"' EXIT
   echo "# Generated by test-data/scripts/generate-corruption-corpus.sh (epic #970, issue #999)."
   echo "# Each entry corrupts EXACTLY ONE component of a clean test_comp / test_da fixture."
   echo "# Corrupted *.db binaries are gitignored and regeneratable byte-for-byte from this manifest."
+  echo "#"
+  echo "# Per-fixture cassandra_verdict is the ACTUAL Apache Cassandra 5.0.2"
+  echo "# 'sstableverify --extended --force' outcome captured on that fixture's exact"
+  echo "# bytes (issue #1236), NOT hand-encoded from Cassandra source. Capture tool:"
+  echo "# test-data/scripts/capture-cassandra-verify-verdicts.sh (cassandra:5.0.2)."
   echo "schema_version: 1"
   echo "epic: 970"
   echo "issue: 999"
+  echo "verify_parity_issue: 1236"
+  echo "cassandra_version: \"5.0.2\""
+  echo "cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb"
+  echo "cassandra_verify_tool: \"sstableverify --extended --force\""
   echo "clean_keyspace: $CLEAN_KS"
   echo "corrupt_keyspace: $CORRUPT_KS"
   echo "fixtures:"
@@ -435,7 +513,8 @@ emit_manifest_entry() {
   local name="$1" key="$2" clean_src="$3" component="$4" mtype="$5" \
         offset="$6" orig_hex="$7" mut_hex="$8" orig_sha="$9" corr_sha="${10}" \
         orig_len="${11}" corr_len="${12}" exp="${13}" errc="${14}" rationale="${15}" status="${16}" \
-        clean_table="${17:-}"
+        clean_table="${17:-}" cass_verdict="${18:-}" verdict_parity="${19:-}" verdict_note="${20:-}" \
+        verdict_sha="${21:-}" verdict_byte_stable="${22:-yes}"
   local corr_rel="corruption/$CORRUPT_KS/$name/$component"
   {
     echo "  - name: $name"
@@ -456,17 +535,27 @@ emit_manifest_entry() {
     echo "    expected_failing_component: $exp"
     echo "    expected_error_class: $errc"
     echo "    rationale: \"$rationale\""
+    echo "    cassandra_verdict: $cass_verdict"
+    echo "    verdict_parity: $verdict_parity"
+    echo "    verdict_note: \"$verdict_note\""
+    echo "    verdict_captured_for_sha256: \"$verdict_sha\""
+    echo "    verdict_byte_stable: $verdict_byte_stable"
   } >>"$MANIFEST_TMP"
 }
 
 for spec in "${FIXTURES[@]}"; do
-  IFS='|' read -r name key src comp mtype p1 p2 exp errc rationale <<<"$spec"
+  IFS='|' read -r name key src comp mtype p1 p2 exp errc rationale cass_verdict verdict_parity verdict_note verdict_sha verdict_byte_stable <<<"$spec"
+  # verdict_byte_stable is documentation-only (issue #1236 / #1294); it does NOT
+  # gate fatal-vs-advisory — the sha-binding is advisory for every fixture. Default
+  # to "yes" only to keep the column populated for fixtures that omit it.
+  verdict_byte_stable="${verdict_byte_stable:-yes}"
 
   # --- planned (no source) ---------------------------------------------------
   if [[ -z "$src" ]]; then
     PLANNED+=("$name")
     emit_manifest_entry "$name" "$key" "(none — clean BTI source not available in this checkout)" \
-      "$comp" "$mtype" "n/a" "" "" "" "" "0" "0" "$exp" "$errc" "$rationale" "planned" "(unresolved)"
+      "$comp" "$mtype" "n/a" "" "" "" "" "0" "0" "$exp" "$errc" "$rationale" "planned" "(unresolved)" \
+      "$cass_verdict" "$verdict_parity" "$verdict_note" "$verdict_sha" "$verdict_byte_stable"
     printf "%-30s %-20s %-12s %-9s %s\n" "$name" "$comp" "$mtype" "-" "PLANNED (no clean source)" >>"$REPORT_TMP"
     continue
   fi
@@ -559,6 +648,54 @@ for spec in "${FIXTURES[@]}"; do
   corr_sha="$(sha256 "$corrupt_file")"
   corr_len="$(python3 -c "import os,sys;print(os.path.getsize(sys.argv[1]))" "$corrupt_file")"
 
+  # ---- verdict sha-binding (issue #1236 / #1294) — ADVISORY GLOBALLY --------
+  # The committed Cassandra verdict ($cass_verdict) was captured against an EXACT
+  # set of corrupted bytes, recorded in the mutation table as $verdict_sha
+  # (verdict_captured_for_sha256). The whole-file corrupted sha, however, is NOT a
+  # meaningful invariant when the clean SOURCE is regenerated non-deterministically.
+  #
+  # WHY ADVISORY FOR ALL FIXTURES (issue #1236): the CI lane REGENERATES the clean
+  # sources from a live cassandra:5.0.2 container every run (generate-compression-
+  # parity.sh -> test_comp; gen-wide-bti.sh -> test_da/wide_table). Several SSTable
+  # components are NOT byte-reproducible across regenerations:
+  #   * Statistics.db embeds wall-clock / host / repair metadata.
+  #   * BTI `da` trie components (Partitions.db / Rows.db) serialize non-deterministically.
+  #   * other components (e.g. Summary.db) may drift similarly.
+  # A whole-file sha over the *corrupted* file therefore drifts even for the SAME
+  # deterministic mutation, and classifying fixtures byte-stable yes/no is guesswork
+  # that keeps surfacing new drifting components (whack-a-mole, rounds at the BTI
+  # source then statistics_db_header_damage). So a corrupted_sha256 vs
+  # verdict_captured_for_sha256 MISMATCH is ADVISORY for EVERY fixture: emit a
+  # ::notice:: and PROCEED, emitting the captured cassandra_verdict unchanged.
+  #
+  # WHAT STILL ENFORCES VERDICT-CORRECTNESS: the parity test
+  # cqlite-core/tests/sstable_parity_corruption_verify.rs (CI step 10 under
+  # CQLITE_REQUIRE_FIXTURES=1) asserts CQLite's verify verdict + VerifyErrorClass
+  # match the captured Cassandra verdict on whatever bytes are present. A mutation
+  # that stopped being "corrupt" would fail THAT test. That is the real fail-closed
+  # guarantee; the exact corrupted-file sha is not.
+  #
+  # KEPT FAIL-CLOSED: the *authoring* check only. A fixture with NO captured verdict
+  # (empty cassandra_verdict or empty verdict_captured_for_sha256) is an authoring
+  # error and still aborts. (Planned fixtures have no bytes and skip this entirely.)
+  #
+  # NOTE: verdict_byte_stable is retained as a documentation-only column; it no
+  # longer gates fatal-vs-advisory (a mismatch is advisory regardless). Full
+  # per-component sha binding is tracked by follow-up #1294.
+  if [[ -z "$verdict_sha" || -z "$cass_verdict" ]]; then
+    fail "$name: no captured Cassandra verdict (cassandra_verdict / \
+verdict_captured_for_sha256 must both be present); each fixture must record the \
+Cassandra verdict and the corrupted sha it was captured against (issue #1236)."
+  fi
+  if [[ "$verdict_sha" != "$corr_sha" ]]; then
+    log "::notice::$name: verdict sha-binding is advisory; corrupted bytes are \
+regenerated and may drift (e.g. Statistics.db / BTI embed non-deterministic \
+metadata). Captured cassandra_verdict bound to corrupted_sha256 $verdict_sha but \
+freshly-regenerated bytes hash to $corr_sha. Verdict-correctness is enforced by the \
+sstable_parity_corruption_verify test (not the file sha). See #1294 for per-component \
+binding. The recorded cassandra_verdict ('$cass_verdict') is emitted unchanged."
+  fi
+
   # ---- single-mutation proof ----------------------------------------------
   status="OK"
   if [[ "$mtype" == "truncate" ]]; then
@@ -598,7 +735,8 @@ PY
   GENERATED+=("$name")
   emit_manifest_entry "$name" "$key" "$(rel_path "$clean_file")" "$comp" "$mtype" "$offset" \
     "$orig_hex" "$mut_hex" "$orig_sha" "$corr_sha" "$orig_len" "$corr_len" \
-    "$exp" "$errc" "$rationale" "active" "$clean_table"
+    "$exp" "$errc" "$rationale" "active" "$clean_table" \
+    "$cass_verdict" "$verdict_parity" "$verdict_note" "$verdict_sha" "$verdict_byte_stable"
 
   printf "%-30s %-20s %-12s %-9s %s\n" "$name" "$comp" "$mtype" "$offset" "$status" >>"$REPORT_TMP"
   {
