@@ -86,7 +86,9 @@ fn parse_args(rest: &[String]) -> Result<Args> {
             "--provenance" => {
                 args.provenance = Some(PathBuf::from(next_val(&mut it, "--provenance")?))
             }
-            "--checksums" => args.checksums = Some(PathBuf::from(next_val(&mut it, "--checksums")?)),
+            "--checksums" => {
+                args.checksums = Some(PathBuf::from(next_val(&mut it, "--checksums")?))
+            }
             "--expected-inventory" => {
                 args.expected_inventory =
                     Some(PathBuf::from(next_val(&mut it, "--expected-inventory")?))

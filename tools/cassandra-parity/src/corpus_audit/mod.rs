@@ -223,11 +223,7 @@ pub fn check_component_changes(
     }
 
     // Appeared inside a directory that the expected set already tracks.
-    let expected_dirs: BTreeSet<&str> = expected
-        .components
-        .keys()
-        .map(|p| parent_dir(p))
-        .collect();
+    let expected_dirs: BTreeSet<&str> = expected.components.keys().map(|p| parent_dir(p)).collect();
     for path in inventory.checksums.keys() {
         if expected.components.contains_key(path) {
             continue;

@@ -178,7 +178,8 @@ fn unexpected_component_change_fails_on_checksum_drift() {
     let mut expected = BTreeMap::new();
     expected.insert(comp.clone(), "expected_sha".to_string());
     let mut inv = clean_inventory();
-    inv.checksums.insert(comp.clone(), "regenerated_sha".to_string());
+    inv.checksums
+        .insert(comp.clone(), "regenerated_sha".to_string());
 
     let report = corpus_audit::audit(
         &manifest(),
