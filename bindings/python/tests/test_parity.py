@@ -90,10 +90,16 @@ DISCOVERED_CORPUS = discover_corpus(DATASETS)
 
 
 def find_jsonl_file(keyspace: str, table: str) -> Path | None:
-    """Find the JSONL reference file for a table.
+    """Find the JSONL reference file for a table (format-agnostic, #1229).
 
-    JSONL files are located at:
-    test-data/datasets/sstables/{keyspace}/{table}-{hash}/nb-1-big-Data.db.jsonl
+    JSONL files live at:
+    test-data/datasets/sstables/{keyspace}/{table}-{hash}/<format>-<gen>-<kind>-Data.db.jsonl
+
+    The format prefix varies by SSTable format (``nb-`` legacy BIG, ``oa-``
+    Cassandra 5.0 BIG, ``da-`` BTI) and the generation is not always ``1``
+    (e.g. ``nb-2``, ``nb-45``, ``oa-2``, ``da-2``). Globbing ``*-Data.db.jsonl``
+    instead of hard-coding ``nb-1-big-Data.db.jsonl`` ensures a missing golden
+    for a non-nb-1 table is detected (not silently treated as "no golden").
     """
     keyspace_dir = DATASETS / keyspace
     if not keyspace_dir.exists():
@@ -102,9 +108,9 @@ def find_jsonl_file(keyspace: str, table: str) -> Path | None:
     # Find table directory (contains hash suffix)
     for table_dir in keyspace_dir.iterdir():
         if table_dir.is_dir() and table_dir.name.startswith(f"{table}-"):
-            jsonl_file = table_dir / "nb-1-big-Data.db.jsonl"
-            if jsonl_file.exists():
-                return jsonl_file
+            for jsonl_file in sorted(table_dir.glob("*-Data.db.jsonl")):
+                if jsonl_file.exists():
+                    return jsonl_file
     return None
 
 
@@ -773,15 +779,25 @@ class TestCoverageSummary:
                 assert keyspace not in SKIP_KEYSPACES
 
     def test_coverage_report(self, datasets_root):
-        """Report JSONL coverage for the full in-scope corpus (no tautology)."""
+        """Report JSONL coverage for the full in-scope corpus (no tautology).
+
+        Every in-scope table MUST have a golden JSONL, EXCEPT tables in a
+        documented skip-pending keyspace (binaries/goldens not yet shipped).
+        A missing golden for a non-exempt in-scope table FAILS loudly here —
+        it must never be silently swallowed as "no golden" (#1229).
+        """
         passed = []
         failed = []
-        skipped = []
+        missing = []          # in-scope, non-exempt, golden absent -> FAIL
+        skip_pending = []     # documented skip-pending -> reported, not fatal
 
         for keyspace, table in DISCOVERED_CORPUS:
             jsonl_file = find_jsonl_file(keyspace, table)
             if jsonl_file is None:
-                skipped.append(f"{keyspace}.{table}")
+                if keyspace in SKIP_PENDING_KEYSPACES:
+                    skip_pending.append(f"{keyspace}.{table}")
+                else:
+                    missing.append(f"{keyspace}.{table}")
                 continue
 
             try:
@@ -802,7 +818,8 @@ class TestCoverageSummary:
         print(f"Skip-set keyspaces: {sorted(SKIP_KEYSPACES)}")
         print(f"Discovered tables: {len(DISCOVERED_CORPUS)}")
         print(f"JSONL available: {len(passed)}")
-        print(f"JSONL missing: {len(skipped)}")
+        print(f"JSONL missing (skip-pending, exempt): {len(skip_pending)}")
+        print(f"JSONL missing (in-scope, FAIL): {len(missing)}")
         print(f"Parse errors: {len(failed)}")
         print()
 
@@ -811,9 +828,18 @@ class TestCoverageSummary:
             for name, error in failed:
                 print(f"  {name}: {error}")
 
-        # No parse errors are tolerated; missing JSONL is reported but not
-        # fatal (some in-scope keyspaces are skip-pending until binaries ship).
+        # No parse errors are tolerated.
         assert not failed, f"JSONL parse errors for: {[n for n, _ in failed]}"
+        # A missing golden for a non-skip-pending in-scope table is a real
+        # coverage gap (e.g. an oa/da/nb-2 table whose golden was overlooked):
+        # fail loudly instead of reporting "100%".
+        assert not missing, (
+            f"In-scope table(s) {missing} have NO golden JSONL and are not in a "
+            f"documented skip-pending keyspace ({sorted(SKIP_PENDING_KEYSPACES)}). "
+            f"Commit the golden, or add the keyspace to SKIP_PENDING_KEYSPACES / "
+            f"SKIP_KEYSPACES in corpus.py with a reason "
+            f"(test-data/corpus-coverage-policy.md)."
+        )
         # We must have discovered at least the executable corpus.
         assert len(DISCOVERED_CORPUS) >= sum(
             len(discover_tables(DATASETS, ks)) for ks in EXECUTABLE_KEYSPACES
@@ -960,17 +986,12 @@ class TestOaRowCountParity:
     behaviour of suppressing deleted rows from query results).
     """
 
-    # All 6 oa tables now work correctly through the Python binding layer (VG6)
-    WORKING_TABLES = [
-        "udt_table",
-        "static_table",
-        "ttl_table",
-        "simple_table",
-        "tombstone_table",
-        "collection_table",
-    ]
+    # oa tables are DISCOVERED from the committed corpus (#1229), not a frozen
+    # hand-typed list — newly-added oa tables get row-count parity automatically.
+    # test_oa is not skip-pending, so every discovered oa table is enforced.
+    OA_TABLE_NAMES = [table for (_ks, table) in OA_TABLES]
 
-    @pytest.mark.parametrize("table", WORKING_TABLES)
+    @pytest.mark.parametrize("table", OA_TABLE_NAMES)
     def test_oa_row_count(self, db_oa, table):
         """Row count for test_oa.{table} must match JSONL golden (VG6, Issue #672)."""
         jsonl_file = find_oa_jsonl_file("test_oa", table)

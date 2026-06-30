@@ -642,6 +642,35 @@ const SKIP_KEYSPACES = {
   test_compactionparityudt: 'compaction-parity UDT fixtures (compaction harness; may be local-only)',
 };
 
+/**
+ * Keyspaces discovered + listed in-scope but not executed yet (binaries not in
+ * the published dataset asset). Mirrors corpus.py SKIP_PENDING_KEYSPACES.
+ */
+const SKIP_PENDING_KEYSPACES = {
+  test_deltas: 'binaries not in published dataset asset yet (issue #701)',
+};
+
+/**
+ * Explicit in-scope read-parity corpus (the documented list in
+ * test-data/corpus-coverage-policy.md). AUTHORITATIVE classified set used by
+ * unclassifiedKeyspaces() — NOT "everything not skipped", so a newly-committed
+ * keyspace that nobody added here trips the integrity guard. Mirrors
+ * corpus.py IN_SCOPE_KEYSPACES (includes the skip-pending keyspaces).
+ */
+const IN_SCOPE_KEYSPACES = {
+  test_basic: 'simple-types read-parity corpus',
+  test_collections: 'list/set/map read-parity corpus',
+  test_timeseries: 'time-series read-parity corpus',
+  test_wide_rows: 'wide-partition read-parity corpus',
+  test_oa: 'Cassandra 5.0 oa-format read-parity corpus (#656)',
+  test_da: 'BTI (da-format) read-parity corpus',
+  test_big: 'large/wide-partition read-parity corpus',
+  test_comp: 'compression read-parity corpus',
+  test_tomb: 'tombstone read-parity corpus',
+  test_types: 'extended CQL-type read-parity corpus',
+  test_deltas: 'CDC-delta read-parity corpus (skip-pending, #701)',
+};
+
 /** Keyspaces this Node suite can EXECUTE queries against (have a schema map). */
 const EXECUTABLE_KEYSPACES = ['test_basic', 'test_collections', 'test_timeseries', 'test_wide_rows'];
 
@@ -674,10 +703,24 @@ function inScopeKeyspaces() {
   return discoverKeyspaces().filter((k) => !(k in SKIP_KEYSPACES));
 }
 
-/** Discovered keyspaces that are neither in-scope nor in the skip-set (should be []). */
+/**
+ * Discovered keyspaces classified into NONE of the explicit buckets.
+ *
+ * A keyspace is "classified" only if it appears in one of the explicit,
+ * hand-maintained sets: IN_SCOPE_KEYSPACES (read-parity corpus, incl.
+ * skip-pending) or SKIP_KEYSPACES (intentionally excluded). This is
+ * deliberately NOT "discovered minus skip-set" (which can never be
+ * unclassified by construction — the tautology #1229 exists to kill). A
+ * newly-committed keyspace nobody added to either explicit set is returned
+ * here so the classification test reds the suite instead of absorbing it.
+ */
 function unclassifiedKeyspaces() {
-  const inScope = new Set(inScopeKeyspaces());
-  return discoverKeyspaces().filter((k) => !(k in SKIP_KEYSPACES) && !inScope.has(k));
+  const classified = new Set([
+    ...Object.keys(IN_SCOPE_KEYSPACES),
+    ...Object.keys(SKIP_KEYSPACES),
+    ...Object.keys(SKIP_PENDING_KEYSPACES),
+  ]);
+  return discoverKeyspaces().filter((k) => !classified.has(k));
 }
 
 /**

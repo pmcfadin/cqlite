@@ -45,6 +45,26 @@ SKIP_PENDING_KEYSPACES: dict[str, str] = {
     "test_deltas": "binaries not in published dataset asset yet (issue #701)",
 }
 
+# Explicit in-scope read-parity corpus (the documented list in
+# test-data/corpus-coverage-policy.md). This is the AUTHORITATIVE classified
+# set used by ``unclassified_keyspaces`` — it is NOT "everything not skipped",
+# so a NEWLY-committed keyspace that nobody added here trips the integrity
+# guard (rather than being silently absorbed as "in-scope" by construction).
+# Includes the skip-pending keyspaces (they ARE in-scope; just not executed).
+IN_SCOPE_KEYSPACES: dict[str, str] = {
+    "test_basic": "simple-types read-parity corpus",
+    "test_collections": "list/set/map read-parity corpus",
+    "test_timeseries": "time-series read-parity corpus",
+    "test_wide_rows": "wide-partition read-parity corpus",
+    "test_oa": "Cassandra 5.0 oa-format read-parity corpus (#656)",
+    "test_da": "BTI (da-format) read-parity corpus",
+    "test_big": "large/wide-partition read-parity corpus",
+    "test_comp": "compression read-parity corpus",
+    "test_tomb": "tombstone read-parity corpus",
+    "test_types": "extended CQL-type read-parity corpus",
+    "test_deltas": "CDC-delta read-parity corpus (skip-pending, #701)",
+}
+
 
 def discover_keyspaces(sstables_dir: Path) -> list[str]:
     """Return every keyspace directory present under ``sstables_dir``.
@@ -97,12 +117,20 @@ def discover_corpus(sstables_dir: Path) -> list[tuple[str, str]]:
 
 
 def unclassified_keyspaces(sstables_dir: Path) -> list[str]:
-    """Discovered keyspaces that are neither in-scope nor in any documented set.
+    """Discovered keyspaces classified into NONE of the explicit buckets.
 
-    Should always be empty: every discovered keyspace is either in-scope
-    (covered) or in SKIP_KEYSPACES. A non-empty result means a newly
-    committed keyspace slipped in without a coverage decision — the
-    enumeration tests fail loudly on this.
+    A keyspace is "classified" only if it appears in one of the explicit,
+    hand-maintained sets:
+
+      * ``IN_SCOPE_KEYSPACES`` — the documented read-parity corpus (includes
+        the skip-pending keyspaces, which are in-scope but not executed yet),
+      * ``SKIP_KEYSPACES`` — intentionally excluded (system + parity-fixture).
+
+    This is deliberately NOT "discovered minus skip-set" (which can never be
+    unclassified by construction — the tautology #1229 exists to kill). A
+    newly-committed keyspace that nobody added to either explicit set is
+    returned here, so the enumeration test reds the suite instead of silently
+    absorbing it as in-scope.
     """
-    known = set(SKIP_KEYSPACES)
-    return [k for k in discover_keyspaces(sstables_dir) if k not in known and k not in in_scope_keyspaces(sstables_dir)]
+    classified = set(IN_SCOPE_KEYSPACES) | set(SKIP_KEYSPACES) | set(SKIP_PENDING_KEYSPACES)
+    return [k for k in discover_keyspaces(sstables_dir) if k not in classified]
