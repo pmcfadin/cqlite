@@ -115,6 +115,16 @@ const INCL_START_BOUND: u8 = 1;
 const INCL_END_BOUND: u8 = 6;
 const EXCL_START_BOUND: u8 = 7;
 
+// Range tombstone BOUNDARY kinds (issue #1220). A boundary closes one range and
+// opens the next at the SAME clustering point, carrying TWO deletion-time pairs
+// (primary = end/close of the previous range, secondary = start/open of the next
+// range). Cassandra emits these whenever two adjacent ranges share a boundary
+// point with complementary inclusivity (`ClusteringBoundOrBoundary.Serializer`):
+//   2 = EXCL_END_INCL_START_BOUNDARY (close exclusive, open inclusive),
+//   5 = INCL_END_EXCL_START_BOUNDARY (close inclusive, open exclusive).
+const EXCL_END_INCL_START_BOUNDARY: u8 = 2;
+const INCL_END_EXCL_START_BOUNDARY: u8 = 5;
+
 // Partition/row markers
 const END_OF_PARTITION: u8 = 0x01;
 
