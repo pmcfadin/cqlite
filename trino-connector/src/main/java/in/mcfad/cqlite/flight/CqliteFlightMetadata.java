@@ -613,21 +613,53 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
      * {@code table_stats} action across the distinct flight nodes in the ring
      * (issue #944). Summing across replicas over-counts by the replication factor,
      * which is acceptable for an UPPER-BOUND gate input (it only ever errs toward
-     * DECLINING pushdown). A node whose stats call fails is skipped.
+     * DECLINING pushdown).
+     *
+     * <p>If ANY distinct ring node that should have been queried FAILS to return
+     * stats, the aggregate is tainted INCOMPLETE: we fold {@link TableStats#UNAVAILABLE}
+     * (an incomplete sentinel) so the AND-of-{@code complete} in {@link TableStats#plus}
+     * becomes {@code false}. A failed node is NOT silently dropped — its peers'
+     * partial totals must not be treated as authoritative (issue #944, #28), so the
+     * caller fails closed to "no estimate" rather than dividing the gate/optimizer by
+     * an under-counted row total.
      */
     private TableStats fetchTableStats(CqliteFlightTableHandle handle) {
         byte[] body = tableStatsRequest(handle.keyspace(), handle.table());
+        int port = config.flightPort();
+        return aggregateNodeStats(
+                sidecar.ring().entries(), address -> flight.tableStats(address, port, body));
+    }
+
+    /**
+     * Aggregate per-node {@code table_stats} across the DISTINCT addresses in
+     * {@code nodes} by summing {@link TableStats#plus} (issue #944). Pulled out as a
+     * package-private static seam so the completeness-tainting behavior can be unit
+     * tested without a live Sidecar/Flight client.
+     *
+     * <p>For each distinct, non-null address {@code fetch} is invoked. If the fetch
+     * THROWS for a node we should have queried, the node is NOT silently dropped: an
+     * incomplete {@link TableStats#UNAVAILABLE} sentinel is folded in, so the AND-of-
+     * {@code complete} in {@link TableStats#plus} taints the whole aggregate to
+     * {@code complete=false}. A partial cross-ring total is therefore reported as
+     * "no estimate" (the caller fails closed) rather than as authoritative.
+     */
+    static TableStats aggregateNodeStats(
+            Iterable<RingEntry> nodes, java.util.function.Function<String, TableStats> fetch) {
         TableStats total = TableStats.EMPTY;
         Set<String> seen = new LinkedHashSet<>();
-        for (RingEntry node : sidecar.ring().entries()) {
+        for (RingEntry node : nodes) {
             String address = node.address();
             if (address == null || !seen.add(address)) {
                 continue;
             }
             try {
-                total = total.plus(flight.tableStats(address, config.flightPort(), body));
+                total = total.plus(fetch.apply(address));
             } catch (RuntimeException e) {
-                // Skip a node that could not answer; its peers still contribute.
+                // A node we should have queried could not answer. Do NOT silently drop
+                // it: fold an incomplete sentinel so the cross-ring aggregate is marked
+                // incomplete (complete=false), forcing the caller to "no estimate"
+                // instead of treating the peers' partial totals as authoritative.
+                total = total.plus(TableStats.UNAVAILABLE);
             }
         }
         return total;

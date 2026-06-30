@@ -51,6 +51,17 @@ public record TableStats(
     public static final TableStats EMPTY = new TableStats(0, 0, 0, true, 0);
 
     /**
+     * An INCOMPLETE, all-zero sentinel folded into the cross-ring aggregate when a
+     * ring node's {@code table_stats} call FAILS (issue #944). Because {@link #plus}
+     * ANDs the {@code complete} flags, folding this taints the whole aggregate to
+     * {@code complete=false} — so a node we should have queried but could not reach is
+     * never silently dropped, and a partial cross-ring total is correctly reported as
+     * "no estimate" rather than authoritative. It carries one {@code skippedSstables}
+     * so the failure is visible in the aggregate.
+     */
+    public static final TableStats UNAVAILABLE = new TableStats(0, 0, 0, false, 1);
+
+    /**
      * Element-wise sum, used to aggregate per-node responses across the ring. The
      * {@code complete} flag is the logical AND of both sides: the aggregate is
      * complete only if EVERY contributing node reported a complete decode, so a

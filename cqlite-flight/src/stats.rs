@@ -171,18 +171,25 @@ pub enum StatsError {
 /// `partition_count` and `total_rows` to the running totals; `sstable_count`
 /// counts the files that decoded.
 ///
-/// A `Statistics.db` that fails to decode (corrupt, below the version floor, or a
-/// `total_rows` the gated walk could not reach) is handled conservatively: a hard
-/// decode error SKIPS the whole file (it does not contribute and is not counted)
-/// AND flips the response's [`TableStatsResponse::complete`] flag to `false` (with
-/// `skipped_sstables` incremented). Partial sums are NOT authoritative (issue #28),
-/// so the consumer must fail closed to "no estimate" rather than feed a biased
-/// ratio to the AUTOMATIC pushdown gate — the flag is how it learns the totals are
-/// incomplete. A reachable-but-`None` `total_rows` is different: that file decoded,
-/// so it contributes 0 rows while still counting its partitions and stays
-/// `complete` (an honest under-count, never a guess). A missing table directory
-/// surfaces as [`StatsError::Discovery`]; an existing table with no SSTables yields
-/// an all-zero `complete=true` response (nothing was skipped).
+/// A `Statistics.db` that fails to decode (corrupt, below the version floor) is
+/// handled conservatively: a hard decode error SKIPS the whole file (it does not
+/// contribute and is not counted) AND flips the response's
+/// [`TableStatsResponse::complete`] flag to `false` (with `skipped_sstables`
+/// incremented). Partial sums are NOT authoritative (issue #28), so the consumer
+/// must fail closed to "no estimate" rather than feed a biased ratio to the
+/// AUTOMATIC pushdown gate — the flag is how it learns the totals are incomplete.
+///
+/// A file that decodes but whose `total_rows` is `None` (the gated walk could not
+/// reach it — e.g. a clustered covered-Slice not modeled) ALSO marks the response
+/// incomplete (`complete=false`, `skipped_sstables` incremented). The
+/// authoritative-or-nothing principle (issue #28) means a missing row count cannot
+/// be reported as complete: `live_rows` is what the gate/optimizer divide by, so a
+/// silent 0-row contribution would under-count `live_rows` while still claiming to
+/// be authoritative. Its `partition_count` is still summed (the
+/// `estimatedPartitionSize` histogram is self-describing and authoritative), but the
+/// completeness flag must be `false` so the consumer fails closed. A missing table
+/// directory surfaces as [`StatsError::Discovery`]; an existing table with no
+/// SSTables yields an all-zero `complete=true` response (nothing was skipped).
 ///
 /// This is a SYNCHRONOUS, blocking function: it performs `std::fs::read_dir` /
 /// `std::fs::read` directly. Callers on an async runtime MUST invoke it inside
@@ -206,21 +213,7 @@ pub fn gather_table_stats(dir: &Path) -> Result<TableStatsResponse, StatsError> 
     let mut response = TableStatsResponse::default();
     for path in stats_paths {
         match read_one_sstable_counts(&path) {
-            Ok(counts) => {
-                // Saturating: independent per-SSTable counts; a real table never
-                // overflows u64, but never wrap into a tiny estimate that would
-                // wrongly let a high-cardinality GROUP BY push.
-                response.partition_count = response
-                    .partition_count
-                    .saturating_add(counts.partition_count);
-                // total_rows is None when the gated walk could not reach it
-                // (clustered covered-Slice not modeled). Contribute 0 rather than
-                // guess; partitions still count.
-                response.live_rows = response
-                    .live_rows
-                    .saturating_add(counts.total_rows.unwrap_or(0));
-                response.sstable_count = response.sstable_count.saturating_add(1);
-            }
+            Ok(counts) => fold_counts(&mut response, &path, counts),
             Err(e) => {
                 // Skip an unreadable/corrupt/below-floor Statistics.db rather than
                 // failing the whole gate, but mark the totals as INCOMPLETE: partial
@@ -239,6 +232,45 @@ pub fn gather_table_stats(dir: &Path) -> Result<TableStatsResponse, StatsError> 
     }
 
     Ok(response)
+}
+
+/// Fold one decoded SSTable's [`TableCounts`] into the running `response`.
+///
+/// `partition_count` (from the self-describing `estimatedPartitionSize` histogram)
+/// is always authoritative and is summed unconditionally. `total_rows`, however, is
+/// authoritative-or-nothing: when it is `None` (the gated walk could not reach the
+/// `totalRows` field — e.g. a clustered covered-Slice not modeled) the response is
+/// marked INCOMPLETE and the file counted toward `skipped_sstables`, rather than
+/// silently contributing 0 live rows while still claiming `complete`. `live_rows` is
+/// the denominator the gate/optimizer divide by, so an honest 0 here would under-
+/// count and mislead the consumer — issue #28's authoritative-or-nothing rule (this
+/// REVERSES the earlier choice to stay complete on `None`). Only a file with a known
+/// row count contributes to `live_rows` and `sstable_count`.
+fn fold_counts(
+    response: &mut TableStatsResponse,
+    path: &Path,
+    counts: cqlite_core::parser::repair_metadata::TableCounts,
+) {
+    // Saturating: independent per-SSTable counts; a real table never overflows u64,
+    // but never wrap into a tiny estimate that would wrongly let a high-cardinality
+    // GROUP BY push.
+    response.partition_count = response
+        .partition_count
+        .saturating_add(counts.partition_count);
+    match counts.total_rows {
+        Some(rows) => {
+            response.live_rows = response.live_rows.saturating_add(rows);
+            response.sstable_count = response.sstable_count.saturating_add(1);
+        }
+        None => {
+            response.complete = false;
+            response.skipped_sstables = response.skipped_sstables.saturating_add(1);
+            tracing::debug!(
+                path = %path.display(),
+                "table_stats: Statistics.db decoded but total_rows is None (marking incomplete)"
+            );
+        }
+    }
 }
 
 /// Decode one `*-Statistics.db` file's authoritative counts. Derives the
@@ -384,6 +416,96 @@ mod tests {
 
         assert!(stats.complete, "every Statistics.db decoded → complete");
         assert_eq!(stats.skipped_sstables, 0);
+    }
+
+    /// A directory where one SSTable's `total_rows` is `None` (but a sibling has a
+    /// known row count) must report `complete=false` (issue #944, #28: a missing row
+    /// count is authoritative-or-nothing — `live_rows` is what the gate/optimizer
+    /// divide by, so a silent 0 contribution must not be reported as complete). The
+    /// known-rows SSTable still contributes its `live_rows`/`sstable_count`, and both
+    /// SSTables contribute their authoritative `partition_count`; the None one is
+    /// counted toward `skipped_sstables`. This exercises [`fold_counts`] directly
+    /// (the per-file decode→fold seam) so the rule is tested without crafting a STATS
+    /// file whose descriptor parses but whose gated walk cannot reach `totalRows`.
+    #[test]
+    fn fold_none_total_rows_marks_incomplete() {
+        use cqlite_core::parser::repair_metadata::TableCounts;
+        let dummy = std::path::Path::new("nb-2-big-Statistics.db");
+
+        let mut response = TableStatsResponse::default();
+        // SSTable A: fully decoded, 5 rows over 2 partitions.
+        fold_counts(
+            &mut response,
+            std::path::Path::new("nb-1-big-Statistics.db"),
+            TableCounts {
+                partition_count: 2,
+                total_rows: Some(5),
+            },
+        );
+        // SSTable B: histogram decoded (3 partitions) but the gated walk could not
+        // reach totalRows → None.
+        fold_counts(
+            &mut response,
+            dummy,
+            TableCounts {
+                partition_count: 3,
+                total_rows: None,
+            },
+        );
+
+        assert!(
+            !response.complete,
+            "any SSTable with total_rows=None must mark the response incomplete"
+        );
+        assert_eq!(
+            response.live_rows, 5,
+            "only the known-rows SSTable contributes live_rows"
+        );
+        assert_eq!(
+            response.partition_count, 5,
+            "partition_count is authoritative for BOTH SSTables (2 + 3)"
+        );
+        assert_eq!(
+            response.sstable_count, 1,
+            "only the SSTable with a known row count is counted as contributing"
+        );
+        assert_eq!(
+            response.skipped_sstables, 1,
+            "the None-total_rows SSTable is counted as skipped"
+        );
+    }
+
+    /// The all-rows-present case stays `complete=true`: two SSTables, each with a
+    /// known `total_rows`, fold to a complete response with summed counts.
+    #[test]
+    fn fold_all_rows_present_stays_complete() {
+        use cqlite_core::parser::repair_metadata::TableCounts;
+        let mut response = TableStatsResponse::default();
+        fold_counts(
+            &mut response,
+            std::path::Path::new("nb-1-big-Statistics.db"),
+            TableCounts {
+                partition_count: 2,
+                total_rows: Some(5),
+            },
+        );
+        fold_counts(
+            &mut response,
+            std::path::Path::new("nb-2-big-Statistics.db"),
+            TableCounts {
+                partition_count: 3,
+                total_rows: Some(7),
+            },
+        );
+
+        assert!(
+            response.complete,
+            "all SSTables have a known row count → complete"
+        );
+        assert_eq!(response.live_rows, 12);
+        assert_eq!(response.partition_count, 5);
+        assert_eq!(response.sstable_count, 2);
+        assert_eq!(response.skipped_sstables, 0);
     }
 
     /// Authoritative decode against REAL Cassandra 5.0 `nb` fixtures (issue #944).
