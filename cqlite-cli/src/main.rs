@@ -529,13 +529,19 @@ async fn run_main() -> Result<()> {
     // `--execute` statement. That write runs later (in the --execute block), so
     // flushing here would flush an empty memtable. The --execute DML branch
     // performs the flush itself after the write so the row reaches the SSTable.
+    //
+    // The DML `--execute` branch is only reached when `cli.file.is_none()`,
+    // because `--file` is handled first and returns early. So only defer when
+    // `--file` is absent; otherwise the standalone `--flush` must run now (the
+    // deferred-to branch would never execute this invocation).
     #[cfg(feature = "write-support")]
     {
-        let defer_flush_to_execute = cli
-            .execute
-            .as_deref()
-            .map(is_dml_statement)
-            .unwrap_or(false);
+        let defer_flush_to_execute = cli.file.is_none()
+            && cli
+                .execute
+                .as_deref()
+                .map(is_dml_statement)
+                .unwrap_or(false);
 
         if cli.flush && !defer_flush_to_execute {
             if let Some(engine) = write_engine.as_mut() {
