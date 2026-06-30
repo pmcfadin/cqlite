@@ -113,11 +113,12 @@ Additive only — a new workflow, a new `cassandra-parity` subcommand + its unit
 format, and doctrine cross-links. Reverting removes the lane and subcommand with no runtime impact on CQLite
 itself (the generators and manifest are unchanged).
 
-## Open Questions
+## Open Questions — RESOLVED (owner, 2026-06-29, Seam 1)
 
-- **Cron cadence value.** Weekly (`0 6 * * 0`) is proposed (D5). Owner may prefer a different day/time or a
-  monthly cadence for cost — needs an owner decision.
-- **Provenance record format/location.** JSON vs YAML, and whether it is only an artifact or also written to
-  a tracked path (e.g. `docs/reports/`) for citation in the release checklist — owner preference.
-- **Audit strictness on RC vs scheduled runs.** Whether "unexpected component change" is a hard failure on
-  every scheduled run or only blocking for RC-tagged dispatches — owner scope decision.
+- **Cron cadence value.** RESOLVED → **weekly `cron: '0 6 * * 0'`** (Sun 06:00 UTC) + `workflow_dispatch`.
+- **Provenance record format/location.** RESOLVED → **artifact only, JSON**. The provenance block is a JSON
+  document inside the uploaded report artifact; it is NOT written to a tracked repo path. The release
+  checklist cites the artifact's run URL.
+- **Audit strictness on RC vs scheduled runs.** RESOLVED → **hard-fail always**. An "unexpected component
+  change" is a hard non-zero exit on every run (scheduled + dispatch); a legitimate corpus change must land
+  via a manifest-update PR to turn the lane green. No RC-only / report-but-pass mode.
