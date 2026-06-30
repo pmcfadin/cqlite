@@ -80,8 +80,12 @@ impl TableStatsRequest {
 
 /// Response payload for [`TABLE_STATS_ACTION`] (`Result.body` JSON).
 ///
-/// All three fields are AUTHORITATIVE per-SSTable sums (see the module docs).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// All three counts are AUTHORITATIVE per-SSTable sums (see the module docs).
+/// The `complete` flag tells the consumer whether those sums cover EVERY SSTable
+/// in the directory: partial sums are NOT authoritative (no-heuristics mandate,
+/// issue #28) and the consumer must fail closed to "no estimate" rather than feed
+/// a biased ratio to the AUTOMATIC pushdown gate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct TableStatsResponse {
     /// Σ live (non-tombstone) rows across the table's SSTables. Upper bound on
@@ -92,6 +96,43 @@ pub struct TableStatsResponse {
     pub partition_count: u64,
     /// Number of SSTables whose `Statistics.db` was parsed into the sums above.
     pub sstable_count: u64,
+    /// `true` iff EVERY `*-Statistics.db` in the directory decoded into the sums
+    /// above. `false` if ANY file failed to read/decode (corrupt, below the
+    /// version floor, or an undecodable descriptor) — the counts are then an
+    /// explicit UNDER-count over only the SSTables that decoded, and the consumer
+    /// MUST treat the estimate as unknown rather than compute a (biased) ratio.
+    ///
+    /// Defaults to `false` on deserialization so a response from an older server
+    /// that predates this field is treated as incomplete (fail closed), never as
+    /// spuriously complete.
+    #[serde(default = "default_incomplete")]
+    pub complete: bool,
+    /// Number of `*-Statistics.db` files that failed to read/decode and so did
+    /// NOT contribute to the sums above (0 iff `complete`). Surfaced for
+    /// diagnostics; the boolean `complete` is the authoritative gate signal.
+    #[serde(default)]
+    pub skipped_sstables: u64,
+}
+
+/// serde default for [`TableStatsResponse::complete`]: an absent flag (older
+/// server) is treated as INCOMPLETE so the consumer fails closed to "no estimate".
+fn default_incomplete() -> bool {
+    false
+}
+
+impl Default for TableStatsResponse {
+    fn default() -> Self {
+        // An empty table (no SSTables at all) is trivially COMPLETE: there is
+        // nothing that could have been skipped. `gather_table_stats` flips
+        // `complete` to false only when it actually skips a file.
+        Self {
+            live_rows: 0,
+            partition_count: 0,
+            sstable_count: 0,
+            complete: true,
+            skipped_sstables: 0,
+        }
+    }
 }
 
 impl TableStatsResponse {
@@ -132,12 +173,16 @@ pub enum StatsError {
 ///
 /// A `Statistics.db` that fails to decode (corrupt, below the version floor, or a
 /// `total_rows` the gated walk could not reach) is handled conservatively: a hard
-/// decode error SKIPS the whole file (it does not contribute and is not counted),
-/// and a reachable-but-`None` `total_rows` contributes 0 rows while still counting
-/// its partitions. Both degrade the estimate toward "fewer rows" rather than
-/// aborting the gate. A missing table directory surfaces as
-/// [`StatsError::Discovery`]; an existing table with no SSTables yields an
-/// all-zero response.
+/// decode error SKIPS the whole file (it does not contribute and is not counted)
+/// AND flips the response's [`TableStatsResponse::complete`] flag to `false` (with
+/// `skipped_sstables` incremented). Partial sums are NOT authoritative (issue #28),
+/// so the consumer must fail closed to "no estimate" rather than feed a biased
+/// ratio to the AUTOMATIC pushdown gate — the flag is how it learns the totals are
+/// incomplete. A reachable-but-`None` `total_rows` is different: that file decoded,
+/// so it contributes 0 rows while still counting its partitions and stays
+/// `complete` (an honest under-count, never a guess). A missing table directory
+/// surfaces as [`StatsError::Discovery`]; an existing table with no SSTables yields
+/// an all-zero `complete=true` response (nothing was skipped).
 ///
 /// This is a SYNCHRONOUS, blocking function: it performs `std::fs::read_dir` /
 /// `std::fs::read` directly. Callers on an async runtime MUST invoke it inside
@@ -178,11 +223,16 @@ pub fn gather_table_stats(dir: &Path) -> Result<TableStatsResponse, StatsError> 
             }
             Err(e) => {
                 // Skip an unreadable/corrupt/below-floor Statistics.db rather than
-                // failing the whole gate. Logged at debug so the cause is recoverable.
+                // failing the whole gate, but mark the totals as INCOMPLETE: partial
+                // sums are not authoritative (issue #28), so the consumer must fail
+                // closed to "no estimate" instead of feeding a biased ratio to the
+                // AUTOMATIC gate. Logged at debug so the cause is recoverable.
+                response.complete = false;
+                response.skipped_sstables = response.skipped_sstables.saturating_add(1);
                 tracing::debug!(
                     path = %path.display(),
                     error = %e,
-                    "table_stats: skipping undecodable Statistics.db"
+                    "table_stats: skipping undecodable Statistics.db (marking incomplete)"
                 );
             }
         }
@@ -225,9 +275,25 @@ mod tests {
             live_rows: 42,
             partition_count: 7,
             sstable_count: 3,
+            complete: false,
+            skipped_sstables: 1,
+            ..Default::default()
         };
         let back = TableStatsResponse::from_bytes(&resp.to_bytes().unwrap()).unwrap();
         assert_eq!(resp, back);
+    }
+
+    #[test]
+    fn response_complete_defaults_false_when_flag_absent() {
+        // A response from an older server that predates the `complete` field must
+        // deserialize as INCOMPLETE (fail closed), never spuriously complete.
+        let resp = TableStatsResponse::from_bytes(
+            br#"{"live_rows":5,"partition_count":2,"sstable_count":1}"#,
+        )
+        .unwrap();
+        assert_eq!(resp.live_rows, 5);
+        assert!(!resp.complete, "absent complete flag must default to false");
+        assert_eq!(resp.skipped_sstables, 0);
     }
 
     #[test]
@@ -263,6 +329,61 @@ mod tests {
         let stats = gather_table_stats(&dir).expect("gather");
 
         assert_eq!(stats.sstable_count, 2, "two SSTables decoded");
+        assert!(stats.complete, "all SSTables decoded → complete");
+        assert_eq!(stats.skipped_sstables, 0);
+    }
+
+    /// A directory containing an UNDECODABLE `Statistics.db` must mark the response
+    /// INCOMPLETE (`complete=false`, `skipped_sstables` incremented) so the consumer
+    /// fails closed to "no estimate" instead of feeding a biased ratio to the gate
+    /// (no-heuristics mandate, issue #28). A sibling fully-decodable directory must
+    /// yield `complete=true`.
+    #[test]
+    fn gather_undecodable_statistics_marks_incomplete() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = temp.path().join("data").join(KS).join(TBL);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Garbage bytes under a *-Statistics.db name: read_table_counts cannot
+        // decode the STATS layout, so read_one_sstable_counts returns Err and the
+        // file is skipped + marks the response incomplete.
+        std::fs::write(
+            dir.join("nb-1-big-Statistics.db"),
+            b"not a real statistics file",
+        )
+        .unwrap();
+
+        let stats = gather_table_stats(&dir).expect("gather");
+
+        assert!(
+            !stats.complete,
+            "an undecodable Statistics.db must mark the response incomplete"
+        );
+        assert_eq!(
+            stats.skipped_sstables, 1,
+            "the corrupt file is counted as skipped"
+        );
+        assert_eq!(
+            stats.sstable_count, 0,
+            "the corrupt file did not contribute"
+        );
+    }
+
+    /// A fully-decodable directory yields `complete=true`. Uses the write-engine
+    /// build path (its StatisticsWriter still emits a decodable STATS component even
+    /// though the histogram is empty), confirming a clean decode is reported complete.
+    #[test]
+    fn gather_fully_decodable_directory_is_complete() {
+        let schema = simple_schema();
+        let (_temp, data_dir, _dir) = build_sstables(
+            &schema,
+            vec![vec![write_row(1, "a", 1, 100), write_row(2, "b", 2, 100)]],
+        );
+        let dir = DirSource::resolve(&data_dir, KS, TBL, None).into_dir();
+
+        let stats = gather_table_stats(&dir).expect("gather");
+
+        assert!(stats.complete, "every Statistics.db decoded → complete");
+        assert_eq!(stats.skipped_sstables, 0);
     }
 
     /// Authoritative decode against REAL Cassandra 5.0 `nb` fixtures (issue #944).
@@ -314,6 +435,8 @@ mod tests {
         assert_eq!(stats.sstable_count, 1, "one SSTable in the fixture");
         assert_eq!(stats.partition_count, 10, "sensor_data has 10 partitions");
         assert_eq!(stats.live_rows, 2000, "sensor_data has 2000 rows (wide)");
+        assert!(stats.complete, "real fixture decoded fully → complete");
+        assert_eq!(stats.skipped_sstables, 0);
     }
 
     #[test]

@@ -19,12 +19,12 @@ class EstimateGroupRatioTest {
     // Wide table: 10 partitions, 2000 rows (mirrors the sensor_data fixture).
     private static final String WIDE_DDL =
             "CREATE TABLE ks.t (pk int, ck int, v int, PRIMARY KEY (pk, ck))";
-    private static final TableStats WIDE_STATS = new TableStats(2000, 10, 1);
+    private static final TableStats WIDE_STATS = new TableStats(2000, 10, 1, true, 0);
 
     // Single-row-partition table: 1000 partitions, 1000 rows (simple_table shape).
     private static final String SIMPLE_DDL =
             "CREATE TABLE ks.t (id int PRIMARY KEY, name text)";
-    private static final TableStats SIMPLE_STATS = new TableStats(1000, 1000, 1);
+    private static final TableStats SIMPLE_STATS = new TableStats(1000, 1000, 1, true, 0);
 
     @Test
     void groupByFullPartitionKeyOnWideTableIsLowRatio() {
@@ -54,7 +54,7 @@ class EstimateGroupRatioTest {
         // push a high-cardinality aggregation the gate exists to decline.)
         String ddl = "CREATE TABLE ks.t (pk int, ck1 int, ck2 int, v int, "
                 + "PRIMARY KEY (pk, ck1, ck2))";
-        TableStats stats = new TableStats(2000, 10, 1);
+        TableStats stats = new TableStats(2000, 10, 1, true, 0);
         OptionalDouble ratio = CqliteFlightMetadata.estimateGroupRatio(
                 ddl, List.of("pk", "ck1"), stats);
         assertTrue(ratio.isEmpty(),
@@ -76,7 +76,7 @@ class EstimateGroupRatioTest {
         // Composite partition key (a, b); GROUP BY a is only a PREFIX → cannot be
         // bounded from partition/row counts → empty → PUSH (safe).
         String ddl = "CREATE TABLE ks.t (a int, b int, v int, PRIMARY KEY ((a, b)))";
-        TableStats stats = new TableStats(500, 500, 1);
+        TableStats stats = new TableStats(500, 500, 1, true, 0);
         OptionalDouble ratio = CqliteFlightMetadata.estimateGroupRatio(
                 ddl, List.of("a"), stats);
         assertTrue(ratio.isEmpty(), "partition-key prefix is unbounded → push");
@@ -122,6 +122,38 @@ class EstimateGroupRatioTest {
     }
 
     @Test
+    void incompleteStatsYieldNoEstimateEvenForBoundedShape() {
+        // GROUP BY pk on the wide table is normally a bounded, low ratio (PUSH).
+        // But when the per-table counts are INCOMPLETE (a node's Statistics.db
+        // failed to decode), the sums are not authoritative — a skipped SSTable
+        // could hold many rows/groups and bias the ratio low. The gate must fail
+        // closed to "no estimate" (empty) regardless of the otherwise-bounded shape.
+        TableStats incomplete = new TableStats(2000, 10, 1, false, 1);
+        OptionalDouble ratio = CqliteFlightMetadata.estimateGroupRatio(
+                WIDE_DDL, List.of("pk"), incomplete);
+        assertTrue(ratio.isEmpty(),
+                "incomplete stats → no estimate (push) even for a bounded GROUP BY shape");
+
+        // And the same shape with COMPLETE stats is the bounded low ratio (control).
+        OptionalDouble complete = CqliteFlightMetadata.estimateGroupRatio(
+                WIDE_DDL, List.of("pk"), WIDE_STATS);
+        assertTrue(complete.isPresent());
+        assertEquals(10.0 / 2000.0, complete.getAsDouble(), 1e-9);
+    }
+
+    @Test
+    void incompleteStatsYieldNoEstimateForFullPrimaryKeyGrouping() {
+        // GROUP BY = full PK on a key-only table normally reaches full row uniqueness
+        // (ratio 1.0 → DECLINE). With incomplete stats the gate must still fail closed
+        // to empty (push-safe default) rather than derive ANY ratio from partial sums.
+        TableStats incomplete = new TableStats(1000, 1000, 1, false, 2);
+        OptionalDouble ratio = CqliteFlightMetadata.estimateGroupRatio(
+                SIMPLE_DDL, List.of("id"), incomplete);
+        assertTrue(ratio.isEmpty(),
+                "incomplete stats → no estimate even when GROUP BY = full primary key");
+    }
+
+    @Test
     void zeroRowsYieldsNoEstimate() {
         OptionalDouble ratio = CqliteFlightMetadata.estimateGroupRatio(
                 WIDE_DDL, List.of("pk"), TableStats.EMPTY);
@@ -152,7 +184,7 @@ class EstimateGroupRatioTest {
         // A GROUP BY on the lower-case unquoted column id is a DIFFERENT column and
         // must NOT be treated as covering the partition key → unbounded → PUSH.
         String ddl = "CREATE TABLE ks.t (\"Id\" int PRIMARY KEY, name text)";
-        TableStats stats = new TableStats(1000, 1000, 1);
+        TableStats stats = new TableStats(1000, 1000, 1, true, 0);
         OptionalDouble lowerCased = CqliteFlightMetadata.estimateGroupRatio(
                 ddl, List.of("id"), stats);
         assertTrue(lowerCased.isEmpty(),

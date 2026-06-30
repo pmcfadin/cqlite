@@ -496,6 +496,14 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
      */
     static java.util.OptionalDouble estimateGroupRatio(
             String ddl, List<String> groupingColumns, TableStats stats) {
+        // Fail closed to "no estimate" when the per-table counts are INCOMPLETE
+        // (some node's Statistics.db failed to decode; issue #944, #28). Partial
+        // sums are not authoritative — a skipped SSTable could hold many rows/groups,
+        // biasing the ratio low and PUSHING a high-cardinality GROUP BY that should
+        // have been declined. Empty here means AUTOMATIC pushes (the safe default).
+        if (!stats.complete()) {
+            return java.util.OptionalDouble.empty();
+        }
         long rows = stats.liveRows();
         long partitions = stats.partitionCount();
         if (rows <= 0 || groupingColumns.isEmpty()) {
@@ -721,8 +729,10 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
      * across the table's SSTables (an upper bound; see {@link TableStats}); we report
      * it as the table's row-count estimate. Column-level stats are left unknown —
      * Cassandra 5.0 stores no reliable per-regular-column NDV, so reporting any would
-     * be a heuristic (#28). A failed/zero fetch yields {@link TableStatistics#empty()}
-     * (unknown), which is always a safe input for the optimizer.
+     * be a heuristic (#28). A failed, zero, or INCOMPLETE fetch (some node's
+     * {@code Statistics.db} failed to decode → {@code !stats.complete()}) yields
+     * {@link TableStatistics#empty()} (unknown), which is always a safe input for
+     * the optimizer — we never report a row count derived from incomplete data.
      *
      * <p>For an <em>aggregated</em> handle the scan's OUTPUT cardinality is the
      * aggregate-result cardinality, NOT the base-table row count (issue #944): a
@@ -748,7 +758,11 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
         } catch (RuntimeException e) {
             return TableStatistics.empty();
         }
-        if (stats.liveRows() <= 0) {
+        // Fail closed to "unknown" when the counts are INCOMPLETE (a node's
+        // Statistics.db failed to decode; issue #944, #28): an under-counted
+        // row total is NOT authoritative, so report no estimate rather than a
+        // biased one. Empty is always a safe optimizer input.
+        if (!stats.complete() || stats.liveRows() <= 0) {
             return TableStatistics.empty();
         }
         return TableStatistics.builder()
