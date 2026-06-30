@@ -922,6 +922,36 @@ mod tests {
         }
     }
 
+    /// #1297: opening an SSTable whose descriptor parses to an unknown
+    /// ABOVE-floor BIG version (`nc`, outside the exact `{na, nb, oa}`
+    /// allowlist) fails at open with `UnsupportedVersion` and does NOT proceed
+    /// on nb-compatible gates. Drives the public `SSTableReader::open` path
+    /// (wiring evidence for the ceiling, not just the gate helper).
+    #[tokio::test]
+    async fn test_open_above_floor_unknown_version_rejected() {
+        use super::super::SSTableReader;
+        use crate::{Config, Error, Platform};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        // `nc` is above the `na` floor but NOT in the supported allowlist.
+        let path = dir.path().join("nc-1-big-Data.db");
+        std::fs::write(&path, b"\x00\x01\x02\x03\x04\x05\x06\x07").expect("write fixture");
+
+        let config = Config::default();
+        let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+
+        let err = SSTableReader::open(&path, &config, platform)
+            .await
+            .expect_err("above-allowlist open must fail, not fall back to nb");
+        match err {
+            Error::UnsupportedVersion { version, .. } => {
+                assert_eq!(version, "nc", "error names the offending version");
+            }
+            other => panic!("expected UnsupportedVersion at open, got {:?}", other),
+        }
+    }
+
     /// R2: a structurally-unparseable descriptor (not a valid version string at
     /// all) preserves the existing fallback behaviour — open may fail for other
     /// reasons (e.g. header parse) but it must NOT raise `UnsupportedVersion`.
