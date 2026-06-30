@@ -9,11 +9,29 @@ name: Publish Trino Connector
 # are not addressable in a job-level `if:`, so a guard step checks them and
 # exposes a boolean output that the publish step keys off; when absent the job
 # logs a notice and succeeds without publishing.
+#
+# A `workflow_dispatch` trigger allows exercising the publish on demand. Manual
+# runs have no tag to derive the version from, so the `version` input supplies
+# it. By default `dry_run` is true: the connector is published to the local
+# Maven repo (publishToMavenLocal) — no Central upload, no signing/Central
+# secrets needed — so the pipeline can be validated without cutting a release.
+# Set `dry_run=false` to perform the real Central publish (still gated on the
+# secrets being present, exactly like the tag path).
 
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (no leading v), e.g. 0.13.0'
+        type: string
+        required: true
+      dry_run:
+        description: 'Dry run: publishToMavenLocal only (no Central upload, no secrets needed)'
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -33,9 +51,18 @@ jobs:
           cache: gradle
           cache-dependency-path: trino-connector/*.gradle.kts
 
-      - name: Derive version from tag
+      # Tag runs derive the version from GITHUB_REF_NAME (v0.13.0 -> 0.13.0);
+      # manual workflow_dispatch runs have no tag, so use the `version` input.
+      - name: Resolve version
         id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${INPUT_VERSION#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
 
       # Secrets cannot be referenced in a job/step-level `if:`. Read them here and
       # publish a boolean output the publish step gates on.
@@ -54,8 +81,16 @@ jobs:
             echo "should_publish=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Dry run (manual workflow_dispatch with dry_run=true): publish only to the
+      # local Maven repo. No Central upload and no signing/Central secrets needed,
+      # so this path is independent of the guard step above.
+      - name: Publish to Maven local (dry run)
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        working-directory: trino-connector
+        run: ./gradlew --no-daemon publishToMavenLocal -Pversion=${{ steps.version.outputs.version }}
+
       - name: Publish to Maven Central
-        if: steps.guard.outputs.should_publish == 'true'
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) && steps.guard.outputs.should_publish == 'true' }}
         working-directory: trino-connector
         env:
           # vanniktech reads Central credentials + the in-memory GPG key from
@@ -67,5 +102,5 @@ jobs:
         run: ./gradlew --no-daemon publishToMavenCentral -Pversion=${{ steps.version.outputs.version }}
 
       - name: Skip notice (secrets absent)
-        if: steps.guard.outputs.should_publish != 'true'
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) && steps.guard.outputs.should_publish != 'true' }}
         run: echo "::notice::Maven Central secrets absent — skipping connector publish"
