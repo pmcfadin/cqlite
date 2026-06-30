@@ -26,11 +26,6 @@ mod status_metrics;
 
 use cli_types::{AdminCommands, Cli, Commands, ExportSstableArgs, MaintenanceArgs, OutputMode};
 use commands::info::execute_info_command;
-// mod data_parser;
-// mod formatter; // New cqlsh-compatible formatter
-// mod interactive;
-// mod pagination;
-// mod query_executor;
 mod repl; // Core REPL engine
 mod tui; // TUI mode implementation (ratatui)
 
