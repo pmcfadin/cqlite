@@ -128,10 +128,14 @@ jobs:
           find test-data/datasets \( -name '*.jsonl' -o -name '*.db.txt' \) -type f -print0 \
             | sort -z | xargs -0r sha256sum > "$ARTIFACT_DIR/actual.sha256" || true
 
-      # Build the provenance record from the ACTUAL generation environment: the
-      # image tag is the single source of truth in regenerate-datasets.sh, and the
-      # version is derived from it. The audit fails if the recorded version/ref/sha
-      # is not declared by the manifest (a silent image bump is caught).
+      # Build the provenance record. version/ref/sha come from the manifest's
+      # `cassandra_source` block, but `docker_image` MUST be the ACTUAL image used
+      # by regenerate-datasets.sh (grepped from its `CASSANDRA_IMAGE=`), sourced
+      # INDEPENDENTLY of the manifest. That independence is what gives the audit
+      # teeth: validating the manifest-derived version/ref/sha against the manifest
+      # is tautological, so `check_provenance` parses the version out of
+      # `docker_image` and fails when it diverges from the pin — catching a silent
+      # image bump (e.g. cassandra:5.0.2 -> 5.0.3) not mirrored into the manifest.
       - name: Write provenance record
         run: |
           set -euo pipefail

@@ -314,6 +314,68 @@ fn provenance_mismatch_fails_on_undeclared_version() {
     );
 }
 
+/// Build a provenance record the way the CI heredoc does: version/ref/sha are
+/// all derived from the manifest (`cassandra_source.ref`/`.sha`, version from the
+/// ref), and ONLY `docker_image` is sourced independently (grepped from
+/// `regenerate-datasets.sh`'s `CASSANDRA_IMAGE=`). This mirrors the real lane so
+/// the docker_image check is exercised on the path that actually runs in CI.
+fn manifest_derived_provenance(docker_image: &str) -> Provenance {
+    // Manifest pins ref `cassandra-5.0.2` + GOOD_SHA; version is `ref` minus the
+    // `cassandra-` prefix, exactly like the workflow's Python derivation.
+    Provenance {
+        cassandra_version: "5.0.2".to_string(),
+        cassandra_ref: "cassandra-5.0.2".to_string(),
+        cassandra_git_sha: GOOD_SHA.to_string(),
+        docker_image: docker_image.to_string(),
+        generator_commands: vec!["bash test-data/scripts/regenerate-datasets.sh".to_string()],
+        dataset_asset_name: "dataset-asset.tar.gz".to_string(),
+        dataset_asset_sha256: "deadbeef".to_string(),
+    }
+}
+
+/// Regression for issue #1026 (roborev MEDIUM): in the lane, cassandra_version/
+/// ref/sha are all parsed FROM the manifest, so validating them against the
+/// manifest is tautological and can never fail. The one independently-sourced
+/// field — `docker_image` (from `regenerate-datasets.sh`'s `CASSANDRA_IMAGE=`) —
+/// is what catches a silent image bump. Bumping the image to `5.0.3` WITHOUT
+/// updating the manifest pin (still `cassandra-5.0.2`) MUST now hard-fail with a
+/// ProvenanceMismatch that names the image; before the fix this passed clean.
+#[test]
+fn provenance_mismatch_fails_on_divergent_docker_image() {
+    let prov = manifest_derived_provenance("cassandra:5.0.3");
+    let findings = corpus_audit::provenance::check_provenance(&prov, &manifest());
+    assert_eq!(
+        findings.len(),
+        1,
+        "only the divergent docker_image should fire, got: {findings:?}"
+    );
+    assert_eq!(findings[0].kind, FindingKind::ProvenanceMismatch);
+    assert!(
+        findings[0].subject.contains("cassandra:5.0.3"),
+        "finding must name the offending image, got: {findings:?}"
+    );
+}
+
+/// The matching-image clean case on the same manifest-derived CI path: when the
+/// image tag agrees with the manifest pin, no provenance finding fires.
+#[test]
+fn provenance_clean_on_matching_docker_image() {
+    let prov = manifest_derived_provenance("cassandra:5.0.2");
+    let findings = corpus_audit::provenance::check_provenance(&prov, &manifest());
+    assert!(findings.is_empty(), "got: {findings:?}");
+}
+
+/// An unverifiable image tag (`latest`, or any non-semver) is itself a mismatch:
+/// it cannot be checked against the manifest pin, so it must not be trusted.
+#[test]
+fn provenance_mismatch_fails_on_unpinned_latest_image() {
+    let prov = manifest_derived_provenance("cassandra:latest");
+    let findings = corpus_audit::provenance::check_provenance(&prov, &manifest());
+    assert_eq!(findings.len(), 1, "got: {findings:?}");
+    assert_eq!(findings[0].kind, FindingKind::ProvenanceMismatch);
+    assert!(findings[0].subject.contains("cassandra:latest"));
+}
+
 #[test]
 fn corruption_coverage_gap_fails_and_names_missing_component() {
     let mut components = all_corruption_components();
