@@ -53,6 +53,10 @@ use std::path::{Path, PathBuf};
 
 use cqlite_core::storage::sstable::compression_info::CompressionInfo;
 
+#[path = "parity_support/mod.rs"]
+mod parity_support;
+use parity_support::parity_datasets_required;
+
 /// Resolve the committed datasets root (env override first, else workspace tree).
 fn datasets_sstables_root() -> PathBuf {
     let root = if let Ok(root) = std::env::var("CQLITE_DATASETS_ROOT") {
@@ -480,42 +484,77 @@ fn compression_info_strict_metadata_and_chunk_parity() {
         "CompressionInfo.db binaries are present but zero fixtures were compared — strict \
          compression parity proved nothing"
     );
-    // Metadata parity for LZ4 is proven by the comparison above; chunk-CRC parity
-    // additionally requires Data.db (asserted below only when Data.db present).
-    assert!(
-        codec_present_lz4,
-        "no LZ4Compressor CompressionInfo.db was compared despite present binaries — LZ4 metadata \
-         parity unproven (the corpus contains LZ4 fixtures)"
-    );
-    assert!(
-        codec_present_snappy,
-        "no SnappyCompressor CompressionInfo.db was compared despite present binaries — Snappy \
-         metadata parity unproven (the corpus contains Snappy fixtures)"
-    );
-    assert!(
-        saw_multi_chunk,
-        "no multi-chunk CompressionInfo.db was compared — final partial-chunk / chunk-boundary \
-         handling unproven (the corpus contains multi-chunk fixtures)"
-    );
+    // Full-matrix coverage (every released codec + a multi-chunk fixture) is a
+    // property of the COMPLETE fetched corpus, not of any single git-committed
+    // fixture. A deliberately-narrow committed fixture (e.g. the issue #1309
+    // wide_partition LZ4 reference binaries) makes `any_ci_present` true without
+    // bringing Snappy or multi-chunk coverage along. Mirror the
+    // `sstable_parity_index_db_test.rs` convention: enforce the full matrix only
+    // under the CI require-datasets contract (where the full datasets-v3 corpus
+    // IS fetched, so LZ4 + Snappy + multi-chunk fixtures are all present), and
+    // skip the missing-coverage path gracefully in a clean/local checkout.
+    if parity_datasets_required() {
+        // Metadata parity for LZ4 is proven by the comparison above; chunk-CRC
+        // parity additionally requires Data.db (asserted below only when present).
+        assert!(
+            codec_present_lz4,
+            "CQLITE_PARITY_REQUIRE_DATASETS=1 but no LZ4Compressor CompressionInfo.db was \
+             compared despite present binaries — LZ4 metadata parity unproven (the corpus \
+             contains LZ4 fixtures)"
+        );
+        assert!(
+            codec_present_snappy,
+            "CQLITE_PARITY_REQUIRE_DATASETS=1 but no SnappyCompressor CompressionInfo.db was \
+             compared despite present binaries — Snappy metadata parity unproven (the corpus \
+             contains Snappy fixtures)"
+        );
+        assert!(
+            saw_multi_chunk,
+            "CQLITE_PARITY_REQUIRE_DATASETS=1 but no multi-chunk CompressionInfo.db was compared \
+             — final partial-chunk / chunk-boundary handling unproven (the corpus contains \
+             multi-chunk fixtures)"
+        );
+    } else if !(codec_present_lz4 && codec_present_snappy && saw_multi_chunk) {
+        eprintln!(
+            "compression_info_strict_metadata_and_chunk_parity: note — full codec matrix not \
+             present in this checkout (lz4={codec_present_lz4} snappy={codec_present_snappy} \
+             multi_chunk={saw_multi_chunk}); proved parity for the committed fixtures only. \
+             Fetch the full dataset (bash test-data/scripts/fetch-datasets.sh) or set \
+             CQLITE_PARITY_REQUIRE_DATASETS=1 to enforce LZ4 + Snappy + multi-chunk coverage."
+        );
+    }
 
-    // When Data.db is also present, the inline-CRC chunk gate must actually have run
-    // for both real codecs (proves the per-chunk CRC trailer parity, not just metadata).
+    // When Data.db is also present the inline-CRC chunk gate must have validated
+    // something. The full per-codec matrix (LZ4 + Snappy chunks CRC-validated) is,
+    // like the metadata matrix above, a property of the COMPLETE fetched corpus —
+    // a narrow committed Data.db fixture (issue #1309 wide_partition LZ4) makes
+    // `any_data_present` true without bringing Snappy Data.db along. Enforce the
+    // per-codec matrix only under the CI require-datasets contract; otherwise note.
     if any_data_present {
         assert!(
             crc_validated_chunks > 0,
             "Data.db binaries are present but zero compressed chunks were CRC-validated — \
              inline-CRC chunk parity proved nothing"
         );
-        assert!(
-            saw_lz4,
-            "no LZ4 Data.db chunks were CRC-validated despite present Data.db — LZ4 inline-CRC \
-             parity unproven"
-        );
-        assert!(
-            saw_snappy,
-            "no Snappy Data.db chunks were CRC-validated despite present Data.db — Snappy \
-             inline-CRC parity unproven"
-        );
+        if parity_datasets_required() {
+            assert!(
+                saw_lz4,
+                "CQLITE_PARITY_REQUIRE_DATASETS=1 but no LZ4 Data.db chunks were CRC-validated \
+                 despite present Data.db — LZ4 inline-CRC parity unproven"
+            );
+            assert!(
+                saw_snappy,
+                "CQLITE_PARITY_REQUIRE_DATASETS=1 but no Snappy Data.db chunks were CRC-validated \
+                 despite present Data.db — Snappy inline-CRC parity unproven"
+            );
+        } else if !(saw_lz4 && saw_snappy) {
+            eprintln!(
+                "compression_info_strict_metadata_and_chunk_parity: note — full Data.db codec \
+                 matrix not present in this checkout (lz4_chunks={saw_lz4} \
+                 snappy_chunks={saw_snappy}); CRC-validated the committed fixtures only. Fetch \
+                 the full dataset or set CQLITE_PARITY_REQUIRE_DATASETS=1 to enforce both codecs."
+            );
+        }
     }
 
     // The committed corpus carries fixtures with compression options on some tables;
