@@ -13,6 +13,7 @@
 //! types whose comparator is unsigned-lexicographic.
 
 use super::*;
+use num_bigint::BigInt;
 use std::cmp::Ordering;
 
 /// Total-order comparator for two SET elements / MAP keys, matching the
@@ -29,9 +30,11 @@ use std::cmp::Ordering;
 ///   * `TimestampType` / `TimeType` — extend/share `LongType`'s signed long
 ///     compare.
 ///   * `FloatType` / `DoubleType` — `Float.compare` / `Double.compare`: a total
-///     order where `-0.0 < +0.0` and `NaN` sorts last; the sign bit makes raw
-///     big-endian byte order wrong for negatives. Matched here with Rust's
-///     `f32/f64::total_cmp`, which is exactly `Float/Double.compare`.
+///     order where `-0.0 < +0.0` and EVERY `NaN` sorts last (greater than any
+///     non-NaN); the sign bit makes raw big-endian byte order wrong for
+///     negatives. Note Rust's `f32/f64::total_cmp` is NOT this order — it sorts
+///     negative NaNs BEFORE numeric values — so we implement Java's comparator
+///     directly (`compare_f32_java`/`compare_f64_java`).
 ///   * `IntegerType` (varint) — signed two's-complement big-integer compare over
 ///     variable-length bodies.
 ///   * `DecimalType` — numeric `BigDecimal` order (scale-aware), not byte order.
@@ -55,8 +58,8 @@ pub(crate) fn compare_collection_elements(a: &Value, b: &Value) -> Ordering {
         (Value::Timestamp(x), Value::Timestamp(y)) => x.cmp(y),
         (Value::Time(x), Value::Time(y)) => x.cmp(y),
         // Floating point — Float.compare / Double.compare total order.
-        (Value::Float32(x), Value::Float32(y)) => x.total_cmp(y),
-        (Value::Float(x), Value::Float(y)) => x.total_cmp(y),
+        (Value::Float32(x), Value::Float32(y)) => compare_f32_java(*x, *y),
+        (Value::Float(x), Value::Float(y)) => compare_f64_java(*x, *y),
         // Varint — signed big-integer compare of two's-complement bodies.
         (Value::Varint(x), Value::Varint(y)) => compare_signed_varint(x, y),
         // Decimal — scale-aware numeric compare.
@@ -124,58 +127,69 @@ fn compare_signed_varint(a: &[u8], b: &[u8]) -> Ordering {
     Ordering::Equal
 }
 
+/// Java `Float.compare` total order for two `f32`, matching Cassandra
+/// `FloatType.compare` (issue #1275). Unlike Rust's `f32::total_cmp`, Java treats
+/// EVERY NaN (any payload/sign) as greater than every non-NaN value (NaN sorts
+/// last) and does NOT distinguish NaN bit-patterns; it also orders `-0.0 < +0.0`.
+fn compare_f32_java(x: f32, y: f32) -> Ordering {
+    match (x.is_nan(), y.is_nan()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        // Neither is NaN: total_cmp gives the numeric order with -0.0 < +0.0.
+        (false, false) => x.total_cmp(&y),
+    }
+}
+
+/// Java `Double.compare` total order for two `f64`, matching Cassandra
+/// `DoubleType.compare` (issue #1275). See [`compare_f32_java`] for the NaN /
+/// signed-zero rules.
+fn compare_f64_java(x: f64, y: f64) -> Ordering {
+    match (x.is_nan(), y.is_nan()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => x.total_cmp(&y),
+    }
+}
+
 /// Scale-aware numeric comparison of two `decimal` values, matching Cassandra
-/// `DecimalType.compare` (BigDecimal numeric order) (issue #1275). The unscaled
-/// part is a two's-complement varint; the value is `unscaled * 10^-scale`. We
-/// align to the common (max) scale: multiply each unscaled integer by
-/// `10^(max_scale - own_scale)` and compare the resulting signed big integers.
+/// `DecimalType.compare` (`BigDecimal.compareTo`, arbitrary precision) (issue
+/// #1275). The unscaled part is a two's-complement varint; the value is
+/// `unscaled * 10^-scale`. We align to the common (max) scale: multiply each
+/// unscaled integer by `10^(max_scale - own_scale)` and compare the resulting
+/// signed big integers.
+///
+/// Uses `num_bigint::BigInt` (already a cqlite-core dependency, used by
+/// `value_fmt` for varint/decimal formatting) so unscaled magnitudes wider than
+/// 128 bits and large scale differences compare exactly, with no saturation.
 fn compare_decimal(scale_a: i32, unscaled_a: &[u8], scale_b: i32, unscaled_b: &[u8]) -> Ordering {
     let mut big_a = varint_to_bigint(unscaled_a);
     let mut big_b = varint_to_bigint(unscaled_b);
     let max_scale = scale_a.max(scale_b);
     // value = unscaled * 10^-scale; to align scales multiply by 10^(max-own).
     if let Some(p) = max_scale.checked_sub(scale_a).filter(|p| *p > 0) {
-        big_a = mul_pow10(big_a, p as u32);
+        big_a *= pow10(p as u32);
     }
     if let Some(p) = max_scale.checked_sub(scale_b).filter(|p| *p > 0) {
-        big_b = mul_pow10(big_b, p as u32);
+        big_b *= pow10(p as u32);
     }
     big_a.cmp(&big_b)
 }
 
-/// Decode a two's-complement big-endian `varint` body into a signed big integer.
-/// Bodies in this codebase are bounded (collection elements), so an `i128` is
-/// sufficient for realistic decimal/varint magnitudes; oversized bodies saturate
-/// toward the correct sign so the comparison stays total and never panics.
-fn varint_to_bigint(bytes: &[u8]) -> i128 {
-    let Some(&first) = bytes.first() else {
-        return 0;
-    };
-    let negative = first & 0x80 != 0;
-    let mut acc: i128 = if negative { -1 } else { 0 };
-    for &byte in bytes {
-        match acc
-            .checked_shl(8)
-            .and_then(|shifted| shifted.checked_add(byte as i128))
-        {
-            Some(next) => acc = next,
-            None => return if negative { i128::MIN } else { i128::MAX },
-        }
+/// Decode a two's-complement big-endian `varint` body into an arbitrary-precision
+/// signed big integer (matches the `from_signed_bytes_be` decode used elsewhere in
+/// the crate). An empty body is `0`.
+fn varint_to_bigint(bytes: &[u8]) -> BigInt {
+    if bytes.is_empty() {
+        return BigInt::ZERO;
     }
-    acc
+    BigInt::from_signed_bytes_be(bytes)
 }
 
-/// Multiply a signed big integer by `10^exp`, saturating toward the correct sign
-/// on overflow (keeps the comparator total and panic-free for extreme inputs).
-fn mul_pow10(value: i128, exp: u32) -> i128 {
-    let mut acc = value;
-    for _ in 0..exp {
-        match acc.checked_mul(10) {
-            Some(next) => acc = next,
-            None => return if value < 0 { i128::MIN } else { i128::MAX },
-        }
-    }
-    acc
+/// Arbitrary-precision `10^exp` for decimal scale alignment.
+fn pow10(exp: u32) -> BigInt {
+    BigInt::from(10).pow(exp)
 }
 
 #[cfg(test)]
@@ -287,6 +301,102 @@ mod tests {
                     unscaled: vec![0x02]
                 },
             ]
+        );
+    }
+
+    /// DoubleType: Java `Double.compare` rules that Rust's `total_cmp` gets wrong.
+    /// A NEGATIVE NaN must sort LAST (greater than every numeric value), and
+    /// `-0.0 < +0.0`. Under `total_cmp` a negative NaN would sort FIRST, so this
+    /// case fails before the fix and passes after.
+    #[test]
+    fn double_nan_sorts_last_and_signed_zero() {
+        let neg_nan = f64::from_bits(0xFFF8_0000_0000_0000); // a NEGATIVE quiet NaN
+        assert!(neg_nan.is_nan() && neg_nan.is_sign_negative());
+        let mut v = vec![
+            Value::Float(neg_nan),
+            Value::Float(2.0),
+            Value::Float(0.0),  // +0.0
+            Value::Float(-0.0), // -0.0
+            Value::Float(-3.0),
+        ];
+        v.sort_by(compare_collection_elements);
+        // -3.0 < -0.0 < +0.0 < 2.0 < NaN(last)
+        assert_eq!(v[0], Value::Float(-3.0));
+        assert!(matches!(v[1], Value::Float(f) if f == 0.0 && f.is_sign_negative()));
+        assert!(matches!(v[2], Value::Float(f) if f == 0.0 && f.is_sign_positive()));
+        assert_eq!(v[3], Value::Float(2.0));
+        assert!(matches!(v[4], Value::Float(f) if f.is_nan()));
+    }
+
+    /// FloatType: same Java NaN-last / signed-zero rules for `f32`.
+    #[test]
+    fn float32_nan_sorts_last_and_signed_zero() {
+        let neg_nan = f32::from_bits(0xFFC0_0000); // a NEGATIVE quiet NaN
+        assert!(neg_nan.is_nan() && neg_nan.is_sign_negative());
+        let mut v = vec![
+            Value::Float32(neg_nan),
+            Value::Float32(1.0),
+            Value::Float32(0.0),
+            Value::Float32(-0.0),
+        ];
+        v.sort_by(compare_collection_elements);
+        assert!(matches!(v[0], Value::Float32(f) if f == 0.0 && f.is_sign_negative()));
+        assert!(matches!(v[1], Value::Float32(f) if f == 0.0 && f.is_sign_positive()));
+        assert_eq!(v[2], Value::Float32(1.0));
+        assert!(matches!(v[3], Value::Float32(f) if f.is_nan()));
+    }
+
+    /// DecimalType: an unscaled value WIDER than 128 bits must compare exactly.
+    /// `2^136` differs from `16` only in bits ABOVE 128, so the old i128 decode
+    /// truncated `2^136` to `0` and reported `cmp(16, 2^136) = Greater` — the
+    /// REVERSE of the true order. Arbitrary-precision `BigInt` orders it `Less`.
+    /// Both share scale 0, so order is purely the unscaled big integers.
+    #[test]
+    fn decimals_with_unscaled_wider_than_128_bits() {
+        let big = BigInt::from(2).pow(136).to_signed_bytes_be();
+        // Sanity: body exceeds 16 bytes (128 bits), so i128 cannot hold it.
+        assert!(big.len() > 16);
+
+        let smaller = Value::Decimal {
+            scale: 0,
+            unscaled: BigInt::from(16).to_signed_bytes_be(),
+        };
+        let larger = Value::Decimal {
+            scale: 0,
+            unscaled: big,
+        };
+        // True order: 16 < 2^136 (old i128 truncation reported Greater here).
+        assert_eq!(
+            compare_collection_elements(&smaller, &larger),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_collection_elements(&larger, &smaller),
+            Ordering::Greater
+        );
+
+        let mut v = vec![larger.clone(), smaller.clone()];
+        v.sort_by(compare_collection_elements);
+        assert_eq!(v, vec![smaller, larger]);
+    }
+
+    /// DecimalType: a huge scale difference (well beyond what 10^p fits in i128)
+    /// must still align exactly. `1 * 10^0` vs `1 * 10^-40` → the first is far
+    /// larger; i128 `mul_pow10` would saturate the alignment and could tie.
+    #[test]
+    fn decimals_with_large_scale_difference() {
+        let whole = Value::Decimal {
+            scale: 0,
+            unscaled: vec![0x01], // 1
+        };
+        let tiny = Value::Decimal {
+            scale: 40,
+            unscaled: vec![0x01], // 1 * 10^-40
+        };
+        assert_eq!(compare_collection_elements(&tiny, &whole), Ordering::Less);
+        assert_eq!(
+            compare_collection_elements(&whole, &tiny),
+            Ordering::Greater
         );
     }
 
