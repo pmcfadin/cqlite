@@ -251,6 +251,148 @@ fn test_frozen_collection_not_complex() {
 }
 
 #[test]
+fn test_frozen_set_sorted_by_serialized_element_bytes() {
+    // Issue #1254: Cassandra SetType is a sorted collection. A frozen<set<int>>
+    // written with REVERSED elements must serialize in unsigned serialized-byte
+    // order. serialize_value is the exact path a frozen collection cell takes
+    // (cells.rs -> serialize_value). Assert the FULL serialized blob, not a count.
+    let value = Value::Frozen(Box::new(Value::Set(vec![
+        Value::Integer(3),
+        Value::Integer(2),
+        Value::Integer(1),
+    ])));
+
+    let bytes = serialize_value(&value).unwrap();
+
+    // Wire format: [count i32][len i32][value]... — int values are 4 big-endian bytes.
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&3i32.to_be_bytes()); // count
+    for n in [1i32, 2, 3] {
+        // sorted ascending
+        expected.extend_from_slice(&4i32.to_be_bytes());
+        expected.extend_from_slice(&n.to_be_bytes());
+    }
+    assert_eq!(
+        bytes, expected,
+        "frozen<set<int>> must serialize elements in sorted-byte order"
+    );
+}
+
+#[test]
+fn test_frozen_map_sorted_by_serialized_key_bytes() {
+    // Issue #1254: Cassandra MapType is a sorted collection. A frozen<map<text,int>>
+    // written with REVERSED keys must serialize entries in unsigned serialized
+    // key-byte order. Assert the FULL serialized blob.
+    let value = Value::Frozen(Box::new(Value::Map(vec![
+        (Value::Text("c".to_string()), Value::Integer(30)),
+        (Value::Text("b".to_string()), Value::Integer(20)),
+        (Value::Text("a".to_string()), Value::Integer(10)),
+    ])));
+
+    let bytes = serialize_value(&value).unwrap();
+
+    // Wire format: [count i32]([klen i32][key][vlen i32][val])...
+    // Text key bytes are raw UTF-8; int values are 4 big-endian bytes.
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&3i32.to_be_bytes());
+    for (k, v) in [("a", 10i32), ("b", 20), ("c", 30)] {
+        // sorted ascending by key
+        let kb = k.as_bytes();
+        expected.extend_from_slice(&(kb.len() as i32).to_be_bytes());
+        expected.extend_from_slice(kb);
+        expected.extend_from_slice(&4i32.to_be_bytes());
+        expected.extend_from_slice(&v.to_be_bytes());
+    }
+    assert_eq!(
+        bytes, expected,
+        "frozen<map<text,int>> must serialize entries in sorted key-byte order"
+    );
+}
+
+#[test]
+fn test_frozen_map_row_emits_sorted_bytes_end_to_end() {
+    // Issue #1254 AC#3: byte-for-byte check that a full written row for a
+    // multi-entry non-UDT frozen<map<text,int>> contains the map blob in sorted
+    // key order — the same bytes Cassandra's MapType produces — when fed reversed.
+    let schema = TableSchema {
+        keyspace: "test_ks".to_string(),
+        table: "test_table".to_string(),
+        partition_keys: vec![KeyColumn {
+            name: "id".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+        }],
+        clustering_keys: vec![],
+        columns: vec![Column {
+            name: "fm".to_string(),
+            data_type: "frozen<map<text, int>>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        }],
+        comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
+    };
+
+    let stats = create_test_stats();
+    let mut writer = DataWriter::new(stats);
+
+    let table_id = TableId::new("test_ks", "test_table");
+    let pk = PartitionKey::single("id", Value::Integer(1));
+    let mutation = Mutation::new(
+        table_id,
+        pk,
+        None,
+        vec![CellOperation::Write {
+            column: "fm".to_string(),
+            value: Value::Frozen(Box::new(Value::Map(vec![
+                (Value::Text("c".to_string()), Value::Integer(30)),
+                (Value::Text("b".to_string()), Value::Integer(20)),
+                (Value::Text("a".to_string()), Value::Integer(10)),
+            ]))),
+        }],
+        1001000,
+        None,
+    );
+
+    writer.write_row(&mutation, &schema).unwrap();
+    let bytes = writer.finish().unwrap();
+
+    // The exact frozen-map blob the cell must carry (sorted a,b,c).
+    let mut sorted_blob = Vec::new();
+    sorted_blob.extend_from_slice(&3i32.to_be_bytes());
+    for (k, v) in [("a", 10i32), ("b", 20), ("c", 30)] {
+        let kb = k.as_bytes();
+        sorted_blob.extend_from_slice(&(kb.len() as i32).to_be_bytes());
+        sorted_blob.extend_from_slice(kb);
+        sorted_blob.extend_from_slice(&4i32.to_be_bytes());
+        sorted_blob.extend_from_slice(&v.to_be_bytes());
+    }
+    let reversed_blob = {
+        let mut b = Vec::new();
+        b.extend_from_slice(&3i32.to_be_bytes());
+        for (k, v) in [("c", 30i32), ("b", 20), ("a", 10)] {
+            let kb = k.as_bytes();
+            b.extend_from_slice(&(kb.len() as i32).to_be_bytes());
+            b.extend_from_slice(kb);
+            b.extend_from_slice(&4i32.to_be_bytes());
+            b.extend_from_slice(&v.to_be_bytes());
+        }
+        b
+    };
+
+    let contains = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).any(|w| w == needle);
+    assert!(
+        contains(&bytes, &sorted_blob),
+        "written row must contain the frozen map in sorted key-byte order"
+    );
+    assert!(
+        !contains(&bytes, &reversed_blob),
+        "written row must NOT contain the frozen map in input (reversed) order"
+    );
+}
+
+#[test]
 fn test_mixed_simple_and_complex_columns() {
     let schema = TableSchema {
         keyspace: "test_ks".to_string(),
