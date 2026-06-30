@@ -115,8 +115,10 @@ pub fn component_identity(path: &str) -> String {
     }
 }
 
-/// Split a `/`-separated path into `(parent, basename)`.
-fn split_path(p: &str) -> (&str, &str) {
+/// Split a `/`-separated path into `(parent, basename)`. The parent is `""` for a
+/// top-level path. Shared with [`super`]'s component-change audit so the
+/// parent-of-a-path rule lives in exactly one place (issue #1026).
+pub(crate) fn split_path(p: &str) -> (&str, &str) {
     match p.rfind('/') {
         Some(i) => (&p[..i], &p[i + 1..]),
         None => ("", p),

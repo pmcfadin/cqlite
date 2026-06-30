@@ -230,7 +230,7 @@ pub fn check_component_changes(
     // Disappeared / checksum-changed, by identity.
     for (path, expected_sha) in &expected.components {
         let identity = refs::component_identity(path);
-        expected_tables.insert(parent_dir(&identity).to_string());
+        expected_tables.insert(refs::split_path(&identity).0.to_string());
         expected_identities.insert(identity.clone());
         match actual_by_identity.get(&identity) {
             Some((actual_sha, _)) if actual_sha == expected_sha => {}
@@ -253,7 +253,7 @@ pub fn check_component_changes(
         if expected_identities.contains(identity) {
             continue;
         }
-        if expected_tables.contains(parent_dir(identity)) {
+        if expected_tables.contains(refs::split_path(identity).0) {
             out.push(AuditFinding::new(
                 FindingKind::UnexpectedComponentChange,
                 path.clone(),
@@ -280,12 +280,4 @@ pub fn check_corruption_coverage(produced: &BTreeSet<String>) -> Vec<AuditFindin
         }
     }
     out
-}
-
-/// Parent directory of a `/`-separated repo-relative path (`""` if top-level).
-fn parent_dir(path: &str) -> &str {
-    match path.rfind('/') {
-        Some(i) => &path[..i],
-        None => "",
-    }
 }
