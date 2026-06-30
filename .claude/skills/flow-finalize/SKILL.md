@@ -1,6 +1,6 @@
 ---
 name: flow-finalize
-description: Finalize a merged issue — archive its OpenSpec change (sync delta specs into openspec/specs/), remove the worktree + branch, and close the issue with a traceable comment. Fifth stage of the CQLite delivery pipeline. Only after the owner has merged (or merge-on-green under explicit pre-authorization). Use when the owner says "finalize #N" or after a merge.
+description: Finalize a merged issue — archive its OpenSpec change (sync delta specs into openspec/specs/), remove the worktree + branch, and close the issue with a traceable comment. Fifth stage of the CQLite delivery pipeline. Runs after the PR is merged — workers merge autonomously on green (gate PASS + C PASS + roborev clean), so finalize normally follows the worker's own merge. Use right after a merge (or when the owner says "finalize #N").
 ---
 
 # flow-finalize — archive, clean up, close
@@ -16,13 +16,20 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    # state MUST be MERGED; record headRefName as <merged-branch> for step 6.
    ```
    If not merged, stop — finalize only runs post-merge.
-2. **Update the root checkout's main.** Do NOT `git switch main` from a worktree — `main` is checked out
-   in the repo root, so the switch is rejected. Operate on the root explicitly:
+2. **Update the root checkout's main — but FIRST guard against a commandeered root.** A Codex/other
+   session may have switched the shared root checkout onto its own branch. Do NOT `git switch main` /
+   `git reset` it back (that yanks it from whoever owns it), and NEVER commit to it while it is off-main:
    ```bash
-   git -C <repo-root> fetch origin main -q
-   git -C <repo-root> merge --ff-only origin/main   # only if the root is on main; else just the fetch
+   repo_root=~/projects/cqlite
+   root_branch=$(git -C "$repo_root" rev-parse --abbrev-ref HEAD)
+   git -C "$repo_root" fetch origin main -q
+   if [ "$root_branch" = "main" ]; then
+     git -C "$repo_root" merge --ff-only origin/main
+   else
+     echo "⚠️ root checkout is on $root_branch, not main — will stamp main-only artifacts via a throwaway worktree (step 4), NOT the root."
+   fi
    ```
-   (Archiving + cleanup below run from the worktree / repo root as noted; they don't require local main.)
+   (Archiving + cleanup below run from the worktree; they don't require local main.)
 3. **Archive the OpenSpec change** (design-driven): `openspec archive <slug> --yes` (use `--skip-specs`
    only for a doc/infra change with no capability delta). This moves the change to
    `openspec/changes/archive/` and syncs its delta spec into `openspec/specs/<capability>/spec.md`.
@@ -38,13 +45,23 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
      --gate pass --gate-runs <runs through the first PASS; don't re-run after a pass> \
      --claim-collisions <rejected claim pushes> --rebase-events <rebases/conflict resolutions> \
      --roborev-findings <roborev findings raised> --rework <re-open / re-review rounds>
-   git -C <repo-root> add docs/reports/delivery-telemetry.jsonl
-   git -C <repo-root> commit -m "telemetry(#<N>): stamp delivery ledger" && git -C <repo-root> push
+   # Stamp on MAIN — never on a commandeered root branch. If the root is on main, commit there;
+   # otherwise land the ledger via a throwaway origin/main worktree so it can't go to the wrong branch:
+   if [ "$(git -C ~/projects/cqlite rev-parse --abbrev-ref HEAD)" = "main" ]; then
+     git -C ~/projects/cqlite add docs/reports/delivery-telemetry.jsonl
+     git -C ~/projects/cqlite commit -m "telemetry(#<N>): stamp delivery ledger" && git -C ~/projects/cqlite push
+   else
+     git -C ~/projects/cqlite worktree add /tmp/cqlite-ledger origin/main -q
+     # re-run the `record` command above with its output going to /tmp/cqlite-ledger (cd there first), then:
+     git -C /tmp/cqlite-ledger add docs/reports/delivery-telemetry.jsonl
+     git -C /tmp/cqlite-ledger commit -m "telemetry(#<N>): stamp delivery ledger" && git -C /tmp/cqlite-ledger push origin HEAD:main
+     git -C ~/projects/cqlite worktree remove /tmp/cqlite-ledger
+   fi
    ```
    `--routing` is required (it is never inferred); `--priority` defaults from the issue's `P?` label
    (pass it to override). `record` refuses a second stamp for the same issue (pass `--allow-duplicate` to
-   override). The live ledger lives on `main`, so stamp it on the root checkout / via a tiny follow-up
-   commit. Confirm with `python3 scripts/delivery-telemetry.py lint`.
+   override). The live ledger lives on `main` — stamp it on main only (never a commandeered root branch).
+   Confirm with `python3 scripts/delivery-telemetry.py lint`.
 5. **Set the board to Done + release the claim.** The PR-merged / issue-closed server-side automation
    should already have moved the Project item to `Status=Done` (it fires even when you merge from the
    phone/web — no `flow-*` run needed); if it hasn't, set it yourself, else flip the `status:*` label in
