@@ -163,7 +163,13 @@ compute_committed_keyspaces() {
     if ! git -C "${src}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         return
     fi
-    COMMITTED_KEYSPACES_OK=1
+    # Do NOT enable committed-corpus filtering yet: rev-parse success only proves
+    # this is a work tree, not that any golden is actually tracked. If ls-files
+    # errors or returns zero records (rev-parse OK but no tracked goldens), an
+    # empty committed set would treat EVERY keyspace as uncommitted and fail with
+    # "no in-scope keyspaces". Mirror the Python/Node fallback: keep
+    # COMMITTED_KEYSPACES_OK=0 (treat all discovered as committed) until the loop
+    # below has parsed at least one tracked table dir.
     local path ks tabledir seen="" tdseen=""
     # Single git ls-files call rooted at the source tree. Path layout is
     # <keyspace>/<table-dir>/<golden>; first segment is the keyspace, first two
@@ -173,6 +179,9 @@ compute_committed_keyspaces() {
     while IFS= read -r -d '' path; do
         ks="${path%%/*}"
         [[ -z "${ks}" ]] && continue
+        # A tracked golden exists -> enable committed-corpus filtering. Until this
+        # fires (zero records / ls-files error), the fallback stays engaged.
+        COMMITTED_KEYSPACES_OK=1
         case " ${seen} " in
             *" ${ks} "*) ;;
             *) seen="${seen} ${ks}"; COMMITTED_KEYSPACES+=("${ks}");;
