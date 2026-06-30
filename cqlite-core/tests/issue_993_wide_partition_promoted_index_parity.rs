@@ -147,11 +147,70 @@ fn jsonl_golden_path() -> Option<PathBuf> {
     None
 }
 
+/// CI fail-closed switch (issue #1185). Returns `true` when
+/// `CQLITE_PARITY_REQUIRE_DATASETS=1` is set — the same env idiom used by every
+/// other strict parity lane (`cqlite-core/tests/parity_support/mod.rs`,
+/// `sstable_parity_index_db_test.rs`). In that mode a missing wide_partition
+/// binary is a HARD FAILURE (panic), never a skip, because these scenarios are
+/// pinned `byte_for_byte` in `test-data/cassandra-parity-manifest.yml` and the
+/// fixture is now part of the pinned CI dataset (v3.4). Locally (env unset) the
+/// byte-level checks keep their skip-on-absence behavior.
+fn parity_datasets_required() -> bool {
+    std::env::var("CQLITE_PARITY_REQUIRE_DATASETS")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+/// The exact binary components every byte-level scenario depends on. Their
+/// absence under `CQLITE_PARITY_REQUIRE_DATASETS=1` is a gate failure (the
+/// wide_partition fixture is now pinned in the CI dataset, v3.4).
+const REQUIRED_BINARY_COMPONENTS: [&str; 4] =
+    ["Data.db", "Index.db", "Digest.crc32", "CompressionInfo.db"];
+
 /// Whether the binary components needed by a byte-level test are present. The
 /// committed tree always carries the JSONL/TOC; the binaries (Data.db/Index.db)
 /// are gitignored and only present after a dataset fetch.
 fn binaries_present() -> bool {
     component("Data.db").exists() && component("Index.db").exists()
+}
+
+/// List the exact strict components that are missing on disk (empty when all
+/// present). Used by the fail-closed guard so the failure names precisely which
+/// reference binary is absent.
+fn missing_required_components() -> Vec<String> {
+    REQUIRED_BINARY_COMPONENTS
+        .iter()
+        .filter(|suffix| !component(suffix).exists())
+        .map(|suffix| format!("{PREFIX}-{suffix}"))
+        .collect()
+}
+
+/// Gate a byte-level scenario on fixture presence. Returns `true` when the
+/// caller should proceed (binaries present), `false` when it should skip.
+///
+/// Fail-closed contract (issue #1185): under `CQLITE_PARITY_REQUIRE_DATASETS=1`
+/// (the REQUIRED "Real M5 SSTableDump parity validation" CI lane sets it) the
+/// absence of the EXACT wide_partition reference binaries is a HARD FAILURE — it
+/// must NOT skip-and-green. With the env unset (local dev without the fetched
+/// binaries) the byte-level checks skip cleanly while the JSONL canonical-semantic
+/// tier still runs.
+fn require_or_skip_binaries(test: &str) -> bool {
+    if binaries_present() {
+        return true;
+    }
+    if parity_datasets_required() {
+        panic!(
+            "{test}: CQLITE_PARITY_REQUIRE_DATASETS=1 but the wide_partition byte-parity \
+             reference binaries are absent at {} (missing: {:?}) — these scenarios are pinned \
+             `byte_for_byte` in test-data/cassandra-parity-manifest.yml and the fixture is in \
+             the pinned CI dataset (v3.4). The required parity gate must FAIL CLOSED here, not \
+             skip. Fetch the dataset: bash test-data/scripts/fetch-datasets.sh",
+            fixture_dir().display(),
+            missing_required_components(),
+        );
+    }
+    byte_level_skip(test);
+    false
 }
 
 /// Emit a uniform line noting the byte-level checks are skipped (binaries absent)
@@ -412,8 +471,7 @@ fn jsonl_golden_canonical_semantics() {
 #[tokio::test]
 async fn row_boundaries_index_info_offsets() {
     let test = "row_boundaries_index_info_offsets";
-    if !binaries_present() {
-        byte_level_skip(test);
+    if !require_or_skip_binaries(test) {
         return;
     }
 
@@ -570,8 +628,7 @@ async fn row_boundaries_index_info_offsets() {
 #[tokio::test]
 async fn clustering_bounds() {
     let test = "clustering_bounds";
-    if !binaries_present() {
-        byte_level_skip(test);
+    if !require_or_skip_binaries(test) {
         return;
     }
 
@@ -639,8 +696,7 @@ async fn clustering_bounds() {
 #[tokio::test]
 async fn range_tombstone_boundary_at_block_edge() {
     let test = "range_tombstone_boundary_at_block_edge";
-    if !binaries_present() {
-        byte_level_skip(test);
+    if !require_or_skip_binaries(test) {
         return;
     }
 
@@ -740,8 +796,7 @@ async fn range_tombstone_boundary_at_block_edge() {
 #[tokio::test]
 async fn forward_bounds_completeness() {
     let test = "forward_bounds_completeness";
-    if !binaries_present() {
-        byte_level_skip(test);
+    if !require_or_skip_binaries(test) {
         return;
     }
 
