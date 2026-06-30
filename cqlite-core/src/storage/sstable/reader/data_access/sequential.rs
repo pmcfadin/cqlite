@@ -242,8 +242,9 @@ impl SSTableReader {
     /// (the FIXED, BOUNDED amount the issue-#1143 batching subsystem may run ahead,
     /// regardless of `buffer_size`, holding even for `buffer_size == 1`).
     /// `MAX_INFLIGHT_BATCH_ROWS` bounds the batching subsystem alone, NOT the
-    /// `max_partition_size` materialization term. Non-stitching SSTables honour
-    /// `buffer_size` exactly.
+    /// `max_partition_size` materialization term. Non-stitching SSTables parse a
+    /// whole block before forwarding its rows, so the resident `(RowKey, Value)`
+    /// count is bounded by `buffer_size + (one parsed block's entries)`.
     pub fn scan_stream(
         self: std::sync::Arc<Self>,
         table_id: TableId,
