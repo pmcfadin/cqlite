@@ -10,8 +10,8 @@ Sources: [`docs/cassandra_test_index.md`](../../docs/cassandra_test_index.md) ·
 
 | Status | Scenarios |
 |---|---|
-| `mirrored` | 218 |
-| `partial` | 16 |
+| `mirrored` | 219 |
+| `partial` | 15 |
 | `planned` | 50 |
 | `out_of_scope` | 31 |
 | **total** | **315** |
@@ -23,9 +23,9 @@ _Counts are per scenario; see [Distinct test backing](#distinct-test-backing-ded
 | Evidence | Scenarios |
 |---|---|
 | `byte_for_byte` | 118 |
-| `canonical_semantic` | 98 |
+| `canonical_semantic` | 99 |
 | `smoke` | 7 |
-| `partial` | 59 |
+| `partial` | 58 |
 | `out_of_scope` | 33 |
 
 ## ⚠️ P0 scenarios with weak evidence
@@ -551,6 +551,8 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
   - Normalization: A generation containing only a partition-level deletion (no live rows) is read; its partition_deletion fact is mapped to the sstabledump JSONL fact and compared.
 - `cass.sstable_io.scanner.tombstone_only_partition_ranges` — Tombstone-only partition range-scan parity
   - Normalization: A partition-range scan over the tombstone-only generation surfaces the partition deletion fact and no live rows; mapped to the sstabledump JSONL and compared.
+- `cass.sstable_scan.wide_partition.forward_reverse_bounds` — Wide-partition forward and reverse scan boundary parity
+  - Normalization: Forward (ASC) and reverse (DESC) single-partition scans are normalized to the per-partition clustering set and ordering: the live clustering values and their sequence are compared (forward == reverse-of-DESC), ignoring presentation/whitespace. Proven in CI via the production reverse iterator on a write-engine multi-block BIG wide partition (issue_1184); the real test_big.wide_partition byte-level 290-row equality runs locally on absence.
 - `cass.statistics_metadata.serialization_header` — Statistics.db metadata and serialization header parity
   - Normalization: Min/max timestamps, row count, partition count and serialization-header column types are compared against the Statistics.db.txt dump and sstabledump JSONL.
 - `cass.tombstone_ttl.deletion_markers.cell_delete` — Cell-level deletion marker parity
@@ -622,7 +624,7 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 
 Scenario counts above can overstate distinct proof: one backing test may exercise many scenario ids. The dedup view below counts unique test targets so the program is not read as more independent tests than exist (issue #1228).
 
-- Distinct backing tests: **63** across **245** scenarios that name a test.
+- Distinct backing tests: **64** across **245** scenarios that name a test.
 
 ### Tests backing more than one scenario
 
