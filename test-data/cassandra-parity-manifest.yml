@@ -4139,7 +4139,9 @@ scenarios:
       category: scrub-verify
       relevance: high
       files:
-        - VerifyTest.java
+        # Path-precise (#1199): the high-relevance VerifyTest lives under io/sstable;
+        # a bare basename also matches the tools/nodetool/VerifyTest.java twin.
+        - test/unit/org/apache/cassandra/io/sstable/VerifyTest.java
         - StandaloneVerifier.java
     cqlite:
       coverage:
@@ -14517,7 +14519,9 @@ scenarios:
       category: sstable-format
       relevance: high
       files:
-        - VersionSupportedFeaturesTest.java
+        # Path-precise (#1199): the high-relevance file is the Big-format twin; a
+        # bare basename also matches the Med-relevance format/bti/ twin.
+        - test/unit/org/apache/cassandra/io/sstable/format/big/VersionSupportedFeaturesTest.java
     cqlite:
       coverage:
         suite: sstable_parity_component_manifest
@@ -14555,7 +14559,10 @@ scenarios:
       category: bloom-filter
       relevance: high
       files:
-        - SerializationsTest.java
+        # Path-precise (#1199): the high-relevance bloom-filter SerializationsTest is
+        # utils/SerializationsTest.java; bare basename also matches the Med
+        # (service/) and Low (gms/) twins.
+        - test/unit/org/apache/cassandra/utils/SerializationsTest.java
     cqlite:
       coverage:
         suite: sstable_parity_filter_db_bloom
