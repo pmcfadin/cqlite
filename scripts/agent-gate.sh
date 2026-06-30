@@ -26,6 +26,15 @@
 #   python-bindings    maturin develop + pytest bindings/python/tests in a throwaway
 #                      venv; SKIPs (never silently PASSes) if python3 is unavailable.
 #                      Set RUN_SLOW_TESTS=1 to also run the CLI-parity suite.
+#                      The full pytest run includes the #1231 Python write→read
+#                      content proof (test_write_readback_content.py), so a core
+#                      write-format regression reds a binding content test.
+#   node-bindings      napi build + the #1231 Node write→read content proof
+#                      (npx jest write-readback-content) in bindings/node; SKIPs
+#                      (never silently PASSes) if node/npm is unavailable. Scoped
+#                      to the content proof (not full `npm test`) so it stays
+#                      fast and corpus-free while still failing closed on a Node
+#                      write-path regression (#1255).
 #   tooling-tests      shell-tooling regression tests (fast, no datasets/network):
 #                      scripts/tests/test_agent_gate_summary.sh — proves the
 #                      SUMMARY block survives non-foreground capture (#1175). It
@@ -125,7 +134,7 @@ if ! command -v cargo >/dev/null 2>&1 && [ -d "$HOME/.cargo/bin" ]; then
 fi
 export CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-$REPO_ROOT/test-data/datasets}"
 
-COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard integration-tests format-compat write-tests cli-tests python-bindings delivery-telemetry tooling-tests minimal-build smoke)
+COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard integration-tests format-compat write-tests cli-tests python-bindings node-bindings delivery-telemetry tooling-tests minimal-build smoke)
 ONLY=""
 SELFTEST=0
 case "${1:-}" in
@@ -396,6 +405,54 @@ run_python_bindings() {
       pip install --quiet maturin pytest
       maturin develop -m bindings/python/Cargo.toml
       pytest bindings/python/tests -q' >"$log" 2>&1; then
+    status=PASS
+  else
+    status=FAIL
+    OVERALL=FAIL
+    echo "--- [$name] FAILED; last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
+# node-bindings: build the napi-rs native module and run the #1231 Node
+# write→read CONTENT proof. Symmetric to run_python_bindings and SKIP-aware:
+# if there is no node/npm on PATH the component records SKIP (loudly, never
+# silently PASS) so a missing toolchain can't mask a real Node write-path
+# regression. Anything else (install/build/test failure) is a hard FAIL.
+#
+# Scope (#1255): we run the content proof specifically (npx jest
+# write-readback-content) rather than the full `npm test`. The full Node suite
+# pulls in corpus-dependent parity/smoke tests and a slow `--release` napi
+# build; scoping to the content proof keeps the gate fast and reliable while
+# guaranteeing the load-bearing #1231 test executes fail-closed. The content
+# test self-generates its SSTables, so it needs no fixture corpus (hence
+# node-bindings is NOT in DATASET_COMPONENTS); CQLITE_DATASETS_ROOT is still
+# exported defensively for any test that reads it.
+run_node_bindings() {
+  local name=node-bindings
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local log="$LOG_DIR/$name.log"
+  local start end status
+  start=$(date +%s)
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    status=SKIP
+    echo ">>> [$name] SKIP (no node/npm on PATH)"
+    NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("0s")
+    return 0
+  fi
+  echo ">>> [$name] npm ci + npm run build + jest write-readback-content (#1231)"
+  if CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" bash -c '
+      set -euo pipefail
+      cd "'"$REPO_ROOT"'/bindings/node"
+      if [ -f package-lock.json ]; then npm ci; else npm install; fi
+      npm run build
+      npx jest write-readback-content' >"$log" 2>&1; then
     status=PASS
   else
     status=FAIL
@@ -701,6 +758,7 @@ run_component cli-tests bash -c '
   cargo test --package cqlite-cli --test unit_tests &&
   cargo test --package cqlite-cli --features write-support --test write_readback_content_tests'
 run_python_bindings
+run_node_bindings
 run_delivery_telemetry
 run_tooling_tests
 run_component minimal-build cargo build --package cqlite-core --no-default-features --features all-compression
