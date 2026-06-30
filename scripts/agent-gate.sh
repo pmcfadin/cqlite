@@ -35,6 +35,20 @@
 #                      to the content proof (not full `npm test`) so it stays
 #                      fast and corpus-free while still failing closed on a Node
 #                      write-path regression (#1255).
+#   parity-report      cassandra-parity report --check: FAILs (naming
+#                      docs/reports/cassandra-test-parity.md) when the committed
+#                      derived report drifts from a fresh render of
+#                      test-data/cassandra-parity-manifest.yml. Catches the
+#                      single-PR "changed the manifest, forgot to regenerate the
+#                      report" case at the local gate, before push (issue #1338).
+#                      SKIP-aware (loud, never silent PASS): SKIPs when the
+#                      cassandra-parity crate (tools/cassandra-parity) or the
+#                      manifest is absent (a minimal checkout). No Docker/datasets
+#                      — reads the manifest + committed report only. NOTE: a stale
+#                      report can ALSO arise post-merge from a semantic merge race
+#                      (two manifest-changing PRs), which no per-PR/local check can
+#                      see; that path self-heals via the push-to-main job in
+#                      .github/workflows/cassandra-parity.yml (issue #1338).
 #   tooling-tests      shell-tooling regression tests (fast, no datasets/network):
 #                      scripts/tests/test_agent_gate_summary.sh — proves the
 #                      SUMMARY block survives non-foreground capture (#1175). It
@@ -134,7 +148,7 @@ if ! command -v cargo >/dev/null 2>&1 && [ -d "$HOME/.cargo/bin" ]; then
 fi
 export CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-$REPO_ROOT/test-data/datasets}"
 
-COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard integration-tests format-compat write-tests cli-tests python-bindings node-bindings delivery-telemetry tooling-tests minimal-build smoke)
+COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard integration-tests format-compat write-tests cli-tests python-bindings node-bindings delivery-telemetry parity-report tooling-tests minimal-build smoke)
 ONLY=""
 SELFTEST=0
 case "${1:-}" in
@@ -499,12 +513,66 @@ run_delivery_telemetry() {
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
+# parity-report: verify the committed derived parity report is not stale vs its
+# source manifest (issue #1338). Renders test-data/cassandra-parity-manifest.yml
+# with `cassandra-parity report --check`; PASS when the committed report matches a
+# fresh render, FAIL (naming docs/reports/cassandra-test-parity.md) when it drifts.
+# This catches the single-PR "edited the manifest, forgot to regenerate" case at
+# the local gate, before push — the layer the post-merge self-healing job cannot
+# cover. SKIP-aware like delivery-telemetry/python-bindings: when the
+# cassandra-parity crate (tools/cassandra-parity) or the manifest is absent (a
+# minimal checkout), it records SKIP (loud, never silent PASS) rather than FAIL.
+# The manifest source and the tool-crate dir resolve to their repo defaults but are
+# overridable (PARITY_REPORT_MANIFEST / PARITY_REPORT_TOOL_DIR) so the component is
+# self-testable without mutating the committed tree; the --output target is always
+# the canonical committed report (read-only under --check) so a failure always
+# names that file. No Docker, no datasets — reads the manifest + committed report.
+run_parity_report() {
+  local name=parity-report
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local manifest="${PARITY_REPORT_MANIFEST:-test-data/cassandra-parity-manifest.yml}"
+  local tool_dir="${PARITY_REPORT_TOOL_DIR:-tools/cassandra-parity}"
+  local report="docs/reports/cassandra-test-parity.md"
+  local log="$LOG_DIR/$name.log"
+  local start end status
+  start=$(date +%s)
+  if [ ! -f "$manifest" ] || [ ! -d "$tool_dir" ]; then
+    status=SKIP
+    echo ">>> [$name] SKIP (cassandra-parity tool or manifest unavailable: manifest=$manifest tool=$tool_dir)"
+    NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("0s")
+    return 0
+  fi
+  echo ">>> [$name] cargo run -q -p cassandra-parity -- report --check ($report)"
+  if cargo run -q -p cassandra-parity -- report \
+       --manifest "$manifest" --output "$report" --check >"$log" 2>&1; then
+    status=PASS
+  else
+    status=FAIL
+    OVERALL=FAIL
+    echo "--- [$name] FAILED: $report is STALE vs the manifest."
+    echo "    Regenerate: cargo run -p cassandra-parity -- report --manifest $manifest --output $report"
+    echo "--- last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
 # tooling-tests: fast shell-tooling regression tests that have no Rust target and
 # no dataset/network needs. Currently scripts/tests/test_agent_gate_summary.sh,
 # which verifies the SUMMARY block survives non-foreground capture (#1175), and
 # scripts/tests/test_agent_gate_smoke_target_dir.sh, which verifies the smoke step
-# resolves the CLI via CARGO_TARGET_DIR (#1247). Neither runs the real gate
-# components, so wiring them here cannot cause the gate to recurse. SKIP-aware:
+# resolves the CLI via CARGO_TARGET_DIR (#1247). These two never run the real gate
+# components, so wiring them here cannot cause the gate to recurse. Also runs
+# scripts/tests/test_agent_gate_parity_report.sh (#1338), which drives nested
+# `agent-gate.sh --only parity-report` invocations to assert the SKIP/PASS/FAIL
+# outcomes; that nesting is BOUNDED (--only parity-report never selects
+# tooling-tests, so it cannot recurse) and the cassandra-parity build is already
+# warm from the earlier parity-report component, so it stays cheap. SKIP-aware:
 # the summary test's truncation case relies on a python3 reader, so with no
 # python3 we record SKIP (loud, never silent PASS); any test failure -> hard FAIL.
 run_tooling_tests() {
@@ -524,6 +592,21 @@ run_tooling_tests() {
     status=FAIL
     OVERALL=FAIL
     echo "--- [$name] FAILED (keyspace-scoping guard); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # parity-report component self-test (#1338): no python3 needed, always runs. A
+  # failure FAILs the component, mirroring the keyspace-scoping guard semantics.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_parity_report.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_parity_report.sh" >>"$log" 2>&1; then
+    status=FAIL
+    OVERALL=FAIL
+    echo "--- [$name] FAILED (parity-report self-test); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
@@ -658,6 +741,8 @@ run_file_size
 #   dataset-free (deliberately NOT guarded): fmt, clippy, file-size (operate on
 #     source text), cli-tests (only the unit_tests.rs target: tempfile-based
 #     config/parsing/output tests, no CQLITE_DATASETS_ROOT, no Data.db),
+#     parity-report (renders the manifest + diffs the committed report; reads no
+#     CQLITE_DATASETS_ROOT, no Data.db — issue #1338),
 #     delivery-telemetry + tooling-tests (pure shell/stdlib tool tests; the lone
 #     CQLITE_DATASETS_ROOT in test_agent_gate_summary.sh *sets an empty* root to
 #     exercise the preflight, it consumes no real data), minimal-build (a cargo
@@ -762,6 +847,7 @@ run_component cli-tests bash -c '
 run_python_bindings
 run_node_bindings
 run_delivery_telemetry
+run_parity_report
 run_tooling_tests
 run_component minimal-build cargo build --package cqlite-core --no-default-features --features all-compression
 # Pin smoke to a binary built from THIS tree. Left to its own devices the
