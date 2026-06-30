@@ -31,7 +31,7 @@ permissions:
 
 concurrency:
   group: sstabledump-parity-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
 
 env:
   DATASET_TAG: datasets-v3

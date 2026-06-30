@@ -54,10 +54,10 @@ permissions:
   contents: read
   pull-requests: write
 
-# Cancel any in-progress PR run when a new push arrives; let push/scheduled runs complete.
+# Cancel stale PR runs and stale main push runs; keep manual runs independent.
 concurrency:
   group: cassandra-validation-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
 
 # This workflow validates that SSTables written by CQLite can be imported
 # into a real Cassandra 5.0 cluster using the current loader-based harness
