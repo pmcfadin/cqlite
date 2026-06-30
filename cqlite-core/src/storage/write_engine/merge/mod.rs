@@ -1806,6 +1806,9 @@ pub async fn compact_sstables_with_registry(
         repair_state.pending_repair,
         repair_state.is_transient,
     );
+    // Compaction output (issue #1222): emit the uncompressed-BIG CRC.db with
+    // Cassandra's compaction-only trailing empty-final-chunk CRC32 = 0.
+    writer.mark_compaction_output();
 
     // Two-pass compaction (issue #729): seed the output's encoding baselines from
     // the inputs' Statistics.db before writing any partition.

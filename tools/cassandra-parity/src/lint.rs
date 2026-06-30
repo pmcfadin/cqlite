@@ -7,8 +7,8 @@
 
 use std::path::Path;
 
-use crate::enums;
 use crate::model::{non_empty, Manifest, Scenario};
+use crate::{enums, workflow_check};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
@@ -494,6 +494,20 @@ fn lint_scenario(s: &Scenario, repo_root: Option<&Path>, out: &mut Vec<Finding>)
             "ci.workflow",
             "required_parity scenarios must name a workflow path",
         ));
+    }
+
+    // --- machine-enforced: the named required_parity workflow actually runs the
+    //     mapped test under a fail-closed flag (issue #1228) ---
+    if s.ci.tier == "required_parity" {
+        if let (Some(root), Some(wf)) = (repo_root, s.ci.workflow.as_ref()) {
+            if let Ok(text) = std::fs::read_to_string(root.join(wf)) {
+                for f in workflow_check::check_scenario(id, wf, &text, &s.cqlite.coverage.tests) {
+                    out.push(Finding::error(&f.id, &f.field, f.message));
+                }
+            }
+            // A missing workflow file is already reported by the generic
+            // path-existence check below; do not double-report here.
+        }
     }
 
     // --- referenced local files must exist (unless planned) ---

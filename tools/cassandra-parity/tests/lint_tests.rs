@@ -132,8 +132,7 @@ const VALID_DELTA_SCAN_SCENARIO: &str = r#"  - id: cass.delta_scan.cell_tombston
       storage_format_version: [nb]
       fixture_generation_command: bash test-data/scripts/generate-deltas.sh
     ci:
-      tier: required_parity
-      workflow: .github/workflows/delta-roundtrip.yml
+      tier: fast_pr
     scope: {}
 "#;
 

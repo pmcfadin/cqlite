@@ -55,6 +55,8 @@ pub fn render(m: &Manifest, manifest_path: &str) -> String {
     // --- evidence counts ---
     line("## Evidence counts");
     line("");
+    line("_Counts are per scenario; see [Distinct test backing](#distinct-test-backing-dedup) for the deduplicated test view (issue #1228)._");
+    line("");
     line("| Evidence | Scenarios |");
     line("|---|---|");
     for ev in [
@@ -122,6 +124,9 @@ pub fn render(m: &Manifest, manifest_path: &str) -> String {
         false,
     );
     render_evidence_group(&mut s, &scenarios, "smoke", "Smoke-only scenarios", false);
+
+    // --- deduplicated test-backing view (issue #1228) ---
+    crate::report_dedup::render(&mut s, &scenarios);
 
     // --- gaps (partial + planned) ---
     let mut line = |text: &str| {

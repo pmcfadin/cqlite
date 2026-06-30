@@ -107,6 +107,11 @@ jobs:
           fi
           echo "✅ Core fixture present: ${CORE_FIXTURE}"
           echo "✅ Required JSONL golden present: ${GOLDEN_JSONL}"
+          # Issue #1230: broaden the sanity check beyond the single core fixture —
+          # assert the WHOLE 39-table enforced corpus (33 nb + 6 test_oa) is
+          # present so a partial extraction or a dropped table reds CI here
+          # instead of letting the dataset-dependent lanes skip-and-pass.
+          bash test-data/scripts/check-dataset-manifest.sh test-data/datasets
 
       - name: Validate environment
         run: |
@@ -140,6 +145,11 @@ jobs:
       - name: Run core lib/doc tests with timings
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          # Issue #1230: fail-closed. The ~70 legacy dataset-dependent tests skip
+          # on missing data; with these flags an absent/empty fixture FAILS the
+          # lane (via require_fixtures_strict) instead of false-greening.
+          CQLITE_REQUIRE_FIXTURES: "1"
+          CQLITE_PARITY_REQUIRE_DATASETS: "1"
           RUST_LOG: debug
           RUST_BACKTRACE: full
         run: bash scripts/ci/run-core-test-group.sh lib-doc
@@ -317,6 +327,9 @@ jobs:
       - name: Run integration tests (issue #514)
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          # Issue #1230: fail-closed for the dataset-dependent golden-path lane.
+          CQLITE_REQUIRE_FIXTURES: "1"
+          CQLITE_PARITY_REQUIRE_DATASETS: "1"
         run: |
           echo "Running revived orphan integration tests (issue #514)..."
           # Run the seven golden-path / chunked-reader / component tests that were

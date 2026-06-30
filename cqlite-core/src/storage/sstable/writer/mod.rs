@@ -297,6 +297,15 @@ pub struct SSTableWriter {
     /// (>= 2 column-index blocks) — the row-index blocks. `None` for BIG so that
     /// path allocates nothing. See [`bti_state::PendingBtiPartition`].
     bti_pending: Option<Vec<bti_state::PendingBtiPartition>>,
+    /// Whether this writer produces a COMPACTION output (issue #1222).
+    ///
+    /// `false` for the default FLUSH path. When `true`, [`Self::finish`] emits
+    /// the uncompressed-BIG `CRC.db` with Cassandra's compaction-only trailing
+    /// empty-final-chunk `CRC32 = 0` (see [`crc_writer::CrcTrailer`]); the flush
+    /// path's `CRC.db` is byte-for-byte unchanged. Set via
+    /// [`Self::mark_compaction_output`] by the two compaction producers
+    /// (`compact_sstables` and the WriteEngine background compactor).
+    is_compaction_output: bool,
 }
 
 #[cfg(feature = "write-support")]
@@ -505,12 +514,26 @@ impl SSTableWriter {
             format,
             partitions_trie,
             bti_pending,
+            is_compaction_output: false,
         })
     }
 
     /// The on-disk index format this writer emits (issue #766).
     pub fn format(&self) -> SSTableFormat {
         self.format
+    }
+
+    /// Mark this writer as producing a COMPACTION output (issue #1222).
+    ///
+    /// Cassandra's compaction write path appends one trailing empty-final-chunk
+    /// `CRC32 = 0` to the uncompressed-BIG `CRC.db` (its close-time zero-length
+    /// buffer flush); the flush path does not. Compaction producers
+    /// (`compact_sstables`, the WriteEngine background compactor) call this so
+    /// [`Self::finish`] emits the byte-faithful compacted `CRC.db`. Leaving it
+    /// unset (the default) keeps the flush `CRC.db` byte-for-byte unchanged.
+    pub fn mark_compaction_output(&mut self) -> &mut Self {
+        self.is_compaction_output = true;
+        self
     }
 
     /// Write a partition (partition key + all mutations)

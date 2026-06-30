@@ -61,10 +61,36 @@ SCHEMA_WIDE_ROWS = SCHEMAS / "wide-rows.cql"
 # =============================================================================
 
 
+def _require_fixtures_strict() -> bool:
+    """True when strict fixture mode is requested (issue #1230).
+
+    Mirrors the Rust ``require_fixtures_strict`` helper: either
+    ``CQLITE_REQUIRE_FIXTURES`` or ``CQLITE_PARITY_REQUIRE_DATASETS`` set to a
+    truthy value flips the dataset-dependent pytest lane FAIL-CLOSED — a missing
+    dataset becomes a hard failure instead of a silent skip, so a dropped table
+    or a path regression reds CI rather than false-greening. Local dev without
+    the binaries (neither flag set) still skips.
+    """
+    return os.environ.get("CQLITE_REQUIRE_FIXTURES") in ("1", "true") or os.environ.get(
+        "CQLITE_PARITY_REQUIRE_DATASETS"
+    ) in ("1", "true")
+
+
 def skip_if_no_datasets():
-    """Skip test if datasets directory doesn't exist."""
+    """Skip (or, under strict mode, FAIL) when the datasets dir is absent.
+
+    Issue #1230: under ``CQLITE_REQUIRE_FIXTURES=1`` (used by CI) a missing
+    dataset is a hard failure, never a silent skip.
+    """
     if not DATASETS.exists():
-        pytest.skip(f"Test data not found: {DATASETS}")
+        msg = f"Test data not found: {DATASETS}"
+        if _require_fixtures_strict():
+            pytest.fail(
+                f"{msg} (CQLITE_REQUIRE_FIXTURES=1 — fetch with "
+                "bash test-data/scripts/fetch-datasets.sh)",
+                pytrace=False,
+            )
+        pytest.skip(msg)
 
 
 def skip_if_no_schema(schema_path: Path):
@@ -389,3 +415,43 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "slow" in item.keywords:
             item.add_marker(skip_slow)
+
+
+# =============================================================================
+# Whole-session no-op floor (issue #1230)
+# =============================================================================
+
+# Count of tests that actually PASSED their call phase. Under strict mode a
+# session in which 0 tests pass (everything skipped, or nothing collected) is a
+# failure, not a green run.
+#
+# SCOPE (be honest): this is a whole-session no-op guard ONLY. It fires solely
+# when the ENTIRE session has zero passing call-phase tests. Because this lane
+# also runs many passing NON-dataset tests, the floor does NOT catch "the
+# dataset tests all skipped while the rest passed" — i.e. it will NOT catch a
+# dropped/renamed table or a #773-class path regression on its own. Those are
+# covered by check-dataset-manifest.sh (hard-fails on a partial corpus) and by
+# skip_if_no_datasets() failing closed under strict mode.
+_PASSED_CALLS = 0
+
+
+def pytest_runtest_logreport(report):
+    global _PASSED_CALLS
+    if report.when == "call" and report.passed:
+        _PASSED_CALLS += 1
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Fail the session under strict mode if no test passed (issue #1230)."""
+    if not _require_fixtures_strict():
+        return
+    if _PASSED_CALLS == 0:
+        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+        if reporter is not None:
+            reporter.write_line(
+                "ERROR (issue #1230): CQLITE_REQUIRE_FIXTURES=1 but 0 tests passed "
+                "— the dataset lane ran nothing or everything skipped (fail-closed).",
+                red=True,
+            )
+        # Override exit status so CI reds even though no test technically failed.
+        session.exitstatus = 1

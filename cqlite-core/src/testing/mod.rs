@@ -8,6 +8,8 @@ pub use dataset_helpers::{
     list_tables_at,
     load_metadata,
     load_metadata_at,
+    // Strict fixture gate (issue #1230): single shared definition.
+    require_fixtures_strict,
     resolve_table_to_sstable_path,
     resolve_table_to_sstable_path_at,
     TableInfo,

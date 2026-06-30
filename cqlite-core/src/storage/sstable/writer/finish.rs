@@ -168,11 +168,21 @@ impl SSTableWriter {
         // CRC.db (verified against the Cassandra-written `da` fixtures), and the
         // compressed path carries per-chunk CRCs inline (CompressionInfo.db),
         // so this is gated on the BIG + uncompressed write path only.
+        // Flush vs compaction CRC.db tail (issue #1222). The compaction write
+        // path appends one trailing empty-final-chunk CRC32 = 0 (Cassandra's
+        // close-time zero-length buffer flush); the flush path does not. Selected
+        // by `is_compaction_output` so the flush CRC.db stays byte-identical to
+        // the #1190 goldens while the compaction CRC.db matches the #1017 goldens.
         let crc_path = if is_bti {
             None
         } else {
-            use crate::storage::sstable::writer::crc_writer;
-            Some(crc_writer::write_crc_db(&data_path, cpath("CRC.db")).await?)
+            use crate::storage::sstable::writer::crc_writer::{self, CrcTrailer};
+            let trailer = if self.is_compaction_output {
+                CrcTrailer::EmptyFinalChunk
+            } else {
+                CrcTrailer::None
+            };
+            Some(crc_writer::write_crc_db(&data_path, cpath("CRC.db"), trailer).await?)
         };
 
         // 7. Write TOC.txt (LAST - publication barrier).
