@@ -921,8 +921,22 @@ async fn issue_1309_wide_partition_following_offset_is_not_off_by_three() {
     let ci_path = dir.join("nb-2-big-CompressionInfo.db");
     let jsonl_path = dir.join("nb-2-big-Data.db.jsonl");
 
-    // Skip-on-absence: a fresh checkout has only TOC.txt + JSONL, no binaries.
+    // Skip-on-absence: a fresh checkout that has not fetched the dataset would carry
+    // only TOC.txt + JSONL. The reference binaries for THIS fixture are force-committed
+    // (git add -f) so the guard runs without any dataset fetch — but a CQLITE_DATASETS_ROOT
+    // override could still point at a tree lacking them. When datasets are MANDATED
+    // (CQLITE_PARITY_REQUIRE_DATASETS=1) a missing binary is a hard failure, never a skip,
+    // so the required parity gate cannot pass without exercising this guard
+    // (mirrors `big_index_db_entry_byte_and_field_parity`).
     if !index_path.exists() || !data_path.exists() || !ci_path.exists() {
+        if parity_datasets_required() {
+            panic!(
+                "CQLITE_PARITY_REQUIRE_DATASETS=1 but no wide_partition binaries were present \
+                 at {} (Index.db/Data.db/CompressionInfo.db) — required parity gate must not \
+                 skip when datasets are mandated",
+                dir.display()
+            );
+        }
         eprintln!(
             "issue_1309_wide_partition_following_offset_is_not_off_by_three: SKIP — \
              wide_partition binaries not fetched"
