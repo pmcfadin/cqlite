@@ -30,6 +30,7 @@ pub mod script_executor;
 pub mod repl;
 
 // TUI mode implementation (Issue #251)
+#[cfg(feature = "tui")]
 pub mod tui;
 
 #[cfg(all(test, feature = "state_machine"))]

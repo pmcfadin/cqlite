@@ -32,6 +32,7 @@ use commands::info::execute_info_command;
 // mod pagination;
 // mod query_executor;
 mod repl; // Core REPL engine
+#[cfg(feature = "tui")]
 mod tui; // TUI mode implementation (ratatui)
 
 #[tokio::main]
@@ -777,59 +778,71 @@ async fn run_main() -> Result<()> {
             })
         }
         Some(Commands::Tui) => {
-            // Check if we need to run ingestion from config file
-            // Returns (Database, Option<SchemaRegistry>) to preserve schema info
-            #[cfg(feature = "state_machine")]
-            let (database, _tui_schema_registry) = if !config.schema_paths.is_empty()
-                && config.data_directory.is_some()
             {
-                info!("TUI: Running ingestion from config file");
-                info!(
-                    "TUI: Loading {} schema file(s) from config",
-                    config.schema_paths.len()
-                );
-                info!(
-                    "TUI: Discovering SSTables in: {}",
-                    config.data_directory.as_ref().unwrap().display()
-                );
-
-                let ingestion_config = IngestionConfig {
-                    schema_paths: config.schema_paths.clone(),
-                    data_dir: config.data_directory.clone().unwrap(),
-                    version_hint: config.cassandra_version.clone(),
-                    core_config: create_core_config(&config)?,
-                    table_directory_filter: None, // TUI doesn't filter tables
-                };
-
-                match ingest(ingestion_config).await {
-                    Ok(result) => {
+                #[cfg(feature = "tui")]
+                {
+                    // Check if we need to run ingestion from config file
+                    // Returns (Database, Option<SchemaRegistry>) to preserve schema info
+                    #[cfg(feature = "state_machine")]
+                    let (database, _tui_schema_registry) = if !config.schema_paths.is_empty()
+                        && config.data_directory.is_some()
+                    {
+                        info!("TUI: Running ingestion from config file");
                         info!(
-                            "TUI ingestion complete: {} schema(s) loaded, {} SSTable(s) discovered, {} keyspace(s) found",
-                            result.schema_load_result.schemas_loaded,
-                            result.discovery_summary.sstables_found,
-                            result.discovery_summary.keyspaces.len()
+                            "TUI: Loading {} schema file(s) from config",
+                            config.schema_paths.len()
                         );
-                        (result.database, Some(result.schema_registry))
-                    }
-                    Err(e) => {
-                        return Err(anyhow::anyhow!(
-                            "TUI ingestion failed: {}. Check schema paths and data directory in config file.",
-                            e
-                        ));
-                    }
+                        info!(
+                            "TUI: Discovering SSTables in: {}",
+                            config.data_directory.as_ref().unwrap().display()
+                        );
+
+                        let ingestion_config = IngestionConfig {
+                            schema_paths: config.schema_paths.clone(),
+                            data_dir: config.data_directory.clone().unwrap(),
+                            version_hint: config.cassandra_version.clone(),
+                            core_config: create_core_config(&config)?,
+                            table_directory_filter: None, // TUI doesn't filter tables
+                        };
+
+                        match ingest(ingestion_config).await {
+                            Ok(result) => {
+                                info!(
+                                    "TUI ingestion complete: {} schema(s) loaded, {} SSTable(s) discovered, {} keyspace(s) found",
+                                    result.schema_load_result.schemas_loaded,
+                                    result.discovery_summary.sstables_found,
+                                    result.discovery_summary.keyspaces.len()
+                                );
+                                (result.database, Some(result.schema_registry))
+                            }
+                            Err(e) => {
+                                return Err(anyhow::anyhow!(
+                                    "TUI ingestion failed: {}. Check schema paths and data directory in config file.",
+                                    e
+                                ));
+                            }
+                        }
+                    } else {
+                        // No config-based ingestion, use existing database and startup schema registry
+                        (database, startup_schema_registry)
+                    };
+
+                    #[cfg(not(feature = "state_machine"))]
+                    let database = database;
+
+                    // TUI mode (full-screen terminal UI)
+                    tui::start_tui_mode(&db_path, &config, database)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("TUI error: {}", e))
                 }
-            } else {
-                // No config-based ingestion, use existing database and startup schema registry
-                (database, startup_schema_registry)
-            };
 
-            #[cfg(not(feature = "state_machine"))]
-            let database = database;
-
-            // TUI mode (full-screen terminal UI)
-            tui::start_tui_mode(&db_path, &config, database)
-                .await
-                .map_err(|e| anyhow::anyhow!("TUI error: {}", e))
+                #[cfg(not(feature = "tui"))]
+                {
+                    Err(anyhow::anyhow!(
+                        "TUI mode is not enabled. Build with --features tui to enable terminal UI."
+                    ))
+                }
+            }
         }
         Some(Commands::Query {
             query,

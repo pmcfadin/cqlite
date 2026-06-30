@@ -187,9 +187,11 @@ jobs:
 
       # Build the CLI once while the native wheel job's Rust target cache is
       # still hot. Pytest's fixture finds this binary and skips its own rebuild.
+      # The Python parity tests do not exercise the full-screen TUI, so keep
+      # this build on the lighter cli-helpers feature set.
       - name: Build CLI binary for tests
         shell: bash
-        run: cargo build --package cqlite-cli --release
+        run: cargo build --package cqlite-cli --release --no-default-features --features cli-helpers
 
       - name: Install wheel and test dependencies
         shell: bash
