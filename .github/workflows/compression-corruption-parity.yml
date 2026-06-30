@@ -151,10 +151,19 @@ jobs:
         # tests would run against the script's oracle instead of the committed
         # change. Fail-closed: diff the HUMAN-AUTHORED oracle PROJECTION of the
         # committed manifest (git HEAD) against the same projection of the
-        # just-regenerated manifest. Only the human-edited oracle fields are
-        # compared — the regeneration-dependent byte shas / sizes / table-UUID
-        # paths are deliberately excluded (they legitimately drift when the clean
-        # sources are rebuilt from the cassandra:5.0.2 container). Any drift means a
+        # just-regenerated manifest. Only the human-edited oracle fields the
+        # generator emits VERBATIM are compared — the regeneration-dependent byte
+        # shas / sizes / table-UUID paths are deliberately excluded (they
+        # legitimately drift when the clean sources are rebuilt from the
+        # cassandra:5.0.2 container). CRUCIALLY this also excludes
+        # verdict_captured_for_dir_sha256: the generator REBINDS that full-dir hash
+        # to the freshly-regenerated dir hash on benign sibling drift, so guarding
+        # it here would FAIL CI on a drift the generator (correctly) treats as
+        # benign — a self-contradiction. Regeneration-rebound hashes are enforced
+        # instead by the PARITY TEST
+        # (cqlite-core/tests/sstable_parity_corruption_verify.rs::check_full_dir_binding)
+        # against the committed byte-stable tree. This guard protects ONLY
+        # human-authored, regeneration-stable oracle fields. Any drift here means a
         # committed oracle edit disagrees with the generator and must be reconciled
         # in generate-corruption-corpus.sh — not silently lost.
         shell: bash
