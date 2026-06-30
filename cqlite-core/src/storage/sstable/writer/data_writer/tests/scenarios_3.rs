@@ -445,11 +445,6 @@ fn static_using_ttl_write_byte_parity_1210() {
         )
         .unwrap();
 
-    let after = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
-
     assert_eq!(cells, 1, "exactly one static cell written");
 
     // Decode the full cell wire format:
@@ -483,15 +478,9 @@ fn static_using_ttl_write_byte_parity_1210() {
     );
 
     // min_local_deletion_time == 0, so the decoded delta IS the absolute
-    // localDeletionTime; it must equal `now + ttl` for the captured window.
+    // localDeletionTime; it must equal `now + ttl`. The bound is checked below
+    // against a single `[before, after]` window captured around BOTH writes.
     let ldt = read_uvint_at(&row_ttl_buf, &mut pos) as i64;
-    assert!(
-        ldt >= before + ttl as i64 && ldt <= after + ttl as i64,
-        "#1210: localDeletionTime ({ldt}) must be now + ttl \
-         (expected in [{}, {}])",
-        before + ttl as i64,
-        after + ttl as i64
-    );
 
     // min_ttl == 0, so the decoded delta IS the absolute ttl.
     let ttl_on_wire = read_uvint_at(&row_ttl_buf, &mut pos);
@@ -524,6 +513,23 @@ fn static_using_ttl_write_byte_parity_1210() {
             &schema,
         )
         .unwrap();
+
+    // Close the wall-clock window only after BOTH writes have run, so each
+    // cell's LDT (now + ttl, sampled at its own write) is covered by the same
+    // `[before, after]` bound regardless of one-second boundary crossings.
+    let after = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    // Both cells' localDeletionTime must be now + ttl within the shared window.
+    assert!(
+        ldt >= before + ttl as i64 && ldt <= after + ttl as i64,
+        "#1210: localDeletionTime ({ldt}) must be now + ttl \
+         (expected in [{}, {}])",
+        before + ttl as i64,
+        after + ttl as i64
+    );
 
     // Flags + timestamp delta must be byte-identical between the two paths.
     let mut rpos = 0usize;
