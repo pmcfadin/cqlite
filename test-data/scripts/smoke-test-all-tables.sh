@@ -586,7 +586,28 @@ print_summary() {
         echo ""
     fi
 
-    if [[ ${#FAILED_TABLES[@]} -eq 0 ]]; then
+    # Issue #1312 (fast-follow to #1229): a dataset-dependent test must NEVER
+    # report success on an empty dataset. validate_environment() already exits
+    # non-zero when NO in-scope keyspaces are discovered (case (a): corpus
+    # genuinely absent). By the time we reach here the enforced corpus
+    # (${KEYSPACES[*]}) is non-empty by construction, so if NOTHING passed and
+    # NOTHING failed then every enforced table was skipped because its Data.db
+    # is absent (case (b): a broken/empty dataset asset — every Data.db missing).
+    # That is NOT a pass; fail loudly instead of printing "All 0 ... passed".
+    # The #1229 per-fixture skip-on-absence (case (c): partial subset) is
+    # preserved: as long as at least one enforced Data.db was present and passed,
+    # PASSED_TABLES is non-empty and we return success, while any PRESENT
+    # Data.db yielding 0 rows still lands in FAILED_TABLES below.
+    if [[ ${#FAILED_TABLES[@]} -eq 0 && ${#PASSED_TABLES[@]} -eq 0 ]]; then
+        echo -e "${RED}=========================================${NC}"
+        echo -e "${RED}  Empty/broken dataset: 0 enforced tables ran${NC}"
+        echo -e "${RED}  ${#SKIPPED_ABSENT_TABLES[@]} enforced table(s) were skipped because NO Data.db is present${NC}"
+        echo -e "${RED}  Enforced keyspaces (discovered from disk): ${KEYSPACES[*]}${NC}"
+        echo -e "${RED}  A dataset-dependent smoke run must not pass with zero present fixtures.${NC}"
+        echo -e "${RED}  Fetch the corpus (test-data/scripts/fetch-datasets.sh) or fix the dataset asset.${NC}"
+        echo -e "${RED}=========================================${NC}"
+        return 1
+    elif [[ ${#FAILED_TABLES[@]} -eq 0 ]]; then
         echo -e "${GREEN}=========================================${NC}"
         echo -e "${GREEN}  All ${#PASSED_TABLES[@]} enforced tables passed smoke test${NC}"
         echo -e "${GREEN}  Enforced keyspaces (discovered from disk): ${KEYSPACES[*]}${NC}"

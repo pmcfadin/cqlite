@@ -476,12 +476,19 @@ class TestRowCountParity:
     test-data/corpus-coverage-policy.md).
     """
 
-    def test_tier1_enumerates_discovered_tables(self):
+    def test_tier1_enumerates_discovered_tables(self, datasets_root):
         """Guard: the parametrized set must enumerate the discovered Tier-1 corpus.
 
         Fails loudly (rather than silently shrinking) if discovery returns
         nothing for the schema-mapped keyspaces, which would make every
         row-count case below vanish unnoticed.
+
+        Issue #1312 (fast-follow to #1229): take the ``datasets_root`` fixture so
+        an UNFETCHED checkout SKIPs consistently with the rest of the suite
+        (``skip_if_no_datasets()`` — or FAILs under ``CQLITE_REQUIRE_FIXTURES=1``
+        strict mode) instead of reporting a hard failure here. A datasets-root
+        that is PRESENT but yields an empty enumeration is still a real bug and
+        FAILs the assertion below (strict mode preserved).
         """
         assert TIER1_ROW_COUNT_TABLES, (
             "No Tier-1 row-count tables discovered for the schema-mapped "
