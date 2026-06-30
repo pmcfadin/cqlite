@@ -91,6 +91,11 @@ const T_B: i64 = 2000;
 const KEYSPACE: &str = "test_compactionparityudt";
 const TABLE: &str = "udt_collections";
 
+/// Issue #1289: the dedicated table whose surviving nested-collection-UDT
+/// elements every carry a NULL INNER FIELD (`person.last_name = null`,
+/// `address.city = null`) — the one shape `udt_collections` cannot pin.
+const TABLE_NULL: &str = "udt_null_inner";
+
 /// Output generation passed to the compactor. Fixed for determinism; affects only
 /// the on-disk filename, never component CONTENT bytes. Matches #1020.
 const OUT_GENERATION: u64 = 3;
@@ -116,6 +121,10 @@ fn require_fixtures_strict() -> bool {
 }
 
 fn reference_dir() -> Option<PathBuf> {
+    reference_dir_for(TABLE)
+}
+
+fn reference_dir_for(table: &str) -> Option<PathBuf> {
     let root = std::env::var("CQLITE_DATASETS_ROOT").ok()?;
     let base = Path::new(&root).join("sstables").join(KEYSPACE);
     let mut matches: Vec<PathBuf> = std::fs::read_dir(&base)
@@ -123,7 +132,7 @@ fn reference_dir() -> Option<PathBuf> {
         .flatten()
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().to_string();
-            if name.starts_with(&format!("{TABLE}-")) {
+            if name.starts_with(&format!("{table}-")) {
                 Some(e.path())
             } else {
                 None
@@ -137,7 +146,7 @@ fn reference_dir() -> Option<PathBuf> {
             let dir = matches.pop().unwrap();
             if single_data_db(&dir).is_none() {
                 panic!(
-                    "{KEYSPACE}.{TABLE}: reference directory {dir:?} exists but contains no \
+                    "{KEYSPACE}.{table}: reference directory {dir:?} exists but contains no \
                      compacted nb-*-big-Data.db. Fixture is PRESENT-BUT-INCOMPLETE — regenerate \
                      with: bash test-data/scripts/generate-compaction-parity-udt.sh"
                 );
@@ -145,7 +154,7 @@ fn reference_dir() -> Option<PathBuf> {
             Some(dir)
         }
         n => panic!(
-            "{KEYSPACE}.{TABLE}: found {n} matching `{TABLE}-*` directories under {base:?} — \
+            "{KEYSPACE}.{table}: found {n} matching `{table}-*` directories under {base:?} — \
              there must be EXACTLY ONE."
         ),
     }
@@ -325,8 +334,12 @@ fn op(column: &str, value: Value) -> CellOperation {
 }
 
 fn write_row(id: i32, ops: Vec<CellOperation>, ts: i64) -> Mutation {
+    write_row_table(TABLE, id, ops, ts)
+}
+
+fn write_row_table(table: &str, id: i32, ops: Vec<CellOperation>, ts: i64) -> Mutation {
     Mutation::new(
-        TableId::new(KEYSPACE, TABLE),
+        TableId::new(KEYSPACE, table),
         PartitionKey::single("id", Value::Integer(id)),
         None,
         ops,
@@ -418,12 +431,132 @@ fn collections_groups() -> (Vec<Mutation>, Vec<Mutation>) {
     (group_a, group_b)
 }
 
+// ── Issue #1289: null-inner-field nested-collection-UDT scenario ──────────────
+
+/// Schema for `udt_null_inner` (matches compaction-parity-udt.cql): only the two
+/// nested-collection-of-UDT columns, no plain `fl`/`fm`.
+fn null_inner_schema() -> TableSchema {
+    TableSchema {
+        keyspace: KEYSPACE.into(),
+        table: TABLE_NULL.into(),
+        partition_keys: vec![KeyColumn {
+            name: "id".into(),
+            data_type: "int".into(),
+            position: 0,
+        }],
+        clustering_keys: vec![],
+        columns: vec![
+            col("id", "int", false),
+            col("lp", "frozen<list<frozen<person>>>", true),
+            col("ma", "frozen<map<text, frozen<address>>>", true),
+        ],
+        comments: Default::default(),
+        dropped_columns: Default::default(),
+    }
+}
+
+/// The SAME two overlapping input groups the generator's `insert_null_inner`
+/// writes, so CQLite reproduces the exact inputs Cassandra wrote. Every
+/// SURVIVING element carries a null inner field: list persons have
+/// `last_name = null`, map addresses have `city = null`.
+fn null_inner_groups() -> (Vec<Mutation>, Vec<Mutation>) {
+    let row = |id, ops, ts| write_row_table(TABLE_NULL, id, ops, ts);
+    let group_a = vec![
+        row(
+            1,
+            vec![
+                op("lp", flist_persons(vec![person_null_last("Ada", 36)])),
+                op(
+                    "ma",
+                    fmap_addrs(vec![("home", address_inner("1 Navy Way", None, "22201"))]),
+                ),
+            ],
+            T_A,
+        ),
+        row(
+            2,
+            vec![
+                op("lp", flist_persons(vec![person_inner("Old", "Val", 1)])),
+                op(
+                    "ma",
+                    fmap_addrs(vec![("k", address_inner("old", Some("old"), "0"))]),
+                ),
+            ],
+            T_A,
+        ),
+    ];
+    let group_b = vec![
+        row(
+            2,
+            vec![
+                op(
+                    "lp",
+                    flist_persons(vec![
+                        person_null_last("Grace", 85),
+                        person_null_last("Alan", 41),
+                    ]),
+                ),
+                op(
+                    "ma",
+                    fmap_addrs(vec![("office", address_inner("9 Apollo", None, "23666"))]),
+                ),
+            ],
+            T_B,
+        ),
+        row(
+            3,
+            vec![
+                op(
+                    "lp",
+                    flist_persons(vec![person_null_last("Katherine", 101)]),
+                ),
+                op(
+                    "ma",
+                    fmap_addrs(vec![("h", address_inner("9 Apollo", None, "23666"))]),
+                ),
+            ],
+            T_B,
+        ),
+    ];
+    (group_a, group_b)
+}
+
+/// A `person` with a NULL `last_name` middle field (the absent-field encoding
+/// under test on the winning side of the merge).
+fn person_null_last(first: &str, age: i32) -> Value {
+    Value::Udt(UdtValue {
+        type_name: "person".into(),
+        keyspace: KEYSPACE.into(),
+        fields: vec![
+            UdtField {
+                name: "first_name".into(),
+                value: Some(Value::Text(first.into())),
+            },
+            UdtField {
+                name: "last_name".into(),
+                value: None,
+            },
+            UdtField {
+                name: "age".into(),
+                value: Some(Value::Integer(age)),
+            },
+        ],
+    })
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // Input building + compaction (CQLite candidate, registry-aware)
 // ════════════════════════════════════════════════════════════════════════════
 
 async fn cqlite_compact(group_a: Vec<Mutation>, group_b: Vec<Mutation>) -> (TempDir, PathBuf) {
-    let schema = collections_schema();
+    cqlite_compact_schema(collections_schema(), group_a, group_b).await
+}
+
+async fn cqlite_compact_schema(
+    schema: TableSchema,
+    group_a: Vec<Mutation>,
+    group_b: Vec<Mutation>,
+) -> (TempDir, PathBuf) {
     let temp = TempDir::new().expect("tempdir");
     let data_dir = temp.path().join("inputs");
     let wal_dir = temp.path().join("wal");
@@ -915,5 +1048,211 @@ async fn nested_frozen_collection_of_udt_compaction_parity() {
     eprintln!(
         "[issue_1240] BYTE PARITY PASS — {BYTE_FOR_BYTE_COMPONENTS:?} of the compacted output are \
          byte-identical to the Cassandra 5.0.2 reference (nested frozen-collection-of-UDT layout)."
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Issue #1289 — null INNER FIELD inside a nested-collection UDT
+//
+// The committed `udt_collections` golden carries a present `city` in every `ma`
+// address, so it cannot pin the one shape that matters here: a SURVIVING
+// nested-collection-UDT element whose inner field is NULL. The dedicated
+// `udt_null_inner` fixture closes that gap — every surviving element has
+// `person.last_name = null` (in `lp`) and `address.city = null` (in `ma`),
+// exercising the `-1` absent-field encoding of a frozen UDT nested inside a
+// frozen collection on the WINNING side of a compaction merge.
+//
+// Fail-closed: SKIPS only on genuine dataset absence (binaries not fetched);
+// a PRESENT-but-empty / present-but-incomplete fixture, a decoded 0-cell output,
+// or a non-null inner field is a FAILURE. CQLITE_REQUIRE_FIXTURES=1 turns the
+// would-be SKIP into a PANIC.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Issue #1289: null-inner-field parity for `udt_null_inner`. Same three tiers as
+/// the `udt_collections` test (structural round-trip + byte parity + typed JSONL
+/// pin), but the typed pin asserts the NULL inner field is preserved through the
+/// compaction merge and decodes to `null` in the authoritative sstabledump golden.
+#[tokio::test]
+async fn nested_collection_udt_null_inner_field_compaction_parity() {
+    let Some(ref_dir) = reference_dir_for(TABLE_NULL) else {
+        if require_fixtures_strict() {
+            panic!(
+                "CQLITE_REQUIRE_FIXTURES=1 but the compacted reference for {KEYSPACE}.{TABLE_NULL} \
+                 is absent; generate with bash test-data/scripts/generate-compaction-parity-udt.sh"
+            );
+        }
+        eprintln!(
+            "[issue_1289] reference for {KEYSPACE}.{TABLE_NULL} absent (dataset not fetched); \
+             skipping"
+        );
+        return;
+    };
+
+    let schema = null_inner_schema();
+    let (group_a, group_b) = null_inner_groups();
+    let (_guard, out_dir) = cqlite_compact_schema(schema.clone(), group_a, group_b).await;
+
+    // ── 1a. Structural nested round-trip via the compaction reader (FLOOR) ────
+    let reference = decode_typed_cell_map(&ref_dir, &schema).await;
+    let ours = decode_typed_cell_map(&out_dir, &schema).await;
+    assert!(
+        !ours.is_empty(),
+        "CQLite compacted output decoded to ZERO typed cells — blob fallback / unreadable output"
+    );
+    assert!(
+        !reference.is_empty(),
+        "Cassandra reference decoded to ZERO typed cells — broken golden"
+    );
+
+    // Surviving shape after last-write-wins: pk 1 (A), 2 (B), 3 (B).
+    let expected_lp_len: BTreeMap<&str, usize> = BTreeMap::from([("1", 1), ("2", 2), ("3", 1)]);
+    let expected_ma_keys: BTreeMap<&str, &str> =
+        BTreeMap::from([("1", "home"), ("2", "office"), ("3", "h")]);
+
+    let mut checked_lp = 0usize;
+    let mut checked_ma = 0usize;
+    for pk in ["1", "2", "3"] {
+        let our_lp = ours
+            .get(&(pk.to_string(), "lp".to_string()))
+            .unwrap_or_else(|| panic!("CQLite output missing lp cell for pk={pk}"));
+        let ref_lp = reference
+            .get(&(pk.to_string(), "lp".to_string()))
+            .unwrap_or_else(|| panic!("Cassandra reference missing lp cell for pk={pk}"));
+        let our_list = assert_list_structure(pk, our_lp);
+        let ref_list = assert_list_structure(pk, ref_lp);
+        assert_eq!(
+            our_list.len(),
+            expected_lp_len[pk],
+            "lp[pk={pk}]: decoded list element count {} != expected {}",
+            our_list.len(),
+            expected_lp_len[pk]
+        );
+        assert_eq!(
+            our_list, ref_list,
+            "lp[pk={pk}]: CQLite nested frozen<list<frozen<person>>> element bytes (null-last_name) \
+             != Cassandra reference"
+        );
+        checked_lp += 1;
+
+        let our_ma = ours
+            .get(&(pk.to_string(), "ma".to_string()))
+            .unwrap_or_else(|| panic!("CQLite output missing ma cell for pk={pk}"));
+        let ref_ma = reference
+            .get(&(pk.to_string(), "ma".to_string()))
+            .unwrap_or_else(|| panic!("Cassandra reference missing ma cell for pk={pk}"));
+        let our_map = assert_map_structure(pk, our_ma);
+        let ref_map = assert_map_structure(pk, ref_ma);
+        assert!(
+            our_map.contains_key(expected_ma_keys[pk]),
+            "ma[pk={pk}]: decoded map missing expected key '{}' (have {:?})",
+            expected_ma_keys[pk],
+            our_map.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            our_map, ref_map,
+            "ma[pk={pk}]: CQLite nested frozen<map<text,frozen<address>>> key set + value bytes \
+             (null-city) != Cassandra reference"
+        );
+        checked_ma += 1;
+    }
+    assert_eq!(checked_lp, 3, "expected to check lp on 3 partitions");
+    assert_eq!(checked_ma, 3, "expected to check ma on 3 partitions");
+
+    eprintln!(
+        "[issue_1289] STRUCTURAL ROUND-TRIP PASS — {TABLE_NULL} nested {NESTED_COLS:?} columns \
+         (null inner field) decoded as structured List/Map and matched the Cassandra reference on \
+         all 3 partitions ({checked_lp} lp + {checked_ma} ma)."
+    );
+
+    // ── 1b. TYPED inner-UDT pin: the NULL inner field decodes to `null` ───────
+    // This is the slice this issue adds: the byte-preserving reader keeps the
+    // inner frozen UDT opaque, so the authoritative TYPED view of the null inner
+    // field comes from the sstabledump golden. `last_name` and `city` MUST render
+    // as JSON `null`; a regression that dropped the field or mis-decoded it would
+    // not produce these exact structured typed values.
+    let typed = jsonl_typed_cells(&ref_dir);
+    let expected_typed: &[(&str, &str, &str)] = &[
+        (
+            "1",
+            "lp",
+            r#"[{"first_name":"Ada","last_name":null,"age":36}]"#,
+        ),
+        (
+            "2",
+            "lp",
+            r#"[{"first_name":"Grace","last_name":null,"age":85},{"first_name":"Alan","last_name":null,"age":41}]"#,
+        ),
+        (
+            "3",
+            "lp",
+            r#"[{"first_name":"Katherine","last_name":null,"age":101}]"#,
+        ),
+        (
+            "1",
+            "ma",
+            r#"{"home":{"street":"1 Navy Way","city":null,"zip":"22201"}}"#,
+        ),
+        (
+            "2",
+            "ma",
+            r#"{"office":{"street":"9 Apollo","city":null,"zip":"23666"}}"#,
+        ),
+        (
+            "3",
+            "ma",
+            r#"{"h":{"street":"9 Apollo","city":null,"zip":"23666"}}"#,
+        ),
+    ];
+    let mut null_fields_seen = 0usize;
+    for (pk, col, want) in expected_typed {
+        let got = typed
+            .get(&(pk.to_string(), col.to_string()))
+            .unwrap_or_else(|| panic!("JSONL golden missing typed {col} for pk={pk}"));
+        assert_eq!(
+            got, want,
+            "{col}[pk={pk}]: typed inner-UDT decode in the sstabledump golden does not match the \
+             expected null-inner-field nested value"
+        );
+        // Fail-closed on the WHOLE POINT of #1289: the inner field must be null.
+        assert!(
+            got.contains(":null"),
+            "{col}[pk={pk}]: expected a NULL inner field but the golden value has none: {got}"
+        );
+        null_fields_seen += 1;
+    }
+    assert_eq!(
+        null_fields_seen,
+        expected_typed.len(),
+        "every nested-column cell must carry a null inner field"
+    );
+    eprintln!(
+        "[issue_1289] NULL INNER-FIELD TYPED PASS — sstabledump golden pins person.last_name=null \
+         and address.city=null for all {} nested-column cells.",
+        expected_typed.len()
+    );
+
+    // ── 2. Byte parity (CONDITIONAL — a Cassandra reference exists) ──────────
+    for suffix in BYTE_FOR_BYTE_COMPONENTS {
+        let reference = read_component(&ref_dir, suffix);
+        let mine = read_component(&out_dir, suffix);
+        assert!(
+            !reference.is_empty(),
+            "reference {suffix} is present-but-empty — broken golden"
+        );
+        if reference != mine {
+            let at = first_diff(&reference, &mine);
+            panic!(
+                "{suffix} byte mismatch (cass={} ours={} bytes, first diff at {at:?})\n  \
+                 cass={}\n  ours={}",
+                reference.len(),
+                mine.len(),
+                hex(&reference),
+                hex(&mine),
+            );
+        }
+    }
+    eprintln!(
+        "[issue_1289] BYTE PARITY PASS — {BYTE_FOR_BYTE_COMPONENTS:?} of the compacted \
+         {TABLE_NULL} output are byte-identical to the Cassandra 5.0.2 reference (null inner field)."
     );
 }

@@ -46,6 +46,10 @@
 --   * udt_collections    — frozen<list<frozen<person>>> and
 --     frozen<map<text, frozen<address>>>: COLLECTIONS CONTAINING UDT VALUES,
 --     plus the plain frozen<list<int>> / frozen<map<text,int>> the AC names.
+--   * udt_null_inner     — same nested-collection-of-UDT shape, but every
+--     surviving element carries a NULL INNER FIELD (list person last_name:null,
+--     map address city:null), pinning the absent-field encoding of a frozen UDT
+--     nested inside a frozen collection on the winning side of a merge (#1289).
 
 CREATE KEYSPACE IF NOT EXISTS test_compactionparityudt WITH replication = {
   'class': 'SimpleStrategy',
@@ -98,6 +102,21 @@ CREATE TABLE IF NOT EXISTS udt_collections (
     id  INT PRIMARY KEY,
     fl  frozen<list<int>>,
     fm  frozen<map<text,int>>,
+    lp  frozen<list<frozen<person>>>,
+    ma  frozen<map<text, frozen<address>>>
+) WITH compression = {'enabled': 'false'}
+  AND compaction = {'class': 'SizeTieredCompactionStrategy'};
+
+-- udt_null_inner — the SAME nested-collection-of-UDT shape as udt_collections,
+-- but every SURVIVING element carries a NULL INNER FIELD: a list person with
+-- last_name:null and a map address with city:null. This is the one shape
+-- udt_collections cannot pin (every committed udt_collections address has a
+-- present city). It exercises the `-1` absent-field encoding of a frozen UDT
+-- nested INSIDE a frozen collection, on the WINNING side of a compaction merge
+-- (issue #1289). Same determinism contract (fixed T_A/T_B, uncompressed, int PK,
+-- no TTL/DELETE) so the compaction output is byte-reproducible by CQLite.
+CREATE TABLE IF NOT EXISTS udt_null_inner (
+    id  INT PRIMARY KEY,
     lp  frozen<list<frozen<person>>>,
     ma  frozen<map<text, frozen<address>>>
 ) WITH compression = {'enabled': 'false'}

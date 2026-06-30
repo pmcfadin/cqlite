@@ -8,6 +8,10 @@
 #   * cqlite.compaction_parity.udt.frozen_person       (udt_frozen_person)
 #   * cqlite.compaction_parity.udt.nested_udt          (udt_nested)
 #   * cqlite.compaction_parity.udt.collections_with_udts (udt_collections)
+#   * (issue #1289) udt_null_inner — nested-collection-of-UDT where every
+#     surviving element has a NULL INNER FIELD (list person last_name:null,
+#     map address city:null), pinning the absent-field encoding of a frozen UDT
+#     nested inside a frozen collection on the winning side of a merge.
 #
 # For each table the generator writes TWO overlapping SSTables (group A at
 # USING TIMESTAMP T_A, group B at the newer T_B that wins overlaps), flushes each
@@ -62,7 +66,7 @@ DRY_RUN="${DRY_RUN:-0}"
 CONTAINER_NAME="cqlite-compactionparityudt"
 CASSANDRA_IMAGE="cassandra:5.0.2"
 KEYSPACE="test_compactionparityudt"
-TABLES=(udt_frozen_person udt_nested udt_collections)
+TABLES=(udt_frozen_person udt_nested udt_collections udt_null_inner)
 
 # Fixed writetimes (micros). MUST match the constants the byte-comparison test
 # feeds CQLite's compactor (issue_1020_udt_frozen_compaction_byte_parity.rs).
@@ -216,6 +220,25 @@ insert_collections() {
   flush_ks
 }
 
+# udt_null_inner: nested-collection-of-UDT where every SURVIVING element carries
+# a NULL INNER FIELD (issue #1289). Same LWW-overlap + flush + major-compact shape
+# as udt_collections, but:
+#   * lp list persons have last_name:null
+#   * ma map addresses have city:null
+#   A (T_A): id 1 (null-inner, survives), id 2 (old, overridden)
+#   B (T_B): id 2 override (null-inner, survives), id 3 new (null-inner, survives)
+# Surviving: 1=A, 2=B, 3=B — all three carry a null inner field on the winning side.
+insert_null_inner() {
+  log "=== udt_null_inner: group A (USING TIMESTAMP $T_A) ==="
+  cql "INSERT INTO udt_null_inner (id, lp, ma) VALUES (1, [{first_name:'Ada', last_name:null, age:36}], {'home':{street:'1 Navy Way', city:null, zip:'22201'}}) USING TIMESTAMP $T_A"
+  cql "INSERT INTO udt_null_inner (id, lp, ma) VALUES (2, [{first_name:'Old', last_name:'Val', age:1}], {'k':{street:'old', city:'old', zip:'0'}}) USING TIMESTAMP $T_A"
+  flush_ks
+  log "=== udt_null_inner: group B (USING TIMESTAMP $T_B) ==="
+  cql "INSERT INTO udt_null_inner (id, lp, ma) VALUES (2, [{first_name:'Grace', last_name:null, age:85},{first_name:'Alan', last_name:null, age:41}], {'office':{street:'9 Apollo', city:null, zip:'23666'}}) USING TIMESTAMP $T_B"
+  cql "INSERT INTO udt_null_inner (id, lp, ma) VALUES (3, [{first_name:'Katherine', last_name:null, age:101}], {'h':{street:'9 Apollo', city:null, zip:'23666'}}) USING TIMESTAMP $T_B"
+  flush_ks
+}
+
 major_compact() {
   local table="$1"
   log "=== Major-compacting $KEYSPACE.$table (two inputs -> one output) ==="
@@ -304,6 +327,7 @@ run $ENGINE exec "$CONTAINER_NAME" nodetool disableautocompaction "$KEYSPACE"
 insert_frozen_person
 insert_nested
 insert_collections
+insert_null_inner
 
 for table in "${TABLES[@]}"; do
   major_compact "$table"
