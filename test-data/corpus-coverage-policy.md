@@ -54,18 +54,27 @@ goldens):
 ### Run-mode tiers within the in-scope corpus
 
 Not every in-scope keyspace can be *executed* in every harness yet (some
-need a schema the harness does not map, or `Data.db` binaries that are not
+need a schema the harness does not map, contain only zero-live-row partitions
+validated by dedicated Rust tests, or have `Data.db` binaries that are not
 in the published dataset asset). These are NOT silently dropped — they are
 discovered, listed, and reported explicitly:
 
 - **enforced** — run through the reader; failures fail the suite.
 - **skip-pending** — discovered and listed explicitly as SKIP-PENDING, but
-  not executed (binaries not yet in the published dataset asset, e.g.
-  `test_deltas` per #701). Flip to enforced once the dataset pin is bumped.
+  not executed through the comprehensive row-count corpus. Flip to enforced
+  once the listed constraint is lifted.
 
-The smoke script (`smoke-test-all-tables.sh`) and the Python parity suite
-(`bindings/python/tests/test_parity.py`) both load this policy from the
-shared helpers so the skip-set lives in exactly one place per language.
+The skip-pending set + per-keyspace reason is the single source of truth here
+and MUST be classified identically across all harnesses
+(`smoke-test-all-tables.sh` `SKIP_PENDING_KEYSPACES`,
+`bindings/python/tests/corpus.py` `SKIP_PENDING_KEYSPACES`,
+`bindings/node/__test__/parity-utils.js` `SKIP_PENDING_KEYSPACES`):
+
+| Keyspace | Skip-pending reason |
+|----------|---------------------|
+| `test_deltas` | `Data.db` binaries not yet in the published dataset asset (#701); flip to enforced once the `fetch-datasets.sh` pin is bumped. |
+| `test_tomb` | Tombstone parity fixtures that legitimately contain partitions with ZERO live rows (e.g. partition-delete-only). The comprehensive corpus's "must emit ≥1 row" check would mis-flag those valid empty results; validated instead by dedicated Rust tombstone/TTL parity tests. |
+| `test_types` | CQL-type / schema-evolution parity fixtures that legitimately contain zero-live-row cases (e.g. deleted-counter shadowing). Same "≥1 row" mismatch as `test_tomb`; validated instead by dedicated Rust CQL-type parity tests. |
 
 ## How to add a keyspace
 
@@ -73,6 +82,10 @@ shared helpers so the skip-set lives in exactly one place per language.
    with its JSONL goldens (and schema if it is to be executed).
 2. The dynamic enumeration picks it up automatically as **in-scope**.
 3. If it must be excluded, add a row to the skip-set table above AND to the
-   skip-set constant in the harness (`smoke-test-all-tables.sh`
-   `SKIP_KEYSPACES` and `bindings/python/tests/corpus.py SKIP_KEYSPACES`)
-   with a one-line reason. Do not silently drop it.
+   skip-set constant in EVERY harness (`smoke-test-all-tables.sh`
+   `SKIP_KEYSPACE_NAMES`, `bindings/python/tests/corpus.py SKIP_KEYSPACES`,
+   `bindings/node/__test__/parity-utils.js SKIP_KEYSPACES`) with a one-line
+   reason. If it is in-scope but cannot be executed yet, add it to the
+   skip-pending table above AND to each harness's `SKIP_PENDING_KEYSPACES`
+   instead — the skip-pending set MUST be identical across all three harnesses
+   and this doc. Do not silently drop it.

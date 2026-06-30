@@ -444,127 +444,79 @@ KNOWN_ROW_COUNT_ISSUES = {
 }
 
 
+# Map each executable keyspace to its module-scoped database fixture name, so
+# the dynamically-parametrized row-count test can dispatch by keyspace (Issue
+# #1229). A newly-committed table under one of these keyspaces is picked up by
+# discover_tables() and automatically gets row-count coverage.
+_KEYSPACE_DB_FIXTURE = {
+    "test_basic": "db_basic",
+    "test_collections": "db_collections",
+    "test_timeseries": "db_timeseries",
+    "test_wide_rows": "db_wide_rows",
+}
+
+# Discovered (keyspace, table) Tier-1 pairs, respecting the documented
+# skip-pending set (corpus.py SKIP_PENDING_KEYSPACES / corpus-coverage-policy.md):
+# enumerate every executable keyspace's committed tables, NOT a hand-typed list.
+TIER1_ROW_COUNT_TABLES = [
+    (ks, table)
+    for (ks, table) in ALL_TABLES
+    if ks in _KEYSPACE_DB_FIXTURE and ks not in SKIP_PENDING_KEYSPACES
+]
+
+
 class TestRowCountParity:
     """Tier 1: Verify row counts match the JSONL reference.
 
     This is the primary parity test - ensures the schema-mapped keyspaces are
-    readable and return the expected number of rows.
+    readable and return the expected number of rows. The (keyspace, table)
+    pairs are DISCOVERED dynamically from the committed corpus (Issue #1229),
+    not hand-typed, so a newly-committed in-scope table gets coverage
+    automatically. The skip-pending set is respected (corpus.py /
+    test-data/corpus-coverage-policy.md).
     """
 
-    # test_basic tables (8)
-    @pytest.mark.parametrize(
-        "table",
-        [
-            "simple_table",
-            "composite_key_table",
-            "compression_test_table",
-            "multi_partition_table",
-            "ttl_test_table",
-            "counters",
-            "static_columns_table",  # Issue resolved
-            "uncompressed_table",
-        ],
-    )
-    def test_basic_row_count(self, db_basic, table):
-        """Verify row count parity for test_basic tables."""
-        jsonl_file = find_jsonl_file("test_basic", table)
-        if jsonl_file is None:
-            pytest.skip(f"JSONL reference not found for test_basic.{table}")
+    def test_tier1_enumerates_discovered_tables(self):
+        """Guard: the parametrized set must enumerate the discovered Tier-1 corpus.
 
-        expected_count = count_rows_in_jsonl(jsonl_file)
-        result = db_basic.execute(f"SELECT * FROM test_basic.{table}")
-        actual_count = len(result.rows)
-
-        assert actual_count == expected_count, (
-            f"Row count mismatch for test_basic.{table}: "
-            f"got {actual_count}, expected {expected_count}"
+        Fails loudly (rather than silently shrinking) if discovery returns
+        nothing for the schema-mapped keyspaces, which would make every
+        row-count case below vanish unnoticed.
+        """
+        assert TIER1_ROW_COUNT_TABLES, (
+            "No Tier-1 row-count tables discovered for the schema-mapped "
+            f"keyspaces {sorted(_KEYSPACE_DB_FIXTURE)}; expected the committed "
+            "corpus to yield at least one table per keyspace (Issue #1229)."
+        )
+        # Every schema-mapped, non-skip-pending keyspace must contribute tables.
+        covered = {ks for (ks, _t) in TIER1_ROW_COUNT_TABLES}
+        expected = {
+            ks for ks in _KEYSPACE_DB_FIXTURE if ks not in SKIP_PENDING_KEYSPACES
+        }
+        assert covered == expected, (
+            f"Tier-1 keyspace coverage mismatch: discovered {sorted(covered)}, "
+            f"expected {sorted(expected)} (Issue #1229)."
         )
 
-    # test_collections tables (8)
     @pytest.mark.parametrize(
-        "table",
-        [
-            "collection_table",
-            "collection_clustering_table",
-            "collections_with_udts",
-            "empty_collections_table",
-            "frozen_collections_table",
-            "large_collections_table",
-            "nested_collections_table",
-            "typed_collections_table",  # Issue resolved
-        ],
+        ("keyspace", "table"),
+        TIER1_ROW_COUNT_TABLES,
+        ids=[f"{ks}.{t}" for (ks, t) in TIER1_ROW_COUNT_TABLES],
     )
-    def test_collections_row_count(self, db_collections, table):
-        """Verify row count parity for test_collections tables."""
-        jsonl_file = find_jsonl_file("test_collections", table)
+    def test_row_count(self, request, keyspace, table):
+        """Verify row count parity for every discovered Tier-1 table."""
+        database = request.getfixturevalue(_KEYSPACE_DB_FIXTURE[keyspace])
+
+        jsonl_file = find_jsonl_file(keyspace, table)
         if jsonl_file is None:
-            pytest.skip(f"JSONL reference not found for test_collections.{table}")
+            pytest.skip(f"JSONL reference not found for {keyspace}.{table}")
 
         expected_count = count_rows_in_jsonl(jsonl_file)
-        result = db_collections.execute(f"SELECT * FROM test_collections.{table}")
+        result = database.execute(f"SELECT * FROM {keyspace}.{table}")
         actual_count = len(result.rows)
 
         assert actual_count == expected_count, (
-            f"Row count mismatch for test_collections.{table}: "
-            f"got {actual_count}, expected {expected_count}"
-        )
-
-    # test_timeseries tables (9)
-    @pytest.mark.parametrize(
-        "table",
-        [
-            "event_store",
-            "user_sessions",
-            "sensor_data",
-            "app_metrics",
-            "log_entries",
-            "stock_prices",
-            "tick_data",
-            "time_bucketed_counters",
-            "user_activity",
-        ],
-    )
-    def test_timeseries_row_count(self, db_timeseries, table):
-        """Verify row count parity for test_timeseries tables."""
-        jsonl_file = find_jsonl_file("test_timeseries", table)
-        if jsonl_file is None:
-            pytest.skip(f"JSONL reference not found for test_timeseries.{table}")
-
-        expected_count = count_rows_in_jsonl(jsonl_file)
-        result = db_timeseries.execute(f"SELECT * FROM test_timeseries.{table}")
-        actual_count = len(result.rows)
-
-        assert actual_count == expected_count, (
-            f"Row count mismatch for test_timeseries.{table}: "
-            f"got {actual_count}, expected {expected_count}"
-        )
-
-    # test_wide_rows tables (8)
-    @pytest.mark.parametrize(
-        "table",
-        [
-            "wide_partition_table",
-            "chat_messages",
-            "document_versions",
-            "large_blob_table",
-            "many_columns_table",
-            "multi_metric_timeseries",
-            "product_catalog",
-            "sparse_data_table",
-        ],
-    )
-    def test_wide_rows_row_count(self, db_wide_rows, table):
-        """Verify row count parity for test_wide_rows tables."""
-        jsonl_file = find_jsonl_file("test_wide_rows", table)
-        if jsonl_file is None:
-            pytest.skip(f"JSONL reference not found for test_wide_rows.{table}")
-
-        expected_count = count_rows_in_jsonl(jsonl_file)
-        result = db_wide_rows.execute(f"SELECT * FROM test_wide_rows.{table}")
-        actual_count = len(result.rows)
-
-        assert actual_count == expected_count, (
-            f"Row count mismatch for test_wide_rows.{table}: "
+            f"Row count mismatch for {keyspace}.{table}: "
             f"got {actual_count}, expected {expected_count}"
         )
 

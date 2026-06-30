@@ -96,8 +96,8 @@ SKIP_PENDING_KEYSPACES=("test_deltas" "test_tomb" "test_types")
 SKIP_PENDING_KEYSPACE_NAMES=("test_deltas" "test_tomb" "test_types")
 SKIP_PENDING_KEYSPACE_REASONS=(
     "binaries not in published dataset asset yet (see issue #701 — promote once fetch-datasets.sh pin is bumped)"
-    "tombstone parity fixtures with valid zero-live-row partitions; validated by dedicated Rust tombstone/TTL parity tests, not the row-count smoke test"
-    "CQL-type/schema-evolution parity fixtures with valid zero-live-row cases (deleted-counter shadowing); validated by dedicated Rust CQL-type parity tests"
+    "tombstone parity fixtures with valid zero-live-row partitions; validated by dedicated Rust tombstone/TTL parity tests, not the comprehensive row-count corpus"
+    "CQL-type/schema-evolution parity fixtures with valid zero-live-row cases (deleted-counter shadowing); validated by dedicated Rust CQL-type parity tests, not the comprehensive row-count corpus"
 )
 
 # Return 0 if $1 is in SKIP_KEYSPACE_NAMES

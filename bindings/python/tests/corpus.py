@@ -39,10 +39,22 @@ SKIP_KEYSPACES: dict[str, str] = {
     "test_compactionparityudt": "compaction-parity UDT fixtures (compaction harness; may be local-only)",
 }
 
-# In-scope keyspaces that are discovered + listed but not executed yet
-# (binaries not in the published dataset asset). Not silently dropped.
+# In-scope keyspaces that are discovered + listed but not executed through the
+# comprehensive row-count corpus. Not silently dropped. This set MUST be
+# identical across smoke-test-all-tables.sh (SKIP_PENDING_KEYSPACES),
+# parity-utils.js (SKIP_PENDING_KEYSPACES), and corpus-coverage-policy.md.
 SKIP_PENDING_KEYSPACES: dict[str, str] = {
     "test_deltas": "binaries not in published dataset asset yet (issue #701)",
+    "test_tomb": (
+        "tombstone parity fixtures with valid zero-live-row partitions; "
+        "validated by dedicated Rust tombstone/TTL parity tests, not the "
+        "comprehensive row-count corpus"
+    ),
+    "test_types": (
+        "CQL-type/schema-evolution parity fixtures with valid zero-live-row "
+        "cases (deleted-counter shadowing); validated by dedicated Rust "
+        "CQL-type parity tests, not the comprehensive row-count corpus"
+    ),
 }
 
 # Explicit in-scope read-parity corpus (the documented list in

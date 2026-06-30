@@ -643,11 +643,17 @@ const SKIP_KEYSPACES = {
 };
 
 /**
- * Keyspaces discovered + listed in-scope but not executed yet (binaries not in
- * the published dataset asset). Mirrors corpus.py SKIP_PENDING_KEYSPACES.
+ * Keyspaces discovered + listed in-scope but not executed through the
+ * comprehensive row-count corpus. This set MUST be identical across
+ * smoke-test-all-tables.sh, corpus.py (SKIP_PENDING_KEYSPACES), and
+ * corpus-coverage-policy.md.
  */
 const SKIP_PENDING_KEYSPACES = {
   test_deltas: 'binaries not in published dataset asset yet (issue #701)',
+  test_tomb:
+    'tombstone parity fixtures with valid zero-live-row partitions; validated by dedicated Rust tombstone/TTL parity tests, not the comprehensive row-count corpus',
+  test_types:
+    'CQL-type/schema-evolution parity fixtures with valid zero-live-row cases (deleted-counter shadowing); validated by dedicated Rust CQL-type parity tests, not the comprehensive row-count corpus',
 };
 
 /**
