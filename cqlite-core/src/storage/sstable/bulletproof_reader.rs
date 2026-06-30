@@ -33,6 +33,7 @@ use super::{
     chunk_decompressor::{create_decompressor_from_file, ChunkDecompressor},
     compression_info::CompressionInfo,
     format_detector::{SSTableComponent, SSTableFormat, SSTableInfo},
+    version_gate::VersionGates,
 };
 use crate::parser::vint::parse_vint;
 use crate::{Error, Result};
@@ -81,19 +82,23 @@ impl BulletproofReader {
     /// proper compression handling if needed.
     pub fn open<P: AsRef<Path>>(sstable_path: P) -> Result<Self> {
         let path = sstable_path.as_ref();
-        let info = SSTableInfo::from_path(path)?;
 
-        // #1249: reject below-floor formats (Cassandra 2.x and pre-`na` 3.x
-        // BIG, i.e. `ma`–`me`) BEFORE any initialization or file-body read.
-        // There is no correctness-modeling read path for them; return the
-        // typed version error naming the supported floor rather than opening
-        // files and reading rows we cannot interpret.
-        if let SSTableFormat::V2x(v) | SSTableFormat::V3x(v) = &info.format {
-            return Err(Error::UnsupportedVersion {
-                version: v.clone(),
-                floor: "na".to_string(),
-            });
+        // #1249: reject ALL below-floor versions BEFORE any initialization or
+        // file-body read, using the SAME authoritative gate the production
+        // readers use (`reader/mod.rs::open_inner`, `statistics_reader.rs::open`).
+        // `VersionGates::from_path` derives the version from the filename alone
+        // (no I/O) and rejects every pre-`na` BIG (`la`/`ic`/`jb`/`ma`–`me`) and
+        // non-`da` BTI descriptor with a typed `UnsupportedVersion` naming the
+        // supported floor — including below-floor versions that
+        // `SSTableInfo::from_path` classifies as `Unknown` (e.g. `la`), which the
+        // old `V2x`/`V3x` format match silently bypassed. A structurally-
+        // unparseable descriptor falls through to current behaviour (it is not
+        // made fatal); the floor only fires on a *parsed* below-floor version.
+        if let Err(e @ Error::UnsupportedVersion { .. }) = VersionGates::from_path(path) {
+            return Err(e);
         }
+
+        let info = SSTableInfo::from_path(path)?;
 
         let base_dir = path
             .parent()
@@ -240,18 +245,21 @@ impl BulletproofReader {
     /// This is where we'll implement the actual SSTable parsing
     /// based on the detected format version
     pub fn parse_sstable_data(&mut self) -> Result<Vec<SSTableEntry>> {
-        // #1249: reject below-floor formats (Cassandra 2.x and pre-`na` 3.x
-        // BIG, i.e. `ma`–`me`) BEFORE reading any row bytes. There is no
-        // correctness-modeling read path for them; return the typed version
-        // error naming the supported floor instead of routing into a stub
-        // parser or surfacing a downstream parse/corruption error. `open`
-        // already rejects these, but readers built via `new()` reach here
-        // directly, so guard before `read_all_data()`.
-        if let SSTableFormat::V2x(v) | SSTableFormat::V3x(v) = &self.info.format {
-            return Err(Error::UnsupportedVersion {
-                version: v.clone(),
-                floor: "na".to_string(),
-            });
+        // #1249: reject ALL below-floor versions BEFORE reading any row bytes,
+        // using the same authoritative gate as `open` and the production
+        // readers. `open` already rejects these, but readers built via `new()`
+        // reach here directly, so re-derive from the same descriptor (the
+        // `<version>-<id>-<format>` `base_name` plus the Data component). This
+        // catches every pre-`na` BIG (`la`/`ma`–`me`) and non-`da` BTI
+        // version — including ones classified as `Unknown` (e.g. `la`) that the
+        // old `V2x`/`V3x` format match silently bypassed — with a typed
+        // `UnsupportedVersion` before `read_all_data()`. A structurally-
+        // unparseable descriptor is NOT made fatal: it falls through to the
+        // format-family match below.
+        if let Err(e @ Error::UnsupportedVersion { .. }) =
+            VersionGates::from_path(Path::new(&format!("{}-Data.db", self.info.base_name)))
+        {
+            return Err(e);
         }
 
         let data = self.read_all_data()?;
@@ -264,10 +272,13 @@ impl BulletproofReader {
 
         match &self.info.format {
             SSTableFormat::V4x(_) | SSTableFormat::V5x(_) => self.parse_modern_format(&data),
-            SSTableFormat::V2x(_) | SSTableFormat::V3x(_) => {
-                unreachable!("below-floor V2x/V3x formats are rejected before read_all_data")
-            }
-            SSTableFormat::Unknown(version) => Err(Error::UnsupportedFormat(format!(
+            // Below-floor V2x/V3x (and below-floor Unknown like `la`) are
+            // rejected via VersionGates above before any read, so they never
+            // reach this match. An above-floor Unknown (e.g. `nc`/`ob`/`pa`,
+            // tracked separately in #1297) still surfaces UnsupportedFormat.
+            SSTableFormat::V2x(version)
+            | SSTableFormat::V3x(version)
+            | SSTableFormat::Unknown(version) => Err(Error::UnsupportedFormat(format!(
                 "Unknown SSTable version: {}",
                 version
             ))),
@@ -857,6 +868,63 @@ mod tests {
                 assert_eq!(floor, "na");
             }
             other => panic!("expected UnsupportedVersion, got {:?}", other.map(|_| ())),
+        }
+    }
+
+    /// #1249 regression: a below-floor BIG descriptor that `SSTableInfo`
+    /// classifies as `SSTableFormat::Unknown` (Cassandra 2.x `la`) must STILL
+    /// be rejected by the floor. The old `V2x`/`V3x` format-match guard let
+    /// `la` (Unknown) bypass the floor entirely; routing through the
+    /// authoritative `VersionGates` rejects it via `BigVersionGates`'s `< na`
+    /// gate. We point at a non-existent Data.db so any post-read code path
+    /// would surface an IO/parse error instead of `UnsupportedVersion`.
+    #[test]
+    fn test_below_floor_unknown_la_rejected_before_read() {
+        let info = SSTableInfo::from_path(&std::path::PathBuf::from("la-1-big-Data.db")).unwrap();
+        // `la` is NOT classified as V2x/V3x — it falls into Unknown, which the
+        // old guard did not catch. This assertion documents that gap.
+        assert!(matches!(info.format, SSTableFormat::Unknown(ref v) if v == "la"));
+
+        let mut reader = BulletproofReader {
+            info,
+            base_dir: std::path::PathBuf::from("/nonexistent/cqlite-1249-la"),
+            decompressor: None,
+            data_reader: None,
+        };
+
+        match reader.parse_sstable_data() {
+            Err(Error::UnsupportedVersion { version, floor }) => {
+                assert_eq!(version, "la");
+                assert_eq!(floor, "na");
+            }
+            other => panic!("expected UnsupportedVersion for la, got {:?}", other),
+        }
+    }
+
+    /// #1249 regression: `open` rejects a below-floor `Unknown`-classified BIG
+    /// descriptor (`la`) before initialization, even when a (garbage) Data.db
+    /// body exists on disk. Proves pre-read rejection via the authoritative
+    /// gate rather than a parse/corruption error from reading the body.
+    #[test]
+    fn test_open_below_floor_unknown_la_rejected_with_body_present() {
+        let dir = std::env::temp_dir().join(format!("cqlite-1249-la-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let data_path = dir.join("la-1-big-Data.db");
+        // Garbage body: would error during parsing if it were ever read.
+        std::fs::write(&data_path, b"not a valid sstable body").unwrap();
+
+        let result = BulletproofReader::open(&data_path);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        match result {
+            Err(Error::UnsupportedVersion { version, floor }) => {
+                assert_eq!(version, "la");
+                assert_eq!(floor, "na");
+            }
+            other => panic!(
+                "expected UnsupportedVersion for la, got {:?}",
+                other.map(|_| ())
+            ),
         }
     }
 }
