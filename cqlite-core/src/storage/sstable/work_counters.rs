@@ -98,6 +98,14 @@ struct Counters {
     chunks_decompressed: AtomicU64,
     /// Individual rows DECODED within a partition by the seek path (Issue #954).
     rows_decoded: AtomicU64,
+    /// Promoted-index blocks DECODED back-to-front by the BIG reverse partition
+    /// iterator (Issue #1184). One per block the reverse walk visits.
+    reverse_blocks_decoded: AtomicU64,
+    /// Peak number of decoded rows held in a SINGLE block buffer by the BIG
+    /// reverse iterator (Issue #1184) — the per-iteration memory high-water mark.
+    /// A regression that materialises the whole partition before reversing pushes
+    /// this to the partition's full row count instead of one block's worth.
+    reverse_peak_block_rows: AtomicU64,
 }
 
 impl Counters {
@@ -108,6 +116,8 @@ impl Counters {
             partitions_decoded: AtomicU64::new(0),
             chunks_decompressed: AtomicU64::new(0),
             rows_decoded: AtomicU64::new(0),
+            reverse_blocks_decoded: AtomicU64::new(0),
+            reverse_peak_block_rows: AtomicU64::new(0),
         }
     }
 
@@ -136,6 +146,25 @@ impl Counters {
         self.rows_decoded.fetch_add(count, Ordering::Relaxed);
     }
 
+    #[cfg(not(feature = "tombstones"))]
+    fn add_reverse_block_decoded(&self) {
+        self.reverse_blocks_decoded.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(not(feature = "tombstones"))]
+    fn observe_reverse_block_rows(&self, rows: u64) {
+        self.reverse_peak_block_rows
+            .fetch_max(rows, Ordering::Relaxed);
+    }
+
+    fn reverse_blocks_decoded(&self) -> u64 {
+        self.reverse_blocks_decoded.load(Ordering::Relaxed)
+    }
+
+    fn reverse_peak_block_rows(&self) -> u64 {
+        self.reverse_peak_block_rows.load(Ordering::Relaxed)
+    }
+
     fn sstables_scanned(&self) -> u64 {
         self.sstables_scanned.load(Ordering::Relaxed)
     }
@@ -162,6 +191,8 @@ impl Counters {
         self.partitions_decoded.store(0, Ordering::Relaxed);
         self.chunks_decompressed.store(0, Ordering::Relaxed);
         self.rows_decoded.store(0, Ordering::Relaxed);
+        self.reverse_blocks_decoded.store(0, Ordering::Relaxed);
+        self.reverse_peak_block_rows.store(0, Ordering::Relaxed);
     }
 }
 
@@ -238,6 +269,23 @@ pub(crate) fn add_rows_decoded(count: u64) {
     COUNTERS.add_rows_decoded(count);
 }
 
+/// Record that the BIG reverse partition iterator decoded one promoted-index
+/// block (Issue #1184). Called once per block the back-to-front walk visits, so
+/// a test can prove the reverse scan is block-driven (count == block count) and
+/// not a post-fetch in-memory `sort_by` over a single full-partition read.
+#[cfg(not(feature = "tombstones"))]
+pub(crate) fn add_reverse_block_decoded() {
+    COUNTERS.add_reverse_block_decoded();
+}
+
+/// Observe the row count of ONE block buffer the reverse iterator just decoded
+/// (Issue #1184); keeps the running peak. A test asserts the peak stays bounded
+/// to a single block, proving per-iteration memory is O(block), not O(partition).
+#[cfg(not(feature = "tombstones"))]
+pub(crate) fn observe_reverse_block_rows(rows: u64) {
+    COUNTERS.observe_reverse_block_rows(rows);
+}
+
 /// Number of candidate SSTables parsed by partition-targeted lookups since the
 /// last [`reset`].
 ///
@@ -287,6 +335,21 @@ pub fn chunks_decompressed() -> u64 {
 /// the bound, even though `partitions_decoded` would still read 1.
 pub fn rows_decoded() -> u64 {
     COUNTERS.rows_decoded()
+}
+
+/// Number of promoted-index blocks the BIG reverse partition iterator decoded
+/// back-to-front since the last [`reset`] (Issue #1184). For a wide partition
+/// this equals the partition's block count; a regression to a forward
+/// full-partition read + in-memory sort leaves it at 0.
+pub fn reverse_blocks_decoded() -> u64 {
+    COUNTERS.reverse_blocks_decoded()
+}
+
+/// Peak rows held in a single reverse-iterator block buffer since the last
+/// [`reset`] (Issue #1184). Tests assert this stays bounded to one block's worth
+/// of rows — far below the partition total — proving bounded per-iteration memory.
+pub fn reverse_peak_block_rows() -> u64 {
+    COUNTERS.reverse_peak_block_rows()
 }
 
 /// Clear all five process-global counters. Integration tests call this before a

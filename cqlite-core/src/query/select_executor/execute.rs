@@ -26,9 +26,6 @@ use super::{
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-#[cfg(not(feature = "tombstones"))]
-use super::classify_clustering_slice;
-
 impl SelectExecutor {
     /// Execute an optimized query plan.
     ///
@@ -80,6 +77,7 @@ impl SelectExecutor {
             scan_rows: 0,
             projection_flags,
             access_path: None,
+            reverse_served: false,
         };
 
         // Handle queries without FROM clause (like SELECT 1)
@@ -110,7 +108,13 @@ impl SelectExecutor {
                     ..
                 } => {
                     let rows = self
-                        .execute_sstable_scan(table, predicates, projection, &mut context)
+                        .execute_sstable_scan(
+                            table,
+                            predicates,
+                            projection,
+                            plan.statement.order_by.as_ref(),
+                            &mut context,
+                        )
                         .await?;
                     intermediate_results = rows;
                 }
@@ -120,9 +124,14 @@ impl SelectExecutor {
                         .await?;
                 }
                 ExecutionStep::Sort { order_by, .. } => {
-                    intermediate_results = self
-                        .execute_sort(intermediate_results, order_by, &mut context)
-                        .await?;
+                    // Issue #1184: when the BIG reverse partition iterator already
+                    // produced the rows in descending clustering order, skip the
+                    // in-memory sort entirely (it remains the fallback otherwise).
+                    if !context.reverse_served {
+                        intermediate_results = self
+                            .execute_sort(intermediate_results, order_by, &mut context)
+                            .await?;
+                    }
                 }
                 ExecutionStep::Aggregate { plan: agg_plan, .. } => {
                     intermediate_results = self
@@ -528,11 +537,13 @@ impl SelectExecutor {
     /// handled by the free helpers `build_row_from_scan` and
     /// `evaluate_predicates`, which are shared with the streaming background
     /// task to keep the two execution paths in lockstep.
+    #[cfg_attr(feature = "tombstones", allow(unused_variables))]
     pub(super) async fn execute_sstable_scan(
         &self,
         table: &TableId,
         predicates: &[SSTablePredicate],
         projection: &[String],
+        order_by: Option<&crate::query::select_ast::OrderByClause>,
         context: &mut ExecutionContext,
     ) -> Result<Vec<QueryRow>> {
         const MAX_RESULTS: usize = 1_000_000;
@@ -673,26 +684,20 @@ impl SelectExecutor {
                     // only when the seek engaged, else `PartitionLookup`. The
                     // clustering seek exists only on the default build; the
                     // `tombstones` build uses the plain partition lookup.
+                    // Issue #954/#960/#1184: forward clustering-slice seek OR (for
+                    // `ORDER BY <ck>` reverse-of-stored) the BIG reverse iterator,
+                    // with the honest access path recorded inside the helper.
                     #[cfg(not(feature = "tombstones"))]
                     {
-                        let clustering = classify_clustering_slice(predicates, schema_opt.as_ref());
-                        let (rows, engaged) = self
-                            .storage
-                            .scan_partition_clustering(
-                                table,
-                                &pk_bytes,
-                                clustering.as_ref(),
-                                schema_opt.as_ref(),
-                            )
-                            .await?;
-                        let path = if engaged {
-                            AccessPath::ClusteringSlice
-                        } else {
-                            AccessPath::PartitionLookup
-                        };
-                        context.access_path = Some(path.clone());
-                        crate::query::access_path::record(path);
-                        rows
+                        self.targeted_partition_rows(
+                            table,
+                            &pk_bytes,
+                            predicates,
+                            order_by,
+                            schema_opt.as_ref(),
+                            context,
+                        )
+                        .await?
                     }
                     #[cfg(feature = "tombstones")]
                     {

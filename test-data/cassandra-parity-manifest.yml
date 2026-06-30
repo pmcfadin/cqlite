@@ -1970,7 +1970,7 @@ scenarios:
 
   - id: cass.sstable_scan.wide_partition.forward_reverse_bounds
     title: Wide-partition forward and reverse scan boundary parity
-    status: partial
+    status: mirrored
     capability: index_summary
     priority: P1
     risk: p1_correctness
@@ -1985,16 +1985,26 @@ scenarios:
         suite: sstable_parity_index_db_big
         tests:
           - cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs
+          - cqlite-core/tests/issue_1184_big_promoted_read_seek.rs
         notes: >-
-          Forward-scan completeness is proven: forward scans return exactly
-          290/300/300 live rows with no rows lost across promoted-index block
-          boundaries or the deleted range. Reverse-iteration parity is not yet
-          provable (see gap).
+          Reverse iteration is now real (issue #1184): the BIG reverse partition
+          iterator walks the promoted IndexInfo blocks back-to-front
+          (SSTableReader::big_reverse_partition_rows), routed through the production
+          query path for single-partition `ORDER BY <ck> DESC`. issue_1184 pins
+          forward==reverse on a multi-block BIG wide partition built via the write
+          engine (identical clustering set, exact reverse ordering, block-by-block
+          decode with per-iteration memory bounded to one block), plus the forward
+          promoted-index clustering-range seek (AccessPath::ClusteringSlice) and a
+          ranged read keeping the rows adjacent to a clustering gap. issue_993 pins
+          the forward 290/300/300 completeness and, when the local-only Cassandra
+          binaries are present, the byte-level forward==reverse 290-row equality on
+          the real test_big.wide_partition fixture (skip-on-absence until the
+          dataset re-pin).
     fixtures:
       references:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
     evidence:
-      type: partial
+      type: canonical_semantic
       artifacts: [offsets, jsonl]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
@@ -2003,29 +2013,35 @@ scenarios:
         bash test-data/scripts/gen-wide-big.sh
       reference_paths:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
+      normalization: >-
+        Forward (ASC) and reverse (DESC) single-partition scans are normalized to
+        the per-partition clustering set and ordering: the live clustering values
+        and their sequence are compared (forward == reverse-of-DESC), ignoring
+        presentation/whitespace. Proven in CI via the production reverse iterator on
+        a write-engine multi-block BIG wide partition (issue_1184); the real
+        test_big.wide_partition byte-level 290-row equality runs locally on absence.
       known_limitations: >-
-        Only forward-scan completeness is proven. Local-only fixture
-        (gen-wide-big.sh) pending dataset re-pin; test skips-on-absence.
+        The CI-runnable forward==reverse proof (issue_1184) uses a write-engine-built
+        multi-block BIG wide partition. The byte-level forward==reverse equality on
+        the real Cassandra test_big.wide_partition fixture is a local-only check
+        (gen-wide-big.sh) that skips-on-absence until the dataset re-pin promotes
+        the binaries into the release tarball.
     ci:
-      tier: manual_debug
+      tier: fast_pr
     scope:
       gap: >-
-        Forward-scan completeness is backed by forward_bounds_completeness, which
-        reads the binary Data.db and therefore SKIPS in CI because the
-        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
-        in progress); the CI-running JSONL canonical-semantic check proves live
-        counts but not scan completeness across promoted-index block boundaries.
-        Reverse SSTable iteration is additionally not implemented for BIG wide
-        partitions (only a post-fetch in-memory ORDER BY DESC sort exists, which
-        does not exercise reverse promoted-index block decoding).
+        Reverse SSTable iteration for BIG wide partitions is now implemented and
+        proven in CI (issue_1184, production reverse iterator over a write-engine
+        multi-block BIG wide partition). The remaining gap is byte-level coverage on
+        the real fixture: the test_big.wide_partition forward==reverse 290-row
+        equality reads the binary Data.db and therefore SKIPS in CI because those
+        binaries are not in the pinned dataset (issue #1185 in progress); the
+        CI-running JSONL canonical-semantic check proves live counts but not
+        byte-level completeness across promoted-index block boundaries.
       next_step: >-
-        First re-promote to required_parity once issue #1185 pins the
-        test_big.wide_partition binaries into the CI dataset so forward-scan
-        completeness runs fail-closed; then implement a BIG-format reverse partition
-        iterator that uses the promoted IndexInfo blocks to seek/decode blocks
-        back-to-front (mirroring Cassandra SSTableReversedIterator) and assert
-        forward and reverse scans of pk=1 return the identical 290-row clustering set
-        with no rows lost adjacent to the deleted block.
+        Add the test_big.wide_partition binaries to the dataset release pin (issue
+        #1185) so the byte-level forward==reverse 290-row equality runs in the
+        required_parity lane rather than skip-on-absence.
 
   - id: cass.index_db.bti.index_component_discovery
     title: BTI index-component discovery and classification

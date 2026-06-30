@@ -24,13 +24,13 @@ pub mod work_counters;
 pub use reader::SSTableReader;
 pub mod schema_aware_reader;
 pub use schema_aware_reader::SchemaAwareReader;
+mod reverse_scan; // BIG reverse partition iteration (issue #1184); file is tombstones-gated.
 pub mod row_cell_state_machine;
 pub mod statistics_reader;
 #[cfg(feature = "tombstones")]
 pub mod tombstone_merger;
 pub mod validation;
-// Verifier contract for compressed + corrupted SSTables (epic #970, issue #1000).
-pub mod verify;
+pub mod verify; // Verifier contract for compressed + corrupted SSTables (epic #970, issue #1000).
 pub use verify::{verify_sstable, VerifyErrorClass, VerifyFinding, VerifyMode, VerifyReport};
 
 // M5: SSTable writer components (Issue #359)
@@ -217,7 +217,7 @@ pub struct SSTableManager {
 
     /// Table name to SSTable readers mapping
     /// Maps table names (e.g., "simple_table") to their corresponding SSTable readers
-    table_readers: Arc<RwLock<HashMap<String, Vec<Arc<reader::SSTableReader>>>>>,
+    pub(crate) table_readers: Arc<RwLock<HashMap<String, Vec<Arc<reader::SSTableReader>>>>>,
 
     /// Platform abstraction
     platform: Arc<Platform>,
@@ -1314,7 +1314,7 @@ impl SSTableManager {
     /// Shared by [`get`](Self::get), [`scan`](Self::scan), and
     /// [`scan_partition`](Self::scan_partition) so the resolution rule lives in
     /// one place and the targeted-lookup path can never drift from `scan`.
-    fn resolve_reader_list<'a>(
+    pub(in crate::storage::sstable) fn resolve_reader_list<'a>(
         table_readers: &'a HashMap<String, Vec<Arc<reader::SSTableReader>>>,
         table_name: &str,
     ) -> Option<&'a Vec<Arc<reader::SSTableReader>>> {
