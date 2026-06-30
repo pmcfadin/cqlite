@@ -199,8 +199,8 @@ for line in sys.stdin:
         log "  OK: $jsonl_file ($lines partitions)"
       fi
     fi
-  done < <(find "$sstables_dir" -type f -name "*-Data.db" -not -name "._*" -print0 \
-            | grep -z "$KEYSPACE" 2>/dev/null || true)
+  done < <(find "$sstables_dir/$KEYSPACE" -type f -name "*-Data.db" -not -name "._*" -print0 \
+            2>/dev/null || true)
 }
 
 # ----------------------------------------------------------------------------

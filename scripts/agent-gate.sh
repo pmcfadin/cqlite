@@ -33,6 +33,11 @@
 #                      exits before running any component, so there is no recursion.
 #                      SKIP-aware: no python3 -> SKIP (the selftest's truncation
 #                      assertion needs a python reader), never silent PASS.
+#                      Also runs scripts/tests/test_generator_keyspace_scoping.sh
+#                      (#1232) — fails if a generate-*.sh enumerates the whole
+#                      SSTable corpus and grep -z filters by keyspace; needs no
+#                      python3 so it runs even on the SKIP path, and any failure
+#                      hard-FAILs this component.
 #   minimal-build      cargo build -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
 #   file-size          campsite-rule ratchet (epic #1116 / #1135): lists changed
@@ -452,6 +457,23 @@ run_tooling_tests() {
   local log="$LOG_DIR/$name.log"
   local start end status
   start=$(date +%s)
+  : >"$log"
+
+  # generator keyspace-scoping guard (#1232): no python3 needed, always runs. A
+  # failure here FAILs the component, mirroring the summary selftest semantics.
+  echo ">>> [$name] bash scripts/tests/test_generator_keyspace_scoping.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_generator_keyspace_scoping.sh" >>"$log" 2>&1; then
+    status=FAIL
+    OVERALL=FAIL
+    echo "--- [$name] FAILED (keyspace-scoping guard); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   if ! command -v python3 >/dev/null 2>&1; then
     status=SKIP
     echo ">>> [$name] SKIP (no python3 on PATH; selftest truncation reader needs it)"
@@ -459,7 +481,7 @@ run_tooling_tests() {
     return 0
   fi
   echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh"
-  if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >"$log" 2>&1; then
+  if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1; then
     status=PASS
   else
     status=FAIL
