@@ -622,7 +622,7 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 
 Scenario counts above can overstate distinct proof: one backing test may exercise many scenario ids. The dedup view below counts unique test targets so the program is not read as more independent tests than exist (issue #1228).
 
-- Distinct backing tests: **62** across **245** scenarios that name a test.
+- Distinct backing tests: **63** across **245** scenarios that name a test.
 
 ### Tests backing more than one scenario
 
@@ -630,7 +630,6 @@ Scenario counts above can overstate distinct proof: one backing test may exercis
 |---|---|
 | `cqlite-core/tests/issue_1000_verifier.rs` | 18 |
 | `cqlite-core/tests/issue_997_compressioninfo_parity.rs` | 15 |
-| `cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs` | 10 |
 | `cqlite-core/tests/scan_delta_parity_test.rs` | 10 |
 | `cqlite-core/tests/sstable_parity_compression_info_test.rs` | 10 |
 | `compaction-parity/src/test/java/org/cqlite/parity/BasicDifferentialTest.java` | 9 |
@@ -638,6 +637,7 @@ Scenario counts above can overstate distinct proof: one backing test may exercis
 | `cqlite-core/tests/issue_1015_dropped_static_parity.rs` | 8 |
 | `cqlite-core/tests/issue_1001_reject_unknown_compression.rs` | 7 |
 | `cqlite-core/tests/issue_1019_static_dropped_collection_compaction_parity.rs` | 7 |
+| `cqlite-core/tests/issue_992_ttl_tombstone_parity.rs` | 7 |
 | `cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs` | 7 |
 | `cqlite-core/tests/issue_998_inline_crc_trailers.rs` | 7 |
 | `cqlite-core/tests/issue_1003_schema_evolution_header_parity.rs` | 6 |
@@ -663,6 +663,7 @@ Scenario counts above can overstate distinct proof: one backing test may exercis
 | `cqlite-core/tests/issue_1006_null_empty_boundary_parity.rs` | 4 |
 | `cqlite-core/tests/issue_1021_repaired_metadata_compaction_parity.rs` | 4 |
 | `cqlite-core/tests/issue_990_data_db_row_framing_parity.rs` | 4 |
+| `cqlite-core/tests/issue_992_range_boundary_grammar.rs` | 4 |
 | `cqlite-core/tests/issue_1190_write_load_byte_parity.rs` | 3 |
 | `compaction-parity/src/test/java/org/cqlite/parity/ComponentByteComparatorTest.java` | 2 |
 | `compaction-parity/src/test/java/org/cqlite/parity/DifferentialParityTester.java` | 2 |
