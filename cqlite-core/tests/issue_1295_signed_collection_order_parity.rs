@@ -26,10 +26,14 @@
 //! ## Gate
 //!
 //!   * `#[cfg(feature = "delta-scan")]`.
-//!   * Skips cleanly when `CQLITE_DATASETS_ROOT` is unset or the binary `Data.db`
-//!     is absent (the `.db` reference binaries are gitignored / local-only and
-//!     supplied via `CQLITE_DATASETS_ROOT`). When a fixture IS present, decoding
-//!     to ZERO rows is a HARD FAILURE — a present-but-empty fixture cannot pass.
+//!   * `CQLITE_DATASETS_ROOT` takes precedence; when unset the resolver falls
+//!     back to the committed in-repo tree (`<crate>/../test-data/datasets`), so
+//!     this golden coverage runs under a plain `cargo test` because the
+//!     `test_signed_coll` fixtures (incl. `Data.db`) are committed for this
+//!     issue. Per-table skip-on-absence still holds for keyspaces whose `Data.db`
+//!     is genuinely absent under the chosen root. When a fixture IS present,
+//!     decoding to ZERO rows is a HARD FAILURE — a present-but-empty fixture
+//!     cannot pass.
 //!   * `CQLITE_REQUIRE_FIXTURES=1` makes a missing fixture a hard failure (the
 //!     nightly/exhaustive lane sets this).
 //!
@@ -301,9 +305,22 @@ fn extract_create_table(ddl: &str, table: &str) -> Option<String> {
 // Fixture discovery + skip-on-absence guard.
 // ===========================================================================
 
+/// Resolve the datasets root. `CQLITE_DATASETS_ROOT` takes precedence (the
+/// env-supplied corpus); otherwise fall back to the committed in-repo tree
+/// (`<crate>/../test-data/datasets`) so the golden coverage runs under a plain
+/// `cargo test` whenever the fixtures are committed (e.g. `test_signed_coll`).
+/// Per-table skip-on-absence still holds: `fixture_dir()` only resolves a dir
+/// for keyspaces whose `Data.db` is actually present under the chosen root.
 fn datasets_root() -> Option<PathBuf> {
-    let p = PathBuf::from(std::env::var("CQLITE_DATASETS_ROOT").ok()?);
-    p.exists().then_some(p)
+    if let Ok(env_root) = std::env::var("CQLITE_DATASETS_ROOT") {
+        let p = PathBuf::from(env_root);
+        return p.exists().then_some(p);
+    }
+    let in_repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("test-data")
+        .join("datasets");
+    in_repo.exists().then_some(in_repo)
 }
 
 fn fixture_dir(table: &str) -> Option<PathBuf> {
