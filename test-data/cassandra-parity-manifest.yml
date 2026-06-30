@@ -3122,7 +3122,8 @@ scenarios:
           - cqlite-core/tests/v5_compressed_legacy_row_count_parity.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_collections/collection_table-6b8c8fb0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
@@ -3134,19 +3135,22 @@ scenarios:
         bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
       comparison_command: >-
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test v5_compressed_legacy_parity_test
         --test v5_compressed_legacy_row_count_parity
       reference_paths:
-        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_collections/collection_table-6b8c8fb0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       normalization: >-
         Decompressed chunk payloads are decoded to rows and compared (row count
         and values) against sstabledump JSONL; chunk offset tables are used for
         positioning.
       known_limitations: >-
-        Validates decompressed content equivalence (row count + values). The
-        byte-level CompressionInfo.db chunk-offset table and per-chunk inline-CRC
-        parity is gated separately by the strict lane below
-        (cass.compression_info.* / sstable_parity_compression_info_db_strict_test,
-        issue #986).
+        Validates decompressed content equivalence (row count + values) against
+        the simple_table and collection_table V5CompressedLegacy fixtures actually
+        exercised by the wired tests. The byte-level CompressionInfo.db
+        chunk-offset table and per-chunk inline-CRC parity is gated separately by
+        the strict lane below (cass.compression_info.* /
+        sstable_parity_compression_info_db_strict_test, issue #986).
     ci:
       tier: required_parity
       workflow: .github/workflows/sstabledump-parity-gate.yml

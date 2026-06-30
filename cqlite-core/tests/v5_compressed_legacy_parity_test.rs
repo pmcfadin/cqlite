@@ -53,6 +53,33 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::Arc;
 
+// ---------------------------------------------------------------------------
+// Fail-closed gate (issue #1242)
+// ---------------------------------------------------------------------------
+
+/// CI fail-closed switch. The `sstabledump-parity-gate.yml` workflow sets
+/// `CQLITE_PARITY_REQUIRE_DATASETS=1` and treats this test's step as a REQUIRED
+/// gate. In that mode a missing dataset / missing golden / zero matched rows
+/// must PANIC (the gate enforces real coverage) rather than silently skip and
+/// green-pass. Locally (env unset) the test keeps its skip-on-absence behavior.
+fn parity_datasets_required() -> bool {
+    std::env::var("CQLITE_PARITY_REQUIRE_DATASETS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Skip when local (flag unset), but FAIL-CLOSED (panic) when
+/// `CQLITE_PARITY_REQUIRE_DATASETS=1` is set.
+fn skip_or_fail_closed(test_name: &str, reason: &str) {
+    if parity_datasets_required() {
+        panic!(
+            "{test_name}: CQLITE_PARITY_REQUIRE_DATASETS=1 but {reason} — \
+             required parity gate cannot green-pass without running fail-closed (issue #1242)"
+        );
+    }
+    eprintln!("{test_name}: SKIPPED ({reason})");
+}
+
 /// Represents a partition from JSONL reference data
 #[derive(Debug, Clone)]
 struct JsonlPartition {
@@ -575,6 +602,8 @@ fn values_match(parser_value: &cqlite_core::Value, jsonl_value: &JsonlValue) -> 
 
 #[tokio::test]
 async fn test_v5_compressed_legacy_jsonl_parity() {
+    let test_name = "test_v5_compressed_legacy_jsonl_parity";
+
     // Setup
     let config = Config::default();
     let platform = Arc::new(
@@ -583,8 +612,13 @@ async fn test_v5_compressed_legacy_jsonl_parity() {
             .expect("Failed to create platform"),
     );
 
-    let datasets_root = std::env::var("CQLITE_DATASETS_ROOT")
-        .expect("CQLITE_DATASETS_ROOT environment variable must be set");
+    let datasets_root = match std::env::var("CQLITE_DATASETS_ROOT") {
+        Ok(root) => root,
+        Err(_) => {
+            skip_or_fail_closed(test_name, "CQLITE_DATASETS_ROOT not set");
+            return;
+        }
+    };
 
     let test_dir = Path::new(&datasets_root)
         .join("sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9");
@@ -592,14 +626,14 @@ async fn test_v5_compressed_legacy_jsonl_parity() {
     let jsonl_path = test_dir.join("nb-1-big-Data.db.jsonl");
 
     if !data_path.exists() {
-        println!("⚠️  Test data not found at {:?}, skipping test", data_path);
+        skip_or_fail_closed(test_name, &format!("Data.db not found at {:?}", data_path));
         return;
     }
 
     if !jsonl_path.exists() {
-        println!(
-            "⚠️  JSONL reference not found at {:?}, skipping test",
-            jsonl_path
+        skip_or_fail_closed(
+            test_name,
+            &format!("JSONL golden not found at {:?}", jsonl_path),
         );
         return;
     }
