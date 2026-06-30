@@ -463,18 +463,25 @@ log "BTI Rows source:       ${BTI_ROWS_SRC:-<none found -> planned>}"
 # `verdict_captured_for_dir_sha256`. This binding is ADDITIVE to the per-component
 # one — both are emitted and validated.
 #
-# Drift gating (deterministic, fail-closed for the Item-1 hole):
-#   * Whole-source REGENERATION drift moves BOTH the mutated-component sha AND the
-#     full-dir sha together (Statistics.db / BTI / Summary.db are not byte-repro
-#     across `cassandra:5.0.2` regenerations). A mismatch where BOTH drift is the
-#     known, legitimate, ADVISORY case (issue #1236) — emit a ::notice:: and proceed.
-#   * But if the mutated-component sha MATCHES its captured binding while the full-dir
-#     sha does NOT, that is EXACTLY the Item-1 hole: a non-mutated component changed
-#     under a "stable" mutated component, making the captured verdict stale for the
-#     bytes under test. That is FATAL — abort generation naming the fixture. The
-#     `other_diffs` check below independently proves non-mutated components are
-#     byte-identical to source, so this guard is belt-and-suspenders against a stale
-#     committed dir-binding too.
+# Drift gating — fatal ONLY against a byte-stable source (issue #1294 roborev Finding 1):
+#   The full-dir hash binds the verdict to the COMPLETE bytes sstableverify reads.
+#   Whether a drift is fatal depends on whether the SOURCE is byte-stable:
+#   * REGENERATION (VERIFY_ONLY=0, default): clean sources are re-derived from a live
+#     cassandra:5.0.2 container; sibling components (Statistics.db / BTI / Summary.db)
+#     are NOT byte-reproducible. A byte-REPRODUCIBLE mutated component (e.g. a Data.db
+#     bitflip) can stay stable while a sibling legitimately drifts — the same byte
+#     pattern as the Item-1 hole but BENIGN. Hard-failing here would falsely block
+#     every legitimate regeneration. Instead RE-CAPTURE: rebind verdict_dir_sha to the
+#     fresh dir hash ATOMICALLY with the verdict it is bound to (they move together),
+#     emit a ::notice::, and proceed.
+#   * VERIFY-ONLY (--verify-only): the on-disk bytes are the byte-stable / committed
+#     source. There a full-dir drift with a byte-stable mutated component IS the real
+#     Item-1 hole (a committed non-mutated component tampered without re-capturing the
+#     verdict) and is FATAL — deterministically, naming the fixture. This mirrors the
+#     committed-fixture parity test (sstable_parity_corruption_verify.rs), which keeps
+#     the same check FATAL against the byte-stable git tree (that is where a real tamper
+#     is caught). The `other_diffs` check below independently proves non-mutated
+#     components are byte-identical to source.
 # Full per-component sha binding is tracked by follow-up #1294.
 # ---------------------------------------------------------------------------
 
@@ -805,6 +812,36 @@ PY
   # ---- full-fixture-dir hash + Item-1 drift gate (issue #1294) --------------
   # Hash the ENTIRE fixture directory (every component sstableverify reads), then
   # bind the verdict to it. The captured-against dir hash is $verdict_dir_sha.
+  #
+  # WHERE FULL-DIR DRIFT IS FATAL vs WHERE IT REBINDS (issue #1294 roborev Finding 1)
+  # ---------------------------------------------------------------------------------
+  # The full-dir hash binds the captured Cassandra verdict to the COMPLETE set of
+  # bytes sstableverify reads — closing the Item-1 hole (a NON-mutated component
+  # drifting under a byte-stable mutated component silently staling the verdict).
+  # But the SOURCE this generator copies from is NOT always byte-stable:
+  #
+  #   * REGENERATION path (VERIFY_ONLY=0, the default): the clean sources are
+  #     (re)derived from a live cassandra:5.0.2 container every CI run. Several
+  #     sibling components are NOT byte-reproducible across regenerations
+  #     (Statistics.db wall-clock/host/repair metadata; BTI da-trie serialization;
+  #     Summary.db). A byte-REPRODUCIBLE mutated component (e.g. a Data.db bitflip)
+  #     can therefore stay stable WHILE a sibling legitimately drifts — which is
+  #     EXACTLY the byte pattern of the Item-1 hole, but here it is benign: the
+  #     bytes simply changed because Cassandra re-emitted them. Hard-failing here
+  #     would falsely block every legitimate regeneration. Instead we RE-CAPTURE:
+  #     the verdict_dir_sha is rebound to the freshly-regenerated dir hash
+  #     ATOMICALLY with the (unchanged-meaning) Cassandra verdict it is bound to —
+  #     they move together — and we emit a ::notice:: rather than aborting.
+  #     Verdict-CORRECTNESS is still enforced fail-closed by the parity test
+  #     (sstable_parity_corruption_verify.rs) on whatever bytes are present.
+  #
+  #   * VERIFY-ONLY path (--verify-only): no regeneration happens; the bytes on
+  #     disk are taken as the byte-stable / committed source. There a full-dir
+  #     drift with a byte-stable mutated component is the REAL Item-1 hole (a
+  #     committed sibling was tampered without re-capturing the verdict) and is
+  #     FATAL — deterministically, with no live Cassandra to recapture from. This
+  #     mirrors the committed-fixture parity test, which keeps the same check
+  #     FATAL against the byte-stable git tree.
   dir_sha="$(fixture_dir_sha256 "$dest")"
   if [[ -z "$verdict_dir_sha" ]]; then
     fail "$name: no captured full-dir hash (verdict_captured_for_dir_sha256 must be \
@@ -812,28 +849,40 @@ present); bind the Cassandra verdict to the COMPLETE fixture-dir bytes it was \
 captured against (issue #1294 Item 1)."
   fi
   if [[ "$dir_sha" != "$verdict_dir_sha" ]]; then
-    # Discriminate the legitimate whole-source REGENERATION drift (advisory) from
-    # the Item-1 hole (FATAL). The hole is: the mutated component is byte-stable
-    # (its corrupted_sha256 still matches its captured binding) yet the full-dir
-    # hash moved — i.e. a NON-mutated component changed under a "stable" mutated
-    # component, making the captured verdict stale for the bytes under test.
-    if [[ "$corr_sha" == "$verdict_sha" ]]; then
-      fail "$name: full-fixture-dir hash drifted ($verdict_dir_sha -> $dir_sha) while \
+    if [[ "$VERIFY_ONLY" -eq 1 ]]; then
+      # Byte-stable / committed source: a drift with a byte-stable mutated
+      # component is the Item-1 hole (a non-mutated component tampered without
+      # re-capturing the verdict). FATAL — no live Cassandra to recapture from.
+      if [[ "$corr_sha" == "$verdict_sha" ]]; then
+        fail "$name: full-fixture-dir hash drifted ($verdict_dir_sha -> $dir_sha) while \
 the mutated component ($comp) is UNCHANGED (corrupted_sha256 still $verdict_sha). A \
-NON-mutated component in the fixture dir changed, so the captured Cassandra verdict \
-('$cass_verdict') is now stale for the bytes sstableverify reads. Re-capture the \
+NON-mutated committed component in the fixture dir changed, so the captured Cassandra \
+verdict ('$cass_verdict') is now stale for the bytes sstableverify reads. Re-capture the \
 verdict (capture-cassandra-verify-verdicts.sh) and update verdict_captured_for_dir_sha256 \
 (issue #1294 Item 1)."
+      fi
+      # Both shas moved on a byte-stable source: the committed mutated component
+      # ALSO changed — likewise stale; advisory because the per-component binding
+      # already governs that case and the parity test enforces correctness.
+      log "::notice::$name: full-dir hash drifted with the mutated component on a \
+byte-stable source (verify-only). Captured verdict bound to dir-sha $verdict_dir_sha \
+but on-disk dir hashes to $dir_sha. Advisory; verdict-correctness is enforced by the \
+sstable_parity_corruption_verify test."
+    else
+      # REGENERATION path: the clean source was re-derived from live Cassandra and
+      # siblings drift non-deterministically (Statistics.db / BTI / Summary.db). A
+      # byte-stable mutated component with a drifted sibling is benign here, NOT the
+      # Item-1 hole. Re-capture: rebind verdict_dir_sha to the fresh dir hash
+      # ATOMICALLY with the verdict it is bound to (they move together), warn, and
+      # proceed. Verdict-correctness stays fail-closed in the parity test.
+      log "::notice::$name: full-dir hash drifted on regeneration ($verdict_dir_sha \
+-> $dir_sha) — clean source re-derived from live cassandra:5.0.2 (non-deterministic \
+siblings: Statistics.db / BTI / Summary.db). Re-capturing: verdict_captured_for_dir_sha256 \
+rebound to the freshly-regenerated dir hash alongside the recorded cassandra_verdict \
+('$cass_verdict'). Verdict-correctness is enforced by the sstable_parity_corruption_verify \
+test, not the file sha (issue #1294 roborev Finding 1)."
+      verdict_dir_sha="$dir_sha"
     fi
-    # Both shas moved together => the clean SOURCE was regenerated non-determin-
-    # istically (Statistics.db / BTI / Summary.db). Advisory, same as the per-
-    # component binding (issue #1236); verdict-correctness is enforced by the
-    # sstable_parity_corruption_verify parity test, not the file sha.
-    log "::notice::$name: full-dir hash drifted with the mutated component \
-(regeneration drift). Captured verdict bound to dir-sha $verdict_dir_sha but the \
-regenerated dir hashes to $dir_sha. Advisory; verdict-correctness is enforced by the \
-sstable_parity_corruption_verify test. The recorded cassandra_verdict \
-('$cass_verdict') is emitted unchanged."
   fi
 
   GENERATED+=("$name")

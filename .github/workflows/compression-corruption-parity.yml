@@ -68,6 +68,10 @@ on:
       - 'test-data/cassandra-parity-manifest.yml'
       - 'test-data/scripts/generate-compression-parity.sh'
       - 'test-data/scripts/generate-corruption-corpus.sh'
+      # The drift guard extracts the corruption oracle via this script; a PR that
+      # only edits it must re-trigger the workflow it can break (roborev #1294
+      # Finding 2).
+      - 'test-data/scripts/extract-corruption-oracle.py'
       - 'test-data/schemas/compression-parity.cql'
       - '.github/workflows/compression-corruption-parity.yml'
       # Production code the parity tests validate — a regression here must trip
