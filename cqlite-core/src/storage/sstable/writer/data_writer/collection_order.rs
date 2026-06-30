@@ -19,9 +19,16 @@ use std::cmp::Ordering;
 /// Total-order comparator for two SET elements / MAP keys, matching the
 /// element/key type's Cassandra `AbstractType.compare` (issue #1275).
 ///
-/// For most types (text/ascii/blob/boolean/uuid/inet/date) that comparator IS
+/// For most types (text/ascii/blob/boolean/inet/date) that comparator IS
 /// unsigned-lexicographic over the serialized bytes, so raw byte order is
-/// correct. But the SIGNED numeric types order differently from their big-endian
+/// correct (see the per-type audit on the fallback arm below). But several
+/// types order differently from their raw serialized bytes:
+///
+///   * `uuid`/`timeuuid` (`UUIDType`) — NOT raw-byte-ordered: Cassandra compares
+///     the version nibble first, then (for v1) the reordered timestamp, then the
+///     remaining bytes. Implemented by [`compare_uuid_cassandra`].
+///
+/// And the SIGNED numeric types order differently from their big-endian
 /// two's-complement bytes:
 ///
 ///   * `Int32Type`(int) / `LongType`(bigint) / `ShortType`(smallint) /
@@ -73,12 +80,36 @@ pub(crate) fn compare_collection_elements(a: &Value, b: &Value) -> Ordering {
                 unscaled: ub,
             },
         ) => compare_decimal(*sa, ua, *sb, ub),
+        // UUID/TimeUUID — version-first + v1-timestamp + tail compare (UUIDType).
+        (Value::Uuid(x), Value::Uuid(y)) => compare_uuid_cassandra(x, y),
         // Frozen wrappers: compare the inner values by the same rule.
         (Value::Frozen(x), other) => compare_collection_elements(x, other),
         (x, Value::Frozen(y)) => compare_collection_elements(x, y),
-        // Everything else (text/ascii/blob/boolean/uuid/inet/date/duration, or a
-        // mixed/unsupported pair): the type comparator is unsigned-lexicographic
-        // over the serialized bytes, so fall back to comparing serialized bytes.
+        // Everything else falls back to unsigned-lexicographic order over the
+        // serialized bytes. Per-type audit vs Cassandra `AbstractType.compare`
+        // (issue #1275 convergence audit) — each of these IS unsigned-byte-
+        // lexicographic, so raw serialized bytes are the correct order:
+        //   * `text`/`varchar` (UTF8Type) and `ascii` (AsciiType): both use
+        //     `ComparisonType.BYTE_ORDER` — UTF-8 / 7-bit ASCII bytes sort
+        //     unsigned-lexicographically, which equals codepoint order.
+        //   * `blob` (BytesType): BYTE_ORDER, raw bytes.
+        //   * `boolean` (BooleanType): BYTE_ORDER over the single serialized byte
+        //     (0x00 false < 0x01 true), which is the natural order.
+        //   * `inet` (InetAddressType): BYTE_ORDER — IPv4 (4 bytes) sorts before
+        //     any IPv6 (16 bytes) by length-then-byte, matching Cassandra.
+        //   * `date` (SimpleDateType): stored as an UNSIGNED 32-bit day count
+        //     offset by 2^31, compared `ByteBufferUtil.compareUnsigned`, i.e.
+        //     unsigned big-endian bytes — exactly raw-byte order.
+        //   * `duration` (DurationType): Cassandra makes duration NON-comparable
+        //     (`isEmptyValueMeaningless`/no total order) and FORBIDS it as a set
+        //     element or map key, so a `Value::Duration` cannot legitimately reach
+        //     this comparator; the fallback keeps the sort total/panic-free if one
+        //     somehow does, but it is not an ordering Cassandra would ever emit.
+        //   * `tuple`/`UDT`/nested frozen collections: composite recursive order
+        //     is intentionally OUT OF SCOPE here (tracked by issue #1296); they
+        //     stay on this byte fallback.
+        // A mixed/unsupported variant pair also lands here (byte fallback keeps
+        // the sort total). `numeric/float/decimal/uuid` are handled above.
         _ => match (serialize_value(a), serialize_value(b)) {
             (Ok(ba), Ok(bb)) => ba.cmp(&bb),
             // Serialization should not fail for a non-null collection element; if
@@ -125,6 +156,79 @@ fn compare_signed_varint(a: &[u8], b: &[u8]) -> Ordering {
         }
     }
     Ordering::Equal
+}
+
+/// Cassandra `UUIDType.compareCustom` for two 16-byte UUID values (issue #1275).
+///
+/// Matches `org.apache.cassandra.db.marshal.UUIDType.compareCustom`
+/// (`~/projects/cassandra/.../db/marshal/UUIDType.java`) exactly:
+///   1. Compare the 4-bit version nibble (top nibble of byte 6). If versions
+///      differ, order by `version1 - version2`.
+///   2. If both are version 1, compare the most-significant 64 bits AFTER
+///      `reorderTimestampBytes` (the time-UUID timestamp reshuffle, copied from
+///      `AbstractTimeUUIDType.reorderTimestampBytes`); the reordered value is
+///      `>= 0` so `Long.compare` of the reordered longs is correct.
+///      Otherwise compare the MSB 64 bits as an UNSIGNED long
+///      (`UnsignedLongs.compare`).
+///   3. Tie-break on the least-significant 64 bits as an UNSIGNED long.
+///
+/// WHY `UUIDType` and not `TimeUUIDType`: the writer's `Value::Uuid([u8; 16])`
+/// carries NO uuid-vs-timeuuid discriminator, and this shared comparator only
+/// receives `&Value` — the declared CQL element/key type (`uuid` vs `timeuuid`)
+/// is NOT threaded to this layer (no-heuristics forbids inferring it from the
+/// version nibble: a v1 UUID is legal in a `set<uuid>`). `UUIDType.compareCustom`
+/// is the universal comparator that correctly orders UUIDs of EVERY version
+/// (Cassandra "freely takes time UUIDs" in `UUIDType`), so it is the correct
+/// order for a declared `uuid` element for all versions. For a declared
+/// `timeuuid`, `AbstractTimeUUIDType.compareCustom` agrees on steps 1-2 and
+/// differs ONLY in the v1 LSB tie-break, where `TimeUUIDType` compares the low
+/// 64 bits with SIGNED-per-byte semantics rather than unsigned (the documented
+/// CASSANDRA-8730 discrepancy). That tie-break only changes the relative order of
+/// two UUIDs sharing an identical version-1 timestamp — vanishingly rare and not
+/// representable without the missing type tag — so we apply the `uuid` order
+/// uniformly and document the one-case divergence here rather than guess.
+fn compare_uuid_cassandra(a: &[u8; 16], b: &[u8; 16]) -> Ordering {
+    let msb1 = read_be_u64(&a[0..8]);
+    let msb2 = read_be_u64(&b[0..8]);
+
+    let version1 = ((msb1 >> 12) & 0xf) as i32;
+    let version2 = ((msb2 >> 12) & 0xf) as i32;
+    if version1 != version2 {
+        return version1.cmp(&version2);
+    }
+
+    let msb_cmp = if version1 == 1 {
+        // Reordered timestamp longs are non-negative; signed Long.compare ==
+        // their natural numeric order.
+        reorder_timestamp_bytes(msb1).cmp(&reorder_timestamp_bytes(msb2))
+    } else {
+        // UnsignedLongs.compare(msb1, msb2)
+        msb1.cmp(&msb2)
+    };
+    if msb_cmp != Ordering::Equal {
+        return msb_cmp;
+    }
+
+    // UnsignedLongs.compare of the least-significant 64 bits.
+    read_be_u64(&a[8..16]).cmp(&read_be_u64(&b[8..16]))
+}
+
+/// Big-endian read of an 8-byte slice as a `u64` (mirrors Java `getLong`). The
+/// slice is always exactly 8 bytes at the call sites; a short slice pads with
+/// zeros to stay panic-free, but that never happens for a 16-byte UUID.
+fn read_be_u64(bytes: &[u8]) -> u64 {
+    let mut buf = [0u8; 8];
+    let n = bytes.len().min(8);
+    buf[..n].copy_from_slice(&bytes[..n]);
+    u64::from_be_bytes(buf)
+}
+
+/// `AbstractTimeUUIDType.reorderTimestampBytes`, copied verbatim from
+/// `~/projects/cassandra/.../db/marshal/AbstractTimeUUIDType.java`:
+/// reshuffles the version-1 timestamp halves so a plain long compare orders by
+/// time. All shifts are on `u64` to match Java's `>>>` (unsigned) and `<<`.
+fn reorder_timestamp_bytes(input: u64) -> u64 {
+    (input << 48) | ((input << 16) & 0xFFFF_0000_0000) | (input >> 32)
 }
 
 /// Java `Float.compare` total order for two `f32`, matching Cassandra
@@ -574,7 +678,106 @@ mod tests {
         );
     }
 
-    /// Unsigned-lexicographic types (text/blob/uuid/boolean) keep serialized-byte
+    /// Build a 16-byte UUID with the given version nibble (high nibble of byte 6),
+    /// `msb_lo48` packed into the timestamp/version region, and `lsb` as the low
+    /// 64 bits. `msb_hi32` is the time-low (bytes 0-3); `msb_mid16` is time-mid
+    /// (bytes 4-5). Layout follows the standard big-endian UUID byte order so the
+    /// comparator's `getLong(0)`/`getLong(8)` reads match Cassandra.
+    fn make_uuid(time_low: u32, time_mid: u16, version: u8, time_hi: u16, lsb: u64) -> [u8; 16] {
+        let mut u = [0u8; 16];
+        u[0..4].copy_from_slice(&time_low.to_be_bytes());
+        u[4..6].copy_from_slice(&time_mid.to_be_bytes());
+        // bytes 6-7: top nibble = version, remaining 12 bits = time_hi (0..=0xFFF).
+        let ver_and_hi: u16 = ((version as u16 & 0xf) << 12) | (time_hi & 0x0fff);
+        u[6..8].copy_from_slice(&ver_and_hi.to_be_bytes());
+        u[8..16].copy_from_slice(&lsb.to_be_bytes());
+        u
+    }
+
+    /// UUIDType step 1: version nibble decides first. A version-1 UUID whose raw
+    /// bytes are LARGER must still sort BEFORE a version-4 UUID, because
+    /// `version1 - version2` (1 - 4 < 0) wins regardless of the rest. Under the
+    /// old raw-serialized-byte fallback the all-0xFF v1 value would sort AFTER the
+    /// small v4 value — the REVERSE — so this fails before the fix, passes after.
+    #[test]
+    fn uuid_version_decides_first() {
+        // v1 with maximal bytes everywhere it can control.
+        let v1 = make_uuid(0xFFFF_FFFF, 0xFFFF, 1, 0x0FFF, u64::MAX);
+        // v4 with minimal bytes.
+        let v4 = make_uuid(0x0000_0000, 0x0000, 4, 0x0000, 0);
+        // Raw-byte fallback (the OLD behavior) would order v4 < v1 here:
+        assert_eq!(v4.as_slice().cmp(v1.as_slice()), Ordering::Less);
+        // Cassandra UUIDType orders by version first: v1 (1) < v4 (4), so
+        // compare(v1, v4) is Less (and compare(v4, v1) is Greater).
+        assert_eq!(
+            compare_collection_elements(&Value::Uuid(v1), &Value::Uuid(v4)),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_collection_elements(&Value::Uuid(v4), &Value::Uuid(v1)),
+            Ordering::Greater
+        );
+        let mut v = vec![Value::Uuid(v4), Value::Uuid(v1)];
+        v.sort_by(compare_collection_elements);
+        assert_eq!(v, vec![Value::Uuid(v1), Value::Uuid(v4)]);
+    }
+
+    /// UUIDType step 2 (version 1): two v1 UUIDs order by TIMESTAMP via
+    /// `reorderTimestampBytes`, NOT by raw bytes. `earlier` has a smaller
+    /// time_hi/time_mid but a LARGER time_low; the reorder puts time_hi/time_mid
+    /// in the most-significant position, so `earlier` (smaller hi) sorts first
+    /// even though its raw leading bytes (time_low) are larger. Grounded in
+    /// `UUIDType.compareCustom` + `reorderTimestampBytes`.
+    #[test]
+    fn uuid_v1_orders_by_timestamp() {
+        // earlier: time_hi=0x000, time_mid=0x0000, time_low=0xFFFF_FFFF
+        let earlier = make_uuid(0xFFFF_FFFF, 0x0000, 1, 0x000, 0);
+        // later: time_hi=0x001, everything else minimal
+        let later = make_uuid(0x0000_0000, 0x0000, 1, 0x001, 0);
+        // Raw bytes would call `earlier` (leading 0xFF..) GREATER than `later`:
+        assert_eq!(earlier.as_slice().cmp(later.as_slice()), Ordering::Greater);
+        // But the timestamp reorder makes the high-12-bits dominate: earlier < later.
+        assert_eq!(
+            compare_collection_elements(&Value::Uuid(earlier), &Value::Uuid(later)),
+            Ordering::Less
+        );
+        let mut v = vec![Value::Uuid(later), Value::Uuid(earlier)];
+        v.sort_by(compare_collection_elements);
+        assert_eq!(v, vec![Value::Uuid(earlier), Value::Uuid(later)]);
+    }
+
+    /// UUIDType step 2 (non-v1) + step 3: two version-4 UUIDs compare MSB then LSB
+    /// as UNSIGNED longs. Equal MSB, differing LSB → LSB unsigned order decides.
+    /// Also a v4 whose MSB has the high bit set must sort ABOVE one without it
+    /// (unsigned), which signed-long compare would get wrong.
+    #[test]
+    fn uuid_v4_orders_unsigned_msb_then_lsb() {
+        // Same MSB region (version 4), LSB differs: 1 < 2.
+        let a = make_uuid(0x0000_0001, 0x0000, 4, 0x000, 1);
+        let b = make_uuid(0x0000_0001, 0x0000, 4, 0x000, 2);
+        assert_eq!(
+            compare_collection_elements(&Value::Uuid(a), &Value::Uuid(b)),
+            Ordering::Less
+        );
+
+        // MSB high bit set (time_low top bit) must be treated as UNSIGNED-larger.
+        let low_msb = make_uuid(0x0000_0001, 0x0000, 4, 0x000, 0);
+        let high_msb = make_uuid(0x8000_0000, 0x0000, 4, 0x000, 0);
+        assert_eq!(
+            compare_collection_elements(&Value::Uuid(low_msb), &Value::Uuid(high_msb)),
+            Ordering::Less
+        );
+
+        let mut v = vec![Value::Uuid(b), Value::Uuid(high_msb), Value::Uuid(a)];
+        v.sort_by(compare_collection_elements);
+        // a (msb small, lsb 1) < b (msb small, lsb 2) < high_msb (msb big)
+        assert_eq!(
+            v,
+            vec![Value::Uuid(a), Value::Uuid(b), Value::Uuid(high_msb)]
+        );
+    }
+
+    /// Unsigned-lexicographic types (text/blob/boolean) keep serialized-byte
     /// order — raw byte comparison is the correct Cassandra comparator there.
     #[test]
     fn text_keeps_byte_order() {
