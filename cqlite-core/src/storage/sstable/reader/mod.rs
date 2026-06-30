@@ -334,6 +334,29 @@ impl SSTableReader {
 
     /// Open implementation; see [`open`](Self::open) for the instrumented wrapper.
     async fn open_inner(path: &Path, config: &Config, platform: Arc<Platform>) -> Result<Self> {
+        // #1249 (spec R1): reject below-floor versions BEFORE any file I/O.
+        // Gates derive solely from the filename, so this is the earliest point
+        // that can enforce the na+ floor — a pre-`na` (BIG) or non-`da` (BTI)
+        // descriptor is rejected with a typed `UnsupportedVersion` before we
+        // open/mmap/read the body (it never surfaces an I/O/parse error). Only a
+        // structurally-unparseable descriptor falls back to nb-compatible BIG
+        // gates (preserving existing tolerance for odd-but-5.0 unit-test paths);
+        // the gates do not change parsing decisions until VG3 flips behaviour.
+        let version_gates = Arc::new(match VersionGates::from_path(path) {
+            Ok(gates) => gates,
+            // A parsed-but-below-floor version is FATAL — never degrade it.
+            Err(e @ Error::UnsupportedVersion { .. }) => return Err(e),
+            Err(e) => {
+                log::debug!(
+                    "SSTableReader::open: could not derive VersionGates from {:?} ({}); \
+                     defaulting to nb-compatible BIG gates",
+                    path,
+                    e
+                );
+                VersionGates::Big(BigVersionGates::nb_fallback())
+            }
+        });
+
         // Resolve the disk-access backend (buffered / mmap / direct, or auto)
         // from config + environment overrides. See `Config::storage.disk_access_mode`.
         let mut reader_config = SSTableReaderConfig::default();
@@ -390,32 +413,6 @@ impl SSTableReader {
             let bytes_read = file_guard.read(&mut header_buffer).await?;
             header_buffer.truncate(bytes_read);
         }
-
-        // Derive VersionGates from the SSTable filename BEFORE header parsing so
-        // parse_header_with_version_detection can receive them.  Gates are derived
-        // solely from the filename and need no file I/O, so this is safe to do here.
-        //
-        // Falls back to nb-compatible BIG gates when the filename is not a valid
-        // SSTable descriptor (e.g. paths used in unit tests).  Using nb-fallback
-        // maintains existing behaviour — the gates will not change parsing
-        // decisions until VG3 actually flips behaviour.
-        let version_gates = Arc::new(match VersionGates::from_path(path) {
-            Ok(gates) => gates,
-            // #1249: a parsed-but-below-floor version is FATAL — never degrade a
-            // pre-`na` (BIG) or non-`da` (BTI) SSTable to the nb fallback. Only a
-            // genuinely unparseable / structurally-malformed descriptor may fall
-            // back so existing tolerance for odd-but-5.0 filenames is preserved.
-            Err(e @ Error::UnsupportedVersion { .. }) => return Err(e),
-            Err(e) => {
-                log::debug!(
-                    "SSTableReader::open: could not derive VersionGates from {:?} ({}); \
-                     defaulting to nb-compatible BIG gates",
-                    path,
-                    e
-                );
-                VersionGates::Big(BigVersionGates::nb_fallback())
-            }
-        });
 
         // VG5 / Issue #831 / #909: BTI ("da") read support.
         //

@@ -53,13 +53,6 @@ impl StatisticsReader {
             )));
         }
 
-        // Read the entire file (Statistics.db files are typically small)
-        let mut file = File::open(path).await?;
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer).await?;
-
-        // Parse the statistics data using enhanced parser with fallback.
-        //
         // Derive the format gates from the component filename (e.g.
         // `da-1-bti-Statistics.db` vs `nb-1-big-Statistics.db`) so the best-effort
         // STATS-extras decode (max local deletion time + tombstone-drop histogram,
@@ -68,10 +61,13 @@ impl StatisticsReader {
         // bin width differ from the legacy (nb) signed-i32 / 16-byte forms. When the
         // filename does not parse, fall back to None (nb-compatible defaults).
         //
-        // #1249: a parsed-but-below-floor version is FATAL — propagate
-        // `Error::UnsupportedVersion` instead of silently degrading to nb-compatible
-        // defaults (mirrors `SSTableReader::open` in reader/mod.rs). Only a genuinely
-        // unparseable / structurally-malformed descriptor falls back to None.
+        // #1249 (spec R1): reject below-floor versions BEFORE reading the file.
+        // Gates derive solely from the filename (no file I/O), so a parsed-but-
+        // below-floor version is propagated as a FATAL `Error::UnsupportedVersion`
+        // here — before `File::open`/`read_to_end` — instead of silently degrading
+        // to nb-compatible defaults (mirrors `SSTableReader::open` in reader/mod.rs).
+        // Only a genuinely unparseable / structurally-malformed descriptor falls
+        // back to None.
         let gates = match crate::storage::sstable::version_gate::VersionGates::from_path(path) {
             Ok(gates) => Some(gates),
             Err(e @ Error::UnsupportedVersion { .. }) => return Err(e),
@@ -85,6 +81,14 @@ impl StatisticsReader {
                 None
             }
         };
+
+        // Read the entire file (Statistics.db files are typically small).
+        // Reached only for at-or-above-floor (or structurally-unparseable)
+        // descriptors — a below-floor version was already rejected above.
+        let mut file = File::open(path).await?;
+        let mut buffer = Vec::new();
+        file.read_to_end(&mut buffer).await?;
+
         let statistics = match parse_statistics_with_fallback(&buffer, gates.as_ref()) {
             Ok((_, stats)) => stats,
             Err(e) => {
@@ -526,6 +530,45 @@ mod tests {
                 other
             ),
             Ok(_) => panic!("below-floor Statistics.db must NOT open on nb-compatible defaults"),
+        }
+    }
+
+    /// #1249 R1 (roborev finding 1): the version-floor check fires BEFORE the
+    /// file body is read/parsed. A below-floor `*-Statistics.db` with an empty
+    /// (0-byte) body must STILL fail with `UnsupportedVersion` rather than a
+    /// parse/corruption error — proving `read_to_end` + the enhanced parser are
+    /// never reached for a below-floor descriptor.
+    #[tokio::test]
+    async fn test_open_below_floor_statistics_rejected_before_body_read() {
+        use crate::error::Error;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("ma-1-big-Statistics.db");
+        // Empty body: if the gate ran AFTER read_to_end/parse, an empty file
+        // would surface as a parse/corruption error, not UnsupportedVersion.
+        std::fs::write(&path, b"").expect("write empty fixture");
+
+        let config = crate::Config::default();
+        let platform = Arc::new(
+            crate::Platform::new(&config)
+                .await
+                .expect("create platform"),
+        );
+
+        match super::StatisticsReader::open(&path, platform).await {
+            Err(Error::UnsupportedVersion { version, floor }) => {
+                assert_eq!(version, "ma");
+                assert_eq!(floor, "na");
+            }
+            Err(other) => panic!(
+                "expected UnsupportedVersion before body read for empty below-floor \
+                 Statistics.db, got {:?}",
+                other
+            ),
+            Ok(_) => {
+                panic!("below-floor Statistics.db with empty body must be rejected before parse")
+            }
         }
     }
 }

@@ -87,8 +87,12 @@ impl SSTableFormat {
     /// reject-at-open behaviour of `SSTableReader`/`StatisticsReader`.
     pub fn is_supported(&self) -> bool {
         match self {
-            // na/nb BIG and oa/da BTI/BIG — the only versions with a read path.
-            SSTableFormat::V4x(_) | SSTableFormat::V5x(_) => true,
+            // Exactly the four versions with a real read path — matching
+            // `supported_versions()`. A future/typo'd letter in the same family
+            // (e.g. `V4x("nc")`, `V5x("ob")`) is NOT a supported version and
+            // must return false (#1249).
+            SSTableFormat::V4x(v) => matches!(v.as_str(), "na" | "nb"),
+            SSTableFormat::V5x(v) => matches!(v.as_str(), "oa" | "da"),
             // Pre-`na` (Cassandra 3.x) and 2.x are below the floor.
             SSTableFormat::V2x(_) | SSTableFormat::V3x(_) => false,
             SSTableFormat::Unknown(_) => false,
@@ -519,6 +523,18 @@ mod tests {
         assert!(!SSTableFormat::V3x("ma".to_string()).is_supported());
         assert!(!SSTableFormat::V2x("jb".to_string()).is_supported());
         assert!(!SSTableFormat::Unknown("zz".to_string()).is_supported());
+
+        // #1249: the predicate must match EXACT version letters, not whole
+        // families — a future/typo'd letter in a supported family is NOT
+        // supported. `is_supported` is exactly {na, nb, oa, da}.
+        assert!(
+            !SSTableFormat::V4x("nc".to_string()).is_supported(),
+            "V4x(\"nc\") is not in the supported set and must be unsupported"
+        );
+        assert!(
+            !SSTableFormat::V5x("ob".to_string()).is_supported(),
+            "V5x(\"ob\") is not in the supported set and must be unsupported"
+        );
     }
 
     #[test]

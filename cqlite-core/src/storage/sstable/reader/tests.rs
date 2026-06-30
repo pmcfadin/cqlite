@@ -948,4 +948,40 @@ mod tests {
             panic!("unparseable descriptor must not raise UnsupportedVersion (fallback preserved)");
         }
     }
+
+    /// R1 (roborev finding 1): the version-floor check fires BEFORE any file
+    /// I/O. A below-floor descriptor that does not even exist on disk must fail
+    /// with the typed `UnsupportedVersion` — NOT an I/O `NotFound` from
+    /// `tokio::fs::metadata` / `build_block_sources` — proving the reader never
+    /// opens, mmaps, or reads the body of a below-floor SSTable.
+    #[tokio::test]
+    async fn test_open_below_floor_rejected_before_any_file_io() {
+        use super::super::SSTableReader;
+        use crate::{Config, Error, Platform};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Pre-`na` BIG descriptor that is intentionally NOT created on disk: if
+        // the floor check ran after file I/O we would get an I/O error here.
+        let path = dir.path().join("mc-1-big-Data.db");
+        assert!(!path.exists(), "fixture path must not exist on disk");
+
+        let config = Config::default();
+        let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+
+        let err = SSTableReader::open(&path, &config, platform)
+            .await
+            .expect_err("below-floor open must fail before touching the file");
+        match err {
+            Error::UnsupportedVersion { version, floor } => {
+                assert_eq!(version, "mc");
+                assert_eq!(floor, "na");
+            }
+            other => panic!(
+                "expected UnsupportedVersion before file I/O, got {:?} \
+                 (a NotFound/I-O error would mean the floor check ran too late)",
+                other
+            ),
+        }
+    }
 }
