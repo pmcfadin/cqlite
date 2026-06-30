@@ -501,11 +501,12 @@ run_delivery_telemetry() {
 
 # tooling-tests: fast shell-tooling regression tests that have no Rust target and
 # no dataset/network needs. Currently scripts/tests/test_agent_gate_summary.sh,
-# which verifies the SUMMARY block survives non-foreground capture (#1175). That
-# test only drives `agent-gate.sh --emit-summary-selftest` (which exits before any
-# component runs), so wiring it here cannot cause the gate to recurse. SKIP-aware:
-# the test's truncation case relies on a python3 reader, so with no python3 we
-# record SKIP (loud, never silent PASS); any test failure -> hard FAIL.
+# which verifies the SUMMARY block survives non-foreground capture (#1175), and
+# scripts/tests/test_agent_gate_smoke_target_dir.sh, which verifies the smoke step
+# resolves the CLI via CARGO_TARGET_DIR (#1247). Neither runs the real gate
+# components, so wiring them here cannot cause the gate to recurse. SKIP-aware:
+# the summary test's truncation case relies on a python3 reader, so with no
+# python3 we record SKIP (loud, never silent PASS); any test failure -> hard FAIL.
 run_tooling_tests() {
   local name=tooling-tests
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -537,8 +538,9 @@ run_tooling_tests() {
     NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("0s")
     return 0
   fi
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh"
-  if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1; then
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh"
+  if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1 &&
+     bash "$REPO_ROOT/scripts/tests/test_agent_gate_smoke_target_dir.sh" >>"$log" 2>&1; then
     status=PASS
   else
     status=FAIL
@@ -766,9 +768,13 @@ run_component minimal-build cargo build --package cqlite-core --no-default-featu
 # smoke script prefers any existing target/release/cqlite, however stale —
 # the first full gate run caught a May binary failing all test_oa tables
 # that current code reads fine.
+# Resolve the just-built CLI honoring CARGO_TARGET_DIR (issue #1247): when the
+# gate runs from a git worktree sharing a target dir via CARGO_TARGET_DIR, the
+# binary lands in "$CARGO_TARGET_DIR/debug", not "$PWD/target/debug". Fall back
+# to "$PWD/target" when CARGO_TARGET_DIR is unset.
 run_component smoke bash -c '
   cargo build --package cqlite-cli --bin cqlite &&
-  CQLITE_CLI="$PWD/target/debug/cqlite" bash test-data/scripts/smoke-test-all-tables.sh'
+  CQLITE_CLI="${CARGO_TARGET_DIR:-$PWD/target}/debug/cqlite" bash test-data/scripts/smoke-test-all-tables.sh'
 
 declare -a SUMMARY_META=()
 SUMMARY_META+=("commit: $(git rev-parse --short HEAD) branch: $(git rev-parse --abbrev-ref HEAD) dirty: $(test -n "$(git status --porcelain)" && echo yes || echo no)")
