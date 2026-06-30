@@ -386,29 +386,32 @@ log "BTI Rows source:       ${BTI_ROWS_SRC:-<none found -> planned>}"
 # new sha. The committed fixtures are unchanged, so each bound sha below equals the
 # committed `corrupted_sha256` and normal regeneration succeeds.
 #
-# verdict_byte_stable (issue #1236 / follow-up #1294 — scope the fail-closed guard)
+# verdict sha-binding is ADVISORY GLOBALLY (issue #1236 / follow-up #1294)
 # --------------------------------------------------------------------------------
-# The sha-binding guard above is only meaningful when the CLEAN SOURCE is
-# byte-reproducible. The nb/BIG LZ4 fixtures (clean source test_comp/lz4_table)
-# ARE byte-stable: Cassandra writes them deterministically, so a freshly-regenerated
-# corrupted sha equals the bound sha and a mismatch is a REAL drift -> fail closed.
+# A whole-file sha over the CORRUPTED file is NOT a meaningful drift invariant: the
+# CI lane regenerates the clean SOURCES from a live cassandra:5.0.2 container every
+# run (generate-compression-parity.sh -> test_comp; gen-wide-bti.sh ->
+# test_da/wide_table), and several SSTable components are not byte-reproducible
+# across regenerations — Statistics.db (wall-clock/host/repair metadata), the BTI
+# `da` trie components (non-deterministic serialization), and potentially others
+# (Summary.db, ...). The same deterministic mutation therefore yields a different
+# corrupted sha on every regeneration, so a corrupted_sha256 vs
+# verdict_captured_for_sha256 MISMATCH is ADVISORY for EVERY fixture (::notice:: +
+# proceed, emitting the captured cassandra_verdict unchanged). Classifying fixtures
+# byte-stable yes/no was guesswork that kept surfacing new drifting components
+# (whack-a-mole); the verdict sha-binding does not gate the build.
 #
-# The BTI (`da`) fixtures (clean source test_da/wide_table — bti_rows_truncation,
-# bti_partitions_footer_flip, and any future `da`/BTI-derived fixture) are NOT
-# byte-reproducible: CI regenerates wide_table fresh from a live cassandra:5.0.2
-# container each run (gen-wide-bti.sh), and Cassandra's BTI trie serialization is
-# non-deterministic, so the corrupted bytes — and therefore their sha — differ on
-# every regeneration. The bound sha can NEVER match in CI for these. For BTI
-# fixtures the recorded cassandra_verdict is DOCUMENTARY parity evidence (the
-# `da-2-bti` verifier outcome), not a byte-pinned gate, so the sha-binding is
-# ADVISORY: a mismatch logs a ::notice:: and proceeds, and the verdict is still
-# emitted into the manifest unchanged. Full-directory binding for these is tracked
-# by follow-up #1294.
+# Verdict-CORRECTNESS is enforced by the parity test
+# cqlite-core/tests/sstable_parity_corruption_verify.rs (CI step 10 under
+# CQLITE_REQUIRE_FIXTURES=1): it asserts CQLite's verdict + VerifyErrorClass match
+# the captured Cassandra verdict on whatever bytes are present. A mutation that
+# stopped being corrupt would fail THAT test. The only thing kept fail-closed here
+# is the AUTHORING check: a fixture missing a captured verdict (empty
+# cassandra_verdict or verdict_captured_for_sha256) aborts.
 #
-# `verdict_byte_stable` makes this per-fixture and self-documenting:
-#   * yes (default if omitted) : byte-stable source -> strict fail-closed guard.
-#   * no                       : non-deterministic source (BTI) -> advisory only.
-# Defaulting to `yes` keeps a NEW fixture fail-closed unless it explicitly opts out.
+# `verdict_byte_stable` is retained as a documentation-only column (yes/no describes
+# whether the clean source is byte-reproducible); it NO LONGER gates fatal-vs-advisory.
+# Full per-component sha binding is tracked by follow-up #1294.
 # ---------------------------------------------------------------------------
 
 PART_DIR_BTI="${BTI_PART_SRC:-}"
@@ -542,8 +545,9 @@ emit_manifest_entry() {
 
 for spec in "${FIXTURES[@]}"; do
   IFS='|' read -r name key src comp mtype p1 p2 exp errc rationale cass_verdict verdict_parity verdict_note verdict_sha verdict_byte_stable <<<"$spec"
-  # Default fail-closed: an unspecified flag means "byte-stable" (the strict guard
-  # applies). New fixtures must opt OUT of the strict sha-binding explicitly.
+  # verdict_byte_stable is documentation-only (issue #1236 / #1294); it does NOT
+  # gate fatal-vs-advisory — the sha-binding is advisory for every fixture. Default
+  # to "yes" only to keep the column populated for fixtures that omit it.
   verdict_byte_stable="${verdict_byte_stable:-yes}"
 
   # --- planned (no source) ---------------------------------------------------
@@ -644,43 +648,52 @@ for spec in "${FIXTURES[@]}"; do
   corr_sha="$(sha256 "$corrupt_file")"
   corr_len="$(python3 -c "import os,sys;print(os.path.getsize(sys.argv[1]))" "$corrupt_file")"
 
-  # ---- stale-verdict guard (issue #1236 roborev Finding 1) -----------------
+  # ---- verdict sha-binding (issue #1236 / #1294) — ADVISORY GLOBALLY --------
   # The committed Cassandra verdict ($cass_verdict) was captured against an EXACT
   # set of corrupted bytes, recorded in the mutation table as $verdict_sha
-  # (verdict_captured_for_sha256). If the freshly-regenerated corrupted bytes have
-  # a DIFFERENT sha — because a mutation parameter or a clean-source byte changed —
-  # the old verdict no longer describes these bytes and MUST NOT be silently
-  # reattached. Fail closed, naming the fixture, and demand re-capture. (We only
-  # check active fixtures: planned ones have no bytes; an empty bound sha in the
-  # table is itself an authoring error and is rejected here too.)
+  # (verdict_captured_for_sha256). The whole-file corrupted sha, however, is NOT a
+  # meaningful invariant when the clean SOURCE is regenerated non-deterministically.
   #
-  # SCOPING (issue #1236, follow-up #1294): the sha-binding is only a meaningful
-  # gate when the clean source is BYTE-REPRODUCIBLE. For verdict_byte_stable=yes
-  # fixtures (nb/BIG LZ4, test_comp/lz4_table) a mismatch is a REAL drift -> fail
-  # closed. For verdict_byte_stable=no fixtures (the BTI `da` sources from
-  # test_da/wide_table, which CI regenerates non-deterministically — Cassandra's
-  # BTI trie serialization is not byte-reproducible) the corrupted sha differs on
-  # every regeneration and can NEVER match in CI, so the binding is ADVISORY: log
-  # a ::notice:: and proceed, still emitting the (unchanged) documentary verdict.
-  if [[ -z "$verdict_sha" ]]; then
-    fail "$name: no verdict_captured_for_sha256 recorded in the mutation table; \
-each captured Cassandra verdict must be bound to the corrupted sha it was captured against (issue #1236)."
+  # WHY ADVISORY FOR ALL FIXTURES (issue #1236): the CI lane REGENERATES the clean
+  # sources from a live cassandra:5.0.2 container every run (generate-compression-
+  # parity.sh -> test_comp; gen-wide-bti.sh -> test_da/wide_table). Several SSTable
+  # components are NOT byte-reproducible across regenerations:
+  #   * Statistics.db embeds wall-clock / host / repair metadata.
+  #   * BTI `da` trie components (Partitions.db / Rows.db) serialize non-deterministically.
+  #   * other components (e.g. Summary.db) may drift similarly.
+  # A whole-file sha over the *corrupted* file therefore drifts even for the SAME
+  # deterministic mutation, and classifying fixtures byte-stable yes/no is guesswork
+  # that keeps surfacing new drifting components (whack-a-mole, rounds at the BTI
+  # source then statistics_db_header_damage). So a corrupted_sha256 vs
+  # verdict_captured_for_sha256 MISMATCH is ADVISORY for EVERY fixture: emit a
+  # ::notice:: and PROCEED, emitting the captured cassandra_verdict unchanged.
+  #
+  # WHAT STILL ENFORCES VERDICT-CORRECTNESS: the parity test
+  # cqlite-core/tests/sstable_parity_corruption_verify.rs (CI step 10 under
+  # CQLITE_REQUIRE_FIXTURES=1) asserts CQLite's verify verdict + VerifyErrorClass
+  # match the captured Cassandra verdict on whatever bytes are present. A mutation
+  # that stopped being "corrupt" would fail THAT test. That is the real fail-closed
+  # guarantee; the exact corrupted-file sha is not.
+  #
+  # KEPT FAIL-CLOSED: the *authoring* check only. A fixture with NO captured verdict
+  # (empty cassandra_verdict or empty verdict_captured_for_sha256) is an authoring
+  # error and still aborts. (Planned fixtures have no bytes and skip this entirely.)
+  #
+  # NOTE: verdict_byte_stable is retained as a documentation-only column; it no
+  # longer gates fatal-vs-advisory (a mismatch is advisory regardless). Full
+  # per-component sha binding is tracked by follow-up #1294.
+  if [[ -z "$verdict_sha" || -z "$cass_verdict" ]]; then
+    fail "$name: no captured Cassandra verdict (cassandra_verdict / \
+verdict_captured_for_sha256 must both be present); each fixture must record the \
+Cassandra verdict and the corrupted sha it was captured against (issue #1236)."
   fi
   if [[ "$verdict_sha" != "$corr_sha" ]]; then
-    if [[ "$verdict_byte_stable" == "no" ]]; then
-      log "::notice::$name: sha-binding ADVISORY — non-deterministic clean source \
-(BTI/da, e.g. test_da/wide_table). Captured cassandra_verdict bound to corrupted_sha256 \
-$verdict_sha but freshly-regenerated bytes hash to $corr_sha; this is EXPECTED for a \
-regenerated BTI source (trie serialization is not byte-reproducible). The recorded \
-cassandra_verdict ('$cass_verdict') stays as documentary parity evidence. Full-directory \
-binding tracked by issue #1294."
-    else
-      fail "$name: STALE VERDICT — captured Cassandra verdict is bound to corrupted_sha256 \
-$verdict_sha but the freshly-regenerated corrupted bytes hash to $corr_sha. The mutation \
-parameters or clean source changed, so the recorded cassandra_verdict ('$cass_verdict') no \
-longer describes these bytes. Re-capture with capture-cassandra-verify-verdicts.sh and update \
-verdict_captured_for_sha256 for '$name' (issue #1236 Finding 1)."
-    fi
+    log "::notice::$name: verdict sha-binding is advisory; corrupted bytes are \
+regenerated and may drift (e.g. Statistics.db / BTI embed non-deterministic \
+metadata). Captured cassandra_verdict bound to corrupted_sha256 $verdict_sha but \
+freshly-regenerated bytes hash to $corr_sha. Verdict-correctness is enforced by the \
+sstable_parity_corruption_verify test (not the file sha). See #1294 for per-component \
+binding. The recorded cassandra_verdict ('$cass_verdict') is emitted unchanged."
   fi
 
   # ---- single-mutation proof ----------------------------------------------
