@@ -1,8 +1,8 @@
 ================================================================
  CORRUPTION CORPUS VERIFICATION REPORT (epic #970, issue #999)
 ================================================================
-corrupt corpus: /tmp/cqlite-1236-gen/datasets/corruption/test_comp_corrupt
-clean source  : /tmp/cqlite-1236-gen/datasets/sstables/test_comp
+corrupt corpus: datasets/corruption/test_comp_corrupt
+clean source  : datasets/sstables/test_comp
 
 FIXTURE                        COMPONENT            MUTATION     OFFSET    STATUS
 ----------------------------------------------------------------------------------------

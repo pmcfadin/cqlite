@@ -54,6 +54,59 @@ trap cleanup EXIT
 command -v docker >/dev/null 2>&1 || fatal "docker required"
 [[ -d "$CORPUS" ]] || fatal "corruption corpus missing: $CORPUS (run generate-corruption-corpus.sh)"
 
+MANIFEST="$CORPUS/corruption-manifest.yml"
+[[ -f "$MANIFEST" ]] || fatal "corruption manifest missing: $MANIFEST (run generate-corruption-corpus.sh)"
+
+# -------------------------------------------------------------------------
+# FAIL-CLOSED corpus completeness preflight (Finding 1 / issue #1236).
+#
+# This tool produces the Cassandra verdict ORACLE. A partially-regenerated
+# corpus (a fixture dir without its *-Data.db, or a missing clean baseline)
+# must NEVER yield a silent, incomplete capture. So BEFORE any capture begins
+# we assert that EVERY fixture marked `status: active` in the manifest has its
+# corrupted SSTable materialized (a *-Data.db present) AND that the clean
+# baseline generation is materialized. Any gap is FATAL and names the offender.
+#
+# The manifest is the authoritative active-fixture list — we do NOT glob the
+# corpus dir and skip whatever happens to be absent (the old silent behaviour).
+ACTIVE_FIXTURES=$(python3 - "$MANIFEST" <<'PY'
+import sys, re
+txt = open(sys.argv[1]).read()
+for b in re.split(r"\n  - name: ", txt)[1:]:
+    name = b.splitlines()[0].strip()
+    m = re.search(r"^    status: (.+)$", b, re.M)
+    if m and m.group(1).strip() == "active":
+        print(name)
+PY
+)
+[[ -n "$ACTIVE_FIXTURES" ]] || fatal "no active fixtures parsed from $MANIFEST"
+
+missing=()
+while IFS= read -r name; do
+  [[ -n "$name" ]] || continue
+  fxdir="$CORPUS/$name"
+  if [[ ! -d "$fxdir" ]]; then
+    missing+=("$name (directory absent: $fxdir)")
+  elif ! ls "$fxdir"/*-Data.db >/dev/null 2>&1; then
+    missing+=("$name (no *-Data.db in $fxdir — corpus not regenerated?)")
+  fi
+done <<<"$ACTIVE_FIXTURES"
+
+# Clean baseline must be materialized too (it is captured as CLEAN_BASELINE_lz4).
+CLEANSRC=$(ls -d "$DATASETS"/sstables/test_comp/lz4_table-* 2>/dev/null | head -1 || true)
+if [[ -z "$CLEANSRC" ]]; then
+  missing+=("CLEAN_BASELINE_lz4 (no test_comp/lz4_table-* dir under $DATASETS/sstables)")
+elif ! ls "$CLEANSRC"/*-Data.db >/dev/null 2>&1; then
+  missing+=("CLEAN_BASELINE_lz4 (no *-Data.db in $CLEANSRC — fetch datasets)")
+fi
+
+if [[ "${#missing[@]}" -gt 0 ]]; then
+  echo "[verdicts] FATAL: corpus incomplete; refusing to capture a partial oracle." >&2
+  for m in "${missing[@]}"; do echo "  - $m" >&2; done
+  fatal "regenerate the full corpus (generate-corruption-corpus.sh + fetch-datasets.sh) before capturing verdicts"
+fi
+echo "[verdicts] preflight OK: $(echo "$ACTIVE_FIXTURES" | grep -c .) active fixtures + clean baseline materialized."
+
 docker rm -f "$CID" >/dev/null 2>&1 || true
 echo "[verdicts] starting $IMAGE..."
 docker run -d --name "$CID" \
@@ -116,19 +169,23 @@ run_verify() {
   echo "[verdicts] $label => $verdict (rc=$rc)" >&2
 }
 
-# Clean baseline (whole clean lz4_table generation).
-CLEANSRC=$(ls -d "$DATASETS"/sstables/test_comp/lz4_table-* 2>/dev/null | head -1 || true)
-[[ -n "$CLEANSRC" ]] && run_verify "$CLEANSRC" test_comp lz4_table CLEAN_BASELINE_lz4
+# Clean baseline (whole clean lz4_table generation). $CLEANSRC was resolved and
+# proven materialized by the fail-closed preflight above, so we run it
+# unconditionally (no silent skip).
+run_verify "$CLEANSRC" test_comp lz4_table CLEAN_BASELINE_lz4
 
-for fx in "$CORPUS"/*/; do
-  fx="${fx%/}"; name="$(basename "$fx")"
-  ls "$fx"/*-Data.db >/dev/null 2>&1 || continue
+# Iterate the AUTHORITATIVE active-fixture list (not a corpus glob): the preflight
+# already proved each has a *-Data.db, so a now-missing one is FATAL, never skipped.
+while IFS= read -r name; do
+  [[ -n "$name" ]] || continue
+  fx="$CORPUS/$name"
+  ls "$fx"/*-Data.db >/dev/null 2>&1 || fatal "$name lost its *-Data.db after preflight: $fx"
   if ls "$fx"/da-*-Data.db >/dev/null 2>&1; then
     run_verify "$fx" test_da wide_table "$name"
   else
     run_verify "$fx" test_comp lz4_table "$name"
   fi
-done
+done <<<"$ACTIVE_FIXTURES"
 
 # Container teardown is handled by the EXIT trap (cleanup).
 echo "[verdicts] done." >&2
