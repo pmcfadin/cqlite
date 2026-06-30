@@ -723,10 +723,25 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
      * Cassandra 5.0 stores no reliable per-regular-column NDV, so reporting any would
      * be a heuristic (#28). A failed/zero fetch yields {@link TableStatistics#empty()}
      * (unknown), which is always a safe input for the optimizer.
+     *
+     * <p>For an <em>aggregated</em> handle the scan's OUTPUT cardinality is the
+     * aggregate-result cardinality, NOT the base-table row count (issue #944): a
+     * GLOBAL aggregate (no GROUP BY) emits exactly one row, so we report {@code
+     * ROW_COUNT = 1}; a grouped aggregate's output group count is not authoritatively
+     * known, so we return {@link TableStatistics#empty()} and let Trino estimate
+     * rather than fabricate (#28).
      */
     @Override
     public TableStatistics getTableStatistics(ConnectorSession session, ConnectorTableHandle table) {
         CqliteFlightTableHandle handle = (CqliteFlightTableHandle) table;
+        if (handle.isAggregated()) {
+            if (handle.hasGroupBy()) {
+                // Grouped aggregate: output group count is unknown — do not guess.
+                return TableStatistics.empty();
+            }
+            // Global aggregate (e.g. count(*) with no GROUP BY): exactly one row.
+            return TableStatistics.builder().setRowCount(Estimate.of(1)).build();
+        }
         TableStats stats;
         try {
             stats = fetchTableStats(handle);

@@ -1,5 +1,7 @@
 package in.mcfad.cqlite.flight;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.trino.spi.connector.ConnectorTableHandle;
 
 import java.util.Optional;
@@ -45,5 +47,29 @@ public record CqliteFlightTableHandle(
     /** True when this handle carries a pushed-down aggregation (the finalize-split path). */
     public boolean isAggregated() {
         return aggregationJson.isPresent();
+    }
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    /**
+     * True when this aggregated handle carries a non-empty GROUP BY (a grouped
+     * aggregate), false for a GLOBAL aggregate (no GROUP BY). Reads the {@code
+     * group_by} array of the carried {@code aggregationJson} — the authoritative,
+     * already-serialized signal {@link CqliteFlightMetadata#applyAggregation} put
+     * there — rather than introducing new handle state. Returns {@code false} when
+     * the handle is not aggregated or the JSON is absent/unparseable (treated as a
+     * global aggregate, i.e. one output row).
+     */
+    public boolean hasGroupBy() {
+        if (aggregationJson.isEmpty()) {
+            return false;
+        }
+        try {
+            JsonNode root = MAPPER.readTree(aggregationJson.get());
+            JsonNode groupBy = root.get("group_by");
+            return groupBy != null && groupBy.isArray() && !groupBy.isEmpty();
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            return false;
+        }
     }
 }

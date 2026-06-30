@@ -435,7 +435,14 @@ impl CqliteFlightService {
         )
         .into_dir();
 
-        let stats = gather_table_stats(&dir).await?;
+        // `gather_table_stats` is synchronous blocking fs I/O (read_dir + read of
+        // every Statistics.db). Run it off the async runtime so a table with many
+        // SSTables / slow storage cannot stall unrelated Flight RPCs — mirroring the
+        // `do_get` merge offload above. Outer `?` maps a task panic; inner `?` keeps
+        // the `StatsError` -> `Status` mapping (`From<StatsError> for Status`).
+        let stats = tokio::task::spawn_blocking(move || gather_table_stats(&dir))
+            .await
+            .map_err(|e| Status::internal(format!("table_stats task panicked: {e}")))??;
         let body = stats
             .to_bytes()
             .map_err(|e| Status::internal(format!("encode table_stats response: {e}")))?;

@@ -138,7 +138,12 @@ pub enum StatsError {
 /// aborting the gate. A missing table directory surfaces as
 /// [`StatsError::Discovery`]; an existing table with no SSTables yields an
 /// all-zero response.
-pub async fn gather_table_stats(dir: &Path) -> Result<TableStatsResponse, StatsError> {
+///
+/// This is a SYNCHRONOUS, blocking function: it performs `std::fs::read_dir` /
+/// `std::fs::read` directly. Callers on an async runtime MUST invoke it inside
+/// [`tokio::task::spawn_blocking`] so the blocking I/O cannot stall the reactor
+/// (see [`crate::service`] `do_action_inner`, matching the `do_get` merge offload).
+pub fn gather_table_stats(dir: &Path) -> Result<TableStatsResponse, StatsError> {
     let entries = std::fs::read_dir(dir).map_err(|source| StatsError::Discovery {
         path: dir.to_path_buf(),
         source,
@@ -234,7 +239,8 @@ mod tests {
     }
 
     // `build_sstables` drives its own runtime to flush; gather_table_stats is
-    // async, so build first then enter a fresh runtime to gather.
+    // synchronous (callers offload it via spawn_blocking), so build first then
+    // gather directly.
     //
     // The write-engine StatisticsWriter emits EMPTY estimated histograms, so the
     // histogram-derived partition_count is 0 for write-engine SSTables (real
@@ -254,8 +260,7 @@ mod tests {
         // Resolve the SSTable dir exactly as the service does, then gather.
         let dir = DirSource::resolve(&data_dir, KS, TBL, None).into_dir();
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let stats = rt.block_on(gather_table_stats(&dir)).expect("gather");
+        let stats = gather_table_stats(&dir).expect("gather");
 
         assert_eq!(stats.sstable_count, 2, "two SSTables decoded");
     }
@@ -304,8 +309,7 @@ mod tests {
             return;
         }
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let stats = rt.block_on(gather_table_stats(&dir)).expect("gather");
+        let stats = gather_table_stats(&dir).expect("gather");
 
         assert_eq!(stats.sstable_count, 1, "one SSTable in the fixture");
         assert_eq!(stats.partition_count, 10, "sensor_data has 10 partitions");
@@ -317,8 +321,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let dir = temp.path().join("data").join(KS).join(TBL);
         std::fs::create_dir_all(&dir).unwrap();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let stats = rt.block_on(gather_table_stats(&dir)).expect("gather");
+        let stats = gather_table_stats(&dir).expect("gather");
         assert_eq!(
             stats,
             TableStatsResponse::default(),
@@ -330,10 +333,7 @@ mod tests {
     fn gather_missing_dir_is_discovery_error() {
         let temp = tempfile::TempDir::new().unwrap();
         let missing = temp.path().join("does").join("not").join("exist");
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let err = rt
-            .block_on(gather_table_stats(&missing))
-            .expect_err("missing dir must error");
+        let err = gather_table_stats(&missing).expect_err("missing dir must error");
         assert!(matches!(err, StatsError::Discovery { .. }), "got {err:?}");
     }
 }
