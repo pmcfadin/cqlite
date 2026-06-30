@@ -610,59 +610,135 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
 
     /**
      * Fetch the AUTHORITATIVE per-table statistics by summing the
-     * {@code table_stats} action across the distinct flight nodes in the ring
-     * (issue #944). Summing across replicas over-counts by the replication factor,
+     * {@code table_stats} action across the REPLICA hosts that own this keyspace
+     * (issue #944). The target host set is scoped to the keyspace's read replicas
+     * (from {@link SidecarClient#tokenRangeReplicas}) rather than the whole cluster
+     * ring: in multi-DC / keyspace-scoped replication a ring entry can be a node that
+     * does NOT host this keyspace at all, and fanning out to it would either waste an
+     * RPC or — if that node answered {@code not_found} — wrongly taint completeness.
+     * Summing across the keyspace's replicas over-counts by the replication factor,
      * which is acceptable for an UPPER-BOUND gate input (it only ever errs toward
      * DECLINING pushdown).
      *
-     * <p>If ANY distinct ring node that should have been queried FAILS to return
-     * stats, the aggregate is tainted INCOMPLETE: we fold {@link TableStats#UNAVAILABLE}
-     * (an incomplete sentinel) so the AND-of-{@code complete} in {@link TableStats#plus}
-     * becomes {@code false}. A failed node is NOT silently dropped — its peers'
-     * partial totals must not be treated as authoritative (issue #944, #28), so the
-     * caller fails closed to "no estimate" rather than dividing the gate/optimizer by
-     * an under-counted row total.
+     * <p>If ANY replica host that should have been queried is UNREACHABLE (a transport
+     * failure), the aggregate is tainted INCOMPLETE: we fold {@link TableStats#UNAVAILABLE}
+     * so the AND-of-{@code complete} in {@link TableStats#plus} becomes {@code false} and
+     * the caller fails closed to "no estimate" (issue #944, #28). A replica that RESPONDS
+     * {@code not_found} (it does not currently host this keyspace/table — e.g. replica
+     * metadata drift) is NOT a failure: it contributes nothing ({@link TableStats#EMPTY})
+     * and does NOT taint completeness.
      */
     private TableStats fetchTableStats(CqliteFlightTableHandle handle) {
         byte[] body = tableStatsRequest(handle.keyspace(), handle.table());
         int port = config.flightPort();
-        return aggregateNodeStats(
-                sidecar.ring().entries(), address -> flight.tableStats(address, port, body));
+        Set<String> hosts =
+                replicaHosts(sidecar.tokenRangeReplicas(handle.keyspace()), config.localDatacenter());
+        return aggregateNodeStats(hosts, address -> flight.tableStats(address, port, body));
     }
 
     /**
-     * Aggregate per-node {@code table_stats} across the DISTINCT addresses in
-     * {@code nodes} by summing {@link TableStats#plus} (issue #944). Pulled out as a
-     * package-private static seam so the completeness-tainting behavior can be unit
-     * tested without a live Sidecar/Flight client.
+     * Distinct replica HOSTS that own a keyspace, derived from its token-range read
+     * replicas (issue #944). The Sidecar returns replicas as {@code "ip:storage_port"}
+     * grouped by datacenter; we strip the port (the flight server listens on the
+     * configured flight port at the same host) and de-duplicate across all ranges and
+     * datacenters. Scoping the stats fan-out to these hosts — instead of the cluster
+     * ring — keeps a node that does not host this keyspace out of the completeness
+     * calculation entirely. Static and package-private for unit testing without a live
+     * Sidecar.
+     */
+    static Set<String> replicaHosts(
+            in.mcfad.cqlite.flight.sidecar.SidecarModels.TokenRangeReplicasResponse replicas,
+            String localDatacenter) {
+        Set<String> hosts = new LinkedHashSet<>();
+        if (replicas == null || replicas.readReplicas() == null) {
+            return hosts;
+        }
+        for (var range : replicas.readReplicas()) {
+            if (range.replicasByDatacenter() == null) {
+                continue;
+            }
+            for (List<String> dcReplicas : range.replicasByDatacenter().values()) {
+                if (dcReplicas == null) {
+                    continue;
+                }
+                for (String replica : dcReplicas) {
+                    if (replica != null && !replica.isBlank()) {
+                        hosts.add(CqliteFlightSplitManager.hostOnly(replica));
+                    }
+                }
+            }
+        }
+        return hosts;
+    }
+
+    /**
+     * Aggregate per-host {@code table_stats} across the DISTINCT replica
+     * {@code hosts} by summing {@link TableStats#plus} (issue #944). Pulled out as a
+     * package-private static seam so the completeness-classification behavior can be
+     * unit tested without a live Sidecar/Flight client.
      *
-     * <p>For each distinct, non-null address {@code fetch} is invoked. If the fetch
-     * THROWS for a node we should have queried, the node is NOT silently dropped: an
-     * incomplete {@link TableStats#UNAVAILABLE} sentinel is folded in, so the AND-of-
-     * {@code complete} in {@link TableStats#plus} taints the whole aggregate to
-     * {@code complete=false}. A partial cross-ring total is therefore reported as
-     * "no estimate" (the caller fails closed) rather than as authoritative.
+     * <p>For each distinct, non-null host {@code fetch} is invoked:
+     * <ul>
+     *   <li>SUCCESS — its (possibly incomplete) response is summed.</li>
+     *   <li>{@code not_found} — the host responded that it does not host this
+     *       keyspace/table. This is NOT a failure: it contributes
+     *       {@link TableStats#EMPTY} (nothing) and does NOT taint completeness. A
+     *       legitimate not-hosting replica must not disable the gate everywhere.</li>
+     *   <li>any other RuntimeException (transport/unreachable) — the host should have
+     *       answered but could not, so it is NOT silently dropped: an incomplete
+     *       {@link TableStats#UNAVAILABLE} sentinel is folded in, tainting the
+     *       aggregate to {@code complete=false} so the caller fails closed.</li>
+     * </ul>
      */
     static TableStats aggregateNodeStats(
-            Iterable<RingEntry> nodes, java.util.function.Function<String, TableStats> fetch) {
+            Iterable<String> hosts, java.util.function.Function<String, TableStats> fetch) {
         TableStats total = TableStats.EMPTY;
         Set<String> seen = new LinkedHashSet<>();
-        for (RingEntry node : nodes) {
-            String address = node.address();
+        for (String address : hosts) {
             if (address == null || !seen.add(address)) {
                 continue;
             }
             try {
                 total = total.plus(fetch.apply(address));
             } catch (RuntimeException e) {
-                // A node we should have queried could not answer. Do NOT silently drop
-                // it: fold an incomplete sentinel so the cross-ring aggregate is marked
-                // incomplete (complete=false), forcing the caller to "no estimate"
-                // instead of treating the peers' partial totals as authoritative.
+                if (isNotHosting(e)) {
+                    // The replica responded "table/keyspace absent" (Flight NOT_FOUND).
+                    // It legitimately hosts no data for this table — contribute nothing
+                    // and do NOT taint completeness, so a not-hosting replica in a
+                    // multi-DC / keyspace-scoped layout cannot disable the gate.
+                    continue;
+                }
+                // A replica we should have reached could not answer (transport failure).
+                // Do NOT silently drop it: fold an incomplete sentinel so the aggregate
+                // is marked incomplete (complete=false), forcing the caller to "no
+                // estimate" instead of treating peers' partial totals as authoritative.
                 total = total.plus(TableStats.UNAVAILABLE);
             }
         }
         return total;
+    }
+
+    /**
+     * Classify a {@code table_stats} fetch failure: a Flight {@code NOT_FOUND} status
+     * means the queried node does not host this keyspace/table (it responded), which
+     * is a legitimate not-a-failure that must NOT taint completeness. Any other error
+     * (transport/unreachable, internal) DOES taint. The NOT_FOUND status can be wrapped
+     * (the client rethrows runtime exceptions and wraps checked ones), so we walk the
+     * cause chain looking for a Flight {@link org.apache.arrow.flight.FlightRuntimeException}
+     * carrying {@link org.apache.arrow.flight.FlightStatusCode#NOT_FOUND}.
+     */
+    static boolean isNotHosting(Throwable error) {
+        for (Throwable t = error; t != null; t = t.getCause()) {
+            if (t instanceof org.apache.arrow.flight.FlightRuntimeException fre
+                    && fre.status() != null
+                    && fre.status().code() == org.apache.arrow.flight.FlightStatusCode.NOT_FOUND) {
+                return true;
+            }
+            if (t.getCause() == t) {
+                break;
+            }
+        }
+        return false;
     }
 
     /** Build the {@code table_stats} action body (JSON {@code TableStatsRequest}). */

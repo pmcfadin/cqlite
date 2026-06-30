@@ -201,16 +201,16 @@ pub fn gather_table_stats(dir: &Path) -> Result<TableStatsResponse, StatsError> 
         source,
     })?;
 
-    let stats_paths: Vec<std::path::PathBuf> = entries
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.ends_with("-Statistics.db"))
-        })
-        .collect();
-
     let mut response = TableStatsResponse::default();
+
+    // Enumerate directory entries WITHOUT silently dropping iteration errors. A
+    // `read_dir` entry that fails to yield (e.g. a transient I/O error partway
+    // through) means we may NOT have seen every SSTable, so the totals cannot be
+    // authoritative: taint completeness (consistent with the missing-`total_rows`
+    // and undecodable-Statistics.db paths below) rather than claiming complete totals
+    // over files we could not enumerate (issue #944, #28).
+    let stats_paths = collect_statistics_paths(entries, &mut response);
+
     for path in stats_paths {
         match read_one_sstable_counts(&path) {
             Ok(counts) => fold_counts(&mut response, &path, counts),
@@ -232,6 +232,51 @@ pub fn gather_table_stats(dir: &Path) -> Result<TableStatsResponse, StatsError> 
     }
 
     Ok(response)
+}
+
+/// Collect the `*-Statistics.db` paths from a `read_dir` iterator, treating any
+/// entry-iteration error as INCOMPLETE rather than silently discarding it.
+///
+/// `read_dir` yields `io::Result<DirEntry>`; an `Err` element means an entry could
+/// not be read (e.g. a transient FS error partway through enumeration), so the
+/// directory listing is NOT known to be exhaustive. Each such error flips
+/// `response.complete` to `false` and bumps `skipped_sstables` — the consumer then
+/// fails closed to "no estimate" instead of reporting authoritative totals over a
+/// directory it could not fully enumerate (issue #944, #28). Successful entries are
+/// filtered to `*-Statistics.db` paths as before.
+fn collect_statistics_paths<I>(
+    entries: I,
+    response: &mut TableStatsResponse,
+) -> Vec<std::path::PathBuf>
+where
+    I: IntoIterator<Item = std::io::Result<std::fs::DirEntry>>,
+{
+    let mut paths = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(e) => {
+                let path = e.path();
+                if path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with("-Statistics.db"))
+                {
+                    paths.push(path);
+                }
+            }
+            Err(e) => {
+                // An unreadable directory entry: the listing is not known to be
+                // complete, so taint the totals rather than dropping the error.
+                response.complete = false;
+                response.skipped_sstables = response.skipped_sstables.saturating_add(1);
+                tracing::debug!(
+                    error = %e,
+                    "table_stats: read_dir entry iteration error (marking incomplete)"
+                );
+            }
+        }
+    }
+    paths
 }
 
 /// Fold one decoded SSTable's [`TableCounts`] into the running `response`.
@@ -580,5 +625,43 @@ mod tests {
         let missing = temp.path().join("does").join("not").join("exist");
         let err = gather_table_stats(&missing).expect_err("missing dir must error");
         assert!(matches!(err, StatsError::Discovery { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn read_dir_entry_error_taints_completeness() {
+        // A `read_dir` iterator that yields an Err entry partway through must NOT be
+        // silently dropped: the directory listing is not known to be exhaustive, so
+        // the totals are tainted INCOMPLETE (issue #944, #28). We drive the helper
+        // directly with a synthetic iterator since provoking a real entry-iteration
+        // error from the OS is not portable.
+        let entries: Vec<std::io::Result<std::fs::DirEntry>> = vec![Err(std::io::Error::other(
+            "synthetic entry iteration failure",
+        ))];
+        let mut response = TableStatsResponse::default();
+        let paths = collect_statistics_paths(entries, &mut response);
+
+        assert!(paths.is_empty(), "an errored entry yields no path");
+        assert!(
+            !response.complete,
+            "a read_dir entry error must taint completeness (no silent drop)"
+        );
+        assert_eq!(
+            response.skipped_sstables, 1,
+            "the unreadable entry is visible as a skip"
+        );
+    }
+
+    #[test]
+    fn read_dir_all_ok_entries_stay_complete() {
+        // Sanity: with no Err entries the helper leaves completeness untouched. We
+        // enumerate a real (empty) directory so every yielded item is Ok.
+        let temp = tempfile::TempDir::new().unwrap();
+        let entries = std::fs::read_dir(temp.path()).unwrap();
+        let mut response = TableStatsResponse::default();
+        let paths = collect_statistics_paths(entries, &mut response);
+
+        assert!(paths.is_empty());
+        assert!(response.complete, "all-Ok enumeration stays complete");
+        assert_eq!(response.skipped_sstables, 0);
     }
 }
