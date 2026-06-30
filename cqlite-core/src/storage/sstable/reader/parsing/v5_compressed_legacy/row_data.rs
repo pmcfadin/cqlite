@@ -319,12 +319,24 @@ impl V5CompressedLegacyParser {
         }
 
         let columns_in_order: Vec<ColumnToParse> = if !reader.header.columns.is_empty() {
-            // Build lookup map from schema for column details
-            let schema_map: HashMap<String, &crate::schema::Column> = schema
-                .columns
-                .iter()
-                .map(|col| (col.name.clone(), col))
-                .collect();
+            // Issue #1046: resolve each header column to its schema `Column` by an
+            // allocation-free linear scan of `schema.columns` rather than building
+            // (and immediately discarding) a `HashMap<String, &Column>` per row.
+            //
+            // The old map cost one `String` clone per schema column PLUS one
+            // HashMap allocation on EVERY parsed row — the dominant per-row
+            // allocation-count site in the read/scan hot path (dhat: the single
+            // largest call-site for a full scan, scaling linearly with
+            // rows × schema-columns). The map was local to this function and never
+            // escaped, and it was queried at most once per header column, so a
+            // borrowing `iter().find()` is byte-for-byte equivalent: `HashMap::get`
+            // and `find(|c| c.name == name)` both return the column whose name
+            // matches exactly. Cassandra schemas have a handful of columns, so the
+            // linear scan is also cheaper in practice than a per-row hash build —
+            // and it allocates nothing, which is the point of this change.
+            let resolve_schema = |name: &str| -> Option<&crate::schema::Column> {
+                schema.columns.iter().find(|col| col.name == name)
+            };
 
             // Iterate serialization header columns in exact order (skipping keys,
             // and filtering to match the current row's static/regular kind).
@@ -338,7 +350,7 @@ impl V5CompressedLegacyParser {
                         && col_info.is_static == is_static
                 })
                 .map(|col_info| ColumnToParse {
-                    schema: schema_map.get(&col_info.name).copied(),
+                    schema: resolve_schema(&col_info.name),
                     header_type: Some(col_info.column_type.as_str()),
                 })
                 .collect()
