@@ -316,11 +316,25 @@ fn cmd_corpus_audit(args: &Args) -> Result<ExitCode> {
     }
 }
 
-/// Directory names skipped while walking a corpus: VCS metadata and build
-/// output. Recursing into `.git/`/`target/` would add tens of thousands of
-/// irrelevant paths (and a misleading `inventory.files.len()`) when the tool is
-/// pointed at a checkout root via `--corpus .` (issue #1026, Finding 2).
-const WALK_SKIP_DIRS: &[&str] = &[".git", "target", ".hg", ".svn", "node_modules"];
+/// Directory names skipped while walking a corpus: VCS metadata, build output,
+/// and the regeneration lane's own report dir. Recursing into `.git/`/`target/`
+/// would add tens of thousands of irrelevant paths (and a misleading
+/// `inventory.files.len()`) when the tool is pointed at a checkout root via
+/// `--corpus .`; `exhaustive-regeneration-report` is the lane's report dir, which
+/// lives inside the checkout and holds the audit's own inputs/outputs
+/// (`*.sha256`, `provenance.json`, `*.log`, `dataset-asset.tar.gz`) — walking it
+/// would re-enumerate them as corpus files. `--corpus .` (repo root) is required
+/// because manifest references are repo-root-relative (`test-data/datasets/...`),
+/// so we prune the report dir by name rather than scoping the walk (issue #1026,
+/// Findings 1 and 2).
+const WALK_SKIP_DIRS: &[&str] = &[
+    ".git",
+    "target",
+    ".hg",
+    ".svn",
+    "node_modules",
+    "exhaustive-regeneration-report",
+];
 
 /// Recursively collect every file under `dir` as a `/`-separated path relative
 /// to `dir` (matching the repo-relative form of manifest references when `dir`
@@ -520,17 +534,25 @@ mod tests {
     use super::*;
     use std::fs;
 
-    /// Finding 2: the corpus walk must prune `.git`/`target` so pointing
-    /// `--corpus .` at a checkout root does not enumerate VCS/build noise.
+    /// Findings 1 + 2: the corpus walk must prune `.git`/`target` and the
+    /// regeneration lane's own `exhaustive-regeneration-report` dir so pointing
+    /// `--corpus .` at a checkout root does not enumerate VCS/build noise or the
+    /// audit's own inputs/outputs.
     #[test]
     fn walk_relative_skips_vcs_and_build_dirs() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
         fs::create_dir_all(root.join(".git/objects")).expect("mkdir .git");
         fs::create_dir_all(root.join("target/debug")).expect("mkdir target");
+        fs::create_dir_all(root.join("exhaustive-regeneration-report")).expect("mkdir report");
         fs::create_dir_all(root.join("test-data/datasets/test_basic")).expect("mkdir corpus");
         fs::write(root.join(".git/objects/abc"), b"pack").expect("write git");
         fs::write(root.join("target/debug/bin"), b"elf").expect("write target");
+        fs::write(
+            root.join("exhaustive-regeneration-report/actual.sha256"),
+            b"deadbeef  x",
+        )
+        .expect("write report artifact");
         fs::write(
             root.join("test-data/datasets/test_basic/nb-1-big-Data.db"),
             b"data",
@@ -550,6 +572,12 @@ mod tests {
         assert!(
             !files.iter().any(|p| p.starts_with("target/")),
             "target must be pruned, got: {files:?}"
+        );
+        assert!(
+            !files
+                .iter()
+                .any(|p| p.starts_with("exhaustive-regeneration-report/")),
+            "the report dir must be pruned, got: {files:?}"
         );
     }
 
