@@ -66,6 +66,17 @@ OpenSpec change `<slug>` (design-driven only).
 5. **Gate (correctness).** Run `scripts/agent-gate.sh` in the worktree; it must be PASS. Paste the
    AGENT-GATE SUMMARY block. A known-flaky lane (e.g. `test_flush_throughput`, py3.9) that passes on
    re-run is not a failure — note it.
+   - **Gate PASS ≠ CI green** (L2, flow-meta #1310). The local gate does NOT run every CI lane (it uses
+     pre-existing datasets and a subset of `--test` targets). When the change touches a **regenerate path,
+     a fixture parser, or a fail-closed CI guard**, reproduce the **actual CI lane** locally before relying
+     on the gate — regenerate sources from the live container → corpus gen → the lane's exact target (e.g.
+     `compression-corruption-parity` = regenerate + require-fixtures; `parity-manifest` =
+     `cargo test -p cassandra-parity --test corpus_audit_tests`). #1236 and #1199 both passed the gate then
+     failed CI on lanes the gate never ran. (#1269 reconciles the gate's component set with the CI lanes.)
+   - **Never gate a non-deterministically-regenerated source on a whole-file byte identity** — the BTI trie
+     (`Partitions.db`/`Rows.db`) and `Statistics.db` are not byte-reproducible across regen runs. Gate the
+     **semantic verdict** (the parity test), keep the empty/missing-verdict authoring check fail-closed
+     (validation playbook, L1). Per-component binding is tracked in #1294.
 6. **C — intent audit** (design-driven). Spawn `spec-auditor` (explicit model) anchored to
    `openspec/changes/<slug>/specs/**`. Verdict must be PASS — every requirement `satisfied` with a
    public-surface test as evidence. `unmet`/uncovered/unjustified-`partial` → route the fix back (loop).
