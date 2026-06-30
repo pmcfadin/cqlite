@@ -60,7 +60,9 @@ struct Fixture {
 }
 
 fn datasets_root() -> Option<PathBuf> {
-    std::env::var("CQLITE_DATASETS_ROOT").ok().map(PathBuf::from)
+    std::env::var("CQLITE_DATASETS_ROOT")
+        .ok()
+        .map(PathBuf::from)
 }
 
 /// `true` when `CQLITE_REQUIRE_FIXTURES` is set to a truthy value ("1"/"true").
@@ -314,15 +316,15 @@ async fn sstable_parity_corruption_verify_matches_cassandra_per_fixture() {
 #[tokio::test]
 async fn sstable_parity_corruption_verify_clean_baseline_is_clean() {
     let Some(root) = datasets_root() else {
-        skip_or_require(
-            "issue_1236 clean baseline",
-            "CQLITE_DATASETS_ROOT not set",
-        );
+        skip_or_require("issue_1236 clean baseline", "CQLITE_DATASETS_ROOT not set");
         return;
     };
     let comp_dir = root.join("sstables/test_comp");
     if !comp_dir.exists() {
-        skip_or_require("test_comp clean baseline", "test_comp directory not present");
+        skip_or_require(
+            "test_comp clean baseline",
+            "test_comp directory not present",
+        );
         return;
     }
 
