@@ -227,32 +227,41 @@ pub(super) fn table_ids_match_strict(entry_table_id: &TableId, query_table_id: &
     }
 }
 
-/// Seek-path table-id consistency check (issue #1284).
+/// Seek-path table-id consistency check (issue #1284, hardened per #1284 review).
 ///
 /// The single-partition SEEK (`bti_decompress_and_parse_target_all`) builds
 /// `entry_table_id` from THIS reader's AUTHORITATIVE serialization header
-/// (`{header.keyspace}.{header.table_name}`), and the reader was already resolved
-/// as the query's target table by the manager's `resolve_reader_list`. So the
-/// emitted `entry_table_id` is the SSTable's own authoritative identity for the
-/// data it is decoding.
+/// (`{header.keyspace}.{header.table_name}`). `query_table_id` is the query's id.
 ///
-/// [`table_ids_match_strict`] additionally requires the *keyspace* to match the
-/// query id when BOTH are fully qualified. That is the correct defensive guard
-/// for a `get()` point lookup (issue #831) — but it falsely REJECTS every row of
-/// a legitimately-resolved seek when the SSTable's header keyspace differs from
-/// the query's keyspace (e.g. a header whose embedded keyspace was not the
-/// path-derived one, or a writer-produced header), silently zeroing the result
-/// and forcing a full-scan fallback (issue #1284).
+/// `fully_qualified_match` records HOW the manager resolved this reader for the
+/// query (`resolve_reader_list`):
+///   - `true`  — the query's fully-qualified `keyspace.table` key matched the
+///     reader map EXACTLY (path-authoritative: this reader genuinely IS the
+///     queried table), or the query was unqualified.
+///   - `false` — the query was fully qualified but reached this reader via the
+///     bare/unqualified NAME fallback (its keyspace did NOT match any map key).
 ///
-/// For the seek the authoritative consistency test is: does the SSTable header's
-/// TABLE NAME equal the query's table name? A matching table name means the
-/// header is consistent with what was queried, so the decoded rows belong to the
-/// target table and are accepted — even when the keyspaces differ. A DIFFERENT
-/// table name still rejects (the #831 wrong-table guard is preserved), because
-/// the unqualified-name comparison in [`table_ids_match`] fails for it.
+/// [`table_ids_match_strict`] additionally requires the *keyspace* to match when
+/// BOTH ids are fully qualified — the correct `get()` defensive guard (#831). For
+/// a seek it falsely REJECTS every row when the reader's HEADER keyspace differs
+/// from the query keyspace even though resolution was an exact FQ match (e.g. a
+/// writer-produced header, or a header whose embedded keyspace is not the
+/// path-derived one), silently zeroing the result and forcing a full-scan
+/// fallback (#1284).
 ///
-/// This is no-heuristic: it relies only on the authoritative header identity and
-/// the query id, never on guessing.
+/// The relaxation (accept on a consistent TABLE NAME despite a header-keyspace
+/// divergence) is therefore gated on `fully_qualified_match`:
+///   - Exact FQ match (or unqualified query): the reader is authoritatively the
+///     target table, so a header-keyspace divergence is benign — accept when the
+///     table names agree, reject a different table name (the #831 wrong-table
+///     guard survives via [`table_ids_match`]). This is #1284's actual goal.
+///   - FQ query reached via the bare-name FALLBACK: the keyspace genuinely did
+///     NOT match, so a relaxed name-only check could surface rows from ANOTHER
+///     keyspace whose table name collides — keep STRICT keyspace matching
+///     ([`table_ids_match_strict`]) and REJECT the wrong-keyspace rows.
+///
+/// This is no-heuristic: it relies only on the authoritative header identity, the
+/// query id, and the authoritative resolution mode — never on guessing.
 ///
 /// Compiled only for the default (`not(tombstones)`) build: its only caller,
 /// `bti_collect_partition_rows`, exists only there (the manager's seek-driven
@@ -262,14 +271,15 @@ pub(super) fn table_ids_match_strict(entry_table_id: &TableId, query_table_id: &
 pub(super) fn table_header_consistent_for_seek(
     entry_table_id: &TableId,
     query_table_id: &TableId,
+    fully_qualified_match: bool,
 ) -> bool {
-    // Accept when the query is fully qualified and the header table name is
-    // consistent (matching unqualified table names), OR when the strict guard
-    // already accepts (identical qualified ids / qualified-vs-unqualified). The
-    // first arm is exactly the #1284 relaxation: a fully-qualified query whose
-    // keyspace differs from the SSTable header's keyspace is still served when the
-    // table names agree.
-    if query_table_id.name().contains('.') {
+    // Only relax to the name-only consistency check for a fully-qualified query
+    // when resolution was an EXACT fully-qualified match (the reader is
+    // path-authoritatively the queried table). A fully-qualified query that
+    // reached this reader via the bare-name fallback keeps STRICT keyspace
+    // matching, so it can never return rows from a different keyspace whose table
+    // name collides (#1284 review correctness fix).
+    if fully_qualified_match && query_table_id.name().contains('.') {
         table_ids_match(entry_table_id, query_table_id)
     } else {
         table_ids_match_strict(entry_table_id, query_table_id)
@@ -388,53 +398,80 @@ mod tests {
         assert!(table_ids_match_strict(&unq, &a));
     }
 
-    /// Issue #1284: the SEEK consistency check must ACCEPT a decoded row whose
-    /// SSTable header keyspace differs from a fully-qualified query keyspace, so
-    /// long as the TABLE NAME is consistent — the strict guard would otherwise
-    /// zero the result and force a full-scan fallback. A genuinely different
-    /// table name still rejects (the #831 wrong-table guard is preserved).
+    /// Issue #1284 (hardened per review): the SEEK consistency check relaxes to a
+    /// name-only match across a header-keyspace divergence ONLY when resolution
+    /// was an EXACT fully-qualified match. A fully-qualified query that reached
+    /// the reader via the bare-name FALLBACK keeps STRICT keyspace matching, so a
+    /// wrong-keyspace query can never return another keyspace's same-named rows.
+    /// A different table name always rejects (the #831 wrong-table guard).
     #[cfg(not(feature = "tombstones"))]
     #[test]
-    fn test_table_header_consistent_for_seek_accepts_keyspace_divergence() {
+    fn test_table_header_consistent_for_seek_gates_on_resolution_mode() {
         // The seek builds `entry` from the SSTable's authoritative header.
         let header = TableId::new("ks_a.users".to_string());
 
-        // 1. Fully-qualified query, SAME table name, DIFFERENT keyspace: the
-        //    strict guard REJECTS (the #1284 bug), but the seek check ACCEPTS
-        //    because the table names are consistent and the header is authoritative.
+        // 1. EXACT fully-qualified match, header keyspace MATCHES, same table:
+        //    ACCEPT (seek engages — the genuine #1284 goal, no regression).
+        let query_same = TableId::new("ks_a.users".to_string());
+        assert!(
+            table_header_consistent_for_seek(&header, &query_same, /*fq_match=*/ true),
+            "exact FQ match with a consistent header keyspace+table must accept (seek engages)"
+        );
+
+        // 1b. EXACT fully-qualified match, header keyspace DIFFERS but resolution
+        //     was path-authoritative (the benign #1284 divergence): ACCEPT on the
+        //     consistent table name. The strict guard alone would wrongly reject.
+        let query_div_exact = TableId::new("ks_b.users".to_string());
+        assert!(
+            !table_ids_match_strict(&header, &query_div_exact),
+            "precondition: the strict guard rejects a different-keyspace same-name query"
+        );
+        assert!(
+            table_header_consistent_for_seek(&header, &query_div_exact, /*fq_match=*/ true),
+            "Issue #1284: an EXACT fully-qualified resolution must accept rows when only the \
+             header keyspace diverges and the table name is consistent"
+        );
+
+        // 2. Fully-qualified query, header keyspace DIFFERS, reached via the
+        //    bare-name FALLBACK (fq_match = false), SAME table name: REJECT — the
+        //    keyspaces genuinely differ, so accepting would surface another
+        //    keyspace's same-named rows (#1284 review correctness fix).
         let query_other_ks = TableId::new("ks_b.users".to_string());
         assert!(
-            !table_ids_match_strict(&header, &query_other_ks),
-            "precondition: the strict guard rejects a different-keyspace same-name query (the bug)"
-        );
-        assert!(
-            table_header_consistent_for_seek(&header, &query_other_ks),
-            "Issue #1284: the seek must accept rows when the query is fully qualified and the \
-             header table name is consistent, even across a keyspace divergence"
+            !table_header_consistent_for_seek(&header, &query_other_ks, /*fq_match=*/ false),
+            "Issue #1284 review: a fully-qualified query resolved via the bare-name fallback must \
+             NOT accept rows from a reader whose header keyspace differs (no wrong-keyspace rows)"
         );
 
-        // 2. Fully-qualified query, SAME keyspace and table: accepted (no regression).
-        let query_same = TableId::new("ks_a.users".to_string());
-        assert!(table_header_consistent_for_seek(&header, &query_same));
-
-        // 3. Fully-qualified query, DIFFERENT table name: still REJECTED (the
-        //    #831 wrong-table guard must survive the relaxation).
+        // 3. DIFFERENT table name: REJECT regardless of resolution mode (the #831
+        //    wrong-table guard must survive the relaxation).
         let query_wrong_table = TableId::new("ks_b.accounts".to_string());
         assert!(
-            !table_header_consistent_for_seek(&header, &query_wrong_table),
-            "Issue #1284: a genuinely different table name must still be rejected"
+            !table_header_consistent_for_seek(&header, &query_wrong_table, /*fq_match=*/ true),
+            "Issue #831: a genuinely different table name must still be rejected (exact match)"
+        );
+        assert!(
+            !table_header_consistent_for_seek(
+                &header,
+                &query_wrong_table,
+                /*fq_match=*/ false
+            ),
+            "Issue #831: a genuinely different table name must still be rejected (fallback)"
         );
 
-        // 4. UNqualified query: defers to the strict guard's permissive name match.
+        // 4. UNqualified query: defers to the strict guard's permissive name match
+        //    (resolution mode irrelevant — there is no keyspace to mismatch).
         let query_unqualified = TableId::new("users".to_string());
         assert!(table_header_consistent_for_seek(
             &header,
-            &query_unqualified
+            &query_unqualified,
+            /*fq_match=*/ false
         ));
         let query_unqualified_wrong = TableId::new("accounts".to_string());
         assert!(!table_header_consistent_for_seek(
             &header,
-            &query_unqualified_wrong
+            &query_unqualified_wrong,
+            /*fq_match=*/ true
         ));
     }
 

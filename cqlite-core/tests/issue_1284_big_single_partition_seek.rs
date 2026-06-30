@@ -49,6 +49,7 @@ use cqlite_core::query::access_path::AccessPath;
 use cqlite_core::query::result::QueryRow;
 use cqlite_core::storage::sstable::work_counters;
 use cqlite_core::{Database, Value};
+use serial_test::serial;
 
 fn datasets_root() -> Option<PathBuf> {
     std::env::var("CQLITE_DATASETS_ROOT")
@@ -246,13 +247,24 @@ async fn assert_seek_engages_and_matches_full_scan(keyspace: &str, table: &str) 
 }
 
 /// Compressed (Snappy) BIG `nb` SSTable.
+///
+/// `#[serial(work_counters)]`: both cases reset and read the process-global
+/// `work_counters` to prove the seek engaged (`partitions_decoded == 1`), so they
+/// must not run concurrently within the test binary — an interleaved reset/read
+/// would make the engagement signal nondeterministic. Shares the `work_counters`
+/// serial group with the other counter-asserting tests in this crate.
 #[tokio::test]
+#[serial(work_counters)]
 async fn big_compressed_where_pk_eq_engages_seek_and_matches_full_scan() {
     assert_seek_engages_and_matches_full_scan("test_basic", "simple_table").await;
 }
 
 /// Uncompressed BIG `nb` SSTable (`compression_info = None`).
+///
+/// Serialized on the `work_counters` group for the same reason as the compressed
+/// case above: it resets and reads the process-global counters.
 #[tokio::test]
+#[serial(work_counters)]
 async fn big_uncompressed_where_pk_eq_engages_seek_and_matches_full_scan() {
     assert_seek_engages_and_matches_full_scan("test_basic", "uncompressed_table").await;
 }
