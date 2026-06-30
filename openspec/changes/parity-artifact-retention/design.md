@@ -156,24 +156,23 @@ is below the minimum for the tier(s) of the scenarios it gates.
    A standalone crate is deferred unless the emitter is needed from a context that cannot depend on the
    tool.
 
-## OPEN QUESTIONS (owner decision — policy/product choices, not decided here)
+## OWNER DECISIONS (resolved 2026-06-30 — Seam 1 approval)
 
-1. **Retention durations per tier.** The table above uses the tier-contract recommendations (14/30/90)
-   as enforced minimums. Are those the values to enforce, or should any tier be longer/shorter
-   (e.g. required_parity 30 to match the current sstabledump lane, exhaustive 90→180 for RC lifetime)?
+1. **Retention durations per tier.** ✅ Enforce the tier-contract values as **minimums**:
+   `required_parity` 14d, `nightly_docker` 30d, `exhaustive_regeneration` 90d. A lane may set higher.
 
-2. **Gate on artifact presence?** Should a parity workflow **fail** if a scenario reported a failure but
-   did not emit a conforming `failure-artifact.json` (fail-closed on missing forensics), or only warn?
-   This trades stricter triage guarantees against added flakiness if an emitter path is missed.
+2. **Gate on artifact presence?** ✅ **Fail-closed.** A parity workflow MUST fail when a scenario
+   reported a failure but did not emit a conforming `failure-artifact.json`. Triage forensics are
+   guaranteed to exist; this matches CQLite's fail-closed gate doctrine. (Implementers: take care the
+   emitter path is exercised so a missed emitter does not introduce flakiness.)
 
-3. **Migration of existing `failure_artifacts` strings.** Convert all ~119 existing free-text entries to
-   typed descriptors in this change, or introduce descriptors additively and deprecate the strings over
-   one or two follow-up issues? (Affects blast radius of this PR.)
+3. **Migration of existing `failure_artifacts` strings.** ✅ **Convert all ~119 existing free-text
+   entries to typed descriptors in this change.** Lint goes green for the whole manifest at once; no
+   mixed state, no follow-up debt. Larger diff is accepted.
 
-4. **Repro bundle for byte fixtures.** `repro/inputs/` could copy the fixture binaries (heavyweight) or
-   record their paths + dataset SHA only (lightweight, but requires the dataset to reproduce). Default
-   recommendation is paths + SHA (permanent storage of datasets is out of scope per the issue) — confirm.
+4. **Repro bundle for byte fixtures.** ✅ Record fixture **paths + dataset SHA256 only** (no full
+   dataset copy — permanent dataset storage is out of scope per the issue).
 
-5. **Live-Cassandra logs scope (nightly_docker).** How much of the container/log output belongs in
-   `live_log` — the failing comparison's stdout/stderr only, or the full Cassandra container log for the
-   run? (Size vs. completeness.)
+5. **Live-Cassandra logs scope (nightly_docker).** ✅ Capture the **failing comparison's
+   stdout/stderr** as the `live_log` entry, not the full Cassandra container log (size vs. completeness
+   trade resolved toward the failing comparison).
