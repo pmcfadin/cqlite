@@ -18,7 +18,12 @@ name: Project Board Sync
 #     id field(name:"Status"){... on ProjectV2SingleSelectField{id options{id name}}}}}}'
 
 on:
-  pull_request:
+  # pull_request_target (not pull_request) so the closed-PR job can read the
+  # PROJECTS_TOKEN secret. This is SAFE here: the workflow performs NO
+  # actions/checkout of PR head code and executes NO PR-controlled code — it
+  # consumes only structured event metadata (pull_request.node_id/number/merged)
+  # and the GraphQL API. There is no untrusted-code execution surface.
+  pull_request_target:
     types: [closed]
   schedule:
     # Hygiene sweep every 30 min (null-status -> Backlog; closed-PR safety net).
@@ -48,7 +53,7 @@ jobs:
   # by the built-in "Pull request merged" rule), move its board card to Done.
   # ---------------------------------------------------------------------------
   pr-closed-to-done:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
     steps:
       - name: Guard token
@@ -114,7 +119,7 @@ jobs:
   # Never touches Ready / In Progress / In Review items, and never reaps claims.
   # ---------------------------------------------------------------------------
   sweep:
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request_target'
     runs-on: ubuntu-latest
     steps:
       - name: Guard token
@@ -167,29 +172,46 @@ jobs:
                 }
               }" -f p="$PROJECT_ID")
 
-            # OPEN issues with null status -> Backlog
-            while read -r id; do
-              [ -n "$id" ] || continue
-              set_status "$id" "$OPT_BACKLOG"
-              backlogged=$((backlogged+1))
-            done < <(echo "$resp" | jq -r '
+            # Validate the response SHAPE before extracting IDs. With process
+            # substitution (`< <(... | jq ...)`) a malformed/stale-PROJECT_ID
+            # response prints a jq error to stderr but the read loop still
+            # completes with zero rows and the step reports "0" — masking the
+            # failure. `jq -e` here asserts the expected nodes array exists and
+            # FAILS the step (set -e) on a bad shape. A genuine empty board
+            # (`.items.nodes == []`) still satisfies `arrays` and is non-fatal.
+            echo "$resp" | jq -e '.data.node.items.nodes | arrays' >/dev/null
+
+            # Capture the two ID lists via checked command substitutions BEFORE
+            # iterating, so any extraction failure aborts the step rather than
+            # being swallowed inside a process substitution. An empty list is the
+            # benign no-work case and leaves the while loop a no-op.
+            null_issue_ids=$(echo "$resp" | jq -r '
               .data.node.items.nodes[]
               | select(.content.__typename=="Issue")
               | select(.content.state=="OPEN")
               | select((.fieldValueByName.name // "") == "")
               | .id')
 
-            # CLOSED PRs not yet Done -> Done (safety net)
-            while read -r id; do
-              [ -n "$id" ] || continue
-              set_status "$id" "$OPT_DONE"
-              doned=$((doned+1))
-            done < <(echo "$resp" | jq -r '
+            closed_pr_ids=$(echo "$resp" | jq -r '
               .data.node.items.nodes[]
               | select(.content.__typename=="PullRequest")
               | select(.content.state=="CLOSED" or .content.state=="MERGED")
               | select((.fieldValueByName.name // "") != "Done")
               | .id')
+
+            # OPEN issues with null status -> Backlog
+            while read -r id; do
+              [ -n "$id" ] || continue
+              set_status "$id" "$OPT_BACKLOG"
+              backlogged=$((backlogged+1))
+            done <<< "$null_issue_ids"
+
+            # CLOSED PRs not yet Done -> Done (safety net)
+            while read -r id; do
+              [ -n "$id" ] || continue
+              set_status "$id" "$OPT_DONE"
+              doned=$((doned+1))
+            done <<< "$closed_pr_ids"
 
             has_next=$(echo "$resp" | jq -r '.data.node.items.pageInfo.hasNextPage')
             cursor=$(echo "$resp" | jq -r '.data.node.items.pageInfo.endCursor')

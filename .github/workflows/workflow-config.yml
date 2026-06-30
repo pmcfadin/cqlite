@@ -48,7 +48,10 @@ jobs:
           # Workflows exempt from the paths/paths-ignore requirement because they
           # MUST fire on every matching event and path-scoping would defeat them.
           #   project-board-sync.yml: moves ANY closed PR's board card to Done;
-          #     it cannot be limited to PRs that touch certain paths.
+          #     it cannot be limited to PRs that touch certain paths. It now uses
+          #     the pull_request_target trigger (so the closed-PR job can read
+          #     PROJECTS_TOKEN) — that event is outside the pull_request/push
+          #     policy loop below, so the exemption is belt-and-suspenders.
           path_filter_exempt = %w[
             project-board-sync.yml
           ]
