@@ -25,6 +25,7 @@ Write for AI agents: terse, imperative, copy-pasteable commands. Skip the prose.
 | [Format debugging workflow](/cqlite/agents-developing/format-debugging/) | Hex dumps, definitive-guide chapters, appendix F known limitations |
 | [Spec-driven audit](/cqlite/agents-developing/spec-driven-audit/) | OpenSpec as the front door for design-driven work; the intent audit (C) + roborev escalation (B); superpowers mapping |
 | [Delivery pipeline](/cqlite/agents-developing/delivery-pipeline/) | The `flow-lead` manager agent + `flow-*` pipeline; specialist roster; the two human seams + pre-authorized merge-on-green |
+| [Pre-roborev self-check](/cqlite/agents-developing/roborev-findings/) | The recurring roborev finding classes + the one-line fix for each; scan your diff before handing off (issue #1245) |
 
 ## Non-negotiable rules
 

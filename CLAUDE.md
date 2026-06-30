@@ -511,6 +511,16 @@ bash test-data/scripts/fetch-datasets.sh
 - Stay within your assigned issue's scope; flag cross-cutting changes to the lead instead of editing another teammate's files.
 - An issue is "done" only when tests pass, coverage meets threshold, roborev is clean, and both the spec-auditor and coverage-reviewer sign off.
 
+### Pre-roborev self-check (common findings to pre-empt)
+`roborev_findings` is the #1 recurring delivery cost (telemetry retro). Before reporting an implementation done, scan your diff for these recurring finding classes and fix them up front — every one avoided is a review round saved. Full guidance: https://pmcfadin.github.io/cqlite/agents-developing/roborev-findings/.
+- **GitHub Actions command injection** — never interpolate `${{ inputs.* }}` / `${{ steps.*.outputs.* }}` directly into a `run:` shell (worst in a step holding secrets). Allowlist-validate the value fail-closed *before* any secret step, then pass it via a quoted env var (`-Pversion="$VAR"`), not inline `${{ }}`.
+- **clippy `manual_range_contains`** — `x >= a && x <= b` fails under `-D warnings`. Write `(a..=b).contains(&x)`.
+- **Integer overflow / saturation** — decoding into `i128`/fixed width and saturating (decimal unscaled values, scale math) loses data. Use `num_bigint::BigInt` (already a dep); bound the computation by comparing signs/adjusted-exponents *before* any large power-of-ten — never materialize `10^scale` with an unbounded exponent (DoS/OOM).
+- **Float ordering vs Java** — Rust `total_cmp` ≠ Java `Float/Double.compare`: Rust puts negative NaN first, Java sorts NaN last; also signed-zero differs. When matching Cassandra, use an explicit comparator (NaN last, `-0.0 < +0.0`).
+- **Wall-clock races in tests** — never assert a value sampled at one instant against a window captured at another (one-second boundary flakes). Capture the window to cover *all* sampled operations.
+- **No-heuristics violations** — never infer type/behavior from byte patterns; use authoritative schema/`Statistics.db` metadata (see no-heuristics mandate).
+- **Gitignored reference binaries / dirty-tree gate** — byte-parity tests silently SKIP in a clean checkout when `.db` references are gitignored. Force-add the tiny reference binaries (`git add -f`) and verify the test against a fresh `git worktree add --detach HEAD`, not the dirty tree.
+
 ### Spec-driven work (OpenSpec)
 - OpenSpec is the front door for **design-driven** new work (bindings/M6, query-engine surface, CLI/REPL UX, perf/M7, process). **Oracle-driven** bug fixes (SSTable parsing, compaction/tombstone parity, type decode) stay as a GitHub issue + a pinned parity test — no OpenSpec change.
 - Merge flow for a design-driven change: `apply → gate (correctness) → C (intent audit) → roborev (code) → merge → archive`. The intent audit **C** is the `spec-auditor` subagent anchored to `openspec/changes/<name>/specs/**`; it runs only after `scripts/agent-gate.sh` is green. **B** (optional) reuses `roborev-design-review-branch` with the change's artifacts as criteria — escalate when C reports `partial`, the change is high-stakes, or it touches doctrine.
