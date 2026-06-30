@@ -202,20 +202,19 @@ fn require_or_skip_binaries(test: &str) -> bool {
     // component in REQUIRED_BINARY_COMPONENTS was present.
     if parity_datasets_required() {
         let missing = missing_required_components();
-        if !missing.is_empty() {
-            panic!(
-                "{test}: CQLITE_PARITY_REQUIRE_DATASETS=1 but the wide_partition byte-parity \
-                 reference is incomplete at {} (missing {} of {} required component(s): {:?}) — \
-                 these scenarios are pinned `byte_for_byte` in \
-                 test-data/cassandra-parity-manifest.yml and the fixture is in the pinned CI \
-                 dataset (v3.4). The required parity gate must FAIL CLOSED here, not skip. \
-                 Fetch the dataset: bash test-data/scripts/fetch-datasets.sh",
-                fixture_dir().display(),
-                missing.len(),
-                REQUIRED_BINARY_COMPONENTS.len(),
-                missing,
-            );
-        }
+        assert!(
+            missing.is_empty(),
+            "{test}: CQLITE_PARITY_REQUIRE_DATASETS=1 but the wide_partition byte-parity \
+             reference is incomplete at {} (missing {} of {} required component(s): {:?}) — \
+             these scenarios are pinned `byte_for_byte` in \
+             test-data/cassandra-parity-manifest.yml and the fixture is in the pinned CI \
+             dataset (v3.4). The required parity gate must FAIL CLOSED here, not skip. \
+             Fetch the dataset: bash test-data/scripts/fetch-datasets.sh",
+            fixture_dir().display(),
+            missing.len(),
+            REQUIRED_BINARY_COMPONENTS.len(),
+            missing,
+        );
         return true;
     }
     // Local dev (env unset): the byte-level decode only needs Data.db+Index.db;
