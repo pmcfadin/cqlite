@@ -38,7 +38,7 @@ use crate::types::Value;
 use crate::{Error, Result, RowKey};
 use log::debug;
 use std::io::SeekFrom;
-use tokio::io::AsyncSeekExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 /// `ClusteringPrefix.Kind.CLUSTERING` ordinal (a full row clustering name). Block
 /// `firstName`/`lastName` for a row carry this kind byte; range-bound names carry a
@@ -482,12 +482,36 @@ impl SSTableReader {
                 (window_base, Vec::<u8>::new())
             }
             None => {
-                let header_size = self.calculate_header_size();
+                // Uncompressed Data.db: the data section is RAW bytes after the
+                // header, so read ONLY the partition's `[offset, end_bound)` span
+                // directly instead of stitching the ENTIRE file (Finding 3, roborev
+                // #1184). Stitching materialized O(file); the window must be
+                // O(partition) — exactly the bound the compressed arm already holds —
+                // so the per-iteration "O(block), not O(partition)" claim is honest
+                // for uncompressed SSTables too. `offset`/`end_bound` are relative to
+                // the data section (after the header), matching the prior within=offset
+                // contract; we keep window_base = offset so within = 0.
+                let header_size = self.calculate_header_size() as u64;
+                let phys_start = header_size.saturating_add(offset as u64);
+                let phys_end = match end_bound {
+                    Some(end) => header_size.saturating_add(end as u64),
+                    // Last partition: extends to the end of the Data.db data section.
+                    None => {
+                        let mut file_guard = cursor.file.lock().await;
+                        file_guard.seek(SeekFrom::End(0)).await?
+                    }
+                };
+                if phys_end <= phys_start {
+                    return Ok(None);
+                }
+                let span = (phys_end - phys_start) as usize;
+                let mut buf = vec![0u8; span];
                 {
                     let mut file_guard = cursor.file.lock().await;
-                    file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
+                    file_guard.seek(SeekFrom::Start(phys_start)).await?;
+                    file_guard.read_exact(&mut buf).await?;
                 }
-                (0usize, self.stitch_all_chunks(&cursor).await?)
+                (offset, buf)
             }
         };
 
