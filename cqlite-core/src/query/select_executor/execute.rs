@@ -14,14 +14,14 @@
 //! and error handling are unchanged.
 
 use super::{
-    AccessPath, ColumnInfo, Error, ExecutionContext, ExecutionStep, FallbackReason,
-    OptimizedQueryPlan, ProjectionFlags, QueryResult, QueryRow, Result, SchemaManager,
-    SelectExecutor, StorageEngine, TableId,
-};
-use super::{
     build_row_from_scan, classify_partition_lookup, column_info_from_type_str, evaluate_predicates,
     honest_targeted_path, parse_table_id, select_has_writetime_ttl, sort_rows_by_token,
     validate_token_predicates, PartitionLookupOutcome, SSTablePredicate,
+};
+use super::{
+    AccessPath, ColumnInfo, Error, ExecutionContext, ExecutionStep, FallbackReason,
+    OptimizedQueryPlan, ProjectionFlags, QueryResult, QueryRow, Result, SchemaManager,
+    SelectExecutor, StorageEngine, TableId,
 };
 use std::sync::Arc;
 use tokio::sync::mpsc;
