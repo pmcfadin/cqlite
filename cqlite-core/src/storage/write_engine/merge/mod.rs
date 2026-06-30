@@ -2077,6 +2077,15 @@ impl KWayMerger {
             output_writer.write_partition(key, mutations)?;
         }
 
+        // Issue #1238: report the REAL output Data.db byte count instead of a
+        // hardcoded 0. The streaming writer flushes each partition as it is
+        // written, so its running position is the authoritative total Data.db
+        // size — identical to the `data_size` the caller's later
+        // `writer.finish()` reports (only residual scratch, normally empty, is
+        // flushed there). This is the writer's own byte accounting, not an
+        // estimate or a re-stat of the produced file.
+        stats.bytes_written = output_writer.data_bytes_written();
+
         stats.elapsed = start_time.elapsed();
         Ok(stats)
     }

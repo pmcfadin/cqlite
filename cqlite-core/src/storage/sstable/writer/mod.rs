@@ -819,6 +819,20 @@ impl SSTableWriter {
         Ok(())
     }
 
+    /// Total number of Data.db bytes produced so far (issue #1238).
+    ///
+    /// Returns the running Data.db size: bytes already flushed to the streaming
+    /// sink plus the current per-partition scratch. After the last
+    /// `write_partition` call this equals the `data_size` that
+    /// [`SSTableWriter::finish`] will report (and the on-disk Data.db length),
+    /// because the streaming `DataWriter` flushes each partition as it is written
+    /// and `finish` only flushes residual scratch (normally empty). Callers that
+    /// drive `write_partition` directly — e.g. `KWayMerger::merge` — use this to
+    /// fill in the authoritative output byte count without re-stat-ing the file.
+    pub fn data_bytes_written(&self) -> u64 {
+        self.data_writer.position()
+    }
+
     /// Pre-seed the encoding baselines with pre-computed final values.
     ///
     /// Call this BEFORE any `write_partition` call with the minimum values
