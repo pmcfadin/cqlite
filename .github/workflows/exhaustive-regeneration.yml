@@ -137,14 +137,39 @@ jobs:
           set -euo pipefail
           IMAGE=$(grep -E '^CASSANDRA_IMAGE=' test-data/scripts/regenerate-datasets.sh \
             | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
-          VERSION="${IMAGE#cassandra:}"
-          SHA=$(grep -E '^[[:space:]]*sha:' "$MANIFEST" | head -1 | awk '{print $2}')
-          python3 - "$IMAGE" "$VERSION" "$SHA" "${{ steps.package.outputs.asset_sha }}" <<'PY' > "$ARTIFACT_DIR/provenance.json"
-          import json, sys
-          image, version, sha, asset_sha = sys.argv[1:5]
+          # Parse the manifest's top-level `cassandra_source` block specifically
+          # (YAML-aware, indentation-scoped) so we record the intended
+          # cassandra_source.ref/.sha — never a scenario `evidence.cassandra_git_sha`
+          # or any other `sha:` line that happens to precede it (issue #1026).
+          # The ref drives the recorded version (cassandra-X.Y.Z -> X.Y.Z); the
+          # audit then fails on any version/ref/sha the manifest does not declare.
+          python3 - "$MANIFEST" "$IMAGE" "${{ steps.package.outputs.asset_sha }}" \
+            > "$ARTIFACT_DIR/provenance.json" <<'PY'
+          import json, re, sys
+          manifest, image, asset_sha = sys.argv[1:4]
+          ref = sha = ""
+          in_src = False
+          with open(manifest) as f:
+              for line in f:
+                  if re.match(r'^cassandra_source:\s*$', line):
+                      in_src = True
+                      continue
+                  if in_src:
+                      if re.match(r'^\S', line):  # next top-level key ends the block
+                          break
+                      m = re.match(r'^\s+(ref|sha):\s*(.+?)\s*$', line)
+                      if m:
+                          val = m.group(2).strip().strip('"').strip("'")
+                          if m.group(1) == 'ref':
+                              ref = val
+                          else:
+                              sha = val
+          if not ref or not sha:
+              sys.exit("cassandra_source.ref/.sha not found in manifest")
+          version = ref[len("cassandra-"):] if ref.startswith("cassandra-") else ref
           rec = {
               "cassandra_version": version,
-              "cassandra_ref": f"cassandra-{version}",
+              "cassandra_ref": ref,
               "cassandra_git_sha": sha,
               "docker_image": image,
               "generator_commands": [
