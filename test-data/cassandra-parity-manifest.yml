@@ -1445,7 +1445,8 @@ scenarios:
         promoted-offset/bounds assertions are NOT in the required lane because they
         depend on local-only binaries absent from the pinned CI dataset.
     ci:
-      tier: manual_debug
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope:
       gap: >-
         Byte-level promoted-index parity (Index.db offsets, widths, clustering
@@ -1709,7 +1710,8 @@ scenarios:
         promoted-offset/bounds assertions are NOT in the required lane because they
         depend on local-only binaries absent from the pinned CI dataset.
     ci:
-      tier: manual_debug
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope:
       gap: >-
         Byte-level promoted-index parity (Index.db offsets, widths, clustering
@@ -1766,7 +1768,8 @@ scenarios:
         promoted-offset/bounds assertions are NOT in the required lane because they
         depend on local-only binaries absent from the pinned CI dataset.
     ci:
-      tier: manual_debug
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope:
       gap: >-
         Byte-level promoted-index parity (Index.db offsets, widths, clustering
@@ -1822,7 +1825,8 @@ scenarios:
         promoted-offset/bounds assertions are NOT in the required lane because they
         depend on local-only binaries absent from the pinned CI dataset.
     ci:
-      tier: manual_debug
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope:
       gap: >-
         Byte-level promoted-index parity (Index.db offsets, widths, clustering
@@ -1880,7 +1884,8 @@ scenarios:
         promoted-offset/bounds assertions are NOT in the required lane because they
         depend on local-only binaries absent from the pinned CI dataset.
     ci:
-      tier: manual_debug
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope:
       gap: >-
         Byte-level promoted-index parity (Index.db offsets, widths, clustering
@@ -1938,7 +1943,8 @@ scenarios:
         promoted-offset/bounds assertions are NOT in the required lane because they
         depend on local-only binaries absent from the pinned CI dataset.
     ci:
-      tier: manual_debug
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope:
       gap: >-
         Byte-level promoted-index parity (Index.db offsets, widths, clustering
@@ -1989,7 +1995,8 @@ scenarios:
         Only forward-scan completeness is proven. Local-only fixture
         (gen-wide-big.sh) pending dataset re-pin; test skips-on-absence.
     ci:
-      tier: manual_debug
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope:
       gap: >-
         Reverse SSTable iteration is not implemented for BIG wide partitions; only
@@ -3123,7 +3130,8 @@ scenarios:
         (cass.compression_info.* / sstable_parity_compression_info_db_strict_test,
         issue #986).
     ci:
-      tier: manual_debug
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   - id: cass.compression_checksum.checksum_trailer_detection
@@ -4537,7 +4545,8 @@ scenarios:
         Canonical-semantic equivalence of liveness fields; not a Data.db byte
         comparison.
     ci:
-      tier: manual_debug
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   # ----------------------------------------------------------------------------
@@ -5108,7 +5117,8 @@ scenarios:
         Logical / canonical-semantic equivalence only; byte-for-byte compaction
         output parity is debug-only and non-gated (north-star issue #842).
     ci:
-      tier: manual_debug
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   - id: cass.compaction_merge.load_path_validity
@@ -12530,7 +12540,8 @@ scenarios:
         Logical / canonical-semantic equivalence; byte-for-byte compaction output
         parity is the separate non-gated byte tier (north-star issue #842).
     ci:
-      tier: manual_debug
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   - id: cass.compaction_merge.issue_819.differential_row_tombstone_wide_partition_regression
@@ -12581,7 +12592,8 @@ scenarios:
         Logical equivalence only; byte-for-byte compaction output parity is the
         separate non-gated byte tier (north-star issue #842).
     ci:
-      tier: manual_debug
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   - id: cass.compaction_merge.issue_819.differential_input_merge_write_fidelity
@@ -12635,7 +12647,8 @@ scenarios:
         Logical equivalence of per-cell writetimes; byte-for-byte compaction
         output parity is the separate non-gated byte tier (north-star #842).
     ci:
-      tier: manual_debug
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   # ----------------------------------------------------------------------------
