@@ -137,6 +137,25 @@ CREATE TABLE IF NOT EXISTS test_da.wide_table (pk int, ck int, payload text, PRI
 CQL
 
 echo "[verdicts] cassandra version: $(docker exec "$CID" cassandra -v 2>/dev/null || echo '?')"
+
+# -------------------------------------------------------------------------
+# Verifier-tool preflight (Finding 2 / issue #1236).
+#
+# The entire oracle's integrity rests on `sstableverify` actually existing and
+# being runnable in the container. If the tool is absent or unrunnable, EVERY
+# fixture would `docker exec ... sstableverify` -> exit 127 (command not found),
+# which the old code would have happily recorded as `corrupt` — silently
+# fabricating a Cassandra "corruption" verdict from a broken environment.
+#
+# So before any capture we probe the tool once. `command -v` returns 0 only if
+# the binary resolves on PATH inside the container; anything else (not installed,
+# container not running, docker daemon down) is FATAL and aborts the capture.
+echo "[verdicts] preflighting sstableverify in container..."
+if ! docker exec "$CID" sh -c 'command -v sstableverify >/dev/null 2>&1'; then
+  fatal "sstableverify not found / not runnable inside $IMAGE container ($CID); cannot capture a trustworthy verdict oracle"
+fi
+echo "[verdicts] preflight OK: sstableverify present in container."
+
 printf "fixture\tks\ttbl\tverdict\tmessage\n" > "$OUT"
 
 run_verify() {
@@ -159,9 +178,40 @@ run_verify() {
   set +e
   raw=$(docker exec "$CID" sh -c "sstableverify -e -f $ks $tbl 2>&1"); rc=$?
   set -e
+
+  # ---- infra/exec failure vs. genuine verifier verdict (Finding 2 / #1236) ----
+  # A nonzero exit here is AMBIGUOUS: it can mean (a) the verifier ran and judged
+  # the SSTable corrupt (the EXPECTED nonzero path we want to record), or (b) the
+  # invocation itself failed (container gone, docker daemon down, tool missing,
+  # OOM-kill) — which must NEVER be laundered into a fake `corrupt` verdict.
+  #
+  # Discrimination rule:
+  #   * `docker exec` surfaces its OWN failures with reserved exit codes:
+  #       125 = docker daemon/run error (e.g. cannot connect, No such container)
+  #       126 = command found but not executable
+  #       127 = command not found (e.g. sstableverify vanished from PATH)
+  #     The verifier's own corruption exit is a normal JVM/app code (1, or 2..124),
+  #     never one of these reserved 125/126/127 codes.
+  #   * 137 = 128+9 (SIGKILL, typically the OOM-killer) — an environment failure,
+  #     not a verdict.
+  #   * As a belt-and-suspenders signal we also scan output for unambiguous infra
+  #     signatures (Docker daemon / missing container / command-not-found) that
+  #     could in principle ride other codes.
+  # Any of these => HARD ERROR / abort, so a broken environment can never be
+  # committed as Cassandra saying "corrupt".
+  case "$rc" in
+    125|126|127|137)
+      fatal "infra/exec failure verifying $label ($ks.$tbl): docker/exec error rc=$rc; refusing to record as a corruption verdict. Output: $(echo "$raw" | tr '\n\t' '  ')"
+      ;;
+  esac
+  if echo "$raw" | grep -qiE 'cannot connect to the Docker daemon|No such container|Is the docker daemon running|sstableverify: (not found|command not found)|exec: "?sstableverify"?: executable file not found|OCI runtime'; then
+    fatal "infra/exec failure verifying $label ($ks.$tbl): infrastructure signature in output (rc=$rc); refusing to record as a corruption verdict. Output: $(echo "$raw" | tr '\n\t' '  ')"
+  fi
+
   if [[ $rc -eq 0 ]] && ! echo "$raw" | grep -qiE 'Corrupt|Exception|Error|mismatch|FAILED'; then
     verdict=clean
   else
+    # Genuine verifier corruption verdict (the expected nonzero path) — record it.
     verdict=corrupt
   fi
   # Optional summary extraction: a non-matching grep returns nonzero, which under
@@ -170,12 +220,22 @@ run_verify() {
   msg=$(echo "$raw" | grep -iE 'succeeded|Corrupt|Exception|mismatch|EOF|missing|Invalid' | head -2 | tr '\n\t' '  ' || true)
   printf "%s\t%s\t%s\t%s\t%s\n" "$label" "$ks" "$tbl" "$verdict" "${msg:-rc=$rc}" >> "$OUT"
   echo "[verdicts] $label => $verdict (rc=$rc)" >&2
+  # Expose the verdict to the caller so the clean-baseline assertion can check it
+  # (Finding 3 / #1236). Set last so a fatal above never leaves a stale value.
+  LAST_VERDICT="$verdict"
 }
+LAST_VERDICT=""
 
 # Clean baseline (whole clean lz4_table generation). $CLEANSRC was resolved and
 # proven materialized by the fail-closed preflight above, so we run it
 # unconditionally (no silent skip).
 run_verify "$CLEANSRC" test_comp lz4_table CLEAN_BASELINE_lz4
+# Fail-closed clean-baseline assertion (Finding 3 / #1236): the clean source MUST
+# verify clean. If a known-good SSTable reports corrupt, the verifier/environment
+# is broken and EVERY corruption verdict below is untrustworthy — abort rather
+# than commit an oracle built on a tool that mis-judges clean data.
+[[ "$LAST_VERDICT" == "clean" ]] || \
+  fatal "clean baseline CLEAN_BASELINE_lz4 did NOT verify clean (got: $LAST_VERDICT); verifier/environment is untrustworthy, aborting capture"
 
 # Iterate the AUTHORITATIVE active-fixture list (not a corpus glob): the preflight
 # already proved each has a *-Data.db, so a now-missing one is FATAL, never skipped.
