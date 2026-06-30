@@ -204,6 +204,15 @@ cargo run --package cqlite-cli --features write-support -- \
   --schema test-data/schemas/basic-types.cql \
   --flush
 
+# Issue #1253: a single combined invocation persists durably. `--execute` DML
+# now runs BEFORE the flush within the same invocation, so the inserted row
+# lands in Data.db (not just the WAL):
+cargo run --package cqlite-cli --features write-support -- \
+  --writable --write-dir /tmp/cqlite-write \
+  --schema test-data/schemas/basic-types.cql \
+  --execute "INSERT INTO test_basic.simple_table (id, name) VALUES (33333333-3333-3333-3333-333333333333, 'Carol')" \
+  --flush
+
 # Write subcommands
 cargo run --package cqlite-cli --features write-support -- \
   maintenance --budget-ms 100 \
