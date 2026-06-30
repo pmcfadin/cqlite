@@ -1,0 +1,1 @@
+{"table kind":"REGULAR","partition":{"key":["1"],"position":0},"rows":[{"type":"row","position":18,"liveness_info":{"tstamp":"2026-06-30T14:12:55.641998Z"},"cells":[{"name":"fm","value":{"-5":"neg-five","-1":"neg-one","0":"zero","2":"two"}},{"name":"fs","value":[-2,-1,0,1,3]}]}]}
