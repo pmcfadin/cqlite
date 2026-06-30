@@ -404,9 +404,9 @@ impl TuiApp {
 
     /// Load tables into the tables browser (Issue #251)
     ///
-    /// Uses the data directory scanning approach from REPL session fallback.
-    /// This scans the filesystem for table directories since we don't have
-    /// a ReplSession instance in TUI mode.
+    /// Uses the data directory scanning approach from the REPL session fallback.
+    /// This scans the filesystem for table directories since the TUI mode does
+    /// not have an active REPL session.
     async fn load_tables(&mut self, config: &Config) {
         // Get data directory from config
         let data_dir = match &config.data_directory {
@@ -437,7 +437,7 @@ impl TuiApp {
 
     /// Scan data directory for table entries
     ///
-    /// This is adapted from ReplSession::scan_data_directory_tables but
+    /// This is adapted from the prior REPL session data-directory table scan but
     /// returns TableEntry structs suitable for the TUI browser.
     async fn scan_tables(&self, data_dir: &Path) -> Result<Vec<TableEntry>> {
         use std::fs;
