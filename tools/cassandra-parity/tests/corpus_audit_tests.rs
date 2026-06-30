@@ -253,8 +253,7 @@ fn unexpected_component_change_fires_on_removed_component() {
     );
     assert!(findings
         .iter()
-        .any(|f| f.kind == FindingKind::UnexpectedComponentChange
-            && f.detail.contains("absent")));
+        .any(|f| f.kind == FindingKind::UnexpectedComponentChange && f.detail.contains("absent")));
 }
 
 #[test]
