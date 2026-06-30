@@ -15325,6 +15325,115 @@ scenarios:
       related_in_scope_scenarios:
         - cass.write_load_path.cassandra_sstable_writer_fixtures
 
+  # ----------------------------------------------------------------------------
+  # Issue #1199 (coverage soundness fix): exact-basename matching in
+  # `cassandra-parity coverage` revealed two high-relevance files that were
+  # previously only substring-"classified" by longer scenario filenames
+  # (AntiCompactionTest by PendingAntiCompactionTest; TombstonesTest by
+  # RepairedDataTombstonesTest). Both describe node-side write/repair/query
+  # guardrail behavior that CQLite (read/write/compact of on-disk SSTables)
+  # does not implement, so each is conservatively out_of_scope with the
+  # in-scope semantics they border named under related_in_scope_scenarios.
+  # ----------------------------------------------------------------------------
+  - id: cass.compaction.AntiCompactionTest.range_split_repair_state
+    title: Anticompaction range-split of SSTables into pending-repair / unrepaired sets
+    status: out_of_scope
+    capability: compaction_merge
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - AntiCompactionTest.java
+    cqlite:
+      coverage:
+        notes: >-
+          Anticompaction is a node-side repair operation that physically splits
+          an SSTable's partitions by token range into pending-repair and
+          unrepaired output sets and stamps the repair-state flags. CQLite reads
+          and merges whatever SSTables anticompaction produced; it does not run
+          anticompaction, own repair sessions, or split by token range.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts: [logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: not_sstable_reader_writer_compactor
+      rationale: >-
+        Anticompaction (splitting SSTables by token range during incremental
+        repair, managing repair-session lifecycle and transient/full replica
+        ranges) is a node-side repair behavior. CQLite is a read/write/compact
+        library over on-disk SSTables and never executes anticompaction.
+      cqlite_boundary: >-
+        CQLite parses and preserves the repair-state metadata (repairedAt /
+        pendingRepair UUID) an SSTable carries and rejects mixed-repair-state
+        compaction; it does not perform the token-range split or run a repair
+        session.
+      safe_claim: >-
+        CQLite reads and compacts the pending-repair and unrepaired SSTables
+        anticompaction produced, honoring their repair-state metadata; it does
+        not reproduce the anticompaction split itself.
+      related_in_scope_scenarios:
+        - cass.repair.PendingAntiCompactionTest.pending_repair_metadata
+        - cass.tombstone_ttl.RepairedDataTombstonesTest.repair_metadata_gates_purge
+
+  - id: cass.tombstone_ttl.TombstonesTest.overwhelming_threshold_guardrail
+    title: Tombstone-overwhelming query guardrail (warn/fail thresholds + metrics)
+    status: out_of_scope
+    capability: tombstone_ttl
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - TombstonesTest.java
+    cqlite:
+      coverage:
+        notes: >-
+          TombstonesTest exercises the query-time tombstone-overwhelming
+          guardrail: raising TombstoneOverwhelmingException and incrementing
+          warn/fail metrics once a read scans more tombstones than a configured
+          threshold. That is a node-side query-execution guardrail. The
+          underlying correctness semantics it relies on — tombstone shadowing by
+          partition/row deletes and gc_grace expiry exclusion — ARE in CQLite's
+          domain and are covered by the related in-scope scenarios below.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts: [logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: not_sstable_reader_writer_compactor
+      rationale: >-
+        The warn/fail tombstone-count thresholds, TombstoneOverwhelmingException,
+        and the associated read-failure metrics are a node-side query-execution
+        guardrail enforced by the coordinator/read path, not an on-disk SSTable
+        read/write/compaction behavior.
+      cqlite_boundary: >-
+        CQLite reads tombstones from SSTables and applies shadowing and gc_grace
+        expiry during scans/merges; it does not enforce a per-query tombstone
+        budget or raise TombstoneOverwhelmingException.
+      safe_claim: >-
+        CQLite correctly filters tombstones shadowed by partition/row deletes and
+        excludes gc_grace-expired tombstones during reads and compaction; it does
+        not implement the query-time tombstone-overwhelming threshold guardrail.
+      related_in_scope_scenarios:
+        - cass.tombstone_ttl.gc_grace.partition_row_cell
+        - cass.tombstone_ttl.skipped_sstable.partition_delete_shadows_older_rows
+
 # ==============================================================================
 # Public/release-facing parity claims (issue #1023).
 #

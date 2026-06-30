@@ -13,8 +13,8 @@ Sources: [`docs/cassandra_test_index.md`](../../docs/cassandra_test_index.md) ·
 | `mirrored` | 218 |
 | `partial` | 16 |
 | `planned` | 50 |
-| `out_of_scope` | 29 |
-| **total** | **313** |
+| `out_of_scope` | 31 |
+| **total** | **315** |
 
 ## Evidence counts
 
@@ -26,7 +26,7 @@ _Counts are per scenario; see [Distinct test backing](#distinct-test-backing-ded
 | `canonical_semantic` | 98 |
 | `smoke` | 7 |
 | `partial` | 59 |
-| `out_of_scope` | 31 |
+| `out_of_scope` | 33 |
 
 ## ⚠️ P0 scenarios with weak evidence
 
@@ -788,10 +788,14 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 
 ### `not_sstable_reader_writer_compactor`
 
+- `cass.compaction.AntiCompactionTest.range_split_repair_state` — Anticompaction range-split of SSTables into pending-repair / unrepaired sets
+  - Safe wording: CQLite reads and compacts the pending-repair and unrepaired SSTables anticompaction produced, honoring their repair-state metadata; it does not reproduce the anticompaction split itself.
 - `cass.compaction.CompactionsBytemanTest.fault_injected_compaction` — Byteman fault-injected compaction internals
   - Safe wording: CQLite produces correct merged output for the inputs it is given; it does not reproduce the node's fault-injection compaction internals.
 - `cass.summary_db.IndexSummaryManagerTest.memory_constrained_summary_reload` — Runtime index-summary redistribution / memory-constrained reload
   - Safe wording: CQLite reads any Summary.db Cassandra wrote (including downsampled ones, pending a fixture); it does not reproduce the redistribution scheduler.
+- `cass.tombstone_ttl.TombstonesTest.overwhelming_threshold_guardrail` — Tombstone-overwhelming query guardrail (warn/fail thresholds + metrics)
+  - Safe wording: CQLite correctly filters tombstones shadowed by partition/row deletes and excludes gc_grace-expired tombstones during reads and compaction; it does not implement the query-time tombstone-overwhelming threshold guardrail.
 
 ### `read_repair_coordinator`
 
@@ -852,6 +856,7 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.commitlog.CommitLogStressTest.replay_round_trip` | manual_debug | — |
 | `cass.commitlog_replay.recovery_out_of_scope` | fast_pr | — |
 | `cass.compaction.AntiCompactionBytemanTest.repair_driven_anticompaction` | manual_debug | — |
+| `cass.compaction.AntiCompactionTest.range_split_repair_state` | manual_debug | — |
 | `cass.compaction.CompactionAwareWriterTest.live_row_count_preservation` | required_parity | .github/workflows/live-cell-compaction-parity.yml |
 | `cass.compaction.CompactionAwareWriterTest.row_count_and_order_preservation` | required_parity | .github/workflows/compaction-parity.yml |
 | `cass.compaction.CompactionColumnDeleteAndPurgeTest.cell_delete_purge` | manual_debug | — |
@@ -1114,6 +1119,7 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.tombstone_ttl.RangeTombstoneTest.marker_merge_and_persistence` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.tombstone_ttl.RepairedDataTombstonesTest.repair_metadata_gates_purge` | required_parity | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.tombstone_ttl.TTLExpiryTest.gc_boundary` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.tombstone_ttl.TombstonesTest.overwhelming_threshold_guardrail` | manual_debug | — |
 | `cass.tombstone_ttl.ViewComplexTombstoneTest.cell_tombstone_not_purged` | manual_debug | — |
 | `cass.tombstone_ttl.deletion_markers.cell_delete` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.tombstone_ttl.deletion_markers.partition_delete` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
@@ -1170,6 +1176,7 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.commitlog.CommitLogStressTest.replay_round_trip` | — | — |
 | `cass.commitlog_replay.recovery_out_of_scope` | — | — |
 | `cass.compaction.AntiCompactionBytemanTest.repair_driven_anticompaction` | — | — |
+| `cass.compaction.AntiCompactionTest.range_split_repair_state` | — | — |
 | `cass.compaction.CompactionAwareWriterTest.live_row_count_preservation` | nb | test-data/datasets/sstables/test_compactionparity/live_clustering-e094a78073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl |
 | `cass.compaction.CompactionAwareWriterTest.row_count_and_order_preservation` | nb | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
 | `cass.compaction.CompactionColumnDeleteAndPurgeTest.cell_delete_purge` | nb, oa, big | — |
@@ -1432,6 +1439,7 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.tombstone_ttl.RangeTombstoneTest.marker_merge_and_persistence` | nb, oa | test-data/datasets/sstables/test_deltas/range_tombstones-298894f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/range-marker-grammar-diff.log |
 | `cass.tombstone_ttl.RepairedDataTombstonesTest.repair_metadata_gates_purge` | nb | — |
 | `cass.tombstone_ttl.TTLExpiryTest.gc_boundary` | nb, oa | test-data/datasets/sstables/test_deltas/ttl_cells-299c9220701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/ttl-gc-boundary-delta-diff.log |
+| `cass.tombstone_ttl.TombstonesTest.overwhelming_threshold_guardrail` | — | — |
 | `cass.tombstone_ttl.ViewComplexTombstoneTest.cell_tombstone_not_purged` | nb, oa, big | — |
 | `cass.tombstone_ttl.deletion_markers.cell_delete` | nb | test-data/datasets/sstables/test_deltas/cell_tombstones-88c7bde06c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl |
 | `cass.tombstone_ttl.deletion_markers.partition_delete` | nb | test-data/datasets/sstables/test_deltas/partition_tombstones-88f66f006c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl |
