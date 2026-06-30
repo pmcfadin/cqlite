@@ -32,12 +32,34 @@ import java.util.regex.Pattern;
 public final class PrimaryKeyExtractor {
     private PrimaryKeyExtractor() {}
 
+    /**
+     * A primary-key column name together with whether it was a quoted identifier in
+     * the DDL. CQL identifiers are case-insensitive ONLY when unquoted; a quoted
+     * identifier is case-sensitive and must compare exactly. {@link #name} is the
+     * canonical stored name (unquoted → lower-cased; quoted → exact case, quotes
+     * stripped); {@code quoted} records which folding rule applies on comparison.
+     */
+    public record KeyColumn(String name, boolean quoted) {
+        /** Match {@code other} against this key column under CQL identifier rules. */
+        public boolean matches(String other) {
+            if (other == null) {
+                return false;
+            }
+            return quoted ? name.equals(other) : name.equalsIgnoreCase(other);
+        }
+    }
+
     /** Resolved key columns of a table. */
-    public record Keys(List<String> partitionKey, List<String> clusteringColumns) {
-        /** Distinct names of partition + clustering columns, lower-cased. */
+    public record Keys(List<KeyColumn> partitionKey, List<KeyColumn> clusteringColumns) {
+        /** Distinct names of partition + clustering columns (canonical/stored case). */
         public Set<String> allKeyColumns() {
-            Set<String> all = new LinkedHashSet<>(partitionKey);
-            all.addAll(clusteringColumns);
+            Set<String> all = new LinkedHashSet<>();
+            for (KeyColumn k : partitionKey) {
+                all.add(k.name());
+            }
+            for (KeyColumn k : clusteringColumns) {
+                all.add(k.name());
+            }
             return all;
         }
     }
@@ -62,7 +84,7 @@ public final class PrimaryKeyExtractor {
         // Inline single-column form: "<col> <type> PRIMARY KEY".
         Matcher inline = INLINE_PK.matcher(ddl);
         if (inline.find()) {
-            String col = inlinePartitionColumn(ddl, inline.start());
+            KeyColumn col = inlinePartitionColumn(ddl, inline.start());
             if (col != null) {
                 return new Keys(List.of(col), List.of());
             }
@@ -98,7 +120,7 @@ public final class PrimaryKeyExtractor {
         // Split top-level (depth-0) commas; a leading "(...)" is the composite
         // partition key, everything after it is clustering columns.
         List<String> topLevel = new ArrayList<>();
-        List<String> partitionKey = new ArrayList<>();
+        List<KeyColumn> partitionKey = new ArrayList<>();
         boolean compositePk = body.trim().startsWith("(");
         int d = 0;
         StringBuilder cur = new StringBuilder();
@@ -131,7 +153,7 @@ public final class PrimaryKeyExtractor {
             topLevel.add(cur.toString());
         }
 
-        List<String> clustering = new ArrayList<>();
+        List<KeyColumn> clustering = new ArrayList<>();
         if (compositePk) {
             // partitionKey already filled from the "(...)" group; topLevel holds the
             // clustering columns (the first topLevel entry may be empty from the
@@ -159,7 +181,7 @@ public final class PrimaryKeyExtractor {
      * to the start of the column definition (the previous top-level comma or open
      * paren) and take the first identifier.
      */
-    private static String inlinePartitionColumn(String ddl, int primaryKeyStart) {
+    private static KeyColumn inlinePartitionColumn(String ddl, int primaryKeyStart) {
         int start = primaryKeyStart;
         int depth = 0;
         while (start > 0) {
@@ -184,23 +206,29 @@ public final class PrimaryKeyExtractor {
         return normalize(first);
     }
 
-    private static void addName(List<String> out, String raw) {
-        String n = normalize(raw);
-        if (n != null && !n.isEmpty()) {
-            out.add(n);
+    private static void addName(List<KeyColumn> out, String raw) {
+        KeyColumn k = normalize(raw);
+        if (k != null && !k.name().isEmpty()) {
+            out.add(k);
         }
     }
 
-    /** Strip whitespace + double-quotes and lower-case for case-insensitive match. */
-    private static String normalize(String raw) {
+    /**
+     * Strip whitespace + the surrounding double-quotes of a quoted identifier, and
+     * record whether it was quoted. CQL folds UNQUOTED identifiers to lower case
+     * (case-insensitive) and preserves the exact case of QUOTED identifiers
+     * (case-sensitive); the {@code quoted} flag carries that distinction so the
+     * comparison side applies the right rule per column.
+     */
+    private static KeyColumn normalize(String raw) {
         if (raw == null) {
             return null;
         }
         String s = raw.trim();
         if (s.startsWith("\"") && s.endsWith("\"") && s.length() >= 2) {
-            // Quoted identifiers are case-sensitive in CQL; preserve case but drop quotes.
-            return s.substring(1, s.length() - 1);
+            // Quoted identifiers are case-sensitive in CQL; preserve case, drop quotes.
+            return new KeyColumn(s.substring(1, s.length() - 1), true);
         }
-        return s.isEmpty() ? "" : s.toLowerCase(Locale.ROOT);
+        return new KeyColumn(s.isEmpty() ? "" : s.toLowerCase(Locale.ROOT), false);
     }
 }

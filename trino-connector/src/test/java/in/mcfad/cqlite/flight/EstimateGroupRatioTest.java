@@ -45,6 +45,23 @@ class EstimateGroupRatioTest {
     }
 
     @Test
+    void groupByPartitionPlusPartialClusteringIsUnboundedAndPushes() {
+        // PRIMARY KEY (pk, ck1, ck2); GROUP BY pk, ck1 covers the full partition key
+        // plus a PARTIAL (non-empty, non-full) clustering subset. The group count is
+        // bounded only by the row count (no per-prefix NDV is stored), so the gate
+        // must NOT fabricate partitionCount/rows — it returns empty → PUSH. (Before
+        // the fix this wrongly returned partitionCount/rows, a low ratio that could
+        // push a high-cardinality aggregation the gate exists to decline.)
+        String ddl = "CREATE TABLE ks.t (pk int, ck1 int, ck2 int, v int, "
+                + "PRIMARY KEY (pk, ck1, ck2))";
+        TableStats stats = new TableStats(2000, 10, 1);
+        OptionalDouble ratio = CqliteFlightMetadata.estimateGroupRatio(
+                ddl, List.of("pk", "ck1"), stats);
+        assertTrue(ratio.isEmpty(),
+                "full PK + partial clustering is unbounded → push, not a fabricated low ratio");
+    }
+
+    @Test
     void groupBySinglePartitionKeyTableIsRatioOne() {
         // PK = id, no clustering: GROUP BY id covers the full key AND all clustering
         // (empty) → full row uniqueness → ratio ≈ 1.0 → DECLINE.
@@ -96,6 +113,25 @@ class EstimateGroupRatioTest {
                 WIDE_DDL, List.of("PK"), WIDE_STATS);
         assertTrue(ratio.isPresent());
         assertEquals(10.0 / 2000.0, ratio.getAsDouble(), 1e-9);
+    }
+
+    @Test
+    void quotedKeyIsNotMatchedByDifferentlyCasedGrouping() {
+        // PRIMARY KEY ("Id") is a QUOTED, case-sensitive identifier stored as "Id".
+        // A GROUP BY on the lower-case unquoted column id is a DIFFERENT column and
+        // must NOT be treated as covering the partition key → unbounded → PUSH.
+        String ddl = "CREATE TABLE ks.t (\"Id\" int PRIMARY KEY, name text)";
+        TableStats stats = new TableStats(1000, 1000, 1);
+        OptionalDouble lowerCased = CqliteFlightMetadata.estimateGroupRatio(
+                ddl, List.of("id"), stats);
+        assertTrue(lowerCased.isEmpty(),
+                "quoted \"Id\" must not be covered by unquoted id (case-sensitive)");
+
+        // The exact-case grouping DOES cover it → single-column key → ratio 1.0.
+        OptionalDouble exact = CqliteFlightMetadata.estimateGroupRatio(
+                ddl, List.of("Id"), stats);
+        assertTrue(exact.isPresent());
+        assertEquals(1.0, exact.getAsDouble(), 1e-9);
     }
 
     @Test

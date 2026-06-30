@@ -474,16 +474,21 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
      *
      * <p><b>Derived mapping</b> (best-effort, from the grouping shape vs the DDL
      * primary key — NOT a true NDV gate; Cassandra 5.0 stores no reliable
-     * per-regular-column NDV, so we never trust per-column cardinality):
+     * per-regular-column or per-clustering-prefix NDV, so we never invent per-column
+     * cardinality). We only claim a bound in the two shapes the authoritative
+     * partition/row counts actually bound:
      * <ul>
      *   <li><b>GROUP BY reaches full row uniqueness</b> (partition key + ALL
      *       clustering columns ⊆ grouping) → groups ≈ rows → ratio ≈ 1.0 → DECLINE.</li>
-     *   <li><b>GROUP BY = the full partition key</b> (and no clustering, or a strict
-     *       subset of clustering) → groups ≈ partitionCount, bounded above by rows →
-     *       ratio = partitionCount / rows.</li>
-     *   <li><b>GROUP BY is a partition-key PREFIX / a non-key or low-cardinality
-     *       column</b> → cannot be bounded from these stats → empty → default PUSH
-     *       (safe).</li>
+     *   <li><b>GROUP BY = the full partition key AND the table has NO clustering
+     *       columns</b> → one group per partition → groups ≈ partitionCount, bounded
+     *       above by rows → ratio = partitionCount / rows.</li>
+     *   <li><b>Everything else is UNBOUNDED</b> → empty → default PUSH (safe). This
+     *       includes a full partition key plus a PARTIAL subset of clustering columns
+     *       (group count can approach row cardinality, e.g. GROUP BY pk, ck1 with
+     *       PRIMARY KEY (pk, ck1, ck2) — no per-prefix NDV exists to bound it, so we
+     *       must NOT fabricate partitionCount/rows), a partition-key PREFIX, and
+     *       grouping on a non-key or low-cardinality column.</li>
      * </ul>
      *
      * <p>Returns {@link java.util.OptionalDouble#empty()} when no row count is
@@ -504,44 +509,82 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
             return java.util.OptionalDouble.empty();
         }
 
-        // Case-insensitive grouping set (quoted identifiers keep their case in the
-        // extractor; unquoted are lower-cased on both sides).
-        Set<String> grouping = new java.util.HashSet<>();
-        for (String g : groupingColumns) {
-            grouping.add(foldName(g));
-        }
-        Set<String> partitionKey = fold(keys.partitionKey());
-        Set<String> clustering = fold(keys.clusteringColumns());
+        // Per-column CQL identifier matching: an UNQUOTED key column matches a
+        // grouping name case-insensitively (CQL folds unquoted identifiers); a QUOTED
+        // key column matches only its exact case (CQL preserves quoted identifiers).
+        // The flag rides on each KeyColumn from the extractor, so quoted "Id" is NOT
+        // conflated with unquoted id.
+        List<PrimaryKeyExtractor.KeyColumn> partitionKey = keys.partitionKey();
+        List<PrimaryKeyExtractor.KeyColumn> clustering = keys.clusteringColumns();
 
-        boolean coversPartitionKey = grouping.containsAll(partitionKey);
-        boolean coversAllClustering = grouping.containsAll(clustering);
+        boolean coversPartitionKey = coversAll(partitionKey, groupingColumns);
+        boolean coversAllClustering = coversAll(clustering, groupingColumns);
+        // Does the grouping touch ANY clustering column? (Used to distinguish the
+        // partition-only case from a partition-key + partial-clustering grouping.)
+        boolean groupsAnyClustering = touchesAny(clustering, groupingColumns);
 
         if (coversPartitionKey && coversAllClustering) {
-            // Grouping reaches full row uniqueness → one group per row → ratio ≈ 1.0.
+            // Grouping reaches full row uniqueness (partition key + ALL clustering
+            // columns) → one group per row → ratio ≈ 1.0 → DECLINE.
             return java.util.OptionalDouble.of(1.0);
         }
-        if (coversPartitionKey) {
-            // Grouping = full partition key (with at most a strict clustering subset):
-            // distinct groups ≈ partition count, never more than the row count.
+        if (coversPartitionKey && !groupsAnyClustering) {
+            // Grouping = full partition key with NO clustering columns: each group is
+            // exactly one distinct partition → groups ≈ partition count, never more
+            // than the row count. This is the ONLY shape bounded by the authoritative
+            // partition count (whether or not the table also HAS clustering columns,
+            // since the grouping does not slice partitions any finer).
             double ratio = (double) Math.min(partitions, rows) / (double) rows;
             return java.util.OptionalDouble.of(ratio);
         }
-        // Partition-key prefix, or grouping on a non-key / low-cardinality column:
-        // not boundable from partition/row counts alone → push (safe default).
+        // Everything else is UNBOUNDED from the authoritative stats → push (safe
+        // default). This includes:
+        //   - GROUP BY = full partition key + a PARTIAL (non-empty, non-full) subset
+        //     of clustering columns. Per-clustering-prefix NDV is NOT stored by
+        //     Cassandra 5.0; group count can approach the row count, so partitionCount
+        //     is NOT a valid bound — fabricating partitionCount/rows here would let the
+        //     gate push exactly the high-cardinality aggregation it exists to decline.
+        //   - A partition-key PREFIX, or grouping on a non-key / low-cardinality column.
         return java.util.OptionalDouble.empty();
     }
 
-    private static Set<String> fold(List<String> names) {
-        Set<String> out = new java.util.HashSet<>();
-        for (String n : names) {
-            out.add(foldName(n));
+    /**
+     * True iff EVERY key column is matched by some grouping name under CQL identifier
+     * rules (unquoted: case-insensitive; quoted: exact). An empty key list is trivially
+     * covered.
+     */
+    private static boolean coversAll(
+            List<PrimaryKeyExtractor.KeyColumn> keyColumns, List<String> groupingColumns) {
+        for (PrimaryKeyExtractor.KeyColumn key : keyColumns) {
+            boolean matched = false;
+            for (String g : groupingColumns) {
+                if (key.matches(g)) {
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) {
+                return false;
+            }
         }
-        return out;
+        return true;
     }
 
-    /** Match {@link PrimaryKeyExtractor}'s normalization: unquoted names lower-cased. */
-    private static String foldName(String name) {
-        return name == null ? null : name.toLowerCase(java.util.Locale.ROOT);
+    /**
+     * True iff AT LEAST ONE key column is matched by some grouping name (same CQL
+     * identifier rules as {@link #coversAll}). Used to detect whether a grouping
+     * slices partitions by any clustering column.
+     */
+    private static boolean touchesAny(
+            List<PrimaryKeyExtractor.KeyColumn> keyColumns, List<String> groupingColumns) {
+        for (PrimaryKeyExtractor.KeyColumn key : keyColumns) {
+            for (String g : groupingColumns) {
+                if (key.matches(g)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**
