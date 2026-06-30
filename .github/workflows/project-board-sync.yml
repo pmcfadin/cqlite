@@ -1,0 +1,221 @@
+name: Project Board Sync
+
+# Server-side board hygiene the built-in Project workflows can't express.
+# Covers the two gaps found in the delivery pipeline:
+#   1. A PR closed WITHOUT merge leaks in "In Review" forever (the built-in
+#      "Item closed" rule only acts on issues; "Pull request merged" only on
+#      merges). -> move any closed PR's card to Done.
+#   2. New issues can land with a NULL Status (race with Auto-add). -> sweep
+#      null-status OPEN issues into Backlog.
+#
+# Requires a repo secret PROJECTS_TOKEN: a PAT (or GitHub App token) with the
+# `project` scope. The default GITHUB_TOKEN CANNOT write user/org Projects v2.
+# If the secret is absent the workflow no-ops with a notice (never fails CI).
+#
+# IDs below are for the "CQLite Delivery" user Project #1 (owner: pmcfadin).
+# Re-confirm with:
+#   gh api graphql -f query='query{user(login:"pmcfadin"){projectV2(number:1){
+#     id field(name:"Status"){... on ProjectV2SingleSelectField{id options{id name}}}}}}'
+
+on:
+  # pull_request_target (not pull_request) so the closed-PR job can read the
+  # PROJECTS_TOKEN secret. This is SAFE here: the workflow performs NO
+  # actions/checkout of PR head code and executes NO PR-controlled code — it
+  # consumes only structured event metadata (pull_request.node_id/number/merged)
+  # and the GraphQL API. There is no untrusted-code execution surface.
+  pull_request_target:
+    types: [closed]
+  schedule:
+    # Hygiene sweep every 30 min (null-status -> Backlog; closed-PR safety net).
+    - cron: '*/30 * * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: project-board-sync
+  cancel-in-progress: false
+
+env:
+  GH_TOKEN: ${{ secrets.PROJECTS_TOKEN }}
+  PROJECT_ID: PVT_kwHOAAZP5c4Bb2Ay
+  STATUS_FIELD_ID: PVTSSF_lAHOAAZP5c4Bb2AyzhWjcFM
+  OPT_BACKLOG: 35ab797f
+  OPT_READY: c584340f
+  OPT_IN_PROGRESS: 821bf3e8
+  OPT_IN_REVIEW: 588b594a
+  OPT_DONE: 3723ed80
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Event path: a PR was just closed. If it is NOT merged (merges are handled
+  # by the built-in "Pull request merged" rule), move its board card to Done.
+  # ---------------------------------------------------------------------------
+  pr-closed-to-done:
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Guard token
+        id: guard
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::notice::PROJECTS_TOKEN not set — skipping board sync. Add a PAT with 'project' scope as repo secret PROJECTS_TOKEN."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Move closed PR card to Done
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          PR_NODE_ID: ${{ github.event.pull_request.node_id }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_MERGED: ${{ github.event.pull_request.merged }}
+        run: |
+          set -euo pipefail
+          # Find this PR's item in OUR project. Capture the raw GraphQL response
+          # FIRST so a gh/auth/GraphQL failure fails the step (set -e), instead
+          # of being swallowed by `|| true` and masquerading as "not on board".
+          resp=$(gh api graphql -f query='
+            query($id: ID!) {
+              node(id: $id) {
+                ... on PullRequest {
+                  projectItems(first: 50) {
+                    nodes {
+                      id
+                      project { id }
+                      fieldValueByName(name: "Status") {
+                        ... on ProjectV2ItemFieldSingleSelectValue { name }
+                      }
+                    }
+                  }
+                }
+              }
+            }' -f id="$PR_NODE_ID")
+
+          # Run jq against the captured response. A jq PARSE failure fails the
+          # step; only an EMPTY result is the benign no-match (PR legitimately
+          # not on the board, or already Done) -> exit 0 below.
+          item_id=$(echo "$resp" | jq -r \
+            ".data.node.projectItems.nodes[] | select(.project.id==\"$PROJECT_ID\") | select((.fieldValueByName.name // \"\") != \"Done\") | .id")
+
+          if [ -z "${item_id:-}" ]; then
+            echo "PR #$PR_NUMBER: not on the board or already Done — nothing to do."
+            exit 0
+          fi
+
+          echo "PR #$PR_NUMBER closed (merged=$PR_MERGED) — setting card $item_id -> Done."
+          gh api graphql -f query='
+            mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
+              updateProjectV2ItemFieldValue(input: {
+                projectId: $p, itemId: $i, fieldId: $f,
+                value: { singleSelectOptionId: $o }
+              }) { projectV2Item { id } }
+            }' -f p="$PROJECT_ID" -f i="$item_id" -f f="$STATUS_FIELD_ID" -f o="$OPT_DONE"
+
+  # ---------------------------------------------------------------------------
+  # Scheduled path: idempotent sweep over the whole board.
+  #   * OPEN issue with NULL Status        -> Backlog
+  #   * CLOSED PR with Status != Done      -> Done   (safety net for the leak)
+  # Never touches Ready / In Progress / In Review items, and never reaps claims.
+  # ---------------------------------------------------------------------------
+  sweep:
+    if: github.event_name != 'pull_request_target'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Guard token
+        id: guard
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::notice::PROJECTS_TOKEN not set — skipping board sweep. Add a PAT with 'project' scope as repo secret PROJECTS_TOKEN."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Reconcile board
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+
+          set_status() { # item_id  option_id
+            gh api graphql -f query='
+              mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
+                updateProjectV2ItemFieldValue(input: {
+                  projectId: $p, itemId: $i, fieldId: $f,
+                  value: { singleSelectOptionId: $o }
+                }) { projectV2Item { id } }
+              }' -f p="$PROJECT_ID" -f i="$1" -f f="$STATUS_FIELD_ID" -f o="$2" >/dev/null
+          }
+
+          cursor=""
+          backlogged=0
+          doned=0
+          while : ; do
+            if [ -z "$cursor" ]; then after="null"; else after="\"$cursor\""; fi
+            resp=$(gh api graphql -f query="
+              query(\$p: ID!) {
+                node(id: \$p) {
+                  ... on ProjectV2 {
+                    items(first: 100, after: $after) {
+                      pageInfo { hasNextPage endCursor }
+                      nodes {
+                        id
+                        fieldValueByName(name: \"Status\") {
+                          ... on ProjectV2ItemFieldSingleSelectValue { name }
+                        }
+                        content {
+                          __typename
+                          ... on Issue { number state }
+                          ... on PullRequest { number state }
+                        }
+                      }
+                    }
+                  }
+                }
+              }" -f p="$PROJECT_ID")
+
+            # Validate the response SHAPE before extracting IDs. With process
+            # substitution (`< <(... | jq ...)`) a malformed/stale-PROJECT_ID
+            # response prints a jq error to stderr but the read loop still
+            # completes with zero rows and the step reports "0" — masking the
+            # failure. `jq -e` here asserts the expected nodes array exists and
+            # FAILS the step (set -e) on a bad shape. A genuine empty board
+            # (`.items.nodes == []`) still satisfies `arrays` and is non-fatal.
+            echo "$resp" | jq -e '.data.node.items.nodes | arrays' >/dev/null
+
+            # Capture the two ID lists via checked command substitutions BEFORE
+            # iterating, so any extraction failure aborts the step rather than
+            # being swallowed inside a process substitution. An empty list is the
+            # benign no-work case and leaves the while loop a no-op.
+            null_issue_ids=$(echo "$resp" | jq -r '
+              .data.node.items.nodes[]
+              | select(.content.__typename=="Issue")
+              | select(.content.state=="OPEN")
+              | select((.fieldValueByName.name // "") == "")
+              | .id')
+
+            closed_pr_ids=$(echo "$resp" | jq -r '
+              .data.node.items.nodes[]
+              | select(.content.__typename=="PullRequest")
+              | select(.content.state=="CLOSED" or .content.state=="MERGED")
+              | select((.fieldValueByName.name // "") != "Done")
+              | .id')
+
+            # OPEN issues with null status -> Backlog
+            while read -r id; do
+              [ -n "$id" ] || continue
+              set_status "$id" "$OPT_BACKLOG"
+              backlogged=$((backlogged+1))
+            done <<< "$null_issue_ids"
+
+            # CLOSED PRs not yet Done -> Done (safety net)
+            while read -r id; do
+              [ -n "$id" ] || continue
+              set_status "$id" "$OPT_DONE"
+              doned=$((doned+1))
+            done <<< "$closed_pr_ids"
+
+            has_next=$(echo "$resp" | jq -r '.data.node.items.pageInfo.hasNextPage')
+            cursor=$(echo "$resp" | jq -r '.data.node.items.pageInfo.endCursor')
+            [ "$has_next" = "true" ] || break
+          done
+
+          echo "Sweep complete: $backlogged issue(s) -> Backlog, $doned closed PR card(s) -> Done."
