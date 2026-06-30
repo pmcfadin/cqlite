@@ -114,6 +114,10 @@ const EXCL_END_BOUND: u8 = 0;
 const INCL_START_BOUND: u8 = 1;
 const INCL_END_BOUND: u8 = 6;
 const EXCL_START_BOUND: u8 = 7;
+// The CLUSTERING ordinal (a regular row's clustering name). Used by
+// `partition::sort_class` as the row's Kind tiebreak so co-located bounds order
+// against rows exactly as Cassandra's comparator does (issue #1220).
+const CLUSTERING: u8 = 4;
 
 // Range tombstone BOUNDARY kinds (issue #1220). A boundary closes one range and
 // opens the next at the SAME clustering point, carrying TWO deletion-time pairs

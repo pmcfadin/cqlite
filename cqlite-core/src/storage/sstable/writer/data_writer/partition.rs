@@ -37,34 +37,77 @@ enum PartitionItem<'a> {
     },
 }
 
+/// The Cassandra `ClusteringPrefix.Kind` ordinal for a range-tombstone BOUND.
+/// Used purely as a sort tiebreak (see [`sort_class`]); the canonical ordering is
+/// the one decoded on the read path (`v5_compressed_legacy/block_emit.rs`) and the
+/// constants in `data_writer/mod.rs`:
+///   0 EXCL_END_BOUND · 1 INCL_START_BOUND · 6 INCL_END_BOUND · 7 EXCL_START_BOUND.
+fn bound_kind_ordinal(bound: &ClusteringBound, is_open: bool) -> u8 {
+    match (is_open, bound) {
+        (true, ClusteringBound::Inclusive(_)) => INCL_START_BOUND, // 1
+        (false, ClusteringBound::Exclusive(_)) => EXCL_END_BOUND,  // 0
+        (false, ClusteringBound::Inclusive(_)) => INCL_END_BOUND,  // 6
+        (true, ClusteringBound::Exclusive(_)) => EXCL_START_BOUND, // 7
+        // Open-ended bounds are positioned by `class` (Bottom/Top), never reach a
+        // value-level tiebreak; report their side's kind for completeness.
+        (true, ClusteringBound::Bottom | ClusteringBound::Top) => INCL_START_BOUND,
+        (false, ClusteringBound::Bottom | ClusteringBound::Top) => INCL_END_BOUND,
+    }
+}
+
 /// Sort key for clustering-ordered emission: `(position class, clustering values,
-/// bound weight)`. class: -1 = before all rows (Bottom), 0 = positioned by
-/// clustering values, 1 = after all rows (Top). The weight orders a marker
-/// relative to a row at the SAME clustering value
+/// bound weight, kind ordinal)`. class: -1 = before all rows (Bottom), 0 =
+/// positioned by clustering values, 1 = after all rows (Top). The weight orders a
+/// marker relative to a row at the SAME clustering value
 /// (`ClusteringPrefix.Kind.comparedToClustering`): an inclusive-start /
 /// exclusive-end bound sorts before the row, an inclusive-end / exclusive-start
-/// bound after it. Boundaries are produced only AFTER this sort (by
+/// bound after it.
+///
+/// The final element is the Cassandra `ClusteringPrefix.Kind` ordinal, used as a
+/// strict tiebreak so that — at an equal clustering point and equal weight — the
+/// CLOSING bound of one range always sorts immediately before the matching OPENING
+/// bound of the next, regardless of the order the `range_tombstones` arrived in
+/// (issue #1220, roborev finding 2). This mirrors Cassandra's comparator, whose
+/// distinct Kind ordinals disambiguate co-located bounds: EXCL_END(0) < INCL_START(1)
+/// for a kind-2 boundary and INCL_END(6) < EXCL_START(7) for a kind-5 boundary —
+/// close before open in both cases. Without it, two co-located bounds carry the same
+/// `weight` and a stable sort would leave them in input order, so a reversed input
+/// vector would emit an open-before-close pair that [`coalesce_boundaries`] cannot
+/// merge (parity loss + a non-Cassandra marker order).
+///
+/// Rows take the CLUSTERING ordinal (4); since a row's `weight` (0) already differs
+/// from every bound's weight (-1/+1) at the same clustering, the ordinal only ever
+/// breaks ties between two bounds. Boundaries are produced only AFTER this sort (by
 /// [`coalesce_boundaries`]), so the `Boundary` arm is never exercised during
 /// sorting; it is provided for exhaustiveness and positions the boundary at its
 /// clustering value.
-fn sort_class<'a, 'b>(item: &'b PartitionItem<'a>) -> (i8, Option<&'b ClusteringKey>, i8) {
+fn sort_class<'a, 'b>(item: &'b PartitionItem<'a>) -> (i8, Option<&'b ClusteringKey>, i8, u8) {
     match item {
-        PartitionItem::Row(row) => (0, row.clustering_key, 0),
-        PartitionItem::Marker { bound, is_open, .. } => match bound {
-            ClusteringBound::Inclusive(ck) => (0, Some(ck), if *is_open { -1 } else { 1 }),
-            ClusteringBound::Exclusive(ck) => (0, Some(ck), if *is_open { 1 } else { -1 }),
-            ClusteringBound::Bottom => (-1, None, 0),
-            ClusteringBound::Top => (1, None, 0),
-        },
-        PartitionItem::Boundary { clustering, .. } => (0, Some(clustering), 0),
+        PartitionItem::Row(row) => (0, row.clustering_key, 0, CLUSTERING),
+        PartitionItem::Marker { bound, is_open, .. } => {
+            let kind = bound_kind_ordinal(bound, *is_open);
+            match bound {
+                ClusteringBound::Inclusive(ck) => {
+                    (0, Some(ck), if *is_open { -1 } else { 1 }, kind)
+                }
+                ClusteringBound::Exclusive(ck) => {
+                    (0, Some(ck), if *is_open { 1 } else { -1 }, kind)
+                }
+                ClusteringBound::Bottom => (-1, None, 0, kind),
+                ClusteringBound::Top => (1, None, 0, kind),
+            }
+        }
+        PartitionItem::Boundary {
+            kind, clustering, ..
+        } => (0, Some(clustering), 0, *kind),
     }
 }
 
 /// Sort `items` into clustering order (rows + bound markers), schema-aware.
 fn sort_partition_items(items: &mut [PartitionItem], schema: &TableSchema) {
     items.sort_by(|a, b| {
-        let (class_a, ck_a, weight_a) = sort_class(a);
-        let (class_b, ck_b, weight_b) = sort_class(b);
+        let (class_a, ck_a, weight_a, kind_a) = sort_class(a);
+        let (class_b, ck_b, weight_b, kind_b) = sort_class(b);
         class_a
             .cmp(&class_b)
             .then_with(|| match (ck_a, ck_b) {
@@ -72,6 +115,7 @@ fn sort_partition_items(items: &mut [PartitionItem], schema: &TableSchema) {
                 _ => std::cmp::Ordering::Equal,
             })
             .then(weight_a.cmp(&weight_b))
+            .then(kind_a.cmp(&kind_b))
     });
 }
 
