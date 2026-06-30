@@ -2077,9 +2077,24 @@ scenarios:
         non-mixing; byte parity of the BTI Partitions.db/Rows.db trie payloads is a
         separate scenario.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
-    scope: {}
+      tier: manual_debug
+    scope:
+      target_issue: 1205
+      gap: >-
+        The wired lane bti_index_component_discovery skips UNCONDITIONALLY in CI
+        (even under CQLITE_PARITY_REQUIRE_DATASETS=1): the test_da/* BTI (da)
+        binaries — Data.db / Partitions.db / Rows.db — are LOCAL-ONLY and are NOT
+        shipped in the pinned CI dataset (cassandra5-small-full-v3.2.tar.gz), so
+        the BTI-discovery assertion never runs on the required gate and the
+        scenario would green-pass on a pure skip. Demoted from required_parity
+        (issue #1242 finding 1 / final audit) to stop overclaiming a parity check
+        that does not execute in CI.
+      next_step: >-
+        Re-promote to required_parity only after the BTI (da) Partitions.db/Rows.db
+        binaries are added to the pinned CI dataset tarball AND the
+        bti_index_component_discovery lane is made fail-closed under
+        CQLITE_PARITY_REQUIRE_DATASETS=1 (mirroring the test_deltas #1205 fix), so
+        the discovery assertion actually executes on the gate (fixture work).
 
   # ---- Strict Summary.db byte parity (epic #968 / issue #984) ----------------
   - id: cass.summary_db.IndexSummaryTest.serialization_round_trip
@@ -5139,9 +5154,24 @@ scenarios:
         Logical / canonical-semantic equivalence only; byte-for-byte compaction
         output parity is debug-only and non-gated (north-star issue #842).
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
-    scope: {}
+      tier: manual_debug
+    scope:
+      target_issue: 819
+      gap: >-
+        The CI-wired tests (issue_819_differential_compaction /
+        issue_933_range_tombstone_compaction) only run CQLite SELF-CONSISTENCY
+        (gen1-vs-gen2, one-shot-vs-hand-driven merge, resurrection safety) by
+        default. The Cassandra-reference comparison
+        (differential_vs_live_cassandra_env_gated) is env-gated behind
+        CQLITE_DIFFERENTIAL_CASSANDRA=1 and is NOT set by
+        sstabledump-parity-gate.yml, so no committed Cassandra-compacted
+        reference is actually diffed in CI. Demoted from required_parity (issue
+        #1242 roborev finding 1) to stop overclaiming Cassandra parity.
+      next_step: >-
+        Re-promote to required_parity only after a follow-up sets
+        CQLITE_DIFFERENTIAL_CASSANDRA=1 in the gating workflow AND commits a
+        CI-pinned Cassandra-5.0.2-compacted reference SSTable the harness diffs
+        against (fixture work, out of scope for #1242).
 
   - id: cass.compaction_merge.load_path_validity
     title: Compaction output load-path validity (Tier-1)
@@ -12562,9 +12592,21 @@ scenarios:
         Logical / canonical-semantic equivalence; byte-for-byte compaction output
         parity is the separate non-gated byte tier (north-star issue #842).
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
-    scope: {}
+      tier: manual_debug
+    scope:
+      target_issue: 819
+      gap: >-
+        The CI-wired issue_819_differential_compaction / issue_992 tests run
+        CQLite SELF-CONSISTENCY merge round-trips only; the Cassandra-reference
+        diff (differential_vs_live_cassandra_env_gated) is env-gated behind
+        CQLITE_DIFFERENTIAL_CASSANDRA=1, which sstabledump-parity-gate.yml does
+        NOT set, so no committed Cassandra-compacted reference is diffed in CI.
+        Demoted from required_parity (issue #1242 roborev finding 1).
+      next_step: >-
+        Re-promote to required_parity only after a follow-up sets
+        CQLITE_DIFFERENTIAL_CASSANDRA=1 in the gating workflow AND commits a
+        CI-pinned Cassandra-5.0.2-compacted reference SSTable the harness diffs
+        against (fixture work, out of scope for #1242).
 
   - id: cass.compaction_merge.issue_819.differential_row_tombstone_wide_partition_regression
     title: Differential compaction — row tombstone in a wide partition round-trips
@@ -12614,9 +12656,22 @@ scenarios:
         Logical equivalence only; byte-for-byte compaction output parity is the
         separate non-gated byte tier (north-star issue #842).
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
-    scope: {}
+      tier: manual_debug
+    scope:
+      target_issue: 819
+      gap: >-
+        The CI-wired issue_819_differential_compaction test runs CQLite
+        SELF-CONSISTENCY (gen1 read-back vs merge-from-inputs) only; the
+        Cassandra-reference diff (differential_vs_live_cassandra_env_gated) is
+        env-gated behind CQLITE_DIFFERENTIAL_CASSANDRA=1, which
+        sstabledump-parity-gate.yml does NOT set, so the row-tombstone
+        wide-partition regression is not diffed against a committed Cassandra
+        reference in CI. Demoted from required_parity (issue #1242 finding 1).
+      next_step: >-
+        Re-promote to required_parity only after a follow-up sets
+        CQLITE_DIFFERENTIAL_CASSANDRA=1 in the gating workflow AND commits a
+        CI-pinned Cassandra-5.0.2-compacted reference SSTable the harness diffs
+        against (fixture work, out of scope for #1242).
 
   - id: cass.compaction_merge.issue_819.differential_input_merge_write_fidelity
     title: Differential compaction — per-cell write timestamps preserved (write fidelity)
@@ -12669,9 +12724,22 @@ scenarios:
         Logical equivalence of per-cell writetimes; byte-for-byte compaction
         output parity is the separate non-gated byte tier (north-star #842).
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
-    scope: {}
+      tier: manual_debug
+    scope:
+      target_issue: 819
+      gap: >-
+        The CI-wired issue_819_differential_compaction test runs CQLite
+        SELF-CONSISTENCY (gen1 read-back vs merge-from-inputs) only; the
+        Cassandra-reference diff (differential_vs_live_cassandra_env_gated) is
+        env-gated behind CQLITE_DIFFERENTIAL_CASSANDRA=1, which
+        sstabledump-parity-gate.yml does NOT set, so per-cell write-timestamp
+        fidelity is not diffed against a committed Cassandra reference in CI.
+        Demoted from required_parity (issue #1242 finding 1).
+      next_step: >-
+        Re-promote to required_parity only after a follow-up sets
+        CQLITE_DIFFERENTIAL_CASSANDRA=1 in the gating workflow AND commits a
+        CI-pinned Cassandra-5.0.2-compacted reference SSTable the harness diffs
+        against (fixture work, out of scope for #1242).
 
   # ----------------------------------------------------------------------------
   # Repair-metadata parse / preserve / classify through compaction (issue #1021,

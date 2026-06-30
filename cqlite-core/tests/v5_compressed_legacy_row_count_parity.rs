@@ -118,17 +118,30 @@ async fn test_v5_multi_partition_parity_simple_table() {
         }
     };
 
-    if expected_rows == 0 || entries.is_empty() {
+    // A MISSING or genuinely EMPTY golden is an absence signal: skip locally,
+    // fail-closed under CQLITE_PARITY_REQUIRE_DATASETS=1. But a PRESENT golden
+    // with `expected_rows > 0` while the parser returned zero entries is a real
+    // parser regression (issue #196 / #1242 finding) — NEVER skippable, assert
+    // failure UNCONDITIONALLY regardless of the fail-closed flag.
+    if expected_rows == 0 {
         skip_or_fail_closed(
             test_name,
             &format!(
-                "0 rows (entries={}, golden={}) — Data.db/golden absent?",
-                entries.len(),
-                expected_rows
+                "golden {:?} is empty (0 rows) — Data.db/golden absent?",
+                jsonl_path
             ),
         );
         return;
     }
+
+    assert!(
+        !entries.is_empty(),
+        "Parser returned 0 entries but golden {:?} has {} rows — V5 parser regression \
+         (issue #196): a present, non-empty golden with zero parsed rows is a real defect, \
+         not a skip (issue #1242)",
+        jsonl_path,
+        expected_rows
+    );
 
     assert_eq!(
         entries.len(),
@@ -190,17 +203,27 @@ async fn test_v5_multi_partition_parity_collection_table() {
         }
     };
 
-    if expected_rows == 0 || entries.is_empty() {
+    // MISSING / EMPTY golden = absence (skip or fail-closed); a PRESENT non-empty
+    // golden with zero parsed entries is a real parser regression (issue #1242).
+    if expected_rows == 0 {
         skip_or_fail_closed(
             test_name,
             &format!(
-                "0 rows (entries={}, golden={}) — Data.db/golden absent?",
-                entries.len(),
-                expected_rows
+                "golden {:?} is empty (0 rows) — Data.db/golden absent?",
+                jsonl_path
             ),
         );
         return;
     }
+
+    assert!(
+        !entries.is_empty(),
+        "Parser returned 0 entries but golden {:?} has {} rows — V5 parser regression \
+         (issue #196): a present, non-empty golden with zero parsed rows is a real defect, \
+         not a skip (issue #1242)",
+        jsonl_path,
+        expected_rows
+    );
 
     assert_eq!(
         entries.len(),

@@ -307,7 +307,17 @@ jobs:
             --test issue_993_wide_partition_promoted_index_parity \
             -- --nocapture
 
-      - name: Run differential-compaction parity tests (issues #819 / #933 / #992)
+      - name: Run differential-compaction SELF-CONSISTENCY tests (issues #819 / #933)
+        # SCOPE (issue #1242 finding 1): these tests run CQLite's OWN compaction
+        # merge round-trips (gen1-vs-gen2, one-shot-vs-hand-driven, resurrection
+        # safety) by default. The Cassandra-reference comparison
+        # (differential_vs_live_cassandra_env_gated) is env-gated behind
+        # CQLITE_DIFFERENTIAL_CASSANDRA=1, which this workflow does NOT set, so this
+        # step proves SELF-CONSISTENCY only — it does NOT prove Cassandra parity. The
+        # related cass.compaction_merge.* manifest scenarios were demoted from
+        # required_parity to manual_debug (no required scenario maps to this step;
+        # the #1228 workflow-check lint therefore does not depend on it). It still
+        # runs as a regression guard against self-consistency defects.
         id: differential_compaction_parity
         continue-on-error: true
         run: |
