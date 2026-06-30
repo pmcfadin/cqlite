@@ -730,9 +730,23 @@ impl SSTableManager {
             return Ok(None);
         };
 
+        // Did resolution match the FULLY-QUALIFIED `keyspace.table` key exactly, or
+        // fall back to the bare table name? An unqualified query is treated as an
+        // exact match (no keyspace to mismatch). This authoritative signal gates the
+        // get() point-lookup table-consistency guard exactly like the seek path
+        // (#1284): only an exact FQ match may relax to a name-only check across a
+        // header-keyspace divergence; a fully-qualified query resolved via the
+        // bare-name fallback keeps strict keyspace matching so get() never returns
+        // another keyspace's same-named rows (issue #1321).
+        let fully_qualified_match =
+            !table_name.contains('.') || table_readers.contains_key(table_name);
+
         // Return the first value found across all SSTables for this table
         for reader in reader_list {
-            if let Some(value) = reader.get(table_id, key).await? {
+            if let Some(value) = reader
+                .get_with_resolution(table_id, key, fully_qualified_match)
+                .await?
+            {
                 return Ok(Some(value));
             }
         }

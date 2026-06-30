@@ -8,8 +8,8 @@
 
 use super::super::SSTableReader;
 use super::model::{
-    bti_lookup_step, sort_by_token_order_with_meta, table_ids_match_strict, BtiLookupStep,
-    SCAN_FOR_KEY_CALLS,
+    bti_lookup_step, sort_by_token_order_with_meta, table_header_consistent_for_seek,
+    BtiLookupStep, SCAN_FOR_KEY_CALLS,
 };
 use crate::types::{CellWriteMetadata, TableId, Value};
 use crate::{Error, Result, RowKey};
@@ -20,10 +20,7 @@ use tokio::io::AsyncSeekExt;
 #[cfg(not(feature = "tombstones"))]
 use super::super::source::ScanCursor;
 #[cfg(not(feature = "tombstones"))]
-use super::model::{
-    physical_byte_bounds_for_slice, table_header_consistent_for_seek, ClusteringRowWindow,
-    ClusteringSlice,
-};
+use super::model::{physical_byte_bounds_for_slice, ClusteringRowWindow, ClusteringSlice};
 
 impl SSTableReader {
     /// Current value of the test-only `scan_for_key` invocation counter.
@@ -459,10 +456,20 @@ impl SSTableReader {
     /// - **Prefix-collision guard**: the trie may return a candidate for a
     ///   prefix-colliding key, so the decoded partition key is verified to equal
     ///   the queried key before any row is returned.
+    ///
+    /// `fully_qualified_match` is the authoritative resolution-mode signal threaded
+    /// from the manager's `resolve_reader_list` (issue #1321, mirroring #1284's
+    /// seek path): `true` iff the query's fully-qualified `keyspace.table` key
+    /// matched this reader's map slot EXACTLY (or the query was unqualified),
+    /// `false` iff a fully-qualified query reached this reader via the bare-name
+    /// fallback. It gates the per-row table-consistency guard in
+    /// `bti_decompress_and_parse_target`: an exact FQ match may relax across a
+    /// header-keyspace divergence, while a fallback keeps strict keyspace matching.
     pub(super) async fn bti_point_lookup(
         &self,
         table_id: &TableId,
         key: &RowKey,
+        fully_qualified_match: bool,
     ) -> Result<Option<Value>> {
         // 1. Resolve the uncompressed Data.db offset via the trie.
         let offset = match self.lookup_partition_via_bti_trie(key.as_bytes())? {
@@ -486,7 +493,14 @@ impl SSTableReader {
         let parser = self.build_v5_parser();
 
         let found = self
-            .bti_decompress_and_parse_target(offset, key, table_id, schema_opt.as_ref(), &parser)
+            .bti_decompress_and_parse_target(
+                offset,
+                key,
+                table_id,
+                fully_qualified_match,
+                schema_opt.as_ref(),
+                &parser,
+            )
             .await?;
 
         match found {
@@ -546,6 +560,13 @@ impl SSTableReader {
         offset: usize,
         key: &RowKey,
         table_id: &TableId,
+        // Issue #1321: authoritative resolution mode (see `bti_point_lookup`).
+        // Gates the per-row table-consistency guard exactly like the seek path
+        // (#1284): an EXACT fully-qualified resolution may accept rows across a
+        // benign header-keyspace divergence on a consistent table name, while a
+        // fully-qualified query resolved via the bare-name fallback keeps STRICT
+        // keyspace matching (no wrong-keyspace rows).
+        fully_qualified_match: bool,
         schema_opt: Option<&crate::schema::TableSchema>,
         parser: &crate::storage::sstable::reader::parsing::V5CompressedLegacyParser,
     ) -> Result<Option<Value>> {
@@ -697,10 +718,16 @@ impl SSTableReader {
                 self,
                 |(tid, entry_key, entry_value)| {
                     emitted = true;
-                    // Verify BOTH the emitted table id matches the queried table
-                    // (a wrong-table query never returns a row, issue #831 review)
-                    // AND the parser-decoded partition key equals the queried key.
-                    if table_ids_match_strict(&tid, table_id)
+                    // Verify BOTH the emitted table id is consistent with the
+                    // queried table AND the parser-decoded partition key equals the
+                    // queried key. The table check is resolution-mode-aware (issue
+                    // #1321, mirroring the seek path #1284): an EXACT fully-qualified
+                    // resolution accepts a consistent table name across a benign
+                    // header-keyspace divergence; a fully-qualified query resolved via
+                    // the bare-name fallback keeps STRICT keyspace matching so it can
+                    // never return another keyspace's same-named rows. A genuinely
+                    // different table name is always rejected (issue #831).
+                    if table_header_consistent_for_seek(&tid, table_id, fully_qualified_match)
                         && entry_key.as_bytes() == key.as_bytes()
                     {
                         found = Some(entry_value);
