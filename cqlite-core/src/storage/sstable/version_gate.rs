@@ -770,8 +770,10 @@ mod tests {
     #[test]
     fn test_big_below_na_rejected_with_typed_error() {
         for v in &["ma", "mb", "mc", "md", "me"] {
-            let err = BigVersionGates::from_version(v)
-                .expect_err(&format!("{} is below the na floor and must be rejected", v));
+            let err = match BigVersionGates::from_version(v) {
+                Ok(_) => panic!("{} is below the na floor and must be rejected", v),
+                Err(e) => e,
+            };
             match err {
                 Error::UnsupportedVersion { version, floor } => {
                     assert_eq!(version, *v, "error must name the offending version");
@@ -914,8 +916,10 @@ mod tests {
     #[test]
     fn test_bti_rejects_non_da() {
         for v in &["nb", "oa", "na", "ca"] {
-            let err = BtiVersionGates::from_version(v)
-                .expect_err(&format!("{} is not da and must be rejected", v));
+            let err = match BtiVersionGates::from_version(v) {
+                Ok(_) => panic!("{} is not da and must be rejected", v),
+                Err(e) => e,
+            };
             match err {
                 Error::UnsupportedVersion { version, floor } => {
                     assert_eq!(version, *v, "error must name the offending version");

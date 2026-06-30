@@ -67,7 +67,24 @@ impl StatisticsReader {
         // (oa/da) `u32::MAX` no-deletion sentinel and the 12-byte modern histogram
         // bin width differ from the legacy (nb) signed-i32 / 16-byte forms. When the
         // filename does not parse, fall back to None (nb-compatible defaults).
-        let gates = crate::storage::sstable::version_gate::VersionGates::from_path(path).ok();
+        //
+        // #1249: a parsed-but-below-floor version is FATAL — propagate
+        // `Error::UnsupportedVersion` instead of silently degrading to nb-compatible
+        // defaults (mirrors `SSTableReader::open` in reader/mod.rs). Only a genuinely
+        // unparseable / structurally-malformed descriptor falls back to None.
+        let gates = match crate::storage::sstable::version_gate::VersionGates::from_path(path) {
+            Ok(gates) => Some(gates),
+            Err(e @ Error::UnsupportedVersion { .. }) => return Err(e),
+            Err(e) => {
+                log::debug!(
+                    "StatisticsReader::open: could not derive VersionGates from {:?} ({}); \
+                     defaulting to nb-compatible behaviour",
+                    path,
+                    e
+                );
+                None
+            }
+        };
         let statistics = match parse_statistics_with_fallback(&buffer, gates.as_ref()) {
             Ok((_, stats)) => stats,
             Err(e) => {
@@ -469,6 +486,46 @@ mod tests {
                     assert_eq!(stats_name, "users-123abc-Statistics.db");
                 }
             }
+        }
+    }
+
+    /// #1249 (roborev finding 1): a below-floor `*-Statistics.db` descriptor
+    /// MUST make `StatisticsReader::open` fail with a typed
+    /// `Error::UnsupportedVersion` rather than silently degrading to
+    /// nb-compatible defaults and proceeding to parse. Drives the public
+    /// `StatisticsReader::open` surface against a real on-disk file whose
+    /// version (`ma`, a pre-`na` BIG version) is below the floor.
+    #[tokio::test]
+    async fn test_open_below_floor_statistics_rejected() {
+        use crate::error::Error;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("create tempdir");
+        // `ma` is a pre-`na` BIG version, below the version floor (#1249).
+        let path = dir.path().join("ma-1-big-Statistics.db");
+        // The file must exist: the existence check precedes gate derivation, so
+        // we are exercising the gate-floor branch and not the not-found branch.
+        std::fs::write(&path, b"not really a valid statistics file").expect("write fixture");
+
+        let config = crate::Config::default();
+        let platform = Arc::new(
+            crate::Platform::new(&config)
+                .await
+                .expect("create platform"),
+        );
+
+        let result = super::StatisticsReader::open(&path, platform).await;
+
+        match result {
+            Err(Error::UnsupportedVersion { version, floor }) => {
+                assert_eq!(version, "ma", "error must name the offending version");
+                assert_eq!(floor, "na", "error must name the na BIG floor");
+            }
+            Err(other) => panic!(
+                "expected UnsupportedVersion for below-floor Statistics.db, got {:?}",
+                other
+            ),
+            Ok(_) => panic!("below-floor Statistics.db must NOT open on nb-compatible defaults"),
         }
     }
 }
