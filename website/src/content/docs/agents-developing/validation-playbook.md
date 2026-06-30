@@ -3,7 +3,7 @@ title: sstabledump Validation Playbook
 description: JSONL golden files, parity tests, and smoke-test-all-tables — how CQLite validates parsing correctness against Cassandra's reference output.
 sidebar:
   label: Validation playbook
-  order: 5
+  order: 6
 ---
 
 CQLite validates parsing correctness by comparing output against `sstabledump` — the

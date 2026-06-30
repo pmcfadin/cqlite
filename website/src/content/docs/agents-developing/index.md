@@ -17,6 +17,7 @@ Write for AI agents: terse, imperative, copy-pasteable commands. Skip the prose.
 |------|----------------|
 | [Gate contract](/cqlite/agents-developing/gate-contract/) | `scripts/agent-gate.sh` — the only run that counts; summary-block format |
 | [No-heuristics mandate](/cqlite/agents-developing/no-heuristics/) | Authoritative metadata only; legacy fallbacks behind flags (issue #28) |
+| [Supported formats](/cqlite/agents-developing/supported-formats/) | Cassandra 5.0 version floor — `na`/`nb` BIG + `oa`/`da` BTI in scope; pre-`na` out of scope, do not review (issue #1249) |
 | [Test data](/cqlite/agents-developing/test-data/) | Fetching datasets, dataset pins, CQLITE_DATASETS_ROOT, missing-data behaviour |
 | [Key source paths](/cqlite/agents-developing/source-map/) | Where parsers, writers, query engine, and bindings live |
 | [sstabledump validation playbook](/cqlite/agents-developing/validation-playbook/) | JSONL golden files, parity tests, smoke-test-all-tables |
@@ -29,9 +30,10 @@ Write for AI agents: terse, imperative, copy-pasteable commands. Skip the prose.
 
 1. Run `scripts/agent-gate.sh` before opening any PR. Paste its summary block verbatim. Ad-hoc `cargo test` runs do not count.
 2. Use authoritative metadata only — no type guessing, no heuristics (see [no-heuristics mandate](/cqlite/agents-developing/no-heuristics/)).
-3. Integration tests use real SSTable data. Fetch it before running: `bash test-data/scripts/fetch-datasets.sh`.
-4. `RUSTFLAGS="-D warnings"` must pass — zero clippy warnings allowed.
-5. A feature is done only when its **public surface** exercises it. Name the surface, the
+3. CQLite targets Cassandra 5.0 — `na`/`nb` BIG + `oa`/`da` BTI are in scope; pre-`na` (`ma`–`me`) is out of scope. Do not introduce, support, or review pre-`na` correctness (see [Supported formats](/cqlite/agents-developing/supported-formats/)).
+4. Integration tests use real SSTable data. Fetch it before running: `bash test-data/scripts/fetch-datasets.sh`.
+5. `RUSTFLAGS="-D warnings"` must pass — zero clippy warnings allowed.
+6. A feature is done only when its **public surface** exercises it. Name the surface, the
    call chain, and add an end-to-end test from that surface — green helper unit tests are
    not sufficient (see [Wiring evidence](/cqlite/agents-developing/wiring-evidence/)).
 

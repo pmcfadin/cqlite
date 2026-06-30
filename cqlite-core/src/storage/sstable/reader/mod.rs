@@ -401,6 +401,11 @@ impl SSTableReader {
         // decisions until VG3 actually flips behaviour.
         let version_gates = Arc::new(match VersionGates::from_path(path) {
             Ok(gates) => gates,
+            // #1249: a parsed-but-below-floor version is FATAL — never degrade a
+            // pre-`na` (BIG) or non-`da` (BTI) SSTable to the nb fallback. Only a
+            // genuinely unparseable / structurally-malformed descriptor may fall
+            // back so existing tolerance for odd-but-5.0 filenames is preserved.
+            Err(e @ Error::UnsupportedVersion { .. }) => return Err(e),
             Err(e) => {
                 log::debug!(
                     "SSTableReader::open: could not derive VersionGates from {:?} ({}); \

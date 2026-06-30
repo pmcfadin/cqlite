@@ -296,7 +296,9 @@ impl BigVersionGates {
     ///
     /// # Errors
     ///
-    /// Returns `Err` if `version` is not exactly two ASCII lowercase letters.
+    /// Returns `Err(Error::InvalidFormat)` if `version` is not exactly two
+    /// ASCII lowercase letters, and `Err(Error::UnsupportedVersion)` if the
+    /// version is below the supported floor (`na`).
     pub fn from_version(version: &str) -> Result<Self> {
         if version.len() != 2 || !version.chars().all(|c| c.is_ascii_lowercase()) {
             return Err(Error::InvalidFormat(format!(
@@ -307,41 +309,45 @@ impl BigVersionGates {
 
         let v = version;
 
-        // `version.matches("(m[d-z])|(n[a-z])")` from BigFormat.java line 397.
-        let has_accurate_min_max = {
-            let first = v.chars().next().unwrap();
-            let second = v.chars().nth(1).unwrap();
-            (first == 'm' && ('d'..='z').contains(&second))
-                || (first == 'n' && second.is_ascii_lowercase())
-        };
+        // #1249: the supported BIG floor is `na` (Cassandra 5.0). Pre-`na`
+        // (`ma`–`me`, Cassandra 3.x) is out of scope and rejected here so the
+        // struct never *models* a below-floor version as readable. Because of
+        // this, every gate threshold below collapses to "`na` and above" — the
+        // old `mb`/`mc`/`md`/`me` branches are unreachable and are gone.
+        if v < "na" {
+            return Err(Error::UnsupportedVersion {
+                version: version.to_string(),
+                floor: "na".to_string(),
+            });
+        }
 
-        // `version.matches("(m[a-z])|(n[a-z])")` from BigFormat.java line 398.
-        let has_legacy_min_max = {
-            let first = v.chars().next().unwrap();
-            let second = v.chars().nth(1).unwrap();
-            (first == 'm' && second.is_ascii_lowercase())
-                || (first == 'n' && second.is_ascii_lowercase())
-        };
+        // BigFormat.java:397-398. Both predicates match only `n[a-z]` once the
+        // pre-`na` arms are gone: `m[d-z]`/`m[a-z]` are unreachable below the
+        // floor, and `oa` (first letter `o`) matches neither (both deprecated
+        // in `oa`). So both gates are exactly "first letter is `n`".
+        let first = v.chars().next().unwrap_or('\0');
+        let has_accurate_min_max = first == 'n';
+        let has_legacy_min_max = first == 'n';
 
-        // `version.compareTo("nb") >= 0 || version.matches("(m[e-z])")` (line 400).
-        let has_originating_host_id = {
-            let first = v.chars().next().unwrap();
-            let second = v.chars().nth(1).unwrap();
-            v >= "nb" || (first == 'm' && ('e'..='z').contains(&second))
-        };
+        // `version.compareTo("nb") >= 0` (BigFormat.java:400); the `m[e-z]` arm
+        // is unreachable now that pre-`na` is rejected.
+        let has_originating_host_id = v >= "nb";
 
         Ok(Self {
             version: version.to_string(),
-            has_commit_log_lower_bound: v >= "mb",
-            has_commit_log_intervals: v >= "mc",
+            // All of these were introduced at or before `na`, so they are
+            // unconditionally TRUE at the floor and above.
+            has_commit_log_lower_bound: true,
+            has_commit_log_intervals: true,
             has_accurate_min_max,
             has_legacy_min_max,
             has_originating_host_id,
-            has_max_compressed_length: v >= "na",
-            has_pending_repair: v >= "na",
-            has_is_transient: v >= "na",
-            has_metadata_checksum: v >= "na",
-            has_old_bf_format: v < "na",
+            has_max_compressed_length: true,
+            has_pending_repair: true,
+            has_is_transient: true,
+            has_metadata_checksum: true,
+            // `hasOldBfFormat` is `v < "na"`, which is never true at the floor.
+            has_old_bf_format: false,
             // oa-only gates: all false for nb, all true for oa
             has_improved_min_max: v >= "oa",
             has_partition_level_deletion_presence_marker: v >= "oa",
@@ -349,17 +355,6 @@ impl BigVersionGates {
             has_uint_deletion_time: v >= "oa",
             has_token_space_coverage: v >= "oa",
         })
-    }
-
-    /// Returns `true` if this version is compatible for reading according to
-    /// `BigVersion.isCompatible()` (BigFormat.java:516-519).
-    ///
-    /// A version is compatible when:
-    /// - It is >= `ma` (the earliest supported version), **and**
-    /// - Its first letter is <= `o` (the first letter of the current `oa`)
-    pub fn is_compatible(&self) -> bool {
-        let v = self.version.as_str();
-        v >= "ma" && v.chars().next().is_some_and(|c| c <= 'o')
     }
 
     /// Returns `true` when this is a stock Cassandra 5.0 default-mode SSTable
@@ -453,13 +448,14 @@ impl BtiVersionGates {
     ///
     /// # Errors
     ///
-    /// Returns `Err` if the version is not `"da"` (the only BTI version).
+    /// Returns `Err(Error::UnsupportedVersion)` if the version is not `"da"`
+    /// (the only supported BTI version; #1249 version floor).
     pub fn from_version(version: &str) -> Result<Self> {
         if version != "da" {
-            return Err(Error::InvalidFormat(format!(
-                "BTI format only supports version 'da', got {:?}",
-                version
-            )));
+            return Err(Error::UnsupportedVersion {
+                version: version.to_string(),
+                floor: "da".to_string(),
+            });
         }
         Ok(Self {
             version: version.to_string(),
@@ -724,37 +720,16 @@ mod tests {
     // BigVersionGates: hasOriginatingHostId straddle gate
     // -----------------------------------------------------------------------
 
-    /// `hasOriginatingHostId` introduced in `me` (straddles letter boundary).
-    /// Source: BigFormat.java:400
-    ///   `version.compareTo("nb") >= 0 || version.matches("(m[e-z])")`
+    /// `hasOriginatingHostId` is TRUE from `nb` onward (the `m[e-z]` arm of the
+    /// Cassandra predicate is unreachable now that pre-`na` is rejected at the
+    /// floor; see `from_version`). `na` (< `nb`) must be FALSE.
     #[test]
     fn test_originating_host_id_straddle_gate() {
-        // Must be FALSE for versions before me in the m-series
-        for v in &["ma", "mb", "mc", "md"] {
-            let g = BigVersionGates::from_version(v).unwrap();
-            assert!(
-                !g.has_originating_host_id,
-                "{}: hasOriginatingHostId must be FALSE",
-                v
-            );
-        }
-
-        // Must be TRUE for me..mz
-        for v in &["me", "mf", "mz"] {
-            let g = BigVersionGates::from_version(v).unwrap();
-            assert!(
-                g.has_originating_host_id,
-                "{}: hasOriginatingHostId must be TRUE (m[e-z] match)",
-                v
-            );
-        }
-
-        // Must be TRUE for na..nz (>= nb is lexicographically satisfied by the
-        // whole n-series above nb: na < nb so na must be FALSE)
+        // na (< nb): FALSE
         let na = BigVersionGates::from_version("na").unwrap();
         assert!(
             !na.has_originating_host_id,
-            "na: hasOriginatingHostId must be FALSE (na < nb, not m[e-z])"
+            "na: hasOriginatingHostId must be FALSE (na < nb)"
         );
 
         // nb and above: TRUE
@@ -769,25 +744,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // BigVersionGates: older versions
+    // BigVersionGates: na (the supported floor)
     // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_big_ma_gates() {
-        let g = BigVersionGates::from_version("ma").unwrap();
-        // ma has none of the later features
-        assert!(!g.has_commit_log_lower_bound);
-        assert!(!g.has_commit_log_intervals);
-        assert!(!g.has_accurate_min_max);
-        assert!(g.has_legacy_min_max, "ma is in m[a-z]");
-        assert!(!g.has_originating_host_id);
-        assert!(!g.has_max_compressed_length);
-        assert!(g.has_old_bf_format, "ma: hasOldBfFormat");
-        assert!(!g.has_improved_min_max);
-        assert!(!g.has_key_range);
-        assert!(!g.has_uint_deletion_time);
-        assert!(!g.has_token_space_coverage);
-    }
 
     #[test]
     fn test_big_na_gates() {
@@ -803,39 +761,42 @@ mod tests {
         assert!(!g.has_improved_min_max, "oa-only");
     }
 
-    #[test]
-    fn test_big_md_gates() {
-        let g = BigVersionGates::from_version("md").unwrap();
-        assert!(g.has_accurate_min_max, "md is m[d-z]");
-        assert!(g.has_legacy_min_max, "md is m[a-z]");
-        assert!(!g.has_originating_host_id, "md < me");
-    }
-
-    #[test]
-    fn test_big_me_gates() {
-        let g = BigVersionGates::from_version("me").unwrap();
-        assert!(g.has_accurate_min_max, "me is m[d-z]");
-        assert!(g.has_originating_host_id, "me matches m[e-z]");
-    }
-
     // -----------------------------------------------------------------------
-    // BigVersionGates: isCompatible
+    // Version floor (#1249): pre-`na` BIG is rejected at the floor with a
+    // typed `Error::UnsupportedVersion` naming the version + floor.
     // -----------------------------------------------------------------------
 
+    /// R1/R3: a below-`na` BIG version yields `UnsupportedVersion`, not gates.
     #[test]
-    fn test_big_is_compatible() {
-        // All known valid versions should be compatible
-        for v in &["ma", "mb", "mc", "md", "me", "na", "nb", "oa"] {
-            let g = BigVersionGates::from_version(v).unwrap();
-            assert!(g.is_compatible(), "{} should be compatible", v);
+    fn test_big_below_na_rejected_with_typed_error() {
+        for v in &["ma", "mb", "mc", "md", "me"] {
+            let err = BigVersionGates::from_version(v)
+                .expect_err(&format!("{} is below the na floor and must be rejected", v));
+            match err {
+                Error::UnsupportedVersion { version, floor } => {
+                    assert_eq!(version, *v, "error must name the offending version");
+                    assert_eq!(floor, "na", "error must name the na floor");
+                }
+                other => panic!("{}: expected UnsupportedVersion, got {:?}", v, other),
+            }
         }
-        // 'pa' would be next major after oa — not compatible if current is oa
-        // (first letter 'p' > 'o')
-        let pa = BigVersionGates::from_version("pa").unwrap();
+    }
+
+    /// R3: there is no branch returning usable gates for a below-floor version.
+    #[test]
+    fn test_big_below_na_yields_no_usable_gates() {
         assert!(
-            !pa.is_compatible(),
-            "pa is beyond current 'oa' major letter"
+            BigVersionGates::from_version("ma").is_err(),
+            "ma must not construct usable gates"
         );
+        // Supported floor and above still succeed.
+        for v in &["na", "nb", "oa"] {
+            assert!(
+                BigVersionGates::from_version(v).is_ok(),
+                "{} must still construct gates",
+                v
+            );
+        }
     }
 
     #[test]
@@ -947,11 +908,24 @@ mod tests {
         assert!(g.has_uint_deletion_time);
     }
 
+    /// R1: a non-`da` BTI version is rejected with the typed
+    /// `Error::UnsupportedVersion` (naming the `da` floor), not a generic
+    /// `InvalidFormat`.
     #[test]
     fn test_bti_rejects_non_da() {
-        assert!(BtiVersionGates::from_version("nb").is_err());
-        assert!(BtiVersionGates::from_version("oa").is_err());
-        assert!(BtiVersionGates::from_version("na").is_err());
+        for v in &["nb", "oa", "na", "ca"] {
+            let err = BtiVersionGates::from_version(v)
+                .expect_err(&format!("{} is not da and must be rejected", v));
+            match err {
+                Error::UnsupportedVersion { version, floor } => {
+                    assert_eq!(version, *v, "error must name the offending version");
+                    assert_eq!(floor, "da", "error must name the da floor");
+                }
+                other => panic!("{}: expected UnsupportedVersion, got {:?}", v, other),
+            }
+        }
+        // The single supported BTI version still constructs gates.
+        assert!(BtiVersionGates::from_version("da").is_ok());
     }
 
     // -----------------------------------------------------------------------
