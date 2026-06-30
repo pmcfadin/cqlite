@@ -61,7 +61,12 @@ restore_ci_tracked_dataset_files() {
   fi
 }
 
-has_required_dataset() {
+# Validates the dataset CONTENT only (no pin tag/asset/sha checks). A freshly
+# extracted archive is in exactly this state — content present but the pin not
+# yet stamped — so the post-extraction validation uses this to confirm the
+# archive is complete (incl. the exact wide_partition reference binaries) before
+# write_pin runs.
+has_required_content() {
   [ -f "${DATASET_ROOT}/metadata.yml" ] || return 1
   [ -s "${WIDE_PARTITION_GOLDEN}" ] || return 1
 
@@ -88,6 +93,13 @@ has_required_dataset() {
   for component in "${WIDE_PARTITION_REQUIRED_COMPONENTS[@]}"; do
     [ -f "${WIDE_PARTITION_DIR}/${component}" ] || return 1
   done
+}
+
+# Strict fast-path check: content present AND pinned to the expected v3.4 tag/
+# asset/sha. The skip-download path requires BOTH so a stale/unpinned dataset
+# forces a re-fetch (issue #1185 fail-closed).
+has_required_dataset() {
+  has_required_content || return 1
 
   # The pin file MUST exist and match. A missing pin is NOT acceptable — it would
   # otherwise let an unverified dataset fall through and be re-stamped (#1185).
@@ -141,7 +153,10 @@ restore_ci_tracked_dataset_files
 # suffix (e.g., `*-Data.db` matches both the real file and `._..-Data.db`).
 find "${DATASET_ROOT}" \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev/null || true
 
-if ! has_required_dataset; then
+# Validate the freshly extracted CONTENT (not the pin — package_datasets.sh does
+# not embed a .dataset-pin in the archive). A bad/partial archive still fails
+# loudly here; the pin is stamped only after content is confirmed.
+if ! has_required_content; then
   echo "ERROR: dataset extraction did not produce required Cassandra SSTable components in ${DATASET_ROOT}" >&2
   exit 1
 fi
