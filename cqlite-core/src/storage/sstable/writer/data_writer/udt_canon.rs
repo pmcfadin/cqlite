@@ -352,6 +352,17 @@ fn sort_sorted_collection<T>(
 where
     Value: SortedCollection<T>,
 {
+    // roborev #1020 Finding 2 (REGRESSION guard): ordering is a no-op for a
+    // collection with fewer than 2 elements — there is no pair to compare — so
+    // skip comparator classification/validation ENTIRELY and return the
+    // (already element-canonicalized) collection unchanged. Without this, the
+    // round-6 fail-closed comparator wrongly REJECTS a perfectly valid singleton
+    // such as `frozen<map<uuid, frozen<person>>>` (one entry) purely because
+    // UUIDType has no implemented comparator. Fail-closed behavior is preserved
+    // only where an actual sort comparison is required (`len >= 2`).
+    if items.len() < 2 {
+        return Ok(Value::from_sorted(items));
+    }
     let mut keyed: Vec<(Vec<u8>, T)> = Vec::with_capacity(items.len());
     for item in items {
         let bytes = serialize_value(key(&item))?;
@@ -1258,6 +1269,83 @@ mod tests {
         assert!(
             msg.contains("UUIDType") && msg.contains("no comparator implemented"),
             "unexpected error: {msg}"
+        );
+    }
+
+    // A frozen<map<uuid, frozen<person>>> marshal: a UUIDType KEY whose
+    // comparator is NOT implemented (fail-closed for len >= 2). Used to verify the
+    // roborev #1020 Finding 2 regression guard: a SINGLE-entry map must NOT trip
+    // the unsupported-comparator error (no ordering decision is needed), while a
+    // 2+-entry map still fails closed (behavior preserved).
+    fn map_uuid_to_person_marshal() -> String {
+        format!(
+            "{p}FrozenType({p}MapType({p}UUIDType,{p}FrozenType({p}UserType({KS},706572736f6e,\
+             66697273745f6e616d65:{p}UTF8Type,6c6173745f6e616d65:{p}UTF8Type,616765:{p}Int32Type))))",
+            p = MARSHAL_PREFIX
+        )
+    }
+
+    #[test]
+    fn single_entry_uuid_keyed_map_canonicalizes_without_error() {
+        // roborev #1020 Finding 2 REGRESSION GUARD: a one-entry
+        // frozen<map<uuid, frozen<person>>> needs no ordering decision, so the
+        // unsupported-UUIDType comparator must NOT be consulted. The round-6 fix
+        // wrongly errored here; this must now succeed and reorder the nested UDT.
+        let v = Value::Frozen(Box::new(Value::Map(vec![(
+            Value::Uuid([7u8; 16]),
+            named_person("Solo"),
+        )])));
+        let canon = canonicalize_udt_value(&map_uuid_to_person_marshal(), &v)
+            .expect("single-entry uuid-keyed map must canonicalize without a comparator error");
+        let Value::Frozen(inner) = canon.as_ref() else {
+            panic!("expected frozen map");
+        };
+        let Value::Map(entries) = inner.as_ref() else {
+            panic!("expected map, got {inner:?}");
+        };
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(&entries[0].0, Value::Uuid(u) if u == &[7u8; 16]));
+        // The nested UDT value is still canonicalized to declared field order.
+        assert_eq!(
+            declared_order(&entries[0].1),
+            vec![
+                ("first_name".into(), Some(Value::Text("Solo".into()))),
+                ("last_name".into(), None),
+                ("age".into(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_uuid_keyed_map_canonicalizes_without_error() {
+        // Zero entries: also a no-op for ordering — must not consult the
+        // unsupported comparator (roborev #1020 Finding 2 regression guard).
+        let v = Value::Frozen(Box::new(Value::Map(vec![])));
+        let canon = canonicalize_udt_value(&map_uuid_to_person_marshal(), &v)
+            .expect("empty uuid-keyed map must canonicalize without a comparator error");
+        let Value::Frozen(inner) = canon.as_ref() else {
+            panic!("expected frozen map");
+        };
+        let Value::Map(entries) = inner.as_ref() else {
+            panic!("expected map, got {inner:?}");
+        };
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn multi_entry_uuid_keyed_map_still_fails_closed() {
+        // 2+ entries DO require an ordering decision: the unsupported UUIDType
+        // comparator must still fail closed (round-6 behavior preserved — NOT
+        // weakened by the len<2 regression guard).
+        let v = Value::Frozen(Box::new(Value::Map(vec![
+            (Value::Uuid([1u8; 16]), named_person("One")),
+            (Value::Uuid([2u8; 16]), named_person("Two")),
+        ])));
+        let err = canonicalize_udt_value(&map_uuid_to_person_marshal(), &v).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("UUIDType") && msg.contains("no comparator implemented"),
+            "2+-entry uuid-keyed map must still fail closed: {msg}"
         );
     }
 

@@ -424,11 +424,15 @@ fn render_udt_reference(
     }
     // Fallback: build a transient definition from the inline pairs so a nested
     // UDT that is not separately registered still renders structurally (never a
-    // silent BytesType, which would lose the type — issue #28).
+    // silent BytesType, which would lose the type — issue #28). A qualified
+    // `keyspace.udt` reference contributes its explicit keyspace + bare name to
+    // the marshal (the `UserType(...)` carries an unqualified hex name —
+    // roborev #1020 Finding 1).
+    let (ref_keyspace, bare_name) = split_qualified_udt(name, keyspace);
     let mut out = String::from("org.apache.cassandra.db.marshal.UserType(");
-    out.push_str(keyspace);
+    out.push_str(ref_keyspace);
     out.push(',');
-    out.push_str(&hex::encode(name.as_bytes()));
+    out.push_str(&hex::encode(bare_name.as_bytes()));
     for (fname, fty) in inline_fields {
         out.push(',');
         out.push_str(&hex::encode(fname.as_bytes()));
@@ -439,19 +443,42 @@ fn render_udt_reference(
     out
 }
 
+/// Split a possibly KEYSPACE-QUALIFIED UDT reference `name` into its
+/// `(lookup_keyspace, bare_name)` (roborev #1020 Finding 1). A reference may be
+/// written `keyspace.udt` (the schema parser + validation honor this form — see
+/// `TableSchema::ensure_udt_exists`); when qualified, the explicit keyspace is
+/// used, otherwise the table's `default_keyspace`. The registry keys UDTs by
+/// `(keyspace, bare_name)` (see `UdtRegistry::get_udt`), so resolution everywhere
+/// MUST go through this split — otherwise `frozen<test_ks.person>` never matches
+/// the registry and silently falls back to `BytesType` (the exact #1020 bug, for
+/// qualified names).
+fn split_qualified_udt<'a>(name: &'a str, default_keyspace: &'a str) -> (&'a str, &'a str) {
+    match name.split_once('.') {
+        Some((ks, bare)) => (ks, bare),
+        None => (default_keyspace, name),
+    }
+}
+
 /// Resolve a UDT name in `registry` for `keyspace`: exact match first, then an
 /// unambiguous case-insensitive match (unquoted CQL identifiers are
 /// case-insensitive). Ambiguous case-insensitive matches resolve to `None`.
+///
+/// `name` may be KEYSPACE-QUALIFIED (`keyspace.udt`); the explicit keyspace wins
+/// over `keyspace` when present (roborev #1020 Finding 1, via
+/// [`split_qualified_udt`]).
 fn resolve_registered_udt<'a>(
     name: &str,
     keyspace: &str,
     registry: &'a UdtRegistry,
 ) -> Option<&'a UdtTypeDef> {
-    if let Some(udt) = registry.get_udt(keyspace, name) {
+    let (lookup_keyspace, bare_name) = split_qualified_udt(name, keyspace);
+    if let Some(udt) = registry.get_udt(lookup_keyspace, bare_name) {
         return Some(udt);
     }
-    let ks_udts = registry.get_keyspace_udts(keyspace)?;
-    let mut matches = ks_udts.iter().filter(|(n, _)| n.eq_ignore_ascii_case(name));
+    let ks_udts = registry.get_keyspace_udts(lookup_keyspace)?;
+    let mut matches = ks_udts
+        .iter()
+        .filter(|(n, _)| n.eq_ignore_ascii_case(bare_name));
     let first = matches.next()?;
     if matches.next().is_some() {
         return None; // ambiguous — refuse rather than guess.
@@ -706,11 +733,15 @@ pub(crate) fn cql_type_references_udt(
         CqlType::Udt(..) => true,
         CqlType::Custom(name) => {
             let clean = name.strip_prefix("udt:").unwrap_or(name);
+            // `clean` may be KEYSPACE-QUALIFIED (`keyspace.udt`); resolve the
+            // registry under the explicit keyspace when present, else `keyspace`
+            // (roborev #1020 Finding 1, via `split_qualified_udt`).
+            let (lookup_keyspace, bare_name) = split_qualified_udt(clean, keyspace);
             name.starts_with("udt:")
-                || registry.get_udt(keyspace, clean).is_some()
+                || registry.get_udt(lookup_keyspace, bare_name).is_some()
                 || registry
-                    .get_keyspace_udts(keyspace)
-                    .is_some_and(|m| m.keys().any(|k| k.eq_ignore_ascii_case(clean)))
+                    .get_keyspace_udts(lookup_keyspace)
+                    .is_some_and(|m| m.keys().any(|k| k.eq_ignore_ascii_case(bare_name)))
         }
         CqlType::List(inner) | CqlType::Set(inner) | CqlType::Frozen(inner) => {
             cql_type_references_udt(inner, keyspace, registry)
@@ -807,6 +838,81 @@ mod tests {
         assert!(
             !m.contains("BytesType"),
             "nested UDT must never collapse to BytesType: {m}"
+        );
+    }
+
+    /// roborev #1020 Finding 1: a KEYSPACE-QUALIFIED `frozen<test_ks.address>`
+    /// direct UDT field resolves through the registry split and renders byte-for-
+    /// byte identical to the unqualified `frozen<address>` form (bare
+    /// `UserType(...)`, no `FrozenType` wrapper, no `BytesType` fallback).
+    #[test]
+    fn qualified_frozen_udt_field_resolves_identically_to_bare() {
+        let reg = registry_with_address();
+        let bare = CqlType::Frozen(Box::new(CqlType::Custom("address".to_string())));
+        let qualified = CqlType::Frozen(Box::new(CqlType::Custom("test_ks.address".to_string())));
+        let m_bare = render_field_marshal(&bare, KS, &reg);
+        let m_qual = render_field_marshal(&qualified, KS, &reg);
+        assert!(
+            m_qual.starts_with("org.apache.cassandra.db.marshal.UserType("),
+            "qualified frozen<ks.udt> must be bare UserType, got {m_qual}"
+        );
+        assert!(
+            !m_qual.contains("BytesType"),
+            "qualified UDT must resolve, not collapse to BytesType: {m_qual}"
+        );
+        assert_eq!(
+            m_qual, m_bare,
+            "qualified frozen<ks.udt> must render identically to the bare form"
+        );
+    }
+
+    /// roborev #1020 Finding 1: a KEYSPACE-QUALIFIED
+    /// `frozen<list<frozen<test_ks.address>>>` resolves the nested qualified UDT
+    /// element through the registry split — identical marshal to the unqualified
+    /// `frozen<list<frozen<address>>>` (FrozenType+ListType wrappers preserved,
+    /// nested UDT expanded to `UserType(...)`, never `BytesType`).
+    #[test]
+    fn qualified_frozen_list_of_frozen_udt_resolves_identically_to_bare() {
+        let reg = registry_with_address();
+        let bare = CqlType::Frozen(Box::new(CqlType::List(Box::new(CqlType::Frozen(
+            Box::new(CqlType::Custom("address".to_string())),
+        )))));
+        let qualified = CqlType::Frozen(Box::new(CqlType::List(Box::new(CqlType::Frozen(
+            Box::new(CqlType::Custom("test_ks.address".to_string())),
+        )))));
+        let m_bare = render_field_marshal(&bare, KS, &reg);
+        let m_qual = render_field_marshal(&qualified, KS, &reg);
+        assert!(
+            m_qual.starts_with(
+                "org.apache.cassandra.db.marshal.FrozenType(\
+                 org.apache.cassandra.db.marshal.ListType("
+            ),
+            "outer Frozen+List wrappers must be preserved: {m_qual}"
+        );
+        assert!(
+            m_qual.contains("org.apache.cassandra.db.marshal.UserType(test_ks,61646472657373,"),
+            "nested qualified address UDT must expand to UserType: {m_qual}"
+        );
+        assert!(
+            !m_qual.contains("BytesType"),
+            "nested qualified UDT must never collapse to BytesType: {m_qual}"
+        );
+        assert_eq!(
+            m_qual, m_bare,
+            "qualified nested frozen<list<frozen<ks.udt>>> must match the bare form"
+        );
+    }
+
+    /// roborev #1020 Finding 1: `cql_type_references_udt` must detect a UDT behind
+    /// a KEYSPACE-QUALIFIED name (so the column-level dispatch rewrites the header
+    /// instead of leaving it `BytesType`).
+    #[test]
+    fn cql_type_references_udt_detects_qualified_name() {
+        let reg = registry_with_address();
+        let qualified = CqlType::Frozen(Box::new(CqlType::Custom("test_ks.address".to_string())));
+        assert!(
+            cql_type_references_udt(&qualified, KS, &reg),
+            "qualified frozen<ks.udt> must be detected as referencing a UDT"
         );
     }
 }
