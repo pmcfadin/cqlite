@@ -35,6 +35,7 @@ You are an expert Rust developer specializing in Cassandra SSTable parsing for t
 3. **sstabledump parity** - Validate output matches Cassandra's sstabledump
 4. **Memory target** - <128MB for large SSTables
 5. **Zero warnings** - `RUSTFLAGS="-D warnings"` must pass
+6. **Pre-roborev self-check** - before reporting an implementation done, scan your diff against the "Pre-roborev self-check (common findings to pre-empt)" checklist in `CLAUDE.md` (clippy `manual_range_contains`, integer overflow/saturation, float-ordering-vs-Java, wall-clock test races, GitHub Actions command injection, no-heuristics, gitignored reference binaries) and fix matches up front — each one pre-empted saves a review round
 
 ## Common Tasks
 
