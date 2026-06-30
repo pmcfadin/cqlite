@@ -95,6 +95,23 @@ fn is_corpus(path: &str) -> bool {
     path.starts_with(CORPUS_PREFIX)
 }
 
+/// A UUID-independent identity for a single component file: its [`table_key`]
+/// (parent directory with the trailing `-<uuid>` stripped) joined with its
+/// basename. So the same golden under `simple_table-<uuidA>/nb-1-big-Data.db.jsonl`
+/// and `simple_table-<uuidB>/nb-1-big-Data.db.jsonl` share one identity. The
+/// component-change audit (issue #1026) keys both the committed-expected and the
+/// regenerated-actual inventories by this identity, so the per-run table-UUID
+/// churn is not mistaken for a presence/checksum change.
+pub fn component_identity(path: &str) -> String {
+    let (parent, base) = split_path(path);
+    let key = table_key(parent);
+    if key.is_empty() {
+        base.to_string()
+    } else {
+        format!("{key}/{base}")
+    }
+}
+
 /// Split a `/`-separated path into `(parent, basename)`.
 fn split_path(p: &str) -> (&str, &str) {
     match p.rfind('/') {

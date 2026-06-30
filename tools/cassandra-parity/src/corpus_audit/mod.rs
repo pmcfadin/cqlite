@@ -185,13 +185,20 @@ pub fn audit(
 
 /// Diff the regenerated component inventory's presence/checksums against the
 /// expected entry set: a recorded component that disappeared, whose checksum
-/// changed, or that newly appeared inside an expected directory — each without a
+/// changed, or that newly appeared inside an expected table — each without a
 /// corresponding manifest update — is an unexpected component change.
 ///
-/// "Appeared" is intentionally scoped to directories that already carry an
-/// expected entry, so timestamp/UUID churn in *unpinned* fixtures (design risk
-/// note) never reds the lane: only a directory the manifest already tracks can
-/// surface a surprise component.
+/// Both sides are keyed by their UUID-independent table+component identity
+/// ([`refs::component_identity`]), NOT by the raw repo-relative path. Every
+/// regeneration `rm -rf`s the corpus and re-mints each table under a fresh
+/// `<table>-<uuid>` directory, so the committed-expected golden and the
+/// regenerated-actual golden never share a path; comparing identities is what
+/// makes the check fire only on a *genuine* presence/checksum change of a stable
+/// identity instead of false-positiving on the per-run UUID churn (issue #1026).
+///
+/// "Appeared" is scoped to tables that already carry an expected entry, so churn
+/// in *unpinned* fixtures never reds the lane: only a table the manifest already
+/// tracks can surface a surprise component.
 pub fn check_component_changes(
     inventory: &CorpusInventory,
     expected: &ExpectedInventory,
@@ -201,39 +208,50 @@ pub fn check_component_changes(
         return out;
     }
 
-    // Disappeared / checksum-changed.
+    // Regenerated checksummed components keyed by UUID-independent identity,
+    // keeping a representative regenerated path for messaging.
+    let mut actual_by_identity: BTreeMap<String, (String, String)> = BTreeMap::new();
+    for (path, sha) in &inventory.checksums {
+        actual_by_identity
+            .entry(refs::component_identity(path))
+            .or_insert_with(|| (sha.clone(), path.clone()));
+    }
+
+    // Identities + tables the expected set tracks (for the "appeared" half).
+    let mut expected_identities: BTreeSet<String> = BTreeSet::new();
+    let mut expected_tables: BTreeSet<String> = BTreeSet::new();
+
+    // Disappeared / checksum-changed, by identity.
     for (path, expected_sha) in &expected.components {
-        match inventory.checksums.get(path) {
-            Some(actual_sha) if actual_sha == expected_sha => {}
-            Some(actual_sha) => out.push(AuditFinding::new(
+        let identity = refs::component_identity(path);
+        expected_tables.insert(parent_dir(&identity).to_string());
+        expected_identities.insert(identity.clone());
+        match actual_by_identity.get(&identity) {
+            Some((actual_sha, _)) if actual_sha == expected_sha => {}
+            Some((actual_sha, actual_path)) => out.push(AuditFinding::new(
                 FindingKind::UnexpectedComponentChange,
-                path.clone(),
+                actual_path.clone(),
                 format!("checksum changed: expected {expected_sha}, regenerated {actual_sha}"),
             )),
-            None => {
-                if !inventory.files.contains(path) {
-                    out.push(AuditFinding::new(
-                        FindingKind::UnexpectedComponentChange,
-                        path.clone(),
-                        "expected component is absent from the regenerated corpus".to_string(),
-                    ));
-                }
-            }
+            None => out.push(AuditFinding::new(
+                FindingKind::UnexpectedComponentChange,
+                path.clone(),
+                "expected component is absent from the regenerated corpus".to_string(),
+            )),
         }
     }
 
-    // Appeared inside a directory that the expected set already tracks.
-    let expected_dirs: BTreeSet<&str> = expected.components.keys().map(|p| parent_dir(p)).collect();
-    for path in inventory.checksums.keys() {
-        if expected.components.contains_key(path) {
+    // Appeared: a regenerated component whose table identity the expected set
+    // already tracks, but whose own component identity it does not.
+    for (identity, (_, path)) in &actual_by_identity {
+        if expected_identities.contains(identity) {
             continue;
         }
-        if expected_dirs.contains(parent_dir(path)) {
+        if expected_tables.contains(parent_dir(identity)) {
             out.push(AuditFinding::new(
                 FindingKind::UnexpectedComponentChange,
                 path.clone(),
-                "component appeared in a tracked directory with no expected manifest entry"
-                    .to_string(),
+                "component appeared in a tracked table with no expected manifest entry".to_string(),
             ));
         }
     }

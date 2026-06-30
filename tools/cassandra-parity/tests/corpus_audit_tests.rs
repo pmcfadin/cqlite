@@ -172,6 +172,91 @@ fn unclassified_high_relevance_fails_and_names_offender() {
     );
 }
 
+/// Regression for issue #1026 (Finding 1): every regeneration mints a fresh
+/// `<table>-<uuid>` directory, so the committed golden (expected, under uuidA)
+/// and the regenerated golden (actual, under uuidB) NEVER share a repo-relative
+/// path. The component-change check MUST normalize both sides by their
+/// UUID-independent table+component identity, so identical bytes under a churned
+/// UUID directory raise NO finding (otherwise the lane is perpetually red).
+#[test]
+fn uuid_churn_alone_does_not_fire_unexpected_component_change() {
+    let regenerated = REF.replace(
+        "simple_table-aaaa0000000000000000000000000001",
+        "simple_table-bbbb0000000000000000000000000002",
+    );
+    let mut expected = BTreeMap::new();
+    expected.insert(REF.to_string(), "same_sha".to_string());
+
+    let mut inv = CorpusInventory::default();
+    inv.files.insert(regenerated.clone());
+    inv.checksums.insert(regenerated, "same_sha".to_string());
+
+    let findings = corpus_audit::check_component_changes(
+        &inv,
+        &ExpectedInventory {
+            components: expected,
+        },
+    );
+    assert!(
+        findings.is_empty(),
+        "UUID churn alone must NOT fire UnexpectedComponentChange, got: {findings:?}"
+    );
+}
+
+/// A genuine checksum drift of a STABLE identity (same table+component) is still
+/// caught even though the regeneration churned the UUID directory.
+#[test]
+fn unexpected_component_change_fires_on_checksum_drift_across_uuid_churn() {
+    let regenerated = REF.replace(
+        "simple_table-aaaa0000000000000000000000000001",
+        "simple_table-bbbb0000000000000000000000000002",
+    );
+    let mut expected = BTreeMap::new();
+    expected.insert(REF.to_string(), "old_sha".to_string());
+
+    let mut inv = CorpusInventory::default();
+    inv.files.insert(regenerated.clone());
+    inv.checksums.insert(regenerated, "new_sha".to_string());
+
+    let findings = corpus_audit::check_component_changes(
+        &inv,
+        &ExpectedInventory {
+            components: expected,
+        },
+    );
+    assert_eq!(
+        findings.len(),
+        1,
+        "drift under a stable identity must fire exactly one finding, got: {findings:?}"
+    );
+    assert_eq!(findings[0].kind, FindingKind::UnexpectedComponentChange);
+}
+
+/// A genuinely removed component (expected identity has no regenerated match at
+/// all) is caught.
+#[test]
+fn unexpected_component_change_fires_on_removed_component() {
+    let mut expected = BTreeMap::new();
+    expected.insert(REF.to_string(), "some_sha".to_string());
+
+    // Regenerated corpus has a DIFFERENT component (different basename) under the
+    // same table — the expected component itself is gone.
+    let other = REF.replace("Data.db.jsonl", "Index.db.jsonl");
+    let mut inv = CorpusInventory::default();
+    inv.checksums.insert(other, "x".to_string());
+
+    let findings = corpus_audit::check_component_changes(
+        &inv,
+        &ExpectedInventory {
+            components: expected,
+        },
+    );
+    assert!(findings
+        .iter()
+        .any(|f| f.kind == FindingKind::UnexpectedComponentChange
+            && f.detail.contains("absent")));
+}
+
 #[test]
 fn unexpected_component_change_fails_on_checksum_drift() {
     let comp = REF.to_string();
