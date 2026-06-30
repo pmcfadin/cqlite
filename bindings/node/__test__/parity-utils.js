@@ -726,8 +726,8 @@ function discoverKeyspaces() {
  * Discover table names (UUID suffix stripped) for one keyspace.
  *
  * Filtered to the COMMITTED corpus at TABLE granularity (#1319): an untracked
- * WIP `<table>-<uuid>/` dir (no git-tracked golden) under an already-tracked
- * keyspace is IGNORED, not enumerated into ALL_TABLES/OA_TABLES.
+ * WIP `<table>-<uuid>/` dir (no git-tracked file at all) under an
+ * already-tracked keyspace is IGNORED, not enumerated into ALL_TABLES/OA_TABLES.
  */
 function discoverTables(keyspace) {
   const dir = path.join(global.testPaths.SSTABLES_DIR, keyspace);
@@ -741,7 +741,7 @@ function discoverTables(keyspace) {
   return tables.sort();
 }
 
-let _trackedGoldenTableDirsCache = null;
+let _trackedTableDirsCache = null;
 
 // The committed corpus is owned by THIS source tree (the repo that contains
 // this harness + the corpus-coverage policy), NOT by whatever checkout
@@ -761,32 +761,40 @@ const SOURCE_TREE_SSTABLES = path.resolve(
 );
 
 /**
- * `"<keyspace>/<table-dir>"` for each dir owning a git-tracked golden (#1319).
+ * `"<keyspace>/<table-dir>"` for each dir owning ANY git-tracked file (#1319/#1312).
  *
  * The classification/enforcement set is the COMMITTED corpus, NOT raw live-disk
- * enumeration: a table DIRECTORY counts as "committed" iff git tracks at least
- * one `<keyspace>/<table>-<uuid>/*-Data.db.jsonl` golden inside it. This ignores
- * untracked WIP fixtures a concurrent session may have dropped into the live
- * CQLITE_DATASETS_ROOT — at either keyspace granularity (a whole new keyspace,
- * e.g. `test_signed_coll`) OR table granularity (a new untracked
- * `<table>-<uuid>/` dir under an already-tracked keyspace) — so neither gets
- * enforced nor reds the integrity guard.
+ * enumeration: a table DIRECTORY counts as "committed" iff git tracks AT LEAST
+ * ONE file under `<keyspace>/<table>-<uuid>/` — Data.db, TOC, Statistics, a
+ * JSONL golden, ANYTHING. This deliberately does NOT require a tracked
+ * `*-Data.db.jsonl` golden: a newly-committed table dir that ships SSTable
+ * metadata but is (regressionly) MISSING its JSONL golden must still count as
+ * committed so the coverage check can surface the missing golden and FAIL
+ * LOUDLY (#1229), rather than be silently omitted as "uncommitted". The
+ * separate golden-presence check (findJsonlFile / coverage tests) enforces that.
+ *
+ * This still ignores untracked WIP fixtures a concurrent session may have
+ * dropped into the live CQLITE_DATASETS_ROOT — at either keyspace granularity
+ * (a whole new keyspace, e.g. `test_signed_coll`, ZERO tracked files) OR table
+ * granularity (a new untracked `<table>-<uuid>/` dir under an already-tracked
+ * keyspace) — so neither gets enforced.
  *
  * Tracked-ness is measured against THIS source tree's
  * `test-data/datasets/sstables` (the repo that owns this harness + the policy),
  * NOT the live SSTABLES_DIR — the live datasets root may be a *different*
  * checkout whose index already contains a concurrent session's WIP. Single
- * `git ls-files` call, parsed into `keyspace/table-dir` (first two segments).
+ * `git ls-files` call (no pathspec — ALL tracked files), parsed into
+ * `keyspace/table-dir` (first two segments).
  *
- * @returns {Set<string>} tracked-golden `keyspace/table-dir` (empty if git unavailable)
+ * @returns {Set<string>} tracked `keyspace/table-dir` (empty if git unavailable)
  */
-function gitTrackedGoldenTableDirs() {
-  if (_trackedGoldenTableDirsCache) return _trackedGoldenTableDirsCache;
+function gitTrackedTableDirs() {
+  if (_trackedTableDirsCache) return _trackedTableDirsCache;
   const out = new Set();
   try {
     const stdout = execFileSync(
       'git',
-      ['-C', SOURCE_TREE_SSTABLES, 'ls-files', '-z', '--', '*-Data.db.jsonl'],
+      ['-C', SOURCE_TREE_SSTABLES, 'ls-files', '-z'],
       { encoding: 'buffer' },
     );
     for (const raw of stdout.toString('utf8').split('\0')) {
@@ -797,36 +805,40 @@ function gitTrackedGoldenTableDirs() {
   } catch (_err) {
     // git unavailable / not a work tree: fall back (empty => treat all as committed).
   }
-  _trackedGoldenTableDirsCache = out;
+  _trackedTableDirsCache = out;
   return out;
 }
 
 /**
- * Keyspaces with at least one git-tracked golden (#1319).
+ * Keyspaces with at least one git-tracked file under a table dir (#1319/#1312).
  *
- * Derived from the table-granular tracked set (gitTrackedGoldenTableDirs): a
- * keyspace is committed iff it owns at least one tracked table dir. Empty when
- * git is unavailable (callers then fall back to treating all as committed).
+ * Derived from the table-granular tracked set (gitTrackedTableDirs): a keyspace
+ * is committed iff it owns at least one tracked table dir. Empty when git is
+ * unavailable (callers then fall back to treating all as committed).
  *
- * @returns {Set<string>} tracked-golden keyspace names (empty if git unavailable)
+ * @returns {Set<string>} tracked keyspace names (empty if git unavailable)
  */
-function gitTrackedGoldenKeyspaces() {
+function gitTrackedKeyspaces() {
   const out = new Set();
-  for (const td of gitTrackedGoldenTableDirs()) out.add(td.split('/', 1)[0]);
+  for (const td of gitTrackedTableDirs()) out.add(td.split('/', 1)[0]);
   return out;
 }
 
 /**
- * True if `<keyspace>/<tableDirName>` owns a git-tracked golden (#1319).
+ * True if `<keyspace>/<tableDirName>` owns ANY git-tracked file (#1319/#1312).
  *
- * Graceful fallback: if git reports NO tracked goldens (git unavailable / not a
+ * "Committed" is decoupled from "has a JSONL golden": a committed dir missing
+ * its golden must remain DISCOVERABLE so the coverage check fails loudly on the
+ * missing golden (#1229), not be silently dropped here.
+ *
+ * Graceful fallback: if git reports NO tracked files (git unavailable / not a
  * work tree), every discovered table dir is treated as committed so the guard
  * is not silently neutered.
  *
  * @returns {boolean}
  */
 function isCommittedTableDir(keyspace, tableDirName) {
-  const tracked = gitTrackedGoldenTableDirs();
+  const tracked = gitTrackedTableDirs();
   if (tracked.size === 0) return true;
   return tracked.has(`${keyspace}/${tableDirName}`);
 }
@@ -837,7 +849,7 @@ function isCommittedTableDir(keyspace, tableDirName) {
  * Untracked-on-disk WIP keyspaces are excluded — neither enforced nor flagged.
  * Untracked table dirs UNDER a tracked keyspace are filtered at table
  * granularity by discoverTables(). Graceful fallback: if git reports NO tracked
- * goldens (git unavailable / not a work tree), every discovered keyspace is
+ * files (git unavailable / not a work tree), every discovered keyspace is
  * treated as committed so the guard is not silently neutered. In CI and local
  * dev `.git` is present.
  *
@@ -845,7 +857,7 @@ function isCommittedTableDir(keyspace, tableDirName) {
  */
 function committedKeyspaces() {
   const discovered = discoverKeyspaces();
-  const tracked = gitTrackedGoldenKeyspaces();
+  const tracked = gitTrackedKeyspaces();
   if (tracked.size === 0) return discovered;
   return discovered.filter((k) => tracked.has(k));
 }
@@ -955,8 +967,8 @@ module.exports = {
   EXECUTABLE_KEYSPACES,
   isSystemKeyspace,
   discoverKeyspaces,
-  gitTrackedGoldenTableDirs,
-  gitTrackedGoldenKeyspaces,
+  gitTrackedTableDirs,
+  gitTrackedKeyspaces,
   isCommittedTableDir,
   committedKeyspaces,
   discoverTables,

@@ -40,15 +40,25 @@ keyspace onto disk whose JSONL goldens are **not yet git-tracked** (e.g.
 keyspace as "unclassified" and red the integrity guard on every PR, even though
 it is not a coverage gap in the committed corpus. So:
 
-- A keyspace present on disk but with **no git-tracked golden** is **IGNORED** —
-  neither enforced nor flagged as unclassified.
-- A genuinely-**committed** keyspace (has git-tracked goldens) that is
-  unclassified **still reds** the guard — the integrity check is not neutered.
+- A keyspace present on disk but with **no git-tracked file at all** is
+  **IGNORED** — neither enforced nor flagged as unclassified.
+- A genuinely-**committed** keyspace (has at least one git-tracked file under a
+  table dir) that is unclassified **still reds** the guard — the integrity check
+  is not neutered.
 
-Tracked-ness is computed via a single `git ls-files -- '*-Data.db.jsonl'`,
-parsed into the set of first-level keyspace dir names, in each harness
-(`committed_keyspaces`/`_git_tracked_golden_keyspaces` in `corpus.py`,
-`committedKeyspaces`/`gitTrackedGoldenKeyspaces` in `parity-utils.js`,
+"Committed" is the presence of **any** git-tracked file under
+`<keyspace>/<table-dir>/` (Data.db, TOC, Statistics, a JSONL golden, ...) — it
+is deliberately **decoupled** from "has a JSONL golden" (#1312). A committed
+table dir that ships SSTable metadata but is **missing** its golden must still
+count as committed so its absent golden is surfaced **loudly** by the separate
+golden-presence / coverage check (the #1229 guarantee), not silently dropped
+as "uncommitted".
+
+Tracked-ness is computed via a single `git ls-files -z` (no pathspec — **any**
+tracked file), parsed into the set of `keyspace/table-dir` (and first-level
+keyspace dir names), in each harness
+(`committed_keyspaces`/`_git_tracked_keyspaces` in `corpus.py`,
+`committedKeyspaces`/`gitTrackedKeyspaces` in `parity-utils.js`,
 `compute_committed_keyspaces`/`is_committed_keyspace` in
 `smoke-test-all-tables.sh`). The query is rooted at **this source tree's**
 `test-data/datasets/sstables` (the repo that owns the harness + this policy),

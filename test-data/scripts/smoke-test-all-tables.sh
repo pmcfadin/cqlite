@@ -130,17 +130,20 @@ is_skip_pending_keyspace() {
     return 1
 }
 
-# Committed keyspaces: those with at least one git-tracked *-Data.db.jsonl
-# golden (Issue #1319). The classification/enforcement set is the COMMITTED
+# Committed keyspaces: those with at least one git-tracked file under a table
+# dir (Issue #1319/#1312). The classification/enforcement set is the COMMITTED
 # corpus, NOT raw live-disk enumeration — an untracked WIP keyspace a concurrent
-# session dropped into CQLITE_DATASETS_ROOT (e.g. test_signed_coll, goldens not
-# yet committed) is IGNORED here so it is neither enforced nor flagged by the
-# integrity guard. Populated by compute_committed_keyspaces(); if git is
-# unavailable / not a work tree, COMMITTED_KEYSPACES_OK stays 0 and callers fall
-# back to treating every discovered keyspace as committed (guard not neutered).
+# session dropped into CQLITE_DATASETS_ROOT (e.g. test_signed_coll, zero tracked
+# files) is IGNORED here so it is neither enforced nor flagged by the integrity
+# guard. "Committed" is deliberately decoupled from "has a JSONL golden": a
+# committed table dir that ships SSTable metadata but is MISSING its golden
+# still counts so its absent golden is surfaced loudly (#1229), not silently
+# dropped. Populated by compute_committed_keyspaces(); if git is unavailable /
+# not a work tree, COMMITTED_KEYSPACES_OK stays 0 and callers fall back to
+# treating every discovered keyspace as committed (guard not neutered).
 COMMITTED_KEYSPACES=()
 # Committed table directories at TABLE granularity (#1319): each entry is
-# "keyspace/table-dir" for a dir that owns at least one git-tracked golden. Used
+# "keyspace/table-dir" for a dir that owns at least one git-tracked file. Used
 # so an untracked WIP table dir under an ALREADY-tracked keyspace is IGNORED,
 # not enumerated/enforced. Newline-separated for bash 3.x grep lookups.
 COMMITTED_TABLE_DIRS=""
@@ -164,41 +167,47 @@ compute_committed_keyspaces() {
         return
     fi
     # Do NOT enable committed-corpus filtering yet: rev-parse success only proves
-    # this is a work tree, not that any golden is actually tracked. If ls-files
-    # errors or returns zero records (rev-parse OK but no tracked goldens), an
+    # this is a work tree, not that any file is actually tracked. If ls-files
+    # errors or returns zero records (rev-parse OK but nothing tracked), an
     # empty committed set would treat EVERY keyspace as uncommitted and fail with
     # "no in-scope keyspaces". Mirror the Python/Node fallback: keep
     # COMMITTED_KEYSPACES_OK=0 (treat all discovered as committed) until the loop
     # below has parsed at least one tracked table dir.
     local path ks tabledir seen="" tdseen=""
-    # Single git ls-files call rooted at the source tree. Path layout is
-    # <keyspace>/<table-dir>/<golden>; first segment is the keyspace, first two
-    # are the committed table dir. -z keeps it NUL-delimited (newline-safe);
-    # read NUL records straight from the pipe — capturing NUL output in $(...)
-    # strips the NULs.
+    # Single git ls-files call rooted at the source tree, NO pathspec so ANY
+    # tracked file (Data.db, TOC, Statistics, a JSONL golden, ...) marks the dir
+    # committed (#1312 — committed must NOT require a tracked golden, else a
+    # committed dir missing its golden is silently dropped instead of failing
+    # the coverage check loudly). Path layout is <keyspace>/<table-dir>/<file>;
+    # first segment is the keyspace, first two are the committed table dir. -z
+    # keeps it NUL-delimited (newline-safe); read NUL records straight from the
+    # pipe — capturing NUL output in $(...) strips the NULs.
     while IFS= read -r -d '' path; do
         ks="${path%%/*}"
         [[ -z "${ks}" ]] && continue
-        # A tracked golden exists -> enable committed-corpus filtering. Until this
-        # fires (zero records / ls-files error), the fallback stays engaged.
+        # Skip paths that are not at least <keyspace>/<table-dir>/<file> (e.g. a
+        # tracked file directly under sstables/ or under a keyspace dir): they do
+        # not identify a committed table dir.
+        tabledir="${path%/*}"
+        [[ "${tabledir}" == */* ]] || continue
+        # A tracked file under a table dir exists -> enable committed-corpus
+        # filtering. Until this fires (zero qualifying records / ls-files error),
+        # the fallback stays engaged.
         COMMITTED_KEYSPACES_OK=1
         case " ${seen} " in
             *" ${ks} "*) ;;
             *) seen="${seen} ${ks}"; COMMITTED_KEYSPACES+=("${ks}");;
         esac
-        # "keyspace/table-dir" = strip the trailing "/golden" segment.
-        tabledir="${path%/*}"
-        # Only count it if there were >=2 segments (keyspace + table dir).
-        if [[ "${tabledir}" == */* ]]; then
-            case $'\n'"${tdseen}"$'\n' in
-                *$'\n'"${tabledir}"$'\n'*) ;;
-                *) tdseen="${tdseen}${tabledir}"$'\n'; COMMITTED_TABLE_DIRS="${COMMITTED_TABLE_DIRS}${tabledir}"$'\n';;
-            esac
-        fi
-    done < <(git -C "${src}" ls-files -z -- '*-Data.db.jsonl' 2>/dev/null)
+        # "keyspace/table-dir" = strip the trailing "/file" segment (computed
+        # above as ${tabledir}).
+        case $'\n'"${tdseen}"$'\n' in
+            *$'\n'"${tabledir}"$'\n'*) ;;
+            *) tdseen="${tdseen}${tabledir}"$'\n'; COMMITTED_TABLE_DIRS="${COMMITTED_TABLE_DIRS}${tabledir}"$'\n';;
+        esac
+    done < <(git -C "${src}" ls-files -z 2>/dev/null)
 }
 
-# Return 0 if $1 is a committed keyspace (git-tracked golden), or if git was
+# Return 0 if $1 is a committed keyspace (git-tracked file), or if git was
 # unavailable (COMMITTED_KEYSPACES_OK=0 => fall back to "all discovered count").
 is_committed_keyspace() {
     [[ ${COMMITTED_KEYSPACES_OK} -eq 0 ]] && return 0
@@ -209,7 +218,7 @@ is_committed_keyspace() {
     return 1
 }
 
-# Return 0 if "keyspace/table-dir" ($1) owns a git-tracked golden (TABLE
+# Return 0 if "keyspace/table-dir" ($1) owns a git-tracked file (TABLE
 # granularity, #1319), or if git was unavailable (COMMITTED_KEYSPACES_OK=0 =>
 # fall back to treating every discovered table dir as committed). An untracked
 # WIP table dir under an already-tracked keyspace returns 1 (IGNORED).
@@ -223,7 +232,7 @@ is_committed_table_dir() {
 }
 
 # Discover the enforced keyspace set by walking the committed corpus.
-# In-scope = every COMMITTED keyspace dir (git-tracked golden, #1319) minus
+# In-scope = every COMMITTED keyspace dir (git-tracked file, #1319) minus
 # SKIP_KEYSPACE_NAMES minus SKIP_PENDING. Based on directory structure
 # (committed), independent of Data.db presence.
 discover_keyspaces() {
@@ -292,7 +301,7 @@ validate_environment() {
         exit 1
     fi
 
-    # Issue #1319: compute the COMMITTED keyspace set (git-tracked goldens) so
+    # Issue #1319: compute the COMMITTED keyspace set (git-tracked files) so
     # discovery + the integrity guard ignore untracked WIP keyspaces.
     compute_committed_keyspaces
 
@@ -309,9 +318,9 @@ validate_environment() {
     # in-scope (enforced), skip-pending, or in the documented skip-set. A new
     # committed keyspace that is none of these reds the smoke test loudly
     # instead of being silently uncovered while CI reports "100%". Issue #1319:
-    # the guard enumerates the COMMITTED corpus (git-tracked goldens), NOT raw
+    # the guard enumerates the COMMITTED corpus (git-tracked files), NOT raw
     # live-disk enumeration, so an untracked WIP keyspace (e.g. test_signed_coll,
-    # goldens not yet committed) is IGNORED — neither enforced nor flagged.
+    # zero tracked files) is IGNORED — neither enforced nor flagged.
     local unclassified=()
     local dir ks
     while IFS= read -r dir; do
@@ -319,7 +328,7 @@ validate_environment() {
         if is_system_keyspace "${ks}" || is_skip_keyspace "${ks}" || is_skip_pending_keyspace "${ks}"; then
             continue
         fi
-        # Ignore untracked WIP keyspaces (no git-tracked golden) — #1319.
+        # Ignore untracked WIP keyspaces (no git-tracked file) — #1319.
         is_committed_keyspace "${ks}" || continue
         # in-scope (enforced) keyspaces are exactly KEYSPACES by construction
         local found=0 k
@@ -438,7 +447,7 @@ discover_tables() {
 
         # Find all table directories (directories containing Data.db files).
         # Filter to the COMMITTED corpus at TABLE granularity (#1319): an
-        # untracked WIP <table>-<uuid>/ dir (no git-tracked golden) under an
+        # untracked WIP <table>-<uuid>/ dir (no git-tracked file) under an
         # already-tracked keyspace is IGNORED, not enforced.
         while IFS= read -r table_dir; do
             local table_dir_name
@@ -581,7 +590,7 @@ register_skip_pending_tables() {
         while IFS= read -r table_dir; do
             local table_dir_name
             table_dir_name=$(basename "${table_dir}")
-            # Ignore untracked WIP table dirs (no git-tracked golden) — #1319.
+            # Ignore untracked WIP table dirs (no git-tracked file) — #1319.
             is_committed_table_dir "${keyspace}/${table_dir_name}" || continue
             local table_name
             table_name=$(extract_table_name "${table_dir_name}")
