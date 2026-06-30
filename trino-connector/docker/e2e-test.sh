@@ -106,6 +106,55 @@ assert_eq "group-by group count"    '"2"'                                    "$(
 # Aggregation + predicate: sum(score) WHERE score > 25 -> 30+40+50 = 120.
 assert_eq "agg + predicate"         '"120"'                                  "$(trino 'SELECT sum(score) FROM cqlite.analytics.events WHERE score > 25')"
 
+# AUTOMATIC aggregation-pushdown cardinality gate (issue #944). The `readings`
+# table has 2 partitions × 5 clustering rows = 10 rows. The connector surfaces
+# authoritative partition_count=2 / total_rows=10 over the Flight table_stats
+# action; the DDL-driven gate then:
+#   GROUP BY device      -> ratio ≈ 0.2 (< 0.5) -> PUSH (low cardinality)
+#   GROUP BY device, ts  -> ratio ≈ 1.0 (> 0.5) -> DECLINE (high cardinality)
+# Globals always push regardless of the gate.
+log "wait for the connector to resolve analytics.readings"
+for i in $(seq 1 36); do
+  if "${COMPOSE[@]}" exec -T trino trino --execute \
+       "SELECT count(*) FROM cqlite.analytics.readings" >/dev/null 2>&1; then break; fi
+  sleep 5
+  [[ $i -eq 36 ]] && { echo "connector never resolved analytics.readings"; exit 1; }
+done
+
+# Results are identical whether or not the aggregate is pushed (pushdown is a pure
+# optimization), so assert the answers first.
+assert_eq "readings row count"      '"10"'                                   "$(trino 'SELECT count(*) FROM cqlite.analytics.readings')"
+# GROUP BY device -> 2 groups; sum(value) per device: dev1=150, dev2=165.
+assert_eq "low-card group count"    '"2"'                                    "$(trino 'SELECT count(*) FROM (SELECT device FROM cqlite.analytics.readings GROUP BY device)')"
+# GROUP BY device, ts -> 10 groups (full row uniqueness).
+assert_eq "high-card group count"   '"10"'                                   "$(trino 'SELECT count(*) FROM (SELECT device, ts FROM cqlite.analytics.readings GROUP BY device, ts)')"
+
+# Now assert the GATE via EXPLAIN: when an aggregate is pushed into the scan,
+# Trino's PushAggregationIntoTableScan removes the Aggregate node (the scan emits
+# the aggregate). When NOT pushed, an "Aggregate" plan node remains above the scan.
+explain() { "${COMPOSE[@]}" exec -T trino trino --execute "EXPLAIN (TYPE LOGICAL) $1" 2>&1; }
+assert_contains() {
+  local desc="$1" needle="$2" haystack="$3"
+  if grep -qi -- "$needle" <<<"$haystack"; then echo "PASS: $desc";
+  else echo "FAIL: $desc — plan did not contain [$needle]"; echo "$haystack"; FAILURES=$((FAILURES + 1)); fi
+}
+assert_absent() {
+  local desc="$1" needle="$2" haystack="$3"
+  if grep -qi -- "$needle" <<<"$haystack"; then
+    echo "FAIL: $desc — plan unexpectedly contained [$needle]"; echo "$haystack"; FAILURES=$((FAILURES + 1));
+  else echo "PASS: $desc"; fi
+}
+
+# Low-cardinality GROUP BY device: PUSHED -> no residual Aggregate node above scan.
+LOWCARD_PLAN="$(explain 'SELECT device, sum(value) FROM cqlite.analytics.readings GROUP BY device')"
+assert_absent  "low-card GROUP BY is pushed (no Aggregate node)" 'Aggregate' "$LOWCARD_PLAN"
+# High-cardinality GROUP BY device, ts: DECLINED -> Aggregate node remains in Trino.
+HIGHCARD_PLAN="$(explain 'SELECT device, ts, sum(value) FROM cqlite.analytics.readings GROUP BY device, ts')"
+assert_contains "high-card GROUP BY left to Trino (Aggregate node present)" 'Aggregate' "$HIGHCARD_PLAN"
+# Global aggregate always pushes regardless of the gate -> no Aggregate node.
+GLOBAL_PLAN="$(explain 'SELECT sum(value) FROM cqlite.analytics.readings')"
+assert_absent  "global aggregate is pushed (no Aggregate node)" 'Aggregate' "$GLOBAL_PLAN"
+
 # Proof it reads SSTables (not live CQL): an unflushed row must be invisible.
 log "assert SSTable semantics (memtable invisible until flush)"
 "${COMPOSE[@]}" exec -T cassandra cqlsh 172.42.0.2 \

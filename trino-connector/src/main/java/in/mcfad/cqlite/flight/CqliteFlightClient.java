@@ -1,18 +1,27 @@
 package in.mcfad.cqlite.flight;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.arrow.flight.Action;
 import org.apache.arrow.flight.FlightClient;
 import org.apache.arrow.flight.FlightDescriptor;
 import org.apache.arrow.flight.FlightStream;
 import org.apache.arrow.flight.Location;
+import org.apache.arrow.flight.Result;
 import org.apache.arrow.flight.Ticket;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.types.pojo.Schema;
+
+import java.util.Iterator;
 
 /**
  * Thin wrapper over the Arrow Flight Java client for talking to a cqlite-flight
  * endpoint: fetch a table's Arrow schema, and open a record-batch stream.
  */
 public final class CqliteFlightClient {
+    /** Wire name of the per-table statistics action (matches the Rust server). */
+    static final String TABLE_STATS_ACTION = "table_stats";
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
     private final BufferAllocator allocator;
 
     public CqliteFlightClient(BufferAllocator allocator) {
@@ -27,6 +36,33 @@ public final class CqliteFlightClient {
             throw e;
         } catch (Exception e) {
             throw new IllegalStateException("GetSchema to " + host + ":" + port + " failed", e);
+        }
+    }
+
+    /**
+     * Fetch per-table aggregate statistics from a flight endpoint via the
+     * {@code table_stats} DoAction (issue #944). {@code requestBody} is the
+     * JSON-encoded {@code TableStatsRequest} (keyspace/table/snapshot). The server
+     * returns exactly one {@link Result} whose body is the JSON
+     * {@link TableStats}.
+     */
+    public TableStats tableStats(String host, int port, byte[] requestBody) {
+        try (FlightClient client = connect(host, port)) {
+            Iterator<Result> results = client.doAction(new Action(TABLE_STATS_ACTION, requestBody));
+            if (!results.hasNext()) {
+                throw new IllegalStateException(
+                        "table_stats to " + host + ":" + port + " returned no result");
+            }
+            byte[] body = results.next().getBody();
+            // Drain any (unexpected) extra results so the gRPC call completes cleanly.
+            while (results.hasNext()) {
+                results.next();
+            }
+            return MAPPER.readValue(body, TableStats.class);
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IllegalStateException("table_stats to " + host + ":" + port + " failed", e);
         }
     }
 

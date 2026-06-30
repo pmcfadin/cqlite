@@ -13,6 +13,8 @@ import io.trino.spi.connector.ConnectorTableVersion;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.statistics.Estimate;
+import io.trino.spi.statistics.TableStatistics;
 import io.trino.spi.expression.Call;
 import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.expression.Constant;
@@ -30,9 +32,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import in.mcfad.cqlite.flight.sidecar.SidecarClient;
 import in.mcfad.cqlite.flight.sidecar.SidecarModels.RingEntry;
@@ -256,13 +260,15 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
             groupByNameSet.add(col.name());
         }
 
-        // Cardinality / operator gate (issue #893). Global aggregates (no GROUP BY)
-        // are an unconditional data-reduction win and are NEVER gated — they bypass
-        // this check. For a GROUP BY, the single-finalize-split design degrades to
-        // break-even-to-loss as distinct groups approach the row count, so honor the
-        // operator policy and decline when the estimated group ratio is too high.
+        // Cardinality / operator gate (issue #893, #944). Global aggregates (no
+        // GROUP BY) are an unconditional data-reduction win and are NEVER gated —
+        // they bypass this check. For a GROUP BY, the single-finalize-split design
+        // degrades to break-even-to-loss as distinct groups approach the row count,
+        // so honor the operator policy and decline when the estimated group ratio is
+        // too high. The ratio is only needed for the AUTOMATIC policy, so the
+        // (network) stats fetch is skipped under NEVER/ALWAYS.
         if (hasGroupBy && declineGroupByPushdown(
-                groupByPolicy(), estimateGroupRatio(table, groupingColumns), maxGroupRatio())) {
+                groupByPolicy(), groupRatioForGate(table, groupingColumns), maxGroupRatio())) {
             return Optional.empty();
         }
 
@@ -427,18 +433,153 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
     }
 
     /**
-     * Estimate distinct-groups / rows for a GROUP BY, used by the AUTOMATIC gate.
-     *
-     * <p>Returns empty today: an authoritative per-column NDV is not surfaced through
-     * the Flight/Sidecar path (Cassandra's Statistics.db does not store it), so there is
-     * no estimate to gate on. The hook is in place — once a row-count + per-grouping-column
-     * cardinality source exists, populate it here and AUTOMATIC starts gating without any
-     * other change. Until then AUTOMATIC pushes, and operators who hit the rare
-     * high-cardinality loss set {@code cqlite.aggregation-pushdown-group-by=never}.
+     * Resolve the estimated groups/rows ratio for the gate. The ratio only matters
+     * under {@link GroupByPushdownPolicy#AUTOMATIC}, so for NEVER/ALWAYS we skip the
+     * (network) statistics fetch entirely and return empty. For AUTOMATIC we fetch
+     * the authoritative per-table counts and feed them to the pure
+     * {@link #estimateGroupRatio} mapping. Any failure fetching stats degrades to
+     * empty (no estimate → AUTOMATIC pushes, always correct).
      */
-    private java.util.OptionalDouble estimateGroupRatio(
+    private java.util.OptionalDouble groupRatioForGate(
             CqliteFlightTableHandle table, List<CqliteFlightColumnHandle> groupingColumns) {
+        if (groupByPolicy() != GroupByPushdownPolicy.AUTOMATIC) {
+            return java.util.OptionalDouble.empty();
+        }
+        TableStats stats;
+        try {
+            stats = fetchTableStats(table);
+        } catch (RuntimeException e) {
+            // No estimate available → AUTOMATIC pushes (correct, may risk the rare
+            // high-cardinality perf loss). Never block a query on a stats fetch.
+            return java.util.OptionalDouble.empty();
+        }
+        List<String> groupByNames = new ArrayList<>();
+        for (CqliteFlightColumnHandle col : groupingColumns) {
+            groupByNames.add(col.name());
+        }
+        return estimateGroupRatio(table.ddl(), groupByNames, stats);
+    }
+
+    /**
+     * Estimate distinct-groups / rows for a GROUP BY (issue #944), used by the
+     * AUTOMATIC gate. PURE function of the table DDL, the grouping column names, and
+     * the AUTHORITATIVE per-table counts — no network, fully unit-testable.
+     *
+     * <p><b>Authoritative inputs</b> (from {@code cqlite-core} Statistics.db parse,
+     * surfaced via the Flight {@code table_stats} action): {@code stats.liveRows} and
+     * {@code stats.partitionCount}. Both are per-SSTable / per-node SUMS, i.e. UPPER
+     * BOUNDS on the table's true counts (a partition can appear in several SSTables /
+     * be replicated across nodes). An upper bound on distinct groups never
+     * under-counts, so the gate never wrongly pushes a high-cardinality GROUP BY.
+     *
+     * <p><b>Derived mapping</b> (best-effort, from the grouping shape vs the DDL
+     * primary key — NOT a true NDV gate; Cassandra 5.0 stores no reliable
+     * per-regular-column NDV, so we never trust per-column cardinality):
+     * <ul>
+     *   <li><b>GROUP BY reaches full row uniqueness</b> (partition key + ALL
+     *       clustering columns ⊆ grouping) → groups ≈ rows → ratio ≈ 1.0 → DECLINE.</li>
+     *   <li><b>GROUP BY = the full partition key</b> (and no clustering, or a strict
+     *       subset of clustering) → groups ≈ partitionCount, bounded above by rows →
+     *       ratio = partitionCount / rows.</li>
+     *   <li><b>GROUP BY is a partition-key PREFIX / a non-key or low-cardinality
+     *       column</b> → cannot be bounded from these stats → empty → default PUSH
+     *       (safe).</li>
+     * </ul>
+     *
+     * <p>Returns {@link java.util.OptionalDouble#empty()} when no row count is
+     * available (rows == 0) or the shape is unbounded — the gate then pushes.
+     */
+    static java.util.OptionalDouble estimateGroupRatio(
+            String ddl, List<String> groupingColumns, TableStats stats) {
+        long rows = stats.liveRows();
+        long partitions = stats.partitionCount();
+        if (rows <= 0 || groupingColumns.isEmpty()) {
+            // No rows to reason about, or a global aggregate (handled before the gate).
+            return java.util.OptionalDouble.empty();
+        }
+
+        PrimaryKeyExtractor.Keys keys = PrimaryKeyExtractor.extract(ddl);
+        if (keys.partitionKey().isEmpty()) {
+            // DDL primary key not parseable → cannot bound → push.
+            return java.util.OptionalDouble.empty();
+        }
+
+        // Case-insensitive grouping set (quoted identifiers keep their case in the
+        // extractor; unquoted are lower-cased on both sides).
+        Set<String> grouping = new java.util.HashSet<>();
+        for (String g : groupingColumns) {
+            grouping.add(foldName(g));
+        }
+        Set<String> partitionKey = fold(keys.partitionKey());
+        Set<String> clustering = fold(keys.clusteringColumns());
+
+        boolean coversPartitionKey = grouping.containsAll(partitionKey);
+        boolean coversAllClustering = grouping.containsAll(clustering);
+
+        if (coversPartitionKey && coversAllClustering) {
+            // Grouping reaches full row uniqueness → one group per row → ratio ≈ 1.0.
+            return java.util.OptionalDouble.of(1.0);
+        }
+        if (coversPartitionKey) {
+            // Grouping = full partition key (with at most a strict clustering subset):
+            // distinct groups ≈ partition count, never more than the row count.
+            double ratio = (double) Math.min(partitions, rows) / (double) rows;
+            return java.util.OptionalDouble.of(ratio);
+        }
+        // Partition-key prefix, or grouping on a non-key / low-cardinality column:
+        // not boundable from partition/row counts alone → push (safe default).
         return java.util.OptionalDouble.empty();
+    }
+
+    private static Set<String> fold(List<String> names) {
+        Set<String> out = new java.util.HashSet<>();
+        for (String n : names) {
+            out.add(foldName(n));
+        }
+        return out;
+    }
+
+    /** Match {@link PrimaryKeyExtractor}'s normalization: unquoted names lower-cased. */
+    private static String foldName(String name) {
+        return name == null ? null : name.toLowerCase(java.util.Locale.ROOT);
+    }
+
+    /**
+     * Fetch the AUTHORITATIVE per-table statistics by summing the
+     * {@code table_stats} action across the distinct flight nodes in the ring
+     * (issue #944). Summing across replicas over-counts by the replication factor,
+     * which is acceptable for an UPPER-BOUND gate input (it only ever errs toward
+     * DECLINING pushdown). A node whose stats call fails is skipped.
+     */
+    private TableStats fetchTableStats(CqliteFlightTableHandle handle) {
+        byte[] body = tableStatsRequest(handle.keyspace(), handle.table());
+        TableStats total = TableStats.EMPTY;
+        Set<String> seen = new LinkedHashSet<>();
+        for (RingEntry node : sidecar.ring().entries()) {
+            String address = node.address();
+            if (address == null || !seen.add(address)) {
+                continue;
+            }
+            try {
+                total = total.plus(flight.tableStats(address, config.flightPort(), body));
+            } catch (RuntimeException e) {
+                // Skip a node that could not answer; its peers still contribute.
+            }
+        }
+        return total;
+    }
+
+    /** Build the {@code table_stats} action body (JSON {@code TableStatsRequest}). */
+    private static byte[] tableStatsRequest(String keyspace, String table) {
+        var root = MAPPER.createObjectNode();
+        root.put("keyspace", keyspace);
+        root.put("table", table);
+        root.putNull("snapshot");
+        try {
+            return MAPPER.writeValueAsBytes(root);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new IllegalStateException("Failed to serialize table_stats request", e);
+        }
     }
 
     /**
@@ -516,6 +657,32 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
             columns.add(new ColumnMetadata(field.getName(), ArrowTypeMapper.toTrino(field)));
         }
         return new ConnectorTableMetadata(new SchemaTableName(handle.keyspace(), handle.table()), columns);
+    }
+
+    /**
+     * Surface the AUTHORITATIVE per-table row count to the Trino optimizer (issue
+     * #944). The cqlite-flight {@code table_stats} action returns Σ {@code totalRows}
+     * across the table's SSTables (an upper bound; see {@link TableStats}); we report
+     * it as the table's row-count estimate. Column-level stats are left unknown —
+     * Cassandra 5.0 stores no reliable per-regular-column NDV, so reporting any would
+     * be a heuristic (#28). A failed/zero fetch yields {@link TableStatistics#empty()}
+     * (unknown), which is always a safe input for the optimizer.
+     */
+    @Override
+    public TableStatistics getTableStatistics(ConnectorSession session, ConnectorTableHandle table) {
+        CqliteFlightTableHandle handle = (CqliteFlightTableHandle) table;
+        TableStats stats;
+        try {
+            stats = fetchTableStats(handle);
+        } catch (RuntimeException e) {
+            return TableStatistics.empty();
+        }
+        if (stats.liveRows() <= 0) {
+            return TableStatistics.empty();
+        }
+        return TableStatistics.builder()
+                .setRowCount(Estimate.of(stats.liveRows()))
+                .build();
     }
 
     /** Resolve the table's Arrow schema by asking any flight node's GetSchema. */
