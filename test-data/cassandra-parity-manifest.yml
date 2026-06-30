@@ -4159,9 +4159,10 @@ scenarios:
         Verify-parity ONLY. Scope is the structural/checksum corruption classes
         CQLite's verifier detects. Out of scope (NO parity claimed, follow-ups
         filed): scrub/recovery (ScrubResult good/bad/empty, out-of-order rewrite,
-        skip-corrupted, TTL-overflow fix), out-of-order key/row detection, and
-        negative/overflowed local-deletion-time — CQLite has no VerifyErrorClass
-        for these today. One recorded verdict DIVERGENCE: toc_missing_component —
+        skip-corrupted, TTL-overflow fix — issue #1281), out-of-order key/row
+        detection and negative/overflowed local-deletion-time (no CQLite
+        VerifyErrorClass today — issue #1282), and verify/integrity API
+        consolidation (issue #1283). One recorded verdict DIVERGENCE: toc_missing_component —
         Cassandra 5.0.2's standalone verifier scans on-disk components and rebuilds
         the TOC, so a dropped TOC.txt line verifies CLEAN; CQLite is intentionally
         STRICTER and reports MissingComponent (it treats TOC.txt as authoritative).
