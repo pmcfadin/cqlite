@@ -59,10 +59,19 @@ jobs:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${INPUT_VERSION#v}" >> "$GITHUB_OUTPUT"
+            resolved="${INPUT_VERSION#v}"
           else
-            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            resolved="${GITHUB_REF_NAME#v}"
           fi
+          # Strict allowlist: semver core with an optional pre-release suffix
+          # (e.g. 0.13.0, 0.13.0-test, 0.13.0-rc.1). Reject anything else so a
+          # crafted version cannot inject shell metacharacters into the gradle
+          # invocations below — which run with Maven Central + signing secrets.
+          if ! printf '%s' "$resolved" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$'; then
+            echo "::error::Refusing to publish: version '$resolved' is not a valid release version (expected ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$)"
+            exit 1
+          fi
+          echo "version=$resolved" >> "$GITHUB_OUTPUT"
 
       # Secrets cannot be referenced in a job/step-level `if:`. Read them here and
       # publish a boolean output the publish step gates on.
@@ -87,7 +96,9 @@ jobs:
       - name: Publish to Maven local (dry run)
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run
         working-directory: trino-connector
-        run: ./gradlew --no-daemon publishToMavenLocal -Pversion=${{ steps.version.outputs.version }}
+        env:
+          PUBLISH_VERSION: ${{ steps.version.outputs.version }}
+        run: ./gradlew --no-daemon publishToMavenLocal -Pversion="$PUBLISH_VERSION"
 
       - name: Publish to Maven Central
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) && steps.guard.outputs.should_publish == 'true' }}
@@ -99,7 +110,8 @@ jobs:
           ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
           ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
           ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_PASSWORD }}
-        run: ./gradlew --no-daemon publishToMavenCentral -Pversion=${{ steps.version.outputs.version }}
+          PUBLISH_VERSION: ${{ steps.version.outputs.version }}
+        run: ./gradlew --no-daemon publishToMavenCentral -Pversion="$PUBLISH_VERSION"
 
       - name: Skip notice (secrets absent)
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) && steps.guard.outputs.should_publish != 'true' }}
