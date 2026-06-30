@@ -185,10 +185,11 @@ jobs:
       run: |
         set -euo pipefail
         version="${{ needs.merge.outputs.version }}"
-        # The merge job always resolves a tag (a v* release version, or the
-        # required `image_tag` dispatch input which defaults to `dev`), so an
-        # empty value means something upstream broke — fail clearly instead of
-        # issuing a `docker pull <image>:` with a dangling reference.
+        # The merge job normally resolves a tag (a v* release version, or the
+        # `image_tag` dispatch input — required, defaulting to `dev` in the UI,
+        # though a programmatic dispatch can still send it empty). Guard rather
+        # than assume: an empty value means something upstream broke, so fail
+        # clearly instead of issuing `docker pull <image>:` with a dangling ref.
         if [ -z "$version" ]; then
           echo "::error::merge job resolved no published tag (empty version) — cannot smoke-test the image"
           exit 1
@@ -203,6 +204,9 @@ jobs:
         set -euo pipefail
         data="$RUNNER_TEMP/flight-data"
         mkdir -p "$data"
+        # Read-only data mount is intentional and matches production use: the
+        # Flight server only reads/merges SSTables and never writes to its data
+        # dir, so :ro is the correct, safe mount (see cqlite-flight/README.md).
         cid=$(docker run -d -p 8815:8815 \
           -v "$data":/data:ro \
           "${{ steps.tag.outputs.ref }}" \
