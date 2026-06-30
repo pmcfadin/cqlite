@@ -67,12 +67,14 @@ use cqlite_core::Database;
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
 /// Allocations-per-row ceiling for the NARROW (18-column) `simple_table` scan.
-/// Measured: original per-row String-clone map 102.3/row, v2 borrowed-key map
-/// 82.3/row, true hoist 77.3/row. The 85.0 ceiling sits below both the original
-/// (102.3) and the rejected v2 borrowed-map (82.3) figures — so any
-/// reintroduction of a per-row map fails — yet ~8 allocs/row above the hoisted
-/// figure to tolerate small legitimate decode churn without flaking.
-const MAX_ALLOCS_PER_ROW_NARROW: f64 = 85.0;
+/// Measured: original per-row String-clone map 102.3/row, rejected v2
+/// borrowed-key map 82.3/row, current true hoist 77.3/row. The 80.0 ceiling sits
+/// BETWEEN the current hoisted figure (~77.3) and the rejected v2 borrowed-map
+/// figure (~82.3): it leaves ~2.7 allocs/row of headroom above the measured
+/// value to tolerate small legitimate decode churn, while staying ~2.3
+/// allocs/row BELOW the rejected per-row-map figure so any reintroduction of a
+/// per-row map (which measured 82.3) fails closed at this guard.
+const MAX_ALLOCS_PER_ROW_NARROW: f64 = 80.0;
 
 /// Allocations-per-row ceiling for the WIDE (100-column) `many_columns_table`
 /// scan. The wide table materializes ~5.5x as many columns per row, so the
