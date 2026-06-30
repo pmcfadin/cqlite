@@ -156,25 +156,88 @@ fn compare_f64_java(x: f64, y: f64) -> Ordering {
 /// Scale-aware numeric comparison of two `decimal` values, matching Cassandra
 /// `DecimalType.compare` (`BigDecimal.compareTo`, arbitrary precision) (issue
 /// #1275). The unscaled part is a two's-complement varint; the value is
-/// `unscaled * 10^-scale`. We align to the common (max) scale: multiply each
-/// unscaled integer by `10^(max_scale - own_scale)` and compare the resulting
-/// signed big integers.
+/// `unscaled * 10^-scale`.
 ///
-/// Uses `num_bigint::BigInt` (already a cqlite-core dependency, used by
-/// `value_fmt` for varint/decimal formatting) so unscaled magnitudes wider than
-/// 128 bits and large scale differences compare exactly, with no saturation.
+/// IMPORTANT (DoS-safe): we must NEVER materialize `10^(max_scale - own_scale)`,
+/// because a valid `i32` scale difference (e.g. `0` vs `2_147_483_647`) would
+/// build an astronomically large `BigInt` and hang/OOM the writer. Instead we
+/// mirror `BigDecimal.compareTo`'s bounded strategy:
+///
+///   1. Sign first: negative < zero < positive. Differing signs decide with no
+///      big-int multiply at all.
+///   2. Same-sign non-zero: compare by ADJUSTED EXPONENT
+///      `adj = (num_unscaled_digits - 1) - scale`, the base-10 exponent of the
+///      most-significant digit (`value ≈ d.dddd × 10^adj`). A larger adjusted
+///      exponent means a larger magnitude; apply the (shared) sign. Decided
+///      WITHOUT any `10^p`.
+///   3. Only when the adjusted exponents are EQUAL (same decimal magnitude band)
+///      do we align and compare exactly. There the rescale multiplier exponent
+///      is the scale delta, which — because the adjusted exponents match — is
+///      bounded by the difference in digit counts (`|digits_a - digits_b|`), a
+///      small number. That `10^delta` is safe to build.
+///
+/// Uses `num_bigint::BigInt` (already a cqlite-core dependency) so unscaled
+/// magnitudes wider than 128 bits compare exactly, with no saturation.
 fn compare_decimal(scale_a: i32, unscaled_a: &[u8], scale_b: i32, unscaled_b: &[u8]) -> Ordering {
-    let mut big_a = varint_to_bigint(unscaled_a);
-    let mut big_b = varint_to_bigint(unscaled_b);
-    let max_scale = scale_a.max(scale_b);
-    // value = unscaled * 10^-scale; to align scales multiply by 10^(max-own).
-    if let Some(p) = max_scale.checked_sub(scale_a).filter(|p| *p > 0) {
-        big_a *= pow10(p as u32);
+    let big_a = varint_to_bigint(unscaled_a);
+    let big_b = varint_to_bigint(unscaled_b);
+
+    // 1. Sign comparison: negative < zero < positive. Differing signs decide
+    //    immediately with no rescale.
+    let sign_a = big_a.sign();
+    let sign_b = big_b.sign();
+    if sign_a != sign_b {
+        return sign_a.cmp(&sign_b);
     }
-    if let Some(p) = max_scale.checked_sub(scale_b).filter(|p| *p > 0) {
-        big_b *= pow10(p as u32);
+    // Equal signs that are both Zero → both values are exactly 0 (scale is
+    // irrelevant for a zero unscaled part), so the values are equal.
+    if sign_a == num_bigint::Sign::NoSign {
+        return Ordering::Equal;
     }
-    big_a.cmp(&big_b)
+
+    // 2. Same-sign non-zero: compare by adjusted exponent (magnitude band).
+    //    digits = number of base-10 digits of |unscaled| (>= 1 here).
+    let digits_a = decimal_digit_count(&big_a);
+    let digits_b = decimal_digit_count(&big_b);
+    // adjusted exponent = (digits - 1) - scale, as i64 to avoid i32 overflow
+    // for extreme scales near i32::MIN/MAX.
+    let adj_a = (digits_a as i64 - 1) - scale_a as i64;
+    let adj_b = (digits_b as i64 - 1) - scale_b as i64;
+    let positive = sign_a == num_bigint::Sign::Plus;
+    if adj_a != adj_b {
+        let by_magnitude = adj_a.cmp(&adj_b);
+        // For negatives the larger magnitude is the SMALLER value.
+        return if positive {
+            by_magnitude
+        } else {
+            by_magnitude.reverse()
+        };
+    }
+
+    // 3. Adjusted exponents equal: same magnitude band, so an exact compare
+    //    requires aligning scales. The scale delta is bounded by the digit-count
+    //    difference (`adj_a == adj_b` ⇒ `scale_a - scale_b == digits_a -
+    //    digits_b`), which is small — safe to build `10^delta`.
+    let delta = scale_a as i64 - scale_b as i64; // == digits_a - digits_b
+    let (mut lhs, mut rhs) = (big_a, big_b);
+    match delta.cmp(&0) {
+        // scale_a > scale_b: a is finer-grained; scale b UP by multiplying b.
+        Ordering::Greater => rhs *= pow10(delta as u32),
+        // scale_a < scale_b: scale a UP by multiplying a.
+        Ordering::Less => lhs *= pow10((-delta) as u32),
+        Ordering::Equal => {}
+    }
+    lhs.cmp(&rhs)
+}
+
+/// Number of base-10 digits in the magnitude of `n` (with `n != 0`), matching the
+/// "precision" of `BigDecimal`. Derived from the decimal string of the magnitude
+/// so it is exact; the BigInt here is bounded by the unscaled body length (an
+/// actual serialized value), never by an unbounded power of ten.
+fn decimal_digit_count(n: &BigInt) -> u64 {
+    // magnitude() yields the BigUint; its base-10 string length is the digit
+    // count. Cheap because the unscaled body is a real (short) serialized value.
+    n.magnitude().to_str_radix(10).len() as u64
 }
 
 /// Decode a two's-complement big-endian `varint` body into an arbitrary-precision
@@ -397,6 +460,117 @@ mod tests {
         assert_eq!(
             compare_collection_elements(&whole, &tiny),
             Ordering::Greater
+        );
+    }
+
+    /// DecimalType DoS-safety: a scale near `i32::MAX` against a `scale 0` value
+    /// must compare correctly AND instantly. Under the old approach this aligned
+    /// to the max scale and built `10^2_000_000_000` as a `BigInt`, hanging/OOMing
+    /// the writer. The bounded comparator decides by adjusted exponent
+    /// (`(1-1) - 2_000_000_000 = -2e9` for the tiny value vs `(1-1) - 0 = 0` for
+    /// the magnitude-1 value) without any `10^p`, so it returns immediately.
+    #[test]
+    fn decimal_extreme_scale_compares_fast_and_correct() {
+        // tiny = 1 * 10^-2_000_000_000  (a positive value extremely close to 0)
+        let tiny = Value::Decimal {
+            scale: 2_000_000_000,
+            unscaled: vec![0x01],
+        };
+        // one = 1 * 10^0
+        let one = Value::Decimal {
+            scale: 0,
+            unscaled: vec![0x01],
+        };
+        // tiny is a vanishingly small positive number, far less than 1.
+        assert_eq!(compare_collection_elements(&tiny, &one), Ordering::Less);
+        assert_eq!(compare_collection_elements(&one, &tiny), Ordering::Greater);
+
+        // The same against zero: tiny is positive, so > 0.
+        let zero = Value::Decimal {
+            scale: 0,
+            unscaled: vec![0x00],
+        };
+        assert_eq!(compare_collection_elements(&tiny, &zero), Ordering::Greater);
+
+        // And a negative extreme-scale value sorts below zero.
+        let neg_tiny = Value::Decimal {
+            scale: 2_000_000_000,
+            unscaled: vec![0xFF], // -1 * 10^-2e9
+        };
+        assert_eq!(
+            compare_collection_elements(&neg_tiny, &zero),
+            Ordering::Less
+        );
+    }
+
+    /// DecimalType: a huge scale difference where the SMALLER-scale number is the
+    /// LARGER magnitude, and the reverse — decided by adjusted exponent without
+    /// materializing `10^p`. `5 * 10^0 = 5` (scale 0) vs `999 * 10^-1_000_000_000`
+    /// (a number with three digits but an enormous negative exponent, ≈ 0). The
+    /// scale-0 value is far larger despite its smaller scale; reversing the roles
+    /// (a huge whole number at scale 0 vs a finely-scaled value) flips the result.
+    #[test]
+    fn decimal_huge_scale_diff_magnitude_dominates() {
+        let five = Value::Decimal {
+            scale: 0,
+            unscaled: vec![0x05], // 5
+        };
+        let near_zero = Value::Decimal {
+            scale: 1_000_000_000,
+            unscaled: vec![0x03, 0xE7], // 999 * 10^-1e9 ≈ 0
+        };
+        // Smaller scale (0) holds the larger magnitude.
+        assert_eq!(
+            compare_collection_elements(&five, &near_zero),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_collection_elements(&near_zero, &five),
+            Ordering::Less
+        );
+
+        // Reverse: a huge whole number (scale 0, adjusted exp huge) vs a finely
+        // scaled small value — the larger-scale value is the smaller number.
+        let huge_whole = Value::Decimal {
+            scale: 0,
+            unscaled: BigInt::from(10).pow(50).to_signed_bytes_be(), // 10^50
+        };
+        let small_fine = Value::Decimal {
+            scale: 2_000_000_000,
+            unscaled: vec![0x09], // 9 * 10^-2e9 ≈ 0
+        };
+        assert_eq!(
+            compare_collection_elements(&huge_whole, &small_fine),
+            Ordering::Greater
+        );
+    }
+
+    /// DecimalType: adjusted exponents EQUAL → the bounded exact-rescale branch.
+    /// `1.5` (unscaled 15, scale 1, adj = (2-1)-1 = 0) vs `2` (unscaled 2, scale
+    /// 0, adj = (1-1)-0 = 0): same magnitude band, so the comparator rescales by
+    /// the small `10^(digit-count delta)` and finds 1.5 < 2.
+    #[test]
+    fn decimal_equal_adjusted_exponent_exact_branch() {
+        let one_point_five = Value::Decimal {
+            scale: 1,
+            unscaled: vec![0x0F], // 15 * 10^-1 = 1.5
+        };
+        let two = Value::Decimal {
+            scale: 0,
+            unscaled: vec![0x02], // 2
+        };
+        assert_eq!(
+            compare_collection_elements(&one_point_five, &two),
+            Ordering::Less
+        );
+        // Equal values across scales: 1.50 (150, scale 2) == 1.5 (15, scale 1).
+        let one_point_fifty = Value::Decimal {
+            scale: 2,
+            unscaled: vec![0x00, 0x96], // 150 * 10^-2 = 1.50 (0x96 alone is negative)
+        };
+        assert_eq!(
+            compare_collection_elements(&one_point_five, &one_point_fifty),
+            Ordering::Equal
         );
     }
 
