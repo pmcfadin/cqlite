@@ -20,7 +20,10 @@ use tokio::io::AsyncSeekExt;
 #[cfg(not(feature = "tombstones"))]
 use super::super::source::ScanCursor;
 #[cfg(not(feature = "tombstones"))]
-use super::model::{physical_byte_bounds_for_slice, ClusteringRowWindow, ClusteringSlice};
+use super::model::{
+    physical_byte_bounds_for_slice, table_header_consistent_for_seek, ClusteringRowWindow,
+    ClusteringSlice,
+};
 
 impl SSTableReader {
     /// Current value of the test-only `scan_for_key` invocation counter.
@@ -1059,9 +1062,9 @@ impl SSTableReader {
             clamped_window,
             |(tid, entry_key, entry_value)| {
                 if entry_key.as_bytes() == key.as_bytes() {
-                    // A row of the TARGET partition. Verify the table id matches
-                    // (a wrong-table query never returns a row, issue #831).
-                    if table_ids_match_strict(&tid, table_id) {
+                    // Header-authoritative table consistency: wrong-table rejected
+                    // (#831), keyspace-divergent same-table query still served (#1284).
+                    if table_header_consistent_for_seek(&tid, table_id) {
                         rows.push(entry_value);
                     }
                     Ok(std::ops::ControlFlow::Continue(()))
