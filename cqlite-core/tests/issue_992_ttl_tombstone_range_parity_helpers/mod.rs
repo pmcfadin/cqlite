@@ -11,6 +11,13 @@
 //! the file-size ratchet (#1135).
 
 #![cfg(feature = "write-support")]
+// This module is `#[path]`-included into BOTH sibling test binaries
+// (`issue_992_ttl_tombstone_parity` and `issue_992_range_boundary_grammar`).
+// Each binary uses only the subset of the shared constants/helpers its tests
+// need, so per-binary dead-code warnings are expected and allowed (the
+// standard pattern for a shared `tests/` helper module, mirroring
+// `parity_support/mod.rs`).
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -455,4 +462,32 @@ pub mod minima {
     /// Shared minLocalDeletionTime floor for the row/cell/range/adjacent
     /// fixtures (2026-06-24T22:50:57Z, seconds).
     pub const SHARED_MIN_LDT: i64 = 1_782_341_457;
+}
+
+// ===========================================================================
+// JSONL golden field extractors shared across the issue #992 sibling test
+// files (string-scan; no JSON crate, mirroring #991). The TTL/tombstone and
+// range/boundary suites both locate a partition by its golden `position`, so
+// these live in the shared module; suite-specific extractors stay with their
+// tests.
+// ===========================================================================
+
+/// Extract the substring after `marker` up to the next `"`, `,`, or `}`.
+pub fn extract_after(line: &str, marker: &str) -> Option<String> {
+    let start = line.find(marker)? + marker.len();
+    let rest = &line[start..];
+    let end = rest.find(['"', ',', '}'])?;
+    Some(rest[..end].to_string())
+}
+
+/// `"position":<N>` of a `partition` object (the FIRST one in the line).
+pub fn golden_partition_position(line: &str) -> usize {
+    let p = line
+        .find("\"partition\":")
+        .unwrap_or_else(|| panic!("no partition object: {line}"));
+    let rest = &line[p..];
+    extract_after(rest, "\"position\":")
+        .unwrap_or_else(|| panic!("no partition position: {line}"))
+        .parse()
+        .expect("partition position int")
 }
