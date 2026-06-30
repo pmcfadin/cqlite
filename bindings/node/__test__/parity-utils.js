@@ -632,11 +632,23 @@ function formatValue(value) {
 
 const TABLE_DIR_RE = /^(.+)-[0-9a-f]{32}$/;
 
-/** Keyspaces intentionally excluded from the read-parity corpus (reasons in policy doc). */
+/**
+ * All `system*` keyspaces (system, system_auth, system_schema,
+ * system_distributed, system_traces, system_views, ...) are Cassandra-internal
+ * metadata, not user-data read-parity targets, and are excluded by PREFIX so
+ * any future `system*` keyspace shipped in a dataset subset is auto-excluded
+ * (#1229). See test-data/corpus-coverage-policy.md.
+ */
+function isSystemKeyspace(keyspace) {
+  return keyspace.startsWith('system');
+}
+
+/**
+ * Keyspaces intentionally excluded from the read-parity corpus by EXACT name
+ * (reasons in policy doc). `system*` keyspaces are excluded separately by
+ * prefix via isSystemKeyspace() — do not enumerate them here.
+ */
 const SKIP_KEYSPACES = {
-  system: 'Cassandra-internal metadata; not a read-parity target',
-  system_auth: 'Cassandra-internal auth metadata; not a read-parity target',
-  system_schema: 'Cassandra-internal schema catalog; not a read-parity target',
   test_writeparity: 'write byte-parity fixtures (dedicated Rust parity tests)',
   test_compactionparity: 'compaction byte-parity fixtures (differential-compaction harness)',
   test_compactionparityudt: 'compaction-parity UDT fixtures (compaction harness; may be local-only)',
@@ -704,9 +716,9 @@ function discoverTables(keyspace) {
   return tables.sort();
 }
 
-/** In-scope keyspaces = discovered minus the documented skip-set. */
+/** In-scope keyspaces = discovered minus the documented skip-set + system*. */
 function inScopeKeyspaces() {
-  return discoverKeyspaces().filter((k) => !(k in SKIP_KEYSPACES));
+  return discoverKeyspaces().filter((k) => !(k in SKIP_KEYSPACES) && !isSystemKeyspace(k));
 }
 
 /**
@@ -726,7 +738,9 @@ function unclassifiedKeyspaces() {
     ...Object.keys(SKIP_KEYSPACES),
     ...Object.keys(SKIP_PENDING_KEYSPACES),
   ]);
-  return discoverKeyspaces().filter((k) => !classified.has(k));
+  // system* keyspaces are classified by prefix (Cassandra-internal metadata),
+  // not enumerated in any explicit set.
+  return discoverKeyspaces().filter((k) => !classified.has(k) && !isSystemKeyspace(k));
 }
 
 /**
@@ -800,6 +814,7 @@ module.exports = {
   // Corpus enumeration (Issue #1229)
   SKIP_KEYSPACES,
   EXECUTABLE_KEYSPACES,
+  isSystemKeyspace,
   discoverKeyspaces,
   discoverTables,
   inScopeKeyspaces,

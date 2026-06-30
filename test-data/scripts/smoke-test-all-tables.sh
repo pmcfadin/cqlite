@@ -44,6 +44,12 @@ declare -a PASSED_TABLES=()
 declare -a FAILED_TABLES=()
 declare -a FAILED_DETAILS=()
 declare -a SKIPPED_PENDING_TABLES=()
+# Tables whose Data.db is ABSENT in THIS environment's dataset subset. CI ships
+# a subset of the full local corpus, so an enforced table dir (committed
+# TOC/schema/JSONL) may lack its gitignored Data.db here. Absence => SKIP (not
+# FAIL), per the local-only-fixtures-skip-on-presence pattern. A Data.db that
+# IS present but yields 0 rows remains a FAILURE.
+declare -a SKIPPED_ABSENT_TABLES=()
 
 # Get script directory (resolve symlinks)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -64,21 +70,27 @@ OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/smoke-test-all-tables-results}"
 KEYSPACES=()
 
 # Skip-set: keyspaces intentionally EXCLUDED from the comprehensive read-parity
-# corpus. Each MUST carry a reason (parallel arrays, bash 3.x compatible).
-# Mirrored in bindings/python/tests/corpus.py (SKIP_KEYSPACES) and
+# corpus by EXACT name. Each MUST carry a reason (parallel arrays, bash 3.x
+# compatible). ALL `system*` keyspaces (system, system_auth, system_schema,
+# system_distributed, system_traces, system_views, ...) are excluded separately
+# by PREFIX via is_system_keyspace() — do NOT enumerate them here. Mirrored in
+# bindings/python/tests/corpus.py (SKIP_KEYSPACES) and
 # test-data/corpus-coverage-policy.md.
 SKIP_KEYSPACE_NAMES=(
-    "system" "system_auth" "system_schema"
     "test_writeparity" "test_compactionparity" "test_compactionparityudt"
 )
 SKIP_KEYSPACE_REASONS=(
-    "Cassandra-internal metadata; not a read-parity target"
-    "Cassandra-internal auth metadata; not a read-parity target"
-    "Cassandra-internal schema catalog; not a read-parity target"
     "write byte-parity fixtures (dedicated Rust parity tests)"
     "compaction byte-parity fixtures (differential-compaction harness)"
     "compaction-parity UDT fixtures (compaction harness; may be local-only)"
 )
+
+# Return 0 if $1 is a system* keyspace (Cassandra-internal metadata, excluded
+# by prefix; not a user-data read-parity target). Mirrors is_system_keyspace()
+# in corpus.py and isSystemKeyspace() in parity-utils.js.
+is_system_keyspace() {
+    [[ "$1" == system* ]]
+}
 
 # Skip-pending keyspaces: in-scope (covered by JSONL goldens + the dynamic
 # enumeration) but discovered + listed explicitly as SKIP-PENDING rather than
@@ -126,6 +138,7 @@ discover_keyspaces() {
     local dir ks
     while IFS= read -r dir; do
         ks="$(basename "${dir}")"
+        is_system_keyspace "${ks}" && continue
         is_skip_keyspace "${ks}" && continue
         is_skip_pending_keyspace "${ks}" && continue
         KEYSPACES+=("${ks}")
@@ -202,7 +215,7 @@ validate_environment() {
     local dir ks
     while IFS= read -r dir; do
         ks="$(basename "${dir}")"
-        if is_skip_keyspace "${ks}" || is_skip_pending_keyspace "${ks}"; then
+        if is_system_keyspace "${ks}" || is_skip_keyspace "${ks}" || is_skip_pending_keyspace "${ks}"; then
             continue
         fi
         # in-scope (enforced) keyspaces are exactly KEYSPACES by construction
@@ -352,10 +365,15 @@ test_table() {
     data_db_file=$(find "${full_table_path}" -name "*-Data.db" -type f -not -name "._*" | head -1)
 
     if [[ -z "${data_db_file}" ]]; then
-        log_error "${qualified_name} ... FAIL (no Data.db file found)"
-        FAILED_TABLES+=("${qualified_name}")
-        FAILED_DETAILS+=("${qualified_name}: No Data.db file found in ${full_table_path}")
-        return 1
+        # Data.db ABSENT => this fixture is not in THIS environment's dataset
+        # subset (CI ships a subset; local has the full set). SKIP it — do NOT
+        # fail. This keeps smoke robust to any subset while preserving the
+        # parity-is-truth rule: a PRESENT Data.db yielding 0 rows still FAILs
+        # below. See the local-only-fixtures-skip-on-presence pattern
+        # (cf. test_da/wide_table, test_big.wide_partition).
+        log_warn "${qualified_name} ... SKIP (no Data.db in this dataset subset)"
+        SKIPPED_ABSENT_TABLES+=("${qualified_name}")
+        return 0
     fi
 
     # Find corresponding JSONL file
@@ -530,6 +548,10 @@ print_summary() {
         echo -e "  ${YELLOW}Skip-pending:        ${#SKIPPED_PENDING_TABLES[@]} (${SKIP_PENDING_KEYSPACES[*]} - discovered but not executed; see corpus-coverage-policy.md)${NC}"
     fi
 
+    if [[ ${#SKIPPED_ABSENT_TABLES[@]} -gt 0 ]]; then
+        echo -e "  ${YELLOW}Skipped (no Data.db): ${#SKIPPED_ABSENT_TABLES[@]} (enforced tables whose Data.db is absent in this dataset subset)${NC}"
+    fi
+
     echo ""
     echo "  Output Directory:    ${OUTPUT_DIR}"
     echo ""
@@ -549,6 +571,16 @@ print_summary() {
         echo -e "${YELLOW}Skip-Pending Tables (fixtures present, parser not yet wired):${NC}"
         echo ""
         for entry in "${SKIPPED_PENDING_TABLES[@]}"; do
+            echo -e "${YELLOW}  • ${entry}${NC}"
+        done
+        echo ""
+    fi
+
+    # List tables skipped because their Data.db is absent in this dataset subset
+    if [[ ${#SKIPPED_ABSENT_TABLES[@]} -gt 0 ]]; then
+        echo -e "${YELLOW}Skipped Tables (Data.db absent in this dataset subset; enforced where present):${NC}"
+        echo ""
+        for entry in "${SKIPPED_ABSENT_TABLES[@]}"; do
             echo -e "${YELLOW}  • ${entry}${NC}"
         done
         echo ""

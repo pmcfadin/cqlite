@@ -55,10 +55,15 @@ explicitly, not silently dropped.
 
 ### Excluded (skip-set) keyspaces
 
-`system`, `system_auth`, `system_schema` (Cassandra-internal metadata);
-`test_writeparity`, `test_compactionparity`, `test_compactionparityudt`
+All `system*` keyspaces by PREFIX (`system`, `system_auth`, `system_schema`,
+`system_distributed`, `system_traces`, `system_views`, and any future
+`system*`) — Cassandra-internal metadata, not user-data parity targets, so a
+dataset subset that ships extra `system*` keyspaces auto-excludes them.
+Also `test_writeparity`, `test_compactionparity`, `test_compactionparityudt`
 (write/compaction byte-parity fixtures validated by dedicated Rust parity tests).
-Reasons in [`corpus-coverage-policy.md`](corpus-coverage-policy.md).
+Reasons in [`corpus-coverage-policy.md`](corpus-coverage-policy.md). Enforced
+tables whose `Data.db` is absent in a given dataset subset are SKIPPED (not
+failed); a present `Data.db` that yields 0 rows still FAILS.
 
 > Local-only fixtures (e.g. an extra `test_da/wide_table` generation, or extra
 > `test_deltas` generations present in a full local dataset) are picked up

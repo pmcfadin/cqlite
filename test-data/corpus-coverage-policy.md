@@ -31,15 +31,34 @@ keyspace is neither covered nor listed here.
 
 | Keyspace | Category | Reason for exclusion |
 |----------|----------|----------------------|
-| `system` | system | Cassandra-internal metadata SSTables; no user-facing CQLite schema; not a read-parity target. |
-| `system_auth` | system | Cassandra-internal auth metadata; not a read-parity target. |
-| `system_schema` | system | Cassandra-internal schema catalog; not a read-parity target. |
+| `system*` (all) | system | **All `system*` keyspaces are excluded — Cassandra-internal metadata, not user-data parity targets.** Matched by PREFIX (`system`, `system_auth`, `system_schema`, `system_distributed`, `system_traces`, `system_views`, and any future `system*`), so a dataset subset that ships additional `system*` keyspaces auto-excludes them. |
 | `test_writeparity` | parity-fixture | Write byte-parity fixtures validated by dedicated Rust parity tests (`cqlite-core/tests/issue_*_parity.rs`), not the comprehensive read-parity corpus. |
 | `test_compactionparity` | parity-fixture | STCS compaction byte-parity fixtures validated by the differential-compaction harness, not the read-parity corpus. |
 | `test_compactionparityudt` | parity-fixture | Compaction-parity UDT fixtures (compaction harness only; may be local-only). |
 
-`system*` are matched by the `system`/`system_auth`/`system_schema` names;
-`*parity` keyspaces are matched by the explicit names above.
+`system*` keyspaces are matched by the `system` **prefix** in every harness
+(`is_system_keyspace` in `smoke-test-all-tables.sh` and `corpus.py`,
+`isSystemKeyspace` in `parity-utils.js`); the `*parity` keyspaces are matched by
+the explicit names above. Because `system*` is a prefix rule, it is NOT
+enumerated in the per-harness `SKIP_KEYSPACE*` constants — only the
+`test_*parity` exact names are.
+
+## Dataset subsets and `Data.db` presence (skip-on-absence)
+
+The CI dataset asset ships a **subset** of the full local corpus: every
+keyspace's committed TOC/schema/JSONL files are present, but the gitignored
+`*-Data.db` binaries for some fixtures are not. Discovery and classification are
+based on the committed directory structure (so the corpus is identical
+everywhere), but **enforcement is gated on `Data.db` presence**:
+
+- An enforced table whose `Data.db` is **absent** in this environment's dataset
+  is **SKIPPED** (reported explicitly as "Skipped (no Data.db)"), not failed.
+  This keeps the smoke suite robust to any dataset subset
+  (cf. the `local-only-fixtures-skip-on-presence` pattern, e.g.
+  `test_da/wide_table`, `test_big.wide_partition` — enforced locally where the
+  `Data.db` is present, skipped in CI where it is absent).
+- An enforced table whose `Data.db` **is present** but yields **0 rows** remains
+  a **FAILURE** — parity is truth; only ABSENCE of `Data.db` triggers a skip.
 
 ## In-scope read-parity corpus (everything else)
 

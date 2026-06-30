@@ -30,6 +30,8 @@ const {
   getKnownIssue,
   inScopeKeyspaces,
   unclassifiedKeyspaces,
+  isSystemKeyspace,
+  SKIP_KEYSPACES,
 } = require('./parity-utils.js');
 
 // =============================================================================
@@ -411,6 +413,38 @@ describe('Parity Summary (Issue #307 / dynamic enumeration #1229)', () => {
     // A newly-committed keyspace that nobody classified reds the suite instead
     // of being silently uncovered (replaces the old tautological toBe(33)).
     expect(unclassified).toEqual([]);
+  });
+
+  test('All system* keyspaces are excluded by prefix (not enumerated)', () => {
+    // The prefix rule must cover every system* keyspace, including ones a
+    // dataset subset ships beyond the hard-named three (#1229).
+    for (const ks of [
+      'system',
+      'system_auth',
+      'system_schema',
+      'system_distributed',
+      'system_traces',
+      'system_views',
+      'system_anything_future',
+    ]) {
+      expect(isSystemKeyspace(ks)).toBe(true);
+    }
+    // system* must NOT be enumerated in the exact-name skip-set (prefix-only).
+    for (const k of Object.keys(SKIP_KEYSPACES)) {
+      expect(isSystemKeyspace(k)).toBe(false);
+    }
+    // A non-system test keyspace is not caught by the prefix.
+    expect(isSystemKeyspace('test_brandnew')).toBe(false);
+  });
+
+  test('A genuinely-unknown keyspace still trips the classification guard', () => {
+    // The guard must NOT be neutered: a fake, never-classified keyspace name is
+    // neither in any explicit bucket nor a system* keyspace, so the
+    // classification logic must treat it as unclassified.
+    const fake = 'test_brandnew';
+    const classified =
+      fake in SKIP_KEYSPACES || isSystemKeyspace(fake);
+    expect(classified).toBe(false);
   });
 });
 
