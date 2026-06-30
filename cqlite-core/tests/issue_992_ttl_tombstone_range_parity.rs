@@ -962,10 +962,336 @@ fn fixture_range_inclusive_end_bound_kind() {
 // Cassandra oracle: a BOUNDARY marker (kind 2 = EXCL_END_INCL_START_BOUNDARY or
 // 5 = INCL_END_EXCL_START_BOUNDARY) closes one range and opens the next at the
 // SAME clustering point. Its body carries TWO deletion-time pairs (primary = end
-// of the previous range, secondary = start of the new range). Only real
-// Cassandra (adjacent_ranges) emits boundaries — CQLite's writer emits separate
-// bound pairs — so this is a fixture-only byte walk.
+// of the previous range, secondary = start of the new range). As of issue #1220
+// CQLite's writer COALESCES two adjacent range tombstones that share a boundary
+// point (complementary inclusivity) into exactly this marker, so the form now has
+// a deterministic writer round-trip lane in addition to the fixture byte walks.
 // ===========================================================================
+
+/// Deterministic BYTE parity for a coalesced BOUNDARY marker (issue #1220), the
+/// boundary sibling of `range_bound_markers_exact_grammar_writer`. Two ADJACENT
+/// range tombstones meeting at clustering [4] — rt1 closes EXCLUSIVE(4), rt2 opens
+/// INCLUSIVE(4) — must be emitted by the public `DataWriter` as a SINGLE kind-2
+/// (EXCL_END_INCL_START) boundary marker carrying TWO deletion-time pairs, NOT as
+/// a separate end-BOUND + start-BOUND pair. Assert the EXACT marker grammar at
+/// absolute offsets: the bracketing rt1 START / rt2 END bounds, the boundary's
+/// IS_MARKER flag + kind-2 ordinal + u16 count + clustering value, and BOTH
+/// deletion-time pairs (primary = rt1's end, secondary = rt2's start).
+#[test]
+fn range_boundary_marker_exact_grammar_writer() {
+    let schema = int_clustering_schema();
+    // rt1 = [2 .. 4) (close EXCLUSIVE at 4), rt2 = [4 .. 6) (open INCLUSIVE at 4).
+    let rt1 = RangeTombstone {
+        start: ClusteringBound::Inclusive(ClusteringKey::single("ck", Value::Integer(2))),
+        end: ClusteringBound::Exclusive(ClusteringKey::single("ck", Value::Integer(4))),
+        deletion_time: 1_500_000, // end/PRIMARY mfda µs
+        local_deletion_time: 1_700,
+    };
+    let rt2 = RangeTombstone {
+        start: ClusteringBound::Inclusive(ClusteringKey::single("ck", Value::Integer(4))),
+        end: ClusteringBound::Exclusive(ClusteringKey::single("ck", Value::Integer(6))),
+        deletion_time: 1_800_000, // start/SECONDARY mfda µs
+        local_deletion_time: 1_900,
+    };
+    let m = Mutation::new(
+        TableId::new("issue992", "t"),
+        PartitionKey::single("id", Value::Integer(1)),
+        Some(ClusteringKey::single("ck", Value::Integer(1))),
+        vec![write_op("val", "x")],
+        2_000_000,
+        None,
+    );
+    let bytes = write_one_partition(det_stats(), &schema, 1, &[m], None, &[rt1, rt2]);
+
+    // (1) First marker after the header: rt1's open START bound at [2].
+    let start = find_marker(&bytes, INT_PK_HEADER_SIZE, INT_CLUSTERING)
+        .expect("a range tombstone START marker (rt1.start)");
+    let (after_start, start_kind, start_ck, _sm, _sl) = walk_bound_marker(&bytes, start);
+    assert_eq!(
+        start_kind, INCL_START_BOUND,
+        "rt1 open inclusive START bound kind ordinal must be INCL_START_BOUND (1)"
+    );
+    assert_eq!(
+        start_ck,
+        Some(2),
+        "rt1 START bound clustering value must be 2"
+    );
+
+    // (2) The COALESCED BOUNDARY marker at [4] — the heart of issue #1220.
+    let boundary = find_marker(&bytes, after_start, INT_CLUSTERING)
+        .expect("a range tombstone BOUNDARY marker at [4]");
+    fail_flag(
+        read_u8_loc(&bytes, boundary),
+        IS_MARKER,
+        "boundary marker IS_MARKER flag",
+    );
+    assert_eq!(
+        bytes[boundary + 1],
+        EXCL_END_INCL_START_BOUNDARY,
+        "adjacent exclusive-end(4) / inclusive-start(4) ranges MUST coalesce into a single \
+         kind-2 EXCL_END_INCL_START_BOUNDARY marker — not separate end+start bounds"
+    );
+    let (b_kind, b_ck, primary, secondary) = walk_boundary_marker(&bytes, boundary);
+    assert_eq!(
+        b_kind, EXCL_END_INCL_START_BOUNDARY,
+        "boundary kind ordinal"
+    );
+    assert_eq!(b_ck, Some(4), "boundary clustering value must be 4");
+    // PRIMARY pair = rt1's end (close of the previous range).
+    fail_vint(
+        primary,
+        1_500_000 - 1_000_000,
+        "boundary PRIMARY (end) mfda delta = rt1",
+    );
+    let primary_ldt = read_uvint_loc(&bytes, primary.end());
+    fail_vint(primary_ldt, 1_700, "boundary PRIMARY (end) ldt delta = rt1");
+    // SECONDARY pair = rt2's start (open of the next range).
+    fail_vint(
+        secondary,
+        1_800_000 - 1_000_000,
+        "boundary SECONDARY (start) mfda delta = rt2",
+    );
+    let secondary_ldt = read_uvint_loc(&bytes, secondary.end());
+    fail_vint(
+        secondary_ldt,
+        1_900,
+        "boundary SECONDARY (start) ldt delta = rt2",
+    );
+
+    // (3) rt2's close EXCLUSIVE END bound at [6] follows the boundary body.
+    let end = find_marker(&bytes, secondary_ldt.end(), INT_CLUSTERING)
+        .expect("a range tombstone END marker (rt2.end)");
+    let (_after_end, end_kind, end_ck, end_mfda, end_ldt) = walk_bound_marker(&bytes, end);
+    assert_eq!(
+        end_kind, EXCL_END_BOUND,
+        "rt2 close exclusive END bound kind ordinal must be EXCL_END_BOUND (0)"
+    );
+    assert_eq!(end_ck, Some(6), "rt2 END bound clustering value must be 6");
+    fail_vint(
+        end_mfda,
+        1_800_000 - 1_000_000,
+        "rt2 END bound mfda delta = rt2",
+    );
+    fail_vint(end_ldt, 1_900, "rt2 END bound ldt delta = rt2");
+}
+
+/// Deterministic BYTE parity for a coalesced KIND-5 BOUNDARY marker (issue #1220,
+/// roborev finding 1 — the kind-5 sibling of `range_boundary_marker_exact_grammar_writer`).
+/// Two ADJACENT range tombstones meeting at clustering [4] — rt1 closes INCLUSIVE(4),
+/// rt2 opens EXCLUSIVE(4) — must be emitted by the public `DataWriter` as a SINGLE
+/// kind-5 (INCL_END_EXCL_START) boundary carrying TWO deletion-time pairs, NOT a
+/// separate INCL_END + EXCL_START bound pair. A LIVE row also sits at clustering [4]
+/// (its write timestamp outranks the covering rt1, so it survives): because the
+/// kind-5 boundary's bounds are close-inclusive / open-exclusive (comparedToClustering
+/// = +1), the boundary MUST sort AFTER that row at the same clustering. Assert the
+/// EXACT marker grammar at absolute offsets: the row-then-boundary positioning, the
+/// boundary's IS_MARKER flag + kind-5 ordinal + u16 count + clustering value, and
+/// BOTH deletion-time pairs (primary = rt1's end/close, secondary = rt2's start/open).
+#[test]
+fn range_boundary_marker_kind5_exact_grammar_writer() {
+    let schema = int_clustering_schema();
+    // rt1 = [2 .. 4] (close INCLUSIVE at 4), rt2 = (4 .. 6] (open EXCLUSIVE at 4).
+    let rt1 = RangeTombstone {
+        start: ClusteringBound::Inclusive(ClusteringKey::single("ck", Value::Integer(2))),
+        end: ClusteringBound::Inclusive(ClusteringKey::single("ck", Value::Integer(4))),
+        deletion_time: 1_500_000, // end/PRIMARY mfda µs
+        local_deletion_time: 1_700,
+    };
+    let rt2 = RangeTombstone {
+        start: ClusteringBound::Exclusive(ClusteringKey::single("ck", Value::Integer(4))),
+        end: ClusteringBound::Inclusive(ClusteringKey::single("ck", Value::Integer(6))),
+        deletion_time: 1_800_000, // start/SECONDARY mfda µs
+        local_deletion_time: 1_900,
+    };
+    // A live row at the boundary clustering [4]. rt1 [2..4] inclusive covers it, but
+    // the row's timestamp (2_000_000) outranks rt1's deletion (1_500_000), so the row
+    // survives and we can prove the boundary sorts AFTER it.
+    let row_at_boundary = Mutation::new(
+        TableId::new("issue992", "t"),
+        PartitionKey::single("id", Value::Integer(1)),
+        Some(ClusteringKey::single("ck", Value::Integer(4))),
+        vec![write_op("val", "y")],
+        2_000_000,
+        None,
+    );
+    let m = Mutation::new(
+        TableId::new("issue992", "t"),
+        PartitionKey::single("id", Value::Integer(1)),
+        Some(ClusteringKey::single("ck", Value::Integer(1))),
+        vec![write_op("val", "x")],
+        2_000_000,
+        None,
+    );
+    let bytes = write_one_partition(
+        det_stats(),
+        &schema,
+        1,
+        &[m, row_at_boundary],
+        None,
+        &[rt1, rt2],
+    );
+
+    // (1) First marker after the header: rt1's open INCLUSIVE START bound at [2].
+    let start = find_marker(&bytes, INT_PK_HEADER_SIZE, INT_CLUSTERING)
+        .expect("a range tombstone START marker (rt1.start)");
+    let (after_start, start_kind, start_ck, _sm, _sl) = walk_bound_marker(&bytes, start);
+    assert_eq!(
+        start_kind, INCL_START_BOUND,
+        "rt1 open inclusive START bound kind ordinal must be INCL_START_BOUND (1)"
+    );
+    assert_eq!(
+        start_ck,
+        Some(2),
+        "rt1 START bound clustering value must be 2"
+    );
+
+    // (2) The LIVE row at clustering [4] must appear BEFORE the boundary at [4].
+    // The first unfiltered after rt1.start is that regular row (not a marker / EOP).
+    let row4 = after_start;
+    assert!(
+        bytes[row4] & (IS_MARKER | END_OF_PARTITION) == 0,
+        "expected a regular row (not a marker/EOP) at clustering [4] before the kind-5 \
+         boundary; got leading byte 0x{:02X} @ {row4}",
+        bytes[row4]
+    );
+    let row4_header = read_uvint_loc(&bytes, row4 + 1);
+    let row4_ck = read_be_i32(&bytes, row4_header.end(), "row@4 clustering value");
+    assert_eq!(row4_ck, 4, "the surviving row must be at clustering [4]");
+
+    // (3) The COALESCED KIND-5 BOUNDARY marker at [4] — the heart of finding 1. It
+    // sits AFTER the row@4 (close-inclusive / open-exclusive => comparedToClustering +1).
+    let boundary = find_marker(&bytes, after_start, INT_CLUSTERING)
+        .expect("a range tombstone BOUNDARY marker at [4]");
+    assert!(
+        boundary > row4,
+        "kind-5 boundary (close-inclusive/open-exclusive, weight +1) MUST sort AFTER the row \
+         at the same clustering [4]: boundary @ {boundary}, row @ {row4}"
+    );
+    fail_flag(
+        read_u8_loc(&bytes, boundary),
+        IS_MARKER,
+        "boundary marker IS_MARKER flag",
+    );
+    assert_eq!(
+        bytes[boundary + 1],
+        INCL_END_EXCL_START_BOUNDARY,
+        "adjacent inclusive-end(4) / exclusive-start(4) ranges MUST coalesce into a single \
+         kind-5 INCL_END_EXCL_START_BOUNDARY marker — not separate end+start bounds"
+    );
+    let (b_kind, b_ck, primary, secondary) = walk_boundary_marker(&bytes, boundary);
+    assert_eq!(
+        b_kind, INCL_END_EXCL_START_BOUNDARY,
+        "boundary kind ordinal must be 5"
+    );
+    assert_eq!(b_ck, Some(4), "boundary clustering value must be 4");
+    // PRIMARY pair = rt1's end (close of the previous range).
+    fail_vint(
+        primary,
+        1_500_000 - 1_000_000,
+        "boundary PRIMARY (end) mfda delta = rt1",
+    );
+    let primary_ldt = read_uvint_loc(&bytes, primary.end());
+    fail_vint(primary_ldt, 1_700, "boundary PRIMARY (end) ldt delta = rt1");
+    // SECONDARY pair = rt2's start (open of the next range).
+    fail_vint(
+        secondary,
+        1_800_000 - 1_000_000,
+        "boundary SECONDARY (start) mfda delta = rt2",
+    );
+    let secondary_ldt = read_uvint_loc(&bytes, secondary.end());
+    fail_vint(
+        secondary_ldt,
+        1_900,
+        "boundary SECONDARY (start) ldt delta = rt2",
+    );
+
+    // (4) rt2's close INCLUSIVE END bound at [6] follows the boundary body.
+    let end = find_marker(&bytes, secondary_ldt.end(), INT_CLUSTERING)
+        .expect("a range tombstone END marker (rt2.end)");
+    let (_after_end, end_kind, end_ck, end_mfda, end_ldt) = walk_bound_marker(&bytes, end);
+    assert_eq!(
+        end_kind, INCL_END_BOUND,
+        "rt2 close inclusive END bound kind ordinal must be INCL_END_BOUND (6)"
+    );
+    assert_eq!(end_ck, Some(6), "rt2 END bound clustering value must be 6");
+    fail_vint(
+        end_mfda,
+        1_800_000 - 1_000_000,
+        "rt2 END bound mfda delta = rt2",
+    );
+    fail_vint(end_ldt, 1_900, "rt2 END bound ldt delta = rt2");
+}
+
+/// Coalescing must NOT depend on the order the `range_tombstones` arrive in
+/// (issue #1220, roborev finding 2). Two adjacent ranges meeting at clustering [4]
+/// (rt1 closes EXCLUSIVE(4), rt2 opens INCLUSIVE(4)) coalesce into a kind-2 boundary
+/// when supplied in start-key order; supplying them REVERSED (rt2 before rt1) must
+/// produce BYTE-IDENTICAL output and still emit the single coalesced boundary —
+/// proving the Kind-ordinal sort tiebreak (close before open) is order-independent
+/// rather than relying on the input vector's order surviving a stable sort.
+#[test]
+fn range_boundary_coalesces_regardless_of_input_order() {
+    let schema = int_clustering_schema();
+    let make_rts = || {
+        let rt1 = RangeTombstone {
+            start: ClusteringBound::Inclusive(ClusteringKey::single("ck", Value::Integer(2))),
+            end: ClusteringBound::Exclusive(ClusteringKey::single("ck", Value::Integer(4))),
+            deletion_time: 1_500_000,
+            local_deletion_time: 1_700,
+        };
+        let rt2 = RangeTombstone {
+            start: ClusteringBound::Inclusive(ClusteringKey::single("ck", Value::Integer(4))),
+            end: ClusteringBound::Exclusive(ClusteringKey::single("ck", Value::Integer(6))),
+            deletion_time: 1_800_000,
+            local_deletion_time: 1_900,
+        };
+        (rt1, rt2)
+    };
+    let make_row = || {
+        Mutation::new(
+            TableId::new("issue992", "t"),
+            PartitionKey::single("id", Value::Integer(1)),
+            Some(ClusteringKey::single("ck", Value::Integer(1))),
+            vec![write_op("val", "x")],
+            2_000_000,
+            None,
+        )
+    };
+
+    let (rt1, rt2) = make_rts();
+    let forward = write_one_partition(det_stats(), &schema, 1, &[make_row()], None, &[rt1, rt2]);
+    let (rt1, rt2) = make_rts();
+    let reversed = write_one_partition(det_stats(), &schema, 1, &[make_row()], None, &[rt2, rt1]);
+
+    assert_eq!(
+        forward, reversed,
+        "coalescing must be independent of range_tombstone input order: forward and reversed \
+         input vectors must produce byte-identical Data.db bodies"
+    );
+
+    // And the (identical) output must carry the single coalesced kind-2 boundary,
+    // NOT a degenerate open-before-close bound pair.
+    let start =
+        find_marker(&forward, INT_PK_HEADER_SIZE, INT_CLUSTERING).expect("rt1.start bound marker");
+    let (after_start, start_kind, _ck, _m, _l) = walk_bound_marker(&forward, start);
+    assert_eq!(
+        start_kind, INCL_START_BOUND,
+        "first marker must be the open INCL_START bound at [2]"
+    );
+    let boundary = find_marker(&forward, after_start, INT_CLUSTERING)
+        .expect("a coalesced BOUNDARY marker at [4]");
+    assert_eq!(
+        forward[boundary + 1],
+        EXCL_END_INCL_START_BOUNDARY,
+        "reversed input must STILL coalesce into a single kind-2 EXCL_END_INCL_START_BOUNDARY"
+    );
+    let (b_kind, b_ck, _p, _s) = walk_boundary_marker(&forward, boundary);
+    assert_eq!(
+        b_kind, EXCL_END_INCL_START_BOUNDARY,
+        "coalesced boundary kind = 2"
+    );
+    assert_eq!(b_ck, Some(4), "boundary clustering value must be 4");
+}
 
 /// FIXTURE BYTE parity for a BOUNDARY marker: real adjacent_ranges Data.db PK=1
 /// (golden line 1) has a `range_tombstone_boundary` at clustering [20] with

@@ -431,4 +431,100 @@ impl DataWriter {
 
         Ok(self.buffer.len() - start_len)
     }
+
+    /// Write a range-tombstone BOUNDARY marker (issue #1220).
+    ///
+    /// A boundary closes the previous range and opens the next at the SAME
+    /// clustering point, so it carries TWO deletion-time pairs. Mirrors
+    /// Cassandra's `UnfilteredSerializer.serialize` for a
+    /// `RangeTombstoneBoundaryMarker`: it serializes `endDeletionTime()` (the
+    /// closing range) THEN `startDeletionTime()` (the opening range), each via
+    /// `header.writeDeletionTime` (mfda delta then ldt delta). On-disk layout:
+    ///
+    /// ```text
+    /// [IS_MARKER: 0x02]
+    /// [boundary_kind: u8]              ← 2 (EXCL_END_INCL_START) | 5 (INCL_END_EXCL_START)
+    /// [cluster_count: u16 BE]
+    /// [cluster_header + values]
+    /// [marker_body_size: VUInt]        ← size of (prev_size + the TWO deletion pairs)
+    /// [prev_unfiltered_size: VUInt]
+    /// [end_marked_for_delete_at: VUInt]    ← primary  (close of previous range)
+    /// [end_local_deletion_time: VUInt32]
+    /// [start_marked_for_delete_at: VUInt]  ← secondary (open of next range)
+    /// [start_local_deletion_time: VUInt32]
+    /// ```
+    ///
+    /// Returns the total serialized marker size (for prev_unfiltered_size
+    /// threading). A boundary always sits at a concrete clustering value, so
+    /// (unlike a bound) it never carries the open-ended `Bottom`/`Top` form.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn write_range_boundary(
+        &mut self,
+        boundary_kind: u8,
+        clustering: &ClusteringKey,
+        end_deletion_time: i64,
+        end_local_deletion_time: i32,
+        start_deletion_time: i64,
+        start_local_deletion_time: i32,
+        schema: &TableSchema,
+        prev_size: u64,
+    ) -> Result<usize> {
+        let start_len = self.buffer.len();
+
+        self.buffer.push(IS_MARKER);
+        self.buffer.push(boundary_kind);
+
+        // Cluster count (u16 BE) + clustering header/values.
+        let cluster_count = clustering.columns.len();
+        if cluster_count > u16::MAX as usize {
+            return Err(Error::InvalidInput(format!(
+                "Range tombstone boundary has too many clustering values: {}",
+                cluster_count
+            )));
+        }
+        self.buffer
+            .write_all(&(cluster_count as u16).to_be_bytes())?;
+        self.write_clustering_prefix(clustering, schema)?;
+
+        // Reject only a genuine below-baseline ordering violation in normal
+        // (non-negative i32) time space; a far-future LDT (negative as i32) is
+        // legitimate — same contract as `write_range_bound` (issue #853/#889).
+        for (which, ldt) in [
+            ("end", end_local_deletion_time),
+            ("start", start_local_deletion_time),
+        ] {
+            if ldt >= 0
+                && self.stats.min_local_deletion_time >= 0
+                && ldt < self.stats.min_local_deletion_time
+            {
+                return Err(Error::InvalidInput(format!(
+                    "Range tombstone boundary: {which} local deletion time {} is less than \
+                     min_local_deletion_time {}",
+                    ldt, self.stats.min_local_deletion_time
+                )));
+            }
+        }
+
+        // TWO deletion-time pairs, canonical Cassandra order: primary = end
+        // (close of previous range), secondary = start (open of next range);
+        // within each pair markedForDeleteAt delta first, then localDeletionTime.
+        let mut deletion = Vec::new();
+        for (dt, ldt) in [
+            (end_deletion_time, end_local_deletion_time),
+            (start_deletion_time, start_local_deletion_time),
+        ] {
+            let ts_delta = (dt - self.stats.min_timestamp) as u64;
+            encode_unsigned(ts_delta, &mut deletion);
+            let ldt_delta = ldt.wrapping_sub(self.stats.min_local_deletion_time) as u32;
+            encode_unsigned(ldt_delta as u64, &mut deletion);
+        }
+
+        // marker_body_size covers the prev_size VInt + the two deletion pairs.
+        let body_size = unsigned_len(prev_size) as u64 + deletion.len() as u64;
+        encode_unsigned(body_size, &mut self.buffer);
+        encode_unsigned(prev_size, &mut self.buffer);
+        self.buffer.extend_from_slice(&deletion);
+
+        Ok(self.buffer.len() - start_len)
+    }
 }
