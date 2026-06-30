@@ -86,6 +86,13 @@ impl DirSource {
         Self { dir: dir.into() }
     }
 
+    /// The resolved SSTable directory this source reads from. Used by the
+    /// `table_stats` action (issue #944) to gather per-SSTable statistics from
+    /// the same directory `do_get` would merge.
+    pub fn into_dir(self) -> PathBuf {
+        self.dir
+    }
+
     /// Resolve the SSTable directory for `keyspace.table` under `data_dir`,
     /// optionally inside a named snapshot.
     ///

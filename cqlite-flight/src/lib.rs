@@ -13,6 +13,7 @@ pub mod filter;
 pub mod obs;
 pub mod producer;
 pub mod service;
+pub mod stats;
 pub mod ticket;
 
 #[cfg(test)]

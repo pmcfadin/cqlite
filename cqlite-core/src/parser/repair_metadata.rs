@@ -782,6 +782,140 @@ pub fn parse_repair_metadata(input: &[u8], gates: Option<&VersionGates>) -> Resu
     })
 }
 
+/// Authoritative per-SSTable row/partition counts decoded from the STATS
+/// component of `Statistics.db` (issue #944).
+///
+/// Both fields come straight from cassandra-5.0.0
+/// `StatsMetadata.StatsMetadataSerializer.serialize` — no heuristics (#28):
+///
+///   * `partition_count` is the sum of the bucket counts of the
+///     `estimatedPartitionSize` `EstimatedHistogram` (the FIRST STATS field). That
+///     histogram records one observation per partition, so Σ counts is exactly the
+///     SSTable's partition count — the same value `SSTableReader` exposes via
+///     `getEstimatedPartitionSize().count()`. It is reachable by a fully
+///     self-describing walk and needs NO version gates.
+///   * `total_rows` is the `totalRows` `long` written near the end of the STATS
+///     body (field 12). Reaching it requires the version-gated forward walk
+///     (`improvedMinMax`/`legacyMinMax` block + commit-log intervals), so it is
+///     `Some` only when authoritative [`VersionGates`] are supplied AND the walk
+///     could traverse the min/max block. For a clustered table whose covered-Slice
+///     bound values are not modeled, `total_rows` is honestly `None` rather than a
+///     guessed value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TableCounts {
+    /// Σ `estimatedPartitionSize` histogram bucket counts = partition count.
+    pub partition_count: u64,
+    /// `totalRows` from the STATS body, when the gated walk could reach it.
+    pub total_rows: Option<u64>,
+}
+
+/// Decode authoritative [`TableCounts`] from a raw `Statistics.db` buffer.
+///
+/// `partition_count` is always decoded (self-describing leading histogram).
+/// `total_rows` is decoded only when `gates` is `Some` and the version-gated walk
+/// to field 12 succeeds; otherwise it is `None` (never fabricated).
+///
+/// # Errors
+///
+/// Returns `Error::Corruption` when the STATS component is present but truncated
+/// or structurally invalid (mirrors [`parse_repair_metadata`] — fails closed). A
+/// `Statistics.db` with NO STATS component yields all-zero counts
+/// (`partition_count == 0`, `total_rows == None`).
+pub fn read_table_counts(input: &[u8], gates: Option<&VersionGates>) -> Result<TableCounts> {
+    let walk = gates.map(RepairWalkGates::from);
+
+    let Some(bounds) = stats_component_bounds(input)? else {
+        return Ok(TableCounts {
+            partition_count: 0,
+            total_rows: None,
+        });
+    };
+
+    let modern_histogram = walk.map(|w| w.modern_histogram).unwrap_or(false);
+    let mut c = Cursor::new(&input[bounds.start..bounds.end]);
+
+    // 1. estimatedPartitionSize histogram: read it (don't skip) so we can sum the
+    //    per-partition bucket counts. Σ counts = partition count (authoritative).
+    let partition_count = sum_estimated_histogram_counts(&mut c)?;
+
+    // 2. estimatedCellPerPartitionCount histogram — skip.
+    skip_estimated_histogram(&mut c)?;
+
+    // Without authoritative gates the path to totalRows (the gated min/max block)
+    // cannot be traversed; report partition_count alone and total_rows = None.
+    let Some(walk) = walk else {
+        return Ok(TableCounts {
+            partition_count,
+            total_rows: None,
+        });
+    };
+
+    // 3-8. commitLogUpperBound, timestamps, deletion times, TTLs, compressionRatio,
+    //       tombstone histogram — same fixed/gated skips as the repair walk.
+    c.skip(8 + 4)?; // commitLogUpperBound: i64 segmentId + i32 position
+    c.skip(8 + 8)?; // minTimestamp, maxTimestamp
+    c.skip(4 + 4)?; // min/maxLocalDeletionTime
+    c.skip(4 + 4)?; // minTTL, maxTTL
+    c.skip(8)?; // compressionRatio (f64)
+    skip_tombstone_histogram(&mut c, modern_histogram)?;
+
+    // 9. sstableLevel (i32), repairedAt (i64).
+    c.skip(4 + 8)?;
+
+    // 10. version-gated min/max clustering block. The improvedMinMax covered-Slice
+    //     bound values are not always modeled; when they cannot be skipped, totalRows
+    //     is unreachable and reported honestly as None.
+    if walk.has_improved_min_max {
+        if !try_skip_improved_min_max(&mut c)? {
+            return Ok(TableCounts {
+                partition_count,
+                total_rows: None,
+            });
+        }
+    } else if walk.has_legacy_min_max {
+        skip_legacy_min_max(&mut c)?;
+    }
+
+    // 11. hasLegacyCounterShards (bool).
+    c.skip(1)?;
+
+    // 12. totalColumnsSet (long), then totalRows (long) — READ totalRows.
+    c.skip(8)?; // totalColumnsSet
+    let total_rows = c.read_i64()?;
+    let total_rows = u64::try_from(total_rows).ok();
+
+    Ok(TableCounts {
+        partition_count,
+        total_rows,
+    })
+}
+
+/// Read an `EstimatedHistogram` and return the SUM of its bucket counts (`i64`
+/// each). Layout: `i32 bucketCount`, then `bucketCount` × (`i64 offset`,
+/// `i64 count`). Σ counts = number of observations (one per partition for the
+/// estimatedPartitionSize histogram). Saturating add: a real SSTable never
+/// overflows u64, but never wrap into a tiny count that would mislead the gate.
+fn sum_estimated_histogram_counts(c: &mut Cursor) -> Result<u64> {
+    let count = c.read_i32()?;
+    if count < 0 {
+        return Err(Error::Corruption(format!(
+            "negative EstimatedHistogram bucket count {count}"
+        )));
+    }
+    let mut sum: u64 = 0;
+    for _ in 0..count {
+        let _offset = c.read_i64()?;
+        let bucket = c.read_i64()?;
+        if bucket < 0 {
+            return Err(Error::Corruption(format!(
+                "negative EstimatedHistogram bucket value {bucket}"
+            )));
+        }
+        sum = sum.saturating_add(bucket as u64);
+    }
+    Ok(sum)
+}
+
 /// Cassandra's canonical "no deletion" local-deletion-time sentinel,
 /// normalized to `i64` for both legacy (nb) and modern (oa/da) encodings.
 ///
@@ -1617,5 +1751,82 @@ mod tests {
             }
         }
         !crc
+    }
+
+    // ---- read_table_counts (issue #944) ----------------------------------
+
+    /// Build an `nb`-layout STATS body with a POPULATED estimatedPartitionSize
+    /// histogram (so `partition_count` is non-zero) and a known `totalRows`.
+    /// `partition_buckets` are `(offset, count)` pairs; Σ counts = partition_count.
+    fn synthetic_counts_nb(partition_buckets: &[(i64, i64)], total_rows: i64) -> Vec<u8> {
+        let mut stats = Vec::new();
+        // estimatedPartitionSize: i32 bucketCount, then (i64 offset, i64 count)*.
+        stats.extend_from_slice(&(partition_buckets.len() as i32).to_be_bytes());
+        for (off, cnt) in partition_buckets {
+            stats.extend_from_slice(&off.to_be_bytes());
+            stats.extend_from_slice(&cnt.to_be_bytes());
+        }
+        stats.extend_from_slice(&0i32.to_be_bytes()); // estimatedCellPerPartitionCount (empty)
+        stats.extend_from_slice(&(-1i64).to_be_bytes()); // commitLogUpperBound segmentId
+        stats.extend_from_slice(&0i32.to_be_bytes()); // commitLogUpperBound position
+        stats.extend_from_slice(&100i64.to_be_bytes()); // minTimestamp
+        stats.extend_from_slice(&200i64.to_be_bytes()); // maxTimestamp
+        stats.extend_from_slice(&i32::MAX.to_be_bytes()); // minLocalDeletionTime
+        stats.extend_from_slice(&i32::MAX.to_be_bytes()); // maxLocalDeletionTime
+        stats.extend_from_slice(&0i32.to_be_bytes()); // minTTL
+        stats.extend_from_slice(&0i32.to_be_bytes()); // maxTTL
+        stats.extend_from_slice(&(-1.0f64).to_be_bytes()); // compressionRatio
+        stats.extend_from_slice(&0i32.to_be_bytes()); // TombstoneHistogram maxBinSize
+        stats.extend_from_slice(&0i32.to_be_bytes()); // TombstoneHistogram size
+        stats.extend_from_slice(&0i32.to_be_bytes()); // sstableLevel
+        stats.extend_from_slice(&0i64.to_be_bytes()); // repairedAt
+        stats.extend_from_slice(&0i32.to_be_bytes()); // legacy min clustering list (empty)
+        stats.extend_from_slice(&0i32.to_be_bytes()); // legacy max clustering list (empty)
+        stats.push(0x00); // hasLegacyCounterShards
+        stats.extend_from_slice(&7u64.to_be_bytes()); // totalColumnsSet (arbitrary)
+        stats.extend_from_slice(&total_rows.to_be_bytes()); // totalRows
+        stats.extend_from_slice(&(-1i64).to_be_bytes()); // commitLogLowerBound segmentId
+        stats.extend_from_slice(&0i32.to_be_bytes()); // commitLogLowerBound position
+        stats.extend_from_slice(&0i32.to_be_bytes()); // commitLogIntervals size = 0
+        stats.push(0x00); // pendingRepair absent
+        stats.push(0x00); // isTransient
+        wrap_stats_last(stats)
+    }
+
+    #[test]
+    fn read_table_counts_sums_partition_histogram_and_total_rows() {
+        // 3 + 2 + 5 = 10 partitions; 2000 total rows (wide table shape).
+        let buf = synthetic_counts_nb(&[(0, 3), (16, 2), (64, 5)], 2000);
+        let counts = read_table_counts(&buf, Some(&nb_gates())).expect("decode");
+        assert_eq!(counts.partition_count, 10, "Σ histogram bucket counts");
+        assert_eq!(counts.total_rows, Some(2000), "totalRows from field 12");
+    }
+
+    #[test]
+    fn read_table_counts_partition_count_without_gates_total_rows_none() {
+        // Without gates, partition_count is still decoded (self-describing leading
+        // histogram), but the gated walk to totalRows is not attempted.
+        let buf = synthetic_counts_nb(&[(0, 4), (8, 6)], 999);
+        let counts = read_table_counts(&buf, None).expect("decode");
+        assert_eq!(counts.partition_count, 10);
+        assert_eq!(
+            counts.total_rows, None,
+            "no gates → totalRows honestly absent, never guessed"
+        );
+    }
+
+    #[test]
+    fn read_table_counts_no_stats_component_is_all_zero() {
+        // A TOC with only a non-STATS component → no counts to decode.
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u32.to_be_bytes()); // 1 component
+        out.extend_from_slice(&0u32.to_be_bytes()); // checksum
+        out.extend_from_slice(&0u32.to_be_bytes()); // type 0 (VALIDATION), not STATS
+        out.extend_from_slice(&16u32.to_be_bytes()); // offset
+        out.push(0u8); // body
+        out.extend_from_slice(&0u32.to_be_bytes()); // trailing CRC
+        let counts = read_table_counts(&out, Some(&nb_gates())).expect("decode");
+        assert_eq!(counts.partition_count, 0);
+        assert_eq!(counts.total_rows, None);
     }
 }
