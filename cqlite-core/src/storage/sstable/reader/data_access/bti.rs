@@ -140,15 +140,10 @@ impl SSTableReader {
 
         let schema_opt = self.get_table_schema(schema);
 
-        // Issue #954 / #1184: when a single-column clustering slice is requested,
-        // consult the target partition's authoritative index (BTI `Rows.db` trie or
-        // BIG promoted `IndexInfo` blocks) to bound BOTH the decode and the
-        // decompression to the block(s) covering the requested clustering range. The
-        // unified resolver (`big_promoted.rs`) returns the row-body byte window
-        // (relative to the partition start, the same domain the parser sees for
-        // `window[within..]`), a tightened decompression end, and whether the
-        // narrowing engaged. Kept out of this (over-threshold) file per the campsite
-        // rule — `bti_clustering_row_window` is the BTI half it dispatches to.
+        // Issue #954 / #1184: resolve the within-partition row-body byte window for a
+        // single-column clustering slice from the authoritative index (BTI `Rows.db`
+        // trie or BIG promoted `IndexInfo` blocks). The unified resolver lives in
+        // `big_promoted.rs` (campsite: keeps this over-threshold file from growing).
         let (row_body_window, decode_end_bound, clustering_engaged) = self
             .resolve_clustering_seek_window(
                 is_bti,
@@ -159,13 +154,9 @@ impl SSTableReader {
                 end_bound,
             )?;
 
-        // Issue #1184: when the BIG (`nb`) promoted-index clustering narrowing
-        // engaged, decode the selected block window via the BIG-specific decoder
-        // (`big_promoted.rs`). It uses the format-agnostic table-id match + a
-        // partition-key-bytes guard rather than the BTI `get()`-path strict table-id
-        // match (which rejects SSTables whose serialization header keyspace/table
-        // differ from a fully-qualified query id), and reuses the windowed parser so
-        // only the slice's blocks are decoded. BTI keeps its existing decoder below.
+        // Issue #1184: an engaged BIG clustering narrowing decodes the selected block
+        // window via `big_promoted.rs` (partition-key-bytes guard, not the BTI strict
+        // table-id match that rejects writer-header SSTables). BTI keeps its decoder.
         if !is_bti && clustering_engaged {
             if let Some(rows) = self
                 .big_decode_clustering_window(

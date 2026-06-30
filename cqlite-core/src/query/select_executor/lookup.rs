@@ -402,48 +402,61 @@ pub(super) fn requests_clustering_reverse(
 
 #[cfg(not(feature = "tombstones"))]
 impl super::SelectExecutor {
-    /// Issue #1184: route a single-partition `ORDER BY <ck> DESC` through the BIG
-    /// reverse partition iterator when the requested order is the reverse of the
-    /// stored clustering order. Returns `Ok(Some(rows))` in descending clustering
-    /// order (raw `(RowKey, Value)`, so they flow through the SAME post-scan
-    /// row-build + predicate backstop as the forward path) and marks
-    /// `context.reverse_served` so the in-memory `Sort` step is skipped. Returns
-    /// `Ok(None)` to keep the forward read + in-memory sort (no ORDER BY, ascending
-    /// order requested, no schema, or the storage layer declined — small / BTI /
-    /// multi-generation).
-    pub(super) async fn reverse_partition_if_requested(
+    /// Serve a fully-constrained `WHERE pk = ?` (optionally with a single-column
+    /// clustering restriction and/or `ORDER BY <ck>`) from a partition-targeted
+    /// read, recording the honest access path (Issue #954 / #960 / #1184). The
+    /// returned raw `(RowKey, Value)` rows flow through the SAME post-scan row-build
+    /// + predicate backstop the caller applies, so output is byte-identical.
+    ///
+    /// `ORDER BY <ck>` whose direction is the REVERSE of the stored clustering order
+    /// on a BIG wide partition is served by the reverse promoted-index iterator
+    /// (block walk back-to-front), marking `context.reverse_served` so the executor
+    /// skips the in-memory `Sort`. Every other case takes the forward seek (which
+    /// narrows via the promoted index when a clustering slice is present) and keeps
+    /// the in-memory sort as the ordering fallback.
+    pub(super) async fn targeted_partition_rows(
         &self,
         table: &crate::types::TableId,
         pk_bytes: &[u8],
-        has_clustering_slice: bool,
+        predicates: &[SSTablePredicate],
         order_by: Option<&crate::query::select_ast::OrderByClause>,
         schema: Option<&crate::schema::TableSchema>,
         context: &mut super::ExecutionContext,
-    ) -> crate::Result<Option<Vec<(RowKey, Value)>>> {
-        let (Some(order_by), Some(schema)) = (order_by, schema) else {
-            return Ok(None);
-        };
-        if !requests_clustering_reverse(order_by, schema) {
-            return Ok(None);
+    ) -> crate::Result<Vec<(RowKey, Value)>> {
+        let clustering = classify_clustering_slice(predicates, schema);
+        // Reverse path: ORDER BY <first ck> opposite to the stored clustering order.
+        if let (Some(order_by), Some(schema)) = (order_by, schema) {
+            if requests_clustering_reverse(order_by, schema) {
+                if let Some(rows) = self
+                    .storage
+                    .scan_partition_clustering_reverse(table, pk_bytes, Some(schema))
+                    .await?
+                {
+                    let path = if clustering.is_some() {
+                        AccessPath::ClusteringSlice
+                    } else {
+                        AccessPath::PartitionLookup
+                    };
+                    context.access_path = Some(path.clone());
+                    crate::query::access_path::record(path);
+                    context.reverse_served = true;
+                    return Ok(rows);
+                }
+            }
         }
-        let Some(rows) = self
+        // Forward seek (clustering-narrowed when a slice is present).
+        let (rows, engaged) = self
             .storage
-            .scan_partition_clustering_reverse(table, pk_bytes, Some(schema))
-            .await?
-        else {
-            return Ok(None);
-        };
-        // The reverse iterator IS a promoted-index seek; report ClusteringSlice when
-        // a clustering predicate is also present, else the partition-lookup path.
-        let path = if has_clustering_slice {
+            .scan_partition_clustering(table, pk_bytes, clustering.as_ref(), schema)
+            .await?;
+        let path = if engaged {
             AccessPath::ClusteringSlice
         } else {
             AccessPath::PartitionLookup
         };
         context.access_path = Some(path.clone());
         crate::query::access_path::record(path);
-        context.reverse_served = true;
-        Ok(Some(rows))
+        Ok(rows)
     }
 }
 

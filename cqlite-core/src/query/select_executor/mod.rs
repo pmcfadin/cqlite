@@ -70,9 +70,6 @@ use writetime_ttl::{
     writetime_ttl_column_name, SystemClock,
 };
 
-#[cfg(not(feature = "tombstones"))]
-use lookup::classify_clustering_slice;
-
 // Public surface re-exports (kept identical to the pre-split module so
 // `query::mod`'s `pub use select_executor::{...}` resolves unchanged).
 pub use predicate::{evaluate_leaf, evaluate_predicates, LeafOutcome};

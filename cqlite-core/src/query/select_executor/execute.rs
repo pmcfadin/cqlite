@@ -26,9 +26,6 @@ use super::{
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-#[cfg(not(feature = "tombstones"))]
-use super::classify_clustering_slice;
-
 impl SelectExecutor {
     /// Execute an optimized query plan.
     ///
@@ -540,6 +537,7 @@ impl SelectExecutor {
     /// handled by the free helpers `build_row_from_scan` and
     /// `evaluate_predicates`, which are shared with the streaming background
     /// task to keep the two execution paths in lockstep.
+    #[cfg_attr(feature = "tombstones", allow(unused_variables))]
     pub(super) async fn execute_sstable_scan(
         &self,
         table: &TableId,
@@ -686,45 +684,20 @@ impl SelectExecutor {
                     // only when the seek engaged, else `PartitionLookup`. The
                     // clustering seek exists only on the default build; the
                     // `tombstones` build uses the plain partition lookup.
+                    // Issue #954/#960/#1184: forward clustering-slice seek OR (for
+                    // `ORDER BY <ck>` reverse-of-stored) the BIG reverse iterator,
+                    // with the honest access path recorded inside the helper.
                     #[cfg(not(feature = "tombstones"))]
                     {
-                        let clustering = classify_clustering_slice(predicates, schema_opt.as_ref());
-                        // Issue #1184: `ORDER BY <ck> DESC` on a BIG wide partition is
-                        // served by the reverse promoted-index iterator (block walk
-                        // back-to-front) instead of a forward read + in-memory sort.
-                        // `Ok(None)` (small / BTI / multi-generation) keeps the
-                        // forward path + the in-memory `Sort` step below.
-                        if let Some(rows) = self
-                            .reverse_partition_if_requested(
-                                table,
-                                &pk_bytes,
-                                clustering.is_some(),
-                                order_by,
-                                schema_opt.as_ref(),
-                                context,
-                            )
-                            .await?
-                        {
-                            rows
-                        } else {
-                            let (rows, engaged) = self
-                                .storage
-                                .scan_partition_clustering(
-                                    table,
-                                    &pk_bytes,
-                                    clustering.as_ref(),
-                                    schema_opt.as_ref(),
-                                )
-                                .await?;
-                            let path = if engaged {
-                                AccessPath::ClusteringSlice
-                            } else {
-                                AccessPath::PartitionLookup
-                            };
-                            context.access_path = Some(path.clone());
-                            crate::query::access_path::record(path);
-                            rows
-                        }
+                        self.targeted_partition_rows(
+                            table,
+                            &pk_bytes,
+                            predicates,
+                            order_by,
+                            schema_opt.as_ref(),
+                            context,
+                        )
+                        .await?
                     }
                     #[cfg(feature = "tombstones")]
                     {
