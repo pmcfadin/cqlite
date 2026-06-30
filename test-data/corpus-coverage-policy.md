@@ -35,6 +35,7 @@ keyspace is neither covered nor listed here.
 | `test_writeparity` | parity-fixture | Write byte-parity fixtures validated by dedicated Rust parity tests (`cqlite-core/tests/issue_*_parity.rs`), not the comprehensive read-parity corpus. |
 | `test_compactionparity` | parity-fixture | STCS compaction byte-parity fixtures validated by the differential-compaction harness, not the read-parity corpus. |
 | `test_compactionparityudt` | parity-fixture | Compaction-parity UDT fixtures (compaction harness only; may be local-only). |
+| `test_signed_coll` | parity-fixture | signed set/map element-order byte-parity fixtures (dedicated Rust parity test issue_1295_*). |
 
 `system*` keyspaces are matched by the `system` **prefix** in every harness
 (`is_system_keyspace` in `smoke-test-all-tables.sh` and `corpus.py`,
