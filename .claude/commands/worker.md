@@ -24,12 +24,41 @@ Your context is for coordination only (claim, manager orders, board/PR/merge, fi
 - If your own context is filling with file contents or long tool output, you're doing the work yourself.
   Stop and delegate.
 
+## Worktree isolation — NEVER touch the shared root checkout (READ FIRST)
+The shared root checkout (`~/projects/cqlite`) is the ONE working tree the manager and every session
+share. If you switch its branch, you break every other session — finalize, the gate, and new claims all
+assume root = `main`. **This is the #1 collision we hit** (a Codex/other session commandeering the root
+onto its own branch). Rules, non-negotiable:
+- **You operate ONLY inside your issue's worktree.** Never run `git checkout`, `git switch`,
+  `git reset --hard`, `git rebase`, `git merge`, or edit files in `~/projects/cqlite` itself. Every git /
+  file / gate command runs with `git -C <worktree>` or after `cd <worktree>`.
+- **Branch every worktree from `origin/main`**, never from the root's current HEAD (it may be
+  commandeered or stale) — see step 3.
+- **If you find the root on a non-main branch, do NOT switch it back** (that yanks it from whoever owns
+  it). Isolate entirely in your own worktree and surface it to the manager (preflight, step 1).
+- Codex / other-tool sessions don't honor this guard — you can't control them, but you can refuse to be
+  the one that commandeers root, and isolate cleanly when you find it already commandeered.
+
 ## Loop (repeat until Ready is empty or the owner stops you)
 1. `gh auth switch --user pmcfadin && gh auth setup-git` (EMU guard).
+   **Root-checkout preflight (before anything else):**
+   `root=$(git -C ~/projects/cqlite rev-parse --abbrev-ref HEAD)` — if it is not `main`, another session
+   has commandeered the shared checkout. Do NOT touch it; proceed only via your own worktree (steps below
+   all use `git -C`), and report to the manager: `⚠️ root checkout is on <branch>, not main — that session
+   needs its own worktree`.
 2. **Pick up** (`flow-board` pickup rule): the **oldest `Ready`** issue with **no** `issue-N-*` lock on
    origin. None? Report "Ready empty" and stop.
-3. **Claim** it: create the worktree + push `issue-<N>-<slug>` to origin (the cross-machine lock). If the
-   push is rejected (another worker won), drop it and go back to step 2 for the next item.
+3. **Claim it — in an isolated worktree branched from `origin/main` (this NEVER changes the root's branch):**
+   ```
+   git -C ~/projects/cqlite fetch origin main
+   git -C ~/projects/cqlite worktree add ~/projects/cqlite-wt/issue-<N> -b issue-<N>-<slug> origin/main
+   git -C ~/projects/cqlite-wt/issue-<N> push -u origin issue-<N>-<slug>   # cross-machine lock
+   cd ~/projects/cqlite-wt/issue-<N>
+   ```
+   `worktree add` leaves the root checkout untouched — that is the entire point. If the push is rejected
+   (another worker won the race), `git worktree remove ~/projects/cqlite-wt/issue-<N>`, drop it, and go
+   back to step 2. Run the gate with `CQLITE_DATASETS_ROOT=~/projects/cqlite/test-data/datasets` (worktrees
+   lack the gitignored Data.db binaries).
 4. **Read manager orders** on the issue: `🧭 MANAGER <!-- MGR:... -->` comments. Note the latest
    `GO` / `HOLD: merge after #N` / `ORDER` + any instructions.
 5. **Route — spec-first for anything new.** Read the issue's oracle-vs-design routing (set at grooming):
@@ -64,7 +93,12 @@ diff and breaks 1:1:1:1. Instead:
   then resume the original. Do not fold an unrelated fix into your current branch.
 
 ## Hard rules
-- Worktrees only; stage explicit paths; the branch push is your lock. Never edit another worker's files.
+- **Worktrees only — never touch the root checkout's branch.** All git ops via `git -C <worktree>` / after
+  `cd <worktree>`; branch from `origin/main`; the branch push is your lock; stage explicit paths; never
+  edit another worker's files. If the root is on a non-main branch, isolate in your worktree and surface
+  it — never `checkout`/`reset` the root to "fix" it.
+- **Finalize cleans up YOUR worktree only** (`git worktree remove`), then deletes the origin lock branch.
+  Never `git checkout main` / `git reset` the shared root checkout as part of cleanup.
 - The gate is the only run that counts — paste its summary block.
 - Merge autonomously on green; do NOT wait for a human merge. Escalate to the owner ONLY for: a genuine
   design-call roborev finding, a scope/product question, or anything outside your issue.

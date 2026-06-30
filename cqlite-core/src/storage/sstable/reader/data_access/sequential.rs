@@ -230,6 +230,21 @@ impl SSTableReader {
     /// matching the order of the materializing [`scan`](Self::scan) path. The
     /// bounded channel applies backpressure: parsing pauses when the consumer
     /// falls behind and stops entirely if the consumer is dropped.
+    ///
+    /// In-flight bound (chunk-stitching SSTables): the windowed pipeline (issue
+    /// #1143) materializes one confirmed partition at a time and batches its rows to
+    /// amortize the cross-thread wake, so against a stalled consumer the resident
+    /// `(RowKey, Value)` count is the SUM of three inherent terms, not one constant:
+    /// `buffer_size` (this channel) `+ max_partition_size` (the one fully-materialized
+    /// confirmed partition — a pre-existing #1156 windowed-scan term, inherent to any
+    /// row-materializing partition scan) `+`
+    /// [`MAX_INFLIGHT_BATCH_ROWS`](super::super::scan_stream_windowed::MAX_INFLIGHT_BATCH_ROWS)
+    /// (the FIXED, BOUNDED amount the issue-#1143 batching subsystem may run ahead,
+    /// regardless of `buffer_size`, holding even for `buffer_size == 1`).
+    /// `MAX_INFLIGHT_BATCH_ROWS` bounds the batching subsystem alone, NOT the
+    /// `max_partition_size` materialization term. Non-stitching SSTables parse a
+    /// whole block before forwarding its rows, so the resident `(RowKey, Value)`
+    /// count is bounded by `buffer_size + (one parsed block's entries)`.
     pub fn scan_stream(
         self: std::sync::Arc<Self>,
         table_id: TableId,
@@ -270,27 +285,15 @@ impl SSTableReader {
         }
 
         if self.requires_chunk_stitching() {
-            // Issue #1143: SLIDING-WINDOW stitch+parse instead of stitching the
-            // ENTIRE Data.db into one growing `Vec<u8>` before parsing. The old
-            // path allocated an O(file) buffer per scan; with ~6 concurrent
-            // readers that meant ~6 multi-MB buffers thrashing the global
-            // allocator alongside writer allocation, blowing up the read-side p99
-            // tail under concurrent write load. Here we keep only a `window` of
-            // decompressed bytes bounded by `max_partition_size + one_chunk`:
-            // append one decompressed chunk, drain every CONFIRMED partition out
-            // of the front, and stop at NeedMore to await the next chunk (a
-            // partition/row/cell can straddle a 64 KiB chunk boundary). This is
-            // the SAME bounded driver the compaction read path already uses
-            // (`stream_all_partitions_for_compaction` / issue #827); the only
-            // difference is it emits user-facing `(RowKey, Value)` entries and
-            // applies the scan's key-range + tombstone filters.
-            //
-            // Parity: per-partition parse (`parse_one_partition_with_timestamps`)
-            // matches the whole-block parse (`test_issue_827_streaming_parity`);
-            // we drop the timestamp and reuse the same key-range / tombstone
-            // filters as `parse_stitched_stream`, ADDITIONALLY applying the
-            // `table_ids_match` guard the non-stitching branch below uses — a
-            // no-op for single-table SSTables, so scan OUTPUT is unchanged there.
+            // Issue #1143: SLIDING-WINDOW stitch+parse on a bounded blocking->async
+            // pipeline instead of stitching the ENTIRE Data.db into one growing
+            // `Vec<u8>` before parsing (which thrashed the allocator and blew up
+            // read p99 under concurrent write load). Keeps only a `window` bounded
+            // by `max_partition_size + one_chunk`. Same bounded driver as the
+            // compaction read path (issue #827); scan output (key-range + tombstone
+            // + `table_ids_match` filters, dropped timestamp) is parity-identical to
+            // `parse_stitched_stream`. Full rationale + the in-flight batching bound
+            // live in the `scan_stream_windowed` module docs.
             self.run_scan_stream_windowed(table_id, start_key, end_key, schema, &cursor, &tx)
                 .await
         } else {

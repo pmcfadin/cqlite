@@ -7,6 +7,197 @@
 
 use super::*;
 
+/// One unfiltered to emit inside a partition body, in clustering order: a regular
+/// row, a single range-tombstone BOUND marker, or a coalesced range-tombstone
+/// BOUNDARY marker (issue #1220).
+///
+/// Lifted to module scope (from the two per-function local enums it replaced) so
+/// the marker-coalescing pass ([`coalesce_boundaries`]) is shared verbatim by both
+/// the plain [`DataWriter::write_partition`] and the wide-partition
+/// [`DataWriter::write_partition_with_index_blocks`] emitters — they must produce
+/// byte-identical bodies, boundary coalescing included.
+enum PartitionItem<'a> {
+    Row(RowWrite<'a>),
+    Marker {
+        bound: &'a ClusteringBound,
+        is_open: bool,
+        deletion_time: i64,
+        local_deletion_time: i32,
+    },
+    /// A coalesced boundary: closes the previous range and opens the next at the
+    /// same `clustering` point. `end_*` is the closing range's deletion (primary),
+    /// `start_*` is the opening range's deletion (secondary).
+    Boundary {
+        kind: u8,
+        clustering: &'a ClusteringKey,
+        end_deletion_time: i64,
+        end_local_deletion_time: i32,
+        start_deletion_time: i64,
+        start_local_deletion_time: i32,
+    },
+}
+
+/// The Cassandra `ClusteringPrefix.Kind` ordinal for a range-tombstone BOUND.
+/// Used purely as a sort tiebreak (see [`sort_class`]); the canonical ordering is
+/// the one decoded on the read path (`v5_compressed_legacy/block_emit.rs`) and the
+/// constants in `data_writer/mod.rs`:
+///   0 EXCL_END_BOUND · 1 INCL_START_BOUND · 6 INCL_END_BOUND · 7 EXCL_START_BOUND.
+fn bound_kind_ordinal(bound: &ClusteringBound, is_open: bool) -> u8 {
+    match (is_open, bound) {
+        (true, ClusteringBound::Inclusive(_)) => INCL_START_BOUND, // 1
+        (false, ClusteringBound::Exclusive(_)) => EXCL_END_BOUND,  // 0
+        (false, ClusteringBound::Inclusive(_)) => INCL_END_BOUND,  // 6
+        (true, ClusteringBound::Exclusive(_)) => EXCL_START_BOUND, // 7
+        // Open-ended bounds are positioned by `class` (Bottom/Top), never reach a
+        // value-level tiebreak; report their side's kind for completeness.
+        (true, ClusteringBound::Bottom | ClusteringBound::Top) => INCL_START_BOUND,
+        (false, ClusteringBound::Bottom | ClusteringBound::Top) => INCL_END_BOUND,
+    }
+}
+
+/// Sort key for clustering-ordered emission: `(position class, clustering values,
+/// bound weight, kind ordinal)`. class: -1 = before all rows (Bottom), 0 =
+/// positioned by clustering values, 1 = after all rows (Top). The weight orders a
+/// marker relative to a row at the SAME clustering value
+/// (`ClusteringPrefix.Kind.comparedToClustering`): an inclusive-start /
+/// exclusive-end bound sorts before the row, an inclusive-end / exclusive-start
+/// bound after it.
+///
+/// The final element is the Cassandra `ClusteringPrefix.Kind` ordinal, used as a
+/// strict tiebreak so that — at an equal clustering point and equal weight — the
+/// CLOSING bound of one range always sorts immediately before the matching OPENING
+/// bound of the next, regardless of the order the `range_tombstones` arrived in
+/// (issue #1220, roborev finding 2). This mirrors Cassandra's comparator, whose
+/// distinct Kind ordinals disambiguate co-located bounds: EXCL_END(0) < INCL_START(1)
+/// for a kind-2 boundary and INCL_END(6) < EXCL_START(7) for a kind-5 boundary —
+/// close before open in both cases. Without it, two co-located bounds carry the same
+/// `weight` and a stable sort would leave them in input order, so a reversed input
+/// vector would emit an open-before-close pair that [`coalesce_boundaries`] cannot
+/// merge (parity loss + a non-Cassandra marker order).
+///
+/// Rows take the CLUSTERING ordinal (4); since a row's `weight` (0) already differs
+/// from every bound's weight (-1/+1) at the same clustering, the ordinal only ever
+/// breaks ties between two bounds. Boundaries are produced only AFTER this sort (by
+/// [`coalesce_boundaries`]), so the `Boundary` arm is never exercised during
+/// sorting; it is provided for exhaustiveness and positions the boundary at its
+/// clustering value.
+fn sort_class<'a, 'b>(item: &'b PartitionItem<'a>) -> (i8, Option<&'b ClusteringKey>, i8, u8) {
+    match item {
+        PartitionItem::Row(row) => (0, row.clustering_key, 0, CLUSTERING),
+        PartitionItem::Marker { bound, is_open, .. } => {
+            let kind = bound_kind_ordinal(bound, *is_open);
+            match bound {
+                ClusteringBound::Inclusive(ck) => {
+                    (0, Some(ck), if *is_open { -1 } else { 1 }, kind)
+                }
+                ClusteringBound::Exclusive(ck) => {
+                    (0, Some(ck), if *is_open { 1 } else { -1 }, kind)
+                }
+                ClusteringBound::Bottom => (-1, None, 0, kind),
+                ClusteringBound::Top => (1, None, 0, kind),
+            }
+        }
+        PartitionItem::Boundary {
+            kind, clustering, ..
+        } => (0, Some(clustering), 0, *kind),
+    }
+}
+
+/// Sort `items` into clustering order (rows + bound markers), schema-aware.
+fn sort_partition_items(items: &mut [PartitionItem], schema: &TableSchema) {
+    items.sort_by(|a, b| {
+        let (class_a, ck_a, weight_a, kind_a) = sort_class(a);
+        let (class_b, ck_b, weight_b, kind_b) = sort_class(b);
+        class_a
+            .cmp(&class_b)
+            .then_with(|| match (ck_a, ck_b) {
+                (Some(x), Some(y)) => x.compare(y, schema).unwrap_or_else(|_| x.cmp(y)),
+                _ => std::cmp::Ordering::Equal,
+            })
+            .then(weight_a.cmp(&weight_b))
+            .then(kind_a.cmp(&kind_b))
+    });
+}
+
+/// The BOUNDARY kind for an adjacent close+open bound pair at the same clustering
+/// point, or `None` when the two bounds do NOT form a boundary (issue #1220).
+///
+/// Cassandra coalesces two adjacent range tombstones into a single boundary only
+/// when the closing bound and the opening bound meet at the same clustering value
+/// with COMPLEMENTARY inclusivity (exactly one of them inclusive) — otherwise the
+/// ranges either overlap (both inclusive) or leave a gap (both exclusive) and stay
+/// separate bounds. Returns the boundary kind ordinal plus the shared clustering.
+fn boundary_kind_for<'a>(
+    close: &'a ClusteringBound,
+    open: &'a ClusteringBound,
+    schema: &TableSchema,
+) -> Option<(u8, &'a ClusteringKey)> {
+    let same = |a: &ClusteringKey, b: &ClusteringKey| {
+        a.compare(b, schema)
+            .map(|o| o == std::cmp::Ordering::Equal)
+            .unwrap_or(false)
+    };
+    match (close, open) {
+        (ClusteringBound::Exclusive(c1), ClusteringBound::Inclusive(c2)) if same(c1, c2) => {
+            Some((EXCL_END_INCL_START_BOUNDARY, c2))
+        }
+        (ClusteringBound::Inclusive(c1), ClusteringBound::Exclusive(c2)) if same(c1, c2) => {
+            Some((INCL_END_EXCL_START_BOUNDARY, c1))
+        }
+        _ => None,
+    }
+}
+
+/// Coalesce each adjacent (close BOUND, open BOUND) pair that meets at the same
+/// clustering point with complementary inclusivity into a single BOUNDARY item
+/// (issue #1220). After [`sort_partition_items`], the closing bound of one range
+/// and the opening bound of the next sit at the same sort position (equal class,
+/// clustering and weight) with the close first, so no row can fall between them;
+/// this single forward pass merges them into one two-deletion-time boundary.
+fn coalesce_boundaries<'a>(
+    items: Vec<PartitionItem<'a>>,
+    schema: &TableSchema,
+) -> Vec<PartitionItem<'a>> {
+    let mut out: Vec<PartitionItem<'a>> = Vec::with_capacity(items.len());
+    let mut iter = items.into_iter().peekable();
+    while let Some(item) = iter.next() {
+        if let PartitionItem::Marker {
+            bound: close_bound,
+            is_open: false,
+            deletion_time: end_dt,
+            local_deletion_time: end_ldt,
+        } = &item
+        {
+            if let Some(PartitionItem::Marker {
+                bound: open_bound,
+                is_open: true,
+                deletion_time: start_dt,
+                local_deletion_time: start_ldt,
+            }) = iter.peek()
+            {
+                if let Some((kind, clustering)) = boundary_kind_for(close_bound, open_bound, schema)
+                {
+                    let boundary = PartitionItem::Boundary {
+                        kind,
+                        clustering,
+                        end_deletion_time: *end_dt,
+                        end_local_deletion_time: *end_ldt,
+                        start_deletion_time: *start_dt,
+                        start_local_deletion_time: *start_ldt,
+                    };
+                    // The open marker's fields are already copied into `boundary`;
+                    // drop it from the stream.
+                    iter.next();
+                    out.push(boundary);
+                    continue;
+                }
+            }
+        }
+        out.push(item);
+    }
+    out
+}
+
 impl DataWriter {
     /// Write a complete partition (partition key + all rows)
     ///
@@ -121,16 +312,6 @@ impl DataWriter {
         // clustering values, inclusive-start/exclusive-end bounds sort before
         // the row and inclusive-end/exclusive-start bounds sort after it
         // (ClusteringPrefix.Kind.comparedToClustering).
-        enum PartitionItem<'a> {
-            Row(RowWrite<'a>),
-            Marker {
-                bound: &'a ClusteringBound,
-                is_open: bool,
-                deletion_time: i64,
-                local_deletion_time: i32,
-            },
-        }
-
         let mut items: Vec<PartitionItem> = rows.into_iter().map(PartitionItem::Row).collect();
         for rt in range_tombstones {
             items.push(PartitionItem::Marker {
@@ -147,31 +328,11 @@ impl DataWriter {
             });
         }
 
-        // Sort key: (partition position class, clustering values, bound weight).
-        // class: -1 = before all rows (Bottom), 0 = positioned by clustering
-        // values, 1 = after all rows (Top).
-        fn sort_class<'a, 'b>(item: &'b PartitionItem<'a>) -> (i8, Option<&'b ClusteringKey>, i8) {
-            match item {
-                PartitionItem::Row(row) => (0, row.clustering_key, 0),
-                PartitionItem::Marker { bound, is_open, .. } => match bound {
-                    ClusteringBound::Inclusive(ck) => (0, Some(ck), if *is_open { -1 } else { 1 }),
-                    ClusteringBound::Exclusive(ck) => (0, Some(ck), if *is_open { 1 } else { -1 }),
-                    ClusteringBound::Bottom => (-1, None, 0),
-                    ClusteringBound::Top => (1, None, 0),
-                },
-            }
-        }
-        items.sort_by(|a, b| {
-            let (class_a, ck_a, weight_a) = sort_class(a);
-            let (class_b, ck_b, weight_b) = sort_class(b);
-            class_a
-                .cmp(&class_b)
-                .then_with(|| match (ck_a, ck_b) {
-                    (Some(x), Some(y)) => x.compare(y, schema).unwrap_or_else(|_| x.cmp(y)),
-                    _ => std::cmp::Ordering::Equal,
-                })
-                .then(weight_a.cmp(&weight_b))
-        });
+        sort_partition_items(&mut items, schema);
+        // Issue #1220: coalesce each adjacent close+open bound pair sharing a
+        // boundary point into a single two-deletion-time BOUNDARY marker, exactly
+        // as Cassandra emits them.
+        let items = coalesce_boundaries(items, schema);
 
         for item in items {
             prev_unfiltered_size = match item {
@@ -190,6 +351,23 @@ impl DataWriter {
                     is_open,
                     deletion_time,
                     local_deletion_time,
+                    schema,
+                    prev_unfiltered_size,
+                )? as u64,
+                PartitionItem::Boundary {
+                    kind,
+                    clustering,
+                    end_deletion_time,
+                    end_local_deletion_time,
+                    start_deletion_time,
+                    start_local_deletion_time,
+                } => self.write_range_boundary(
+                    kind,
+                    clustering,
+                    end_deletion_time,
+                    end_local_deletion_time,
+                    start_deletion_time,
+                    start_local_deletion_time,
                     schema,
                     prev_unfiltered_size,
                 )? as u64,
@@ -292,16 +470,6 @@ impl DataWriter {
             range_tombstones,
         );
 
-        enum PartitionItem<'a> {
-            Row(RowWrite<'a>),
-            Marker {
-                bound: &'a ClusteringBound,
-                is_open: bool,
-                deletion_time: i64,
-                local_deletion_time: i32,
-            },
-        }
-
         let mut items: Vec<PartitionItem> = rows.into_iter().map(PartitionItem::Row).collect();
         for rt in range_tombstones {
             items.push(PartitionItem::Marker {
@@ -318,28 +486,10 @@ impl DataWriter {
             });
         }
 
-        fn sort_class<'a, 'b>(item: &'b PartitionItem<'a>) -> (i8, Option<&'b ClusteringKey>, i8) {
-            match item {
-                PartitionItem::Row(row) => (0, row.clustering_key, 0),
-                PartitionItem::Marker { bound, is_open, .. } => match bound {
-                    ClusteringBound::Inclusive(ck) => (0, Some(ck), if *is_open { -1 } else { 1 }),
-                    ClusteringBound::Exclusive(ck) => (0, Some(ck), if *is_open { 1 } else { -1 }),
-                    ClusteringBound::Bottom => (-1, None, 0),
-                    ClusteringBound::Top => (1, None, 0),
-                },
-            }
-        }
-        items.sort_by(|a, b| {
-            let (class_a, ck_a, weight_a) = sort_class(a);
-            let (class_b, ck_b, weight_b) = sort_class(b);
-            class_a
-                .cmp(&class_b)
-                .then_with(|| match (ck_a, ck_b) {
-                    (Some(x), Some(y)) => x.compare(y, schema).unwrap_or_else(|_| x.cmp(y)),
-                    _ => std::cmp::Ordering::Equal,
-                })
-                .then(weight_a.cmp(&weight_b))
-        });
+        sort_partition_items(&mut items, schema);
+        // Issue #1220: coalesce adjacent close+open bound pairs into BOUNDARY
+        // markers so the wide-partition body matches the plain path byte-for-byte.
+        let items = coalesce_boundaries(items, schema);
 
         // ── Promoted index block tracking ────────────────────────────────
         // Mirrors Cassandra's BigFormatPartitionWriter:
@@ -388,6 +538,10 @@ impl DataWriter {
                     serialize_marker_bound_prefix_for_index(bound, *is_open, schema)
                         .unwrap_or_else(|_| marker_bound_prefix_for_index(bound, *is_open))
                 }
+                PartitionItem::Boundary {
+                    kind, clustering, ..
+                } => serialize_boundary_prefix_for_index(*kind, clustering, schema)
+                    .unwrap_or_else(|_| boundary_prefix_for_index_fallback(*kind)),
             };
 
             if current_block_first_ck.is_none() {
@@ -402,7 +556,10 @@ impl DataWriter {
                         .clustering_key
                         .filter(|ck| !ck.columns.is_empty())
                         .map(|ck| ck.columns.iter().map(|(_, v)| v.clone()).collect()),
-                    PartitionItem::Marker { .. } => None,
+                    // A marker / boundary yields no row-index separator: the
+                    // promoted-index row trie keys off concrete row clusterings,
+                    // not tombstone bound names.
+                    PartitionItem::Marker { .. } | PartitionItem::Boundary { .. } => None,
                 };
                 // Per-column clustering ORDER (ASC/DESC). For a DESC column the
                 // OSS50 separator bytes must be the REVERSED byte-comparable form
@@ -450,6 +607,23 @@ impl DataWriter {
                     is_open,
                     deletion_time,
                     local_deletion_time,
+                    schema,
+                    prev_unfiltered_size,
+                )? as u64,
+                PartitionItem::Boundary {
+                    kind,
+                    clustering,
+                    end_deletion_time,
+                    end_local_deletion_time,
+                    start_deletion_time,
+                    start_local_deletion_time,
+                } => self.write_range_boundary(
+                    kind,
+                    clustering,
+                    end_deletion_time,
+                    end_local_deletion_time,
+                    start_deletion_time,
+                    start_local_deletion_time,
                     schema,
                     prev_unfiltered_size,
                 )? as u64,

@@ -127,6 +127,42 @@ pub(super) fn marker_bound_prefix_for_index(bound: &ClusteringBound, is_open: bo
     buf
 }
 
+/// Serialize a range-tombstone **boundary** marker as its promoted-index
+/// (`IndexInfo`) `ClusteringPrefix` byte sequence (issue #1220). A boundary uses
+/// the same `ClusteringBoundOrBoundary.Serializer` wire form as a bound — a kind
+/// byte (2 or 5), a 2-byte big-endian `size` short, then the values-without-size
+/// blob — but its kind is the BOUNDARY ordinal and it always carries a concrete
+/// clustering value (never the empty `Bottom`/`Top` form). Returns `Err` only if a
+/// clustering column type is unknown (the caller falls back via
+/// [`boundary_prefix_for_index_fallback`]).
+pub(super) fn serialize_boundary_prefix_for_index(
+    boundary_kind: u8,
+    clustering: &ClusteringKey,
+    schema: &TableSchema,
+) -> Result<Vec<u8>> {
+    let size = clustering.columns.len();
+    if size > u16::MAX as usize {
+        return Err(crate::error::Error::InvalidInput(format!(
+            "Range tombstone boundary has too many clustering values: {size}"
+        )));
+    }
+    let mut buf = Vec::new();
+    buf.push(boundary_kind);
+    buf.extend_from_slice(&(size as u16).to_be_bytes());
+    buf.extend_from_slice(&serialize_clustering_prefix_to_vec(clustering, schema)?);
+    Ok(buf)
+}
+
+/// Fallback promoted-index prefix for a boundary whose clustering values cannot be
+/// encoded: the boundary kind byte followed by a `0` size short (an empty bound
+/// form). Mirrors [`marker_bound_prefix_for_index`] for the boundary case.
+pub(super) fn boundary_prefix_for_index_fallback(boundary_kind: u8) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(3);
+    buf.push(boundary_kind);
+    buf.extend_from_slice(&0u16.to_be_bytes());
+    buf
+}
+
 /// Select the `ClusteringPrefix.Kind` ordinal and clustering values for a marker
 /// bound — the SINGLE source of truth shared by the serializer and the fallback.
 ///

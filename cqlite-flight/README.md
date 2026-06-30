@@ -101,8 +101,9 @@ cargo run -p cqlite-flight -- \
 
 ## Container image (GHCR)
 
-The server is published as a multi-arch (`linux/amd64` + `linux/arm64`) image to
-the GitHub Container Registry on every release tag:
+The server publishes as a multi-arch (`linux/amd64` + `linux/arm64`) image to the
+GitHub Container Registry — built on every release (`v*`) tag and on demand via
+the manual workflow (see [below](#cutting-a-one-off-image-no-release-tag)):
 
 ```
 ghcr.io/pmcfadin/cqlite-flight
@@ -110,10 +111,17 @@ ghcr.io/pmcfadin/cqlite-flight
 
 | Tag | Points at |
 |-----|-----------|
-| `vX.Y.Z` | An exact release (e.g. `v0.12.0`). |
-| `X.Y` | The latest patch on a minor line (e.g. `0.12`). |
+| `vX.Y.Z` | An exact release (e.g. `v0.13.0`). |
+| `X.Y` | The latest patch on a minor line (e.g. `0.13`). |
 | `latest` | The most recent **stable** release (prereleases excluded). |
 | custom | One-off images cut via the manual workflow (see below). |
+
+Once the GHCR package is public, pulling needs **no authentication** (no
+`docker login`):
+
+```bash
+docker pull ghcr.io/pmcfadin/cqlite-flight:<tag>   # e.g. latest, or a vX.Y.Z release tag
+```
 
 The container exposes the Arrow Flight **gRPC** listener on `:8815` and reads
 SSTables from a directory you **mount at runtime** — it ships no data of its own.
@@ -142,8 +150,13 @@ Notes:
 ### Pulling a specific release
 
 ```bash
-docker pull ghcr.io/pmcfadin/cqlite-flight:v0.12.0
+docker pull ghcr.io/pmcfadin/cqlite-flight:vX.Y.Z   # a published release tag
 ```
+
+Every published image is smoke-tested by the release workflow on both
+architectures — it is pulled and run, and the publish fails unless the container
+serves the Flight listener on `:8815` — so a tag that lands in GHCR is one that
+boots and serves.
 
 ### Cutting a one-off image (no release tag)
 

@@ -22,9 +22,16 @@ concurrency:
   group: minimal-features-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  # Avoid one-shot failures from transient crates.io HTTP/2 framing errors.
+  CARGO_HTTP_MULTIPLEXING: false
+
 jobs:
-  minimal-build:
-    name: Minimal Build & Test
+  minimal_compression_build:
+    name: Minimal Compression Build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -42,6 +49,22 @@ jobs:
       - name: Build with minimal compression (lz4 + snappy only)
         run: cargo build --no-default-features --features=lz4,snappy
 
+  all_compression_test:
+    name: All Compression Build & Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cqlite-core
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
       - name: Build with all compression support
         run: cargo build --no-default-features --features=all-compression
 
@@ -55,12 +78,44 @@ jobs:
           # is validating feature gating and minimal compilation, not data parity.
           cargo test --no-default-features --features=all-compression --quiet --lib
 
+  parquet_export_test:
+    name: Parquet Export Build & Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cqlite-core
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
       - name: Build and test with parquet export feature (Epic #682)
         run: |
           # The optional parquet feature must compile and its writer unit
           # tests must pass (no test-data dependency for the lib tests).
           cargo build --features=parquet
           cargo test --features=parquet --quiet --lib export::parquet
+
+  default_dependency_guard:
+    name: Default Dependency Guard
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cqlite-core
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
 
       - name: Verify default build does not compile arrow/parquet (Epic #682)
         run: |

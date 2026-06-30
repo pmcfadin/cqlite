@@ -102,6 +102,11 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      # Primary tag the smoke job pulls (the dispatch input on a manual run, or
+      # the release version on a v* tag). docker/metadata-action sets `version`
+      # from the highest-priority tag — the same value the Inspect step uses.
+      version: ${{ steps.meta.outputs.version }}
     steps:
     - name: Download digests
       uses: actions/download-artifact@v4
@@ -141,3 +146,86 @@ jobs:
     - name: Inspect image
       run: |
         docker buildx imagetools inspect ${{ env.REGISTRY_IMAGE }}:${{ steps.meta.outputs.version }}
+
+  # Prove the published image is pullable and actually serves Flight on :8815 on
+  # EACH architecture, natively (amd64 on ubuntu-latest, arm64 on
+  # ubuntu-24.04-arm). A pulled image that cannot run, or that never binds :8815,
+  # fails the run instead of shipping silently — the wiring-evidence for #1145's
+  # acceptance ("pull works" + "the image runs and listens on :8815"). We pull
+  # the just-published tag, run the container against a throwaway empty data dir,
+  # and poll a TCP connect to :8815; we deliberately do NOT do a full do_get
+  # round-trip here (that needs a mounted SSTable fixture and is covered by
+  # `cargo test -p cqlite-flight`) — port readiness is the low-flake signal that
+  # the entrypoint launched and bound the listener.
+  smoke:
+    name: Smoke (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    needs: merge
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+    - name: Log in to GHCR
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Resolve the published tag
+      id: tag
+      run: |
+        set -euo pipefail
+        version="${{ needs.merge.outputs.version }}"
+        # The merge job normally resolves a tag (a v* release version, or the
+        # `image_tag` dispatch input — required, defaulting to `dev` in the UI,
+        # though a programmatic dispatch can still send it empty). Guard rather
+        # than assume: an empty value means something upstream broke, so fail
+        # clearly instead of issuing `docker pull <image>:` with a dangling ref.
+        if [ -z "$version" ]; then
+          echo "::error::merge job resolved no published tag (empty version) — cannot smoke-test the image"
+          exit 1
+        fi
+        echo "ref=${{ env.REGISTRY_IMAGE }}:${version}" >> "$GITHUB_OUTPUT"
+
+    - name: Pull published image
+      run: docker pull "${{ steps.tag.outputs.ref }}"
+
+    - name: Run container and assert it serves :8815
+      run: |
+        set -euo pipefail
+        data="$RUNNER_TEMP/flight-data"
+        mkdir -p "$data"
+        # Read-only data mount is intentional and matches production use: the
+        # Flight server only reads/merges SSTables and never writes to its data
+        # dir, so :ro is the correct, safe mount (see cqlite-flight/README.md).
+        cid=$(docker run -d -p 8815:8815 \
+          -v "$data":/data:ro \
+          "${{ steps.tag.outputs.ref }}" \
+          --data-dir /data --listen 0.0.0.0:8815)
+        # Always surface logs + clean up, whether we pass, fail, or error out.
+        trap 'echo "--- container logs ---"; docker logs "$cid" 2>&1 || true; docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+        # Poll the listener with an explicit socket connect (python3 is always
+        # present on GitHub ubuntu runners) rather than a bash /dev/tcp redirect.
+        for i in $(seq 1 30); do
+          if python3 -c "import socket,sys; s=socket.socket(); s.settimeout(2); sys.exit(0 if s.connect_ex(('127.0.0.1',8815))==0 else 1)"; then
+            echo "cqlite-flight is accepting connections on :8815 (after ${i}s) on ${{ matrix.platform }}"
+            exit 0
+          fi
+          # Bail early with a clear message if the container died before binding.
+          if [ "$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null)" != "true" ]; then
+            echo "::error::container exited before binding :8815 on ${{ matrix.platform }}"
+            exit 1
+          fi
+          sleep 1
+        done
+        echo "::error::cqlite-flight did not accept a connection on :8815 within 30s on ${{ matrix.platform }}"
+        exit 1
