@@ -1,0 +1,195 @@
+name: Exhaustive Regeneration (parity corpus)
+
+# CI tier: `exhaustive_regeneration` (issue #1026, child of epic #974).
+#
+# The full, expensive regeneration of the Cassandra-generated parity corpus
+# across the storage-format matrix, the test_deltas fixtures, and the corruption
+# fixtures — followed by the corpus audit (`cassandra-parity corpus-audit`). It
+# uploads ONE report artifact (provenance record + audit report + generator logs)
+# and deliberately does NOT commit regenerated binaries or publish a dataset asset
+# (design D6).
+#
+# Cadence (design D5, owner-pinned): weekly cron + manual dispatch only. It NEVER
+# runs on pull_request and never gates the fast/required PR path. See the tier
+# contract: docs/development/parity-ci-tiers.md (`exhaustive_regeneration`) and the
+# release checklist (`parity-release-checklist.md`).
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # Weekly, Sunday 06:00 UTC — slower than the nightly Docker lane (#1025),
+    # reflecting the cost of full-corpus generation + a Cassandra container.
+    - cron: '0 6 * * 0'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: exhaustive-regeneration
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+  MANIFEST: test-data/cassandra-parity-manifest.yml
+  ARTIFACT_DIR: ${{ github.workspace }}/exhaustive-regeneration-report
+
+jobs:
+  regenerate-and-audit:
+    runs-on: ubuntu-latest
+    # Generous timeout: the matrix regeneration restarts a Cassandra container
+    # twice (oa, da) and compacts every keyspace.
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: exhaustive-regeneration-${{ hashFiles('**/Cargo.toml') }}
+
+      - name: Check Docker available
+        run: docker info
+
+      - name: Build cassandra-parity (audit tool)
+        run: cargo build -p cassandra-parity
+
+      - name: Prepare report dir
+        run: mkdir -p "$ARTIFACT_DIR"
+
+      # The corruption corpus needs clean nb/BTI sources; fetch the committed
+      # dataset binaries so generate-corruption-corpus.sh has clean inputs and the
+      # reference-golden snapshot below has the committed JSONL/txt goldens.
+      - name: Fetch dataset binaries (clean sources)
+        run: bash test-data/scripts/fetch-datasets.sh
+
+      # Snapshot the committed reference-golden checksums BEFORE regeneration.
+      # After regeneration we recompute the same set; the audit's
+      # "unexpected component change" check flags any golden whose bytes drifted
+      # without a manifest/golden-update PR.
+      - name: Snapshot committed reference-golden checksums (expected inventory)
+        run: |
+          set -euo pipefail
+          find test-data/datasets \( -name '*.jsonl' -o -name '*.db.txt' \) -type f \
+            | sort | xargs -r sha256sum > "$ARTIFACT_DIR/expected.sha256" || true
+          echo "expected goldens: $(wc -l < "$ARTIFACT_DIR/expected.sha256")"
+
+      # ---- exhaustive.regenerate.all_formats ----
+      - name: Regenerate storage-format matrix (nb/oa/da)
+        run: |
+          set -euo pipefail
+          bash test-data/scripts/regenerate-datasets.sh \
+            2>&1 | tee "$ARTIFACT_DIR/regenerate-datasets.log"
+
+      # ---- exhaustive.regenerate.test_deltas ----
+      - name: Regenerate test_deltas fixtures
+        run: |
+          set -euo pipefail
+          bash test-data/scripts/generate-deltas.sh \
+            2>&1 | tee "$ARTIFACT_DIR/generate-deltas.log"
+
+      # Compression fixtures (test_comp) + BTI sources are the clean inputs the
+      # corruption generator mutates; (re)build them so corruption coverage is real.
+      - name: Regenerate compression + BTI source fixtures
+        run: |
+          set -euo pipefail
+          bash test-data/scripts/generate-compression-parity.sh \
+            2>&1 | tee "$ARTIFACT_DIR/generate-compression-parity.log"
+          OUT="$CQLITE_DATASETS_ROOT" bash test-data/scripts/gen-wide-bti.sh \
+            2>&1 | tee "$ARTIFACT_DIR/gen-wide-bti.log"
+
+      # ---- exhaustive.regenerate.corruption_fixtures ----
+      - name: Regenerate corruption fixtures
+        run: |
+          set -euo pipefail
+          bash test-data/scripts/generate-corruption-corpus.sh \
+            2>&1 | tee "$ARTIFACT_DIR/generate-corruption-corpus.log"
+
+      # Package the regenerated corpus to obtain the asset name + SHA256 for the
+      # provenance record. NO publish (design D6 / non-goal).
+      - name: Package dataset asset (name + SHA256 only; no publish)
+        id: package
+        run: |
+          set -euo pipefail
+          ARCHIVE_PATH="$ARTIFACT_DIR/dataset-asset.tar.gz" \
+            bash test-data/scripts/package_datasets.sh --full \
+            2>&1 | tee "$ARTIFACT_DIR/package_datasets.log"
+          ASSET_SHA=$(sha256sum "$ARTIFACT_DIR/dataset-asset.tar.gz" | awk '{print $1}')
+          echo "asset_sha=$ASSET_SHA" >> "$GITHUB_OUTPUT"
+
+      # Recompute the reference-golden checksums AFTER regeneration.
+      - name: Compute regenerated reference-golden checksums (actual inventory)
+        run: |
+          set -euo pipefail
+          find test-data/datasets \( -name '*.jsonl' -o -name '*.db.txt' \) -type f \
+            | sort | xargs -r sha256sum > "$ARTIFACT_DIR/actual.sha256" || true
+
+      # Build the provenance record from the ACTUAL generation environment: the
+      # image tag is the single source of truth in regenerate-datasets.sh, and the
+      # version is derived from it. The audit fails if the recorded version/ref/sha
+      # is not declared by the manifest (a silent image bump is caught).
+      - name: Write provenance record
+        run: |
+          set -euo pipefail
+          IMAGE=$(grep -E '^CASSANDRA_IMAGE=' test-data/scripts/regenerate-datasets.sh \
+            | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          VERSION="${IMAGE#cassandra:}"
+          SHA=$(grep -E '^[[:space:]]*sha:' "$MANIFEST" | head -1 | awk '{print $2}')
+          python3 - "$IMAGE" "$VERSION" "$SHA" "${{ steps.package.outputs.asset_sha }}" <<'PY' > "$ARTIFACT_DIR/provenance.json"
+          import json, sys
+          image, version, sha, asset_sha = sys.argv[1:5]
+          rec = {
+              "cassandra_version": version,
+              "cassandra_ref": f"cassandra-{version}",
+              "cassandra_git_sha": sha,
+              "docker_image": image,
+              "generator_commands": [
+                  "bash test-data/scripts/regenerate-datasets.sh",
+                  "bash test-data/scripts/generate-deltas.sh",
+                  "bash test-data/scripts/generate-compression-parity.sh",
+                  "bash test-data/scripts/gen-wide-bti.sh",
+                  "bash test-data/scripts/generate-corruption-corpus.sh",
+              ],
+              "dataset_asset_name": "dataset-asset.tar.gz",
+              "dataset_asset_sha256": asset_sha,
+          }
+          print(json.dumps(rec, indent=2))
+          PY
+          cat "$ARTIFACT_DIR/provenance.json"
+
+      # ---- exhaustive.audit.manifest_coverage + exhaustive.audit.generated_references ----
+      # Hard-fails (non-zero exit) and names the offender on any finding: missing/
+      # stale reference, unclassified high-relevance file, unexpected component
+      # change, provenance mismatch, or corruption-coverage gap (owner-pinned:
+      # always hard-fail; no report-but-pass).
+      - name: Corpus audit (manifest coverage + generated references)
+        run: |
+          set -euo pipefail
+          cargo run -p cassandra-parity -- corpus-audit \
+            --manifest "$MANIFEST" \
+            --corpus . \
+            --provenance "$ARTIFACT_DIR/provenance.json" \
+            --checksums "$ARTIFACT_DIR/actual.sha256" \
+            --expected-inventory "$ARTIFACT_DIR/expected.sha256" \
+            --corruption-manifest test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml \
+            2>&1 | tee "$ARTIFACT_DIR/corpus-audit-report.txt"
+
+      # One report artifact: provenance + audit report + generator logs. Always
+      # uploaded (pass or fail) so a release can cite the run.
+      - name: Upload regeneration report artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: exhaustive-regeneration-report
+          path: |
+            ${{ env.ARTIFACT_DIR }}/provenance.json
+            ${{ env.ARTIFACT_DIR }}/corpus-audit-report.txt
+            ${{ env.ARTIFACT_DIR }}/expected.sha256
+            ${{ env.ARTIFACT_DIR }}/actual.sha256
+            ${{ env.ARTIFACT_DIR }}/*.log
+          retention-days: 90
+          if-no-files-found: warn
