@@ -132,6 +132,8 @@ insta = { version = "1.34", features = ["json"] }
 fastrand = "2.0"
 libc = { workspace = true }
 num-traits = "0.2"  # Required for BigInt conversion methods
+# Full-fixture-dir hashing for the corruption-verify parity test (issue #1294).
+sha2 = "0.10"
 
 # In-process sampling CPU profiler for the criterion benches (signal-based, so
 # it works in containers and on CI runners where `perf` is unavailable).

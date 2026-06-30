@@ -48,6 +48,8 @@ struct Manifest {
 struct Fixture {
     name: String,
     status: String,
+    /// The single mutated component file name (e.g. `nb-1-big-Data.db`).
+    component: String,
     expected_failing_component: String,
     expected_error_class: String,
     /// Captured Apache Cassandra 5.0.2 `sstableverify --extended` verdict for
@@ -60,6 +62,16 @@ struct Fixture {
     /// equivalence for `equivalent` fixtures and asserts the recorded divergence
     /// for `divergent` ones, so a regression in either direction is caught.
     verdict_parity: String,
+    /// The corrupted sha-256 of the single MUTATED component the verdict was
+    /// captured against (issue #1236). Used to discriminate regeneration drift
+    /// from the issue #1294 Item-1 "non-mutated component changed" hole.
+    #[serde(default)]
+    verdict_captured_for_sha256: String,
+    /// The full-fixture-dir hash (every component `sstableverify` reads) the
+    /// captured verdict was observed against (issue #1294 Item 1). Empty for
+    /// manifests predating #1294.
+    #[serde(default)]
+    verdict_captured_for_dir_sha256: String,
 }
 
 fn datasets_root() -> Option<PathBuf> {
@@ -100,6 +112,82 @@ fn has_data_db(dir: &Path) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+/// SHA-256 hex of a single file (matches `sha256sum`/`shasum -a 256`).
+fn sha256_file(path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let mut h = Sha256::new();
+    h.update(&bytes);
+    format!("{:x}", h.finalize())
+}
+
+/// Deterministic hash over an ENTIRE fixture directory, byte-for-byte identical
+/// to `fixture_dir_sha256()` in `generate-corruption-corpus.sh` (issue #1294
+/// Item 1): sorted regular-file names directly under the dir; for each mix in the
+/// NUL-terminated relative name then the 8-byte-big-endian length + file bytes;
+/// finally the 8-byte-big-endian file count. This binds the captured verdict to
+/// the COMPLETE set of bytes `sstableverify` reads, not just the mutated component.
+fn fixture_dir_sha256(dir: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()))
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+        .collect();
+    names.sort();
+    let mut h = Sha256::new();
+    for n in &names {
+        h.update(n.as_bytes());
+        h.update([0u8]);
+        let data = std::fs::read(dir.join(n))
+            .unwrap_or_else(|e| panic!("read {}: {e}", dir.join(n).display()));
+        h.update((data.len() as u64).to_be_bytes());
+        h.update(&data);
+    }
+    h.update((names.len() as u64).to_be_bytes());
+    format!("{:x}", h.finalize())
+}
+
+/// Validate the full-fixture-dir binding (issue #1294 Item 1): the on-disk fixture
+/// dir hash vs the manifest's captured-against dir hash. FAILS on the Item-1 hole
+/// (mutated component byte-stable but a NON-mutated component changed). Advisory
+/// for legitimate whole-source regeneration drift (mutated component also moved),
+/// matching the generator. Skipped for pre-#1294 manifests (empty binding).
+fn check_full_dir_binding(fx: &Fixture, dir: &Path) {
+    if fx.verdict_captured_for_dir_sha256.trim().is_empty() {
+        return; // pre-#1294 manifest: no full-dir binding recorded.
+    }
+    let on_disk_dir = fixture_dir_sha256(dir);
+    if on_disk_dir == fx.verdict_captured_for_dir_sha256.trim() {
+        return; // bytes under test == bytes the verdict was captured against.
+    }
+    // Dir hash drifted. Is the MUTATED component byte-stable against its binding?
+    let mutated = dir.join(fx.component.trim());
+    let mutated_stable = mutated.is_file()
+        && !fx.verdict_captured_for_sha256.trim().is_empty()
+        && sha256_file(&mutated) == fx.verdict_captured_for_sha256.trim();
+    assert!(
+        !mutated_stable,
+        "fixture {}: full-fixture-dir hash drifted (captured {} != on-disk {}) while the \
+         mutated component '{}' is UNCHANGED (sha still {}). A NON-mutated component changed, \
+         so the captured Cassandra verdict '{}' is stale for the bytes sstableverify reads. \
+         Re-capture and update verdict_captured_for_dir_sha256 (issue #1294 Item 1).",
+        fx.name,
+        fx.verdict_captured_for_dir_sha256.trim(),
+        on_disk_dir,
+        fx.component.trim(),
+        fx.verdict_captured_for_sha256.trim(),
+        fx.cassandra_verdict,
+    );
+    // Both moved together => regeneration drift (advisory).
+    eprintln!(
+        "[dir-binding] {} full-dir hash drifted with the mutated component (regeneration \
+         drift); advisory — verdict-correctness enforced by the verify assertions below.",
+        fx.name
+    );
 }
 
 async fn make_platform(config: &Config) -> Arc<Platform> {
@@ -193,6 +281,11 @@ async fn sstable_parity_corruption_verify_matches_cassandra_per_fixture() {
             skipped_absent += 1;
             continue;
         }
+
+        // Item 1 (issue #1294): the captured verdict must be bound to the COMPLETE
+        // set of bytes sstableverify reads, not just the mutated component. Fail
+        // closed if a NON-mutated component changed under a byte-stable mutated one.
+        check_full_dir_binding(fx, &dir);
 
         let report = verify_full(&dir).await;
         let cqlite_corrupt = !report.is_ok();
