@@ -319,23 +319,45 @@ impl V5CompressedLegacyParser {
         }
 
         let columns_in_order: Vec<ColumnToParse> = if !reader.header.columns.is_empty() {
-            // Issue #1046: resolve each header column to its schema `Column` by an
-            // allocation-free linear scan of `schema.columns` rather than building
-            // (and immediately discarding) a `HashMap<String, &Column>` per row.
+            // Issue #1046: resolve each header column to its schema `Column` via a
+            // BORROWED-KEY lookup (`HashMap<&str, &Column>`) built once per row,
+            // rather than (a) the original `HashMap<String, &Column>` that cloned
+            // one `String` per schema column per row, or (b) a per-header-column
+            // `iter().find()` linear scan that is O(header_cols × schema_cols) and
+            // regresses CPU for the WIDE schemas this repo explicitly supports
+            // (wide_rows / wide_table, many-column tables — roborev finding).
             //
-            // The old map cost one `String` clone per schema column PLUS one
-            // HashMap allocation on EVERY parsed row — the dominant per-row
-            // allocation-count site in the read/scan hot path (dhat: the single
-            // largest call-site for a full scan, scaling linearly with
-            // rows × schema-columns). The map was local to this function and never
-            // escaped, and it was queried at most once per header column, so a
-            // borrowing `iter().find()` is byte-for-byte equivalent: `HashMap::get`
-            // and `find(|c| c.name == name)` both return the column whose name
-            // matches exactly. Cassandra schemas have a handful of columns, so the
-            // linear scan is also cheaper in practice than a per-row hash build —
-            // and it allocates nothing, which is the point of this change.
+            // This borrowed-key map keys on `&str` slices into `schema.columns[].name`
+            // (no `String` clones — the precise allocations the dhat guard measures)
+            // and gives O(1) per-header-column lookup. It costs one HashMap
+            // allocation per row, but ZERO per-column `String` clones, so it fixes
+            // BOTH the original alloc problem (~18 name clones/row removed) AND the
+            // new quadratic-CPU finding. Resolution is identical to the original
+            // map / scan: an exact column-name match.
+            //
+            // NOTE on the fallback-vs-hoist choice: the header→schema resolution is
+            // constant for every row in an SSTable, so it could in principle be
+            // hoisted and built ONCE per scan. But `parse_row_data_with_offset` is
+            // reached from 5 per-partition loops across block_emit / block_emit_windowed
+            // / compaction, and the resolved map borrows from BOTH `reader.header`
+            // (keys) and the per-call `schema` (values) — neither of which is owned
+            // by a single per-scan struct. A true hoist would thread a new
+            // `&HashMap<&str, &Column>` parameter through two function signatures and
+            // all 5 call sites. That churn is out of scope for this finding; the
+            // per-row borrowed-key map already delivers O(1) lookup with no per-column
+            // allocation, which is what both the original issue and the finding require.
+            // Keep-FIRST on a duplicate name to exactly match the prior
+            // `iter().find()` / `HashMap<String, &Column>::get` semantics (both
+            // returned the first matching column). Cassandra schemas cannot have
+            // duplicate column names, so this is defensive — but it keeps the change
+            // byte-for-byte equivalent for any synthetic/edge schema too.
+            let mut resolve_lookup: HashMap<&str, &crate::schema::Column> =
+                HashMap::with_capacity(schema.columns.len());
+            for col in &schema.columns {
+                resolve_lookup.entry(col.name.as_str()).or_insert(col);
+            }
             let resolve_schema = |name: &str| -> Option<&crate::schema::Column> {
-                schema.columns.iter().find(|col| col.name == name)
+                resolve_lookup.get(name).copied()
             };
 
             // Iterate serialization header columns in exact order (skipping keys,
