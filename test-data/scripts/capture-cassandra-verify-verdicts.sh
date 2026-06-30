@@ -44,6 +44,12 @@ CORPUS="$DATASETS/corruption/test_comp_corrupt"
 IMAGE="${CASSANDRA_IMAGE:-cassandra:5.0.2}"
 CID="${CASS_VERIFY_CID:-cass-verify-verdicts}"
 OUT="${OUT:-/dev/stdout}"
+# Explicit in-container path to the standalone verifier. The repo's Cassandra
+# Docker tooling lives under /opt/cassandra/tools/bin/, which is NOT guaranteed
+# to be on the container PATH — invoking `sstableverify` by bare name then aborts
+# even though the binary exists (Finding / issue #1236). Prefer this explicit
+# path; fall back to PATH resolution only if it's genuinely absent.
+SSTABLEVERIFY="${SSTABLEVERIFY:-/opt/cassandra/tools/bin/sstableverify}"
 
 fatal() { echo "[verdicts] FATAL: $*" >&2; exit 1; }
 
@@ -147,14 +153,24 @@ echo "[verdicts] cassandra version: $(docker exec "$CID" cassandra -v 2>/dev/nul
 # which the old code would have happily recorded as `corrupt` — silently
 # fabricating a Cassandra "corruption" verdict from a broken environment.
 #
-# So before any capture we probe the tool once. `command -v` returns 0 only if
-# the binary resolves on PATH inside the container; anything else (not installed,
-# container not running, docker daemon down) is FATAL and aborts the capture.
-echo "[verdicts] preflighting sstableverify in container..."
-if ! docker exec "$CID" sh -c 'command -v sstableverify >/dev/null 2>&1'; then
-  fatal "sstableverify not found / not runnable inside $IMAGE container ($CID); cannot capture a trustworthy verdict oracle"
+# So before any capture we probe the tool once. We preflight the EXPLICIT path
+# ($SSTABLEVERIFY, defaulting to /opt/cassandra/tools/bin/sstableverify) by
+# asserting the file is present AND executable inside the container. Only if that
+# explicit path is genuinely absent do we fall back to PATH resolution (and, on
+# success, pin $SSTABLEVERIFY to the resolved absolute path). Anything else (not
+# installed, container not running, docker daemon down) is FATAL and aborts the
+# capture — a bare-name invocation must never be the reason a verdict is lost.
+echo "[verdicts] preflighting $SSTABLEVERIFY in container..."
+if docker exec "$CID" test -x "$SSTABLEVERIFY"; then
+  echo "[verdicts] preflight OK: $SSTABLEVERIFY present and executable in container."
+else
+  echo "[verdicts] $SSTABLEVERIFY absent; falling back to PATH resolution..." >&2
+  resolved=$(docker exec "$CID" sh -c 'command -v sstableverify 2>/dev/null' | tr -d '\r')
+  [[ -n "$resolved" ]] || \
+    fatal "sstableverify not found at $SSTABLEVERIFY nor on PATH inside $IMAGE container ($CID); cannot capture a trustworthy verdict oracle"
+  SSTABLEVERIFY="$resolved"
+  echo "[verdicts] preflight OK: resolved sstableverify on PATH at $SSTABLEVERIFY."
 fi
-echo "[verdicts] preflight OK: sstableverify present in container."
 
 printf "fixture\tks\ttbl\tverdict\tmessage\n" > "$OUT"
 
@@ -176,7 +192,7 @@ run_verify() {
   # The ONLY place errexit is intentionally relaxed: sstableverify's nonzero exit
   # IS the verdict we want to capture, not a script failure.
   set +e
-  raw=$(docker exec "$CID" sh -c "sstableverify -e -f $ks $tbl 2>&1"); rc=$?
+  raw=$(docker exec "$CID" sh -c "$SSTABLEVERIFY -e -f $ks $tbl 2>&1"); rc=$?
   set -e
 
   # ---- infra/exec failure vs. genuine verifier verdict (Finding 2 / #1236) ----
