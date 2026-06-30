@@ -2,6 +2,7 @@
 //! exercise the linter, coverage, and report logic directly.
 
 pub mod claim_scan;
+pub mod corpus_audit;
 pub mod coverage;
 pub mod enums;
 pub mod lint;

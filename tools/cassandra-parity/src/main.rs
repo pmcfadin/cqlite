@@ -9,12 +9,14 @@
 //!   cassandra-parity coverage [--manifest PATH] [--strict]
 //!   cassandra-parity report   [--manifest PATH] [--output PATH] [--check] [--json PATH]
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{bail, Context, Result};
 
 use cassandra_parity::claim_scan::{self, ScanInput};
+use cassandra_parity::corpus_audit::{self, CorpusInventory, ExpectedInventory, Provenance};
 use cassandra_parity::lint::Level;
 use cassandra_parity::model::Manifest;
 use cassandra_parity::{coverage, enums, lint, report, tier_contract};
@@ -32,6 +34,9 @@ USAGE:
   cassandra-parity coverage           [--manifest PATH] [--strict]
   cassandra-parity report             [--manifest PATH] [--output PATH] [--check] [--json PATH]
   cassandra-parity tier-contract-check [--manifest PATH] [--tier-doc PATH] [--schema PATH]
+  cassandra-parity corpus-audit       [--manifest PATH] --corpus DIR [--provenance JSON]
+                                      [--checksums FILE] [--expected-inventory FILE]
+                                      [--corruption-manifest YML] [--index MD]
 ";
 
 struct Args {
@@ -42,6 +47,13 @@ struct Args {
     schema: PathBuf,
     strict: bool,
     check: bool,
+    // corpus-audit (issue #1026)
+    corpus: Option<PathBuf>,
+    provenance: Option<PathBuf>,
+    checksums: Option<PathBuf>,
+    expected_inventory: Option<PathBuf>,
+    corruption_manifest: Option<PathBuf>,
+    index: Option<PathBuf>,
 }
 
 fn parse_args(rest: &[String]) -> Result<Args> {
@@ -53,6 +65,12 @@ fn parse_args(rest: &[String]) -> Result<Args> {
         schema: PathBuf::from(DEFAULT_SCHEMA),
         strict: false,
         check: false,
+        corpus: None,
+        provenance: None,
+        checksums: None,
+        expected_inventory: None,
+        corruption_manifest: None,
+        index: None,
     };
     let mut it = rest.iter();
     while let Some(flag) = it.next() {
@@ -64,6 +82,20 @@ fn parse_args(rest: &[String]) -> Result<Args> {
             "--schema" => args.schema = PathBuf::from(next_val(&mut it, "--schema")?),
             "--strict" => args.strict = true,
             "--check" => args.check = true,
+            "--corpus" => args.corpus = Some(PathBuf::from(next_val(&mut it, "--corpus")?)),
+            "--provenance" => {
+                args.provenance = Some(PathBuf::from(next_val(&mut it, "--provenance")?))
+            }
+            "--checksums" => args.checksums = Some(PathBuf::from(next_val(&mut it, "--checksums")?)),
+            "--expected-inventory" => {
+                args.expected_inventory =
+                    Some(PathBuf::from(next_val(&mut it, "--expected-inventory")?))
+            }
+            "--corruption-manifest" => {
+                args.corruption_manifest =
+                    Some(PathBuf::from(next_val(&mut it, "--corruption-manifest")?))
+            }
+            "--index" => args.index = Some(PathBuf::from(next_val(&mut it, "--index")?)),
             other => bail!("unknown argument: {other}\n\n{USAGE}"),
         }
     }
@@ -117,6 +149,7 @@ fn run() -> Result<ExitCode> {
         "coverage" => cmd_coverage(&args),
         "report" => cmd_report(&args),
         "tier-contract-check" => cmd_tier_contract_check(&args),
+        "corpus-audit" => cmd_corpus_audit(&args),
         "-h" | "--help" | "help" => {
             println!("{USAGE}");
             Ok(ExitCode::SUCCESS)
@@ -203,6 +236,150 @@ fn cmd_tier_contract_check(args: &Args) -> Result<ExitCode> {
         );
         Ok(ExitCode::FAILURE)
     }
+}
+
+/// Audit the regenerated corpus + run provenance against the manifest
+/// (issue #1026). Hard-fails (non-zero exit) and names the offender on any
+/// finding — no report-but-pass mode (owner-pinned strictness).
+fn cmd_corpus_audit(args: &Args) -> Result<ExitCode> {
+    let corpus = args
+        .corpus
+        .as_ref()
+        .context("corpus-audit requires --corpus <regenerated corpus root>")?;
+    let m = load(&args.manifest)?;
+    let root = repo_root(&args.manifest);
+
+    let index_path = args
+        .index
+        .clone()
+        .unwrap_or_else(|| root.join(&m.cassandra_source.index));
+    let index_text = std::fs::read_to_string(&index_path)
+        .with_context(|| format!("reading index {}", index_path.display()))?;
+
+    // Regenerated component inventory: every repo-relative file under --corpus.
+    let mut inventory = CorpusInventory {
+        files: walk_relative(corpus)?,
+        checksums: BTreeMap::new(),
+    };
+    if let Some(p) = &args.checksums {
+        inventory.checksums = read_sha256_file(p)?;
+    }
+
+    let mut expected = ExpectedInventory {
+        components: BTreeMap::new(),
+    };
+    if let Some(p) = &args.expected_inventory {
+        expected.components = read_sha256_file(p)?;
+    }
+
+    let provenance = match &args.provenance {
+        Some(p) => {
+            let text = std::fs::read_to_string(p)
+                .with_context(|| format!("reading provenance {}", p.display()))?;
+            Some(Provenance::from_json(&text).with_context(|| {
+                format!("parsing provenance record {} (expected JSON)", p.display())
+            })?)
+        }
+        None => None,
+    };
+
+    let corruption_components = match &args.corruption_manifest {
+        Some(p) => read_corruption_components(p)?,
+        None => BTreeSet::new(),
+    };
+
+    let report = corpus_audit::audit(
+        &m,
+        &index_text,
+        &inventory,
+        &expected,
+        provenance.as_ref(),
+        &corruption_components,
+    );
+
+    if report.ok() {
+        println!(
+            "corpus-audit: OK — {} corpus files, manifest references resolved, provenance matches \
+             the manifest pin, all required corruption components covered",
+            inventory.files.len()
+        );
+        Ok(ExitCode::SUCCESS)
+    } else {
+        eprintln!("{}", report.render());
+        eprintln!(
+            "corpus-audit: FAILED — {} finding(s)",
+            report.findings.len()
+        );
+        Ok(ExitCode::FAILURE)
+    }
+}
+
+/// Recursively collect every file under `dir` as a `/`-separated path relative
+/// to `dir` (matching the repo-relative form of manifest references when `dir`
+/// is the checkout root). Symlinks are not followed.
+fn walk_relative(dir: &Path) -> Result<BTreeSet<String>> {
+    let mut out = BTreeSet::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let entries = std::fs::read_dir(&d)
+            .with_context(|| format!("reading corpus directory {}", d.display()))?;
+        for entry in entries {
+            let entry = entry?;
+            let ft = entry.file_type()?;
+            let path = entry.path();
+            if ft.is_dir() {
+                stack.push(path);
+            } else if ft.is_file() {
+                if let Ok(rel) = path.strip_prefix(dir) {
+                    out.insert(rel.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Parse a `sha256sum`-format file (`<hex>  <path>` per line) into a
+/// `path -> sha256` map. Blank/comment lines are ignored.
+fn read_sha256_file(path: &Path) -> Result<BTreeMap<String, String>> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading checksums file {}", path.display()))?;
+    let mut map = BTreeMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut it = line.split_whitespace();
+        let (Some(sha), Some(first)) = (it.next(), it.next()) else {
+            continue;
+        };
+        // sha256sum prints a leading `*` for binary mode; strip it.
+        let rest: Vec<&str> = std::iter::once(first).chain(it).collect();
+        let rel = rest.join(" ");
+        let rel = rel.strip_prefix('*').unwrap_or(&rel).replace('\\', "/");
+        map.insert(rel, sha.to_string());
+    }
+    Ok(map)
+}
+
+/// Parse the set of `expected_failing_component:` values from a committed
+/// `corruption-manifest.yml`, i.e. which SSTable component types the corruption
+/// corpus actually targets.
+fn read_corruption_components(path: &Path) -> Result<BTreeSet<String>> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading corruption manifest {}", path.display()))?;
+    let mut set = BTreeSet::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("expected_failing_component:") {
+            let v = rest.trim().trim_matches('"');
+            if !v.is_empty() {
+                set.insert(v.to_string());
+            }
+        }
+    }
+    Ok(set)
 }
 
 fn cmd_coverage(args: &Args) -> Result<ExitCode> {
