@@ -187,6 +187,7 @@ pub struct DataWriter {
 }
 
 mod cells;
+mod collection_order;
 mod complex;
 mod encoding;
 mod index_prefix;
@@ -211,6 +212,7 @@ pub use types::PartitionEmitCounts;
 // `normalize_schema_udts`, `resolve_bare_udt_marshal`) keep their
 // `...::data_writer::<name>` paths. Flag/marker constants stay private items of
 // this `mod.rs` and reach the submodules as ancestor privates.
+pub(crate) use collection_order::compare_collection_elements;
 pub(crate) use encoding::*;
 pub(crate) use index_prefix::*;
 pub(crate) use schema_helpers::*;
