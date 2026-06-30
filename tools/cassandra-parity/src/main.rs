@@ -316,9 +316,16 @@ fn cmd_corpus_audit(args: &Args) -> Result<ExitCode> {
     }
 }
 
+/// Directory names skipped while walking a corpus: VCS metadata and build
+/// output. Recursing into `.git/`/`target/` would add tens of thousands of
+/// irrelevant paths (and a misleading `inventory.files.len()`) when the tool is
+/// pointed at a checkout root via `--corpus .` (issue #1026, Finding 2).
+const WALK_SKIP_DIRS: &[&str] = &[".git", "target", ".hg", ".svn", "node_modules"];
+
 /// Recursively collect every file under `dir` as a `/`-separated path relative
 /// to `dir` (matching the repo-relative form of manifest references when `dir`
-/// is the checkout root). Symlinks are not followed.
+/// is the checkout root). Symlinks are not followed; [`WALK_SKIP_DIRS`] are
+/// pruned so the walk is robust regardless of the caller's `--corpus` argument.
 fn walk_relative(dir: &Path) -> Result<BTreeSet<String>> {
     let mut out = BTreeSet::new();
     let mut stack = vec![dir.to_path_buf()];
@@ -330,6 +337,10 @@ fn walk_relative(dir: &Path) -> Result<BTreeSet<String>> {
             let ft = entry.file_type()?;
             let path = entry.path();
             if ft.is_dir() {
+                let name = entry.file_name();
+                if WALK_SKIP_DIRS.iter().any(|s| name == *s) {
+                    continue;
+                }
                 stack.push(path);
             } else if ft.is_file() {
                 if let Ok(rel) = path.strip_prefix(dir) {
@@ -341,25 +352,40 @@ fn walk_relative(dir: &Path) -> Result<BTreeSet<String>> {
     Ok(out)
 }
 
-/// Parse a `sha256sum`-format file (`<hex>  <path>` per line) into a
-/// `path -> sha256` map. Blank/comment lines are ignored.
+/// Parse a `sha256sum`-format file into a `path -> sha256` map. Each line is
+/// `<hash><sp><mode><path>`, where `<mode>` is a space (text mode) or `*`
+/// (binary mode). Parsing is POSITIONAL — the path is taken verbatim after the
+/// single separator so runs of spaces/tabs inside a path are preserved (issue
+/// #1026, Finding 3); splitting on whitespace would collapse them and mismatch
+/// the keys produced by [`walk_relative`]. Blank/comment lines are ignored.
 fn read_sha256_file(path: &Path) -> Result<BTreeMap<String, String>> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading checksums file {}", path.display()))?;
     let mut map = BTreeMap::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+    for raw in text.lines() {
+        // Trim only the trailing line terminator / whitespace; never touch the
+        // interior of the path.
+        let line = raw.trim_end();
+        if line.is_empty() || line.trim_start().starts_with('#') {
             continue;
         }
-        let mut it = line.split_whitespace();
-        let (Some(sha), Some(first)) = (it.next(), it.next()) else {
+        // The hash is the leading token up to the first space separator.
+        let Some(sep) = line.find(' ') else {
             continue;
         };
-        // sha256sum prints a leading `*` for binary mode; strip it.
-        let rest: Vec<&str> = std::iter::once(first).chain(it).collect();
-        let rel = rest.join(" ");
-        let rel = rel.strip_prefix('*').unwrap_or(&rel).replace('\\', "/");
+        let (sha, rest) = line.split_at(sep);
+        // `rest` begins with the separating space; after it is the mode
+        // indicator (`*` binary, or a second space for text mode). Drop exactly
+        // the separator + one mode char, then take the remainder verbatim.
+        let rest = &rest[1..];
+        let path_part = rest
+            .strip_prefix('*')
+            .or_else(|| rest.strip_prefix(' '))
+            .unwrap_or(rest);
+        let rel = path_part.replace('\\', "/");
+        if sha.is_empty() || rel.is_empty() {
+            continue;
+        }
         map.insert(rel, sha.to_string());
     }
     Ok(map)
@@ -487,4 +513,84 @@ fn evidence_counts(m: &Manifest) -> serde_json::Value {
         map.insert((*ev).to_string(), serde_json::json!(n));
     }
     serde_json::Value::Object(map)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// Finding 2: the corpus walk must prune `.git`/`target` so pointing
+    /// `--corpus .` at a checkout root does not enumerate VCS/build noise.
+    #[test]
+    fn walk_relative_skips_vcs_and_build_dirs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join(".git/objects")).expect("mkdir .git");
+        fs::create_dir_all(root.join("target/debug")).expect("mkdir target");
+        fs::create_dir_all(root.join("test-data/datasets/test_basic")).expect("mkdir corpus");
+        fs::write(root.join(".git/objects/abc"), b"pack").expect("write git");
+        fs::write(root.join("target/debug/bin"), b"elf").expect("write target");
+        fs::write(
+            root.join("test-data/datasets/test_basic/nb-1-big-Data.db"),
+            b"data",
+        )
+        .expect("write corpus");
+
+        let files = walk_relative(root).expect("walk");
+
+        assert!(
+            files.contains("test-data/datasets/test_basic/nb-1-big-Data.db"),
+            "corpus file must be enumerated, got: {files:?}"
+        );
+        assert!(
+            !files.iter().any(|p| p.starts_with(".git/")),
+            ".git must be pruned, got: {files:?}"
+        );
+        assert!(
+            !files.iter().any(|p| p.starts_with("target/")),
+            "target must be pruned, got: {files:?}"
+        );
+    }
+
+    /// Finding 3: positional parsing preserves a path containing a double space
+    /// and a tab; whitespace-splitting would collapse them and mismatch
+    /// `walk_relative` keys.
+    #[test]
+    fn read_sha256_file_preserves_internal_whitespace() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("sums.sha256");
+        let dbl = "a".repeat(64);
+        let tab = "b".repeat(64);
+        let bin = "c".repeat(64);
+        // text mode (two spaces sep) with a double space inside the path;
+        // text mode with a TAB inside the path; binary mode (` *`) line.
+        let body = format!(
+            "{dbl}  dir/with  double space.jsonl\n\
+             {tab}  dir/with\ttab.jsonl\n\
+             {bin} *dir/binary mode.jsonl\n\
+             # a comment line\n\
+             \n"
+        );
+        fs::write(&file, body).expect("write sums");
+
+        let map = read_sha256_file(&file).expect("parse");
+
+        assert_eq!(
+            map.get("dir/with  double space.jsonl").map(String::as_str),
+            Some(dbl.as_str()),
+            "double space in path must be preserved, got: {map:?}"
+        );
+        assert_eq!(
+            map.get("dir/with\ttab.jsonl").map(String::as_str),
+            Some(tab.as_str()),
+            "tab in path must be preserved, got: {map:?}"
+        );
+        assert_eq!(
+            map.get("dir/binary mode.jsonl").map(String::as_str),
+            Some(bin.as_str()),
+            "binary-mode `*` prefix must be stripped, got: {map:?}"
+        );
+        assert_eq!(map.len(), 3, "comment/blank lines ignored, got: {map:?}");
+    }
 }
