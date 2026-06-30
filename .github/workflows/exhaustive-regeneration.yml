@@ -74,8 +74,8 @@ jobs:
       - name: Snapshot committed reference-golden checksums (expected inventory)
         run: |
           set -euo pipefail
-          find test-data/datasets \( -name '*.jsonl' -o -name '*.db.txt' \) -type f \
-            | sort | xargs -r sha256sum > "$ARTIFACT_DIR/expected.sha256" || true
+          find test-data/datasets \( -name '*.jsonl' -o -name '*.db.txt' \) -type f -print0 \
+            | sort -z | xargs -0r sha256sum > "$ARTIFACT_DIR/expected.sha256" || true
           echo "expected goldens: $(wc -l < "$ARTIFACT_DIR/expected.sha256")"
 
       # ---- exhaustive.regenerate.all_formats ----
@@ -125,8 +125,8 @@ jobs:
       - name: Compute regenerated reference-golden checksums (actual inventory)
         run: |
           set -euo pipefail
-          find test-data/datasets \( -name '*.jsonl' -o -name '*.db.txt' \) -type f \
-            | sort | xargs -r sha256sum > "$ARTIFACT_DIR/actual.sha256" || true
+          find test-data/datasets \( -name '*.jsonl' -o -name '*.db.txt' \) -type f -print0 \
+            | sort -z | xargs -0r sha256sum > "$ARTIFACT_DIR/actual.sha256" || true
 
       # Build the provenance record from the ACTUAL generation environment: the
       # image tag is the single source of truth in regenerate-datasets.sh, and the
