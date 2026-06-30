@@ -10,7 +10,18 @@ SHA256_EXPECTED="${DATASET_SHA256:-3cae644360e0142a6bb5e96ddab445ff18e3478e70581
 DATASET_ROOT="${CQLITE_DATASETS_ROOT:-test-data/datasets}"
 PIN_FILE="${DATASET_ROOT}/.dataset-pin"
 ASSET_PATH="/tmp/${ASSET}"
-WIDE_PARTITION_GOLDEN="${DATASET_ROOT}/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl"
+WIDE_PARTITION_DIR="${DATASET_ROOT}/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294"
+WIDE_PARTITION_GOLDEN="${WIDE_PARTITION_DIR}/nb-2-big-Data.db.jsonl"
+# Exact promoted wide_partition reference binaries the byte_for_byte parity
+# scenarios + the digest strict test require (mirrors REQUIRED_BINARY_COMPONENTS
+# in cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs). A
+# dataset missing any of these must force a re-fetch (issue #1185 fail-closed).
+WIDE_PARTITION_REQUIRED_COMPONENTS=(
+  "nb-2-big-Data.db"
+  "nb-2-big-Index.db"
+  "nb-2-big-Digest.crc32"
+  "nb-2-big-CompressionInfo.db"
+)
 
 if [ -z "${DATASET_ROOT}" ] || [ "${DATASET_ROOT}" = "/" ]; then
   echo "ERROR: unsafe CQLITE_DATASETS_ROOT='${DATASET_ROOT}'" >&2
@@ -69,11 +80,21 @@ has_required_dataset() {
   [ "${summary_count}" -gt 0 ] || return 1
   [ "${statistics_count}" -gt 0 ] || return 1
 
-  if [ -f "${PIN_FILE}" ]; then
-    grep -qx "tag=${TAG}" "${PIN_FILE}" || return 1
-    grep -qx "asset=${ASSET}" "${PIN_FILE}" || return 1
-    grep -qx "sha256=${SHA256_EXPECTED}" "${PIN_FILE}" || return 1
-  fi
+  # The global counts above can be satisfied by other tables; explicitly require
+  # the EXACT promoted wide_partition reference binaries so a partial/stale
+  # dataset (other tables present, wide_partition absent) cannot be accepted and
+  # stamped as the new pin (issue #1185 fail-closed).
+  local component
+  for component in "${WIDE_PARTITION_REQUIRED_COMPONENTS[@]}"; do
+    [ -f "${WIDE_PARTITION_DIR}/${component}" ] || return 1
+  done
+
+  # The pin file MUST exist and match. A missing pin is NOT acceptable — it would
+  # otherwise let an unverified dataset fall through and be re-stamped (#1185).
+  [ -f "${PIN_FILE}" ] || return 1
+  grep -qx "tag=${TAG}" "${PIN_FILE}" || return 1
+  grep -qx "asset=${ASSET}" "${PIN_FILE}" || return 1
+  grep -qx "sha256=${SHA256_EXPECTED}" "${PIN_FILE}" || return 1
 }
 
 restore_ci_tracked_dataset_files
