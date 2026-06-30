@@ -106,12 +106,26 @@ elif ! ls "$CLEANSRC"/*-Data.db >/dev/null 2>&1; then
   missing+=("CLEAN_BASELINE_lz4 (no *-Data.db in $CLEANSRC — fetch datasets)")
 fi
 
+# Clean BTI baseline must be materialized too (Finding 2 / issue #1236). The active
+# BtiRootPointerCorrupt / BtiTrieCorrupt fixtures are mutated from test_da/wide_table
+# (`da` BTI), so we must ALSO capture the CLEAN wide_table verdict — otherwise a
+# CQLite false-positive that flags every clean BTI table as corrupt, or a broken BTI
+# schema/setup in capture, would go undetected (the corrupt-fixture assertions still
+# expect corrupt). This is the same clean BTI source the generator resolves
+# (test_da/wide_table-*).
+CLEAN_BTI_SRC=$(ls -d "$DATASETS"/sstables/test_da/wide_table-* 2>/dev/null | head -1 || true)
+if [[ -z "$CLEAN_BTI_SRC" ]]; then
+  missing+=("CLEAN_BASELINE_bti (no test_da/wide_table-* dir under $DATASETS/sstables)")
+elif ! ls "$CLEAN_BTI_SRC"/*-Data.db >/dev/null 2>&1; then
+  missing+=("CLEAN_BASELINE_bti (no *-Data.db in $CLEAN_BTI_SRC — fetch datasets)")
+fi
+
 if [[ "${#missing[@]}" -gt 0 ]]; then
   echo "[verdicts] FATAL: corpus incomplete; refusing to capture a partial oracle." >&2
   for m in "${missing[@]}"; do echo "  - $m" >&2; done
   fatal "regenerate the full corpus (generate-corruption-corpus.sh + fetch-datasets.sh) before capturing verdicts"
 fi
-echo "[verdicts] preflight OK: $(echo "$ACTIVE_FIXTURES" | grep -c .) active fixtures + clean baseline materialized."
+echo "[verdicts] preflight OK: $(echo "$ACTIVE_FIXTURES" | grep -c .) active fixtures + clean lz4 + clean BTI baselines materialized."
 
 docker rm -f "$CID" >/dev/null 2>&1 || true
 echo "[verdicts] starting $IMAGE..."
@@ -252,6 +266,15 @@ run_verify "$CLEANSRC" test_comp lz4_table CLEAN_BASELINE_lz4
 # than commit an oracle built on a tool that mis-judges clean data.
 [[ "$LAST_VERDICT" == "clean" ]] || \
   fatal "clean baseline CLEAN_BASELINE_lz4 did NOT verify clean (got: $LAST_VERDICT); verifier/environment is untrustworthy, aborting capture"
+
+# Clean BTI baseline (whole clean wide_table `da` generation). $CLEAN_BTI_SRC was
+# resolved and proven materialized by the fail-closed preflight above. Capturing
+# it CLEAN proves the BTI verify path is healthy in this environment, so the
+# BtiRootPointerCorrupt / BtiTrieCorrupt fixtures' "corrupt" verdicts are real
+# corruption signals and not a BTI-table-wide false positive (Finding 2 / #1236).
+run_verify "$CLEAN_BTI_SRC" test_da wide_table CLEAN_BASELINE_bti
+[[ "$LAST_VERDICT" == "clean" ]] || \
+  fatal "clean BTI baseline CLEAN_BASELINE_bti did NOT verify clean (got: $LAST_VERDICT); the BTI verify path or wide_table schema setup is broken, so every BtiRootPointerCorrupt/BtiTrieCorrupt verdict is untrustworthy, aborting capture"
 
 # Iterate the AUTHORITATIVE active-fixture list (not a corpus glob): the preflight
 # already proved each has a *-Data.db, so a now-missing one is FATAL, never skipped.

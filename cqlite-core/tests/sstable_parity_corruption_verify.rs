@@ -374,3 +374,110 @@ async fn sstable_parity_corruption_verify_clean_baseline_is_clean() {
         "FULL verify of the clean baseline must report a scanned row count"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Clean BTI baseline (Finding 2 / issue #1236): when the BTI corrupt fixtures
+// (BtiRootPointerCorrupt / BtiTrieCorrupt) are active in the manifest, the
+// uncorrupted Cassandra-5.0.2-written `test_da/wide_table` (`da` BTI) generation
+// — the clean source those fixtures are mutated from — MUST verify clean (zero
+// findings).
+//
+// Without this, a CQLite false-positive that flags EVERY clean BTI table as
+// corrupt would go undetected: the corrupt-fixture assertions expect corrupt, so
+// they would still pass. The clean BTI baseline catches that whole class of
+// BTI-wide false positives. Fixture-gated identically to the corpus test:
+// skip-clean when the clean source is absent, FAIL when present-but-wrong, honor
+// CQLITE_REQUIRE_FIXTURES.
+// ---------------------------------------------------------------------------
+
+/// `true` when a fixture's failing component is a BTI (`da`) trie component, i.e.
+/// it is derived from the clean BTI `test_da/wide_table` source.
+fn is_bti_component(component: &str) -> bool {
+    let c = component.trim();
+    c.ends_with("Partitions.db") || c.ends_with("Rows.db")
+}
+
+#[tokio::test]
+async fn sstable_parity_corruption_verify_clean_bti_baseline_is_clean() {
+    let Some(root) = datasets_root() else {
+        skip_or_require(
+            "issue_1236 clean BTI baseline",
+            "CQLITE_DATASETS_ROOT not set",
+        );
+        return;
+    };
+
+    // Only assert the clean BTI baseline when the BTI corrupt fixtures are ACTIVE
+    // in the manifest (otherwise there is no BTI parity to anchor). The clean BTI
+    // source is the same dataset the BTI fixtures are mutated from.
+    let corrupt_root = root.join("corruption/test_comp_corrupt");
+    let manifest_path = corrupt_root.join("corruption-manifest.yml");
+    if !manifest_path.exists() {
+        skip_or_require(
+            "test_comp_corrupt corruption manifest",
+            "corruption manifest not present",
+        );
+        return;
+    }
+    let manifest_raw = std::fs::read_to_string(&manifest_path).expect("read corruption manifest");
+    let manifest: Manifest = serde_yaml::from_str(&manifest_raw).expect("parse manifest yaml");
+
+    let bti_active = manifest
+        .fixtures
+        .iter()
+        .any(|fx| fx.status == "active" && is_bti_component(&fx.expected_failing_component));
+    if !bti_active {
+        // No active BTI corrupt fixtures → no BTI parity to anchor a clean
+        // baseline against. Skip-clean (strict mode still demands the corpus via
+        // the corpus test, which would fail there if BTI fixtures were expected).
+        skip_or_require(
+            "issue_1236 clean BTI baseline",
+            "no active BTI corrupt fixtures in manifest (nothing to anchor)",
+        );
+        return;
+    }
+
+    let da_dir = root.join("sstables/test_da");
+    if !da_dir.exists() {
+        skip_or_require(
+            "test_da clean BTI baseline",
+            "test_da directory not present",
+        );
+        return;
+    }
+
+    // Resolve the clean BTI source the same way the generator does: the
+    // `test_da/wide_table-*` generation (a materialized `*-Data.db`).
+    let Some(fixture) = std::fs::read_dir(&da_dir)
+        .expect("read test_da")
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.is_dir()
+                && has_data_db(p)
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with("wide_table"))
+                    .unwrap_or(false)
+        })
+    else {
+        skip_or_require(
+            "clean BTI baseline wide_table",
+            "not materialized (Data.db absent)",
+        );
+        return;
+    };
+
+    let report = verify_full(&fixture).await;
+    assert!(
+        report.is_ok(),
+        "clean Cassandra-written BTI wide_table must verify clean (zero findings) — a \
+         non-empty finding set here means CQLite false-positives on clean BTI tables, which \
+         would mask the BtiRootPointerCorrupt/BtiTrieCorrupt parity. Got: {:?}",
+        report.findings
+    );
+    assert!(
+        report.rows_scanned.is_some(),
+        "FULL verify of the clean BTI baseline must report a scanned row count"
+    );
+}
