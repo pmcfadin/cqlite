@@ -14,14 +14,14 @@
 #
 # Usage:
 #   test-data/scripts/bump-dataset-pin.sh --new-sha <sha256> \
-#     [--new-asset cassandra5-small-full-v3.4.tar.gz] \
+#     [--new-asset cassandra5-small-full-v3.5.tar.gz] \
 #     [--new-tag datasets-v3] \
-#     [--old-asset cassandra5-small-full-v3.3.tar.gz] \
-#     [--old-sha 44a3dc5d1fdb918dbf9d7568676cf906ccad7881991aaadcf96a7993627951ac] \
+#     [--old-asset cassandra5-small-full-v3.4.tar.gz] \
+#     [--old-sha 3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33] \
 #     [--old-tag datasets-v3]
 #
-# Only --new-sha is required. Defaults below match the current (v3.3) pin and a
-# v3.4 asset uploaded to the SAME release tag (datasets-v3 can hold multiple
+# Only --new-sha is required. Defaults below match the current (v3.4) pin and a
+# v3.5 asset uploaded to the SAME release tag (datasets-v3 can hold multiple
 # assets). If you cut a NEW release tag instead, pass --new-tag (and --old-tag
 # if it differs).
 
