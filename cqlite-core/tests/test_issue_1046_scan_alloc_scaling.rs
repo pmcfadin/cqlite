@@ -158,13 +158,14 @@ async fn test_scan_allocations_do_not_scale_per_row() {
     // Start the profiler before the workload so all allocation is attributed.
     let _profiler = dhat::Profiler::builder().testing().build();
 
-    let db = match setup_db("basic-types.cql", "test_basic").await {
-        Ok(db) => db,
-        Err(e) => {
-            eprintln!("Skipping: setup failed: {e}");
-            return;
-        }
-    };
+    // Fail-closed once fixtures are present: the only legitimate skip is the
+    // genuine absence of the external dataset, which `data_files_present` above
+    // already handles. With Data.db files on disk, any setup/schema/ingestion
+    // failure must FAIL the test so a broken setup cannot let the allocation
+    // guard pass vacuously.
+    let db = setup_db("basic-types.cql", "test_basic")
+        .await
+        .expect("setup_db must succeed when Data.db fixtures are present");
 
     // `test_basic.simple_table` is a wide-schema (18 regular column) UUID-keyed
     // table; the per-row decode dominates a full scan's allocation count. The
