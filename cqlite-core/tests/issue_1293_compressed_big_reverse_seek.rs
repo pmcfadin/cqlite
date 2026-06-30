@@ -49,9 +49,12 @@ use std::sync::Arc;
 use cqlite_core::ingestion::{ingest, IngestionConfig};
 use cqlite_core::query::access_path::AccessPath;
 use cqlite_core::query::result::QueryRow;
+use cqlite_core::storage::sstable::compression_info::CompressionInfo;
+use cqlite_core::storage::sstable::directory::types::SSTableComponent;
 use cqlite_core::storage::sstable::work_counters;
 use cqlite_core::storage::sstable::writer::{
-    create_compressor, CompressedDataWriter, CompressionAlgorithm, CompressionInfoWriter,
+    create_compressor, ComponentEntry, CompressedDataWriter, CompressionAlgorithm,
+    CompressionInfoWriter, DigestWriter, TocWriter,
 };
 use cqlite_core::storage::write_engine::{
     CellOperation, ClusteringKey, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
@@ -176,6 +179,19 @@ fn walkdir(root: &std::path::Path) -> Vec<std::path::PathBuf> {
 /// auto-detects the sidecar and routes the BIG promoted-index reverse/seek path
 /// through its COMPRESSED arm.
 ///
+/// To keep the fixture a *valid* compressed BIG SSTable (not just a Data.db swap),
+/// it also rewrites the two metadata components that describe the file set so they
+/// stay internally consistent:
+///   - `<base>-Digest.crc32` is recomputed as the CRC32 over the NEW compressed
+///     `Data.db` (the same whole-file CRC32 the production `DigestWriter` writes;
+///     the uncompressed writer's digest no longer matches the compressed bytes).
+///   - `<base>-TOC.txt` is regenerated from the component files actually present on
+///     disk after compression, so it INCLUDES `CompressionInfo.db` and OMITS the
+///     now-deleted `CRC.db` — matching a real compressed BIG component set.
+///
+/// Both reuse the production writers (`DigestWriter`, `TocWriter`) so the fixture's
+/// metadata is byte-identical to what CQLite would emit for a compressed table.
+///
 /// This is sound because the CQLite uncompressed-BIG Data.db is HEADERLESS (data
 /// starts at byte 0) and Index.db offsets are in the uncompressed domain — exactly
 /// the invariants the compressed reader assumes (CompressionInfo chunk offsets are
@@ -216,6 +232,51 @@ fn compress_data_db_in_place(data_path: &std::path::Path, base: &str) {
     // longer matches; compressed BIG stores per-chunk CRCs inline in Data.db.
     let crc_path = parent.join(format!("{base}-CRC.db"));
     let _ = std::fs::remove_file(&crc_path);
+
+    // Recompute Digest.crc32 over the NEW compressed Data.db. The write engine's
+    // digest was computed over the uncompressed bytes and no longer matches, leaving
+    // an internally inconsistent fixture. `DigestWriter::write_for_file` re-reads the
+    // (now compressed) Data.db and writes the whole-file CRC32, exactly as production.
+    let digest_path = parent.join(format!("{base}-Digest.crc32"));
+    DigestWriter::new(digest_path.clone())
+        .write_for_file(&data_path.to_path_buf())
+        .expect("recompute Digest.crc32 over compressed Data.db");
+
+    // Rewrite TOC.txt from the component set actually on disk after compression, so
+    // it INCLUDES CompressionInfo.db and OMITS the deleted CRC.db (a real compressed
+    // BIG component set). Enumerate the `<base>-*` siblings and map each to its
+    // `SSTableComponent`; `TocWriter` self-references TOC.txt.
+    let mut components: Vec<ComponentEntry> = Vec::new();
+    for entry in std::fs::read_dir(parent).expect("read sstable dir") {
+        let entry = entry.expect("dir entry");
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(suffix) = name.strip_prefix(&format!("{base}-")) else {
+            continue;
+        };
+        // Skip TOC.txt itself — TocWriter adds it back deterministically.
+        if suffix == "TOC.txt" {
+            continue;
+        }
+        if let Ok(component) = suffix.parse::<SSTableComponent>() {
+            components.push(ComponentEntry::new(component));
+        }
+    }
+    assert!(
+        components
+            .iter()
+            .any(|c| c.component == SSTableComponent::CompressionInfo),
+        "fixture invariant: TOC must list CompressionInfo.db for a compressed BIG SSTable"
+    );
+    assert!(
+        !components
+            .iter()
+            .any(|c| c.component == SSTableComponent::Crc),
+        "fixture invariant: TOC must NOT list CRC.db for a compressed BIG SSTable"
+    );
+    let toc_path = parent.join(format!("{base}-TOC.txt"));
+    TocWriter::new(toc_path)
+        .write(&components)
+        .expect("rewrite TOC.txt to compressed BIG component set");
 }
 
 async fn open_compressed_db() -> (TempDir, Arc<Database>, std::path::PathBuf) {
@@ -285,6 +346,25 @@ fn cks_in_order(rows: &[QueryRow]) -> Vec<i32> {
         .collect()
 }
 
+/// Total compressed-chunk count for the whole fixture, read back from the generated
+/// `CompressionInfo.db`. This is the authoritative full-partition decompress upper
+/// bound: a bounded-window read MUST touch strictly fewer chunks than this, while a
+/// regression that decompresses the entire partition before windowing would touch
+/// (about) all of them. Used to make the bounded-window assertions fail-closed.
+fn fixture_total_chunks(info_path: &std::path::Path) -> u64 {
+    let bytes = std::fs::read(info_path).expect("read CompressionInfo.db");
+    let info = CompressionInfo::parse(&bytes).expect("parse CompressionInfo.db");
+    let total = info.chunk_offsets.len() as u64;
+    // The fixture is deliberately many (16 KiB) chunks; if it ever collapses to a
+    // handful, "strictly fewer than total" stops being a meaningful window bound.
+    assert!(
+        total > 8,
+        "fixture invariant: CompressionInfo.db must record many chunks (got {total}) so that \
+         'fewer than total' is a meaningful bounded-window assertion"
+    );
+    total
+}
+
 // ─────────────── 1. Compression genuinely engaged ───────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -320,7 +400,8 @@ async fn compressed_fixture_actually_compressed() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compressed_forward_clustering_slice_is_bounded() {
     let _g = PROBE_LOCK.lock().await;
-    let (temp, db, _info) = open_compressed_db().await;
+    let (temp, db, info_path) = open_compressed_db().await;
+    let total_chunks = fixture_total_chunks(&info_path);
 
     work_counters::reset();
     cqlite_core::query::access_path::reset();
@@ -352,11 +433,29 @@ async fn compressed_forward_clustering_slice_is_bounded() {
          partition's {} rows — a regression to full-partition decompress reads them all",
         live_cks().len()
     );
-    // The compressed window arithmetic must have decompressed at least one chunk
-    // (and, because the slice is bounded, NOT every chunk in the partition).
+    // The compressed window arithmetic must have decompressed at least one chunk AND,
+    // because the slice is bounded, STRICTLY FEWER than the fixture's full chunk count
+    // — a regression that decompresses the whole partition before applying the row
+    // window would touch (about) every chunk and fail here.
+    //
+    // The slice ck in (100,140) is 39 live rows × ~512 B ≈ 20 KiB of row bodies, plus
+    // the promoted-index block(s) covering them: empirically ~9 of the fixture's 32
+    // chunks. We cap at ~40% of the partition's chunks: comfortably above what the
+    // window genuinely touches, still far below the full-partition count, and robust
+    // to chunk-count drift since it scales with `total_chunks` rather than hard-coding
+    // a number. The strict `< total_chunks` check below is the real full-decompress
+    // guard; this cap keeps the window from creeping toward "most of the partition".
+    let bounded_cap = ((total_chunks * 2) / 5).max(4);
     assert!(
-        chunks > 0,
-        "Issue #1293: the compressed arm must decompress at least one chunk for the slice, \
+        chunks > 0 && chunks < total_chunks,
+        "Issue #1293: the compressed slice must decompress at least one chunk and STRICTLY \
+         FEWER than the partition's {total_chunks} total chunks (full-partition decompress \
+         regression), got chunks_decompressed={chunks}"
+    );
+    assert!(
+        chunks <= bounded_cap,
+        "Issue #1293: the compressed slice window must stay tightly bounded — at most \
+         {bounded_cap} of the partition's {total_chunks} chunks for the (100,140) range, \
          got chunks_decompressed={chunks}"
     );
     drop(temp);
@@ -367,7 +466,8 @@ async fn compressed_forward_clustering_slice_is_bounded() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compressed_reverse_matches_forward_via_chunk_walk() {
     let _g = PROBE_LOCK.lock().await;
-    let (temp, db, _info) = open_compressed_db().await;
+    let (temp, db, info_path) = open_compressed_db().await;
+    let total_chunks = fixture_total_chunks(&info_path);
 
     let asc = db
         .execute(&format!(
@@ -414,10 +514,21 @@ async fn compressed_reverse_matches_forward_via_chunk_walk() {
          far below the partition's {} rows",
         live_cks().len()
     );
+    // This DESC has no clustering predicate, so it legitimately visits the whole
+    // partition back-to-front: the bounded property here is per-iteration MEMORY
+    // (`peak`, asserted above), not the chunk count. Pin the chunk count to the
+    // fixture's authoritative total so the assertion is fail-closed rather than the
+    // near-vacuous `> 1`: a full reverse walk over a multi-chunk partition must
+    // decompress most of its chunks (a regression that bails after one block would
+    // fall short), and it must never exceed the total + a small re-pull slack (a
+    // regression that re-decompresses chunks per block would blow past it).
+    let reverse_floor = (total_chunks / 2).max(2);
+    let reverse_ceil = total_chunks + total_chunks / 4 + 1;
     assert!(
-        chunks > 1,
-        "Issue #1293: the compressed reverse walk must decompress multiple chunks \
-         (`pull_reverse_chunk`), got chunks_decompressed={chunks}"
+        chunks >= reverse_floor && chunks <= reverse_ceil,
+        "Issue #1293: the compressed reverse walk must decompress most of the partition's \
+         {total_chunks} chunks via `pull_reverse_chunk` (>= {reverse_floor}, <= {reverse_ceil}), \
+         got chunks_decompressed={chunks}"
     );
     drop(temp);
 }
