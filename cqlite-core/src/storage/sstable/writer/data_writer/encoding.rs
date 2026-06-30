@@ -227,18 +227,21 @@ pub(crate) fn serialize_value(value: &Value) -> Result<Vec<u8>> {
         }
         Value::Set(elements) => {
             // Cassandra SetType is a sorted collection: a frozen set serializes its
-            // elements in unsigned serialized-byte order (issue #1254). Serialize
-            // every element with the writer's own `serialize_value` (via
-            // `serialize_collection_element`, which rejects null), then sort by the
-            // serialized bytes — the SAME single comparator the non-frozen SET cell
-            // path uses (`write_set_complex_cells` in complex.rs). Without this a
-            // direct write of a `frozen<set<..>>` with unsorted elements produces
-            // non-Cassandra bytes.
-            let mut serialized: Vec<Vec<u8>> = elements
+            // elements in the SetType element-type comparator's order (issue #1254,
+            // #1275). Order by `compare_collection_elements` — SIGNED for numeric
+            // element types, unsigned-byte otherwise — decided from the element
+            // `Value`s (authoritative type), the SAME single comparator the
+            // non-frozen SET cell path uses (`write_set_complex_cells` in
+            // complex.rs). A raw serialized-byte sort (the pre-#1275 behavior) put
+            // negatives last, e.g. `frozen<set<int>>` of {-1,0,1} serialized in the
+            // wrong order. Then serialize each element in that order
+            // (`serialize_collection_element` rejects Value::Null).
+            let mut ordered: Vec<&Value> = elements.iter().collect();
+            ordered.sort_by(|a, b| compare_collection_elements(a, b));
+            let serialized: Vec<Vec<u8>> = ordered
                 .iter()
                 .map(|e| serialize_collection_element(e, "Collection"))
                 .collect::<Result<Vec<_>>>()?;
-            serialized.sort();
 
             let mut buf = Vec::new();
             buf.extend_from_slice(&len_as_i32(serialized.len())?.to_be_bytes());
@@ -250,11 +253,16 @@ pub(crate) fn serialize_value(value: &Value) -> Result<Vec<u8>> {
         }
         Value::Map(entries) => {
             // Cassandra MapType is a sorted collection: a frozen map serializes its
-            // entries in unsigned serialized-KEY-byte order (issue #1254). Serialize
-            // every key/value with the writer's own `serialize_value`, then sort by
-            // the serialized key bytes — the SAME single comparator the non-frozen
-            // MAP cell path uses (`write_map_complex_cells` in complex.rs).
-            let mut serialized: Vec<(Vec<u8>, Vec<u8>)> = entries
+            // entries in the KEY-type comparator's order (issue #1254, #1275). Order
+            // by `compare_collection_elements` over the KEY `Value`s — SIGNED for
+            // numeric key types, unsigned-byte otherwise — the SAME single
+            // comparator the non-frozen MAP cell path uses (`write_map_complex_cells`
+            // in complex.rs). A raw serialized-KEY-byte sort (the pre-#1275 behavior)
+            // ordered a `map<int,…>` with negative keys wrong. Then serialize each
+            // key/value in that order.
+            let mut ordered: Vec<&(Value, Value)> = entries.iter().collect();
+            ordered.sort_by(|a, b| compare_collection_elements(&a.0, &b.0));
+            let serialized: Vec<(Vec<u8>, Vec<u8>)> = ordered
                 .iter()
                 .map(|(key, val)| {
                     if matches!(key, Value::Null) {
@@ -265,7 +273,6 @@ pub(crate) fn serialize_value(value: &Value) -> Result<Vec<u8>> {
                     Ok((serialize_value(key)?, serialize_value(val)?))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            serialized.sort_by(|a, b| a.0.cmp(&b.0));
 
             let mut buf = Vec::new();
             buf.extend_from_slice(&len_as_i32(serialized.len())?.to_be_bytes());

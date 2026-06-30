@@ -1156,3 +1156,166 @@ fn test_set_complex_column_with_ttl() {
         cell_flags
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #1275: type-aware SIGNED ordering of SET elements / MAP keys.
+//
+// Cassandra `SetType`/`MapType` sort by the element/key type's own
+// `AbstractType.compare`. For `Int32Type`(int) that is SIGNED, so a collection
+// containing NEGATIVE values must serialize -1 BEFORE 0/1 — the opposite of the
+// raw big-endian two's-complement (unsigned) byte order, where -1 (0xFFFF_FFFF)
+// sorts LAST. The ordering ORACLE asserted below is Cassandra's signed
+// `Int32Type` comparator; the expected byte layout is DERIVED from that oracle +
+// the documented frozen/complex collection wire format (no Cassandra-written
+// golden fixture with negative numeric collection elements exists under
+// test-data/ yet — see the issue summary's follow-up note).
+// ---------------------------------------------------------------------------
+
+/// frozen<set<int>> of {3, -1, 1, 0, -2} fed UNSORTED must serialize its elements
+/// in SIGNED order (-2, -1, 0, 1, 3). Asserts the FULL serialized blob byte-for-
+/// byte against the layout derived from Cassandra's Int32Type comparator.
+#[test]
+fn test_frozen_set_int_negative_sorts_signed() {
+    let value = Value::Frozen(Box::new(Value::Set(vec![
+        Value::Integer(3),
+        Value::Integer(-1),
+        Value::Integer(1),
+        Value::Integer(0),
+        Value::Integer(-2),
+    ])));
+
+    let bytes = serialize_value(&value).unwrap();
+
+    // Wire format: [count i32]([len i32][value])... — int = 4 big-endian bytes.
+    // Oracle: Int32Type signed order -> -2, -1, 0, 1, 3.
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&5i32.to_be_bytes());
+    for n in [-2i32, -1, 0, 1, 3] {
+        expected.extend_from_slice(&4i32.to_be_bytes());
+        expected.extend_from_slice(&n.to_be_bytes());
+    }
+    assert_eq!(
+        bytes, expected,
+        "frozen<set<int>> with negatives must serialize in SIGNED (Int32Type) order, \
+         not raw unsigned byte order"
+    );
+}
+
+/// frozen<map<int,text>> with negative keys fed UNSORTED must serialize its
+/// entries in SIGNED KEY order (-5, -1, 0, 2). Asserts the FULL serialized blob.
+#[test]
+fn test_frozen_map_int_key_negative_sorts_signed() {
+    let value = Value::Frozen(Box::new(Value::Map(vec![
+        (Value::Integer(2), Value::Text("two".to_string())),
+        (Value::Integer(-1), Value::Text("neg-one".to_string())),
+        (Value::Integer(0), Value::Text("zero".to_string())),
+        (Value::Integer(-5), Value::Text("neg-five".to_string())),
+    ])));
+
+    let bytes = serialize_value(&value).unwrap();
+
+    // Wire format: [count i32]([klen i32][key][vlen i32][val])...
+    // Oracle: Int32Type signed KEY order -> -5, -1, 0, 2.
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&4i32.to_be_bytes());
+    for (k, v) in [
+        (-5i32, "neg-five"),
+        (-1, "neg-one"),
+        (0, "zero"),
+        (2, "two"),
+    ] {
+        expected.extend_from_slice(&4i32.to_be_bytes());
+        expected.extend_from_slice(&k.to_be_bytes());
+        let vb = v.as_bytes();
+        expected.extend_from_slice(&(vb.len() as i32).to_be_bytes());
+        expected.extend_from_slice(vb);
+    }
+    assert_eq!(
+        bytes, expected,
+        "frozen<map<int,text>> with negative keys must serialize entries in SIGNED \
+         (Int32Type) key order"
+    );
+}
+
+/// Non-frozen set<int> (multicell complex column) of {3, -1, 1, 0, -2} fed
+/// UNSORTED must emit its cells with cell_paths in SIGNED order. The cell_path of
+/// a SET element is its serialized element (4 big-endian int bytes). Asserts the
+/// exact cell_path byte sequence decoded from the on-disk complex column.
+#[test]
+fn test_nonfrozen_set_int_negative_sorts_signed() {
+    let stats = create_test_stats();
+    let writer = DataWriter::new(stats);
+
+    let column = Column {
+        name: "s".to_string(),
+        data_type: "set<int>".to_string(),
+        nullable: true,
+        default: None,
+        is_static: false,
+    };
+    let value = Value::Set(vec![
+        Value::Integer(3),
+        Value::Integer(-1),
+        Value::Integer(1),
+        Value::Integer(0),
+        Value::Integer(-2),
+    ]);
+
+    let mut buf = Vec::new();
+    writer
+        .write_complex_column(&mut buf, &column, &value, 1_001_000, None)
+        .unwrap();
+
+    let (_, _, cells) = decode_complex_column(&buf);
+    let paths: Vec<Vec<u8>> = cells.iter().map(|c| c.cell_path.clone()).collect();
+
+    // Oracle: Int32Type signed order -> -2, -1, 0, 1, 3.
+    let expected: Vec<Vec<u8>> = [-2i32, -1, 0, 1, 3]
+        .iter()
+        .map(|n| n.to_be_bytes().to_vec())
+        .collect();
+    assert_eq!(
+        paths, expected,
+        "non-frozen set<int> with negatives must order cells in SIGNED (Int32Type) order"
+    );
+}
+
+/// Non-frozen map<int,text> (multicell complex column) with negative keys fed
+/// UNSORTED must emit cells with cell_paths (= serialized keys) in SIGNED order.
+#[test]
+fn test_nonfrozen_map_int_key_negative_sorts_signed() {
+    let stats = create_test_stats();
+    let writer = DataWriter::new(stats);
+
+    let column = Column {
+        name: "m".to_string(),
+        data_type: "map<int, text>".to_string(),
+        nullable: true,
+        default: None,
+        is_static: false,
+    };
+    let value = Value::Map(vec![
+        (Value::Integer(2), Value::Text("two".to_string())),
+        (Value::Integer(-1), Value::Text("neg-one".to_string())),
+        (Value::Integer(0), Value::Text("zero".to_string())),
+        (Value::Integer(-5), Value::Text("neg-five".to_string())),
+    ]);
+
+    let mut buf = Vec::new();
+    writer
+        .write_complex_column(&mut buf, &column, &value, 1_001_000, None)
+        .unwrap();
+
+    let (_, _, cells) = decode_complex_column(&buf);
+    let paths: Vec<Vec<u8>> = cells.iter().map(|c| c.cell_path.clone()).collect();
+
+    // Oracle: Int32Type signed KEY order -> -5, -1, 0, 2.
+    let expected: Vec<Vec<u8>> = [-5i32, -1, 0, 2]
+        .iter()
+        .map(|n| n.to_be_bytes().to_vec())
+        .collect();
+    assert_eq!(
+        paths, expected,
+        "non-frozen map<int,text> with negative keys must order cells in SIGNED key order"
+    );
+}

@@ -539,7 +539,7 @@ impl DataWriter {
     /// Write SET complex cells.
     ///
     /// SET elements: cell_path = serialized element value, cell value = empty (HAS_EMPTY_VALUE).
-    /// Elements are sorted by their serialized byte representation for Cassandra compatibility.
+    /// Elements are ordered by the element type's Cassandra `SetType` comparator (#1275).
     pub(super) fn write_set_complex_cells(
         &self,
         buf: &mut Vec<u8>,
@@ -557,17 +557,17 @@ impl DataWriter {
             }
         };
 
-        // Serialize all elements first, then sort by byte representation.
-        // serialize_value rejects Value::Null, enforcing CQL semantics.
-        let mut serialized: Vec<Vec<u8>> = elements
+        // Order by the element type's Cassandra `SetType` comparator (#1275, see
+        // collection_order: SIGNED numerics, unsigned-byte otherwise) decided from
+        // the element `Value`s. serialize_collection_element rejects Value::Null.
+        let mut ordered: Vec<&Value> = elements.iter().collect();
+        ordered.sort_by(|a, b| compare_collection_elements(a, b));
+        let serialized: Vec<Vec<u8>> = ordered
             .iter()
             .map(|e| serialize_collection_element(e, "SET"))
             .collect::<Result<Vec<_>>>()?;
-        serialized.sort();
 
-        // Cell count
-        encode_unsigned(serialized.len() as u64, buf);
-
+        encode_unsigned(serialized.len() as u64, buf); // cell count
         for path_bytes in &serialized {
             // Cell header: flags + optional TTL fields
             self.write_complex_cell_header(
@@ -580,7 +580,6 @@ impl DataWriter {
             // Cell path: serialized element value
             encode_unsigned(path_bytes.len() as u64, buf);
             buf.extend_from_slice(path_bytes);
-
             // No value bytes (HAS_EMPTY_VALUE flag set)
         }
 
@@ -608,9 +607,12 @@ impl DataWriter {
             }
         };
 
-        // Serialize all keys and values, then sort by serialized key bytes.
-        // Null keys are rejected inline; null values are allowed for MAP.
-        let mut serialized: Vec<(Vec<u8>, Vec<u8>)> = entries
+        // Order by the KEY type's Cassandra `MapType` comparator (#1275, see
+        // collection_order: SIGNED numerics so negative keys sort -1 before 0/1,
+        // unsigned-byte otherwise) from the key `Value`s. Null keys rejected inline.
+        let mut ordered: Vec<&(Value, Value)> = entries.iter().collect();
+        ordered.sort_by(|a, b| compare_collection_elements(&a.0, &b.0));
+        let serialized: Vec<(Vec<u8>, Vec<u8>)> = ordered
             .iter()
             .map(|(key, val)| {
                 if matches!(key, Value::Null) {
@@ -621,11 +623,8 @@ impl DataWriter {
                 Ok((serialize_value(key)?, serialize_value(val)?))
             })
             .collect::<Result<Vec<_>>>()?;
-        serialized.sort_by(|a, b| a.0.cmp(&b.0));
 
-        // Cell count
-        encode_unsigned(serialized.len() as u64, buf);
-
+        encode_unsigned(serialized.len() as u64, buf); // cell count
         for (path_bytes, value_bytes) in &serialized {
             // Cell header: flags + optional TTL fields
             self.write_complex_cell_header(buf, 0, timestamp_micros, ttl_seconds)?;
