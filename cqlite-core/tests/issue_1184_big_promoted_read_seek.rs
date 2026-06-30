@@ -313,6 +313,86 @@ async fn reverse_order_by_desc_matches_forward_via_block_walk() {
     drop(temp);
 }
 
+// ───────────── 3b. Reverse iterator WITH a clustering bound ─────────────
+//
+// Finding 1/2 (roborev #1184): `WHERE pk=1 AND ck>X ORDER BY ck DESC` (and the
+// `ck<N` variant across the gap) is served by the reverse block-walk iterator,
+// which walks EVERY promoted-index block back-to-front and is NOT narrowed by the
+// clustering slice. So the recorded access path must be the HONEST
+// `PartitionLookup` (not `ClusteringSlice`), and correctness — exactly the bounded
+// forward set, reversed — comes from the post-scan predicate backstop.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reverse_with_clustering_bound_reports_partition_lookup() {
+    let _g = PROBE_LOCK.lock().await;
+    let (temp, db) = open_db().await;
+
+    // ck > 950 ORDER BY ck DESC: the bounded forward live set, reversed.
+    work_counters::reset();
+    cqlite_core::query::access_path::reset();
+    let gt = db
+        .execute(&format!(
+            "SELECT pk, ck, payload FROM {KS}.{TBL} WHERE pk = 1 AND ck > 950 ORDER BY ck DESC"
+        ))
+        .await
+        .expect("reverse gt query");
+    let expected_gt: Vec<i32> = {
+        let mut v: Vec<i32> = live_cks().into_iter().filter(|c| *c > 950).collect();
+        v.reverse();
+        v
+    };
+    assert_eq!(
+        cks_in_order(&gt.rows),
+        expected_gt,
+        "Issue #1184: ck>950 ORDER BY ck DESC must return the bounded forward set, reversed"
+    );
+    assert_eq!(
+        gt.metadata.access_path,
+        Some(AccessPath::PartitionLookup),
+        "Finding 1: a reverse query WITH a clustering bound must report the HONEST \
+         PartitionLookup (the reverse block-walk is not narrowed by the slice), NOT \
+         ClusteringSlice; got {:?}",
+        gt.metadata.access_path
+    );
+    // The reverse block-walk drove it (not a forward clustering seek + in-memory sort).
+    assert!(
+        work_counters::reverse_blocks_decoded() > 1,
+        "Issue #1184: the bounded reverse query must still be served by the back-to-front \
+         block walk, got reverse_blocks_decoded={}",
+        work_counters::reverse_blocks_decoded()
+    );
+
+    // ck < 50 ORDER BY ck DESC across the clustering gap (30..39 absent).
+    cqlite_core::query::access_path::reset();
+    let lt = db
+        .execute(&format!(
+            "SELECT pk, ck, payload FROM {KS}.{TBL} WHERE pk = 1 AND ck < 50 ORDER BY ck DESC"
+        ))
+        .await
+        .expect("reverse lt query");
+    let expected_lt: Vec<i32> = {
+        let mut v: Vec<i32> = live_cks().into_iter().filter(|c| *c < 50).collect();
+        v.reverse();
+        v
+    };
+    assert_eq!(
+        cks_in_order(&lt.rows),
+        expected_lt,
+        "Issue #1184: ck<50 ORDER BY ck DESC must return the bounded forward set (gap 30..39 \
+         absent), reversed"
+    );
+    assert!(!cks_in_order(&lt.rows)
+        .iter()
+        .any(|c| (GAP_LO..GAP_HI).contains(c)));
+    assert_eq!(
+        lt.metadata.access_path,
+        Some(AccessPath::PartitionLookup),
+        "Finding 1: reverse + `ck<N` bound must also report the HONEST PartitionLookup; got {:?}",
+        lt.metadata.access_path
+    );
+    drop(temp);
+}
+
 // ─────────────── 5. Real Cassandra fixture (skip-on-absence) ───────────────
 //
 // Byte-level forward==reverse 290-row equality on the REAL `test_big.wide_partition`
