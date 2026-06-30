@@ -26,7 +26,12 @@ exact release commit:
       disabled nightly does not satisfy this item).
 - [ ] **Recent `exhaustive_regeneration` pass (release candidates).** For any RC
       or major format change, an `exhaustive_regeneration` run over the full
-      storage-format matrix passed within the release window.
+      storage-format matrix passed within the release window. This is the
+      [`exhaustive-regeneration.yml`](../../.github/workflows/exhaustive-regeneration.yml)
+      lane (weekly + `workflow_dispatch`, issue #1026); cite the run URL and its
+      uploaded report artifact (provenance record + corpus-audit report). The audit
+      hard-fails on any corpus/manifest or provenance divergence, so a green run is
+      the citable evidence.
 
 ## Claim-wording gate
 
