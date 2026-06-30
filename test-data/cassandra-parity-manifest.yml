@@ -1435,7 +1435,7 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
       comparison_command: >-
-        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        env CQLITE_PARITY_REQUIRE_DATASETS=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features write-support --test issue_993_wide_partition_promoted_index_parity
         row_boundaries_index_info_offsets
       reference_paths:
@@ -1694,7 +1694,7 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
       comparison_command: >-
-        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        env CQLITE_PARITY_REQUIRE_DATASETS=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features write-support --test issue_993_wide_partition_promoted_index_parity
         row_boundaries_index_info_offsets
       reference_paths:
@@ -1746,7 +1746,7 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
       comparison_command: >-
-        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        env CQLITE_PARITY_REQUIRE_DATASETS=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features write-support --test issue_993_wide_partition_promoted_index_parity
         row_boundaries_index_info_offsets
       reference_paths:
@@ -1797,7 +1797,7 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
       comparison_command: >-
-        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        env CQLITE_PARITY_REQUIRE_DATASETS=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features write-support --test issue_993_wide_partition_promoted_index_parity
         row_boundaries_index_info_offsets
       reference_paths:
@@ -1850,7 +1850,7 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
       comparison_command: >-
-        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        env CQLITE_PARITY_REQUIRE_DATASETS=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features write-support --test issue_993_wide_partition_promoted_index_parity
         clustering_bounds
       reference_paths:
@@ -1903,7 +1903,7 @@ scenarios:
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
       comparison_command: >-
-        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        env CQLITE_PARITY_REQUIRE_DATASETS=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features write-support --test issue_993_wide_partition_promoted_index_parity
         range_tombstone_boundary_at_block_edge
       reference_paths:
