@@ -24,7 +24,7 @@ use crate::model::{Manifest, Scenario};
 use super::{AuditFinding, CorpusInventory, FindingKind};
 
 /// Only references under this prefix are part of the regenerated corpus.
-const CORPUS_PREFIX: &str = "test-data/datasets/";
+pub const CORPUS_PREFIX: &str = "test-data/datasets/";
 
 /// Classify every corpus-tree reference of every non-`planned` scenario.
 ///

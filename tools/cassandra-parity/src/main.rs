@@ -302,9 +302,16 @@ fn cmd_corpus_audit(args: &Args) -> Result<ExitCode> {
     );
 
     if report.ok() {
+        // Count only genuine corpus components, not every walked path: under the
+        // lane's `--corpus .` the inventory holds every non-pruned file in the
+        // checkout, so `inventory.files.len()` overstates the corpus by thousands.
+        let corpus_files = count_corpus_files(&inventory);
         println!(
-            "corpus-audit: OK — {} corpus files, manifest references resolved, provenance matches \
-             the manifest pin, all required corruption components covered",
+            "corpus-audit: OK — {} corpus files under {} ({} paths walked), manifest references \
+             resolved, provenance matches the manifest pin, all required corruption components \
+             covered",
+            corpus_files,
+            corpus_audit::refs::CORPUS_PREFIX,
             inventory.files.len()
         );
         Ok(ExitCode::SUCCESS)
@@ -587,6 +594,18 @@ fn status_counts(m: &Manifest) -> serde_json::Value {
     serde_json::Value::Object(map)
 }
 
+/// Count only genuine corpus components in a walked inventory. Under the lane's
+/// `--corpus .`, `inventory.files` holds every non-pruned file in the checkout, so
+/// the raw length overstates the corpus by thousands; only paths under
+/// [`corpus_audit::refs::CORPUS_PREFIX`] are real corpus components.
+fn count_corpus_files(inventory: &CorpusInventory) -> usize {
+    inventory
+        .files
+        .iter()
+        .filter(|p| p.starts_with(corpus_audit::refs::CORPUS_PREFIX))
+        .count()
+}
+
 fn evidence_counts(m: &Manifest) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     for ev in enums::EVIDENCE_TYPE {
@@ -650,6 +669,23 @@ mod tests {
                 .any(|p| p.starts_with("exhaustive-regeneration-report/")),
             "the report dir must be pruned, got: {files:?}"
         );
+    }
+
+    /// The success-line corpus count reports only `test-data/datasets/` components,
+    /// not every walked path (`--corpus .` enumerates the whole checkout).
+    #[test]
+    fn count_corpus_files_counts_only_corpus_prefix() {
+        let mut files = std::collections::BTreeSet::new();
+        files.insert("test-data/datasets/test_basic/nb-1-big-Data.db".to_string());
+        files.insert("test-data/datasets/test_basic/nb-1-big-Index.db".to_string());
+        files.insert("README.md".to_string());
+        files.insert("cqlite-core/src/lib.rs".to_string());
+        files.insert("exhaustive-regeneration-report/actual.sha256".to_string());
+        let inventory = CorpusInventory {
+            files,
+            checksums: std::collections::BTreeMap::new(),
+        };
+        assert_eq!(count_corpus_files(&inventory), 2);
     }
 
     /// Finding 3: positional parsing preserves a path containing a double space
