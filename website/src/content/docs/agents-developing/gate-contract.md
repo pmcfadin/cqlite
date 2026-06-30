@@ -182,8 +182,8 @@ the same asset CI uses. Current pins (as of the script source):
 
 ```
 DATASET_TAG:    datasets-v3
-DATASET_ASSET:  cassandra5-small-full-v3.3.tar.gz
-DATASET_SHA256: 44a3dc5d1fdb918dbf9d7568676cf906ccad7881991aaadcf96a7993627951ac
+DATASET_ASSET:  cassandra5-small-full-v3.4.tar.gz
+DATASET_SHA256: 3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33
 ```
 
 See [Test data](/cqlite/agents-developing/test-data/) for how `fetch-datasets.sh` uses these pins and why

@@ -238,9 +238,9 @@ jobs:
       with:
         path: |
           test-data/datasets/
-        key: datasets-v3-44a3dc5d1fdb918dbf9d7568676cf906ccad7881991aaadcf96a7993627951ac-${{ hashFiles('test-data/**/*.md') }}
+        key: datasets-v3-3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33-${{ hashFiles('test-data/**/*.md') }}
         restore-keys: |
-          datasets-v3-44a3dc5d1fdb918dbf9d7568676cf906ccad7881991aaadcf96a7993627951ac-
+          datasets-v3-3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33-
 
     - name: Download Cassandra 5 Datasets (if cache miss)
       run: |
@@ -252,10 +252,10 @@ jobs:
         if [ "$CORE_FIXTURE_COUNT" -eq 0 ]; then
           echo "📦 Core Data.db fixture missing — downloading real Cassandra 5 datasets from release (datasets-v3, includes oa+da fixtures)..."
           mkdir -p test-data
-          gh release download datasets-v3 --pattern "cassandra5-small-full-v3.3.tar.gz" --dir /tmp
-          echo "44a3dc5d1fdb918dbf9d7568676cf906ccad7881991aaadcf96a7993627951ac  /tmp/cassandra5-small-full-v3.3.tar.gz" | sha256sum -c -
+          gh release download datasets-v3 --pattern "cassandra5-small-full-v3.4.tar.gz" --dir /tmp
+          echo "3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33  /tmp/cassandra5-small-full-v3.4.tar.gz" | sha256sum -c -
           rm -rf test-data/datasets
-          tar -xzf /tmp/cassandra5-small-full-v3.3.tar.gz -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
+          tar -xzf /tmp/cassandra5-small-full-v3.4.tar.gz -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
           DATA_COUNT=$(find test-data/datasets/sstables -name '*-Data.db' 2>/dev/null | wc -l)
           echo "✅ Downloaded datasets for M1 CI ($DATA_COUNT Data.db fixtures)"
         else
@@ -442,9 +442,9 @@ jobs:
       with:
         path: |
           test-data/datasets/
-        key: datasets-v3-44a3dc5d1fdb918dbf9d7568676cf906ccad7881991aaadcf96a7993627951ac-${{ hashFiles('test-data/**/*.md') }}
+        key: datasets-v3-3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33-${{ hashFiles('test-data/**/*.md') }}
         restore-keys: |
-          datasets-v3-44a3dc5d1fdb918dbf9d7568676cf906ccad7881991aaadcf96a7993627951ac-
+          datasets-v3-3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33-
 
     - name: Download Cassandra 5 Datasets (if cache miss)
       run: |
@@ -456,10 +456,10 @@ jobs:
         if [ "$CORE_FIXTURE_COUNT" -eq 0 ]; then
           echo "📦 Core Data.db fixture missing — downloading real Cassandra 5 datasets from release (datasets-v3, includes oa+da fixtures)..."
           mkdir -p test-data
-          gh release download datasets-v3 --pattern "cassandra5-small-full-v3.3.tar.gz" --dir /tmp
-          echo "44a3dc5d1fdb918dbf9d7568676cf906ccad7881991aaadcf96a7993627951ac  /tmp/cassandra5-small-full-v3.3.tar.gz" | sha256sum -c -
+          gh release download datasets-v3 --pattern "cassandra5-small-full-v3.4.tar.gz" --dir /tmp
+          echo "3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33  /tmp/cassandra5-small-full-v3.4.tar.gz" | sha256sum -c -
           rm -rf test-data/datasets
-          tar -xzf /tmp/cassandra5-small-full-v3.3.tar.gz -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
+          tar -xzf /tmp/cassandra5-small-full-v3.4.tar.gz -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
           DATA_COUNT=$(find test-data/datasets/sstables -name '*-Data.db' 2>/dev/null | wc -l)
           echo "✅ Downloaded datasets for parity validation ($DATA_COUNT Data.db fixtures)"
         else

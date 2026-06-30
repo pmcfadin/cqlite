@@ -60,7 +60,7 @@ env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
 binaries, and writes `<archive>.sha256`:
 
 ```bash
-ASSET=cassandra5-small-full-v3.3.tar.gz
+ASSET=cassandra5-small-full-v3.4.tar.gz
 ASSET_NAME="$ASSET" test-data/scripts/package_datasets.sh \
   --type full --asset-name "$ASSET" --tag datasets-v3
 
@@ -98,7 +98,7 @@ test-data/scripts/bump-dataset-pin.sh --new-sha <sha256-from-step-2>
 
 # Stage everything the finalizer touched (workflows AND the fetch helper):
 git add .github/workflows test-data/scripts/fetch-datasets.sh
-git commit -m "ci: pin dataset asset to cassandra5-small-full-v3.3 (#1099)"
+git commit -m "ci: pin dataset asset to cassandra5-small-full-v3.4 (#1099)"
 git push -u origin chore/1099-bump-dataset-pin-v3.2
 gh pr create --base main --fill
 ```

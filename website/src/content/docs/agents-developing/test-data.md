@@ -26,16 +26,16 @@ The fetch script uses these defaults (override with environment variables):
 
 ```bash
 DATASET_TAG=datasets-v3
-DATASET_ASSET=cassandra5-small-full-v3.3.tar.gz
-DATASET_SHA256=44a3dc5d1fdb918dbf9d7568676cf906ccad7881991aaadcf96a7993627951ac
+DATASET_ASSET=cassandra5-small-full-v3.4.tar.gz
+DATASET_SHA256=3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33
 ```
 
 CI reads the same pins from `.github/workflows/sstabledump-parity-gate.yml`:
 
 ```yaml
 DATASET_TAG: datasets-v3
-DATASET_ASSET: cassandra5-small-full-v3.3.tar.gz
-DATASET_SHA256: 44a3dc5d1fdb918dbf9d7568676cf906ccad7881991aaadcf96a7993627951ac
+DATASET_ASSET: cassandra5-small-full-v3.4.tar.gz
+DATASET_SHA256: 3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33
 ```
 
 **Why SHA256 is the cache key**: CI caches the extracted dataset by SHA256. Using the

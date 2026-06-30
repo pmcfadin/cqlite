@@ -5,8 +5,8 @@ set -euo pipefail
 # Usage: DATASET_TAG=datasets-v2 DATASET_ASSET=cassandra5-small-full.tar.gz DATASET_SHA256=<sha> ./test-data/scripts/fetch-datasets.sh
 
 TAG="${DATASET_TAG:-datasets-v3}"
-ASSET="${DATASET_ASSET:-cassandra5-small-full-v3.3.tar.gz}"
-SHA256_EXPECTED="${DATASET_SHA256:-44a3dc5d1fdb918dbf9d7568676cf906ccad7881991aaadcf96a7993627951ac}"
+ASSET="${DATASET_ASSET:-cassandra5-small-full-v3.4.tar.gz}"
+SHA256_EXPECTED="${DATASET_SHA256:-3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33}"
 DATASET_ROOT="${CQLITE_DATASETS_ROOT:-test-data/datasets}"
 PIN_FILE="${DATASET_ROOT}/.dataset-pin"
 ASSET_PATH="/tmp/${ASSET}"
