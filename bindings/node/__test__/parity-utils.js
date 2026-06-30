@@ -620,64 +620,141 @@ function formatValue(value) {
 // Test Table Definitions
 // =============================================================================
 
+// =============================================================================
+// Dynamic corpus enumeration (Issue #1229)
+//
+// The table set is DISCOVERED by walking the committed corpus
+// (sstables/<keyspace>/<table>-<uuid>/), NOT hand-typed. Based on directory
+// structure (committed), independent of Data.db presence. The skip-set +
+// rationale lives in test-data/corpus-coverage-policy.md and is mirrored in
+// bindings/python/tests/corpus.py.
+// =============================================================================
+
+const TABLE_DIR_RE = /^(.+)-[0-9a-f]{32}$/;
+
 /**
- * All 33 test tables organized by keyspace.
+ * All `system*` keyspaces (system, system_auth, system_schema,
+ * system_distributed, system_traces, system_views, ...) are Cassandra-internal
+ * metadata, not user-data read-parity targets, and are excluded by PREFIX so
+ * any future `system*` keyspace shipped in a dataset subset is auto-excluded
+ * (#1229). See test-data/corpus-coverage-policy.md.
  */
-const ALL_TABLES = {
-  test_basic: [
-    'simple_table',
-    'composite_key_table',
-    'compression_test_table',
-    'multi_partition_table',
-    'ttl_test_table',
-    'counters',
-    'static_columns_table',
-    'uncompressed_table',
-  ],
-  test_collections: [
-    'collection_table',
-    'collection_clustering_table',
-    'collections_with_udts',
-    'empty_collections_table',
-    'frozen_collections_table',
-    'large_collections_table',
-    'nested_collections_table',
-    'typed_collections_table',
-  ],
-  test_timeseries: [
-    'event_store',
-    'user_sessions',
-    'sensor_data',
-    'app_metrics',
-    'log_entries',
-    'stock_prices',
-    'tick_data',
-    'time_bucketed_counters',
-    'user_activity',
-  ],
-  test_wide_rows: [
-    'wide_partition_table',
-    'chat_messages',
-    'document_versions',
-    'large_blob_table',
-    'many_columns_table',
-    'multi_metric_timeseries',
-    'product_catalog',
-    'sparse_data_table',
-  ],
+function isSystemKeyspace(keyspace) {
+  return keyspace.startsWith('system');
+}
+
+/**
+ * Keyspaces intentionally excluded from the read-parity corpus by EXACT name
+ * (reasons in policy doc). `system*` keyspaces are excluded separately by
+ * prefix via isSystemKeyspace() — do not enumerate them here.
+ */
+const SKIP_KEYSPACES = {
+  test_writeparity: 'write byte-parity fixtures (dedicated Rust parity tests)',
+  test_compactionparity: 'compaction byte-parity fixtures (differential-compaction harness)',
+  test_compactionparityudt: 'compaction-parity UDT fixtures (compaction harness; may be local-only)',
 };
 
 /**
- * All 6 oa-format test tables (Issue #656 VG4 — oa parity enforcement).
+ * Keyspaces discovered + listed in-scope but not executed through the
+ * comprehensive row-count corpus. This set MUST be identical across
+ * smoke-test-all-tables.sh, corpus.py (SKIP_PENDING_KEYSPACES), and
+ * corpus-coverage-policy.md.
  */
-const OA_TABLES = [
-  'simple_table',
-  'collection_table',
-  'udt_table',
-  'ttl_table',
-  'static_table',
-  'tombstone_table',
-];
+const SKIP_PENDING_KEYSPACES = {
+  test_deltas: 'binaries not in published dataset asset yet (issue #701)',
+  test_tomb:
+    'tombstone parity fixtures with valid zero-live-row partitions; validated by dedicated Rust tombstone/TTL parity tests, not the comprehensive row-count corpus',
+  test_types:
+    'CQL-type/schema-evolution parity fixtures with valid zero-live-row cases (deleted-counter shadowing); validated by dedicated Rust CQL-type parity tests, not the comprehensive row-count corpus',
+};
+
+/**
+ * Explicit in-scope read-parity corpus (the documented list in
+ * test-data/corpus-coverage-policy.md). AUTHORITATIVE classified set used by
+ * unclassifiedKeyspaces() — NOT "everything not skipped", so a newly-committed
+ * keyspace that nobody added here trips the integrity guard. Mirrors
+ * corpus.py IN_SCOPE_KEYSPACES (includes the skip-pending keyspaces).
+ */
+const IN_SCOPE_KEYSPACES = {
+  test_basic: 'simple-types read-parity corpus',
+  test_collections: 'list/set/map read-parity corpus',
+  test_timeseries: 'time-series read-parity corpus',
+  test_wide_rows: 'wide-partition read-parity corpus',
+  test_oa: 'Cassandra 5.0 oa-format read-parity corpus (#656)',
+  test_da: 'BTI (da-format) read-parity corpus',
+  test_big: 'large/wide-partition read-parity corpus',
+  test_comp: 'compression read-parity corpus',
+  test_tomb: 'tombstone read-parity corpus',
+  test_types: 'extended CQL-type read-parity corpus',
+  test_deltas: 'CDC-delta read-parity corpus (skip-pending, #701)',
+};
+
+/** Keyspaces this Node suite can EXECUTE queries against (have a schema map). */
+const EXECUTABLE_KEYSPACES = ['test_basic', 'test_collections', 'test_timeseries', 'test_wide_rows'];
+
+/** Discover all keyspace directory names under the sstables dir. */
+function discoverKeyspaces() {
+  const dir = global.testPaths.SSTABLES_DIR;
+  if (!fs.existsSync(dir)) return [];
+  return fs
+    .readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
+    .map((e) => e.name)
+    .sort();
+}
+
+/** Discover table names (UUID suffix stripped) for one keyspace. */
+function discoverTables(keyspace) {
+  const dir = path.join(global.testPaths.SSTABLES_DIR, keyspace);
+  if (!fs.existsSync(dir)) return [];
+  const tables = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const m = TABLE_DIR_RE.exec(entry.name);
+    if (m) tables.push(m[1]);
+  }
+  return tables.sort();
+}
+
+/** In-scope keyspaces = discovered minus the documented skip-set + system*. */
+function inScopeKeyspaces() {
+  return discoverKeyspaces().filter((k) => !(k in SKIP_KEYSPACES) && !isSystemKeyspace(k));
+}
+
+/**
+ * Discovered keyspaces classified into NONE of the explicit buckets.
+ *
+ * A keyspace is "classified" only if it appears in one of the explicit,
+ * hand-maintained sets: IN_SCOPE_KEYSPACES (read-parity corpus, incl.
+ * skip-pending) or SKIP_KEYSPACES (intentionally excluded). This is
+ * deliberately NOT "discovered minus skip-set" (which can never be
+ * unclassified by construction — the tautology #1229 exists to kill). A
+ * newly-committed keyspace nobody added to either explicit set is returned
+ * here so the classification test reds the suite instead of absorbing it.
+ */
+function unclassifiedKeyspaces() {
+  const classified = new Set([
+    ...Object.keys(IN_SCOPE_KEYSPACES),
+    ...Object.keys(SKIP_KEYSPACES),
+    ...Object.keys(SKIP_PENDING_KEYSPACES),
+  ]);
+  // system* keyspaces are classified by prefix (Cassandra-internal metadata),
+  // not enumerated in any explicit set.
+  return discoverKeyspaces().filter((k) => !classified.has(k) && !isSystemKeyspace(k));
+}
+
+/**
+ * Executable test tables organized by keyspace — DISCOVERED dynamically.
+ * (The Node suite only runs queries against EXECUTABLE_KEYSPACES.)
+ */
+const ALL_TABLES = Object.fromEntries(
+  EXECUTABLE_KEYSPACES.map((ks) => [ks, discoverTables(ks)]),
+);
+
+/**
+ * oa-format test tables — discovered dynamically (Issue #656 VG4 / #1229).
+ */
+const OA_TABLES = discoverTables('test_oa');
 
 /**
  * Known issues from Python parity tests that may also affect Node.js.
@@ -728,9 +805,18 @@ module.exports = {
   VARINT_HEX_PATTERN,
   DECIMAL_HEX_PATTERN,
 
-  // Test tables
+  // Test tables (dynamically discovered — Issue #1229)
   ALL_TABLES,
   OA_TABLES,
   KNOWN_ISSUES,
   getKnownIssue,
+
+  // Corpus enumeration (Issue #1229)
+  SKIP_KEYSPACES,
+  EXECUTABLE_KEYSPACES,
+  isSystemKeyspace,
+  discoverKeyspaces,
+  discoverTables,
+  inScopeKeyspaces,
+  unclassifiedKeyspaces,
 };
