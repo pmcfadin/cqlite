@@ -33,6 +33,43 @@ const {
 } = require('./parity-utils.js');
 
 // =============================================================================
+// Guarded test.each registration (Issue #1229 round-2)
+//
+// Under Jest 29 an empty `test.each([])` is a COLLECTION-TIME error, which
+// bypasses the intended graceful dataset-absent skip. `guardedTestEach` guards
+// the dynamic registration:
+//   * cases present            -> normal `test.each(cases)(...)`
+//   * cases empty + no datasets -> a single `test.skip` placeholder
+//   * cases empty + datasets present -> a single FAILING test (the disk-derived
+//     enumeration is unexpectedly empty — a real bug, not a skip)
+// This mirrors the Python fail-vs-skip distinction.
+// =============================================================================
+
+const fsForGuard = require('fs');
+
+function datasetsPresent() {
+  return fsForGuard.existsSync(global.testPaths.SSTABLES_DIR);
+}
+
+function guardedTestEach(label, cases, name, fn) {
+  if (Array.isArray(cases) && cases.length > 0) {
+    test.each(cases)(name, fn);
+    return;
+  }
+  if (datasetsPresent()) {
+    // Datasets are on disk but enumeration produced nothing: fail loudly.
+    test(`${label} enumeration is non-empty`, () => {
+      throw new Error(
+        `${label}: datasets are present but the disk-derived corpus is empty; ` +
+          'dynamic enumeration is broken (#1229)'
+      );
+    });
+  } else {
+    test.skip(`${label} (datasets absent — skipped)`, () => {});
+  }
+}
+
+// =============================================================================
 // Schema Mapping for Keyspaces
 // =============================================================================
 
@@ -75,7 +112,7 @@ afterAll(async () => {
 
 describe('Tier 1: Row Count Parity (Issue #307)', () => {
   describe('test_basic keyspace', () => {
-    test.each(ALL_TABLES.test_basic)('%s row count matches JSONL', async (table) => {
+    guardedTestEach('test_basic', ALL_TABLES.test_basic, '%s row count matches JSONL', async (table) => {
       const jsonlPath = findJsonlFile('test_basic', table);
       if (!jsonlPath) {
         console.log(`  Skipping ${table}: JSONL file not found`);
@@ -102,7 +139,7 @@ describe('Tier 1: Row Count Parity (Issue #307)', () => {
   });
 
   describe('test_collections keyspace', () => {
-    test.each(ALL_TABLES.test_collections)('%s row count matches JSONL', async (table) => {
+    guardedTestEach('test_collections', ALL_TABLES.test_collections, '%s row count matches JSONL', async (table) => {
       const jsonlPath = findJsonlFile('test_collections', table);
       if (!jsonlPath) {
         console.log(`  Skipping ${table}: JSONL file not found`);
@@ -137,7 +174,7 @@ describe('Tier 1: Row Count Parity (Issue #307)', () => {
   });
 
   describe('test_timeseries keyspace', () => {
-    test.each(ALL_TABLES.test_timeseries)('%s row count matches JSONL', async (table) => {
+    guardedTestEach('test_timeseries', ALL_TABLES.test_timeseries, '%s row count matches JSONL', async (table) => {
       const jsonlPath = findJsonlFile('test_timeseries', table);
       if (!jsonlPath) {
         console.log(`  Skipping ${table}: JSONL file not found`);
@@ -163,7 +200,7 @@ describe('Tier 1: Row Count Parity (Issue #307)', () => {
   });
 
   describe('test_wide_rows keyspace', () => {
-    test.each(ALL_TABLES.test_wide_rows)('%s row count matches JSONL', async (table) => {
+    guardedTestEach('test_wide_rows', ALL_TABLES.test_wide_rows, '%s row count matches JSONL', async (table) => {
       const jsonlPath = findJsonlFile('test_wide_rows', table);
       if (!jsonlPath) {
         console.log(`  Skipping ${table}: JSONL file not found`);
@@ -438,7 +475,7 @@ describe('VG6: OA Format Parity — Row Count (Issue #672)', () => {
   });
 
   // All 6 oa tables now enforce row count parity (VG6, Issue #672)
-  test.each(OA_TABLES)('test_oa.%s row count matches JSONL golden', async (table) => {
+  guardedTestEach('test_oa', OA_TABLES, 'test_oa.%s row count matches JSONL golden', async (table) => {
     if (!dbOa) {
       console.log(`  Skipping test_oa.${table}: oa binaries absent (run fetch-datasets.sh)`);
       return; // graceful skip (no assert failures)

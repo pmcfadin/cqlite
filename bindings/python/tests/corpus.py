@@ -102,18 +102,60 @@ def in_scope_keyspaces(sstables_dir: Path) -> list[str]:
     return [k for k in discover_keyspaces(sstables_dir) if k not in SKIP_KEYSPACES]
 
 
-def discover_corpus(sstables_dir: Path) -> list[tuple[str, str]]:
-    """Return ``(keyspace, table)`` pairs for the in-scope read-parity corpus.
+def discover_table_dirs(sstables_dir: Path, keyspace: str) -> list[tuple[str, Path]]:
+    """Return ``(table, dir_path)`` for EVERY ``<table>-<uuid>/`` under a keyspace.
+
+    Unlike :func:`discover_tables`, this does NOT collapse the multiple
+    generation directories that share one logical table name (e.g.
+    ``test_deltas`` ships three UUID dirs per table). Each physical directory
+    is returned separately so its golden is verified individually — collapsing
+    by table name silently drops the later generations' JSONL files (#1229).
+    """
+    keyspace_dir = sstables_dir / keyspace
+    if not keyspace_dir.exists():
+        return []
+    entries: list[tuple[str, Path]] = []
+    for d in keyspace_dir.iterdir():
+        if not d.is_dir():
+            continue
+        m = _TABLE_DIR_RE.match(d.name)
+        if m:
+            entries.append((m.group("table"), d))
+    return sorted(entries, key=lambda e: e[1].name)
+
+
+def discover_corpus(sstables_dir: Path) -> list[tuple[str, str, Path]]:
+    """Return ``(keyspace, table, dir_path)`` for the in-scope read-parity corpus.
+
+    Enumerated PER DIRECTORY, not per logical table: a keyspace/table with N
+    generation directories contributes N entries, each carrying its exact
+    ``<table>-<uuid>/`` directory so the JSONL golden of every generation is
+    checked (not just the first one matching the table prefix — #1229).
 
     Excludes skip-set keyspaces (system + parity-fixture). Includes
     skip-pending keyspaces (they are discovered; the caller decides whether
     to execute them).
     """
-    pairs: list[tuple[str, str]] = []
+    entries: list[tuple[str, str, Path]] = []
     for keyspace in in_scope_keyspaces(sstables_dir):
-        for table in discover_tables(sstables_dir, keyspace):
-            pairs.append((keyspace, table))
-    return pairs
+        for table, dir_path in discover_table_dirs(sstables_dir, keyspace):
+            entries.append((keyspace, table, dir_path))
+    return entries
+
+
+def find_jsonl_in_dir(table_dir: Path) -> Path | None:
+    """Return the JSONL golden inside one specific ``<table>-<uuid>/`` directory.
+
+    Operates on the EXACT directory (no table-prefix search), so the correct
+    generation's golden is verified. Globs ``*-Data.db.jsonl`` to stay
+    format-agnostic (nb-/oa-/da-, any generation).
+    """
+    if not table_dir.is_dir():
+        return None
+    for jsonl_file in sorted(table_dir.glob("*-Data.db.jsonl")):
+        if jsonl_file.exists():
+            return jsonl_file
+    return None
 
 
 def unclassified_keyspaces(sstables_dir: Path) -> list[str]:

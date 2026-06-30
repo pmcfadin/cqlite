@@ -41,7 +41,9 @@ from corpus import (
     SKIP_KEYSPACES,
     SKIP_PENDING_KEYSPACES,
     discover_corpus,
+    discover_table_dirs,
     discover_tables,
+    find_jsonl_in_dir,
     in_scope_keyspaces,
     unclassified_keyspaces,
 )
@@ -791,20 +793,23 @@ class TestCoverageSummary:
         missing = []          # in-scope, non-exempt, golden absent -> FAIL
         skip_pending = []     # documented skip-pending -> reported, not fatal
 
-        for keyspace, table in DISCOVERED_CORPUS:
-            jsonl_file = find_jsonl_file(keyspace, table)
+        for keyspace, table, table_dir in DISCOVERED_CORPUS:
+            # Verify THIS generation's golden, not just the first dir matching
+            # the table prefix (per-directory coverage, #1229 round-2).
+            label = f"{keyspace}.{table_dir.name}"
+            jsonl_file = find_jsonl_in_dir(table_dir)
             if jsonl_file is None:
                 if keyspace in SKIP_PENDING_KEYSPACES:
-                    skip_pending.append(f"{keyspace}.{table}")
+                    skip_pending.append(label)
                 else:
-                    missing.append(f"{keyspace}.{table}")
+                    missing.append(label)
                 continue
 
             try:
                 count = count_rows_in_jsonl(jsonl_file)
-                passed.append((f"{keyspace}.{table}", count))
+                passed.append((label, count))
             except Exception as e:
-                failed.append((f"{keyspace}.{table}", str(e)))
+                failed.append((label, str(e)))
 
         # Skip test entirely if no corpus discovered (CI without test data)
         if not DISCOVERED_CORPUS:
@@ -840,9 +845,10 @@ class TestCoverageSummary:
             f"SKIP_KEYSPACES in corpus.py with a reason "
             f"(test-data/corpus-coverage-policy.md)."
         )
-        # We must have discovered at least the executable corpus.
+        # We must have discovered at least the executable corpus (counted
+        # per directory, matching DISCOVERED_CORPUS's per-directory granularity).
         assert len(DISCOVERED_CORPUS) >= sum(
-            len(discover_tables(DATASETS, ks)) for ks in EXECUTABLE_KEYSPACES
+            len(discover_table_dirs(DATASETS, ks)) for ks in EXECUTABLE_KEYSPACES
         )
 
 
@@ -872,6 +878,21 @@ class TestE2ESummary:
         2. it is queryable via Python bindings
         3. row counts match the JSONL reference (excluding known issues)
         """
+        # Distinguish "datasets genuinely absent" (legitimate skip) from
+        # "datasets present but enumeration yielded nothing" (a broken
+        # EXECUTABLE_KEYSPACES enumeration that must FAIL, not skip — #1229
+        # round-2). The skip is based ONLY on the datasets root being absent.
+        if not DATASETS.exists():
+            pytest.skip("Datasets root absent - test data may not be fetched")
+
+        # Datasets ARE present: a non-empty executable corpus is mandatory.
+        # An empty ALL_TABLES here means the dynamic enumeration is broken;
+        # fail loudly rather than letting the all-skipped shortcut hide it.
+        assert len(ALL_TABLES) > 0, (
+            "Datasets root is present but no executable tables were discovered; "
+            "the EXECUTABLE_KEYSPACES enumeration is broken (#1229)"
+        )
+
         passed = []
         failed = []
         xfail = []
@@ -918,9 +939,10 @@ class TestE2ESummary:
                 else:
                     failed.append((keyspace, table, str(e)))
 
-        # Skip test entirely if all tables skipped (CI without test data)
-        if len(skipped) == len(ALL_TABLES):
-            pytest.skip("No JSONL reference files available - test data may not be fetched")
+        # NOTE: there is no "all tables skipped -> skip" shortcut here. With
+        # datasets present and ALL_TABLES asserted non-empty above, any per-table
+        # skip (missing JSONL/schema) is a real coverage gap surfaced by the
+        # `assert len(skipped) == 0` below — it must not silently skip the test.
 
         # Report results
         print(f"\n{'='*60}")
