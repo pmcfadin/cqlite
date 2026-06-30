@@ -1,26 +1,17 @@
 """sstabledump Parity Tests for Python Bindings - Issue #309.
 
-Validates that Python binding output matches Cassandra sstabledump for all 33 test tables.
-This is part of M4 Python Bindings Epic (#321).
+Validates that Python binding output matches Cassandra sstabledump for the
+committed test corpus. This is part of M4 Python Bindings Epic (#321).
 
 Test Strategy:
-    Tier 1: Row Count Parity - Verify row counts match JSONL reference for all 33 tables
-    Tier 2: Value Comparison - For tables with simple types, validate cell values match
-
-Tables Tested (33 total):
-    test_basic (8): simple_table, composite_key_table, compression_test_table,
-                    multi_partition_table, ttl_test_table, counters,
-                    static_columns_table, uncompressed_table
-    test_collections (8): collection_table, collection_clustering_table,
-                          collections_with_udts, empty_collections_table,
-                          frozen_collections_table, large_collections_table,
-                          nested_collections_table, typed_collections_table
-    test_timeseries (9): event_store, user_sessions, sensor_data, app_metrics,
-                         log_entries, stock_prices, tick_data,
-                         time_bucketed_counters, user_activity
-    test_wide_rows (8): wide_partition_table, chat_messages, document_versions,
-                        large_blob_table, many_columns_table,
-                        multi_metric_timeseries, product_catalog, sparse_data_table
+    Tier 1: Row Count Parity - Verify row counts match the JSONL reference for
+            the schema-mapped keyspaces (test_basic/collections/timeseries/wide_rows).
+    Tier 2: Value Comparison - For tables with simple types, validate cell values match.
+    Coverage/E2E: enumerate the committed corpus DYNAMICALLY (Issue #1229) so a
+            newly-committed keyspace is automatically in scope; the skip-set +
+            rationale lives in ``test-data/corpus-coverage-policy.md`` and
+            ``corpus.py``. No hand-typed table count and no tautological
+            "assert len == 33" assertions.
 """
 
 # Defer annotation evaluation so PEP 604 unions (e.g. `Path | None`) parse on
@@ -46,12 +37,24 @@ import cqlite
 
 from conftest import DATASETS, SCHEMAS
 
+from corpus import (
+    SKIP_KEYSPACES,
+    SKIP_PENDING_KEYSPACES,
+    discover_corpus,
+    discover_tables,
+    in_scope_keyspaces,
+    unclassified_keyspaces,
+)
+
 
 # =============================================================================
-# Table Definitions (33 tables across 4 keyspaces)
+# Table Definitions — DYNAMICALLY enumerated from the committed corpus
+# (Issue #1229). The skip-set + rationale lives in corpus.py /
+# test-data/corpus-coverage-policy.md, NOT hand-typed here.
 # =============================================================================
 
-# Schema file to keyspace mapping
+# Schema file to keyspace mapping (which keyspaces this Python suite can
+# *execute* queries against; coverage checks span the full in-scope corpus).
 SCHEMA_KEYSPACE_MAP = {
     "basic-types.cql": ["test_basic"],
     "collections.cql": ["test_collections"],
@@ -60,56 +63,25 @@ SCHEMA_KEYSPACE_MAP = {
     "oa-test.cql": ["test_oa"],
 }
 
-# All 6 oa tables (Issue #656 VG4 — oa parity enforcement)
-OA_TABLES = [
-    ("test_oa", "simple_table"),
-    ("test_oa", "collection_table"),
-    ("test_oa", "udt_table"),
-    ("test_oa", "ttl_table"),
-    ("test_oa", "static_table"),
-    ("test_oa", "tombstone_table"),
+# Keyspaces this suite executes row-count parity against (have a schema map
+# AND a stable nb-format golden layout). Other in-scope keyspaces are still
+# enumerated by the coverage tests so they cannot silently fall out of scope.
+EXECUTABLE_KEYSPACES = ["test_basic", "test_collections", "test_timeseries", "test_wide_rows"]
+
+# All 6 oa tables — discovered dynamically (Issue #656 VG4 / #1229).
+OA_TABLES = [("test_oa", t) for t in discover_tables(DATASETS, "test_oa")]
+
+# Executable (keyspace, table) pairs — discovered, not hand-typed.
+ALL_TABLES = [
+    (ks, table)
+    for ks in EXECUTABLE_KEYSPACES
+    for table in discover_tables(DATASETS, ks)
 ]
 
-# All 33 tables organized by keyspace
-ALL_TABLES = [
-    # test_basic (8 tables)
-    ("test_basic", "simple_table"),
-    ("test_basic", "composite_key_table"),
-    ("test_basic", "compression_test_table"),
-    ("test_basic", "multi_partition_table"),
-    ("test_basic", "ttl_test_table"),
-    ("test_basic", "counters"),
-    ("test_basic", "static_columns_table"),
-    ("test_basic", "uncompressed_table"),
-    # test_collections (8 tables)
-    ("test_collections", "collection_table"),
-    ("test_collections", "collection_clustering_table"),
-    ("test_collections", "collections_with_udts"),
-    ("test_collections", "empty_collections_table"),
-    ("test_collections", "frozen_collections_table"),
-    ("test_collections", "large_collections_table"),
-    ("test_collections", "nested_collections_table"),
-    ("test_collections", "typed_collections_table"),
-    # test_timeseries (9 tables)
-    ("test_timeseries", "event_store"),
-    ("test_timeseries", "user_sessions"),
-    ("test_timeseries", "sensor_data"),
-    ("test_timeseries", "app_metrics"),
-    ("test_timeseries", "log_entries"),
-    ("test_timeseries", "stock_prices"),
-    ("test_timeseries", "tick_data"),
-    ("test_timeseries", "time_bucketed_counters"),
-    ("test_timeseries", "user_activity"),
-    # test_wide_rows (8 tables)
-    ("test_wide_rows", "wide_partition_table"),
-    ("test_wide_rows", "chat_messages"),
-    ("test_wide_rows", "document_versions"),
-    ("test_wide_rows", "large_blob_table"),
-    ("test_wide_rows", "many_columns_table"),
-    ("test_wide_rows", "multi_metric_timeseries"),
-    ("test_wide_rows", "product_catalog"),
-    ("test_wide_rows", "sparse_data_table"),
-]
+# The full in-scope read-parity corpus (every committed keyspace minus the
+# documented skip-set). Used by coverage/E2E tests so a newly-committed
+# keyspace is automatically in scope.
+DISCOVERED_CORPUS = discover_corpus(DATASETS)
 
 
 # =============================================================================
@@ -454,7 +426,7 @@ def db_oa():
 
 
 # =============================================================================
-# Tier 1: Row Count Parity Tests (All 33 Tables)
+# Tier 1: Row Count Parity Tests (schema-mapped executable keyspaces)
 # =============================================================================
 
 
@@ -466,10 +438,10 @@ KNOWN_ROW_COUNT_ISSUES = {
 
 
 class TestRowCountParity:
-    """Tier 1: Verify row counts match JSONL reference for all 33 tables.
+    """Tier 1: Verify row counts match the JSONL reference.
 
-    This is the primary parity test - ensures all tables are readable and
-    return the expected number of rows.
+    This is the primary parity test - ensures the schema-mapped keyspaces are
+    readable and return the expected number of rows.
     """
 
     # test_basic tables (8)
@@ -764,15 +736,49 @@ class TestValueParity:
 
 
 class TestCoverageSummary:
-    """Generate a coverage report for all 33 tables."""
+    """Coverage report for the dynamically-discovered corpus (Issue #1229)."""
+
+    def test_every_discovered_keyspace_is_classified(self, datasets_root):
+        """Fail loudly if a committed keyspace is neither in-scope nor skipped.
+
+        This is the integrity guard: a newly-committed keyspace that nobody
+        added to a schema map OR to the documented skip-set shows up here and
+        reds the suite, instead of being silently uncovered while CI reports
+        "100%".
+        """
+        unclassified = unclassified_keyspaces(DATASETS)
+        assert not unclassified, (
+            f"Committed keyspace(s) {unclassified} are neither in the in-scope "
+            f"corpus nor in the documented skip-set. Add them to a schema map "
+            f"or to SKIP_KEYSPACES in corpus.py (see "
+            f"test-data/corpus-coverage-policy.md)."
+        )
+
+    def test_skip_pending_keyspaces_are_in_scope(self, datasets_root):
+        """Skip-pending keyspaces must be IN-SCOPE (discovered), not skip-set.
+
+        A skip-pending keyspace (e.g. test_deltas) is discovered + listed
+        explicitly; it must never silently become a skip-set exclusion.
+        """
+        if not DISCOVERED_CORPUS:
+            pytest.skip("No corpus discovered - test data may not be fetched")
+        discovered = set(in_scope_keyspaces(DATASETS))
+        for keyspace in SKIP_PENDING_KEYSPACES:
+            # Only assert for keyspaces actually present on disk.
+            if (DATASETS / keyspace).exists():
+                assert keyspace in discovered, (
+                    f"skip-pending keyspace {keyspace} is present on disk but "
+                    f"not in the in-scope corpus; it must not be in SKIP_KEYSPACES"
+                )
+                assert keyspace not in SKIP_KEYSPACES
 
     def test_coverage_report(self, datasets_root):
-        """Report coverage status for all tables."""
+        """Report JSONL coverage for the full in-scope corpus (no tautology)."""
         passed = []
         failed = []
         skipped = []
 
-        for keyspace, table in ALL_TABLES:
+        for keyspace, table in DISCOVERED_CORPUS:
             jsonl_file = find_jsonl_file(keyspace, table)
             if jsonl_file is None:
                 skipped.append(f"{keyspace}.{table}")
@@ -784,39 +790,33 @@ class TestCoverageSummary:
             except Exception as e:
                 failed.append((f"{keyspace}.{table}", str(e)))
 
-        # Skip test entirely if no JSONL files available (CI without test data)
-        if len(passed) == 0:
-            pytest.skip("No JSONL reference files available - test data may not be fetched")
+        # Skip test entirely if no corpus discovered (CI without test data)
+        if not DISCOVERED_CORPUS:
+            pytest.skip("No corpus discovered - test data may not be fetched")
 
         # Print summary
         print(f"\n{'='*60}")
-        print("sstabledump Parity Test Coverage Report")
+        print("sstabledump Parity Test Coverage Report (dynamic, #1229)")
         print(f"{'='*60}")
-        print(f"Total tables: {len(ALL_TABLES)}")
+        print(f"In-scope keyspaces: {in_scope_keyspaces(DATASETS)}")
+        print(f"Skip-set keyspaces: {sorted(SKIP_KEYSPACES)}")
+        print(f"Discovered tables: {len(DISCOVERED_CORPUS)}")
         print(f"JSONL available: {len(passed)}")
         print(f"JSONL missing: {len(skipped)}")
         print(f"Parse errors: {len(failed)}")
         print()
 
-        if passed:
-            print("Tables with JSONL references:")
-            for name, count in passed:
-                print(f"  {name}: {count} rows")
-
-        if skipped:
-            print("\nTables missing JSONL:")
-            for name in skipped:
-                print(f"  {name}")
-
         if failed:
-            print("\nTables with parse errors:")
+            print("Tables with parse errors:")
             for name, error in failed:
                 print(f"  {name}: {error}")
 
-        # Assert we have coverage for all tables (only if JSONL available)
-        assert len(passed) == len(ALL_TABLES), (
-            f"Expected {len(ALL_TABLES)} tables with JSONL references, "
-            f"but only found {len(passed)}"
+        # No parse errors are tolerated; missing JSONL is reported but not
+        # fatal (some in-scope keyspaces are skip-pending until binaries ship).
+        assert not failed, f"JSONL parse errors for: {[n for n, _ in failed]}"
+        # We must have discovered at least the executable corpus.
+        assert len(DISCOVERED_CORPUS) >= sum(
+            len(discover_tables(DATASETS, ks)) for ks in EXECUTABLE_KEYSPACES
         )
 
 
@@ -826,26 +826,25 @@ class TestCoverageSummary:
 
 
 class TestE2ESummary:
-    """Explicit E2E summary test for all 33 tables.
+    """Explicit E2E summary test for the executable corpus (Issue #323/#1229).
 
-    This test is the acceptance criteria for Issue #323:
-    Python E2E tests validate all 33 tables against JSONL golden files.
+    The set of tables is enumerated dynamically from the committed corpus
+    (the schema-mapped EXECUTABLE_KEYSPACES), not a frozen 33-tuple, and the
+    old tautological ``assert len(ALL_TABLES) == 33`` has been removed.
     """
-
-    EXPECTED_TABLE_COUNT = 33
 
     # Tables with known issues that are expected to fail (XFail)
     # Update this list as core issues are resolved
     KNOWN_ISSUES: dict = {}
 
-    def test_e2e_all_33_tables(self, datasets_root):
-        """E2E validation that all 33 tables are queryable.
+    def test_e2e_all_tables(self, datasets_root):
+        """E2E validation that the executable corpus is queryable.
 
         This is the primary acceptance test for Issue #323.
-        Verifies:
-        1. All 33 tables have JSONL golden files
-        2. All 33 tables are queryable via Python bindings
-        3. Row counts match JSONL reference (excluding known issues)
+        Verifies, for every dynamically-discovered executable table:
+        1. it has a JSONL golden file
+        2. it is queryable via Python bindings
+        3. row counts match the JSONL reference (excluding known issues)
         """
         passed = []
         failed = []
@@ -899,8 +898,9 @@ class TestE2ESummary:
 
         # Report results
         print(f"\n{'='*60}")
-        print("E2E Test Summary (Issue #323)")
+        print("E2E Test Summary (Issue #323/#1229, dynamic enumeration)")
         print(f"{'='*60}")
+        print(f"Executable keyspaces: {EXECUTABLE_KEYSPACES}")
         print(f"Total: {len(ALL_TABLES)} tables")
         print(f"Passed: {len(passed)}")
         print(f"XFail (known issues): {len(xfail)}")
@@ -918,9 +918,11 @@ class TestE2ESummary:
             for ks, tbl, reason in xfail:
                 print(f"  {ks}.{tbl}: {reason}")
 
-        # Assert all tables covered (passed + xfail should equal total)
-        assert len(ALL_TABLES) == self.EXPECTED_TABLE_COUNT, (
-            f"Expected {self.EXPECTED_TABLE_COUNT} tables, found {len(ALL_TABLES)}"
+        # The executable corpus must be non-empty when test data is present
+        # (replaces the tautological len(ALL_TABLES) == 33 assertion).
+        assert len(ALL_TABLES) > 0, (
+            "No executable tables discovered though JSONL goldens are present; "
+            "EXECUTABLE_KEYSPACES enumeration is broken"
         )
 
         # Assert no unexpected failures

@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
 # Comprehensive Smoke Test Script for All Test Tables
-# Issue #200: Validate that all 33 nb test tables can be loaded successfully
-# Issue #654: Also discover oa/da keyspaces
-# Issue #656 (VG4): Promote test_oa to enforced (nb + oa = 39 tables); test_da stays skip-pending
-# Issue #701 (DS5): Add test_deltas (8 delete-bearing tables); currently skip-pending
-#   until a new dataset asset containing test_deltas binaries is published and
-#   fetch-datasets.sh's pin (DATASET_TAG/DATASET_ASSET/DATASET_SHA256) is bumped.
-#   At that point, move "test_deltas" from SKIP_PENDING_KEYSPACES back into KEYSPACES.
 #
-# This script discovers all test tables across all keyspaces:
-#   - nb (enforced): test_basic, test_collections, test_timeseries, test_wide_rows
-#   - oa (enforced, VG4): test_oa — oa format BIG read implemented in #655
-#   - nb/deltas (skip-pending, DS5 #701): test_deltas — delete-bearing fixtures (8 tables);
-#     binaries not yet included in the published dataset asset; skipped if binaries absent
-#   - da/bti (enforced, BTI read epic #660): test_da — full trie-walk read implemented in #660
+# Issue #1229: the enforced keyspace set is DISCOVERED dynamically by walking the
+# committed corpus under test-data/datasets/sstables/<keyspace>/, NOT hand-typed.
+# A newly-committed keyspace is automatically in scope unless it is added to the
+# documented SKIP_KEYSPACE_NAMES (excluded) or SKIP_PENDING_KEYSPACES (discovered
+# but not executed) below. The skip-set + rationale is the single source of truth
+# in test-data/corpus-coverage-policy.md. Discovery is based on directory
+# structure (committed), independent of whether *-Data.db binaries are present;
+# enforced tables that NEED a Data.db skip-on-absence, but a present-but-empty
+# result (0 entries) is still a FAILURE.
+#
+# Earlier issues that shaped this corpus: #200 (nb), #654/#656 (oa/da), #701
+# (test_deltas delete-bearing fixtures).
 #
 # Tables in SKIP_PENDING_KEYSPACES are discovered and listed, but not run
 # through the read-sstable command. They appear explicitly in the summary
@@ -55,25 +54,83 @@ DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-${WORKSPACE_ROOT}/test-data/datasets}"
 SSTABLES_DIR="${DATASETS_ROOT}/sstables"
 OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/smoke-test-all-tables-results}"
 
-# Enforced keyspaces (must all pass, failures exit non-zero)
-# Issue #656 (VG4): test_oa promoted from skip-pending to enforced (nb=33 + oa=6 = 39 tables)
-# Issue #701 (DS5): test_deltas fixtures created but kept skip-pending until its binaries are
-#   published in a new dataset asset and fetch-datasets.sh pin is bumped (DATASET_TAG etc).
-KEYSPACES=("test_basic" "test_collections" "test_timeseries" "test_wide_rows" "test_oa" "test_da")
-
-# Skip-pending keyspaces (Issue #654):
-#   - test_deltas: delete-bearing fixtures (#701) - skip until dataset asset includes binaries;
-#                  flip to enforced (move into KEYSPACES above) once fetch-datasets.sh pin is bumped
-# These keyspaces are discovered and listed explicitly as SKIP-PENDING,
-# but are not run through read-sstable (would produce parse errors or missing Data.db).
+# Issue #1229: the enforced keyspace set is DISCOVERED dynamically by walking
+# the committed corpus (test-data/datasets/sstables/<keyspace>/), NOT hand-typed.
+# A newly-committed keyspace is automatically in scope unless it is added to
+# SKIP_KEYSPACES (documented exclusion) below. The skip-set + rationale is the
+# single source of truth in test-data/corpus-coverage-policy.md.
 #
-# Issue #660: test_da (da/BTI format) promoted to enforced — BTI end-to-end read
-# (whole-Data.db trie scan + ByteComparable decode) is implemented; read-sstable
-# resolves all 3 da tables via the header-extracted schema.
-SKIP_PENDING_KEYSPACES=("test_deltas")
+# KEYSPACES is populated at runtime by discover_keyspaces() (see below).
+KEYSPACES=()
+
+# Skip-set: keyspaces intentionally EXCLUDED from the comprehensive read-parity
+# corpus. Each MUST carry a reason (parallel arrays, bash 3.x compatible).
+# Mirrored in bindings/python/tests/corpus.py (SKIP_KEYSPACES) and
+# test-data/corpus-coverage-policy.md.
+SKIP_KEYSPACE_NAMES=(
+    "system" "system_auth" "system_schema"
+    "test_writeparity" "test_compactionparity" "test_compactionparityudt"
+)
+SKIP_KEYSPACE_REASONS=(
+    "Cassandra-internal metadata; not a read-parity target"
+    "Cassandra-internal auth metadata; not a read-parity target"
+    "Cassandra-internal schema catalog; not a read-parity target"
+    "write byte-parity fixtures (dedicated Rust parity tests)"
+    "compaction byte-parity fixtures (differential-compaction harness)"
+    "compaction-parity UDT fixtures (compaction harness; may be local-only)"
+)
+
+# Skip-pending keyspaces: in-scope (covered by JSONL goldens + the dynamic
+# enumeration) but discovered + listed explicitly as SKIP-PENDING rather than
+# executed through read-sstable. Reasons differ per keyspace:
+#   - test_deltas (#701): Data.db binaries not yet in the published dataset asset.
+#   - test_tomb / test_types: delete/tombstone/type-edge parity fixtures that
+#     legitimately contain partitions with ZERO live rows (e.g. partition-delete
+#     -only, deleted-counter-shadowing). The smoke test's "must emit ≥1 entry"
+#     check would mis-flag those valid empty results as failures; these keyspaces
+#     are validated by dedicated Rust parity tests (tombstone/TTL + CQL-type),
+#     not the read-row-count smoke test.
+# Flip an entry to enforced (drop from this list) when its constraint is lifted.
+SKIP_PENDING_KEYSPACES=("test_deltas" "test_tomb" "test_types")
 # Reason per keyspace (parallel arrays, bash 3.x compatible)
-SKIP_PENDING_KEYSPACE_NAMES=("test_deltas")
-SKIP_PENDING_KEYSPACE_REASONS=("binaries not in published dataset asset yet (see issue #701 — promote once fetch-datasets.sh pin is bumped)")
+SKIP_PENDING_KEYSPACE_NAMES=("test_deltas" "test_tomb" "test_types")
+SKIP_PENDING_KEYSPACE_REASONS=(
+    "binaries not in published dataset asset yet (see issue #701 — promote once fetch-datasets.sh pin is bumped)"
+    "tombstone parity fixtures with valid zero-live-row partitions; validated by dedicated Rust tombstone/TTL parity tests, not the row-count smoke test"
+    "CQL-type/schema-evolution parity fixtures with valid zero-live-row cases (deleted-counter shadowing); validated by dedicated Rust CQL-type parity tests"
+)
+
+# Return 0 if $1 is in SKIP_KEYSPACE_NAMES
+is_skip_keyspace() {
+    local ks="$1" k
+    for k in "${SKIP_KEYSPACE_NAMES[@]}"; do
+        [[ "$k" == "$ks" ]] && return 0
+    done
+    return 1
+}
+
+# Return 0 if $1 is in SKIP_PENDING_KEYSPACES
+is_skip_pending_keyspace() {
+    local ks="$1" k
+    for k in "${SKIP_PENDING_KEYSPACES[@]}"; do
+        [[ "$k" == "$ks" ]] && return 0
+    done
+    return 1
+}
+
+# Discover the enforced keyspace set by walking the committed corpus.
+# In-scope = every keyspace dir minus SKIP_KEYSPACE_NAMES minus SKIP_PENDING.
+# Based on directory structure (committed), independent of Data.db presence.
+discover_keyspaces() {
+    KEYSPACES=()
+    local dir ks
+    while IFS= read -r dir; do
+        ks="$(basename "${dir}")"
+        is_skip_keyspace "${ks}" && continue
+        is_skip_pending_keyspace "${ks}" && continue
+        KEYSPACES+=("${ks}")
+    done < <(find "${SSTABLES_DIR}" -mindepth 1 -maxdepth 1 -type d | sort)
+}
 
 # Get skip reason for a keyspace (bash 3.x compatible, no associative arrays)
 get_skip_reason() {
@@ -128,17 +185,38 @@ validate_environment() {
         exit 1
     fi
 
-    # Verify all enforced keyspaces exist
-    local missing_keyspaces=()
-    for keyspace in "${KEYSPACES[@]}"; do
-        if [[ ! -d "${SSTABLES_DIR}/${keyspace}" ]]; then
-            missing_keyspaces+=("${keyspace}")
-        fi
-    done
+    # Issue #1229: discover the enforced keyspace set from disk.
+    discover_keyspaces
 
-    if [[ ${#missing_keyspaces[@]} -gt 0 ]]; then
-        log_error "Missing keyspaces: ${missing_keyspaces[*]}"
-        log_error "Expected keyspaces: ${KEYSPACES[*]}"
+    if [[ ${#KEYSPACES[@]} -eq 0 ]]; then
+        log_error "No in-scope keyspaces discovered under ${SSTABLES_DIR}"
+        log_error "(every keyspace is in the skip-set or skip-pending — check the corpus)"
+        exit 1
+    fi
+
+    # Integrity guard: every discovered keyspace must be classified — either
+    # in-scope (enforced), skip-pending, or in the documented skip-set. A new
+    # keyspace that is none of these reds the smoke test loudly instead of
+    # being silently uncovered while CI reports "100%".
+    local unclassified=()
+    local dir ks
+    while IFS= read -r dir; do
+        ks="$(basename "${dir}")"
+        if is_skip_keyspace "${ks}" || is_skip_pending_keyspace "${ks}"; then
+            continue
+        fi
+        # in-scope (enforced) keyspaces are exactly KEYSPACES by construction
+        local found=0 k
+        for k in "${KEYSPACES[@]}"; do
+            [[ "$k" == "$ks" ]] && { found=1; break; }
+        done
+        [[ ${found} -eq 0 ]] && unclassified+=("${ks}")
+    done < <(find "${SSTABLES_DIR}" -mindepth 1 -maxdepth 1 -type d | sort)
+
+    if [[ ${#unclassified[@]} -gt 0 ]]; then
+        log_error "Unclassified committed keyspace(s): ${unclassified[*]}"
+        log_error "Add them to SKIP_KEYSPACE_NAMES (with a reason) or accept them"
+        log_error "as in-scope. See test-data/corpus-coverage-policy.md."
         exit 1
     fi
 
@@ -151,6 +229,7 @@ validate_environment() {
 
     log_success "Environment validation passed"
     log_info "  SSTables directory: ${SSTABLES_DIR}"
+    log_info "  Discovered in-scope keyspaces: ${KEYSPACES[*]}"
 }
 
 # Build or locate CLI binary
@@ -419,7 +498,7 @@ run_all_tests() {
     set -e
 
     echo ""
-    log_info "Checking skip-pending keyspaces (test_deltas - dataset publish pending, see #701)..."
+    log_info "Checking skip-pending keyspaces: ${SKIP_PENDING_KEYSPACES[*]} (discovered + listed, not executed)..."
     echo ""
     register_skip_pending_tables
 
@@ -436,7 +515,9 @@ print_summary() {
     echo "    SMOKE TEST SUMMARY - ALL TABLES"
     echo "========================================="
     echo ""
-    echo "  Total Tables Tested: ${total_tables}/42 (nb=33 + oa=6 + da=3, enforced; test_deltas=8 skip-pending until dataset publish)"
+    echo "  Enforced keyspaces (discovered): ${KEYSPACES[*]}"
+    echo "  Skip-pending keyspaces:          ${SKIP_PENDING_KEYSPACES[*]}"
+    echo "  Total Enforced Tables Tested:    ${total_tables} (= passed + failed; denominator derived from disk, not hard-coded)"
     echo -e "  ${GREEN}Passed:              ${#PASSED_TABLES[@]}${NC}"
 
     if [[ ${#FAILED_TABLES[@]} -gt 0 ]]; then
@@ -446,7 +527,7 @@ print_summary() {
     fi
 
     if [[ ${#SKIPPED_PENDING_TABLES[@]} -gt 0 ]]; then
-        echo -e "  ${YELLOW}Skip-pending:        ${#SKIPPED_PENDING_TABLES[@]} (test_deltas - not enforced until dataset publish #701)${NC}"
+        echo -e "  ${YELLOW}Skip-pending:        ${#SKIPPED_PENDING_TABLES[@]} (${SKIP_PENDING_KEYSPACES[*]} - discovered but not executed; see corpus-coverage-policy.md)${NC}"
     fi
 
     echo ""
@@ -475,14 +556,14 @@ print_summary() {
 
     if [[ ${#FAILED_TABLES[@]} -eq 0 ]]; then
         echo -e "${GREEN}=========================================${NC}"
-        echo -e "${GREEN}  All nb+oa+da tables (42) passed smoke test${NC}"
-        echo -e "${GREEN}  da/BTI tables (3): enforced — BTI end-to-end read (epic #660)${NC}"
-        echo -e "${GREEN}  test_deltas (8): skip-pending until dataset publish (#701)${NC}"
+        echo -e "${GREEN}  All ${#PASSED_TABLES[@]} enforced tables passed smoke test${NC}"
+        echo -e "${GREEN}  Enforced keyspaces (discovered from disk): ${KEYSPACES[*]}${NC}"
+        echo -e "${GREEN}  Skip-pending: ${SKIP_PENDING_KEYSPACES[*]} (see corpus-coverage-policy.md)${NC}"
         echo -e "${GREEN}=========================================${NC}"
         return 0
     else
         echo -e "${RED}=========================================${NC}"
-        echo -e "${RED}  Some nb tables failed${NC}"
+        echo -e "${RED}  ${#FAILED_TABLES[@]} enforced table(s) failed${NC}"
         echo -e "${RED}=========================================${NC}"
         return 1
     fi
@@ -491,9 +572,9 @@ print_summary() {
 # Main execution
 main() {
     log_info "CQLite Comprehensive Table Loading Smoke Test"
-    log_info "Issue #200: Validate all 33 nb test tables load successfully"
-    log_info "Issue #656 (VG4): oa tables (test_oa) now enforced; da tables listed as SKIP-PENDING"
-    log_info "Issue #701 (DS5): test_deltas fixtures added; skip-pending until dataset asset published"
+    log_info "Issue #1229: enforced keyspaces are DISCOVERED from the committed"
+    log_info "  corpus (no hand-typed allowlist); skip-set + reasons in"
+    log_info "  test-data/corpus-coverage-policy.md"
     echo ""
 
     detect_timeout_command

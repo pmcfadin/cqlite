@@ -2,9 +2,19 @@
 
 **Comprehensive validation tracking for all test tables across the CQLite test suite**
 
-**Last Updated**: 2026-06-20 (Issue #911 — BTI write-path parity vs Cassandra 5 sstabledump added; see "BTI write-path parity")
-**Issue Reference**: [#200](https://github.com/pmcfadin/cqlite/issues/200) - Validate all 33 test tables can be loaded successfully
-**Current Status**: 39/39 PASS (100% pass rate across nb+oa corpus) — test_deltas (9 tables) skip-pending until dataset asset published (#701)
+**Last Updated**: 2026-06-29 (Issue #1229 — comprehensive suites now DISCOVER the committed corpus dynamically; skip-set + rationale in [`corpus-coverage-policy.md`](corpus-coverage-policy.md))
+**Issue Reference**: [#200](https://github.com/pmcfadin/cqlite/issues/200) — original 33-table corpus; coverage policy now in [`corpus-coverage-policy.md`](corpus-coverage-policy.md)
+
+> **Corpus coverage is enumerated from disk (Issue #1229).** The "all tables"
+> smoke (`smoke-test-all-tables.sh`) and the Python/Node parity suites no longer
+> use a hand-typed 33-table allowlist or any `assert count == 33` tautology. They
+> walk `test-data/datasets/sstables/<keyspace>/` and exclude only the documented
+> skip-set (system + write/compaction parity-fixture keyspaces). A newly-committed
+> keyspace is automatically in scope. See
+> [`corpus-coverage-policy.md`](corpus-coverage-policy.md) for the authoritative
+> in-scope set and exclusion reasons. The historical per-keyspace tables below
+> document the original 33-table nb corpus and are no longer the coverage source
+> of truth.
 
 > **Differential compaction harness (Epic #817 / #819):** compaction fidelity is
 > validated separately by `cqlite-core/tests/issue_819_differential_compaction.rs`
@@ -18,15 +28,42 @@
 
 ## Summary Statistics
 
-| Metric | Value | Notes |
-|--------|-------|-------|
-| **Total Tables** | 48 | 4 nb keyspaces (33) + test_oa (6) + test_deltas (9); test_da skip-pending |
-| **Enforced Tables** | 39 | nb (33) + test_oa (6); test_deltas skip-pending until dataset asset published (#701) |
-| **Tables with JSONL** | 48 | 100% coverage - all tables (incl. skip-pending) have sstabledump reference files |
-| **Smoke Test Pass** | 39/39 | 100% pass rate (nb+oa enforced corpus) |
-| **Smoke Test Fail** | 0/39 | 0% failure rate |
-| **Exit Code 3 Failures** | 0 | None remaining (Issue #220 fixed) |
-| **Exit Code 5 Failures** | 0 | None remaining |
+Counts below are derived from the committed corpus on disk (Issue #1229) — they
+are NOT hard-coded. Re-derive with `discover_keyspaces`/`discover_tables` in
+`bindings/python/tests/corpus.py` or by running `smoke-test-all-tables.sh`
+(its summary prints the discovered enforced keyspaces + the disk-derived total).
+
+### In-scope read-parity corpus (per `corpus-coverage-policy.md`)
+
+| Keyspace | Tables | Smoke run-mode | JSONL goldens |
+|----------|--------|----------------|---------------|
+| test_basic | 8 | enforced | ✅ |
+| test_big | 1 | enforced | ✅ |
+| test_collections | 8 | enforced | ✅ |
+| test_comp | 7 | enforced | ✅ |
+| test_da | 3 | enforced | ✅ |
+| test_oa | 6 | enforced | ✅ |
+| test_timeseries | 9 | enforced | ✅ |
+| test_wide_rows | 8 | enforced | ✅ |
+| test_deltas | 24 | skip-pending (#701: binaries not in dataset asset) | ✅ |
+| test_tomb | 9 | skip-pending (valid zero-live-row tombstone fixtures; Rust parity tests) | ✅ |
+| test_types | 20 | skip-pending (valid zero-live-row type-edge fixtures; Rust parity tests) | ✅ |
+
+**Enforced smoke total**: 50 tables across 8 keyspaces, all PASS (re-derived per
+run, not hard-coded). **Skip-pending**: 3 keyspaces, discovered + listed
+explicitly, not silently dropped.
+
+### Excluded (skip-set) keyspaces
+
+`system`, `system_auth`, `system_schema` (Cassandra-internal metadata);
+`test_writeparity`, `test_compactionparity`, `test_compactionparityudt`
+(write/compaction byte-parity fixtures validated by dedicated Rust parity tests).
+Reasons in [`corpus-coverage-policy.md`](corpus-coverage-policy.md).
+
+> Local-only fixtures (e.g. an extra `test_da/wide_table` generation, or extra
+> `test_deltas` generations present in a full local dataset) are picked up
+> automatically by the dynamic enumeration when present; committed counts above
+> reflect the git-tracked directory structure.
 
 ### Pass Rate by Keyspace
 

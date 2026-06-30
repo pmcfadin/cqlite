@@ -4,8 +4,12 @@
  * Issue #307: Validate Node.js binding output against sstabledump JSONL reference files.
  *
  * Test Tiers:
- * - Tier 1: Row count parity for all 33 tables
+ * - Tier 1: Row count parity for the dynamically-discovered executable corpus
  * - Tier 2: Value parity for representative tables
+ *
+ * Issue #1229: the table set is enumerated from the committed corpus (no
+ * hand-typed allowlist, no tautological count assertions). Skip-set + rationale
+ * in test-data/corpus-coverage-policy.md.
  *
  * Adapted from Python bindings (bindings/python/tests/test_parity.py) patterns.
  */
@@ -24,6 +28,8 @@ const {
   ALL_TABLES,
   OA_TABLES,
   getKnownIssue,
+  inScopeKeyspaces,
+  unclassifiedKeyspaces,
 } = require('./parity-utils.js');
 
 // =============================================================================
@@ -323,13 +329,15 @@ describe('Tier 2: Column and Type Validation (Issue #307)', () => {
 // Summary Test
 // =============================================================================
 
-describe('Parity Summary (Issue #307)', () => {
-  test('All 33 tables have JSONL reference files', () => {
+describe('Parity Summary (Issue #307 / dynamic enumeration #1229)', () => {
+  test('Every discovered executable table has a JSONL reference file', () => {
     let missing = [];
     let found = 0;
+    let total = 0;
 
     for (const [keyspace, tables] of Object.entries(ALL_TABLES)) {
       for (const table of tables) {
+        total++;
         const jsonlPath = findJsonlFile(keyspace, table);
         if (jsonlPath) {
           found++;
@@ -339,20 +347,33 @@ describe('Parity Summary (Issue #307)', () => {
       }
     }
 
+    if (total === 0) {
+      // No corpus discovered (CI without fetched datasets) — nothing to assert.
+      console.log('  No executable tables discovered; skipping JSONL coverage check');
+      return;
+    }
+
     if (missing.length > 0) {
       console.log(`  Missing JSONL files: ${missing.join(', ')}`);
     }
 
-    console.log(`  Found ${found}/33 JSONL reference files`);
-    expect(found).toBe(33);
+    console.log(`  Found ${found}/${total} JSONL reference files (discovered, not hard-coded)`);
+    // Every discovered executable table must have a golden — not a literal count.
+    expect(found).toBe(total);
   });
 
-  test('Total table count is 33', () => {
-    let total = 0;
-    for (const tables of Object.values(ALL_TABLES)) {
-      total += tables.length;
+  test('Every committed keyspace is classified (in-scope or documented skip-set)', () => {
+    if (inScopeKeyspaces().length === 0) {
+      console.log('  No keyspaces discovered; skipping classification check');
+      return;
     }
-    expect(total).toBe(33);
+    const unclassified = unclassifiedKeyspaces();
+    if (unclassified.length > 0) {
+      console.log(`  Unclassified keyspaces: ${unclassified.join(', ')}`);
+    }
+    // A newly-committed keyspace that nobody classified reds the suite instead
+    // of being silently uncovered (replaces the old tautological toBe(33)).
+    expect(unclassified).toEqual([]);
   });
 });
 
