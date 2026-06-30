@@ -43,8 +43,8 @@
 //!     dropped/reordered element would FAIL rather than pass silently.
 //!
 //! 1b. **Typed inner-UDT round-trip.** Pins the TYPED inner person/address field
-//!     values (field order, the null `city`) against the authoritative sstabledump
-//!     JSONL golden — the typed half the byte-preserving reader leaves opaque.
+//!     values (and field order) against the authoritative sstabledump JSONL
+//!     golden — the typed half the byte-preserving reader leaves opaque.
 //!
 //! 2.  **Byte parity (CONDITIONAL — only because a Cassandra reference exists).**
 //!     Diffs Data.db/Index.db/Summary.db/Digest.crc32 byte-for-byte against the
@@ -601,9 +601,19 @@ fn element_bytes(col: &str, pk: &str, el: &Value) -> Vec<u8> {
 /// Assert a decoded `lp` cell is a structured `List` (NOT a top-level blob) and
 /// return its per-element frozen-UDT bytes in order. Element COUNT + ORDER is the
 /// nested-collection structure under test.
+///
+/// `lp` is `frozen<list<frozen<person>>>`, so we pin it STRICTLY as `Value::List`:
+/// a regression that decoded an ordered list as a `Value::Set` would silently
+/// pass an `List | Set` match yet drop the list's order guarantee, so a `Set`
+/// (or any other variant) is a hard failure here.
 fn assert_list_structure(pk: &str, v: &Value) -> Vec<Vec<u8>> {
     let list = match peel_frozen(v) {
-        Value::List(items) | Value::Set(items) => items,
+        Value::List(items) => items,
+        Value::Set(_) => panic!(
+            "lp[pk={pk}]: nested-decode produced a Value::Set, expected a Value::List — \
+             `lp` is frozen<list<frozen<person>>> and its element ORDER is under test; \
+             a Set has no order guarantee and must NOT satisfy this assertion"
+        ),
         other => panic!(
             "lp[pk={pk}]: nested-decode produced {other:?}, expected a structured List \
              (top-level blob fallback / wrong outer-collection decode)"
@@ -826,7 +836,9 @@ async fn nested_frozen_collection_of_udt_compaction_parity() {
     // The compaction reader keeps the inner frozen UDT opaque (byte-preserving),
     // so pin the TYPED inner fields against the authoritative sstabledump golden:
     // a blob fallback or wrong inner-UDT field decode would not produce these
-    // structured typed values (field order, null `city`).
+    // structured typed values (incl. field order). Every committed `ma` address
+    // here carries a present `city`; the fixture does not exercise a null nested
+    // field, so this does not claim null-field coverage.
     let typed = jsonl_typed_cells(&ref_dir);
     let expected_typed: &[(&str, &str, &str)] = &[
         (
