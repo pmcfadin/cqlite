@@ -37,6 +37,7 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             manylinux: "2_28"
+            test_target: true
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             manylinux: "2_28"
@@ -44,8 +45,10 @@ jobs:
             target: x86_64-apple-darwin
           - os: macos-14
             target: aarch64-apple-darwin
+            test_target: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            test_target: true
 
     steps:
       - name: Checkout
@@ -98,6 +101,25 @@ jobs:
           working-directory: bindings/python
           manylinux: ${{ matrix.manylinux || 'auto' }}
 
+      # Build the CLI once while the native wheel job's Rust target cache is
+      # still hot, then pass it to pytest. This avoids rebuilding cqlite-cli
+      # from scratch in every native test job.
+      - name: Build CLI binary for tests
+        if: matrix.test_target == true
+        shell: bash
+        run: cargo build --package cqlite-cli --release
+
+      - name: Upload CLI binary artifact
+        if: matrix.test_target == true
+        uses: actions/upload-artifact@v6
+        with:
+          name: cli-${{ matrix.target }}
+          path: |
+            target/release/cqlite
+            target/release/cqlite.exe
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v6
         with:
@@ -142,6 +164,17 @@ jobs:
         with:
           name: wheel-${{ matrix.target }}
           path: dist
+
+      - name: Download CLI binary
+        uses: actions/download-artifact@v7
+        with:
+          name: cli-${{ matrix.target }}
+          path: target/release
+
+      - name: Make CLI binary executable
+        if: runner.os != 'Windows'
+        shell: bash
+        run: chmod +x target/release/cqlite
 
       - name: Install wheel and test dependencies
         shell: bash
@@ -218,12 +251,6 @@ jobs:
           # test_oa), not just test_basic, so a partial extraction reds CI
           # instead of skip-greening the pytest lane.
           bash test-data/scripts/check-dataset-manifest.sh test-data/datasets
-
-      # Issue #331: Pre-build CLI binary for faster CLI parity tests
-      - name: Build CLI binary for tests
-        shell: bash
-        run: |
-          cargo build --package cqlite-cli --release
 
       - name: Run pytest
         env:
