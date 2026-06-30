@@ -171,6 +171,78 @@ fn corpus_audit_missing_reference_exits_nonzero_and_names_finding() {
 }
 
 #[test]
+fn corpus_audit_component_checksum_drift_exits_nonzero_and_names_finding() {
+    // Finding 5 (CLI E2E for the component-change path): drive `--checksums` +
+    // `--expected-inventory` through the binary with a deliberate checksum drift
+    // for a stable table+component identity. This is the only test that exercises
+    // the disk -> `read_sha256_file` -> `check_component_changes` glue end-to-end
+    // — the `UnexpectedComponentChange` path rewritten for the prior HIGH fix —
+    // which the other CLI tests never reach (they leave both inventories empty).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    write_common(root);
+    write_reference_file(root);
+    write_provenance(root);
+
+    // A stable, UUID-independent component identity (table_key/basename) that the
+    // committed-expected golden and the regenerated-actual checksums agree on,
+    // but with drifted SHA256s -> exactly one UNEXPECTED-COMPONENT-CHANGE finding.
+    let component =
+        format!("test-data/datasets/sstables/test_basic/simple_table-{UUID}/nb-1-big-Data.db");
+    let expected_sha = "1".repeat(64);
+    let actual_sha = "2".repeat(64);
+    fs::write(
+        root.join("expected.sha256"),
+        format!("{expected_sha}  {component}\n"),
+    )
+    .expect("write expected inventory");
+    fs::write(
+        root.join("actual.sha256"),
+        format!("{actual_sha}  {component}\n"),
+    )
+    .expect("write actual checksums");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_cassandra-parity"))
+        .args([
+            "corpus-audit",
+            "--manifest",
+            root.join("manifest.yml").to_str().expect("utf8"),
+            "--index",
+            root.join("index.md").to_str().expect("utf8"),
+            "--corpus",
+            root.to_str().expect("utf8"),
+            "--provenance",
+            root.join("provenance.json").to_str().expect("utf8"),
+            "--corruption-manifest",
+            root.join("corruption-manifest.yml").to_str().expect("utf8"),
+            "--checksums",
+            root.join("actual.sha256").to_str().expect("utf8"),
+            "--expected-inventory",
+            root.join("expected.sha256").to_str().expect("utf8"),
+        ])
+        .output()
+        .expect("run cassandra-parity corpus-audit");
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit for a component checksum drift, got: {combined}"
+    );
+    assert!(
+        combined.contains("UNEXPECTED-COMPONENT-CHANGE"),
+        "expected a named UNEXPECTED-COMPONENT-CHANGE finding, got: {combined}"
+    );
+    assert!(
+        combined.contains(&actual_sha) && combined.contains(&expected_sha),
+        "finding must name the drifted expected/regenerated checksums, got: {combined}"
+    );
+}
+
+#[test]
 fn corpus_audit_provenance_mismatch_exits_nonzero_and_names_finding() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
