@@ -43,7 +43,6 @@ from corpus import (
     discover_corpus,
     discover_table_dirs,
     discover_tables,
-    find_jsonl_in_dir,
     in_scope_keyspaces,
     unclassified_keyspaces,
 )
@@ -793,11 +792,13 @@ class TestCoverageSummary:
         missing = []          # in-scope, non-exempt, golden absent -> FAIL
         skip_pending = []     # documented skip-pending -> reported, not fatal
 
-        for keyspace, table, table_dir in DISCOVERED_CORPUS:
-            # Verify THIS generation's golden, not just the first dir matching
-            # the table prefix (per-directory coverage, #1229 round-2).
-            label = f"{keyspace}.{table_dir.name}"
-            jsonl_file = find_jsonl_in_dir(table_dir)
+        for keyspace, table, golden_or_dir in DISCOVERED_CORPUS:
+            # Each entry is ONE golden path (per-generation coverage), or a
+            # directory when that table dir ships no golden yet. Verify THIS
+            # exact golden, never collapse multiple generations to first-match
+            # (#1229 round-3).
+            label = f"{keyspace}.{golden_or_dir.name}"
+            jsonl_file = golden_or_dir if golden_or_dir.is_file() else None
             if jsonl_file is None:
                 if keyspace in SKIP_PENDING_KEYSPACES:
                     skip_pending.append(label)
@@ -821,7 +822,7 @@ class TestCoverageSummary:
         print(f"{'='*60}")
         print(f"In-scope keyspaces: {in_scope_keyspaces(DATASETS)}")
         print(f"Skip-set keyspaces: {sorted(SKIP_KEYSPACES)}")
-        print(f"Discovered tables: {len(DISCOVERED_CORPUS)}")
+        print(f"Discovered goldens (per generation): {len(DISCOVERED_CORPUS)}")
         print(f"JSONL available: {len(passed)}")
         print(f"JSONL missing (skip-pending, exempt): {len(skip_pending)}")
         print(f"JSONL missing (in-scope, FAIL): {len(missing)}")
@@ -845,8 +846,9 @@ class TestCoverageSummary:
             f"SKIP_KEYSPACES in corpus.py with a reason "
             f"(test-data/corpus-coverage-policy.md)."
         )
-        # We must have discovered at least the executable corpus (counted
-        # per directory, matching DISCOVERED_CORPUS's per-directory granularity).
+        # We must have discovered at least one entry per executable directory
+        # (DISCOVERED_CORPUS is now per-golden, so a dir with N generation
+        # goldens contributes N >= 1 entries — the count only grows).
         assert len(DISCOVERED_CORPUS) >= sum(
             len(discover_table_dirs(DATASETS, ks)) for ks in EXECUTABLE_KEYSPACES
         )

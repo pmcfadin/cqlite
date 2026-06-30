@@ -124,13 +124,43 @@ def discover_table_dirs(sstables_dir: Path, keyspace: str) -> list[tuple[str, Pa
     return sorted(entries, key=lambda e: e[1].name)
 
 
-def discover_corpus(sstables_dir: Path) -> list[tuple[str, str, Path]]:
-    """Return ``(keyspace, table, dir_path)`` for the in-scope read-parity corpus.
+def find_jsonls_in_dir(table_dir: Path) -> list[Path]:
+    """Return EVERY JSONL golden inside one ``<table>-<uuid>/`` directory.
 
-    Enumerated PER DIRECTORY, not per logical table: a keyspace/table with N
-    generation directories contributes N entries, each carrying its exact
-    ``<table>-<uuid>/`` directory so the JSONL golden of every generation is
-    checked (not just the first one matching the table prefix — #1229).
+    A single directory can ship multiple generation goldens
+    (``nb-1-…``/``nb-2-…``/``nb-3-…``), e.g. ``test_tomb/dropped_regular_col``
+    (nb-1+nb-2) and ``test_types/se_altered_then_dropped_column``
+    (nb-1+nb-2+nb-3). Returning only the first one silently drops the later
+    generations — the exact blind spot #1229 exists to remove. Globs
+    ``*-Data.db.jsonl`` to stay format-agnostic (nb-/oa-/da-, any generation).
+    """
+    if not table_dir.is_dir():
+        return []
+    return [p for p in sorted(table_dir.glob("*-Data.db.jsonl")) if p.exists()]
+
+
+def find_jsonl_in_dir(table_dir: Path) -> Path | None:
+    """Return the FIRST JSONL golden inside one ``<table>-<uuid>/`` directory.
+
+    Retained for callers (e.g. value-parity row sampling) that only need a
+    single representative golden. Coverage/enumeration MUST instead use
+    :func:`find_jsonls_in_dir` / :func:`discover_corpus` so every generation
+    is checked — never collapse to first-match for coverage (#1229).
+    """
+    jsonls = find_jsonls_in_dir(table_dir)
+    return jsonls[0] if jsonls else None
+
+
+def discover_corpus(sstables_dir: Path) -> list[tuple[str, str, Path]]:
+    """Return ``(keyspace, table, golden_path)`` for the in-scope read-parity corpus.
+
+    Enumerated PER GOLDEN, not per logical table and not per directory: a
+    keyspace/table directory with N ``*-Data.db.jsonl`` generation goldens
+    contributes N entries, each carrying the exact golden ``Path`` so every
+    generation is checked (not just the first one in the directory — #1229).
+    Directories with NO golden still contribute a single ``(keyspace, table,
+    dir_path)`` entry so a missing golden is reported rather than silently
+    dropped.
 
     Excludes skip-set keyspaces (system + parity-fixture). Includes
     skip-pending keyspaces (they are discovered; the caller decides whether
@@ -139,23 +169,15 @@ def discover_corpus(sstables_dir: Path) -> list[tuple[str, str, Path]]:
     entries: list[tuple[str, str, Path]] = []
     for keyspace in in_scope_keyspaces(sstables_dir):
         for table, dir_path in discover_table_dirs(sstables_dir, keyspace):
-            entries.append((keyspace, table, dir_path))
+            goldens = find_jsonls_in_dir(dir_path)
+            if goldens:
+                for golden in goldens:
+                    entries.append((keyspace, table, golden))
+            else:
+                # No golden yet (skip-pending / overlooked): keep one entry so
+                # the coverage check can report it instead of dropping it.
+                entries.append((keyspace, table, dir_path))
     return entries
-
-
-def find_jsonl_in_dir(table_dir: Path) -> Path | None:
-    """Return the JSONL golden inside one specific ``<table>-<uuid>/`` directory.
-
-    Operates on the EXACT directory (no table-prefix search), so the correct
-    generation's golden is verified. Globs ``*-Data.db.jsonl`` to stay
-    format-agnostic (nb-/oa-/da-, any generation).
-    """
-    if not table_dir.is_dir():
-        return None
-    for jsonl_file in sorted(table_dir.glob("*-Data.db.jsonl")):
-        if jsonl_file.exists():
-            return jsonl_file
-    return None
 
 
 def unclassified_keyspaces(sstables_dir: Path) -> list[str]:
