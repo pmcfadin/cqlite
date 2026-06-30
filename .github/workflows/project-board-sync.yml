@@ -1,0 +1,192 @@
+name: Project Board Sync
+
+# Server-side board hygiene the built-in Project workflows can't express.
+# Covers the two gaps found in the delivery pipeline:
+#   1. A PR closed WITHOUT merge leaks in "In Review" forever (the built-in
+#      "Item closed" rule only acts on issues; "Pull request merged" only on
+#      merges). -> move any closed PR's card to Done.
+#   2. New issues can land with a NULL Status (race with Auto-add). -> sweep
+#      null-status OPEN issues into Backlog.
+#
+# Requires a repo secret PROJECTS_TOKEN: a PAT (or GitHub App token) with the
+# `project` scope. The default GITHUB_TOKEN CANNOT write user/org Projects v2.
+# If the secret is absent the workflow no-ops with a notice (never fails CI).
+#
+# IDs below are for the "CQLite Delivery" user Project #1 (owner: pmcfadin).
+# Re-confirm with:
+#   gh api graphql -f query='query{user(login:"pmcfadin"){projectV2(number:1){
+#     id field(name:"Status"){... on ProjectV2SingleSelectField{id options{id name}}}}}}'
+
+on:
+  pull_request:
+    types: [closed]
+  schedule:
+    # Hygiene sweep every 30 min (null-status -> Backlog; closed-PR safety net).
+    - cron: '*/30 * * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: project-board-sync
+  cancel-in-progress: false
+
+env:
+  GH_TOKEN: ${{ secrets.PROJECTS_TOKEN }}
+  PROJECT_ID: PVT_kwHOAAZP5c4Bb2Ay
+  STATUS_FIELD_ID: PVTSSF_lAHOAAZP5c4Bb2AyzhWjcFM
+  OPT_BACKLOG: 35ab797f
+  OPT_READY: c584340f
+  OPT_IN_PROGRESS: 821bf3e8
+  OPT_IN_REVIEW: 588b594a
+  OPT_DONE: 3723ed80
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Event path: a PR was just closed. If it is NOT merged (merges are handled
+  # by the built-in "Pull request merged" rule), move its board card to Done.
+  # ---------------------------------------------------------------------------
+  pr-closed-to-done:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Guard token
+        id: guard
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::notice::PROJECTS_TOKEN not set — skipping board sync. Add a PAT with 'project' scope as repo secret PROJECTS_TOKEN."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Move closed PR card to Done
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          PR_NODE_ID: ${{ github.event.pull_request.node_id }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_MERGED: ${{ github.event.pull_request.merged }}
+        run: |
+          set -euo pipefail
+          # Find this PR's item in OUR project.
+          item_id=$(gh api graphql -f query='
+            query($id: ID!) {
+              node(id: $id) {
+                ... on PullRequest {
+                  projectItems(first: 50) {
+                    nodes {
+                      id
+                      project { id }
+                      fieldValueByName(name: "Status") {
+                        ... on ProjectV2ItemFieldSingleSelectValue { name }
+                      }
+                    }
+                  }
+                }
+              }
+            }' -f id="$PR_NODE_ID" \
+            --jq ".data.node.projectItems.nodes[] | select(.project.id==\"$PROJECT_ID\") | select((.fieldValueByName.name // \"\") != \"Done\") | .id" || true)
+
+          if [ -z "${item_id:-}" ]; then
+            echo "PR #$PR_NUMBER: not on the board or already Done — nothing to do."
+            exit 0
+          fi
+
+          echo "PR #$PR_NUMBER closed (merged=$PR_MERGED) — setting card $item_id -> Done."
+          gh api graphql -f query='
+            mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
+              updateProjectV2ItemFieldValue(input: {
+                projectId: $p, itemId: $i, fieldId: $f,
+                value: { singleSelectOptionId: $o }
+              }) { projectV2Item { id } }
+            }' -f p="$PROJECT_ID" -f i="$item_id" -f f="$STATUS_FIELD_ID" -f o="$OPT_DONE"
+
+  # ---------------------------------------------------------------------------
+  # Scheduled path: idempotent sweep over the whole board.
+  #   * OPEN issue with NULL Status        -> Backlog
+  #   * CLOSED PR with Status != Done      -> Done   (safety net for the leak)
+  # Never touches Ready / In Progress / In Review items, and never reaps claims.
+  # ---------------------------------------------------------------------------
+  sweep:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Guard token
+        id: guard
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::notice::PROJECTS_TOKEN not set — skipping board sweep. Add a PAT with 'project' scope as repo secret PROJECTS_TOKEN."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Reconcile board
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+
+          set_status() { # item_id  option_id
+            gh api graphql -f query='
+              mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
+                updateProjectV2ItemFieldValue(input: {
+                  projectId: $p, itemId: $i, fieldId: $f,
+                  value: { singleSelectOptionId: $o }
+                }) { projectV2Item { id } }
+              }' -f p="$PROJECT_ID" -f i="$1" -f f="$STATUS_FIELD_ID" -f o="$2" >/dev/null
+          }
+
+          cursor=""
+          backlogged=0
+          doned=0
+          while : ; do
+            if [ -z "$cursor" ]; then after="null"; else after="\"$cursor\""; fi
+            resp=$(gh api graphql -f query="
+              query(\$p: ID!) {
+                node(id: \$p) {
+                  ... on ProjectV2 {
+                    items(first: 100, after: $after) {
+                      pageInfo { hasNextPage endCursor }
+                      nodes {
+                        id
+                        fieldValueByName(name: \"Status\") {
+                          ... on ProjectV2ItemFieldSingleSelectValue { name }
+                        }
+                        content {
+                          __typename
+                          ... on Issue { number state }
+                          ... on PullRequest { number state }
+                        }
+                      }
+                    }
+                  }
+                }
+              }" -f p="$PROJECT_ID")
+
+            # OPEN issues with null status -> Backlog
+            while read -r id; do
+              [ -n "$id" ] || continue
+              set_status "$id" "$OPT_BACKLOG"
+              backlogged=$((backlogged+1))
+            done < <(echo "$resp" | jq -r '
+              .data.node.items.nodes[]
+              | select(.content.__typename=="Issue")
+              | select(.content.state=="OPEN")
+              | select((.fieldValueByName.name // "") == "")
+              | .id')
+
+            # CLOSED PRs not yet Done -> Done (safety net)
+            while read -r id; do
+              [ -n "$id" ] || continue
+              set_status "$id" "$OPT_DONE"
+              doned=$((doned+1))
+            done < <(echo "$resp" | jq -r '
+              .data.node.items.nodes[]
+              | select(.content.__typename=="PullRequest")
+              | select(.content.state=="CLOSED" or .content.state=="MERGED")
+              | select((.fieldValueByName.name // "") != "Done")
+              | .id')
+
+            has_next=$(echo "$resp" | jq -r '.data.node.items.pageInfo.hasNextPage')
+            cursor=$(echo "$resp" | jq -r '.data.node.items.pageInfo.endCursor')
+            [ "$has_next" = "true" ] || break
+          done
+
+          echo "Sweep complete: $backlogged issue(s) -> Backlog, $doned closed PR card(s) -> Done."
