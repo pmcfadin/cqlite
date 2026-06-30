@@ -53,8 +53,27 @@
 #   --skip-compaction Skip the compaction legs (3 + 5). For environments without
 #                     a JDK/ant Cassandra-source build. The skipped HARD-FAIL leg
 #                     is recorded as SKIPPED and does NOT fail the lane (a skipped
-#                     leg is honestly reported, never silently green).
+#                     leg is honestly reported, never silently green) — this is an
+#                     EXPLICIT user skip and stays a legitimate SKIP even under
+#                     strict mode.
 #   --skip-live       Skip the live read-back leg (1) when no Docker is available.
+#                     EXPLICIT user skip — a legitimate SKIP even under strict mode.
+#
+# ---------------------------------------------------------------------------
+# STRICT MODE (issue #1025) — run-or-fail for HARD legs in the real lane.
+# ---------------------------------------------------------------------------
+# In the REAL scheduled nightly lane every HARD leg must RUN or FAIL: if a HARD
+# leg cannot actually execute (failed Cassandra bootstrap, missing Docker image,
+# live checks skipped), that is a FAIL — never a non-failing SKIP that lets the
+# aggregate runner exit 0. The workflow sets NIGHTLY_DOCKER_STRICT=1 (it has
+# Docker/JDK/gradle/Cassandra available), so infra breakage REDS the lane.
+#
+# Under strict mode a HARD leg recorded SKIPPED for any reason OTHER than an
+# EXPLICIT user skip flag (--skip-compaction / --skip-live) is converted to FAIL
+# (fail-closed) and propagates to a non-zero exit. Explicit user skips remain a
+# legitimate SKIP even in strict mode (the user asked). ADVISORY legs may always
+# SKIP. Local/non-lane smoke runs (strict OFF) skip cleanly so the agent-gate
+# stays green.
 #
 # This script is the local-repro path AND what the workflow calls. Reproduce a CI
 # failure locally with the exact same command the report prints.
@@ -78,6 +97,14 @@ SKIP_BUILD=0
 SKIP_COMPACTION=0
 SKIP_LIVE=0
 REPORT_DIR="${REPORT_DIR:-$ROOT/target/nightly-docker-parity}"
+
+# Strict mode (issue #1025): the real scheduled lane sets NIGHTLY_DOCKER_STRICT=1.
+# When on, a HARD leg that SKIPs for any reason OTHER than an explicit user skip
+# flag is converted to FAIL (run-or-fail). Truthy = "1"/"true".
+STRICT=0
+case "${NIGHTLY_DOCKER_STRICT:-0}" in
+  1|true|TRUE|yes|on) STRICT=1 ;;
+esac
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -113,12 +140,25 @@ LEG_CMDS=()
 HARD_FAIL=0   # set to 1 if any HARD leg FAILs
 
 record_leg() {
-  # record_leg <name> <HARD|ADVISORY> <PASS|FAIL|SKIPPED> <repro-cmd>
-  LEG_NAMES+=("$1")
-  LEG_CLASSES+=("$2")
-  LEG_OUTCOMES+=("$3")
-  LEG_CMDS+=("$4")
-  if [[ "$2" == "HARD" && "$3" == "FAIL" ]]; then
+  # record_leg <name> <HARD|ADVISORY> <PASS|FAIL|SKIPPED> <repro-cmd> [user-skip]
+  #
+  # The optional 5th arg, when "user-skip", marks a SKIP that the user explicitly
+  # requested via a dispatch/CLI flag (--skip-compaction / --skip-live). Such a
+  # SKIP stays a legitimate SKIP even under strict mode. Any OTHER HARD SKIP under
+  # strict mode is an infra failure (Docker/gradle/Cassandra unavailable) and is
+  # converted to FAIL fail-closed (issue #1025 run-or-fail invariant).
+  local name="$1" class="$2" outcome="$3" cmd="$4" user_skip="${5:-}"
+  if [[ "$STRICT" -eq 1 && "$class" == "HARD" && "$outcome" == "SKIPPED" \
+        && "$user_skip" != "user-skip" ]]; then
+    warn "STRICT: HARD leg '$name' SKIPPED for a non-user reason (infra unavailable) \
+— converting to FAIL (run-or-fail)."
+    outcome="FAIL"
+  fi
+  LEG_NAMES+=("$name")
+  LEG_CLASSES+=("$class")
+  LEG_OUTCOMES+=("$outcome")
+  LEG_CMDS+=("$cmd")
+  if [[ "$class" == "HARD" && "$outcome" == "FAIL" ]]; then
     HARD_FAIL=1
   fi
 }
@@ -182,7 +222,7 @@ fi
 LIVE_CMD="bash test-data/scripts/e2e-cassandra-readback.sh --no-build --bin <cqlite>"
 if [[ "$SKIP_LIVE" -eq 1 ]]; then
   log "SKIP live read-back leg (--skip-live)"
-  record_leg "live_readback_semantic" "HARD" "SKIPPED" "$LIVE_CMD"
+  record_leg "live_readback_semantic" "HARD" "SKIPPED" "$LIVE_CMD" "user-skip"
 elif ! command -v docker >/dev/null 2>&1; then
   warn "docker not available — SKIPPING live read-back leg"
   record_leg "live_readback_semantic" "HARD" "SKIPPED" "$LIVE_CMD"
@@ -282,7 +322,7 @@ LOGICAL_CMD="cd compaction-parity && gradle --no-daemon test"
 BYTE_CMD="cd compaction-parity && gradle --no-daemon byteParity"
 if [[ "$SKIP_COMPACTION" -eq 1 ]]; then
   log "SKIP compaction legs (--skip-compaction)"
-  record_leg "compaction_logical_parity" "HARD" "SKIPPED" "$LOGICAL_CMD"
+  record_leg "compaction_logical_parity" "HARD" "SKIPPED" "$LOGICAL_CMD" "user-skip"
   record_leg "compaction_byte_tier (advisory)" "ADVISORY" "SKIPPED" "$BYTE_CMD"
 elif ! command -v gradle >/dev/null 2>&1; then
   warn "gradle not available — SKIPPING compaction legs"
@@ -335,6 +375,14 @@ emit_report() {
   echo "byte tier, statistical Bloom FPR threshold) never fail the lane on their own."
   echo "The Bloom **no-false-negative** property is ALWAYS hard-fail (P0 data loss)."
   echo
+  if [[ "$STRICT" -eq 1 ]]; then
+    echo "**Strict mode ON** (\`NIGHTLY_DOCKER_STRICT=1\`): a HARD leg that SKIPs for"
+    echo "any reason other than an explicit user skip flag (\`--skip-compaction\` /"
+    echo "\`--skip-live\`) is converted to FAIL — HARD legs are run-or-fail in the lane."
+  else
+    echo "Strict mode OFF: HARD legs may SKIP cleanly when infra is unavailable (local repro)."
+  fi
+  echo
   echo "## Per-leg results"
   echo
   echo "| Leg | Class | Outcome |"
@@ -386,7 +434,11 @@ log "Report written to $REPORT_MD"
 cat "$REPORT_MD" >&2
 
 if [[ "$HARD_FAIL" -eq 1 ]]; then
-  log "RESULT: FAIL — at least one hard-fail leg failed."
+  if [[ "$STRICT" -eq 1 ]]; then
+    log "RESULT: FAIL — a hard-fail leg failed or (strict mode) a HARD leg could not run."
+  else
+    log "RESULT: FAIL — at least one hard-fail leg failed."
+  fi
   exit 1
 fi
 log "RESULT: PASS — all hard-fail legs passed (advisory outcomes recorded only)."

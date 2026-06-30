@@ -208,6 +208,18 @@ jobs:
           cargo build --package cqlite-cli --features write-support
           test -x target/debug/cqlite
 
+      # Ensure the pinned cassandra:5.0.2 image is present BEFORE the lane runs.
+      # The live read-back leg AND the BTI sstabledump leg need a local 5.0 image;
+      # the BTI test only discovers images already on the host (it never pulls). In
+      # strict mode an absent image would FAIL the BTI HARD leg, so pull it up front
+      # so the leg genuinely exercises Cassandra rather than failing on a missing
+      # image (issue #1025 run-or-fail). Pin matches docker-compose-cassandra5.yml /
+      # the committed corpus (5.0.2) — NOT a second pin.
+      - name: Ensure pinned Cassandra 5.0.2 image (live + BTI legs)
+        run: |
+          docker pull cassandra:5.0.2
+          docker image inspect cassandra:5.0.2 >/dev/null
+
       - name: Setup Gradle (no wrapper in compaction-parity)
         if: github.event.inputs.skip_compaction != 'true'
         uses: gradle/actions/setup-gradle@v4
@@ -234,6 +246,16 @@ jobs:
           # fetched + fail-closed-verified above, so under normal operation this
           # only guards against an in-run loss of the fixtures.
           CQLITE_REQUIRE_FIXTURES: '1'
+          # Strict mode (issue #1025): this is the REAL scheduled lane and it has
+          # Docker + the pinned cassandra:5.0.2 image + JDK/gradle + the Cassandra
+          # source build all provisioned above. So every HARD leg must RUN or FAIL:
+          # a HARD leg that SKIPs for any reason OTHER than an explicit user skip
+          # flag (--skip-compaction) is converted to FAIL by the runner. Infra
+          # breakage (failed bootstrap, missing image, live check skipped) reds the
+          # lane instead of silently passing. The BTI test inherits this via
+          # CQLITE_REQUIRE_FIXTURES (it panics rather than skip when Cassandra is
+          # unavailable); the runner enforces it for every other HARD leg.
+          NIGHTLY_DOCKER_STRICT: '1'
           # boolean dispatch input (constrained to true/false by GitHub) routed
           # through env per the workflow-injection guidance — no free-text input.
           SKIP_COMPACTION: ${{ github.event.inputs.skip_compaction }}
