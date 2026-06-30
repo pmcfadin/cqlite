@@ -307,7 +307,7 @@ impl SSTableReader {
     /// the in-memory sort: no Index.db offset, a narrow partition with no promoted
     /// index, a variable-width clustering column, a static column present, or an
     /// open range-tombstone marker.
-    pub(super) async fn big_reverse_partition_rows(
+    pub(crate) async fn big_reverse_partition_rows(
         &self,
         partition_key: &[u8],
         schema: Option<&TableSchema>,

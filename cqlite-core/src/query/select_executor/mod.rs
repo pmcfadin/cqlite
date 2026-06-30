@@ -125,13 +125,13 @@ struct ExecutionContext {
     /// per-cell write metadata.
     pub projection_flags: ProjectionFlags,
     /// Access path chosen by the SSTable-scan step for THIS query (Issue #960).
-    ///
     /// Per-query state, set where the scan step decides its path. The
     /// result-attached `QueryMetadata.access_path` is read from here, NOT from
     /// the process-global probe, so concurrent SELECTs cannot overwrite each
     /// other's reported path between `record()` and the result build. The global
     /// probe (`access_path::record/last`) remains for test assertions only.
     pub access_path: Option<AccessPath>,
+    pub reverse_served: bool, // #1184: BIG reverse iterator produced DESC order; skip Sort.
 }
 
 impl SelectExecutor {

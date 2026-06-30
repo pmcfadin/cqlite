@@ -369,6 +369,84 @@ pub(super) fn sort_rows_by_token(rows: &mut [(RowKey, Value)]) {
     });
 }
 
+/// True when `ORDER BY` is a single item on the FIRST clustering column whose
+/// requested direction is the REVERSE of that column's stored clustering order
+/// (Issue #1184) — i.e. a true reverse partition traversal is needed. A query that
+/// asks for the stored order (or orders by a non-clustering / multi-column key) is
+/// not a reverse scan and keeps the normal path.
+#[cfg(not(feature = "tombstones"))]
+pub(super) fn requests_clustering_reverse(
+    order_by: &crate::query::select_ast::OrderByClause,
+    schema: &crate::schema::TableSchema,
+) -> bool {
+    use crate::query::select_ast::{SelectExpression, SortDirection};
+    use crate::schema::ClusteringOrder;
+
+    if order_by.items.len() != 1 {
+        return false;
+    }
+    let item = &order_by.items[0];
+    let SelectExpression::Column(col_ref) = &item.expression else {
+        return false;
+    };
+    let Some(first_ck) = schema.clustering_keys.first() else {
+        return false;
+    };
+    if col_ref.column != first_ck.name {
+        return false;
+    }
+    let stored_desc = matches!(first_ck.order, ClusteringOrder::Desc);
+    let requested_desc = matches!(item.direction, SortDirection::Descending);
+    requested_desc != stored_desc
+}
+
+#[cfg(not(feature = "tombstones"))]
+impl super::SelectExecutor {
+    /// Issue #1184: route a single-partition `ORDER BY <ck> DESC` through the BIG
+    /// reverse partition iterator when the requested order is the reverse of the
+    /// stored clustering order. Returns `Ok(Some(rows))` in descending clustering
+    /// order (raw `(RowKey, Value)`, so they flow through the SAME post-scan
+    /// row-build + predicate backstop as the forward path) and marks
+    /// `context.reverse_served` so the in-memory `Sort` step is skipped. Returns
+    /// `Ok(None)` to keep the forward read + in-memory sort (no ORDER BY, ascending
+    /// order requested, no schema, or the storage layer declined — small / BTI /
+    /// multi-generation).
+    pub(super) async fn reverse_partition_if_requested(
+        &self,
+        table: &crate::types::TableId,
+        pk_bytes: &[u8],
+        has_clustering_slice: bool,
+        order_by: Option<&crate::query::select_ast::OrderByClause>,
+        schema: Option<&crate::schema::TableSchema>,
+        context: &mut super::ExecutionContext,
+    ) -> crate::Result<Option<Vec<(RowKey, Value)>>> {
+        let (Some(order_by), Some(schema)) = (order_by, schema) else {
+            return Ok(None);
+        };
+        if !requests_clustering_reverse(order_by, schema) {
+            return Ok(None);
+        }
+        let Some(rows) = self
+            .storage
+            .scan_partition_clustering_reverse(table, pk_bytes, Some(schema))
+            .await?
+        else {
+            return Ok(None);
+        };
+        // The reverse iterator IS a promoted-index seek; report ClusteringSlice when
+        // a clustering predicate is also present, else the partition-lookup path.
+        let path = if has_clustering_slice {
+            AccessPath::ClusteringSlice
+        } else {
+            AccessPath::PartitionLookup
+        };
+        context.access_path = Some(path.clone());
+        crate::query::access_path::record(path);
+        context.reverse_served = true;
+        Ok(Some(rows))
+    }
+}
+
 /// Cartesian product of per-column value sets, preserving column order and the
 /// input order within each column. Empty input yields a single empty tuple.
 fn cartesian_product(per_column: &[Vec<Value>]) -> Vec<Vec<Value>> {
