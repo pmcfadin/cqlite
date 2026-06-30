@@ -519,21 +519,25 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
 
         boolean coversPartitionKey = coversAll(partitionKey, groupingColumns);
         boolean coversAllClustering = coversAll(clustering, groupingColumns);
-        // Does the grouping touch ANY clustering column? (Used to distinguish the
-        // partition-only case from a partition-key + partial-clustering grouping.)
-        boolean groupsAnyClustering = touchesAny(clustering, groupingColumns);
+        // Is EVERY grouping column a partition-key column? Together with
+        // coversPartitionKey this is true iff the grouping set is EXACTLY the partition
+        // key — no extra clustering AND no extra regular (non-key) columns. A regular
+        // column in the grouping (e.g. GROUP BY pk, v) can split a single partition into
+        // one group per row, so partitionCount is NOT a valid bound there.
+        boolean allGroupingArePartitionKey = allMatchSomeKey(partitionKey, groupingColumns);
 
         if (coversPartitionKey && coversAllClustering) {
             // Grouping reaches full row uniqueness (partition key + ALL clustering
             // columns) → one group per row → ratio ≈ 1.0 → DECLINE.
             return java.util.OptionalDouble.of(1.0);
         }
-        if (coversPartitionKey && !groupsAnyClustering) {
-            // Grouping = full partition key with NO clustering columns: each group is
-            // exactly one distinct partition → groups ≈ partition count, never more
-            // than the row count. This is the ONLY shape bounded by the authoritative
-            // partition count (whether or not the table also HAS clustering columns,
-            // since the grouping does not slice partitions any finer).
+        if (coversPartitionKey && allGroupingArePartitionKey) {
+            // Grouping is EXACTLY the partition key (every PK column is grouped AND every
+            // grouping column is a PK column — no clustering, no regular columns): each
+            // group is exactly one distinct partition → groups ≈ partition count, never
+            // more than the row count. This is the ONLY shape bounded by the
+            // authoritative partition count (whether or not the table also HAS clustering
+            // columns, since the grouping does not slice partitions any finer).
             double ratio = (double) Math.min(partitions, rows) / (double) rows;
             return java.util.OptionalDouble.of(ratio);
         }
@@ -544,6 +548,9 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
         //     Cassandra 5.0; group count can approach the row count, so partitionCount
         //     is NOT a valid bound — fabricating partitionCount/rows here would let the
         //     gate push exactly the high-cardinality aggregation it exists to decline.
+        //   - GROUP BY = full partition key + a REGULAR (non-key) column (e.g.
+        //     GROUP BY pk, v). A regular column has no stored NDV and can produce one
+        //     group per row, so partitionCount is NOT a valid bound here either.
         //   - A partition-key PREFIX, or grouping on a non-key / low-cardinality column.
         return java.util.OptionalDouble.empty();
     }
@@ -571,20 +578,26 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
     }
 
     /**
-     * True iff AT LEAST ONE key column is matched by some grouping name (same CQL
-     * identifier rules as {@link #coversAll}). Used to detect whether a grouping
-     * slices partitions by any clustering column.
+     * True iff EVERY grouping name is matched by some key column in {@code keyColumns}
+     * (same CQL identifier rules as {@link #coversAll}). Used with {@link #coversAll} to
+     * decide whether a grouping set is EXACTLY the given key set: no extra clustering and
+     * no extra regular (non-key) columns. An empty grouping list is trivially all-matched.
      */
-    private static boolean touchesAny(
+    private static boolean allMatchSomeKey(
             List<PrimaryKeyExtractor.KeyColumn> keyColumns, List<String> groupingColumns) {
-        for (PrimaryKeyExtractor.KeyColumn key : keyColumns) {
-            for (String g : groupingColumns) {
+        for (String g : groupingColumns) {
+            boolean matched = false;
+            for (PrimaryKeyExtractor.KeyColumn key : keyColumns) {
                 if (key.matches(g)) {
-                    return true;
+                    matched = true;
+                    break;
                 }
             }
+            if (!matched) {
+                return false;
+            }
         }
-        return false;
+        return true;
     }
 
     /**

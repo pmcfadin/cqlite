@@ -91,6 +91,37 @@ class EstimateGroupRatioTest {
     }
 
     @Test
+    void groupByFullPartitionKeyPlusRegularColumnIsUnboundedAndPushes() {
+        // PRIMARY KEY (pk, ck); GROUP BY pk, v where v is a REGULAR (non-key) column.
+        // The grouping covers the full partition key and touches NO clustering column,
+        // but the regular column v has no stored NDV and can split a partition into one
+        // group per row → the partitionCount bound is INVALID. The gate must return
+        // empty → PUSH, NOT a fabricated low partitionCount/rows ratio. (Before the fix
+        // this slipped into the bounded branch and produced a low ratio that would push
+        // a potentially high-cardinality aggregation.)
+        OptionalDouble ratio = CqliteFlightMetadata.estimateGroupRatio(
+                WIDE_DDL, List.of("pk", "v"), WIDE_STATS);
+        assertTrue(ratio.isEmpty(),
+                "full PK + a regular non-key column is unbounded → push, not a low bounded ratio");
+    }
+
+    @Test
+    void groupByPartitionKeyPlusRegularColumnOnKeyOnlyTableDoesNotFabricateLowRatio() {
+        // PK = id, NO clustering; GROUP BY id, name where name is a REGULAR column. The
+        // grouping covers the full PK and ALL clustering (the empty clustering set is
+        // trivially covered), so it reaches full row uniqueness → ratio 1.0 → DECLINE.
+        // The key invariant for this fix: it must NOT produce the bounded low
+        // partitionCount/rows ratio (that branch is reserved for grouping that is
+        // EXACTLY the partition key). 1.0 (decline) is the correct, safe outcome.
+        OptionalDouble ratio = CqliteFlightMetadata.estimateGroupRatio(
+                SIMPLE_DDL, List.of("id", "name"), SIMPLE_STATS);
+        assertTrue(ratio.isPresent());
+        assertEquals(1.0, ratio.getAsDouble(), 1e-9,
+                "full PK + extra regular column reaches full row uniqueness → 1.0, "
+                        + "never a fabricated low partitionCount/rows ratio");
+    }
+
+    @Test
     void zeroRowsYieldsNoEstimate() {
         OptionalDouble ratio = CqliteFlightMetadata.estimateGroupRatio(
                 WIDE_DDL, List.of("pk"), TableStats.EMPTY);
