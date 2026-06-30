@@ -767,8 +767,37 @@ mod tests {
             "use_mmap=true must select the mmap backend for a >4KiB file"
         );
 
+        // Legacy opt-in (roborev #1143): `use_mmap=true` on the DEFAULT (`Auto`)
+        // config — without ALSO setting `disk_access_mode=Buffered` — must still
+        // promote to mmap. The promotion is applied AFTER `Auto` resolves to
+        // `Buffered`, so the documented back-compat path works for the default
+        // config too (it previously gated on the *configured* mode being
+        // `Buffered`, silently dropping the flag once `Auto`→`Buffered` landed).
+        config.storage.disk_access_mode = DiskAccessMode::Auto;
+        config.storage.use_mmap = true;
+        let auto_mapped = SSTableReader::open(&data_file, &config, platform.clone()).await?;
+        assert!(
+            auto_mapped.is_mmap_backed().await,
+            "use_mmap=true on the default Auto config must promote to mmap (roborev #1143)"
+        );
+
+        // The legacy flag must NEVER override an EXPLICIT non-buffered backend or
+        // be promoted when it does not also win the resolver: with `use_mmap=true`
+        // but an explicit `Mmap` mode, mmap is selected because mode is explicit —
+        // and the flag stays strictly opt-in (default Auto, no flag, stays
+        // buffered, asserted below).
+        config.storage.disk_access_mode = DiskAccessMode::Mmap;
+        config.storage.use_mmap = true;
+        let explicit_mmap_flag = SSTableReader::open(&data_file, &config, platform.clone()).await?;
+        assert!(
+            explicit_mmap_flag.is_mmap_backed().await,
+            "explicit Mmap must select the mmap backend regardless of the legacy flag"
+        );
+
         // Auto stays buffered regardless of the (now Auto-irrelevant) min-size
-        // threshold: Auto never maps, so it is buffered here too.
+        // threshold: Auto never maps WITHOUT the legacy opt-in, so it is buffered
+        // here too. This pins that the flag remains strictly opt-in (no #1143
+        // regression: default Auto, no flag ⇒ Buffered).
         config.storage.use_mmap = false;
         config.storage.disk_access_mode = DiskAccessMode::Auto;
         config.storage.mmap_min_size_bytes = usize::MAX;
@@ -776,6 +805,20 @@ mod tests {
         assert!(
             !small.is_mmap_backed().await,
             "Auto must stay buffered (issue #1143)"
+        );
+
+        // Legacy opt-in respects the mmap size threshold: `use_mmap=true` on the
+        // default `Auto` config but with the min-size set above the file size must
+        // NOT promote to mmap (the promotion is gated on the file meeting the
+        // threshold, matching the explicit-Buffered+use_mmap behaviour).
+        config.storage.disk_access_mode = DiskAccessMode::Auto;
+        config.storage.use_mmap = true;
+        config.storage.mmap_min_size_bytes = usize::MAX;
+        let auto_below_threshold =
+            SSTableReader::open(&data_file, &config, platform.clone()).await?;
+        assert!(
+            !auto_below_threshold.is_mmap_backed().await,
+            "use_mmap on Auto must respect mmap_min_size_bytes (no promotion below threshold)"
         );
 
         Ok(())

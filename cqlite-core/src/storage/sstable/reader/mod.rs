@@ -428,17 +428,8 @@ impl SSTableReader {
 
         let file_size = tokio::fs::metadata(path).await?.len();
 
-        // The explicit mode comes from env > config. The legacy `use_mmap` flag
-        // is folded in by promoting an otherwise-`Buffered` request to `Mmap` so
-        // the old opt-in keeps working (`Auto` and explicit non-buffered modes
-        // are left untouched, so a real backend decision always wins).
+        // The explicit mode comes from env > config.
         let configured_mode = disk_access_mode_via_env().unwrap_or(config.storage.disk_access_mode);
-        let configured_mode =
-            if reader_config.use_mmap && matches!(configured_mode, DiskAccessMode::Buffered) {
-                DiskAccessMode::Mmap
-            } else {
-                configured_mode
-            };
 
         let resolved_mode = resolve_disk_access_mode(
             configured_mode,
@@ -448,6 +439,26 @@ impl SSTableReader {
             system_memory_bytes(),
             direct_io_available(),
         );
+
+        // Fold in the legacy `use_mmap` / `CQLITE_USE_MMAP` opt-in AFTER resolving
+        // the backend so it works for the DEFAULT (`Auto`) config too (issue #1143:
+        // `Auto` now resolves to `Buffered`, so gating the promotion on the
+        // *configured* mode being `Buffered` silently dropped the legacy flag). We
+        // promote only when the RESOLVED mode is `Buffered` — i.e. it came from an
+        // explicit `Buffered` request OR from `Auto` falling through to buffered —
+        // and the file meets the mmap size threshold. An explicit `Direct`/`Mmap`
+        // backend decision (or `Auto` selecting `Direct`) always wins, so the
+        // legacy flag never overrides a real backend choice. The flag stays strictly
+        // opt-in: the default (`Auto`, no `use_mmap`) still resolves to `Buffered`.
+        let resolved_mode = if reader_config.use_mmap
+            && matches!(resolved_mode, DiskAccessMode::Buffered)
+            && file_size > 0
+            && file_size >= reader_config.mmap_min_size_bytes as u64
+        {
+            DiskAccessMode::Mmap
+        } else {
+            resolved_mode
+        };
 
         // Build both the shared point-read source and the per-scan factory from
         // the same backend decision so concurrent scans get independent cursors
