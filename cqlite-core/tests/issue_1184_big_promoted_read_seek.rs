@@ -307,6 +307,83 @@ async fn reverse_order_by_desc_matches_forward_via_block_walk() {
     drop(temp);
 }
 
+// ─────────────── 5. Real Cassandra fixture (skip-on-absence) ───────────────
+//
+// Byte-level forward==reverse 290-row equality on the REAL `test_big.wide_partition`
+// Cassandra 5.0 fixture (pk=1 = 290 live rows, ck 0..299 minus the range tombstone
+// deleting ck 30..39 that straddles a promoted-index block boundary). The binaries
+// are local-only until a dataset re-pin, so this skips (does not fail) when absent;
+// the CI-runnable proof is the write-engine fixture tests above.
+
+const REAL_FIXTURE_REL: &str =
+    "sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294";
+const REAL_PK1_LIVE_ROWS: usize = 290;
+
+fn real_fixture_data_dir() -> Option<std::path::PathBuf> {
+    let root = std::env::var("CQLITE_DATASETS_ROOT").ok()?;
+    let dir = std::path::PathBuf::from(&root).join(REAL_FIXTURE_REL);
+    dir.join("nb-2-big-Data.db").exists().then(|| {
+        std::path::PathBuf::from(root).join("sstables")
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_fixture_forward_equals_reverse_290_rows() {
+    let _g = PROBE_LOCK.lock().await;
+    let Some(data_dir) = real_fixture_data_dir() else {
+        eprintln!("Skipping real test_big.wide_partition forward==reverse (binaries local-only)");
+        return;
+    };
+    let temp = TempDir::new().unwrap();
+    let schema_path = temp.path().join("wide_partition.cql");
+    std::fs::write(
+        &schema_path,
+        "CREATE TABLE test_big.wide_partition (pk int, ck int, payload text, PRIMARY KEY (pk, ck));\n",
+    )
+    .unwrap();
+
+    let result = ingest(IngestionConfig {
+        schema_paths: vec![schema_path],
+        data_dir,
+        version_hint: None,
+        core_config: Config::default(),
+        table_directory_filter: Some("/test_big/".to_string()),
+    })
+    .await
+    .expect("ingest real test_big.wide_partition");
+    let db = result.database;
+
+    let asc = db
+        .execute("SELECT pk, ck, payload FROM test_big.wide_partition WHERE pk = 1 ORDER BY ck ASC")
+        .await
+        .expect("asc query");
+    let desc = db
+        .execute("SELECT pk, ck, payload FROM test_big.wide_partition WHERE pk = 1 ORDER BY ck DESC")
+        .await
+        .expect("desc query");
+
+    let asc_order = cks_in_order(&asc.rows);
+    let desc_order = cks_in_order(&desc.rows);
+    assert_eq!(
+        asc_order.len(),
+        REAL_PK1_LIVE_ROWS,
+        "real fixture pk=1 must hold {REAL_PK1_LIVE_ROWS} live rows"
+    );
+    assert_eq!(
+        desc_order.len(),
+        REAL_PK1_LIVE_ROWS,
+        "real fixture pk=1 DESC must hold {REAL_PK1_LIVE_ROWS} live rows"
+    );
+    assert_eq!(
+        desc_order,
+        asc_order.iter().rev().copied().collect::<Vec<_>>(),
+        "real fixture: DESC must be the exact reverse of ASC (forward==reverse), \
+         with no row lost adjacent to the deleted ck 30..39 block boundary"
+    );
+    // The deleted range is absent on both sides.
+    assert!(!asc_order.iter().any(|c| (30..40).contains(c)));
+}
+
 // ───────────────────── 4. Fallback regression ─────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

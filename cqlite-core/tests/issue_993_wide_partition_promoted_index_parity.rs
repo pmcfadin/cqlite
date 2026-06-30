@@ -726,24 +726,17 @@ async fn range_tombstone_boundary_at_block_edge() {
 /// reversal preserves the same row set), but this does NOT exercise a true
 /// reverse SSTable iterator — see the GAP note below.
 ///
-// GAP (scenario `forward_reverse_bounds`): CQLite has no true reverse partition
-// scan for the BIG ("nb") format. The only "reverse" available is a post-fetch
-// in-memory `ORDER BY ck DESC` sort
-// (`query::select_executor::execute_sort`, `SortDirection::Descending`), which
-// reads the whole partition FORWARD via `get_all_entries`/`scan` and then sorts
-// the materialized rows. It never drives the promoted index to seek blocks in
-// reverse, so it cannot prove that reverse block decoding via the promoted index
-// is correct. There is no `scan_reverse` / reverse iterator at the
-// `SSTableReader` data-access layer (only `is_reversed` clustering-ORDER-encoding
-// helpers in `reader/data_access/{bti,model}.rs`, which encode DESC clustering
-// columns, not a runtime reverse traversal).
-//
-// next_step: implement a BIG-format reverse partition iterator that uses the
-// promoted IndexInfo blocks to seek and decode blocks back-to-front (mirroring
-// Cassandra `SSTableReversedIterator`), then assert forward and reverse scans of
-// pk=1 return the identical 290-row clustering set with no rows lost adjacent to
-// the deleted block. Manifest scenario `forward_reverse_bounds` should be marked
-// `partial` until then.
+// RESOLVED (issue #1184): the BIG ("nb") reverse partition iterator is now real —
+// `SSTableReader::big_reverse_partition_rows` walks the promoted IndexInfo blocks
+// back-to-front (mirroring Cassandra `SSTableReversedIterator`), routed through the
+// production query path for single-partition `ORDER BY <ck> DESC` so the in-memory
+// sort is skipped (and remains the fallback for small / BTI / multi-generation).
+// The forward==reverse equality (identical clustering set, exact reverse ordering,
+// block-by-block decode bounded to one block) is pinned in CI on a multi-block BIG
+// wide partition built by the write engine in
+// `tests/issue_1184_big_promoted_read_seek.rs`; the byte-level 290-row equality on
+// this real fixture runs locally when the binaries are present (skip-on-absence).
+// Manifest scenario `forward_reverse_bounds` is now `mirrored`.
 #[tokio::test]
 async fn forward_bounds_completeness() {
     let test = "forward_bounds_completeness";
