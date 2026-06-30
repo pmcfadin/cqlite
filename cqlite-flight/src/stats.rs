@@ -25,7 +25,11 @@
 //!   when it can traverse the version-gated min/max block; an SSTable whose
 //!   `total_rows` could not be reached contributes 0 (honest under-count, never a
 //!   guess).
-//! - `sstable_count` = number of `*-Statistics.db` files successfully decoded.
+//! - `sstable_count` = number of SSTables whose sibling `*-Statistics.db` was
+//!   successfully decoded. The SSTable SET is enumerated from the authoritative
+//!   `*-Data.db` components (the "this SSTable exists" signal); a Data.db whose
+//!   sibling Statistics.db is missing or undecodable TAINTS completeness instead
+//!   of being silently invisible (issue #944, #28).
 //!
 //! Because these are per-SSTable sums they are an UPPER BOUND on the table's true
 //! distinct partition / live-row counts (the same partition can appear in several
@@ -166,15 +170,23 @@ pub enum StatsError {
 /// Sum the AUTHORITATIVE per-SSTable STATS counts for one table directory.
 ///
 /// `dir` is the already-resolved SSTable directory (live data dir or a snapshot
-/// directory — see [`crate::producer::DirSource::resolve`]). For each
-/// `*-Statistics.db` file under `dir`, decode its [`read_table_counts`] and add
-/// `partition_count` and `total_rows` to the running totals; `sstable_count`
-/// counts the files that decoded.
+/// directory — see [`crate::producer::DirSource::resolve`]). The SSTable SET is
+/// enumerated from the `*-Data.db` components (the authoritative "this SSTable
+/// exists" signal). For each Data.db we derive its sibling `*-Statistics.db` path
+/// (same generation prefix, e.g. `nb-<gen>-big-Data.db` → `nb-<gen>-big-Statistics.db`),
+/// decode its [`read_table_counts`], and add `partition_count` and `total_rows` to
+/// the running totals; `sstable_count` counts the SSTables whose stats decoded.
 ///
-/// A `Statistics.db` that fails to decode (corrupt, below the version floor) is
-/// handled conservatively: a hard decode error SKIPS the whole file (it does not
-/// contribute and is not counted) AND flips the response's
-/// [`TableStatsResponse::complete`] flag to `false` (with `skipped_sstables`
+/// Enumerating by Data.db (not by Statistics.db) is what closes the fail-closed
+/// hole in issue #944: an SSTable with a readable Data.db but a MISSING or
+/// unreadable `*-Statistics.db` is no longer silently invisible — it now TAINTS
+/// completeness (`complete=false`, `skipped_sstables` incremented), exactly like
+/// the undecodable-stats path below.
+///
+/// A `Statistics.db` that is missing, fails to read, or fails to decode (corrupt,
+/// below the version floor) is handled conservatively: the SSTable does not
+/// contribute and is not counted, AND the response's
+/// [`TableStatsResponse::complete`] flag flips to `false` (with `skipped_sstables`
 /// incremented). Partial sums are NOT authoritative (issue #28), so the consumer
 /// must fail closed to "no estimate" rather than feed a biased ratio to the
 /// AUTOMATIC pushdown gate — the flag is how it learns the totals are incomplete.
@@ -203,29 +215,48 @@ pub fn gather_table_stats(dir: &Path) -> Result<TableStatsResponse, StatsError> 
 
     let mut response = TableStatsResponse::default();
 
-    // Enumerate directory entries WITHOUT silently dropping iteration errors. A
+    // Enumerate the SSTable SET from the `*-Data.db` components (the authoritative
+    // "this SSTable exists" signal), WITHOUT silently dropping iteration errors. A
     // `read_dir` entry that fails to yield (e.g. a transient I/O error partway
     // through) means we may NOT have seen every SSTable, so the totals cannot be
-    // authoritative: taint completeness (consistent with the missing-`total_rows`
-    // and undecodable-Statistics.db paths below) rather than claiming complete totals
-    // over files we could not enumerate (issue #944, #28).
-    let stats_paths = collect_statistics_paths(entries, &mut response);
+    // authoritative: taint completeness (consistent with the missing/undecodable
+    // sibling-Statistics.db and missing-`total_rows` paths below) rather than
+    // claiming complete totals over files we could not enumerate (issue #944, #28).
+    let data_paths = collect_data_paths(entries, &mut response);
 
-    for path in stats_paths {
-        match read_one_sstable_counts(&path) {
-            Ok(counts) => fold_counts(&mut response, &path, counts),
-            Err(e) => {
-                // Skip an unreadable/corrupt/below-floor Statistics.db rather than
-                // failing the whole gate, but mark the totals as INCOMPLETE: partial
-                // sums are not authoritative (issue #28), so the consumer must fail
-                // closed to "no estimate" instead of feeding a biased ratio to the
-                // AUTOMATIC gate. Logged at debug so the cause is recoverable.
+    for data_path in data_paths {
+        // Derive the sibling Statistics.db (same generation prefix). The lookup
+        // itself can fail (no recognisable Data.db suffix) — that taints too.
+        let stats_path = match sibling_statistics_path(&data_path) {
+            Some(p) => p,
+            None => {
                 response.complete = false;
                 response.skipped_sstables = response.skipped_sstables.saturating_add(1);
                 tracing::debug!(
-                    path = %path.display(),
+                    path = %data_path.display(),
+                    "table_stats: Data.db with no derivable Statistics.db sibling (marking incomplete)"
+                );
+                continue;
+            }
+        };
+        match read_one_sstable_counts(&stats_path) {
+            Ok(counts) => fold_counts(&mut response, &stats_path, counts),
+            Err(e) => {
+                // A sibling Statistics.db that is MISSING (NotFound), unreadable, or
+                // undecodable (corrupt, below the version floor) does not contribute
+                // and is not counted, but marks the totals INCOMPLETE: partial sums
+                // are not authoritative (issue #28), so the consumer must fail closed
+                // to "no estimate" instead of feeding a biased ratio to the AUTOMATIC
+                // gate. Enumerating by Data.db means a Data.db with no usable stats
+                // now TAINTS instead of being silently invisible. Logged at debug so
+                // the cause is recoverable.
+                response.complete = false;
+                response.skipped_sstables = response.skipped_sstables.saturating_add(1);
+                tracing::debug!(
+                    data_path = %data_path.display(),
+                    stats_path = %stats_path.display(),
                     error = %e,
-                    "table_stats: skipping undecodable Statistics.db (marking incomplete)"
+                    "table_stats: skipping missing/undecodable sibling Statistics.db (marking incomplete)"
                 );
             }
         }
@@ -234,20 +265,30 @@ pub fn gather_table_stats(dir: &Path) -> Result<TableStatsResponse, StatsError> 
     Ok(response)
 }
 
-/// Collect the `*-Statistics.db` paths from a `read_dir` iterator, treating any
+/// Derive the sibling `*-Statistics.db` path for an SSTable's `*-Data.db` path by
+/// swapping the trailing `Data.db` component for `Statistics.db` (the generation
+/// prefix — e.g. `nb-<gen>-big-` — is identical for every component of one
+/// SSTable). Returns `None` if `data_path` does not end in `-Data.db`.
+fn sibling_statistics_path(data_path: &Path) -> Option<std::path::PathBuf> {
+    let name = data_path.file_name().and_then(|n| n.to_str())?;
+    let prefix = name.strip_suffix("-Data.db")?;
+    let stats_name = format!("{prefix}-Statistics.db");
+    Some(data_path.with_file_name(stats_name))
+}
+
+/// Collect the `*-Data.db` paths from a `read_dir` iterator, treating any
 /// entry-iteration error as INCOMPLETE rather than silently discarding it.
 ///
-/// `read_dir` yields `io::Result<DirEntry>`; an `Err` element means an entry could
-/// not be read (e.g. a transient FS error partway through enumeration), so the
-/// directory listing is NOT known to be exhaustive. Each such error flips
-/// `response.complete` to `false` and bumps `skipped_sstables` — the consumer then
-/// fails closed to "no estimate" instead of reporting authoritative totals over a
-/// directory it could not fully enumerate (issue #944, #28). Successful entries are
-/// filtered to `*-Statistics.db` paths as before.
-fn collect_statistics_paths<I>(
-    entries: I,
-    response: &mut TableStatsResponse,
-) -> Vec<std::path::PathBuf>
+/// The SSTable SET is enumerated from `*-Data.db` (the authoritative "this SSTable
+/// exists" signal) rather than from `*-Statistics.db`: an SSTable with a readable
+/// Data.db but a missing/unreadable Statistics.db must TAINT completeness, not be
+/// silently invisible (issue #944, #28). `read_dir` yields `io::Result<DirEntry>`;
+/// an `Err` element means an entry could not be read (e.g. a transient FS error
+/// partway through enumeration), so the directory listing is NOT known to be
+/// exhaustive. Each such error flips `response.complete` to `false` and bumps
+/// `skipped_sstables` — the consumer then fails closed to "no estimate" instead of
+/// reporting authoritative totals over a directory it could not fully enumerate.
+fn collect_data_paths<I>(entries: I, response: &mut TableStatsResponse) -> Vec<std::path::PathBuf>
 where
     I: IntoIterator<Item = std::io::Result<std::fs::DirEntry>>,
 {
@@ -259,7 +300,7 @@ where
                 if path
                     .file_name()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.ends_with("-Statistics.db"))
+                    .is_some_and(|n| n.ends_with("-Data.db"))
                 {
                     paths.push(path);
                 }
@@ -420,9 +461,10 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let dir = temp.path().join("data").join(KS).join(TBL);
         std::fs::create_dir_all(&dir).unwrap();
-        // Garbage bytes under a *-Statistics.db name: read_table_counts cannot
-        // decode the STATS layout, so read_one_sstable_counts returns Err and the
-        // file is skipped + marks the response incomplete.
+        // A Data.db enumerates the SSTable; its sibling Statistics.db holds garbage
+        // bytes that read_table_counts cannot decode, so read_one_sstable_counts
+        // returns Err and the SSTable is skipped + marks the response incomplete.
+        std::fs::write(dir.join("nb-1-big-Data.db"), b"data").unwrap();
         std::fs::write(
             dir.join("nb-1-big-Statistics.db"),
             b"not a real statistics file",
@@ -442,6 +484,36 @@ mod tests {
         assert_eq!(
             stats.sstable_count, 0,
             "the corrupt file did not contribute"
+        );
+    }
+
+    /// A directory containing a `*-Data.db` with NO sibling `*-Statistics.db` must
+    /// mark the response INCOMPLETE (`complete=false`, `skipped_sstables`
+    /// incremented) — the SSTable is enumerated by its Data.db, so a missing
+    /// Statistics.db can no longer make it silently invisible (issue #944, #28).
+    #[test]
+    fn gather_data_db_without_statistics_sibling_taints() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = temp.path().join("data").join(KS).join(TBL);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A readable Data.db with NO sibling Statistics.db. The old enumeration (by
+        // Statistics.db) would have seen an empty directory and reported
+        // complete=true with zero counts — silently hiding this SSTable.
+        std::fs::write(dir.join("nb-1-big-Data.db"), b"data").unwrap();
+
+        let stats = gather_table_stats(&dir).expect("gather");
+
+        assert!(
+            !stats.complete,
+            "a Data.db with no Statistics.db sibling must mark the response incomplete"
+        );
+        assert_eq!(
+            stats.skipped_sstables, 1,
+            "the SSTable with no usable stats is counted as skipped"
+        );
+        assert_eq!(
+            stats.sstable_count, 0,
+            "the SSTable with no usable stats did not contribute"
         );
     }
 
@@ -638,7 +710,7 @@ mod tests {
             "synthetic entry iteration failure",
         ))];
         let mut response = TableStatsResponse::default();
-        let paths = collect_statistics_paths(entries, &mut response);
+        let paths = collect_data_paths(entries, &mut response);
 
         assert!(paths.is_empty(), "an errored entry yields no path");
         assert!(
@@ -652,13 +724,26 @@ mod tests {
     }
 
     #[test]
+    fn sibling_statistics_path_swaps_suffix() {
+        // The generation prefix is shared across an SSTable's components: a Data.db
+        // maps to its sibling Statistics.db by swapping only the trailing suffix.
+        let data = std::path::Path::new("/x/y/nb-7-big-Data.db");
+        assert_eq!(
+            sibling_statistics_path(data).unwrap(),
+            std::path::PathBuf::from("/x/y/nb-7-big-Statistics.db")
+        );
+        // A path that is not a Data.db has no derivable sibling.
+        assert!(sibling_statistics_path(std::path::Path::new("/x/y/nb-7-big-Index.db")).is_none());
+    }
+
+    #[test]
     fn read_dir_all_ok_entries_stay_complete() {
         // Sanity: with no Err entries the helper leaves completeness untouched. We
         // enumerate a real (empty) directory so every yielded item is Ok.
         let temp = tempfile::TempDir::new().unwrap();
         let entries = std::fs::read_dir(temp.path()).unwrap();
         let mut response = TableStatsResponse::default();
-        let paths = collect_statistics_paths(entries, &mut response);
+        let paths = collect_data_paths(entries, &mut response);
 
         assert!(paths.is_empty());
         assert!(response.complete, "all-Ok enumeration stays complete");
