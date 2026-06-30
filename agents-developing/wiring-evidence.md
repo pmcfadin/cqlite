@@ -3,7 +3,7 @@ title: Wiring Evidence
 description: A feature is done when the intended public surface exercises it — not when a helper passes unit tests in isolation. How to name the public surface and prove the call chain reaches it. (Issues #949/#963)
 sidebar:
   label: Wiring evidence
-  order: 6
+  order: 7
 ---
 
 A capability is **done** when the intended USER-FACING surface exercises it — not when a

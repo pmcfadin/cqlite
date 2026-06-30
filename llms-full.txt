@@ -88,6 +88,7 @@ Write for AI agents: terse, imperative, copy-pasteable commands. Skip the prose.
 | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | [Gate contract](/cqlite/agents-developing/gate-contract/)                         | `scripts/agent-gate.sh` — the only run that counts; summary-block format                                                  |
 | [No-heuristics mandate](/cqlite/agents-developing/no-heuristics/)                 | Authoritative metadata only; legacy fallbacks behind flags (issue #28)                                                    |
+| [Supported formats](/cqlite/agents-developing/supported-formats/)                 | Cassandra 5.0 version floor — `na`/`nb` BIG + `oa`/`da` BTI in scope; pre-`na` out of scope, do not review (issue #1249)  |
 | [Test data](/cqlite/agents-developing/test-data/)                                 | Fetching datasets, dataset pins, CQLITE\_DATASETS\_ROOT, missing-data behaviour                                           |
 | [Key source paths](/cqlite/agents-developing/source-map/)                         | Where parsers, writers, query engine, and bindings live                                                                   |
 | [sstabledump validation playbook](/cqlite/agents-developing/validation-playbook/) | JSONL golden files, parity tests, smoke-test-all-tables                                                                   |
@@ -102,9 +103,10 @@ Write for AI agents: terse, imperative, copy-pasteable commands. Skip the prose.
 
 1. Run `scripts/agent-gate.sh` before opening any PR. Paste its summary block verbatim. Ad-hoc `cargo test` runs do not count.
 2. Use authoritative metadata only — no type guessing, no heuristics (see [no-heuristics mandate](/cqlite/agents-developing/no-heuristics/)).
-3. Integration tests use real SSTable data. Fetch it before running: `bash test-data/scripts/fetch-datasets.sh`.
-4. `RUSTFLAGS="-D warnings"` must pass — zero clippy warnings allowed.
-5. A feature is done only when its **public surface** exercises it. Name the surface, the call chain, and add an end-to-end test from that surface — green helper unit tests are not sufficient (see [Wiring evidence](/cqlite/agents-developing/wiring-evidence/)).
+3. CQLite targets Cassandra 5.0 — `na`/`nb` BIG + `oa`/`da` BTI are in scope; pre-`na` (`ma`–`me`) is out of scope. Do not introduce, support, or review pre-`na` correctness (see [Supported formats](/cqlite/agents-developing/supported-formats/)).
+4. Integration tests use real SSTable data. Fetch it before running: `bash test-data/scripts/fetch-datasets.sh`.
+5. `RUSTFLAGS="-D warnings"` must pass — zero clippy warnings allowed.
+6. A feature is done only when its **public surface** exercises it. Name the surface, the call chain, and add an end-to-end test from that surface — green helper unit tests are not sufficient (see [Wiring evidence](/cqlite/agents-developing/wiring-evidence/)).
 
 ## Quick-start for a new agent
 
@@ -1008,6 +1010,42 @@ Three rules:
 1. **Brainstorming is satisfied by `explore`** — opening design-driven work in explore *is* the brainstorming step. (You may still invoke `brainstorming` standalone as a technique; it just needs no second home.)
 2. **One system of record** — capture the plan’s thinking into OpenSpec artifacts; do not keep a parallel `plan.md` alongside the proposal.
 3. **Front door is conditional** — design-driven new work → OpenSpec; oracle-driven bug fixes → GitHub issue + pinned parity test.
+
+# Supported formats (version floor)
+
+> CQLite targets Cassandra 5.0. na+/nb BIG and oa/da BTI are in scope; pre-na (ma–me, Cassandra 3.x) is out of scope — do not introduce, support, or review pre-na correctness. (Issue
+
+Issue #1249 codified this as a hard rule after roborev repeatedly raised “regression for older SSTable versions” findings on pre-`na` (Cassandra 3.x) formats — formats CQLite does not read at all. The churn came from dead version-gate modeling surface that *looked* like pre-`na` support. This page is the single authoritative statement of the support floor.
+
+## The rule
+
+[Section titled “The rule”](#the-rule)
+
+**CQLite targets Cassandra 5.0. `na`+/`nb` BIG and `oa`/`da` BTI are in scope. Pre-`na` (`ma`–`me`, Cassandra 3.x) is out of scope and SHALL NOT be introduced, supported, or reviewed for correctness.**
+
+| Format | In scope         | Out of scope                                  |
+| ------ | ---------------- | --------------------------------------------- |
+| BIG    | `na`, `nb`, `oa` | `ma`–`me` (Cassandra 3.x) and anything `< na` |
+| BTI    | `da`             | any version other than `da`                   |
+
+## For reviewers (including roborev)
+
+[Section titled “For reviewers (including roborev)”](#for-reviewers-including-roborev)
+
+* **Do not re-litigate pre-`na` correctness.** A branch, gate, or test that touches `ma`–`me` is not a regression surface — pre-`na` reads are unsupported by design.
+* Do not request changes that “fix” pre-`na` behaviour, add pre-`na` gates, or restore deleted pre-`na` modeling code. The floor is the contract.
+
+## How it is enforced
+
+[Section titled “How it is enforced”](#how-it-is-enforced)
+
+The floor lives in version parsing and is propagated by the reader:
+
+* `BigVersionGates::from_version` returns `Error::UnsupportedVersion { version, floor: "na" }` for any BIG version `< na`. It never constructs gates for a below-floor version.
+* `BtiVersionGates::from_version` returns `Error::UnsupportedVersion { version, floor: "da" }` for any BTI version other than `da`.
+* `SSTableReader::open` **propagates** `Error::UnsupportedVersion` instead of degrading to the `nb` fallback. Only a structurally-unparseable descriptor (not a parsed-but-below-floor one) may use the fallback.
+
+The rejection happens before any row data is read. `Error::UnsupportedVersion` maps to the non-recoverable `ErrorCategory::Data`.
 
 # Test Data
 

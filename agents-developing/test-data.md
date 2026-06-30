@@ -3,7 +3,7 @@ title: Test Data
 description: Fetching the dataset, dataset pins, CQLITE_DATASETS_ROOT, and what happens without Data.db files.
 sidebar:
   label: Test data
-  order: 3
+  order: 4
 ---
 
 The git repository contains only JSONL reference files (sstabledump output, used for
