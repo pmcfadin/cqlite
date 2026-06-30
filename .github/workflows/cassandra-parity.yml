@@ -109,8 +109,12 @@ jobs:
       - name: Report is not stale
         run: cargo run -p cassandra-parity -- report --manifest test-data/cassandra-parity-manifest.yml --output docs/reports/cassandra-test-parity.md --check
 
-      - name: Coverage of high-relevance Cassandra files (informational)
-        run: cargo run -p cassandra-parity -- coverage --manifest test-data/cassandra-parity-manifest.yml
+      - name: Coverage of high-relevance Cassandra files (strict — every high-relevance file must be classified)
+        # Fail-closed ratchet (issue #1199): every high-relevance Cassandra index
+        # file must be classified by a manifest scenario (mirrored/partial/planned/
+        # out_of_scope). An unclassified high-relevance file fails the gate, so
+        # coverage can never silently regress below 100%.
+        run: cargo run -p cassandra-parity -- coverage --strict --manifest test-data/cassandra-parity-manifest.yml
 
       - name: Unit + integration tests
         run: cargo test -p cassandra-parity

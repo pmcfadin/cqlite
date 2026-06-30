@@ -12,9 +12,9 @@ Sources: [`docs/cassandra_test_index.md`](../../docs/cassandra_test_index.md) ·
 |---|---|
 | `mirrored` | 218 |
 | `partial` | 16 |
-| `planned` | 17 |
-| `out_of_scope` | 14 |
-| **total** | **265** |
+| `planned` | 50 |
+| `out_of_scope` | 31 |
+| **total** | **315** |
 
 ## Evidence counts
 
@@ -25,8 +25,8 @@ _Counts are per scenario; see [Distinct test backing](#distinct-test-backing-ded
 | `byte_for_byte` | 118 |
 | `canonical_semantic` | 98 |
 | `smoke` | 7 |
-| `partial` | 26 |
-| `out_of_scope` | 16 |
+| `partial` | 59 |
+| `out_of_scope` | 33 |
 
 ## ⚠️ P0 scenarios with weak evidence
 
@@ -677,9 +677,33 @@ Scenario counts above can overstate distinct proof: one backing test may exercis
 
 ## Gaps and next steps
 
+- `cass.compaction.CompactionColumnDeleteAndPurgeTest.cell_delete_purge` (planned): No dedicated fixture mirrors this specific cell-delete-then-gc-purge case; the general purge path is covered by the compaction_parity_tombstone_ttl suite. → _Commission a Cassandra fixture for cell deletion + gc purge and add per-case sstabledump goldens to the compaction parity suite._
+- `cass.compaction.CompactionColumnTest.cell_merge_lww` (planned): No dedicated fixture mirrors this specific per-column LWW merge case. → _Commission a fixture for per-column LWW merge and assert per-case goldens._
+- `cass.compaction.CompactionControllerTest.purgeable_timestamp_boundary` (planned): No dedicated fixture mirrors the CompactionController purgeable-timestamp boundary cases. → _Commission fixtures spanning the purgeable-timestamp boundary and assert per-case goldens._
+- `cass.compaction.CompactionDeleteAndPurgePKTest.partition_delete_purge` (planned): No dedicated fixture mirrors this partition-delete-then-purge case. → _Commission a partition-delete + gc-purge fixture and assert per-case goldens._
+- `cass.compaction.CompactionDeleteAndPurgeRowTest.row_delete_purge` (planned): No dedicated fixture mirrors this row-delete-then-purge case. → _Commission a row-delete + gc-purge fixture and assert per-case goldens._
+- `cass.compaction.CompactionDeletePKTest.partition_delete_preserved` (planned): No dedicated fixture mirrors this partition-delete-preservation case. → _Commission a fixture asserting partition deletions survive compaction and add goldens._
+- `cass.compaction.CompactionDeleteRowRangeTest.range_tombstone_merge` (planned): No dedicated fixture mirrors this overlapping range-tombstone merge case. → _Commission overlapping range-tombstone fixtures and assert per-case goldens._
+- `cass.compaction.CompactionDeleteRowTest.row_deletion_marker_preserved` (planned): No dedicated fixture mirrors this row-deletion-marker-preservation case. → _Commission a row-deletion fixture and assert markers survive compaction._
+- `cass.compaction.CompactionOverlappingSSTableTest.partial_space_constrained_merge` (planned): No dedicated fixture mirrors the disk-space-constrained partial-compaction case. → _Commission overlapping-SSTable fixtures under a space constraint and assert live-row preservation._
+- `cass.compaction.CompactionsCQLTest.negative_ldts_suspect_table` (planned): No dedicated fixture mirrors the negative-LDTS suspect-table cases. → _Commission fixtures with negative local-deletion-time metadata and assert detection/goldens._
+- `cass.compaction.ForceCompactionTest.major_compaction_tombstone_purge` (planned): No dedicated fixture mirrors the forced/major-compaction purge case. → _Commission a major-compaction fixture and assert tombstone/TTL purge goldens._
+- `cass.compaction.LeveledCompactionStrategyTest.non_overlapping_levels` (planned): CQLite does not yet run a leveled compaction strategy; merge output parity for LCS-produced inputs is unmirrored. → _Implement/mirror leveled-strategy merge ordering or assert read parity over LCS-produced fixtures._
+- `cass.compaction.LeveledGenerationsTest.level_generation_merge_order` (planned): CQLite does not yet model leveled generations; merge-order parity is unmirrored. → _Mirror leveled-generation merge ordering or assert read parity over generation-tagged fixtures._
+- `cass.compaction.LongLeveledCompactionStrategyTest.concurrent_level_merge_safety` (planned): CQLite does not yet run concurrent leveled compaction; overlapping-range merge safety is unmirrored. → _Mirror concurrent leveled-compaction merge safety or assert read parity over the produced fixtures._
+- `cass.compaction.ParallelizedTasksTest.sharded_row_partition_integrity` (planned): CQLite does not run parallelized compaction tasks; sharded row/partition integrity over the produced output is unmirrored. → _Mirror sharded row/partition integrity or assert read parity over parallelized-compaction fixtures._
+- `cass.compaction.PartialCompactionsTest.tombstone_not_purged_excluded_sources` (planned): No dedicated fixture mirrors this excluded-source tombstone-retention case. → _Commission a partial-compaction fixture excluding sources and assert tombstones are retained._
 - `cass.compaction.SSTableRewriterTest.output_component_integrity` (planned): Byte-for-byte compaction output parity is computed and reported but not gated; the writer is not yet byte-identical to Cassandra. → _Land the divergence-fix children (#844/#846/#848 …), then drop continue-on-error on the byte step to promote it to a hard gate._
+- `cass.compaction.SSTablesIteratedTest.merge_no_shadow_without_timestamp` (planned): No dedicated fixture mirrors the SSTablesIterated shadow-ordering case. → _Commission overlapping fixtures and assert no live cell is shadowed without timestamp ordering._
+- `cass.compaction.ShardedCompactionWriterTest.shard_boundary_row_preservation` (planned): No dedicated fixture mirrors sharded-compaction-writer shard-boundary preservation. → _Commission sharded-writer fixtures and assert no partition is orphaned across shard boundaries._
+- `cass.compaction.ShardedMultiWriterTest.flush_sharding_row_count` (planned): No dedicated fixture mirrors flush-triggered sharded multi-writer row counts. → _Commission flush-sharding fixtures and assert each partition yields the expected row count._
+- `cass.compaction.SingleSSTableLCSTaskTest.single_table_uplevel_metadata_readable` (planned): CQLite does not run LCS uplevel tasks; the single-table uplevel metadata path is unmirrored. → _Mirror single-SSTable LCS uplevel metadata validation or assert metadata read parity._
+- `cass.compaction.TimeWindowCompactionStrategyTest.ttl_window_expiry_purge` (planned): CQLite does not yet run a time-window compaction strategy; window-expiry purge parity is unmirrored. → _Mirror TWCS window-expiry purge semantics or assert read parity over TWCS-produced fixtures._
+- `cass.compaction.UnifiedCompactionDensitiesTest.sstable_density_distribution` (planned): CQLite does not implement UCS density distribution; output sizing parity is unmirrored. → _Mirror UCS density distribution or assert read parity over the produced SSTables._
+- `cass.compaction.UnifiedCompactionStrategyTest.gc_grace_purge_boundary` (planned): CQLite does not yet run the unified compaction strategy; gc_grace purge-boundary parity is unmirrored. → _Mirror UCS gc_grace purge boundary or assert read parity over UCS-produced fixtures._
 - `cass.compaction.harness_byte_tier_artifacts` (planned): No gated byte-for-byte comparison; the tier reports diffs + artifacts but does not fail the build yet. → _Promote to a hard gate (drop continue-on-error) once compaction output is byte-stable across the scenario matrix._
 - `cass.compaction_merge.byte_for_byte_output` (planned): No gated byte-for-byte comparison of compaction output. → _Promote the debug byte tier in compaction-parity to a gated comparison once writer output is byte-stable._
+- `cass.compression.CompressionUpgradeTest.codec_compat_across_upgrade` (planned): No dedicated fixture mirrors compressed SSTables produced across an upgrade boundary. → _Commission pre/post-upgrade compressed fixtures and assert decompression read parity._
 - `cass.compression_checksum.checksum_trailer_detection` (partial): No gated test injects corruption and asserts rejection; only inline-checksum validation on read is implemented. (Byte-compare of clean Digest.crc32 is already covered by cass.sstable_format.toc_component_manifest.) → _Byte-compare of clean Digest.crc32 is covered by cass.sstable_format.toc_component_manifest; corruption-detection / rejection remains open and is tracked by the carved-out scrub/verify issue #1236._
 - `cass.compression_info.deflate.real_fixture_chunks` (planned): No real DeflateCompressor CompressionInfo.db / Data.db fixture in the committed corpus, so chunk + CRC parity cannot be byte-compared. → _Generate a DeflateCompressor SSTable via regenerate-datasets.sh and let the existing test exercise it (the codec dispatch already handles it)._
 - `cass.compression_info.deflate.real_fixture_chunks.strict` (planned): No real Cassandra Deflate-compressed fixture in the corpus. → _Generate a DeflateCompressor SSTable fixture via issue #996 (epic #970) and add it to the dataset; the strict lane will then decode and round-trip it._
@@ -691,7 +715,9 @@ Scenario counts above can overstate distinct proof: one backing test may exercis
 - `cass.delta_scan.wide_partition_corpus` (planned): No test_deltas wide-partition delete fixture; wide partitions are produced by the wide-row corpus (epic #993), not generate-deltas.sh. Byte-for-byte backing for delta_scan remains tracked by epic #969. → _Add a wide-partition delete shape (or reuse a wide-row corpus fixture) and a paired test_delta_parity_wide_partition test under epic #993._
 - `cass.filter_db.bti_membership` (partial): No raw-partition-key source for BTI fixtures, so the no-false-negative probe cannot run against da Filter.db. → _Recover raw BTI partition keys (e.g. by decoding partitions during a Data.db scan) and extend the no-false-negative gate to cover da fixtures._
 - `cass.filter_db.statistical_false_positive_rate` (planned): No gated comparison of measured FPR against Cassandra's configured bloom_filter_fp_chance. → _Add larger-cardinality fixtures and assert the measured FPR tracks the configured fp_chance within a documented statistical tolerance._
+- `cass.filter_db_bloom.SerializationsTest.bloom_filter_deserialization` (planned): No dedicated fixture mirrors the bloom-filter serialization round-trip cases from SerializationsTest. → _Commission bloom-filter serialization fixtures and assert deserialized membership goldens._
 - `cass.index_db.RowIndexEntryTest.promoted_index_entries` (partial): This scenario's proving evidence is the byte-level Index.db promoted-index decode (offsets, widths, clustering bounds), which SKIPS in CI because the test_big/wide_partition binaries are not in the pinned dataset (issue #1185 in progress). Marking it required_parity would report coverage for a check that does not run; the only CI-running assertion in this test binary is the JSONL canonical-semantic check, which does not decode the promoted index and so does not satisfy this scenario's evidence on its own. → _Re-promote to required_parity once issue #1185 pins the test_big.wide_partition binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256) so the byte-level promoted-index assertions actually run fail-closed._
+- `cass.index_db.RowIndexTest.row_index_sort_order` (planned): No dedicated fixture mirrors the RowIndex out-of-order / duplicate-key cases. → _Commission RowIndex fixtures with out-of-order/duplicate keys and assert offset/order goldens._
 - `cass.index_db.big.wide_partition_promoted_entries` (partial): This scenario's proving evidence is the byte-level Index.db promoted-index decode (offsets, widths, clustering bounds), which SKIPS in CI because the test_big/wide_partition binaries are not in the pinned dataset (issue #1185 in progress). Marking it required_parity would report coverage for a check that does not run; the only CI-running assertion in this test binary is the JSONL canonical-semantic check, which does not decode the promoted index and so does not satisfy this scenario's evidence on its own. → _Re-promote to required_parity once issue #1185 pins the test_big.wide_partition binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256) so the byte-level promoted-index assertions actually run fail-closed._
 - `cass.index_db.promoted_index.clustering_bounds` (partial): This scenario's proving evidence is the byte-level Index.db promoted-index decode across the range-tombstone block edge, which SKIPS in CI because the test_big/wide_partition binaries are not in the pinned dataset (issue #1185 in progress). The CI-running JSONL canonical-semantic check does assert pk=1 is missing exactly ck 30..39 (the range-tombstone fact), but it does NOT decode the promoted index across the block boundary — the headline claim of this scenario — so the running part alone does not justify required_parity. → _Re-promote to required_parity once issue #1185 pins the test_big.wide_partition binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256) so the byte-level promoted-index block-edge assertions actually run fail-closed._
 - `cass.index_db.promoted_index.index_info_offsets` (partial): This scenario's proving evidence is the byte-level Index.db promoted-index decode (offsets, widths, clustering bounds), which SKIPS in CI because the test_big/wide_partition binaries are not in the pinned dataset (issue #1185 in progress). Marking it required_parity would report coverage for a check that does not run; the only CI-running assertion in this test binary is the JSONL canonical-semantic check, which does not decode the promoted index and so does not satisfy this scenario's evidence on its own. → _Re-promote to required_parity once issue #1185 pins the test_big.wide_partition binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256) so the byte-level promoted-index assertions actually run fail-closed._
@@ -701,14 +727,21 @@ Scenario counts above can overstate distinct proof: one backing test may exercis
 - `cass.repaired_metadata.statistics_db.pending_repair_uuid` (planned): No Cassandra 5.0 pending-repair fixture available; the reference null (`Pending repair: --`) state is confirmed, and the read path reports the field as Unparsed (it is not walked from bytes) rather than a fabricated absent value. → _When a pending-repair fixture is generated, decode the pendingRepair UUID (type-aware skip past improvedMinMax + commitLogIntervals) — promoting the field from RepairField::Unparsed to Decoded — and assert it byte-for-byte against the `Pending repair: <uuid>` reference line._
 - `cass.repaired_metadata.statistics_db.transient_repair_flag` (planned): No transiently-replicated fixture available; the reference `IsTransient: false` state is confirmed, and the read path reports the field as Unparsed (it is not walked from bytes) rather than a fabricated `false`. → _When a transient-replication fixture is generated, decode the isTransient flag (after the version-gated improvedMinMax block and commitLogIntervals) — promoting it from RepairField::Unparsed to Decoded — and assert it byte-for-byte against the `IsTransient: true` reference line._
 - `cass.schema_evolution.dropped_column.empty_index_block_reverse_scan` (partial): A wide dropped-column empty-index-block reverse-scan fixture is not yet generated. → _Generate a wide dropped-column fixture that yields an empty index block under reverse scan and assert parity; file a follow-up issue._
+- `cass.sstable_format.SSTableIdGenerationTest.mixed_id_scheme_readable` (planned): No dedicated fixture mirrors a mixed sequential/UUID id-scheme generation set. → _Commission a fixture mixing sequential and UUID SSTable ids and assert all generations are discovered/readable._
+- `cass.sstable_format.VersionSupportedFeaturesTest.version_feature_matrix` (planned): No dedicated fixture mirrors the complete version/supported-features matrix. → _Commission fixtures spanning the version matrix and assert feature-support resolution goldens._
 - `cass.sstable_scan.wide_partition.forward_reverse_bounds` (partial): Forward-scan completeness is backed by forward_bounds_completeness, which reads the binary Data.db and therefore SKIPS in CI because the test_big/wide_partition binaries are not in the pinned dataset (issue #1185 in progress); the CI-running JSONL canonical-semantic check proves live counts but not scan completeness across promoted-index block boundaries. Reverse SSTable iteration is additionally not implemented for BIG wide partitions (only a post-fetch in-memory ORDER BY DESC sort exists, which does not exercise reverse promoted-index block decoding). → _First re-promote to required_parity once issue #1185 pins the test_big.wide_partition binaries into the CI dataset so forward-scan completeness runs fail-closed; then implement a BIG-format reverse partition iterator that uses the promoted IndexInfo blocks to seek/decode blocks back-to-front (mirroring Cassandra SSTableReversedIterator) and assert forward and reverse scans of pk=1 return the identical 290-row clustering set with no rows lost adjacent to the deleted block._
 - `cass.statistics_db.SSTableMetadataTest.max_local_deletion_time` (planned): STATS-section max timestamp / max local-deletion-time not yet decoded. → _Decode the STATS MetadataType component and assert max timestamp / max local-deletion-time against the reference dump._
 - `cass.statistics_db.clustering_key_bounds` (planned): Covered-clustering min/max bounds not yet decoded from the STATS component. → _Decode the STATS-section clustering bounds and compare against the "Covered clusterings" reference line._
 - `cass.statistics_db.histograms_and_estimates` (planned): STATS-section histograms and partition/row estimates not yet decoded. → _Decode the STATS-section EstimatedHistograms and count estimates and compare bucket boundaries against the reference dump._
 - `cass.summary_db.IndexSummaryRedistributionTest.downsampled_summary_entries` (planned): No downsampled (sampling_level < 128) Summary.db fixture exists. → _Publish a redistributed Summary.db fixture and extend the strict suite to assert downsampled offset tables and size_at_full_sampling > entry count._
+- `cass.tombstone_ttl.RangeTombstoneBurnTest.range_partition_column_deletes_readable` (planned): No dedicated burn-scale fixture mirrors the RangeTombstoneBurn cases. → _Commission a range-tombstone burn fixture and assert deletes serialize and read back vs Cassandra._
 - `cass.tombstone_ttl.RepairedDataTombstonesTest.repair_metadata_gates_purge` (partial): Repair-aware tombstone purge gating is unimplemented (and out of scope for #1021); only the parse/preserve/reject-mixed prerequisite exists. No real repaired fixture exists in the corpus (the published Cassandra 5.0 datasets are all unrepaired; a repaired SSTable requires a live cluster + nodetool repair / anticompaction). → _File a follow-up to (1) commission a live-cluster repaired+unrepaired fixture with a cross-repair-boundary shadowing tombstone (nodetool repair / sstablerepairedset + sstabledump/sstablemetadata goldens), and (2) implement + test repair-aware tombstone purge gating against it._
+- `cass.tombstone_ttl.ViewComplexTombstoneTest.cell_tombstone_not_purged` (planned): No dedicated fixture mirrors the view complex cell-tombstone cases; MV maintenance is coordinator-side. → _Commission a fixture with view-style cell tombstones and assert they are not prematurely purged on merge._
 - `cass.tombstone_ttl.range_tombstone_boundaries` (partial): test_deltas dataset asset not published/enforced in CI (#701). → _Publish the test_deltas dataset and enforce scan_delta parity in CI._
 - `cass.tombstone_ttl.repaired_unrepaired_purge_gate` (partial): repairedAt / pendingRepair parsing is not implemented (gated on #968/#988), so the repaired-vs-unrepaired purge gate is only partially exercised. → _Parse repairedAt / pendingRepair from Statistics.db and gate purge on repair status (#968/#988)._
+- `cass.write_load_path.FlushingTest.flush_no_phantom_rows` (planned): No dedicated fixture mirrors the flush phantom-row / tombstone-placement case. → _Commission a flush fixture and assert no phantom rows and correct tombstone placement vs Cassandra output._
+- `cass.write_load_path.MemtableQuickTest.flush_living_cells_survive` (planned): No dedicated fixture mirrors the living-cells-survive-flush case. → _Commission a flush fixture asserting living cells survive and tombstones do not over-purge._
+- `cass.write_load_path.SSTableWriterTransactionTest.writer_output_components` (planned): No dedicated fixture mirrors committed writer-output component integrity for this case. → _Commission a writer fixture and assert committed output components match Cassandra (transaction-log abort lifecycle remains out of scope)._
 - `cass.write_load_path.flush.tombstone_and_ttl_artifacts` (partial): The static-row writer gap (row-level HAS_TIMESTAMP / PK liveness wrongly set on a static-only UPDATE) is now RESOLVED (issue #1196): CQLite emits the static block byte-identical to Cassandra (flags 0xa0, static cell carries its own explicit timestamp), verified file-vs-file against the committed test_writeparity.static_clustering_shape reference. Whole-artifact byte parity for the broader tombstone/TTL shape REMAINS blocked by wall-clock-derived localDeletionTime on TTL/DELETE cells (nowInSeconds, not reproducible across independent writers). → _The remaining blocker is intrinsic: TTL/DELETE cells carry a wall-clock-derived localDeletionTime (nowInSeconds) that cannot byte-match an independent writer, so they stay semantic-only by nature. A future upgrade to byte_for_byte would require a non-TTL static-tombstone reference whose deletion time is deterministic (explicit localDeletionTime) plus a strict Data.db byte diff._
 
 ## Out-of-scope taxonomy
@@ -717,6 +750,8 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 
 ### `commitlog_replay`
 
+- `cass.commitlog.CommitLogStressTest.replay_round_trip` — Commitlog stress replay round-trip
+  - Safe wording: CQLite reads any SSTable produced after a commitlog-driven flush; it does not implement commit-log replay.
 - `cass.commitlog_replay.recovery_out_of_scope` — Commitlog and replay compatibility (out of scope)
   - Safe wording: CQLite reads SSTables that Cassandra has already flushed; it does not replay or validate commitlogs.
 
@@ -725,6 +760,27 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 - `cass.distributed_consensus.paxos_accord_out_of_scope` — Paxos/Accord and distributed consensus (out of scope)
   - Safe wording: CQLite does not implement distributed consensus.
 
+### `java_tooling`
+
+- `cass.scrub_verify.ScrubToolTest.scrub_corrupt_partitions` — Standalone scrub tool (corrupt-partition skip/fail)
+  - Safe wording: CQLite detects on-disk corruption during reads; it does not provide a scrub tool that rewrites corrupted SSTables.
+- `cass.tools_cli.StandaloneUpgraderOnSStablesTest.standalone_upgrade` — Standalone SSTable upgrader tool
+  - Safe wording: CQLite reads legacy and current SSTable versions directly; it does not implement Cassandra's standalone upgrader tool.
+
+### `memtable_internals`
+
+- `cass.memtable_flush.MemtableNegativeReleasedCQLReproTest.memtable_memory_accounting` — Memtable negative-released memory accounting repro
+  - Safe wording: CQLite reads any SSTable produced by a flush; it does not model the node's memtable memory accounting.
+- `cass.memtable_flush.NonSplittablePartitionerTrieMemtableFlushSetTest.trie_memtable_flushset` — Non-splittable-partitioner trie-memtable FlushSet metadata
+  - Safe wording: CQLite reads any SSTable the trie memtable flushed; it does not implement the trie-memtable internals.
+- `cass.memtable_flush.SplittablePartitionerTrieMemtableFlushSetTest.trie_memtable_flushset_split` — Splittable-partitioner trie-memtable FlushSet enumeration
+  - Safe wording: CQLite reads any SSTable the trie memtable flushed; it does not implement the trie-memtable internals.
+
+### `node_lifecycle`
+
+- `cass.compaction.EarlyOpenCompactionTest.early_open_intermediate_readers` — Early-open compaction intermediate readers
+  - Safe wording: CQLite reads any completed SSTable a compaction produced; it does not implement early-open intermediate reader exposure.
+
 ### `nodetool_jmx_metrics`
 
 - `cass.nodetool_jmx_metrics.operational_out_of_scope` — nodetool, JMX, metrics, and operational controls (out of scope)
@@ -732,26 +788,46 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 
 ### `not_sstable_reader_writer_compactor`
 
+- `cass.compaction.AntiCompactionTest.range_split_repair_state` — Anticompaction range-split of SSTables into pending-repair / unrepaired sets
+  - Safe wording: CQLite reads and compacts the pending-repair and unrepaired SSTables anticompaction produced, honoring their repair-state metadata; it does not reproduce the anticompaction split itself.
+- `cass.compaction.CompactionsBytemanTest.fault_injected_compaction` — Byteman fault-injected compaction internals
+  - Safe wording: CQLite produces correct merged output for the inputs it is given; it does not reproduce the node's fault-injection compaction internals.
 - `cass.summary_db.IndexSummaryManagerTest.memory_constrained_summary_reload` — Runtime index-summary redistribution / memory-constrained reload
   - Safe wording: CQLite reads any Summary.db Cassandra wrote (including downsampled ones, pending a fixture); it does not reproduce the redistribution scheduler.
+- `cass.tombstone_ttl.TombstonesTest.overwhelming_threshold_guardrail` — Tombstone-overwhelming query guardrail (warn/fail thresholds + metrics)
+  - Safe wording: CQLite correctly filters tombstones shadowed by partition/row deletes and excludes gc_grace-expired tombstones during reads and compaction; it does not implement the query-time tombstone-overwhelming threshold guardrail.
 
 ### `read_repair_coordinator`
 
+- `cass.read_repair.ReadRepairCollectionQueriesTest.collection_divergence_repair` — Read-repair of divergent replica collections
+  - Safe wording: CQLite decodes any collection cells Cassandra wrote; it does not perform coordinator read-repair.
+- `cass.read_repair.SSTableAndMemTableDigestMatchTest.digest_match` — SSTable/memtable digest match for read-repair
+  - Safe wording: CQLite reads any SSTable Cassandra flushed; it does not compute read-repair digests against a live memtable.
 - `cass.read_repair_coordinator.out_of_scope` — Read-repair coordinator (out of scope)
   - Safe wording: CQLite does not perform read repair.
 
 ### `repair_coordinator`
 
+- `cass.compaction.AntiCompactionBytemanTest.repair_driven_anticompaction` — Repair-driven anti-compaction SSTable lifecycle (Byteman)
+  - Safe wording: CQLite reads any SSTable Cassandra wrote, including post-anti-compaction outputs; it does not perform repair-driven anti-compaction.
+- `cass.repair.RepairJobTest.merkle_tree_sync` — Repair job merkle-tree synchronization
+  - Safe wording: CQLite reads any SSTable produced before/after repair; it does not implement repair coordination.
 - `cass.repair_coordinator.anti_entropy_out_of_scope` — Repair coordinator and anti-entropy protocol (out of scope)
   - Safe wording: CQLite does not perform or validate repair.
 
 ### `sai_sasi_query`
 
+- `cass.memtable_flush.SSTableFlushObserverTest.secondary_index_observer` — SSTable flush observer (secondary-index callbacks)
+  - Safe wording: CQLite reads the primary SSTable components a flush produced; it does not build secondary indexes.
 - `cass.sai_sasi_query.secondary_index_out_of_scope` — SAI/SASI secondary index query behavior (out of scope)
   - Safe wording: CQLite reads base-table SSTables only and does not implement SAI/SASI secondary indexes.
 
 ### `streaming_protocol`
 
+- `cass.streaming.EntireSSTableStreamConcurrentComponentMutationTest.zero_copy_stream_mutation` — Entire-SSTable zero-copy streaming under concurrent component mutation
+  - Safe wording: CQLite reads any SSTable a node streamed and persisted; it does not implement the streaming protocol.
+- `cass.streaming.SSTableZeroCopyWriterTest.zero_copy_component_roundtrip` — Zero-copy streaming writer component round-trip
+  - Safe wording: CQLite reads any SSTable materialized by zero-copy streaming; it does not implement the streaming writer.
 - `cass.streaming_protocol.node_lifecycle_out_of_scope` — SSTable streaming protocol and node lifecycle (out of scope)
   - Safe wording: CQLite-written SSTables can be loaded with sstableloader, but CQLite does not implement the streaming protocol itself.
 
@@ -777,16 +853,44 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.bti_big_version_matrix.big_nb_oa_read` | manual_debug | — |
 | `cass.bti_big_version_matrix.bti_da_write_read` | nightly_docker | .github/workflows/e2e-readback.yml |
 | `cass.cli_reporting.parity_manifest_lint_and_report` | fast_pr | .github/workflows/cassandra-parity.yml |
+| `cass.commitlog.CommitLogStressTest.replay_round_trip` | manual_debug | — |
 | `cass.commitlog_replay.recovery_out_of_scope` | fast_pr | — |
+| `cass.compaction.AntiCompactionBytemanTest.repair_driven_anticompaction` | manual_debug | — |
+| `cass.compaction.AntiCompactionTest.range_split_repair_state` | manual_debug | — |
 | `cass.compaction.CompactionAwareWriterTest.live_row_count_preservation` | required_parity | .github/workflows/live-cell-compaction-parity.yml |
 | `cass.compaction.CompactionAwareWriterTest.row_count_and_order_preservation` | required_parity | .github/workflows/compaction-parity.yml |
+| `cass.compaction.CompactionColumnDeleteAndPurgeTest.cell_delete_purge` | manual_debug | — |
+| `cass.compaction.CompactionColumnTest.cell_merge_lww` | manual_debug | — |
+| `cass.compaction.CompactionControllerTest.purgeable_timestamp_boundary` | manual_debug | — |
+| `cass.compaction.CompactionDeleteAndPurgePKTest.partition_delete_purge` | manual_debug | — |
+| `cass.compaction.CompactionDeleteAndPurgeRowTest.row_delete_purge` | manual_debug | — |
+| `cass.compaction.CompactionDeletePKTest.partition_delete_preserved` | manual_debug | — |
+| `cass.compaction.CompactionDeleteRowRangeTest.range_tombstone_merge` | manual_debug | — |
+| `cass.compaction.CompactionDeleteRowTest.row_deletion_marker_preserved` | manual_debug | — |
 | `cass.compaction.CompactionIteratorTest.differential_compaction_loop` | required_parity | .github/workflows/compaction-parity.yml |
 | `cass.compaction.CompactionIteratorTest.live_partition_merge` | required_parity | .github/workflows/live-cell-compaction-parity.yml |
+| `cass.compaction.CompactionOverlappingSSTableTest.partial_space_constrained_merge` | manual_debug | — |
 | `cass.compaction.CompactionSimpleValueMergeTest.static_row_merge` | required_parity | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.compaction.CompactionTaskTest.reject_mixed_repair_state` | required_parity | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.compaction.CompactionsBytemanTest.fault_injected_compaction` | manual_debug | — |
+| `cass.compaction.CompactionsCQLTest.negative_ldts_suspect_table` | manual_debug | — |
+| `cass.compaction.EarlyOpenCompactionTest.early_open_intermediate_readers` | manual_debug | — |
+| `cass.compaction.ForceCompactionTest.major_compaction_tombstone_purge` | manual_debug | — |
 | `cass.compaction.GcCompactionTest.static_and_complex_columns_survive_gc` | required_parity | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.compaction.LeveledCompactionStrategyTest.non_overlapping_levels` | manual_debug | — |
+| `cass.compaction.LeveledGenerationsTest.level_generation_merge_order` | manual_debug | — |
 | `cass.compaction.LongCompactionsTest.live_rows_lww_overlap` | required_parity | .github/workflows/live-cell-compaction-parity.yml |
+| `cass.compaction.LongLeveledCompactionStrategyTest.concurrent_level_merge_safety` | manual_debug | — |
+| `cass.compaction.ParallelizedTasksTest.sharded_row_partition_integrity` | manual_debug | — |
+| `cass.compaction.PartialCompactionsTest.tombstone_not_purged_excluded_sources` | manual_debug | — |
 | `cass.compaction.SSTableRewriterTest.output_component_integrity` | nightly_docker | .github/workflows/compaction-parity.yml |
+| `cass.compaction.SSTablesIteratedTest.merge_no_shadow_without_timestamp` | manual_debug | — |
+| `cass.compaction.ShardedCompactionWriterTest.shard_boundary_row_preservation` | manual_debug | — |
+| `cass.compaction.ShardedMultiWriterTest.flush_sharding_row_count` | manual_debug | — |
+| `cass.compaction.SingleSSTableLCSTaskTest.single_table_uplevel_metadata_readable` | manual_debug | — |
+| `cass.compaction.TimeWindowCompactionStrategyTest.ttl_window_expiry_purge` | manual_debug | — |
+| `cass.compaction.UnifiedCompactionDensitiesTest.sstable_density_distribution` | manual_debug | — |
+| `cass.compaction.UnifiedCompactionStrategyTest.gc_grace_purge_boundary` | manual_debug | — |
 | `cass.compaction.harness_byte_tier_artifacts` | nightly_docker | .github/workflows/compaction-parity.yml |
 | `cass.compaction.harness_logical_tier` | required_parity | .github/workflows/compaction-parity.yml |
 | `cass.compaction.issue_899_per_element_collection_compaction` | required_parity | .github/workflows/tombstone-ttl-parity.yml |
@@ -806,6 +910,7 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.compaction_merge.static_row.survives_tombstone_gc` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.compaction_merge.tombstone_ttl_shadowing` | manual_debug | — |
 | `cass.compaction_parity.statistics.repaired_metadata_preserve` | required_parity | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.compression.CompressionUpgradeTest.codec_compat_across_upgrade` | manual_debug | — |
 | `cass.compression.fixture_matrix.deflate` | exhaustive_regeneration | .github/workflows/compression-corruption-parity.yml |
 | `cass.compression.fixture_matrix.incompressible_uncompressed_chunk` | exhaustive_regeneration | .github/workflows/compression-corruption-parity.yml |
 | `cass.compression.fixture_matrix.lz4` | exhaustive_regeneration | .github/workflows/compression-corruption-parity.yml |
@@ -930,10 +1035,12 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.filter_db.no_false_negative_membership` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.filter_db.serialization_round_trip` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.filter_db.statistical_false_positive_rate` | manual_debug | — |
+| `cass.filter_db_bloom.SerializationsTest.bloom_filter_deserialization` | manual_debug | — |
 | `cass.filter_db_bloom.serialization_no_false_negative` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.index_db.CorruptPrimaryIndexTest.big_primary_index_corruption` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.index_db.RowIndexEntryTest.partition_offsets` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.index_db.RowIndexEntryTest.promoted_index_entries` | manual_debug | — |
+| `cass.index_db.RowIndexTest.row_index_sort_order` | manual_debug | — |
 | `cass.index_db.SSTableReaderTest.point_lookup_offsets` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.index_db.SSTableScannerTest.range_boundaries` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.index_db.big.raw_partition_keys_and_offsets` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
@@ -945,9 +1052,16 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.index_summary.big_index_offsets` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.index_summary.column_index.range_tombstone_boundary_big_bti` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.index_summary.summary_boundaries` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.memtable_flush.MemtableNegativeReleasedCQLReproTest.memtable_memory_accounting` | manual_debug | — |
+| `cass.memtable_flush.NonSplittablePartitionerTrieMemtableFlushSetTest.trie_memtable_flushset` | manual_debug | — |
+| `cass.memtable_flush.SSTableFlushObserverTest.secondary_index_observer` | manual_debug | — |
+| `cass.memtable_flush.SplittablePartitionerTrieMemtableFlushSetTest.trie_memtable_flushset_split` | manual_debug | — |
 | `cass.nodetool_jmx_metrics.operational_out_of_scope` | fast_pr | — |
+| `cass.read_repair.ReadRepairCollectionQueriesTest.collection_divergence_repair` | manual_debug | — |
+| `cass.read_repair.SSTableAndMemTableDigestMatchTest.digest_match` | manual_debug | — |
 | `cass.read_repair_coordinator.out_of_scope` | fast_pr | — |
 | `cass.repair.PendingAntiCompactionTest.pending_repair_metadata` | required_parity | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.repair.RepairJobTest.merkle_tree_sync` | manual_debug | — |
 | `cass.repair.RepairedDataInfoTest.repaired_metadata_roundtrip` | required_parity | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.repair_coordinator.anti_entropy_out_of_scope` | fast_pr | — |
 | `cass.repaired_metadata.statistics_db.pending_repair_uuid` | manual_debug | — |
@@ -966,11 +1080,14 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.schema_evolution.serialization_header.no_schema_change` | required_parity | .github/workflows/cql-type-parity.yml |
 | `cass.schema_evolution.serialization_header.static_regular_kind_mismatch` | required_parity | .github/workflows/cql-type-parity.yml |
 | `cass.schema_evolution.serialization_header_column_order` | fast_pr | — |
+| `cass.scrub_verify.ScrubToolTest.scrub_corrupt_partitions` | manual_debug | — |
 | `cass.serialization.SerializationHeaderTest.static_and_dropped_columns` | required_parity | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.serialization.SerializationHeaderTest.udt_schema_resolution` | required_parity | .github/workflows/live-cell-compaction-parity.yml |
 | `cass.serialization.SerializationMirrorTest.schema_evolution_ordering` | required_parity | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.sstable_format.CQLSSTableWriterTest.frozen_udt_roundtrip` | required_parity | .github/workflows/live-cell-compaction-parity.yml |
 | `cass.sstable_format.LegacySSTableTest.complex_udt_frozen_non_frozen` | required_parity | .github/workflows/live-cell-compaction-parity.yml |
+| `cass.sstable_format.SSTableIdGenerationTest.mixed_id_scheme_readable` | manual_debug | — |
+| `cass.sstable_format.VersionSupportedFeaturesTest.version_feature_matrix` | manual_debug | — |
 | `cass.sstable_format.descriptor_component_resolution` | fast_pr | — |
 | `cass.sstable_format.toc_component_manifest` | fast_pr | — |
 | `cass.sstable_io.reader.tombstone_only_partition` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
@@ -987,6 +1104,8 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.statistics_metadata.max_local_deletion_time.tombstones_ttl` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.statistics_metadata.serialization_header` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.statistics_metadata.tombstone_histogram.deletion_times` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.streaming.EntireSSTableStreamConcurrentComponentMutationTest.zero_copy_stream_mutation` | manual_debug | — |
+| `cass.streaming.SSTableZeroCopyWriterTest.zero_copy_component_roundtrip` | manual_debug | — |
 | `cass.streaming_protocol.node_lifecycle_out_of_scope` | fast_pr | — |
 | `cass.summary_db.IndexSummaryManagerTest.memory_constrained_summary_reload` | manual_debug | — |
 | `cass.summary_db.IndexSummaryRedistributionTest.downsampled_summary_entries` | manual_debug | — |
@@ -996,9 +1115,12 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.summary_db.big.index_offset_references` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.summary_db.bti.summary_discovery_classification` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.tombstone_ttl.NeverPurgeTest.preserve_all_tombstone_types` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.tombstone_ttl.RangeTombstoneBurnTest.range_partition_column_deletes_readable` | manual_debug | — |
 | `cass.tombstone_ttl.RangeTombstoneTest.marker_merge_and_persistence` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.tombstone_ttl.RepairedDataTombstonesTest.repair_metadata_gates_purge` | required_parity | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.tombstone_ttl.TTLExpiryTest.gc_boundary` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.tombstone_ttl.TombstonesTest.overwhelming_threshold_guardrail` | manual_debug | — |
+| `cass.tombstone_ttl.ViewComplexTombstoneTest.cell_tombstone_not_purged` | manual_debug | — |
 | `cass.tombstone_ttl.deletion_markers.cell_delete` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.tombstone_ttl.deletion_markers.partition_delete` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.tombstone_ttl.deletion_markers.range_delete_bounds` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
@@ -1020,6 +1142,7 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.tombstone_ttl.ttl_cells.local_deletion_time` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.tombstone_ttl.ttl_cells.mixed_expiring_and_live` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.tombstone_ttl.ttl_expiry.gc_before_boundary` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.tools_cli.StandaloneUpgraderOnSStablesTest.standalone_upgrade` | manual_debug | — |
 | `cass.verify.component_presence` | nightly_docker | .github/workflows/compression-corruption-parity.yml |
 | `cass.verify.compression_info_parse` | nightly_docker | .github/workflows/compression-corruption-parity.yml |
 | `cass.verify.digest_crc32_match` | nightly_docker | .github/workflows/compression-corruption-parity.yml |
@@ -1028,6 +1151,9 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.verify.healthy_uncompressed_sstable` | nightly_docker | .github/workflows/compression-corruption-parity.yml |
 | `cass.verify.inline_crc_validation` | nightly_docker | .github/workflows/compression-corruption-parity.yml |
 | `cass.verify.no_silent_empty_result_on_corruption` | nightly_docker | .github/workflows/compression-corruption-parity.yml |
+| `cass.write_load_path.FlushingTest.flush_no_phantom_rows` | manual_debug | — |
+| `cass.write_load_path.MemtableQuickTest.flush_living_cells_survive` | manual_debug | — |
+| `cass.write_load_path.SSTableWriterTransactionTest.writer_output_components` | manual_debug | — |
 | `cass.write_load_path.cassandra_sstable_writer_fixtures` | fast_pr | — |
 | `cass.write_load_path.cql_sstable_writer.finished_data_db_artifacts` | exhaustive_regeneration | .github/workflows/cassandra-parity.yml |
 | `cass.write_load_path.flush.partition_boundary_artifacts` | exhaustive_regeneration | .github/workflows/cassandra-parity.yml |
@@ -1047,16 +1173,44 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.bti_big_version_matrix.big_nb_oa_read` | nb, oa | test-data/datasets/sstables/test_oa/simple_table-4b7cd05064e711f1bd3ac7dbf655c673/oa-2-big-Data.db.jsonl |
 | `cass.bti_big_version_matrix.bti_da_write_read` | da | test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Data.db.jsonl |
 | `cass.cli_reporting.parity_manifest_lint_and_report` | — | — |
+| `cass.commitlog.CommitLogStressTest.replay_round_trip` | — | — |
 | `cass.commitlog_replay.recovery_out_of_scope` | — | — |
+| `cass.compaction.AntiCompactionBytemanTest.repair_driven_anticompaction` | — | — |
+| `cass.compaction.AntiCompactionTest.range_split_repair_state` | — | — |
 | `cass.compaction.CompactionAwareWriterTest.live_row_count_preservation` | nb | test-data/datasets/sstables/test_compactionparity/live_clustering-e094a78073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl |
 | `cass.compaction.CompactionAwareWriterTest.row_count_and_order_preservation` | nb | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
+| `cass.compaction.CompactionColumnDeleteAndPurgeTest.cell_delete_purge` | nb, oa, big | — |
+| `cass.compaction.CompactionColumnTest.cell_merge_lww` | nb, oa, big | — |
+| `cass.compaction.CompactionControllerTest.purgeable_timestamp_boundary` | nb, oa, big | — |
+| `cass.compaction.CompactionDeleteAndPurgePKTest.partition_delete_purge` | nb, oa, big | — |
+| `cass.compaction.CompactionDeleteAndPurgeRowTest.row_delete_purge` | nb, oa, big | — |
+| `cass.compaction.CompactionDeletePKTest.partition_delete_preserved` | nb, oa, big | — |
+| `cass.compaction.CompactionDeleteRowRangeTest.range_tombstone_merge` | nb, oa, big | — |
+| `cass.compaction.CompactionDeleteRowTest.row_deletion_marker_preserved` | nb, oa, big | — |
 | `cass.compaction.CompactionIteratorTest.differential_compaction_loop` | nb | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
 | `cass.compaction.CompactionIteratorTest.live_partition_merge` | nb | test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl |
+| `cass.compaction.CompactionOverlappingSSTableTest.partial_space_constrained_merge` | nb, oa, big | — |
 | `cass.compaction.CompactionSimpleValueMergeTest.static_row_merge` | nb | — |
 | `cass.compaction.CompactionTaskTest.reject_mixed_repair_state` | nb | cqlite-core/tests/issue_1021_repaired_metadata_compaction_parity.rs |
+| `cass.compaction.CompactionsBytemanTest.fault_injected_compaction` | — | — |
+| `cass.compaction.CompactionsCQLTest.negative_ldts_suspect_table` | nb, oa, big | — |
+| `cass.compaction.EarlyOpenCompactionTest.early_open_intermediate_readers` | — | — |
+| `cass.compaction.ForceCompactionTest.major_compaction_tombstone_purge` | nb, oa, big | — |
 | `cass.compaction.GcCompactionTest.static_and_complex_columns_survive_gc` | nb | test-data/datasets/sstables/test_collections |
+| `cass.compaction.LeveledCompactionStrategyTest.non_overlapping_levels` | nb, oa, big | — |
+| `cass.compaction.LeveledGenerationsTest.level_generation_merge_order` | nb, oa, big | — |
 | `cass.compaction.LongCompactionsTest.live_rows_lww_overlap` | nb | test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl |
+| `cass.compaction.LongLeveledCompactionStrategyTest.concurrent_level_merge_safety` | nb, oa, big | — |
+| `cass.compaction.ParallelizedTasksTest.sharded_row_partition_integrity` | nb, oa, big | — |
+| `cass.compaction.PartialCompactionsTest.tombstone_not_purged_excluded_sources` | nb, oa, big | — |
 | `cass.compaction.SSTableRewriterTest.output_component_integrity` | nb | compaction-parity/build/parity-artifacts-byteParity/<scenario>/cassandra-output/<br>_fail:_ byte-diff.txt: first byte/offset diff per component (component, offset, ref byte, candidate byte, lengths), checksums.txt: SHA-256 of every component on both sides, cassandra-output/ and cqlite-output/: the full component dirs for offline decoding |
+| `cass.compaction.SSTablesIteratedTest.merge_no_shadow_without_timestamp` | nb, oa, big | — |
+| `cass.compaction.ShardedCompactionWriterTest.shard_boundary_row_preservation` | nb, oa, big | — |
+| `cass.compaction.ShardedMultiWriterTest.flush_sharding_row_count` | nb, oa, big | — |
+| `cass.compaction.SingleSSTableLCSTaskTest.single_table_uplevel_metadata_readable` | nb, oa, big | — |
+| `cass.compaction.TimeWindowCompactionStrategyTest.ttl_window_expiry_purge` | nb, oa, big | — |
+| `cass.compaction.UnifiedCompactionDensitiesTest.sstable_density_distribution` | nb, oa, big | — |
+| `cass.compaction.UnifiedCompactionStrategyTest.gc_grace_purge_boundary` | nb, oa, big | — |
 | `cass.compaction.harness_byte_tier_artifacts` | nb | compaction-parity/build/parity-artifacts-byteParity/<scenario>/cassandra-output/<br>_fail:_ byte-diff.txt: first differing byte/offset per component, checksums.txt: SHA-256 per component, both engines, commands.txt: exact cqlite compact + sstabledump command lines, cqlite-compact.stdout / cqlite-compact.stderr |
 | `cass.compaction.harness_logical_tier` | nb | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
 | `cass.compaction.issue_899_per_element_collection_compaction` | nb | test-data/datasets/sstables/test_collections<br>test-data/datasets/sstables/test_deltas/collection_ops-2a5006f06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl |
@@ -1076,6 +1230,7 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.compaction_merge.static_row.survives_tombstone_gc` | nb | test-data/datasets/sstables/test_tomb/static_with_tombstones-4cdb9780702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl |
 | `cass.compaction_merge.tombstone_ttl_shadowing` | nb | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
 | `cass.compaction_parity.statistics.repaired_metadata_preserve` | nb | cqlite-core/tests/issue_1021_repaired_metadata_compaction_parity.rs |
+| `cass.compression.CompressionUpgradeTest.codec_compat_across_upgrade` | nb, oa, big | — |
 | `cass.compression.fixture_matrix.deflate` | nb | test-data/datasets/sstables/test_comp/deflate_table-2592698071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt<br>test-data/datasets/sstables/test_comp/deflate_table-2592698071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/compression-fixture-deflate.log |
 | `cass.compression.fixture_matrix.incompressible_uncompressed_chunk` | nb | test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-25b8dd4071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt<br>test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-25b8dd4071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/compression-fixture-incompressible.log |
 | `cass.compression.fixture_matrix.lz4` | nb | test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt<br>test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/compression-fixture-lz4.log |
@@ -1200,10 +1355,12 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.filter_db.no_false_negative_membership` | nb, oa, da | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/filter-db-false-negative.log |
 | `cass.filter_db.serialization_round_trip` | nb, oa, da | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Data.db.jsonl<br>_fail:_ target/cassandra-parity/filter-db-roundtrip.log |
 | `cass.filter_db.statistical_false_positive_rate` | nb, oa, da | — |
+| `cass.filter_db_bloom.SerializationsTest.bloom_filter_deserialization` | nb, oa, big | — |
 | `cass.filter_db_bloom.serialization_no_false_negative` | nb, oa | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/filter-db-false-negative.log |
 | `cass.index_db.CorruptPrimaryIndexTest.big_primary_index_corruption` | nb, oa | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/index-db-diff.log |
 | `cass.index_db.RowIndexEntryTest.partition_offsets` | nb, oa | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/index-db-diff.log |
 | `cass.index_db.RowIndexEntryTest.promoted_index_entries` | nb | test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl |
+| `cass.index_db.RowIndexTest.row_index_sort_order` | nb, oa, big | — |
 | `cass.index_db.SSTableReaderTest.point_lookup_offsets` | nb, oa | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/index-db-diff.log |
 | `cass.index_db.SSTableScannerTest.range_boundaries` | nb, oa | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/index-db-diff.log |
 | `cass.index_db.big.raw_partition_keys_and_offsets` | nb, oa | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/index-db-diff.log |
@@ -1215,9 +1372,16 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.index_summary.big_index_offsets` | nb | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
 | `cass.index_summary.column_index.range_tombstone_boundary_big_bti` | nb | test-data/datasets/sstables/test_tomb/wide_range_tombstone-4ce3add0702011f1b8f419c9a388d558/nb-1-big-Statistics.db.txt |
 | `cass.index_summary.summary_boundaries` | nb, oa, big | test-data/datasets/sstables/test_timeseries/app_metrics-6c87b890a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ validation_artifacts/sstabledump/summary/summary_parity_report.md |
+| `cass.memtable_flush.MemtableNegativeReleasedCQLReproTest.memtable_memory_accounting` | — | — |
+| `cass.memtable_flush.NonSplittablePartitionerTrieMemtableFlushSetTest.trie_memtable_flushset` | — | — |
+| `cass.memtable_flush.SSTableFlushObserverTest.secondary_index_observer` | — | — |
+| `cass.memtable_flush.SplittablePartitionerTrieMemtableFlushSetTest.trie_memtable_flushset_split` | — | — |
 | `cass.nodetool_jmx_metrics.operational_out_of_scope` | — | — |
+| `cass.read_repair.ReadRepairCollectionQueriesTest.collection_divergence_repair` | — | — |
+| `cass.read_repair.SSTableAndMemTableDigestMatchTest.digest_match` | — | — |
 | `cass.read_repair_coordinator.out_of_scope` | — | — |
 | `cass.repair.PendingAntiCompactionTest.pending_repair_metadata` | nb | — |
+| `cass.repair.RepairJobTest.merkle_tree_sync` | — | — |
 | `cass.repair.RepairedDataInfoTest.repaired_metadata_roundtrip` | nb, oa, da | test-data/datasets/sstables/system_schema/column_masks-738cc5ed01683268b9d1853d4bc278af/nb-45-big-Statistics.db.txt |
 | `cass.repair_coordinator.anti_entropy_out_of_scope` | — | — |
 | `cass.repaired_metadata.statistics_db.pending_repair_uuid` | nb, oa, da | test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt |
@@ -1236,11 +1400,14 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.schema_evolution.serialization_header.no_schema_change` | nb | test-data/datasets/sstables/test_types/se_no_schema_change-4f5a4d20706211f197e20b846582ecc8/nb-1-big-Statistics.db.txt<br>test-data/datasets/sstables/test_types/se_no_schema_change-4f5a4d20706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl<br>_fail:_ logs |
 | `cass.schema_evolution.serialization_header.static_regular_kind_mismatch` | nb | test-data/datasets/sstables/test_types/se_static_regular_kind_mismatch-4f87ecd0706211f197e20b846582ecc8/nb-1-big-Statistics.db.txt<br>test-data/datasets/sstables/test_types/se_static_regular_kind_mismatch-4f87ecd0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl<br>_fail:_ logs |
 | `cass.schema_evolution.serialization_header_column_order` | nb | — |
+| `cass.scrub_verify.ScrubToolTest.scrub_corrupt_partitions` | — | — |
 | `cass.serialization.SerializationHeaderTest.static_and_dropped_columns` | nb | test-data/datasets/sstables/test_tomb/dropped_static_col-4cd18560702011f1b8f419c9a388d558/nb-1-big-Statistics.db.txt<br>test-data/datasets/sstables/test_tomb/dropped_regular_col-4cc79a50702011f1b8f419c9a388d558/nb-2-big-Statistics.db.txt |
 | `cass.serialization.SerializationHeaderTest.udt_schema_resolution` | nb | test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl<br>test-data/datasets/sstables/test_compactionparityudt/udt_nested-3dda9a6073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl |
 | `cass.serialization.SerializationMirrorTest.schema_evolution_ordering` | nb | — |
 | `cass.sstable_format.CQLSSTableWriterTest.frozen_udt_roundtrip` | nb | test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-3dcdc92073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl<br>_fail:_ panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; typed JSONL (pk,cell)->value map mismatch |
 | `cass.sstable_format.LegacySSTableTest.complex_udt_frozen_non_frozen` | nb | test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl<br>_fail:_ panic diff: CQLite-compacted vs Cassandra-compacted Data.db/Index.db/Summary.db/Digest.crc32 byte mismatch (full hex of both); typed JSONL (pk,cell)->value map mismatch for the collection-element UDT decode |
+| `cass.sstable_format.SSTableIdGenerationTest.mixed_id_scheme_readable` | nb, oa, big | — |
+| `cass.sstable_format.VersionSupportedFeaturesTest.version_feature_matrix` | nb, oa, big | — |
 | `cass.sstable_format.descriptor_component_resolution` | nb, oa, da | — |
 | `cass.sstable_format.toc_component_manifest` | nb, oa, da | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt<br>test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-TOC.txt<br>test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-TOC.txt<br>test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Digest.crc32<br>test-data/datasets/sstables/test_oa/simple_table-4b7cd05064e711f1bd3ac7dbf655c673/oa-2-big-Digest.crc32<br>_fail:_ panic diff: cqlite-recomputed Digest.crc32 payload vs Cassandra reference (bytes + decoded decimal + Data.db path) |
 | `cass.sstable_io.reader.tombstone_only_partition` | nb | test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-2-big-Data.db.jsonl |
@@ -1257,6 +1424,8 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.statistics_metadata.max_local_deletion_time.tombstones_ttl` | nb | test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt<br>_fail:_ target/cassandra-parity/statistics-db-max-ldt-mismatch.log |
 | `cass.statistics_metadata.serialization_header` | nb | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt |
 | `cass.statistics_metadata.tombstone_histogram.deletion_times` | nb | test-data/datasets/sstables/test_tomb/tombstone_histogram-4ca1e9e0702011f1b8f419c9a388d558/nb-1-big-Statistics.db.txt<br>_fail:_ target/cassandra-parity/statistics-db-tombstone-histogram-mismatch.log |
+| `cass.streaming.EntireSSTableStreamConcurrentComponentMutationTest.zero_copy_stream_mutation` | — | — |
+| `cass.streaming.SSTableZeroCopyWriterTest.zero_copy_component_roundtrip` | — | — |
 | `cass.streaming_protocol.node_lifecycle_out_of_scope` | — | — |
 | `cass.summary_db.IndexSummaryManagerTest.memory_constrained_summary_reload` | — | — |
 | `cass.summary_db.IndexSummaryRedistributionTest.downsampled_summary_entries` | nb, oa, big | — |
@@ -1266,9 +1435,12 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.summary_db.big.index_offset_references` | nb, oa, big | test-data/datasets/sstables/test_timeseries/app_metrics-6c87b890a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ validation_artifacts/sstabledump/summary/summary_parity_report.md |
 | `cass.summary_db.bti.summary_discovery_classification` | nb, oa, da, big, bti | test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-TOC.txt<br>_fail:_ validation_artifacts/sstabledump/summary/summary_parity_report.md |
 | `cass.tombstone_ttl.NeverPurgeTest.preserve_all_tombstone_types` | nb, oa | test-data/datasets/sstables/test_deltas/partition_tombstones-299258f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_deltas/row_tombstones-297f1f10701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_deltas/cell_tombstones-29733830701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/tombstone-types-delta-diff.log |
+| `cass.tombstone_ttl.RangeTombstoneBurnTest.range_partition_column_deletes_readable` | nb, oa, big | — |
 | `cass.tombstone_ttl.RangeTombstoneTest.marker_merge_and_persistence` | nb, oa | test-data/datasets/sstables/test_deltas/range_tombstones-298894f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/range-marker-grammar-diff.log |
 | `cass.tombstone_ttl.RepairedDataTombstonesTest.repair_metadata_gates_purge` | nb | — |
 | `cass.tombstone_ttl.TTLExpiryTest.gc_boundary` | nb, oa | test-data/datasets/sstables/test_deltas/ttl_cells-299c9220701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/ttl-gc-boundary-delta-diff.log |
+| `cass.tombstone_ttl.TombstonesTest.overwhelming_threshold_guardrail` | — | — |
+| `cass.tombstone_ttl.ViewComplexTombstoneTest.cell_tombstone_not_purged` | nb, oa, big | — |
 | `cass.tombstone_ttl.deletion_markers.cell_delete` | nb | test-data/datasets/sstables/test_deltas/cell_tombstones-88c7bde06c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl |
 | `cass.tombstone_ttl.deletion_markers.partition_delete` | nb | test-data/datasets/sstables/test_deltas/partition_tombstones-88f66f006c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl |
 | `cass.tombstone_ttl.deletion_markers.range_delete_bounds` | nb | test-data/datasets/sstables/test_deltas/range_tombstones-88e928906c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl |
@@ -1290,6 +1462,7 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.tombstone_ttl.ttl_cells.local_deletion_time` | nb | test-data/datasets/sstables/test_deltas/ttl_cells-890626706c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl |
 | `cass.tombstone_ttl.ttl_cells.mixed_expiring_and_live` | nb | test-data/datasets/sstables/test_deltas/ttl_cells-890626706c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl |
 | `cass.tombstone_ttl.ttl_expiry.gc_before_boundary` | nb | test-data/datasets/sstables/test_tomb/gc_before_boundary-4c92ceb0702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl |
+| `cass.tools_cli.StandaloneUpgraderOnSStablesTest.standalone_upgrade` | — | — |
 | `cass.verify.component_presence` | nb | test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl |
 | `cass.verify.compression_info_parse` | nb | test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl |
 | `cass.verify.digest_crc32_match` | nb | test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl |
@@ -1298,6 +1471,9 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.verify.healthy_uncompressed_sstable` | nb | test-data/datasets/sstables/test_comp/uncompressed_table-25a5ca7071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl |
 | `cass.verify.inline_crc_validation` | nb | test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl |
 | `cass.verify.no_silent_empty_result_on_corruption` | nb | test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml<br>test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl |
+| `cass.write_load_path.FlushingTest.flush_no_phantom_rows` | nb, oa, big | — |
+| `cass.write_load_path.MemtableQuickTest.flush_living_cells_survive` | nb, oa, big | — |
+| `cass.write_load_path.SSTableWriterTransactionTest.writer_output_components` | nb, oa, big | — |
 | `cass.write_load_path.cassandra_sstable_writer_fixtures` | nb | — |
 | `cass.write_load_path.cql_sstable_writer.finished_data_db_artifacts` | nb | test-data/datasets/sstables/test_writeparity/finished_data-18ca5be0735711f1a757db89184be81f/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_writeparity/finished_data-18ca5be0735711f1a757db89184be81f/nb-1-big-Data.db<br>test-data/datasets/sstables/test_writeparity/finished_data-18ca5be0735711f1a757db89184be81f/nb-1-big-Index.db<br>test-data/datasets/sstables/test_writeparity/finished_data-18ca5be0735711f1a757db89184be81f/nb-1-big-Summary.db<br>test-data/datasets/sstables/test_writeparity/finished_data-18ca5be0735711f1a757db89184be81f/nb-1-big-Digest.crc32<br>_fail:_ panic diff: CQLite-written vs Cassandra-reference component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; TOC component-set delta; JSONL partition-count / per-partition row assertion |
 | `cass.write_load_path.flush.partition_boundary_artifacts` | nb | test-data/datasets/sstables/test_writeparity/partition_boundary-1909d5e0735711f1a757db89184be81f/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_writeparity/partition_boundary-1909d5e0735711f1a757db89184be81f/nb-1-big-Data.db<br>test-data/datasets/sstables/test_writeparity/partition_boundary-1909d5e0735711f1a757db89184be81f/nb-1-big-Index.db<br>test-data/datasets/sstables/test_writeparity/partition_boundary-1909d5e0735711f1a757db89184be81f/nb-1-big-Summary.db<br>test-data/datasets/sstables/test_writeparity/partition_boundary-1909d5e0735711f1a757db89184be81f/nb-1-big-Digest.crc32<br>_fail:_ panic diff: CQLite-written vs Cassandra-reference component (cass len + ours len + first-diff byte index + full hex of both) for Index.db / Data.db / Summary.db / Digest.crc32; TOC component-set delta; JSONL partition-count / per-partition row assertion |

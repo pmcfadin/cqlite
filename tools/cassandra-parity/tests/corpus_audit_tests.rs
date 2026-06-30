@@ -16,13 +16,22 @@ const GOOD_SHA: &str = "f278f6774fc76465c182041e081982105c3e7dbb";
 const REF: &str = "test-data/datasets/sstables/test_basic/simple_table-aaaa0000000000000000000000000001/nb-1-big-Data.db.jsonl";
 
 /// An index with one classified + one unclassified high-relevance Java file.
+///
+/// Emits the detailed per-file section format the coverage parser consumes
+/// (issue #1199): each high file is a `#### 🔴 High · \`Name.java\`` header
+/// followed by its `- **Path:** \`...\`` line. The basename-only "quick list"
+/// table is no longer parsed, so fixtures must use this layout.
 fn index_text(include_unclassified: bool) -> String {
     let mut s = String::from(
-        "# Cassandra test index\n\n## High-relevance tests (quick list)\n\n\
-         | Test | Notes |\n|------|-------|\n| `SortedTableWriterTest.java` | classified |\n",
+        "# Cassandra test index\n\n## Detailed high-relevance tests\n\n\
+         #### 🔴 High · `SortedTableWriterTest.java`\n\
+         - **Path:** `test/unit/org/apache/cassandra/io/sstable/format/SortedTableWriterTest.java`\n",
     );
     if include_unclassified {
-        s.push_str("| `RogueUnclassifiedTest.java` | not in manifest |\n");
+        s.push_str(
+            "#### 🔴 High · `RogueUnclassifiedTest.java`\n\
+             - **Path:** `test/unit/org/apache/cassandra/db/RogueUnclassifiedTest.java`\n",
+        );
     }
     s.push_str("\n## Other section\n");
     s
