@@ -125,6 +125,11 @@ fn compare_ordered_seq(a: &[&Value], b: &[&Value]) -> Ordering {
 pub(super) fn compare_set(a: &[Value], b: &[Value]) -> Ordering {
     let mut sa: Vec<&Value> = a.iter().collect();
     let mut sb: Vec<&Value> = b.iter().collect();
+    // PERF (correctness-first, #1296): each pairwise call re-sorts both inner
+    // sets, so an OUTER sort that compares this set O(N log N) times re-sorts the
+    // same inner collections O(N log N) times — correct but redundant. A future
+    // optimization is to canonicalize (sort) each element ONCE before the outer
+    // sort; intentionally out of scope here (no behavioral change).
     sa.sort_by(|x, y| compare_collection_elements(x, y));
     sb.sort_by(|x, y| compare_collection_elements(x, y));
     compare_ordered_seq(&sa, &sb)
@@ -149,6 +154,12 @@ pub(super) fn compare_list(a: &[Value], b: &[Value]) -> Ordering {
 pub(super) fn compare_map(a: &[(Value, Value)], b: &[(Value, Value)]) -> Ordering {
     let mut sa: Vec<&(Value, Value)> = a.iter().collect();
     let mut sb: Vec<&(Value, Value)> = b.iter().collect();
+    // PERF (correctness-first, #1296): each pairwise call re-sorts both inner
+    // maps by key, so an OUTER sort that compares this map O(N log N) times
+    // re-sorts the same inner collections O(N log N) times — correct but
+    // redundant. A future optimization is to canonicalize (key-sort) each map
+    // ONCE before the outer sort; intentionally out of scope here (no behavioral
+    // change).
     sa.sort_by(|x, y| compare_collection_elements(&x.0, &y.0));
     sb.sort_by(|x, y| compare_collection_elements(&x.0, &y.0));
     let common = sa.len().min(sb.len());
@@ -414,5 +425,54 @@ mod tests {
             compare_collection_elements(&udt(Some(-100)), &udt(None)),
             Ordering::Greater
         );
+    }
+
+    /// `frozen<list<T>>` PRESERVES INSERTION ORDER (it is NOT sorted) — the most
+    /// error-prone part of the contract: sets/maps canonicalize (sort) but lists
+    /// do not. `[3,1]` vs `[1,3]` is decided POSITIONALLY by element 0 (3 vs 1) →
+    /// `Greater`. If `compare_list` sorted (like a set), both would canonicalize to
+    /// `[1,3]` and the result would be `Equal` — so a `Greater`/`Less` (non-equal)
+    /// result is exactly what proves no sort happens. The SAME elements as a SET
+    /// DO compare equal, pinning the list-vs-set distinction.
+    #[test]
+    fn frozen_list_preserves_insertion_order_not_sorted() {
+        let l_3_1 = vec![Value::Integer(3), Value::Integer(1)];
+        let l_1_3 = vec![Value::Integer(1), Value::Integer(3)];
+        // List: positional — element 0 (3 vs 1) decides → Greater (NOT sorted).
+        assert_eq!(compare_list(&l_3_1, &l_1_3), Ordering::Greater);
+        assert_eq!(compare_list(&l_1_3, &l_3_1), Ordering::Less);
+        // Via the dispatcher (Value::List arm) — same positional result.
+        assert_eq!(
+            compare_collection_elements(&Value::List(l_3_1.clone()), &Value::List(l_1_3.clone())),
+            Ordering::Greater
+        );
+        // CONTRAST: the SAME elements as a SET canonicalize (sort) to {1,3} on both
+        // sides → Equal. A list of the same elements is NOT equal, proving lists are
+        // ordered element-wise positionally while sets are reordered.
+        assert_eq!(
+            compare_collection_elements(&Value::Set(l_3_1.clone()), &Value::Set(l_1_3.clone())),
+            Ordering::Equal
+        );
+        assert_ne!(
+            compare_collection_elements(&Value::List(l_3_1), &Value::List(l_1_3)),
+            Ordering::Equal
+        );
+    }
+
+    /// `frozen<list<T>>` compared ELEMENT-WISE POSITIONALLY (not reordered): when
+    /// element 0 ties, element 1 decides in stored position. `[1,3]` < `[1,9]` on
+    /// element 1 (3 < 9), and the prefix `[1]` < `[1,0]` (shorter-first tiebreak) —
+    /// note `[1,0]` would sort to `[0,1]` and flip if lists were sorted, so the
+    /// `[1] < [1,0]` result also confirms positional (un-sorted) comparison.
+    #[test]
+    fn frozen_list_compared_elementwise_positionally() {
+        let l_1_3 = vec![Value::Integer(1), Value::Integer(3)];
+        let l_1_9 = vec![Value::Integer(1), Value::Integer(9)];
+        assert_eq!(compare_list(&l_1_3, &l_1_9), Ordering::Less);
+        // Prefix/length tiebreak, positional: [1] < [1,0].
+        let l_1 = vec![Value::Integer(1)];
+        let l_1_0 = vec![Value::Integer(1), Value::Integer(0)];
+        assert_eq!(compare_list(&l_1, &l_1_0), Ordering::Less);
+        assert_eq!(compare_list(&l_1_0, &l_1), Ordering::Greater);
     }
 }
