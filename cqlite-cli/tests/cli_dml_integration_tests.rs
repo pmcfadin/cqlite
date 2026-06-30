@@ -396,3 +396,64 @@ fn test_cli_execute_insert_then_flush() {
         "Should print OK for INSERT. stdout: {stdout}"
     );
 }
+
+/// Issue #1253: a SINGLE combined `--execute INSERT ... --flush` invocation must
+/// persist the inserted row's VALUE into the produced SSTable. Previously the
+/// `--flush` handler ran before `--execute`, flushing an empty memtable; the row
+/// only landed in the WAL, never in Data.db. This is a content assertion: it
+/// reopens the produced SSTable read-only and reads the row back.
+#[test]
+fn test_cli_execute_insert_and_flush_single_invocation_persists_value() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema_path = create_simple_schema(&temp_dir);
+    let write_dir = temp_dir.path().join("write_data");
+
+    // Single invocation: INSERT + flush together.
+    let output = run_write_cli(&[
+        "--writable",
+        "--write-dir",
+        write_dir.to_str().unwrap(),
+        "--schema",
+        schema_path.to_str().unwrap(),
+        "--execute",
+        "INSERT INTO test_write.users (id, name, age) VALUES (7, 'Grace', 42)",
+        "--flush",
+    ]);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "Combined INSERT + flush should succeed. stderr: {stderr}"
+    );
+
+    // The flush must produce a real Data.db (not an empty-memtable no-op).
+    let data_db = write_dir.join("data/test_write/users/nb-1-big-Data.db");
+    assert!(
+        data_db.exists(),
+        "Combined INSERT + flush must produce Data.db. stdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // Reopen the produced SSTable READ-ONLY and assert the inserted VALUE is present.
+    let read_output = run_write_cli(&[
+        "--schema",
+        schema_path.to_str().unwrap(),
+        "--data-dir",
+        write_dir.join("data").to_str().unwrap(),
+        "--execute",
+        "SELECT * FROM test_write.users",
+        "--out",
+        "json",
+    ]);
+    let read_stdout = String::from_utf8_lossy(&read_output.stdout);
+    let read_stderr = String::from_utf8_lossy(&read_output.stderr);
+    assert!(
+        read_output.status.success(),
+        "Read-back SELECT should succeed. stderr: {read_stderr}"
+    );
+    assert!(
+        read_stdout.contains("\"Grace\"") && read_stdout.contains("42"),
+        "Inserted row value must be persisted in the SSTable and readable back. \
+         Got read stdout: {read_stdout}\nread stderr: {read_stderr}"
+    );
+}
