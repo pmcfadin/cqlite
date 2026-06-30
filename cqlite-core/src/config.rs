@@ -106,18 +106,25 @@ pub struct StorageConfig {
     ///
     /// Defaults to [`DiskAccessMode::Auto`], which sizes each Data.db file
     /// against system RAM and picks the backend automatically:
-    /// - files below [`Self::mmap_min_size_bytes`] use buffered I/O (mapping a
-    ///   tiny file is not worth the setup cost);
-    /// - files up to [`Self::direct_io_memory_fraction`] of system memory are
-    ///   **memory-mapped**, so repeated scans stay resident in the page cache;
+    /// - files up to [`Self::direct_io_memory_fraction`] of system memory use
+    ///   **buffered I/O** through the OS page cache with ordinary kernel
+    ///   read-ahead — the safe, contention-friendly default;
     /// - files larger than that fraction use **direct I/O** (`O_DIRECT` on
     ///   Linux, `F_NOCACHE` on macOS), which bypasses the page cache so a
     ///   single huge scan does not evict everything else the host has cached.
     ///
+    /// `Auto` deliberately does **not** select memory-mapping (issue #1143):
+    /// mmap with `madvise(MADV_SEQUENTIAL)` read-ahead has aggressive drop-behind
+    /// that thrashes the shared page cache when multiple readers scan the same
+    /// file while a writer flushes, roughly doubling read p99 under concurrent
+    /// write load even though it speeds up an *isolated* scan. Use mmap only when
+    /// you ask for it explicitly.
+    ///
     /// Set an explicit [`DiskAccessMode::Buffered`], [`DiskAccessMode::Mmap`],
     /// or [`DiskAccessMode::Direct`] to override the heuristic. The legacy
     /// [`Self::use_mmap`] flag still forces mmap when `Auto` would otherwise
-    /// pick buffered, for backward compatibility.
+    /// pick buffered, for backward compatibility (and for the repeated-rescan
+    /// workload mmap was built for).
     ///
     /// Can also be set at runtime via `CQLITE_DISK_ACCESS_MODE`
     /// (`auto` / `buffered` / `mmap` / `direct`).
@@ -125,7 +132,7 @@ pub struct StorageConfig {
     pub disk_access_mode: DiskAccessMode,
 
     /// Fraction of total system memory above which [`DiskAccessMode::Auto`]
-    /// switches a file from memory-mapped to direct I/O. Defaults to `0.5`
+    /// switches a file from buffered to direct I/O. Defaults to `0.5`
     /// (half of RAM). Clamped to `(0.0, 1.0]`; values outside that range fall
     /// back to the default. Ignored when system memory cannot be determined
     /// (in which case `Auto` never escalates to direct I/O).

@@ -602,8 +602,10 @@ mod tests {
         assert_eq!(parse_prefetch_mode("???"), None);
     }
 
-    /// The `Auto` heuristic: tiny → buffered, sub-RAM → mmap, > fraction of
-    /// RAM → direct (when memory is known and direct I/O is compiled in).
+    /// The `Auto` heuristic (issue #1143): sub-RAM-fraction → buffered (NEVER
+    /// mmap — mmap+SEQUENTIAL drop-behind thrashes the page cache under
+    /// concurrent write load), > fraction of RAM → direct (when memory is known
+    /// and direct I/O is compiled in, else buffered).
     #[test]
     fn test_resolve_disk_access_mode_auto() {
         use super::super::resolve_disk_access_mode;
@@ -618,25 +620,30 @@ mod tests {
             DiskAccessMode::Buffered
         );
 
-        // Below mmap_min_size_bytes → buffered.
+        // Tiny file → buffered.
         assert_eq!(
             resolve_disk_access_mode(DiskAccessMode::Auto, 100, min, 0.5, Some(8 * gib), true),
             DiskAccessMode::Buffered
         );
 
-        // Comfortably sub-RAM → mmap.
+        // Comfortably sub-RAM → buffered (issue #1143: no longer mmap). This is
+        // the load-bearing assertion the read-while-write tail regression turned
+        // on: `Auto` must not silently pick mmap+SEQUENTIAL read-ahead for an
+        // ordinary-sized SSTable, which is the common benchmark/production case.
         assert_eq!(
             resolve_disk_access_mode(DiskAccessMode::Auto, gib, min, 0.5, Some(8 * gib), true),
-            DiskAccessMode::Mmap
+            DiskAccessMode::Buffered
         );
 
-        // Larger than half of RAM → direct.
+        // Larger than half of RAM → direct (page-cache-bypassing one-shot scan;
+        // no shared-page drop-behind, so no cross-reader thrash).
         assert_eq!(
             resolve_disk_access_mode(DiskAccessMode::Auto, 5 * gib, min, 0.5, Some(8 * gib), true),
             DiskAccessMode::Direct
         );
 
-        // Larger than half of RAM but direct I/O unavailable → mmap.
+        // Larger than half of RAM but direct I/O unavailable → buffered (NOT
+        // mmap: the contention hazard outweighs avoiding cache eviction).
         assert_eq!(
             resolve_disk_access_mode(
                 DiskAccessMode::Auto,
@@ -646,13 +653,13 @@ mod tests {
                 Some(8 * gib),
                 false
             ),
-            DiskAccessMode::Mmap
+            DiskAccessMode::Buffered
         );
 
-        // Unknown system memory → never escalates to direct.
+        // Unknown system memory → never escalates to direct; stays buffered.
         assert_eq!(
             resolve_disk_access_mode(DiskAccessMode::Auto, 100 * gib, min, 0.5, None, true),
-            DiskAccessMode::Mmap
+            DiskAccessMode::Buffered
         );
 
         // A non-finite/zero fraction falls back to the 0.5 default.
@@ -697,9 +704,10 @@ mod tests {
     }
 
     /// End-to-end: `disk_access_mode` drives backend selection. The default
-    /// `Auto` mode maps a small (sub-RAM) Data.db file; an explicit `Buffered`
-    /// mode and the `mmap_min_size_bytes` threshold both force buffered I/O; the
-    /// legacy `use_mmap` flag still selects mmap.
+    /// `Auto` mode now uses buffered I/O for a small (sub-RAM) Data.db file
+    /// (issue #1143 — `Auto` no longer silently maps); an explicit `Buffered`
+    /// mode also stays buffered; the legacy `use_mmap` flag and an explicit
+    /// `Mmap` mode both still select the mmap backend.
     #[tokio::test]
     async fn test_config_drives_mmap_backend() -> crate::Result<()> {
         use super::super::SSTableReader;
@@ -725,11 +733,13 @@ mod tests {
         let mut config = Config::default();
         let platform = Arc::new(Platform::new(&config).await?);
 
-        // Default config (Auto): a >4KiB file far below system RAM is mapped.
+        // Default config (Auto): a sub-RAM file is now BUFFERED, not mapped
+        // (issue #1143). `Auto` must never silently select mmap+SEQUENTIAL
+        // read-ahead, whose drop-behind doubled read p99 under concurrent write.
         let reader = SSTableReader::open(&data_file, &config, platform.clone()).await?;
         assert!(
-            reader.is_mmap_backed().await,
-            "Auto must map a small (sub-RAM) file"
+            !reader.is_mmap_backed().await,
+            "Auto must use buffered I/O for a sub-RAM file (issue #1143), not mmap"
         );
 
         // Explicit Buffered mode forces buffered I/O.
@@ -740,7 +750,16 @@ mod tests {
             "explicit Buffered mode must not map"
         );
 
+        // Explicit Mmap mode still selects the mmap backend (opt-in preserved).
+        config.storage.disk_access_mode = DiskAccessMode::Mmap;
+        let explicit_mmap = SSTableReader::open(&data_file, &config, platform.clone()).await?;
+        assert!(
+            explicit_mmap.is_mmap_backed().await,
+            "explicit Mmap mode must select the mmap backend"
+        );
+
         // Legacy opt-in still selects mmap even with mode left at Buffered.
+        config.storage.disk_access_mode = DiskAccessMode::Buffered;
         config.storage.use_mmap = true;
         let mapped = SSTableReader::open(&data_file, &config, platform.clone()).await?;
         assert!(
@@ -748,14 +767,15 @@ mod tests {
             "use_mmap=true must select the mmap backend for a >4KiB file"
         );
 
-        // A min-size threshold above the file size forces buffered under Auto.
+        // Auto stays buffered regardless of the (now Auto-irrelevant) min-size
+        // threshold: Auto never maps, so it is buffered here too.
         config.storage.use_mmap = false;
         config.storage.disk_access_mode = DiskAccessMode::Auto;
         config.storage.mmap_min_size_bytes = usize::MAX;
         let small = SSTableReader::open(&data_file, &config, platform.clone()).await?;
         assert!(
             !small.is_mmap_backed().await,
-            "files below mmap_min_size_bytes must stay buffered"
+            "Auto must stay buffered (issue #1143)"
         );
 
         Ok(())

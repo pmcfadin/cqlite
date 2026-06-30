@@ -727,15 +727,23 @@ run_component core-tests cargo test --package cqlite-core --features cli-helpers
 run_component tombstones-scan cargo test --package cqlite-core \
   --features write-support,cli-helpers,tombstones \
   --test issue_1085_tombstones_full_scan_parity
-# Issue #1143: the thread-identity guard proves the windowed scan's
-# decompress+parse runs OFF the async worker pool. Its probe is gated behind the
-# non-default `scan-offload-probe` feature (so the instrumentation never ships in
-# normal builds), and the test only compiles under that feature — so the default
-# core-tests run never executes it. Run it here with the feature on; a guard that
-# doesn't run in CI is not a guard.
-run_component scan-offload-guard cargo test --package cqlite-core \
-  --features cli-helpers,scan-offload-probe \
-  --test issue_1143_scan_offload_thread
+# Issue #1143: two regression guards, both gated behind the non-default
+# `scan-offload-probe` feature (so the probe instrumentation never ships in
+# normal builds) and so only compiled/run here:
+#   1. issue_1143_scan_offload_thread — the windowed scan's decompress+parse runs
+#      OFF the async worker pool (PR #1156 scan-stream starvation fix).
+#   2. issue_1143_default_disk_access_backend — the DEFAULT `Auto` disk-access
+#      backend does NOT silently memory-map an ordinary SSTable (#964 read-while-
+#      write tail regression: mmap+MADV_SEQUENTIAL drop-behind thrashed the page
+#      cache under concurrent write, ~doubling read p99). A guard that doesn't run
+#      in CI is not a guard, so run both with the feature on.
+run_component scan-offload-guard bash -c '
+  cargo test --package cqlite-core \
+    --features cli-helpers,scan-offload-probe \
+    --test issue_1143_scan_offload_thread &&
+  cargo test --package cqlite-core \
+    --features cli-helpers,scan-offload-probe \
+    --test issue_1143_default_disk_access_backend'
 # Compile EVERY target in the package first (--no-run, whole package) so a
 # new/edited test file that doesn't compile can't hide behind the enumerated
 # run-list (issue #865); then execute the seven CI-enforced targets.

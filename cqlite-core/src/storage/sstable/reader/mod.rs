@@ -52,6 +52,14 @@ pub use compaction_row::{
 #[doc(hidden)]
 pub use parsing::PublicV5CompressedLegacyParser as V5CompressedLegacyParser;
 
+// Issue #1143: probe for the disk-access-backend regression guard. Exposed only
+// under the non-default `scan-offload-probe` feature (alongside the existing
+// scan-offload thread probe) so the guard test can deterministically assert the
+// default `Auto` backend selection. Never present in normal/release builds.
+#[cfg(feature = "scan-offload-probe")]
+#[doc(hidden)]
+pub use probe_resolved_disk_access_mode as probe_disk_access_mode;
+
 // Re-export compression utilities for testing (Issue #202)
 #[doc(hidden)]
 pub use compression::extract_sstable_base_name;
@@ -181,9 +189,35 @@ fn system_memory_bytes() -> Option<u64> {
 /// heuristic can be unit-tested deterministically. Resolution rules:
 /// - explicit `Buffered`/`Mmap`/`Direct` are returned unchanged (the caller
 ///   applies graceful fallback if the OS refuses the backend);
-/// - `Auto` returns `Buffered` for files below `mmap_min_size_bytes`, `Direct`
-///   when the file exceeds `memory_fraction` of `system_memory` (and memory is
-///   known and direct I/O is available on this platform), otherwise `Mmap`.
+/// - `Auto` returns `Direct` when the file exceeds `memory_fraction` of
+///   `system_memory` (and memory is known and direct I/O is available on this
+///   platform), otherwise `Buffered`.
+///
+/// # Why `Auto` defaults to `Buffered`, not `Mmap` (issue #1143)
+///
+/// `Auto` used to escalate every sub-RAM-fraction file to `Mmap` with
+/// `madvise(MADV_SEQUENTIAL)` read-ahead (PrefetchMode::Auto → Sequential). That
+/// silently flipped the *default* read backend from buffered I/O — the pre-#964
+/// behaviour — to mmap-with-aggressive-sequential-readahead. `MADV_SEQUENTIAL`
+/// enables aggressive read-ahead **and drop-behind** (the kernel evicts pages
+/// behind each reader's cursor). Under concurrent write load — N readers all
+/// scanning the same Data.db while a writer flushes (the `mixed.read_while_write`
+/// shape, issue #1143) — that is pathological: each reader's drop-behind evicts
+/// pages the *other* readers still need (re-fault storms / page-cache thrash) and
+/// the eager read-ahead competes with the concurrent flush for the same I/O queue
+/// and page cache. Isolated single-reader throughput *improved* (sequential
+/// read-ahead is ideal with no contention), but read p99 under concurrent write
+/// roughly doubled — the classic "faster isolated, worse tail under contention"
+/// regression. Restoring `Buffered` as the `Auto` default removes the shared-page
+/// drop-behind hazard while keeping ordinary kernel read-ahead. `Mmap` stays
+/// available as an explicit opt-in (config / `CQLITE_DISK_ACCESS_MODE=mmap` /
+/// the legacy `use_mmap` flag) for the repeated-rescan workload it was built for.
+///
+/// `Direct` is still the right pick for a genuinely > RAM-fraction one-shot scan:
+/// it bypasses the page cache via its OWN per-cursor aligned read-ahead buffer
+/// (`DirectCursor`), so it neither thrashes the shared page cache nor performs
+/// cross-reader drop-behind — there is no contention hazard, and it keeps a giant
+/// scan from evicting everything else the host has warm.
 ///
 /// The deprecated `use_mmap` flag / `CQLITE_USE_MMAP` env is folded in by the
 /// caller (it promotes a `Buffered` request to `Mmap`), so it is not an input
@@ -206,9 +240,10 @@ fn resolve_disk_access_mode(
         DiskAccessMode::Mmap => DiskAccessMode::Mmap,
         DiskAccessMode::Direct => DiskAccessMode::Direct,
         DiskAccessMode::Auto => {
-            if file_size < mmap_min_size_bytes {
-                return DiskAccessMode::Buffered;
-            }
+            // `mmap_min_size_bytes` no longer gates `Auto` (it never picks mmap),
+            // but it remains meaningful for the explicit/`use_mmap` mmap path the
+            // caller resolves separately; reference it so the contract is explicit.
+            let _ = mmap_min_size_bytes;
             let fraction = if memory_fraction.is_finite() && memory_fraction > 0.0 {
                 memory_fraction.min(1.0)
             } else {
@@ -222,9 +257,37 @@ fn resolve_disk_access_mode(
                     }
                 }
             }
-            DiskAccessMode::Mmap
+            // Default: buffered I/O. See the regression note above (issue #1143)
+            // for why `Auto` must NOT silently select mmap+SEQUENTIAL read-ahead.
+            DiskAccessMode::Buffered
         }
     }
+}
+
+/// Issue #1143 regression guard probe: deterministically resolve the
+/// disk-access backend the DEFAULT (`Auto`) config picks for a given file size,
+/// using the same `resolve_disk_access_mode` + real system-memory inputs the
+/// reader uses at `open()`. Exposed ONLY under the non-default
+/// `scan-offload-probe` feature so the guard test can assert that `Auto` does
+/// NOT silently select mmap for an ordinary sub-RAM SSTable (the
+/// read-while-write tail regression's root cause). Adds zero cost to normal /
+/// release builds — the symbol does not exist there.
+#[cfg(feature = "scan-offload-probe")]
+#[doc(hidden)]
+pub fn probe_resolved_disk_access_mode(
+    configured: DiskAccessMode,
+    file_size: u64,
+    mmap_min_size_bytes: u64,
+    memory_fraction: f64,
+) -> DiskAccessMode {
+    resolve_disk_access_mode(
+        configured,
+        file_size,
+        mmap_min_size_bytes,
+        memory_fraction,
+        system_memory_bytes(),
+        direct_io_available(),
+    )
 }
 
 /// Whether the direct-I/O backend is compiled in for this platform.
