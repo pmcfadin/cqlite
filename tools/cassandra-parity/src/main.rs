@@ -372,6 +372,15 @@ fn walk_relative(dir: &Path) -> Result<BTreeSet<String>> {
 /// single separator so runs of spaces/tabs inside a path are preserved (issue
 /// #1026, Finding 3); splitting on whitespace would collapse them and mismatch
 /// the keys produced by [`walk_relative`]. Blank/comment lines are ignored.
+///
+/// ASSUMPTION: corpus paths contain neither a backslash nor a newline. GNU
+/// coreutils `sha256sum` escapes any filename containing one of those by
+/// prefixing the WHOLE line with a single `\` and backslash-escaping the path
+/// (`\` -> `\\`, newline -> `\n`). The audit consumes only `test-data/datasets/`
+/// component paths, which never contain such characters, so rather than carry a
+/// full unescaper we reject a `\`-marked line loudly: folding the leading `\`
+/// into the hash token (then `replace('\\','/')`-ing the escapes) would silently
+/// corrupt both the hash and the path key (issue #1026, Finding LOW B).
 fn read_sha256_file(path: &Path) -> Result<BTreeMap<String, String>> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading checksums file {}", path.display()))?;
@@ -382,6 +391,14 @@ fn read_sha256_file(path: &Path) -> Result<BTreeMap<String, String>> {
         let line = raw.trim_end();
         if line.is_empty() || line.trim_start().starts_with('#') {
             continue;
+        }
+        // A leading `\` marks a GNU-escaped line (path has a backslash/newline).
+        if line.starts_with('\\') {
+            bail!(
+                "checksums file {} contains a GNU sha256sum-escaped path (line starts with `\\`): \
+                 corpus component paths must not contain a backslash or newline",
+                path.display()
+            );
         }
         // The hash is the leading token up to the first space separator.
         let Some(sep) = line.find(' ') else {
@@ -620,5 +637,26 @@ mod tests {
             "binary-mode `*` prefix must be stripped, got: {map:?}"
         );
         assert_eq!(map.len(), 3, "comment/blank lines ignored, got: {map:?}");
+    }
+
+    /// Finding LOW B: GNU `sha256sum` escapes a path containing a backslash or
+    /// newline by prefixing the WHOLE line with `\`. The parser must reject such
+    /// a line loudly rather than fold the leading `\` into the hash token and
+    /// corrupt the key — corpus paths never contain those characters.
+    #[test]
+    fn read_sha256_file_rejects_gnu_escaped_backslash_line() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("sums.sha256");
+        let hash = "a".repeat(64);
+        // GNU emits a leading `\` and escapes the in-path backslash as `\\`.
+        let body = format!("\\{hash}  dir/with\\\\backslash.jsonl\n");
+        fs::write(&file, body).expect("write sums");
+
+        let err = read_sha256_file(&file).expect_err("escaped line must error");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("GNU sha256sum-escaped") && msg.contains("backslash"),
+            "expected a clear escaped-path error, got: {msg}"
+        );
     }
 }
