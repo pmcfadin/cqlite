@@ -180,8 +180,23 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
+    - name: Resolve the published tag
+      id: tag
+      run: |
+        set -euo pipefail
+        version="${{ needs.merge.outputs.version }}"
+        # The merge job always resolves a tag (a v* release version, or the
+        # required `image_tag` dispatch input which defaults to `dev`), so an
+        # empty value means something upstream broke — fail clearly instead of
+        # issuing a `docker pull <image>:` with a dangling reference.
+        if [ -z "$version" ]; then
+          echo "::error::merge job resolved no published tag (empty version) — cannot smoke-test the image"
+          exit 1
+        fi
+        echo "ref=${{ env.REGISTRY_IMAGE }}:${version}" >> "$GITHUB_OUTPUT"
+
     - name: Pull published image
-      run: docker pull ${{ env.REGISTRY_IMAGE }}:${{ needs.merge.outputs.version }}
+      run: docker pull "${{ steps.tag.outputs.ref }}"
 
     - name: Run container and assert it serves :8815
       run: |
@@ -190,13 +205,14 @@ jobs:
         mkdir -p "$data"
         cid=$(docker run -d -p 8815:8815 \
           -v "$data":/data:ro \
-          ${{ env.REGISTRY_IMAGE }}:${{ needs.merge.outputs.version }} \
+          "${{ steps.tag.outputs.ref }}" \
           --data-dir /data --listen 0.0.0.0:8815)
         # Always surface logs + clean up, whether we pass, fail, or error out.
         trap 'echo "--- container logs ---"; docker logs "$cid" 2>&1 || true; docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+        # Poll the listener with an explicit socket connect (python3 is always
+        # present on GitHub ubuntu runners) rather than a bash /dev/tcp redirect.
         for i in $(seq 1 30); do
-          if (exec 3<>/dev/tcp/127.0.0.1/8815) 2>/dev/null; then
-            exec 3>&- 3<&-
+          if python3 -c "import socket,sys; s=socket.socket(); s.settimeout(2); sys.exit(0 if s.connect_ex(('127.0.0.1',8815))==0 else 1)"; then
             echo "cqlite-flight is accepting connections on :8815 (after ${i}s) on ${{ matrix.platform }}"
             exit 0
           fi
