@@ -164,7 +164,10 @@ run_verify() {
   else
     verdict=corrupt
   fi
-  msg=$(echo "$raw" | grep -iE 'succeeded|Corrupt|Exception|mismatch|EOF|missing|Invalid' | head -2 | tr '\n\t' '  ')
+  # Optional summary extraction: a non-matching grep returns nonzero, which under
+  # errexit would abort before the ${msg:-rc=$rc} fallback can run. Make ONLY this
+  # extraction non-fatal so an empty msg falls through to the rc=$rc fallback.
+  msg=$(echo "$raw" | grep -iE 'succeeded|Corrupt|Exception|mismatch|EOF|missing|Invalid' | head -2 | tr '\n\t' '  ' || true)
   printf "%s\t%s\t%s\t%s\t%s\n" "$label" "$ks" "$tbl" "$verdict" "${msg:-rc=$rc}" >> "$OUT"
   echo "[verdicts] $label => $verdict (rc=$rc)" >&2
 }
