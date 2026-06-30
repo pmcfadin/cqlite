@@ -4085,8 +4085,8 @@ scenarios:
   # corruption_verify
   # ----------------------------------------------------------------------------
   - id: cass.corruption_verify.component_corruption_detection
-    title: Component corruption detection, scrub, and verify
-    status: planned
+    title: Component corruption detection verify parity vs Cassandra 5.0.2 sstableverify
+    status: mirrored
     capability: corruption_verify
     priority: P0
     risk: p0_data_loss
@@ -4095,25 +4095,82 @@ scenarios:
       relevance: high
       files:
         - VerifyTest.java
-        - ScrubTest.java
+        - StandaloneVerifier.java
     cqlite:
       coverage:
         suite: sstable_parity_corruption_verify
-    fixtures: {}
+        tests:
+          - cqlite-core/tests/sstable_parity_corruption_verify.rs
+        notes: >-
+          Fail-closed lane (sstable_parity_corruption_verify_matches_cassandra_per_fixture
+          + _clean_baseline_is_clean). It drives the PUBLIC verify surface —
+          verify_sstable(dir, VerifyMode::Full, ...), the same call path behind
+          `cqlite verify --mode full` — over the Cassandra-5.0.2-written
+          corruption corpus (corruption/test_comp_corrupt). For every active
+          single-mutation fixture it asserts (1) the returned VerifyReport.findings
+          contain the manifest-declared expected_error_class for the corrupted
+          component, and (2) CQLite's overall corrupt/clean verdict matches the
+          ACTUAL Cassandra 5.0.2 `sstableverify --extended --force` verdict captured
+          into corruption-manifest.yml's per-fixture cassandra_verdict (gated by
+          verdict_parity). The clean Cassandra-written lz4_table baseline verifies
+          clean (zero findings). In-scope classes: DigestMismatch, Data.db chunk
+          corruption (ChunkDecompressionError / ChunkOffsetOutOfBounds),
+          CompressionInfoCorrupt, IndexEntryCorrupt (BIG), BtiRootPointerCorrupt /
+          BtiTrieCorrupt, StatisticsHeaderCorrupt, SummaryCorrupt, MissingComponent.
+    fixtures:
+      references:
+        - test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
     evidence:
-      type: partial
-      artifacts: [checksums, component_files]
+      type: canonical_semantic
+      strict: false
+      artifacts: [checksums, component_files, jsonl, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, da]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-compression-parity.sh &&
+        OUT=$CQLITE_DATASETS_ROOT bash test-data/scripts/gen-wide-bti.sh &&
+        bash test-data/scripts/generate-corruption-corpus.sh
+        # Cassandra verdicts captured once via
+        # test-data/scripts/capture-cassandra-verify-verdicts.sh (cassandra:5.0.2)
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets CQLITE_REQUIRE_FIXTURES=1
+        cargo test -p cqlite-core --features write-support,cli-helpers
+        --test sstable_parity_corruption_verify -- --nocapture
+      normalization: >-
+        The parity oracle is Cassandra 5.0.2's actual `sstableverify --extended
+        --force` clean/corrupt verdict per fixture (captured into
+        corruption-manifest.yml's cassandra_verdict, NOT hand-encoded). CQLite's
+        verdict is `!VerifyReport.is_ok()` (any finding ⇒ corrupt). Verdicts are
+        compared as the boolean clean/corrupt equivalence on identical on-disk
+        bytes; CQLite's stable VerifyErrorClass codes are matched against each
+        fixture's expected_error_class. Corrupted *.db binaries are gitignored and
+        regenerate byte-for-byte from the committed clean sources + mutation
+        manifest, so CI re-derives the bytes but consumes the committed Cassandra
+        verdict (no live Cassandra per run).
+      reference_paths:
+        - test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml
+        - test-data/datasets/corruption/test_comp_corrupt/corruption-sha256.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/corruption-verify-parity.log
       known_limitations: >-
-        CQLite detects checksum mismatches on read but does not yet implement a
-        full scrub/verify pass with parity against Cassandra's nodetool verify.
+        Verify-parity ONLY. Scope is the structural/checksum corruption classes
+        CQLite's verifier detects. Out of scope (NO parity claimed, follow-ups
+        filed): scrub/recovery (ScrubResult good/bad/empty, out-of-order rewrite,
+        skip-corrupted, TTL-overflow fix), out-of-order key/row detection, and
+        negative/overflowed local-deletion-time — CQLite has no VerifyErrorClass
+        for these today. One recorded verdict DIVERGENCE: toc_missing_component —
+        Cassandra 5.0.2's standalone verifier scans on-disk components and rebuilds
+        the TOC, so a dropped TOC.txt line verifies CLEAN; CQLite is intentionally
+        STRICTER and reports MissingComponent (it treats TOC.txt as authoritative).
+        The test asserts that exact divergence (verdict_parity=divergent) rather
+        than claiming verdict equivalence for it.
     ci:
-      tier: manual_debug
-    scope:
-      target_suite: sstable_parity_corruption_verify
-      gap: No scrub/verify parity pass implemented.
-      next_step: >-
-        Implement a verify pass and compare detected-corruption outcomes against
-        Cassandra VerifyTest/ScrubTest scenarios.
+      tier: nightly_docker
+      workflow: .github/workflows/compression-corruption-parity.yml
+    scope: {}
 
   # ----------------------------------------------------------------------------
   # filter_db_bloom

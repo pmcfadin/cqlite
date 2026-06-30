@@ -55,6 +55,8 @@ on:
       - 'cqlite-core/tests/issue_997_compressioninfo_parity.rs'
       - 'cqlite-core/tests/issue_998_inline_crc_trailers.rs'
       - 'cqlite-core/tests/issue_1000_verifier.rs'
+      - 'cqlite-core/tests/sstable_parity_corruption_verify.rs'
+      - 'test-data/scripts/capture-cassandra-verify-verdicts.sh'
       - 'cqlite-core/tests/issue_1001_reject_unknown_compression.rs'
       - 'cqlite-core/tests/issue_1082_deflate_zlib.rs'
       - 'cqlite-core/tests/issue_1104_compaction_incompressible_chunks.rs'
@@ -150,6 +152,12 @@ jobs:
           done
 
       - name: Run compression / corruption parity tests (strict, fixtures present)
+        # sstable_parity_corruption_verify (issue #1236) is the fail-closed
+        # verify-parity lane: it drives the public verify_sstable surface over the
+        # corruption corpus and compares CQLite's clean/corrupt verdict + error
+        # class against the captured Cassandra 5.0.2 sstableverify verdicts pinned
+        # in corruption-manifest.yml. CQLITE_REQUIRE_FIXTURES=1 turns skip-clean
+        # into a hard failure here, so the comparison cannot false-pass.
         run: |
           env CQLITE_REQUIRE_FIXTURES=1 \
             CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
@@ -160,4 +168,5 @@ jobs:
               --test issue_1001_reject_unknown_compression \
               --test issue_1082_deflate_zlib \
               --test issue_1104_compaction_incompressible_chunks \
+              --test sstable_parity_corruption_verify \
               -- --nocapture

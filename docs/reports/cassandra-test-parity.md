@@ -10,9 +10,9 @@ Sources: [`docs/cassandra_test_index.md`](../../docs/cassandra_test_index.md) ·
 
 | Status | Scenarios |
 |---|---|
-| `mirrored` | 211 |
+| `mirrored` | 212 |
 | `partial` | 16 |
-| `planned` | 18 |
+| `planned` | 17 |
 | `out_of_scope` | 14 |
 | **total** | **259** |
 
@@ -23,9 +23,9 @@ _Counts are per scenario; see [Distinct test backing](#distinct-test-backing-ded
 | Evidence | Scenarios |
 |---|---|
 | `byte_for_byte` | 113 |
-| `canonical_semantic` | 96 |
+| `canonical_semantic` | 97 |
 | `smoke` | 7 |
-| `partial` | 27 |
+| `partial` | 26 |
 | `out_of_scope` | 16 |
 
 ## ⚠️ P0 scenarios with weak evidence
@@ -37,7 +37,6 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.compression_checksum.checksum_trailer_detection` — Inline checksum / Digest.crc32 corruption detection (partial)
 - `cass.compression_info.deflate.real_fixture_chunks.strict` — Deflate real-fixture CompressionInfo.db + chunk parity (partial)
 - `cass.compression_info.zstd.real_fixture_chunks.strict` — Zstd real-fixture CompressionInfo.db + chunk parity (partial)
-- `cass.corruption_verify.component_corruption_detection` — Component corruption detection, scrub, and verify (partial)
 - `cass.data_db_decode.wide_partition.row_boundaries` — Wide-partition Data.db row boundaries align with promoted-index offsets (partial)
 - `cass.index_db.RowIndexEntryTest.promoted_index_entries` — BIG Index.db promoted-index (wide-partition) boundary metadata (partial)
 - `cass.index_db.promoted_index.clustering_bounds` — BIG promoted-index IndexInfo clustering bounds ordering and coverage (partial)
@@ -121,7 +120,7 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 | `cass.corruption.digest_crc32_mismatch` | corruption_verify | mirrored | byte_for_byte | `sstable_parity_corruption_verify` | p0_data_loss |
 | `cass.corruption.index_db.bit_flip_big` | corruption_verify | mirrored | byte_for_byte | `sstable_parity_corruption_verify` | p0_data_loss |
 | `cass.corruption.statistics_db.header_damage` | corruption_verify | mirrored | byte_for_byte | `sstable_parity_corruption_verify` | p0_data_loss |
-| `cass.corruption_verify.component_corruption_detection` | corruption_verify | planned | partial | `sstable_parity_corruption_verify` | p0_data_loss |
+| `cass.corruption_verify.component_corruption_detection` | corruption_verify | mirrored | canonical_semantic | `sstable_parity_corruption_verify` | p0_data_loss |
 | `cass.cql_types.boundaries.null_empty_text_blob` | cql_types | mirrored | canonical_semantic | `—` | p1_correctness |
 | `cass.cql_types.jsonl.canonical_value_comparator` | cql_types | mirrored | canonical_semantic | `—` | tooling_only |
 | `cass.cql_types.jsonl.cell_path_timestamp_ttl_tombstone_compare` | cql_types | mirrored | canonical_semantic | `—` | tooling_only |
@@ -445,6 +444,8 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
   - Normalization: An options map the reader cannot honour produces an explicit error rather than a best-effort decode; the supported-options LZ4 fixture (JSONL baseline) still decodes, isolating the rejection to bad options.
 - `cass.compression_checksum.chunk_offsets_and_crc` — CompressionInfo.db chunk decode and row-count parity
   - Normalization: Decompressed chunk payloads are decoded to rows and compared (row count and values) against sstabledump JSONL; chunk offset tables are used for positioning.
+- `cass.corruption_verify.component_corruption_detection` — Component corruption detection verify parity vs Cassandra 5.0.2 sstableverify
+  - Normalization: The parity oracle is Cassandra 5.0.2's actual `sstableverify --extended --force` clean/corrupt verdict per fixture (captured into corruption-manifest.yml's cassandra_verdict, NOT hand-encoded). CQLite's verdict is `!VerifyReport.is_ok()` (any finding ⇒ corrupt). Verdicts are compared as the boolean clean/corrupt equivalence on identical on-disk bytes; CQLite's stable VerifyErrorClass codes are matched against each fixture's expected_error_class. Corrupted *.db binaries are gitignored and regenerate byte-for-byte from the committed clean sources + mutation manifest, so CI re-derives the bytes but consumes the committed Cassandra verdict (no live Cassandra per run).
 - `cass.cql_types.boundaries.absent_vs_null_regular_columns` — Absent vs null regular column distinction
   - Normalization: A regular column that was never written (absent) has no cell at all, a column written then deleted is a cell tombstone (null), and a column written with a zero-length value is a live empty cell; the three are mapped to distinct sstabledump JSONL facts (no cell / deletion_info / empty value) and compared.
 - `cass.cql_types.boundaries.empty_collections` — Empty collection vs null collection distinction
@@ -603,7 +604,7 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 
 Scenario counts above can overstate distinct proof: one backing test may exercise many scenario ids. The dedup view below counts unique test targets so the program is not read as more independent tests than exist (issue #1228).
 
-- Distinct backing tests: **60** across **238** scenarios that name a test.
+- Distinct backing tests: **61** across **239** scenarios that name a test.
 
 ### Tests backing more than one scenario
 
@@ -667,7 +668,6 @@ Scenario counts above can overstate distinct proof: one backing test may exercis
 - `cass.compression_info.zstd.real_fixture_chunks.strict` (planned): No real Cassandra Zstd-compressed fixture in the corpus (non-dictionary). → _Generate a non-dictionary ZstdCompressor SSTable fixture via issue #996 (epic #970); the strict lane will then decode and round-trip it._
 - `cass.corruption.bti_partitions_footer_bit_flip` (planned): Clean BTI source (test_da/wide_table Partitions.db) is not git-tracked, so the corrupted fixture cannot be regenerated by CI. → _Commit the clean test_da/wide_table BTI components (or add them to the published dataset bundle) so generate-corruption-corpus.sh can emit the corrupted Partitions.db, then flip status to mirrored._
 - `cass.corruption.bti_rows_truncation` (planned): Clean BTI source (test_da/wide_table Rows.db) is not git-tracked, so the truncated fixture cannot be regenerated by CI. → _Commit the clean test_da/wide_table BTI components so generate-corruption-corpus.sh can emit the truncated Rows.db, then flip status to mirrored._
-- `cass.corruption_verify.component_corruption_detection` (planned): No scrub/verify parity pass implemented. → _Implement a verify pass and compare detected-corruption outcomes against Cassandra VerifyTest/ScrubTest scenarios._
 - `cass.data_db_decode.wide_partition.row_boundaries` (partial): Byte-level promoted-index parity (Index.db offsets, widths, clustering bounds) runs only against local-only binaries that are not in the pinned CI dataset; the required lane enforces only the committed-JSONL canonical-semantic facts. → _Add the test_big.wide_partition binaries to the dataset release pin (regenerate the tarball + update DATASET_SHA256) to promote these scenarios to byte_for_byte enforced in the required_parity lane._
 - `cass.delta_scan.wide_partition_corpus` (planned): No test_deltas wide-partition delete fixture; wide partitions are produced by the wide-row corpus (epic #993), not generate-deltas.sh. Byte-for-byte backing for delta_scan remains tracked by epic #969. → _Add a wide-partition delete shape (or reuse a wide-row corpus fixture) and a paired test_delta_parity_wide_partition test under epic #993._
 - `cass.filter_db.bti_membership` (partial): No raw-partition-key source for BTI fixtures, so the no-false-negative probe cannot run against da Filter.db. → _Recover raw BTI partition keys (e.g. by decoding partitions during a Data.db scan) and extend the no-false-negative gate to cover da fixtures._
@@ -836,7 +836,7 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.corruption.statistics_db.header_damage` | exhaustive_regeneration | .github/workflows/compression-corruption-parity.yml |
 | `cass.corruption.summary_db_truncation` | exhaustive_regeneration | .github/workflows/compression-corruption-parity.yml |
 | `cass.corruption.toc_missing_component` | exhaustive_regeneration | .github/workflows/compression-corruption-parity.yml |
-| `cass.corruption_verify.component_corruption_detection` | manual_debug | — |
+| `cass.corruption_verify.component_corruption_detection` | nightly_docker | .github/workflows/compression-corruption-parity.yml |
 | `cass.cql_types.boundaries.absent_vs_null_regular_columns` | required_parity | .github/workflows/cql-type-parity.yml |
 | `cass.cql_types.boundaries.empty_collections` | required_parity | .github/workflows/cql-type-parity.yml |
 | `cass.cql_types.boundaries.length_prefix_edges` | required_parity | .github/workflows/cql-type-parity.yml |
@@ -1100,7 +1100,7 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.corruption.statistics_db.header_damage` | nb | test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml<br>test-data/datasets/corruption/test_comp_corrupt/corruption-sha256.txt<br>_fail:_ target/cassandra-parity/corruption-statistics_db_header_damage.log |
 | `cass.corruption.summary_db_truncation` | nb | test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml<br>test-data/datasets/corruption/test_comp_corrupt/corruption-sha256.txt<br>_fail:_ target/cassandra-parity/corruption-summary_db_truncation.log |
 | `cass.corruption.toc_missing_component` | nb | test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml<br>test-data/datasets/corruption/test_comp_corrupt/corruption-sha256.txt<br>_fail:_ target/cassandra-parity/corruption-toc_missing_component.log |
-| `cass.corruption_verify.component_corruption_detection` | — | — |
+| `cass.corruption_verify.component_corruption_detection` | nb, da | test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml<br>test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl<br>test-data/datasets/corruption/test_comp_corrupt/corruption-sha256.txt<br>_fail:_ target/cassandra-parity/corruption-verify-parity.log |
 | `cass.cql_types.boundaries.absent_vs_null_regular_columns` | nb | test-data/datasets/sstables/test_types/nb_absent_vs_null_regular-4fa69860706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl |
 | `cass.cql_types.boundaries.empty_collections` | nb | test-data/datasets/sstables/test_types/nb_empty_collections-4faf9910706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl |
 | `cass.cql_types.boundaries.length_prefix_edges` | nb | test-data/datasets/sstables/test_types/nb_length_prefix_edges-4fba4770706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl<br>_fail:_ logs |
