@@ -204,6 +204,13 @@ jobs:
           # the repo root. The audit's WALK_SKIP_DIRS prunes this report dir
           # (`exhaustive-regeneration-report`) so the walk ignores its own
           # artifacts (issue #1026, Finding 1).
+          # The corruption-coverage check cross-references each --corruption-manifest
+          # fixture's `corrupted_path` against this SAME walked corpus, so the
+          # `test-data/datasets/corruption/...` fixtures regenerated above must be
+          # on disk: a required component DECLARED but not produced on disk fails
+          # the audit (spec R4 = on-disk reality, not a manifest declaration;
+          # issue #1026, LOW 2). This is why corruption fixtures are regenerated
+          # before — and walked by — this step.
           cargo run -p cassandra-parity -- corpus-audit \
             --manifest "$MANIFEST" \
             --corpus . \

@@ -1,6 +1,6 @@
 //! End-to-end tests for the `cassandra-parity corpus-audit` subcommand (issue
 //! #1026, Finding 5). These exercise the disk->`audit()` glue in `main.rs`
-//! (`walk_relative`, `read_sha256_file`, `read_corruption_components`,
+//! (`walk_relative`, `read_sha256_file`, `read_corruption_fixtures`,
 //! `cmd_corpus_audit`, and the exit-code mapping) that the pure `audit()` unit
 //! tests cannot reach: they build a temp-dir corpus + manifest + index +
 //! provenance + corruption manifest on disk, invoke the built binary, and assert
@@ -12,6 +12,18 @@ use std::process::Command;
 
 const GOOD_SHA: &str = "f278f6774fc76465c182041e081982105c3e7dbb";
 const UUID: &str = "aaaa0000000000000000000000000001";
+
+/// The seven required corruption component types (mirrors
+/// `corpus_audit::REQUIRED_CORRUPTION_COMPONENTS`).
+const REQUIRED_CORRUPTION: &[&str] = &[
+    "Data.db",
+    "Index.db",
+    "Summary.db",
+    "Statistics.db",
+    "CompressionInfo.db",
+    "TOC.txt",
+    "Digest.crc32",
+];
 
 /// A repo-relative corpus reference the fixture scenario pins.
 fn reference_path() -> String {
@@ -63,20 +75,39 @@ scenarios:
          ## Other section\n";
     fs::write(root.join("index.md"), index).expect("write index");
 
-    // Corruption manifest covering every required component type.
-    let mut corr = String::new();
-    for comp in [
-        "Data.db",
-        "Index.db",
-        "Summary.db",
-        "Statistics.db",
-        "CompressionInfo.db",
-        "TOC.txt",
-        "Digest.crc32",
-    ] {
+    // Corruption manifest covering every required component type, with each
+    // declared fixture's corrupted file present on disk so coverage is clean.
+    write_corruption(root, REQUIRED_CORRUPTION);
+}
+
+/// Datasets-relative on-disk path of a component's corruption fixture, mirroring
+/// the real `corruption-manifest.yml` layout.
+fn corruption_rel(comp: &str) -> String {
+    format!("corruption/test_comp_corrupt/{comp}_fixture/nb-1-big-{comp}")
+}
+
+/// Write a corruption manifest DECLARING every required component (with on-disk
+/// `corrupted_path` + `status`), and create the corrupted file under the corpus
+/// only for components listed in `on_disk`. A component declared but omitted from
+/// `on_disk` drives the on-disk coverage gap (spec R4): a declared-but-absent
+/// fixture must fail the audit, not merely a manifest declaration.
+fn write_corruption(root: &Path, on_disk: &[&str]) {
+    // Start from a clean corruption tree so a re-declaration with a narrower
+    // `on_disk` set genuinely removes a previously-written fixture file.
+    let corruption_root = root.join("test-data/datasets/corruption");
+    let _ = fs::remove_dir_all(&corruption_root);
+    let mut corr = String::from("schema_version: 1\nfixtures:\n");
+    for comp in REQUIRED_CORRUPTION {
+        let rel = corruption_rel(comp);
         corr.push_str(&format!(
-            "- fixture: x\n  expected_failing_component: {comp}\n"
+            "  - name: {comp}_fixture\n    status: active\n    corrupted_path: \"{rel}\"\n    \
+             expected_failing_component: {comp}\n"
         ));
+        if on_disk.contains(comp) {
+            let path = root.join("test-data/datasets").join(&rel);
+            fs::create_dir_all(path.parent().expect("parent")).expect("mkdir corruption fixture");
+            fs::write(&path, b"corrupt\n").expect("write corruption fixture");
+        }
     }
     fs::write(root.join("corruption-manifest.yml"), corr).expect("write corruption manifest");
 }
@@ -310,5 +341,44 @@ fn corpus_audit_provenance_mismatch_exits_nonzero_and_names_finding() {
     assert!(
         combined.contains("PROVENANCE-MISMATCH"),
         "expected a named PROVENANCE-MISMATCH finding, got: {combined}"
+    );
+}
+
+/// Issue #1026 (roborev LOW 2), CLI E2E for the on-disk corruption check: spec R4
+/// requires an on-disk corruption FIXTURE per required component, not just a
+/// manifest declaration. Here every component is DECLARED but `Summary.db`'s
+/// corrupted file is not written under the corpus, so the disk-backed audit must
+/// exit non-zero naming `Summary.db` — proving the check validates on-disk
+/// reality, not the manifest alone (a generator that silently produced fewer
+/// files than declared cannot slip through).
+#[test]
+fn corpus_audit_corruption_fixture_absent_on_disk_exits_nonzero_and_names_component() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    write_common(root);
+    write_reference_file(root);
+    write_provenance(root);
+
+    // Re-declare all seven but withhold Summary.db's on-disk fixture file.
+    let on_disk: Vec<&str> = REQUIRED_CORRUPTION
+        .iter()
+        .copied()
+        .filter(|c| *c != "Summary.db")
+        .collect();
+    write_corruption(root, &on_disk);
+
+    let out = run_audit(root);
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success(),
+        "expected non-zero exit when a declared corruption fixture is absent on disk, got: {combined}"
+    );
+    assert!(
+        combined.contains("CORRUPTION-COVERAGE-GAP") && combined.contains("Summary.db"),
+        "expected a named CORRUPTION-COVERAGE-GAP for Summary.db, got: {combined}"
     );
 }

@@ -16,7 +16,9 @@ use std::process::ExitCode;
 use anyhow::{bail, Context, Result};
 
 use cassandra_parity::claim_scan::{self, ScanInput};
-use cassandra_parity::corpus_audit::{self, CorpusInventory, ExpectedInventory, Provenance};
+use cassandra_parity::corpus_audit::{
+    self, CorpusInventory, CorruptionFixture, ExpectedInventory, Provenance,
+};
 use cassandra_parity::lint::Level;
 use cassandra_parity::model::Manifest;
 use cassandra_parity::{coverage, enums, lint, report, tier_contract};
@@ -285,9 +287,9 @@ fn cmd_corpus_audit(args: &Args) -> Result<ExitCode> {
         None => None,
     };
 
-    let corruption_components = match &args.corruption_manifest {
-        Some(p) => read_corruption_components(p)?,
-        None => BTreeSet::new(),
+    let corruption_fixtures = match &args.corruption_manifest {
+        Some(p) => read_corruption_fixtures(p)?,
+        None => Vec::new(),
     };
 
     let report = corpus_audit::audit(
@@ -296,7 +298,7 @@ fn cmd_corpus_audit(args: &Args) -> Result<ExitCode> {
         &inventory,
         &expected,
         provenance.as_ref(),
-        &corruption_components,
+        &corruption_fixtures,
     );
 
     if report.ok() {
@@ -422,23 +424,65 @@ fn read_sha256_file(path: &Path) -> Result<BTreeMap<String, String>> {
     Ok(map)
 }
 
-/// Parse the set of `expected_failing_component:` values from a committed
-/// `corruption-manifest.yml`, i.e. which SSTable component types the corruption
-/// corpus actually targets.
-fn read_corruption_components(path: &Path) -> Result<BTreeSet<String>> {
+/// Parse the corruption fixtures (targeted component + on-disk `corrupted_path` +
+/// `status`) from a committed `corruption-manifest.yml`. The audit cross-checks
+/// each declared `corrupted_path` against the walked corpus inventory, so a
+/// fixture declared but absent on disk is caught (spec R4: on-disk reality, not
+/// merely a manifest declaration; issue #1026). Each `  - name:` line opens a new
+/// fixture block; `corrupted_path`/`status`/`expected_failing_component` are
+/// captured within it. A block with no `expected_failing_component` is skipped.
+fn read_corruption_fixtures(path: &Path) -> Result<Vec<CorruptionFixture>> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading corruption manifest {}", path.display()))?;
-    let mut set = BTreeSet::new();
+
+    let mut fixtures = Vec::new();
+    let mut component: Option<String> = None;
+    let mut corrupted_path: Option<String> = None;
+    let mut status: Option<String> = None;
+
+    // Emit the in-progress fixture (if it declared a component) and reset all
+    // three accumulators for the next block.
+    fn flush(
+        fixtures: &mut Vec<CorruptionFixture>,
+        component: &mut Option<String>,
+        corrupted_path: &mut Option<String>,
+        status: &mut Option<String>,
+    ) {
+        let comp = component.take();
+        let cpath = corrupted_path.take();
+        let st = status.take();
+        if let Some(component) = comp {
+            fixtures.push(CorruptionFixture {
+                component,
+                corrupted_path: cpath.unwrap_or_default(),
+                status: st.unwrap_or_default(),
+            });
+        }
+    }
+
     for line in text.lines() {
         let line = line.trim();
-        if let Some(rest) = line.strip_prefix("expected_failing_component:") {
+        if line.starts_with("- name:") {
+            flush(&mut fixtures, &mut component, &mut corrupted_path, &mut status);
+        } else if let Some(rest) = line.strip_prefix("expected_failing_component:") {
             let v = rest.trim().trim_matches('"');
             if !v.is_empty() {
-                set.insert(v.to_string());
+                component = Some(v.to_string());
+            }
+        } else if let Some(rest) = line.strip_prefix("corrupted_path:") {
+            let v = rest.trim().trim_matches('"');
+            if !v.is_empty() {
+                corrupted_path = Some(v.to_string());
+            }
+        } else if let Some(rest) = line.strip_prefix("status:") {
+            let v = rest.trim().trim_matches('"');
+            if !v.is_empty() {
+                status = Some(v.to_string());
             }
         }
     }
-    Ok(set)
+    flush(&mut fixtures, &mut component, &mut corrupted_path, &mut status);
+    Ok(fixtures)
 }
 
 fn cmd_coverage(args: &Args) -> Result<ExitCode> {
@@ -658,5 +702,45 @@ mod tests {
             msg.contains("GNU sha256sum-escaped") && msg.contains("backslash"),
             "expected a clear escaped-path error, got: {msg}"
         );
+    }
+
+    /// LOW 2: the corruption-manifest parser must capture per-fixture component,
+    /// on-disk `corrupted_path`, and `status` so the audit can cross-check each
+    /// declared fixture against the regenerated corpus (spec R4). A `planned`
+    /// fixture (declared, no clean source) is still parsed; its on-disk absence
+    /// is what the audit catches downstream.
+    #[test]
+    fn read_corruption_fixtures_captures_component_path_and_status() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("corruption-manifest.yml");
+        let body = "\
+schema_version: 1
+fixtures:
+  - name: data_db_bit_flip
+    status: active
+    component: nb-1-big-Data.db
+    corrupted_path: \"corruption/test_comp_corrupt/data_db_bit_flip/nb-1-big-Data.db\"
+    expected_failing_component: Data.db
+  - name: bti_rows_truncation
+    status: planned
+    corrupted_path: \"corruption/test_comp_corrupt/bti_rows_truncation/__BTI_ROWS__\"
+    expected_failing_component: Rows.db
+";
+        fs::write(&file, body).expect("write manifest");
+
+        let fixtures = read_corruption_fixtures(&file).expect("parse");
+        assert_eq!(fixtures.len(), 2, "got: {fixtures:?}");
+
+        let data = &fixtures[0];
+        assert_eq!(data.component, "Data.db");
+        assert_eq!(
+            data.corrupted_path,
+            "corruption/test_comp_corrupt/data_db_bit_flip/nb-1-big-Data.db"
+        );
+        assert_eq!(data.status, "active");
+
+        let rows = &fixtures[1];
+        assert_eq!(rows.component, "Rows.db");
+        assert_eq!(rows.status, "planned");
     }
 }

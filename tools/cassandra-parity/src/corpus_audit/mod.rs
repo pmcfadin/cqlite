@@ -24,7 +24,10 @@
 //!   5. **Provenance mismatch** — the run's recorded Cassandra version/ref/sha is
 //!      not declared by the manifest's `cassandra_source` / `evidence.*` pin.
 //!   6. **Corruption coverage gap** — a required corrupted-component type
-//!      (Data.db … Digest.crc32) has no corruption fixture.
+//!      (Data.db … Digest.crc32) has no on-disk corruption fixture: either no
+//!      manifest fixture declares it, or every fixture that declares it has no
+//!      corrupted file present in the regenerated corpus (spec R4 is on-disk
+//!      reality, not just a manifest declaration; issue #1026).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -109,6 +112,26 @@ pub struct CorpusInventory {
     pub checksums: BTreeMap<String, String>,
 }
 
+/// One corruption fixture as declared in `corruption-manifest.yml`. The audit
+/// cross-checks each fixture's [`corrupted_path`](Self::corrupted_path) against
+/// the walked corpus inventory so a fixture that was DECLARED but never produced
+/// on disk is caught (spec R4: an on-disk fixture per required component, not
+/// merely a manifest declaration; issue #1026).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorruptionFixture {
+    /// The targeted `expected_failing_component`, e.g. `Data.db`.
+    pub component: String,
+    /// Datasets-root-relative on-disk path of the corrupted fixture file, e.g.
+    /// `corruption/test_comp_corrupt/data_db_bit_flip/nb-1-big-Data.db`. The
+    /// walked inventory keys this with a `test-data/datasets/` prefix the
+    /// manifest omits, so presence is matched on a path boundary
+    /// ([`inventory_contains_fixture`]).
+    pub corrupted_path: String,
+    /// `active` (a real corrupted file was produced) or `planned` (declared but
+    /// no clean source was available in the checkout, so no file exists).
+    pub status: String,
+}
+
 /// The expected component entry set the corpus is diffed against: repo-relative
 /// path -> expected SHA256 (e.g. committed reference-golden checksums computed at
 /// checkout, before regeneration).
@@ -158,7 +181,7 @@ pub fn audit(
     inventory: &CorpusInventory,
     expected: &ExpectedInventory,
     provenance: Option<&Provenance>,
-    corruption_components: &BTreeSet<String>,
+    corruption_fixtures: &[CorruptionFixture],
 ) -> AuditReport {
     let mut findings = Vec::new();
 
@@ -183,8 +206,12 @@ pub fn audit(
         findings.extend(provenance::check_provenance(prov, manifest));
     }
 
-    // 6: corruption-fixture coverage of every required component type.
-    findings.extend(check_corruption_coverage(corruption_components));
+    // 6: corruption-fixture coverage of every required component type, verified
+    // against the on-disk inventory (not just the manifest declarations).
+    findings.extend(check_corruption_coverage(
+        corruption_fixtures,
+        &inventory.files,
+    ));
 
     AuditReport { findings }
 }
@@ -265,19 +292,62 @@ pub fn check_component_changes(
     out
 }
 
-/// Fail when any required corrupted-component type has no corruption fixture.
-/// `produced` is the set of `expected_failing_component` values the corruption
-/// corpus actually generated (parsed from `corruption-manifest.yml` by the CLI).
-pub fn check_corruption_coverage(produced: &BTreeSet<String>) -> Vec<AuditFinding> {
+/// Fail when any required corrupted-component type has no ON-DISK corruption
+/// fixture. `fixtures` are the corruption fixtures declared in
+/// `corruption-manifest.yml` (parsed by the CLI); `inventory` is the set of
+/// repo-relative file paths walked from the regenerated corpus.
+///
+/// For each required component a fixture must both DECLARE it AND have produced a
+/// corrupted file present in `inventory` — spec R4 is on-disk reality, not just a
+/// manifest declaration, so a fixture that was declared but never produced (e.g.
+/// `generate-corruption-corpus.sh` silently produced fewer files, or the fixture
+/// is `planned` for lack of a clean source) is a coverage gap (issue #1026).
+pub fn check_corruption_coverage(
+    fixtures: &[CorruptionFixture],
+    inventory: &BTreeSet<String>,
+) -> Vec<AuditFinding> {
     let mut out = Vec::new();
     for req in REQUIRED_CORRUPTION_COMPONENTS {
-        if !produced.contains(*req) {
+        let declaring: Vec<&CorruptionFixture> =
+            fixtures.iter().filter(|f| f.component == *req).collect();
+        if declaring.is_empty() {
             out.push(AuditFinding::new(
                 FindingKind::CorruptionCoverageGap,
                 (*req).to_string(),
-                "no corruption fixture targets this required component type".to_string(),
+                "no corruption fixture declares this required component type".to_string(),
+            ));
+            continue;
+        }
+        let on_disk = declaring
+            .iter()
+            .any(|f| inventory_contains_fixture(inventory, &f.corrupted_path));
+        if !on_disk {
+            out.push(AuditFinding::new(
+                FindingKind::CorruptionCoverageGap,
+                (*req).to_string(),
+                "corruption fixture(s) declare this required component type but no corrupted \
+                 fixture file is present in the regenerated corpus"
+                    .to_string(),
             ));
         }
     }
     out
+}
+
+/// True when `corrupted_path` (datasets-root-relative, as declared in the
+/// corruption manifest, e.g. `corruption/test_comp_corrupt/<name>/<file>`) is
+/// present in the walked corpus `inventory` (repo-root-relative, carrying a
+/// leading `test-data/datasets/` the manifest path omits). The two are reconciled
+/// by a path-boundary suffix match — an exact equality OR an inventory key whose
+/// suffix is `/<corrupted_path>` — so the prefix is not hard-coded and a partial
+/// path component (e.g. `…/x-Data.db` vs `…/Data.db`) cannot spuriously match.
+fn inventory_contains_fixture(inventory: &BTreeSet<String>, corrupted_path: &str) -> bool {
+    if corrupted_path.is_empty() {
+        return false;
+    }
+    inventory.iter().any(|p| {
+        p == corrupted_path
+            || p.strip_suffix(corrupted_path)
+                .is_some_and(|prefix| prefix.ends_with('/'))
+    })
 }

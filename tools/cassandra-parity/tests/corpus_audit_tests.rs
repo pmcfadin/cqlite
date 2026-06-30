@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cassandra_parity::corpus_audit::{
-    self, CorpusInventory, ExpectedInventory, FindingKind, Provenance,
+    self, CorpusInventory, CorruptionFixture, ExpectedInventory, FindingKind, Provenance,
 };
 use cassandra_parity::model::Manifest;
 
@@ -80,21 +80,46 @@ fn good_provenance() -> Provenance {
     }
 }
 
-fn all_corruption_components() -> BTreeSet<String> {
+/// One corruption fixture per required component, each with a distinct
+/// datasets-relative `corrupted_path` whose on-disk (repo-relative) entry is
+/// supplied by [`corruption_inventory_files`]. Mirrors the real
+/// `corruption-manifest.yml` layout (`corruption/test_comp_corrupt/<name>/<file>`).
+fn all_corruption_fixtures() -> Vec<CorruptionFixture> {
     corpus_audit::REQUIRED_CORRUPTION_COMPONENTS
         .iter()
-        .map(|s| s.to_string())
+        .map(|c| CorruptionFixture {
+            component: c.to_string(),
+            corrupted_path: format!("corruption/test_comp_corrupt/{c}_fixture/nb-1-big-{c}"),
+            status: "active".to_string(),
+        })
         .collect()
 }
 
-/// Inventory containing exactly the referenced golden.
-fn clean_inventory() -> CorpusInventory {
-    let mut files = BTreeSet::new();
-    files.insert(REF.to_string());
+/// Repo-relative ON-DISK inventory entries for [`all_corruption_fixtures`] (the
+/// walk keys carry the `test-data/datasets/` prefix the manifest path omits).
+fn corruption_inventory_files() -> BTreeSet<String> {
+    all_corruption_fixtures()
+        .iter()
+        .map(|f| format!("test-data/datasets/{}", f.corrupted_path))
+        .collect()
+}
+
+/// Inventory that always carries the on-disk corruption fixtures (so corruption
+/// coverage passes) plus any extra files supplied.
+fn inventory_with(extra: &[&str]) -> CorpusInventory {
+    let mut files = corruption_inventory_files();
+    for e in extra {
+        files.insert((*e).to_string());
+    }
     CorpusInventory {
         files,
         checksums: BTreeMap::new(),
     }
+}
+
+/// Inventory containing the referenced golden plus the on-disk corruption corpus.
+fn clean_inventory() -> CorpusInventory {
+    inventory_with(&[REF])
 }
 
 #[test]
@@ -105,24 +130,26 @@ fn passing_clean_corpus_audit() {
         &clean_inventory(),
         &ExpectedInventory::default(),
         Some(&good_provenance()),
-        &all_corruption_components(),
+        &all_corruption_fixtures(),
     );
     assert!(report.ok(), "expected clean pass, got: {}", report.render());
 }
 
 #[test]
 fn missing_reference_fails_and_names_offender() {
-    // Reference absent and no same-table component anywhere -> missing.
+    // Reference absent and no same-table component anywhere -> missing. The
+    // on-disk corruption corpus is present so ONLY the missing reference fires.
     let report = corpus_audit::audit(
         &manifest(),
         &index_text(false),
-        &CorpusInventory::default(),
+        &inventory_with(&[]),
         &ExpectedInventory::default(),
         Some(&good_provenance()),
-        &all_corruption_components(),
+        &all_corruption_fixtures(),
     );
     assert!(!report.ok());
     assert_eq!(report.count(FindingKind::MissingReference), 1);
+    assert_eq!(report.count(FindingKind::CorruptionCoverageGap), 0);
     assert!(report.render().contains(REF), "got: {}", report.render());
 }
 
@@ -142,19 +169,14 @@ fn churned_reference_under_new_uuid_is_clean() {
         "simple_table-aaaa0000000000000000000000000001",
         "simple_table-bbbb0000000000000000000000000002",
     );
-    let mut files = BTreeSet::new();
-    files.insert(regenerated);
-    let inv = CorpusInventory {
-        files,
-        checksums: BTreeMap::new(),
-    };
+    let inv = inventory_with(&[regenerated.as_str()]);
     let report = corpus_audit::audit(
         &manifest(),
         &index_text(false),
         &inv,
         &ExpectedInventory::default(),
         Some(&good_provenance()),
-        &all_corruption_components(),
+        &all_corruption_fixtures(),
     );
     assert!(
         report.ok(),
@@ -173,7 +195,7 @@ fn unclassified_high_relevance_fails_and_names_offender() {
         &clean_inventory(),
         &ExpectedInventory::default(),
         Some(&good_provenance()),
-        &all_corruption_components(),
+        &all_corruption_fixtures(),
     );
     assert!(!report.ok());
     assert_eq!(report.count(FindingKind::UnclassifiedHighRelevance), 1);
@@ -285,7 +307,7 @@ fn unexpected_component_change_fails_on_checksum_drift() {
             components: expected,
         },
         Some(&good_provenance()),
-        &all_corruption_components(),
+        &all_corruption_fixtures(),
     );
     assert!(!report.ok());
     assert_eq!(report.count(FindingKind::UnexpectedComponentChange), 1);
@@ -303,7 +325,7 @@ fn provenance_mismatch_fails_on_undeclared_version() {
         &clean_inventory(),
         &ExpectedInventory::default(),
         Some(&prov),
-        &all_corruption_components(),
+        &all_corruption_fixtures(),
     );
     assert!(!report.ok());
     assert!(report.count(FindingKind::ProvenanceMismatch) >= 1);
@@ -408,25 +430,67 @@ fn provenance_mismatch_fails_on_divergent_variant_docker_image() {
 
 #[test]
 fn corruption_coverage_gap_fails_and_names_missing_component() {
-    let mut components = all_corruption_components();
-    components.remove("Summary.db");
+    // Summary.db is declared by NO fixture -> an undeclared coverage gap, even
+    // though its file happens to be on disk (clean_inventory carries the corpus).
+    let fixtures: Vec<CorruptionFixture> = all_corruption_fixtures()
+        .into_iter()
+        .filter(|f| f.component != "Summary.db")
+        .collect();
     let report = corpus_audit::audit(
         &manifest(),
         &index_text(false),
         &clean_inventory(),
         &ExpectedInventory::default(),
         Some(&good_provenance()),
-        &components,
+        &fixtures,
     );
     assert!(!report.ok());
     assert_eq!(report.count(FindingKind::CorruptionCoverageGap), 1);
     assert!(report.render().contains("Summary.db"));
+    assert!(
+        report.render().contains("no corruption fixture declares"),
+        "got: {}",
+        report.render()
+    );
+}
+
+/// Regression for issue #1026 (roborev LOW 2): spec R4 requires an ON-DISK
+/// corruption fixture per required component, not merely a manifest declaration.
+/// A fixture that DECLARES Summary.db but whose corrupted file is ABSENT from the
+/// regenerated corpus must fail, naming Summary.db — so a generator that silently
+/// produced fewer files than declared cannot pass the audit. Before the fix the
+/// audit only checked the manifest declaration and would have passed.
+#[test]
+fn corruption_coverage_gap_fails_when_declared_fixture_absent_on_disk() {
+    let fixtures = all_corruption_fixtures();
+    // On-disk inventory has every corruption fixture EXCEPT Summary.db's file.
+    let summary = all_corruption_fixtures()
+        .into_iter()
+        .find(|f| f.component == "Summary.db")
+        .expect("Summary.db fixture");
+    let mut inventory = corruption_inventory_files();
+    inventory.remove(&format!("test-data/datasets/{}", summary.corrupted_path));
+
+    let findings = corpus_audit::check_corruption_coverage(&fixtures, &inventory);
+    assert_eq!(findings.len(), 1, "got: {findings:?}");
+    assert_eq!(findings[0].kind, FindingKind::CorruptionCoverageGap);
+    assert!(findings[0].subject.contains("Summary.db"));
+    assert!(
+        findings[0]
+            .detail
+            .contains("no corrupted fixture file is present"),
+        "got: {}",
+        findings[0].detail
+    );
 }
 
 #[test]
-fn corruption_coverage_clean_when_all_present() {
-    let findings = corpus_audit::check_corruption_coverage(&all_corruption_components());
-    assert!(findings.is_empty());
+fn corruption_coverage_clean_when_all_present_on_disk() {
+    let findings = corpus_audit::check_corruption_coverage(
+        &all_corruption_fixtures(),
+        &corruption_inventory_files(),
+    );
+    assert!(findings.is_empty(), "got: {findings:?}");
 }
 
 #[test]
