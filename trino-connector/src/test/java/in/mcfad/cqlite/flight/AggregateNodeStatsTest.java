@@ -45,6 +45,11 @@ class AggregateNodeStatsTest {
         return CallStatus.NOT_FOUND.withDescription("table absent").toRuntimeException();
     }
 
+    /** The Flight runtime exception surfaced when the call's deadline (timeout) fires. */
+    private static RuntimeException timedOut() {
+        return CallStatus.TIMED_OUT.withDescription("table_stats deadline exceeded").toRuntimeException();
+    }
+
     @Test
     void allNodesSucceedAggregateIsComplete() {
         List<String> hosts = List.of("10.0.0.1", "10.0.0.2");
@@ -225,6 +230,53 @@ class AggregateNodeStatsTest {
                 CqliteFlightMetadata.estimateGroupRatio(ddl, List.of("pk"), agg);
         assertTrue(ratio.isEmpty(),
                 "incomplete cross-ring stats must produce no group-ratio estimate");
+    }
+
+    @Test
+    void timedOutReplicaIsTreatedAsUnavailableStats() {
+        // Fix 1 (issue #944): the planning-time table_stats DoAction is bounded by a
+        // deadline. When it fires, gRPC surfaces a FlightRuntimeException with status
+        // TIMED_OUT. That must be classified like any other fetch failure (NOT a
+        // not-hosting NOT_FOUND): the aggregate is tainted INCOMPLETE — never an
+        // exception escaping planning.
+        List<String> hosts = List.of("10.0.0.1", "10.0.0.2");
+        Function<String, TableStats> fetch = address -> {
+            if (address.equals("10.0.0.2")) {
+                throw timedOut();
+            }
+            return ok(2000, 10);
+        };
+
+        TableStats agg = CqliteFlightMetadata.aggregateNodeStats(hosts, fetch);
+
+        assertFalse(CqliteFlightMetadata.isNotHosting(timedOut()),
+                "a TIMED_OUT status is a fetch failure, not a not-hosting NOT_FOUND");
+        assertFalse(agg.complete(),
+                "a timed-out replica must taint the aggregate to incomplete (no estimate)");
+        assertEquals(2000, agg.liveRows(), "the reachable node still contributed its totals");
+        assertTrue(agg.skippedSstables() >= 1, "the timed-out node is visible as a skip");
+    }
+
+    @Test
+    void timedOutStatsYieldEmptyGroupRatioAndDoNotThrow() {
+        // End-to-end with the gate's pure function: a timed-out replica makes the
+        // cross-ring aggregate incomplete, so the AUTOMATIC group-ratio gate gets NO
+        // estimate (→ push). No exception escapes — planning degrades gracefully.
+        List<String> hosts = List.of("10.0.0.1", "10.0.0.2");
+        Function<String, TableStats> fetch = address -> {
+            if (address.equals("10.0.0.2")) {
+                throw timedOut();
+            }
+            return ok(2000, 10);
+        };
+
+        TableStats agg = CqliteFlightMetadata.aggregateNodeStats(hosts, fetch);
+        assertFalse(agg.complete());
+
+        String ddl = "CREATE TABLE ks.t (pk int, ck int, v int, PRIMARY KEY (pk, ck))";
+        OptionalDouble ratio = CqliteFlightMetadata.estimateGroupRatio(ddl, List.of("pk"), agg);
+        assertTrue(ratio.isEmpty(),
+                "timed-out (incomplete) stats must produce no group-ratio estimate (push)");
     }
 
     @Test

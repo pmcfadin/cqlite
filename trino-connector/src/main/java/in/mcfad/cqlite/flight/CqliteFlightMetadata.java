@@ -260,18 +260,6 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
             groupByNameSet.add(col.name());
         }
 
-        // Cardinality / operator gate (issue #893, #944). Global aggregates (no
-        // GROUP BY) are an unconditional data-reduction win and are NEVER gated —
-        // they bypass this check. For a GROUP BY, the single-finalize-split design
-        // degrades to break-even-to-loss as distinct groups approach the row count,
-        // so honor the operator policy and decline when the estimated group ratio is
-        // too high. The ratio is only needed for the AUTOMATIC policy, so the
-        // (network) stats fetch is skipped under NEVER/ALWAYS.
-        if (hasGroupBy && declineGroupByPushdown(
-                groupByPolicy(), groupRatioForGate(table, groupingColumns), maxGroupRatio())) {
-            return Optional.empty();
-        }
-
         // Translate each Trino aggregate into one or more server partial aggregates,
         // assigning deterministic output names (agg0, agg1, ...) that are kept
         // DISTINCT from the grouping column names — both share one Arrow partial
@@ -364,6 +352,21 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
                     return Optional.empty(); // unsupported aggregate function
                 }
             }
+        }
+
+        // Cardinality / operator gate (issue #893, #944). Run AFTER aggregate/argument
+        // support validation so we only fetch (network) stats for an aggregation that is
+        // OTHERWISE PUSHABLE — an aggregation declined above for an unsupported function,
+        // argument shape, DISTINCT/FILTER/ORDER BY, etc. never fans out to Sidecar/Flight
+        // for stats. Global aggregates (no GROUP BY) are an unconditional data-reduction
+        // win and are NEVER gated — they bypass this check. For a GROUP BY, the
+        // single-finalize-split design degrades to break-even-to-loss as distinct groups
+        // approach the row count, so honor the operator policy and decline when the
+        // estimated group ratio is too high. The ratio is only needed for the AUTOMATIC
+        // policy, so the stats fetch is skipped under NEVER/ALWAYS too.
+        if (hasGroupBy && declineGroupByPushdown(
+                groupByPolicy(), groupRatioForGate(table, groupingColumns), maxGroupRatio())) {
+            return Optional.empty();
         }
 
         // Grouping columns pass through. They are threaded ONLY via
@@ -627,13 +630,23 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
      * {@code not_found} (it does not currently host this keyspace/table — e.g. replica
      * metadata drift) is NOT a failure: it contributes nothing ({@link TableStats#EMPTY})
      * and does NOT taint completeness.
+     *
+     * <p>Package-private and overridable as a test seam (issue #944): a subclass can
+     * observe whether this planning-time stats fetch was invoked. It MUST NOT be for an
+     * aggregation declined for an unsupported function/argument shape (the fetch now runs
+     * only on the otherwise-pushable path), and MUST be for a supported AUTOMATIC GROUP BY.
      */
-    private TableStats fetchTableStats(CqliteFlightTableHandle handle) {
+    TableStats fetchTableStats(CqliteFlightTableHandle handle) {
         byte[] body = tableStatsRequest(handle.keyspace(), handle.table());
         int port = config.flightPort();
+        // Bound each per-replica DoAction with a deadline (issue #944): this runs during
+        // query planning, so a slow/half-open endpoint must degrade to "no estimate"
+        // (a TIMED_OUT FlightRuntimeException → the fetch-failure → UNAVAILABLE path in
+        // aggregateNodeStats), never stall the planner.
+        long timeoutMillis = config.tableStatsTimeoutMillis();
         Set<String> hosts =
                 replicaHosts(sidecar.tokenRangeReplicas(handle.keyspace()), config.localDatacenter());
-        return aggregateNodeStats(hosts, address -> flight.tableStats(address, port, body));
+        return aggregateNodeStats(hosts, address -> flight.tableStats(address, port, body, timeoutMillis));
     }
 
     /**
