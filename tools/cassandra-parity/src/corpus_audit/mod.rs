@@ -11,10 +11,11 @@
 //!
 //! Failure classes (design D3 of the OpenSpec change):
 //!   1. **Missing reference** — a manifest reference under the regenerated corpus
-//!      tree that no fresh component matches at all.
-//!   2. **Stale reference** — a manifest reference whose table/component the corpus
-//!      still produces, but only under a *different* generation directory (the
-//!      manifest pins an obsolete table-UUID dir).
+//!      tree whose UUID-independent table+component identity NO fresh component
+//!      matches (a genuine disappearance). A reference the corpus still produces
+//!      under a *churned* `<table>-<uuid>` directory is NOT a finding: every
+//!      regeneration mints fresh table UUIDs, so reference classification is by
+//!      identity, never raw path ([`refs::component_identity`], issue #1026).
 //!   3. **Unclassified high-relevance file** — a `docs/cassandra_test_index.md`
 //!      high-relevance entry no manifest scenario classifies (reuses
 //!      [`crate::coverage`], the `coverage --strict` failure verbatim).
@@ -53,6 +54,11 @@ pub const REQUIRED_CORRUPTION_COMPONENTS: &[&str] = &[
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FindingKind {
     MissingReference,
+    /// Retained for the spec's "stale reference" vocabulary and the rendered
+    /// tag. A genuinely vanished reference (no regenerated file shares its
+    /// table+component identity) is reported as [`Self::MissingReference`]; a
+    /// reference present under a churned `<table>-<uuid>` directory is clean, so
+    /// reference checking never constructs this variant (issue #1026).
     StaleReference,
     UnclassifiedHighRelevance,
     UnexpectedComponentChange,

@@ -126,9 +126,18 @@ fn missing_reference_fails_and_names_offender() {
     assert!(report.render().contains(REF), "got: {}", report.render());
 }
 
+/// Regression for issue #1026 (HIGH, roborev): the regeneration lane `rm -rf`s
+/// the corpus and re-mints every table under a FRESH `<table>-<uuid>` directory,
+/// so the committed manifest reference (pinned to the OLD uuid) and the
+/// regenerated golden NEVER share a repo-relative path. A reference whose
+/// UUID-independent `(table_key, basename)` identity IS produced under the new
+/// uuid dir is NOT stale/missing — the corpus still produces that exact
+/// table+component — so the audit MUST be clean (zero reference findings).
+/// Before the fix this fired a hard-fail STALE-REFERENCE on every run, leaving
+/// the owner-pinned lane perpetually red.
 #[test]
-fn stale_reference_fails_and_names_offender() {
-    // Same table + component, but under a NEW generation UUID dir -> stale.
+fn churned_reference_under_new_uuid_is_clean() {
+    // Same table + component, but under a NEW generation UUID dir -> churn, not stale.
     let regenerated = REF.replace(
         "simple_table-aaaa0000000000000000000000000001",
         "simple_table-bbbb0000000000000000000000000002",
@@ -147,10 +156,13 @@ fn stale_reference_fails_and_names_offender() {
         Some(&good_provenance()),
         &all_corruption_components(),
     );
-    assert!(!report.ok());
-    assert_eq!(report.count(FindingKind::StaleReference), 1);
+    assert!(
+        report.ok(),
+        "UUID churn (same table+component, new uuid dir) must be clean, got: {}",
+        report.render()
+    );
+    assert_eq!(report.count(FindingKind::StaleReference), 0);
     assert_eq!(report.count(FindingKind::MissingReference), 0);
-    assert!(report.render().contains(REF));
 }
 
 #[test]

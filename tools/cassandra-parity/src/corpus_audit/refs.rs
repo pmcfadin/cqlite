@@ -1,16 +1,21 @@
-//! Missing/stale reference classification for the corpus audit (design D3).
+//! Missing reference classification for the corpus audit (design D3).
 //!
 //! Only manifest references that point INTO the regenerated corpus tree
 //! (`test-data/datasets/...`) are audited here; arbitrary repo files (test
 //! sources, scripts) are covered by the manifest linter's path-existence check.
 //!
-//! A reference is:
-//!   * **OK** when its exact path is present in the regenerated corpus.
-//!   * **Stale** when the corpus still produces the same table+component, but
-//!     only under a *different* generation directory — i.e. the manifest pins an
-//!     obsolete table-UUID dir (the common real-world drift: every regeneration
-//!     mints fresh table UUIDs).
-//!   * **Missing** when no regenerated component matches the table+component at all.
+//! The lane audits a FRESHLY regenerated corpus: `regenerate-datasets.sh`
+//! `rm -rf`s the corpus and re-creates each table via `CREATE TABLE`, so
+//! Cassandra mints a NEW random table UUID for each table every run. The
+//! committed manifest references pin OLD UUID directories, so a healthy
+//! reference almost never matches by exact path. Classification is therefore by
+//! the SAME UUID-independent identity [`component_identity`] the sibling
+//! component-change audit uses — never by raw path:
+//!   * **OK** when its exact path is present in the regenerated corpus, OR when
+//!     a regenerated file shares its `(table_key, basename)` identity (the
+//!     manifest merely pins an obsolete table-UUID dir — pure per-run churn).
+//!   * **Missing** only on GENUINE disappearance: no regenerated file shares the
+//!     reference's table+component identity at all.
 
 use std::collections::BTreeSet;
 
@@ -22,13 +27,20 @@ use super::{AuditFinding, CorpusInventory, FindingKind};
 const CORPUS_PREFIX: &str = "test-data/datasets/";
 
 /// Classify every corpus-tree reference of every non-`planned` scenario.
+///
+/// A reference is a [`FindingKind::MissingReference`] ONLY when no regenerated
+/// file shares its UUID-independent [`component_identity`]. A reference whose
+/// identity IS present — even under a churned `<table>-<uuid>` directory the
+/// manifest does not pin — produces ZERO findings, matching the churn-tolerant
+/// contract of [`super::check_component_changes`] (issue #1026).
 pub fn check_references(manifest: &Manifest, inventory: &CorpusInventory) -> Vec<AuditFinding> {
-    // (table_key, basename) of every regenerated file, for stale-vs-missing.
-    let mut produced: BTreeSet<(String, String)> = BTreeSet::new();
-    for f in &inventory.files {
-        let (parent, base) = split_path(f);
-        produced.insert((table_key(parent), base.to_string()));
-    }
+    // UUID-independent identity of every regenerated file, so a reference pinned
+    // to an obsolete table-UUID dir still resolves to its churned twin.
+    let produced: BTreeSet<String> = inventory
+        .files
+        .iter()
+        .map(|f| component_identity(f))
+        .collect();
 
     let mut out = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -40,31 +52,22 @@ pub fn check_references(manifest: &Manifest, inventory: &CorpusInventory) -> Vec
             if !seen.insert(r.clone()) {
                 continue;
             }
-            if inventory.files.contains(&r) {
+            // Exact path present, or the same table+component exists under a
+            // churned UUID dir -> the corpus still produces it; not a finding.
+            if inventory.files.contains(&r) || produced.contains(&component_identity(&r)) {
                 continue;
             }
-            let (parent, base) = split_path(&r);
-            let key = (table_key(parent), base.to_string());
-            if produced.contains(&key) {
-                out.push(AuditFinding::new(
-                    FindingKind::StaleReference,
-                    r.clone(),
-                    format!(
-                        "scenario {} pins a generation dir the fresh corpus replaced \
-                         (same table+component exists under a new directory)",
-                        s.id
-                    ),
-                ));
-            } else {
-                out.push(AuditFinding::new(
-                    FindingKind::MissingReference,
-                    r.clone(),
-                    format!(
-                        "scenario {} references a corpus component the regeneration did not produce",
-                        s.id
-                    ),
-                ));
-            }
+            // Genuine disappearance: no regenerated file shares this reference's
+            // table+component identity.
+            out.push(AuditFinding::new(
+                FindingKind::MissingReference,
+                r.clone(),
+                format!(
+                    "scenario {} references a corpus component the regeneration did not produce \
+                     (no regenerated file shares its table+component identity)",
+                    s.id
+                ),
+            ));
         }
     }
     out
