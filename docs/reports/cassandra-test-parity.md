@@ -10,11 +10,11 @@ Sources: [`docs/cassandra_test_index.md`](../../docs/cassandra_test_index.md) ·
 
 | Status | Scenarios |
 |---|---|
-| `mirrored` | 211 |
+| `mirrored` | 217 |
 | `partial` | 16 |
 | `planned` | 18 |
 | `out_of_scope` | 14 |
-| **total** | **259** |
+| **total** | **265** |
 
 ## Evidence counts
 
@@ -22,8 +22,8 @@ _Counts are per scenario; see [Distinct test backing](#distinct-test-backing-ded
 
 | Evidence | Scenarios |
 |---|---|
-| `byte_for_byte` | 113 |
-| `canonical_semantic` | 96 |
+| `byte_for_byte` | 118 |
+| `canonical_semantic` | 97 |
 | `smoke` | 7 |
 | `partial` | 27 |
 | `out_of_scope` | 16 |
@@ -71,6 +71,9 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 | `cass.compaction.issue_899_per_element_collection_compaction` | compaction_merge | mirrored | canonical_semantic | `compaction_parity_tombstone_ttl` | p0_data_loss |
 | `cass.compaction.live_cells_clustering_lww` | compaction_merge | mirrored | byte_for_byte | `compaction_parity_tombstone_ttl` | p0_data_loss |
 | `cass.compaction.live_cells_no_clustering` | compaction_merge | mirrored | byte_for_byte | `compaction_parity_tombstone_ttl` | p0_data_loss |
+| `cass.compaction.udt_collections_with_udts` | compaction_merge | mirrored | byte_for_byte | `compaction_parity_tombstone_ttl` | p0_data_loss |
+| `cass.compaction.udt_frozen_person` | compaction_merge | mirrored | byte_for_byte | `compaction_parity_tombstone_ttl` | p0_data_loss |
+| `cass.compaction.udt_nested` | compaction_merge | mirrored | byte_for_byte | `compaction_parity_tombstone_ttl` | p0_data_loss |
 | `cass.compaction_merge.GcCompactionTest.row_cell_partition_tombstone_gc` | compaction_merge | mirrored | canonical_semantic | `compaction_parity_tombstone_ttl` | p0_data_loss |
 | `cass.compaction_merge.byte_for_byte_output` | compaction_merge | planned | partial | `compaction_parity_tombstone_ttl` | p0_data_loss |
 | `cass.compaction_merge.issue_819.differential_input_merge_write_fidelity` | compaction_merge | mirrored | canonical_semantic | `compaction_parity_tombstone_ttl` | p0_data_loss |
@@ -187,6 +190,9 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 | `cass.schema_evolution.serialization_header.no_schema_change` | schema_evolution | mirrored | byte_for_byte | `schema_parity_serialization_header` | p1_correctness |
 | `cass.schema_evolution.serialization_header.static_regular_kind_mismatch` | schema_evolution | mirrored | byte_for_byte | `schema_parity_serialization_header` | p1_correctness |
 | `cass.serialization.SerializationHeaderTest.static_and_dropped_columns` | schema_evolution | mirrored | canonical_semantic | `schema_parity_serialization_header` | p1_correctness |
+| `cass.serialization.SerializationHeaderTest.udt_schema_resolution` | compaction_merge | mirrored | canonical_semantic | `compaction_parity_tombstone_ttl` | p1_correctness |
+| `cass.sstable_format.CQLSSTableWriterTest.frozen_udt_roundtrip` | compaction_merge | mirrored | byte_for_byte | `compaction_parity_tombstone_ttl` | p0_data_loss |
+| `cass.sstable_format.LegacySSTableTest.complex_udt_frozen_non_frozen` | compaction_merge | mirrored | byte_for_byte | `compaction_parity_tombstone_ttl` | p0_data_loss |
 | `cass.sstable_format.descriptor_component_resolution` | sstable_format | mirrored | smoke | `sstable_parity_component_manifest` | p1_correctness |
 | `cass.sstable_format.toc_component_manifest` | sstable_format | mirrored | byte_for_byte | `sstable_parity_component_manifest` | p1_correctness |
 | `cass.sstable_io.reader.tombstone_only_partition` | data_db_decode | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p0_data_loss |
@@ -247,6 +253,12 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
   - Normalization: Data.db/Index.db/Summary.db/Digest.crc32 whole-file byte-for-byte; CRC.db prefix (compaction-only trailing empty-chunk CRC32=0 excluded); JSONL secondary.
 - `cass.compaction.live_cells_no_clustering` — Live-cell compaction byte parity — partition-key-only table (the claim)
   - Normalization: Data.db/Index.db/Summary.db/Digest.crc32 whole-file byte-for-byte; CRC.db prefix (compaction-only trailing empty-chunk CRC32=0 excluded); JSONL secondary.
+- `cass.compaction.udt_collections_with_udts` — Frozen-collection + collections-of-UDT compaction byte parity (the claim)
+  - Normalization: Data.db/Index.db/Summary.db/Digest.crc32 whole-file byte-for-byte; CRC.db prefix (compaction-only trailing empty-chunk CRC32=0 excluded); typed JSONL (frozen collections + collections-of-UDT field decode) cross-check.
+- `cass.compaction.udt_frozen_person` — Frozen-UDT (person) value compaction byte parity
+  - Normalization: Data.db/Index.db/Summary.db/Digest.crc32 whole-file byte-for-byte; CRC.db prefix (compaction-only trailing empty-chunk CRC32=0 excluded); typed JSONL per-(pk,cell) canonical UDT JSON equality pins field order + null-field + empty-string-field decode of the LWW survivors.
+- `cass.compaction.udt_nested` — Nested frozen-UDT (employee→address) compaction byte parity
+  - Normalization: Data.db/Index.db/Summary.db/Digest.crc32 whole-file byte-for-byte; CRC.db prefix (compaction-only trailing empty-chunk CRC32=0 excluded); typed JSONL per-(pk,cell) canonical nested-UDT JSON equality pins inner+outer field order, nested field decode, and the inner null field.
 - `cass.compression.fixture_matrix.deflate` — Deflate (zlib) compression fixture — CompressionInfo.db parity
 - `cass.compression.fixture_matrix.incompressible_uncompressed_chunk` — Incompressible payload — chunk stored uncompressed within compressed file
 - `cass.compression.fixture_matrix.lz4` — LZ4 compression fixture — CompressionInfo.db chunk-offset/CRC parity
@@ -356,6 +368,10 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.schema_evolution.serialization_header.frozen_multicell_collection_mismatch` — Serialization-header parity across frozen/multicell collection mismatch
 - `cass.schema_evolution.serialization_header.no_schema_change` — Serialization-header parity with no schema change
 - `cass.schema_evolution.serialization_header.static_regular_kind_mismatch` — Serialization-header parity across static/regular column-kind mismatch
+- `cass.sstable_format.CQLSSTableWriterTest.frozen_udt_roundtrip` — Frozen-UDT round-trip through compaction (byte-parity mirror)
+  - Normalization: Cross-references cass.compaction.udt_frozen_person (byte-for-byte components + typed JSONL survivor map).
+- `cass.sstable_format.LegacySSTableTest.complex_udt_frozen_non_frozen` — Complex frozen UDT inside frozen collections survives compaction (mirror)
+  - Normalization: Cross-references the byte-level claim cass.compaction.udt_collections_with_udts.
 - `cass.sstable_format.toc_component_manifest` — TOC.txt component manifest completeness
 - `cass.statistics_db.MetadataSerializerTest.metadata_components` — Statistics.db metadata-component TOC byte parity (count + ordered types)
 - `cass.statistics_db.SSTableMetadataTrackingTest.timestamp_and_ttl_metadata` — Statistics.db min timestamp / local-deletion-time / TTL byte parity
@@ -526,6 +542,8 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
   - Normalization: The compacted output static-column set is decoded byte-derived and must contain the re-added column as static (never demoted to regular); the static cell presence is read back via KWayMerger.
 - `cass.serialization.SerializationHeaderTest.static_and_dropped_columns` — Compaction preserves static + strips fully-purged dropped columns in the output SerializationHeader
   - Normalization: The compacted output Statistics.db SerializationHeader column sets (regular / static) are decoded byte-derived and compared to the oracle's committed sstablemetadata golden dumps; presentation ignored.
+- `cass.serialization.SerializationHeaderTest.udt_schema_resolution` — UDT schema resolution through compaction (fail-loud, no blob fallback)
+  - Normalization: Schema-driven UDT resolution: a missing/incorrect registry would degrade the frozen-UDT column to a bare BytesType cell that would not decode to a typed UDT (test fails) — no silent blob fallback (issue #28).
 - `cass.serialization.SerializationMirrorTest.schema_evolution_ordering` — Serialization-header column ordering survives compaction across schema evolution
   - Normalization: Surviving regular cells read back via KWayMerger are compared at the clustering-key granularity to the expected oracle positions; the output header column set is decoded byte-derived.
 - `cass.sstable_io.reader.tombstone_only_partition` — Tombstone-only partition reader parity
@@ -603,7 +621,7 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 
 Scenario counts above can overstate distinct proof: one backing test may exercise many scenario ids. The dedup view below counts unique test targets so the program is not read as more independent tests than exist (issue #1228).
 
-- Distinct backing tests: **60** across **238** scenarios that name a test.
+- Distinct backing tests: **61** across **244** scenarios that name a test.
 
 ### Tests backing more than one scenario
 
@@ -625,6 +643,7 @@ Scenario counts above can overstate distinct proof: one backing test may exercis
 | `cqlite-core/tests/issue_1004_primitive_codec_vectors.rs` | 6 |
 | `cqlite-core/tests/issue_1005_collection_serializer_vectors.rs` | 6 |
 | `cqlite-core/tests/issue_1007_complex_type_parity.rs` | 6 |
+| `cqlite-core/tests/issue_1020_udt_frozen_compaction_byte_parity.rs` | 6 |
 | `cqlite-core/tests/sstable_parity_filter_db_test.rs` | 6 |
 | `cqlite-core/tests/sstable_parity_index_db_test.rs` | 6 |
 | `cqlite-core/tests/sstable_parity_repaired_metadata_test.rs` | 6 |
@@ -773,6 +792,9 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.compaction.issue_899_per_element_collection_compaction` | required_parity | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.compaction.live_cells_clustering_lww` | required_parity | .github/workflows/live-cell-compaction-parity.yml |
 | `cass.compaction.live_cells_no_clustering` | required_parity | .github/workflows/live-cell-compaction-parity.yml |
+| `cass.compaction.udt_collections_with_udts` | required_parity | .github/workflows/live-cell-compaction-parity.yml |
+| `cass.compaction.udt_frozen_person` | required_parity | .github/workflows/live-cell-compaction-parity.yml |
+| `cass.compaction.udt_nested` | required_parity | .github/workflows/live-cell-compaction-parity.yml |
 | `cass.compaction_merge.GcCompactionTest.row_cell_partition_tombstone_gc` | manual_debug | — |
 | `cass.compaction_merge.byte_for_byte_output` | manual_debug | — |
 | `cass.compaction_merge.issue_819.differential_input_merge_write_fidelity` | manual_debug | — |
@@ -945,7 +967,10 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.schema_evolution.serialization_header.static_regular_kind_mismatch` | required_parity | .github/workflows/cql-type-parity.yml |
 | `cass.schema_evolution.serialization_header_column_order` | fast_pr | — |
 | `cass.serialization.SerializationHeaderTest.static_and_dropped_columns` | required_parity | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.serialization.SerializationHeaderTest.udt_schema_resolution` | required_parity | .github/workflows/live-cell-compaction-parity.yml |
 | `cass.serialization.SerializationMirrorTest.schema_evolution_ordering` | required_parity | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.sstable_format.CQLSSTableWriterTest.frozen_udt_roundtrip` | required_parity | .github/workflows/live-cell-compaction-parity.yml |
+| `cass.sstable_format.LegacySSTableTest.complex_udt_frozen_non_frozen` | required_parity | .github/workflows/live-cell-compaction-parity.yml |
 | `cass.sstable_format.descriptor_component_resolution` | fast_pr | — |
 | `cass.sstable_format.toc_component_manifest` | fast_pr | — |
 | `cass.sstable_io.reader.tombstone_only_partition` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
@@ -1037,6 +1062,9 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.compaction.issue_899_per_element_collection_compaction` | nb | test-data/datasets/sstables/test_collections<br>test-data/datasets/sstables/test_deltas/collection_ops-2a5006f06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl |
 | `cass.compaction.live_cells_clustering_lww` | nb | test-data/datasets/sstables/test_compactionparity/live_clustering-e094a78073a611f1b17b3da6654e7580/nb-3-big-Data.db<br>test-data/datasets/sstables/test_compactionparity/live_clustering-e094a78073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl<br>test-data/datasets/sstables/test_compactionparity/live_clustering-e094a78073a611f1b17b3da6654e7580/nb-3-big-Index.db<br>test-data/datasets/sstables/test_compactionparity/live_clustering-e094a78073a611f1b17b3da6654e7580/nb-3-big-Summary.db<br>test-data/datasets/sstables/test_compactionparity/live_clustering-e094a78073a611f1b17b3da6654e7580/nb-3-big-Digest.crc32<br>_fail:_ panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; JSONL partition-count + LWW-survivor assertion |
 | `cass.compaction.live_cells_no_clustering` | nb | test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Data.db<br>test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl<br>test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Index.db<br>test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Summary.db<br>test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Digest.crc32<br>_fail:_ panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; JSONL partition-count + LWW-survivor assertion |
+| `cass.compaction.udt_collections_with_udts` | nb | test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db<br>test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl<br>test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Index.db<br>test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Summary.db<br>test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Digest.crc32<br>_fail:_ panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; typed JSONL (pk,cell)->value map mismatch |
+| `cass.compaction.udt_frozen_person` | nb | test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-3dcdc92073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db<br>test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-3dcdc92073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl<br>test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-3dcdc92073fe11f1ba13ff2af5955bf3/nb-3-big-Index.db<br>test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-3dcdc92073fe11f1ba13ff2af5955bf3/nb-3-big-Summary.db<br>test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-3dcdc92073fe11f1ba13ff2af5955bf3/nb-3-big-Digest.crc32<br>_fail:_ panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; typed JSONL (pk,cell)->value map mismatch |
+| `cass.compaction.udt_nested` | nb | test-data/datasets/sstables/test_compactionparityudt/udt_nested-3dda9a6073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db<br>test-data/datasets/sstables/test_compactionparityudt/udt_nested-3dda9a6073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl<br>test-data/datasets/sstables/test_compactionparityudt/udt_nested-3dda9a6073fe11f1ba13ff2af5955bf3/nb-3-big-Index.db<br>test-data/datasets/sstables/test_compactionparityudt/udt_nested-3dda9a6073fe11f1ba13ff2af5955bf3/nb-3-big-Summary.db<br>test-data/datasets/sstables/test_compactionparityudt/udt_nested-3dda9a6073fe11f1ba13ff2af5955bf3/nb-3-big-Digest.crc32<br>_fail:_ panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; typed JSONL (pk,cell)->value map mismatch |
 | `cass.compaction_merge.GcCompactionTest.row_cell_partition_tombstone_gc` | nb | test-data/datasets/sstables/test_deltas/cell_tombstones-29733830701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl |
 | `cass.compaction_merge.byte_for_byte_output` | — | — |
 | `cass.compaction_merge.issue_819.differential_input_merge_write_fidelity` | nb | test-data/datasets/sstables/test_deltas/cell_tombstones-29733830701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl |
@@ -1209,7 +1237,10 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.schema_evolution.serialization_header.static_regular_kind_mismatch` | nb | test-data/datasets/sstables/test_types/se_static_regular_kind_mismatch-4f87ecd0706211f197e20b846582ecc8/nb-1-big-Statistics.db.txt<br>test-data/datasets/sstables/test_types/se_static_regular_kind_mismatch-4f87ecd0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl<br>_fail:_ logs |
 | `cass.schema_evolution.serialization_header_column_order` | nb | — |
 | `cass.serialization.SerializationHeaderTest.static_and_dropped_columns` | nb | test-data/datasets/sstables/test_tomb/dropped_static_col-4cd18560702011f1b8f419c9a388d558/nb-1-big-Statistics.db.txt<br>test-data/datasets/sstables/test_tomb/dropped_regular_col-4cc79a50702011f1b8f419c9a388d558/nb-2-big-Statistics.db.txt |
+| `cass.serialization.SerializationHeaderTest.udt_schema_resolution` | nb | test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl<br>test-data/datasets/sstables/test_compactionparityudt/udt_nested-3dda9a6073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl |
 | `cass.serialization.SerializationMirrorTest.schema_evolution_ordering` | nb | — |
+| `cass.sstable_format.CQLSSTableWriterTest.frozen_udt_roundtrip` | nb | test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-3dcdc92073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl<br>_fail:_ panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; typed JSONL (pk,cell)->value map mismatch |
+| `cass.sstable_format.LegacySSTableTest.complex_udt_frozen_non_frozen` | nb | test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl<br>_fail:_ panic diff: CQLite-compacted vs Cassandra-compacted Data.db/Index.db/Summary.db/Digest.crc32 byte mismatch (full hex of both); typed JSONL (pk,cell)->value map mismatch for the collection-element UDT decode |
 | `cass.sstable_format.descriptor_component_resolution` | nb, oa, da | — |
 | `cass.sstable_format.toc_component_manifest` | nb, oa, da | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt<br>test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-TOC.txt<br>test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-TOC.txt<br>test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Digest.crc32<br>test-data/datasets/sstables/test_oa/simple_table-4b7cd05064e711f1bd3ac7dbf655c673/oa-2-big-Digest.crc32<br>_fail:_ panic diff: cqlite-recomputed Digest.crc32 payload vs Cassandra reference (bytes + decoded decimal + Data.db path) |
 | `cass.sstable_io.reader.tombstone_only_partition` | nb | test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-2-big-Data.db.jsonl |
