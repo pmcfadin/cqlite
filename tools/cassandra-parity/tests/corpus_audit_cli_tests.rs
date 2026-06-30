@@ -144,6 +144,43 @@ fn corpus_audit_clean_exits_zero() {
     );
 }
 
+/// Issue #1026 (HIGH/LOW A, roborev): the lane audits a FRESHLY regenerated
+/// corpus — every run `rm -rf`s the tree and re-creates each table, so Cassandra
+/// mints a NEW random table UUID and the regenerated golden lands under a
+/// DIFFERENT `<table>-<uuid>` directory than the committed manifest reference
+/// pins. The prior exact-path-match clean test never exercised this and passed
+/// green while the real regenerated input hard-failed STALE-REFERENCE. This
+/// drives the CLI with the golden under a churned UUID dir and asserts exit 0.
+#[test]
+fn corpus_audit_clean_under_uuid_churn_exits_zero() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    write_common(root);
+    write_provenance(root);
+
+    // Same table_key + basename, but under a fresh (churned) UUID directory the
+    // manifest does not pin.
+    let churned = reference_path().replace(
+        "simple_table-aaaa0000000000000000000000000001",
+        "simple_table-bbbb0000000000000000000000000002",
+    );
+    let path = root.join(&churned);
+    fs::create_dir_all(path.parent().expect("parent")).expect("mkdir churned corpus");
+    fs::write(&path, b"{}\n").expect("write churned golden");
+
+    let out = run_audit(root);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "UUID churn (golden under a new uuid dir) must exit 0.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("corpus-audit: OK"),
+        "expected OK summary under churn, got stdout: {stdout}"
+    );
+}
+
 #[test]
 fn corpus_audit_missing_reference_exits_nonzero_and_names_finding() {
     let dir = tempfile::tempdir().expect("tempdir");
