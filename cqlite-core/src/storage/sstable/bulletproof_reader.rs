@@ -83,6 +83,18 @@ impl BulletproofReader {
         let path = sstable_path.as_ref();
         let info = SSTableInfo::from_path(path)?;
 
+        // #1249: reject below-floor formats (Cassandra 2.x and pre-`na` 3.x
+        // BIG, i.e. `ma`–`me`) BEFORE any initialization or file-body read.
+        // There is no correctness-modeling read path for them; return the
+        // typed version error naming the supported floor rather than opening
+        // files and reading rows we cannot interpret.
+        if let SSTableFormat::V2x(v) | SSTableFormat::V3x(v) = &info.format {
+            return Err(Error::UnsupportedVersion {
+                version: v.clone(),
+                floor: "na".to_string(),
+            });
+        }
+
         let base_dir = path
             .parent()
             .ok_or_else(|| Error::InvalidPath("No parent directory".to_string()))?
@@ -228,6 +240,20 @@ impl BulletproofReader {
     /// This is where we'll implement the actual SSTable parsing
     /// based on the detected format version
     pub fn parse_sstable_data(&mut self) -> Result<Vec<SSTableEntry>> {
+        // #1249: reject below-floor formats (Cassandra 2.x and pre-`na` 3.x
+        // BIG, i.e. `ma`–`me`) BEFORE reading any row bytes. There is no
+        // correctness-modeling read path for them; return the typed version
+        // error naming the supported floor instead of routing into a stub
+        // parser or surfacing a downstream parse/corruption error. `open`
+        // already rejects these, but readers built via `new()` reach here
+        // directly, so guard before `read_all_data()`.
+        if let SSTableFormat::V2x(v) | SSTableFormat::V3x(v) = &self.info.format {
+            return Err(Error::UnsupportedVersion {
+                version: v.clone(),
+                floor: "na".to_string(),
+            });
+        }
+
         let data = self.read_all_data()?;
 
         info!(
@@ -238,14 +264,9 @@ impl BulletproofReader {
 
         match &self.info.format {
             SSTableFormat::V4x(_) | SSTableFormat::V5x(_) => self.parse_modern_format(&data),
-            // #1249: pre-`na` (Cassandra 3.x BIG, `ma`–`me`) and 2.x are below
-            // the supported floor. There is no correctness-modeling read path
-            // for them; reject with the typed version error naming the floor
-            // instead of routing into a stub parser.
-            SSTableFormat::V3x(v) | SSTableFormat::V2x(v) => Err(Error::UnsupportedVersion {
-                version: v.clone(),
-                floor: "na".to_string(),
-            }),
+            SSTableFormat::V2x(_) | SSTableFormat::V3x(_) => {
+                unreachable!("below-floor V2x/V3x formats are rejected before read_all_data")
+            }
             SSTableFormat::Unknown(version) => Err(Error::UnsupportedFormat(format!(
                 "Unknown SSTable version: {}",
                 version
@@ -785,5 +806,57 @@ mod tests {
         assert_eq!(value, 128);
         assert_eq!(bytes_read, 2);
         Ok(())
+    }
+
+    /// #1249: a below-floor format (Cassandra 3.x BIG `ma`) must yield the typed
+    /// `UnsupportedVersion` error from `parse_sstable_data` BEFORE any row bytes
+    /// are read. The reader points at a non-existent Data.db: if the rejection
+    /// happened after `read_all_data()` we would instead get an IO/parse error,
+    /// so observing `UnsupportedVersion` proves no body read occurred.
+    #[test]
+    fn test_below_floor_rejected_before_read() {
+        let info = SSTableInfo::from_path(&std::path::PathBuf::from("ma-1-big-Data.db")).unwrap();
+        assert!(matches!(info.format, SSTableFormat::V3x(_)));
+
+        let mut reader = BulletproofReader {
+            info,
+            // Intentionally bogus base dir + no data_reader so that any attempt
+            // to read the body would fail loudly with a non-version error.
+            base_dir: std::path::PathBuf::from("/nonexistent/cqlite-1249"),
+            decompressor: None,
+            data_reader: None,
+        };
+
+        match reader.parse_sstable_data() {
+            Err(Error::UnsupportedVersion { version, floor }) => {
+                assert_eq!(version, "ma");
+                assert_eq!(floor, "na");
+            }
+            other => panic!("expected UnsupportedVersion, got {:?}", other),
+        }
+    }
+
+    /// #1249: `open` rejects a below-floor descriptor before initialization,
+    /// even when the Data.db body exists (here a truncated/garbage body). The
+    /// typed `UnsupportedVersion` must surface rather than a parse/corruption
+    /// error from reading the body.
+    #[test]
+    fn test_open_below_floor_rejected_with_body_present() {
+        let dir = std::env::temp_dir().join(format!("cqlite-1249-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let data_path = dir.join("ma-1-big-Data.db");
+        // Non-empty, non-'oa' body: would error during parsing if ever read.
+        std::fs::write(&data_path, b"not a valid sstable body").unwrap();
+
+        let result = BulletproofReader::open(&data_path);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        match result {
+            Err(Error::UnsupportedVersion { version, floor }) => {
+                assert_eq!(version, "ma");
+                assert_eq!(floor, "na");
+            }
+            other => panic!("expected UnsupportedVersion, got {:?}", other.map(|_| ())),
+        }
     }
 }
