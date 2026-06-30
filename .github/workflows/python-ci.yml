@@ -25,7 +25,7 @@ env:
   DATASET_SHA256: bebc763752c8d68c7fb0483a1b31294b4d1d21343d3f7d124da069e5073202fa
 
 jobs:
-  build-wheels:
+  build-only-wheels:
     name: Build wheel (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -35,17 +35,10 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            manylinux: "2_28"
-          - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             manylinux: "2_28"
           - os: macos-14
             target: x86_64-apple-darwin
-          - os: macos-14
-            target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
 
     steps:
       - name: Checkout
@@ -108,8 +101,7 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    needs: build-wheels
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     strategy:
       fail-fast: false
@@ -121,48 +113,39 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             python: "3.12"
+            manylinux: "2_28"
+            run_slow_tests: true
           - os: macos-14
             target: aarch64-apple-darwin
             python: "3.12"
+            run_slow_tests: false
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             python: "3.12"
+            run_slow_tests: false
 
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Setup Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: ${{ matrix.python }}
-
-      - name: Download wheel
-        uses: actions/download-artifact@v7
-        with:
-          name: wheel-${{ matrix.target }}
-          path: dist
-
-      - name: Install wheel and test dependencies
-        shell: bash
-        run: |
-          pip install pytest>=7.0
-          pip install dist/*.whl
-
-      # Issue #1209: drop the conflicting clippy-preview component BEFORE the
-      # dtolnay/rust-toolchain@stable action runs any rustup work, so the @stable
-      # setup (minimal profile, no clippy) cannot reinstall clippy-preview and
-      # hit "detected conflict: 'bin/cargo-clippy'". The runner ships a working
-      # rustup, so this `run:` step before the action has rustup available.
-      # This test job does not run clippy. Idempotent: a no-op if clippy is absent.
+      # Issue #1209: GitHub runner images ship a stable toolchain that already
+      # provides bin/cargo-clippy. The dtolnay/rust-toolchain@stable action is
+      # invoked with `targets:`, so it performs a rustup reconcile that can
+      # intermittently try to (re)install the 'clippy-preview' component and
+      # fail with "detected conflict: 'bin/cargo-clippy'". Remove the conflicting
+      # component FIRST — before the toolchain action runs any rustup work — so
+      # the @stable setup (which defaults to the minimal profile, no clippy)
+      # cannot reinstall clippy-preview. The runner ships a working rustup, so
+      # this `run:` step before the action has rustup available.
+      # This wheel build does not run clippy. Idempotent: a no-op if clippy is absent.
       - name: Remove preinstalled clippy (avoid clippy-preview install conflict)
-        if: runner.os == 'macOS'
         shell: bash
         run: rustup component remove clippy 2>/dev/null || true
 
-      - name: Setup Rust (for CLI build)
-        if: runner.os == 'macOS'
+      - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Normalize PATH for macOS (prepend ~/.cargo/bin so real cargo wins over rustup-init)
         if: runner.os == 'macOS'
@@ -177,6 +160,38 @@ jobs:
           which -a cargo rustup rustup-init || true
           cargo --version
           rustup --version
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "bindings/python -> target"
+          key: ${{ matrix.os }}-${{ matrix.target }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          working-directory: bindings/python
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: wheel-${{ matrix.target }}
+          path: bindings/python/dist/*.whl
+          retention-days: 7
+
+      - name: Install wheel and test dependencies
+        shell: bash
+        run: |
+          pip install pytest>=7.0
+          pip install bindings/python/dist/*.whl
 
       - name: Restore dataset cache
         id: dataset-cache
@@ -221,11 +236,13 @@ jobs:
 
       # Issue #331: Pre-build CLI binary for faster CLI parity tests
       - name: Build CLI binary for tests
+        if: matrix.run_slow_tests
         shell: bash
         run: |
           cargo build --package cqlite-cli --release
 
-      - name: Run pytest
+      - name: Run pytest (full, with slow CLI parity)
+        if: matrix.run_slow_tests
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
           RUN_SLOW_TESTS: "1"  # Issue #331: Run all tests including CLI parity
@@ -242,6 +259,15 @@ jobs:
         run: |
           pytest bindings/python/tests/ -v --tb=short
 
+      - name: Run pytest (non-slow)
+        if: ${{ !matrix.run_slow_tests }}
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          CQLITE_REQUIRE_FIXTURES: "1"
+        shell: bash
+        run: |
+          pytest bindings/python/tests/ -v --tb=short -m "not slow"
+
       - name: Upload test results on failure
         if: failure()
         uses: actions/upload-artifact@v6
@@ -254,15 +280,15 @@ jobs:
   quality-gate:
     name: Python CI Quality Gate
     runs-on: ubuntu-latest
-    needs: [build-wheels, test]
+    needs: [build-only-wheels, test]
     if: always()
 
     steps:
       - name: Check build results
         run: |
-          echo "Build results: ${{ needs.build-wheels.result }}"
-          if [ "${{ needs.build-wheels.result }}" != "success" ]; then
-            echo "::error::Wheel builds failed"
+          echo "Build-only wheel results: ${{ needs.build-only-wheels.result }}"
+          if [ "${{ needs.build-only-wheels.result }}" != "success" ]; then
+            echo "::error::Build-only wheel builds failed"
             exit 1
           fi
 
@@ -317,7 +343,9 @@ jobs:
           echo "| x86_64-pc-windows-msvc | :white_check_mark: |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Test Results" >> $GITHUB_STEP_SUMMARY
-          echo "Tests passed on 3 native platforms (ARM64 Linux and x86_64 macOS are build-only)" >> $GITHUB_STEP_SUMMARY
+          echo "Full Python tests, including slow CLI parity, passed on Ubuntu." >> $GITHUB_STEP_SUMMARY
+          echo "Non-slow Python binding tests passed on macOS and Windows." >> $GITHUB_STEP_SUMMARY
+          echo "ARM64 Linux and x86_64 macOS are build-only." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Artifacts" >> $GITHUB_STEP_SUMMARY
           echo "Download wheels: \`cqlite-wheels\`" >> $GITHUB_STEP_SUMMARY

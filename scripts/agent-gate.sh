@@ -26,6 +26,15 @@
 #   python-bindings    maturin develop + pytest bindings/python/tests in a throwaway
 #                      venv; SKIPs (never silently PASSes) if python3 is unavailable.
 #                      Set RUN_SLOW_TESTS=1 to also run the CLI-parity suite.
+#                      The full pytest run includes the #1231 Python write→read
+#                      content proof (test_write_readback_content.py), so a core
+#                      write-format regression reds a binding content test.
+#   node-bindings      napi build + the #1231 Node write→read content proof
+#                      (npx jest write-readback-content) in bindings/node; SKIPs
+#                      (never silently PASSes) if node/npm is unavailable. Scoped
+#                      to the content proof (not full `npm test`) so it stays
+#                      fast and corpus-free while still failing closed on a Node
+#                      write-path regression (#1255).
 #   tooling-tests      shell-tooling regression tests (fast, no datasets/network):
 #                      scripts/tests/test_agent_gate_summary.sh — proves the
 #                      SUMMARY block survives non-foreground capture (#1175). It
@@ -33,6 +42,11 @@
 #                      exits before running any component, so there is no recursion.
 #                      SKIP-aware: no python3 -> SKIP (the selftest's truncation
 #                      assertion needs a python reader), never silent PASS.
+#                      Also runs scripts/tests/test_generator_keyspace_scoping.sh
+#                      (#1232) — fails if a generate-*.sh enumerates the whole
+#                      SSTable corpus and grep -z filters by keyspace; needs no
+#                      python3 so it runs even on the SKIP path, and any failure
+#                      hard-FAILs this component.
 #   minimal-build      cargo build -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
 #   file-size          campsite-rule ratchet (epic #1116 / #1135): lists changed
@@ -120,7 +134,7 @@ if ! command -v cargo >/dev/null 2>&1 && [ -d "$HOME/.cargo/bin" ]; then
 fi
 export CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-$REPO_ROOT/test-data/datasets}"
 
-COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard integration-tests format-compat write-tests cli-tests python-bindings delivery-telemetry tooling-tests minimal-build smoke)
+COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard integration-tests format-compat write-tests cli-tests python-bindings node-bindings delivery-telemetry tooling-tests minimal-build smoke)
 ONLY=""
 SELFTEST=0
 case "${1:-}" in
@@ -404,6 +418,54 @@ run_python_bindings() {
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
+# node-bindings: build the napi-rs native module and run the #1231 Node
+# write→read CONTENT proof. Symmetric to run_python_bindings and SKIP-aware:
+# if there is no node/npm on PATH the component records SKIP (loudly, never
+# silently PASS) so a missing toolchain can't mask a real Node write-path
+# regression. Anything else (install/build/test failure) is a hard FAIL.
+#
+# Scope (#1255): we run the content proof specifically (npx jest
+# write-readback-content) rather than the full `npm test`. The full Node suite
+# pulls in corpus-dependent parity/smoke tests and a slow `--release` napi
+# build; scoping to the content proof keeps the gate fast and reliable while
+# guaranteeing the load-bearing #1231 test executes fail-closed. The content
+# test self-generates its SSTables, so it needs no fixture corpus (hence
+# node-bindings is NOT in DATASET_COMPONENTS); CQLITE_DATASETS_ROOT is still
+# exported defensively for any test that reads it.
+run_node_bindings() {
+  local name=node-bindings
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local log="$LOG_DIR/$name.log"
+  local start end status
+  start=$(date +%s)
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    status=SKIP
+    echo ">>> [$name] SKIP (no node/npm on PATH)"
+    NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("0s")
+    return 0
+  fi
+  echo ">>> [$name] npm ci + npm run build + jest write-readback-content (#1231)"
+  if CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" bash -c '
+      set -euo pipefail
+      cd "'"$REPO_ROOT"'/bindings/node"
+      if [ -f package-lock.json ]; then npm ci; else npm install; fi
+      npm run build
+      npx jest write-readback-content' >"$log" 2>&1; then
+    status=PASS
+  else
+    status=FAIL
+    OVERALL=FAIL
+    echo "--- [$name] FAILED; last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
 # delivery-telemetry: run the delivery-pipeline telemetry tool's unit tests
 # (scripts/tests/test_delivery_telemetry.py) with the stdlib unittest runner.
 # SKIP-aware like python-bindings: no python3 -> SKIP (loud, never silent PASS);
@@ -439,11 +501,12 @@ run_delivery_telemetry() {
 
 # tooling-tests: fast shell-tooling regression tests that have no Rust target and
 # no dataset/network needs. Currently scripts/tests/test_agent_gate_summary.sh,
-# which verifies the SUMMARY block survives non-foreground capture (#1175). That
-# test only drives `agent-gate.sh --emit-summary-selftest` (which exits before any
-# component runs), so wiring it here cannot cause the gate to recurse. SKIP-aware:
-# the test's truncation case relies on a python3 reader, so with no python3 we
-# record SKIP (loud, never silent PASS); any test failure -> hard FAIL.
+# which verifies the SUMMARY block survives non-foreground capture (#1175), and
+# scripts/tests/test_agent_gate_smoke_target_dir.sh, which verifies the smoke step
+# resolves the CLI via CARGO_TARGET_DIR (#1247). Neither runs the real gate
+# components, so wiring them here cannot cause the gate to recurse. SKIP-aware:
+# the summary test's truncation case relies on a python3 reader, so with no
+# python3 we record SKIP (loud, never silent PASS); any test failure -> hard FAIL.
 run_tooling_tests() {
   local name=tooling-tests
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -452,14 +515,32 @@ run_tooling_tests() {
   local log="$LOG_DIR/$name.log"
   local start end status
   start=$(date +%s)
+  : >"$log"
+
+  # generator keyspace-scoping guard (#1232): no python3 needed, always runs. A
+  # failure here FAILs the component, mirroring the summary selftest semantics.
+  echo ">>> [$name] bash scripts/tests/test_generator_keyspace_scoping.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_generator_keyspace_scoping.sh" >>"$log" 2>&1; then
+    status=FAIL
+    OVERALL=FAIL
+    echo "--- [$name] FAILED (keyspace-scoping guard); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   if ! command -v python3 >/dev/null 2>&1; then
     status=SKIP
     echo ">>> [$name] SKIP (no python3 on PATH; selftest truncation reader needs it)"
     NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("0s")
     return 0
   fi
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh"
-  if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >"$log" 2>&1; then
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh"
+  if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1 &&
+     bash "$REPO_ROOT/scripts/tests/test_agent_gate_smoke_target_dir.sh" >>"$log" 2>&1; then
     status=PASS
   else
     status=FAIL
@@ -679,6 +760,7 @@ run_component cli-tests bash -c '
   cargo test --package cqlite-cli --test unit_tests &&
   cargo test --package cqlite-cli --features write-support --test write_readback_content_tests'
 run_python_bindings
+run_node_bindings
 run_delivery_telemetry
 run_tooling_tests
 run_component minimal-build cargo build --package cqlite-core --no-default-features --features all-compression
@@ -686,9 +768,13 @@ run_component minimal-build cargo build --package cqlite-core --no-default-featu
 # smoke script prefers any existing target/release/cqlite, however stale —
 # the first full gate run caught a May binary failing all test_oa tables
 # that current code reads fine.
+# Resolve the just-built CLI honoring CARGO_TARGET_DIR (issue #1247): when the
+# gate runs from a git worktree sharing a target dir via CARGO_TARGET_DIR, the
+# binary lands in "$CARGO_TARGET_DIR/debug", not "$PWD/target/debug". Fall back
+# to "$PWD/target" when CARGO_TARGET_DIR is unset.
 run_component smoke bash -c '
   cargo build --package cqlite-cli --bin cqlite &&
-  CQLITE_CLI="$PWD/target/debug/cqlite" bash test-data/scripts/smoke-test-all-tables.sh'
+  CQLITE_CLI="${CARGO_TARGET_DIR:-$PWD/target}/debug/cqlite" bash test-data/scripts/smoke-test-all-tables.sh'
 
 declare -a SUMMARY_META=()
 SUMMARY_META+=("commit: $(git rev-parse --short HEAD) branch: $(git rev-parse --abbrev-ref HEAD) dirty: $(test -n "$(git status --porcelain)" && echo yes || echo no)")

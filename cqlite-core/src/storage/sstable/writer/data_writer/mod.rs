@@ -195,6 +195,7 @@ mod rows;
 mod schema_helpers;
 mod static_rows;
 mod types;
+mod udt_canon;
 
 #[cfg(test)]
 mod tests;
@@ -214,6 +215,7 @@ pub(crate) use encoding::*;
 pub(crate) use index_prefix::*;
 pub(crate) use schema_helpers::*;
 pub(crate) use types::*;
+pub(crate) use udt_canon::{canonicalize_static_value, canonicalize_udt_value};
 
 impl DataWriter {
     /// Create a new in-memory Data.db writer.

@@ -112,30 +112,40 @@ impl DataWriter {
                 }
                 if is_complex {
                     self.write_complex_column(buf, col, value, mop.timestamp_micros, None)?;
-                } else if let Some(ttl_seconds) = mop.row_ttl_seconds {
-                    if row.ttl_seconds == Some(ttl_seconds)
-                        && row.liveness_ts == Some(mop.timestamp_micros)
-                    {
-                        self.write_cell_with_row_ttl(
-                            buf,
-                            column,
-                            value,
-                            mop.timestamp_micros,
-                            ttl_seconds,
-                        )?;
-                    } else {
-                        self.write_cell_with_ttl(
-                            buf,
-                            column,
-                            value,
-                            mop.timestamp_micros,
-                            ttl_seconds,
-                        )?;
-                    }
-                } else if row.liveness_ts == Some(mop.timestamp_micros) {
-                    self.write_cell(buf, column, value, mop.timestamp_micros)?;
                 } else {
-                    self.write_cell_explicit_ts(buf, column, value, mop.timestamp_micros)?;
+                    // roborev #1020 Finding 1: a frozen-UDT (or UDT-bearing frozen
+                    // collection/tuple) simple-cell value is canonicalized against
+                    // the column's declared marshal BEFORE serialization, so its
+                    // field bytes follow declared order / `-1` padding and match the
+                    // advertised `FrozenType(UserType(...))` header. A non-UDT column
+                    // is returned unchanged (byte-identical path).
+                    let canon = canonicalize_udt_value(&col.data_type, value)?;
+                    let value = canon.as_ref();
+                    if let Some(ttl_seconds) = mop.row_ttl_seconds {
+                        if row.ttl_seconds == Some(ttl_seconds)
+                            && row.liveness_ts == Some(mop.timestamp_micros)
+                        {
+                            self.write_cell_with_row_ttl(
+                                buf,
+                                column,
+                                value,
+                                mop.timestamp_micros,
+                                ttl_seconds,
+                            )?;
+                        } else {
+                            self.write_cell_with_ttl(
+                                buf,
+                                column,
+                                value,
+                                mop.timestamp_micros,
+                                ttl_seconds,
+                            )?;
+                        }
+                    } else if row.liveness_ts == Some(mop.timestamp_micros) {
+                        self.write_cell(buf, column, value, mop.timestamp_micros)?;
+                    } else {
+                        self.write_cell_explicit_ts(buf, column, value, mop.timestamp_micros)?;
+                    }
                 }
                 Ok(1)
             }
@@ -157,10 +167,12 @@ impl DataWriter {
                         Some(*ttl_seconds),
                     )?;
                 } else {
+                    // roborev #1020 Finding 1: schema-aware frozen-UDT value.
+                    let canon = canonicalize_udt_value(&col.data_type, value)?;
                     self.write_cell_with_ttl(
                         buf,
                         column,
-                        value,
+                        canon.as_ref(),
                         mop.timestamp_micros,
                         *ttl_seconds,
                     )?;

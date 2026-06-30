@@ -1448,14 +1448,17 @@ scenarios:
       tier: manual_debug
     scope:
       gap: >-
-        Byte-level promoted-index parity (Index.db offsets, widths, clustering
-        bounds) runs only against local-only binaries that are not in the pinned CI
-        dataset; the required lane enforces only the committed-JSONL
-        canonical-semantic facts.
+        This scenario's proving evidence is the byte-level Index.db promoted-index
+        decode (offsets, widths, clustering bounds), which SKIPS in CI because the
+        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
+        in progress). Marking it required_parity would report coverage for a check
+        that does not run; the only CI-running assertion in this test binary is the
+        JSONL canonical-semantic check, which does not decode the promoted index and
+        so does not satisfy this scenario's evidence on its own.
       next_step: >-
-        Add the test_big.wide_partition binaries to the dataset release pin
-        (regenerate the tarball + update DATASET_SHA256) to promote these scenarios
-        to byte_for_byte enforced in the required_parity lane.
+        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
+        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
+        so the byte-level promoted-index assertions actually run fail-closed.
 
   - id: cass.index_db.SSTableReaderTest.point_lookup_offsets
     title: BIG Index.db point/absent-key lookup offsets
@@ -1712,14 +1715,17 @@ scenarios:
       tier: manual_debug
     scope:
       gap: >-
-        Byte-level promoted-index parity (Index.db offsets, widths, clustering
-        bounds) runs only against local-only binaries that are not in the pinned CI
-        dataset; the required lane enforces only the committed-JSONL
-        canonical-semantic facts.
+        This scenario's proving evidence is the byte-level Index.db promoted-index
+        decode (offsets, widths, clustering bounds), which SKIPS in CI because the
+        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
+        in progress). Marking it required_parity would report coverage for a check
+        that does not run; the only CI-running assertion in this test binary is the
+        JSONL canonical-semantic check, which does not decode the promoted index and
+        so does not satisfy this scenario's evidence on its own.
       next_step: >-
-        Add the test_big.wide_partition binaries to the dataset release pin
-        (regenerate the tarball + update DATASET_SHA256) to promote these scenarios
-        to byte_for_byte enforced in the required_parity lane.
+        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
+        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
+        so the byte-level promoted-index assertions actually run fail-closed.
 
   - id: cass.data_db_decode.wide_partition.row_boundaries
     title: Wide-partition Data.db row boundaries align with promoted-index offsets
@@ -1769,14 +1775,17 @@ scenarios:
       tier: manual_debug
     scope:
       gap: >-
-        Byte-level promoted-index parity (Index.db offsets, widths, clustering
-        bounds) runs only against local-only binaries that are not in the pinned CI
-        dataset; the required lane enforces only the committed-JSONL
-        canonical-semantic facts.
+        This scenario's proving evidence is the byte-level Index.db promoted-index
+        decode (offsets, widths, clustering bounds), which SKIPS in CI because the
+        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
+        in progress). Marking it required_parity would report coverage for a check
+        that does not run; the only CI-running assertion in this test binary is the
+        JSONL canonical-semantic check, which does not decode the promoted index and
+        so does not satisfy this scenario's evidence on its own.
       next_step: >-
-        Add the test_big.wide_partition binaries to the dataset release pin
-        (regenerate the tarball + update DATASET_SHA256) to promote these scenarios
-        to byte_for_byte enforced in the required_parity lane.
+        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
+        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
+        so the byte-level promoted-index assertions actually run fail-closed.
 
   - id: cass.index_db.promoted_index.index_info_offsets
     title: BIG promoted-index IndexInfo Data.db offsets and width chain
@@ -1825,14 +1834,17 @@ scenarios:
       tier: manual_debug
     scope:
       gap: >-
-        Byte-level promoted-index parity (Index.db offsets, widths, clustering
-        bounds) runs only against local-only binaries that are not in the pinned CI
-        dataset; the required lane enforces only the committed-JSONL
-        canonical-semantic facts.
+        This scenario's proving evidence is the byte-level Index.db promoted-index
+        decode (offsets, widths, clustering bounds), which SKIPS in CI because the
+        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
+        in progress). Marking it required_parity would report coverage for a check
+        that does not run; the only CI-running assertion in this test binary is the
+        JSONL canonical-semantic check, which does not decode the promoted index and
+        so does not satisfy this scenario's evidence on its own.
       next_step: >-
-        Add the test_big.wide_partition binaries to the dataset release pin
-        (regenerate the tarball + update DATASET_SHA256) to promote these scenarios
-        to byte_for_byte enforced in the required_parity lane.
+        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
+        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
+        so the byte-level promoted-index assertions actually run fail-closed.
 
   - id: cass.index_db.promoted_index.clustering_bounds
     title: BIG promoted-index IndexInfo clustering bounds ordering and coverage
@@ -1883,14 +1895,17 @@ scenarios:
       tier: manual_debug
     scope:
       gap: >-
-        Byte-level promoted-index parity (Index.db offsets, widths, clustering
-        bounds) runs only against local-only binaries that are not in the pinned CI
-        dataset; the required lane enforces only the committed-JSONL
-        canonical-semantic facts.
+        This scenario's proving evidence is the byte-level Index.db promoted-index
+        decode across the range-tombstone block edge, which SKIPS in CI because the
+        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
+        in progress). The CI-running JSONL canonical-semantic check does assert pk=1
+        is missing exactly ck 30..39 (the range-tombstone fact), but it does NOT
+        decode the promoted index across the block boundary — the headline claim of
+        this scenario — so the running part alone does not justify required_parity.
       next_step: >-
-        Add the test_big.wide_partition binaries to the dataset release pin
-        (regenerate the tarball + update DATASET_SHA256) to promote these scenarios
-        to byte_for_byte enforced in the required_parity lane.
+        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
+        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
+        so the byte-level promoted-index block-edge assertions actually run fail-closed.
 
   - id: cass.index_db.promoted_index.range_tombstone_boundary_at_block_edge
     title: BIG promoted-index decode across a range-tombstone block boundary
@@ -1941,14 +1956,17 @@ scenarios:
       tier: manual_debug
     scope:
       gap: >-
-        Byte-level promoted-index parity (Index.db offsets, widths, clustering
-        bounds) runs only against local-only binaries that are not in the pinned CI
-        dataset; the required lane enforces only the committed-JSONL
-        canonical-semantic facts.
+        This scenario's proving evidence is the byte-level Index.db promoted-index
+        decode (offsets, widths, clustering bounds), which SKIPS in CI because the
+        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
+        in progress). Marking it required_parity would report coverage for a check
+        that does not run; the only CI-running assertion in this test binary is the
+        JSONL canonical-semantic check, which does not decode the promoted index and
+        so does not satisfy this scenario's evidence on its own.
       next_step: >-
-        Add the test_big.wide_partition binaries to the dataset release pin
-        (regenerate the tarball + update DATASET_SHA256) to promote these scenarios
-        to byte_for_byte enforced in the required_parity lane.
+        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
+        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
+        so the byte-level promoted-index assertions actually run fail-closed.
 
   - id: cass.sstable_scan.wide_partition.forward_reverse_bounds
     title: Wide-partition forward and reverse scan boundary parity
@@ -1992,15 +2010,22 @@ scenarios:
       tier: manual_debug
     scope:
       gap: >-
-        Reverse SSTable iteration is not implemented for BIG wide partitions; only
-        a post-fetch in-memory ORDER BY DESC sort exists, which does not exercise
-        reverse promoted-index block decoding.
+        Forward-scan completeness is backed by forward_bounds_completeness, which
+        reads the binary Data.db and therefore SKIPS in CI because the
+        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
+        in progress); the CI-running JSONL canonical-semantic check proves live
+        counts but not scan completeness across promoted-index block boundaries.
+        Reverse SSTable iteration is additionally not implemented for BIG wide
+        partitions (only a post-fetch in-memory ORDER BY DESC sort exists, which
+        does not exercise reverse promoted-index block decoding).
       next_step: >-
-        Implement a BIG-format reverse partition iterator that uses the promoted
-        IndexInfo blocks to seek/decode blocks back-to-front (mirroring Cassandra
-        SSTableReversedIterator), then assert forward and reverse scans of pk=1
-        return the identical 290-row clustering set with no rows lost adjacent to
-        the deleted block.
+        First re-promote to required_parity once issue #1185 pins the
+        test_big.wide_partition binaries into the CI dataset so forward-scan
+        completeness runs fail-closed; then implement a BIG-format reverse partition
+        iterator that uses the promoted IndexInfo blocks to seek/decode blocks
+        back-to-front (mirroring Cassandra SSTableReversedIterator) and assert
+        forward and reverse scans of pk=1 return the identical 290-row clustering set
+        with no rows lost adjacent to the deleted block.
 
   - id: cass.index_db.bti.index_component_discovery
     title: BTI index-component discovery and classification
@@ -2052,9 +2077,24 @@ scenarios:
         non-mixing; byte parity of the BTI Partitions.db/Rows.db trie payloads is a
         separate scenario.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
-    scope: {}
+      tier: manual_debug
+    scope:
+      target_issue: 1205
+      gap: >-
+        The wired lane bti_index_component_discovery skips UNCONDITIONALLY in CI
+        (even under CQLITE_PARITY_REQUIRE_DATASETS=1): the test_da/* BTI (da)
+        binaries — Data.db / Partitions.db / Rows.db — are LOCAL-ONLY and are NOT
+        shipped in the pinned CI dataset (cassandra5-small-full-v3.2.tar.gz), so
+        the BTI-discovery assertion never runs on the required gate and the
+        scenario would green-pass on a pure skip. Demoted from required_parity
+        (issue #1242 finding 1 / final audit) to stop overclaiming a parity check
+        that does not execute in CI.
+      next_step: >-
+        Re-promote to required_parity only after the BTI (da) Partitions.db/Rows.db
+        binaries are added to the pinned CI dataset tarball AND the
+        bti_index_component_discovery lane is made fail-closed under
+        CQLITE_PARITY_REQUIRE_DATASETS=1 (mirroring the test_deltas #1205 fix), so
+        the discovery assertion actually executes on the gate (fixture work).
 
   # ---- Strict Summary.db byte parity (epic #968 / issue #984) ----------------
   - id: cass.summary_db.IndexSummaryTest.serialization_round_trip
@@ -3097,7 +3137,8 @@ scenarios:
           - cqlite-core/tests/v5_compressed_legacy_row_count_parity.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_collections/collection_table-6b8c8fb0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
@@ -3109,21 +3150,25 @@ scenarios:
         bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
       comparison_command: >-
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test v5_compressed_legacy_parity_test
         --test v5_compressed_legacy_row_count_parity
       reference_paths:
-        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_collections/collection_table-6b8c8fb0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       normalization: >-
         Decompressed chunk payloads are decoded to rows and compared (row count
         and values) against sstabledump JSONL; chunk offset tables are used for
         positioning.
       known_limitations: >-
-        Validates decompressed content equivalence (row count + values). The
-        byte-level CompressionInfo.db chunk-offset table and per-chunk inline-CRC
-        parity is gated separately by the strict lane below
-        (cass.compression_info.* / sstable_parity_compression_info_db_strict_test,
-        issue #986).
+        Validates decompressed content equivalence (row count + values) against
+        the simple_table and collection_table V5CompressedLegacy fixtures actually
+        exercised by the wired tests. The byte-level CompressionInfo.db
+        chunk-offset table and per-chunk inline-CRC parity is gated separately by
+        the strict lane below (cass.compression_info.* /
+        sstable_parity_compression_info_db_strict_test, issue #986).
     ci:
-      tier: manual_debug
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   - id: cass.compression_checksum.checksum_trailer_detection
@@ -4585,7 +4630,7 @@ scenarios:
         bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
       comparison_command: >-
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
-        --test issue_694_writetime_ttl_parity
+        --features write-support,cli-helpers --test issue_694_writetime_ttl_parity
       reference_paths:
         - test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       normalization: >-
@@ -4595,7 +4640,8 @@ scenarios:
         Canonical-semantic equivalence of liveness fields; not a Data.db byte
         comparison.
     ci:
-      tier: manual_debug
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
   # ----------------------------------------------------------------------------
@@ -5167,7 +5213,23 @@ scenarios:
         output parity is debug-only and non-gated (north-star issue #842).
     ci:
       tier: manual_debug
-    scope: {}
+    scope:
+      target_issue: 819
+      gap: >-
+        The CI-wired tests (issue_819_differential_compaction /
+        issue_933_range_tombstone_compaction) only run CQLite SELF-CONSISTENCY
+        (gen1-vs-gen2, one-shot-vs-hand-driven merge, resurrection safety) by
+        default. The Cassandra-reference comparison
+        (differential_vs_live_cassandra_env_gated) is env-gated behind
+        CQLITE_DIFFERENTIAL_CASSANDRA=1 and is NOT set by
+        sstabledump-parity-gate.yml, so no committed Cassandra-compacted
+        reference is actually diffed in CI. Demoted from required_parity (issue
+        #1242 roborev finding 1) to stop overclaiming Cassandra parity.
+      next_step: >-
+        Re-promote to required_parity only after a follow-up sets
+        CQLITE_DIFFERENTIAL_CASSANDRA=1 in the gating workflow AND commits a
+        CI-pinned Cassandra-5.0.2-compacted reference SSTable the harness diffs
+        against (fixture work, out of scope for #1242).
 
   - id: cass.compaction_merge.load_path_validity
     title: Compaction output load-path validity (Tier-1)
@@ -6238,6 +6300,394 @@ scenarios:
       known_limitations: >-
         Statistics.db + Filter.db present on both but not byte-diffed (impl detail).
         CRC.db prefix-parity only. Live cells only (the smallest blocking slice).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/live-cell-compaction-parity.yml
+    scope: {}
+
+  # ----------------------------------------------------------------------------
+  # UDT / frozen-value compaction byte parity (issue #1020, epic #973)
+  #
+  # The UDT/frozen extension of the live-cell compaction slice (#1017). Three
+  # committed Cassandra 5.0.2 COMPACTED reference SSTables under
+  # test_compactionparityudt/{udt_frozen_person,udt_nested,udt_collections} are
+  # diffed against CQLite's own compact_sstables_with_registry output by the
+  # pinned Rust test
+  # cqlite-core/tests/issue_1020_udt_frozen_compaction_byte_parity.rs. Every
+  # complex value is FROZEN (single value cell) and the same UdtRegistry built
+  # from schemas/compaction-parity-udt.cql drives both engines.
+  #
+  # HONEST CLASSIFICATION (issue #1020 AC7):
+  #   * All three scenarios achieve byte_for_byte parity (Data.db / Index.db /
+  #     Summary.db / Digest.crc32 byte-identical; CRC.db prefix; Statistics.db +
+  #     Filter.db present-not-diffed; typed JSONL cross-check).
+  #   * udt_collections covers frozen collections incl. collections-of-UDT.
+  #   * udt_frozen_person / udt_nested have a TOP-LEVEL frozen<UDT> regular column
+  #     (a frozen SCALAR / NESTED UDT). The issue #1020 fix makes flush advertise
+  #     the authoritative FrozenType(UserType(...)) SerializationHeader marshal
+  #     (nested UDT fields expanded), so the single frozen UDT cell round-trips
+  #     through compaction byte-identical to the Cassandra 5.0.2 reference instead
+  #     of being dropped (the prior data-loss failure mode).
+  #
+  # NOTE on ids: the manifest id grammar requires a `cass.<group>...` prefix, so
+  # the three cqlite-conceptual scenarios use `cass.compaction.udt_*`. They map to
+  # `cqlite.compaction_parity.udt.frozen_person`,
+  # `cqlite.compaction_parity.udt.nested_udt`, and
+  # `cqlite.compaction_parity.udt.collections_with_udts` respectively.
+  # ----------------------------------------------------------------------------
+
+  # cqlite.compaction_parity.udt.collections_with_udts (issue identifier) — the
+  # byte_for_byte claim.
+  - id: cass.compaction.udt_collections_with_udts
+    title: Frozen-collection + collections-of-UDT compaction byte parity (the claim)
+    status: mirrored
+    capability: compaction_merge
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - LegacySSTableTest.java
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_1020_udt_frozen_compaction_byte_parity.rs
+        notes: >-
+          THE CLAIM: two overlapping SSTables of a table with frozen<list<int>>,
+          frozen<map<text,int>>, frozen<list<frozen<person>>>, and
+          frozen<map<text,frozen<address>>> columns are major-compacted by Cassandra
+          into one reference; CQLite's compact_sstables_with_registry merges the SAME
+          two inputs and its Data.db/Index.db/Summary.db/Digest.crc32 are
+          byte-identical to the Cassandra 5.0.2 compacted reference. Frozen UDT values
+          nested inside frozen collections decode to typed UDTs in the JSONL
+          cross-check. Newer write wins by timestamp (LWW); Murmur3 token order
+          preserved.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, checksums, component_files, jsonl, generated_report]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-compaction-parity-udt.sh  # cassandra:5.0.2 → 2 flushes → nodetool compact → compacted SSTable
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_1020_udt_frozen_compaction_byte_parity
+        collections_with_udts_compaction_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Index.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Summary.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Digest.crc32
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
+      normalization: >-
+        Data.db/Index.db/Summary.db/Digest.crc32 whole-file byte-for-byte; CRC.db
+        prefix (compaction-only trailing empty-chunk CRC32=0 excluded); typed JSONL
+        (frozen collections + collections-of-UDT field decode) cross-check.
+      failure_artifacts:
+        - "panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; typed JSONL (pk,cell)->value map mismatch"
+      known_limitations: >-
+        Statistics.db + Filter.db present on both but not byte-diffed (impl detail).
+        CRC.db prefix-parity only. Frozen values only (multicell UDT/collection
+        cell-path ownership is a separate complex-collection issue).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/live-cell-compaction-parity.yml
+    scope: {}
+
+  - id: cass.sstable_format.LegacySSTableTest.complex_udt_frozen_non_frozen
+    title: Complex frozen UDT inside frozen collections survives compaction (mirror)
+    status: mirrored
+    capability: compaction_merge
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - LegacySSTableTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_1020_udt_frozen_compaction_byte_parity.rs
+        notes: >-
+          Cassandra-test-class perspective cross-referencing the byte-level claim
+          cass.compaction.udt_collections_with_udts. A complex column carrying frozen
+          UDTs inside frozen list/map values round-trips byte-for-byte through
+          compaction; the typed JSONL pins per-field UDT decode of the collection
+          elements.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, component_files, jsonl, generated_report]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-compaction-parity-udt.sh
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_1020_udt_frozen_compaction_byte_parity
+        collections_with_udts_compaction_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
+      normalization: >-
+        Cross-references the byte-level claim cass.compaction.udt_collections_with_udts.
+      failure_artifacts:
+        - "panic diff: CQLite-compacted vs Cassandra-compacted Data.db/Index.db/Summary.db/Digest.crc32 byte mismatch (full hex of both); typed JSONL (pk,cell)->value map mismatch for the collection-element UDT decode"
+      known_limitations: >-
+        Non-frozen (multicell) UDT/collection cell-path ownership is a separate
+        complex-collection issue, out of scope here.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/live-cell-compaction-parity.yml
+    scope: {}
+
+  # cqlite.compaction_parity.udt.frozen_person (issue identifier) — byte_for_byte.
+  - id: cass.compaction.udt_frozen_person
+    title: Frozen-UDT (person) value compaction byte parity
+    status: mirrored
+    capability: compaction_merge
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_1020_udt_frozen_compaction_byte_parity.rs
+        notes: >-
+          frozen<person> values (full / null-middle-field / empty-first-field)
+          across two overlapping SSTables. CQLite's compact_sstables_with_registry
+          merges the SAME two inputs and its Data.db/Index.db/Summary.db/Digest.crc32
+          are byte-identical to the Cassandra 5.0.2 compacted reference. The frozen
+          scalar UDT is a SINGLE-cell value: the issue #1020 fix makes flush advertise
+          the authoritative FrozenType(UserType(...)) SerializationHeader marshal, so
+          the frozen UDT cell round-trips (preserving field ORDER, null fields, and
+          frozen value boundaries) instead of being dropped. Typed JSONL cross-check
+          pins the per-field UDT decode of the LWW survivors.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-3dcdc92073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-3dcdc92073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, checksums, component_files, jsonl, generated_report]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-compaction-parity-udt.sh
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_1020_udt_frozen_compaction_byte_parity
+        frozen_person_compaction_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-3dcdc92073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-3dcdc92073fe11f1ba13ff2af5955bf3/nb-3-big-Index.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-3dcdc92073fe11f1ba13ff2af5955bf3/nb-3-big-Summary.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-3dcdc92073fe11f1ba13ff2af5955bf3/nb-3-big-Digest.crc32
+        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-3dcdc92073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
+      normalization: >-
+        Data.db/Index.db/Summary.db/Digest.crc32 whole-file byte-for-byte; CRC.db
+        prefix (compaction-only trailing empty-chunk CRC32=0 excluded); typed JSONL
+        per-(pk,cell) canonical UDT JSON equality pins field order + null-field +
+        empty-string-field decode of the LWW survivors.
+      failure_artifacts:
+        - "panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; typed JSONL (pk,cell)->value map mismatch"
+      known_limitations: >-
+        Statistics.db + Filter.db present on both but not byte-diffed (impl detail).
+        CRC.db prefix-parity only.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/live-cell-compaction-parity.yml
+    scope: {}
+
+  # cqlite.compaction_parity.udt.nested_udt (issue identifier) — byte_for_byte.
+  - id: cass.compaction.udt_nested
+    title: Nested frozen-UDT (employee→address) compaction byte parity
+    status: mirrored
+    capability: compaction_merge
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CQLSSTableWriterTest.java
+        - SerializationHeaderTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_1020_udt_frozen_compaction_byte_parity.rs
+        notes: >-
+          frozen<employee> values that CONTAIN a frozen<address> (nested UDT),
+          including an inner null `city` field. CQLite's compact_sstables_with_registry
+          output is byte-identical to the Cassandra 5.0.2 compacted reference. The
+          issue #1020 fix expands the flush SerializationHeader to the authoritative
+          FrozenType(UserType(...,home:UserType(...),...)) marshal (inner UDT field
+          spelled as bare UserType per Cassandra), so the nested frozen UDT cell
+          round-trips through compaction (inner+outer field order, nested field
+          decode, inner frozen value boundary, inner null field) instead of being
+          dropped. Typed JSONL cross-check pins the nested decode.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-3dda9a6073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-3dda9a6073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, checksums, component_files, jsonl, generated_report]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-compaction-parity-udt.sh
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_1020_udt_frozen_compaction_byte_parity
+        nested_udt_compaction_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-3dda9a6073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-3dda9a6073fe11f1ba13ff2af5955bf3/nb-3-big-Index.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-3dda9a6073fe11f1ba13ff2af5955bf3/nb-3-big-Summary.db
+        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-3dda9a6073fe11f1ba13ff2af5955bf3/nb-3-big-Digest.crc32
+        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-3dda9a6073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
+      normalization: >-
+        Data.db/Index.db/Summary.db/Digest.crc32 whole-file byte-for-byte; CRC.db
+        prefix (compaction-only trailing empty-chunk CRC32=0 excluded); typed JSONL
+        per-(pk,cell) canonical nested-UDT JSON equality pins inner+outer field
+        order, nested field decode, and the inner null field.
+      failure_artifacts:
+        - "panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; typed JSONL (pk,cell)->value map mismatch"
+      known_limitations: >-
+        Statistics.db + Filter.db present on both but not byte-diffed (impl detail).
+        CRC.db prefix-parity only.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/live-cell-compaction-parity.yml
+    scope: {}
+
+  - id: cass.sstable_format.CQLSSTableWriterTest.frozen_udt_roundtrip
+    title: Frozen-UDT round-trip through compaction (byte-parity mirror)
+    status: mirrored
+    capability: compaction_merge
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_1020_udt_frozen_compaction_byte_parity.rs
+        notes: >-
+          Cassandra-test-class perspective cross-referencing
+          cass.compaction.udt_frozen_person: a frozen UDT written via the CQL writer,
+          flushed, and compacted retains its typed value (field order, null fields)
+          and is byte-identical to the Cassandra 5.0.2 compacted reference.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-3dcdc92073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, component_files, jsonl, generated_report]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-compaction-parity-udt.sh
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_1020_udt_frozen_compaction_byte_parity
+        frozen_person_compaction_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_compactionparityudt/udt_frozen_person-3dcdc92073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
+      normalization: >-
+        Cross-references cass.compaction.udt_frozen_person (byte-for-byte components +
+        typed JSONL survivor map).
+      failure_artifacts:
+        - "panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; typed JSONL (pk,cell)->value map mismatch"
+      known_limitations: >-
+        Statistics.db + Filter.db present on both but not byte-diffed (impl detail).
+        CRC.db prefix-parity only.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/live-cell-compaction-parity.yml
+    scope: {}
+
+  - id: cass.serialization.SerializationHeaderTest.udt_schema_resolution
+    title: UDT schema resolution through compaction (fail-loud, no blob fallback)
+    status: mirrored
+    capability: compaction_merge
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationHeaderTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_1020_udt_frozen_compaction_byte_parity.rs
+        notes: >-
+          The compaction is driven by a UdtRegistry built from the DDL UDT
+          definitions in schemas/compaction-parity-udt.cql (person/address/employee,
+          incl. the nested frozen<address>) and passed to both the input writers and
+          compact_sstables_with_registry. The input SSTable headers advertise the
+          column as FrozenType(UserType(...)) (verified), proving schema-driven UDT
+          resolution rather than a blob fallback. All three scenarios achieve
+          byte_for_byte parity (the strongest evidence the resolution is exact) plus a
+          typed-decode JSONL cross-check.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-3dda9a6073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      artifacts: [jsonl, generated_report]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-compaction-parity-udt.sh
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_1020_udt_frozen_compaction_byte_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_compactionparityudt/udt_collections-3de4104073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_compactionparityudt/udt_nested-3dda9a6073fe11f1ba13ff2af5955bf3/nb-3-big-Data.db.jsonl
+      normalization: >-
+        Schema-driven UDT resolution: a missing/incorrect registry would degrade the
+        frozen-UDT column to a bare BytesType cell that would not decode to a typed
+        UDT (test fails) — no silent blob fallback (issue #28).
+      known_limitations: >-
+        Resolution correctness is fully exercised: all three scenarios are
+        byte_for_byte with a typed-decode JSONL cross-check.
     ci:
       tier: required_parity
       workflow: .github/workflows/live-cell-compaction-parity.yml
@@ -12589,7 +13039,20 @@ scenarios:
         parity is the separate non-gated byte tier (north-star issue #842).
     ci:
       tier: manual_debug
-    scope: {}
+    scope:
+      target_issue: 819
+      gap: >-
+        The CI-wired issue_819_differential_compaction / issue_992 tests run
+        CQLite SELF-CONSISTENCY merge round-trips only; the Cassandra-reference
+        diff (differential_vs_live_cassandra_env_gated) is env-gated behind
+        CQLITE_DIFFERENTIAL_CASSANDRA=1, which sstabledump-parity-gate.yml does
+        NOT set, so no committed Cassandra-compacted reference is diffed in CI.
+        Demoted from required_parity (issue #1242 roborev finding 1).
+      next_step: >-
+        Re-promote to required_parity only after a follow-up sets
+        CQLITE_DIFFERENTIAL_CASSANDRA=1 in the gating workflow AND commits a
+        CI-pinned Cassandra-5.0.2-compacted reference SSTable the harness diffs
+        against (fixture work, out of scope for #1242).
 
   - id: cass.compaction_merge.issue_819.differential_row_tombstone_wide_partition_regression
     title: Differential compaction — row tombstone in a wide partition round-trips
@@ -12640,7 +13103,21 @@ scenarios:
         separate non-gated byte tier (north-star issue #842).
     ci:
       tier: manual_debug
-    scope: {}
+    scope:
+      target_issue: 819
+      gap: >-
+        The CI-wired issue_819_differential_compaction test runs CQLite
+        SELF-CONSISTENCY (gen1 read-back vs merge-from-inputs) only; the
+        Cassandra-reference diff (differential_vs_live_cassandra_env_gated) is
+        env-gated behind CQLITE_DIFFERENTIAL_CASSANDRA=1, which
+        sstabledump-parity-gate.yml does NOT set, so the row-tombstone
+        wide-partition regression is not diffed against a committed Cassandra
+        reference in CI. Demoted from required_parity (issue #1242 finding 1).
+      next_step: >-
+        Re-promote to required_parity only after a follow-up sets
+        CQLITE_DIFFERENTIAL_CASSANDRA=1 in the gating workflow AND commits a
+        CI-pinned Cassandra-5.0.2-compacted reference SSTable the harness diffs
+        against (fixture work, out of scope for #1242).
 
   - id: cass.compaction_merge.issue_819.differential_input_merge_write_fidelity
     title: Differential compaction — per-cell write timestamps preserved (write fidelity)
@@ -12694,7 +13171,21 @@ scenarios:
         output parity is the separate non-gated byte tier (north-star #842).
     ci:
       tier: manual_debug
-    scope: {}
+    scope:
+      target_issue: 819
+      gap: >-
+        The CI-wired issue_819_differential_compaction test runs CQLite
+        SELF-CONSISTENCY (gen1 read-back vs merge-from-inputs) only; the
+        Cassandra-reference diff (differential_vs_live_cassandra_env_gated) is
+        env-gated behind CQLITE_DIFFERENTIAL_CASSANDRA=1, which
+        sstabledump-parity-gate.yml does NOT set, so per-cell write-timestamp
+        fidelity is not diffed against a committed Cassandra reference in CI.
+        Demoted from required_parity (issue #1242 finding 1).
+      next_step: >-
+        Re-promote to required_parity only after a follow-up sets
+        CQLITE_DIFFERENTIAL_CASSANDRA=1 in the gating workflow AND commits a
+        CI-pinned Cassandra-5.0.2-compacted reference SSTable the harness diffs
+        against (fixture work, out of scope for #1242).
 
   # ----------------------------------------------------------------------------
   # Repair-metadata parse / preserve / classify through compaction (issue #1021,

@@ -522,3 +522,78 @@ fn compact_clustering_table_preserves_rows_and_lww() {
         );
     }
 }
+
+/// Issue #1238 regression: `MergeStats.bytes_written` must report the REAL output
+/// Data.db byte count, not a hardcoded 0.
+///
+/// Before the fix `KWayMerger::merge` initialized `bytes_written: 0` and never
+/// updated it, so callers treating it as a byte count saw a misleading 0 even
+/// after compacting non-empty input into a non-empty output. This compacts a
+/// single non-empty SSTable (10 partitions) and asserts:
+///   1. `report.stats.bytes_written > 0`, and
+///   2. it EQUALS the authoritative output size — both `report.output.data_size`
+///      (what `writer.finish()` reports) and the actual on-disk Data.db length.
+#[test]
+fn compact_sstables_reports_real_bytes_written() {
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let temp = TempDir::new().unwrap();
+    let data_dir = temp.path().join("data");
+    let wal_dir = temp.path().join("wal");
+    let output_dir = temp.path().join("out");
+    let schema = make_schema();
+
+    // ── Build one non-empty input SSTable via the public WriteEngine API ──
+    let config = WriteEngineConfig::new(data_dir.clone(), wal_dir.clone(), schema.clone());
+    let mut engine = WriteEngine::new(config).expect("engine creation");
+    for id in 1_i32..=10 {
+        engine
+            .write(write_row(id, &format!("name-{id}"), 100))
+            .expect("write");
+    }
+    let info = rt.block_on(engine.flush()).expect("flush").expect("info");
+    assert_eq!(info.partition_count, 10, "input SSTable: 10 partitions");
+    drop(engine);
+
+    let inputs = discover_inputs(&data_dir);
+    assert_eq!(inputs.len(), 1, "expected 1 input SSTable, got {inputs:?}");
+
+    let report = rt
+        .block_on(compact_sstables(
+            inputs,
+            &output_dir,
+            &schema,
+            9,
+            Some(1_700_000_000),
+            None,
+            true,
+        ))
+        .expect("compaction must succeed");
+
+    // The output is non-empty.
+    assert_eq!(
+        report.stats.output_partitions, 10,
+        "non-empty compaction output expected"
+    );
+
+    // (1) bytes_written must be non-zero (was hardcoded 0 before #1238).
+    assert!(
+        report.stats.bytes_written > 0,
+        "MergeStats.bytes_written must be > 0 for a non-empty output, got {}",
+        report.stats.bytes_written
+    );
+
+    // (2) bytes_written must equal the writer's authoritative output Data.db size.
+    assert_eq!(
+        report.stats.bytes_written, report.output.data_size,
+        "MergeStats.bytes_written must equal SSTableInfo.data_size"
+    );
+
+    // (3) and that size must match the actual on-disk Data.db file length.
+    let on_disk = std::fs::metadata(&report.output.data_path)
+        .expect("output Data.db must exist")
+        .len();
+    assert_eq!(
+        report.stats.bytes_written, on_disk,
+        "MergeStats.bytes_written must equal the on-disk Data.db length"
+    );
+}

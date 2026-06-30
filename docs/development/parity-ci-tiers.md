@@ -148,6 +148,20 @@ P0 data-loss path without a recorded gap is a contract violation.
   claim.
 - **Promotion.** Terminal tier — it is the strongest, broadest gate. New
   format-matrix scenarios are *added* here once their generation command exists.
+- **Backing lane (issue #1026).** This tier is realized by
+  [`.github/workflows/exhaustive-regeneration.yml`](../../.github/workflows/exhaustive-regeneration.yml)
+  — a `workflow_dispatch` + weekly-cron lane (never on PRs) that orchestrates the
+  existing generators (`regenerate-datasets.sh`, `generate-deltas.sh`,
+  `generate-corruption-corpus.sh`), records a per-run provenance record (Cassandra
+  version/ref/sha, Docker image, generator commands, dataset asset name + SHA256),
+  and runs the corpus audit:
+  `cargo run -p cassandra-parity -- corpus-audit --corpus . --manifest <manifest> --provenance <record>`.
+  The audit **hard-fails** (non-zero exit, naming the offender) on a missing/stale
+  manifest reference, an unclassified high-relevance Cassandra file, an unexpected
+  component presence/checksum change, a provenance/manifest version divergence, or a
+  corruption-fixture coverage gap. The lane uploads ONE report artifact (provenance +
+  audit report + generator logs) and never commits regenerated binaries or publishes a
+  dataset asset.
 
 ### `manual_debug`
 
