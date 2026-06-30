@@ -101,6 +101,19 @@ fn all_filter_files() -> Vec<PathBuf> {
     out
 }
 
+/// `true` when `CQLITE_REQUIRE_FIXTURES` is set to a truthy value ("1"/"true").
+/// In strict mode (the `nightly_docker` parity lane, issue #1025), a run that
+/// would otherwise SKIP because no `Filter.db` / `Data.db` binaries were fetched
+/// must PANIC instead — the no-false-negative Bloom gate (P0 data loss) can never
+/// be allowed to false-pass on an empty dataset (issue #28 no-heuristics / #1024
+/// fail-closed mandate).
+fn require_fixtures_strict() -> bool {
+    matches!(
+        std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
 /// Whether ANY `Data.db` binary exists under the dataset root — the independent
 /// "dataset present" signal. Tracked separately from the filter-compare count so
 /// a run that has binaries on disk but silently compared nothing fails closed
@@ -268,8 +281,18 @@ async fn filter_db_strict_parameters_and_no_false_negative() {
 
     // Skip-on-total-absence: no binaries fetched at all. The committed corpus has
     // no text reference for Filter.db (it is a pure binary component), so an empty
-    // dataset is a clean skip, not a fail-closed condition.
+    // dataset is a clean skip by default. BUT under CQLITE_REQUIRE_FIXTURES=1 (the
+    // nightly_docker parity lane, issue #1025) the no-false-negative Bloom gate is
+    // a P0 hard leg that must FAIL CLOSED — never vacuously pass on missing data.
     if filters.is_empty() && !data_present {
+        if require_fixtures_strict() {
+            panic!(
+                "CQLITE_REQUIRE_FIXTURES=1 but no Filter.db / Data.db binaries are present \
+                 under {} — the no-false-negative Bloom gate cannot run; \
+                 fetch the dataset (bash test-data/scripts/fetch-datasets.sh)",
+                root.display()
+            );
+        }
         eprintln!(
             "filter_db_strict_parameters_and_no_false_negative: SKIP — no Filter.db / Data.db \
              binaries fetched under {} (run bash test-data/scripts/fetch-datasets.sh)",
