@@ -9,6 +9,7 @@ impl V5CompressedLegacyParser {
     /// Returns: `ParsedRow` = `(cells, row_header, new_offset, is_static)` where
     /// `is_static` is `true` when the row's `EXTENDED_IS_STATIC` flag was set.
     /// Static rows must be merged into clustering rows by the caller, not emitted directly.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn parse_row_data_with_offset(
         &self,
         data: &[u8],
@@ -16,8 +17,17 @@ impl V5CompressedLegacyParser {
         schema: Option<&TableSchema>,
         reader: &crate::storage::sstable::reader::types::SSTableReader,
         want_cell_metadata: bool,
+        resolution: &RowColumnResolution,
     ) -> Result<ParsedRow> {
-        self.parse_row_data_with_offset_impl(data, offset, schema, reader, want_cell_metadata, None)
+        self.parse_row_data_with_offset_impl(
+            data,
+            offset,
+            schema,
+            reader,
+            want_cell_metadata,
+            None,
+            resolution,
+        )
     }
 
     /// Implementation of [`Self::parse_row_data_with_offset`] with an optional
@@ -35,6 +45,7 @@ impl V5CompressedLegacyParser {
         reader: &crate::storage::sstable::reader::types::SSTableReader,
         want_cell_metadata: bool,
         mut compaction_complex_out: Option<&mut CompactionComplexColumns>,
+        resolution: &RowColumnResolution,
     ) -> Result<ParsedRow> {
         let mut cells = HashMap::new();
         // Parallel per-cell write metadata map (populated alongside `cells`).
@@ -268,137 +279,37 @@ impl V5CompressedLegacyParser {
         // This implementation uses schema definition order directly, which is the
         // correct approach per Cassandra 5.0 SerializationHeader semantics.
 
-        // CRITICAL FIX (Issue #164): Filter out partition keys and clustering keys!
-        // The schema.columns list contains ALL columns (including keys), but cells
-        // are only stored for REGULAR columns. Partition/clustering keys are part
-        // of the row key and do NOT have cell data.
-        let partition_key_names: std::collections::HashSet<_> = schema
-            .partition_keys
-            .iter()
-            .map(|k| k.name.as_str())
-            .collect();
-        let clustering_key_names: std::collections::HashSet<_> = schema
-            .clustering_keys
-            .iter()
-            .map(|k| k.name.as_str())
-            .collect();
-
-        // CRITICAL FIX (Issue #191): Use serialization header column order, not schema order
-        // Cassandra 5.0 V5CompressedLegacy stores cells in the order defined by Statistics.db
-        // serialization header (alphabetical by ColumnIdentifier/comparator), NOT CQL schema order.
-        // We must iterate reader.header.columns directly to align binary layout with logical columns.
+        // CRITICAL FIX (Issue #191): cells are stored in SERIALIZATION HEADER column
+        // order (Statistics.db serialization header — alphabetical by
+        // ColumnIdentifier/comparator), NOT CQL schema order. Partition/clustering
+        // keys carry no cell data and are excluded; dropped columns (present on disk
+        // but absent from the supplied schema) are RETAINED in order so their bytes
+        // are consumed and trailing columns stay byte-aligned (issue #1080 Part 2).
         //
-        // Issue #702 FIX: For tables with BOTH static and regular columns, Cassandra's
-        // missing_columns_bitmap is relative to the column group of the current row kind:
-        //   - Static rows:  bitmap covers only static columns
-        //   - Regular rows: bitmap covers only regular columns
-        // Including the wrong group shifts all bitmap indices, causing columns to be
-        // silently absent or misread.  Filter columns_in_order to the matching kind.
-        // Each entry pairs the supplied schema `Column` (drives column identity /
-        // order) with the AUTHORITATIVE on-disk SerializationHeader marshal type
-        // (`ColumnInfo.column_type`). The on-disk marshal type is the no-heuristics
-        // source of truth (issue #28) used to decide complex-ness and to decode
-        // complex values — e.g. `UserType(...)` for a non-frozen multicell UDT
-        // (issue #1081), or `FrozenType(UserType(...))` for a frozen UDT whose
-        // supplied short form carries no field defs (issue #1080).
+        // Issue #702: the on-disk column group differs by row kind, so the resolution
+        // exposes a separate ordering for static vs regular rows.
         //
-        // `schema` is `None` for a column present on disk but ABSENT from the
-        // supplied schema — a DROPPED / evolved-away column.  Such a column is NOT
-        // emitted, but its bytes MUST still be consumed from the cell stream so the
-        // trailing columns stay byte-aligned (issue #1080 Part 2: the gen-1 header
-        // carries dropped tuple/UDT columns ahead of `survivor`).  We therefore keep
-        // dropped columns in iteration order (driven by the header) rather than
-        // filtering them out, which would silently misalign every following column.
-        //
-        // `header_type` is `None` only on the header-empty fallback path (synthetic
-        // SSTables) where the supplied schema type is all we have; on that path
-        // every iterated column is schema-present by construction.
-        struct ColumnToParse<'a> {
-            schema: Option<&'a crate::schema::Column>,
-            header_type: Option<&'a str>,
-        }
+        // Issue #1046 (the true hoist): this header→schema resolution is CONSTANT for
+        // every row in the block, so it is built ONCE (in `RowColumnResolution::build`
+        // at the top of the per-block driver) and reused here. The per-row body now
+        // performs ZERO schema-lookup allocations — no per-row `HashMap`, no per-row
+        // `String` clone, no per-row `Vec` of columns.
+        let columns_in_order: &[ColumnToParse] = resolution.columns_for(is_static);
 
-        let columns_in_order: Vec<ColumnToParse> = if !reader.header.columns.is_empty() {
-            // Build lookup map from schema for column details
-            let schema_map: HashMap<String, &crate::schema::Column> = schema
-                .columns
-                .iter()
-                .map(|col| (col.name.clone(), col))
-                .collect();
-
-            // Iterate serialization header columns in exact order (skipping keys,
-            // and filtering to match the current row's static/regular kind).
-            reader
-                .header
-                .columns
-                .iter()
-                .filter(|col_info| {
-                    !col_info.is_primary_key
-                        && !col_info.is_clustering
-                        && col_info.is_static == is_static
-                })
-                .map(|col_info| ColumnToParse {
-                    schema: schema_map.get(&col_info.name).copied(),
-                    header_type: Some(col_info.column_type.as_str()),
-                })
-                .collect()
-        } else {
-            // Fallback to schema order when header is empty (shouldn't happen for real SSTables)
-            log::warn!("V5CompressedLegacy: reader.header.columns is empty, falling back to schema order (may cause column misalignment)");
-            schema
-                .columns
-                .iter()
-                .filter(|col| {
-                    !partition_key_names.contains(col.name.as_str())
-                        && !clustering_key_names.contains(col.name.as_str())
-                        && col.is_static == is_static // Issue #702: match row kind
-                })
-                .map(|col| ColumnToParse {
-                    schema: Some(col),
-                    header_type: None,
-                })
-                .collect()
-        };
-
-        // Filter columns by missing_columns_bitmap when present.
-        // The bitmap indicates which columns are MISSING (bit=1 → absent).
-        // We only parse cells for columns that are actually present in the data.
-        // The bitmap is indexed by the ON-DISK column order (header order), which is
-        // exactly `columns_in_order` (dropped columns retained), so the index
-        // alignment is preserved.
-        let columns_to_parse: Vec<ColumnToParse> = match row_header.missing_columns_bitmap {
-            Some(bitmap) => {
-                let total_columns = columns_in_order.len();
-                let filtered: Vec<_> = columns_in_order
-                    .into_iter()
-                    .enumerate()
-                    .filter(|(idx, _)| {
-                        // Bitmap only covers the first 64 columns (u64).
-                        // Columns beyond index 63 are not represented in the
-                        // bitmap and are treated as present.
-                        *idx >= 64 || (bitmap & (1u64 << idx)) == 0
-                    })
-                    .map(|(_, col)| col)
-                    .collect();
-                log::debug!(
-                    "V5CompressedLegacy: Column bitmap 0x{:X} filters {} → {} columns",
-                    bitmap,
-                    total_columns,
-                    filtered.len()
-                );
-                filtered
+        // Apply the missing_columns_bitmap INLINE (no per-row `Vec`): a column at
+        // on-disk index `idx` is present iff `idx >= 64` (beyond the u64 bitmap,
+        // treated present) or its bit is clear. The bitmap is indexed by the ON-DISK
+        // column order, which is exactly `columns_in_order` (dropped columns retained),
+        // so the index alignment is preserved.
+        let missing_bitmap = row_header.missing_columns_bitmap;
+        let is_present = |idx: usize| -> bool {
+            match missing_bitmap {
+                Some(bitmap) => idx >= 64 || (bitmap & (1u64 << idx)) == 0,
+                None => true,
             }
-            None => columns_in_order,
         };
 
-        log::debug!("V5CompressedLegacy: Parsing {} cells in SERIALIZATION HEADER ORDER starting at offset {} (row header was {} bytes)", columns_to_parse.len(), offset, row_header.header_size);
-        log::debug!(
-            "V5CompressedLegacy: Column order: {:?}",
-            columns_to_parse
-                .iter()
-                .map(|c| c.schema.map(|s| s.name.as_str()).unwrap_or("<dropped>"))
-                .collect::<Vec<_>>()
-        );
+        log::debug!("V5CompressedLegacy: Parsing cells in SERIALIZATION HEADER ORDER starting at offset {} (row header was {} bytes, {} on-disk columns, bitmap={:?})", offset, row_header.header_size, columns_in_order.len(), missing_bitmap);
         log::debug!(
             "V5CompressedLegacy: Cell data hex (first 64 bytes): {}",
             hex::encode(&data[offset..std::cmp::min(offset + 64, data.len())])
@@ -410,7 +321,14 @@ impl V5CompressedLegacyParser {
             log::debug!("V5CompressedLegacy: Row has HAS_COMPLEX_DELETION flag (0x40) set");
         }
 
-        for (col_idx, ctp) in columns_to_parse.iter().enumerate() {
+        for (col_idx, ctp) in columns_in_order.iter().enumerate() {
+            // Skip columns marked MISSING by the row's bitmap (inline, no per-row
+            // allocation). `col_idx` is the ON-DISK column index — exactly what the
+            // bitmap is indexed by — so this is identical to the prior pre-filtered
+            // `columns_to_parse` Vec, just without materializing it.
+            if !is_present(col_idx) {
+                continue;
+            }
             let header_type: Option<&str> = ctp.header_type;
 
             // A column present on disk but ABSENT from the supplied schema is a
@@ -451,11 +369,11 @@ impl V5CompressedLegacyParser {
 
             if offset >= data.len() {
                 log::debug!(
-                    "V5CompressedLegacy: Reached end of data at column {} ('{}'), parsed {}/{} cells",
+                    "V5CompressedLegacy: Reached end of data at column {} ('{}'), parsed {}/{} on-disk cells",
                     col_idx,
                     column.name,
                     cells.len(),
-                    columns_to_parse.len()
+                    columns_in_order.len()
                 );
                 break;
             }
@@ -616,9 +534,9 @@ impl V5CompressedLegacyParser {
         }
 
         log::debug!(
-            "V5CompressedLegacy: Parsed {}/{} columns (missing columns are NULL)",
+            "V5CompressedLegacy: Parsed {}/{} on-disk columns (missing columns are NULL)",
             cells.len(),
-            columns_to_parse.len()
+            columns_in_order.len()
         );
         log::debug!(
             "V5CompressedLegacy: Cells HashMap keys: {:?}",
