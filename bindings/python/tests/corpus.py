@@ -16,6 +16,8 @@ The skip-set + rationale is the policy decision documented in
 from __future__ import annotations
 
 import re
+import subprocess
+from functools import lru_cache
 from pathlib import Path
 
 # UUID suffix appended to every table directory: ``<table>-<32 hex>``.
@@ -102,10 +104,143 @@ def discover_keyspaces(sstables_dir: Path) -> list[str]:
     )
 
 
+# The committed corpus is owned by THIS source tree (the repo that contains
+# this harness + the corpus-coverage policy), NOT by whatever checkout
+# ``CQLITE_DATASETS_ROOT`` happens to point at. A concurrent session can commit
+# WIP fixtures into a *different* checkout's index (e.g. the main repo the
+# datasets root points at) while this branch has not adopted them yet; the
+# classification guard must reflect what THIS branch considers committed.
+# corpus.py lives at <repo>/bindings/python/tests/corpus.py.
+_SOURCE_TREE_SSTABLES = (
+    Path(__file__).resolve().parents[3] / "test-data" / "datasets" / "sstables"
+)
+
+
+@lru_cache(maxsize=8)
+def _git_tracked_table_dirs(sstables_dir: Path) -> frozenset[str]:
+    """``"<keyspace>/<table-dir>"`` for each dir owning ANY git-tracked file.
+
+    Issue #1319 / #1312 (committed = any tracked file): the
+    classification/enforcement set is the COMMITTED corpus, NOT raw live-disk
+    enumeration. A table DIRECTORY counts as "committed" iff git tracks AT
+    LEAST ONE file under ``<keyspace>/<table>-<uuid>/`` — Data.db, TOC,
+    Statistics, a JSONL golden, ANYTHING. This deliberately does NOT require a
+    tracked ``*-Data.db.jsonl`` golden: a newly-committed table dir that ships
+    SSTable metadata but is (regressionly) MISSING its JSONL golden must still
+    count as committed so the coverage check can surface the missing golden and
+    FAIL LOUDLY (the #1229 missing-golden guarantee), rather than be silently
+    omitted as "uncommitted". The separate golden-presence check
+    (:func:`find_jsonls_in_dir` / :func:`discover_corpus`) enforces that.
+
+    This still ignores untracked WIP fixtures a concurrent session may have
+    dropped into the live ``CQLITE_DATASETS_ROOT`` — at either keyspace
+    granularity (a whole new keyspace, e.g. ``test_signed_coll``, ZERO tracked
+    files) OR table granularity (a new untracked ``<table>-<uuid>/`` dir under
+    an ALREADY-tracked keyspace) — so neither gets enforced.
+
+    Tracked-ness is measured against THIS source tree's
+    ``test-data/datasets/sstables`` (the repo that owns this harness + the
+    corpus-coverage policy), NOT against ``sstables_dir`` — the live datasets
+    root may be a *different* checkout whose index already contains a
+    concurrent session's WIP. The ``sstables_dir`` argument is retained so the
+    result keys on the (cached) live root for callers, but the query is rooted
+    at the source tree.
+
+    Determined with a single ``git ls-files`` call (no pathspec — ALL tracked
+    files under the source tree), parsed into the set of ``keyspace/table-dir``
+    (first two path segments). If ``git`` is unavailable / this is not a work
+    tree, returns an empty set and callers fall back to treating everything
+    discovered as committed (see :func:`committed_keyspaces` /
+    :func:`_is_committed_table_dir`). In CI and local dev ``.git`` is present.
+    """
+    src = _SOURCE_TREE_SSTABLES
+    if not src.exists():
+        return frozenset()
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(src), "ls-files", "-z"],
+            capture_output=True,
+            check=False,
+        )
+    except (OSError, ValueError):
+        return frozenset()
+    if proc.returncode != 0:
+        return frozenset()
+    table_dirs: set[str] = set()
+    for raw in proc.stdout.split(b"\0"):
+        if not raw:
+            continue
+        # Paths are relative to ``src``: ``<keyspace>/<table-dir>/<file>``.
+        rel = raw.decode("utf-8", "surrogateescape")
+        parts = rel.split("/")
+        if len(parts) >= 3 and parts[0] and parts[1]:
+            table_dirs.add(f"{parts[0]}/{parts[1]}")
+    return frozenset(table_dirs)
+
+
+def _git_tracked_keyspaces(sstables_dir: Path) -> frozenset[str]:
+    """Keyspaces with at least one git-tracked file under a table dir.
+
+    Derived from the table-granular tracked set
+    (:func:`_git_tracked_table_dirs`): a keyspace is committed iff it owns at
+    least one tracked table dir. Empty when git is unavailable (callers then
+    fall back to treating all discovered keyspaces as committed).
+    """
+    return frozenset(
+        td.split("/", 1)[0] for td in _git_tracked_table_dirs(sstables_dir)
+    )
+
+
+def _is_committed_table_dir(sstables_dir: Path, keyspace: str, table_dir_name: str) -> bool:
+    """True if ``<keyspace>/<table_dir_name>`` owns ANY git-tracked file.
+
+    "Committed" is deliberately decoupled from "has a JSONL golden" (#1312): a
+    committed dir that is missing its golden must remain DISCOVERABLE so the
+    coverage check fails loudly on the missing golden (#1229), not be silently
+    dropped here as uncommitted.
+
+    Graceful fallback: if git reports NO tracked files (git unavailable / not a
+    work tree), every discovered table dir is treated as committed so the guard
+    is not silently neutered. In CI and local dev ``.git`` is present.
+    """
+    tracked = _git_tracked_table_dirs(sstables_dir)
+    if not tracked:
+        return True
+    return f"{keyspace}/{table_dir_name}" in tracked
+
+
+def committed_keyspaces(sstables_dir: Path) -> list[str]:
+    """Discovered keyspaces restricted to the COMMITTED (git-tracked) corpus.
+
+    A keyspace is "committed" iff it has at least one git-tracked file under a
+    table dir (see :func:`_git_tracked_keyspaces`) — not specifically a tracked
+    golden, so a keyspace whose new table dir ships SSTable metadata but is
+    missing its JSONL golden still counts (the golden gap is caught later,
+    loudly, by the coverage check; #1312).
+    Untracked-on-disk keyspaces (WIP fixtures a concurrent session dropped in)
+    are excluded — they are neither enforced nor flagged as unclassified
+    (#1319). Untracked table dirs UNDER a tracked keyspace are filtered out at
+    table granularity by :func:`discover_table_dirs` / :func:`discover_tables`.
+
+    Graceful fallback: if git reports NO tracked goldens (git unavailable, not
+    a work tree, or a pure dataset asset checked out without ``.git``), every
+    discovered keyspace is treated as committed so the guard is not silently
+    neutered in those environments. In CI and local dev ``.git`` is present.
+    """
+    discovered = discover_keyspaces(sstables_dir)
+    tracked = _git_tracked_keyspaces(sstables_dir)
+    if not tracked:
+        return discovered
+    return [k for k in discovered if k in tracked]
+
+
 def discover_tables(sstables_dir: Path, keyspace: str) -> list[str]:
     """Return the table names (UUID suffix stripped) for one keyspace.
 
-    Discovered from committed ``<table>-<uuid>/`` directories.
+    Discovered from committed ``<table>-<uuid>/`` directories. Filtered to the
+    COMMITTED corpus at TABLE granularity (#1319): an untracked WIP
+    ``<table>-<uuid>/`` dir (no git-tracked golden) under an already-tracked
+    keyspace is IGNORED, not enumerated.
     """
     keyspace_dir = sstables_dir / keyspace
     if not keyspace_dir.exists():
@@ -115,16 +250,21 @@ def discover_tables(sstables_dir: Path, keyspace: str) -> list[str]:
         if not d.is_dir():
             continue
         m = _TABLE_DIR_RE.match(d.name)
-        if m:
+        if m and _is_committed_table_dir(sstables_dir, keyspace, d.name):
             tables.append(m.group("table"))
     return sorted(tables)
 
 
 def in_scope_keyspaces(sstables_dir: Path) -> list[str]:
-    """Discovered keyspaces minus the documented skip-set and ``system*``."""
+    """Committed keyspaces minus the documented skip-set and ``system*``.
+
+    Enumerates the COMMITTED corpus (git-tracked goldens), NOT raw live-disk
+    enumeration (#1319), so an untracked WIP keyspace dropped into
+    ``CQLITE_DATASETS_ROOT`` is never enforced.
+    """
     return [
         k
-        for k in discover_keyspaces(sstables_dir)
+        for k in committed_keyspaces(sstables_dir)
         if k not in SKIP_KEYSPACES and not is_system_keyspace(k)
     ]
 
@@ -137,6 +277,10 @@ def discover_table_dirs(sstables_dir: Path, keyspace: str) -> list[tuple[str, Pa
     ``test_deltas`` ships three UUID dirs per table). Each physical directory
     is returned separately so its golden is verified individually — collapsing
     by table name silently drops the later generations' JSONL files (#1229).
+
+    Filtered to the COMMITTED corpus at TABLE granularity (#1319): an untracked
+    WIP ``<table>-<uuid>/`` dir (no git-tracked golden) under an already-tracked
+    keyspace is IGNORED.
     """
     keyspace_dir = sstables_dir / keyspace
     if not keyspace_dir.exists():
@@ -146,7 +290,7 @@ def discover_table_dirs(sstables_dir: Path, keyspace: str) -> list[tuple[str, Pa
         if not d.is_dir():
             continue
         m = _TABLE_DIR_RE.match(d.name)
-        if m:
+        if m and _is_committed_table_dir(sstables_dir, keyspace, d.name):
             entries.append((m.group("table"), d))
     return sorted(entries, key=lambda e: e[1].name)
 
@@ -225,12 +369,19 @@ def unclassified_keyspaces(sstables_dir: Path) -> list[str]:
     newly-committed keyspace that nobody added to either explicit set is
     returned here, so the enumeration test reds the suite instead of silently
     absorbing it as in-scope.
+
+    The guard enumerates the COMMITTED corpus (keyspaces with git-tracked
+    goldens), NOT raw live-disk enumeration (#1319): an untracked WIP keyspace
+    a concurrent session dropped into ``CQLITE_DATASETS_ROOT`` (e.g.
+    ``test_signed_coll``, goldens not yet committed) is IGNORED — neither
+    enforced nor flagged. A genuinely-committed keyspace that is unclassified
+    is still returned (the guard still reds).
     """
     classified = set(IN_SCOPE_KEYSPACES) | set(SKIP_KEYSPACES) | set(SKIP_PENDING_KEYSPACES)
     # system* keyspaces are classified by prefix (Cassandra-internal metadata),
     # not enumerated in any explicit set.
     return [
         k
-        for k in discover_keyspaces(sstables_dir)
+        for k in committed_keyspaces(sstables_dir)
         if k not in classified and not is_system_keyspace(k)
     ]

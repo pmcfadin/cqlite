@@ -11,6 +11,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('child_process');
 
 // =============================================================================
 // Caches for Performance (matching Python's @lru_cache pattern)
@@ -40,6 +41,12 @@ function evictIfNeeded(cache) {
  * Find the JSONL reference file for a given keyspace and table.
  * Tables have hash-suffixed directories: {table}-{hash}/nb-1-big-Data.db.jsonl
  *
+ * Restricted to the COMMITTED corpus at TABLE granularity (#1319): an untracked
+ * WIP `<table>-<uuid>/` dir reusing an existing committed table's logical name
+ * is SKIPPED so the lookup never resolves a WIP golden in place of the
+ * committed one. Falls back (git unavailable) to treating all discovered dirs
+ * as committed, matching isCommittedTableDir().
+ *
  * @param {string} keyspace - Keyspace name (e.g., "test_basic")
  * @param {string} table - Table name (e.g., "simple_table")
  * @returns {string|null} - Path to JSONL file or null if not found
@@ -54,7 +61,11 @@ function findJsonlFile(keyspace, table) {
   const entries = fs.readdirSync(keyspaceDir, { withFileTypes: true });
 
   for (const entry of entries) {
-    if (entry.isDirectory() && entry.name.startsWith(`${table}-`)) {
+    if (
+      entry.isDirectory() &&
+      entry.name.startsWith(`${table}-`) &&
+      isCommittedTableDir(keyspace, entry.name)
+    ) {
       const jsonlFile = path.join(keyspaceDir, entry.name, 'nb-1-big-Data.db.jsonl');
       if (fs.existsSync(jsonlFile)) {
         return jsonlFile;
@@ -68,6 +79,10 @@ function findJsonlFile(keyspace, table) {
 /**
  * Find the JSONL reference file for an oa-format table (Issue #656 VG4).
  * oa tables use oa-N-big-Data.db.jsonl naming instead of nb-1-big-Data.db.jsonl.
+ *
+ * Restricted to the COMMITTED corpus at TABLE granularity (#1319): an untracked
+ * WIP `<table>-<uuid>/` dir reusing a committed table's logical name is SKIPPED
+ * so the lookup never resolves a WIP golden.
  *
  * @param {string} keyspace - Keyspace name (e.g., "test_oa")
  * @param {string} table - Table name (e.g., "simple_table")
@@ -83,7 +98,11 @@ function findOaJsonlFile(keyspace, table) {
   const entries = fs.readdirSync(keyspaceDir, { withFileTypes: true });
 
   for (const entry of entries) {
-    if (entry.isDirectory() && entry.name.startsWith(`${table}-`)) {
+    if (
+      entry.isDirectory() &&
+      entry.name.startsWith(`${table}-`) &&
+      isCommittedTableDir(keyspace, entry.name)
+    ) {
       const tableDir = path.join(keyspaceDir, entry.name);
       // oa tables use oa-N-big-Data.db.jsonl naming
       const dirEntries = fs.readdirSync(tableDir);
@@ -704,7 +723,13 @@ function discoverKeyspaces() {
     .sort();
 }
 
-/** Discover table names (UUID suffix stripped) for one keyspace. */
+/**
+ * Discover table names (UUID suffix stripped) for one keyspace.
+ *
+ * Filtered to the COMMITTED corpus at TABLE granularity (#1319): an untracked
+ * WIP `<table>-<uuid>/` dir (no git-tracked file at all) under an
+ * already-tracked keyspace is IGNORED, not enumerated into ALL_TABLES/OA_TABLES.
+ */
 function discoverTables(keyspace) {
   const dir = path.join(global.testPaths.SSTABLES_DIR, keyspace);
   if (!fs.existsSync(dir)) return [];
@@ -712,14 +737,135 @@ function discoverTables(keyspace) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const m = TABLE_DIR_RE.exec(entry.name);
-    if (m) tables.push(m[1]);
+    if (m && isCommittedTableDir(keyspace, entry.name)) tables.push(m[1]);
   }
   return tables.sort();
 }
 
-/** In-scope keyspaces = discovered minus the documented skip-set + system*. */
+let _trackedTableDirsCache = null;
+
+// The committed corpus is owned by THIS source tree (the repo that contains
+// this harness + the corpus-coverage policy), NOT by whatever checkout
+// CQLITE_DATASETS_ROOT points at. A concurrent session can commit WIP fixtures
+// into a *different* checkout's index (e.g. the main repo the datasets root
+// points at) while this branch has not adopted them yet; the classification
+// guard must reflect what THIS branch considers committed. parity-utils.js
+// lives at <repo>/bindings/node/__test__/parity-utils.js.
+const SOURCE_TREE_SSTABLES = path.resolve(
+  __dirname,
+  '..',
+  '..',
+  '..',
+  'test-data',
+  'datasets',
+  'sstables',
+);
+
+/**
+ * `"<keyspace>/<table-dir>"` for each dir owning ANY git-tracked file (#1319/#1312).
+ *
+ * The classification/enforcement set is the COMMITTED corpus, NOT raw live-disk
+ * enumeration: a table DIRECTORY counts as "committed" iff git tracks AT LEAST
+ * ONE file under `<keyspace>/<table>-<uuid>/` — Data.db, TOC, Statistics, a
+ * JSONL golden, ANYTHING. This deliberately does NOT require a tracked
+ * `*-Data.db.jsonl` golden: a newly-committed table dir that ships SSTable
+ * metadata but is (regressionly) MISSING its JSONL golden must still count as
+ * committed so the coverage check can surface the missing golden and FAIL
+ * LOUDLY (#1229), rather than be silently omitted as "uncommitted". The
+ * separate golden-presence check (findJsonlFile / coverage tests) enforces that.
+ *
+ * This still ignores untracked WIP fixtures a concurrent session may have
+ * dropped into the live CQLITE_DATASETS_ROOT — at either keyspace granularity
+ * (a whole new keyspace, e.g. `test_signed_coll`, ZERO tracked files) OR table
+ * granularity (a new untracked `<table>-<uuid>/` dir under an already-tracked
+ * keyspace) — so neither gets enforced.
+ *
+ * Tracked-ness is measured against THIS source tree's
+ * `test-data/datasets/sstables` (the repo that owns this harness + the policy),
+ * NOT the live SSTABLES_DIR — the live datasets root may be a *different*
+ * checkout whose index already contains a concurrent session's WIP. Single
+ * `git ls-files` call (no pathspec — ALL tracked files), parsed into
+ * `keyspace/table-dir` (first two segments).
+ *
+ * @returns {Set<string>} tracked `keyspace/table-dir` (empty if git unavailable)
+ */
+function gitTrackedTableDirs() {
+  if (_trackedTableDirsCache) return _trackedTableDirsCache;
+  const out = new Set();
+  try {
+    const stdout = execFileSync(
+      'git',
+      ['-C', SOURCE_TREE_SSTABLES, 'ls-files', '-z'],
+      { encoding: 'buffer' },
+    );
+    for (const raw of stdout.toString('utf8').split('\0')) {
+      if (!raw) continue;
+      const parts = raw.split('/');
+      if (parts.length >= 3 && parts[0] && parts[1]) out.add(`${parts[0]}/${parts[1]}`);
+    }
+  } catch (_err) {
+    // git unavailable / not a work tree: fall back (empty => treat all as committed).
+  }
+  _trackedTableDirsCache = out;
+  return out;
+}
+
+/**
+ * Keyspaces with at least one git-tracked file under a table dir (#1319/#1312).
+ *
+ * Derived from the table-granular tracked set (gitTrackedTableDirs): a keyspace
+ * is committed iff it owns at least one tracked table dir. Empty when git is
+ * unavailable (callers then fall back to treating all as committed).
+ *
+ * @returns {Set<string>} tracked keyspace names (empty if git unavailable)
+ */
+function gitTrackedKeyspaces() {
+  const out = new Set();
+  for (const td of gitTrackedTableDirs()) out.add(td.split('/', 1)[0]);
+  return out;
+}
+
+/**
+ * True if `<keyspace>/<tableDirName>` owns ANY git-tracked file (#1319/#1312).
+ *
+ * "Committed" is decoupled from "has a JSONL golden": a committed dir missing
+ * its golden must remain DISCOVERABLE so the coverage check fails loudly on the
+ * missing golden (#1229), not be silently dropped here.
+ *
+ * Graceful fallback: if git reports NO tracked files (git unavailable / not a
+ * work tree), every discovered table dir is treated as committed so the guard
+ * is not silently neutered.
+ *
+ * @returns {boolean}
+ */
+function isCommittedTableDir(keyspace, tableDirName) {
+  const tracked = gitTrackedTableDirs();
+  if (tracked.size === 0) return true;
+  return tracked.has(`${keyspace}/${tableDirName}`);
+}
+
+/**
+ * Discovered keyspaces restricted to the COMMITTED (git-tracked) corpus (#1319).
+ *
+ * Untracked-on-disk WIP keyspaces are excluded — neither enforced nor flagged.
+ * Untracked table dirs UNDER a tracked keyspace are filtered at table
+ * granularity by discoverTables(). Graceful fallback: if git reports NO tracked
+ * files (git unavailable / not a work tree), every discovered keyspace is
+ * treated as committed so the guard is not silently neutered. In CI and local
+ * dev `.git` is present.
+ *
+ * @returns {string[]} committed keyspace names
+ */
+function committedKeyspaces() {
+  const discovered = discoverKeyspaces();
+  const tracked = gitTrackedKeyspaces();
+  if (tracked.size === 0) return discovered;
+  return discovered.filter((k) => tracked.has(k));
+}
+
+/** In-scope keyspaces = committed minus the documented skip-set + system* (#1319). */
 function inScopeKeyspaces() {
-  return discoverKeyspaces().filter((k) => !(k in SKIP_KEYSPACES) && !isSystemKeyspace(k));
+  return committedKeyspaces().filter((k) => !(k in SKIP_KEYSPACES) && !isSystemKeyspace(k));
 }
 
 /**
@@ -732,6 +878,11 @@ function inScopeKeyspaces() {
  * unclassified by construction — the tautology #1229 exists to kill). A
  * newly-committed keyspace nobody added to either explicit set is returned
  * here so the classification test reds the suite instead of absorbing it.
+ *
+ * The guard enumerates the COMMITTED corpus (git-tracked goldens), NOT raw
+ * live-disk enumeration (#1319): an untracked WIP keyspace a concurrent session
+ * dropped into CQLITE_DATASETS_ROOT (e.g. `test_signed_coll`, goldens not yet
+ * committed) is IGNORED. A genuinely-committed unclassified keyspace still reds.
  */
 function unclassifiedKeyspaces() {
   const classified = new Set([
@@ -741,7 +892,7 @@ function unclassifiedKeyspaces() {
   ]);
   // system* keyspaces are classified by prefix (Cassandra-internal metadata),
   // not enumerated in any explicit set.
-  return discoverKeyspaces().filter((k) => !classified.has(k) && !isSystemKeyspace(k));
+  return committedKeyspaces().filter((k) => !classified.has(k) && !isSystemKeyspace(k));
 }
 
 /**
@@ -817,6 +968,10 @@ module.exports = {
   EXECUTABLE_KEYSPACES,
   isSystemKeyspace,
   discoverKeyspaces,
+  gitTrackedTableDirs,
+  gitTrackedKeyspaces,
+  isCommittedTableDir,
+  committedKeyspaces,
   discoverTables,
   inScopeKeyspaces,
   unclassifiedKeyspaces,

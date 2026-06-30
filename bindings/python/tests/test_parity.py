@@ -40,6 +40,7 @@ from conftest import DATASETS, SCHEMAS
 from corpus import (
     SKIP_KEYSPACES,
     SKIP_PENDING_KEYSPACES,
+    _is_committed_table_dir,
     discover_corpus,
     discover_table_dirs,
     discover_tables,
@@ -101,6 +102,12 @@ def find_jsonl_file(keyspace: str, table: str) -> Path | None:
     (e.g. ``nb-2``, ``nb-45``, ``oa-2``, ``da-2``). Globbing ``*-Data.db.jsonl``
     instead of hard-coding ``nb-1-big-Data.db.jsonl`` ensures a missing golden
     for a non-nb-1 table is detected (not silently treated as "no golden").
+
+    Restricted to the COMMITTED corpus at TABLE granularity (#1319): an
+    untracked WIP ``<table>-<uuid>/`` dir that reuses an existing committed
+    table's logical name is SKIPPED so the lookup never resolves a WIP golden
+    in place of the committed one. Falls back (git unavailable) to treating all
+    discovered dirs as committed, matching :func:`_is_committed_table_dir`.
     """
     keyspace_dir = DATASETS / keyspace
     if not keyspace_dir.exists():
@@ -108,7 +115,11 @@ def find_jsonl_file(keyspace: str, table: str) -> Path | None:
 
     # Find table directory (contains hash suffix)
     for table_dir in keyspace_dir.iterdir():
-        if table_dir.is_dir() and table_dir.name.startswith(f"{table}-"):
+        if (
+            table_dir.is_dir()
+            and table_dir.name.startswith(f"{table}-")
+            and _is_committed_table_dir(DATASETS, keyspace, table_dir.name)
+        ):
             for jsonl_file in sorted(table_dir.glob("*-Data.db.jsonl")):
                 if jsonl_file.exists():
                     return jsonl_file
@@ -120,13 +131,21 @@ def find_oa_jsonl_file(keyspace: str, table: str) -> Path | None:
 
     oa tables use oa-format SSTable files:
     test-data/datasets/sstables/{keyspace}/{table}-{hash}/oa-2-big-Data.db.jsonl
+
+    Restricted to the COMMITTED corpus at TABLE granularity (#1319): an
+    untracked WIP ``<table>-<uuid>/`` dir reusing a committed table's logical
+    name is SKIPPED so the lookup never resolves a WIP golden.
     """
     keyspace_dir = DATASETS / keyspace
     if not keyspace_dir.exists():
         return None
 
     for table_dir in keyspace_dir.iterdir():
-        if table_dir.is_dir() and table_dir.name.startswith(f"{table}-"):
+        if (
+            table_dir.is_dir()
+            and table_dir.name.startswith(f"{table}-")
+            and _is_committed_table_dir(DATASETS, keyspace, table_dir.name)
+        ):
             # oa tables use oa-N-big-Data.db.jsonl naming
             for jsonl_file in table_dir.glob("oa-*-big-Data.db.jsonl"):
                 if jsonl_file.exists():
@@ -476,12 +495,19 @@ class TestRowCountParity:
     test-data/corpus-coverage-policy.md).
     """
 
-    def test_tier1_enumerates_discovered_tables(self):
+    def test_tier1_enumerates_discovered_tables(self, datasets_root):
         """Guard: the parametrized set must enumerate the discovered Tier-1 corpus.
 
         Fails loudly (rather than silently shrinking) if discovery returns
         nothing for the schema-mapped keyspaces, which would make every
         row-count case below vanish unnoticed.
+
+        Issue #1312 (fast-follow to #1229): take the ``datasets_root`` fixture so
+        an UNFETCHED checkout SKIPs consistently with the rest of the suite
+        (``skip_if_no_datasets()`` — or FAILs under ``CQLITE_REQUIRE_FIXTURES=1``
+        strict mode) instead of reporting a hard failure here. A datasets-root
+        that is PRESENT but yields an empty enumeration is still a real bug and
+        FAILs the assertion below (strict mode preserved).
         """
         assert TIER1_ROW_COUNT_TABLES, (
             "No Tier-1 row-count tables discovered for the schema-mapped "
