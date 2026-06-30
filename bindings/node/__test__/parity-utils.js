@@ -41,6 +41,12 @@ function evictIfNeeded(cache) {
  * Find the JSONL reference file for a given keyspace and table.
  * Tables have hash-suffixed directories: {table}-{hash}/nb-1-big-Data.db.jsonl
  *
+ * Restricted to the COMMITTED corpus at TABLE granularity (#1319): an untracked
+ * WIP `<table>-<uuid>/` dir reusing an existing committed table's logical name
+ * is SKIPPED so the lookup never resolves a WIP golden in place of the
+ * committed one. Falls back (git unavailable) to treating all discovered dirs
+ * as committed, matching isCommittedTableDir().
+ *
  * @param {string} keyspace - Keyspace name (e.g., "test_basic")
  * @param {string} table - Table name (e.g., "simple_table")
  * @returns {string|null} - Path to JSONL file or null if not found
@@ -55,7 +61,11 @@ function findJsonlFile(keyspace, table) {
   const entries = fs.readdirSync(keyspaceDir, { withFileTypes: true });
 
   for (const entry of entries) {
-    if (entry.isDirectory() && entry.name.startsWith(`${table}-`)) {
+    if (
+      entry.isDirectory() &&
+      entry.name.startsWith(`${table}-`) &&
+      isCommittedTableDir(keyspace, entry.name)
+    ) {
       const jsonlFile = path.join(keyspaceDir, entry.name, 'nb-1-big-Data.db.jsonl');
       if (fs.existsSync(jsonlFile)) {
         return jsonlFile;
@@ -69,6 +79,10 @@ function findJsonlFile(keyspace, table) {
 /**
  * Find the JSONL reference file for an oa-format table (Issue #656 VG4).
  * oa tables use oa-N-big-Data.db.jsonl naming instead of nb-1-big-Data.db.jsonl.
+ *
+ * Restricted to the COMMITTED corpus at TABLE granularity (#1319): an untracked
+ * WIP `<table>-<uuid>/` dir reusing a committed table's logical name is SKIPPED
+ * so the lookup never resolves a WIP golden.
  *
  * @param {string} keyspace - Keyspace name (e.g., "test_oa")
  * @param {string} table - Table name (e.g., "simple_table")
@@ -84,7 +98,11 @@ function findOaJsonlFile(keyspace, table) {
   const entries = fs.readdirSync(keyspaceDir, { withFileTypes: true });
 
   for (const entry of entries) {
-    if (entry.isDirectory() && entry.name.startsWith(`${table}-`)) {
+    if (
+      entry.isDirectory() &&
+      entry.name.startsWith(`${table}-`) &&
+      isCommittedTableDir(keyspace, entry.name)
+    ) {
       const tableDir = path.join(keyspaceDir, entry.name);
       // oa tables use oa-N-big-Data.db.jsonl naming
       const dirEntries = fs.readdirSync(tableDir);
