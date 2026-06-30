@@ -118,3 +118,114 @@ jobs:
 
       - name: Unit + integration tests
         run: cargo test -p cassandra-parity
+
+  # Self-healing for the semantic merge race (issue #1338). The committed report
+  # docs/reports/cassandra-test-parity.md is a DERIVED artifact rendered from the
+  # manifest. Two manifest-changing PRs can each regenerate it correctly vs their
+  # own base, yet a squash-merge in the wrong order leaves main's report rendered
+  # against a stale base — a drift no per-PR `--check` can catch (each PR is green
+  # vs its base; the staleness exists only post-merge). The `parity-manifest` job
+  # above is the DETECTOR (its `Report is not stale` step reds on the bad tip); this
+  # job is the HEALER. On push to main, if the report is stale it regenerates it and
+  # opens (or force-updates) a single regeneration PR from a fixed bot branch — it
+  # NEVER pushes to protected main directly. The regen PR's merge makes `--check`
+  # green on the new tip, terminating the cycle.
+  #
+  # Non-recursion: this job's push trigger is scoped to `branches: [main]`, so a
+  # push to the bot branch (a different branch) cannot retrigger it; we also guard
+  # on actor as defense-in-depth. No untrusted `${{ github.* }}` value is ever
+  # interpolated into a `run:` shell — paths/branch are constants passed via quoted
+  # env vars and the PR title/body are static (GitHub Actions command-injection
+  # safety).
+  parity-report-heal:
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      REGEN_BRANCH: auto/parity-report-regen
+      REPORT_PATH: docs/reports/cassandra-test-parity.md
+      MANIFEST_PATH: test-data/cassandra-parity-manifest.yml
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # Same clippy-conflict avoidance as the parity-manifest job (issue #1209/#1217).
+      - name: Remove preinstalled clippy (avoid clippy-preview install conflict)
+        shell: bash
+        run: rustup component remove clippy --toolchain stable 2>/dev/null || true
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-parity-${{ runner.os }}-${{ hashFiles('**/Cargo.toml') }}
+
+      - name: Build cassandra-parity
+        run: cargo build -p cassandra-parity
+
+      - name: Detect report staleness
+        id: freshness
+        shell: bash
+        run: |
+          if cargo run -p cassandra-parity -- report \
+               --manifest "$MANIFEST_PATH" --output "$REPORT_PATH" --check; then
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Regenerate the report
+        if: steps.freshness.outputs.stale == 'true'
+        shell: bash
+        run: |
+          cargo run -p cassandra-parity -- report \
+            --manifest "$MANIFEST_PATH" --output "$REPORT_PATH"
+
+      - name: Open or update the regeneration PR
+        if: steps.freshness.outputs.stale == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The regen step writes only the report. Refuse to proceed if anything
+          # else changed (defensive; keeps the heal PR to a single file — D4).
+          changed=$(git diff --name-only)
+          if [ -z "$changed" ]; then
+            echo "Report already in sync after regeneration; nothing to do."
+            exit 0
+          fi
+          if [ "$changed" != "$REPORT_PATH" ]; then
+            echo "Refusing to open PR: regeneration changed more than $REPORT_PATH:" >&2
+            printf '%s\n' "$changed" >&2
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Force-update the fixed bot branch so we never stack duplicate PRs (D4).
+          git checkout -B "$REGEN_BRANCH"
+          git add "$REPORT_PATH"
+          git commit -m "chore(parity): regenerate stale cassandra-test-parity report"
+          git push --force origin "$REGEN_BRANCH"
+          # Open a PR only if none is already open for this branch; otherwise the
+          # force-push above has already updated the existing PR (idempotent — D4).
+          existing=$(gh pr list --head "$REGEN_BRANCH" --state open --json number --jq 'length')
+          if [ "$existing" = "0" ]; then
+            gh pr create --base main --head "$REGEN_BRANCH" \
+              --title "chore(parity): regenerate stale cassandra-test-parity report" \
+              --body "Automated regeneration of the committed parity report from the manifest. The report drifted from a fresh render on main (a semantic merge race between two manifest-changing PRs — see docs/development/parity-ci-tiers.md and issue #1338). This PR changes only docs/reports/cassandra-test-parity.md; merging it makes the parity-manifest staleness check green again."
+          else
+            echo "An open regeneration PR already exists; its branch was updated."
+          fi
