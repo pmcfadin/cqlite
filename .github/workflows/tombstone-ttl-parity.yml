@@ -76,6 +76,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Issue #1209/#1217: GitHub runner images ship a stable toolchain that
+      # already provides bin/cargo-clippy. The dtolnay/rust-toolchain@stable
+      # action performs a rustup reconcile that can intermittently try to
+      # (re)install the 'clippy-preview' component and fail with
+      # "detected conflict: 'bin/cargo-clippy'". Remove the conflicting
+      # component FIRST — before the toolchain action runs any rustup work — so
+      # the @stable setup (minimal profile, no clippy) cannot reinstall
+      # clippy-preview. The runner ships a working rustup, so this `run:` step
+      # before the action has rustup available.
+      # This lane does not run clippy. Idempotent: a no-op if clippy is absent.
+      - name: Remove preinstalled clippy (avoid clippy-preview install conflict)
+        shell: bash
+        run: rustup component remove clippy 2>/dev/null || true
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
