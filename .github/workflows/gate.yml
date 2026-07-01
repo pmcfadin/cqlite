@@ -158,12 +158,14 @@ jobs:
       # explicitly so intent is visible and any tool reading it agrees. The
       # gate exits non-zero on any component FAIL, which fails this step. We
       # pin AGENT_GATE_SUMMARY_FILE so the summary is recoverable as an artifact
-      # even if the streamed stdout is truncated.
+      # even if the streamed stdout is truncated. Use a NON-hidden path (no
+      # leading dot) so actions/upload-artifact publishes it — v6 excludes
+      # hidden files by default, which would silently drop a dotfile summary.
       - name: Run full agent gate
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
           CQLITE_REQUIRE_FIXTURES: '1'
-          AGENT_GATE_SUMMARY_FILE: ${{ github.workspace }}/.agent-gate-summary.txt
+          AGENT_GATE_SUMMARY_FILE: ${{ github.workspace }}/agent-gate-summary.txt
         run: bash scripts/agent-gate.sh
 
       # Always publish the SUMMARY block (even on failure) so the exact
@@ -173,6 +175,6 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: agent-gate-summary
-          path: .agent-gate-summary.txt
+          path: agent-gate-summary.txt
           if-no-files-found: warn
           retention-days: 14
