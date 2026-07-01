@@ -105,6 +105,21 @@ pub enum VerifyErrorClass {
     BtiTrieCorrupt,
     /// A full row scan failed for a reason not otherwise classified above.
     RowScanFailed,
+    /// Partition keys are not in ascending on-disk (Murmur3 token) order, or
+    /// clustering rows within a partition are not in ascending clustering order
+    /// (issue #1282). Cassandra requires strictly ordered keys/rows; its
+    /// `sstableverify` (`SSTableIdentityIterator` / `Verifier`) rejects an
+    /// out-of-order key or row as corrupt.
+    OutOfOrderKeyOrRow,
+    /// A partition-level `localDeletionTime` is negative (invalid) on the legacy
+    /// signed (`nb`) `DeletionTime` form (issue #1282). `localDeletionTime` is
+    /// seconds since the Unix epoch; the only non-negative "special" value is the
+    /// live sentinel `i32::MAX` (`0x7FFFFFFF`). A negative value cannot be a valid
+    /// deletion time — Cassandra's `DeletionTime`/`Verifier` treats it as corrupt.
+    /// (The unsigned `oa`/`da` form legitimately represents far-future times in
+    /// `[2^31, 2^32)`, so those are NOT flagged — the on-disk format, not a
+    /// heuristic, decides.)
+    InvalidLocalDeletionTime,
 }
 
 impl VerifyErrorClass {
@@ -123,6 +138,8 @@ impl VerifyErrorClass {
             VerifyErrorClass::BtiRootPointerCorrupt => "BtiRootPointerCorrupt",
             VerifyErrorClass::BtiTrieCorrupt => "BtiTrieCorrupt",
             VerifyErrorClass::RowScanFailed => "RowScanFailed",
+            VerifyErrorClass::OutOfOrderKeyOrRow => "OutOfOrderKeyOrRow",
+            VerifyErrorClass::InvalidLocalDeletionTime => "InvalidLocalDeletionTime",
         }
     }
 }
@@ -342,6 +359,9 @@ pub async fn verify_sstable(
             // can never be reported as a successful zero-row scan. We still run the
             // scan to exercise the decompression stitch path and surface Data.db
             // corruption that only manifests during decode.
+            // The order/LDT check (Check 8) reuses the reader, so keep a clone of
+            // the platform handle before the scan consumes the original.
+            let platform_for_order = platform.clone();
             match full_row_scan_partitions(&components.data_path, config, platform).await {
                 Ok((rows, scan_partitions)) => {
                     rows_scanned = Some(rows);
@@ -368,6 +388,24 @@ pub async fn verify_sstable(
                 }
                 Err(e) => findings.push(classify_scan_error(&components, &e)),
             }
+
+            // ---- Check 8: key/row order + partition-level LDT validity (#1282)
+            //
+            // Cassandra's `sstableverify` rejects two corruption classes CQLite
+            // did not previously classify: partition keys / clustering rows out of
+            // ascending order, and a negative (invalid) partition-level
+            // `localDeletionTime`. Both are read off the SAME authoritative decode
+            // the scan already performs (no second heuristic pass): the on-disk
+            // partition order (Murmur3 token order) and each deleted partition's
+            // raw `DeletionTime`. Skipped when compression metadata is corrupt
+            // (handled above) — this block is inside the same guard.
+            check_key_order_and_ldt(
+                &components.data_path,
+                config,
+                platform_for_order,
+                &mut findings,
+            )
+            .await;
         } // end: if !compression_metadata_corrupt
     }
 
@@ -1340,6 +1378,131 @@ fn bti_partition_identity_mismatch(
     None
 }
 
+/// Check 8 (FULL): partition key/row ordering + partition-level
+/// `localDeletionTime` validity (issue #1282).
+///
+/// Two corruption classes Cassandra's `sstableverify` rejects that the earlier
+/// checks did not classify:
+///
+/// * **Out-of-order key/row** ([`VerifyErrorClass::OutOfOrderKeyOrRow`]).
+///   Cassandra stores partitions in ascending **Murmur3 token** order (ties
+///   broken by the raw key bytes). We recompute each partition's token with the
+///   authoritative [`cassandra_murmur3_token`] (Murmur3Partitioner, matching the
+///   rest of CQLite's BTI read path, issue #755) and flag the first
+///   `(token, key)` pair that is not strictly greater than its predecessor.
+///
+/// * **Invalid partition-level local-deletion-time**
+///   ([`VerifyErrorClass::InvalidLocalDeletionTime`]). `localDeletionTime` is
+///   seconds since the Unix epoch; the only special non-negative value is the
+///   live sentinel `i32::MAX`. On the legacy signed (`nb`) `DeletionTime` form a
+///   NEGATIVE partition-level value is unambiguously corrupt (Cassandra's
+///   `DeletionTime`/`Verifier` rejects it). The unsigned `oa`/`da` form
+///   legitimately represents far-future times in `[2^31, 2^32)` as a negative
+///   `i32`, so we ONLY flag a negative value when the on-disk format is the
+///   signed legacy form — the format, not a heuristic, decides.
+///
+/// Both facts come from the SAME authoritative partition-header decode the scan
+/// already performs (see [`SSTableReader::partition_verify_scan`]); this is not a
+/// second guessing pass. Environmental errors (reader open) are surfaced through
+/// the existing scan-error classifier rather than aborting verification.
+async fn check_key_order_and_ldt(
+    data_path: &Path,
+    config: &Config,
+    platform: Arc<Platform>,
+    findings: &mut Vec<VerifyFinding>,
+) {
+    let reader = match SSTableReader::open(data_path, config, platform).await {
+        Ok(r) => r,
+        Err(_) => {
+            // A reader-open failure here is already surfaced by the Check 7 scan
+            // (it opens the same reader first); do not double-report it.
+            return;
+        }
+    };
+    let signed_ldt = !reader.has_uint_deletion_time();
+    let partitions = match reader.partition_verify_scan().await {
+        Ok(p) => p,
+        Err(_) => {
+            // A parse failure is Check 7's territory (RowScanFailed / decode);
+            // avoid a duplicate, differently-classed finding for the same cause.
+            return;
+        }
+    };
+
+    findings.extend(classify_order_and_ldt(&partitions, signed_ldt));
+}
+
+/// Pure classifier for Check 8 (issue #1282): given the on-disk-ordered
+/// `(raw_partition_key, partition_local_deletion_time)` list from
+/// [`SSTableReader::partition_verify_scan`] and whether the on-disk
+/// `DeletionTime` is the legacy SIGNED form, return any order / LDT findings.
+///
+/// Kept side-effect-free so both the public verify path and the unit tests drive
+/// the EXACT same classification (wiring evidence: `check_key_order_and_ldt`
+/// calls this, and `verify_sstable` calls that in FULL mode).
+fn classify_order_and_ldt(
+    partitions: &[(Vec<u8>, Option<i32>)],
+    signed_ldt: bool,
+) -> Vec<VerifyFinding> {
+    use crate::util::cassandra_murmur3::cassandra_murmur3_token;
+
+    let mut findings = Vec::new();
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{:02x}", x)).collect::<String>();
+
+    // ---- Out-of-order partition keys (Murmur3 token order) -----------------
+    let mut prev: Option<(i64, Vec<u8>)> = None;
+    for (idx, (key, _ldt)) in partitions.iter().enumerate() {
+        let token = cassandra_murmur3_token(key);
+        if let Some((prev_token, prev_key)) = prev.as_ref() {
+            // Cassandra orders by (token, key bytes). A later partition MUST be
+            // strictly greater; equal or lesser is out-of-order corruption.
+            let ordered = (*prev_token, prev_key.as_slice()) < (token, key.as_slice());
+            if !ordered {
+                findings.push(VerifyFinding::new(
+                    VerifyErrorClass::OutOfOrderKeyOrRow,
+                    "Data.db",
+                    format!(
+                        "partition {} (key {}, token {}) is not strictly after the previous partition (key {}, token {}) — partitions are stored out of Murmur3 token order",
+                        idx,
+                        hex(key),
+                        token,
+                        hex(prev_key),
+                        prev_token,
+                    ),
+                ));
+                break;
+            }
+        }
+        prev = Some((token, key.clone()));
+    }
+
+    // ---- Negative (invalid) partition-level localDeletionTime (nb) ---------
+    if signed_ldt {
+        for (key, ldt) in partitions {
+            if let Some(ldt) = ldt {
+                // A deleted partition's localDeletionTime is epoch-seconds; it
+                // cannot be negative. (The live sentinel i32::MAX is positive and
+                // is already resolved to `None` by the header parser.)
+                if *ldt < 0 {
+                    findings.push(VerifyFinding::new(
+                        VerifyErrorClass::InvalidLocalDeletionTime,
+                        "Data.db",
+                        format!(
+                            "partition (key {}) has a negative localDeletionTime {} (0x{:08x}) on the signed (nb) DeletionTime form — a valid deletion time is >= 0 seconds since epoch",
+                            hex(key),
+                            ldt,
+                            *ldt as u32,
+                        ),
+                    ));
+                    break;
+                }
+            }
+        }
+    }
+
+    findings
+}
+
 /// Map an error surfaced by the inline-CRC / decompression path onto a stable
 /// error class, keyed by the message shape the lower layers produce.
 fn classify_data_error(component: &str, err: &Error) -> VerifyFinding {
@@ -1400,6 +1563,15 @@ mod tests {
         assert_eq!(
             VerifyErrorClass::BtiRootPointerCorrupt.code(),
             "BtiRootPointerCorrupt"
+        );
+        // issue #1282: the two new classes must expose stable codes.
+        assert_eq!(
+            VerifyErrorClass::OutOfOrderKeyOrRow.code(),
+            "OutOfOrderKeyOrRow"
+        );
+        assert_eq!(
+            VerifyErrorClass::InvalidLocalDeletionTime.code(),
+            "InvalidLocalDeletionTime"
         );
     }
 
@@ -1635,6 +1807,99 @@ mod tests {
         // prefix, and a position that is not a partition start.
         leaves[0] = inline_leaf(&99u32.to_be_bytes(), 10_000);
         assert!(bti_partition_identity_mismatch(&leaves, &data).is_some());
+    }
+
+    // ---- Check 8: key/row order + partition-level LDT (issue #1282) --------
+
+    use crate::util::cassandra_murmur3::cassandra_murmur3_token;
+
+    /// Build the on-disk-ordered partition list the classifier consumes, sorting
+    /// the supplied keys by their real Murmur3 `(token, key)` order so the "in
+    /// order" input mirrors what a healthy Cassandra SSTable produces.
+    fn ordered_partitions(keys: &[Vec<u8>]) -> Vec<(Vec<u8>, Option<i32>)> {
+        let mut v: Vec<Vec<u8>> = keys.to_vec();
+        v.sort_by_key(|k| (cassandra_murmur3_token(k), k.clone()));
+        v.into_iter().map(|k| (k, None)).collect()
+    }
+
+    #[test]
+    fn order_ldt_clean_partitions_produce_no_findings() {
+        let keys: Vec<Vec<u8>> = (1u32..=6).map(|i| i.to_be_bytes().to_vec()).collect();
+        let partitions = ordered_partitions(&keys);
+        assert!(
+            classify_order_and_ldt(&partitions, true).is_empty(),
+            "in-token-order partitions with live LDT must produce zero findings"
+        );
+    }
+
+    #[test]
+    fn order_ldt_detects_out_of_order_partition_keys() {
+        // Take the correctly-ordered set and swap the first two, forcing a
+        // descending (token, key) step Cassandra's verifier rejects.
+        let keys: Vec<Vec<u8>> = (1u32..=6).map(|i| i.to_be_bytes().to_vec()).collect();
+        let mut partitions = ordered_partitions(&keys);
+        partitions.swap(0, 1);
+        let findings = classify_order_and_ldt(&partitions, true);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.class == VerifyErrorClass::OutOfOrderKeyOrRow),
+            "swapping two partitions must be flagged OutOfOrderKeyOrRow, got {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn order_ldt_detects_duplicate_partition_token_as_out_of_order() {
+        // Equal (token, key) is NOT strictly greater → out of order.
+        let k = 7u32.to_be_bytes().to_vec();
+        let partitions = vec![(k.clone(), None), (k, None)];
+        let findings = classify_order_and_ldt(&partitions, true);
+        assert!(findings
+            .iter()
+            .any(|f| f.class == VerifyErrorClass::OutOfOrderKeyOrRow));
+    }
+
+    #[test]
+    fn order_ldt_flags_negative_ldt_on_signed_nb_form() {
+        // A deleted partition (Some(ldt)) with a negative ldt on the SIGNED (nb)
+        // form is corrupt — Cassandra's DeletionTime/Verifier rejects it.
+        let mut partitions = ordered_partitions(&[1u32.to_be_bytes().to_vec()]);
+        partitions[0].1 = Some(-1);
+        let findings = classify_order_and_ldt(&partitions, /*signed_ldt=*/ true);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.class == VerifyErrorClass::InvalidLocalDeletionTime),
+            "negative nb localDeletionTime must be flagged, got {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn order_ldt_does_not_flag_far_future_ldt_on_unsigned_oa_form() {
+        // On the UNSIGNED (oa/da) form a value in [2^31, 2^32) is a legitimate
+        // far-future deletion time carried as a negative i32 — it MUST NOT be
+        // flagged. This is the no-heuristic guard: the format, not the sign, decides.
+        let mut partitions = ordered_partitions(&[1u32.to_be_bytes().to_vec()]);
+        partitions[0].1 = Some(-1); // == 0xFFFFFFFF unsigned == far-future seconds
+        let findings = classify_order_and_ldt(&partitions, /*signed_ldt=*/ false);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.class == VerifyErrorClass::InvalidLocalDeletionTime),
+            "far-future unsigned oa/da LDT must NOT be flagged, got {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn order_ldt_positive_deletion_time_is_clean() {
+        // A normal positive epoch-seconds partition tombstone is valid on both forms.
+        let mut partitions = ordered_partitions(&[1u32.to_be_bytes().to_vec()]);
+        partitions[0].1 = Some(1_700_000_000); // ~2023, valid
+        assert!(classify_order_and_ldt(&partitions, true).is_empty());
+        assert!(classify_order_and_ldt(&partitions, false).is_empty());
     }
 
     #[test]

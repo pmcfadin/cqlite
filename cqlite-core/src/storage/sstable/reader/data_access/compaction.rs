@@ -314,6 +314,75 @@ impl SSTableReader {
         Ok(result)
     }
 
+    /// Verifier-facing scan (issue #1282): return, in on-disk order, every
+    /// distinct partition's raw key together with its raw partition-level
+    /// `localDeletionTime` (when the partition carries a tombstone).
+    ///
+    /// Each element is `(raw_partition_key, partition_local_deletion_time)` where
+    /// the LDT is `Some(i32)` only for a DELETED partition (a live partition
+    /// carries the `DeletionTime.LIVE` sentinel and yields `None`). The `i32` is
+    /// exactly the value [`parse_partition_header_full`] decodes: for the legacy
+    /// signed `nb` form it is the genuine signed `i32 BE`; for the unsigned
+    /// `oa`/`da` form it is the wrapping `as u32 as i32` representation of the
+    /// on-disk `u32` (far-future values in `[2^31, 2^32)` therefore appear
+    /// negative and are LEGITIMATE — the caller must consult
+    /// [`SSTableReader::has_uint_deletion_time`] before interpreting a negative
+    /// value as corrupt).
+    ///
+    /// The ordering is the on-disk partition order, so the verifier can assert
+    /// ascending Murmur3 token order (Cassandra stores partitions in token order)
+    /// without a separate scan.
+    ///
+    /// [`parse_partition_header_full`]: crate::storage::sstable::reader::parsing::V5CompressedLegacyParser::parse_partition_header_full
+    pub async fn partition_verify_scan(&self) -> Result<Vec<(Vec<u8>, Option<i32>)>> {
+        use std::collections::HashSet;
+
+        let cursor = self.new_scan_cursor().await?;
+        let header_size = self.calculate_header_size();
+        {
+            let mut file_guard = cursor.file.lock().await;
+            file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
+        }
+        let whole = self.stitch_all_chunks(&cursor).await?;
+
+        let effective_schema = self.get_table_schema(None);
+        let parser = self.build_v5_parser();
+
+        // First pass: recover the distinct partition-start offsets in on-disk
+        // order (a partition spans contiguous rows, so the first row's offset is
+        // the partition start). Reuses the same emit-with-offset parser the BTI
+        // identity cross-check relies on, so partition framing stays defined in
+        // exactly one place.
+        let mut seen: HashSet<Vec<u8>> = HashSet::new();
+        let mut starts: Vec<usize> = Vec::new();
+        parser.parse_block_for_compaction_emit_with_offset(
+            &whole,
+            effective_schema.as_ref(),
+            self,
+            |partition_start, row| {
+                let k = row.key.as_bytes().to_vec();
+                if seen.insert(k) {
+                    starts.push(partition_start);
+                }
+                Ok(std::ops::ControlFlow::Continue(()))
+            },
+        )?;
+
+        // Second pass: for each partition start, decode the raw partition header
+        // (authoritative key + partition-level DeletionTime). The header decode is
+        // byte-exact (no wrapping for the signed `nb` form), so the verifier sees
+        // a genuine negative `nb` `localDeletionTime`.
+        let mut result: Vec<(Vec<u8>, Option<i32>)> = Vec::with_capacity(starts.len());
+        for start in starts {
+            let (row_key, _next, partition_deletion) =
+                parser.parse_partition_header_full(&whole, start)?;
+            let ldt = partition_deletion.map(|(_mfda, ldt)| ldt);
+            result.push((row_key.as_bytes().to_vec(), ldt));
+        }
+
+        Ok(result)
+    }
+
     /// Streaming compaction read (issue #827): yield `(RowKey, Value, ts)`
     /// entries via `emit` one partition at a time, so peak memory is bounded by
     /// `max_partition_size + one_chunk` rather than by the total input size.
