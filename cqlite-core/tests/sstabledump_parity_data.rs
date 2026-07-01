@@ -501,6 +501,10 @@ async fn test_data_db_jsonl_reference_parity() -> CqliteResult<()> {
             .lane("data_db_jsonl")
             .cassandra_source("sstabledump JSONL (Data.db row/cell decode)")
             .components(["Data.db", "Data.db.jsonl"])
+            // Carry the REAL reference (Cassandra) + candidate (CQLite) JSONL sides
+            // so the bundle writes a genuine normalized jsonl.diff plus non-empty
+            // reference.jsonl / candidate.jsonl raw files (issue #1027 finding 1).
+            .jsonl_evidence(expected.clone(), actual.clone())
             .detail(format!(
                 "Data.db JSONL parity failures detected ({passed}/{} tables passed)\n{diff}",
                 results.len(),

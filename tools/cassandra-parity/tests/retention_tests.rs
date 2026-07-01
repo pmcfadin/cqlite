@@ -7,11 +7,11 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use cassandra_parity::model::Manifest;
 use cassandra_parity::retention::{
     binding_minimum, check_workflow, check_workflow_detailed, parse_documented_minimums,
     run_repo_check, upload_retention_days,
 };
-use cassandra_parity::model::Manifest;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

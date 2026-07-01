@@ -159,6 +159,44 @@ pub fn bundle_descriptor_for_suite(suite: &str) -> Option<BundleDescriptor> {
     Some(d)
 }
 
+/// REAL, typed evidence carried from a concrete mismatch site into the shared
+/// failure bundle (issue #1027 finding 1). The bundle emitter renders each
+/// variant into its genuine diff bodies via the `parity_bundle` formatters — it
+/// NEVER fabricates a diff kind whose file would not contain the evidence its
+/// kind promises. A site that only has a rendered diagnostic attaches nothing
+/// here, and the bundle emits only `diagnostic.txt` for it.
+#[derive(Clone, Debug)]
+pub enum BundleEvidence {
+    /// Raw expected/actual component bytes. Yields REAL `byte_diff`,
+    /// `offset_diff`, `checksum_diff` (two distinct SHA-256s) and, when a
+    /// component inventory is supplied, `component_inventory` bodies.
+    RawBytes {
+        component: String,
+        expected: Vec<u8>,
+        actual: Vec<u8>,
+        /// Optional (expected, actual) component-name lists for the inventory.
+        inventory: Option<(Vec<String>, Vec<String>)>,
+    },
+    /// Offset-delta pairs `(expected, actual)`. Only a REAL `offset_diff` body
+    /// can be produced (no raw bytes / checksums), so only that kind is emitted.
+    OffsetDelta {
+        component: String,
+        pairs: Vec<(i64, i64)>,
+    },
+    /// Named scalar/checksum fields `(name, expected, actual)`. Only a REAL
+    /// `checksum_diff` body is produced, so only that kind is emitted.
+    Checksums {
+        component: String,
+        fields: Vec<(String, String, String)>,
+    },
+    /// Both raw JSONL sides. Yields a REAL normalized `jsonl.diff` plus the two
+    /// non-empty raw `reference.jsonl` / `candidate.jsonl` bundle files.
+    Jsonl {
+        reference: Vec<String>,
+        candidate: Vec<String>,
+    },
+}
+
 /// Structured parity-failure / fail-closed diagnostic.
 ///
 /// Build with the manifest scenario ID, then attach the Cassandra source rule,
@@ -176,6 +214,11 @@ pub struct ParityFailure {
     /// writes `target/cassandra-parity/<lane>.diff` and a `summary.json` row before
     /// panicking, so CI uploads a structured diff for the failure.
     lane: Option<String>,
+    /// REAL typed evidence from the concrete mismatch site (issue #1027 finding
+    /// 1). When present, the bundle writes genuine diff bodies for exactly the
+    /// kinds this evidence supports; when absent, the bundle emits only
+    /// `diagnostic.txt` (never a fabricated kind).
+    evidence: Option<BundleEvidence>,
 }
 
 impl ParityFailure {
@@ -189,7 +232,65 @@ impl ParityFailure {
             repro: None,
             detail: None,
             lane: None,
+            evidence: None,
         }
+    }
+
+    /// Attach REAL raw expected/actual component bytes as byte_for_byte evidence
+    /// (issue #1027 finding 1). The bundle renders genuine byte-diff / offset-diff
+    /// / checksums (two distinct SHA-256s) and, when `inventory` is supplied, a
+    /// component_inventory body from these bytes — never a fabricated kind.
+    pub fn byte_evidence(
+        mut self,
+        component: &str,
+        expected: impl Into<Vec<u8>>,
+        actual: impl Into<Vec<u8>>,
+        inventory: Option<(Vec<String>, Vec<String>)>,
+    ) -> Self {
+        self.evidence = Some(BundleEvidence::RawBytes {
+            component: component.to_string(),
+            expected: expected.into(),
+            actual: actual.into(),
+            inventory,
+        });
+        self
+    }
+
+    /// Attach REAL offset-delta `(expected, actual)` pairs. Only a genuine
+    /// `offset_diff` body is produced (no raw bytes to checksum), so the bundle
+    /// emits ONLY that diff kind for this failure (issue #1027 finding 1).
+    pub fn offset_evidence(mut self, component: &str, pairs: Vec<(i64, i64)>) -> Self {
+        self.evidence = Some(BundleEvidence::OffsetDelta {
+            component: component.to_string(),
+            pairs,
+        });
+        self
+    }
+
+    /// Attach REAL named checksum/scalar fields `(name, expected, actual)`. Only a
+    /// genuine `checksum_diff` body is produced, so the bundle emits ONLY that
+    /// diff kind for this failure (issue #1027 finding 1).
+    pub fn checksum_evidence(
+        mut self,
+        component: &str,
+        fields: Vec<(String, String, String)>,
+    ) -> Self {
+        self.evidence = Some(BundleEvidence::Checksums {
+            component: component.to_string(),
+            fields,
+        });
+        self
+    }
+
+    /// Attach REAL reference/candidate JSONL sides as canonical_semantic evidence
+    /// (issue #1027 finding 1). The bundle writes a genuine normalized `jsonl.diff`
+    /// plus the two non-empty raw `reference.jsonl` / `candidate.jsonl` files.
+    pub fn jsonl_evidence(mut self, reference: Vec<String>, candidate: Vec<String>) -> Self {
+        self.evidence = Some(BundleEvidence::Jsonl {
+            reference,
+            candidate,
+        });
+        self
     }
 
     /// Set the diff-artifact lane stem so [`ParityFailure::panic`] emits a
@@ -294,6 +395,16 @@ impl ParityFailure {
     /// `manual_debug` delta-scan suite) writes nothing. A write error is logged to
     /// stderr rather than masking the parity panic below, which still fails the
     /// build regardless (fail-closed, owner decision 2).
+    ///
+    /// Issue #1027 finding 1: the bundle's diff bodies are REAL. When the site
+    /// attached typed [`BundleEvidence`], each written diff file contains genuine
+    /// evidence for exactly the kinds that evidence supports (raw byte-diff +
+    /// offset-diff + two-distinct-SHA-256 checksums + component_inventory for raw
+    /// bytes; only an offset_diff for offset-delta pairs; only a checksum_diff for
+    /// scalar fields; a real normalized jsonl.diff + non-empty raw reference/
+    /// candidate JSONL for JSONL). A site with NO typed evidence writes a single
+    /// `diagnostic.txt` and an EMPTY `diffs[]` — it never fabricates a kind whose
+    /// file would not contain the evidence its kind promises.
     fn emit_failure_bundle(&self, rendered: &str) {
         let Some(desc) = bundle_descriptor_for_suite(&self.scenario_id) else {
             return;
@@ -326,22 +437,59 @@ impl ParityFailure {
         .artifacts_compared(desc.artifacts_compared.iter().copied())
         .stdout(rendered.to_string())
         .stderr(rendered.to_string());
-        // Attach the already-rendered diagnostic as the evidence diff for this
-        // evidence type so the bundle's diffs[] resolves.
-        bundle = match desc.evidence_type {
-            "canonical_semantic" => {
-                bundle.jsonl(rendered.to_string(), String::new(), String::new())
+
+        // Attach REAL typed evidence bodies (issue #1027 finding 1). Each diff
+        // kind is written ONLY when the concrete site supplied the data that kind
+        // promises — never the same rendered string across four files, and never a
+        // fabricated kind. A site with only a diagnostic (no typed evidence, e.g.
+        // the dataset-absent fail-closed panics) attaches a single `diagnostic.txt`
+        // bundle file and an EMPTY diffs[] — honest about what evidence exists.
+        bundle = match &self.evidence {
+            Some(BundleEvidence::RawBytes {
+                component,
+                expected,
+                actual,
+                inventory,
+            }) => {
+                let (inv_exp, inv_act) = inventory.clone().unwrap_or_else(|| {
+                    // No explicit inventory: derive it from the failure's own
+                    // component list on both sides (real data, not fabricated).
+                    (self.components.clone(), self.components.clone())
+                });
+                bundle.byte_for_byte_component(
+                    component,
+                    parity_bundle::byte_diff_body(component, expected, actual),
+                    parity_bundle::offset_diff_body(component, expected, actual),
+                    parity_bundle::checksums_body(component, expected, actual),
+                    parity_bundle::component_inventory_body(&inv_exp, &inv_act),
+                )
             }
-            _ => bundle.byte_for_byte_component(
-                self.components
-                    .first()
-                    .map(String::as_str)
-                    .unwrap_or("component"),
-                rendered.to_string(),
-                rendered.to_string(),
-                rendered.to_string(),
-                rendered.to_string(),
+            Some(BundleEvidence::OffsetDelta { component, pairs }) => {
+                // Only a real offset diff can be produced — emit ONLY that kind.
+                bundle.offset_diff_only(component, offset_delta_diff(component, pairs))
+            }
+            Some(BundleEvidence::Checksums { component, fields }) => {
+                // Only a real checksum diff can be produced — emit ONLY that kind.
+                let refs: Vec<(&str, String, String)> = fields
+                    .iter()
+                    .map(|(n, e, a)| (n.as_str(), e.clone(), a.clone()))
+                    .collect();
+                bundle.checksum_diff_only(checksum_diff(component, &refs))
+            }
+            Some(BundleEvidence::Jsonl {
+                reference,
+                candidate,
+            }) => bundle.jsonl(
+                parity_bundle::jsonl_diff_body(reference, candidate),
+                reference.join("\n"),
+                candidate.join("\n"),
             ),
+            None => {
+                // No typed evidence at this site (only a rendered diagnostic).
+                // Do NOT fabricate any diff kind: write a single diagnostic.txt
+                // bundle file and leave diffs[] empty.
+                bundle.raw_bundle_file("diagnostic.txt", rendered.to_string())
+            }
         };
         match bundle.emit() {
             Ok(emitted) => eprintln!(

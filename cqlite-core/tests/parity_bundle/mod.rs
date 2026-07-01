@@ -222,6 +222,46 @@ impl FailureBundle {
         self
     }
 
+    /// Add a SINGLE `byte_diff` diff artifact (`<component>.byte-diff.txt`).
+    /// Used when a site has real raw bytes but only wants the byte diff kind.
+    pub fn byte_diff_only(mut self, component: &str, body: String) -> Self {
+        self.diff_files.push((
+            "byte_diff".to_string(),
+            format!("{component}.byte-diff.txt"),
+            body,
+        ));
+        self
+    }
+
+    /// Add a SINGLE `offset_diff` diff artifact (`<component>.offset-diff.txt`).
+    /// Used by the Index.db offset-delta site, which has real offset pairs but no
+    /// raw bytes to checksum — so ONLY this kind is emitted (issue #1027 finding 1).
+    pub fn offset_diff_only(mut self, component: &str, body: String) -> Self {
+        self.diff_files.push((
+            "offset_diff".to_string(),
+            format!("{component}.offset-diff.txt"),
+            body,
+        ));
+        self
+    }
+
+    /// Add a SINGLE `checksum_diff` diff artifact (`checksums.txt`). Used by the
+    /// Statistics.db CRC32 site, which has real scalar checksum fields but no raw
+    /// component bytes — so ONLY this kind is emitted (issue #1027 finding 1).
+    pub fn checksum_diff_only(mut self, body: String) -> Self {
+        self.diff_files
+            .push(("checksum_diff".to_string(), "checksums.txt".to_string(), body));
+        self
+    }
+
+    /// Add a plain bundle file that is NOT a record `diffs[]` pointer (e.g.
+    /// `diagnostic.txt` for a site that only has a rendered diagnostic and cannot
+    /// supply a typed diff kind — issue #1027 finding 1: never fabricate a kind).
+    pub fn raw_bundle_file(mut self, file_name: &str, body: String) -> Self {
+        self.raw_files.push((file_name.to_string(), body));
+        self
+    }
+
     // ---- canonical_semantic diff artifacts (task 2.3) ---------------------
 
     /// Add the `canonical_semantic` artifacts: the normalized `jsonl.diff`

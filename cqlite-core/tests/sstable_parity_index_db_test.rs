@@ -378,6 +378,16 @@ async fn big_index_db_entry_byte_and_field_parity() {
                     .cassandra_source("RowIndexEntryTest.java (BIG Index.db entry bytes)")
                     .fixture(index_path.clone())
                     .components(["Index.db", "Data.db"])
+                    // Carry the REAL raw key bytes so the bundle writes a genuine
+                    // byte-diff / offset-diff / two-distinct-SHA-256 checksums /
+                    // component_inventory (issue #1027 finding 1) — expected is the
+                    // on-disk key, actual is the reader's key.
+                    .byte_evidence(
+                        "Index.db",
+                        raw.key.as_slice().to_vec(),
+                        got.key_digest.as_ref().to_vec(),
+                        None,
+                    )
                     .detail(format!(
                         "{}: entry {n} raw key bytes mismatch\n{diff}",
                         fx.name()
@@ -498,6 +508,14 @@ async fn big_index_db_entry_byte_and_field_parity() {
                         .cassandra_source("RowIndexEntryTest.java (BIG Index.db data offsets)")
                         .fixture(index_path.clone())
                         .components(["Index.db", "Data.db.jsonl"])
+                        // Carry the REAL (expected=JSONL pos delta, actual=Index.db
+                        // offset delta) pair. This site has no raw bytes to
+                        // checksum, so the bundle emits ONLY a genuine offset_diff
+                        // kind — never a fabricated byte/checksum diff (finding 1).
+                        .offset_evidence(
+                            "Index.db",
+                            vec![(pos_delta as i64, off_delta as i64)],
+                        )
                         .detail(format!(
                             "{}: offset delta {off_delta} != JSONL position delta {pos_delta} at \
                              partition {n}\n{diff}",
