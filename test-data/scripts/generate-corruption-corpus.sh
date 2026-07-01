@@ -427,8 +427,8 @@ log "BTI Rows source:       ${BTI_ROWS_SRC:-<none found -> planned>}"
 # whether a drift is fatal:
 #
 #   * MODE 1 — VERIFY-ONLY (--verify-only) / committed byte-stable validation:
-#     the on-disk bytes ARE the committed git tree (also the world the parity test and
-#     validate-committed-dir-binding.py operate in). Committed bytes are byte-stable in
+#     the on-disk bytes ARE the committed git tree (also the world the parity test
+#     operates in). Committed bytes are byte-stable in
 #     git, so a verdict captured against them must STILL match them exactly. ANY drift
 #     of EITHER binding (mutated-sha OR dir-sha) means the verdict is stale for the
 #     bytes under test and is FATAL — deterministically, naming the fixture (no live
@@ -447,14 +447,15 @@ log "BTI Rows source:       ${BTI_ROWS_SRC:-<none found -> planned>}"
 #     verdict_captured_for_dir_sha256 to the freshly-computed hashes ATOMICALLY with the
 #     verdict they are bound to (all move together), emits a ::notice::, and proceeds.
 #
-# Because MODE 2 REBINDS both hashes, the POST-regeneration drift guard
-# (extract-corruption-oracle.py) EXCLUDES BOTH verdict_captured_for_sha256 AND
-# verdict_captured_for_dir_sha256 — a rebound field cannot be guarded there without
-# contradicting the generator. That guard protects only the human-authored oracle
-# fields (cassandra_verdict, verdict_parity, expected_error_class, ...). MODE 1
-# enforcement of the machine hashes lives in the parity test
-# (sstable_parity_corruption_verify.rs::check_full_dir_binding), the --verify-only
-# branches here, and validate-committed-dir-binding.py (committed dir-sha, PRE-regen).
+# Because MODE 2 REBINDS both hashes, a post-regeneration CI drift guard cannot guard
+# verdict_captured_for_sha256 or verdict_captured_for_dir_sha256 without contradicting
+# the generator's benign rebind. MODE 1 enforcement of the machine hashes lives in the
+# parity test (sstable_parity_corruption_verify.rs::check_full_dir_binding) against the
+# committed byte-stable tree, plus the --verify-only branches here. A nightly-tier
+# committed-vs-generated oracle drift guard (protecting the human-authored oracle fields
+# cassandra_verdict / verdict_parity / expected_error_class / ...) is tracked separately
+# in issue #1373 under the CI-runtime-overhaul epic #1360 — NOT on the per-PR lane, where
+# gitignored corpus binaries make a committed-binding comparison ill-defined.
 #
 # KEPT FAIL-CLOSED in BOTH modes: the AUTHORING check — a fixture missing a captured
 # verdict (empty cassandra_verdict or verdict_captured_for_sha256) aborts.
@@ -739,12 +740,12 @@ for spec in "${FIXTURES[@]}"; do
   #     (sstable_parity_corruption_verify.rs) on whatever bytes are present: a mutation
   #     that stopped being "corrupt" fails THAT test.
   #
-  # Because MODE 2 REBINDS $verdict_sha, the post-regeneration drift guard
-  # (extract-corruption-oracle.py) EXCLUDES verdict_captured_for_sha256 (same as
-  # verdict_captured_for_dir_sha256) — a rebound field cannot be guarded there
-  # without contradicting the generator. The MODE 1 committed-byte-stable enforcement
-  # of the mutated-sha lives in check_full_dir_binding (parity test) + the --verify-only
-  # branch here + validate-committed-dir-binding.py (dir-sha).
+  # Because MODE 2 REBINDS $verdict_sha, a post-regeneration CI drift guard cannot guard
+  # verdict_captured_for_sha256 (or verdict_captured_for_dir_sha256) — a rebound field
+  # cannot be guarded there without contradicting the generator. The MODE 1
+  # committed-byte-stable enforcement of the mutated-sha lives in check_full_dir_binding
+  # (parity test) + the --verify-only branch here. (The nightly committed-vs-generated
+  # oracle drift guard for human-authored fields is issue #1373 / epic #1360.)
   #
   # KEPT FAIL-CLOSED in BOTH modes: the *authoring* check. A fixture with NO captured
   # verdict (empty cassandra_verdict or empty verdict_captured_for_sha256) is an
