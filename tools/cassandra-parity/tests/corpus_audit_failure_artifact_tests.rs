@@ -14,7 +14,8 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use cassandra_parity::corpus_audit::audit_report;
+use cassandra_parity::corpus_audit::{audit_report, AuditFinding, AuditReport, FindingKind};
+use cassandra_parity::model::Manifest;
 
 const GOOD_SHA: &str = "f278f6774fc76465c182041e081982105c3e7dbb";
 const UUID: &str = "aaaa0000000000000000000000000001";
@@ -335,4 +336,103 @@ fn audit_scenario_id_is_a_real_exhaustive_regeneration_manifest_id() {
         tier_line.contains("exhaustive_regeneration"),
         "AUDIT_SCENARIO_ID's tier must be exhaustive_regeneration, got: {tier_line}"
     );
+}
+
+/// A minimal manifest sufficient for `write_audit_bundle::build_record` (it reads
+/// only `cassandra_source`).
+fn minimal_manifest() -> Manifest {
+    let text = format!(
+        r#"manifest_version: 1
+cassandra_source:
+  repo: https://github.com/apache/cassandra
+  ref: cassandra-5.0.2
+  sha: {GOOD_SHA}
+  index: docs/cassandra_test_index.md
+  assessment_report: docs/reports/x.md
+program:
+  parent_epic: 966
+  reporting_epic: 967
+scenarios: []
+"#
+    );
+    Manifest::from_yaml(&text).expect("minimal manifest parses")
+}
+
+/// Issue #1027 finding 2 (ordering guard): `write_audit_bundle` must write the
+/// `failure-artifact.json` record LAST — only after every file it points at exists.
+/// This drives the writer directly and asserts (a) every pointer in the written
+/// record resolves to a real bundle file/dir, and (b) the record file's mtime is
+/// not earlier than any file it references (writes are sequential and the record is
+/// last, so a dangling-pointer record can never be produced).
+#[test]
+fn write_audit_bundle_writes_record_last_and_all_pointers_resolve() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    let manifest = minimal_manifest();
+    let mut report = AuditReport::default();
+    report.findings.push(AuditFinding::new(
+        FindingKind::MissingReference,
+        "test-data/x.db.jsonl",
+        "reference vanished",
+    ));
+    let rendered = report.render();
+
+    let record_path = audit_report::write_audit_bundle(
+        root,
+        &manifest,
+        &report,
+        None, // no provenance -> DATASET_SHA_UNAVAILABLE sentinel
+        &rendered,
+        "cargo run -p cassandra-parity -- corpus-audit",
+    )
+    .expect("write_audit_bundle succeeds");
+
+    assert!(
+        record_path.is_file(),
+        "record must exist at {}",
+        record_path.display()
+    );
+
+    let bundle = record_path
+        .parent()
+        .expect("record has a parent bundle dir");
+    let text = fs::read_to_string(&record_path).expect("read record");
+    let value: serde_json::Value = serde_json::from_str(&text).expect("record is JSON");
+
+    // Collect every bundle-relative pointer the record carries.
+    let mut pointers: Vec<String> = Vec::new();
+    let prov = &value["provenance"];
+    pointers.push(prov["stdout"].as_str().expect("stdout ptr").to_string());
+    pointers.push(prov["stderr"].as_str().expect("stderr ptr").to_string());
+    for d in value["diffs"].as_array().expect("diffs[]") {
+        pointers.push(d["path"].as_str().expect("diff path").to_string());
+    }
+    let repro = value["repro_bundle"].as_str().expect("repro_bundle");
+
+    // (a) Every referenced file/dir resolves.
+    for p in &pointers {
+        assert!(
+            bundle.join(p).is_file(),
+            "record pointer must resolve to a real file: {p}"
+        );
+    }
+    assert!(
+        bundle.join(repro).is_dir(),
+        "repro_bundle must resolve to a real directory: {repro}"
+    );
+
+    // (b) The record was written LAST: its mtime is >= every referenced file's.
+    let record_mtime = fs::metadata(&record_path)
+        .and_then(|m| m.modified())
+        .expect("record mtime");
+    for p in &pointers {
+        let ref_mtime = fs::metadata(bundle.join(p))
+            .and_then(|m| m.modified())
+            .expect("referenced file mtime");
+        assert!(
+            record_mtime >= ref_mtime,
+            "record ({record_path:?}) must be written no earlier than referenced file {p:?}"
+        );
+    }
 }

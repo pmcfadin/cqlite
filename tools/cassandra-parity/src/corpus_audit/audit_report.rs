@@ -143,7 +143,12 @@ pub fn write_audit_bundle(
     let bundle = parity_failures_root
         .join("exhaustive_regeneration")
         .join(&record.scenario_id);
-    let written = record.write_to_bundle(&bundle)?;
+
+    // Issue #1027 finding 2: write EVERY file the record points at BEFORE the record
+    // itself, so `failure-artifact.json` exists only once all its pointers resolve.
+    // The lane's fail-closed guard checks solely for the record file — writing it
+    // last means a partial write can never leave the record with dangling pointers.
+    create_dir(&bundle)?;
 
     // diffs/corpus-audit-report.txt — the reused audit report.
     let report_path = bundle.join(AUDIT_REPORT_DIFF_PATH);
@@ -161,6 +166,10 @@ pub fn write_audit_bundle(
     // repro/ — command.sh + INSTRUCTIONS.md (consistent with the cqlite-core repro
     // bundle) so the repro_bundle pointer resolves to a real directory.
     write_repro(&bundle.join(REPRO_DIR), command_line, report.findings.len())?;
+
+    // failure-artifact.json LAST — only now does the record (which the guard keys
+    // on) come into existence, and every file/dir it references is already present.
+    let written = record.write_to_bundle(&bundle)?;
 
     Ok(written)
 }
