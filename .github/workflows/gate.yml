@@ -1,0 +1,146 @@
+name: Agent Gate
+
+# CI coverage for the authoritative pre-PR gate `scripts/agent-gate.sh` (issue #1269).
+#
+# The gate has 16 components (fmt, clippy, core/integration/write/cli tests,
+# python-bindings, node-bindings, smoke, ...) but until now NO GitHub Actions
+# workflow ran it — a PR that edited the gate itself or a binding build input
+# could break a gate component and red NOTHING in CI. This lane closes that gap.
+#
+# Design: Option C (owner-approved at Seam 1) — a scoped PR lane on the
+# gate-defining inputs plus a nightly full-gate backstop.
+#   - pull_request: filtered to the gate script, its self-tests, bindings/**,
+#     and this workflow's own file. This is the narrow set of PRs that can
+#     actually break a gate component (so we do not tax every cqlite-core PR).
+#   - schedule: a nightly cron backstop that runs the full gate
+#     path-independently (catches breakage the path filter misses).
+#   - workflow_dispatch: on-demand runs.
+#
+# The lane always runs the FULL gate (`bash scripts/agent-gate.sh`, never
+# `--only`) so the run "counts" — a `--only` run is stamped PARTIAL and
+# explicitly does not count as the gate.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'scripts/agent-gate.sh'
+      - 'scripts/tests/**'
+      - 'bindings/**'
+      - '.github/workflows/gate.yml'
+  schedule:
+    # Nightly backstop, 03:37 UTC — slotted off-peak between the existing
+    # e2e-readback (02:30) and cql-type-parity (04:31) cron lanes to avoid
+    # collision.
+    - cron: '37 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: gate-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  DATASET_TAG: datasets-v3
+  DATASET_ASSET: cassandra5-small-full-v3.4.tar.gz
+  DATASET_SHA256: 3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33
+
+jobs:
+  gate:
+    name: Full agent gate
+    runs-on: ubuntu-latest
+    # A full gate run (napi + maturin builds, full workspace test set, smoke
+    # over the corpus) is comparable in weight to node-ci/python-ci (~25 min);
+    # give it headroom.
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # Rust test jobs can sit near the standard runner's disk ceiling (issue
+      # #722). Dropping preinstalled toolchains we never use frees ~14 GB —
+      # this lane builds the workspace, both binding modules, and pulls the
+      # dataset corpus, so the headroom matters.
+      - name: Free disk space (issue #722)
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h / | tail -1
+
+      # This lane RUNS the gate's clippy + fmt components, so it needs a
+      # toolchain that has clippy + rustfmt. Follow the quality-gates.yml
+      # pattern (the other lane that runs clippy): request the components
+      # explicitly on @stable rather than the node-ci/python-ci
+      # `rustup component remove clippy` normalization (#1217), which is for
+      # build-only lanes that must NOT reinstall clippy-preview. cargo/clippy
+      # invocations still honor rust-toolchain.toml (pins 1.88.0 w/ clippy +
+      # rustfmt), matching how the gate runs locally.
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: agent-gate-${{ hashFiles('**/Cargo.lock') }}
+          cache-on-failure: true
+
+      # Node toolchain for the gate's node-bindings component (napi build +
+      # the #1231 write-readback-content proof). Match node-ci.yml (Node 20).
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: bindings/node/package-lock.json
+
+      # Python toolchain for the gate's python-bindings component (maturin
+      # develop + pytest in a venv the gate creates itself). Match
+      # python-ci.yml (3.12).
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Restore dataset cache
+        id: dataset-cache
+        uses: actions/cache@v5
+        with:
+          path: test-data/datasets
+          key: datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
+
+      # Provision the pinned datasets so the dataset-dependent gate components
+      # (core/integration/write/smoke/tombstones-scan) run against real
+      # SSTables rather than silently skipping. fetch-datasets.sh reads
+      # DATASET_TAG/ASSET/SHA256 from env and honors the cache via .dataset-pin.
+      - name: Fetch datasets
+        run: bash ./test-data/scripts/fetch-datasets.sh
+
+      - name: Verify dataset corpus
+        run: bash test-data/scripts/check-dataset-manifest.sh test-data/datasets
+
+      # Run the FULL gate (never --only). The gate exports CQLITE_DATASETS_ROOT
+      # itself (defaulting to $REPO_ROOT/test-data/datasets), but we set it
+      # explicitly so intent is visible and any tool reading it agrees. The
+      # gate exits non-zero on any component FAIL, which fails this step. We
+      # pin AGENT_GATE_SUMMARY_FILE so the summary is recoverable as an artifact
+      # even if the streamed stdout is truncated.
+      - name: Run full agent gate
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          CQLITE_REQUIRE_FIXTURES: '1'
+          AGENT_GATE_SUMMARY_FILE: ${{ github.workspace }}/.agent-gate-summary.txt
+        run: bash scripts/agent-gate.sh
+
+      # Always publish the SUMMARY block (even on failure) so the exact
+      # per-component result table is inspectable from the run.
+      - name: Upload agent-gate summary
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: agent-gate-summary
+          path: .agent-gate-summary.txt
+          if-no-files-found: warn
+          retention-days: 14
