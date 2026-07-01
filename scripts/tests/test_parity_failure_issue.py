@@ -198,6 +198,82 @@ class DedupTests(unittest.TestCase):
         self.assertIn("some notes without the section", refreshed)
 
 
+class EnsureLabelTests(unittest.TestCase):
+    """Fix A: the `parity-failure` label is self-provisioned before the create path."""
+
+    def _capture_gh(self):
+        """Patch pfi._gh to record argv and never touch GitHub; returns the call log."""
+        calls = []
+
+        def fake_gh(argv):
+            calls.append(argv)
+            return "[]" if (len(argv) > 2 and argv[2] == "list") else ""
+
+        orig_gh = pfi._gh
+        pfi._gh = fake_gh
+        self.addCleanup(lambda: setattr(pfi, "_gh", orig_gh))
+        return calls
+
+    def test_ensure_label_upserts_before_create_on_live_path(self):
+        # Live path (dry_run=False, no injected open-issues): the FIRST gh call must be the
+        # idempotent `gh label create --force` upsert, and it must precede the create.
+        calls = self._capture_gh()
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            fj = _write(tmp, "failures.json", [_failure()])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = pfi.cmd_file(_args(failures_json=fj, open_issues_json=None,
+                                        dry_run=False))
+            self.assertEqual(rc, 0)
+        label_idx = next((i for i, c in enumerate(calls)
+                          if len(c) > 2 and c[1] == "label" and c[2] == "create"), None)
+        create_idx = next((i for i, c in enumerate(calls)
+                           if len(c) > 2 and c[1] == "issue" and c[2] == "create"), None)
+        self.assertIsNotNone(label_idx, "the label must be provisioned on the live path")
+        self.assertIsNotNone(create_idx, "an issue create must occur on the live path")
+        self.assertLess(label_idx, create_idx, "label upsert must precede issue create")
+        # The upsert is idempotent (`--force`).
+        self.assertIn("--force", calls[label_idx])
+        self.assertIn(pfi.PARITY_LABEL, calls[label_idx])
+
+    def test_ensure_label_failure_is_warning_not_crash(self):
+        # Fail-open: a label-provisioning error surfaces a ::warning:: and does not crash.
+        def gh_label_fails(argv):
+            if len(argv) > 2 and argv[1] == "label":
+                raise SystemExit("error: `gh label create` failed: boom")
+            return "[]" if (len(argv) > 2 and argv[2] == "list") else ""
+
+        orig_gh = pfi._gh
+        pfi._gh = gh_label_fails
+        self.addCleanup(lambda: setattr(pfi, "_gh", orig_gh))
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            fj = _write(tmp, "failures.json", [_failure()])
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = pfi.cmd_file(_args(failures_json=fj, open_issues_json=None,
+                                        dry_run=False))
+            self.assertEqual(rc, 0)
+            self.assertIn("::warning::", err.getvalue())
+
+    def test_injected_open_issues_skips_label(self):
+        # Fix A guard: when open issues are injected (offline seam) the label is NOT
+        # provisioned — the guard is `not dry_run and not open_issues_json`.
+        calls = self._capture_gh()
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            fj = _write(tmp, "failures.json", [_failure()])
+            oj = _write(tmp, "open.json", [])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = pfi.cmd_file(_args(failures_json=fj, open_issues_json=oj,
+                                        dry_run=True))
+            self.assertEqual(rc, 0)
+        self.assertFalse(any(len(c) > 1 and c[1] == "label" for c in calls),
+                         "injected-open-issues path must never provision the label")
+
+
 class TierTests(unittest.TestCase):
     def _created_body(self, tier: str, workflow: str) -> str:
         # File one failure (no pre-existing issue) at the given tier; return the create body.

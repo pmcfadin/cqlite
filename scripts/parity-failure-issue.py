@@ -36,6 +36,11 @@ Design (see openspec/changes/issue-1028-parity-failure-issue-automation/):
 The GitHub-touching paths sit behind explicit seams (`--open-issues-json`,
 `--failures-json`) so the unit tests run with no network. This mirrors
 `scripts/delivery-telemetry.py`.
+
+  Fix A  the automation self-provisions the `parity-failure` label idempotently
+      (`gh label create --force`) BEFORE the list/create path, so filing on a repo that
+      lacks the label is not a silent no-op. Fail-open: a label-provisioning failure is a
+      `::warning::`, never a crash. Skipped entirely on the offline/dry-run path.
 """
 
 from __future__ import annotations
@@ -52,6 +57,12 @@ from pathlib import Path
 
 FINGERPRINT_VERSION = "v1"
 PARITY_LABEL = "parity-failure"
+# Idempotent self-provisioning of the label (Fix A). `gh label create --force` upserts:
+# it creates the label if missing and updates its color/description if present, so a
+# fresh repo (or a repo where the label was deleted) never silently no-ops the first
+# filing. Color/description are stable so repeated `--force` upserts are inert.
+PARITY_LABEL_COLOR = "b60205"
+PARITY_LABEL_DESCRIPTION = "Recurring Cassandra parity failure tracked by scripts/parity-failure-issue.py (issue #1028)"
 PARENT_EPIC = "#974"
 # No silent cap: if the open-issue lookup returns this many, dedupe may be incomplete.
 OPEN_ISSUES_LIMIT = 500
@@ -185,6 +196,29 @@ def _gh(argv: list[str]) -> str:
         detail = (exc.stderr or exc.stdout or "").strip()
         raise SystemExit(f"error: `{' '.join(argv)}` failed: {detail}")
     return proc.stdout
+
+
+def ensure_label() -> None:
+    """Idempotently self-provision the `parity-failure` label before filing (Fix A).
+
+    `gh issue create --label parity-failure` FAILS if the label does not exist in the
+    repo — a silent production no-op on first use (the workflow's `|| true` fail-open
+    only logs a warning and files no tracker). We upsert the label first via
+    `gh label create --force`, which creates it if missing and updates it if present, so
+    the real filing path is always guaranteed a valid label.
+
+    This performs a live `gh` call, so callers MUST only invoke it on the network-bearing
+    path (never in `--dry-run`/offline mode). Fail-open: if label
+    provisioning itself fails, surface a `::warning::` and continue rather than crashing
+    the (non-gating) job — a genuinely missing label then fails loudly at `issue create`,
+    which the workflow already handles fail-open.
+    """
+    try:
+        _gh(["gh", "label", "create", PARITY_LABEL, "--force",
+             "--color", PARITY_LABEL_COLOR, "--description", PARITY_LABEL_DESCRIPTION])
+    except SystemExit as exc:
+        print(f"::warning::parity-failure-issue: could not provision the '{PARITY_LABEL}' "
+              f"label ({exc}) — continuing (issue create may fail fail-open)", file=sys.stderr)
 
 
 def load_open_issues(args) -> list[dict]:
@@ -377,6 +411,13 @@ def cmd_file(args) -> int:
     deduped: dict[str, dict] = {}
     for failure in failures:
         deduped[compute_fingerprint(failure)] = failure
+
+    # Fix A: self-provision the `parity-failure` label BEFORE the list/create path so the
+    # real filing path never no-ops on a repo that lacks the label. Guarded to the live
+    # path only — a dry run (or an injected-issues offline preview) stays token/network-free:
+    # no label call when --dry-run, and none when --open-issues-json is injected.
+    if not args.dry_run and not args.open_issues_json:
+        ensure_label()
 
     open_issues = load_open_issues(args)
     for failure in deduped.values():
