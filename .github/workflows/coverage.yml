@@ -1,13 +1,10 @@
 name: "CI: Coverage Gate (90%)"
 
 on:
+  schedule:
+    # Nightly deep coverage validation at 07:35 UTC, after parity/data lanes warm caches.
+    - cron: '35 7 * * *'
   workflow_dispatch:
-  # Disabled for M1 milestone - coverage is informational only in M1
-  # Will be re-enabled post-M1 with 90% enforcement
-  # push:
-  #   branches: [ main, develop ]
-  # pull_request:
-  #   branches: [ main, develop ]
     inputs:
       coverage_mode:
         description: 'Coverage analysis mode'
@@ -23,6 +20,13 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   COVERAGE_THRESHOLD: 90
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage-gate-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   coverage-gate:
@@ -161,13 +165,25 @@ jobs:
         echo "📊 Running enforced coverage analysis with $DB_COUNT real Cassandra 5 SSTable files"
         echo "🎯 Phase 2 requirement: ≥90% coverage for core modules"
 
-        # Use cargo-llvm-cov for more accurate coverage
+        # Use cargo-llvm-cov for more accurate coverage. The tool supports one
+        # output format per report invocation, so run tests once, then emit the
+        # HTML and LCOV reports from the captured profile data.
+        cargo llvm-cov clean --workspace
         cargo llvm-cov \
           --package cqlite-core \
-          --lcov --output-path ../validation_artifacts/coverage/lcov.info \
-          --html --output-dir ../validation_artifacts/coverage/html \
+          --no-report \
           --ignore-filename-regex='(test|spec|bench|examples|bin)' \
-          --fail-under 90 \
+          --verbose
+        cargo llvm-cov report \
+          --html \
+          --output-dir ../validation_artifacts/coverage/html \
+          --ignore-filename-regex='(test|spec|bench|examples|bin)' \
+          --fail-under-lines 90 \
+          --verbose
+        cargo llvm-cov report \
+          --lcov \
+          --output-path ../validation_artifacts/coverage/lcov.info \
+          --ignore-filename-regex='(test|spec|bench|examples|bin)' \
           --verbose
           
     - name: Run Comprehensive Coverage (Informational)
@@ -291,10 +307,41 @@ jobs:
         
     - name: Upload Coverage Reports
       uses: actions/upload-artifact@v6
+      if: always()
       with:
         name: coverage-${{ matrix.coverage-type }}-reports
         path: validation_artifacts/coverage/
-        retention-days: 30
+        retention-days: 45
+        if-no-files-found: warn
+
+    - name: Write coverage triage summary
+      if: always()
+      run: |
+        {
+          echo "## Coverage Gate (${{ matrix.coverage-type }})"
+          echo ""
+          echo "- Event: ${{ github.event_name }}"
+          echo "- Commit: ${{ github.sha }}"
+          echo "- Branch: ${{ github.ref_name }}"
+          echo "- Mode input: ${{ github.event.inputs.coverage_mode || 'enforced' }}"
+          echo "- Dataset root: ${{ env.CQLITE_DATASETS_ROOT }}"
+          echo "- Artifact: coverage-${{ matrix.coverage-type }}-reports (retained 45 days)"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        if [ -f validation_artifacts/coverage/reports/coverage-report.json ]; then
+          python3 <<'PY' >> "$GITHUB_STEP_SUMMARY"
+        import json
+        with open("validation_artifacts/coverage/reports/coverage-report.json") as f:
+            report = json.load(f)
+        print(f"- Coverage: {report['coverage_percentage']:.2f}%")
+        print(f"- Threshold: {report['threshold']}%")
+        print(f"- Status: {report['status']}")
+        PY
+        else
+          {
+            echo "- Coverage report: not generated for this matrix leg; inspect the job log and artifact contents."
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
         
     - name: Integration with Quality Gates
       if: matrix.coverage-type == 'enforced'
@@ -328,6 +375,17 @@ jobs:
 
         echo "✅ Coverage gate passed!"
         echo "📊 Core modules meet ≥90% coverage requirement"
+
+    - name: Write aggregate coverage summary
+      if: always()
+      run: |
+        {
+          echo "## Aggregate Coverage Gate"
+          echo ""
+          echo "- Coverage matrix result: ${{ needs.coverage-gate.result }}"
+          echo "- Required threshold: ${COVERAGE_THRESHOLD}%"
+          echo "- Failure response: inspect the per-matrix artifacts, then rerun this workflow manually after fixes."
+        } >> "$GITHUB_STEP_SUMMARY"
 
   # Store coverage results for coordination
   store-coverage-results:

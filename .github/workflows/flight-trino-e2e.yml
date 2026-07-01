@@ -6,6 +6,11 @@ name: Flight ↔ Trino E2E
 # through the connector (incl. SSTable-vs-memtable semantics).
 
 on:
+  schedule:
+    # Nightly full Flight/Trino Docker E2E at 04:35 UTC
+    - cron: '35 4 * * *'
+  release:
+    types: [published]
   push:
     branches: [ main ]
     paths:
@@ -15,6 +20,7 @@ on:
       - '.github/workflows/flight-trino-e2e.yml'
   pull_request:
     branches: [ main ]
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
     paths:
       - 'cqlite-flight/**'
       - 'cqlite-core/**'
@@ -30,8 +36,38 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  tier-summary:
+    name: E2E tier summary
+    runs-on: ubuntu-latest
+    env:
+      RUN_FULL: >-
+        ${{
+          github.event_name != 'pull_request' ||
+          contains(github.event.pull_request.labels.*.name, 'ci:flight-full') ||
+          contains(github.event.pull_request.labels.*.name, 'ci:trino-full')
+        }}
+    steps:
+      - name: Write CI tier summary
+        run: |
+          {
+            echo "## Flight ↔ Trino E2E tier"
+            echo ""
+            echo "- Docker compose E2E is a full-tier workflow."
+            echo "- Ordinary PRs skip the Docker stack by default."
+            echo "- PRs can opt in with \`ci:flight-full\` or \`ci:trino-full\`."
+            echo "- Full E2E also runs on push to main, nightly schedule, workflow_dispatch, and release publication."
+            echo "- Current full-tier decision: ${RUN_FULL}."
+          } >> "$GITHUB_STEP_SUMMARY"
+
   e2e:
     name: docker-compose integration
+    needs: tier-summary
+    if: >-
+      ${{
+        github.event_name != 'pull_request' ||
+        contains(github.event.pull_request.labels.*.name, 'ci:flight-full') ||
+        contains(github.event.pull_request.labels.*.name, 'ci:trino-full')
+      }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

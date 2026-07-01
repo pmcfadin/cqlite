@@ -42,6 +42,7 @@
 - [ ] CLI tests
 - [ ] Performance tests/benchmarks
 - [ ] Manual testing
+- Local pre-merge mode used: <!-- e.g., not run, fast, full, or custom command -->
 
 ### Test Results
 <!-- Include relevant test output, benchmark results, or screenshots -->

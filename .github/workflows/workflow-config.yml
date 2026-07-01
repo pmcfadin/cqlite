@@ -5,11 +5,16 @@ on:
     branches: [main, develop]
     paths:
       - '.github/workflows/**'
+      - 'scripts/ci/validate-workflows.rb'
   push:
     branches: [main, develop]
     paths:
       - '.github/workflows/**'
+      - 'scripts/ci/validate-workflows.rb'
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: workflow-config-${{ github.ref }}
@@ -17,91 +22,13 @@ concurrency:
 
 jobs:
   validate:
-    name: YAML and trigger policy
+    name: Workflow policy
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Validate workflow YAML parses
-        run: |
-          ruby <<'RUBY'
-          require "yaml"
-
-          files = Dir[".github/workflows/*.{yml,yaml}"].sort
-          abort "No workflow files found" if files.empty?
-
-          files.each do |file|
-            YAML.load_file(file)
-            puts "ok #{file}"
-          end
-          RUBY
-
-      - name: Validate workflow trigger policy
-        run: |
-          ruby <<'RUBY'
-          require "yaml"
-
-          missing_concurrency = []
-          unscoped_branch_triggers = []
-
-          # Workflows exempt from the paths/paths-ignore requirement because they
-          # MUST fire on every matching event and path-scoping would defeat them.
-          #   project-board-sync.yml: moves ANY closed PR's board card to Done;
-          #     it cannot be limited to PRs that touch certain paths. It now uses
-          #     the pull_request_target trigger (so the closed-PR job can read
-          #     PROJECTS_TOKEN) — that event is outside the pull_request/push
-          #     policy loop below, so the exemption is belt-and-suspenders.
-          path_filter_exempt = %w[
-            project-board-sync.yml
-          ]
-
-          Dir[".github/workflows/*.{yml,yaml}"].sort.each do |file|
-            workflow = YAML.load_file(file)
-            triggers = workflow["on"] || workflow[true]
-            next unless triggers.is_a?(Hash)
-
-            file_exempt = path_filter_exempt.include?(File.basename(file))
-
-            if triggers.key?("pull_request") && !workflow.key?("concurrency")
-              missing_concurrency << file
-            end
-
-            %w[pull_request push].each do |event|
-              next unless triggers.key?(event)
-              next if file_exempt
-
-              config = triggers[event]
-              if config.nil?
-                unscoped_branch_triggers << "#{file}: #{event}"
-                next
-              end
-
-              unless config.is_a?(Hash)
-                unscoped_branch_triggers << "#{file}: #{event}"
-                next
-              end
-
-              # Tag-only release workflows are not branch CI and do not need path filters.
-              next if event == "push" && config.key?("tags") && !config.key?("branches")
-
-              unless config.key?("paths") || config.key?("paths-ignore")
-                unscoped_branch_triggers << "#{file}: #{event}"
-              end
-            end
-          end
-
-          unless missing_concurrency.empty?
-            warn "PR workflows missing concurrency:"
-            missing_concurrency.each { |entry| warn "  - #{entry}" }
-          end
-
-          unless unscoped_branch_triggers.empty?
-            warn "Branch-based workflow triggers missing paths or paths-ignore:"
-            unscoped_branch_triggers.each { |entry| warn "  - #{entry}" }
-          end
-
-          exit 1 if missing_concurrency.any? || unscoped_branch_triggers.any?
-
-          puts "Workflow trigger policy validated"
-          RUBY
+      - name: Validate workflow policy
+        run: ruby scripts/ci/validate-workflows.rb

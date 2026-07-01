@@ -1,6 +1,9 @@
 name: Python CI
 
 on:
+  schedule:
+    # Nightly full bindings coverage at 03:35 UTC
+    - cron: '35 3 * * *'
   push:
     branches: [main]
     paths:
@@ -9,10 +12,12 @@ on:
       - '.github/workflows/python-ci.yml'
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
     paths:
       - 'bindings/python/**'
       - 'cqlite-core/**'
       - '.github/workflows/python-ci.yml'
+  workflow_dispatch:
 
 concurrency:
   group: python-ci-${{ github.ref }}
@@ -25,8 +30,58 @@ env:
   DATASET_SHA256: 3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33
 
 jobs:
+  smoke:
+    name: PR smoke (Ubuntu, Python 3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "bindings/python -> target"
+          key: ${{ runner.os }}-smoke
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build local wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          args: --release --out dist --manylinux off
+          working-directory: bindings/python
+
+      - name: Install wheel and smoke dependencies
+        shell: bash
+        run: |
+          python -m pip install 'pytest>=7.0'
+          python -m pip install bindings/python/dist/*.whl
+
+      - name: Run smoke pytest subset
+        shell: bash
+        run: |
+          pytest \
+            bindings/python/tests/test_basic.py \
+            bindings/python/tests/test_config.py \
+            bindings/python/tests/test_errors.py \
+            bindings/python/tests/test_write_api.py \
+            -v --tb=short
+
   build-only-wheels:
     name: Build wheel (${{ matrix.target }})
+    if: >-
+      ${{
+        github.event_name != 'pull_request' ||
+        contains(github.event.pull_request.labels.*.name, 'ci:bindings-full')
+      }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
 
@@ -100,6 +155,11 @@ jobs:
 
   test:
     name: Test (${{ matrix.os }})
+    if: >-
+      ${{
+        github.event_name != 'pull_request' ||
+        contains(github.event.pull_request.labels.*.name, 'ci:bindings-full')
+      }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
 
@@ -190,8 +250,8 @@ jobs:
       - name: Install wheel and test dependencies
         shell: bash
         run: |
-          pip install pytest>=7.0
-          pip install bindings/python/dist/*.whl
+          python -m pip install 'pytest>=7.0'
+          python -m pip install bindings/python/dist/*.whl
 
       - name: Restore dataset cache
         id: dataset-cache
@@ -205,8 +265,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p test-data/datasets
-          curl -fsSL -o /tmp/${DATASET_ASSET} \
-            https://github.com/pmcfadin/cqlite/releases/download/${DATASET_TAG}/${DATASET_ASSET}
+          curl -fsSL -o "/tmp/${DATASET_ASSET}" \
+            "https://github.com/pmcfadin/cqlite/releases/download/${DATASET_TAG}/${DATASET_ASSET}"
           # Issue #1324: portable checksum — GitHub's macOS runners ship `shasum`
           # (perl), not GNU coreutils `sha256sum`. Match release.yml's idiom.
           if command -v sha256sum >/dev/null 2>&1; then
@@ -214,7 +274,7 @@ jobs:
           else
             echo "${DATASET_SHA256}  /tmp/${DATASET_ASSET}" | shasum -a 256 -c -
           fi
-          tar -xzf /tmp/${DATASET_ASSET} -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
+          tar -xzf "/tmp/${DATASET_ASSET}" -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
           # Issue #1335: stamp the .dataset-pin that fetch-datasets.sh writes so
           # the shared `datasets-${DATASET_TAG}-${DATASET_SHA256}` cache entry is
           # accepted by has_required_dataset() in jobs that use fetch-datasets.sh
@@ -298,11 +358,26 @@ jobs:
   quality-gate:
     name: Python CI Quality Gate
     runs-on: ubuntu-latest
-    needs: [build-only-wheels, test]
+    needs: [smoke, build-only-wheels, test]
     if: always()
+    env:
+      RUN_FULL: >-
+        ${{
+          github.event_name != 'pull_request' ||
+          contains(github.event.pull_request.labels.*.name, 'ci:bindings-full')
+        }}
 
     steps:
+      - name: Check smoke results
+        run: |
+          echo "Smoke results: ${{ needs.smoke.result }}"
+          if [ "${{ needs.smoke.result }}" != "success" ]; then
+            echo "::error::Python smoke checks failed"
+            exit 1
+          fi
+
       - name: Check build results
+        if: env.RUN_FULL == 'true'
         run: |
           echo "Build-only wheel results: ${{ needs.build-only-wheels.result }}"
           if [ "${{ needs.build-only-wheels.result }}" != "success" ]; then
@@ -311,6 +386,7 @@ jobs:
           fi
 
       - name: Check test results
+        if: env.RUN_FULL == 'true'
         run: |
           echo "Test results: ${{ needs.test.result }}"
           if [ "${{ needs.test.result }}" != "success" ]; then
@@ -318,7 +394,24 @@ jobs:
             exit 1
           fi
 
+      - name: Summary
+        run: |
+          {
+            echo "## Python CI Summary"
+            echo ""
+            echo "### Tier"
+            echo "- Ordinary PRs run one Ubuntu Python 3.12 wheel build plus non-dataset smoke pytest files."
+            echo "- Full cross-platform wheel builds, dataset-backed tests, slow CLI parity, and wheel artifacts run on push to main, nightly schedule, workflow_dispatch, or PRs labeled \`ci:bindings-full\`."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${RUN_FULL}" = "true" ]; then
+            echo "Full Python bindings tier completed." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Full Python bindings tier skipped for the default PR smoke tier." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Download all wheels
+        if: env.RUN_FULL == 'true'
         uses: actions/download-artifact@v7
         with:
           pattern: wheel-*
@@ -326,12 +419,13 @@ jobs:
           merge-multiple: true
 
       - name: List wheel artifacts
+        if: env.RUN_FULL == 'true'
         run: |
           echo "::group::Built wheels"
           ls -lh wheels/
           echo "::endgroup::"
 
-          WHEEL_COUNT=$(ls wheels/*.whl 2>/dev/null | wc -l)
+          WHEEL_COUNT=$(find wheels -maxdepth 1 -type f -name '*.whl' | wc -l | tr -d ' ')
           echo "Wheel count: $WHEEL_COUNT"
 
           # Verify at least 5 wheels (one per target, plus optional PyPy wheels)
@@ -341,29 +435,31 @@ jobs:
           fi
 
       - name: Upload merged wheel artifact
+        if: env.RUN_FULL == 'true'
         uses: actions/upload-artifact@v6
         with:
           name: cqlite-wheels
           path: wheels/*.whl
           retention-days: 30
 
-      - name: Summary
+      - name: Full artifact summary
+        if: env.RUN_FULL == 'true'
         run: |
-          echo "## Python CI Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Wheel Builds" >> $GITHUB_STEP_SUMMARY
-          echo "| Target | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|--------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| x86_64-unknown-linux-gnu | :white_check_mark: |" >> $GITHUB_STEP_SUMMARY
-          echo "| aarch64-unknown-linux-gnu | :white_check_mark: |" >> $GITHUB_STEP_SUMMARY
-          echo "| x86_64-apple-darwin | :white_check_mark: |" >> $GITHUB_STEP_SUMMARY
-          echo "| aarch64-apple-darwin | :white_check_mark: |" >> $GITHUB_STEP_SUMMARY
-          echo "| x86_64-pc-windows-msvc | :white_check_mark: |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Test Results" >> $GITHUB_STEP_SUMMARY
-          echo "Full Python tests, including slow CLI parity, passed on Ubuntu." >> $GITHUB_STEP_SUMMARY
-          echo "Non-slow Python binding tests passed on macOS and Windows." >> $GITHUB_STEP_SUMMARY
-          echo "ARM64 Linux and x86_64 macOS are build-only." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Artifacts" >> $GITHUB_STEP_SUMMARY
-          echo "Download wheels: \`cqlite-wheels\`" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "### Wheel Builds"
+            echo "| Target | Status |"
+            echo "|--------|--------|"
+            echo "| x86_64-unknown-linux-gnu | :white_check_mark: |"
+            echo "| aarch64-unknown-linux-gnu | :white_check_mark: |"
+            echo "| x86_64-apple-darwin | :white_check_mark: |"
+            echo "| aarch64-apple-darwin | :white_check_mark: |"
+            echo "| x86_64-pc-windows-msvc | :white_check_mark: |"
+            echo ""
+            echo "### Test Results"
+            echo "Full Python tests, including slow CLI parity, passed on Ubuntu."
+            echo "Non-slow Python binding tests passed on macOS and Windows."
+            echo "ARM64 Linux and x86_64 macOS are build-only."
+            echo ""
+            echo "### Artifacts"
+            echo "Download wheels: \`cqlite-wheels\`"
+          } >> "$GITHUB_STEP_SUMMARY"

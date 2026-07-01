@@ -83,8 +83,8 @@ env:
   # (issue #1025; no "gate theater" — never pass a dataset-dependent leg on an
   # empty dataset, issues #1024/#1093/#1097).
   DATASET_TAG: datasets-v3
-  DATASET_ASSET: cassandra5-small-full-v3.2.tar.gz
-  DATASET_SHA256: bebc763752c8d68c7fb0483a1b31294b4d1d21343d3f7d124da069e5073202fa
+  DATASET_ASSET: cassandra5-small-full-v3.4.tar.gz
+  DATASET_SHA256: 3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33
   CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
 
 jobs:
@@ -101,17 +101,16 @@ jobs:
       # The fixture-backed HARD legs (Bloom no-false-negative, BTI read-back)
       # read *-Data.db / *-Filter.db / *-Index.db binaries that are gitignored
       # and absent in a fresh checkout. Mirror the sstabledump-parity-gate.yml
-      # pattern exactly (cache → fetch-datasets.sh → provenance → component-count
+      # pattern exactly (shared cache+fetch action → provenance → component-count
       # hard-fail) so a missing/unfetched dataset can NEVER let a P0 leg pass
       # vacuously (issue #1025; fail-closed mandate #1024/#1093/#1097).
-      - name: Cache canonical full datasets
-        uses: actions/cache@v5
+      - name: Restore canonical full datasets
+        uses: ./.github/actions/restore-canonical-datasets
         with:
-          path: test-data/datasets/
-          key: ${{ runner.os }}-datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
-
-      - name: Fetch canonical full datasets
-        run: bash ./test-data/scripts/fetch-datasets.sh
+          dataset-tag: ${{ env.DATASET_TAG }}
+          dataset-asset: ${{ env.DATASET_ASSET }}
+          dataset-sha256: ${{ env.DATASET_SHA256 }}
+          dataset-root: ${{ env.CQLITE_DATASETS_ROOT }}
 
       - name: Dataset provenance gate
         run: |
@@ -160,13 +159,15 @@ jobs:
       # The guard `github.event.inputs.skip_compaction != 'true'` is TRUE for the
       # scheduled run (no inputs) so the nightly schedule still does the full
       # bootstrap; it is FALSE only on a dispatch that explicitly opts out.
-      - name: Setup JDK 17
-        id: setup-java
+      - name: Setup Java and sstabledump
+        id: setup-sstabledump
         if: github.event.inputs.skip_compaction != 'true'
-        uses: actions/setup-java@v5
+        uses: ./.github/actions/setup-sstabledump
         with:
-          distribution: temurin
+          java-distribution: temurin
           java-version: '17'
+          install-path: .ci/bin
+          cassandra-version: 5.0.2
 
       - name: Install Ant (required by the Cassandra source build)
         if: github.event.inputs.skip_compaction != 'true'
@@ -175,21 +176,11 @@ jobs:
           sudo apt-get install -y ant
 
       - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: ./.github/actions/setup-rust-ci
         with:
-          toolchain: stable
-
-      - name: Cache Rust dependencies
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-nightly-docker-parity-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-nightly-docker-parity-
-            ${{ runner.os }}-cargo-
+          toolchain: 1.88.0
+          components: ''
+          cache-key: nightly-docker-parity
 
       # Cache the slow Cassandra source build, keyed exactly like
       # compaction-parity.yml so the two lanes share a warm cache.
@@ -206,7 +197,7 @@ jobs:
         env:
           CQLITE_CASSANDRA_CACHE: ${{ env.CQLITE_CASSANDRA_CACHE }}
           CASSANDRA_REF: ${{ env.CASSANDRA_REF }}
-          CASSANDRA_BUILD_JAVA_HOME: ${{ steps.setup-java.outputs.path }}
+          CASSANDRA_BUILD_JAVA_HOME: ${{ steps.setup-sstabledump.outputs.java-home }}
         run: |
           bash compaction-parity/scripts/bootstrap-cassandra.sh
 

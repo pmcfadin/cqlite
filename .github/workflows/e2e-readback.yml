@@ -4,32 +4,26 @@ name: "CI: E2E Cassandra Readback Gate"
 # Validates that SSTables produced by CQLite can be loaded by a real
 # Cassandra 5.0.2 cluster via `nodetool refresh` and queried with cqlsh.
 #
-# Runs:
-#   - Nightly (schedule) to catch regressions on main
-#   - On PRs touching writer/serialization/schema paths or the script/compose file itself
-#
-# DUAL-WORKFLOW DECISION (issue #728):
-# This workflow and cassandra-validation.yml are BOTH intentionally kept.
-# They cover two distinct production ingest paths:
-#   - e2e-readback.yml (this file): validates the `nodetool refresh` ingest path
-#   - cassandra-validation.yml:     validates the `sstableloader` ingest path
-# On writer-path PRs, both workflows run (~30 min each). This overlap is accepted
-# deliberately — merging them would obscure ingest-path-specific regressions.
-# See issue #728 for the full decision record.
+# INGEST TIERING (issue #1368):
+# This workflow validates the complementary `nodetool refresh` ingest path. It is
+# intentionally NOT part of ordinary writer-path PR fan-out; cassandra-validation.yml
+# is the single default writer-path PR ingest smoke. Run this full path through:
+#   - PR label: ci:ingest-full
+#   - Manual workflow_dispatch
+#   - Nightly schedule
+#   - Release publication
 
 on:
   schedule:
     # Nightly at 02:30 UTC
     - cron: '30 2 * * *'
+  release:
+    types: [published]
   pull_request:
     branches: [main, develop]
-    paths:
-      - 'cqlite-core/src/storage/**'
-      - 'cqlite-core/src/parser/**'
-      - 'cqlite-core/src/schema/**'
-      - 'test-data/scripts/e2e-cassandra-readback.sh'
-      - 'test-data/docker/docker-compose-cassandra5.yml'
-      - '.github/workflows/e2e-readback.yml'
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    # Unfiltered so adding ci:ingest-full can start this optional full tier on
+    # any PR. The expensive job itself remains label-gated below.
   workflow_dispatch:
     inputs:
       tables:
@@ -53,6 +47,7 @@ concurrency:
 jobs:
   e2e-cassandra-readback:
     name: E2E Cassandra Readback (${{ github.event_name }})
+    if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:ingest-full') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -100,18 +95,18 @@ jobs:
           # failure so the per-table JSONL/spec files survive artifact collection.
           E2E_ARTIFACT_DIR: /tmp/e2e-artifacts
         run: |
-          EXTRA_ARGS=""
+          EXTRA_ARGS=()
           if [[ -n "${{ github.event.inputs.tables }}" ]]; then
-            EXTRA_ARGS="$EXTRA_ARGS --tables ${{ github.event.inputs.tables }}"
+            EXTRA_ARGS+=(--tables "${{ github.event.inputs.tables }}")
           fi
           if [[ "${{ github.event.inputs.keep_running }}" == "true" ]]; then
-            EXTRA_ARGS="$EXTRA_ARGS --keep-running"
+            EXTRA_ARGS+=(--keep-running)
           fi
 
           bash test-data/scripts/e2e-cassandra-readback.sh \
             --no-build \
             --bin "$(pwd)/target/debug/cqlite" \
-            $EXTRA_ARGS \
+            "${EXTRA_ARGS[@]}" \
             2>&1 | tee /tmp/e2e-readback.log
           # tee swallows the exit code; use PIPESTATUS to propagate it
           exit "${PIPESTATUS[0]}"
@@ -183,6 +178,18 @@ jobs:
             -f test-data/docker/docker-compose-cassandra5.yml \
             down -v --remove-orphans 2>/dev/null || true
 
+      - name: Write CI tier summary
+        if: always()
+        run: |
+          {
+            echo "## E2E Cassandra readback tier"
+            echo ""
+            echo "- Validates the full nodetool refresh ingest/readback path."
+            echo "- PR runs require the \`ci:ingest-full\` label."
+            echo "- Full validation is also available from workflow_dispatch, nightly schedule, and release publication."
+            echo "- Default writer-path PR smoke remains in cassandra-validation.yml."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Comment on PR (Success)
         if: success() && github.event_name == 'pull_request'
         continue-on-error: true
@@ -196,6 +203,8 @@ jobs:
               body: `## E2E Cassandra Readback: PASSED
 
             All selected tables passed the full write -> flush -> export -> \`nodetool refresh\` -> \`cqlsh\` verification cycle against Cassandra 5.0.2.
+
+            This full ingest tier runs on PRs only when \`ci:ingest-full\` is present; ordinary writer-path PR smoke remains in \`cassandra-validation.yml\`.
 
             See the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.`
             });
@@ -213,6 +222,8 @@ jobs:
               body: `## E2E Cassandra Readback: FAILED
 
             The PRD §4.1 acceptance gate failed on this PR. One or more tables did not pass the CQLite write -> Cassandra readback cycle.
+
+            This full ingest tier runs on PRs only when \`ci:ingest-full\` is present; ordinary writer-path PR smoke remains in \`cassandra-validation.yml\`.
 
             ### Debugging
             Download the \`e2e-readback-failure-${context.runId}\` artifact from the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}).

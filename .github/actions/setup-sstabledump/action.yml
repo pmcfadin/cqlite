@@ -1,0 +1,87 @@
+name: Setup sstabledump
+description: Install Java and a Cassandra sstabledump wrapper for CI parity jobs.
+
+inputs:
+  java-version:
+    description: Java version used by Cassandra tooling.
+    required: false
+    default: '17'
+  java-distribution:
+    description: Java distribution for actions/setup-java.
+    required: false
+    default: temurin
+  install-path:
+    description: Absolute path, or workspace-relative path, where sstabledump is installed.
+    required: false
+    default: .ci/bin
+  cassandra-version:
+    description: Cassandra version that provides the sstabledump tool.
+    required: false
+    default: 5.0.2
+
+outputs:
+  install-path:
+    description: Absolute directory containing the sstabledump wrapper.
+    value: ${{ steps.install.outputs.install-path }}
+  java-home:
+    description: Java home reported by actions/setup-java.
+    value: ${{ steps.setup-java.outputs.path }}
+  sstabledump-path:
+    description: Absolute path to the installed sstabledump wrapper.
+    value: ${{ steps.install.outputs.sstabledump-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Java
+      id: setup-java
+      uses: actions/setup-java@v5
+      with:
+        distribution: ${{ inputs.java-distribution }}
+        java-version: ${{ inputs.java-version }}
+
+    - name: Install sstabledump
+      id: install
+      shell: bash
+      env:
+        INSTALL_PATH_INPUT: ${{ inputs.install-path }}
+        CASSANDRA_VERSION: ${{ inputs.cassandra-version }}
+      run: |
+        set -euo pipefail
+
+        case "${INSTALL_PATH_INPUT}" in
+          /*) install_dir="${INSTALL_PATH_INPUT}" ;;
+          *) install_dir="${GITHUB_WORKSPACE}/${INSTALL_PATH_INPUT}" ;;
+        esac
+
+        cassandra_home="${RUNNER_TEMP}/cassandra"
+        cassandra_tar="apache-cassandra-${CASSANDRA_VERSION}-bin.tar.gz"
+        cassandra_dir="${cassandra_home}/apache-cassandra-${CASSANDRA_VERSION}"
+        cassandra_url="https://archive.apache.org/dist/cassandra/${CASSANDRA_VERSION}/${cassandra_tar}"
+
+        mkdir -p "${install_dir}" "${cassandra_home}"
+        if [ ! -d "${cassandra_dir}" ]; then
+          curl -fsSL -o "${cassandra_home}/${cassandra_tar}" "${cassandra_url}"
+          tar -xzf "${cassandra_home}/${cassandra_tar}" -C "${cassandra_home}"
+        fi
+
+        sstabledump_script="${install_dir}/sstabledump"
+        cat > "${sstabledump_script}" <<EOF
+        #!/usr/bin/env bash
+        set -euo pipefail
+        export CASSANDRA_HOME="${cassandra_dir}"
+        export CASSANDRA_INCLUDE="\${CASSANDRA_HOME}/tools/bin/cassandra.in.sh"
+        exec "\${CASSANDRA_HOME}/tools/bin/sstabledump" "\$@"
+        EOF
+        sed -i.bak 's/^        //' "${sstabledump_script}"
+        rm -f "${sstabledump_script}.bak"
+        chmod +x "${sstabledump_script}"
+
+        echo "${install_dir}" >> "${GITHUB_PATH}"
+        export PATH="${install_dir}:${PATH}"
+
+        output="$(sstabledump --help 2>&1 || true)"
+        echo "${output}" | grep -q "usage: sstabledump"
+
+        echo "install-path=${install_dir}" >> "${GITHUB_OUTPUT}"
+        echo "sstabledump-path=${sstabledump_script}" >> "${GITHUB_OUTPUT}"

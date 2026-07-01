@@ -5,6 +5,9 @@ name: Flight CI
 # GHCR.
 
 on:
+  schedule:
+    # Nightly full Flight validation at 04:05 UTC
+    - cron: '5 4 * * *'
   push:
     branches: [ main ]
     tags: [ 'v*' ]
@@ -16,6 +19,7 @@ on:
       - '.github/workflows/flight-ci.yml'
   pull_request:
     branches: [ main ]
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
     paths:
       - 'cqlite-flight/**'
       - 'cqlite-core/**'
@@ -37,7 +41,7 @@ env:
 
 jobs:
   test:
-    name: fmt / clippy / test / build
+    name: fmt / clippy / lib test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -63,6 +67,44 @@ jobs:
         run: cargo clippy --package cqlite-flight --all-targets -- -D warnings
 
       - name: test
+        run: cargo test --package cqlite-flight --lib
+
+      - name: Write CI tier summary
+        if: always()
+        run: |
+          {
+            echo "## Flight CI tier"
+            echo ""
+            echo "- Ordinary PRs run fmt, clippy, and cqlite-flight library tests."
+            echo "- Full package tests and release binary artifacts run on push to main/tags, nightly schedule, workflow_dispatch, or PRs labeled \`ci:flight-full\`."
+            echo "- Container publishing remains limited to push and workflow_dispatch runs."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  full:
+    name: full test + release binary
+    needs: test
+    if: >-
+      ${{
+        github.event_name != 'pull_request' ||
+        contains(github.event.pull_request.labels.*.name, 'ci:flight-full')
+      }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-flight-full-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: test
         run: cargo test --package cqlite-flight
 
       - name: build release binary
@@ -77,9 +119,9 @@ jobs:
 
   image:
     name: build & push container image
-    needs: test
-    # Don't publish images from PRs (no write creds / untrusted).
-    if: github.event_name != 'pull_request'
+    needs: full
+    # Don't publish images from PRs or nightly validation runs.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

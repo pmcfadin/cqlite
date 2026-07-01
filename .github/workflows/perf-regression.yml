@@ -7,26 +7,22 @@ name: "CI: Performance Regression Gate"
 # main itself (re-measured every run), so no machine-specific absolute timings
 # are committed and the gate is immune to cross-machine variance.
 #
+# CI TIERING (issue #1368): benchmarks are not part of ordinary PR fan-out.
+# PR runs require the `ci:perf` label; nightly and manual runs remain available.
+#
 # Policy (tracked benches + threshold) lives in cqlite-core/benches/perf-gate.json.
 # See cqlite-core/benches/README.md ("Performance regression gate") for details
 # and the baseline-refresh procedure.
 
 on:
+  schedule:
+    # Nightly at 04:15 UTC
+    - cron: '15 4 * * *'
   pull_request:
     branches: [main]
-    # Trigger ONLY when runtime code, bench policy, or this workflow changes.
-    # Docs-only / examples-only / non-perf CI-only PRs are intentionally excluded:
-    # the fsync-bound write/ingest_wal_on bench is noisy enough on shared runners
-    # to produce false-positive regression alerts on PRs that cannot affect
-    # performance (Issue #572). The NOT-matched files are implicitly ignored:
-    #   docs/**  **/*.md  examples/**  .github/workflows/<other-workflows>
-    paths:
-      - "cqlite-core/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".github/workflows/perf-regression.yml"
-      - "scripts/ci/check_perf_regression.py"
-      - "cqlite-core/benches/perf-gate.json"
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    # Unfiltered so adding ci:perf can start this optional benchmark tier on any
+    # PR. The benchmark job itself remains label-gated below.
   workflow_dispatch:
 
 permissions:
@@ -51,6 +47,7 @@ env:
 jobs:
   perf-gate:
     name: Bench regression vs main
+    if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:perf') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -107,16 +104,24 @@ jobs:
 
       - name: Benchmark PR (merge ref) → baseline 'pr'
         run: |
+          BENCH_ARGV=()
+          if [[ -n "${BENCH_ARGS:-}" ]]; then
+            read -r -a BENCH_ARGV <<< "$BENCH_ARGS"
+          fi
           cargo bench -p cqlite-core --features "$BENCH_FEATURES" \
-            --bench read --bench write -- --save-baseline pr $BENCH_ARGS
+            --bench read --bench write -- --save-baseline pr "${BENCH_ARGV[@]}"
 
       - name: Benchmark main → baseline 'base'
         run: |
           set -euo pipefail
+          BENCH_ARGV=()
+          if [[ -n "${BENCH_ARGS:-}" ]]; then
+            read -r -a BENCH_ARGV <<< "$BENCH_ARGS"
+          fi
           git checkout --force --detach origin/main
           git submodule update --init --recursive || true
           cargo bench -p cqlite-core --features "$BENCH_FEATURES" \
-            --bench read --bench write -- --save-baseline base $BENCH_ARGS
+            --bench read --bench write -- --save-baseline base "${BENCH_ARGV[@]}"
 
       - name: Restore PR ref (for the gate script + policy)
         run: git checkout --force --detach ${{ steps.refs.outputs.pr_ref }}
@@ -125,3 +130,14 @@ jobs:
         run: |
           python3 scripts/ci/check_perf_regression.py \
             target/criterion pr base cqlite-core/benches/perf-gate.json
+
+      - name: Write CI tier summary
+        if: always()
+        run: |
+          {
+            echo "## Performance regression tier"
+            echo ""
+            echo "- PR benchmark runs require the \`ci:perf\` label."
+            echo "- Nightly schedule and workflow_dispatch remain available for full validation."
+            echo "- Ordinary PRs do not run Criterion benchmarks by default."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,13 +1,11 @@
 name: "CI: Cassandra sstableloader Validation"
 
-# DUAL-WORKFLOW DECISION (issue #728):
-# This workflow and e2e-readback.yml are BOTH intentionally kept.
-# They cover two distinct production ingest paths:
-#   - cassandra-validation.yml (this file): validates the `sstableloader` ingest path
-#   - e2e-readback.yml:                     validates the `nodetool refresh` ingest path
-# On writer-path PRs, both workflows run (~30 min each). This overlap is accepted
-# deliberately — merging them would obscure ingest-path-specific regressions.
-# See issue #728 for the full decision record.
+# INGEST TIERING (issue #1368):
+# This workflow is the single default writer-path PR smoke path. It validates the
+# narrower `sstableloader` ingest acceptance path.
+# The complementary `nodetool refresh` readback path remains in e2e-readback.yml,
+# but it is label/manual/nightly/release gated so ordinary writer PRs do not run
+# two separate 30-minute Cassandra ingest jobs by default.
 
 on:
   pull_request:
@@ -135,10 +133,13 @@ jobs:
 
       - name: Run Tier 1 - sstableloader Acceptance Tests
         id: tier1
+        shell: bash
         env:
           CQLITE_CASSANDRA_CONTAINER: ${{ job.services.cassandra.id }}
         run: |
+          set -euo pipefail
           echo "::group::Tier 1: sstableloader Acceptance Tests"
+          trap 'echo "::endgroup::"' EXIT
           cargo test --release --package cqlite-core \
             --test sstableloader_integration \
             --features write-support,docker-integration \
@@ -148,15 +149,17 @@ jobs:
             test_sstableloader_multiple_partitions \
             test_sstableloader_all_stage0_types \
             --nocapture 2>&1 | tee tier1_results.txt
-          echo "::endgroup::"
 
       - name: Run Tier 2 - CQL Query Verification Tests
         id: tier2
         if: success()
+        shell: bash
         env:
           CQLITE_CASSANDRA_CONTAINER: ${{ job.services.cassandra.id }}
         run: |
+          set -euo pipefail
           echo "::group::Tier 2: CQL Query Verification Tests"
+          trap 'echo "::endgroup::"' EXIT
           cargo test --release --package cqlite-core \
             --test sstableloader_integration \
             --features write-support,docker-integration \
@@ -166,7 +169,6 @@ jobs:
             test_sstableloader_where_on_clustering_key \
             test_sstableloader_stage0_types_round_trip_values \
             --nocapture 2>&1 | tee tier2_results.txt
-          echo "::endgroup::"
 
       - name: Run Tier 3 - Stress Tests
         id: tier3
@@ -174,10 +176,13 @@ jobs:
           success() &&
           (github.event_name == 'workflow_dispatch' && github.event.inputs.run_stress_tests == 'true' ||
            github.event_name == 'push')
+        shell: bash
         env:
           CQLITE_CASSANDRA_CONTAINER: ${{ job.services.cassandra.id }}
         run: |
+          set -euo pipefail
           echo "::group::Tier 3: Stress Tests"
+          trap 'echo "::endgroup::"' EXIT
           cargo test --release --package cqlite-core \
             --test sstableloader_integration \
             --features write-support,docker-integration \
@@ -186,21 +191,32 @@ jobs:
             test_sstableloader_many_partitions_100_distinct \
             test_sstableloader_concurrent_writes_followed_by_load \
             --nocapture 2>&1 | tee tier3_results.txt
-          echo "::endgroup::"
 
       - name: Generate Test Summary
         if: always()
         run: |
-          echo "# sstableloader Integration Test Results" > test_summary.md
-          echo "" >> test_summary.md
-          echo "## Tier 1: Acceptance Tests" >> test_summary.md
-          echo "Status: ${{ steps.tier1.outcome }}" >> test_summary.md
-          echo "" >> test_summary.md
-          echo "## Tier 2: Query Verification" >> test_summary.md
-          echo "Status: ${{ steps.tier2.outcome }}" >> test_summary.md
-          echo "" >> test_summary.md
-          echo "## Tier 3: Stress Tests" >> test_summary.md
-          echo "Status: ${{ steps.tier3.outcome }}" >> test_summary.md
+          {
+            echo "# sstableloader Integration Test Results"
+            echo ""
+            echo "## Tier 1: Acceptance Tests"
+            echo "Status: ${{ steps.tier1.outcome }}"
+            echo ""
+            echo "## Tier 2: Query Verification"
+            echo "Status: ${{ steps.tier2.outcome }}"
+            echo ""
+            echo "## Tier 3: Stress Tests"
+            echo "Status: ${{ steps.tier3.outcome }}"
+            echo ""
+            echo "## CI Tier Notes"
+            echo "This is the default writer-path PR ingest smoke."
+            echo "Run the full nodetool refresh readback path with the ci:ingest-full label, e2e-readback workflow_dispatch, nightly schedule, or release trigger."
+          } > test_summary.md
+          {
+            echo "## sstableloader ingest tier"
+            echo ""
+            echo "- Default writer-path PR smoke: this workflow."
+            echo "- Full nodetool refresh readback: add \`ci:ingest-full\`, run e2e-readback manually, wait for nightly, or use the release trigger."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # Issue #1027: this lane gates a nightly_docker parity scenario
       # (cass.write_load_path.live_readback.semantic_only), so its binding
@@ -241,7 +257,9 @@ jobs:
             - ✅ Tier 2: Query Verification - Cassandra returned the expected rows
             - ${{ steps.tier3.outcome == 'success' && '✅' || '⏭️' }} Tier 3: Stress Tests
 
-            CQLite-written SSTables were imported successfully into Cassandra 5.0 through the loader-based validation path.`;
+            CQLite-written SSTables were imported successfully into Cassandra 5.0 through the loader-based validation path.
+
+            Full nodetool refresh readback remains available through the \`ci:ingest-full\` label, e2e-readback workflow_dispatch, nightly schedule, or release trigger.`;
 
             github.rest.issues.createComment({
               issue_number: context.issue.number,

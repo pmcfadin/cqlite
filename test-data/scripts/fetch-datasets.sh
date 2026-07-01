@@ -2,12 +2,13 @@
 set -euo pipefail
 
 # Fetch canonical Cassandra 5 datasets into test-data/datasets
-# Usage: DATASET_TAG=datasets-v2 DATASET_ASSET=cassandra5-small-full.tar.gz DATASET_SHA256=<sha> ./test-data/scripts/fetch-datasets.sh
+# Usage: DATASET_TAG=datasets-v3 DATASET_ASSET=cassandra5-small-full-v3.4.tar.gz DATASET_SHA256=3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33 ./test-data/scripts/fetch-datasets.sh
 
 TAG="${DATASET_TAG:-datasets-v3}"
 ASSET="${DATASET_ASSET:-cassandra5-small-full-v3.4.tar.gz}"
 SHA256_EXPECTED="${DATASET_SHA256:-3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33}"
 DATASET_ROOT="${CQLITE_DATASETS_ROOT:-test-data/datasets}"
+ARCHIVE_DATASET_ROOT="test-data/datasets"
 PIN_FILE="${DATASET_ROOT}/.dataset-pin"
 ASSET_PATH="/tmp/${ASSET}"
 WIDE_PARTITION_DIR="${DATASET_ROOT}/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294"
@@ -27,6 +28,60 @@ if [ -z "${DATASET_ROOT}" ] || [ "${DATASET_ROOT}" = "/" ]; then
   echo "ERROR: unsafe CQLITE_DATASETS_ROOT='${DATASET_ROOT}'" >&2
   exit 1
 fi
+
+fail_unsafe_dataset_root() {
+  echo "ERROR: unsafe CQLITE_DATASETS_ROOT='${DATASET_ROOT}': $1" >&2
+  exit 1
+}
+
+canonicalize_dataset_root() {
+  local raw_root="$1"
+  local abs_root parent base parent_abs repo_root
+
+  case "${raw_root}" in
+    ""|"/"|".")
+      fail_unsafe_dataset_root "must point at a dataset directory, not a filesystem root"
+      ;;
+    /*) abs_root="${raw_root}" ;;
+    *) abs_root="${PWD}/${raw_root}" ;;
+  esac
+
+  parent="$(dirname "${abs_root}")"
+  base="$(basename "${abs_root}")"
+
+  [ "${base}" = "datasets" ] \
+    || fail_unsafe_dataset_root "final path component must be 'datasets'"
+
+  mkdir -p "${parent}"
+  parent_abs="$(cd "${parent}" && pwd -P)"
+  [ "${parent_abs}" != "/" ] \
+    || fail_unsafe_dataset_root "refusing to replace a top-level /datasets directory"
+
+  abs_root="${parent_abs}/${base}"
+
+  if repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+    repo_root="$(cd "${repo_root}" && pwd -P)"
+    [ "${abs_root}" != "${repo_root}" ] \
+      || fail_unsafe_dataset_root "refusing to replace the repository root"
+  fi
+
+  [ "${abs_root}" != "${HOME:-}" ] \
+    || fail_unsafe_dataset_root "refusing to replace HOME"
+  [ "${abs_root}" != "${TMPDIR:-}" ] \
+    || fail_unsafe_dataset_root "refusing to replace TMPDIR"
+  [ "${abs_root}" != "/tmp" ] \
+    || fail_unsafe_dataset_root "refusing to replace /tmp"
+  [ "${abs_root}" != "/private/tmp" ] \
+    || fail_unsafe_dataset_root "refusing to replace /private/tmp"
+
+  printf '%s\n' "${abs_root}"
+}
+
+DATASET_ROOT="$(canonicalize_dataset_root "${DATASET_ROOT}")"
+export CQLITE_DATASETS_ROOT="${DATASET_ROOT}"
+PIN_FILE="${DATASET_ROOT}/.dataset-pin"
+WIDE_PARTITION_DIR="${DATASET_ROOT}/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294"
+WIDE_PARTITION_GOLDEN="${WIDE_PARTITION_DIR}/nb-2-big-Data.db.jsonl"
 
 write_pin() {
   mkdir -p "${DATASET_ROOT}"
@@ -118,7 +173,7 @@ if has_required_dataset; then
 fi
 
 echo "Fetching dataset ${ASSET} (tag ${TAG})"
-mkdir -p test-data/datasets
+mkdir -p "${DATASET_ROOT}"
 curl -fsSL -o "${ASSET_PATH}" "https://github.com/pmcfadin/cqlite/releases/download/${TAG}/${ASSET}"
 
 if command -v sha256sum >/dev/null 2>&1; then
@@ -145,7 +200,21 @@ else
 fi
 
 rm -rf "${DATASET_ROOT}"
-tar -xzf "${ASSET_PATH}" -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
+if [ "${DATASET_ROOT}" = "${ARCHIVE_DATASET_ROOT}" ]; then
+  tar -xzf "${ASSET_PATH}" -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
+else
+  EXTRACT_TMP="$(mktemp -d)"
+  trap 'rm -rf "${EXTRACT_TMP:-}"' EXIT
+  tar -xzf "${ASSET_PATH}" -C "${EXTRACT_TMP}" --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
+
+  if [ ! -d "${EXTRACT_TMP}/${ARCHIVE_DATASET_ROOT}" ]; then
+    echo "ERROR: dataset archive did not contain ${ARCHIVE_DATASET_ROOT}" >&2
+    exit 1
+  fi
+
+  mkdir -p "$(dirname "${DATASET_ROOT}")"
+  mv "${EXTRACT_TMP}/${ARCHIVE_DATASET_ROOT}" "${DATASET_ROOT}"
+fi
 restore_ci_tracked_dataset_files
 
 # Remove macOS AppleDouble shadow files (`._*`). The archive may contain them
