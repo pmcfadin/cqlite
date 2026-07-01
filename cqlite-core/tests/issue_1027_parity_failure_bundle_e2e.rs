@@ -15,17 +15,24 @@
 //! tempdir; a single-test binary has no intra-binary parallelism to race it.
 
 use std::path::Path;
+use std::sync::Mutex;
 
 #[path = "parity_support/mod.rs"]
 mod parity_support;
 
 use parity_support::{bundle_descriptor_for_suite, scenario, ParityFailure};
 
+/// Serialises the two tests that mutate the process-global
+/// `CQLITE_PARITY_FAILURES_ROOT` env var so they can never interleave (each sets
+/// it to its own tempdir, runs, then clears it).
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
 /// Driving the real `ParityFailure::panic` terminal for a wired suite with a real
 /// file fixture writes the shared bundle at
 /// `<root>/parity-failures/<tier>/<cass_scenario_id>/failure-artifact.json`.
 #[test]
 fn real_parity_failure_panic_emits_scenario_id_keyed_bundle() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().expect("tempdir");
     // Redirect the deterministic emit root into the tempdir.
     std::env::set_var("CQLITE_PARITY_FAILURES_ROOT", tmp.path());
@@ -82,6 +89,67 @@ fn real_parity_failure_panic_emits_scenario_id_keyed_bundle() {
     assert!(expected_bundle.join("diffs").is_dir());
     let repro = value["repro_bundle"].as_str().expect("repro_bundle");
     assert!(expected_bundle.join(repro).is_dir());
+
+    std::env::remove_var("CQLITE_PARITY_FAILURES_ROOT");
+}
+
+/// Issue #1027 finding 2 — a `ParityFailure::panic` with NO `.fixture()` still
+/// emits a conforming bundle. Several production call sites lack a fixture; the
+/// emitter is fixture-tolerant, falling back to the `<unknown>` fixture-path
+/// sentinel and the all-zero `dataset_sha256` sentinel rather than skipping.
+#[test]
+fn parity_failure_without_fixture_still_emits_conforming_bundle() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::env::set_var("CQLITE_PARITY_FAILURES_ROOT", tmp.path());
+
+    let desc =
+        bundle_descriptor_for_suite(scenario::STATISTICS_DB).expect("statistics suite is wired");
+    let record_path = tmp
+        .path()
+        .join("parity-failures")
+        .join(desc.tier)
+        .join(desc.cass_scenario_id)
+        .join("failure-artifact.json");
+
+    // Drive the real terminal WITHOUT ever calling .fixture(...).
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ParityFailure::new(scenario::STATISTICS_DB)
+            .lane("statistics_db")
+            .cassandra_source("MetadataSerializer TOC CRC32 (Statistics.db)")
+            .components(["Statistics.db"])
+            .detail("forced mismatch with no fixture attached")
+            .panic();
+    }));
+    assert!(result.is_err(), "panic() must abort the failing lane");
+
+    assert!(
+        record_path.is_file(),
+        "a no-fixture ParityFailure::panic must still emit {}",
+        record_path.display()
+    );
+
+    let text = std::fs::read_to_string(&record_path).expect("read record");
+    let value: serde_json::Value = serde_json::from_str(&text).expect("record is JSON");
+
+    // The record still joins back to the manifest and uses the two sentinels.
+    assert_eq!(value["scenario_id"].as_str(), Some(desc.cass_scenario_id));
+    let prov = &value["provenance"];
+    assert_eq!(
+        prov["fixture_path"].as_str(),
+        Some("<unknown>"),
+        "no-fixture record uses the <unknown> fixture_path sentinel (schema minLength: 1)"
+    );
+    let sha = prov["dataset_sha256"].as_str().expect("dataset_sha256");
+    assert_eq!(
+        sha,
+        "0".repeat(64),
+        "no-fixture record uses the all-zero dataset_sha256 sentinel"
+    );
+    // Sentinels must satisfy the schema patterns (fixture_path minLength 1;
+    // dataset_sha256 ^[0-9a-f]{64}$).
+    assert!(!prov["fixture_path"].as_str().unwrap_or("").is_empty());
+    assert!(sha.len() == 64 && sha.chars().all(|c| c.is_ascii_hexdigit()));
 
     std::env::remove_var("CQLITE_PARITY_FAILURES_ROOT");
 }

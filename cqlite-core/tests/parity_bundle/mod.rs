@@ -66,15 +66,29 @@ pub struct ReproContext {
     pub command_line: String,
 }
 
+/// The schema-required 64-hex `dataset_sha256` sentinel used when the fixture is
+/// missing/unreadable/a directory (issue #1027 finding 2). All-zero clearly reads
+/// as "not recorded" while satisfying the schema's `^[0-9a-f]{64}$` pattern. Kept
+/// identical to the corpus-audit lane's sentinel so both surfaces agree.
+pub const DATASET_SHA_UNAVAILABLE: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
+
 impl ReproContext {
-    /// Compute the dataset SHA-256 of the fixture, or `None` if it cannot be
-    /// read. Callers that need a schema-conforming record must ensure the fixture
-    /// exists (a real mismatch means the fixture was read moments earlier).
-    fn dataset_sha256(&self) -> Option<String> {
-        let bytes = std::fs::read(&self.fixture_path).ok()?;
-        let mut hasher = Sha256::new();
-        hasher.update(&bytes);
-        Some(format!("{:x}", hasher.finalize()))
+    /// Compute the dataset SHA-256 of the fixture, falling back to the all-zero
+    /// [`DATASET_SHA_UNAVAILABLE`] sentinel when the fixture cannot be read (it is
+    /// missing, unreadable, or a directory). `std::fs::read` returns an error for
+    /// a directory too, so this is fixture-tolerant: a required-parity failure
+    /// without a resolvable fixture still yields a schema-conforming record rather
+    /// than aborting the bundle (issue #1027 finding 2).
+    fn dataset_sha256_or_sentinel(&self) -> String {
+        match std::fs::read(&self.fixture_path) {
+            Ok(bytes) => {
+                let mut hasher = Sha256::new();
+                hasher.update(&bytes);
+                format!("{:x}", hasher.finalize())
+            }
+            Err(_) => DATASET_SHA_UNAVAILABLE.to_string(),
+        }
     }
 }
 
@@ -110,8 +124,6 @@ pub enum BundleError {
         #[source]
         source: std::io::Error,
     },
-    #[error("fixture {0} could not be read to compute its dataset SHA-256")]
-    FixtureUnreadable(PathBuf),
     #[error(transparent)]
     Emit(#[from] EmitError),
 }
@@ -260,11 +272,11 @@ impl FailureBundle {
             write_file(&diffs_dir.join(file_name), body)?;
         }
 
-        // repro/
-        let dataset_sha = self
-            .repro
-            .dataset_sha256()
-            .ok_or_else(|| BundleError::FixtureUnreadable(self.repro.fixture_path.clone()))?;
+        // repro/. Fixture-tolerant (issue #1027 finding 2): a required-parity
+        // failure whose fixture is missing/unreadable/a directory still emits a
+        // conforming record — the dataset SHA-256 falls back to the schema-valid
+        // all-zero sentinel instead of aborting the whole bundle.
+        let dataset_sha = self.repro.dataset_sha256_or_sentinel();
         write_repro(&bundle_dir, &self.repro, &dataset_sha)?;
 
         // The Wave 1 record (single source of the shape).

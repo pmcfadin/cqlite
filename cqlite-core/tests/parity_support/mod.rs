@@ -281,22 +281,30 @@ impl ParityFailure {
         panic!("{rendered}")
     }
 
-    /// Best-effort: emit the shared scenario-id-keyed failure bundle for this
-    /// failure. No-ops (logging to stderr) rather than masking the parity panic if
-    /// the suite is not wired to the bundle, no fixture was attached (its dataset
-    /// SHA-256 is a schema-required field), or the write fails — the panic below
-    /// still fails the build regardless (fail-closed, owner decision 2).
+    /// Emit the shared scenario-id-keyed failure bundle for this failure.
+    ///
+    /// Fixture-tolerant (issue #1027 finding 2): ANY `ParityFailure::panic` for a
+    /// suite that has a [`bundle_descriptor_for_suite`] descriptor ALWAYS writes a
+    /// conforming `failure-artifact.json`. When no fixture was attached — several
+    /// real call sites lack `.fixture(...)` — the record is emitted with the
+    /// explicit `<unknown>` fixture-path sentinel (satisfies the schema's
+    /// `minLength: 1`) and the all-zero `dataset_sha256` sentinel
+    /// ([`parity_bundle::DATASET_SHA_UNAVAILABLE`], the same one the corpus-audit
+    /// path uses) rather than skipping. Only a suite with NO descriptor (e.g. the
+    /// `manual_debug` delta-scan suite) writes nothing. A write error is logged to
+    /// stderr rather than masking the parity panic below, which still fails the
+    /// build regardless (fail-closed, owner decision 2).
     fn emit_failure_bundle(&self, rendered: &str) {
         let Some(desc) = bundle_descriptor_for_suite(&self.scenario_id) else {
             return;
         };
-        let Some(fixture) = self.fixture.clone() else {
-            eprintln!(
-                "issue-1027: no fixture on ParityFailure[{}]; skipping shared bundle emit",
-                self.scenario_id
-            );
-            return;
-        };
+        // Fixture-tolerant: fall back to the schema-valid `<unknown>` sentinel path
+        // (minLength: 1) when no fixture is attached; ReproContext then records the
+        // all-zero dataset_sha256 sentinel because that path is unreadable.
+        let fixture = self
+            .fixture
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("<unknown>"));
         let repro = parity_bundle::ReproContext {
             cassandra_version: "5.0.2".to_string(),
             cassandra_git_sha: "f278f6774fc76465c182041e081982105c3e7dbb".to_string(),
