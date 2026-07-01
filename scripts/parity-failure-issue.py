@@ -297,7 +297,7 @@ def cmd_file(args) -> int:
         # D2: surface the degraded path in the run summary, never silent.
         print(f"::notice::parity-failure-issue: no structured parity-failures.json "
               f"({exc}) — degraded fallback used", file=sys.stderr)
-        failures = load_degraded(args.summary_file)
+        failures = load_degraded(args.summary_file, getattr(args, "workflow_file", None))
         degraded = True
 
     if degraded:
@@ -329,19 +329,44 @@ def cmd_file(args) -> int:
     return 0
 
 
-def load_degraded(summary_file: str | None) -> list[dict]:
+def load_degraded(summary_file: str | None, workflow_file: str | None = None) -> list[dict]:
     """Degraded fallback (D2): parse failing scenarios from the lane summary.
 
     Kept intentionally conservative — it returns whatever scenarios it can positively
     identify from a `parity_summary.md`-style file (lines beginning `FAIL <scenario_id>`),
     or an empty list. An empty list on a `failure`-concluded run is surfaced by the caller
     as an anomaly (never a silent no-op).
+
+    Lane identity is KNOWN in degraded mode: `workflow_file` is the validated lane workflow
+    filename (the same value the workflow's `identity` step derives and passes as the
+    `--workflow` filter for the green-run resolve). Populating the degraded record's
+    `workflow` with the REAL lane filename keeps two things working that `"unknown"` broke:
+      * the green-lane resolver (`resolve --workflow <lane-file>`) can match + resolve a
+        degraded-filed issue (R4 for the degraded path);
+      * the degraded fingerprint is stable/aligned with the lane, so cross-run dedup of
+        degraded failures for the same lane is reliable.
+
+    `test_target` / `component_path` intentionally use a STABLE, lane-level degraded
+    sentinel (`"<lane-file>:degraded"`) rather than the free-floating `"unknown"`, so the
+    degraded fingerprint is stable across repeated degraded runs of the same lane. This is
+    consistent with the accepted lane-level v1 fidelity — finer per-scenario identity in
+    degraded mode is tracked in #1345; do NOT attempt per-scenario extraction here.
     """
     if not summary_file:
         return []
     path = Path(summary_file)
     if not path.exists():
         return []
+    lane = (workflow_file or "").strip()
+    if not lane:
+        # The lane filename should always be threaded through after the replay-validation
+        # fix. If it is somehow absent, fail closed with a surfaced warning rather than
+        # silently writing an unresolvable `"unknown"` identity.
+        print("::warning::parity-failure-issue: degraded fallback missing the lane workflow "
+              "filename — cannot file a resolvable/stable degraded issue (no issue filed)",
+              file=sys.stderr)
+        return []
+    sentinel = f"{lane}:degraded"
     failures: list[dict] = []
     for line in path.read_text().splitlines():
         stripped = line.strip()
@@ -352,9 +377,13 @@ def load_degraded(summary_file: str | None) -> list[dict]:
             continue
         failures.append({
             "scenario_id": scenario,
-            "workflow": "unknown",
-            "test_target": "unknown",
-            "component_path": "unknown",
+            # Real lane filename -> matchable by `resolve --workflow <lane-file>` + stable
+            # across runs (unblocks R4 on the degraded path; stabilizes cross-run dedup).
+            "workflow": lane,
+            # Lane-level degraded sentinels (stable across repeated degraded runs of this
+            # lane). Per-scenario degraded identity is #1345 — intentionally not extracted.
+            "test_target": sentinel,
+            "component_path": sentinel,
             "failure_class": "DegradedParse",
         })
     return failures
@@ -447,6 +476,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="originating run conclusion (failure|success|...)")
     fi.add_argument("--tier", default="nightly_docker", help="CI tier of the failing lane")
     fi.add_argument("--repro", default="see run logs", help="reproduction command")
+    fi.add_argument("--workflow-file", dest="workflow_file", default=None,
+                    help="validated lane workflow filename (e.g. tombstone-ttl-parity.yml); "
+                         "used ONLY on the degraded fallback path to populate the known lane "
+                         "identity so the degraded issue is resolvable by the green-run "
+                         "`resolve --workflow` filter and its fingerprint is stable/aligned "
+                         "with the lane. Ignored when a structured --failures-json is present.")
 
     rs = sub.add_parser("resolve", help="post a resolution comment (never closes)")
     common(rs)

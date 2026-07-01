@@ -327,6 +327,11 @@ jobs:
           # Fix C: the effective run link (payload html_url, or reconstructed from the
           # manual replay id). Passed as a quoted env var — never inlined as an expression.
           RUN_URL: ${{ steps.identity.outputs.run_url }}
+          # The validated lane workflow FILENAME derived by the identity step (same value
+          # used to scope the green-run resolve). Threaded into the degraded fallback so a
+          # degraded-filed issue carries the KNOWN lane identity — resolvable by the green
+          # `resolve --workflow` filter and with a stable, lane-aligned fingerprint.
+          LANE_FILE: ${{ steps.identity.outputs.lane_file }}
         run: |
           set -euo pipefail
           REPRO="See the failing run: ${RUN_URL:-<run url unavailable>}"
@@ -335,9 +340,14 @@ jobs:
             ARGS+=(--failures-json artifacts/parity-failures.json)
           elif [ -n "${SUMMARY_FILE:-}" ]; then
             # R3 degraded path: feed the located summary/log to load_degraded() so it has
-            # real input. If it parses zero failures on a failure run the script surfaces
-            # a loud anomaly (::error::) — never a silent no-op.
+            # real input. Also pass the KNOWN lane workflow filename so the degraded record
+            # records the real lane (matchable by the green-run resolver + stable
+            # fingerprint), never the free-floating "unknown". If it parses zero failures on
+            # a failure run the script surfaces a loud anomaly (::error::) — never silent.
             ARGS+=(--summary-file "${SUMMARY_FILE}")
+            if [ -n "${LANE_FILE:-}" ]; then
+              ARGS+=(--workflow-file "${LANE_FILE}")
+            fi
           fi
           # Non-gating: never let a filing error red the automation. `|| true` keeps the
           # job green; the anomaly / degraded notices are surfaced to the run summary by

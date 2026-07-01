@@ -46,6 +46,7 @@ def _args(**overrides):
         failures_json=None, summary_file=None, open_issues_json=None,
         run_url="https://gh/run/1", dry_run=True, conclusion="failure",
         tier="nightly_docker", repro="cargo test -p x", workflow="",
+        workflow_file="tombstone-ttl-parity.yml",
     )
     for k, v in overrides.items():
         setattr(ns, k, v)
@@ -258,6 +259,47 @@ class DegradedFallbackTests(unittest.TestCase):
             self.assertIn("degraded=true", out.getvalue())
             # A create plan was emitted for the parsed scenario (dry-run output).
             self.assertIn("cass.compaction.stcs_merge", out.getvalue())
+
+    def test_degraded_record_carries_known_lane_identity(self):
+        # The degraded record must record the REAL lane workflow filename (matchable by the
+        # green-run `resolve --workflow` filter) and a STABLE lane-level sentinel for
+        # test_target/component_path — never the free-floating "unknown".
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            summary = tmp / "parity_summary.md"
+            summary.write_text("FAIL cass.ttl.expiry details\n")
+            recs = pfi.load_degraded(str(summary), "tombstone-ttl-parity.yml")
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["workflow"], "tombstone-ttl-parity.yml")
+        self.assertEqual(recs[0]["test_target"], "tombstone-ttl-parity.yml:degraded")
+        self.assertEqual(recs[0]["component_path"], "tombstone-ttl-parity.yml:degraded")
+
+    def test_degraded_fingerprint_stable_across_runs_same_lane(self):
+        # Two independent degraded parses of the same lane + scenario must fingerprint
+        # identically (stable cross-run dedup of degraded failures).
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            s1 = tmp / "run1.md"
+            s2 = tmp / "run2.md"
+            s1.write_text("FAIL cass.ttl.expiry run1-extra\n")
+            s2.write_text("FAIL cass.ttl.expiry run2-different-noise\n")
+            r1 = pfi.load_degraded(str(s1), "tombstone-ttl-parity.yml")
+            r2 = pfi.load_degraded(str(s2), "tombstone-ttl-parity.yml")
+        self.assertEqual(
+            pfi.compute_fingerprint(r1[0]), pfi.compute_fingerprint(r2[0]))
+
+    def test_degraded_without_lane_fails_closed_with_warning(self):
+        # If the lane filename is somehow unavailable, load_degraded fails closed (no
+        # records) with a surfaced ::warning:: rather than writing an unresolvable identity.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            summary = tmp / "parity_summary.md"
+            summary.write_text("FAIL cass.ttl.expiry details\n")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                recs = pfi.load_degraded(str(summary), None)
+        self.assertEqual(recs, [])
+        self.assertIn("::warning::", err.getvalue())
 
     def test_zero_parsed_on_success_is_noop(self):
         out = io.StringIO()
