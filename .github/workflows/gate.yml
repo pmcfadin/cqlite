@@ -112,21 +112,20 @@ jobs:
       # #722). This lane builds the workspace, both binding modules, pulls the
       # dataset corpus, AND — after #1269 — provisions a large swapfile on /mnt
       # for OOM headroom, so free disk is a co-factor in the observed runner
-      # kills. Use the well-known jlumbroso/free-disk-space action, which strips
-      # far more than the old hand-rolled rm -rf (dotnet, android, haskell, the
-      # large hosted toolcache, and unused /usr/local dirs), reclaiming ~20-30
-      # GB on both / and /mnt. Pinned to @main to match this repo's tag-based
-      # action-pinning convention (no commit-SHA pins elsewhere).
+      # kills. Reclaim the big unused toolchains with an INLINE cleanup rather
+      # than a third-party action: this job validates PR-controlled code, so a
+      # mutable `@main` action ref (a moving target that could be tampered with
+      # upstream) has no business running before the gate (roborev). Strips
+      # dotnet, android, haskell, the large hosted toolcache, and unused
+      # /usr/local dirs — ~20-30 GB reclaimed with only in-repo shell.
       - name: Free disk space (issue #722, #1269)
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: false
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune --all --force || true
+          df -h / | tail -1
 
       # This lane RUNS the gate's clippy + fmt components, so it needs a
       # toolchain that has clippy + rustfmt. Follow the quality-gates.yml
