@@ -1,24 +1,33 @@
 #!/usr/bin/env python3
-"""validate-committed-dir-binding.py — pre-regeneration enforcement of the COMMITTED
-full-fixture-dir binding (issue #1294 roborev Finding 2).
+"""validate-committed-dir-binding.py — pre-regeneration enforcement of BOTH COMMITTED
+byte-bindings: the full-fixture-dir binding (verdict_captured_for_dir_sha256) AND the
+mutated-component binding (verdict_captured_for_sha256) (issue #1294 roborev Findings
+1 & 2).
 
 WHY
 ---
 The compression/corruption-parity and exhaustive-regeneration CI lanes REGENERATE
-corruption-manifest.yml from generate-corruption-corpus.sh, which REBINDS
-verdict_captured_for_dir_sha256 to the freshly-regenerated full-dir hash on benign
-live-Cassandra sibling drift. The drift-guard projection (extract-corruption-oracle.py)
-therefore — correctly — OMITS verdict_captured_for_dir_sha256, otherwise a benign
-regeneration would false-fail CI. But that left the COMMITTED dir-binding ungated: a PR
-that edits ONLY the committed verdict_captured_for_dir_sha256 (inconsistent with the
-committed fixture bytes) would be silently overwritten at regeneration time and pass.
+corruption-manifest.yml from generate-corruption-corpus.sh, which REBINDS BOTH
+verdict_captured_for_dir_sha256 AND verdict_captured_for_sha256 to the
+freshly-regenerated hashes on benign live-Cassandra sibling drift. The drift-guard
+projection (extract-corruption-oracle.py) therefore — correctly — OMITS BOTH of those
+rebound hashes, otherwise a benign regeneration would false-fail CI. But that left BOTH
+COMMITTED bindings ungated: a PR that edits ONLY the committed
+verdict_captured_for_dir_sha256 OR ONLY the committed verdict_captured_for_sha256
+(inconsistent with the committed fixture bytes) would be silently overwritten at
+regeneration time and pass.
 
-This validator closes that hole. It runs BEFORE regeneration overwrites anything,
-against the COMMITTED manifest and the on-disk (committed/fetched) fixture binaries,
-recomputing each active fixture's full-dir hash with the EXACT algorithm used by
-generate-corruption-corpus.sh::fixture_dir_sha256 and
-sstable_parity_corruption_verify.rs::fixture_dir_sha256, and FAILS CLOSED on any
-mismatch. A committed dir-sha edit inconsistent with the bytes is caught here, before
+This validator closes that hole for BOTH bindings. It runs BEFORE regeneration
+overwrites anything, against the COMMITTED manifest and the on-disk (committed/fetched)
+fixture binaries:
+  * recomputes each active fixture's full-dir hash with the EXACT algorithm used by
+    generate-corruption-corpus.sh::fixture_dir_sha256 /
+    sstable_parity_corruption_verify.rs::fixture_dir_sha256, and
+  * recomputes each active fixture's MUTATED-component hash (plain SHA-256 of
+    <fixture-dir>/<component>) with the EXACT algorithm used by the generator's
+    sha256() / sstable_parity_corruption_verify.rs::sha256_file,
+and FAILS CLOSED on any mismatch of either binding. A committed dir-sha OR
+mutated-component-sha edit inconsistent with the bytes is caught here, before
 regeneration can rebind it away.
 
 INVARIANT C is preserved: this runs PRE-regeneration against the committed bytes the
@@ -27,9 +36,10 @@ committed dir-sha was authored against, so a later benign live-Cassandra regener
 
 Fixture-gating (issue #1094): when a fixture's binaries are NOT present on disk
 (gitignored, not fetched/regenerated in this lane) the fixture is skipped — there is
-nothing to validate the committed dir-sha against. With --require, a fixture whose dir
-is present-but-incomplete is a hard failure. Pre-#1294 fixtures (empty
-verdict_captured_for_dir_sha256) are skipped (no binding recorded).
+nothing to validate the committed bindings against. With --require, a fixture whose dir
+is present-but-incomplete is a hard failure. Pre-#1294 fixtures (both committed bindings
+empty) are skipped (no binding recorded). A fixture counts as validated when at least
+one of its committed bindings is present and matches the on-disk bytes.
 
 Usage:
   validate-committed-dir-binding.py <committed-manifest.yml> <corpus-root-dir> [--require]
@@ -58,6 +68,16 @@ def fixture_dir_sha256(d: str) -> str:
         h.update(len(data).to_bytes(8, "big"))
         h.update(data)
     h.update(len(names).to_bytes(8, "big"))
+    return h.hexdigest()
+
+
+def component_sha256(path: str) -> str:
+    """Plain SHA-256 of a single component file — byte-for-byte identical to the
+    generator's sha256() (sha256sum/shasum -a 256) and
+    sstable_parity_corruption_verify.rs::sha256_file, which is what
+    verdict_captured_for_sha256 is bound to (the MUTATED component's corrupted sha)."""
+    h = hashlib.sha256()
+    h.update(open(path, "rb").read())
     return h.hexdigest()
 
 
@@ -96,18 +116,20 @@ def main() -> int:
         if field("status") != "active":
             continue
         committed_dir_sha = field("verdict_captured_for_dir_sha256")
-        if not committed_dir_sha:
-            # pre-#1294 fixture: no full-dir binding recorded.
+        committed_component_sha = field("verdict_captured_for_sha256")
+        component = field("component")
+        if not committed_dir_sha and not committed_component_sha:
+            # pre-#1294 fixture: no committed binding recorded at all.
             continue
 
         fixture_dir = os.path.join(corpus_root, name)
         if not os.path.isdir(fixture_dir) or not has_data_db(fixture_dir):
             # Binaries gitignored and not fetched/regenerated in this lane: nothing
-            # to validate the committed dir-sha against.
+            # to validate the committed bindings against.
             if require:
                 failures.append(
                     f"{name}: --require set but fixture binaries absent at "
-                    f"{fixture_dir} (no Data.db); cannot validate committed dir-sha"
+                    f"{fixture_dir} (no Data.db); cannot validate committed bindings"
                 )
             else:
                 sys.stderr.write(
@@ -117,23 +139,64 @@ def main() -> int:
                 skipped += 1
             continue
 
-        on_disk = fixture_dir_sha256(fixture_dir)
-        if on_disk != committed_dir_sha:
-            failures.append(
-                f"{name}: COMMITTED verdict_captured_for_dir_sha256 "
-                f"({committed_dir_sha}) does NOT match the on-disk full-dir hash "
-                f"({on_disk}). The committed dir-binding is inconsistent with the "
-                f"committed fixture bytes — a committed dir-sha edit would be silently "
-                f"rebound by regeneration. Recompute it from the actual fixture bytes "
-                f"(issue #1294 Item 2 / roborev Finding 2)."
-            )
-        else:
+        matched_a_binding = False
+
+        # Committed full-dir binding (verdict_captured_for_dir_sha256).
+        if committed_dir_sha:
+            on_disk = fixture_dir_sha256(fixture_dir)
+            if on_disk != committed_dir_sha:
+                failures.append(
+                    f"{name}: COMMITTED verdict_captured_for_dir_sha256 "
+                    f"({committed_dir_sha}) does NOT match the on-disk full-dir hash "
+                    f"({on_disk}). The committed dir-binding is inconsistent with the "
+                    f"committed fixture bytes — a committed dir-sha edit would be "
+                    f"silently rebound by regeneration. Recompute it from the actual "
+                    f"fixture bytes (issue #1294 Item 2 / roborev Finding 2)."
+                )
+            else:
+                matched_a_binding = True
+
+        # Committed MUTATED-component binding (verdict_captured_for_sha256). The
+        # post-regen drift guard (extract-corruption-oracle.py) also EXCLUDES this
+        # rebound hash, so without this check a PR editing ONLY the committed
+        # mutated-component sha is silently overwritten on regeneration.
+        if committed_component_sha:
+            component_file = os.path.join(fixture_dir, component)
+            if not component:
+                failures.append(
+                    f"{name}: committed verdict_captured_for_sha256 present but "
+                    f"the 'component' field is empty; cannot locate the mutated "
+                    f"component to validate against."
+                )
+            elif not os.path.isfile(component_file):
+                failures.append(
+                    f"{name}: --require set but the mutated component "
+                    f"'{component}' is absent at {component_file}; cannot validate "
+                    f"committed verdict_captured_for_sha256."
+                )
+            else:
+                on_disk_component = component_sha256(component_file)
+                if on_disk_component != committed_component_sha:
+                    failures.append(
+                        f"{name}: COMMITTED verdict_captured_for_sha256 "
+                        f"({committed_component_sha}) does NOT match the on-disk "
+                        f"mutated-component ('{component}') hash "
+                        f"({on_disk_component}). The committed mutated-component "
+                        f"binding is inconsistent with the committed fixture bytes — "
+                        f"a committed mutated-sha edit would be silently rebound by "
+                        f"regeneration. Recompute it from the actual component bytes "
+                        f"(issue #1294 Item 1 / roborev Finding 1)."
+                    )
+                else:
+                    matched_a_binding = True
+
+        if matched_a_binding:
             checked += 1
 
     if failures:
         sys.stderr.write(
-            "\nFATAL: committed full-fixture-dir binding(s) inconsistent with the "
-            "committed bytes (issue #1294 roborev Finding 2):\n"
+            "\nFATAL: committed byte-binding(s) inconsistent with the committed "
+            "bytes (issue #1294 roborev Findings 1 & 2):\n"
         )
         for f in failures:
             sys.stderr.write(f"  - {f}\n")
@@ -146,7 +209,7 @@ def main() -> int:
         )
         if require:
             sys.stderr.write(
-                "FATAL: --require set but no committed dir-bindings could be "
+                "FATAL: --require set but no committed bindings could be "
                 f"validated (binaries absent). {msg}\n"
             )
             return 1
@@ -154,8 +217,9 @@ def main() -> int:
         return 0
 
     print(
-        f"validate-committed-dir-binding: {checked} committed dir-binding(s) match "
-        f"the committed bytes ({skipped} skipped, binaries absent)."
+        f"validate-committed-dir-binding: {checked} fixture(s) with committed "
+        f"binding(s) (dir-sha and/or mutated-component-sha) match the committed "
+        f"bytes ({skipped} skipped, binaries absent)."
     )
     return 0
 

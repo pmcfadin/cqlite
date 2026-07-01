@@ -143,6 +143,37 @@ jobs:
       - name: Generate corruption corpus (test_comp_corrupt, issue #999)
         run: bash test-data/scripts/generate-corruption-corpus.sh
 
+      - name: Guard — committed byte-bindings match on-disk bytes (issue #1294 Findings 1 & 2)
+        # Issue #1294 roborev Findings 1 & 2: enforce BOTH COMMITTED byte-bindings
+        # (verdict_captured_for_dir_sha256 AND verdict_captured_for_sha256) against
+        # the on-disk fixture bytes. The post-regeneration oracle guard below
+        # (extract-corruption-oracle.py) deliberately EXCLUDES both of these rebound
+        # hashes — the generator REBINDS them on benign live-Cassandra drift (MODE 2)
+        # — so without this step a PR that edits ONLY a committed dir-sha OR ONLY a
+        # committed mutated-component sha would be silently overwritten at regeneration
+        # and pass. The corruption `.db` binaries are gitignored and NOT in the fetch
+        # bundle, so they exist only AFTER the generation step above; this guard runs
+        # AFTER generation and validates the COMMITTED manifest (from git HEAD, so the
+        # working-tree manifest just overwritten by regeneration cannot mask a committed
+        # binding edit) against the byte-reproducible on-disk fixtures. A byte-stable
+        # fixture reproduces identical bytes, so a committed binding tampered
+        # inconsistent with those bytes FAILS here (MODE 1); the MODE 2 benign rebind is
+        # untouched. `--require` fails closed on an empty/absent fixture set. Mirrors the
+        # exhaustive-regeneration lane. Uses only static strings / workflow-level env
+        # (no ${{ github.event.* }} injection surface).
+        shell: bash
+        run: |
+          set -euo pipefail
+          committed="test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml"
+          if ! git show "HEAD:$committed" > /tmp/committed-corruption-manifest.yml 2>/dev/null; then
+            echo "FATAL: committed manifest $committed not found in HEAD" >&2
+            exit 1
+          fi
+          python3 test-data/scripts/validate-committed-dir-binding.py \
+            /tmp/committed-corruption-manifest.yml \
+            "$CQLITE_DATASETS_ROOT/corruption/test_comp_corrupt" \
+            --require
+
       - name: Guard — committed corruption oracle must not be silently regenerated (issue #1294 Item 2)
         # The step above REGENERATES corruption-manifest.yml from the generator's
         # hard-coded FIXTURES table. A PR that edits ONLY a committed oracle field

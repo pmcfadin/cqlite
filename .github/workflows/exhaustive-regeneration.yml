@@ -67,29 +67,6 @@ jobs:
       - name: Fetch dataset binaries (clean sources)
         run: bash test-data/scripts/fetch-datasets.sh
 
-      # Issue #1294 roborev Finding 2: enforce the COMMITTED full-fixture-dir binding
-      # BEFORE regeneration overwrites the manifest. The post-regeneration drift guard
-      # (extract-corruption-oracle.py) deliberately OMITS both verdict_captured_for_dir_sha256
-      # AND verdict_captured_for_sha256 because the generator REBINDS them on benign
-      # live-Cassandra drift (MODE 2) — so a PR that edits ONLY the committed dir-sha would
-      # otherwise be silently rebound away and pass. The fetched (committed) corruption
-      # binaries + committed manifest coexist at this point (this step runs AFTER
-      # fetch-datasets.sh), so we recompute each active fixture's on-disk full-dir hash with
-      # the identical algorithm and fail closed on any mismatch with the committed dir-sha.
-      # `--require` makes the guard fail-closed on an EMPTY/absent fixture set too (never
-      # pass on zero validated): with binaries present it validates >=1 committed binding,
-      # and if none could be validated (binaries missing) it is a hard error rather than a
-      # silent no-op (roborev Finding 2). This catches a committed-dir-sha-only edit; the
-      # MODE 2 benign regen rebind is untouched because this runs PRE-regeneration against
-      # the committed bytes (MODE 1).
-      - name: Guard — committed full-dir binding matches committed bytes (issue #1294 Finding 2)
-        run: |
-          set -euo pipefail
-          python3 test-data/scripts/validate-committed-dir-binding.py \
-            test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml \
-            "$CQLITE_DATASETS_ROOT/corruption/test_comp_corrupt" \
-            --require
-
       # Snapshot the committed reference-golden checksums BEFORE regeneration.
       # After regeneration we recompute the same set; the audit's
       # "unexpected component change" check flags any golden whose bytes drifted
@@ -131,6 +108,31 @@ jobs:
           set -euo pipefail
           bash test-data/scripts/generate-corruption-corpus.sh \
             2>&1 | tee "$ARTIFACT_DIR/generate-corruption-corpus.log"
+
+      # Issue #1294 roborev Findings 1 & 2: enforce BOTH COMMITTED byte-bindings
+      # (verdict_captured_for_dir_sha256 AND verdict_captured_for_sha256) against the
+      # bytes on disk. The post-regeneration drift guard (extract-corruption-oracle.py)
+      # deliberately OMITS both rebound hashes because the generator REBINDS them on
+      # benign live-Cassandra drift (MODE 2) — so a PR that edits ONLY a committed
+      # dir-sha OR ONLY a committed mutated-component sha would otherwise be silently
+      # rebound away and pass. The corruption `.db` binaries are gitignored and NOT in
+      # the fetch bundle, so they only exist AFTER generate-corruption-corpus.sh above.
+      # We therefore validate the COMMITTED manifest (from git HEAD, so a working-tree
+      # manifest just overwritten by regeneration cannot mask a committed binding edit)
+      # against the byte-reproducible on-disk fixtures. A byte-stable fixture reproduces
+      # identical bytes, so a committed binding tampered inconsistent with those bytes
+      # FAILS here (MODE 1); a benign non-reproducible drift is out of the committed
+      # byte-stable set and is handled by the generator's MODE 2 rebind, untouched here.
+      # `--require` fails closed on an EMPTY/absent fixture set (never a silent no-op).
+      - name: Guard — committed byte-bindings match on-disk bytes (issue #1294 Findings 1 & 2)
+        run: |
+          set -euo pipefail
+          git show "HEAD:test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml" \
+            > "$ARTIFACT_DIR/committed-corruption-manifest.yml"
+          python3 test-data/scripts/validate-committed-dir-binding.py \
+            "$ARTIFACT_DIR/committed-corruption-manifest.yml" \
+            "$CQLITE_DATASETS_ROOT/corruption/test_comp_corrupt" \
+            --require
 
       # Package the regenerated corpus to obtain the asset name + SHA256 for the
       # provenance record. NO publish (design D6 / non-goal).
