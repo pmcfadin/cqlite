@@ -188,7 +188,11 @@ impl EstimatedHistogram {
         for (i, &count) in self.counts.iter().enumerate() {
             // Cassandra serialiser: writeLong(offsets[i == 0 ? 0 : i - 1]).
             let off_idx = i.saturating_sub(1);
-            let offset = self.offsets.get(off_idx).copied().unwrap_or(OVERFLOW_OFFSET);
+            let offset = self
+                .offsets
+                .get(off_idx)
+                .copied()
+                .unwrap_or(OVERFLOW_OFFSET);
             buffer.extend_from_slice(&offset.to_be_bytes());
             // Counts are logically non-negative; the reader decodes each as i64.
             buffer.extend_from_slice(&(count as i64).to_be_bytes());
@@ -285,7 +289,10 @@ mod tests {
         //   value 1 -> exact match on offset[0] == 1 -> bucket 0.
         h.add(0);
         h.add(1);
-        assert_eq!(h.counts[0], 2, "values 0 and 1 both fall in the offset-1 bucket");
+        assert_eq!(
+            h.counts[0], 2,
+            "values 0 and 1 both fall in the offset-1 bucket"
+        );
         assert_eq!(h.offsets[0], 1);
         // value 2 lands in the offset-2 bucket (index 1).
         h.add(2);
@@ -320,6 +327,31 @@ mod tests {
             let got = i64::from_be_bytes(buf[opos..opos + 8].try_into().unwrap());
             assert_eq!(got, want, "serialised partition-size offset[{i}]");
         }
+
+        // BYTE-FOR-BYTE pin against the committed annotated Statistics.db fixture
+        // (`docs/sstables-definitive-guide/statistics-db-annotated-dump.txt`, STATS
+        // component at 0x0b53, first 128 bytes = bucketCount + first 7 full
+        // (offset,count) pairs + one more offset). This nails the interleaved
+        // `i32 bucketCount` then `(i64 offset, i64 count)` layout, big-endian
+        // ordering, and the empty (all-zero) counts of a freshly-seeded histogram
+        // to the REAL Cassandra 5.0 bytes — not just the decoded i64 offset values.
+        #[rustfmt::skip]
+        let fixture_first_128: [u8; 128] = [
+            0x00, 0x00, 0x00, 0x9c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(
+            &buf[..128],
+            &fixture_first_128,
+            "serialised partition-size histogram must match the annotated \
+             Statistics.db fixture byte-for-byte (STATS at 0x0b53)"
+        );
     }
 
     /// Issue #1327 finding 1: the `estimatedCellPerPartitionCount` histogram

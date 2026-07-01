@@ -490,8 +490,10 @@ mod tests {
 
         // STATS component now has a complex binary format (nb version)
         // It should contain:
-        // - 2x EstimatedHistogram — canonical 156-bucket series (issue #1327):
-        //   4 + 156*16 = 2500 bytes each
+        // - estimatedPartitionSize EstimatedHistogram — 156 buckets (issue #1327):
+        //   4 + 156*16 = 2500 bytes
+        // - estimatedCellPerPartitionCount EstimatedHistogram — 119 buckets
+        //   (EH(118), distinct Cassandra shape, issue #1327): 4 + 119*16 = 1908 bytes
         // - CommitLogPosition upper bound (12 bytes)
         // - min/max timestamps (16 bytes)
         // - min/max deletion times (8 bytes)
@@ -509,8 +511,9 @@ mod tests {
         // - pendingRepair (1 byte)
         // - isTransient (1 byte)
         // - originatingHostId (1 byte)
-        let est_histogram_bytes = 4 + 156 * 16; // 2500
-        let two_histograms = 2 * est_histogram_bytes; // 5000
+        let partition_size_bytes = 4 + 156 * 16; // 2500
+        let cell_count_bytes = 4 + 119 * 16; // 1908 (EH(118) — distinct shape)
+        let two_histograms = partition_size_bytes + cell_count_bytes; // 4408
         let fixed_tail = 12 + 16 + 8 + 8 + 8 + 8 + 4 + 8 + 8 + 1 + 8 + 8 + 12 + 4 + 1 + 1 + 1;
         let expected_len = two_histograms + fixed_tail;
         assert_eq!(data.len(), expected_len);

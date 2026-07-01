@@ -625,12 +625,14 @@ mod tests {
         assert_eq!(hll_version, -2, "HLL version should be -2");
 
         // Verify STATS component has correct total size (+ 4 byte checksum).
-        // Issue #1327: the two leading EstimatedHistograms are now the canonical
-        // 156-bucket series (4 + 156*16 = 2500 bytes each) instead of the old
-        // empty 36-byte stubs, so the STATS body grew by 2*(2500-36) = 4928 to
-        // 188 + 4928 = 5116 bytes.
-        let est_histogram_bytes = 4 + 156 * 16; // i32 count + 156*(i64 offset + i64 count)
-        let two_histograms = 2 * est_histogram_bytes;
+        // Issue #1327: the two leading EstimatedHistograms now use their DISTINCT
+        // Cassandra shapes — estimatedPartitionSize is EH(155) => 156 buckets
+        // (4 + 156*16 = 2500 bytes) and estimatedCellPerPartitionCount is EH(118)
+        // => 119 buckets (4 + 119*16 = 1908 bytes) — instead of the old empty
+        // 36-byte stubs. So the STATS body grew by (2500-36)+(1908-36) = 4336.
+        let partition_size_bytes = 4 + 156 * 16; // 2500
+        let cell_count_bytes = 4 + 119 * 16; // 1908 (EH(118) — distinct shape)
+        let two_histograms = partition_size_bytes + cell_count_bytes;
         let expected_stats_size = 188 - 72 + two_histograms; // old 72 = 2*36 empty stubs
         let stats_end = header_offset;
         let stats_size = stats_end - stats_offset - 4; // -4 for checksum
@@ -709,8 +711,9 @@ mod tests {
                 as usize;
 
         // Within the STATS component, the tombstone-histogram field starts after:
-        //   2 × EstimatedHistogram  = 2 × (4 + 156*16) = 5000 bytes (issue #1327:
-        //                             canonical 156-bucket series, not empty stubs)
+        //   estimatedPartitionSize  = 4 + 156*16 = 2500 bytes (EH(155), issue #1327)
+        //   estimatedCellPerPartitionCount = 4 + 119*16 = 1908 bytes (EH(118),
+        //                             distinct Cassandra shape, issue #1327)
         //   CommitLogPosition upper = 12 bytes
         //   minTimestamp (i64)      =  8 bytes
         //   maxTimestamp (i64)      =  8 bytes
@@ -719,7 +722,7 @@ mod tests {
         //   minTTL                  =  4 bytes
         //   maxTTL                  =  4 bytes
         //   compressionRatio (f64)  =  8 bytes
-        let two_histograms = 2 * (4 + 156 * 16);
+        let two_histograms = (4 + 156 * 16) + (4 + 119 * 16);
         let histogram_offset = stats_offset + two_histograms + 12 + 8 + 8 + 4 + 4 + 4 + 4 + 8;
 
         // Read maxBinSize and size
