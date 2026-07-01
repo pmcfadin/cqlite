@@ -37,6 +37,16 @@
 //!     the discrepancy printed to the test stdout (no `<lane>.diff` is written for
 //!     those); they remain real, build-failing assertions regardless.
 //!
+//! Additionally (issue #1027 finding 1), [`ParityFailure::panic`] — the single
+//! common terminal for every concrete mismatch site — routes through the shared,
+//! scenario-id-keyed failure-bundle emitter (the `parity_bundle` module, the same
+//! one the synthetic issue-1027 test exercises). On a real red required-parity run
+//! it writes `parity-failures/<tier>/<scenario_id>/failure-artifact.json` to the
+//! deterministic root matching the workflow upload globs, keyed by the REAL
+//! manifest `cass.*` scenario id each suite binds to (see
+//! [`bundle_descriptor_for_suite`]). The legacy `target/cassandra-parity/**` diff
+//! is kept alongside it.
+//!
 //! Allowing dead code: not every consumer uses every helper, and each strict
 //! test compiles this module independently.
 #![allow(dead_code)]
