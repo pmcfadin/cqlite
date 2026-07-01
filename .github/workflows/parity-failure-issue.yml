@@ -17,7 +17,9 @@ name: Parity Failure Issue Automation
 #   D5 NON-GATING + fail-open: this job never changes the parity lane's result; absent
 #      issue-write token -> `::notice::` + exit 0; never auto-closes.
 #   R4 on a SUCCESS conclusion of a tracked lane, post a "resolved" comment on that
-#      lane's open parity-failure issues (never auto-closes) — same allowlist + guard.
+#      lane's open parity-failure issues ONLY (scoped by the lane's workflow filename,
+#      derived from the completed run's payload path / name), never auto-closes — same
+#      allowlist + guard.
 #
 # SECURITY: this workflow consumes an UNTRUSTED `workflow_run` payload. It never
 # interpolates event fields into a `run:` shell — every event value is passed via a
@@ -70,6 +72,7 @@ jobs:
       WR_EVENT: ${{ github.event.workflow_run.event }}
       WR_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
       WR_NAME: ${{ github.event.workflow_run.name }}
+      WR_PATH: ${{ github.event.workflow_run.path }}
       WR_URL: ${{ github.event.workflow_run.html_url }}
       WR_ID: ${{ github.event.workflow_run.id }}
       WR_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
@@ -119,6 +122,54 @@ jobs:
               echo "proceed=false" >> "$GITHUB_OUTPUT"
               ;;
           esac
+
+      - name: Derive run link + lane workflow filename
+        id: identity
+        if: steps.guard.outputs.skip != 'true' && steps.validate.outputs.proceed == 'true'
+        env:
+          REPO: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          set -euo pipefail
+          # Fix C: on a workflow_dispatch replay the workflow_run payload is empty, so
+          # WR_URL is blank. Reconstruct the run link from the manual DISPATCH_RUN_ID so a
+          # replay-created/updated issue still records a real "Latest failure" link. All
+          # inputs are passed via quoted env vars — never inlined as workflow expressions.
+          RUN_URL="${WR_URL:-}"
+          if [ -z "${RUN_URL}" ] && [ -n "${DISPATCH_RUN_ID:-}" ]; then
+            # DISPATCH_RUN_ID is untrusted workflow_dispatch input; require it be numeric
+            # (fail-closed) before assembling a URL from it.
+            if printf '%s' "${DISPATCH_RUN_ID}" | grep -Eq '^[0-9]+$'; then
+              RUN_URL="${SERVER_URL}/${REPO}/actions/runs/${DISPATCH_RUN_ID}"
+            else
+              echo "::notice::DISPATCH_RUN_ID '${DISPATCH_RUN_ID}' is not a numeric run id — leaving run link empty."
+            fi
+          fi
+          echo "run_url=${RUN_URL}" >> "$GITHUB_OUTPUT"
+
+          # Fix A: map the completed run's identity to its workflow FILENAME so the
+          # green-lane resolve is scoped to THAT lane only (never all open issues). Prefer
+          # the payload `path` (`.github/workflows/<file>`); fall back to a name→filename
+          # lookup for the 4 tracked lanes. WR_PATH / WR_NAME are untrusted -> quoted env.
+          LANE_FILE=""
+          if [ -n "${WR_PATH:-}" ]; then
+            LANE_FILE="$(basename "${WR_PATH}")"
+          fi
+          if [ -z "${LANE_FILE}" ]; then
+            case "${WR_NAME:-}" in
+              "CI: Compression / Corruption Parity (Nightly Docker, Epic #970)")
+                LANE_FILE="compression-corruption-parity.yml" ;;
+              "CI: CQL Type & Schema-Evolution Parity (Nightly Docker, Epic #971)")
+                LANE_FILE="cql-type-parity.yml" ;;
+              "CI: Tombstone / TTL Parity (Nightly Docker, Epic #972)")
+                LANE_FILE="tombstone-ttl-parity.yml" ;;
+              "Exhaustive Regeneration (parity corpus)")
+                LANE_FILE="exhaustive-regeneration.yml" ;;
+              *)
+                echo "::notice::could not map workflow_run name '${WR_NAME:-<none>}' to a tracked lane filename — resolve will be a no-op." ;;
+            esac
+          fi
+          echo "lane_file=${LANE_FILE}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout (for the fingerprint/dedup script)
         if: steps.guard.outputs.skip != 'true' && steps.validate.outputs.proceed == 'true'
@@ -191,10 +242,13 @@ jobs:
         env:
           HAVE_ARTIFACT: ${{ steps.artifact.outputs.have_artifact }}
           SUMMARY_FILE: ${{ steps.artifact.outputs.summary_file }}
+          # Fix C: the effective run link (payload html_url, or reconstructed from the
+          # manual replay id). Passed as a quoted env var — never inlined as an expression.
+          RUN_URL: ${{ steps.identity.outputs.run_url }}
         run: |
           set -euo pipefail
-          REPRO="See the failing run: ${WR_URL:-<run url unavailable>}"
-          ARGS=(file --run-url "${WR_URL:-}" --conclusion "${WR_CONCLUSION:-failure}" --repro "${REPRO}")
+          REPRO="See the failing run: ${RUN_URL:-<run url unavailable>}"
+          ARGS=(file --run-url "${RUN_URL:-}" --conclusion "${WR_CONCLUSION:-failure}" --repro "${REPRO}")
           if [ "${HAVE_ARTIFACT:-false}" = "true" ]; then
             ARGS+=(--failures-json artifacts/parity-failures.json)
           elif [ -n "${SUMMARY_FILE:-}" ]; then
@@ -215,18 +269,25 @@ jobs:
         if: >-
           steps.guard.outputs.skip != 'true' && steps.validate.outputs.proceed == 'true' &&
           env.WR_CONCLUSION == 'success' && env.TRIGGER != 'workflow_dispatch'
+        env:
+          # Fix A: scope resolution to the lane that just went green. LANE_FILE is the
+          # workflow filename derived from the completed run's identity (payload path,
+          # else a name lookup); the issue body records `**Workflow:** <file>`, so the
+          # script's --workflow substring filter touches ONLY this lane's issues. RUN_URL
+          # + LANE_FILE are passed via quoted env vars, never inlined as expressions.
+          RUN_URL: ${{ steps.identity.outputs.run_url }}
+          LANE_FILE: ${{ steps.identity.outputs.lane_file }}
         run: |
           set -euo pipefail
-          # HONEST WHOLE-LANE SCOPE (owner-blessed, issue #1028): a green tracked-lane
-          # completion resolves ALL open parity-failure issues, not a name-filtered subset.
-          # Rationale: the issue body records the workflow *file* (e.g.
-          # compression-corruption-parity.yml) while the workflow_run payload only carries
-          # the *display name* (e.g. "CI: Compression / Corruption Parity ..."), so a
-          # substring filter would silently match nothing. We only ever COMMENT
-          # "resolved on run <url>" and NEVER close, so over-broad resolution is safe: a
-          # human confirms + closes. WR_URL is untrusted workflow_run payload -> passed via
-          # a QUOTED env var, never inlined as a workflow expression. Fail-open: a resolve
-          # error must never red this job or the parity lane.
+          # A green tracked-lane completion resolves only the open parity-failure issues
+          # whose body records THIS lane's workflow file (never all lanes). If the lane
+          # could not be mapped to a filename the resolve is a scoped no-op rather than an
+          # overbroad sweep. We only ever COMMENT "resolved on run <url>" and NEVER close
+          # (a human confirms + closes). Fail-open: a resolve error must never red this job.
+          if [ -z "${LANE_FILE:-}" ]; then
+            echo "::notice::green-lane resolve: no mapped workflow filename — skipping (no issues resolved)."
+            exit 0
+          fi
           python3 scripts/parity-failure-issue.py resolve \
-            --run-url "${WR_URL:-}" || \
+            --run-url "${RUN_URL:-}" --workflow "${LANE_FILE}" || \
             echo "::warning::parity-failure-issue resolve exited non-zero (non-gating; parity result unchanged)."
