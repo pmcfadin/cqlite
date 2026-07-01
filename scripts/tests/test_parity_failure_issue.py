@@ -124,6 +124,41 @@ class DedupTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertIn("update #99", out.getvalue())
 
+    def test_within_run_duplicate_fingerprints_create_once(self):
+        # R1: two input entries sharing ONE fingerprint (and no pre-existing open issue)
+        # must yield exactly ONE create — never two duplicate parity-failure issues.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            failure = _failure()
+            fj = _write(tmp, "failures.json", [failure, failure])
+            oj = _write(tmp, "open.json", [])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = pfi.cmd_file(_args(failures_json=fj, open_issues_json=oj))
+            self.assertEqual(rc, 0)
+            rendered = out.getvalue()
+            # Exactly one create plan (and thus one issue), not two.
+            self.assertEqual(rendered.count("--- DRY RUN (create) ---"), 1)
+            self.assertEqual(rendered.count("--- DRY RUN (update) ---"), 0)
+
+    def test_within_run_duplicate_still_updates_preexisting_open_issue(self):
+        # R1 cross-run invariant preserved: even with duplicate input entries, a
+        # pre-EXISTING open issue for that fingerprint yields an UPDATE — never a create.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            failure = _failure()
+            fp = pfi.compute_fingerprint(failure)
+            fj = _write(tmp, "failures.json", [failure, failure])
+            oj = _write(tmp, "open.json", [{"number": 55, "body": pfi.marker(fp)}])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = pfi.cmd_file(_args(failures_json=fj, open_issues_json=oj))
+            self.assertEqual(rc, 0)
+            rendered = out.getvalue()
+            self.assertEqual(rendered.count("--- DRY RUN (create) ---"), 0)
+            self.assertEqual(rendered.count("--- DRY RUN (update) ---"), 1)
+            self.assertIn("update #55", rendered)
+
     def test_update_refreshes_latest_failure_link_in_body(self):
         # D4 / R1 scenario 2: a repeat failure must refresh the existing issue body's
         # "Latest failure" run link, then post a recurrence comment.

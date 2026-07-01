@@ -312,8 +312,18 @@ def cmd_file(args) -> int:
         print("no failing scenarios parsed — nothing to file")
         return 0
 
-    open_issues = load_open_issues(args)
+    # R1 dedup: collapse same-fingerprint entries WITHIN this run before planning, so a
+    # repeated fingerprint (in parity-failures.json or a degraded parse) yields ONE plan —
+    # never multiple duplicate creates in a single invocation. We keep the LAST occurrence
+    # (most recent latest-run detail) and preserve first-seen order for deterministic output.
+    # Cross-run dedup is unchanged: each surviving entry is still planned against the
+    # already-open issues snapshot, so a pre-existing open issue still updates (never dupes).
+    deduped: dict[str, dict] = {}
     for failure in failures:
+        deduped[compute_fingerprint(failure)] = failure
+
+    open_issues = load_open_issues(args)
+    for failure in deduped.values():
         plan = _plan_failure(failure, open_issues, args)
         _apply_plan(plan, args.dry_run)
     return 0
