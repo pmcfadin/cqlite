@@ -1,0 +1,629 @@
+//! Machine-enforced artifact-retention check (issue #1027, section 5).
+//!
+//! Every parity workflow that uploads failure artifacts MUST set the
+//! `upload-artifact` step's `retention-days` at or above the minimum for the
+//! tier(s) of the manifest scenarios it gates. The minimums are owner-confirmed
+//! policy documented (single source) in the machine-parseable
+//! ```parity-retention-minimums fenced block of
+//! `docs/development/parity-ci-tiers.md`:
+//!   required_parity=14, nightly_docker=30, exhaustive_regeneration=90.
+//! `fast_pr` and `manual_debug` have no minimum (logs only / attach to issue).
+//!
+//! The check is pure text-in / findings-out (doc text, workflow YAML, manifest
+//! tiers) so it is trivially unit-testable, mirroring [`crate::workflow_check`].
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+use serde::Deserialize;
+use thiserror::Error;
+
+use crate::model::Manifest;
+
+/// The fence tag marking the machine-parseable retention-minimums block in
+/// `parity-ci-tiers.md`.
+const DOC_FENCE_TAG: &str = "parity-retention-minimums";
+
+/// Parity-gating lanes that intentionally retain NO failure artifacts yet, because
+/// their suites use plain `assert!`/`panic!` and do not route through the shared
+/// failure-artifact emitter. Wiring them to emit is deferred to follow-up issue
+/// #1353. Until then these lanes report OK-with-a-note (not a silent pass, not a
+/// hard finding) when they have a binding retention minimum but no
+/// `actions/upload-artifact` step.
+///
+/// This allowlist is the ONLY escape hatch: a NEW parity-gating lane added later
+/// WITHOUT an upload step (and without being added here) FAILS retention-check —
+/// making the "gates parity but retains nothing" gap visible and intentional.
+///
+/// See issue #1353 (wire these lanes to the shared emitter, then remove them here).
+const NO_EMITTER_ALLOWLIST: &[&str] = &[
+    // Wave 2f removed the `parity-failures-*` uploads from these six lanes because
+    // their suites use plain `assert!`/`panic!` (they do not route through the
+    // shared emitter). Wiring them to emit is deferred to #1353.
+    ".github/workflows/cql-type-parity.yml",
+    ".github/workflows/tombstone-ttl-parity.yml",
+    ".github/workflows/compression-corruption-parity.yml",
+    ".github/workflows/live-cell-compaction-parity.yml",
+    ".github/workflows/e2e-readback.yml",
+    ".github/workflows/cassandra-validation.yml",
+    // `cassandra-parity.yml` is the manifest meta-lint lane (lint / tier-contract /
+    // retention-check / coverage / unit tests). It gates an
+    // `exhaustive_regeneration` scenario via the manifest but runs no per-fixture
+    // parity suite that diffs, so it has no failure-artifact emitter — deferred to
+    // #1353 along with the assert-based suites above.
+    ".github/workflows/cassandra-parity.yml",
+    // `delta-roundtrip.yml` runs the delta round-trip `cargo test` suite
+    // (assert-based, does not route through the shared emitter) — same #1353 defer.
+    ".github/workflows/delta-roundtrip.yml",
+    // `nightly-docker-parity.yml` runs the nightly docker lane script + the gradle
+    // compaction-parity suite. It uploads its OWN report/diagnostics bundle
+    // (`nightly-docker-parity-*`, under `target/nightly-docker-parity/**` and
+    // `compaction-parity/build/**`) but does NOT emit the shared
+    // `parity-failures/**` scenario-id-keyed bundle. Before issue #1027 finding 2
+    // this lane vacuously satisfied retention-check because it uploaded *something*;
+    // now that only the shared parity-failure bundle counts, the gap is explicit.
+    // Wiring the nightly lane to the shared emitter is deferred to #1353.
+    ".github/workflows/nightly-docker-parity.yml",
+];
+
+/// The lanes whose manifest artifact descriptors are ASPIRATIONAL pending #1353:
+/// the scenario legitimately declares its evidence-type descriptor, but the LANE
+/// does not (yet) route through the shared failure-artifact emitter, so no
+/// `parity-failures/**` bundle is produced. This is the SAME set the retention
+/// check treats as OK-with-a-note. Exposed so the doc (`parity-failure-artifacts.md`)
+/// and a test can tie the aspirational-descriptor list to the retention allowlist +
+/// #1353 and prevent silent drift (issue #1027 finding 3).
+pub fn no_emitter_allowlist() -> &'static [&'static str] {
+    NO_EMITTER_ALLOWLIST
+}
+
+/// True when `workflow_path` names a lane on the #1353 no-emitter allowlist. The
+/// manifest may reference a workflow by a bare filename or a repo-relative path, so
+/// compare the trailing path component (basename) EXACTLY — never a suffix match,
+/// which would wrongly allowlist e.g. `new-cql-type-parity.yml` against
+/// `cql-type-parity.yml` and let a new lane skip the shared-upload requirement.
+fn is_allowlisted_no_emitter(workflow_path: &str) -> bool {
+    let wf_base = workflow_path.rsplit('/').next().unwrap_or(workflow_path);
+    NO_EMITTER_ALLOWLIST.iter().any(|allowed| {
+        let allowed_base = allowed.rsplit('/').next().unwrap_or(allowed);
+        *allowed == workflow_path || allowed_base == wf_base
+    })
+}
+
+/// Errors that prevent the retention check from running (as opposed to a
+/// below-minimum finding the check is designed to report).
+#[derive(Debug, Error)]
+pub enum RetentionError {
+    #[error(
+        "tier-contract doc is missing its ```{DOC_FENCE_TAG} fenced block \
+         (the machine-parseable retention minimums)"
+    )]
+    DocBlockMissing,
+    #[error("tier-contract doc's ```{DOC_FENCE_TAG} block is empty")]
+    DocBlockEmpty,
+    #[error("malformed retention-minimum line (expected `tier=days`): {0}")]
+    MalformedMinimum(String),
+}
+
+/// A single below-minimum finding for one workflow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetentionFinding {
+    /// The workflow path (for messages).
+    pub workflow: String,
+    /// The tier whose minimum was violated (the binding tier for this lane).
+    pub tier: String,
+    /// The minimum required for that tier.
+    pub minimum: u32,
+    /// The offending `retention-days` value found (or `None` when a required
+    /// upload step set no `retention-days` at all).
+    pub found: Option<u32>,
+    /// Human-readable explanation.
+    pub message: String,
+}
+
+/// Parse the documented retention minimums from the fenced block. Each non-blank
+/// line is `tier=days`.
+pub fn parse_documented_minimums(doc: &str) -> Result<BTreeMap<String, u32>, RetentionError> {
+    let open = format!("```{DOC_FENCE_TAG}");
+    let after = doc
+        .find(&open)
+        .map(|i| i + open.len())
+        .ok_or(RetentionError::DocBlockMissing)?;
+    let rest = &doc[after..];
+    let body_start = rest.find('\n').map(|n| n + 1).unwrap_or(rest.len());
+    let body = &rest[body_start..];
+    let close = body.find("```").ok_or(RetentionError::DocBlockMissing)?;
+
+    let mut out = BTreeMap::new();
+    for raw in body[..close].lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (tier, days) = line
+            .split_once('=')
+            .ok_or_else(|| RetentionError::MalformedMinimum(line.to_string()))?;
+        let days: u32 = days
+            .trim()
+            .parse()
+            .map_err(|_| RetentionError::MalformedMinimum(line.to_string()))?;
+        out.insert(tier.trim().to_string(), days);
+    }
+    if out.is_empty() {
+        return Err(RetentionError::DocBlockEmpty);
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Workflow upload-artifact retention parsing.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct WorkflowYaml {
+    #[serde(default)]
+    jobs: BTreeMap<String, JobYaml>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JobYaml {
+    #[serde(default)]
+    steps: Vec<StepYaml>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct StepYaml {
+    #[serde(default)]
+    uses: Option<String>,
+    #[serde(default)]
+    with: BTreeMap<String, serde_yaml::Value>,
+}
+
+/// True when an `actions/upload-artifact` step uploads the SHARED #1027 parity-failure
+/// forensic bundle. A lane's binding retention minimum is satisfied ONLY by such an
+/// upload — an unrelated upload (e.g. `sstableloader-test-results`) does not count,
+/// and NEITHER does issue #1028's automation-summary upload (a single FILE
+/// `parity-failures.json` under artifact `name: parity-failures`), which is NOT the
+/// scenario-id-keyed forensic bundle #1027's retention policy governs.
+///
+/// The #1027 bundle is identified STRICTLY by:
+///   * artifact `name` starting with `parity-failures-` (the trailing-dash
+///     `parity-failures-<workflow>` convention every #1027 emitting lane uses — this
+///     does NOT match #1028's bare `name: parity-failures`), OR
+///   * a `path` containing `parity-failures/` (the directory glob where the emitter
+///     writes the bundle tree — this does NOT match #1028's `path: parity-failures.json`,
+///     a file with no slash).
+///
+/// The step-level `name:` human label is deliberately NOT consulted: #1028's step is
+/// labelled "Upload parity-failures.json", so a label-substring match would falsely
+/// subject #1028's summary to #1027's retention policy.
+fn is_parity_failure_upload(step: &StepYaml) -> bool {
+    let with_name = step
+        .with
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    if with_name.starts_with("parity-failures-") {
+        return true;
+    }
+    step.with
+        .get("path")
+        .and_then(|v| v.as_str())
+        .map(|p| p.contains("parity-failures/"))
+        .unwrap_or(false)
+}
+
+/// The `retention-days` values of every SHARED parity-failure-bundle
+/// `actions/upload-artifact` step in a workflow (issue #1027 finding 2).
+///
+/// ONLY uploads of the shared `parity-failures/**` bundle count toward a lane's
+/// binding retention minimum — an unrelated upload (e.g. `sstableloader-test-results`)
+/// is ignored, so an allowlisted no-emitter lane that happens to upload something
+/// else is still recognised as having no parity-failure emitter. A `None` entry
+/// marks a shared upload that set no `retention-days` (the implicit default is not
+/// a guaranteed floor, so it is reported so the lane sets an explicit window).
+pub fn upload_retention_days(workflow_text: &str) -> Vec<Option<u32>> {
+    let Ok(wf) = serde_yaml::from_str::<WorkflowYaml>(workflow_text) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for job in wf.jobs.values() {
+        for step in &job.steps {
+            let is_upload = step
+                .uses
+                .as_deref()
+                .map(|u| u.trim_start().starts_with("actions/upload-artifact"))
+                .unwrap_or(false);
+            if !is_upload {
+                continue;
+            }
+            // Only the shared parity-failure bundle upload satisfies a lane.
+            if !is_parity_failure_upload(step) {
+                continue;
+            }
+            let days = step.with.get("retention-days").and_then(yaml_value_as_u32);
+            out.push(days);
+        }
+    }
+    out
+}
+
+/// True when a workflow has at least one SHARED parity-failure-bundle
+/// `actions/upload-artifact` step (issue #1027 finding 2). Used to discover shared
+/// uploads in workflows the manifest's `ci.workflow` fields do NOT reference, so a
+/// shared bundle upload cannot be lowered/removed undetected just because no
+/// manifest scenario points at its workflow.
+pub fn has_parity_failure_upload(workflow_text: &str) -> bool {
+    let Ok(wf) = serde_yaml::from_str::<WorkflowYaml>(workflow_text) else {
+        return false;
+    };
+    wf.jobs.values().any(|job| {
+        job.steps.iter().any(|step| {
+            let is_upload = step
+                .uses
+                .as_deref()
+                .map(|u| u.trim_start().starts_with("actions/upload-artifact"))
+                .unwrap_or(false);
+            is_upload && is_parity_failure_upload(step)
+        })
+    })
+}
+
+/// Bind a tier to a directly-scanned shared parity-failure upload whose workflow is
+/// NOT referenced by any manifest `ci.workflow` (issue #1027 finding 2). Be
+/// conservative: if a workflow uploads a shared parity-failures bundle we MUST be
+/// able to bind a tier. `exhaustive-regeneration.yml` maps to
+/// `exhaustive_regeneration` (its own tier by construction — it regenerates the
+/// full corpus and uploads the shared bundle at that tier). A new shared-bundle
+/// workflow with no manifest scenarios and no mapping here returns `None`, which
+/// [`run_repo_check`] treats as a hard finding so the gap is never silent.
+fn tier_for_unmapped_shared_upload(workflow_path: &str) -> Option<&'static str> {
+    let base = workflow_path.rsplit('/').next().unwrap_or(workflow_path);
+    match base {
+        "exhaustive-regeneration.yml" => Some("exhaustive_regeneration"),
+        _ => None,
+    }
+}
+
+/// Coerce a YAML `retention-days` value (integer, or a quoted-string integer) to
+/// `u32`. Non-integer / negative values yield `None`.
+fn yaml_value_as_u32(v: &serde_yaml::Value) -> Option<u32> {
+    match v {
+        serde_yaml::Value::Number(n) => n.as_u64().and_then(|x| u32::try_from(x).ok()),
+        serde_yaml::Value::String(s) => s.trim().parse::<u32>().ok(),
+        _ => None,
+    }
+}
+
+/// The retention minimum a lane must satisfy = the LARGEST minimum among the
+/// tiers of the scenarios it gates (a lane that gates both `required_parity` and
+/// `nightly_docker` scenarios must satisfy the stricter, 30-day, window). Returns
+/// `None` when the lane gates only tiers with no minimum (`fast_pr`/`manual_debug`).
+pub fn binding_minimum(
+    lane_tiers: &[String],
+    minimums: &BTreeMap<String, u32>,
+) -> Option<(String, u32)> {
+    lane_tiers
+        .iter()
+        .filter_map(|t| minimums.get(t).map(|m| (t.clone(), *m)))
+        .max_by_key(|(_, m)| *m)
+}
+
+/// Outcome of checking one workflow: below-minimum findings plus any OK-with-a-note
+/// disposition (an allowlisted lane that gates parity but has no emitter yet).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct WorkflowCheck {
+    /// Below-minimum (or gates-but-retains-nothing) findings for this workflow.
+    pub findings: Vec<RetentionFinding>,
+    /// A non-failing note explaining an intentional gap (e.g. an allowlisted
+    /// no-emitter lane deferred to #1353). Empty when there is nothing to note.
+    pub note: Option<String>,
+}
+
+/// Check one workflow's upload-artifact retention against the minimum for the
+/// tiers it gates. `lane_tiers` is the set of `ci.tier` values of the manifest
+/// scenarios whose `ci.workflow` is this workflow. Returns one finding per
+/// offending upload step (empty == OK). A lane whose binding minimum is `None`
+/// (no fixture-retaining tier) is never flagged.
+///
+/// A lane with a binding minimum but NO SHARED parity-failure-bundle upload (issue
+/// #1027 finding 2: an unrelated upload like `sstableloader-test-results` does NOT
+/// count) gates parity scenarios yet retains no failure artifacts: that gap is made
+/// VISIBLE as a finding UNLESS the lane is on the documented [`NO_EMITTER_ALLOWLIST`]
+/// (deferred to #1353), in which case it is an OK-with-a-note disposition, never a
+/// silent pass. Use [`check_workflow_detailed`] to observe the note; this thin
+/// wrapper returns only the findings.
+pub fn check_workflow(
+    workflow_path: &str,
+    workflow_text: &str,
+    lane_tiers: &[String],
+    minimums: &BTreeMap<String, u32>,
+) -> Vec<RetentionFinding> {
+    check_workflow_detailed(workflow_path, workflow_text, lane_tiers, minimums).findings
+}
+
+/// Like [`check_workflow`] but also surfaces the OK-with-a-note disposition for an
+/// allowlisted no-emitter lane.
+pub fn check_workflow_detailed(
+    workflow_path: &str,
+    workflow_text: &str,
+    lane_tiers: &[String],
+    minimums: &BTreeMap<String, u32>,
+) -> WorkflowCheck {
+    let mut out = WorkflowCheck::default();
+    let Some((tier, minimum)) = binding_minimum(lane_tiers, minimums) else {
+        return out;
+    };
+
+    let uploads = upload_retention_days(workflow_text);
+
+    // Gates parity scenarios but retains NO failure artifacts — no SHARED
+    // parity-failure-bundle upload (issue #1027 finding 2: an unrelated upload does
+    // not count). An allowlisted lane is OK-with-a-note; otherwise it is a finding.
+    if uploads.is_empty() {
+        if is_allowlisted_no_emitter(workflow_path) {
+            out.note = Some(format!(
+                "{workflow_path}: gates `{tier}` parity scenarios but has no failure-artifact \
+                 emitter yet — deferred to #1353 (allowlisted)"
+            ));
+        } else {
+            out.findings.push(RetentionFinding {
+                workflow: workflow_path.to_string(),
+                tier: tier.clone(),
+                minimum,
+                found: None,
+                message: format!(
+                    "{workflow_path}: gates `{tier}` parity scenarios but retains no failure \
+                     artifacts (no `actions/upload-artifact` step). Add an upload step with \
+                     `retention-days: >= {minimum}`, or add the lane to the #1353 no-emitter \
+                     allowlist if it intentionally does not emit yet"
+                ),
+            });
+        }
+        return out;
+    }
+
+    for found in uploads {
+        let below = match found {
+            Some(days) => days < minimum,
+            // No explicit retention-days on a lane that must retain fixtures: the
+            // implicit default is not a guaranteed floor, so require it be set.
+            None => true,
+        };
+        if below {
+            let message = match found {
+                Some(days) => format!(
+                    "{workflow_path}: upload-artifact retention-days {days} is below the \
+                     minimum {minimum} for tier `{tier}`"
+                ),
+                None => format!(
+                    "{workflow_path}: upload-artifact sets no retention-days; tier `{tier}` \
+                     requires an explicit `retention-days: >= {minimum}`"
+                ),
+            };
+            out.findings.push(RetentionFinding {
+                workflow: workflow_path.to_string(),
+                tier: tier.clone(),
+                minimum,
+                found,
+                message,
+            });
+        }
+    }
+    out
+}
+
+/// Outcome of a whole-repo retention check: how many fixture-retaining workflows
+/// were checked, every below-minimum finding, and any OK-with-a-note dispositions
+/// (allowlisted no-emitter lanes deferred to #1353).
+#[derive(Debug, Default)]
+pub struct RepoCheck {
+    pub checked: usize,
+    pub findings: Vec<RetentionFinding>,
+    /// Non-failing notes (e.g. allowlisted no-emitter lanes). Surfaced in `render`
+    /// so the intentional gap is visible, but they do not flip `ok()` to false.
+    pub notes: Vec<String>,
+}
+
+impl RepoCheck {
+    /// True when no upload step is below its tier minimum.
+    pub fn ok(&self) -> bool {
+        self.findings.is_empty()
+    }
+
+    /// Human + machine readable summary (findings, notes, then a final status line).
+    pub fn render(&self) -> String {
+        let mut lines: Vec<String> = self
+            .findings
+            .iter()
+            .map(|f| format!("RETENTION {}", f.message))
+            .collect();
+        for note in &self.notes {
+            lines.push(format!("RETENTION-NOTE {note}"));
+        }
+        if self.ok() {
+            lines.push(format!(
+                "retention-check: OK — {} fixture-retaining parity workflow(s) meet their tier \
+                 retention minimums",
+                self.checked
+            ));
+        } else {
+            lines.push(format!(
+                "retention-check: FAILED — {} workflow upload step(s) below the tier minimum",
+                self.findings.len()
+            ));
+        }
+        lines.join("\n")
+    }
+}
+
+/// Run the retention check across every workflow named by a manifest scenario AND
+/// every workflow that directly uploads a shared parity-failure bundle even if no
+/// manifest scenario references it (issue #1027 finding 2).
+///
+/// Phase 1 groups manifest scenarios by `ci.workflow` → the set of `ci.tier` they
+/// gate, reads each referenced workflow file relative to `repo_root`, and checks its
+/// upload steps against the strictest minimum for the tiers it gates. A lane that
+/// gates only no-minimum tiers, or whose workflow file is missing (already reported
+/// by `lint`'s path-existence check), is skipped.
+///
+/// Phase 2 scans `.github/workflows/*.yml` directly for any SHARED parity-failure
+/// upload (a step whose artifact `name` starts with `parity-failures-` or whose
+/// `path` contains `parity-failures/`) that Phase 1 did NOT already cover — e.g.
+/// `exhaustive-regeneration.yml`, whose shared bundle upload is not referenced by
+/// any manifest `ci.workflow`. Its tier is taken from that workflow's manifest
+/// scenarios if present, else from [`tier_for_unmapped_shared_upload`]; a shared
+/// upload with no bindable tier is itself a hard finding so the retention of a
+/// shared bundle can never be lowered/removed undetected.
+pub fn run_repo_check(
+    manifest: &Manifest,
+    repo_root: &Path,
+    minimums: &BTreeMap<String, u32>,
+) -> RepoCheck {
+    // The tiers each workflow gates according to the manifest (path may be a bare
+    // filename or repo-relative; keep both keyings so Phase 2 can match either).
+    let mut lane_tiers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for s in &manifest.scenarios {
+        if let Some(wf) = &s.ci.workflow {
+            lane_tiers
+                .entry(wf.clone())
+                .or_default()
+                .insert(s.ci.tier.clone());
+        }
+    }
+
+    let mut result = RepoCheck::default();
+    // Track which workflow files Phase 1 already checked (by canonical path) so
+    // Phase 2 does not double-check a manifest-referenced lane.
+    let mut checked_paths: BTreeSet<PathBuf> = BTreeSet::new();
+
+    // ── Phase 1: manifest-referenced lanes ──
+    for (wf, tiers) in &lane_tiers {
+        let tiers_vec: Vec<String> = tiers.iter().cloned().collect();
+        if binding_minimum(&tiers_vec, minimums).is_none() {
+            continue;
+        }
+        let path = repo_root.join(wf);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        result.checked += 1;
+        checked_paths.insert(canonicalize_or_owned(&path));
+        let check = check_workflow_detailed(wf, &text, &tiers_vec, minimums);
+        result.findings.extend(check.findings);
+        if let Some(note) = check.note {
+            result.notes.push(note);
+        }
+    }
+
+    // ── Phase 2: directly-scanned shared parity-failure uploads not in Phase 1 ──
+    let workflows_dir = repo_root.join(".github").join("workflows");
+    let Ok(entries) = std::fs::read_dir(&workflows_dir) else {
+        return result;
+    };
+    // Deterministic order (findings/notes are order-sensitive in messages).
+    let mut yml_paths: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.extension()
+                .map(|e| e == "yml" || e == "yaml")
+                .unwrap_or(false)
+        })
+        .collect();
+    yml_paths.sort();
+
+    for path in yml_paths {
+        if checked_paths.contains(&canonicalize_or_owned(&path)) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if !has_parity_failure_upload(&text) {
+            continue;
+        }
+        // Repo-relative display path for messages/allowlist matching.
+        let rel = path
+            .strip_prefix(repo_root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        // Tier: prefer this workflow's manifest scenarios (matched by bare filename
+        // or repo-relative path), else the conservative unmapped-upload mapping.
+        let base = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+        let manifest_tiers: BTreeSet<String> = lane_tiers
+            .iter()
+            .filter(|(wf, _)| *wf == &rel || wf.rsplit('/').next() == Some(base.as_str()))
+            .flat_map(|(_, tiers)| tiers.iter().cloned())
+            .collect();
+
+        let tiers_vec: Vec<String> = if !manifest_tiers.is_empty() {
+            manifest_tiers.into_iter().collect()
+        } else if let Some(tier) = tier_for_unmapped_shared_upload(&rel) {
+            vec![tier.to_string()]
+        } else {
+            // A shared parity-failure upload we cannot bind to a tier: conservative
+            // hard finding (issue #1027 finding 2) — never a silent pass.
+            result.checked += 1;
+            result.findings.push(RetentionFinding {
+                workflow: rel.clone(),
+                tier: "<unbound>".to_string(),
+                minimum: 0,
+                found: None,
+                message: format!(
+                    "{rel}: uploads a shared parity-failures bundle but no manifest scenario \
+                     references it and no tier mapping exists — add a manifest scenario or a \
+                     tier mapping in retention::tier_for_unmapped_shared_upload so its retention \
+                     minimum can be enforced"
+                ),
+            });
+            continue;
+        };
+
+        if binding_minimum(&tiers_vec, minimums).is_none() {
+            continue;
+        }
+        result.checked += 1;
+        checked_paths.insert(canonicalize_or_owned(&path));
+        let check = check_workflow_detailed(&rel, &text, &tiers_vec, minimums);
+        result.findings.extend(check.findings);
+        if let Some(note) = check.note {
+            result.notes.push(note);
+        }
+    }
+
+    result
+}
+
+/// Canonicalize a path for dedup, falling back to the path itself when the file
+/// cannot be canonicalized (e.g. it does not exist). Pure helper: never panics.
+fn canonicalize_or_owned(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allowlist_matches_bare_and_repo_relative_but_not_suffix_superset() {
+        // A bare allowlisted basename matches.
+        assert!(is_allowlisted_no_emitter("cql-type-parity.yml"));
+        // A repo-relative path to the same lane matches (basename compared exactly).
+        assert!(is_allowlisted_no_emitter(
+            ".github/workflows/cql-type-parity.yml"
+        ));
+        // A NEW lane whose name is a SUFFIX-superset must NOT be allowlisted
+        // (regression: was previously matched via `ends_with`).
+        assert!(!is_allowlisted_no_emitter("new-cql-type-parity.yml"));
+        assert!(!is_allowlisted_no_emitter(
+            ".github/workflows/new-cql-type-parity.yml"
+        ));
+        // An unrelated lane is not allowlisted.
+        assert!(!is_allowlisted_no_emitter(
+            ".github/workflows/sstabledump-parity-gate.yml"
+        ));
+    }
+}

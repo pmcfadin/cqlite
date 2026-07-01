@@ -120,6 +120,39 @@ pub const OUT_OF_SCOPE_CATEGORY: &[&str] = &[
 /// Artifacts that count as byte-level evidence for a `byte_for_byte` claim.
 pub const BYTE_LEVEL_ARTIFACTS: &[&str] = &["bytes", "offsets", "checksums", "component_files"];
 
+/// The closed set of `diffs[].kind` values in a `failure-artifact.json` record
+/// (issue #1027). Mirrors the `diffs.items.properties.kind.enum` in
+/// `test-data/parity-failure-artifact.schema.json`; the `failure_artifact_kind_enum_matches_schema`
+/// cross-check test keeps this in sync with the schema file, exactly as
+/// `schema_enums_match_lint_enums` does for the manifest enums and `CI_TIER`.
+pub const FAILURE_ARTIFACT_KIND: &[&str] = &[
+    "byte_diff",
+    "offset_diff",
+    "checksum_diff",
+    "jsonl_diff",
+    "component_inventory",
+    "live_log",
+    "audit_report",
+];
+
+/// The closed set of `<kind>` segments in a manifest failure-artifact descriptor
+/// `artifact.<tier>.<kind>` (issue #1027). These are the descriptor-level names —
+/// distinct from the record-level [`FAILURE_ARTIFACT_KIND`] because the two
+/// tier-scoped descriptors are plural/renamed (`live_logs` → record `live_log`,
+/// `reproduction_bundle` → the record's `repro_bundle` pointer). Mirrors the
+/// `<kind>` alternation in the manifest schema's `failure_artifacts` item pattern;
+/// the `descriptor_kinds_match_schema_pattern` test keeps them in sync.
+pub const ARTIFACT_DESCRIPTOR_KIND: &[&str] = &[
+    "byte_diff",
+    "offset_diff",
+    "checksum_diff",
+    "component_inventory",
+    "jsonl_diff",
+    "live_logs",
+    "audit_report",
+    "reproduction_bundle",
+];
+
 /// Closed set of public-claim kinds (issue #1023). `safe` = manifest-backed
 /// wording the project may publish; `blocked` = unqualified over-claim phrase the
 /// claim-scan lint rejects in release-facing docs unless explicitly scoped.

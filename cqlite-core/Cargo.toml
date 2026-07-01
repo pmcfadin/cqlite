@@ -128,6 +128,12 @@ tokio-test = "0.4"
 # atomics between a counter test's reset() and its read (issue #1071).
 serial_test = "3"
 insta = { version = "1.34", features = ["json"] }
+# The uniform parity failure-artifact record model + emitter (issue #1027 Wave 1).
+# Dev-only: the required_parity byte/offset/checksum/JSONL parity tests emit a
+# scenario-id-keyed failure bundle through this crate so every surface produces
+# the identical record shape. `cassandra-parity` does NOT depend on cqlite-core,
+# so this introduces no dependency cycle.
+cassandra-parity = { path = "../tools/cassandra-parity" }
 # cqlite-validation = { path = "../cqlite-validation" }
 fastrand = "2.0"
 libc = { workspace = true }

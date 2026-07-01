@@ -185,7 +185,14 @@
             "fixture_generation_command": { "type": "string" },
             "comparison_command": { "type": "string" },
             "reference_paths": { "type": "array", "items": { "type": "string" } },
-            "failure_artifacts": { "type": "array", "items": { "type": "string" } },
+            "failure_artifacts": {
+              "type": "array",
+              "description": "Typed failure-artifact descriptors of the form artifact.<tier>.<kind> (issue #1027), replacing the old free-text strings. <tier> is a ci.tier value; <kind> is a byte_diff/offset_diff/checksum_diff/component_inventory/jsonl_diff/live_logs/audit_report/reproduction_bundle descriptor kind. cassandra-parity lint enforces that <tier> equals the scenario's ci.tier and <kind> is valid for its evidence_type.",
+              "items": {
+                "type": "string",
+                "pattern": "^artifact\\.(fast_pr|required_parity|nightly_docker|exhaustive_regeneration|manual_debug)\\.(byte_diff|offset_diff|checksum_diff|component_inventory|jsonl_diff|live_logs|audit_report|reproduction_bundle)$"
+              }
+            },
             "normalization": { "type": "string" },
             "known_limitations": { "type": "string" }
           }

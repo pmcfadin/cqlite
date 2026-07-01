@@ -34,6 +34,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::coverage;
 use crate::model::Manifest;
 
+pub mod audit_report;
 pub mod provenance;
 pub mod refs;
 

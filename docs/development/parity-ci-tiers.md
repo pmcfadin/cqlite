@@ -6,8 +6,11 @@
 >
 > This contract is the reference that downstream gate work (#1023 claim lint,
 > #1024 gate hardening, #1025 nightly Docker, #1026 exhaustive regen) builds on.
-> See also the [release checklist](./parity-release-checklist.md) and the
-> [manifest reference](./cassandra-parity-manifest.md).
+> See also the [release checklist](./parity-release-checklist.md), the
+> [manifest reference](./cassandra-parity-manifest.md), and the
+> [parity failure-artifacts reference](./parity-failure-artifacts.md) (the
+> failure-record schema + scenario-id-keyed bundle layout this retention policy
+> governs, issue #1027).
 >
 > **Doctrine cross-link:** this contract sits beside the
 > [gate contract](https://pmcfadin.github.io/cqlite/agents-developing/gate-contract/)
@@ -30,6 +33,37 @@ required_parity
 nightly_docker
 exhaustive_regeneration
 manual_debug
+```
+
+## Artifact retention policy (enforced minimums)
+
+When a parity lane uploads failure artifacts (the scenario-id-keyed
+`parity-failures/**` bundle — see the
+[parity failure-artifacts reference](./parity-failure-artifacts.md), issue
+#1027), its `upload-artifact` step MUST set `retention-days` at or above the
+**minimum for the tier(s) it gates**. These are owner-confirmed **minimums** — a
+lane MAY set a longer window, but not shorter. `cassandra-parity retention-check`
+parses each parity workflow's upload step and fails if its `retention-days` is
+below its tier minimum; it runs in CI in
+[`.github/workflows/cassandra-parity.yml`](../../.github/workflows/cassandra-parity.yml)
+alongside `lint` and `tier-contract-check`, so the policy is fail-closed.
+
+| Tier                      | Minimum `retention-days` | Rationale                               |
+|---------------------------|--------------------------|-----------------------------------------|
+| `fast_pr`                 | none (logs only)         | no fixtures produced                     |
+| `required_parity`         | 14                       | enough to triage a blocked PR            |
+| `nightly_docker`          | 30                       | covers the "recent nightly pass" window  |
+| `exhaustive_regeneration` | 90                       | release-candidate citable evidence       |
+| `manual_debug`            | none (attach to issue)   | ad hoc                                    |
+
+The machine-parseable form below is what the retention check reads. Keep it exact:
+one `tier=minimum` pair per line for the tiers that have a minimum; do not add
+list markers or prose inside the fence.
+
+```parity-retention-minimums
+required_parity=14
+nightly_docker=30
+exhaustive_regeneration=90
 ```
 
 ## Gate-strength classification

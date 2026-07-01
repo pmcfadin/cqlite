@@ -444,6 +444,17 @@ fn validate_toc_and_checksums(bytes: &[u8], db: &Path) {
             .cassandra_source("MetadataSerializer TOC CRC32 (Statistics.db)")
             .fixture(db.to_path_buf())
             .components(["Statistics.db"])
+            // Carry the REAL CRC32 fields (expected=recomputed, actual=stored).
+            // This site has no raw component bytes to byte-diff, so the bundle
+            // emits ONLY a genuine checksum_diff kind (issue #1027 finding 1).
+            .checksum_evidence(
+                "Statistics.db",
+                vec![(
+                    "toc_crc32".to_string(),
+                    format!("0x{expected_acc:08x}"),
+                    format!("0x{stored_acc:08x}"),
+                )],
+            )
             .detail(format!(
                 "{}: Statistics.db accumulated TOC CRC32 0x{stored_acc:08x} != recomputed \
                  0x{expected_acc:08x} — corrupt metadata\n{diff}",

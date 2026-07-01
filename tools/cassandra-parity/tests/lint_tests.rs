@@ -288,6 +288,226 @@ fn byte_for_byte_without_evidence_is_rejected() {
     );
 }
 
+// ----------------------------------------------------------------------------
+// Typed failure-artifact descriptors (issue #1027, section 4.2).
+// ----------------------------------------------------------------------------
+
+/// A byte_for_byte / required_parity scenario carrying typed failure-artifact
+/// descriptors. `sstabledump-parity-gate.yml` is a real workflow that runs the
+/// mapped test fail-closed, so the workflow-check passes and the only findings
+/// under test are the descriptor rules.
+const VALID_BYTE_SCENARIO: &str = r#"  - id: cass.data_db_decode.byte_artifact_example
+    title: Byte artifact example scenario
+    status: mirrored
+    capability: data_db_decode
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: sstable-format
+      relevance: high
+      files: [UnfilteredSerializerTest.java]
+    cqlite:
+      coverage:
+        suite: sstable_parity_index_db_big
+        tests: [cqlite-core/tests/sstabledump_parity_index.rs]
+    fixtures:
+      references:
+        - test-data/cassandra-parity-manifest.yml
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, checksums]
+      comparison_command: cargo test --test sstabledump_parity_index
+      reference_paths:
+        - test-data/cassandra-parity-manifest.yml
+      failure_artifacts:
+        - artifact.required_parity.byte_diff
+        - artifact.required_parity.checksum_diff
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: bash regen.sh
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+"#;
+
+/// Descriptor findings from linting a wrapped scenario with repo_root set (so the
+/// workflow-check resolves the real workflow file). Filters to the
+/// `evidence.failure_artifacts` field so unrelated findings do not leak in.
+fn descriptor_errors(scenario: &str) -> Vec<String> {
+    errors_checked(&wrap(scenario))
+        .into_iter()
+        .filter(|e| e.contains("evidence.failure_artifacts"))
+        .collect()
+}
+
+#[test]
+fn valid_descriptors_pass_lint() {
+    // Spec scenario "A valid descriptor passes lint": a byte_for_byte /
+    // required_parity scenario declaring artifact.required_parity.byte_diff and
+    // artifact.required_parity.checksum_diff is accepted.
+    let errs = descriptor_errors(VALID_BYTE_SCENARIO);
+    assert!(
+        errs.is_empty(),
+        "valid descriptors should pass, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn descriptor_tier_mismatch_is_rejected() {
+    // Spec scenario "Descriptor tier must match the scenario tier": a
+    // required_parity scenario declaring a nightly_docker descriptor fails,
+    // reporting the tier mismatch.
+    let scenario = VALID_BYTE_SCENARIO.replace(
+        "        - artifact.required_parity.byte_diff\n",
+        "        - artifact.nightly_docker.live_logs\n",
+    );
+    let errs = descriptor_errors(&scenario);
+    assert!(
+        errs.iter().any(
+            |e| e.contains("tier 'nightly_docker' must equal") && e.contains("required_parity")
+        ),
+        "tier mismatch must be reported, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn descriptor_kind_wrong_for_evidence_is_rejected() {
+    // Spec scenario "Descriptor kind must match the evidence type": a
+    // canonical_semantic scenario declaring a byte_diff descriptor fails.
+    let scenario = VALID_BYTE_SCENARIO
+        .replace(
+            "      type: byte_for_byte",
+            "      type: canonical_semantic",
+        )
+        .replace("      strict: true\n", "")
+        // canonical_semantic requires a normalization + jsonl; add them so the
+        // ONLY remaining error is the byte_diff-on-canonical_semantic mismatch.
+        .replace(
+            "      artifacts: [bytes, offsets, checksums]",
+            "      artifacts: [jsonl]\n      normalization: JSONL normalized to sstabledump facts",
+        )
+        .replace("        - artifact.required_parity.checksum_diff\n", "");
+    let errs = descriptor_errors(&scenario);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("byte_diff") && e.contains("canonical_semantic")),
+        "byte_diff on canonical_semantic must be rejected, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn malformed_descriptor_is_rejected() {
+    // A free-text (non-descriptor) failure artifact must be rejected now that the
+    // field is typed.
+    let scenario = VALID_BYTE_SCENARIO.replace(
+        "        - artifact.required_parity.byte_diff\n",
+        "        - target/cassandra-parity/some-diff.log\n",
+    );
+    let errs = descriptor_errors(&scenario);
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("must be a typed descriptor")),
+        "free-text failure artifact must be rejected, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn descriptor_unknown_kind_is_rejected() {
+    let scenario = VALID_BYTE_SCENARIO.replace(
+        "        - artifact.required_parity.byte_diff\n",
+        "        - artifact.required_parity.not_a_kind\n",
+    );
+    let errs = descriptor_errors(&scenario);
+    assert!(
+        errs.iter().any(|e| e.contains("unknown kind 'not_a_kind'")),
+        "unknown descriptor kind must be rejected, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn descriptor_live_logs_on_wrong_tier_is_rejected() {
+    // Issue #1027 finding 3: a tier-scoped kind mislabelled onto the wrong tier
+    // must be rejected even though its <tier> segment equals ci.tier. `live_logs`
+    // is a nightly_docker-only kind; on a required_parity scenario it must fail.
+    let scenario = VALID_BYTE_SCENARIO.replace(
+        "        - artifact.required_parity.byte_diff\n",
+        "        - artifact.required_parity.live_logs\n",
+    );
+    let errs = descriptor_errors(&scenario);
+    assert!(
+        errs.iter().any(|e| e.contains("live_logs")
+            && e.contains("nightly_docker")
+            && e.contains("required_parity")),
+        "artifact.required_parity.live_logs must be rejected, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn descriptor_audit_report_on_wrong_tier_is_rejected() {
+    // Issue #1027 finding 3: `audit_report` is an exhaustive_regeneration-only
+    // kind; on a required_parity scenario it must fail even though the <tier>
+    // segment matches ci.tier.
+    let scenario = VALID_BYTE_SCENARIO.replace(
+        "        - artifact.required_parity.byte_diff\n",
+        "        - artifact.required_parity.audit_report\n",
+    );
+    let errs = descriptor_errors(&scenario);
+    assert!(
+        errs.iter().any(|e| e.contains("audit_report")
+            && e.contains("exhaustive_regeneration")
+            && e.contains("required_parity")),
+        "artifact.required_parity.audit_report must be rejected, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn descriptor_reproduction_bundle_on_wrong_tier_is_rejected() {
+    // Issue #1027 (roborev R9): `reproduction_bundle` is a manual_debug-only kind;
+    // on a required_parity scenario it must fail even though the <tier> segment
+    // matches ci.tier.
+    let scenario = VALID_BYTE_SCENARIO.replace(
+        "        - artifact.required_parity.byte_diff\n",
+        "        - artifact.required_parity.reproduction_bundle\n",
+    );
+    let errs = descriptor_errors(&scenario);
+    assert!(
+        errs.iter().any(|e| e.contains("reproduction_bundle")
+            && e.contains("manual_debug")
+            && e.contains("required_parity")),
+        "artifact.required_parity.reproduction_bundle must be rejected, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn descriptor_kinds_match_schema_pattern() {
+    // 1027: enums::ARTIFACT_DESCRIPTOR_KIND must equal the <kind> alternation in
+    // the manifest schema's failure_artifacts item pattern, so drift between the
+    // code enum and the schema cannot slip through (mirrors schema_enums_match).
+    let root = repo_root();
+    let schema_text =
+        std::fs::read_to_string(root.join("test-data/cassandra-parity-manifest.schema.json"))
+            .unwrap();
+    let schema: serde_json::Value = serde_json::from_str(&schema_text).unwrap();
+    let pattern = schema["$defs"]["scenario"]["properties"]["evidence"]["properties"]
+        ["failure_artifacts"]["items"]["pattern"]
+        .as_str()
+        .expect("failure_artifacts item has a pattern");
+    // The pattern is ^artifact\.(<tiers>)\.(<kinds>)$; extract the second group.
+    let kinds_group = pattern
+        .rsplit_once("\\.(")
+        .and_then(|(_, tail)| tail.strip_suffix(")$"))
+        .expect("pattern has a trailing (kind1|kind2|...)$ group");
+    let schema_kinds: Vec<&str> = kinds_group.split('|').collect();
+    assert_eq!(
+        schema_kinds,
+        enums::ARTIFACT_DESCRIPTOR_KIND,
+        "enums::ARTIFACT_DESCRIPTOR_KIND must match the schema's failure_artifacts kind alternation"
+    );
+}
+
 #[test]
 fn missing_evidence_metadata_is_rejected() {
     let scenario = VALID_SCENARIO.replace("      cassandra_version: \"5.0.2\"\n", "");

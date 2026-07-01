@@ -7,6 +7,8 @@
 >
 > Tier definitions live in the [parity CI tier contracts](./parity-ci-tiers.md).
 > Manifest mechanics live in the [manifest reference](./cassandra-parity-manifest.md).
+> When a gate is red, the forensic bundle for the failed scenario is described in
+> the [parity failure-artifacts reference](./parity-failure-artifacts.md).
 
 ## Required green gates
 
@@ -32,6 +34,26 @@ exact release commit:
       uploaded report artifact (provenance record + corpus-audit report). The audit
       hard-fails on any corpus/manifest or provenance divergence, so a green run is
       the citable evidence.
+
+## Triaging a near-release red gate
+
+When any required gate above is red on the release commit, do not ship the claim.
+Triage from the **failure bundle keyed by scenario id** (issue #1027):
+
+- [ ] **Locate the failure bundle.** The red lane uploads a single
+      `parity-failures-<workflow>` artifact whose subdirectories are the failed
+      `cass.*` scenario ids: `parity-failures/<tier>/<scenario_id>/`. Cite the
+      failing scenario id in the release-blocking note.
+- [ ] **Read the record.** Open `failure-artifact.json` for the scenario — e.g. a
+      red byte gate for scenario `cass.X.Y` yields
+      `parity-failures/required_parity/cass.X.Y/failure-artifact.json` with the
+      Cassandra version/git-sha, dataset SHA256, `diffs[]` (byte/offset/checksum
+      or `jsonl_diff`), and the `repro/` command. Bundle contents per
+      `evidence_type` are documented in the
+      [parity failure-artifacts reference](./parity-failure-artifacts.md).
+- [ ] **Reproduce before re-claiming.** Run `repro/command.sh` from the bundle to
+      confirm the failure (or the fix) locally before re-running the gate on the
+      release commit.
 
 ## Claim-wording gate
 

@@ -104,6 +104,42 @@ final class ComponentByteComparator
         {
             return b < 0 ? "EOF" : String.format("0x%02X", b & 0xFF);
         }
+
+        /**
+         * A {@code <component>.byte-diff.txt} body for the shared failure bundle
+         * (issue #1027): first differing byte offset + both engines' byte values.
+         */
+        String byteDiffBody()
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.append("byte diff [").append(kind).append("]: ")
+              .append("cassandra (").append(refLen).append(" B) vs cqlite (")
+              .append(candLen).append(" B)\n");
+            if (status == Status.DIFFER)
+                sb.append("first difference at byte offset ").append(offset)
+                  .append(": cassandra=").append(hexOrEof(refByte))
+                  .append(" cqlite=").append(hexOrEof(candByte)).append('\n');
+            else
+                sb.append(this).append('\n');
+            return sb.toString();
+        }
+
+        /**
+         * A {@code <component>.offset-diff.txt} body for the shared failure bundle
+         * (issue #1027): the first divergent offset + both component lengths.
+         */
+        String offsetDiffBody()
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.append("offset diff [").append(kind).append("]\n");
+            if (status == Status.DIFFER)
+                sb.append("  first divergent offset: ").append(offset).append('\n');
+            else
+                sb.append("  ").append(status).append(" (no in-range byte divergence)\n");
+            sb.append("  lengths: cassandra=").append(refLen)
+              .append(" cqlite=").append(candLen).append('\n');
+            return sb.toString();
+        }
     }
 
     /** Aggregate result over all components in the two output directories. */

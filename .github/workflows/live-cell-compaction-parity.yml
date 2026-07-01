@@ -167,3 +167,13 @@ jobs:
             cargo test -p cqlite-core --features write-support \
               --test issue_1020_udt_frozen_compaction_byte_parity \
               -- --nocapture
+
+      # Issue #1027 convergence audit: this lane's live-cell/UDT compaction parity
+      # tests use plain assert!/assert_eq! terminals — they do NOT route through
+      # ParityFailure::panic and have no scenario-id-keyed bundle emitter — so a
+      # speculative `parity-failures-*` upload here would advertise a bundle that
+      # never appears (even with `if-no-files-found: ignore`, the artifact promise
+      # is false). The upload was removed rather than left misleading. FOLLOW-UP:
+      # to restore it, first route these tests' failure terminals through the
+      # shared ParityFailure/FailureBundle emitter (out of scope for #1027, which
+      # only standardises the artifact system, not each suite's assertion sites).

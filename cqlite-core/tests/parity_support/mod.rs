@@ -37,6 +37,16 @@
 //!     the discrepancy printed to the test stdout (no `<lane>.diff` is written for
 //!     those); they remain real, build-failing assertions regardless.
 //!
+//! Additionally (issue #1027 finding 1), [`ParityFailure::panic`] — the single
+//! common terminal for every concrete mismatch site — routes through the shared,
+//! scenario-id-keyed failure-bundle emitter (the `parity_bundle` module, the same
+//! one the synthetic issue-1027 test exercises). On a real red required-parity run
+//! it writes `parity-failures/<tier>/<scenario_id>/failure-artifact.json` to the
+//! deterministic root matching the workflow upload globs, keyed by the REAL
+//! manifest `cass.*` scenario id each suite binds to (see
+//! [`bundle_descriptor_for_suite`]). The legacy `target/cassandra-parity/**` diff
+//! is kept alongside it.
+//!
 //! Allowing dead code: not every consumer uses every helper, and each strict
 //! test compiles this module independently.
 #![allow(dead_code)]
@@ -44,6 +54,14 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+// The shared scenario-id-keyed failure-bundle emitter (issue #1027 Wave 2a). It
+// lives beside this module; including it here routes the REAL required-parity
+// failure terminal ([`ParityFailure::panic`]) through the same emitter the
+// synthetic test exercises, so a real red gate produces
+// `parity-failures/<tier>/<scenario_id>/failure-artifact.json`.
+#[path = "../parity_bundle/mod.rs"]
+mod parity_bundle;
 
 /// CI fail-closed switch.
 ///
@@ -70,6 +88,115 @@ pub mod scenario {
     pub const DELTA_SCAN: &str = "sstable_parity_delta_scan";
 }
 
+/// The manifest join data the shared failure-artifact bundle needs but a
+/// suite-keyed [`ParityFailure`] does not itself carry (issue #1027 finding 1).
+///
+/// A `ParityFailure` is keyed by the manifest *suite* (e.g.
+/// `sstable_parity_data_db_jsonl`), but the uniform failure-artifact record is
+/// keyed by a manifest `cass.*` *scenario id* and needs a `tier` + `evidence_type`.
+/// A suite spans many `cass.*` scenarios; we bind each wired suite to ONE
+/// representative REAL manifest scenario so a red required-parity run emits a
+/// bundle that joins straight back to the manifest (never an invented id).
+#[derive(Clone, Copy, Debug)]
+pub struct BundleDescriptor {
+    /// A REAL `cass.*` manifest scenario id for this suite (schema join key).
+    pub cass_scenario_id: &'static str,
+    /// The manifest `ci.tier` for that scenario.
+    pub tier: &'static str,
+    /// The manifest `evidence.type` for that scenario.
+    pub evidence_type: &'static str,
+    /// What the scenario compares (record `artifacts_compared`).
+    pub artifacts_compared: &'static [&'static str],
+}
+
+/// Map a wired suite id to its representative manifest [`BundleDescriptor`], or
+/// `None` for suites not wired to the shared bundle (e.g. the `manual_debug`
+/// delta-scan suite). The `cass_scenario_id`s are asserted to exist in the real
+/// manifest by the wiring test `bundle_descriptors_are_real_manifest_ids`.
+pub fn bundle_descriptor_for_suite(suite: &str) -> Option<BundleDescriptor> {
+    const BYTE: &[&str] = &["bytes", "offsets", "checksums", "component_files"];
+    const JSONL: &[&str] = &["jsonl"];
+    let d = match suite {
+        s if s == scenario::INDEX_DB_BIG => BundleDescriptor {
+            cass_scenario_id: "cass.index_db.RowIndexEntryTest.partition_offsets",
+            tier: "required_parity",
+            evidence_type: "byte_for_byte",
+            artifacts_compared: BYTE,
+        },
+        s if s == scenario::SUMMARY_DB_BIG => BundleDescriptor {
+            cass_scenario_id: "cass.summary_db.IndexSummaryTest.serialization_round_trip",
+            tier: "required_parity",
+            evidence_type: "byte_for_byte",
+            artifacts_compared: BYTE,
+        },
+        s if s == scenario::STATISTICS_DB => BundleDescriptor {
+            cass_scenario_id: "cass.statistics_db.MetadataSerializerTest.metadata_components",
+            tier: "required_parity",
+            evidence_type: "byte_for_byte",
+            artifacts_compared: BYTE,
+        },
+        s if s == scenario::DATA_DB_JSONL => BundleDescriptor {
+            cass_scenario_id: "cass.data_db_decode.row_cell_flags_and_vint",
+            tier: "required_parity",
+            evidence_type: "canonical_semantic",
+            artifacts_compared: JSONL,
+        },
+        s if s == scenario::COMPONENT_MANIFEST => BundleDescriptor {
+            cass_scenario_id: "cass.sstable_format.toc_component_manifest",
+            tier: "fast_pr",
+            evidence_type: "byte_for_byte",
+            artifacts_compared: BYTE,
+        },
+        s if s == scenario::COMPRESSION_INFO_CHUNKS => BundleDescriptor {
+            cass_scenario_id:
+                "cass.compression_info.CompressionMetadataTest.metadata_serialization",
+            tier: "required_parity",
+            evidence_type: "byte_for_byte",
+            artifacts_compared: BYTE,
+        },
+        _ => return None,
+    };
+    Some(d)
+}
+
+/// REAL, typed evidence carried from a concrete mismatch site into the shared
+/// failure bundle (issue #1027 finding 1). The bundle emitter renders each
+/// variant into its genuine diff bodies via the `parity_bundle` formatters — it
+/// NEVER fabricates a diff kind whose file would not contain the evidence its
+/// kind promises. A site that only has a rendered diagnostic attaches nothing
+/// here, and the bundle emits only `diagnostic.txt` for it.
+#[derive(Clone, Debug)]
+pub enum BundleEvidence {
+    /// Raw expected/actual component bytes. Yields REAL `byte_diff`,
+    /// `offset_diff`, `checksum_diff` (two distinct SHA-256s) and, when a
+    /// component inventory is supplied, `component_inventory` bodies.
+    RawBytes {
+        component: String,
+        expected: Vec<u8>,
+        actual: Vec<u8>,
+        /// Optional (expected, actual) component-name lists for the inventory.
+        inventory: Option<(Vec<String>, Vec<String>)>,
+    },
+    /// Offset-delta pairs `(expected, actual)`. Only a REAL `offset_diff` body
+    /// can be produced (no raw bytes / checksums), so only that kind is emitted.
+    OffsetDelta {
+        component: String,
+        pairs: Vec<(i64, i64)>,
+    },
+    /// Named scalar/checksum fields `(name, expected, actual)`. Only a REAL
+    /// `checksum_diff` body is produced, so only that kind is emitted.
+    Checksums {
+        component: String,
+        fields: Vec<(String, String, String)>,
+    },
+    /// Both raw JSONL sides. Yields a REAL normalized `jsonl.diff` plus the two
+    /// non-empty raw `reference.jsonl` / `candidate.jsonl` bundle files.
+    Jsonl {
+        reference: Vec<String>,
+        candidate: Vec<String>,
+    },
+}
+
 /// Structured parity-failure / fail-closed diagnostic.
 ///
 /// Build with the manifest scenario ID, then attach the Cassandra source rule,
@@ -87,6 +214,11 @@ pub struct ParityFailure {
     /// writes `target/cassandra-parity/<lane>.diff` and a `summary.json` row before
     /// panicking, so CI uploads a structured diff for the failure.
     lane: Option<String>,
+    /// REAL typed evidence from the concrete mismatch site (issue #1027 finding
+    /// 1). When present, the bundle writes genuine diff bodies for exactly the
+    /// kinds this evidence supports; when absent, the bundle emits only
+    /// `diagnostic.txt` (never a fabricated kind).
+    evidence: Option<BundleEvidence>,
 }
 
 impl ParityFailure {
@@ -100,7 +232,65 @@ impl ParityFailure {
             repro: None,
             detail: None,
             lane: None,
+            evidence: None,
         }
+    }
+
+    /// Attach REAL raw expected/actual component bytes as byte_for_byte evidence
+    /// (issue #1027 finding 1). The bundle renders genuine byte-diff / offset-diff
+    /// / checksums (two distinct SHA-256s) and, when `inventory` is supplied, a
+    /// component_inventory body from these bytes — never a fabricated kind.
+    pub fn byte_evidence(
+        mut self,
+        component: &str,
+        expected: impl Into<Vec<u8>>,
+        actual: impl Into<Vec<u8>>,
+        inventory: Option<(Vec<String>, Vec<String>)>,
+    ) -> Self {
+        self.evidence = Some(BundleEvidence::RawBytes {
+            component: component.to_string(),
+            expected: expected.into(),
+            actual: actual.into(),
+            inventory,
+        });
+        self
+    }
+
+    /// Attach REAL offset-delta `(expected, actual)` pairs. Only a genuine
+    /// `offset_diff` body is produced (no raw bytes to checksum), so the bundle
+    /// emits ONLY that diff kind for this failure (issue #1027 finding 1).
+    pub fn offset_evidence(mut self, component: &str, pairs: Vec<(i64, i64)>) -> Self {
+        self.evidence = Some(BundleEvidence::OffsetDelta {
+            component: component.to_string(),
+            pairs,
+        });
+        self
+    }
+
+    /// Attach REAL named checksum/scalar fields `(name, expected, actual)`. Only a
+    /// genuine `checksum_diff` body is produced, so the bundle emits ONLY that
+    /// diff kind for this failure (issue #1027 finding 1).
+    pub fn checksum_evidence(
+        mut self,
+        component: &str,
+        fields: Vec<(String, String, String)>,
+    ) -> Self {
+        self.evidence = Some(BundleEvidence::Checksums {
+            component: component.to_string(),
+            fields,
+        });
+        self
+    }
+
+    /// Attach REAL reference/candidate JSONL sides as canonical_semantic evidence
+    /// (issue #1027 finding 1). The bundle writes a genuine normalized `jsonl.diff`
+    /// plus the two non-empty raw `reference.jsonl` / `candidate.jsonl` files.
+    pub fn jsonl_evidence(mut self, reference: Vec<String>, candidate: Vec<String>) -> Self {
+        self.evidence = Some(BundleEvidence::Jsonl {
+            reference,
+            candidate,
+        });
+        self
     }
 
     /// Set the diff-artifact lane stem so [`ParityFailure::panic`] emits a
@@ -174,6 +364,13 @@ impl ParityFailure {
     /// rendered diagnostic to `target/cassandra-parity/<lane>.diff` and records a
     /// `Fail` row in `summary.json`, so the CI artifact upload captures a
     /// structured diff for the failure before the test process aborts.
+    ///
+    /// Issue #1027 finding 1: this is the SINGLE common failure terminal for every
+    /// concrete required-parity mismatch site, so it ALSO emits the shared,
+    /// scenario-id-keyed failure bundle (`parity-failures/<tier>/<scenario_id>/`)
+    /// through the same emitter the synthetic test exercises — a real red gate now
+    /// produces the same `failure-artifact.json` the workflow upload globs collect.
+    /// Both the bundle and the legacy `target/cassandra-parity/**` diff are kept.
     pub fn panic(&self) -> ! {
         let rendered = self.render();
         if let Some(lane) = &self.lane {
@@ -181,8 +378,149 @@ impl ParityFailure {
             let artifacts: Vec<PathBuf> = artifact.into_iter().collect();
             let _ = write_summary(lane, LaneStatus::Fail, &self.scenario_id, &artifacts);
         }
+        self.emit_failure_bundle(&rendered);
         panic!("{rendered}")
     }
+
+    /// Emit the shared scenario-id-keyed failure bundle for this failure.
+    ///
+    /// Fixture-tolerant (issue #1027 finding 2): ANY `ParityFailure::panic` for a
+    /// suite that has a [`bundle_descriptor_for_suite`] descriptor ALWAYS writes a
+    /// conforming `failure-artifact.json`. When no fixture was attached — several
+    /// real call sites lack `.fixture(...)` — the record is emitted with the
+    /// explicit `<unknown>` fixture-path sentinel (satisfies the schema's
+    /// `minLength: 1`) and the all-zero `dataset_sha256` sentinel
+    /// ([`parity_bundle::DATASET_SHA_UNAVAILABLE`], the same one the corpus-audit
+    /// path uses) rather than skipping. Only a suite with NO descriptor (e.g. the
+    /// `manual_debug` delta-scan suite) writes nothing. A write error is logged to
+    /// stderr rather than masking the parity panic below, which still fails the
+    /// build regardless (fail-closed, owner decision 2).
+    ///
+    /// Issue #1027 finding 1: the bundle's diff bodies are REAL. When the site
+    /// attached typed [`BundleEvidence`], each written diff file contains genuine
+    /// evidence for exactly the kinds that evidence supports (raw byte-diff +
+    /// offset-diff + two-distinct-SHA-256 checksums + component_inventory for raw
+    /// bytes; only an offset_diff for offset-delta pairs; only a checksum_diff for
+    /// scalar fields; a real normalized jsonl.diff + non-empty raw reference/
+    /// candidate JSONL for JSONL). A site with NO typed evidence writes a single
+    /// `diagnostic.txt` and an EMPTY `diffs[]` — it never fabricates a kind whose
+    /// file would not contain the evidence its kind promises.
+    fn emit_failure_bundle(&self, rendered: &str) {
+        let Some(desc) = bundle_descriptor_for_suite(&self.scenario_id) else {
+            return;
+        };
+        // Fixture-tolerant: fall back to the schema-valid `<unknown>` sentinel path
+        // (minLength: 1) when no fixture is attached; ReproContext then records the
+        // all-zero dataset_sha256 sentinel because that path is unreadable.
+        let fixture = self
+            .fixture
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("<unknown>"));
+        let repro = parity_bundle::ReproContext {
+            cassandra_version: "5.0.2".to_string(),
+            cassandra_git_sha: "f278f6774fc76465c182041e081982105c3e7dbb".to_string(),
+            fixture_path: fixture,
+            component_list: self.components.clone(),
+            command_line: self
+                .repro
+                .clone()
+                .unwrap_or_else(|| "see the parity test source".to_string()),
+        };
+        let mut bundle = parity_bundle::FailureBundle::new(
+            parity_failures_root(),
+            desc.cass_scenario_id,
+            "sstabledump-parity-gate.yml",
+            desc.tier,
+            desc.evidence_type,
+            repro,
+        )
+        .artifacts_compared(desc.artifacts_compared.iter().copied())
+        .stdout(rendered.to_string())
+        .stderr(rendered.to_string());
+
+        // Attach REAL typed evidence bodies (issue #1027 finding 1). Each diff
+        // kind is written ONLY when the concrete site supplied the data that kind
+        // promises — never the same rendered string across four files, and never a
+        // fabricated kind. A site with only a diagnostic (no typed evidence, e.g.
+        // the dataset-absent fail-closed panics) attaches a single `diagnostic.txt`
+        // bundle file and an EMPTY diffs[] — honest about what evidence exists.
+        bundle = match &self.evidence {
+            Some(BundleEvidence::RawBytes {
+                component,
+                expected,
+                actual,
+                inventory,
+            }) => {
+                let (inv_exp, inv_act) = inventory.clone().unwrap_or_else(|| {
+                    // No explicit inventory: derive it from the failure's own
+                    // component list on both sides (real data, not fabricated).
+                    (self.components.clone(), self.components.clone())
+                });
+                bundle.byte_for_byte_component(
+                    component,
+                    parity_bundle::byte_diff_body(component, expected, actual),
+                    parity_bundle::offset_diff_body(component, expected, actual),
+                    parity_bundle::checksums_body(component, expected, actual),
+                    parity_bundle::component_inventory_body(&inv_exp, &inv_act),
+                )
+            }
+            Some(BundleEvidence::OffsetDelta { component, pairs }) => {
+                // Only a real offset diff can be produced — emit ONLY that kind.
+                bundle.offset_diff_only(component, offset_delta_diff(component, pairs))
+            }
+            Some(BundleEvidence::Checksums { component, fields }) => {
+                // Only a real checksum diff can be produced — emit ONLY that kind.
+                let refs: Vec<(&str, String, String)> = fields
+                    .iter()
+                    .map(|(n, e, a)| (n.as_str(), e.clone(), a.clone()))
+                    .collect();
+                bundle.checksum_diff_only(checksum_diff(component, &refs))
+            }
+            Some(BundleEvidence::Jsonl {
+                reference,
+                candidate,
+            }) => bundle.jsonl(
+                parity_bundle::jsonl_diff_body(reference, candidate),
+                reference.join("\n"),
+                candidate.join("\n"),
+            ),
+            None => {
+                // No typed evidence at this site (only a rendered diagnostic).
+                // Do NOT fabricate any diff kind: write a single diagnostic.txt
+                // bundle file and leave diffs[] empty.
+                bundle.raw_bundle_file("diagnostic.txt", rendered.to_string())
+            }
+        };
+        match bundle.emit() {
+            Ok(emitted) => eprintln!(
+                "issue-1027: wrote failure bundle {}",
+                emitted.bundle_dir.display()
+            ),
+            Err(e) => eprintln!(
+                "issue-1027: ERROR writing failure bundle for {}: {e}",
+                desc.cass_scenario_id
+            ),
+        }
+    }
+}
+
+/// The deterministic root the shared failure bundle is written beneath, chosen so
+/// the emitted `parity-failures/**` tree matches the workflow upload globs
+/// (`parity-failures/**` and `cqlite-core/parity-failures/**`) in
+/// `sstabledump-parity-gate.yml` / `compaction-parity.yml`.
+///
+/// Resolves to the workspace root (the `CARGO_MANIFEST_DIR` parent, exactly as
+/// [`parity_artifact_dir`] resolves `target/`) so `<root>/parity-failures/` sits
+/// at the repo root regardless of the test binary's cwd. Overridable via
+/// `CQLITE_PARITY_FAILURES_ROOT` (the e2e test points it at a tempdir).
+fn parity_failures_root() -> PathBuf {
+    if let Ok(dir) = std::env::var("CQLITE_PARITY_FAILURES_ROOT") {
+        return PathBuf::from(dir);
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// Per-lane status recorded in `summary.json`.

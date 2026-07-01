@@ -4,6 +4,16 @@
 //! No Docker, live Cassandra, or downloaded dataset binaries required: this tool
 //! only reads the manifest, the repository tree, and the assessment report.
 //!
+//! NOTE (campsite rule / epics #1116, #1135): this file is over the source
+//! threshold, dominated by the corpus-audit CLI I/O helpers added under #1026
+//! (`walk_relative`, `read_sha256_file`, `read_corruption_fixtures` + their inline
+//! tests). Issue #1027 (Wave 1) only adds the thin `retention-check` subcommand
+//! (~21 lines) plus a Wave 2d ~12-line failure-branch call into
+//! `corpus_audit::audit_report::emit_on_failure` (the emit logic itself lives in
+//! that module, not here). Splitting the pre-existing corpus-audit I/O into its
+//! own module is out of this issue's scope, so the growth is acknowledged via
+//! `CQLITE_ALLOW_FILE_GROWTH=1`. A dedicated CLI-I/O split belongs to #1116.
+//!
 //! Usage:
 //!   cassandra-parity lint     [--manifest PATH]
 //!   cassandra-parity coverage [--manifest PATH] [--strict]
@@ -21,7 +31,7 @@ use cassandra_parity::corpus_audit::{
 };
 use cassandra_parity::lint::Level;
 use cassandra_parity::model::Manifest;
-use cassandra_parity::{coverage, enums, lint, report, tier_contract};
+use cassandra_parity::{coverage, enums, lint, report, retention, tier_contract};
 
 const DEFAULT_MANIFEST: &str = "test-data/cassandra-parity-manifest.yml";
 const DEFAULT_OUTPUT: &str = "docs/reports/cassandra-test-parity.md";
@@ -36,6 +46,7 @@ USAGE:
   cassandra-parity coverage           [--manifest PATH] [--strict]
   cassandra-parity report             [--manifest PATH] [--output PATH] [--check] [--json PATH]
   cassandra-parity tier-contract-check [--manifest PATH] [--tier-doc PATH] [--schema PATH]
+  cassandra-parity retention-check    [--manifest PATH] [--tier-doc PATH]
   cassandra-parity corpus-audit       [--manifest PATH] --corpus DIR [--provenance JSON]
                                       [--checksums FILE] [--expected-inventory FILE]
                                       [--corruption-manifest YML] [--index MD]
@@ -153,6 +164,7 @@ fn run() -> Result<ExitCode> {
         "coverage" => cmd_coverage(&args),
         "report" => cmd_report(&args),
         "tier-contract-check" => cmd_tier_contract_check(&args),
+        "retention-check" => cmd_retention_check(&args),
         "corpus-audit" => cmd_corpus_audit(&args),
         "-h" | "--help" | "help" => {
             println!("{USAGE}");
@@ -242,6 +254,29 @@ fn cmd_tier_contract_check(args: &Args) -> Result<ExitCode> {
     }
 }
 
+/// Enforce per-tier artifact retention (issue #1027, section 5.2): parse the
+/// documented retention minimums from the tier doc, group manifest scenarios by
+/// their `ci.workflow`, and check each referenced workflow's `upload-artifact`
+/// `retention-days` against the strictest minimum among the tiers it gates. Reads
+/// only text already in the repo — no Docker/datasets/live Cassandra.
+fn cmd_retention_check(args: &Args) -> Result<ExitCode> {
+    let m = load(&args.manifest)?;
+    let root = repo_root(&args.manifest);
+    let doc = std::fs::read_to_string(&args.tier_doc)
+        .with_context(|| format!("reading tier doc {}", args.tier_doc.display()))?;
+    let minimums =
+        retention::parse_documented_minimums(&doc).context("parsing retention minimums")?;
+
+    let result = retention::run_repo_check(&m, &root, &minimums);
+    if result.ok() {
+        println!("{}", result.render());
+        Ok(ExitCode::SUCCESS)
+    } else {
+        eprintln!("{}", result.render());
+        Ok(ExitCode::FAILURE)
+    }
+}
+
 /// Audit the regenerated corpus + run provenance against the manifest
 /// (issue #1026). Hard-fails (non-zero exit) and names the offender on any
 /// finding — no report-but-pass mode (owner-pinned strictness).
@@ -320,6 +355,18 @@ fn cmd_corpus_audit(args: &Args) -> Result<ExitCode> {
         eprintln!(
             "corpus-audit: FAILED — {} finding(s)",
             report.findings.len()
+        );
+        // Issue #1027: the exhaustive_regeneration lane emits a conforming,
+        // scenario-id-keyed failure-artifact bundle (tier=exhaustive_regeneration,
+        // diffs[] with kind=audit_report) on every audit failure — never zero
+        // forensics (fail-closed). Orchestrated in `audit_report` to keep this
+        // branch small.
+        let command_line = std::env::args().collect::<Vec<_>>().join(" ");
+        corpus_audit::audit_report::emit_on_failure(
+            &m,
+            &report,
+            provenance.as_ref(),
+            &command_line,
         );
         Ok(ExitCode::FAILURE)
     }

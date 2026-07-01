@@ -3,6 +3,9 @@ target/
 Cargo.lock
 *.pdb
 
+# Parity failure-artifact bundles (issue #1027) — CI-only forensics, never committed
+parity-failures/
+
 # Local cargo config
 .cargo/
 

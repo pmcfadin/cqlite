@@ -75,6 +75,138 @@ pub fn lint(m: &Manifest, repo_root: Option<&Path>) -> Vec<Finding> {
     out
 }
 
+/// Split a failure-artifact descriptor `artifact.<tier>.<kind>` into `(tier, kind)`.
+/// Returns `None` if it is not a well-formed 3-segment `artifact.` descriptor.
+fn parse_descriptor(desc: &str) -> Option<(&str, &str)> {
+    let rest = desc.strip_prefix("artifact.")?;
+    let (tier, kind) = rest.split_once('.')?;
+    if tier.is_empty() || kind.is_empty() || kind.contains('.') {
+        return None;
+    }
+    Some((tier, kind))
+}
+
+/// Whether descriptor `kind` is valid for a scenario's `evidence_type`
+/// (issue #1027). Evidence-based kinds (`byte_diff`/`offset_diff`/`checksum_diff`/
+/// `component_inventory`) are valid only where the scenario emits byte-level
+/// diffs — a `byte_for_byte` scenario, or a `partial` scenario that fell short of
+/// full byte parity but still records the same byte/checksum diff shape.
+/// `jsonl_diff` is valid on `canonical_semantic` (or a `partial` semantic gap).
+/// The tier-scoped kinds (`live_logs`/`audit_report`/`reproduction_bundle`) are
+/// governed by TIER (checked separately by [`tier_scoped_kind_valid_for_tier`]),
+/// not evidence type, so they are accepted here regardless of evidence type.
+/// Mirrors the spec: byte/offset/checksum only on byte_for_byte; jsonl on
+/// canonical_semantic; live_log on nightly_docker; audit_report on
+/// exhaustive_regeneration.
+fn descriptor_kind_valid_for_evidence(kind: &str, evidence: &str) -> bool {
+    match kind {
+        "byte_diff" | "offset_diff" | "checksum_diff" | "component_inventory" => {
+            matches!(evidence, "byte_for_byte" | "partial")
+        }
+        "jsonl_diff" => matches!(evidence, "canonical_semantic" | "partial"),
+        // Tier-scoped kinds: evidence-type-agnostic; the tier segment carries the
+        // constraint (a `live_logs` descriptor must be tier=nightly_docker, etc.),
+        // which is enforced by `tier_scoped_kind_valid_for_tier`.
+        "live_logs" | "audit_report" | "reproduction_bundle" => true,
+        _ => false,
+    }
+}
+
+/// Whether a TIER-SCOPED descriptor `kind` is valid on `tier` (issue #1027).
+///
+/// The tier==ci.tier rule alone is not enough: it only proves the descriptor's
+/// `<tier>` segment matches the scenario's tier, so `artifact.required_parity.live_logs`
+/// (a live-log kind mislabelled onto the required_parity tier) would slip through.
+/// A tier-scoped kind is only meaningful on the tier that actually produces it:
+/// `live_logs` ONLY on `nightly_docker` (the live Docker lane), `audit_report`
+/// ONLY on `exhaustive_regeneration` (the corpus-audit lane), and
+/// `reproduction_bundle` ONLY on `manual_debug` (the ad-hoc repro lane). Returns
+/// `None` when `kind` is not a recognised tier-scoped kind (evidence-scoped kinds
+/// are gated by [`descriptor_kind_valid_for_evidence`] instead); otherwise returns
+/// `Some(allowed_tier)` — the SINGLE tier on which that kind is valid.
+fn tier_scoped_kind_allowed_tier(kind: &str) -> Option<&'static str> {
+    match kind {
+        "live_logs" => Some("nightly_docker"),
+        "audit_report" => Some("exhaustive_regeneration"),
+        "reproduction_bundle" => Some("manual_debug"),
+        _ => None,
+    }
+}
+
+/// Validate a scenario's typed failure-artifact descriptors (issue #1027, 4.2):
+/// each must be a well-formed `artifact.<tier>.<kind>`, whose `<tier>` equals the
+/// scenario's `ci.tier`, whose `<kind>` is a known descriptor kind, and whose
+/// `<kind>` is valid for the scenario's `evidence_type`.
+fn lint_failure_artifacts(s: &Scenario, out: &mut Vec<Finding>) {
+    let id = s.id.as_str();
+    for desc in &s.evidence.failure_artifacts {
+        let Some((tier, kind)) = parse_descriptor(desc) else {
+            out.push(Finding::error(
+                id,
+                "evidence.failure_artifacts",
+                format!(
+                    "failure artifact must be a typed descriptor `artifact.<tier>.<kind>`, got: {desc}"
+                ),
+            ));
+            continue;
+        };
+        if !enums::CI_TIER.contains(&tier) {
+            out.push(Finding::error(
+                id,
+                "evidence.failure_artifacts",
+                format!("descriptor {desc} has unknown tier segment '{tier}'"),
+            ));
+            continue;
+        }
+        if !enums::ARTIFACT_DESCRIPTOR_KIND.contains(&kind) {
+            out.push(Finding::error(
+                id,
+                "evidence.failure_artifacts",
+                format!(
+                    "descriptor {desc} has unknown kind '{kind}'; allowed: {}",
+                    enums::ARTIFACT_DESCRIPTOR_KIND.join(", ")
+                ),
+            ));
+            continue;
+        }
+        if tier != s.ci.tier {
+            out.push(Finding::error(
+                id,
+                "evidence.failure_artifacts",
+                format!(
+                    "descriptor {desc} tier '{tier}' must equal the scenario's ci.tier '{}'",
+                    s.ci.tier
+                ),
+            ));
+        }
+        // Tier-scoped kinds (live_logs/audit_report) are only meaningful on the
+        // tier that produces them; the tier==ci.tier rule above does NOT catch a
+        // live-log/audit kind mislabelled onto the wrong tier (e.g.
+        // artifact.required_parity.live_logs), so reject those explicitly here.
+        if let Some(allowed_tier) = tier_scoped_kind_allowed_tier(kind) {
+            if tier != allowed_tier {
+                out.push(Finding::error(
+                    id,
+                    "evidence.failure_artifacts",
+                    format!(
+                        "descriptor kind '{kind}' is only valid on tier '{allowed_tier}', not '{tier}'"
+                    ),
+                ));
+            }
+        }
+        if !descriptor_kind_valid_for_evidence(kind, &s.evidence.kind) {
+            out.push(Finding::error(
+                id,
+                "evidence.failure_artifacts",
+                format!(
+                    "descriptor kind '{kind}' is not valid for a {} scenario",
+                    s.evidence.kind
+                ),
+            ));
+        }
+    }
+}
+
 /// Validate the public-claim entries (issue #1023): closed `kind`, well-formed
 /// ids, non-empty phrase/rationale, `safe` claims must cite real scenario ids,
 /// and `blocked` claims should point at a `claim.safe.*` alternative.
@@ -359,6 +491,9 @@ fn lint_scenario(s: &Scenario, repo_root: Option<&Path>, out: &mut Vec<Finding>)
         }
         _ => {}
     }
+
+    // --- typed failure-artifact descriptors (issue #1027) ---
+    lint_failure_artifacts(s, out);
 
     // --- evidence-type rules ---
     match s.evidence.kind.as_str() {

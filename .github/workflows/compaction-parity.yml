@@ -223,6 +223,9 @@ jobs:
       # harness's preserved per-scenario artifacts (inputs, both engines' output
       # components, schema, exact command lines, stdout/stderr, normalized JSONL,
       # checksum summary, and the first byte/offset diff per component).
+      # Issue #1027: this lane gates both required_parity AND nightly_docker
+      # scenarios, so its binding retention minimum is the stricter 30 days
+      # (nightly_docker) — see docs/development/parity-ci-tiers.md.
       - name: Upload parity reports and diffs
         if: always()
         uses: actions/upload-artifact@v6
@@ -234,7 +237,23 @@ jobs:
             compaction-parity/build/parity-artifacts-test/**
             compaction-parity/build/parity-artifacts-byteParity/**
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 30
+
+      # Issue #1027: shared, scenario-id-keyed failure bundle. The harness maps
+      # its per-scenario tree onto parity-failures/<tier>/<scenario_id>/ so a red
+      # run yields one predictably-named artifact keyed by the failed `cass.*`
+      # scenario id. retention-days meets the stricter (nightly_docker, 30) tier
+      # minimum this lane gates.
+      - name: Upload parity failure bundle (issue #1027)
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: parity-failures-compaction-parity
+          path: |
+            parity-failures/**
+            compaction-parity/build/parity-failures/**
+          if-no-files-found: ignore
+          retention-days: 30
 
       - name: Parity summary
         if: always()

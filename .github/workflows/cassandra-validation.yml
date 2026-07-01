@@ -202,6 +202,9 @@ jobs:
           echo "## Tier 3: Stress Tests" >> test_summary.md
           echo "Status: ${{ steps.tier3.outcome }}" >> test_summary.md
 
+      # Issue #1027: this lane gates a nightly_docker parity scenario
+      # (cass.write_load_path.live_readback.semantic_only), so its binding
+      # retention minimum is 30 days — see docs/development/parity-ci-tiers.md.
       - name: Upload Test Artifacts
         if: always()
         uses: actions/upload-artifact@v6
@@ -212,7 +215,19 @@ jobs:
             tier2_results.txt
             tier3_results.txt
             test_summary.md
-          retention-days: 14
+          retention-days: 30
+
+      # Issue #1027 convergence audit: this lane's sstableloader_integration tests
+      # use plain assert!/assert_eq! terminals — they do NOT route through
+      # ParityFailure::panic and have no scenario-id-keyed bundle emitter — so a
+      # `parity-failures-*` upload here would advertise a bundle that never
+      # appears (even with `if-no-files-found: ignore`, the artifact promise is
+      # false). The speculative upload was removed; the "Upload Test Artifacts"
+      # step above already captures this lane's real forensics (tier results +
+      # summary). FOLLOW-UP: to emit the shared bundle for the live-readback
+      # comparison, route the failure terminal through the shared
+      # ParityFailure/FailureBundle emitter (out of scope for #1027, which
+      # standardises the artifact system, not each lane's terminal).
 
       - name: Comment on PR (Success)
         if: success() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository

@@ -84,6 +84,31 @@ public abstract class DifferentialParityTester extends CQLTester
     private static final Pattern EXPIRED_FLAG =
         Pattern.compile("\"expired\"\\s*:\\s*(true|false)");
 
+    /**
+     * The emitting workflow file recorded as the {@code lane} in the
+     * failure-artifact record (issue #1027). The compaction Java/Gradle harness
+     * (logical + byte tiers) is driven by {@code compaction-parity.yml}.
+     */
+    private static final String LANE = "compaction-parity.yml";
+
+    /**
+     * The pinned Cassandra version/git-sha the harness builds against, recorded in
+     * the failure-artifact {@code provenance} so it is comparable to the manifest
+     * {@code cassandra_source} pin. Overridable via {@code -Dparity.cassandra.version}
+     * / {@code -Dparity.cassandra.git.sha} (the Gradle build sets these from the
+     * pinned source); the defaults match the manifest's compaction scenarios.
+     */
+    private static String cassandraVersion()
+    {
+        return System.getProperty("parity.cassandra.version", "5.0.2");
+    }
+
+    private static String cassandraGitSha()
+    {
+        return System.getProperty("parity.cassandra.git.sha",
+                                  "f278f6774fc76465c182041e081982105c3e7dbb");
+    }
+
     @Rule
     public final TestName testName = new TestName();
 
@@ -172,6 +197,19 @@ public abstract class DifferentialParityTester extends CQLTester
         artifacts.write("cqlite-compact.stdout", res.stdout);
         artifacts.write("cqlite-compact.stderr", res.stderr);
 
+        // ── EARLY-EXIT PATH (a): non-zero `cqlite compact` exit ──
+        // Emit the shared scenario-id-keyed bundle BEFORE the assertion so this
+        // failure mode also produces a manifest-joinable record (issue #1027
+        // finding 1). No typed byte/offset bodies exist here, so the bundle carries
+        // a diagnostic.txt + empty diffs[] (never a fabricated diff kind).
+        if (!res.succeeded())
+        {
+            emitDiagnosticFailureBundle(res, null,
+                "cqlite compact failed (exit " + res.exitCode + ")\n\n"
+                + "## command\n" + res.commandLine() + "\n\n"
+                + "## stdout\n" + res.stdout + "\n\n"
+                + "## stderr\n" + res.stderr + "\n");
+        }
         assertTrue("cqlite compact failed (exit " + res.exitCode + "):\n" + res.stderr + res.stdout,
                    res.succeeded());
         // Single walk for the candidate output. Mirror the reference "exactly one
@@ -180,6 +218,18 @@ public abstract class DifferentialParityTester extends CQLTester
         // directly, not stay hidden inside the swallowed byte-tier block (where a
         // duplicate-kind would otherwise be suppressed on PRs).
         List<Path> candidateDataList = candidateDataFiles(outputDir);
+        // ── EARLY-EXIT PATH (b): zero or multiple candidate Data.db files ──
+        // A writer regression that emits 0 or >1 SSTable generations is a real
+        // divergence; emit the shared bundle before the assertion (issue #1027
+        // finding 1). Diagnostic-only (empty diffs[]): no per-component bytes to diff.
+        if (candidateDataList.size() != 1)
+        {
+            emitDiagnosticFailureBundle(res, null,
+                "wrong candidate Data.db count: expected exactly 1 (one SSTable generation), "
+                + "found " + candidateDataList.size() + " under " + outputDir + "\n\n"
+                + "## candidate Data.db files\n" + candidateDataList + "\n\n"
+                + "## command\n" + res.commandLine() + "\n");
+        }
         assertEquals("expected exactly one cqlite output Data.db (one SSTable generation) under "
                      + outputDir, 1, candidateDataList.size());
         Path candidateData = candidateDataList.get(0);
@@ -202,7 +252,21 @@ public abstract class DifferentialParityTester extends CQLTester
         catch (Exception e)
         {
             if (byteTierEnabled())
+            {
+                // ── EARLY-EXIT PATH (c): byte-comparison threw on the asserting
+                // (byte) tier ── emit the shared bundle BEFORE rethrowing so this
+                // failure mode also yields a manifest-joinable record (issue #1027
+                // finding 1). Diagnostic-only: the typed byte/offset bodies could
+                // not be computed (that is why compare() threw), so diffs[] is empty.
+                java.io.StringWriter sw = new java.io.StringWriter();
+                e.printStackTrace(new java.io.PrintWriter(sw));
+                emitDiagnosticFailureBundle(res, candidateData,
+                    "byte-comparison threw before a typed diff could be produced "
+                    + "(cassandra-output vs cqlite-output):\n\n"
+                    + "## exception\n" + sw + "\n"
+                    + "## command\n" + res.commandLine() + "\n");
                 throw e; // byteParity is the asserting tier: surface the failure.
+            }
             byteResult = null;
             // Visible, greppable signal so a suppressed byte-tier failure on the
             // logical PR path is never silently invisible in the CI log.
@@ -219,8 +283,15 @@ public abstract class DifferentialParityTester extends CQLTester
         System.out.println("[parity] " + scenarioLabel() + " artifacts: " + artifacts.dir());
 
         // LOGICAL tier is the hard gate.
-        assertEquals("logical dump mismatch (cassandra reference vs cqlite candidate)",
-                     referenceJson, candidateJson);
+        if (!referenceJson.equals(candidateJson))
+        {
+            // Issue #1027: emit the shared, scenario-id-keyed failure bundle
+            // (canonical_semantic → jsonl_diff + raw reference/candidate JSONL)
+            // BEFORE failing so a red run yields the manifest-joinable record.
+            emitLogicalFailureBundle(candidateData, res, referenceJson, candidateJson);
+            assertEquals("logical dump mismatch (cassandra reference vs cqlite candidate)",
+                         referenceJson, candidateJson);
+        }
 
         // BYTE tier assertion (opt-in, #842 north star). No allowlist: any
         // component divergence is a failure. (byteResult is non-null whenever the
@@ -232,8 +303,168 @@ public abstract class DifferentialParityTester extends CQLTester
             for (ComponentByteComparator.ComponentDiff d : byteResult.mismatches())
                 msg.append("  ").append(d).append('\n');
             msg.append("Artifacts: ").append(artifacts.dir());
+            // Issue #1027: emit the shared, scenario-id-keyed byte_for_byte bundle
+            // (byte/offset/checksum/component_inventory + live_log, tier
+            // nightly_docker) BEFORE failing.
+            emitByteFailureBundle(byteResult, candidateData, res, cassOutDir, candOutDir);
             fail(msg.toString());
         }
+    }
+
+    /**
+     * Issue #1027 (task 3.2): emit the byte_for_byte failure bundle keyed by the
+     * manifest scenario id. Runs on the byte tier (nightly_docker), so it also
+     * carries a {@code live_log} diff (the failing comparison's stdout/stderr, per
+     * owner decision 5 — NOT the full container log). Bundle emission is
+     * best-effort: it must never mask the real {@code fail()} that follows.
+     */
+    private void emitByteFailureBundle(ComponentByteComparator.Result byteResult,
+                                       Path candidateData,
+                                       CqliteCompactionRunner.Result res,
+                                       Path cassOutDir,
+                                       Path candOutDir)
+    {
+        try
+        {
+            List<String> refKinds = ParityFailureArtifact.componentKinds(cassOutDir);
+            List<String> candKinds = ParityFailureArtifact.componentKinds(candOutDir);
+            String checksums = ParityFailureBundle.checksumsBody(cassOutDir, candOutDir);
+            String inventory = ParityFailureBundle.componentInventoryBody(refKinds, candKinds);
+
+            ParityFailureBundle bundle =
+                ParityFailureBundle.forMethod(scenarioLabel(), true, LANE)
+                    .stdout(res.stdout)
+                    .stderr(res.stderr)
+                    .artifactsCompared("bytes", "offsets", "checksums", "component_files")
+                    .provenance(cassandraVersion(), cassandraGitSha(), candidateData,
+                                candKinds, res.commandLine())
+                    .liveLog(liveLogBody(res));
+
+            // One byte_for_byte diff set per divergent component (the checksum +
+            // inventory files are shared and de-duplicated inside the bundle).
+            for (ComponentByteComparator.ComponentDiff d : byteResult.mismatches())
+                bundle.byteForByteComponent(d.kind, d.byteDiffBody(), d.offsetDiffBody(),
+                                            checksums, inventory);
+            // No divergent component but the tier still failed (defensive): still
+            // attach the checksum + inventory so the bundle is conforming.
+            if (byteResult.mismatches().isEmpty())
+                bundle.byteForByteComponent("Data.db", byteResult.render(), "no per-component offset\n",
+                                            checksums, inventory);
+
+            Path dir = bundle.emit();
+            System.out.println("[parity] byte failure bundle: " + dir);
+        }
+        catch (Exception e)
+        {
+            System.err.println("WARN: could not emit byte failure bundle (#1027): " + e);
+        }
+    }
+
+    /**
+     * Issue #1027 (finding 1): emit a diagnostic-only shared bundle for a compaction
+     * failure that exits BEFORE the typed byte/offset/checksum or JSONL diff can be
+     * produced — a non-zero {@code cqlite compact} exit, a wrong candidate Data.db
+     * count, or a byte-comparison exception. The bundle carries a rendered
+     * {@code diagnostic.txt} and an EMPTY {@code diffs[]} (never a fabricated diff
+     * kind), mirroring the Rust side's diagnostic-only approach. It is keyed by the
+     * currently-active asserting tier so it lands under the same scenario id as a
+     * normal failure. Best-effort: it must never mask the real assertion/throw that
+     * follows (the run still FAILs).
+     *
+     * @param res          the (possibly failed) cqlite compact result for provenance
+     * @param candidateData the candidate Data.db if one was resolved, else {@code null}
+     * @param diagnostic   the rendered human-readable diagnostic body
+     */
+    private void emitDiagnosticFailureBundle(CqliteCompactionRunner.Result res,
+                                             Path candidateData,
+                                             String diagnostic)
+    {
+        try
+        {
+            boolean byteTier = byteTierEnabled();
+            List<String> candKinds = candidateData != null
+                ? ParityFailureArtifact.componentKinds(candidateData.getParent())
+                : new ArrayList<>();
+            Path dir = ParityFailureBundle.forMethod(scenarioLabel(), byteTier, LANE)
+                .stdout(res.stdout)
+                .stderr(res.stderr)
+                .artifactsCompared("diagnostic")
+                .provenance(cassandraVersion(), cassandraGitSha(), candidateData,
+                            candKinds, res.commandLine())
+                .diagnostic(diagnostic)
+                .emit();
+            System.out.println("[parity] diagnostic failure bundle: " + dir);
+        }
+        catch (Exception e)
+        {
+            System.err.println("WARN: could not emit diagnostic failure bundle (#1027): " + e);
+        }
+    }
+
+    /**
+     * Issue #1027 (task 3.1): emit the canonical_semantic failure bundle
+     * (required_parity) with the normalized {@code jsonl.diff} + both raw JSONL
+     * sources. Best-effort: never masks the {@code assertEquals} that follows.
+     */
+    private void emitLogicalFailureBundle(Path candidateData,
+                                          CqliteCompactionRunner.Result res,
+                                          String referenceJson,
+                                          String candidateJson)
+    {
+        try
+        {
+            List<String> candKinds = ParityFailureArtifact.componentKinds(candidateData.getParent());
+            String jsonlDiff = jsonlDiffBody(referenceJson, candidateJson);
+            Path dir = ParityFailureBundle.forMethod(scenarioLabel(), false, LANE)
+                .stdout(res.stdout)
+                .stderr(res.stderr)
+                .artifactsCompared("jsonl")
+                .provenance(cassandraVersion(), cassandraGitSha(), candidateData,
+                            candKinds, res.commandLine())
+                .jsonl(jsonlDiff, referenceJson, candidateJson)
+                .emit();
+            System.out.println("[parity] logical failure bundle: " + dir);
+        }
+        catch (Exception e)
+        {
+            System.err.println("WARN: could not emit logical failure bundle (#1027): " + e);
+        }
+    }
+
+    /** The live_log body: the failing comparison's captured child output only. */
+    private static String liveLogBody(CqliteCompactionRunner.Result res)
+    {
+        return "# Failing comparison live log (cqlite compact child process)\n"
+             + "# (owner decision 5: the failing comparison's stdout/stderr, NOT the full container log)\n\n"
+             + "## command\n" + res.commandLine() + "\n\n"
+             + "## exit code\n" + res.exitCode + "\n\n"
+             + "## stdout\n" + res.stdout + "\n\n"
+             + "## stderr\n" + res.stderr + "\n";
+    }
+
+    /** First-differing-line normalized JSONL diff body (mirrors the Rust helper). */
+    private static String jsonlDiffBody(String referenceJson, String candidateJson)
+    {
+        String[] ref = referenceJson.split("\n", -1);
+        String[] cand = candidateJson.split("\n", -1);
+        StringBuilder sb = new StringBuilder();
+        sb.append("normalized-JSONL diff (cassandra ").append(ref.length)
+          .append(" line(s), cqlite ").append(cand.length).append(" line(s))\n");
+        int max = Math.max(ref.length, cand.length);
+        for (int i = 0; i < max; i++)
+        {
+            String e = i < ref.length ? ref[i] : "<missing>";
+            String a = i < cand.length ? cand[i] : "<missing>";
+            if (!e.equals(a))
+            {
+                sb.append("first differing line ").append(i).append(":\n");
+                sb.append("  cassandra: ").append(e).append('\n');
+                sb.append("  cqlite   : ").append(a).append('\n');
+                return sb.toString();
+            }
+        }
+        sb.append("no line-level difference detected (length mismatch only)\n");
+        return sb.toString();
     }
 
     /**
