@@ -581,8 +581,8 @@ impl QueryExecutor {
         };
 
         rows.sort_by(|a, b| {
-            let a_val = a.values.get(sort_column).unwrap_or(&Value::Null);
-            let b_val = b.values.get(sort_column).unwrap_or(&Value::Null);
+            let a_val = a.values.get(sort_column.as_str()).unwrap_or(&Value::Null);
+            let b_val = b.values.get(sort_column.as_str()).unwrap_or(&Value::Null);
             self.compare_values(a_val, b_val).unwrap_or(Ordering::Equal)
         });
         rows
@@ -594,7 +594,7 @@ impl QueryExecutor {
             .map(|row| {
                 let mut projected_values = HashMap::with_capacity(step.columns.len());
                 for column in &step.columns {
-                    if let Some(value) = row.values.get(column) {
+                    if let Some(value) = row.values.get(column.as_str()) {
                         projected_values.insert(column.clone(), value.clone());
                     }
                 }
@@ -607,7 +607,7 @@ impl QueryExecutor {
 
     /// Evaluate a condition against a row
     fn evaluate_condition(&self, row: &QueryRow, condition: &Condition) -> Result<bool> {
-        let row_value = row.values.get(&condition.column).unwrap_or(&Value::Null);
+        let row_value = row.values.get(condition.column.as_str()).unwrap_or(&Value::Null);
 
         match condition.operator {
             ComparisonOperator::Equal => Ok(row_value == &condition.value),
@@ -737,25 +737,35 @@ impl QueryExecutor {
 
     /// Convert storage data to query row
     fn storage_data_to_query_row(&self, data: Value, key: &RowKey) -> Result<QueryRow> {
-        let mut values = HashMap::new();
+        use std::sync::Arc;
+        let mut values: HashMap<Arc<str>, Value> = HashMap::new();
 
-        // Storage path stores rows as `Value::Map` keyed by column name (Text).
+        // Storage path carries rows as `Value::Row` keyed by the interned
+        // `Arc<str>` column-name handle (issue #1334); move the handle straight
+        // in (no per-cell `String` re-allocation of the name).
         match data {
+            Value::Row(cells) => {
+                for (name, cell_value) in cells {
+                    values.insert(name, cell_value);
+                }
+            }
+            // Backward-compat: the experimental in-memory storage path still
+            // carries rows as `Value::Map` keyed by `Value::Text` column names.
             Value::Map(map) => {
                 for (map_key, map_value) in map {
                     if let Value::Text(column_name) = map_key {
-                        values.insert(column_name, map_value);
+                        values.insert(Arc::from(column_name.as_str()), map_value);
                     }
                 }
             }
             other => {
-                values.insert("data".to_string(), other);
+                values.insert(Arc::from("data"), other);
             }
         }
 
         // If no values were extracted, surface the row key for visibility.
         if values.is_empty() {
-            values.insert("id".to_string(), Value::Text(format!("{:?}", key)));
+            values.insert(Arc::from("id"), Value::Text(format!("{:?}", key)));
         }
 
         Ok(QueryRow::with_values(key.clone(), values))

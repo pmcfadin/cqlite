@@ -138,7 +138,7 @@ impl FilterExpr {
             },
             FilterExpr::IsNull(column) => {
                 // Absent column or an explicit Null cell are both SQL NULL.
-                match row.values.get(column) {
+                match row.values.get(column.as_str()) {
                     None | Some(Value::Null) => Kleene::True,
                     Some(_) => Kleene::False,
                 }

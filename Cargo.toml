@@ -64,7 +64,7 @@ private_interfaces = "allow"  # Allow private interfaces during development
 [workspace.dependencies]
 # Core dependencies - avoid "full" features, enable per-crate
 tokio = { version = "1.0", default-features = false }
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 bincode = "1.3"
 thiserror = "1.0"

@@ -13,6 +13,7 @@ use crate::{
     TableId,
 };
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Split a `TableId` of the form `"keyspace.table"` into its parts.
 ///
@@ -102,15 +103,16 @@ pub fn build_row_from_scan(
         return None;
     }
 
-    let mut row_values = HashMap::new();
+    let mut row_values: HashMap<Arc<str>, Value> = HashMap::new();
     let project = |name: &str| projection.is_empty() || projection.iter().any(|p| p == name);
 
-    if let Value::Map(map) = value {
-        for (col_name, col_value) in map {
-            if let Value::Text(name) = col_name {
-                if project(&name) {
-                    row_values.insert(name, col_value);
-                }
+    if let Value::Row(cells) = value {
+        // Issue #1334: the decoder carries interned `Arc<str>` column-name
+        // handles in the row carrier; move them straight into `QueryRow.values`
+        // (an `Arc` move — NO `String` re-allocation of the name).
+        for (name, col_value) in cells {
+            if project(&name) {
+                row_values.insert(name, col_value);
             }
         }
         // Cassandra never serialises partition-key columns in the cell payload;
@@ -124,7 +126,7 @@ pub fn build_row_from_scan(
                 Ok(pk_columns) => {
                     for (name, value) in pk_columns {
                         if project(&name) {
-                            row_values.insert(name, value);
+                            row_values.insert(name.into(), value);
                         }
                     }
                 }
@@ -143,10 +145,10 @@ pub fn build_row_from_scan(
             }
         }
     } else {
-        // Non-map fallback: expose the raw value plus a debug-formatted id.
-        row_values.insert("data".to_string(), value);
+        // Non-row fallback: expose the raw value plus a debug-formatted id.
+        row_values.insert(Arc::from("data"), value);
         if project("id") {
-            row_values.insert("id".to_string(), Value::Text(format!("{:?}", key)));
+            row_values.insert(Arc::from("id"), Value::Text(format!("{:?}", key)));
         }
     }
 
@@ -171,8 +173,8 @@ mod tests {
     #[test]
     fn build_row_from_scan_materialises_single_text_pk() {
         let key = RowKey::new(b"k0000000000000000".to_vec());
-        let value = Value::Map(vec![(
-            Value::Text("name".to_string()),
+        let value = Value::Row(vec![(
+            Arc::from("name"),
             Value::Text("name-0".to_string()),
         )]);
         let schema = single_pk_schema("id", "text");
@@ -199,7 +201,7 @@ mod tests {
         use super::super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
 
         let key = RowKey::new(b"k0000000000000000".to_vec());
-        let value = Value::Map(vec![(Value::Text("age".to_string()), Value::Integer(0))]);
+        let value = Value::Row(vec![(Arc::from("age"), Value::Integer(0))]);
         let schema = single_pk_schema("id", "text");
         let row = build_row_from_scan(key, value, &[], Some(&schema)).unwrap();
 

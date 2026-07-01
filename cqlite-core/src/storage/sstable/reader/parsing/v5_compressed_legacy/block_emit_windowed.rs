@@ -231,7 +231,7 @@ impl V5CompressedLegacyParser {
                     // values must be merged into each clustering row that follows in the partition.
                     //
                     // We accumulate static cells here and inject them into every clustering row.
-                    let mut static_cells: HashMap<String, Value> = HashMap::new();
+                    let mut static_cells: HashMap<Arc<str>, Value> = HashMap::new();
                     let mut row_count = 0;
                     loop {
                         // Issue #954: stop at the clustering-slice end bound. The
@@ -409,24 +409,16 @@ impl V5CompressedLegacyParser {
                                         // alphabetical, matching Cassandra's on-disk column order exactly.
                                         // That would require threading the column order through ParsedRow
                                         // to this call site.
-                                        let mut map_entries: Vec<(Value, Value)> = cells
-                                            .into_iter()
-                                            .map(|(name, value)| (Value::Text(name), value))
-                                            .collect();
-                                        map_entries.sort_by(|a, b| {
-                                            let a_key = if let Value::Text(s) = &a.0 {
-                                                s.as_str()
-                                            } else {
-                                                ""
-                                            };
-                                            let b_key = if let Value::Text(s) = &b.0 {
-                                                s.as_str()
-                                            } else {
-                                                ""
-                                            };
-                                            a_key.cmp(b_key)
-                                        });
-                                        Value::Map(map_entries)
+                                        // Issue #1334: carry the interned `Arc<str>`
+                                        // column-name handles straight into the row
+                                        // carrier (no `Value::Text(String)` round-trip,
+                                        // no per-cell `.to_string()` re-allocation). The
+                                        // emit-time alphabetical ordering is preserved
+                                        // exactly (sort key is the name `str`).
+                                        let mut row_cells: Vec<(Arc<str>, Value)> =
+                                            cells.into_iter().collect();
+                                        row_cells.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
+                                        Value::Row(row_cells)
                                     };
 
                                     // Issue #954: count each clustering row actually
@@ -759,7 +751,7 @@ impl V5CompressedLegacyParser {
             }
         };
 
-        let mut static_cells: HashMap<String, Value> = HashMap::new();
+        let mut static_cells: HashMap<Arc<str>, Value> = HashMap::new();
 
         // Finding 1 (#827): buffer this partition's emitted rows locally and only
         // forward them to the external `emit` once the partition is CONFIRMED
@@ -882,9 +874,16 @@ impl V5CompressedLegacyParser {
                         } else if cells.is_empty() {
                             Value::Null
                         } else {
+                            // Compaction/delta emit path (issue #1334): this row
+                            // carrier is consumed by the compaction merge/writer,
+                            // which expects `Value::Map`, so materialise the
+                            // interned name into a `Value::Text(String)` here. This
+                            // is the cold compaction path, NOT the user-facing read
+                            // hot path (that path emits `Value::Row` with the shared
+                            // `Arc<str>` handle and no per-cell allocation).
                             let mut map_entries: Vec<(Value, Value)> = cells
                                 .into_iter()
-                                .map(|(name, value)| (Value::Text(name), value))
+                                .map(|(name, value)| (Value::Text(name.to_string()), value))
                                 .collect();
                             map_entries.sort_by(|a, b| {
                                 let a_key = if let Value::Text(s) = &a.0 {

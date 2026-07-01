@@ -231,6 +231,13 @@ impl ByteComparableEncoder {
                 self.encode_bigint(*t)
             }
             Value::Inet(bytes) => self.encode_blob(bytes),
+            // The transient row carrier (issue #1334) is never a BTI key: it only
+            // carries a decoded row from the read path into `QueryRow`.
+            Value::Row(_) => Err(BtiError::InvalidByteComparableKey(
+                "Value::Row is a transient decoded-row carrier and cannot be BTI-encoded"
+                    .to_string(),
+            )
+            .into()),
         }
     }
 

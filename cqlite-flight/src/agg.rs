@@ -297,7 +297,7 @@ impl AggPlan {
         let key: Vec<GroupKey> = self
             .group_by
             .iter()
-            .map(|(name, _)| GroupKey::from_value(row.values.get(name)))
+            .map(|(name, _)| GroupKey::from_value(row.values.get(name.as_str())))
             .collect();
         // Split the index lookup from the group insert so neither borrows the
         // other (an `entry().or_insert_with` closure would double-borrow state).
@@ -310,7 +310,7 @@ impl AggPlan {
                 let key_values: Vec<Option<Value>> = self
                     .group_by
                     .iter()
-                    .map(|(name, _)| match row.values.get(name) {
+                    .map(|(name, _)| match row.values.get(name.as_str()) {
                         None | Some(Value::Null) => None,
                         Some(v) => Some(v.clone()),
                     })
@@ -426,19 +426,19 @@ impl GroupState {
     }
 
     fn into_query_row(self, plan: &AggPlan) -> QueryRow {
-        let mut values: HashMap<String, Value> = HashMap::new();
+        let mut values: HashMap<std::sync::Arc<str>, Value> = HashMap::new();
 
         // Group-by key columns: omit a NULL key so the column reads as Arrow null.
         for ((name, _), value) in plan.group_by.iter().zip(self.key_values.iter()) {
             if let Some(v) = value {
-                values.insert(name.clone(), v.clone());
+                values.insert(name.as_str().into(), v.clone());
             }
         }
 
         // Aggregate output columns: omit a None result so it reads as Arrow null.
         for (acc, planned) in self.accs.into_iter().zip(plan.aggregates.iter()) {
             if let Some(v) = acc.finalize(planned) {
-                values.insert(planned.output.clone(), v);
+                values.insert(planned.output.as_str().into(), v);
             }
         }
 
@@ -487,7 +487,7 @@ impl Accumulator {
                     None => *n += 1,
                     // count(col) counts non-null values of col.
                     Some(col) => {
-                        if !is_null(row.values.get(col)) {
+                        if !is_null(row.values.get(col.as_str())) {
                             *n += 1;
                         }
                     }
@@ -567,7 +567,7 @@ impl Accumulator {
 /// The non-null value of `column` in `row`, or `None` (absent/`Null`/no column).
 fn non_null<'a>(column: &Option<String>, row: &'a QueryRow) -> Option<&'a Value> {
     let col = column.as_ref()?;
-    match row.values.get(col) {
+    match row.values.get(col.as_str()) {
         None | Some(Value::Null) => None,
         Some(v) => Some(v),
     }

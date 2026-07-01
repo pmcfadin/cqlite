@@ -325,7 +325,7 @@ pub async fn export_data(
                         .iter()
                         .map(|col| {
                             row.values
-                                .get(col)
+                                .get(col.as_str())
                                 .map(|v| match v {
                                     cqlite_core::Value::Text(s) => {
                                         format!("'{}'", s.replace("'", "''"))

@@ -629,6 +629,14 @@ pub fn serialize_cql_value(value: &Value) -> Result<Vec<u8>> {
             result.extend_from_slice(&days.to_be_bytes());
             result.extend_from_slice(&nanos.to_be_bytes());
         }
+        // The transient row carrier (issue #1334) is never serialized to disk;
+        // it only carries a decoded row from the read path into `QueryRow`.
+        Value::Row(_) => {
+            return Err(Error::serialization(
+                "Value::Row is a transient decoded-row carrier and cannot be serialized"
+                    .to_string(),
+            ));
+        }
     }
 
     Ok(result)
@@ -700,6 +708,8 @@ fn map_value_to_cql_type(value: &Value) -> CqlTypeId {
         Value::Varint(_) => CqlTypeId::Varint,
         Value::Decimal { .. } => CqlTypeId::Decimal,
         Value::Duration { .. } => CqlTypeId::Duration,
+        // Transient row carrier (issue #1334): not a serializable CQL value.
+        Value::Row(_) => CqlTypeId::Blob,
     }
 }
 

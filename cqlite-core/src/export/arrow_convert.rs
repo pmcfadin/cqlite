@@ -1145,7 +1145,7 @@ pub(crate) fn convert_column_to_array(
             | CqlType::Tuple(_)
             | CqlType::Udt(_, _) => {
                 let column_values: Vec<Option<&Value>> =
-                    rows.iter().map(|row| row.values.get(&col.name)).collect();
+                    rows.iter().map(|row| row.values.get(col.name.as_str())).collect();
                 return build_typed_value_array(cql_type, &column_values);
             }
             // All other complex/collection types fall through to the flat dispatch.
@@ -1238,7 +1238,7 @@ fn build_boolean_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, 
     let values: Vec<Option<bool>> = rows
         .iter()
         .map(|row| {
-            row.values.get(&col.name).and_then(|v| match v {
+            row.values.get(col.name.as_str()).and_then(|v| match v {
                 Value::Boolean(b) => Some(*b),
                 Value::Null => None,
                 _ => None,
@@ -1252,7 +1252,7 @@ fn build_int8_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Arr
     let values: Vec<Option<i8>> = rows
         .iter()
         .map(|row| {
-            row.values.get(&col.name).and_then(|v| match v {
+            row.values.get(col.name.as_str()).and_then(|v| match v {
                 Value::TinyInt(i) => Some(*i),
                 Value::Null => None,
                 _ => None,
@@ -1266,7 +1266,7 @@ fn build_int16_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Ar
     let values: Vec<Option<i16>> = rows
         .iter()
         .map(|row| {
-            row.values.get(&col.name).and_then(|v| match v {
+            row.values.get(col.name.as_str()).and_then(|v| match v {
                 Value::SmallInt(i) => Some(*i),
                 Value::Null => None,
                 _ => None,
@@ -1280,7 +1280,7 @@ fn build_int32_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Ar
     let values: Vec<Option<i32>> = rows
         .iter()
         .map(|row| {
-            row.values.get(&col.name).and_then(|v| match v {
+            row.values.get(col.name.as_str()).and_then(|v| match v {
                 Value::Integer(i) => Some(*i),
                 Value::Date(d) => Some(*d), // Date is stored as i32 days
                 Value::Null => None,
@@ -1295,7 +1295,7 @@ fn build_int64_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Ar
     let values: Vec<Option<i64>> = rows
         .iter()
         .map(|row| {
-            row.values.get(&col.name).and_then(|v| match v {
+            row.values.get(col.name.as_str()).and_then(|v| match v {
                 Value::BigInt(i) => Some(*i),
                 Value::Counter(c) => Some(*c),
                 Value::Time(t) => Some(*t), // Time is stored as i64 nanos
@@ -1311,7 +1311,7 @@ fn build_float32_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, 
     let values: Vec<Option<f32>> = rows
         .iter()
         .map(|row| {
-            row.values.get(&col.name).and_then(|v| match v {
+            row.values.get(col.name.as_str()).and_then(|v| match v {
                 Value::Float32(f) => Some(*f),
                 Value::Null => None,
                 _ => None,
@@ -1325,7 +1325,7 @@ fn build_float64_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, 
     let values: Vec<Option<f64>> = rows
         .iter()
         .map(|row| {
-            row.values.get(&col.name).and_then(|v| match v {
+            row.values.get(col.name.as_str()).and_then(|v| match v {
                 Value::Float(f) => Some(*f),
                 Value::Float32(f) => Some(*f as f64),
                 Value::Null => None,
@@ -1340,7 +1340,7 @@ fn build_string_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, A
     let values: Vec<Option<String>> = rows
         .iter()
         .map(|row| {
-            row.values.get(&col.name).and_then(|v| match v {
+            row.values.get(col.name.as_str()).and_then(|v| match v {
                 Value::Null => None,
                 Value::Text(s) => Some(s.clone()),
                 Value::Json(j) => Some(j.to_string()),
@@ -1356,7 +1356,7 @@ fn build_binary_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, A
     let values: Vec<Option<&[u8]>> = rows
         .iter()
         .map(|row| {
-            row.values.get(&col.name).and_then(|v| match v {
+            row.values.get(col.name.as_str()).and_then(|v| match v {
                 Value::Blob(b) => Some(b.as_slice()),
                 Value::Null => None,
                 _ => None,
@@ -1373,7 +1373,7 @@ fn build_timestamp_array(
     let values: Vec<Option<i64>> = rows
         .iter()
         .map(|row| {
-            row.values.get(&col.name).and_then(|v| match v {
+            row.values.get(col.name.as_str()).and_then(|v| match v {
                 Value::Timestamp(ts) => Some(*ts),
                 Value::Null => None,
                 _ => None,
@@ -1389,7 +1389,7 @@ fn build_uuid_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Arr
     let values: Vec<Option<[u8; 16]>> = rows
         .iter()
         .map(|row| {
-            row.values.get(&col.name).and_then(|v| match v {
+            row.values.get(col.name.as_str()).and_then(|v| match v {
                 Value::Uuid(uuid) => Some(*uuid),
                 Value::Null => None,
                 _ => None,
@@ -1416,7 +1416,7 @@ fn build_date32_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, A
     let values: Vec<Option<i32>> = rows
         .iter()
         .map(|row| {
-            row.values.get(&col.name).and_then(|v| match v {
+            row.values.get(col.name.as_str()).and_then(|v| match v {
                 Value::Date(days) => Some(*days),
                 Value::Null => None,
                 _ => None,
@@ -1434,7 +1434,7 @@ fn build_time64_ns_array(
     let values: Vec<Option<i64>> = rows
         .iter()
         .map(|row| {
-            row.values.get(&col.name).and_then(|v| match v {
+            row.values.get(col.name.as_str()).and_then(|v| match v {
                 Value::Time(nanos) => Some(*nanos),
                 Value::Null => None,
                 _ => None,
@@ -1454,7 +1454,7 @@ fn build_decimal128_array(
         .with_precision_and_scale(DECIMAL_MAX_PRECISION, DECIMAL_FIXED_SCALE as i8)?;
 
     for row in rows {
-        match row.values.get(&col.name) {
+        match row.values.get(col.name.as_str()) {
             Some(Value::Decimal { scale, unscaled }) => {
                 let rescaled = rescale_decimal(*scale, unscaled).map_err(|e| {
                     ArrowConvertError::InvalidValue(format!("Column '{}': {e}", col.name))
@@ -1486,7 +1486,7 @@ fn build_varint_as_decimal128_array(
         .with_precision_and_scale(DECIMAL_MAX_PRECISION, 0)?;
 
     for row in rows {
-        match row.values.get(&col.name) {
+        match row.values.get(col.name.as_str()) {
             Some(Value::Varint(bytes)) => {
                 if bytes.is_empty() {
                     builder.append_value(0);
@@ -1535,7 +1535,7 @@ fn build_duration_utf8_array(
     let values: Vec<Option<String>> = rows
         .iter()
         .map(|row| {
-            row.values.get(&col.name).and_then(|v| match v {
+            row.values.get(col.name.as_str()).and_then(|v| match v {
                 Value::Duration { .. } => Some(ValueFormatter::format_value(v)),
                 Value::Null => None,
                 _ => None,
@@ -1552,7 +1552,7 @@ fn build_uuid_fixed_binary_array(
 ) -> Result<ArrayRef, ArrowConvertError> {
     let mut builder = arrow::array::FixedSizeBinaryBuilder::new(16);
     for row in rows {
-        match row.values.get(&col.name) {
+        match row.values.get(col.name.as_str()) {
             Some(Value::Uuid(bytes)) => builder.append_value(bytes)?,
             Some(Value::Null) | None => builder.append_null(),
             Some(other) => {
@@ -1574,7 +1574,7 @@ fn build_inet_utf8_array(
     let values: Vec<Option<String>> = rows
         .iter()
         .map(|row| {
-            row.values.get(&col.name).and_then(|v| match v {
+            row.values.get(col.name.as_str()).and_then(|v| match v {
                 Value::Inet(bytes) => {
                     Some(ValueFormatter::format_value(&Value::Inet(bytes.clone())))
                 }
@@ -1593,7 +1593,7 @@ fn build_list_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Arr
     let mut null_bitmap: Vec<bool> = Vec::new();
 
     for row in rows {
-        match row.values.get(&col.name) {
+        match row.values.get(col.name.as_str()) {
             Some(Value::List(items)) | Some(Value::Set(items)) => {
                 null_bitmap.push(true);
                 for item in items {
@@ -1633,7 +1633,7 @@ fn build_map_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Arro
     let mut null_bitmap: Vec<bool> = Vec::new();
 
     for row in rows {
-        match row.values.get(&col.name) {
+        match row.values.get(col.name.as_str()) {
             Some(Value::Map(pairs)) => {
                 null_bitmap.push(true);
                 for (k, v) in pairs {

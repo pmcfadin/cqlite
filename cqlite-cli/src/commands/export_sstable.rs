@@ -387,8 +387,14 @@ fn convert_entry_to_query_row(
 
     let mut values: HashMap<String, Value> = HashMap::new();
 
-    // Extract values from the Value (which is typically a Map for parsed rows)
+    // Extract values from the Value (the scan carries rows as `Value::Row`,
+    // issue #1334; older paths may still carry `Value::Map`).
     match value {
+        Value::Row(cells) => {
+            for (name, v) in cells {
+                values.insert(name.to_string(), v.clone());
+            }
+        }
         Value::Map(pairs) => {
             // Each pair is (key_value, column_value)
             for (k, v) in pairs {
@@ -427,10 +433,7 @@ fn convert_entry_to_query_row(
         values.entry(col.name.clone()).or_insert(Value::Null);
     }
 
-    QueryRow {
-        values,
-        key: row_key.clone(),
-        metadata: RowMetadata::default(),
-        cell_metadata: None,
-    }
+    let mut row = QueryRow::with_values(row_key.clone(), values);
+    row.set_metadata(RowMetadata::default());
+    row
 }

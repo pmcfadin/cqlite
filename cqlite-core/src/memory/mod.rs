@@ -351,6 +351,11 @@ impl MemoryManager {
                 .map(|f| f.value.as_ref().map_or(0, |v| self.estimate_value_size(v)))
                 .sum(),
             Value::Frozen(boxed_value) => self.estimate_value_size(boxed_value),
+            // Transient row carrier (issue #1334): name bytes + cell value sizes.
+            Value::Row(cells) => cells
+                .iter()
+                .map(|(name, v)| name.len() + self.estimate_value_size(v))
+                .sum(),
             Value::Varint(data) => data.len(),
             Value::Decimal { unscaled, .. } => 4 + unscaled.len(), // scale + unscaled data
             Value::Duration { .. } => 12,                          // 3 * 4 bytes

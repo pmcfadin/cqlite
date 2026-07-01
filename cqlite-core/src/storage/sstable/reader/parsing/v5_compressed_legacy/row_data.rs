@@ -47,7 +47,11 @@ impl V5CompressedLegacyParser {
         mut compaction_complex_out: Option<&mut CompactionComplexColumns>,
         resolution: &RowColumnResolution,
     ) -> Result<ParsedRow> {
-        let mut cells = HashMap::new();
+        // Cells map keyed by the interned column-name handle (issue #1334): the
+        // name is a schema-owned `Arc<str>` shared across every cell/row, so
+        // populating a cell with its name is an `Arc::clone` refcount bump, NOT a
+        // per-cell, per-row heap `String` allocation.
+        let mut cells: HashMap<Arc<str>, Value> = HashMap::new();
         // Parallel per-cell write metadata map (populated alongside `cells`).
         // Only allocated when the caller actually needs WRITETIME/TTL metadata
         // (i.e. `want_cell_metadata == true`).  On the normal read path this stays
@@ -131,9 +135,13 @@ impl V5CompressedLegacyParser {
         // must be included in the result for proper query output. Without this fix,
         // tables with clustering keys show fallback column names because the clustering
         // values weren't being added to the cells HashMap.
-        for (i, ck) in schema.clustering_keys.iter().enumerate() {
+        for (i, _ck) in schema.clustering_keys.iter().enumerate() {
             if i < clustering_values.len() {
-                cells.insert(ck.name.clone(), clustering_values[i].clone());
+                // Issue #1334: reuse the interned clustering-key name handle
+                // (an `Arc::clone`) rather than cloning the schema `String`.
+                if let Some(name) = resolution.clustering_name(i) {
+                    cells.insert(Arc::clone(name), clustering_values[i].clone());
+                }
             }
         }
 
@@ -455,7 +463,8 @@ impl V5CompressedLegacyParser {
                             if let Some(ref mut ccm_map) = complex_col_meta {
                                 ccm_map.insert(column.name.clone(), col_meta);
                             }
-                            cells.insert(column.name.clone(), value);
+                            // Issue #1334: interned name handle (Arc::clone), no String alloc.
+                            cells.insert(Arc::clone(&ctp.name), value);
                         }
                         offset = new_offset;
                     }
@@ -511,7 +520,8 @@ impl V5CompressedLegacyParser {
                                     },
                                 );
                             }
-                            cells.insert(column.name.clone(), value);
+                            // Issue #1334: interned name handle (Arc::clone), no String alloc.
+                            cells.insert(Arc::clone(&ctp.name), value);
                         }
                         offset = new_offset;
                     }

@@ -141,6 +141,16 @@ pub fn value_to_napi(env: &Env, value: &Value) -> Result<JsUnknown> {
 
         // Tombstone -> null (deleted data)
         Value::Tombstone(_) => env.get_null().map(|v| v.into_unknown()),
+
+        // Transient row carrier (issue #1334): expose as a name→value object. It
+        // is disassembled into `QueryRow.values` before FFI, so this is defensive.
+        Value::Row(cells) => {
+            let mut obj = env.create_object()?;
+            for (name, v) in cells {
+                obj.set_named_property(name.as_ref(), value_to_napi(env, v)?)?;
+            }
+            Ok(obj.into_unknown())
+        }
     }
 }
 

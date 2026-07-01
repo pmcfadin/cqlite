@@ -443,10 +443,11 @@ mod tests {
         eprintln!("Entry 0: row_key={:?}", row_key);
         eprintln!("Entry 0: value={:?}", value);
 
-        // CRITICAL ASSERTION: Value must be a row (Map representation) with cells
-        // Value::Map format: Vec<(Value::Text(column_name), column_value)>
+        // CRITICAL ASSERTION: Value must be a row carrier with cells.
+        // Issue #1334: the row carrier is `Value::Row(Vec<(Arc<str>, Value)>)`
+        // keyed by the interned column-name handle.
         match value {
-            Value::Map(map_entries) => {
+            Value::Row(map_entries) => {
                 eprintln!("Row has {} fields", map_entries.len());
 
                 // CRITICAL: Must extract >0 cells (not 0!)
@@ -458,10 +459,7 @@ mod tests {
                 // Extract field names from map entries (first element of each tuple)
                 let field_names: Vec<String> = map_entries
                     .iter()
-                    .filter_map(|(key, _)| match key {
-                        Value::Text(name) => Some(name.clone()),
-                        _ => None,
-                    })
+                    .map(|(key, _)| key.to_string())
                     .collect();
 
                 eprintln!("Extracted field names: {:?}", field_names);
@@ -469,7 +467,7 @@ mod tests {
                 // Check for ascii_field (first cell in hex dump)
                 let ascii_field = map_entries
                     .iter()
-                    .find(|(key, _)| matches!(key, Value::Text(name) if name == "ascii_field"))
+                    .find(|(key, _)| key.as_ref() == "ascii_field")
                     .expect("Must have 'ascii_field' column");
 
                 eprintln!("ascii_field value: {:?}", ascii_field.1);
@@ -497,7 +495,7 @@ mod tests {
                 // Check for age column (should be Int, not Blob)
                 if let Some((_, age_value)) = map_entries
                     .iter()
-                    .find(|(key, _)| matches!(key, Value::Text(name) if name == "age"))
+                    .find(|(key, _)| key.as_ref() == "age")
                 {
                     eprintln!("age value: {:?}", age_value);
                     match age_value {
@@ -518,7 +516,7 @@ mod tests {
                 // Check for active column (should be Boolean, not Blob)
                 if let Some((_, active_value)) = map_entries
                     .iter()
-                    .find(|(key, _)| matches!(key, Value::Text(name) if name == "active"))
+                    .find(|(key, _)| key.as_ref() == "active")
                 {
                     eprintln!("active value: {:?}", active_value);
                     match active_value {
@@ -539,7 +537,7 @@ mod tests {
             }
             other => {
                 panic!(
-                    "❌ Expected Value::Map (row representation), got {:?}",
+                    "❌ Expected Value::Row (row carrier), got {:?}",
                     other
                 );
             }

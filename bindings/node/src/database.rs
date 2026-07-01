@@ -752,7 +752,7 @@ impl Database {
                     let obj: serde_json::Map<String, serde_json::Value> = row
                         .values
                         .iter()
-                        .map(|(k, v)| (k.clone(), value_to_json(v)))
+                        .map(|(k, v)| (k.to_string(), value_to_json(v)))
                         .collect();
                     serde_json::Value::Object(obj)
                 })
@@ -1326,7 +1326,16 @@ impl napi::Task for ExecuteNativeTask {
         let row_count = result.rows.len() as u32;
         crate::observability::record_rows(&span_for_record, row_count as u64);
         Ok(QueryResultData {
-            rows: result.rows.iter().map(|r| r.values.clone()).collect(),
+            rows: result
+                .rows
+                .iter()
+                .map(|r| {
+                    r.values
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), v.clone()))
+                        .collect()
+                })
+                .collect(),
             execution_time_ms: result.execution_time_ms as u32,
             columns: result.metadata.columns.clone(),
             rows_affected: row_count,
@@ -1520,6 +1529,14 @@ fn value_to_json(value: &cqlite_core::types::Value) -> serde_json::Value {
         }
         Value::Tombstone(_) => serde_json::Value::Null,
         Value::Counter(c) => serde_json::Value::Number((*c).into()),
+        // Transient row carrier (issue #1334): render as a name→value object.
+        Value::Row(cells) => {
+            let obj: serde_json::Map<String, serde_json::Value> = cells
+                .iter()
+                .map(|(name, v)| (name.to_string(), value_to_json(v)))
+                .collect();
+            serde_json::Value::Object(obj)
+        }
     }
 }
 

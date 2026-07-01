@@ -491,7 +491,7 @@ impl SelectExecutor {
     fn evaluate_select_expression(&self, expr: &SelectExpression, row: &QueryRow) -> Result<Value> {
         match expr {
             SelectExpression::Column(col_ref) => {
-                row.values.get(&col_ref.column).cloned().ok_or_else(|| {
+                row.values.get(col_ref.column.as_str()).cloned().ok_or_else(|| {
                     Error::query_execution(format!("Column not found: {}", col_ref.column))
                 })
             }
@@ -546,7 +546,7 @@ impl SelectExecutor {
     ) -> Result<Value> {
         let lookup_column = |col: &ColumnRef| -> Result<&Value> {
             row.values
-                .get(&col.column)
+                .get(col.column.as_str())
                 .ok_or_else(|| Error::query_execution(format!("Column not found: {}", col.column)))
         };
 
@@ -744,7 +744,7 @@ impl SelectExecutor {
         let mut projected_rows = Vec::new();
 
         for row in rows {
-            let mut projected_values = HashMap::new();
+            let mut projected_values: HashMap<std::sync::Arc<str>, Value> = HashMap::new();
 
             for (i, expr) in columns.iter().enumerate() {
                 let value = self.evaluate_select_expression(expr, &row)?;
@@ -755,7 +755,7 @@ impl SelectExecutor {
                     SelectExpression::WriteTimeTtl(call) => writetime_ttl_column_name(call),
                     _ => format!("col_{i}"),
                 };
-                projected_values.insert(column_name, value);
+                projected_values.insert(column_name.into(), value);
             }
 
             projected_rows.push(QueryRow {

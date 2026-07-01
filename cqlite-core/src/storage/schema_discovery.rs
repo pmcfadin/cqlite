@@ -694,6 +694,8 @@ impl ValueExt for Value {
             Value::Decimal { .. } => "Decimal".to_string(),
             Value::Duration { .. } => "Duration".to_string(),
             Value::Tombstone(_) => "Tombstone".to_string(),
+            // Transient row carrier (issue #1334).
+            Value::Row(_) => "Row".to_string(),
         }
     }
 
@@ -731,6 +733,11 @@ impl ValueExt for Value {
             Value::Decimal { unscaled, .. } => 4 + unscaled.len(), // scale + data
             Value::Duration { .. } => 12,                          // 3 * 4 bytes
             Value::Tombstone(_) => 8,                              // Tombstone marker
+            // Transient row carrier (issue #1334).
+            Value::Row(cells) => cells
+                .iter()
+                .map(|(name, v)| name.len() + v.estimate_size())
+                .sum(),
         }
     }
 }

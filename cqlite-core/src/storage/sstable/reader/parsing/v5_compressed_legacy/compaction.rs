@@ -13,7 +13,7 @@ impl V5CompressedLegacyParser {
     /// (no cells, no tombstone) produces an empty `Live`.
     fn build_compaction_row_data(
         &self,
-        cells: HashMap<String, Value>,
+        cells: HashMap<Arc<str>, Value>,
         cell_meta: Option<HashMap<String, CellWriteMetadata>>,
         complex: CompactionComplexColumns,
         row_header_opt: &Option<RowHeader>,
@@ -65,10 +65,10 @@ impl V5CompressedLegacyParser {
 
         let mut simple_cells: Vec<SimpleCell> = cells
             .into_iter()
-            .filter(|(name, _)| !complex_names.contains(name.as_str()))
+            .filter(|(name, _)| !complex_names.contains(name.as_ref()))
             .map(|(column, value)| {
                 let (timestamp, ttl, local_deletion_time) =
-                    match cell_meta.as_ref().and_then(|m| m.get(&column)) {
+                    match cell_meta.as_ref().and_then(|m| m.get(column.as_ref())) {
                         Some(meta) => {
                             let ttl = meta.expiration.as_ref().map(|e| e.ttl_seconds as u32);
                             let ldt = meta
@@ -80,7 +80,7 @@ impl V5CompressedLegacyParser {
                         None => (row_ts, None, None),
                     };
                 SimpleCell {
-                    column,
+                    column: column.to_string(),
                     value,
                     timestamp,
                     ttl,

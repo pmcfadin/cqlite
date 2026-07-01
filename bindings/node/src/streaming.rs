@@ -158,8 +158,15 @@ impl napi::Task for NextTask {
         let next = crate::runtime::block_on(iter.next_async().instrument(self.span.clone()));
         match next {
             Some(Ok(row)) => {
-                // Take ownership of values - no clone needed
-                Ok(NextResult::Value(row.values))
+                // Materialise the interned `Arc<str>` name handles into `String`
+                // keys at the FFI boundary (issue #1334): the JS-facing row map is
+                // keyed by `String`.
+                let values = row
+                    .values
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v))
+                    .collect();
+                Ok(NextResult::Value(values))
             }
             Some(Err(e)) => {
                 // Error occurred - record at the boundary, finalise span, cleanup.

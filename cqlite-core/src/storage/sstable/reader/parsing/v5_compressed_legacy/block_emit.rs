@@ -88,7 +88,7 @@ impl V5CompressedLegacyParser {
             offset = next_data_offset;
             partition_index += 1;
 
-            let mut static_cells: HashMap<String, Value> = HashMap::new();
+            let mut static_cells: HashMap<Arc<str>, Value> = HashMap::new();
             let mut static_cell_meta: HashMap<String, CellWriteMetadata> = HashMap::new();
             let mut row_count = 0;
 
@@ -158,24 +158,14 @@ impl V5CompressedLegacyParser {
                             } else if cells.is_empty() {
                                 Value::Null
                             } else {
-                                let mut map_entries: Vec<(Value, Value)> = cells
-                                    .into_iter()
-                                    .map(|(name, value)| (Value::Text(name), value))
-                                    .collect();
-                                map_entries.sort_by(|a, b| {
-                                    let a_key = if let Value::Text(s) = &a.0 {
-                                        s.as_str()
-                                    } else {
-                                        ""
-                                    };
-                                    let b_key = if let Value::Text(s) = &b.0 {
-                                        s.as_str()
-                                    } else {
-                                        ""
-                                    };
-                                    a_key.cmp(b_key)
-                                });
-                                Value::Map(map_entries)
+                                // Issue #1334: carry the interned `Arc<str>` name
+                                // handles straight into the row carrier (no
+                                // `Value::Text(String)` round-trip). Emit-time
+                                // alphabetical ordering preserved exactly.
+                                let mut row_cells: Vec<(Arc<str>, Value)> =
+                                    cells.into_iter().collect();
+                                row_cells.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
+                                Value::Row(row_cells)
                             };
 
                             match emit((
@@ -548,6 +538,12 @@ impl V5CompressedLegacyParser {
                             (None, false, None, None)
                         };
 
+                        // Delta-scan emit boundary (issue #1334): the delta
+                        // consumer keys cells by `String`; materialise the interned
+                        // `Arc<str>` names here. This is the cold delta path, not
+                        // the user-facing read hot path.
+                        let cells: HashMap<String, Value> =
+                            cells.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
                         match emit((
                             partition_key.clone(),
                             cells,

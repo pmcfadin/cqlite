@@ -75,7 +75,7 @@ pub fn evaluate_leaf(row: &QueryRow, predicate: &SSTablePredicate) -> LeafOutcom
         };
     }
 
-    let column_value = match row.values.get(&predicate.column) {
+    let column_value = match row.values.get(predicate.column.as_str()) {
         // A SQL `NULL` operand (absent column or explicit `Null`) is `UNKNOWN`.
         None | Some(Value::Null) => return LeafOutcome::Unknown,
         Some(v) => v,
@@ -305,8 +305,9 @@ mod tests {
         );
 
         // Explicit Null value → Unknown.
-        let mut values = std::collections::HashMap::new();
-        values.insert("ck".to_string(), Value::Null);
+        let mut values: std::collections::HashMap<std::sync::Arc<str>, Value> =
+            std::collections::HashMap::new();
+        values.insert("ck".into(), Value::Null);
         let null_row = QueryRow {
             values,
             key: RowKey::new(Vec::new()),
@@ -329,8 +330,9 @@ mod tests {
         );
 
         let row_of = |val: Value| {
-            let mut values = std::collections::HashMap::new();
-            values.insert("v".to_string(), val);
+            let mut values: std::collections::HashMap<std::sync::Arc<str>, Value> =
+                std::collections::HashMap::new();
+            values.insert("v".into(), val);
             QueryRow {
                 values,
                 key: RowKey::new(Vec::new()),

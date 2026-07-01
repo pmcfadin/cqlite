@@ -81,8 +81,7 @@ impl CSVWriter {
                 .columns
                 .iter()
                 .map(|col| {
-                    row.values
-                        .get(&col.name)
+                    row.values.get(col.name.as_str())
                         .map(|v| {
                             let formatted = ValueFormatter::format_value(v);
                             // For CSV, convert "null" to empty string
@@ -180,7 +179,7 @@ impl<W: Write + Send> StreamingWriter for StreamingCSVWriter<W> {
                 .iter()
                 .map(|col| {
                     row.values
-                        .get(col)
+                        .get(col.as_str())
                         .map(|v| {
                             let formatted = ValueFormatter::format_value(v);
                             // For CSV, convert "null" to empty string
