@@ -738,7 +738,7 @@ impl SSTableWriter {
         // the incrementally-growing stats of this partition would raise the
         // baseline and corrupt delta encoding for earlier partitions.
         if !self.baselines_locked {
-            self.data_writer.update_stats(self.stats.clone());
+            self.data_writer.update_stats_from_metadata(&self.stats);
         }
 
         // Extract partition tombstone and range tombstones from mutations.
@@ -867,7 +867,7 @@ impl SSTableWriter {
         self.stats.min_ttl = min_ttl;
         // Push final baselines to DataWriter immediately so the very first
         // write_partition call uses them.
-        self.data_writer.update_stats(self.stats.clone());
+        self.data_writer.update_stats_from_metadata(&self.stats);
         // Lock baselines: write_partition will not call update_stats again.
         self.baselines_locked = true;
     }
