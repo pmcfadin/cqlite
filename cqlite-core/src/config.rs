@@ -134,9 +134,9 @@ pub struct StorageConfig {
 
     /// Read-ahead / prefetch strategy applied to the chosen backend.
     ///
-    /// Defaults to [`PrefetchMode::Auto`], which advises the kernel for
-    /// sequential access on the mmap backend and uses a prefetch window of
-    /// [`Self::direct_io_prefetch_bytes`] on the direct-I/O backend. Set
+    /// Defaults to [`PrefetchMode::Auto`], which issues **no** mmap `madvise`
+    /// (relying on the kernel's default read-ahead) and only enables the
+    /// direct-I/O prefetch window of [`Self::direct_io_prefetch_bytes`]. Set
     /// [`PrefetchMode::Off`] to disable explicit hints (relying only on default
     /// kernel read-ahead / single-block direct reads). Can also be set via
     /// `CQLITE_PREFETCH` (`off` / `sequential` / `willneed` / `auto`).
