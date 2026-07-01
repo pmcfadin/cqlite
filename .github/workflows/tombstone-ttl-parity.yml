@@ -143,12 +143,34 @@ jobs:
               --test sstable_parity_repaired_metadata_test \
               -- --nocapture
 
-      # Issue #1027 convergence audit: this lane's tombstone/TTL parity tests use
-      # plain assert!/assert_eq! terminals — they do NOT route through
-      # ParityFailure::panic and have no scenario-id-keyed bundle emitter — so a
-      # speculative `parity-failures-*` upload here would advertise a bundle that
-      # never appears (even with `if-no-files-found: ignore`, the artifact promise
-      # is false). The upload was removed rather than left misleading. FOLLOW-UP:
-      # to restore it, first route these tests' failure terminals through the
-      # shared ParityFailure/FailureBundle emitter (out of scope for #1027, which
-      # only standardises the artifact system, not each suite's assertion sites).
+      # issue #1028: on failure, emit a structured parity-failures.json so the
+      # parity-failure-issue automation fingerprints from structured fields (never a
+      # brittle Markdown scrape). One lane-level entry; the automation dedups per
+      # fingerprint. `failure_class: RowScanFailed` is a stable VerifyErrorClass code
+      # used as the lane-default when the specific class is not otherwise emitted.
+      - name: Emit parity-failures.json (on failure)
+        if: failure()
+        run: |
+          set -euo pipefail
+          # scenario_id/test_target/component_path here are intentionally lane-scoped v1
+          # placeholders (stable per lane so cross-run dedup works). Per-scenario,
+          # manifest-backed emission is tracked in issue #1345.
+          cat > parity-failures.json <<'JSON'
+          [
+            {
+              "scenario_id": "cass.tombstone_ttl.nightly_docker_lane",
+              "workflow": "tombstone-ttl-parity.yml",
+              "test_target": "cqlite-core tombstone-ttl parity suite",
+              "component_path": "test-data/datasets/sstables/test_tomb,test_deltas",
+              "failure_class": "RowScanFailed"
+            }
+          ]
+          JSON
+
+      - name: Upload parity-failures.json
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-failures
+          path: parity-failures.json
+          if-no-files-found: warn

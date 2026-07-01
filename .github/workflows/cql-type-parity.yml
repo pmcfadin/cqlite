@@ -144,12 +144,30 @@ jobs:
             --test issue_1009_canonical_jsonl_comparator \
             -- --nocapture
 
-      # Issue #1027 convergence audit: this lane's CQL-type parity tests use plain
-      # assert!/assert_eq! terminals — they do NOT route through
-      # ParityFailure::panic and have no scenario-id-keyed bundle emitter — so a
-      # speculative `parity-failures-*` upload here would advertise a bundle that
-      # never appears (even with `if-no-files-found: ignore`, the artifact promise
-      # is false). The upload was removed rather than left misleading. FOLLOW-UP:
-      # to restore it, first route these tests' failure terminals through the
-      # shared ParityFailure/FailureBundle emitter (out of scope for #1027, which
-      # only standardises the artifact system, not each suite's assertion sites).
+      # issue #1028: structured failure summary for the parity-failure-issue automation.
+      - name: Emit parity-failures.json (on failure)
+        if: failure()
+        run: |
+          set -euo pipefail
+          # scenario_id/test_target/component_path here are intentionally lane-scoped v1
+          # placeholders (stable per lane so cross-run dedup works). Per-scenario,
+          # manifest-backed emission is tracked in issue #1345.
+          cat > parity-failures.json <<'JSON'
+          [
+            {
+              "scenario_id": "cass.cql_type.nightly_docker_lane",
+              "workflow": "cql-type-parity.yml",
+              "test_target": "cqlite-core cql-type parity suite",
+              "component_path": "test-data/datasets/sstables/test_types",
+              "failure_class": "RowScanFailed"
+            }
+          ]
+          JSON
+
+      - name: Upload parity-failures.json
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-failures
+          path: parity-failures.json
+          if-no-files-found: warn

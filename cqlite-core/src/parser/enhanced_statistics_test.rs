@@ -297,10 +297,10 @@ mod tests {
             "- **Health Score**: {:.1}/100\n",
             analysis.health_score
         ));
-        report.push_str(&format!(
-            "- **Data Efficiency**: {:.1}%\n",
-            analysis.data_efficiency
-        ));
+        report.push_str(&match analysis.data_efficiency {
+            Some(eff) => format!("- **Data Efficiency**: {:.1}%\n", eff),
+            None => "- **Data Efficiency**: unavailable\n".to_string(),
+        });
         report.push_str(&format!(
             "- **Timestamp Range**: {:.1} days\n",
             analysis.timestamp_range_days

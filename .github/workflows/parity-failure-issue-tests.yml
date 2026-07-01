@@ -1,0 +1,43 @@
+name: "CI: Parity Failure Issue Automation (unit tests)"
+
+# PR-blocking coverage for the parity-failure-issue automation (issue #1028, epic #974).
+# The routing/dedup/fingerprint logic lives in scripts/parity-failure-issue.py and its
+# unit tests in scripts/tests/test_parity_failure_issue.py. The automation workflow itself
+# (parity-failure-issue.yml) only runs on `workflow_run` / `workflow_dispatch`, so it never
+# exercises these tests on a PR. This lightweight job runs them on every PR that touches the
+# tool, its tests, or the automation workflow — a regression in the automation cannot merge
+# without the unit tests passing.
+#
+# The manifest's `cass.cli_reporting.failure_issue_*` scenarios (ci.tier: fast_pr) point at
+# THIS workflow so the fast_pr claim is accurate and PR-blocking.
+
+on:
+  pull_request:
+    paths:
+      - scripts/parity-failure-issue.py
+      - scripts/tests/test_parity_failure_issue.py
+      - .github/workflows/parity-failure-issue.yml
+      - .github/workflows/parity-failure-issue-tests.yml
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: parity-failure-issue-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run parity-failure-issue unit tests
+        run: python3 scripts/tests/test_parity_failure_issue.py

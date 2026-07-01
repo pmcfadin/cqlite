@@ -1,0 +1,417 @@
+name: Parity Failure Issue Automation
+
+# Signal routing only (issue #1028, epic #974). When a manifest-backed parity lane
+# completes with a `failure` conclusion on a SCHEDULED, MAIN-BRANCH, or MANUAL
+# (workflow_dispatch) run, this workflow files/updates ONE deduplicated `parity-failure`
+# tracking issue per distinct failing-scenario fingerprint. It does NOT run on
+# pull_request-triggered failures (those already comment on the PR — filing there would
+# spam one issue per PR).
+#
+# Design: openspec/changes/issue-1028-parity-failure-issue-automation/{proposal,design}.md
+#   D1 workflow_run trigger; act only on non-PR runs.
+#   D2 read the failed run's `parity-failures.json` artifact; a degraded summary/log
+#      parse is SURFACED (never silent); zero-failures-on-failure is an anomaly.
+#   D3 stable v1|sha256 fingerprint per scenario (scripts/parity-failure-issue.py).
+#   D4 dedup by body marker `<!-- PARITY-FAIL:<fp> -->` + `parity-failure` label; UPDATE,
+#      never duplicate.
+#   D5 NON-GATING + fail-open: this job never changes the parity lane's result; absent
+#      issue-write token -> `::notice::` + exit 0; never auto-closes.
+#   R4 on a SUCCESS conclusion of a tracked lane, post a "resolved" comment on that
+#      lane's open parity-failure issues ONLY (scoped by the lane's workflow filename,
+#      derived from the completed run's payload path / name), never auto-closes — same
+#      allowlist + guard.
+#
+# SECURITY: this workflow consumes an UNTRUSTED `workflow_run` payload. It never
+# interpolates event fields into a `run:` shell — every event value is passed via a
+# quoted env var, and the origin event is allowlist-validated fail-closed BEFORE any
+# token-bearing step runs.
+
+on:
+  workflow_run:
+    workflows:
+      - "CI: Compression / Corruption Parity (Nightly Docker, Epic #970)"
+      - "CI: CQL Type & Schema-Evolution Parity (Nightly Docker, Epic #971)"
+      - "CI: Tombstone / TTL Parity (Nightly Docker, Epic #972)"
+      - "Exhaustive Regeneration (parity corpus)"
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "workflow_run id to (re)process (manual replay)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  issues: write
+  # `gh run download` reads ANOTHER workflow run's artifacts; that requires the
+  # actions:read scope. Without it artifact download 401s and issue filing silently
+  # falls to the degraded path (files nothing useful). Minimal + complete for this job.
+  actions: read
+
+concurrency:
+  group: parity-failure-issue-${{ github.event.workflow_run.id || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  file-parity-failure-issue:
+    runs-on: ubuntu-latest
+    # D1/R4: react to a FAILED (file path) OR a SUCCESS (resolve path) run whose origin
+    # event was schedule / push(main) / workflow_dispatch. This `if` is a coarse pre-filter
+    # over trusted GitHub-computed fields (event name / conclusion / branch); the Guard
+    # step below re-validates fail-closed before any token use. A manual workflow_dispatch
+    # of THIS workflow always proceeds (replay path).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      ((github.event.workflow_run.conclusion == 'failure' ||
+        github.event.workflow_run.conclusion == 'success') &&
+       github.event.workflow_run.event != 'pull_request')
+    env:
+      # Pass untrusted payload fields as env vars, never inline into a run: shell.
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Give every `gh` call in this job explicit repository context. On a
+      # workflow_dispatch replay the pre-checkout `gh run view` step runs BEFORE
+      # actions/checkout, so `gh` has no repo to infer; without GH_REPO the metadata
+      # fetch fails and the replay path fails open (files nothing) for otherwise-valid
+      # run ids. `github.repository` is trusted GitHub context (owner/name).
+      GH_REPO: ${{ github.repository }}
+      WR_EVENT: ${{ github.event.workflow_run.event }}
+      WR_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+      WR_NAME: ${{ github.event.workflow_run.name }}
+      WR_PATH: ${{ github.event.workflow_run.path }}
+      WR_URL: ${{ github.event.workflow_run.html_url }}
+      WR_ID: ${{ github.event.workflow_run.id }}
+      WR_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+      DISPATCH_RUN_ID: ${{ github.event.inputs.run_id }}
+      TRIGGER: ${{ github.event_name }}
+    steps:
+      - name: Guard token (fail-open, non-gating)
+        id: guard
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::notice::GITHUB_TOKEN absent — skipping parity-failure issue automation (non-gating no-op)."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate origin event (allowlist, fail-closed)
+        id: validate
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          # D1: allowlist the ORIGIN event. Never file for a pull_request-origin run.
+          #
+          # A manual workflow_dispatch (replay) is NOT trusted just because it targets
+          # THIS automation: the caller supplies an arbitrary run_id. Before any artifact
+          # download or issue filing we must independently validate the *target* run the
+          # SAME way the automatic workflow_run path is validated — otherwise a replay
+          # pointed at an unrelated / PR-origin run that merely exposes a
+          # `parity-failures`-named artifact could file parity-failure issues.
+          if [ "${TRIGGER}" = "workflow_dispatch" ]; then
+            # Fail-closed: a manual replay MUST supply a numeric run_id.
+            if [ -z "${DISPATCH_RUN_ID:-}" ]; then
+              echo "::warning::workflow_dispatch replay requires a 'run_id' input — none given; no issue filed."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if ! printf '%s' "${DISPATCH_RUN_ID}" | grep -Eq '^[0-9]+$'; then
+              echo "::warning::workflow_dispatch run_id '${DISPATCH_RUN_ID}' is not a numeric run id — no issue filed."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            # Fetch the TARGET run's authoritative metadata. `gh run view` reads the run
+            # GitHub recorded; DISPATCH_RUN_ID is passed via a quoted env var, never inline.
+            # Fail-open on a fetch error (network/permissions): non-gating no-op.
+            META="$(gh run view "${DISPATCH_RUN_ID}" \
+              --json workflowName,headBranch,event,conclusion,databaseId,url 2>/dev/null)" || META=""
+            if [ -z "${META}" ]; then
+              echo "::warning::could not fetch metadata for run ${DISPATCH_RUN_ID} (gh run view failed) — no issue filed."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            R_NAME="$(printf '%s' "${META}" | jq -r '.workflowName // ""')"
+            R_BRANCH="$(printf '%s' "${META}" | jq -r '.headBranch // ""')"
+            R_EVENT="$(printf '%s' "${META}" | jq -r '.event // ""')"
+            R_CONCLUSION="$(printf '%s' "${META}" | jq -r '.conclusion // ""')"
+            R_URL="$(printf '%s' "${META}" | jq -r '.url // ""')"
+            # (a) tracked-workflow allowlist — the target run must belong to one of the 4
+            # tracked parity lanes (matched by workflow NAME, the same names the auto
+            # workflow_run trigger allowlists above).
+            case "${R_NAME}" in
+              "CI: Compression / Corruption Parity (Nightly Docker, Epic #970)"|\
+              "CI: CQL Type & Schema-Evolution Parity (Nightly Docker, Epic #971)"|\
+              "CI: Tombstone / TTL Parity (Nightly Docker, Epic #972)"|\
+              "Exhaustive Regeneration (parity corpus)")
+                : ;;
+              *)
+                echo "::warning::replay target run ${DISPATCH_RUN_ID} workflow '${R_NAME:-<none>}' is not a tracked parity lane — no issue filed."
+                echo "proceed=false" >> "$GITHUB_OUTPUT"
+                exit 0 ;;
+            esac
+            # (b) event != pull_request.
+            if [ "${R_EVENT}" = "pull_request" ]; then
+              echo "::warning::replay target run ${DISPATCH_RUN_ID} is a pull_request-origin run — no issue filed."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            # (c) if event == push, headBranch must be main.
+            if [ "${R_EVENT}" = "push" ] && [ "${R_BRANCH}" != "main" ]; then
+              echo "::warning::replay target run ${DISPATCH_RUN_ID} is a push on non-main branch '${R_BRANCH:-<none>}' — no issue filed."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            # (d) conclusion == failure (the file path). A non-failure replay is a no-op
+            # (the auto success/resolve path is workflow_run-only, never a manual replay).
+            if [ "${R_CONCLUSION}" != "failure" ]; then
+              echo "::notice::replay target run ${DISPATCH_RUN_ID} concluded '${R_CONCLUSION:-<none>}' (not 'failure') — no issue filed."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "manual replay validated (workflow '${R_NAME}', event '${R_EVENT}', conclusion '${R_CONCLUSION}') — proceeding"
+            # Publish the validated target-run identity so downstream steps use the run's
+            # REAL metadata (never the empty workflow_run payload) — all via step outputs.
+            {
+              echo "proceed=true"
+              echo "validated_name=${R_NAME}"
+              echo "validated_conclusion=${R_CONCLUSION}"
+              echo "validated_run_url=${R_URL}"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "${WR_EVENT}" in
+            schedule|workflow_dispatch)
+              echo "origin event '${WR_EVENT}' is allowlisted — proceeding"
+              echo "proceed=true" >> "$GITHUB_OUTPUT"
+              ;;
+            push)
+              # D1: a push-origin run files ONLY when it targets main. Feature-branch
+              # pushes (and any non-main push) are fail-closed no-ops. WR_HEAD_BRANCH is
+              # untrusted workflow_run payload -> compared via a quoted env var.
+              if [ "${WR_HEAD_BRANCH:-}" = "main" ]; then
+                echo "push origin on main — proceeding"
+                echo "proceed=true" >> "$GITHUB_OUTPUT"
+              else
+                echo "::notice::push origin on non-main branch '${WR_HEAD_BRANCH:-<none>}' — no issue filed."
+                echo "proceed=false" >> "$GITHUB_OUTPUT"
+              fi
+              ;;
+            *)
+              echo "::notice::origin event '${WR_EVENT}' is not schedule/push/workflow_dispatch — no issue filed."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Derive run link + lane workflow filename
+        id: identity
+        if: steps.guard.outputs.skip != 'true' && steps.validate.outputs.proceed == 'true'
+        env:
+          REPO: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+          # Validated target-run identity (workflow_dispatch replay only): the real run
+          # URL + workflow name fetched by the `validate` step from `gh run view`. Empty
+          # on the auto workflow_run path. Passed via quoted env vars, never inlined.
+          VALIDATED_RUN_URL: ${{ steps.validate.outputs.validated_run_url }}
+          VALIDATED_NAME: ${{ steps.validate.outputs.validated_name }}
+        run: |
+          set -euo pipefail
+          # Fix C: on a workflow_dispatch replay the workflow_run payload is empty, so
+          # WR_URL is blank. Prefer the REAL run url the `validate` step fetched from
+          # `gh run view` for the validated target run; else reconstruct from the numeric
+          # DISPATCH_RUN_ID. All inputs are passed via quoted env vars — never inlined.
+          RUN_URL="${WR_URL:-}"
+          if [ -z "${RUN_URL}" ]; then
+            RUN_URL="${VALIDATED_RUN_URL:-}"
+          fi
+          if [ -z "${RUN_URL}" ] && [ -n "${DISPATCH_RUN_ID:-}" ]; then
+            # DISPATCH_RUN_ID is untrusted workflow_dispatch input; require it be numeric
+            # (fail-closed) before assembling a URL from it.
+            if printf '%s' "${DISPATCH_RUN_ID}" | grep -Eq '^[0-9]+$'; then
+              RUN_URL="${SERVER_URL}/${REPO}/actions/runs/${DISPATCH_RUN_ID}"
+            else
+              echo "::notice::DISPATCH_RUN_ID '${DISPATCH_RUN_ID}' is not a numeric run id — leaving run link empty."
+            fi
+          fi
+          echo "run_url=${RUN_URL}" >> "$GITHUB_OUTPUT"
+
+          # Fix A: map the completed run's identity to its workflow FILENAME so the
+          # green-lane resolve is scoped to THAT lane only (never all open issues). Prefer
+          # the payload `path` (`.github/workflows/<file>`); fall back to a name→filename
+          # lookup for the 4 tracked lanes. On a replay, WR_NAME/WR_PATH are empty — use
+          # the validated target-run workflow name. WR_PATH/WR_NAME/VALIDATED_NAME are
+          # untrusted -> quoted env.
+          LANE_FILE=""
+          if [ -n "${WR_PATH:-}" ]; then
+            LANE_FILE="$(basename "${WR_PATH}")"
+          fi
+          if [ -z "${LANE_FILE}" ]; then
+            case "${WR_NAME:-${VALIDATED_NAME:-}}" in
+              "CI: Compression / Corruption Parity (Nightly Docker, Epic #970)")
+                LANE_FILE="compression-corruption-parity.yml" ;;
+              "CI: CQL Type & Schema-Evolution Parity (Nightly Docker, Epic #971)")
+                LANE_FILE="cql-type-parity.yml" ;;
+              "CI: Tombstone / TTL Parity (Nightly Docker, Epic #972)")
+                LANE_FILE="tombstone-ttl-parity.yml" ;;
+              "Exhaustive Regeneration (parity corpus)")
+                LANE_FILE="exhaustive-regeneration.yml" ;;
+              *)
+                echo "::notice::could not map workflow_run name '${WR_NAME:-<none>}' to a tracked lane filename — resolve will be a no-op." ;;
+            esac
+          fi
+          echo "lane_file=${LANE_FILE}" >> "$GITHUB_OUTPUT"
+
+          # Fix A (round 7): derive the lane's CI TIER from its workflow FILENAME so the
+          # filed issue records the correct tier (spec R1). The exhaustive-regeneration
+          # lane is tier `exhaustive_regeneration`; the three nightly parity lanes are
+          # tier `nightly_docker` (the script's default). An unmapped lane leaves the tier
+          # empty so the `file` step falls back to the script default rather than guessing.
+          LANE_TIER=""
+          case "${LANE_FILE}" in
+            exhaustive-regeneration.yml)
+              LANE_TIER="exhaustive_regeneration" ;;
+            compression-corruption-parity.yml|cql-type-parity.yml|tombstone-ttl-parity.yml)
+              LANE_TIER="nightly_docker" ;;
+            *)
+              : ;;
+          esac
+          echo "lane_tier=${LANE_TIER}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout (for the fingerprint/dedup script)
+        if: steps.guard.outputs.skip != 'true' && steps.validate.outputs.proceed == 'true'
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        if: steps.guard.outputs.skip != 'true' && steps.validate.outputs.proceed == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download failed run's parity-failures.json artifact
+        id: artifact
+        # Only the file path (failure or manual replay) needs the artifact; a green
+        # (success) resolve run has no failures artifact to fetch.
+        if: >-
+          steps.guard.outputs.skip != 'true' && steps.validate.outputs.proceed == 'true' &&
+          (env.WR_CONCLUSION != 'success' || env.TRIGGER == 'workflow_dispatch')
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          # Which run to inspect: the triggering workflow_run, or a manual replay id.
+          RUN_ID="${WR_ID:-}"
+          if [ "${TRIGGER}" = "workflow_dispatch" ] && [ -n "${DISPATCH_RUN_ID:-}" ]; then
+            RUN_ID="${DISPATCH_RUN_ID}"
+          fi
+          if [ -z "${RUN_ID}" ]; then
+            echo "::notice::no run id to inspect — degraded path"
+            echo "have_artifact=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p artifacts
+          # RUN_ID is a GitHub-numeric run id; still pass via env, not inline.
+          if gh run download "${RUN_ID}" --name parity-failures --dir artifacts 2>/dev/null \
+              && [ -f artifacts/parity-failures.json ]; then
+            echo "have_artifact=true" >> "$GITHUB_OUTPUT"
+            echo "summary_file=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # DEGRADED PATH (R3): the structured artifact is absent. Best-effort locate a
+          # summary/log artifact so load_degraded() has REAL input rather than a silent
+          # empty parse. We try known summary/report artifact names, then fall back to
+          # ALL artifacts, and hand the first readable summary-like file to the script.
+          echo "::notice::no parity-failures.json artifact on run ${RUN_ID} — using degraded summary/log fallback (R3)"
+          mkdir -p degraded
+          for art in exhaustive-regeneration-report parity-test-results parity-summary; do
+            gh run download "${RUN_ID}" --name "${art}" --dir degraded 2>/dev/null || true
+          done
+          # Last resort: pull every artifact this run produced (best-effort).
+          gh run download "${RUN_ID}" --dir degraded 2>/dev/null || true
+          # Pick the first plausible summary/log file (name contains summary/report/parity).
+          SUMMARY_FILE=""
+          while IFS= read -r f; do
+            SUMMARY_FILE="${f}"
+            break
+          done < <(find degraded -type f \( -iname '*summary*' -o -iname '*report*' -o -iname '*parity*' \) 2>/dev/null)
+          if [ -n "${SUMMARY_FILE}" ]; then
+            echo "::notice::degraded fallback parsing summary artifact: ${SUMMARY_FILE}"
+          else
+            echo "::notice::degraded fallback found no downloadable summary artifact — the script will surface an anomaly if this was a failure run"
+          fi
+          echo "have_artifact=false" >> "$GITHUB_OUTPUT"
+          echo "summary_file=${SUMMARY_FILE}" >> "$GITHUB_OUTPUT"
+
+      - name: File / update the deduplicated parity-failure issue
+        # Failure conclusion, or a manual replay (workflow_dispatch defaults to filing).
+        if: >-
+          steps.guard.outputs.skip != 'true' && steps.validate.outputs.proceed == 'true' &&
+          (env.WR_CONCLUSION != 'success' || env.TRIGGER == 'workflow_dispatch')
+        env:
+          HAVE_ARTIFACT: ${{ steps.artifact.outputs.have_artifact }}
+          SUMMARY_FILE: ${{ steps.artifact.outputs.summary_file }}
+          # Fix C: the effective run link (payload html_url, or reconstructed from the
+          # manual replay id). Passed as a quoted env var — never inlined as an expression.
+          RUN_URL: ${{ steps.identity.outputs.run_url }}
+          # The validated lane workflow FILENAME derived by the identity step (same value
+          # used to scope the green-run resolve). Threaded into the degraded fallback so a
+          # degraded-filed issue carries the KNOWN lane identity — resolvable by the green
+          # `resolve --workflow` filter and with a stable, lane-aligned fingerprint.
+          LANE_FILE: ${{ steps.identity.outputs.lane_file }}
+          # Fix A (round 7): the lane's CI tier derived from its workflow filename
+          # (exhaustive_regeneration for the exhaustive lane; nightly_docker for the three
+          # nightly parity lanes). Recorded in the filed issue body (spec R1). Passed via a
+          # quoted env var, never inlined as an expression.
+          LANE_TIER: ${{ steps.identity.outputs.lane_tier }}
+        run: |
+          set -euo pipefail
+          REPRO="See the failing run: ${RUN_URL:-<run url unavailable>}"
+          ARGS=(file --run-url "${RUN_URL:-}" --conclusion "${WR_CONCLUSION:-failure}" --repro "${REPRO}")
+          # Record the correct CI tier for the failing lane (spec R1). If the lane could
+          # not be mapped to a tier, omit --tier so the script keeps its documented default.
+          if [ -n "${LANE_TIER:-}" ]; then
+            ARGS+=(--tier "${LANE_TIER}")
+          fi
+          if [ "${HAVE_ARTIFACT:-false}" = "true" ]; then
+            ARGS+=(--failures-json artifacts/parity-failures.json)
+          elif [ -n "${SUMMARY_FILE:-}" ]; then
+            # R3 degraded path: feed the located summary/log to load_degraded() so it has
+            # real input. Also pass the KNOWN lane workflow filename so the degraded record
+            # records the real lane (matchable by the green-run resolver + stable
+            # fingerprint), never the free-floating "unknown". If it parses zero failures on
+            # a failure run the script surfaces a loud anomaly (::error::) — never silent.
+            ARGS+=(--summary-file "${SUMMARY_FILE}")
+            if [ -n "${LANE_FILE:-}" ]; then
+              ARGS+=(--workflow-file "${LANE_FILE}")
+            fi
+          fi
+          # Non-gating: never let a filing error red the automation. `|| true` keeps the
+          # job green; the anomaly / degraded notices are surfaced to the run summary by
+          # the script itself. (The parity lane's own conclusion is untouched regardless.)
+          python3 scripts/parity-failure-issue.py "${ARGS[@]}" || \
+            echo "::warning::parity-failure-issue script exited non-zero (non-gating; parity result unchanged)."
+
+      - name: Resolve tracked issues on a green lane (R4 — comment only, never close)
+        # Green (success) conclusion of a tracked lane: post a "resolved" comment on that
+        # lane's open parity-failure issues. Manual replays go through the file path above.
+        if: >-
+          steps.guard.outputs.skip != 'true' && steps.validate.outputs.proceed == 'true' &&
+          env.WR_CONCLUSION == 'success' && env.TRIGGER != 'workflow_dispatch'
+        env:
+          # Fix A: scope resolution to the lane that just went green. LANE_FILE is the
+          # workflow filename derived from the completed run's identity (payload path,
+          # else a name lookup); the issue body records `**Workflow:** <file>`, so the
+          # script's --workflow substring filter touches ONLY this lane's issues. RUN_URL
+          # + LANE_FILE are passed via quoted env vars, never inlined as expressions.
+          RUN_URL: ${{ steps.identity.outputs.run_url }}
+          LANE_FILE: ${{ steps.identity.outputs.lane_file }}
+        run: |
+          set -euo pipefail
+          # A green tracked-lane completion resolves only the open parity-failure issues
+          # whose body records THIS lane's workflow file (never all lanes). If the lane
+          # could not be mapped to a filename the resolve is a scoped no-op rather than an
+          # overbroad sweep. We only ever COMMENT "resolved on run <url>" and NEVER close
+          # (a human confirms + closes). Fail-open: a resolve error must never red this job.
+          if [ -z "${LANE_FILE:-}" ]; then
+            echo "::notice::green-lane resolve: no mapped workflow filename — skipping (no issues resolved)."
+            exit 0
+          fi
+          python3 scripts/parity-failure-issue.py resolve \
+            --run-url "${RUN_URL:-}" --workflow "${LANE_FILE}" || \
+            echo "::warning::parity-failure-issue resolve exited non-zero (non-gating; parity result unchanged)."
