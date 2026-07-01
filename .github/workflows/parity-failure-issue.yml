@@ -69,6 +69,12 @@ jobs:
     env:
       # Pass untrusted payload fields as env vars, never inline into a run: shell.
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Give every `gh` call in this job explicit repository context. On a
+      # workflow_dispatch replay the pre-checkout `gh run view` step runs BEFORE
+      # actions/checkout, so `gh` has no repo to infer; without GH_REPO the metadata
+      # fetch fails and the replay path fails open (files nothing) for otherwise-valid
+      # run ids. `github.repository` is trusted GitHub context (owner/name).
+      GH_REPO: ${{ github.repository }}
       WR_EVENT: ${{ github.event.workflow_run.event }}
       WR_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
       WR_NAME: ${{ github.event.workflow_run.name }}
