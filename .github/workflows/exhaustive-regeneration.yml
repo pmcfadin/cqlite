@@ -247,7 +247,7 @@ jobs:
       # shell (command-injection safety); the audit outcome is referenced only in
       # the step `if:` condition, never passed to the shell.
       - name: Assert failure-artifact bundle exists (fail-closed)
-        if: ${{ steps.corpus_audit.outcome == 'failure' }}
+        if: ${{ failure() && steps.corpus_audit.outcome == 'failure' }}
         run: |
           set -euo pipefail
           count=$(find parity-failures/exhaustive_regeneration -name failure-artifact.json 2>/dev/null | wc -l | tr -d '[:space:]')
@@ -268,7 +268,7 @@ jobs:
       # failed, with `if-no-files-found: error` so a missing bundle fails the
       # upload too (belt-and-suspenders with the guard above).
       - name: Upload parity failure bundle (issue #1027)
-        if: ${{ steps.corpus_audit.outcome == 'failure' }}
+        if: ${{ failure() && steps.corpus_audit.outcome == 'failure' }}
         uses: actions/upload-artifact@v4
         with:
           name: parity-failures-exhaustive-regeneration
