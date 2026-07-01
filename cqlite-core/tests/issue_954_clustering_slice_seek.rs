@@ -889,8 +889,10 @@ async fn desc_clustering_slice_correct_or_documented_skip() {
     let mut by_pk: BTreeMap<String, Vec<CkVal>> = BTreeMap::new();
     let mut pk_lit_for: BTreeMap<String, String> = BTreeMap::new();
     for row in &full.rows {
-        let (Some(pk_v), Some(ck_v)) = (row.values.get(&t.pk_col), row.values.get(&t.ck_col))
-        else {
+        let (Some(pk_v), Some(ck_v)) = (
+            row.values.get(t.pk_col.as_str()),
+            row.values.get(t.ck_col.as_str()),
+        ) else {
             continue;
         };
         let (Some(pk_lit), Some(ck)) = (pk_literal(pk_v), CkVal::from_value(ck_v)) else {
@@ -918,7 +920,7 @@ async fn desc_clustering_slice_correct_or_documented_skip() {
     let collect_cks = |rows: &[cqlite_core::query::result::QueryRow]| -> Vec<CkVal> {
         let mut v: Vec<CkVal> = rows
             .iter()
-            .filter_map(|r| r.values.get(&t.ck_col).and_then(CkVal::from_value))
+            .filter_map(|r| r.values.get(t.ck_col.as_str()).and_then(CkVal::from_value))
             .collect();
         v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         v
