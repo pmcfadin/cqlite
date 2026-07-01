@@ -307,6 +307,30 @@ impl SSTableReader {
     /// the in-memory sort: no Index.db offset, a narrow partition with no promoted
     /// index, a variable-width clustering column, a static column present, or an
     /// open range-tombstone marker.
+    ///
+    /// # Work complexity (Issue #1307)
+    ///
+    /// Per-iteration **memory** is bounded to ONE promoted-index block: `block_rows`
+    /// holds only the rows of the block currently being decoded, is drained into
+    /// `out`, and never accumulates more than a single block at a time (mirrors
+    /// Cassandra `SSTableReversedIterator`).
+    ///
+    /// **Total work is O(partition), independent of any `LIMIT`.** This function
+    /// walks EVERY promoted-index block back-to-front and materializes the full
+    /// partition's rows into `out` before returning; the query-wide `LIMIT` is
+    /// applied by the executor's `Limit` step *after* this call. So `ORDER BY ck DESC
+    /// LIMIT n` still decodes the whole partition — it is O(partition), not O(n). The
+    /// reverse iterator's win over the in-memory-sort fallback is the bounded
+    /// per-block memory high-water mark (and avoiding a full forward re-read to sort),
+    /// NOT reduced total decode work.
+    ///
+    /// A back-to-front early-stop (stop once `n` rows are buffered, giving O(n)) is
+    /// intentionally NOT implemented: the caller (`targeted_partition_rows`) applies a
+    /// post-scan predicate backstop (e.g. `WHERE ck < N ORDER BY ck DESC`) and the
+    /// `LIMIT` is applied only *after* that filtering, so truncating the raw scan at
+    /// `n` rows here could drop rows a predicate would have removed and under-return.
+    /// Threading a *predicate-aware* effective limit down through
+    /// `scan_partition_clustering_reverse` is left as future work (Low, Issue #1307).
     pub(crate) async fn big_reverse_partition_rows(
         &self,
         partition_key: &[u8],
