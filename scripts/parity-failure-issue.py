@@ -22,8 +22,11 @@ Design (see openspec/changes/issue-1028-parity-failure-issue-automation/):
       subsequent green run posts a "resolved" comment but does NOT auto-close.
   R4  the `resolve` subcommand implements the green-run path: with `--failures-json` it
       resolves only the matching fingerprints; without it (the green-lane wiring) it posts
-      a resolution comment on every open `parity-failure` issue (optionally lane-filtered
-      via `--workflow`), never closing any.
+      a resolution comment on the open `parity-failure` issues belonging to the now-green
+      lane — scoped by `--workflow <filename>` (the lane's `.github/workflows/<file>`,
+      matched against the body's `**Workflow:**` record), never closing any. The workflow
+      always passes the completed lane's filename so one green lane never comments on
+      another lane's issues; an empty `--workflow` (unmapped lane) resolves nothing.
 
 The GitHub-touching paths sit behind explicit seams (`--open-issues-json`,
 `--failures-json`) so the unit tests run with no network. This mirrors
@@ -366,12 +369,14 @@ def cmd_resolve(args) -> int:
     * **fingerprint-scoped** — when `--failures-json` supplies explicit failures, resolve
       only the issues whose fingerprint matches (precise; useful for a targeted replay).
     * **lane-scoped** (the green-run wiring, R4) — a subsequent GREEN run has no failures
-      to fingerprint, so we resolve every open `parity-failure` issue tied to the
-      now-green lane. Lane membership is matched by `--workflow` as a substring of the
-      issue body (the body records `**Workflow:** <file>`); when `--workflow` is empty we
-      resolve ALL open parity-failure issues. Resolving the whole lane on a full-green run
-      is intentional and honest — we do not know which subset flipped green, and we only
-      ever COMMENT, never close (a human confirms + closes).
+      to fingerprint, so we resolve the open `parity-failure` issues tied to the now-green
+      lane. Lane membership is matched by `--workflow <filename>` as a substring of the
+      issue body (the body records `**Workflow:** <file>`). The green-run workflow ALWAYS
+      passes the completed lane's filename, so a single green lane never comments on
+      another lane's issues. An empty `--workflow` resolves ALL open parity-failure issues
+      — reserved for an explicit manual full-sweep, never emitted by the green-run wiring
+      (the workflow skips resolve entirely when it cannot map the lane to a filename).
+      Resolution is COMMENT-only — a human confirms + closes.
     """
     open_issues = load_open_issues(args)
 

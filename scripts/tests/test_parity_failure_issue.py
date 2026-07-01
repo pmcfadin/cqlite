@@ -312,13 +312,15 @@ class ResolveTests(unittest.TestCase):
                          "resolve must never close an issue")
 
     def test_green_lane_resolve_workflow_filter_scopes_issues(self):
-        # A --workflow filter resolves only issues whose body records that lane.
+        # Fix A: a green lane's resolve is scoped by --workflow <filename> so it comments
+        # ONLY on that lane's issues and leaves every other lane's issue untouched.
         calls = self._capture_gh()
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
             oj = _write(tmp, "open.json", [
                 {"number": 55, "body": "**Workflow:** `compression-corruption-parity.yml`"},
                 {"number": 56, "body": "**Workflow:** `tombstone-ttl-parity.yml`"},
+                {"number": 57, "body": "**Workflow:** `cql-type-parity.yml`"},
             ])
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
@@ -327,8 +329,31 @@ class ResolveTests(unittest.TestCase):
                     workflow="compression-corruption-parity.yml", dry_run=False))
             self.assertEqual(rc, 0)
         comment_calls = [c for c in calls if len(c) > 2 and c[2] == "comment"]
+        # Only lane X's issue (#55) is commented on.
         self.assertEqual([c[3] for c in comment_calls], ["55"])
+        commented = {c[3] for c in comment_calls}
+        # Unrelated lanes' issues (#56 tombstone, #57 cql-type) are left untouched.
+        self.assertNotIn("56", commented)
+        self.assertNotIn("57", commented)
         self.assertFalse(any("close" in c for c in calls))
+
+    def test_green_lane_resolve_unmatched_workflow_is_noop(self):
+        # A green lane whose filename matches no open issue resolves nothing (and never
+        # falls back to an all-lane sweep). Mirrors the workflow passing a lane filename.
+        calls = self._capture_gh()
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            oj = _write(tmp, "open.json", [
+                {"number": 55, "body": "**Workflow:** `compression-corruption-parity.yml`"},
+            ])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = pfi.cmd_resolve(_args(
+                    failures_json=None, open_issues_json=oj,
+                    workflow="exhaustive-regeneration.yml", dry_run=False))
+            self.assertEqual(rc, 0)
+        self.assertEqual([c for c in calls if len(c) > 2 and c[2] == "comment"], [])
+        self.assertIn("nothing to do", out.getvalue())
 
 
 if __name__ == "__main__":
