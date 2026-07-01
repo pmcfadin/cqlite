@@ -7192,7 +7192,7 @@ scenarios:
         Validates the failure-routing tooling itself, not Cassandra on-disk parity.
     ci:
       tier: fast_pr
-      workflow: .github/workflows/parity-failure-issue.yml
+      workflow: .github/workflows/parity-failure-issue-tests.yml
     scope: {}
 
   - id: cass.cli_reporting.failure_issue_nightly_docker
@@ -7221,7 +7221,7 @@ scenarios:
         Validates the failure-routing tooling itself, not Cassandra on-disk parity.
     ci:
       tier: fast_pr
-      workflow: .github/workflows/parity-failure-issue.yml
+      workflow: .github/workflows/parity-failure-issue-tests.yml
     scope: {}
 
   - id: cass.cli_reporting.failure_issue_exhaustive_regeneration
@@ -7250,7 +7250,7 @@ scenarios:
         Validates the failure-routing tooling itself, not Cassandra on-disk parity.
     ci:
       tier: fast_pr
-      workflow: .github/workflows/parity-failure-issue.yml
+      workflow: .github/workflows/parity-failure-issue-tests.yml
     scope: {}
 
   - id: cass.cli_reporting.failure_issue_bloom_fpr
@@ -7280,7 +7280,7 @@ scenarios:
         Validates the failure-routing tooling itself, not Cassandra on-disk parity.
     ci:
       tier: fast_pr
-      workflow: .github/workflows/parity-failure-issue.yml
+      workflow: .github/workflows/parity-failure-issue-tests.yml
     scope: {}
 
   - id: cass.cli_reporting.failure_issue_dedup
@@ -7310,7 +7310,7 @@ scenarios:
         Validates the failure-routing tooling itself, not Cassandra on-disk parity.
     ci:
       tier: fast_pr
-      workflow: .github/workflows/parity-failure-issue.yml
+      workflow: .github/workflows/parity-failure-issue-tests.yml
     scope: {}
 
   # ----------------------------------------------------------------------------

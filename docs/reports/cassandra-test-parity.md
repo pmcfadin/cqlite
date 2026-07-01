@@ -782,11 +782,11 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 |---|---|---|
 | `cass.bti_big_version_matrix.big_nb_oa_read` | manual_debug | — |
 | `cass.bti_big_version_matrix.bti_da_write_read` | nightly_docker | .github/workflows/e2e-readback.yml |
-| `cass.cli_reporting.failure_issue_bloom_fpr` | fast_pr | .github/workflows/parity-failure-issue.yml |
-| `cass.cli_reporting.failure_issue_dedup` | fast_pr | .github/workflows/parity-failure-issue.yml |
-| `cass.cli_reporting.failure_issue_exhaustive_regeneration` | fast_pr | .github/workflows/parity-failure-issue.yml |
-| `cass.cli_reporting.failure_issue_nightly_docker` | fast_pr | .github/workflows/parity-failure-issue.yml |
-| `cass.cli_reporting.failure_issue_required_parity` | fast_pr | .github/workflows/parity-failure-issue.yml |
+| `cass.cli_reporting.failure_issue_bloom_fpr` | fast_pr | .github/workflows/parity-failure-issue-tests.yml |
+| `cass.cli_reporting.failure_issue_dedup` | fast_pr | .github/workflows/parity-failure-issue-tests.yml |
+| `cass.cli_reporting.failure_issue_exhaustive_regeneration` | fast_pr | .github/workflows/parity-failure-issue-tests.yml |
+| `cass.cli_reporting.failure_issue_nightly_docker` | fast_pr | .github/workflows/parity-failure-issue-tests.yml |
+| `cass.cli_reporting.failure_issue_required_parity` | fast_pr | .github/workflows/parity-failure-issue-tests.yml |
 | `cass.cli_reporting.parity_manifest_lint_and_report` | fast_pr | .github/workflows/cassandra-parity.yml |
 | `cass.commitlog_replay.recovery_out_of_scope` | fast_pr | — |
 | `cass.compaction.CompactionAwareWriterTest.live_row_count_preservation` | required_parity | .github/workflows/live-cell-compaction-parity.yml |
