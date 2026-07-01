@@ -1430,6 +1430,119 @@ async fn check_key_order_and_ldt(
     };
 
     findings.extend(classify_order_and_ldt(&partitions, signed_ldt));
+
+    // Row-order half of OutOfOrderKeyOrRow (issue #1282 roborev follow-up):
+    // Cassandra's Verifier also rejects out-of-order CLUSTERING rows within a
+    // partition. Decode each partition's clustering rows in on-disk order and flag
+    // a non-increasing clustering step using the authoritative schema comparator
+    // (which respects reversed/DESC clustering order). A table with no clustering
+    // columns yields an empty scan and produces no findings.
+    if let Some(schema) = reader.effective_schema() {
+        // A decode failure is Check 7's territory; do not double-report. Only a
+        // successful scan feeds the clustering-order classifier.
+        if !schema.clustering_keys.is_empty() {
+            if let Ok(partition_rows) = reader.partition_clustering_verify_scan().await {
+                findings.extend(classify_clustering_row_order(&partition_rows, &schema));
+            }
+        }
+    }
+}
+
+/// Compare two clustering-key tuples in the authoritative schema clustering
+/// order (issue #1282 roborev follow-up).
+///
+/// Each column is compared with its non-gated [`ComparatorType`] (derived from the
+/// schema clustering type) and the result reversed for a DESC column, mirroring
+/// Cassandra's reversed-type ordering. An absent trailing component (a shorter
+/// tuple) is treated as NULL, which sorts first regardless of ASC/DESC — matching
+/// `ClusteringKey::compare`. NO heuristics: the format-derived comparator and the
+/// schema's ASC/DESC flag decide.
+fn compare_clustering_tuples(
+    a: &[crate::types::Value],
+    b: &[crate::types::Value],
+    schema: &crate::schema::TableSchema,
+) -> Result<std::cmp::Ordering> {
+    use crate::types::Value;
+    use std::cmp::Ordering;
+
+    let comparators = schema.get_clustering_key_comparators()?;
+    for (i, ck) in schema.clustering_keys.iter().enumerate() {
+        let av = a.get(i).unwrap_or(&Value::Null);
+        let bv = b.get(i).unwrap_or(&Value::Null);
+        // NULL/absent component sorts first regardless of ASC/DESC (no reversal).
+        let ord = match (av, bv) {
+            (Value::Null, Value::Null) => Ordering::Equal,
+            (Value::Null, _) => Ordering::Less,
+            (_, Value::Null) => Ordering::Greater,
+            (_, _) => {
+                let cmp = comparators
+                    .get(i)
+                    .ok_or_else(|| {
+                        Error::Schema(format!(
+                            "missing clustering comparator for column {}",
+                            ck.name
+                        ))
+                    })?
+                    .compare(av, bv)?;
+                if ck.order == crate::schema::ClusteringOrder::Desc {
+                    cmp.reverse()
+                } else {
+                    cmp
+                }
+            }
+        };
+        if ord != Ordering::Equal {
+            return Ok(ord);
+        }
+    }
+    Ok(Ordering::Equal)
+}
+
+/// Pure classifier for the ROW half of Check 8 (issue #1282 roborev follow-up):
+/// given each partition's clustering-key tuples in on-disk order and the
+/// authoritative schema, flag the first partition whose clustering rows are not in
+/// strictly ascending schema order as [`VerifyErrorClass::OutOfOrderKeyOrRow`].
+///
+/// The comparison applies each clustering column's ASC/DESC order via
+/// [`compare_clustering_tuples`] — NO heuristics. A non-increasing step (a row
+/// equal to or before its predecessor) is corruption Cassandra's `Verifier`
+/// rejects.
+///
+/// Kept side-effect-free so the public verify path and the unit tests drive the
+/// EXACT same classification (wiring evidence: `check_key_order_and_ldt` calls
+/// this, and `verify_sstable` calls that in FULL mode).
+fn classify_clustering_row_order(
+    partition_rows: &[(usize, Vec<Vec<crate::types::Value>>)],
+    schema: &crate::schema::TableSchema,
+) -> Vec<VerifyFinding> {
+    use std::cmp::Ordering;
+
+    let mut findings = Vec::new();
+    for (part_idx, rows) in partition_rows {
+        for pair in rows.windows(2) {
+            let (prev, cur) = (&pair[0], &pair[1]);
+            // A comparator error (schema/type mismatch) is not an ordering fault;
+            // Check 7 owns decode/type failures, so skip rather than misclassify.
+            let ord = match compare_clustering_tuples(cur, prev, schema) {
+                Ok(o) => o,
+                Err(_) => continue,
+            };
+            // On disk a later clustering row MUST be strictly greater than its
+            // predecessor; Equal or Less is out-of-order corruption.
+            if ord != Ordering::Greater {
+                findings.push(VerifyFinding::new(
+                    VerifyErrorClass::OutOfOrderKeyOrRow,
+                    "Data.db",
+                    format!(
+                        "partition {} has an out-of-order clustering row: {:?} is not strictly after the previous row {:?} in schema clustering order",
+                        part_idx, cur, prev,
+                    ),
+                ));
+                break;
+            }
+        }
+    }
+    findings
 }
 
 /// Pure classifier for Check 8 (issue #1282): given the on-disk-ordered
@@ -1900,6 +2013,98 @@ mod tests {
         partitions[0].1 = Some(1_700_000_000); // ~2023, valid
         assert!(classify_order_and_ldt(&partitions, true).is_empty());
         assert!(classify_order_and_ldt(&partitions, false).is_empty());
+    }
+
+    // ---- Check 8 ROW half: clustering-row order (issue #1282 follow-up) -----
+
+    use crate::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema};
+    use crate::types::Value;
+    use std::collections::HashMap;
+
+    fn schema_one_ck(order: ClusteringOrder) -> TableSchema {
+        TableSchema {
+            keyspace: "issue_1282".to_string(),
+            table: "tbl".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "pk".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![ClusteringColumn {
+                name: "ck".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+                order,
+            }],
+            columns: vec![Column {
+                name: "v".to_string(),
+                data_type: "text".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            }],
+            comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
+        }
+    }
+
+    fn ck_int(n: i32) -> Vec<Value> {
+        vec![Value::Integer(n)]
+    }
+
+    #[test]
+    fn clustering_order_ascending_rows_are_clean() {
+        let schema = schema_one_ck(ClusteringOrder::Asc);
+        let partitions = vec![(0usize, vec![ck_int(1), ck_int(2), ck_int(3)])];
+        assert!(
+            classify_clustering_row_order(&partitions, &schema).is_empty(),
+            "in-order ASC clustering rows must produce no findings"
+        );
+    }
+
+    #[test]
+    fn clustering_order_out_of_order_row_is_flagged() {
+        // Row 3 comes before row 2 on disk under ASC — corrupt.
+        let schema = schema_one_ck(ClusteringOrder::Asc);
+        let partitions = vec![(0usize, vec![ck_int(1), ck_int(3), ck_int(2)])];
+        let findings = classify_clustering_row_order(&partitions, &schema);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.class == VerifyErrorClass::OutOfOrderKeyOrRow),
+            "an out-of-order clustering row must be flagged OutOfOrderKeyOrRow, got {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn clustering_order_duplicate_row_is_flagged() {
+        // Equal consecutive clustering keys are NOT strictly increasing → corrupt.
+        let schema = schema_one_ck(ClusteringOrder::Asc);
+        let partitions = vec![(0usize, vec![ck_int(5), ck_int(5)])];
+        let findings = classify_clustering_row_order(&partitions, &schema);
+        assert!(findings
+            .iter()
+            .any(|f| f.class == VerifyErrorClass::OutOfOrderKeyOrRow));
+    }
+
+    #[test]
+    fn clustering_order_respects_desc_ordering() {
+        let schema = schema_one_ck(ClusteringOrder::Desc);
+        // DESC on disk stores clustering values descending; 3,2,1 is IN ORDER.
+        let ok = vec![(0usize, vec![ck_int(3), ck_int(2), ck_int(1)])];
+        assert!(
+            classify_clustering_row_order(&ok, &schema).is_empty(),
+            "descending rows under DESC clustering order must be clean"
+        );
+        // Ascending 1,2,3 is OUT OF ORDER under DESC.
+        let bad = vec![(0usize, vec![ck_int(1), ck_int(2), ck_int(3)])];
+        assert!(
+            classify_clustering_row_order(&bad, &schema)
+                .iter()
+                .any(|f| f.class == VerifyErrorClass::OutOfOrderKeyOrRow),
+            "ascending rows under a DESC clustering column must be flagged"
+        );
     }
 
     #[test]

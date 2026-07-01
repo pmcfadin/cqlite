@@ -1029,6 +1029,16 @@ impl SSTableReader {
         self.schema.as_deref()
     }
 
+    /// The effective table schema the read/verify paths decode with — the same
+    /// four-tier resolution `partition_clustering_verify_scan` uses (issue #1282).
+    ///
+    /// Returned owned because the registry-fallback tier constructs a schema; the
+    /// verifier needs it to drive the authoritative clustering comparator
+    /// ([`crate::storage::write_engine::mutation::ClusteringKey::compare`]).
+    pub fn effective_schema(&self) -> Option<TableSchema> {
+        self.get_table_schema(None)
+    }
+
     /// Extract write time from entry metadata
     pub fn extract_write_time_from_entry(&self, _key: &RowKey, value: &Value) -> i64 {
         use log::warn;

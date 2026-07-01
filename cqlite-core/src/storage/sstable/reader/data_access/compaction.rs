@@ -353,15 +353,23 @@ impl SSTableReader {
         // the partition start). Reuses the same emit-with-offset parser the BTI
         // identity cross-check relies on, so partition framing stays defined in
         // exactly one place.
-        let mut seen: HashSet<Vec<u8>> = HashSet::new();
+        //
+        // Issue #1282 (roborev): dedup by partition BOUNDARY (the per-partition
+        // start offset), NOT by raw key. Deduping by key would silently DROP a
+        // duplicate partition key that appears again later on disk — precisely the
+        // corruption Cassandra's `Verifier` flags ("Key out of order" for a
+        // non-increasing `(token, key)` step). Keying on the boundary offset
+        // collapses the many rows WITHIN one partition (which all share that
+        // offset) to a single entry while letting each DISTINCT on-disk
+        // partition-start — including a duplicated key — reach the classifier.
+        let mut seen: HashSet<usize> = HashSet::new();
         let mut starts: Vec<usize> = Vec::new();
         parser.parse_block_for_compaction_emit_with_offset(
             &whole,
             effective_schema.as_ref(),
             self,
-            |partition_start, row| {
-                let k = row.key.as_bytes().to_vec();
-                if seen.insert(k) {
+            |partition_start, _row| {
+                if seen.insert(partition_start) {
                     starts.push(partition_start);
                 }
                 Ok(std::ops::ControlFlow::Continue(()))
@@ -381,6 +389,131 @@ impl SSTableReader {
         }
 
         Ok(result)
+    }
+
+    /// Verifier-facing scan (issue #1282, roborev follow-up): return, in on-disk
+    /// order, every partition's ordered list of decoded CLUSTERING-key tuples.
+    ///
+    /// Each element is `(partition_index, Vec<Vec<Value>>)`, where the inner
+    /// `Vec<Value>` is one clustering row's values in schema clustering order, and
+    /// the outer `Vec` holds those rows in the exact ORDER they appear on disk. The
+    /// verifier compares consecutive tuples within a partition using the
+    /// authoritative per-column [`crate::types::comparator::ComparatorType`] plus
+    /// each clustering column's ASC/DESC order, and flags a non-increasing step as
+    /// [`crate::storage::sstable::verify::VerifyErrorClass::OutOfOrderKeyOrRow`] —
+    /// the "row" half of that class (Cassandra's `Verifier` rejects out-of-order
+    /// clustering rows too).
+    ///
+    /// Rows carrying no clustering prefix (a static row, a partition-level
+    /// tombstone carrier, or an unclustered table's single row) are OMITTED from
+    /// the per-partition list: they do not participate in clustering order.
+    ///
+    /// Reuses the SAME on-disk-order emit-with-offset parser as
+    /// [`Self::partition_verify_scan`], so the clustering values come from the
+    /// authoritative schema-aware decode, not a heuristic. Uses only non-gated CQL
+    /// comparators (no `write-support` dependency). When the table has no clustering
+    /// columns the returned list is empty (nothing to order).
+    pub async fn partition_clustering_verify_scan(
+        &self,
+    ) -> Result<Vec<(usize, Vec<Vec<crate::types::Value>>)>> {
+        use crate::types::Value;
+        use std::collections::BTreeMap;
+
+        let cursor = self.new_scan_cursor().await?;
+        let header_size = self.calculate_header_size();
+        {
+            let mut file_guard = cursor.file.lock().await;
+            file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
+        }
+        let whole = self.stitch_all_chunks(&cursor).await?;
+
+        let effective_schema = self.get_table_schema(None);
+
+        // A table with no clustering columns has no intra-partition row order to
+        // verify — return early (empty) without decoding rows.
+        let has_clustering = effective_schema
+            .as_ref()
+            .map(|s| !s.clustering_keys.is_empty())
+            .unwrap_or(false);
+        if !has_clustering {
+            return Ok(Vec::new());
+        }
+
+        let parser = self.build_v5_parser();
+
+        // Group clustering tuples by partition-start offset (partitions appear in
+        // ascending on-disk offset order; rows within a partition are emitted in
+        // on-disk order). A BTreeMap keyed by the boundary offset both dedups the
+        // partition boundary and preserves on-disk partition order.
+        let mut by_partition: BTreeMap<usize, Vec<Vec<Value>>> = BTreeMap::new();
+        let schema = effective_schema.as_ref();
+        parser.parse_block_for_compaction_emit_with_offset(
+            &whole,
+            schema,
+            self,
+            |partition_start, row| {
+                let bucket = by_partition.entry(partition_start).or_default();
+                // A partition with only non-clustering rows still records an
+                // (empty) bucket so its index stays stable.
+                if let Some(tuple) = Self::clustering_tuple_of_compaction_row(&row, schema) {
+                    bucket.push(tuple);
+                }
+                Ok(std::ops::ControlFlow::Continue(()))
+            },
+        )?;
+
+        Ok(by_partition.into_values().enumerate().collect())
+    }
+
+    /// Extract the clustering-key tuple of a compaction row in schema order, or
+    /// `None` when the row carries no clustering prefix (static row, partition-level
+    /// tombstone carrier). Used only by the verifier's clustering-order check.
+    ///
+    /// Clustering columns are surfaced on the compaction read path as pseudo
+    /// simple-cells (row tombstones carry them in their dedicated `clustering`
+    /// field). We rebuild the tuple positionally from the schema's clustering
+    /// columns so the comparison uses authoritative positions.
+    fn clustering_tuple_of_compaction_row(
+        row: &super::super::compaction_row::CompactionRow,
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Option<Vec<crate::types::Value>> {
+        use super::super::compaction_row::CompactionRowData;
+
+        let schema = schema?;
+        if schema.clustering_keys.is_empty() {
+            return None;
+        }
+
+        match &row.row_data {
+            CompactionRowData::Tombstone { clustering, .. } => {
+                if clustering.len() != schema.clustering_keys.len() {
+                    // A partial/absent clustering prefix is not a full point row
+                    // (Cassandra's row order is over full clustering keys); skip.
+                    None
+                } else {
+                    Some(clustering.iter().map(|(_, v)| v.clone()).collect())
+                }
+            }
+            CompactionRowData::Live { simple, .. } => {
+                // A clustering row surfaces every clustering column as a simple
+                // pseudo-cell. Rebuild the tuple in schema order; if not every
+                // clustering column is present the row has no full clustering
+                // prefix (e.g. a static row) and is omitted.
+                let mut values: Vec<crate::types::Value> =
+                    Vec::with_capacity(schema.clustering_keys.len());
+                for ck in &schema.clustering_keys {
+                    match simple.iter().find(|c| c.column == ck.name) {
+                        Some(cell) => values.push(cell.value.clone()),
+                        None => return None,
+                    }
+                }
+                Some(values)
+            }
+            // Range markers / partition deletes are not clustering point rows.
+            CompactionRowData::RangeMarker { .. } | CompactionRowData::PartitionDelete { .. } => {
+                None
+            }
+        }
     }
 
     /// Streaming compaction read (issue #827): yield `(RowKey, Value, ts)`

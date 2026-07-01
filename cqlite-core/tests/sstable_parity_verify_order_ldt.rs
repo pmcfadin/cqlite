@@ -83,6 +83,32 @@ fn uncompressed_source(root: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Locate the committed real Cassandra-5.0.2-written UNCOMPRESSED multi-partition
+/// `nb` source that HAS clustering columns (int PK, int CK, several clustering
+/// rows per partition). Returns `None` when its Data.db is not fetched.
+fn clustered_uncompressed_source(root: &Path) -> Option<PathBuf> {
+    let base = root.join("sstables/test_writeparity");
+    let rd = std::fs::read_dir(&base).ok()?;
+    for e in rd.flatten() {
+        let p = e.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let name = p.file_name()?.to_str()?.to_string();
+        // `partition_boundary` is (id INT, ck INT, v TEXT) PRIMARY KEY (id, ck):
+        // multiple clustering rows per partition, uncompressed nb/BIG.
+        if !name.starts_with("partition_boundary") {
+            continue;
+        }
+        let data = p.join("nb-1-big-Data.db");
+        let ci = p.join("nb-1-big-CompressionInfo.db");
+        if data.is_file() && !ci.is_file() {
+            return Some(p);
+        }
+    }
+    None
+}
+
 /// Copy the source generation into `dst`, apply `mutate` to the Data.db bytes,
 /// then recompute `Digest.crc32` so ONLY the class under test is exercised.
 fn build_fixture(src: &Path, dst: &Path, mutate: impl FnOnce(&mut [u8])) {
@@ -278,6 +304,111 @@ async fn order_ldt_out_of_order_partition_keys_is_flagged_corrupt() {
             .iter()
             .any(|f| f.class == VerifyErrorClass::OutOfOrderKeyOrRow),
         "expected OutOfOrderKeyOrRow finding, got: {:?}",
+        report
+            .findings
+            .iter()
+            .map(|f| f.class.code())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Out-of-order CLUSTERING ROW within a partition (the ROW half of
+/// `OutOfOrderKeyOrRow`, issue #1282 roborev follow-up).
+///
+/// CASSANDRA ORACLE = corrupt. Cassandra stores a partition's clustering rows in
+/// ascending clustering order; its `Verifier` / `SSTableIdentityIterator` reject a
+/// row that is out of clustering order within a partition, exactly as it rejects
+/// out-of-order partition keys. (Source-derived per the issue's fallback clause —
+/// see module docs.)
+///
+/// The source `test_writeparity/partition_boundary` is a real
+/// Cassandra-5.0.2-written UNCOMPRESSED `nb` table `(id INT, ck INT, v TEXT)
+/// PRIMARY KEY (id, ck)`; partition `id=1` holds four fixed-width 16-byte
+/// clustering rows (`ck` = 1,2,3,4) at Data.db offsets 18/34/50/66. We SWAP the
+/// first two 16-byte row records (making the on-disk clustering order 2,1,3,4)
+/// and patch the single `prev_unfiltered_size` byte of each so the row framing
+/// stays valid — the ONLY change is that two rows are reordered. The clustering
+/// step 2 -> 1 is then non-increasing and must be flagged.
+#[tokio::test]
+async fn order_ldt_out_of_order_clustering_row_is_flagged_corrupt() {
+    let Some(root) = datasets_root() else {
+        skip_or_require(
+            "issue_1282 clustering-order",
+            "CQLITE_DATASETS_ROOT not set",
+        );
+        return;
+    };
+    let Some(src) = clustered_uncompressed_source(&root) else {
+        skip_or_require(
+            "issue_1282 clustering-order source",
+            "test_writeparity/partition_boundary Data.db not materialized",
+        );
+        return;
+    };
+
+    // Anchor: the clean source must verify clean (no false-positive row order).
+    let clean = verify_full(&src).await;
+    assert!(
+        clean.is_ok(),
+        "clean clustered source must verify clean, got: {:?}",
+        clean.findings
+    );
+
+    // Row records are 16 bytes each; partition id=1's first two rows are at
+    // offsets 18 and 34. Byte index 7 within a row is `prev_unfiltered_size`
+    // (18 == 0x12 for the first row after the 18-byte partition header, 16 == 0x10
+    // for a row after another 16-byte row). Assert this layout at build time so the
+    // fixture is deterministic-by-construction, then swap the two records and fix
+    // the two prev-size bytes.
+    const R0: usize = 18; // ck=1
+    const R1: usize = 34; // ck=2
+    const ROW: usize = 16;
+    const PREV_IDX: usize = 7;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("out_of_order_clustering");
+    build_fixture(&src, &dir, |data| {
+        assert!(
+            data.len() >= R1 + ROW,
+            "source Data.db too small for the expected partition layout"
+        );
+        // Sanity-check the known clustering values (last clustering byte) and
+        // prev-size bytes before mutating.
+        assert_eq!(data[R0 + 5], 0x01, "row0 clustering value must be ck=1");
+        assert_eq!(data[R1 + 5], 0x02, "row1 clustering value must be ck=2");
+        assert_eq!(
+            data[R0 + PREV_IDX],
+            0x12,
+            "row0 prev_size must be 18 (after 18-byte partition header)"
+        );
+        assert_eq!(
+            data[R1 + PREV_IDX],
+            0x10,
+            "row1 prev_size must be 16 (after a 16-byte row)"
+        );
+
+        let mut row0 = data[R0..R0 + ROW].to_vec(); // old ck=1
+        let mut row1 = data[R1..R1 + ROW].to_vec(); // old ck=2
+                                                    // After the swap, the new first row (old ck=2) follows the partition
+                                                    // header (prev_size 18), and the new second row (old ck=1) follows a
+                                                    // 16-byte row (prev_size 16).
+        row1[PREV_IDX] = 0x12;
+        row0[PREV_IDX] = 0x10;
+        data[R0..R0 + ROW].copy_from_slice(&row1); // now ck=2 first
+        data[R1..R1 + ROW].copy_from_slice(&row0); // now ck=1 second
+    });
+
+    let report = verify_full(&dir).await;
+    assert!(
+        !report.is_ok(),
+        "out-of-order clustering row must be a corrupt verdict (Cassandra oracle: corrupt), got clean"
+    );
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.class == VerifyErrorClass::OutOfOrderKeyOrRow),
+        "expected OutOfOrderKeyOrRow finding for the reordered clustering row, got: {:?}",
         report
             .findings
             .iter()
