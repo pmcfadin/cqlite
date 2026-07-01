@@ -464,6 +464,24 @@ fn descriptor_audit_report_on_wrong_tier_is_rejected() {
 }
 
 #[test]
+fn descriptor_reproduction_bundle_on_wrong_tier_is_rejected() {
+    // Issue #1027 (roborev R9): `reproduction_bundle` is a manual_debug-only kind;
+    // on a required_parity scenario it must fail even though the <tier> segment
+    // matches ci.tier.
+    let scenario = VALID_BYTE_SCENARIO.replace(
+        "        - artifact.required_parity.byte_diff\n",
+        "        - artifact.required_parity.reproduction_bundle\n",
+    );
+    let errs = descriptor_errors(&scenario);
+    assert!(
+        errs.iter().any(|e| e.contains("reproduction_bundle")
+            && e.contains("manual_debug")
+            && e.contains("required_parity")),
+        "artifact.required_parity.reproduction_bundle must be rejected, got: {errs:#?}"
+    );
+}
+
+#[test]
 fn descriptor_kinds_match_schema_pattern() {
     // 1027: enums::ARTIFACT_DESCRIPTOR_KIND must equal the <kind> alternation in
     // the manifest schema's failure_artifacts item pattern, so drift between the

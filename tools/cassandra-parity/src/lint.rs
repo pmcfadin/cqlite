@@ -118,15 +118,17 @@ fn descriptor_kind_valid_for_evidence(kind: &str, evidence: &str) -> bool {
 /// `<tier>` segment matches the scenario's tier, so `artifact.required_parity.live_logs`
 /// (a live-log kind mislabelled onto the required_parity tier) would slip through.
 /// A tier-scoped kind is only meaningful on the tier that actually produces it:
-/// `live_logs` ONLY on `nightly_docker` (the live Docker lane) and `audit_report`
-/// ONLY on `exhaustive_regeneration` (the corpus-audit lane). Returns `None` when
-/// `kind` is not a recognised tier-scoped kind (evidence-scoped kinds are gated by
-/// [`descriptor_kind_valid_for_evidence`] instead); otherwise returns
+/// `live_logs` ONLY on `nightly_docker` (the live Docker lane), `audit_report`
+/// ONLY on `exhaustive_regeneration` (the corpus-audit lane), and
+/// `reproduction_bundle` ONLY on `manual_debug` (the ad-hoc repro lane). Returns
+/// `None` when `kind` is not a recognised tier-scoped kind (evidence-scoped kinds
+/// are gated by [`descriptor_kind_valid_for_evidence`] instead); otherwise returns
 /// `Some(allowed_tier)` — the SINGLE tier on which that kind is valid.
 fn tier_scoped_kind_allowed_tier(kind: &str) -> Option<&'static str> {
     match kind {
         "live_logs" => Some("nightly_docker"),
         "audit_report" => Some("exhaustive_regeneration"),
+        "reproduction_bundle" => Some("manual_debug"),
         _ => None,
     }
 }
