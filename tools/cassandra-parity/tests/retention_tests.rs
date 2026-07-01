@@ -195,6 +195,103 @@ fn parser_only_reads_upload_artifact_steps() {
     assert_eq!(days, vec![Some(30)], "only the one upload step counts");
 }
 
+/// A workflow that gates parity scenarios but whose ONLY `actions/upload-artifact`
+/// step uploads an UNRELATED artifact (not the shared `parity-failures/**` bundle),
+/// e.g. `cassandra-validation.yml`'s `sstableloader-test-results` upload.
+fn unrelated_upload_workflow() -> String {
+    "name: x\n\
+     on: [push]\n\
+     jobs:\n\
+    \x20 j:\n\
+    \x20   runs-on: ubuntu-latest\n\
+    \x20   steps:\n\
+    \x20     - uses: actions/checkout@v4\n\
+    \x20     - name: run parity suite\n\
+    \x20       run: cargo test --test parity\n\
+    \x20     - name: Upload Test Artifacts\n\
+    \x20       uses: actions/upload-artifact@v6\n\
+    \x20       with:\n\
+    \x20         name: sstableloader-test-results\n\
+    \x20         path: |\n\
+    \x20           tier1_results.txt\n\
+    \x20           test_summary.md\n\
+    \x20         retention-days: 30\n"
+        .to_string()
+}
+
+/// Finding 2 (issue #1027): an UNRELATED upload does NOT count as the shared
+/// parity-failure bundle. `upload_retention_days` returns only shared-bundle
+/// uploads, so an unrelated-only workflow yields an empty list.
+#[test]
+fn unrelated_upload_is_not_counted_as_parity_failure_bundle() {
+    let wf = unrelated_upload_workflow();
+    let days = upload_retention_days(&wf);
+    assert!(
+        days.is_empty(),
+        "an unrelated upload must not count as a parity-failure upload, got: {days:#?}"
+    );
+}
+
+/// Finding 2 (issue #1027): a parity-gating lane whose ONLY upload is unrelated,
+/// and which is NOT on the #1353 allowlist, must FAIL retention-check — the
+/// unrelated upload must not vacuously satisfy the lane.
+#[test]
+fn unrelated_upload_non_allowlisted_lane_is_a_finding() {
+    let wf = unrelated_upload_workflow();
+    let detailed = check_workflow_detailed(
+        ".github/workflows/some-new-parity-lane.yml",
+        &wf,
+        &["nightly_docker".to_string()],
+        &minimums(),
+    );
+    assert_eq!(
+        detailed.findings.len(),
+        1,
+        "an unrelated-upload non-allowlisted parity lane must be a finding, got: {:#?}",
+        detailed.findings
+    );
+    let f = &detailed.findings[0];
+    assert_eq!(f.tier, "nightly_docker");
+    assert_eq!(f.minimum, 30);
+    assert_eq!(f.found, None);
+    assert!(
+        f.message.contains("retains no failure artifacts"),
+        "message must name the gap, got: {}",
+        f.message
+    );
+    assert!(
+        detailed.note.is_none(),
+        "a non-allowlisted lane must not get an OK-with-a-note"
+    );
+}
+
+/// Finding 2 (issue #1027): the SAME unrelated-upload lane, when ALLOWLISTED
+/// (#1353), is OK-with-a-note — the unrelated upload does not mask the missing
+/// parity-failure emitter. This is exactly `cassandra-validation.yml`'s shape.
+#[test]
+fn unrelated_upload_allowlisted_lane_is_ok_with_note() {
+    let wf = unrelated_upload_workflow();
+    let detailed = check_workflow_detailed(
+        ".github/workflows/cassandra-validation.yml",
+        &wf,
+        &["nightly_docker".to_string()],
+        &minimums(),
+    );
+    assert!(
+        detailed.findings.is_empty(),
+        "allowlisted unrelated-upload lane must not be a finding, got: {:#?}",
+        detailed.findings
+    );
+    let note = detailed
+        .note
+        .as_deref()
+        .expect("allowlisted unrelated-upload lane must carry an OK-with-a-note");
+    assert!(
+        note.contains("#1353") && note.contains("cassandra-validation.yml"),
+        "note must reference #1353 + the workflow, got: {note}"
+    );
+}
+
 /// A workflow that gates parity scenarios (has a binding tier minimum) but has NO
 /// `actions/upload-artifact` step at all.
 fn no_upload_workflow() -> String {

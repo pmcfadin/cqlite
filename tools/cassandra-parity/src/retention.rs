@@ -55,6 +55,15 @@ const NO_EMITTER_ALLOWLIST: &[&str] = &[
     // `delta-roundtrip.yml` runs the delta round-trip `cargo test` suite
     // (assert-based, does not route through the shared emitter) — same #1353 defer.
     ".github/workflows/delta-roundtrip.yml",
+    // `nightly-docker-parity.yml` runs the nightly docker lane script + the gradle
+    // compaction-parity suite. It uploads its OWN report/diagnostics bundle
+    // (`nightly-docker-parity-*`, under `target/nightly-docker-parity/**` and
+    // `compaction-parity/build/**`) but does NOT emit the shared
+    // `parity-failures/**` scenario-id-keyed bundle. Before issue #1027 finding 2
+    // this lane vacuously satisfied retention-check because it uploaded *something*;
+    // now that only the shared parity-failure bundle counts, the gap is explicit.
+    // Wiring the nightly lane to the shared emitter is deferred to #1353.
+    ".github/workflows/nightly-docker-parity.yml",
 ];
 
 /// True when `workflow_path` names a lane on the #1353 no-emitter allowlist. The
@@ -155,15 +164,55 @@ struct JobYaml {
 #[derive(Debug, Default, Deserialize)]
 struct StepYaml {
     #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
     uses: Option<String>,
     #[serde(default)]
     with: BTreeMap<String, serde_yaml::Value>,
 }
 
-/// The `retention-days` values of every `actions/upload-artifact` step in a
-/// workflow. A `None` entry marks an upload step that set no `retention-days`
-/// (which, for a lane with a tier minimum, defaults to the org's 90d but cannot
-/// be *relied* on — it is reported so the lane sets an explicit window).
+/// True when an `actions/upload-artifact` step uploads the SHARED parity-failure
+/// bundle (issue #1027 finding 2). A lane's binding retention minimum is satisfied
+/// ONLY by such an upload — an unrelated upload (e.g. `sstableloader-test-results`)
+/// does not count. The shared bundle is identified by its artifact `name`
+/// (`parity-failures-*`, the convention every emitting lane uses) or by a `path`
+/// that globs `parity-failures/` (where the emitter writes the bundle tree). The
+/// step-level `name:` (the human label) is a fallback signal only.
+fn is_parity_failure_upload(step: &StepYaml) -> bool {
+    let with_name = step
+        .with
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    if with_name.starts_with("parity-failures-") {
+        return true;
+    }
+    let path_matches = step
+        .with
+        .get("path")
+        .and_then(|v| v.as_str())
+        .map(|p| p.contains("parity-failures/"))
+        .unwrap_or(false);
+    if path_matches {
+        return true;
+    }
+    // Fallback: the human-readable step label mentions the parity-failures bundle.
+    step.name
+        .as_deref()
+        .map(|n| n.contains("parity failure") || n.contains("parity-failures"))
+        .unwrap_or(false)
+}
+
+/// The `retention-days` values of every SHARED parity-failure-bundle
+/// `actions/upload-artifact` step in a workflow (issue #1027 finding 2).
+///
+/// ONLY uploads of the shared `parity-failures/**` bundle count toward a lane's
+/// binding retention minimum — an unrelated upload (e.g. `sstableloader-test-results`)
+/// is ignored, so an allowlisted no-emitter lane that happens to upload something
+/// else is still recognised as having no parity-failure emitter. A `None` entry
+/// marks a shared upload that set no `retention-days` (the implicit default is not
+/// a guaranteed floor, so it is reported so the lane sets an explicit window).
 pub fn upload_retention_days(workflow_text: &str) -> Vec<Option<u32>> {
     let Ok(wf) = serde_yaml::from_str::<WorkflowYaml>(workflow_text) else {
         return Vec::new();
@@ -177,6 +226,10 @@ pub fn upload_retention_days(workflow_text: &str) -> Vec<Option<u32>> {
                 .map(|u| u.trim_start().starts_with("actions/upload-artifact"))
                 .unwrap_or(false);
             if !is_upload {
+                continue;
+            }
+            // Only the shared parity-failure bundle upload satisfies a lane.
+            if !is_parity_failure_upload(step) {
                 continue;
             }
             let days = step.with.get("retention-days").and_then(yaml_value_as_u32);
@@ -227,12 +280,13 @@ pub struct WorkflowCheck {
 /// offending upload step (empty == OK). A lane whose binding minimum is `None`
 /// (no fixture-retaining tier) is never flagged.
 ///
-/// A lane with a binding minimum but ZERO `actions/upload-artifact` steps gates
-/// parity scenarios yet retains no failure artifacts: that gap is made VISIBLE as a
-/// finding UNLESS the lane is on the documented [`NO_EMITTER_ALLOWLIST`] (deferred
-/// to #1353), in which case it is an OK-with-a-note disposition, never a silent
-/// pass. Use [`check_workflow_detailed`] to observe the note; this thin wrapper
-/// returns only the findings.
+/// A lane with a binding minimum but NO SHARED parity-failure-bundle upload (issue
+/// #1027 finding 2: an unrelated upload like `sstableloader-test-results` does NOT
+/// count) gates parity scenarios yet retains no failure artifacts: that gap is made
+/// VISIBLE as a finding UNLESS the lane is on the documented [`NO_EMITTER_ALLOWLIST`]
+/// (deferred to #1353), in which case it is an OK-with-a-note disposition, never a
+/// silent pass. Use [`check_workflow_detailed`] to observe the note; this thin
+/// wrapper returns only the findings.
 pub fn check_workflow(
     workflow_path: &str,
     workflow_text: &str,
@@ -257,7 +311,9 @@ pub fn check_workflow_detailed(
 
     let uploads = upload_retention_days(workflow_text);
 
-    // Gates parity scenarios but retains NO failure artifacts (no upload step).
+    // Gates parity scenarios but retains NO failure artifacts — no SHARED
+    // parity-failure-bundle upload (issue #1027 finding 2: an unrelated upload does
+    // not count). An allowlisted lane is OK-with-a-note; otherwise it is a finding.
     if uploads.is_empty() {
         if is_allowlisted_no_emitter(workflow_path) {
             out.note = Some(format!(
