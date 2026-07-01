@@ -4,6 +4,7 @@
 //! key range, tombstone drop-time histogram) consumed by the Statistics.db
 //! component builders.
 
+use super::estimated_histogram::EstimatedHistogram;
 use std::collections::BTreeMap;
 
 /// Maximum number of bins in the tombstone drop-time histogram.
@@ -174,6 +175,18 @@ pub struct StatisticsMetadata {
     /// `isTransient` boolean. Preserved through compaction from compatible inputs
     /// (issue #1021); a fresh flush leaves it `false`.
     pub is_transient: bool,
+
+    /// `estimatedPartitionSize` EstimatedHistogram — one observation per
+    /// partition of its serialized Data.db size in bytes. Serialised as the FIRST
+    /// STATS field; the authoritative partition-count decode (`read_table_counts`,
+    /// issue #944) sums its bucket counts, so `Σ counts == partition_count`
+    /// (issue #1327). Populated by [`Self::record_partition`].
+    pub estimated_partition_size: EstimatedHistogram,
+
+    /// `estimatedCellPerPartitionCount` EstimatedHistogram — one observation per
+    /// partition of its cell count. Serialised as the SECOND STATS field.
+    /// Populated by [`Self::record_partition`].
+    pub estimated_cell_count: EstimatedHistogram,
 }
 
 impl Default for StatisticsMetadata {
@@ -196,6 +209,8 @@ impl Default for StatisticsMetadata {
             repaired_at: 0,
             pending_repair: None,
             is_transient: false,
+            estimated_partition_size: EstimatedHistogram::new(),
+            estimated_cell_count: EstimatedHistogram::new(),
         }
     }
 }
@@ -266,6 +281,22 @@ impl StatisticsMetadata {
     /// Increment partition count
     pub fn increment_partition_count(&mut self) {
         self.partition_count += 1;
+    }
+
+    /// Record one partition's serialized size and cell count into the
+    /// `estimatedPartitionSize` / `estimatedCellPerPartitionCount` histograms.
+    ///
+    /// Called once per partition written to Data.db with the exact serialized
+    /// partition byte length (`serialized_size`) and the number of cells emitted
+    /// (`cell_count`). Because it adds exactly one observation per partition, the
+    /// `estimatedPartitionSize` histogram's Σ bucket counts equals the SSTable's
+    /// partition count — the value the read-side authoritative decode
+    /// (`read_table_counts`, issue #944) reports. This mirrors Cassandra's
+    /// `MetadataCollector.addPartitionSizeInBytes` /
+    /// `addCellPerPartitionCount` (issue #1327).
+    pub fn record_partition(&mut self, serialized_size: u64, cell_count: u64) {
+        self.estimated_partition_size.add(serialized_size);
+        self.estimated_cell_count.add(cell_count);
     }
 
     /// Record a partition key in the SSTable key range.

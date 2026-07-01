@@ -51,10 +51,12 @@
 //! - this module: `StatisticsWriter` orchestration (TOC + `write`)
 
 mod components;
+mod estimated_histogram;
 mod marshal;
 pub mod metadata;
 mod serialization_header;
 
+pub use estimated_histogram::EstimatedHistogram;
 pub use metadata::{StatisticsMetadata, TombstoneHistogram};
 // Re-exported so callers can keep using the pre-split path
 // `...writer::stats_writer::cql_type_to_marshal_type` (e.g. data_writer.rs).
@@ -288,7 +290,80 @@ impl StatisticsWriter {
 mod tests {
     use super::metadata::TOMBSTONE_HISTOGRAM_MAX_BIN_SIZE;
     use super::*;
+    use crate::parser::repair_metadata::read_table_counts;
+    use crate::storage::sstable::version_gate::{BigVersionGates, VersionGates};
     use tempfile::TempDir;
+
+    fn nb_gates() -> VersionGates {
+        VersionGates::Big(BigVersionGates::from_version("nb").expect("nb gates"))
+    }
+
+    /// Issue #1327: a WriteEngine-produced `Statistics.db` MUST carry a populated
+    /// `estimatedPartitionSize` `EstimatedHistogram` so the authoritative
+    /// `read_table_counts` decode (which sums that histogram's bucket counts)
+    /// returns the true partition count — not 0.
+    ///
+    /// This test fed the histogram builder from per-partition sizes exactly as
+    /// the write path does, wrote the STATS component, and read it back. Before
+    /// the fix the writer emitted a hardcoded all-zero-count histogram, so this
+    /// assertion FAILED (`partition_count == 0`).
+    #[test]
+    fn write_engine_statistics_partition_count_round_trips() {
+        let temp_dir = TempDir::new().unwrap();
+        let stats_path = temp_dir.path().join("nb-1-big-Statistics.db");
+        let writer = StatisticsWriter::new(stats_path.clone());
+
+        let mut meta = StatisticsMetadata::new();
+        // Record five partitions with distinct sizes, exactly as the write path
+        // does after each `write_partition` (authoritative per-partition size +
+        // cell count — no heuristics).
+        let partitions: [(u64, u64); 5] = [(42, 3), (256, 8), (1024, 12), (17, 1), (900, 7)];
+        for (size, cells) in partitions {
+            meta.record_partition(size, cells);
+        }
+        meta.finalize();
+        // `record_partition` populates the histograms; the authoritative
+        // partition_count is derived by the reader from Σ histogram counts, NOT
+        // from the `partition_count` field (which `increment_partition_count`
+        // maintains separately on the live write path). So we assert the DECODED
+        // count below rather than the in-memory field.
+        assert_eq!(meta.estimated_partition_size.total(), 5);
+
+        writer.write(&meta, None).expect("write should succeed");
+
+        let file_data = std::fs::read(&stats_path).expect("file should exist");
+        let counts = read_table_counts(&file_data, Some(&nb_gates())).expect("decode counts");
+        assert_eq!(
+            counts.partition_count, 5,
+            "estimatedPartitionSize histogram bucket-count sum must equal partitions written"
+        );
+        assert_ne!(
+            counts.partition_count, 0,
+            "issue #1327: write-engine Statistics.db must not report partition_count=0"
+        );
+    }
+
+    /// The `da` (BtiFormat) STATS layout must round-trip partition_count too.
+    #[test]
+    fn write_engine_da_statistics_partition_count_round_trips() {
+        let temp_dir = TempDir::new().unwrap();
+        let stats_path = temp_dir.path().join("da-1-bti-Statistics.db");
+        let writer = StatisticsWriter::new_bti(stats_path.clone());
+
+        let mut meta = StatisticsMetadata::new();
+        for (size, cells) in [(10u64, 1u64), (200, 4), (5000, 20)] {
+            meta.record_partition(size, cells);
+        }
+        meta.finalize();
+
+        writer.write(&meta, None).expect("write should succeed");
+
+        let file_data = std::fs::read(&stats_path).expect("file should exist");
+        // partition_count is decoded from the self-describing leading histogram
+        // (no gates needed).
+        let counts = read_table_counts(&file_data, None).expect("decode counts");
+        assert_eq!(counts.partition_count, 3);
+    }
 
     #[test]
     fn test_statistics_writer_basic() {
@@ -549,13 +624,24 @@ mod tests {
         ]);
         assert_eq!(hll_version, -2, "HLL version should be -2");
 
-        // Verify STATS component has correct total size (188 bytes + 4 byte checksum)
+        // Verify STATS component has correct total size (+ 4 byte checksum).
+        // Issue #1327: the two leading EstimatedHistograms are now the canonical
+        // 156-bucket series (4 + 156*16 = 2500 bytes each) instead of the old
+        // empty 36-byte stubs, so the STATS body grew by 2*(2500-36) = 4928 to
+        // 188 + 4928 = 5116 bytes.
+        let est_histogram_bytes = 4 + 156 * 16; // i32 count + 156*(i64 offset + i64 count)
+        let two_histograms = 2 * est_histogram_bytes;
+        let expected_stats_size = 188 - 72 + two_histograms; // old 72 = 2*36 empty stubs
         let stats_end = header_offset;
         let stats_size = stats_end - stats_offset - 4; // -4 for checksum
-        assert_eq!(stats_size, 188, "STATS component should be 188 bytes");
+        assert_eq!(
+            stats_size, expected_stats_size,
+            "STATS component should be {expected_stats_size} bytes"
+        );
 
-        // Verify min_timestamp in STATS component (at offset: 2*36 + 12 = 84 from stats_offset)
-        let ts_offset = stats_offset + 84;
+        // Verify min_timestamp in STATS component. It follows the two histograms
+        // and the 12-byte commitLogUpperBound: two_histograms + 12 from stats_offset.
+        let ts_offset = stats_offset + two_histograms + 12;
         let min_ts = i64::from_be_bytes([
             file_data[ts_offset],
             file_data[ts_offset + 1],
@@ -622,8 +708,9 @@ mod tests {
             u32::from_be_bytes([file_data[28], file_data[29], file_data[30], file_data[31]])
                 as usize;
 
-        // Within the STATS component, the histogram field starts after:
-        //   2 × EstimatedHistogram  = 2 × 36 = 72 bytes
+        // Within the STATS component, the tombstone-histogram field starts after:
+        //   2 × EstimatedHistogram  = 2 × (4 + 156*16) = 5000 bytes (issue #1327:
+        //                             canonical 156-bucket series, not empty stubs)
         //   CommitLogPosition upper = 12 bytes
         //   minTimestamp (i64)      =  8 bytes
         //   maxTimestamp (i64)      =  8 bytes
@@ -632,8 +719,8 @@ mod tests {
         //   minTTL                  =  4 bytes
         //   maxTTL                  =  4 bytes
         //   compressionRatio (f64)  =  8 bytes
-        // = 72 + 12 + 8 + 8 + 4 + 4 + 4 + 4 + 8 = 124 bytes
-        let histogram_offset = stats_offset + 124;
+        let two_histograms = 2 * (4 + 156 * 16);
+        let histogram_offset = stats_offset + two_histograms + 12 + 8 + 8 + 4 + 4 + 4 + 4 + 8;
 
         // Read maxBinSize and size
         let max_bin_size = i32::from_be_bytes(

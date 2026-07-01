@@ -778,6 +778,20 @@ impl SSTableWriter {
         self.stats.row_count += emit_counts.rows;
         self.stats.column_count += emit_counts.columns;
 
+        // Issue #1327: record this partition's serialized Data.db size and cell
+        // count into the estimatedPartitionSize / estimatedCellPerPartitionCount
+        // EstimatedHistograms (one observation per partition). `data_offset` is
+        // this partition's start offset in Data.db and `data_writer.position()`
+        // is the running Data.db length after the write, so their difference is
+        // the exact serialized partition byte length — the value Cassandra's
+        // MetadataCollector records. Σ estimatedPartitionSize bucket counts then
+        // equals the SSTable partition count for the authoritative read-side
+        // decode (`read_table_counts`, issue #944).
+        let partition_serialized_size =
+            self.data_writer.position().saturating_sub(data_offset);
+        self.stats
+            .record_partition(partition_serialized_size, emit_counts.columns);
+
         // Add partition to Index.db and get entry info.
         // Pass promoted blocks (writer gates on >= 2 blocks before emitting payload).
         // IMPORTANT: Capture index_offset AFTER the entry is written to Index.db.
