@@ -13,7 +13,7 @@
 //! tiers) so it is trivially unit-testable, mirroring [`crate::workflow_check`].
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -250,6 +250,43 @@ pub fn upload_retention_days(workflow_text: &str) -> Vec<Option<u32>> {
     out
 }
 
+/// True when a workflow has at least one SHARED parity-failure-bundle
+/// `actions/upload-artifact` step (issue #1027 finding 2). Used to discover shared
+/// uploads in workflows the manifest's `ci.workflow` fields do NOT reference, so a
+/// shared bundle upload cannot be lowered/removed undetected just because no
+/// manifest scenario points at its workflow.
+pub fn has_parity_failure_upload(workflow_text: &str) -> bool {
+    let Ok(wf) = serde_yaml::from_str::<WorkflowYaml>(workflow_text) else {
+        return false;
+    };
+    wf.jobs.values().any(|job| {
+        job.steps.iter().any(|step| {
+            let is_upload = step
+                .uses
+                .as_deref()
+                .map(|u| u.trim_start().starts_with("actions/upload-artifact"))
+                .unwrap_or(false);
+            is_upload && is_parity_failure_upload(step)
+        })
+    })
+}
+
+/// Bind a tier to a directly-scanned shared parity-failure upload whose workflow is
+/// NOT referenced by any manifest `ci.workflow` (issue #1027 finding 2). Be
+/// conservative: if a workflow uploads a shared parity-failures bundle we MUST be
+/// able to bind a tier. `exhaustive-regeneration.yml` maps to
+/// `exhaustive_regeneration` (its own tier by construction — it regenerates the
+/// full corpus and uploads the shared bundle at that tier). A new shared-bundle
+/// workflow with no manifest scenarios and no mapping here returns `None`, which
+/// [`run_repo_check`] treats as a hard finding so the gap is never silent.
+fn tier_for_unmapped_shared_upload(workflow_path: &str) -> Option<&'static str> {
+    let base = workflow_path.rsplit('/').next().unwrap_or(workflow_path);
+    match base {
+        "exhaustive-regeneration.yml" => Some("exhaustive_regeneration"),
+        _ => None,
+    }
+}
+
 /// Coerce a YAML `retention-days` value (integer, or a quoted-string integer) to
 /// `u32`. Non-integer / negative values yield `None`.
 fn yaml_value_as_u32(v: &serde_yaml::Value) -> Option<u32> {
@@ -422,17 +459,31 @@ impl RepoCheck {
     }
 }
 
-/// Run the retention check across every workflow named by a manifest scenario.
-/// Groups scenarios by `ci.workflow` → the set of `ci.tier` they gate, reads each
-/// referenced workflow file relative to `repo_root`, and checks its upload steps
-/// against the strictest minimum for the tiers it gates. A lane that gates only
-/// no-minimum tiers, or whose workflow file is missing (already reported by
-/// `lint`'s path-existence check), is skipped.
+/// Run the retention check across every workflow named by a manifest scenario AND
+/// every workflow that directly uploads a shared parity-failure bundle even if no
+/// manifest scenario references it (issue #1027 finding 2).
+///
+/// Phase 1 groups manifest scenarios by `ci.workflow` → the set of `ci.tier` they
+/// gate, reads each referenced workflow file relative to `repo_root`, and checks its
+/// upload steps against the strictest minimum for the tiers it gates. A lane that
+/// gates only no-minimum tiers, or whose workflow file is missing (already reported
+/// by `lint`'s path-existence check), is skipped.
+///
+/// Phase 2 scans `.github/workflows/*.yml` directly for any SHARED parity-failure
+/// upload (a step whose artifact `name` starts with `parity-failures-` or whose
+/// `path` contains `parity-failures/`) that Phase 1 did NOT already cover — e.g.
+/// `exhaustive-regeneration.yml`, whose shared bundle upload is not referenced by
+/// any manifest `ci.workflow`. Its tier is taken from that workflow's manifest
+/// scenarios if present, else from [`tier_for_unmapped_shared_upload`]; a shared
+/// upload with no bindable tier is itself a hard finding so the retention of a
+/// shared bundle can never be lowered/removed undetected.
 pub fn run_repo_check(
     manifest: &Manifest,
     repo_root: &Path,
     minimums: &BTreeMap<String, u32>,
 ) -> RepoCheck {
+    // The tiers each workflow gates according to the manifest (path may be a bare
+    // filename or repo-relative; keep both keyings so Phase 2 can match either).
     let mut lane_tiers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for s in &manifest.scenarios {
         if let Some(wf) = &s.ci.workflow {
@@ -444,20 +495,111 @@ pub fn run_repo_check(
     }
 
     let mut result = RepoCheck::default();
+    // Track which workflow files Phase 1 already checked (by canonical path) so
+    // Phase 2 does not double-check a manifest-referenced lane.
+    let mut checked_paths: BTreeSet<PathBuf> = BTreeSet::new();
+
+    // ── Phase 1: manifest-referenced lanes ──
     for (wf, tiers) in &lane_tiers {
         let tiers_vec: Vec<String> = tiers.iter().cloned().collect();
         if binding_minimum(&tiers_vec, minimums).is_none() {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(repo_root.join(wf)) else {
+        let path = repo_root.join(wf);
+        let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
         result.checked += 1;
+        checked_paths.insert(canonicalize_or_owned(&path));
         let check = check_workflow_detailed(wf, &text, &tiers_vec, minimums);
         result.findings.extend(check.findings);
         if let Some(note) = check.note {
             result.notes.push(note);
         }
     }
+
+    // ── Phase 2: directly-scanned shared parity-failure uploads not in Phase 1 ──
+    let workflows_dir = repo_root.join(".github").join("workflows");
+    let Ok(entries) = std::fs::read_dir(&workflows_dir) else {
+        return result;
+    };
+    // Deterministic order (findings/notes are order-sensitive in messages).
+    let mut yml_paths: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.extension()
+                .map(|e| e == "yml" || e == "yaml")
+                .unwrap_or(false)
+        })
+        .collect();
+    yml_paths.sort();
+
+    for path in yml_paths {
+        if checked_paths.contains(&canonicalize_or_owned(&path)) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if !has_parity_failure_upload(&text) {
+            continue;
+        }
+        // Repo-relative display path for messages/allowlist matching.
+        let rel = path
+            .strip_prefix(repo_root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        // Tier: prefer this workflow's manifest scenarios (matched by bare filename
+        // or repo-relative path), else the conservative unmapped-upload mapping.
+        let base = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+        let manifest_tiers: BTreeSet<String> = lane_tiers
+            .iter()
+            .filter(|(wf, _)| *wf == &rel || wf.rsplit('/').next() == Some(base.as_str()))
+            .flat_map(|(_, tiers)| tiers.iter().cloned())
+            .collect();
+
+        let tiers_vec: Vec<String> = if !manifest_tiers.is_empty() {
+            manifest_tiers.into_iter().collect()
+        } else if let Some(tier) = tier_for_unmapped_shared_upload(&rel) {
+            vec![tier.to_string()]
+        } else {
+            // A shared parity-failure upload we cannot bind to a tier: conservative
+            // hard finding (issue #1027 finding 2) — never a silent pass.
+            result.checked += 1;
+            result.findings.push(RetentionFinding {
+                workflow: rel.clone(),
+                tier: "<unbound>".to_string(),
+                minimum: 0,
+                found: None,
+                message: format!(
+                    "{rel}: uploads a shared parity-failures bundle but no manifest scenario \
+                     references it and no tier mapping exists — add a manifest scenario or a \
+                     tier mapping in retention::tier_for_unmapped_shared_upload so its retention \
+                     minimum can be enforced"
+                ),
+            });
+            continue;
+        };
+
+        if binding_minimum(&tiers_vec, minimums).is_none() {
+            continue;
+        }
+        result.checked += 1;
+        checked_paths.insert(canonicalize_or_owned(&path));
+        let check = check_workflow_detailed(&rel, &text, &tiers_vec, minimums);
+        result.findings.extend(check.findings);
+        if let Some(note) = check.note {
+            result.notes.push(note);
+        }
+    }
+
     result
+}
+
+/// Canonicalize a path for dedup, falling back to the path itself when the file
+/// cannot be canonicalized (e.g. it does not exist). Pure helper: never panics.
+fn canonicalize_or_owned(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }

@@ -9,8 +9,8 @@ use std::path::PathBuf;
 
 use cassandra_parity::model::Manifest;
 use cassandra_parity::retention::{
-    binding_minimum, check_workflow, check_workflow_detailed, no_emitter_allowlist,
-    parse_documented_minimums, run_repo_check, upload_retention_days,
+    binding_minimum, check_workflow, check_workflow_detailed, has_parity_failure_upload,
+    no_emitter_allowlist, parse_documented_minimums, run_repo_check, upload_retention_days,
 };
 
 fn repo_root() -> PathBuf {
@@ -556,5 +556,182 @@ fn real_repo_retention_check_is_green_with_allowlist_notes() {
         result.checked >= 3,
         "expected at least the 3 emitting lanes checked, got {}",
         result.checked
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Finding 2 (round 6): retention-check must ALSO scan workflows directly for a
+// shared parity-failure upload, even when no manifest `ci.workflow` references
+// them (e.g. exhaustive-regeneration.yml's shared `parity-failures-*` upload).
+// ---------------------------------------------------------------------------
+
+/// A workflow whose ONLY parity-relevant upload is a SHARED parity-failure bundle
+/// (`name: parity-failures-<slug>`, `path: parity-failures/**`), with a
+/// configurable retention window.
+fn shared_bundle_workflow(retention_days: &str) -> String {
+    format!(
+        "name: exhaustive fixture\n\
+         on: [workflow_dispatch]\n\
+         jobs:\n\
+        \x20 j:\n\
+        \x20   runs-on: ubuntu-latest\n\
+        \x20   steps:\n\
+        \x20     - uses: actions/checkout@v4\n\
+        \x20     - name: run\n\
+        \x20       run: cargo run -p cassandra-parity -- corpus-audit\n\
+        \x20     - name: Upload parity failure bundle\n\
+        \x20       uses: actions/upload-artifact@v4\n\
+        \x20       if: failure()\n\
+        \x20       with:\n\
+        \x20         name: parity-failures-exhaustive-regeneration\n\
+        \x20         path: parity-failures/**\n\
+        \x20         retention-days: {retention_days}\n"
+    )
+}
+
+/// `has_parity_failure_upload` recognises a shared bundle upload regardless of
+/// whether the manifest references the workflow.
+#[test]
+fn shared_bundle_upload_is_detected_directly() {
+    assert!(has_parity_failure_upload(&shared_bundle_workflow("90")));
+    assert!(
+        !has_parity_failure_upload(&unrelated_upload_workflow()),
+        "an unrelated upload is not a shared parity-failure bundle"
+    );
+    assert!(
+        !has_parity_failure_upload(&issue_1028_summary_upload_workflow()),
+        "the #1028 summary upload is not a shared parity-failure bundle"
+    );
+}
+
+/// A minimal but schema-complete manifest with NO scenarios (so nothing references
+/// exhaustive-regeneration.yml) — the direct scan is the ONLY thing that can cover
+/// a shared-bundle workflow here.
+fn empty_manifest_yaml() -> String {
+    "manifest_version: 1\n\
+     cassandra_source:\n\
+    \x20 repo: apache/cassandra\n\
+    \x20 ref: cassandra-5.0.2\n\
+    \x20 sha: f278f6774fc76465c182041e081982105c3e7dbb\n\
+    \x20 index: docs/index.md\n\
+    \x20 assessment_report: docs/assessment.md\n\
+     program:\n\
+    \x20 parent_epic: 974\n\
+    \x20 reporting_epic: 974\n\
+     scenarios: []\n"
+        .to_string()
+}
+
+/// Build a tiny throwaway repo root: the tier-minimums doc + an empty manifest +
+/// a `.github/workflows/exhaustive-regeneration.yml` carrying the given shared
+/// bundle upload (NOT referenced by any manifest scenario).
+fn temp_repo_with_exhaustive_workflow(retention_days: &str) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+
+    // Mirror the real tier-minimums doc so parse_documented_minimums works, and so
+    // the check's exhaustive_regeneration minimum is the real 90.
+    let doc_dir = root.join("docs/development");
+    std::fs::create_dir_all(&doc_dir).unwrap();
+    let real_doc =
+        std::fs::read_to_string(repo_root().join("docs/development/parity-ci-tiers.md")).unwrap();
+    std::fs::write(doc_dir.join("parity-ci-tiers.md"), real_doc).unwrap();
+
+    // A manifest with NO scenario referencing exhaustive-regeneration.yml.
+    std::fs::write(root.join("manifest.yml"), empty_manifest_yaml()).unwrap();
+
+    let wf_dir = root.join(".github/workflows");
+    std::fs::create_dir_all(&wf_dir).unwrap();
+    std::fs::write(
+        wf_dir.join("exhaustive-regeneration.yml"),
+        shared_bundle_workflow(retention_days),
+    )
+    .unwrap();
+
+    tmp
+}
+
+/// Finding 2: a directly-scanned shared-bundle workflow NOT in the manifest, with
+/// retention BELOW its (exhaustive_regeneration) tier minimum, is a FINDING.
+#[test]
+fn unmanifested_shared_bundle_below_tier_min_is_a_finding() {
+    let tmp = temp_repo_with_exhaustive_workflow("30");
+    let manifest =
+        Manifest::from_yaml(&std::fs::read_to_string(tmp.path().join("manifest.yml")).unwrap())
+            .expect("manifest parses");
+    let result = run_repo_check(&manifest, tmp.path(), &minimums());
+    assert!(
+        !result.ok(),
+        "a shared bundle at 30 days for exhaustive_regeneration (min 90) must fail, \
+         findings: {:#?}",
+        result.findings
+    );
+    let f = result
+        .findings
+        .iter()
+        .find(|f| f.workflow.ends_with("exhaustive-regeneration.yml"))
+        .expect("finding names the directly-scanned workflow");
+    assert_eq!(f.tier, "exhaustive_regeneration");
+    assert_eq!(f.minimum, 90);
+    assert_eq!(f.found, Some(30));
+}
+
+/// Finding 2: the SAME directly-scanned shared-bundle workflow, AT/ABOVE its tier
+/// minimum (90), is OK — and it WAS checked (proving the direct scan ran).
+#[test]
+fn unmanifested_shared_bundle_at_tier_min_is_ok() {
+    let tmp = temp_repo_with_exhaustive_workflow("90");
+    let manifest =
+        Manifest::from_yaml(&std::fs::read_to_string(tmp.path().join("manifest.yml")).unwrap())
+            .expect("manifest parses");
+    let result = run_repo_check(&manifest, tmp.path(), &minimums());
+    assert!(
+        result.ok(),
+        "a shared bundle at 90 days meets the exhaustive_regeneration min, findings: {:#?}",
+        result.findings
+    );
+    assert!(
+        result.checked >= 1,
+        "the directly-scanned exhaustive-regeneration.yml must have been checked"
+    );
+}
+
+/// Finding 2 (real repo): the REAL exhaustive-regeneration.yml — not referenced by
+/// any manifest `ci.workflow` — is now covered by run_repo_check and passes at its
+/// 90-day exhaustive_regeneration minimum. This is the direct-scan coverage over
+/// the real repository.
+#[test]
+fn real_exhaustive_regeneration_yml_is_covered_and_green() {
+    let root = repo_root();
+    let wf = std::fs::read_to_string(root.join(".github/workflows/exhaustive-regeneration.yml"))
+        .expect("exhaustive-regeneration.yml exists");
+    // Sanity: the real workflow does upload a shared bundle and is NOT referenced
+    // by any manifest ci.workflow (so ONLY the direct scan can cover it).
+    assert!(
+        has_parity_failure_upload(&wf),
+        "the real exhaustive-regeneration.yml must upload a shared parity-failure bundle"
+    );
+    let manifest_text =
+        std::fs::read_to_string(root.join("test-data/cassandra-parity-manifest.yml")).unwrap();
+    assert!(
+        !manifest_text.contains("workflow: .github/workflows/exhaustive-regeneration.yml"),
+        "precondition: no manifest scenario references exhaustive-regeneration.yml"
+    );
+
+    let manifest = Manifest::from_yaml(&manifest_text).expect("manifest parses");
+    let result = run_repo_check(&manifest, &root, &minimums());
+    assert!(
+        result.ok(),
+        "real-repo retention-check must be green (incl. exhaustive-regeneration.yml), \
+         findings: {:#?}",
+        result.findings
+    );
+    // The exhaustive-regeneration.yml lane must NOT be flagged.
+    assert!(
+        !result
+            .findings
+            .iter()
+            .any(|f| f.workflow.ends_with("exhaustive-regeneration.yml")),
+        "exhaustive-regeneration.yml must pass at its 90-day minimum"
     );
 }
