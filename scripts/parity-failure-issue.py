@@ -172,9 +172,7 @@ def issue_body(failure: dict, fingerprint: str, run_url: str, tier: str, repro: 
         f"- **Failure class:** `{failure['failure_class']}`\n"
         f"- **CI tier:** `{tier}`\n"
         f"- **Fingerprint:** `{FINGERPRINT_VERSION}:{fingerprint}`\n\n"
-        f"## Latest failure\n"
-        f"- **Run:** {run_url}\n"
-        f"- **Observed:** {_now()}\n\n"
+        f"{latest_failure_section(run_url)}\n"
         f"## Reproduction\n"
         f"```\n{repro}\n```\n\n"
         f"_Filed by `scripts/parity-failure-issue.py` (issue #1028). "
@@ -187,6 +185,40 @@ def update_comment(failure: dict, run_url: str) -> str:
         f"Recurred on run {run_url} at {_now()} "
         f"(`{failure['failure_class']}` on `{failure['test_target']}`)."
     )
+
+
+def latest_failure_section(run_url: str) -> str:
+    """The `## Latest failure` block (run link + observed timestamp).
+
+    Emitted verbatim into a new body and used to refresh an existing body on a
+    repeat failure (D4: "refresh the latest-run link on that existing issue").
+    """
+    return (
+        f"## Latest failure\n"
+        f"- **Run:** {run_url}\n"
+        f"- **Observed:** {_now()}\n"
+    )
+
+
+def refresh_latest_failure(body: str, run_url: str) -> str:
+    """Replace the `## Latest failure` section of an existing issue body (D4).
+
+    The marker, epic/scenario/tier and reproduction sections are left intact; only
+    the run link + observed timestamp under `## Latest failure` are rewritten. If no
+    such section exists (older/hand-edited body) the fresh section is appended so the
+    latest run link is never lost.
+    """
+    new_section = latest_failure_section(run_url)
+    head = "## Latest failure\n"
+    start = body.find(head)
+    if start == -1:
+        sep = "" if body.endswith("\n") else "\n"
+        return f"{body}{sep}\n{new_section}"
+    # The section runs until the next `## ` heading (or end of body).
+    rest = body.find("\n## ", start + len(head))
+    if rest == -1:
+        return body[:start] + new_section
+    return body[:start] + new_section + body[rest + 1:]
 
 
 def resolution_comment(run_url: str) -> str:
@@ -203,10 +235,15 @@ def _plan_failure(failure: dict, open_issues: list[dict], args) -> dict:
     fingerprint = compute_fingerprint(failure)
     existing = find_existing(open_issues, fingerprint)
     if existing is not None:
+        # D4: refresh the body's "Latest failure" section (run link + timestamp) on the
+        # existing issue, THEN post the dated recurrence comment. Marker + all other
+        # sections stay intact.
+        old_body = existing.get("body") or ""
         return {
             "action": "update",
             "fingerprint": fingerprint,
             "issue_number": existing["number"],
+            "new_body": refresh_latest_failure(old_body, args.run_url),
             "comment": update_comment(failure, args.run_url),
         }
     return {
@@ -224,6 +261,8 @@ def _apply_plan(plan: dict, dry_run: bool) -> None:
             print(f"title: {plan['title']}")
             print(plan["body"])
         else:
+            print(f"update #{plan['issue_number']}: refreshed latest-failure link")
+            print(plan["new_body"])
             print(f"update #{plan['issue_number']}: {plan['comment']}")
         return
     if plan["action"] == "create":
@@ -231,6 +270,8 @@ def _apply_plan(plan: dict, dry_run: bool) -> None:
                    "--body", plan["body"], "--label", PARITY_LABEL])
         print(f"created: {url.strip()}")
     else:
+        # Refresh the body first (latest-run link), then post the dated recurrence comment.
+        _gh(["gh", "issue", "edit", str(plan["issue_number"]), "--body", plan["new_body"]])
         _gh(["gh", "issue", "comment", str(plan["issue_number"]), "--body", plan["comment"]])
         print(f"updated: #{plan['issue_number']}")
 

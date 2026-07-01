@@ -124,6 +124,43 @@ class DedupTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertIn("update #99", out.getvalue())
 
+    def test_update_refreshes_latest_failure_link_in_body(self):
+        # D4 / R1 scenario 2: a repeat failure must refresh the existing issue body's
+        # "Latest failure" run link, then post a recurrence comment.
+        failure = _failure()
+        fp = pfi.compute_fingerprint(failure)
+        stale_body = pfi.issue_body(
+            failure, fp, "https://gh/run/OLD", "nightly_docker", "cargo test -p x")
+        self.assertIn("https://gh/run/OLD", stale_body)
+        open_issues = [{"number": 42, "body": stale_body}]
+        args = _args(run_url="https://gh/run/NEW")
+        plan = pfi._plan_failure(failure, open_issues, args)
+        self.assertEqual(plan["action"], "update")
+        # Body is refreshed to the new run link; stale link is gone.
+        self.assertIn("https://gh/run/NEW", plan["new_body"])
+        self.assertNotIn("https://gh/run/OLD", plan["new_body"])
+        # Marker + repro survive the refresh.
+        self.assertIn(pfi.marker(fp), plan["new_body"])
+        self.assertIn("cargo test -p x", plan["new_body"])
+        # A dated recurrence comment is still posted.
+        self.assertIn("https://gh/run/NEW", plan["comment"])
+        # End-to-end via seams: apply emits both the body refresh and the comment.
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            pfi._apply_plan(plan, dry_run=True)
+        rendered = out.getvalue()
+        self.assertIn("refreshed latest-failure link", rendered)
+        self.assertIn("https://gh/run/NEW", rendered)
+
+    def test_refresh_latest_failure_appends_when_section_absent(self):
+        # Hand-edited / legacy body without a "Latest failure" section: the fresh
+        # section is appended so the newest run link is never lost.
+        body = "<!-- PARITY-FAIL:deadbeef0000 -->\nsome notes without the section"
+        refreshed = pfi.refresh_latest_failure(body, "https://gh/run/NEW")
+        self.assertIn("## Latest failure", refreshed)
+        self.assertIn("https://gh/run/NEW", refreshed)
+        self.assertIn("some notes without the section", refreshed)
+
 
 class DegradedFallbackTests(unittest.TestCase):
     def test_missing_artifact_surfaces_notice_and_uses_summary(self):
