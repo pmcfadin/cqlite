@@ -21,7 +21,7 @@ use cassandra_parity::corpus_audit::{
 };
 use cassandra_parity::lint::Level;
 use cassandra_parity::model::Manifest;
-use cassandra_parity::{coverage, enums, lint, report, tier_contract};
+use cassandra_parity::{coverage, enums, lint, report, retention, tier_contract};
 
 const DEFAULT_MANIFEST: &str = "test-data/cassandra-parity-manifest.yml";
 const DEFAULT_OUTPUT: &str = "docs/reports/cassandra-test-parity.md";
@@ -36,6 +36,7 @@ USAGE:
   cassandra-parity coverage           [--manifest PATH] [--strict]
   cassandra-parity report             [--manifest PATH] [--output PATH] [--check] [--json PATH]
   cassandra-parity tier-contract-check [--manifest PATH] [--tier-doc PATH] [--schema PATH]
+  cassandra-parity retention-check    [--manifest PATH] [--tier-doc PATH]
   cassandra-parity corpus-audit       [--manifest PATH] --corpus DIR [--provenance JSON]
                                       [--checksums FILE] [--expected-inventory FILE]
                                       [--corruption-manifest YML] [--index MD]
@@ -153,6 +154,7 @@ fn run() -> Result<ExitCode> {
         "coverage" => cmd_coverage(&args),
         "report" => cmd_report(&args),
         "tier-contract-check" => cmd_tier_contract_check(&args),
+        "retention-check" => cmd_retention_check(&args),
         "corpus-audit" => cmd_corpus_audit(&args),
         "-h" | "--help" | "help" => {
             println!("{USAGE}");
@@ -237,6 +239,66 @@ fn cmd_tier_contract_check(args: &Args) -> Result<ExitCode> {
             "tier-contract-check: FAILED — {} enum divergence(s), {} unknown manifest tier(s)",
             report.enum_divergences.len(),
             report.unknown_manifest_tiers.len()
+        );
+        Ok(ExitCode::FAILURE)
+    }
+}
+
+/// Enforce per-tier artifact retention (issue #1027, section 5.2): parse the
+/// documented retention minimums from the tier doc, group manifest scenarios by
+/// their `ci.workflow`, and check each referenced workflow's `upload-artifact`
+/// `retention-days` against the strictest minimum among the tiers it gates. Reads
+/// only text already in the repo — no Docker/datasets/live Cassandra.
+fn cmd_retention_check(args: &Args) -> Result<ExitCode> {
+    let m = load(&args.manifest)?;
+    let root = repo_root(&args.manifest);
+    let doc = std::fs::read_to_string(&args.tier_doc)
+        .with_context(|| format!("reading tier doc {}", args.tier_doc.display()))?;
+    let minimums =
+        retention::parse_documented_minimums(&doc).context("parsing retention minimums")?;
+
+    // Group each named workflow to the set of ci.tier values it gates.
+    let mut lane_tiers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for s in &m.scenarios {
+        if let Some(wf) = &s.ci.workflow {
+            lane_tiers
+                .entry(wf.clone())
+                .or_default()
+                .insert(s.ci.tier.clone());
+        }
+    }
+
+    let mut findings = Vec::new();
+    let mut checked = 0usize;
+    for (wf, tiers) in &lane_tiers {
+        let tiers_vec: Vec<String> = tiers.iter().cloned().collect();
+        // A lane that gates only no-minimum tiers needs no retention check.
+        if retention::binding_minimum(&tiers_vec, &minimums).is_none() {
+            continue;
+        }
+        let path = root.join(wf);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            // A missing/unreadable named workflow is already reported by `lint`'s
+            // path-existence check; do not double-report here.
+            continue;
+        };
+        checked += 1;
+        findings.extend(retention::check_workflow(wf, &text, &tiers_vec, &minimums));
+    }
+
+    if findings.is_empty() {
+        println!(
+            "retention-check: OK — {checked} fixture-retaining parity workflow(s) meet their \
+             tier retention minimums"
+        );
+        Ok(ExitCode::SUCCESS)
+    } else {
+        for f in &findings {
+            eprintln!("RETENTION {}", f.message);
+        }
+        eprintln!(
+            "retention-check: FAILED — {} workflow upload step(s) below the tier minimum",
+            findings.len()
         );
         Ok(ExitCode::FAILURE)
     }
