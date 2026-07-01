@@ -42,11 +42,33 @@ middle; you sit in two seats.
 
 1. **Spec approval** (Seam 1, in `flow-activate`) — you approve the OpenSpec spec + design before any
    implementation. The lead renders it inline and stops.
-2. **Merge** (Seam 2) — **pre-authorized merge-on-green**:
-   - *Default:* the lead opens the PR but does **not** merge or close it — merge is yours.
-   - *Exception:* for a set you **explicitly pre-authorize** ("merge #X, #Y on green"), the lead may
-     squash-merge + finalize, **only** when `agent-gate.sh` PASS + C PASS + roborev clean.
+2. **Merge** (Seam 2) — **merge-on-green** (no human merge click for worker-owned issues):
+   - A worker's **terminal state** for an issue is PR-open + `agent-gate.sh` PASS + C PASS (design-driven)
+     + roborev clean. At that point it **arms the merge-on-green mechanism and ends its turn** — it does
+     **not** poll the PR's own external CI in a yield/wake loop (see [Merge-on-green](#merge-on-green-no-ci-busy-wait)).
    - *Always escalated, never decided by the lead:* product decisions, scope/title changes, epic closes.
+
+## Merge-on-green (no CI busy-wait)
+
+Once a worker reaches its terminal state (PR-open + gate PASS + C PASS + roborev clean) it **arms** a
+merge-on-green mechanism and **stops**. It must **not** busy-poll its PR's own external CI — repeatedly
+waking (`ScheduleWakeup`) to watch the cross-platform matrix after the work is done is pure token bleed and
+is prohibited. Landing on green is delegated:
+
+- **Primary today — the manager-owned poller.** `main` currently has **no required status checks**
+  (`contexts=[]`), so a naive `gh pr merge --auto` would merge instantly against an empty check set — which
+  the green-signal guard forbids. The worker hands the PR to the manager-owned poller/merge-engine, which
+  gates on an explicit lane set and lands it on green. The poller runs **once for the whole fleet** at the
+  manager level, not per worker.
+- **`gh pr merge --auto --squash --delete-branch` — primary once required checks are configured on `main`.**
+  With real required checks in place, `--auto` is the zero-token native path: GitHub lands the PR when the
+  required checks pass and auto-closes the issue via `Closes #N`.
+
+The worker **logs which path it armed**. **Green-signal guard:** merge-on-green lands only once a *defined*
+green signal exists (configured required checks or the poller's explicit lane set) — never against an empty
+required-check set. `flow-finalize` runs on the merge event (not a CI busy-wait). `ScheduleWakeup` remains
+valid for genuinely external, harness-untracked state — just not for polling a PR's own CI after the work
+is complete.
 
 ## The specialist roster
 
@@ -133,9 +155,13 @@ dataset binaries). Two supported ways to still drive work from the phone:
   `test-data/scripts/cloud-setup.sh` first — it installs `openspec` + `gh` and fetches the dataset
   (`fetch-datasets.sh`) so `flow-implement` can run the gate in the cloud.
 
-The **two human seams are GitHub-mobile-native** regardless of how you drive: approve the spec in the
-session, and merge the PR from the GitHub mobile app / web UI (the merge automation then moves the board
-item to `Done`).
+**Spec approval is the only standing human seam, and it is GitHub-mobile-native** regardless of how you
+drive: approve the OpenSpec spec + design in the session (Seam 1). For worker-owned issues **merge is no
+longer a hand-merge step** — the PR auto-lands via [merge-on-green](#merge-on-green-no-ci-busy-wait)
+(the manager-owned poller today; `gh pr merge --auto` once required checks are configured on `main`), and
+the merge event moves the board item to `Done`. The owner intervenes on merge (from the mobile app / web
+UI) **only on escalation** — a genuine design-call roborev finding, a scope/product question, or work
+outside the issue.
 
 ## Self-improvement loop (telemetry + retro)
 
