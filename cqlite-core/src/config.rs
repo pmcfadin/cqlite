@@ -134,9 +134,9 @@ pub struct StorageConfig {
 
     /// Read-ahead / prefetch strategy applied to the chosen backend.
     ///
-    /// Defaults to [`PrefetchMode::Auto`], which advises the kernel for
-    /// sequential access on the mmap backend and uses a prefetch window of
-    /// [`Self::direct_io_prefetch_bytes`] on the direct-I/O backend. Set
+    /// Defaults to [`PrefetchMode::Auto`], which issues **no** mmap `madvise`
+    /// (relying on the kernel's default read-ahead) and only enables the
+    /// direct-I/O prefetch window of [`Self::direct_io_prefetch_bytes`]. Set
     /// [`PrefetchMode::Off`] to disable explicit hints (relying only on default
     /// kernel read-ahead / single-block direct reads). Can also be set via
     /// `CQLITE_PREFETCH` (`off` / `sequential` / `willneed` / `auto`).
@@ -188,8 +188,13 @@ pub enum PrefetchMode {
     Sequential,
     /// Hint that the mapped/region bytes will be needed soon (eager fault-in).
     WillNeed,
-    /// Let the backend choose: sequential advice for mmap, windowed read-ahead
-    /// for direct I/O.
+    /// Let the backend choose. For mmap this issues **no** madvise and relies on
+    /// the kernel's default read-ahead: `MADV_SEQUENTIAL`'s drop-behind evicts
+    /// hot pages under concurrent write load and inflates the read-side p99 tail
+    /// (issue #1143), so `Auto` avoids it while keeping the isolated mmap win.
+    /// For direct I/O it enables the windowed read-ahead
+    /// ([`StorageConfig::direct_io_prefetch_bytes`]). Request
+    /// [`PrefetchMode::Sequential`] explicitly for `MADV_SEQUENTIAL` behaviour.
     #[default]
     Auto,
 }
