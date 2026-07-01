@@ -138,6 +138,12 @@ jobs:
   # env vars and the PR title/body are static (GitHub Actions command-injection
   # safety).
   parity-report-heal:
+    # Serialize heal runs so two near-simultaneous main pushes cannot both
+    # force-push auto/parity-report-regen and race the `gh pr list`/`gh pr create`
+    # TOCTOU (issue #1338 roborev). Do not cancel: each push must be evaluated.
+    concurrency:
+      group: parity-report-heal
+      cancel-in-progress: false
     if: >-
       github.event_name == 'push' &&
       github.ref == 'refs/heads/main' &&
@@ -194,11 +200,22 @@ jobs:
         id: freshness
         shell: bash
         run: |
-          if cargo run -p cassandra-parity -- report \
-               --manifest "$MANIFEST_PATH" --output "$REPORT_PATH" --check; then
+          set +e
+          out=$(cargo run -p cassandra-parity -- report \
+                  --manifest "$MANIFEST_PATH" --output "$REPORT_PATH" --check 2>&1)
+          rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" -eq 0 ]; then
             echo "stale=false" >> "$GITHUB_OUTPUT"
-          else
+          elif printf '%s' "$out" | grep -q 'STALE'; then
+            # Genuine drift: report differs from a fresh render → heal it.
             echo "stale=true" >> "$GITHUB_OUTPUT"
+          else
+            # A non-stale failure (e.g. an invalid manifest that fails lint) must
+            # NOT masquerade as staleness — regenerating would fail identically and
+            # obscure the real cause. Fail this step distinctly (issue #1338 roborev).
+            echo "::error::report --check failed for a non-staleness reason (e.g. invalid manifest); not a drift. See output above." >&2
+            exit "$rc"
           fi
 
       - name: Regenerate the report
