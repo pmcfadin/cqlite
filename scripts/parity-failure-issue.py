@@ -41,6 +41,9 @@ The GitHub-touching paths sit behind explicit seams (`--open-issues-json`,
       (`gh label create --force`) BEFORE the list/create path, so filing on a repo that
       lacks the label is not a silent no-op. Fail-open: a label-provisioning failure is a
       `::warning::`, never a crash. Skipped entirely on the offline/dry-run path.
+  Fix B  `--dry-run` (for both `file` and `resolve`) is OFFLINE — it spawns NO `gh`
+      subprocess and provisions no label. Open issues default to empty unless
+      `--open-issues-json` is injected (pass it for a realistic dedup preview).
 """
 
 from __future__ import annotations
@@ -208,7 +211,7 @@ def ensure_label() -> None:
     the real filing path is always guaranteed a valid label.
 
     This performs a live `gh` call, so callers MUST only invoke it on the network-bearing
-    path (never in `--dry-run`/offline mode). Fail-open: if label
+    path (never in `--dry-run`/offline mode — see Fix B). Fail-open: if label
     provisioning itself fails, surface a `::warning::` and continue rather than crashing
     the (non-gating) job — a genuinely missing label then fails loudly at `issue create`,
     which the workflow already handles fail-open.
@@ -222,9 +225,18 @@ def ensure_label() -> None:
 
 
 def load_open_issues(args) -> list[dict]:
-    """Open `parity-failure` issues, from the injected seam or live `gh` (D4)."""
+    """Open `parity-failure` issues, from the injected seam or live `gh` (D4).
+
+    Fix B: in `--dry-run` mode we NEVER shell out to live `gh`. If open issues were not
+    injected via `--open-issues-json`, a dry run treats the open set as empty (a
+    token-free dedup preview); supply `--open-issues-json` for a realistic dedup preview.
+    """
     if args.open_issues_json:
         return json.loads(Path(args.open_issues_json).read_text())
+    if getattr(args, "dry_run", False):
+        print("dry-run: no --open-issues-json supplied — treating open issues as empty "
+              "(offline; pass --open-issues-json for a realistic dedup preview)")
+        return []
     issues = json.loads(_gh(
         ["gh", "issue", "list", "--label", PARITY_LABEL, "--state", "open",
          "--json", "number,body", "--limit", str(OPEN_ISSUES_LIMIT)]))
@@ -414,8 +426,8 @@ def cmd_file(args) -> int:
 
     # Fix A: self-provision the `parity-failure` label BEFORE the list/create path so the
     # real filing path never no-ops on a repo that lacks the label. Guarded to the live
-    # path only — a dry run (or an injected-issues offline preview) stays token/network-free:
-    # no label call when --dry-run, and none when --open-issues-json is injected.
+    # path only — a dry run (or an injected-issues offline preview) stays token/network-free
+    # (Fix B): no label call when --dry-run, and none when --open-issues-json is injected.
     if not args.dry_run and not args.open_issues_json:
         ensure_label()
 
@@ -606,7 +618,10 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--run-url", default="",
                         help="URL of the originating parity run")
         sp.add_argument("--dry-run", action="store_true",
-                        help="print the plan without touching GitHub")
+                        help="print the plan without touching GitHub (OFFLINE: spawns no "
+                             "`gh` subprocess and provisions no label; open issues default "
+                             "to empty — pass --open-issues-json for a realistic dedup "
+                             "preview)")
 
     fi = sub.add_parser("file", help="create/update deduped issues for a failed run")
     common(fi)

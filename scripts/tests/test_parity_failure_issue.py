@@ -199,7 +199,10 @@ class DedupTests(unittest.TestCase):
 
 
 class EnsureLabelTests(unittest.TestCase):
-    """Fix A: the `parity-failure` label is self-provisioned before the create path."""
+    """Fix A: the `parity-failure` label is self-provisioned before the create path.
+
+    Fix B: `--dry-run` (and the injected-issues offline preview) spawn NO `gh` subprocess.
+    """
 
     def _capture_gh(self):
         """Patch pfi._gh to record argv and never touch GitHub; returns the call log."""
@@ -257,9 +260,26 @@ class EnsureLabelTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertIn("::warning::", err.getvalue())
 
-    def test_injected_open_issues_skips_label(self):
-        # Fix A guard: when open issues are injected (offline seam) the label is NOT
-        # provisioned — the guard is `not dry_run and not open_issues_json`.
+    def test_dry_run_spawns_no_gh_and_no_label(self):
+        # Fix B: a dry run with NO injected open-issues must not shell out to gh at all
+        # (no label provisioning, no `gh issue list`), and must default open issues to empty.
+        calls = self._capture_gh()
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            fj = _write(tmp, "failures.json", [_failure()])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = pfi.cmd_file(_args(failures_json=fj, open_issues_json=None,
+                                        dry_run=True))
+            self.assertEqual(rc, 0)
+        self.assertEqual(calls, [], "dry-run must spawn no `gh` subprocess")
+        rendered = out.getvalue()
+        # Open issues default to empty offline → a create plan is produced.
+        self.assertIn("--- DRY RUN (create) ---", rendered)
+        self.assertIn("treating open issues as empty", rendered)
+
+    def test_dry_run_with_injected_open_issues_skips_label(self):
+        # Fix A guard: even a dry run that IS given open-issues must not provision a label.
         calls = self._capture_gh()
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
@@ -271,7 +291,17 @@ class EnsureLabelTests(unittest.TestCase):
                                         dry_run=True))
             self.assertEqual(rc, 0)
         self.assertFalse(any(len(c) > 1 and c[1] == "label" for c in calls),
-                         "injected-open-issues path must never provision the label")
+                         "dry-run must never provision the label")
+
+    def test_resolve_dry_run_spawns_no_gh_offline(self):
+        # Fix B: the resolve dry-run path is also offline — no `gh issue list`, no label.
+        calls = self._capture_gh()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = pfi.cmd_resolve(_args(failures_json=None, open_issues_json=None,
+                                       workflow="tombstone-ttl-parity.yml", dry_run=True))
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [], "resolve dry-run must spawn no `gh` subprocess")
 
 
 class TierTests(unittest.TestCase):
