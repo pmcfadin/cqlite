@@ -97,7 +97,7 @@ async fn setup(schema_file: &str, keyspace_filter: &str) -> Result<Database, Str
 fn row_fingerprint(row: &QueryRow) -> BTreeMap<String, String> {
     row.values
         .iter()
-        .map(|(k, v)| (k.clone(), format!("{v:?}")))
+        .map(|(k, v)| (k.to_string(), format!("{v:?}")))
         .collect()
 }
 
