@@ -135,6 +135,24 @@ pub const FAILURE_ARTIFACT_KIND: &[&str] = &[
     "audit_report",
 ];
 
+/// The closed set of `<kind>` segments in a manifest failure-artifact descriptor
+/// `artifact.<tier>.<kind>` (issue #1027). These are the descriptor-level names —
+/// distinct from the record-level [`FAILURE_ARTIFACT_KIND`] because the two
+/// tier-scoped descriptors are plural/renamed (`live_logs` → record `live_log`,
+/// `reproduction_bundle` → the record's `repro_bundle` pointer). Mirrors the
+/// `<kind>` alternation in the manifest schema's `failure_artifacts` item pattern;
+/// the `descriptor_kinds_match_schema_pattern` test keeps them in sync.
+pub const ARTIFACT_DESCRIPTOR_KIND: &[&str] = &[
+    "byte_diff",
+    "offset_diff",
+    "checksum_diff",
+    "component_inventory",
+    "jsonl_diff",
+    "live_logs",
+    "audit_report",
+    "reproduction_bundle",
+];
+
 /// Closed set of public-claim kinds (issue #1023). `safe` = manifest-backed
 /// wording the project may publish; `blocked` = unqualified over-claim phrase the
 /// claim-scan lint rejects in release-facing docs unless explicitly scoped.

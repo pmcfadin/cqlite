@@ -130,7 +130,7 @@ scenarios:
         - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Digest.crc32
         - test-data/datasets/sstables/test_oa/simple_table-4b7cd05064e711f1bd3ac7dbf655c673/oa-2-big-Digest.crc32
       failure_artifacts:
-        - "panic diff: cqlite-recomputed Digest.crc32 payload vs Cassandra reference (bytes + decoded decimal + Data.db path)"
+        - artifact.fast_pr.byte_diff
       known_limitations: >-
         Digest.crc32 parity is byte-for-byte but environment-gated, not
         unconditional: the recomputed Data.db CRC32 payload is byte-compared to
@@ -257,7 +257,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/data-db-row-framing-diff.log
+        - artifact.required_parity.byte_diff
       normalization: >-
         row_size/prev_size are unsigned VInt deltas; the deterministic lane
         compares raw encoded bytes and decoded values at the exact width
@@ -317,7 +317,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/data-db-flag-diff.log
+        - artifact.required_parity.byte_diff
       normalization: >-
         Flag bytes are compared as raw u8 values at their exact wire offset; the
         fixture lane additionally checks every leading flag byte stays within the
@@ -378,7 +378,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_basic/uncompressed_table-6aedb7a0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/data-db-delta-diff.log
+        - artifact.required_parity.byte_diff
       normalization: >-
         Deltas are decoded as unsigned VInts and reconstructed against the
         Statistics.db EncodingStats minima; the fixture lane compares the
@@ -439,7 +439,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/data-db-clustering-order-diff.log
+        - artifact.required_parity.byte_diff
       normalization: >-
         Clustering header and per-column value bytes are compared at their exact
         offsets in declared order; the fixture lane decompresses the LZ4 Data.db
@@ -509,7 +509,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_basic/static_columns_table-6b0425d0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/data-db-static-row-diff.log
+        - artifact.required_parity.byte_diff
       normalization: >-
         Two distinct assertion families: (1) STATIC-ROW BYTE parity — the row
         flag byte, extended IS_STATIC bit, hard-coded prev_size=0, and the
@@ -589,7 +589,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_tomb/static_with_tombstones-4cdb9780702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/data-db-static-clustering-diff.log
+        - artifact.required_parity.byte_diff
       normalization: >-
         STATIC-ROW + clustering BYTE parity (static marker, then clustered-row
         clustering header + value offsets) is asserted separately from SEMANTIC
@@ -653,7 +653,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_wide_rows/wide_partition_table-6d6d0f80a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/data-db-multi-clustering-diff.log
+        - artifact.required_parity.byte_diff
       normalization: >-
         The deterministic writer lane asserts the FULL multi-column prefix →
         row_size framing byte-for-byte; the wide fixture lane asserts the first
@@ -721,7 +721,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/data-db-desc-clustering-diff.log
+        - artifact.required_parity.byte_diff
       normalization: >-
         BYTE parity (DESC timestamp + ASC text clustering values at exact offsets,
         proving ReversedType does NOT invert on-disk value bytes) is asserted
@@ -787,7 +787,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_basic/static_columns_table-6b0425d0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/data-db-null-empty-clustering-diff.log
+        - artifact.required_parity.byte_diff
       normalization: >-
         Pure BYTE-level distinction: the EMPTY clustering's PRESENT header +
         zero-length value VInt vs the static (absent) row's omitted prefix
@@ -860,7 +860,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_deltas/ttl_cells-299c9220701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/data-db-ttl-delta-diff.log
+        - artifact.required_parity.byte_diff
       normalization: >-
         TTL and localDeletionTime are decoded as UNSIGNED VInt deltas at exact
         wire offsets and reconstructed against the Statistics.db EncodingStats
@@ -928,7 +928,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_deltas/partition_tombstones-299258f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/data-db-partition-deletion-diff.log
+        - artifact.required_parity.byte_diff
       normalization: >-
         The partition deletion is compared as a FIXED big-endian i32 LDT + i64 mfda
         at their exact header offsets (NOT a VInt delta). Under
@@ -996,7 +996,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_deltas/row_tombstones-297f1f10701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/data-db-row-deletion-diff.log
+        - artifact.required_parity.byte_diff
       normalization: >-
         Row deletion mfda/ldt are decoded as UNSIGNED VInt deltas at exact
         offsets; the "no value bytes" claim is asserted as the framed body ending
@@ -1061,7 +1061,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_deltas/cell_tombstones-29733830701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/data-db-cell-deletion-diff.log
+        - artifact.required_parity.byte_diff
       normalization: >-
         Cell tombstone flag byte (IS_DELETED | HAS_EMPTY_VALUE) and own ts/ldt
         deltas are compared at exact offsets; the no-value-bytes claim is asserted
@@ -1129,7 +1129,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_deltas/range_tombstones-298894f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/data-db-range-bound-diff.log
+        - artifact.required_parity.byte_diff
       normalization: >-
         The bound-marker grammar is compared field-by-field at exact offsets: the
         IS_MARKER flag, the ClusteringPrefix.Kind ordinal, the u16 cluster count,
@@ -1207,7 +1207,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_deltas/adjacent_ranges-29bdd5c0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/data-db-range-boundary-diff.log
+        - artifact.required_parity.byte_diff
       normalization: >-
         The boundary-marker grammar is compared field-by-field at exact offsets:
         IS_MARKER, the kind-2/kind-5 ordinal, the u16 cluster count, the prefix
@@ -1329,7 +1329,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_timeseries/app_metrics-6c87b890a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - validation_artifacts/sstabledump/summary/summary_parity_report.md
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Superseded by cass.summary_db.IndexSummaryTest.first_last_key_boundaries.
         Skip-on-absence: validated only when the sibling Data.db is present.
@@ -1389,7 +1389,7 @@ scenarios:
         constant only for uniform partition-key lengths without static blocks, so
         successive deltas (not absolute values) are compared in that case.
       failure_artifacts:
-        - target/cassandra-parity/index-db-diff.log
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Offset-delta equality is asserted only for uniform-key-length, non-static,
         non-counter fixtures (the structural conditions under which the Data.db
@@ -1441,7 +1441,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/wide-partition-promoted-index-diff.log
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Byte-level promoted-index parity now runs fail-closed in the required lane:
         issue #1185 pins the test_big.wide_partition binaries into the CI dataset.
@@ -1492,7 +1492,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/index-db-diff.log
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Lookup parity is exercised on UUID-keyed fixtures where the raw on-disk key
         encoding is unambiguous (the 16 UUID bytes).
@@ -1539,7 +1539,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/index-db-diff.log
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Range boundaries are validated as the first/last entries of the partition
         index; cross-SSTable scan merge ordering is out of scope here.
@@ -1590,7 +1590,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/index-db-diff.log
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Exercises mid-entry truncation; byte-flip corruption of individual VInt
         offsets is not yet a distinct case.
@@ -1647,7 +1647,7 @@ scenarios:
         decoding is not attempted (those fixtures are covered by entry-byte +
         count + offset parity).
       failure_artifacts:
-        - target/cassandra-parity/index-db-diff.log
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Raw-key byte parity against the JSONL is asserted for single-UUID-keyed
         fixtures; composite/text-keyed fixtures are covered by the reader-vs-disk
@@ -1700,7 +1700,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/wide-partition-promoted-index-diff.log
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Byte-level promoted-index parity now runs fail-closed in the required lane:
         issue #1185 pins the test_big.wide_partition binaries into the CI dataset.
@@ -1752,7 +1752,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/wide-partition-promoted-index-diff.log
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Byte-level promoted-index parity now runs fail-closed in the required lane:
         issue #1185 pins the test_big.wide_partition binaries into the CI dataset.
@@ -1803,7 +1803,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/wide-partition-promoted-index-diff.log
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Byte-level promoted-index parity now runs fail-closed in the required lane:
         issue #1185 pins the test_big.wide_partition binaries into the CI dataset.
@@ -1856,7 +1856,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/wide-partition-promoted-index-diff.log
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Byte-level promoted-index parity now runs fail-closed in the required lane:
         issue #1185 pins the test_big.wide_partition binaries into the CI dataset.
@@ -1909,7 +1909,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/wide-partition-promoted-index-diff.log
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Byte-level promoted-index parity now runs fail-closed in the required lane:
         issue #1185 pins the test_big.wide_partition binaries into the CI dataset.
@@ -2039,7 +2039,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-TOC.txt
       failure_artifacts:
-        - target/cassandra-parity/index-db-diff.log
+        - artifact.manual_debug.reproduction_bundle
       known_limitations: >-
         Validates BTI index-component discovery/classification and BIG/BTI
         non-mixing; byte parity of the BTI Partitions.db/Rows.db trie payloads is a
@@ -2110,7 +2110,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_timeseries/app_metrics-6c87b890a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - validation_artifacts/sstabledump/summary/summary_parity_report.md
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Skip-on-absence: a fixture is only validated when its sibling Data.db is
         present (binary images are not committed to git).
@@ -2159,7 +2159,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_timeseries/app_metrics-6c87b890a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - validation_artifacts/sstabledump/summary/summary_parity_report.md
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Skip-on-absence: validated only when the sibling Data.db is present.
     ci:
@@ -2208,7 +2208,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_timeseries/app_metrics-6c87b890a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - validation_artifacts/sstabledump/summary/summary_parity_report.md
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Skip-on-absence: validated only when the sibling Data.db is present.
         Multi-entry images (e.g. test_timeseries/app_metrics) exercise the
@@ -2267,7 +2267,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_timeseries/app_metrics-6c87b890a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - validation_artifacts/sstabledump/summary/summary_parity_report.md
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Skip-on-absence: validated only when the sibling Data.db/Index.db are
         present. The on-disk entry position is little-endian (proven here against
@@ -2324,7 +2324,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-TOC.txt
       failure_artifacts:
-        - validation_artifacts/sstabledump/summary/summary_parity_report.md
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Skip-on-absence: requires committed TOC.txt fixtures (always present for
         the dataset). BTI summary classification is a presence/absence check;
@@ -2552,7 +2552,7 @@ scenarios:
         - test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-Statistics.db.txt
         - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Statistics.db.txt
       failure_artifacts:
-        - target/cassandra-parity/statistics-db-toc-mismatch.log
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         The fetched *-Statistics.db binary is required; when absent that fixture
         is skipped (never a silent pass) and the committed *-Statistics.db.txt
@@ -2602,7 +2602,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Statistics.db.txt
       failure_artifacts:
-        - target/cassandra-parity/statistics-db-crc-mismatch.log
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Validates the metadata-TOC CRC32s Cassandra embeds in Statistics.db; the
         per-component STATS-section internal checksum is not separately decoded.
@@ -2652,7 +2652,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
       failure_artifacts:
-        - target/cassandra-parity/statistics-db-encodingstats-mismatch.log
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Asserts the authoritative EncodingStats min baselines decoded from real
         bytes; max timestamp / max local-deletion-time are not yet decoded by the
@@ -2706,7 +2706,7 @@ scenarios:
         - test-data/datasets/sstables/test_basic/static_columns_table-6b0425d0a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
         - test-data/datasets/sstables/test_oa/udt_table-4b9f738064e711f1bd3ac7dbf655c673/oa-2-big-Statistics.db.txt
       failure_artifacts:
-        - target/cassandra-parity/statistics-db-header-mismatch.log
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Composite partition keys are folded into a single synthetic column by the
         minimal SerializationHeader decoder, so composite partition-key arity is
@@ -2756,7 +2756,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
       failure_artifacts:
-        - target/cassandra-parity/statistics-db-ordering-mismatch.log
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Compares clustering arity and DESC count; the per-column comparator class
         bytes are decoded to CQL types rather than compared as raw marshal-class
@@ -2915,7 +2915,7 @@ scenarios:
         - test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-Statistics.db.txt
         - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Statistics.db.txt
       failure_artifacts:
-        - target/cassandra-parity/statistics-db-repaired-at-mismatch.log
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         repairedAt is decoded from real bytes; pendingRepair / isTransient are
         NOT walked and are reported honestly as RepairField::Unparsed (not a
@@ -3181,7 +3181,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Digest.crc32
       failure_artifacts:
-        - target/cassandra-parity/checksum-mismatch.log
+        - artifact.fast_pr.checksum_diff
       known_limitations: >-
         Byte-compare of a clean Digest.crc32 is covered by
         cass.sstable_format.toc_component_manifest. CQLite validates inline checksums
@@ -3241,7 +3241,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/compression-info-metadata-mismatch.log
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Validates the CompressionInfo.db metadata Cassandra persisted; the codecs
         actually exercised are LZ4Compressor and SnappyCompressor (the only ones in
@@ -3290,7 +3290,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/compression-info-chunk-offsets-mismatch.log
+        - artifact.required_parity.byte_diff
     ci:
       tier: required_parity
       workflow: .github/workflows/sstabledump-parity-gate.yml
@@ -3336,7 +3336,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/compression-info-chunk-boundaries-mismatch.log
+        - artifact.required_parity.byte_diff
     ci:
       tier: required_parity
       workflow: .github/workflows/sstabledump-parity-gate.yml
@@ -3383,7 +3383,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/compression-info-chunk-crc-mismatch.log
+        - artifact.required_parity.byte_diff
     ci:
       tier: required_parity
       workflow: .github/workflows/sstabledump-parity-gate.yml
@@ -3427,7 +3427,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/compression-info-round-trip-mismatch.log
+        - artifact.required_parity.byte_diff
     ci:
       tier: required_parity
       workflow: .github/workflows/sstabledump-parity-gate.yml
@@ -3473,7 +3473,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/compression-info-truncated-chunk.log
+        - artifact.required_parity.byte_diff
     ci:
       tier: required_parity
       workflow: .github/workflows/sstabledump-parity-gate.yml
@@ -3518,7 +3518,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/compression-info-lz4-mismatch.log
+        - artifact.required_parity.byte_diff
     ci:
       tier: required_parity
       workflow: .github/workflows/sstabledump-parity-gate.yml
@@ -3563,7 +3563,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/compression-info-snappy-mismatch.log
+        - artifact.required_parity.byte_diff
     ci:
       tier: required_parity
       workflow: .github/workflows/sstabledump-parity-gate.yml
@@ -3700,7 +3700,7 @@ scenarios:
         - test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-TOC.txt
         - test-data/datasets/sstables/test_da/collection_table-de2c155064e711f19ad401a8c8227b11/da-2-bti-TOC.txt
       failure_artifacts:
-        - target/cassandra-parity/compression-info-roundtrip-mismatch.log
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         The committed *-TOC.txt manifests (always present, listing
         CompressionInfo.db) drive the lane; the *-CompressionInfo.db binary is a
@@ -3757,7 +3757,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt
       failure_artifacts:
-        - target/cassandra-parity/compression-info-offsets-mismatch.log
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Offsets are validated as part of the full byte-for-byte round-trip; the
         chunk-count invariant additionally cross-checks data_length / chunk_length.
@@ -3807,7 +3807,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/compression-chunk-boundary-mismatch.log
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Exercised only when the sibling Data.db binary is fetched; metadata-only
         runs (CompressionInfo.db present, Data.db absent) skip the decompression
@@ -3858,7 +3858,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_da/collection_table-de2c155064e711f19ad401a8c8227b11/da-2-bti-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/compression-inline-crc-mismatch.log
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Inline CRCs are stored in Data.db (not CompressionInfo.db); validation runs
         only when the Data.db binary is fetched.
@@ -3908,7 +3908,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt
       failure_artifacts:
-        - target/cassandra-parity/compression-corruption-accepted.log
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         The flipped-chunk-byte case needs the sibling Data.db; the three
         CompressionInfo.db mutations run whenever any CompressionInfo.db binary is
@@ -3958,7 +3958,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt
       failure_artifacts:
-        - target/cassandra-parity/compression-lz4-mismatch.log
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Compressor coverage is asserted across the whole corpus (LZ4 or Snappy
         required when binaries are present), not per-named-fixture.
@@ -4007,7 +4007,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt
       failure_artifacts:
-        - target/cassandra-parity/compression-snappy-mismatch.log
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Compressor coverage is asserted across the whole corpus (LZ4 or Snappy
         required when binaries are present), not per-named-fixture.
@@ -4169,7 +4169,7 @@ scenarios:
         - test-data/datasets/corruption/test_comp_corrupt/corruption-sha256.txt
         - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/corruption-verify-parity.log
+        - artifact.nightly_docker.live_logs
       known_limitations: >-
         Verify-parity ONLY. Scope is the structural/checksum corruption classes
         CQLite's verifier detects. Out of scope (NO parity claimed, follow-ups
@@ -4248,7 +4248,7 @@ scenarios:
         - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
         - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/filter-db-false-negative.log
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Superseded by cass.filter_db.no_false_negative_membership; the no-false-negative
         gate runs over BIG fixtures whose Index.db exposes the raw partition keys.
@@ -4316,7 +4316,7 @@ scenarios:
         - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
         - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/filter-db-false-negative.log
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         The no-false-negative gate runs over BIG fixtures, whose Index.db exposes the
         raw partition keys. BTI (da) fixtures have no Index.db and their Partitions.db
@@ -4369,7 +4369,7 @@ scenarios:
         - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
         - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/filter-db-roundtrip.log
+        - artifact.required_parity.byte_diff
     ci:
       tier: required_parity
       workflow: .github/workflows/sstabledump-parity-gate.yml
@@ -4416,7 +4416,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/filter-db-corruption.log
+        - artifact.required_parity.byte_diff
     ci:
       tier: required_parity
       workflow: .github/workflows/sstabledump-parity-gate.yml
@@ -5389,9 +5389,7 @@ scenarios:
       reference_paths:
         - compaction-parity/build/parity-artifacts-byteParity/<scenario>/cassandra-output/
       failure_artifacts:
-        - "byte-diff.txt: first byte/offset diff per component (component, offset, ref byte, candidate byte, lengths)"
-        - "checksums.txt: SHA-256 of every component on both sides"
-        - "cassandra-output/ and cqlite-output/: the full component dirs for offline decoding"
+        - artifact.nightly_docker.live_logs
       known_limitations: >-
         The byte tier is implemented and runs in CI, but is non-blocking
         (continue-on-error) and has no committed reference fixtures — the
@@ -5558,10 +5556,7 @@ scenarios:
       reference_paths:
         - compaction-parity/build/parity-artifacts-byteParity/<scenario>/cassandra-output/
       failure_artifacts:
-        - "byte-diff.txt: first differing byte/offset per component"
-        - "checksums.txt: SHA-256 per component, both engines"
-        - "commands.txt: exact cqlite compact + sstabledump command lines"
-        - "cqlite-compact.stdout / cqlite-compact.stderr"
+        - artifact.nightly_docker.live_logs
       known_limitations: >-
         Byte tier is implemented and runs non-blocking in CI with full failure
         artifacts, but has no committed reference fixtures (reference output is
@@ -6217,7 +6212,7 @@ scenarios:
         Data.db/Index.db/Summary.db/Digest.crc32 whole-file byte-for-byte; CRC.db
         prefix (compaction-only trailing empty-chunk CRC32=0 excluded); JSONL secondary.
       failure_artifacts:
-        - "panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; JSONL partition-count + LWW-survivor assertion"
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Statistics.db + Filter.db present on both but not byte-diffed (impl detail).
         CRC.db prefix-parity only. Live cells only (the smallest blocking slice).
@@ -6279,7 +6274,7 @@ scenarios:
         Data.db/Index.db/Summary.db/Digest.crc32 whole-file byte-for-byte; CRC.db
         prefix (compaction-only trailing empty-chunk CRC32=0 excluded); JSONL secondary.
       failure_artifacts:
-        - "panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; JSONL partition-count + LWW-survivor assertion"
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Statistics.db + Filter.db present on both but not byte-diffed (impl detail).
         CRC.db prefix-parity only. Live cells only (the smallest blocking slice).
@@ -6376,7 +6371,7 @@ scenarios:
         prefix (compaction-only trailing empty-chunk CRC32=0 excluded); typed JSONL
         (frozen collections + collections-of-UDT field decode) cross-check.
       failure_artifacts:
-        - "panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; typed JSONL (pk,cell)->value map mismatch"
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Statistics.db + Filter.db present on both but not byte-diffed (impl detail).
         CRC.db prefix-parity only. Frozen values only (multicell UDT/collection
@@ -6429,7 +6424,7 @@ scenarios:
       normalization: >-
         Cross-references the byte-level claim cass.compaction.udt_collections_with_udts.
       failure_artifacts:
-        - "panic diff: CQLite-compacted vs Cassandra-compacted Data.db/Index.db/Summary.db/Digest.crc32 byte mismatch (full hex of both); typed JSONL (pk,cell)->value map mismatch for the collection-element UDT decode"
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Non-frozen (multicell) UDT/collection cell-path ownership is a separate
         complex-collection issue, out of scope here.
@@ -6494,7 +6489,7 @@ scenarios:
         per-(pk,cell) canonical UDT JSON equality pins field order + null-field +
         empty-string-field decode of the LWW survivors.
       failure_artifacts:
-        - "panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; typed JSONL (pk,cell)->value map mismatch"
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Statistics.db + Filter.db present on both but not byte-diffed (impl detail).
         CRC.db prefix-parity only.
@@ -6560,7 +6555,7 @@ scenarios:
         per-(pk,cell) canonical nested-UDT JSON equality pins inner+outer field
         order, nested field decode, and the inner null field.
       failure_artifacts:
-        - "panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; typed JSONL (pk,cell)->value map mismatch"
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Statistics.db + Filter.db present on both but not byte-diffed (impl detail).
         CRC.db prefix-parity only.
@@ -6612,7 +6607,7 @@ scenarios:
         Cross-references cass.compaction.udt_frozen_person (byte-for-byte components +
         typed JSONL survivor map).
       failure_artifacts:
-        - "panic diff: CQLite-compacted vs Cassandra-compacted component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; CRC.db prefix + trailing empty-chunk check; TOC component-set delta; typed JSONL (pk,cell)->value map mismatch"
+        - artifact.required_parity.byte_diff
       known_limitations: >-
         Statistics.db + Filter.db present on both but not byte-diffed (impl detail).
         CRC.db prefix-parity only.
@@ -6771,7 +6766,7 @@ scenarios:
         - test-data/datasets/sstables/test_writeparity/finished_data-18ca5be0735711f1a757db89184be81f/nb-1-big-Digest.crc32
         - test-data/datasets/sstables/test_writeparity/finished_data-18ca5be0735711f1a757db89184be81f/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - "panic diff: CQLite-written vs Cassandra-reference component (cass len + ours len + first-diff byte index + full hex of both) for Data.db / Index.db / Summary.db / Digest.crc32; TOC component-set delta; JSONL partition-count / per-partition row assertion"
+        - artifact.exhaustive_regeneration.audit_report
       known_limitations: >-
         SCOPE OF component_files EVIDENCE: this is NOT unqualified full
         component-set parity. The `component_files` artifact is scoped to the
@@ -6939,7 +6934,7 @@ scenarios:
         - test-data/datasets/sstables/test_writeparity/partition_boundary-1909d5e0735711f1a757db89184be81f/nb-1-big-Digest.crc32
         - test-data/datasets/sstables/test_writeparity/partition_boundary-1909d5e0735711f1a757db89184be81f/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - "panic diff: CQLite-written vs Cassandra-reference component (cass len + ours len + first-diff byte index + full hex of both) for Index.db / Data.db / Summary.db / Digest.crc32; TOC component-set delta; JSONL partition-count / per-partition row assertion"
+        - artifact.exhaustive_regeneration.audit_report
       known_limitations: >-
         SCOPE OF component_files EVIDENCE: this is NOT unqualified full
         component-set parity. The `component_files` artifact is scoped to the
@@ -7779,7 +7774,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
       failure_artifacts:
-        - target/cassandra-parity/statistics-db-max-ldt-mismatch.log
+        - artifact.nightly_docker.live_logs
       normalization: >-
         The STATS-component SSTable max local deletion time decoded by CQLite is
         compared against the parenthesised integer parsed from the reference
@@ -7835,7 +7830,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_tomb/tombstone_histogram-4ca1e9e0702011f1b8f419c9a388d558/nb-1-big-Statistics.db.txt
       failure_artifacts:
-        - target/cassandra-parity/statistics-db-tombstone-histogram-mismatch.log
+        - artifact.nightly_docker.live_logs
       normalization: >-
         The estimated-tombstone-drop-times histogram buckets decoded by CQLite are
         compared against the `Estimated tombstone drop times` rows parsed from the
@@ -8705,7 +8700,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_tomb/dropped_static_col-4cd18560702011f1b8f419c9a388d558/nb-1-big-Statistics.db.txt
       failure_artifacts:
-        - target/cassandra-parity/dropped-static-header-mismatch.log
+        - artifact.nightly_docker.live_logs
       normalization: >-
         The dropped static column is preserved in the embedded SerializationHeader;
         its name set and kind are compared byte-equal against the StaticColumns line
@@ -8811,7 +8806,7 @@ scenarios:
         - test-data/datasets/sstables/test_types/se_no_schema_change-4f5a4d20706211f197e20b846582ecc8/nb-1-big-Statistics.db.txt
         - test-data/datasets/sstables/test_types/se_no_schema_change-4f5a4d20706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - logs
+        - artifact.required_parity.byte_diff
     ci:
       tier: required_parity
       workflow: .github/workflows/cql-type-parity.yml
@@ -8855,7 +8850,7 @@ scenarios:
         - test-data/datasets/sstables/test_types/se_altered_column_type-4f6856e0706211f197e20b846582ecc8/nb-1-big-Statistics.db.txt
         - test-data/datasets/sstables/test_types/se_altered_column_type-4f6856e0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - logs
+        - artifact.required_parity.byte_diff
     ci:
       tier: required_parity
       workflow: .github/workflows/cql-type-parity.yml
@@ -8899,7 +8894,7 @@ scenarios:
         - test-data/datasets/sstables/test_types/se_dropped_column_same_type-4f72b720706211f197e20b846582ecc8/nb-1-big-Statistics.db.txt
         - test-data/datasets/sstables/test_types/se_dropped_column_same_type-4f72b720706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - logs
+        - artifact.required_parity.byte_diff
     ci:
       tier: required_parity
       workflow: .github/workflows/cql-type-parity.yml
@@ -8943,7 +8938,7 @@ scenarios:
         - test-data/datasets/sstables/test_types/se_altered_then_dropped_column-4f7cc940706211f197e20b846582ecc8/nb-1-big-Statistics.db.txt
         - test-data/datasets/sstables/test_types/se_altered_then_dropped_column-4f7cc940706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - logs
+        - artifact.required_parity.byte_diff
     ci:
       tier: required_parity
       workflow: .github/workflows/cql-type-parity.yml
@@ -8987,7 +8982,7 @@ scenarios:
         - test-data/datasets/sstables/test_types/se_static_regular_kind_mismatch-4f87ecd0706211f197e20b846582ecc8/nb-1-big-Statistics.db.txt
         - test-data/datasets/sstables/test_types/se_static_regular_kind_mismatch-4f87ecd0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - logs
+        - artifact.required_parity.byte_diff
     ci:
       tier: required_parity
       workflow: .github/workflows/cql-type-parity.yml
@@ -9031,7 +9026,7 @@ scenarios:
         - test-data/datasets/sstables/test_types/se_frozen_multicell_collection_mismatch-4f913ba0706211f197e20b846582ecc8/nb-1-big-Statistics.db.txt
         - test-data/datasets/sstables/test_types/se_frozen_multicell_collection_mismatch-4f913ba0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - logs
+        - artifact.required_parity.byte_diff
     ci:
       tier: required_parity
       workflow: .github/workflows/cql-type-parity.yml
@@ -9075,7 +9070,7 @@ scenarios:
       reference_paths:
         - test-data/codec-vectors/primitives.json
       failure_artifacts:
-        - logs
+        - artifact.fast_pr.byte_diff
     ci:
       tier: fast_pr
     scope: {}
@@ -9116,7 +9111,7 @@ scenarios:
       reference_paths:
         - test-data/codec-vectors/primitives.json
       failure_artifacts:
-        - logs
+        - artifact.fast_pr.byte_diff
     ci:
       tier: fast_pr
     scope: {}
@@ -9157,7 +9152,7 @@ scenarios:
       reference_paths:
         - test-data/codec-vectors/primitives.json
       failure_artifacts:
-        - logs
+        - artifact.fast_pr.byte_diff
     ci:
       tier: fast_pr
     scope: {}
@@ -9198,7 +9193,7 @@ scenarios:
       reference_paths:
         - test-data/codec-vectors/primitives.json
       failure_artifacts:
-        - logs
+        - artifact.fast_pr.byte_diff
     ci:
       tier: fast_pr
     scope: {}
@@ -9239,7 +9234,7 @@ scenarios:
       reference_paths:
         - test-data/codec-vectors/primitives.json
       failure_artifacts:
-        - logs
+        - artifact.fast_pr.byte_diff
     ci:
       tier: fast_pr
     scope: {}
@@ -9280,7 +9275,7 @@ scenarios:
       reference_paths:
         - test-data/codec-vectors/primitives.json
       failure_artifacts:
-        - logs
+        - artifact.fast_pr.byte_diff
     ci:
       tier: fast_pr
     scope: {}
@@ -9322,7 +9317,7 @@ scenarios:
       reference_paths:
         - test-data/codec-vectors/collections.json
       failure_artifacts:
-        - logs
+        - artifact.fast_pr.byte_diff
     ci:
       tier: fast_pr
     scope: {}
@@ -9362,7 +9357,7 @@ scenarios:
       reference_paths:
         - test-data/codec-vectors/collections.json
       failure_artifacts:
-        - logs
+        - artifact.fast_pr.byte_diff
     ci:
       tier: fast_pr
     scope: {}
@@ -9402,7 +9397,7 @@ scenarios:
       reference_paths:
         - test-data/codec-vectors/collections.json
       failure_artifacts:
-        - logs
+        - artifact.fast_pr.byte_diff
     ci:
       tier: fast_pr
     scope: {}
@@ -9442,7 +9437,7 @@ scenarios:
       reference_paths:
         - test-data/codec-vectors/collections.json
       failure_artifacts:
-        - logs
+        - artifact.fast_pr.byte_diff
     ci:
       tier: fast_pr
     scope: {}
@@ -9482,7 +9477,7 @@ scenarios:
       reference_paths:
         - test-data/codec-vectors/collections.json
       failure_artifacts:
-        - logs
+        - artifact.fast_pr.byte_diff
     ci:
       tier: fast_pr
     scope: {}
@@ -9522,7 +9517,7 @@ scenarios:
       reference_paths:
         - test-data/codec-vectors/collections.json
       failure_artifacts:
-        - logs
+        - artifact.fast_pr.byte_diff
     ci:
       tier: fast_pr
     scope: {}
@@ -9696,7 +9691,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_types/nb_length_prefix_edges-4fba4770706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - logs
+        - artifact.required_parity.byte_diff
     ci:
       tier: required_parity
       workflow: .github/workflows/cql-type-parity.yml
@@ -10428,7 +10423,7 @@ scenarios:
         - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
         - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/compression-fixture-lz4.log
+        - artifact.exhaustive_regeneration.audit_report
       known_limitations: >-
         CompressionInfo.db algorithm/options/chunk-length/data-length and the
         per-chunk offset table are compared byte-for-byte against the committed
@@ -10479,7 +10474,7 @@ scenarios:
         - test-data/datasets/sstables/test_comp/snappy_table-2588f3a071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
         - test-data/datasets/sstables/test_comp/snappy_table-2588f3a071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/compression-fixture-snappy.log
+        - artifact.exhaustive_regeneration.audit_report
       known_limitations: >-
         CompressionInfo.db metadata and per-chunk offset table compared
         byte-for-byte against the committed Cassandra 5.0.2 Snappy golden.
@@ -10529,7 +10524,7 @@ scenarios:
         - test-data/datasets/sstables/test_comp/deflate_table-2592698071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
         - test-data/datasets/sstables/test_comp/deflate_table-2592698071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/compression-fixture-deflate.log
+        - artifact.exhaustive_regeneration.audit_report
       known_limitations: >-
         CompressionInfo.db metadata + offset table compared byte-for-byte; the
         zlib-wrapped Deflate chunk decode is exercised by issue_1082 (#1082 fix).
@@ -10579,7 +10574,7 @@ scenarios:
         - test-data/datasets/sstables/test_comp/zstd_table-259ca2b071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
         - test-data/datasets/sstables/test_comp/zstd_table-259ca2b071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/compression-fixture-zstd.log
+        - artifact.exhaustive_regeneration.audit_report
       known_limitations: >-
         Plain (no-dictionary) Zstd CompressionInfo.db metadata + offset table
         compared byte-for-byte. Zstd dictionary lifecycle is out of scope
@@ -10627,7 +10622,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_comp/uncompressed_table-25a5ca7071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/compression-fixture-uncompressed.log
+        - artifact.exhaustive_regeneration.audit_report
       known_limitations: >-
         Asserts the uncompressed table emits NO CompressionInfo.db component
         (matching Cassandra) and rows decode against the sstabledump JSONL.
@@ -10676,7 +10671,7 @@ scenarios:
         - test-data/datasets/sstables/test_comp/short_final_chunk-25aef23071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
         - test-data/datasets/sstables/test_comp/short_final_chunk-25aef23071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/compression-fixture-short-final-chunk.log
+        - artifact.exhaustive_regeneration.audit_report
       known_limitations: >-
         Validates that the final (short) chunk length in CompressionInfo.db is
         smaller than chunk_length and decodes correctly, byte-for-byte against
@@ -10726,7 +10721,7 @@ scenarios:
         - test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-25b8dd4071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
         - test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-25b8dd4071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/compression-fixture-incompressible.log
+        - artifact.exhaustive_regeneration.audit_report
       known_limitations: >-
         Validates the chunk whose compressed length is >= raw length is stored
         uncompressed (Cassandra fallback), byte-for-byte against the golden.
@@ -10777,7 +10772,7 @@ scenarios:
         - test-data/datasets/sstables/test_comp/deflate_table-2592698071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
         - test-data/datasets/sstables/test_comp/zstd_table-259ca2b071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
       failure_artifacts:
-        - target/cassandra-parity/compressioninfo-algorithm_name.log
+        - artifact.nightly_docker.live_logs
       known_limitations: >-
         The compressor class/algorithm-name string in CompressionInfo.db is
         compared byte-for-byte against the committed Cassandra 5.0.2 golden
@@ -10824,7 +10819,7 @@ scenarios:
         - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
         - test-data/datasets/sstables/test_comp/zstd_table-259ca2b071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
       failure_artifacts:
-        - target/cassandra-parity/compressioninfo-options.log
+        - artifact.nightly_docker.live_logs
       known_limitations: >-
         The compressor options key/value count and entries are compared
         byte-for-byte against the committed golden.
@@ -10869,7 +10864,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
       failure_artifacts:
-        - target/cassandra-parity/compressioninfo-chunk_length.log
+        - artifact.nightly_docker.live_logs
       known_limitations: >-
         The chunk_length (int) is compared byte-for-byte against the golden.
     ci:
@@ -10913,7 +10908,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
       failure_artifacts:
-        - target/cassandra-parity/compressioninfo-max_compressed_length.log
+        - artifact.nightly_docker.live_logs
       known_limitations: >-
         The max_compressed_length (int, nb format) is compared byte-for-byte
         against the golden.
@@ -10958,7 +10953,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
       failure_artifacts:
-        - target/cassandra-parity/compressioninfo-data_length.log
+        - artifact.nightly_docker.live_logs
       known_limitations: >-
         The data_length (long, total uncompressed bytes) is compared
         byte-for-byte against the golden.
@@ -11004,7 +10999,7 @@ scenarios:
         - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
         - test-data/datasets/sstables/test_comp/snappy_table-2588f3a071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
       failure_artifacts:
-        - target/cassandra-parity/compressioninfo-chunk_offsets.log
+        - artifact.nightly_docker.live_logs
       known_limitations: >-
         The chunk count and each chunk's long offset into Data.db are compared
         byte-for-byte against the golden; offsets position chunk decode.
@@ -11050,7 +11045,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
       failure_artifacts:
-        - target/cassandra-parity/compressioninfo-no_crc_fields.log
+        - artifact.nightly_docker.live_logs
       known_limitations: >-
         Confirms the CompressionInfo.db layout ends after the chunk-offset table
         with no per-chunk CRC fields; the 4-byte CRC32 is appended inline after
@@ -11104,7 +11099,7 @@ scenarios:
         - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
         - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/inline-crc-valid_trailer.log
+        - artifact.nightly_docker.live_logs
       known_limitations: >-
         Each chunk's trailing CRC32 (the 4 bytes after the compressed payload,
         located via the CompressionInfo.db offset table) is recomputed and
@@ -11155,7 +11150,7 @@ scenarios:
         - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
         - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/inline-crc-bad_trailer_rejected.log
+        - artifact.nightly_docker.live_logs
       known_limitations: >-
         A flipped CRC trailer byte must surface a checksum error rather than
         silently returning decoded bytes, matching Cassandra reader behaviour.
@@ -11205,7 +11200,7 @@ scenarios:
         - test-data/datasets/sstables/test_comp/short_final_chunk-25aef23071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
         - test-data/datasets/sstables/test_comp/short_final_chunk-25aef23071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/inline-crc-short_final_chunk.log
+        - artifact.nightly_docker.live_logs
       known_limitations: >-
         Validates the trailing CRC32 on the partial final chunk, whose length is
         derived from data_length rather than chunk_length.
@@ -11255,7 +11250,7 @@ scenarios:
         - test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-25b8dd4071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
         - test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-25b8dd4071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/inline-crc-incompressible_uncompressed_chunk.log
+        - artifact.nightly_docker.live_logs
       known_limitations: >-
         The CRC32 trailer is computed over the stored (uncompressed) chunk bytes
         when compression was skipped for the incompressible payload.
@@ -11305,7 +11300,7 @@ scenarios:
         - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
         - test-data/datasets/sstables/test_comp/snappy_table-2588f3a071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
       failure_artifacts:
-        - target/cassandra-parity/inline-crc-offset_delta_minus_crc_length.log
+        - artifact.nightly_docker.live_logs
       known_limitations: >-
         Confirms the compressed payload length is derived as the offset delta
         between consecutive chunks minus the 4-byte inline CRC, matching the
@@ -11357,7 +11352,7 @@ scenarios:
         - test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml
         - test-data/datasets/corruption/test_comp_corrupt/corruption-sha256.txt
       failure_artifacts:
-        - target/cassandra-parity/corruption-data_db_bit_flip.log
+        - artifact.exhaustive_regeneration.audit_report
       known_limitations: >-
         Corruption is a single-bit flip at a manifest-pinned byte offset; the
         corrupted *.db binary is regenerated byte-for-byte from the manifest and
@@ -11407,7 +11402,7 @@ scenarios:
         - test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml
         - test-data/datasets/corruption/test_comp_corrupt/corruption-sha256.txt
       failure_artifacts:
-        - target/cassandra-parity/corruption-data_db_truncation.log
+        - artifact.exhaustive_regeneration.audit_report
       known_limitations: >-
         The tail is truncated so the final chunk(s) referenced by the offset
         table cannot be read; the verifier must surface an EOF/truncation error.
@@ -11455,7 +11450,7 @@ scenarios:
         - test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml
         - test-data/datasets/corruption/test_comp_corrupt/corruption-sha256.txt
       failure_artifacts:
-        - target/cassandra-parity/corruption-compression_info_bad_offset.log
+        - artifact.exhaustive_regeneration.audit_report
       known_limitations: >-
         A chunk offset MSB is set so the offset points far past the Data.db end;
         the verifier must reject the out-of-bounds offset, not read garbage.
@@ -11503,7 +11498,7 @@ scenarios:
         - test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml
         - test-data/datasets/corruption/test_comp_corrupt/corruption-sha256.txt
       failure_artifacts:
-        - target/cassandra-parity/corruption-index_db_bit_flip_big.log
+        - artifact.exhaustive_regeneration.audit_report
       known_limitations: >-
         A bit flip in the BIG Index.db partition-key length region must surface
         a parse error rather than misreading partition boundaries.
@@ -11549,7 +11544,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml
       failure_artifacts:
-        - target/cassandra-parity/corruption-bti_partitions_footer_bit_flip.log
+        - artifact.exhaustive_regeneration.audit_report
       known_limitations: >-
         The clean BTI source (test_da/wide_table) is local-only and NOT
         git-tracked in this worktree, so the corrupted Partitions.db cannot be
@@ -11607,7 +11602,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml
       failure_artifacts:
-        - target/cassandra-parity/corruption-bti_rows_truncation.log
+        - artifact.exhaustive_regeneration.audit_report
       known_limitations: >-
         Same gap as cass.corruption.bti_partitions_footer_bit_flip: the clean
         test_da/wide_table Rows.db source is local-only / not git-tracked, so the
@@ -11666,7 +11661,7 @@ scenarios:
         - test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml
         - test-data/datasets/corruption/test_comp_corrupt/corruption-sha256.txt
       failure_artifacts:
-        - target/cassandra-parity/corruption-statistics_db_header_damage.log
+        - artifact.exhaustive_regeneration.audit_report
       known_limitations: >-
         Header bytes of Statistics.db are damaged; the verifier must surface a
         metadata-parse error rather than silently loading bad statistics.
@@ -11714,7 +11709,7 @@ scenarios:
         - test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml
         - test-data/datasets/corruption/test_comp_corrupt/corruption-sha256.txt
       failure_artifacts:
-        - target/cassandra-parity/corruption-summary_db_truncation.log
+        - artifact.exhaustive_regeneration.audit_report
       known_limitations: >-
         Summary.db is truncated; the reader must fall back to Index.db rather
         than reading a corrupt summary, matching Cassandra recovery behaviour.
@@ -11762,7 +11757,7 @@ scenarios:
         - test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml
         - test-data/datasets/corruption/test_comp_corrupt/corruption-sha256.txt
       failure_artifacts:
-        - target/cassandra-parity/corruption-toc_missing_component.log
+        - artifact.exhaustive_regeneration.audit_report
       known_limitations: >-
         A component line is removed from TOC.txt; component-presence verification
         must flag the missing component rather than silently skipping it.
@@ -11811,7 +11806,7 @@ scenarios:
         - test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml
         - test-data/datasets/corruption/test_comp_corrupt/corruption-sha256.txt
       failure_artifacts:
-        - target/cassandra-parity/corruption-digest_crc32_mismatch.log
+        - artifact.exhaustive_regeneration.audit_report
       known_limitations: >-
         The recorded Digest.crc32 value is altered; whole-file digest validation
         must report a mismatch against the recomputed Data.db CRC.
@@ -12831,7 +12826,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_deltas/ttl_cells-299c9220701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/ttl-gc-boundary-delta-diff.log
+        - artifact.required_parity.byte_diff
       normalization: >-
         TTL and localDeletionTime are decoded as UNSIGNED VInt deltas at exact
         wire offsets and reconstructed against the Statistics.db EncodingStats
@@ -12896,7 +12891,7 @@ scenarios:
         - test-data/datasets/sstables/test_deltas/row_tombstones-297f1f10701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
         - test-data/datasets/sstables/test_deltas/cell_tombstones-29733830701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/tombstone-types-delta-diff.log
+        - artifact.required_parity.byte_diff
       normalization: >-
         Deletion times decoded as deltas / fixed-header at exact wire offsets and
         reconstructed against EncodingStats minima; fixture lanes are local-only
@@ -12956,7 +12951,7 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_deltas/range_tombstones-298894f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
       failure_artifacts:
-        - target/cassandra-parity/range-marker-grammar-diff.log
+        - artifact.required_parity.byte_diff
       normalization: >-
         Bound-marker grammar and deltas decoded at exact wire offsets; fixture
         lanes are local-only and SKIP when the binary is absent (the
