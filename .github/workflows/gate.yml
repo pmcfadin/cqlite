@@ -1,0 +1,244 @@
+name: Nightly agent-gate (deep check)
+
+# Nightly deep-check backstop for the authoritative gate `scripts/agent-gate.sh`
+# (issue #1269, reconciled with epic #1360 / PR #1377).
+#
+# Under epic #1360's tiered CI model the ONE required, always-running PR check is
+# the light `.github/workflows/pr-gate.yml` (fmt + cqlite-core clippy -D warnings
+# + all-feature build + fast tests; no Docker/datasets/agent-gate). Heavy checks
+# live on a nightly schedule, and path-filtered heavy lanes are NOT required.
+#
+# Accordingly this lane is a NIGHTLY, PATH-INDEPENDENT deep-check backstop — NOT a
+# required per-PR check. It runs the full `scripts/agent-gate.sh` (16 components:
+# fmt, clippy, core/integration/write/cli tests, python-bindings, node-bindings,
+# smoke, ...) so that gate-component breakage a light PR check cannot see (e.g. a
+# regression in the gate script itself or a binding build input) is still caught
+# within 24h and surfaces on the Actions dashboard. There is no PR trigger.
+#
+# The lane always runs the FULL gate (`bash scripts/agent-gate.sh`, never
+# `--only`) so the run "counts" — a `--only` run is stamped PARTIAL and
+# explicitly does not count as the gate.
+
+on:
+  schedule:
+    # Nightly deep-check, 03:37 UTC — slotted off-peak between the existing
+    # e2e-readback (02:30) and cql-type-parity (04:31) cron lanes to avoid
+    # collision.
+    - cron: '37 3 * * *'
+  workflow_dispatch:
+
+# Least-privilege token (issue #1269). This lane checks out repo code and runs
+# in-repo scripts (fetch-datasets.sh, scripts/agent-gate.sh) — it only needs to
+# read the repo. Artifact upload via actions/upload-artifact does NOT require
+# write repo scope. Set at the top level so it applies to every job.
+permissions:
+  contents: read
+
+concurrency:
+  # Scheduled + workflow_dispatch runs only; there is no pull_request context to
+  # key on. github.ref is stable per branch/dispatch, so serialize per-ref.
+  group: gate-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  DATASET_TAG: datasets-v3
+  DATASET_ASSET: cassandra5-small-full-v3.4.tar.gz
+  DATASET_SHA256: 3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33
+
+jobs:
+  gate:
+    name: Full agent gate
+    runs-on: ubuntu-latest
+    # A full gate run (napi + maturin builds, full workspace test set, smoke
+    # over the corpus) is comparable in weight to node-ci/python-ci. On a
+    # COLD cache (first run, or after GH's 7-day cache eviction / branch
+    # scoping) the workspace compiles from scratch before any tests run; an
+    # observed cold run reached ~11/17 components in 45m before timing out.
+    # Warm runs (Swatinem cache restored) are far faster, but a nightly backstop
+    # must not depend on a warm cache, so budget for the cold case.
+    timeout-minutes: 75
+
+    # Cap peak compile memory pressure (issue #1269). The full gate compiles the
+    # workspace + both binding modules and runs the full test set; the runner
+    # was OOM-killed twice mid-`Run full agent gate` (23m51s and 40m — both well
+    # under the 75m timeout, with no step conclusion, no summary artifact, and
+    # no logs: the classic runner-process-killed signature). Bounding cargo's
+    # codegen parallelism (2 jobs on the 4-vCPU standard runner) and disabling
+    # incremental compilation drops peak RAM substantially, trading a little
+    # wall-clock for headroom. Combined with the provisioned swapfile below this
+    # keeps the job under the memory ceiling. These are set job-level so every
+    # cargo/clippy invocation the gate spawns inherits them.
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          # Full history so scripts/agent-gate.sh can resolve origin/main for
+          # its file-size ratchet component. The default shallow checkout
+          # leaves that ref unavailable, silently degrading the ratchet to
+          # advisory-only (the gate could PASS on over-threshold Rust file
+          # growth). Matches quality-gates.yml.
+          fetch-depth: 0
+          # Do not persist the GitHub token into .git/config: this lane runs
+          # in-repo scripts (fetch-datasets.sh, agent-gate.sh) and they should
+          # not have ambient access to a repo-scoped credential (issue #1269).
+          # fetch-depth: 0 already fetches full history here, so
+          # origin/main is present locally for the gate's file-size ratchet —
+          # the gate only READS origin/main and issues no authenticated
+          # `git fetch`, so dropping persisted credentials is safe.
+          persist-credentials: false
+
+      # Rust test jobs can sit near the standard runner's disk ceiling (issue
+      # #722). This lane builds the workspace, both binding modules, pulls the
+      # dataset corpus, AND — after #1269 — provisions a large swapfile on /mnt
+      # for OOM headroom, so free disk is a co-factor in the observed runner
+      # kills. Reclaim the big unused toolchains with an INLINE cleanup rather
+      # than a third-party action: this job runs in-repo scripts, so a mutable
+      # `@main` action ref (a moving target that could be tampered with
+      # upstream) has no business running before the gate (roborev). Strips
+      # dotnet, android, haskell, unused /usr/local dirs, and the CodeQL
+      # sub-tree of the hosted toolcache — ~20-30 GB reclaimed with only in-repo
+      # shell.
+      #
+      # Deliberately does NOT remove "$AGENT_TOOLSDIRECTORY"
+      # (/opt/hostedtoolcache) itself: that is the tool-cache ROOT that the
+      # subsequent actions/setup-node and actions/setup-python steps use as their
+      # writable cache root. Deleting the root can leave those setup actions
+      # without an expected/writable directory and fail the job before the gate
+      # even runs (roborev). We remove only the specific large, unused CodeQL
+      # sub-tree of the toolcache and leave the root in place.
+      - name: Free disk space (issue #722, #1269)
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost || true
+          sudo docker image prune --all --force || true
+          df -h / | tail -1
+
+      # This lane RUNS the gate's clippy + fmt components, so it needs a
+      # toolchain that has clippy + rustfmt. Follow the quality-gates.yml
+      # pattern (the other lane that runs clippy): request the components
+      # explicitly on @stable rather than the node-ci/python-ci
+      # `rustup component remove clippy` normalization (#1217), which is for
+      # build-only lanes that must NOT reinstall clippy-preview. cargo/clippy
+      # invocations still honor rust-toolchain.toml (pins 1.88.0 w/ clippy +
+      # rustfmt), matching how the gate runs locally.
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: agent-gate-${{ hashFiles('**/Cargo.lock') }}
+          cache-on-failure: true
+
+      # Node toolchain for the gate's node-bindings component (napi build +
+      # the #1231 write-readback-content proof). Match node-ci.yml (Node 20).
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: bindings/node/package-lock.json
+
+      # Python toolchain for the gate's python-bindings component (maturin
+      # develop + pytest in a venv the gate creates itself). Match
+      # python-ci.yml (3.12).
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Restore dataset cache
+        id: dataset-cache
+        uses: actions/cache@v5
+        with:
+          path: test-data/datasets
+          key: datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
+
+      # Provision the pinned datasets so the dataset-dependent gate components
+      # (core/integration/write/smoke/tombstones-scan) run against real
+      # SSTables rather than silently skipping. fetch-datasets.sh reads
+      # DATASET_TAG/ASSET/SHA256 from env and honors the cache via .dataset-pin.
+      - name: Fetch datasets
+        run: bash ./test-data/scripts/fetch-datasets.sh
+
+      - name: Verify dataset corpus
+        run: bash test-data/scripts/check-dataset-manifest.sh test-data/datasets
+
+      # OOM headroom (issue #1269) — the real fix for the two runner kills. The
+      # standard ubuntu-latest runner has ~16 GB RAM and only a small default
+      # swap; the peak of the parallel Rust compile + the test set exceeds it and
+      # the runner process is OOM-killed (no step conclusion, no artifact, no
+      # logs). Provision a 13 GB swapfile on /mnt (the larger ephemeral disk,
+      # freed further by the free-disk-space step above) so peak memory spills to
+      # swap instead of triggering the OOM killer. Inline (no external action
+      # dependency); guarded so a residual runner-provided swap does not error.
+      - name: Add swap space
+        run: |
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile || true
+          sudo fallocate -l 13G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
+
+      # Legibility (issue #1269) — snapshot memory + disk immediately before the
+      # gate so a future failure has a baseline. An OOM-kill may prevent
+      # post-hoc prints from flushing, so we record state up front; the swapfile
+      # above is the actual remedy.
+      - name: Resource snapshot before gate
+        run: |
+          echo '=== free -h ==='
+          free -h
+          echo '=== df -h ==='
+          df -h
+          echo '=== swapon --show ==='
+          swapon --show || true
+
+      # Run the FULL gate (never --only). The gate exports CQLITE_DATASETS_ROOT
+      # itself (defaulting to $REPO_ROOT/test-data/datasets), but we set it
+      # explicitly so intent is visible and any tool reading it agrees. The
+      # gate exits non-zero on any component FAIL, which fails this step. We
+      # pin AGENT_GATE_SUMMARY_FILE so the summary is recoverable as an artifact
+      # even if the streamed stdout is truncated. Use a NON-hidden path (no
+      # leading dot) so actions/upload-artifact publishes it — v6 excludes
+      # hidden files by default, which would silently drop a dotfile summary.
+      - name: Run full agent gate
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          CQLITE_REQUIRE_FIXTURES: '1'
+          AGENT_GATE_SUMMARY_FILE: ${{ github.workspace }}/agent-gate-summary.txt
+        run: bash scripts/agent-gate.sh
+
+      # Legibility (issue #1269) — resource state after the gate, on success or
+      # a clean component failure. (A hard OOM-kill of the runner process may
+      # abort before this runs and its output may not flush; that case is
+      # what the swapfile above is meant to prevent. This step covers the
+      # non-OOM failure modes so peak/residual usage is still inspectable.)
+      - name: Resource snapshot after gate
+        if: always()
+        run: |
+          echo '=== free -h ==='
+          free -h
+          echo '=== df -h ==='
+          df -h
+
+      # Always publish the SUMMARY block (even on failure) so the exact
+      # per-component result table is inspectable from the run.
+      - name: Upload agent-gate summary
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: agent-gate-summary
+          path: agent-gate-summary.txt
+          if-no-files-found: warn
+          retention-days: 14
