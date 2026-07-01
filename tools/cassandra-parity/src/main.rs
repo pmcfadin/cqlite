@@ -8,8 +8,10 @@
 //! threshold, dominated by the corpus-audit CLI I/O helpers added under #1026
 //! (`walk_relative`, `read_sha256_file`, `read_corruption_fixtures` + their inline
 //! tests). Issue #1027 (Wave 1) only adds the thin `retention-check` subcommand
-//! (~21 lines); splitting the pre-existing corpus-audit I/O into its own module is
-//! out of this issue's scope, so the growth is acknowledged via
+//! (~21 lines) plus a Wave 2d ~12-line failure-branch call into
+//! `corpus_audit::audit_report::emit_on_failure` (the emit logic itself lives in
+//! that module, not here). Splitting the pre-existing corpus-audit I/O into its
+//! own module is out of this issue's scope, so the growth is acknowledged via
 //! `CQLITE_ALLOW_FILE_GROWTH=1`. A dedicated CLI-I/O split belongs to #1116.
 //!
 //! Usage:
@@ -353,6 +355,18 @@ fn cmd_corpus_audit(args: &Args) -> Result<ExitCode> {
         eprintln!(
             "corpus-audit: FAILED — {} finding(s)",
             report.findings.len()
+        );
+        // Issue #1027: the exhaustive_regeneration lane emits a conforming,
+        // scenario-id-keyed failure-artifact bundle (tier=exhaustive_regeneration,
+        // diffs[] with kind=audit_report) on every audit failure — never zero
+        // forensics (fail-closed). Orchestrated in `audit_report` to keep this
+        // branch small.
+        let command_line = std::env::args().collect::<Vec<_>>().join(" ");
+        corpus_audit::audit_report::emit_on_failure(
+            &m,
+            &report,
+            provenance.as_ref(),
+            &command_line,
         );
         Ok(ExitCode::FAILURE)
     }

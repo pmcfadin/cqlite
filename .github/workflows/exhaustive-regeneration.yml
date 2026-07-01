@@ -196,6 +196,7 @@ jobs:
       # change, provenance mismatch, or corruption-coverage gap (owner-pinned:
       # always hard-fail; no report-but-pass).
       - name: Corpus audit (manifest coverage + generated references)
+        id: corpus_audit
         run: |
           set -euo pipefail
           # `--corpus .` (repo root) is REQUIRED: manifest references are
@@ -236,16 +237,38 @@ jobs:
           retention-days: 90
           if-no-files-found: warn
 
+      # Issue #1027 (fail-closed, owner decision 2): a failed corpus audit MUST
+      # produce forensics. `corpus-audit` emits a conforming
+      # parity-failures/exhaustive_regeneration/<scenario_id>/failure-artifact.json
+      # (tier=exhaustive_regeneration, diffs[] with kind=audit_report) on failure;
+      # this guard asserts that record exists whenever the audit step failed, so a
+      # failed audit that produced ZERO forensics is itself a hard failure. Runs
+      # only when the audit step failed. Uses no `${{ }}` interpolation inside the
+      # shell (command-injection safety); the audit outcome is referenced only in
+      # the step `if:` condition, never passed to the shell.
+      - name: Assert failure-artifact bundle exists (fail-closed)
+        if: ${{ steps.corpus_audit.outcome == 'failure' }}
+        run: |
+          set -euo pipefail
+          count=$(find parity-failures/exhaustive_regeneration -name failure-artifact.json 2>/dev/null | wc -l | tr -d '[:space:]')
+          if [ "$count" -eq 0 ]; then
+            echo "FAIL-CLOSED: corpus audit failed but emitted NO failure-artifact record under parity-failures/exhaustive_regeneration/ (issue #1027)." >&2
+            exit 1
+          fi
+          echo "fail-closed OK: $count failure-artifact record(s) present"
+
       # Issue #1027: shared, scenario-id-keyed failure bundle. On a failed
       # corpus audit the exhaustive_regeneration lane emits a
       # parity-failures/exhaustive_regeneration/<scenario_id>/ bundle whose
       # record carries an `audit_report` diff entry (the corpus-audit report
-      # above). Uploaded under the shared name (if: always()) at the 90-day
+      # above). Uploaded under the shared name at the 90-day
       # exhaustive_regeneration tier minimum — see
       # docs/development/parity-ci-tiers.md and
-      # docs/development/parity-failure-artifacts.md.
+      # docs/development/parity-failure-artifacts.md. Uploaded only when the audit
+      # failed, with `if-no-files-found: error` so a missing bundle fails the
+      # upload too (belt-and-suspenders with the guard above).
       - name: Upload parity failure bundle (issue #1027)
-        if: ${{ always() }}
+        if: ${{ steps.corpus_audit.outcome == 'failure' }}
         uses: actions/upload-artifact@v4
         with:
           name: parity-failures-exhaustive-regeneration
@@ -253,4 +276,4 @@ jobs:
             parity-failures/**
             ${{ env.ARTIFACT_DIR }}/parity-failures/**
           retention-days: 90
-          if-no-files-found: ignore
+          if-no-files-found: error
