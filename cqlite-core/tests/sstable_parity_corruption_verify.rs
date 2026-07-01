@@ -123,33 +123,13 @@ fn sha256_file(path: &Path) -> String {
     format!("{:x}", h.finalize())
 }
 
-/// Deterministic hash over an ENTIRE fixture directory, byte-for-byte identical
-/// to `fixture_dir_sha256()` in `generate-corruption-corpus.sh` (issue #1294
-/// Item 1): sorted regular-file names directly under the dir; for each mix in the
-/// NUL-terminated relative name then the 8-byte-big-endian length + file bytes;
-/// finally the 8-byte-big-endian file count. This binds the captured verdict to
-/// the COMPLETE set of bytes `sstableverify` reads, not just the mutated component.
-fn fixture_dir_sha256(dir: &Path) -> String {
-    use sha2::{Digest, Sha256};
-    let mut names: Vec<String> = std::fs::read_dir(dir)
-        .unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()))
-        .flatten()
-        .filter(|e| e.path().is_file())
-        .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
-        .collect();
-    names.sort();
-    let mut h = Sha256::new();
-    for n in &names {
-        h.update(n.as_bytes());
-        h.update([0u8]);
-        let data = std::fs::read(dir.join(n))
-            .unwrap_or_else(|e| panic!("read {}: {e}", dir.join(n).display()));
-        h.update((data.len() as u64).to_be_bytes());
-        h.update(&data);
-    }
-    h.update((names.len() as u64).to_be_bytes());
-    format!("{:x}", h.finalize())
-}
+// The Rust side of the cross-language `fixture_dir_sha256` contract lives in ONE
+// shared place (issue #1294 Item 1) so the parity test and the fast unit test
+// (`fixture_dir_sha256_crosslang.rs`) pin the SAME algorithm — a copy would defeat
+// the purpose. See `common/fixture_dir_hash.rs`.
+#[path = "common/fixture_dir_hash.rs"]
+mod fixture_dir_hash;
+use fixture_dir_hash::fixture_dir_sha256;
 
 /// Validate the fixture bindings against the COMMITTED bytes (issue #1294 Item 1,
 /// roborev Finding 1) — this is always **MODE 1** of the unified two-mode model.
