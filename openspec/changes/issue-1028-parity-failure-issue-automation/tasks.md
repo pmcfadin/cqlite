@@ -9,15 +9,19 @@
 ## 2. The automation workflow
 
 - [x] 2.1 Add `.github/workflows/parity-failure-issue.yml` — `workflow_run` (completed) over the parity lanes
-      + `workflow_dispatch`; `permissions: {issues: write, contents: read}`; board-sync token-guard idiom.
-- [x] 2.2 Act only when `conclusion == failure` AND origin event ∈ {schedule, push(main), workflow_dispatch};
-      skip pull_request.
+      + `workflow_dispatch`; `permissions: {issues: write, contents: read, actions: read}`
+      (actions:read is required for `gh run download` of another run's artifact); board-sync
+      token-guard idiom.
+- [x] 2.2 Act on `conclusion ∈ {failure (file), success (resolve)}` AND origin event ∈
+      {schedule, push(main), workflow_dispatch}; skip pull_request.
 - [x] 2.3 Download the failed run's `parity-failures.json` (degraded summary/log parse + surfaced notice if
       absent); compute the `v1|sha256(...)` fingerprint per failing scenario.
 - [x] 2.4 Dedup: `gh issue list --label parity-failure --state open` → substring-match `<!-- PARITY-FAIL:<fp> -->`;
       update existing (dated comment + latest-run link) or create new (epic #974 + scenario ID + tier + artifact
       links + repro cmd + summary). Warn loudly if the list cap is hit.
-- [x] 2.5 Green-run path: post a resolution comment on a tracked fingerprint's open issue; do NOT auto-close.
+- [x] 2.5 Green-run path WIRED end-to-end: the automation also triggers on `success` completions of the
+      tracked lanes and invokes `parity-failure-issue.py resolve`, posting a resolution comment on the lane's
+      open `parity-failure` issues (whole-lane scope; owner-blessed); do NOT auto-close.
 - [x] 2.6 Non-gating + fail-open: never change the parity result; token absent → notice + exit 0.
 
 ## 3. Fingerprint/dedup unit tests (smoke, wiring-evidence)

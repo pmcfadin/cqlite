@@ -45,7 +45,7 @@ def _args(**overrides):
     ns = argparse.Namespace(
         failures_json=None, summary_file=None, open_issues_json=None,
         run_url="https://gh/run/1", dry_run=True, conclusion="failure",
-        tier="nightly_docker", repro="cargo test -p x",
+        tier="nightly_docker", repro="cargo test -p x", workflow="",
     )
     for k, v in overrides.items():
         setattr(ns, k, v)
@@ -238,6 +238,65 @@ class ResolveTests(unittest.TestCase):
             body = out.getvalue()
             self.assertIn("#55", body)
             self.assertIn("Not auto-closed", pfi.resolution_comment("u"))
+
+    def _capture_gh(self):
+        """Patch pfi._gh to record argv and never touch GitHub; returns the call log."""
+        calls = []
+
+        def fake_gh(argv):
+            calls.append(argv)
+            return ""  # gh create would return a URL; comment returns nothing meaningful
+
+        self._orig_gh = pfi._gh
+        pfi._gh = fake_gh
+        self.addCleanup(lambda: setattr(pfi, "_gh", self._orig_gh))
+        return calls
+
+    def test_green_lane_resolve_comments_all_open_and_never_closes(self):
+        # R4 green-run wiring: no --failures-json → lane-scoped resolve posts a resolution
+        # comment on EVERY open parity-failure issue and NEVER closes any.
+        calls = self._capture_gh()
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            oj = _write(tmp, "open.json", [
+                {"number": 55, "body": "<!-- PARITY-FAIL:aaaaaaaaaaaa -->"},
+                {"number": 56, "body": "<!-- PARITY-FAIL:bbbbbbbbbbbb -->"},
+            ])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = pfi.cmd_resolve(_args(
+                    failures_json=None, open_issues_json=oj,
+                    run_url="https://gh/run/GREEN", dry_run=False))
+            self.assertEqual(rc, 0)
+        # One resolution comment per open issue.
+        comment_calls = [c for c in calls if len(c) > 2 and c[1] == "issue" and c[2] == "comment"]
+        self.assertEqual(len(comment_calls), 2)
+        commented = {c[3] for c in comment_calls}
+        self.assertEqual(commented, {"55", "56"})
+        for c in comment_calls:
+            self.assertIn("https://gh/run/GREEN", " ".join(c))
+        # NEVER closes: no `gh issue close` call is ever emitted.
+        self.assertFalse(any("close" in c for c in calls),
+                         "resolve must never close an issue")
+
+    def test_green_lane_resolve_workflow_filter_scopes_issues(self):
+        # A --workflow filter resolves only issues whose body records that lane.
+        calls = self._capture_gh()
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            oj = _write(tmp, "open.json", [
+                {"number": 55, "body": "**Workflow:** `compression-corruption-parity.yml`"},
+                {"number": 56, "body": "**Workflow:** `tombstone-ttl-parity.yml`"},
+            ])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = pfi.cmd_resolve(_args(
+                    failures_json=None, open_issues_json=oj,
+                    workflow="compression-corruption-parity.yml", dry_run=False))
+            self.assertEqual(rc, 0)
+        comment_calls = [c for c in calls if len(c) > 2 and c[2] == "comment"]
+        self.assertEqual([c[3] for c in comment_calls], ["55"])
+        self.assertFalse(any("close" in c for c in calls))
 
 
 if __name__ == "__main__":

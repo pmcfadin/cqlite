@@ -8,7 +8,7 @@ name: Parity Failure Issue Automation
 # spam one issue per PR).
 #
 # Design: openspec/changes/issue-1028-parity-failure-issue-automation/{proposal,design}.md
-#   D1 workflow_run trigger; act only on non-PR `failure` runs.
+#   D1 workflow_run trigger; act only on non-PR runs.
 #   D2 read the failed run's `parity-failures.json` artifact; a degraded summary/log
 #      parse is SURFACED (never silent); zero-failures-on-failure is an anomaly.
 #   D3 stable v1|sha256 fingerprint per scenario (scripts/parity-failure-issue.py).
@@ -16,6 +16,8 @@ name: Parity Failure Issue Automation
 #      never duplicate.
 #   D5 NON-GATING + fail-open: this job never changes the parity lane's result; absent
 #      issue-write token -> `::notice::` + exit 0; never auto-closes.
+#   R4 on a SUCCESS conclusion of a tracked lane, post a "resolved" comment on that
+#      lane's open parity-failure issues (never auto-closes) — same allowlist + guard.
 #
 # SECURITY: this workflow consumes an UNTRUSTED `workflow_run` payload. It never
 # interpolates event fields into a `run:` shell — every event value is passed via a
@@ -52,14 +54,15 @@ concurrency:
 jobs:
   file-parity-failure-issue:
     runs-on: ubuntu-latest
-    # D1: only react to a FAILED run whose origin event was schedule / push(main) /
-    # workflow_dispatch. This `if` is a coarse pre-filter over trusted GitHub-computed
-    # fields (event name / conclusion / branch); the Guard step below re-validates
-    # fail-closed before any token use. A manual workflow_dispatch of THIS workflow
-    # always proceeds (replay path).
+    # D1/R4: react to a FAILED (file path) OR a SUCCESS (resolve path) run whose origin
+    # event was schedule / push(main) / workflow_dispatch. This `if` is a coarse pre-filter
+    # over trusted GitHub-computed fields (event name / conclusion / branch); the Guard
+    # step below re-validates fail-closed before any token use. A manual workflow_dispatch
+    # of THIS workflow always proceeds (replay path).
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'failure' &&
+      ((github.event.workflow_run.conclusion == 'failure' ||
+        github.event.workflow_run.conclusion == 'success') &&
        github.event.workflow_run.event != 'pull_request')
     env:
       # Pass untrusted payload fields as env vars, never inline into a run: shell.
@@ -116,7 +119,11 @@ jobs:
 
       - name: Download failed run's parity-failures.json artifact
         id: artifact
-        if: steps.guard.outputs.skip != 'true' && steps.validate.outputs.proceed == 'true'
+        # Only the file path (failure or manual replay) needs the artifact; a green
+        # (success) resolve run has no failures artifact to fetch.
+        if: >-
+          steps.guard.outputs.skip != 'true' && steps.validate.outputs.proceed == 'true' &&
+          (env.WR_CONCLUSION != 'success' || env.TRIGGER == 'workflow_dispatch')
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -144,7 +151,10 @@ jobs:
           fi
 
       - name: File / update the deduplicated parity-failure issue
-        if: steps.guard.outputs.skip != 'true' && steps.validate.outputs.proceed == 'true'
+        # Failure conclusion, or a manual replay (workflow_dispatch defaults to filing).
+        if: >-
+          steps.guard.outputs.skip != 'true' && steps.validate.outputs.proceed == 'true' &&
+          (env.WR_CONCLUSION != 'success' || env.TRIGGER == 'workflow_dispatch')
         env:
           HAVE_ARTIFACT: ${{ steps.artifact.outputs.have_artifact }}
         run: |
@@ -159,3 +169,25 @@ jobs:
           # the script itself. (The parity lane's own conclusion is untouched regardless.)
           python3 scripts/parity-failure-issue.py "${ARGS[@]}" || \
             echo "::warning::parity-failure-issue script exited non-zero (non-gating; parity result unchanged)."
+
+      - name: Resolve tracked issues on a green lane (R4 — comment only, never close)
+        # Green (success) conclusion of a tracked lane: post a "resolved" comment on that
+        # lane's open parity-failure issues. Manual replays go through the file path above.
+        if: >-
+          steps.guard.outputs.skip != 'true' && steps.validate.outputs.proceed == 'true' &&
+          env.WR_CONCLUSION == 'success' && env.TRIGGER != 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          # HONEST WHOLE-LANE SCOPE (owner-blessed, issue #1028): a green tracked-lane
+          # completion resolves ALL open parity-failure issues, not a name-filtered subset.
+          # Rationale: the issue body records the workflow *file* (e.g.
+          # compression-corruption-parity.yml) while the workflow_run payload only carries
+          # the *display name* (e.g. "CI: Compression / Corruption Parity ..."), so a
+          # substring filter would silently match nothing. We only ever COMMENT
+          # "resolved on run <url>" and NEVER close, so over-broad resolution is safe: a
+          # human confirms + closes. WR_URL is untrusted workflow_run payload -> passed via
+          # a QUOTED env var, never inlined as a workflow expression. Fail-open: a resolve
+          # error must never red this job or the parity lane.
+          python3 scripts/parity-failure-issue.py resolve \
+            --run-url "${WR_URL:-}" || \
+            echo "::warning::parity-failure-issue resolve exited non-zero (non-gating; parity result unchanged)."

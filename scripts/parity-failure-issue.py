@@ -20,6 +20,10 @@ Design (see openspec/changes/issue-1028-parity-failure-issue-automation/):
       loudly if the open-issue lookup hits its cap (no silent truncation).
   D5  non-gating, fail-open: absent issue-write token -> `::notice::` + exit 0; a
       subsequent green run posts a "resolved" comment but does NOT auto-close.
+  R4  the `resolve` subcommand implements the green-run path: with `--failures-json` it
+      resolves only the matching fingerprints; without it (the green-lane wiring) it posts
+      a resolution comment on every open `parity-failure` issue (optionally lane-filtered
+      via `--workflow`), never closing any.
 
 The GitHub-touching paths sit behind explicit seams (`--open-issues-json`,
 `--failures-json`) so the unit tests run with no network. This mirrors
@@ -343,29 +347,61 @@ def load_degraded(summary_file: str | None) -> list[dict]:
     return failures
 
 
+def _resolve_one(existing: dict, run_url: str, dry_run: bool) -> None:
+    """Post ONE resolution comment; NEVER close (D5 / R4)."""
+    if dry_run:
+        print("--- DRY RUN (resolve) ---")
+        print(f"comment #{existing['number']}: {resolution_comment(run_url)}")
+        return
+    _gh(["gh", "issue", "comment", str(existing["number"]),
+         "--body", resolution_comment(run_url)])
+    print(f"resolved-comment: #{existing['number']} (not closed)")
+
+
 def cmd_resolve(args) -> int:
-    """Post a resolution comment on a tracked fingerprint's open issue; never close (D5)."""
-    failures = []
-    try:
-        failures = load_failures(args.failures_json)
-    except DegradedParse:
-        # For resolve we need explicit fingerprints; degraded resolve is a no-op notice.
-        print("::notice::parity-failure-issue: resolve had no structured failures — "
-              "nothing to resolve", file=sys.stderr)
-        return 0
+    """Post a resolution comment on tracked open parity-failure issues; never close (D5 / R4).
+
+    Two modes, both fail-open and non-closing:
+
+    * **fingerprint-scoped** — when `--failures-json` supplies explicit failures, resolve
+      only the issues whose fingerprint matches (precise; useful for a targeted replay).
+    * **lane-scoped** (the green-run wiring, R4) — a subsequent GREEN run has no failures
+      to fingerprint, so we resolve every open `parity-failure` issue tied to the
+      now-green lane. Lane membership is matched by `--workflow` as a substring of the
+      issue body (the body records `**Workflow:** <file>`); when `--workflow` is empty we
+      resolve ALL open parity-failure issues. Resolving the whole lane on a full-green run
+      is intentional and honest — we do not know which subset flipped green, and we only
+      ever COMMENT, never close (a human confirms + closes).
+    """
     open_issues = load_open_issues(args)
-    for failure in failures:
-        fingerprint = compute_fingerprint(failure)
-        existing = find_existing(open_issues, fingerprint)
-        if existing is None:
+
+    # Fingerprint-scoped resolve (explicit failures provided).
+    if args.failures_json:
+        try:
+            failures = load_failures(args.failures_json)
+        except DegradedParse:
+            print("::notice::parity-failure-issue: resolve had no structured failures — "
+                  "nothing to resolve", file=sys.stderr)
+            return 0
+        for failure in failures:
+            existing = find_existing(open_issues, compute_fingerprint(failure))
+            if existing is not None:
+                _resolve_one(existing, args.run_url, args.dry_run)
+        return 0
+
+    # Lane-scoped resolve (green-run path): comment on every open parity-failure issue
+    # belonging to the now-green lane (or all, if no lane filter given).
+    workflow = (getattr(args, "workflow", None) or "").strip()
+    resolved = 0
+    for issue in open_issues:
+        body = issue.get("body") or ""
+        if workflow and workflow not in body:
             continue
-        if args.dry_run:
-            print("--- DRY RUN (resolve) ---")
-            print(f"comment #{existing['number']}: {resolution_comment(args.run_url)}")
-            continue
-        _gh(["gh", "issue", "comment", str(existing["number"]),
-             "--body", resolution_comment(args.run_url)])
-        print(f"resolved-comment: #{existing['number']} (not closed)")
+        _resolve_one(issue, args.run_url, args.dry_run)
+        resolved += 1
+    if resolved == 0:
+        scope = f"for lane '{workflow}'" if workflow else "for any lane"
+        print(f"no open {PARITY_LABEL} issues to resolve {scope} — nothing to do")
     return 0
 
 
@@ -399,6 +435,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     rs = sub.add_parser("resolve", help="post a resolution comment (never closes)")
     common(rs)
+    rs.add_argument("--workflow", default="",
+                    help="lane-scope filter: only resolve issues whose body records this "
+                         "workflow (substring match); empty resolves all open parity-failure "
+                         "issues. Ignored when --failures-json is supplied.")
 
     return p
 
