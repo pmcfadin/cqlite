@@ -912,14 +912,25 @@ mod tests {
 
         let mut engine = WriteEngine::new(config).unwrap();
 
+        // INDEPENDENTLY-KNOWN row count: the test controls exactly how many rows
+        // it writes, so we anchor the read-back assertion to that literal — NOT to
+        // `report.row_count`, which `export_sstable` itself derives from the same
+        // shared `read_statistics_from_export` reader (issue #1327 finding 2: a
+        // broken reader would satisfy a `row_count == report.row_count` check
+        // circularly). 4 live rows + 4 cell-tombstone rows (each tombstone lands
+        // on a distinct new partition, creating one row) == 8 totalRows.
+        const LIVE_ROWS: i32 = 4;
+        const TOMBSTONE_ROWS: i32 = 4;
+        const EXPECTED_TOTAL_ROWS: u64 = (LIVE_ROWS + TOMBSTONE_ROWS) as u64;
+
         // Live rows.
-        for i in 0..4 {
+        for i in 0..LIVE_ROWS {
             let mutation = create_test_mutation(i, &format!("User{}", i), 1_000_000 + i as i64);
             engine.write(mutation).unwrap();
         }
         // Cell tombstones with explicit local-deletion-times → non-empty
         // `estimatedTombstoneDropTime` histogram in the flushed Statistics.db.
-        for i in 100..104 {
+        for i in 100..(100 + TOMBSTONE_ROWS) {
             let table_id = TableId::new("test_ks", "test_table");
             let pk = PartitionKey::single("id", Value::Integer(i));
             let ops = vec![CellOperation::Delete {
@@ -942,10 +953,21 @@ mod tests {
 
         // Read the exported Statistics.db back through the production read path.
         let (_partitions, row_count) = read_statistics_from_export(&report.components).unwrap();
+
+        // Assert against the INDEPENDENTLY-KNOWN written count, so a broken reader
+        // is actually caught. Cross-checking `report.row_count` here would be
+        // circular (it comes from the same reader), so we additionally assert the
+        // report agrees with the same independent anchor.
         assert_eq!(
-            row_count, report.row_count,
-            "read-back totalRows must match the writer-reported count when the \
-             tombstone histogram is non-empty"
+            row_count, EXPECTED_TOTAL_ROWS,
+            "read-back totalRows must equal the number of rows the test WROTE \
+             ({EXPECTED_TOTAL_ROWS}) when the tombstone histogram is non-empty; a \
+             broken dynamic tombstone-histogram skip would read a different value"
+        );
+        assert_eq!(
+            report.row_count, EXPECTED_TOTAL_ROWS,
+            "export report row_count must also equal the independently-known \
+             written count ({EXPECTED_TOTAL_ROWS})"
         );
 
         // Prove the tombstone histogram is actually non-empty AND that the OLD
