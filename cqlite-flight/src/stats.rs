@@ -452,14 +452,10 @@ mod tests {
     // synchronous (callers offload it via spawn_blocking), so build first then
     // gather directly.
     //
-    // The write-engine StatisticsWriter emits EMPTY estimated histograms, so the
-    // histogram-derived partition_count is 0 for write-engine SSTables (real
-    // Cassandra files carry a populated histogram — see the dataset-backed test;
-    // the write-engine fix is issue #1327). With positive rows but zero
-    // partitions the totals are contradictory, so enforce_count_consistency
-    // fails the response closed (complete=false). This test asserts the
-    // per-SSTable COUNT, that gather succeeds over a multi-SSTable directory, and
-    // that the contradiction is reported incomplete.
+    // The write-engine StatisticsWriter now populates the estimated histograms
+    // (issue #1327), so write-produced SSTables should surface authoritative
+    // nonzero partition counts just like real Cassandra files. This test asserts
+    // the per-SSTable COUNT and summed counts over a multi-SSTable directory.
     #[test]
     fn gather_counts_sstables_in_directory() {
         let schema = simple_schema();
@@ -476,12 +472,13 @@ mod tests {
         let stats = gather_table_stats(&dir).expect("gather");
 
         assert_eq!(stats.sstable_count, 2, "two SSTables decoded");
-        assert!(
-            !stats.complete,
-            "write-engine empty histogram → rows>0 but partitions==0 → fail closed (issue #1327)"
+        assert!(stats.complete, "every write-produced Statistics.db decoded");
+        assert_eq!(
+            stats.partition_count, 4,
+            "two partitions per SSTable, summed per SSTable"
         );
-        assert_eq!(stats.partition_count, 0);
-        assert!(stats.live_rows > 0);
+        assert_eq!(stats.live_rows, 4);
+        assert_eq!(stats.skipped_sstables, 0);
     }
 
     /// A directory containing an UNDECODABLE `Statistics.db` must mark the response
@@ -550,14 +547,10 @@ mod tests {
         );
     }
 
-    /// Every `Statistics.db` decodes cleanly (no skipped SSTables). Uses the
-    /// write-engine build path, whose StatisticsWriter emits a decodable STATS
-    /// component but with an EMPTY partition histogram (issue #1327), so
-    /// partition_count is 0 while live_rows is positive. That contradiction makes
-    /// enforce_count_consistency fail the response closed (complete=false) even
-    /// though no SSTable was skipped — exactly the safety net this fix adds. (Real
-    /// Cassandra fixtures, which carry a populated histogram, are asserted complete
-    /// in `gather_real_cassandra_fixture_authoritative_counts`.)
+    /// Every write-produced `Statistics.db` decodes cleanly (no skipped SSTables)
+    /// and now carries the populated partition-size histogram from issue #1327,
+    /// so a directory produced by the write engine is complete and reports the
+    /// partitions/rows it wrote.
     #[test]
     fn gather_fully_decodable_directory_is_complete() {
         let schema = simple_schema();
@@ -569,15 +562,10 @@ mod tests {
 
         let stats = gather_table_stats(&dir).expect("gather");
 
-        // No decode failures, but the empty-histogram contradiction (rows>0,
-        // partitions==0) forces complete=false (fail closed).
         assert_eq!(stats.skipped_sstables, 0, "every Statistics.db decoded");
-        assert!(
-            !stats.complete,
-            "write-engine empty histogram → contradictory totals → fail closed (issue #1327)"
-        );
-        assert_eq!(stats.partition_count, 0);
-        assert!(stats.live_rows > 0);
+        assert!(stats.complete, "write-produced stats are now authoritative");
+        assert_eq!(stats.partition_count, 2);
+        assert_eq!(stats.live_rows, 2);
     }
 
     /// A directory where one SSTable's `total_rows` is `None` (but a sibling has a
