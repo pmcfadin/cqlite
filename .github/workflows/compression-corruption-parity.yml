@@ -189,3 +189,20 @@ jobs:
               --test issue_1104_compaction_incompressible_chunks \
               --test sstable_parity_corruption_verify \
               -- --nocapture
+
+      # Issue #1027: shared, scenario-id-keyed failure bundle. Uploaded on
+      # failure (if: always()) so a red run yields one predictably-named
+      # artifact whose subdirectories are the failed `cass.*` scenario ids.
+      # This lane gates exhaustive_regeneration AND nightly_docker scenarios, so
+      # its binding retention minimum is the stricter 90 days
+      # (exhaustive_regeneration) — see docs/development/parity-ci-tiers.md.
+      - name: Upload parity failure bundle (issue #1027)
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: parity-failures-compression-corruption-parity
+          path: |
+            parity-failures/**
+            cqlite-core/parity-failures/**
+          if-no-files-found: ignore
+          retention-days: 90

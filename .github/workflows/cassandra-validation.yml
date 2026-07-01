@@ -202,6 +202,9 @@ jobs:
           echo "## Tier 3: Stress Tests" >> test_summary.md
           echo "Status: ${{ steps.tier3.outcome }}" >> test_summary.md
 
+      # Issue #1027: this lane gates a nightly_docker parity scenario
+      # (cass.write_load_path.live_readback.semantic_only), so its binding
+      # retention minimum is 30 days — see docs/development/parity-ci-tiers.md.
       - name: Upload Test Artifacts
         if: always()
         uses: actions/upload-artifact@v6
@@ -212,7 +215,23 @@ jobs:
             tier2_results.txt
             tier3_results.txt
             test_summary.md
-          retention-days: 14
+          retention-days: 30
+
+      # Issue #1027: shared, scenario-id-keyed failure bundle for the
+      # nightly_docker live-readback comparison. Uploaded on failure
+      # (if: always()); the record carries a `live_log` diff entry (the failing
+      # comparison's stdout/stderr). retention-days meets the nightly_docker
+      # tier minimum (30).
+      - name: Upload parity failure bundle (issue #1027)
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: parity-failures-cassandra-validation
+          path: |
+            parity-failures/**
+            cqlite-core/parity-failures/**
+          if-no-files-found: ignore
+          retention-days: 30
 
       - name: Comment on PR (Success)
         if: success() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository

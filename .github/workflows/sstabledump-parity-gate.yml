@@ -391,6 +391,22 @@ jobs:
             target/cassandra-parity/**
           retention-days: 30
 
+      # Issue #1027: shared, scenario-id-keyed failure bundle. Uploaded on
+      # failure (if: always()) so a red required_parity gate yields exactly one
+      # predictably-named artifact whose subdirectories are the failed
+      # `cass.*` scenario ids. retention-days meets the required_parity tier
+      # minimum (14) — see docs/development/parity-ci-tiers.md.
+      - name: Upload parity failure bundle (issue #1027)
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: parity-failures-sstabledump-parity-gate
+          path: |
+            parity-failures/**
+            cqlite-core/parity-failures/**
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Comment on PR (Success)
         if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.data_parity.outcome == 'success' && steps.index_parity.outcome == 'success' && steps.summary_parity.outcome == 'success' && steps.statistics_parity.outcome == 'success' && steps.toc_component_parity.outcome == 'success' && steps.index_db_strict_parity.outcome == 'success' && steps.statistics_db_strict_parity.outcome == 'success' && steps.compression_info_parity.outcome == 'success' && steps.compression_info_strict_parity.outcome == 'success' && steps.filter_db_parity.outcome == 'success' && steps.repaired_metadata_parity.outcome == 'success' && steps.row_framing_parity.outcome == 'success' && steps.static_clustering_parity.outcome == 'success' && steps.ttl_tombstone_range_parity.outcome == 'success' && steps.wide_partition_promoted_index_parity.outcome == 'success' && steps.differential_compaction_parity.outcome == 'success' && steps.writetime_ttl_parity.outcome == 'success' && steps.v5_compressed_legacy_parity.outcome == 'success'
         uses: actions/github-script@v8

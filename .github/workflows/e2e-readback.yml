@@ -151,13 +151,31 @@ jobs:
           echo "Artifact contents:"
           find /tmp/e2e-artifacts -type f | sort
 
+      # Issue #1027: this lane gates a nightly_docker parity scenario
+      # (cass.bti_big_version_matrix.bti_da_write_read), so its binding retention
+      # minimum is 30 days — see docs/development/parity-ci-tiers.md.
       - name: Upload failure artifacts
         if: failure()
         uses: actions/upload-artifact@v6
         with:
           name: e2e-readback-failure-${{ github.run_id }}
           path: /tmp/e2e-artifacts/
-          retention-days: 14
+          retention-days: 30
+
+      # Issue #1027: shared, scenario-id-keyed failure bundle for the
+      # nightly_docker live BTI (da) write/read comparison. The record carries a
+      # `live_log` diff entry (the failing comparison's stdout/stderr).
+      # retention-days meets the nightly_docker tier minimum (30).
+      - name: Upload parity failure bundle (issue #1027)
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: parity-failures-e2e-readback
+          path: |
+            parity-failures/**
+            /tmp/e2e-artifacts/parity-failures/**
+          if-no-files-found: ignore
+          retention-days: 30
 
       # Best-effort container cleanup (the script's EXIT trap handles the
       # happy path; this catches runner-level abrupt termination).

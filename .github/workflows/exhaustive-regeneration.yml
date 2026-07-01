@@ -235,3 +235,22 @@ jobs:
             ${{ env.ARTIFACT_DIR }}/*.log
           retention-days: 90
           if-no-files-found: warn
+
+      # Issue #1027: shared, scenario-id-keyed failure bundle. On a failed
+      # corpus audit the exhaustive_regeneration lane emits a
+      # parity-failures/exhaustive_regeneration/<scenario_id>/ bundle whose
+      # record carries an `audit_report` diff entry (the corpus-audit report
+      # above). Uploaded under the shared name (if: always()) at the 90-day
+      # exhaustive_regeneration tier minimum — see
+      # docs/development/parity-ci-tiers.md and
+      # docs/development/parity-failure-artifacts.md.
+      - name: Upload parity failure bundle (issue #1027)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-failures-exhaustive-regeneration
+          path: |
+            parity-failures/**
+            ${{ env.ARTIFACT_DIR }}/parity-failures/**
+          retention-days: 90
+          if-no-files-found: ignore

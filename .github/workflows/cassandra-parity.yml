@@ -106,6 +106,14 @@ jobs:
         # Fast, dependency-free: reads only the tier doc, schema JSON, and manifest YAML.
         run: cargo run -p cassandra-parity -- tier-contract-check --manifest test-data/cassandra-parity-manifest.yml
 
+      - name: Artifact retention meets tier minimums (#1027)
+        # Fail-closed enforcement of the per-tier retention policy: parses each
+        # parity workflow's upload-artifact `retention-days` (grouped by the tiers
+        # its manifest scenarios gate) against the documented minimums in
+        # docs/development/parity-ci-tiers.md. Fast, dependency-free: reads only
+        # the tier doc, manifest YAML, and workflow YAML already in the checkout.
+        run: cargo run -p cassandra-parity -- retention-check --manifest test-data/cassandra-parity-manifest.yml
+
       - name: Report is not stale
         run: cargo run -p cassandra-parity -- report --manifest test-data/cassandra-parity-manifest.yml --output docs/reports/cassandra-test-parity.md --check
 

@@ -167,3 +167,20 @@ jobs:
             cargo test -p cqlite-core --features write-support \
               --test issue_1020_udt_frozen_compaction_byte_parity \
               -- --nocapture
+
+      # Issue #1027: shared, scenario-id-keyed failure bundle. Uploaded on
+      # failure (if: always()) so a red run yields one predictably-named
+      # artifact whose subdirectories are the failed `cass.*` scenario ids.
+      # This lane gates required_parity byte-for-byte scenarios; retention-days
+      # meets the required_parity tier minimum (14) — see
+      # docs/development/parity-ci-tiers.md.
+      - name: Upload parity failure bundle (issue #1027)
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: parity-failures-live-cell-compaction-parity
+          path: |
+            parity-failures/**
+            cqlite-core/parity-failures/**
+          if-no-files-found: ignore
+          retention-days: 14
