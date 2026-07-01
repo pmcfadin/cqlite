@@ -10,11 +10,11 @@ Sources: [`docs/cassandra_test_index.md`](../../docs/cassandra_test_index.md) ·
 
 | Status | Scenarios |
 |---|---|
-| `mirrored` | 218 |
+| `mirrored` | 223 |
 | `partial` | 16 |
 | `planned` | 17 |
 | `out_of_scope` | 14 |
-| **total** | **265** |
+| **total** | **270** |
 
 ## Evidence counts
 
@@ -24,7 +24,7 @@ _Counts are per scenario; see [Distinct test backing](#distinct-test-backing-ded
 |---|---|
 | `byte_for_byte` | 118 |
 | `canonical_semantic` | 98 |
-| `smoke` | 7 |
+| `smoke` | 12 |
 | `partial` | 26 |
 | `out_of_scope` | 16 |
 
@@ -610,6 +610,11 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 
 ## Smoke-only scenarios
 
+- `cass.cli_reporting.failure_issue_bloom_fpr` — Structured-artifact fingerprinting with a surfaced degraded fallback
+- `cass.cli_reporting.failure_issue_dedup` — Deduplicated failure tracking (update, never duplicate; no auto-close)
+- `cass.cli_reporting.failure_issue_exhaustive_regeneration` — Exhaustive-regeneration failure files or updates a tracking issue
+- `cass.cli_reporting.failure_issue_nightly_docker` — Nightly-docker parity failure files or updates a tracking issue
+- `cass.cli_reporting.failure_issue_required_parity` — Required-parity failure signal routing (blocks the build)
 - `cass.cli_reporting.parity_manifest_lint_and_report` — Parity manifest lint and report tooling
 - `cass.compaction_merge.load_path_validity` — Compaction output load-path validity (Tier-1)
 - `cass.data_db_decode.row_preamble_size_mismatch` — Malformed row-preamble size fails loud
@@ -622,7 +627,7 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 
 Scenario counts above can overstate distinct proof: one backing test may exercise many scenario ids. The dedup view below counts unique test targets so the program is not read as more independent tests than exist (issue #1228).
 
-- Distinct backing tests: **62** across **245** scenarios that name a test.
+- Distinct backing tests: **63** across **250** scenarios that name a test.
 
 ### Tests backing more than one scenario
 
@@ -660,6 +665,7 @@ Scenario counts above can overstate distinct proof: one backing test may exercis
 | `cqlite-core/tests/issue_819_differential_compaction.rs` | 5 |
 | `cqlite-core/tests/issue_991_static_clustering_parity.rs` | 5 |
 | `cqlite-core/tests/sstable_parity_statistics_db_strict_test.rs` | 5 |
+| `scripts/tests/test_parity_failure_issue.py` | 5 |
 | `cqlite-core/tests/issue_1006_null_empty_boundary_parity.rs` | 4 |
 | `cqlite-core/tests/issue_1021_repaired_metadata_compaction_parity.rs` | 4 |
 | `cqlite-core/tests/issue_990_data_db_row_framing_parity.rs` | 4 |
@@ -776,6 +782,11 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 |---|---|---|
 | `cass.bti_big_version_matrix.big_nb_oa_read` | manual_debug | — |
 | `cass.bti_big_version_matrix.bti_da_write_read` | nightly_docker | .github/workflows/e2e-readback.yml |
+| `cass.cli_reporting.failure_issue_bloom_fpr` | fast_pr | .github/workflows/parity-failure-issue.yml |
+| `cass.cli_reporting.failure_issue_dedup` | fast_pr | .github/workflows/parity-failure-issue.yml |
+| `cass.cli_reporting.failure_issue_exhaustive_regeneration` | fast_pr | .github/workflows/parity-failure-issue.yml |
+| `cass.cli_reporting.failure_issue_nightly_docker` | fast_pr | .github/workflows/parity-failure-issue.yml |
+| `cass.cli_reporting.failure_issue_required_parity` | fast_pr | .github/workflows/parity-failure-issue.yml |
 | `cass.cli_reporting.parity_manifest_lint_and_report` | fast_pr | .github/workflows/cassandra-parity.yml |
 | `cass.commitlog_replay.recovery_out_of_scope` | fast_pr | — |
 | `cass.compaction.CompactionAwareWriterTest.live_row_count_preservation` | required_parity | .github/workflows/live-cell-compaction-parity.yml |
@@ -1046,6 +1057,11 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 |---|---|---|
 | `cass.bti_big_version_matrix.big_nb_oa_read` | nb, oa | test-data/datasets/sstables/test_oa/simple_table-4b7cd05064e711f1bd3ac7dbf655c673/oa-2-big-Data.db.jsonl |
 | `cass.bti_big_version_matrix.bti_da_write_read` | da | test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Data.db.jsonl |
+| `cass.cli_reporting.failure_issue_bloom_fpr` | — | — |
+| `cass.cli_reporting.failure_issue_dedup` | — | — |
+| `cass.cli_reporting.failure_issue_exhaustive_regeneration` | — | — |
+| `cass.cli_reporting.failure_issue_nightly_docker` | — | — |
+| `cass.cli_reporting.failure_issue_required_parity` | — | — |
 | `cass.cli_reporting.parity_manifest_lint_and_report` | — | — |
 | `cass.commitlog_replay.recovery_out_of_scope` | — | — |
 | `cass.compaction.CompactionAwareWriterTest.live_row_count_preservation` | nb | test-data/datasets/sstables/test_compactionparity/live_clustering-e094a78073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl |
