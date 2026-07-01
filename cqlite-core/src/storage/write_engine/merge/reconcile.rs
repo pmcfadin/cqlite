@@ -24,6 +24,9 @@
 //! 5. [`filter_dropped_columns`](ReconcileState::filter_dropped_columns) —
 //!    Step 3b: drop cells `ts <= drop_time`, capturing the pre-purge
 //!    `had_data_before` phantom-row guard state.
+//! 5b. [`expire_ttl_cells`](ReconcileState::expire_ttl_cells) — Step 3b′
+//!    (#1382): turn each expired live TTL cell (`localDeletionTime < now_secs`)
+//!    into a cell tombstone so Step 3c purges it under the same gc/overlap gate.
 //! 6. [`purge_gc_grace`](ReconcileState::purge_gc_grace) — Step 3c: drop
 //!    purgeable tombstones (overlap-safe), tallying genuine purges (#1037).
 //! 7. [`build`](ReconcileState::build) — Step 4: phantom-row guard + emit the
@@ -359,6 +362,68 @@ impl ReconcileState {
             .unwrap_or_default();
         let is_data_cell = |cell: &CellData| !ck_names.contains(cell.column.as_str());
         self.had_data_before = self.after_row_del.iter().any(is_data_cell);
+    }
+
+    /// Step 3b′ — TTL EXPIRY (issue #1382, parity Cassandra `ExpiringCell`
+    /// / `TTLExpiryTest`). Runs AFTER dropped-column filtering and BEFORE the
+    /// gc-grace purge (Step 3c) so an expired cell is first turned into a cell
+    /// tombstone and then purged by the SAME gc/overlap gate as any other cell
+    /// tombstone — matching Cassandra, which treats an expiring cell whose
+    /// `localDeletionTime` is past as a tombstone with `localDeletionTime =`
+    /// the expiry instant and the cell's own `markedForDeleteAt` unchanged.
+    ///
+    /// NO-HEURISTICS (#28): a cell is "expiring" ONLY when the reader surfaced
+    /// its authoritative expiry metadata — BOTH `ttl` (Some) AND
+    /// `local_deletion_time` (Some) — from the on-disk cell (never inferred
+    /// from the value's byte shape). `now_secs` is the compaction's pinned
+    /// evaluation instant (`None` disables expiry: a strict no-op).
+    ///
+    /// A cell that is ALREADY a tombstone (`is_cell_tombstone`) is left
+    /// untouched (it has no live value to expire). A complex ELEMENT
+    /// (`is_complex_element`) is intentionally NOT expired here: element-level
+    /// expiry needs per-path handling and is out of scope for #1382 (simple
+    /// cells only); it falls through unchanged.
+    ///
+    /// LDT NORMALIZATION (#921 finding 2): on-disk `localDeletionTime` is an
+    /// UNSIGNED 32-bit GC-clock second count carried as a wrapped `i32`;
+    /// reinterpret the bits as unsigned (`i64::from(ldt as u32)`) before the
+    /// compare so a far-future expiry is not treated as already-past.
+    pub(super) fn expire_ttl_cells(&mut self, now_secs: Option<i64>) {
+        let Some(now) = now_secs else {
+            return; // Expiry disabled — strict no-op.
+        };
+        for cell in &mut self.surviving {
+            // Only simple LIVE expiring cells are candidates. A cell tombstone
+            // has no live value; a complex element is out of scope (#1382).
+            if cell.is_complex_element || KWayMerger::is_cell_tombstone(cell) {
+                continue;
+            }
+            let (Some(_ttl), Some(ldt)) = (cell.ttl, cell.local_deletion_time) else {
+                continue; // Not an authoritative expiring cell.
+            };
+            // Expired iff the expiry instant (unsigned GC-clock seconds) is
+            // strictly before the pinned "now" — matching Cassandra's
+            // `localDeletionTime < now` liveness check for an expiring cell.
+            if i64::from(ldt as u32) < now {
+                // Convert the expired live cell into a cell tombstone whose
+                // `localDeletionTime` IS the expiry instant and whose
+                // `markedForDeleteAt` is the cell's own write timestamp
+                // (unchanged). Step 3c then purges it exactly like any other
+                // cell tombstone once its LDT is < gcBefore and the overlap
+                // gate allows. `ttl` is cleared: a tombstone carries no TTL.
+                cell.value = crate::types::Value::Tombstone(crate::types::TombstoneInfo {
+                    deletion_time: cell.timestamp,
+                    tombstone_type: crate::types::TombstoneType::CellTombstone,
+                    local_deletion_time: i64::from(ldt as u32),
+                    ttl: None,
+                    range_start: None,
+                    range_end: None,
+                });
+                cell.ttl = None;
+                // Keep `cell.local_deletion_time` = the expiry instant so
+                // `cell_effective_ldt` and the writer preserve it verbatim.
+            }
+        }
     }
 
     /// Step 3c — gc_grace / gcBefore tombstone PURGING (issue #845, parity
