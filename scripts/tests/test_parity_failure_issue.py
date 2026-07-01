@@ -192,6 +192,38 @@ class DegradedFallbackTests(unittest.TestCase):
             self.assertIn("::error::", err.getvalue())
             self.assertIn("anomaly", err.getvalue().lower())
 
+    def test_degraded_no_summary_on_failure_is_anomaly_not_silent(self):
+        # R3: the workflow's genuine no-artifact / no-downloadable-summary case invokes
+        # `file` with NEITHER --failures-json NOR --summary-file. On a failure-concluded
+        # run that must surface a loud anomaly, never a silent zero no-op.
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = pfi.cmd_file(_args(
+                failures_json=None, summary_file=None, conclusion="failure"))
+        self.assertEqual(rc, 2)
+        self.assertIn("::notice::", err.getvalue())  # degraded path surfaced
+        self.assertIn("degraded", err.getvalue().lower())
+        self.assertIn("::error::", err.getvalue())  # anomaly surfaced
+        self.assertIn("anomaly", err.getvalue().lower())
+
+    def test_degraded_summary_file_parses_failures_and_files(self):
+        # R3: when a summary artifact IS located, load_degraded parses it and the run
+        # files an issue (dry-run) rather than doing nothing.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            summary = tmp / "parity_summary.md"
+            summary.write_text("PASS cass.ok\nFAIL cass.compaction.stcs_merge details\n")
+            oj = _write(tmp, "open.json", [])
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = pfi.cmd_file(_args(
+                    failures_json=None, summary_file=str(summary),
+                    open_issues_json=oj, conclusion="failure"))
+            self.assertEqual(rc, 0)
+            self.assertIn("degraded=true", out.getvalue())
+            # A create plan was emitted for the parsed scenario (dry-run output).
+            self.assertIn("cass.compaction.stcs_merge", out.getvalue())
+
     def test_zero_parsed_on_success_is_noop(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):

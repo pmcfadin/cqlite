@@ -139,16 +139,36 @@ jobs:
           fi
           mkdir -p artifacts
           # RUN_ID is a GitHub-numeric run id; still pass via env, not inline.
-          if gh run download "${RUN_ID}" --name parity-failures --dir artifacts 2>/dev/null; then
-            if [ -f artifacts/parity-failures.json ]; then
-              echo "have_artifact=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "have_artifact=false" >> "$GITHUB_OUTPUT"
-            fi
-          else
-            echo "::notice::no parity-failures artifact on run ${RUN_ID} — degraded path"
-            echo "have_artifact=false" >> "$GITHUB_OUTPUT"
+          if gh run download "${RUN_ID}" --name parity-failures --dir artifacts 2>/dev/null \
+              && [ -f artifacts/parity-failures.json ]; then
+            echo "have_artifact=true" >> "$GITHUB_OUTPUT"
+            echo "summary_file=" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          # DEGRADED PATH (R3): the structured artifact is absent. Best-effort locate a
+          # summary/log artifact so load_degraded() has REAL input rather than a silent
+          # empty parse. We try known summary/report artifact names, then fall back to
+          # ALL artifacts, and hand the first readable summary-like file to the script.
+          echo "::notice::no parity-failures.json artifact on run ${RUN_ID} — using degraded summary/log fallback (R3)"
+          mkdir -p degraded
+          for art in exhaustive-regeneration-report parity-test-results parity-summary; do
+            gh run download "${RUN_ID}" --name "${art}" --dir degraded 2>/dev/null || true
+          done
+          # Last resort: pull every artifact this run produced (best-effort).
+          gh run download "${RUN_ID}" --dir degraded 2>/dev/null || true
+          # Pick the first plausible summary/log file (name contains summary/report/parity).
+          SUMMARY_FILE=""
+          while IFS= read -r f; do
+            SUMMARY_FILE="${f}"
+            break
+          done < <(find degraded -type f \( -iname '*summary*' -o -iname '*report*' -o -iname '*parity*' \) 2>/dev/null)
+          if [ -n "${SUMMARY_FILE}" ]; then
+            echo "::notice::degraded fallback parsing summary artifact: ${SUMMARY_FILE}"
+          else
+            echo "::notice::degraded fallback found no downloadable summary artifact — the script will surface an anomaly if this was a failure run"
+          fi
+          echo "have_artifact=false" >> "$GITHUB_OUTPUT"
+          echo "summary_file=${SUMMARY_FILE}" >> "$GITHUB_OUTPUT"
 
       - name: File / update the deduplicated parity-failure issue
         # Failure conclusion, or a manual replay (workflow_dispatch defaults to filing).
@@ -157,12 +177,18 @@ jobs:
           (env.WR_CONCLUSION != 'success' || env.TRIGGER == 'workflow_dispatch')
         env:
           HAVE_ARTIFACT: ${{ steps.artifact.outputs.have_artifact }}
+          SUMMARY_FILE: ${{ steps.artifact.outputs.summary_file }}
         run: |
           set -euo pipefail
           REPRO="See the failing run: ${WR_URL:-<run url unavailable>}"
           ARGS=(file --run-url "${WR_URL:-}" --conclusion "${WR_CONCLUSION:-failure}" --repro "${REPRO}")
           if [ "${HAVE_ARTIFACT:-false}" = "true" ]; then
             ARGS+=(--failures-json artifacts/parity-failures.json)
+          elif [ -n "${SUMMARY_FILE:-}" ]; then
+            # R3 degraded path: feed the located summary/log to load_degraded() so it has
+            # real input. If it parses zero failures on a failure run the script surfaces
+            # a loud anomaly (::error::) — never a silent no-op.
+            ARGS+=(--summary-file "${SUMMARY_FILE}")
           fi
           # Non-gating: never let a filing error red the automation. `|| true` keeps the
           # job green; the anomaly / degraded notices are surfaced to the run summary by
