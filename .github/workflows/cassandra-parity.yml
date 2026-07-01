@@ -156,15 +156,12 @@ jobs:
       REGEN_BRANCH: auto/parity-report-regen
       REPORT_PATH: docs/reports/cassandra-test-parity.md
       MANIFEST_PATH: test-data/cassandra-parity-manifest.yml
-      # A PR opened with the default GITHUB_TOKEN does NOT trigger `pull_request`
-      # CI (GitHub's built-in recursion guard), so the regen PR would land with no
-      # checks and could not merge via the green-check flow. Use a dedicated
-      # PAT/GitHub-App token (repo secret PARITY_HEAL_TOKEN, with `contents` +
-      # `pull-requests` write on this repo) so the regen PR fires CI normally.
-      # Same precedent as PROJECTS_TOKEN in project-board-sync.yml. When the secret
-      # is absent the heal step SKIPs with a ::notice:: rather than opening a
-      # check-less PR (issue #1338 roborev finding).
-      GH_TOKEN: ${{ secrets.PARITY_HEAL_TOKEN }}
+      # NOTE: the PAT/App token (secret PARITY_HEAL_TOKEN) is NOT exported job-wide.
+      # It is set as step-level `env:` only on the final `gh`-invoking step, so the
+      # `cargo build`/`cargo run` steps (which execute third-party crate build
+      # scripts) never see it — narrowing blast radius (issue #1338 roborev). The
+      # checkout step still receives it via its `token:` input so the later
+      # `git push` is authenticated as the PAT (which makes the regen PR fire CI).
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -228,6 +225,13 @@ jobs:
       - name: Open or update the regeneration PR
         if: steps.freshness.outputs.stale == 'true'
         shell: bash
+        # Scope the PAT/App token to only this step (not the cargo build/run steps).
+        # A PR opened with the default GITHUB_TOKEN does NOT trigger `pull_request`
+        # CI (recursion guard), so PARITY_HEAL_TOKEN (contents + pull-requests write,
+        # like PROJECTS_TOKEN) makes the regen PR fire CI. Absent → the guard below
+        # SKIPs with a ::notice:: rather than opening a check-less PR (issue #1338).
+        env:
+          GH_TOKEN: ${{ secrets.PARITY_HEAL_TOKEN }}
         run: |
           set -euo pipefail
           # A PR opened by the default GITHUB_TOKEN gets no CI (GitHub recursion
