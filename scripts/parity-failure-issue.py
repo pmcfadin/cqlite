@@ -457,14 +457,19 @@ def _resolve_one(existing: dict, run_url: str, dry_run: bool) -> None:
     new_body = set_resolved(existing.get("body") or "", run_url)
     if dry_run:
         print("--- DRY RUN (resolve) ---")
-        print(f"edit #{existing['number']}: stamped resolved marker")
         print(f"comment #{existing['number']}: {resolution_comment(run_url)}")
+        print(f"edit #{existing['number']}: stamped resolved marker")
         return
-    # Stamp the resolved marker on the body first, then post the (single) resolution
-    # comment. Body edit + comment only — never close (a human confirms + closes).
-    _gh(["gh", "issue", "edit", str(existing["number"]), "--body", new_body])
+    # Order matters (Fix A): post the (single) resolution COMMENT first, and stamp the
+    # resolved marker on the body ONLY after that comment succeeds. If we stamped the
+    # marker first and the comment then failed, a later green run would see the marker,
+    # SKIP the issue as already-resolved, and the required resolution comment would never
+    # be posted. By stamping only after a successful comment, a comment failure leaves the
+    # marker unstamped so the next green run retries and still posts exactly one comment on
+    # success. Comment + body edit only — never close (a human confirms + closes).
     _gh(["gh", "issue", "comment", str(existing["number"]),
          "--body", resolution_comment(run_url)])
+    _gh(["gh", "issue", "edit", str(existing["number"]), "--body", new_body])
     print(f"resolved-comment: #{existing['number']} (not closed)")
 
 

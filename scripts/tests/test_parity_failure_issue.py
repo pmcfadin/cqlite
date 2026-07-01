@@ -528,6 +528,64 @@ class ResolveTests(unittest.TestCase):
         self.assertEqual([c for c in calls if len(c) > 2 and c[2] == "comment"], [])
         self.assertIn("nothing to do", out.getvalue())
 
+    def test_resolve_comments_before_stamping_resolved_marker(self):
+        # Fix A (round 8): the resolution COMMENT must be posted BEFORE the body is edited
+        # to carry the resolved marker, so a comment failure never leaves the marker stamped
+        # (which would make a later green run skip the issue and drop the comment forever).
+        wf = "compression-corruption-parity.yml"
+        issue_body = f"<!-- PARITY-FAIL:aaaaaaaaaaaa -->\n**Workflow:** `{wf}`\n"
+        calls = self._capture_gh()
+        self._run_resolve(calls, [{"number": 55, "body": issue_body}], wf, "https://gh/run/G1")
+        gh_calls = [c for c in calls if len(c) > 2 and c[1] == "issue"]
+        ops = [c[2] for c in gh_calls]
+        # Success path: comment first, then the body edit that stamps the resolved marker.
+        self.assertEqual(ops, ["comment", "edit"])
+        stamped = self._body_after_resolve(calls, "55")
+        self.assertTrue(pfi.is_resolved(stamped), "success path stamps marker AFTER commenting")
+
+    def test_resolve_comment_failure_leaves_marker_unstamped_so_retry_re_posts(self):
+        # Fix A: if the resolution comment FAILS, the resolved marker must NOT be stamped, so
+        # a later green run retries and still posts exactly one comment on eventual success.
+        wf = "compression-corruption-parity.yml"
+        issue_body = f"<!-- PARITY-FAIL:aaaaaaaaaaaa -->\n**Workflow:** `{wf}`\n"
+
+        # First run: `gh issue comment` fails (transient); the failure propagates out of
+        # _resolve_one (cmd_resolve stays non-gating at the workflow level). Assert NO body
+        # edit was attempted → the marker is never stamped.
+        calls = []
+
+        def failing_gh(argv):
+            calls.append(argv)
+            if len(argv) > 2 and argv[2] == "comment":
+                raise SystemExit("error: `gh issue comment` failed: boom")
+            return ""
+
+        orig_gh = pfi._gh
+        pfi._gh = failing_gh
+        self.addCleanup(lambda: setattr(pfi, "_gh", orig_gh))
+        with tempfile.TemporaryDirectory() as d:
+            oj = _write(Path(d), "open.json", [{"number": 55, "body": issue_body}])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+                pfi.cmd_resolve(_args(
+                    failures_json=None, open_issues_json=oj,
+                    workflow=wf, run_url="https://gh/run/FAIL", dry_run=False))
+        self.assertTrue(any(c[2] == "comment" for c in calls if len(c) > 2),
+                        "comment is attempted first")
+        self.assertFalse(any(c[2] == "edit" for c in calls if len(c) > 2),
+                         "body edit (marker stamp) must NOT run after a failed comment")
+        self.assertFalse(pfi.is_resolved(issue_body),
+                         "original body carries no resolved marker → next green run retries")
+
+        # Retry: the SAME still-unresolved issue on a later green run → comment succeeds
+        # once and the marker is stamped (so subsequent green runs are idempotent).
+        calls2 = self._capture_gh()
+        self._run_resolve(calls2, [{"number": 55, "body": issue_body}], wf, "https://gh/run/G2")
+        comment2 = [c for c in calls2 if len(c) > 2 and c[2] == "comment"]
+        self.assertEqual(len(comment2), 1, "retry posts exactly one comment on success")
+        self.assertTrue(pfi.is_resolved(self._body_after_resolve(calls2, "55")),
+                        "successful retry stamps the resolved marker")
+
 
 if __name__ == "__main__":
     unittest.main()
