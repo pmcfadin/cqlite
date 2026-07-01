@@ -15,37 +15,23 @@
  */
 
 const { execSync } = require('child_process');
+const fs = require('fs');
+const path = require('path');
 
 const REPO_OWNER = process.env.GITHUB_REPOSITORY_OWNER || 'pmcfadin';
 const REPO_NAME = process.env.GITHUB_REPOSITORY_NAME || 'cqlite';
 const BRANCH = 'main';
+const PROTECTION_CONFIG_PATH = path.join(__dirname, 'branch-protection.json');
+
+function loadProtectionConfig() {
+  return JSON.parse(fs.readFileSync(PROTECTION_CONFIG_PATH, 'utf8'));
+}
 
 /**
  * Branch protection configuration
  * CRITICAL: These settings enforce quality gates with NO EXCEPTIONS
  */
-const PROTECTION_CONFIG = {
-  required_status_checks: {
-    strict: true,
-    contexts: [
-      'Quality Gates / quality-gates',  // Main quality gates job
-      'Mandatory SSTableDump Parity Validation',  // Issue #38 - Zero tolerance SSTable parity
-      'SSTableDump Parity Gate (Issue #38) / sstabledump-parity-validation',  // Full parity validation workflow
-    ]
-  },
-  enforce_admins: true,  // NO EXCEPTIONS - Even admins must follow quality gates
-  required_pull_request_reviews: {
-    required_approving_review_count: 1,
-    dismiss_stale_reviews: true,
-    require_code_owner_reviews: false,
-    restrict_pushes_that_create_files: false
-  },
-  restrictions: null,  // No push restrictions (rely on PR reviews + quality gates)
-  allow_force_pushes: false,  // CRITICAL: Prevent force pushes that bypass quality gates
-  allow_deletions: false,     // CRITICAL: Prevent accidental branch deletion
-  block_creations: false,     // Allow branch creation
-  required_conversation_resolution: true  // All PR conversations must be resolved
-};
+const PROTECTION_CONFIG = loadProtectionConfig();
 
 /**
  * Execute shell command with error handling
@@ -136,20 +122,12 @@ function applyBranchProtection() {
   console.log(configJson);
   
   try {
-    // Write config to temporary file
-    const fs = require('fs');
-    const tempFile = '/tmp/branch-protection.json';
-    fs.writeFileSync(tempFile, configJson);
-    
-    // Apply protection using GitHub API
+    // Apply the checked-in source-of-truth configuration using GitHub API.
     executeCommand(
-      `gh api --method PUT repos/${REPO_OWNER}/${REPO_NAME}/branches/${BRANCH}/protection --input "${tempFile}"`,
+      `gh api --method PUT repos/${REPO_OWNER}/${REPO_NAME}/branches/${BRANCH}/protection --input "${PROTECTION_CONFIG_PATH}"`,
       'Apply branch protection rules'
     );
-    
-    // Clean up temp file
-    fs.unlinkSync(tempFile);
-    
+
     console.log('✅ Branch protection rules applied successfully!');
     
   } catch (error) {
@@ -248,6 +226,11 @@ function displayInstructions() {
   console.log('  - Security vulnerabilities will BLOCK merges');
   console.log('  - Code formatting issues must be FIXED');
   console.log('');
+  console.log('📌 Required status checks from .github/branch-protection.json:');
+  PROTECTION_CONFIG.required_status_checks.contexts.forEach(context => {
+    console.log(`  - ${context}`);
+  });
+  console.log('');
   console.log('📚 Next steps:');
   console.log('  1. Test quality gates with a sample PR');
   console.log('  2. Train team on new quality standards');
@@ -300,6 +283,8 @@ if (require.main === module) {
 
 module.exports = {
   PROTECTION_CONFIG,
+  PROTECTION_CONFIG_PATH,
+  loadProtectionConfig,
   executeCommand,
   checkGitHubCLI,
   getCurrentProtection,

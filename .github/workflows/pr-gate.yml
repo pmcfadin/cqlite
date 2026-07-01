@@ -1,0 +1,68 @@
+name: Required PR Gate
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  required:
+    name: required
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Validate workflow policy
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "workflow policy"
+          -- ruby scripts/ci/validate-workflows.rb
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+        with:
+          components: rustfmt,clippy
+          cache-key: pr-gate
+
+      - name: Rust format check
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "cargo fmt"
+          -- cargo fmt --all -- --check
+
+      - name: cqlite-core clippy hard gate
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "cqlite-core clippy"
+          -- cargo clippy --package cqlite-core --all-targets --all-features -- -D warnings
+
+      - name: cqlite-core all-feature build
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "cqlite-core all-feature build"
+          -- cargo build --package cqlite-core --all-features
+
+      - name: cqlite-core fast representative tests
+        run: |
+          bash scripts/ci/ci-timing-summary.sh measure "cqlite-core fast tests" -- bash -e -u -o pipefail -c '
+            # Mirrors scripts/local/pre-merge.sh fast. The skipped tests are legacy
+            # write-path cases tracked outside this PR gate; keeping the same scope
+            # makes the required check deterministic and fast without Docker/datasets.
+            cargo test --package cqlite-core --lib --all-features --no-fail-fast -- \
+              --skip query::engine::plan_cache_tests \
+              --skip query::select_integration_tests \
+              --skip storage::tests::test_batch_operations \
+              --skip tests::test_database
+          '
+
+      - name: Required PR Gate timing summary
+        if: always()
+        run: bash scripts/ci/ci-timing-summary.sh summary "Required PR Gate timing"

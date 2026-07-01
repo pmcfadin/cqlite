@@ -11,29 +11,21 @@ name: "CI: Observability Gate"
 #
 # Like the perf-regression gate, both bench arms run on one runner so the delta is
 # immune to cross-machine variance.
+#
+# CI TIERING (issue #1368): dependency isolation and correctness stay on
+# observability-relevant PRs. The overhead benchmark runs only for PRs labeled
+# `ci:observability-overhead`, workflow_dispatch, or nightly schedule.
 
 on:
+  schedule:
+    # Nightly at 04:45 UTC
+    - cron: '45 4 * * *'
   pull_request:
     branches: [main]
-    paths:
-      - "cqlite-core/src/observability/**"
-      # Instrumented PRODUCTION paths: these define the spans/metrics the gate's
-      # tests guard, so a regression here must run the gate. (Without these the
-      # gate would never fire on the code it actually protects.)
-      - "cqlite-core/src/query/**"
-      - "cqlite-core/src/storage/**"
-      # Binding/flight surfaces are also instrumented (per-query/RPC spans + metrics).
-      - "bindings/**"
-      - "cqlite-flight/**"
-      - "cqlite-core/benches/observability_overhead.rs"
-      - "cqlite-core/tests/observability_correctness.rs"
-      - "cqlite-core/tests/observability_no_otel_default.rs"
-      - "cqlite-core/Cargo.toml"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "scripts/ci/observability_overhead.sh"
-      - "scripts/ci/observability_no_otel_default.sh"
-      - ".github/workflows/observability-gate.yml"
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    # Unfiltered so adding ci:observability-overhead can start the optional
+    # benchmark tier on any PR. A cheap classifier keeps correctness scoped to
+    # observability-relevant paths.
   workflow_dispatch:
 
 permissions:
@@ -55,8 +47,56 @@ env:
   BENCH_ARGS: "--sample-size 30 --warm-up-time 1 --measurement-time 5"
 
 jobs:
+  classify:
+    name: Classify observability scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run_correctness: ${{ steps.scope.outputs.run_correctness }}
+      run_overhead: ${{ steps.scope.outputs.run_overhead }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Classify PR paths and labels
+        id: scope
+        env:
+          HAS_OVERHEAD_LABEL: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:observability-overhead') }}
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "run_correctness=true" >> "$GITHUB_OUTPUT"
+            echo "run_overhead=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git diff --name-only \
+            "${{ github.event.pull_request.base.sha }}" \
+            "${{ github.event.pull_request.head.sha }}" > changed-files.txt
+
+          echo "Changed files:"
+          sed 's/^/  - /' changed-files.txt
+
+          relevant_regex='^(cqlite-core/src/observability/|cqlite-core/src/query/|cqlite-core/src/storage/|bindings/|cqlite-flight/|cqlite-core/benches/observability_overhead\.rs|cqlite-core/tests/observability_correctness\.rs|cqlite-core/tests/observability_no_otel_default\.rs|cqlite-core/Cargo\.toml|Cargo\.toml|Cargo\.lock|scripts/ci/observability_overhead\.sh|scripts/ci/observability_no_otel_default\.sh|\.github/workflows/observability-gate\.yml)'
+
+          run_correctness=false
+          if grep -Eq "$relevant_regex" changed-files.txt; then
+            run_correctness=true
+          fi
+
+          echo "run_correctness=${run_correctness}" >> "$GITHUB_OUTPUT"
+          echo "run_overhead=${HAS_OVERHEAD_LABEL}" >> "$GITHUB_OUTPUT"
+
   observability-gate:
-    name: Dependency isolation + correctness + overhead
+    name: Dependency isolation + correctness (+ optional overhead)
+    needs:
+      - classify
+    if: >-
+      needs.classify.outputs.run_correctness == 'true' ||
+      needs.classify.outputs.run_overhead == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -102,4 +142,16 @@ jobs:
 
       # 3. Zero-overhead-when-disabled: two-build bench comparison on one runner.
       - name: Observability overhead gate
+        if: ${{ needs.classify.outputs.run_overhead == 'true' }}
         run: bash scripts/ci/observability_overhead.sh
+
+      - name: Write CI tier summary
+        if: always()
+        run: |
+          {
+            echo "## Observability gate tier"
+            echo ""
+            echo "- Dependency isolation and correctness run on observability-relevant PRs."
+            echo "- Overhead benchmark runs on workflow_dispatch, nightly schedule, or PRs labeled \`ci:observability-overhead\`."
+            echo "- Ordinary observability PRs skip the Criterion overhead benchmark by default."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -66,6 +66,7 @@ concurrency:
 jobs:
   parity-manifest:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -157,6 +158,7 @@ jobs:
       github.ref == 'refs/heads/main' &&
       github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
       pull-requests: write

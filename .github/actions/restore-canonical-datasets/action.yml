@@ -1,0 +1,46 @@
+name: Restore Canonical Datasets
+description: Restore the canonical Cassandra dataset cache and repair partial caches.
+
+inputs:
+  dataset-tag:
+    description: GitHub release tag containing the canonical dataset asset.
+    required: false
+    default: datasets-v3
+  dataset-asset:
+    description: Canonical dataset tarball asset name.
+    required: false
+    default: cassandra5-small-full-v3.4.tar.gz
+  dataset-sha256:
+    description: Expected SHA256 digest for the canonical dataset asset.
+    required: false
+    default: 3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33
+  dataset-root:
+    description: Directory where the canonical dataset should be present.
+    required: false
+    default: test-data/datasets
+
+outputs:
+  cache-hit:
+    description: Whether the primary canonical dataset cache was restored.
+    value: ${{ steps.dataset-cache.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Restore canonical dataset cache
+      id: dataset-cache
+      uses: actions/cache@v5
+      with:
+        path: ${{ inputs.dataset-root }}
+        key: datasets-${{ inputs.dataset-tag }}-${{ inputs.dataset-sha256 }}
+        restore-keys: |
+          datasets-${{ inputs.dataset-tag }}-
+
+    - name: Fetch or repair canonical datasets
+      shell: bash
+      env:
+        DATASET_TAG: ${{ inputs.dataset-tag }}
+        DATASET_ASSET: ${{ inputs.dataset-asset }}
+        DATASET_SHA256: ${{ inputs.dataset-sha256 }}
+        CQLITE_DATASETS_ROOT: ${{ inputs.dataset-root }}
+      run: bash ./test-data/scripts/fetch-datasets.sh

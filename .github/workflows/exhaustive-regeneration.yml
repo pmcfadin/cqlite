@@ -9,17 +9,17 @@ name: Exhaustive Regeneration (parity corpus)
 # and deliberately does NOT commit regenerated binaries or publish a dataset asset
 # (design D6).
 #
-# Cadence (design D5, owner-pinned): weekly cron + manual dispatch only. It NEVER
-# runs on pull_request and never gates the fast/required PR path. See the tier
-# contract: docs/development/parity-ci-tiers.md (`exhaustive_regeneration`) and the
-# release checklist (`parity-release-checklist.md`).
+# Cadence: nightly cron + manual dispatch only. It NEVER runs on pull_request and
+# never gates the fast/required PR path. See the tier contract:
+# docs/development/parity-ci-tiers.md (`exhaustive_regeneration`) and the release
+# checklist (`parity-release-checklist.md`). This workflow packages regenerated
+# data only to compute provenance; it does NOT publish dataset assets.
 
 on:
   workflow_dispatch: {}
   schedule:
-    # Weekly, Sunday 06:00 UTC — slower than the nightly Docker lane (#1025),
-    # reflecting the cost of full-corpus generation + a Cassandra container.
-    - cron: '0 6 * * 0'
+    # Nightly at 08:10 UTC, after coverage and Docker parity lanes have started.
+    - cron: '10 8 * * *'
 
 permissions:
   contents: read
@@ -247,6 +247,7 @@ jobs:
         with:
           name: parity-failures
           path: parity-failures.json
+          retention-days: 90
           if-no-files-found: warn
 
       # One report artifact: provenance + audit report + generator logs. Always
@@ -305,3 +306,20 @@ jobs:
             ${{ env.ARTIFACT_DIR }}/parity-failures/**
           retention-days: 90
           if-no-files-found: error
+
+      - name: Write regeneration triage summary
+        if: always()
+        run: |
+          {
+            echo "## Exhaustive Regeneration"
+            echo ""
+            echo "- Event: ${{ github.event_name }}"
+            echo "- Commit: ${{ github.sha }}"
+            echo "- Branch: ${{ github.ref_name }}"
+            echo "- Report artifact: exhaustive-regeneration-report (retained 90 days)"
+            echo "- Failure artifact: parity-failures, when emitted (retained 90 days)"
+            echo "- Main logs: regenerate-datasets.log, generate-deltas.log, generate-compression-parity.log, gen-wide-bti.log, generate-corruption-corpus.log, package_datasets.log, corpus-audit-report.txt"
+            echo ""
+            echo "If this nightly run fails, download the report artifact first and start with corpus-audit-report.txt. Do not publish regenerated dataset assets from this workflow."
+            echo "Policy: docs/ci/ci-tier-policy.md"
+          } >> "$GITHUB_STEP_SUMMARY"

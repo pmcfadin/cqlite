@@ -1,294 +1,113 @@
-# 🚫 Quality Gates Enforcement Documentation
+# Quality Gates Enforcement
 
-## Overview
+This document describes the enforcement policy for CQLite quality gates during
+the CI runtime overhaul. The detailed tier contract lives in
+`docs/ci/ci-tier-policy.md`.
 
-This document outlines the **uncompromising quality gate enforcement** system for the CQLite project. These quality gates ensure that no code with issues can ever be merged into the main branch.
+## Enforcement Rules
 
-## 🔒 Enforcement Philosophy
+- Branch protection must require only stable aggregate checks.
+- The required PR gate must run on every pull request without path filters.
+- Heavy or surface-specific workflows belong in targeted, nightly, or release
+  tiers, not global branch protection.
+- Required check names must be changed deliberately and documented as a
+  migration rename.
+- `.github/branch-protection.json` is the applyable source of truth for required
+  status checks.
+- `.github/setup-branch-protection.js` must load that JSON file instead of
+  maintaining a second list.
+- Do not change `.github/branch-protection.json` to require a new status until
+  the producing workflow exists and has been proven on a PR.
 
-**ZERO TOLERANCE POLICY**: No warnings, no failing tests, no quality issues, no exceptions.
+## Required PR Gate
 
-- ❌ **NO WARNINGS** allowed in compilation
-- ❌ **NO FAILING TESTS** allowed
-- ❌ **NO CLIPPY LINTS** allowed  
-- ❌ **NO FORMATTING VIOLATIONS** allowed
-- ❌ **NO SECURITY VULNERABILITIES** allowed
-- ❌ **NO PERFORMANCE REGRESSIONS** allowed (>10%)
+The target globally required status check after #1364 is:
 
-## 🚫 Quality Gate Levels
-
-### 🚨 BLOCKING GATES (Cannot be overridden)
-
-1. **🔨 Compilation Enforcement**
-   - Zero warnings tolerance
-   - All features must compile
-   - Cross-platform compatibility required
-
-2. **🧪 Test Enforcement** 
-   - All tests must pass (100% success rate)
-   - No ignored or skipped tests in strict mode
-   - Documentation tests included
-
-3. **🎯 Code Quality Enforcement**
-   - Perfect code formatting (cargo fmt)
-   - Zero clippy lints allowed
-   - Ultra-strict lint configuration
-
-4. **🛡️ Security Enforcement**
-   - Zero known vulnerabilities
-   - Security audit must pass
-   - Dependency validation
-
-5. **⚡ Performance Enforcement**
-   - No regressions >10% slower
-   - Benchmark comparison with base branch
-   - Performance report generation
-
-### 🏁 Final Enforcement Gate
-
-All blocking gates must pass before the **Final Enforcement Gate** allows merge.
-
-## 🛠️ Enforcement Levels
-
-### Strict Mode (Default)
-- All gates enforced without exception
-- No ignored/skipped tests allowed
-- Performance regressions block merge
-- Duplicate dependencies blocked
-
-### Standard Mode  
-- Core gates enforced
-- Minor performance regressions allowed
-- Some duplicate dependencies tolerated
-
-### Permissive Mode
-- Basic gates only
-- Used only for emergency hotfixes
-
-## 🚀 Workflows
-
-### 1. Quality Gate Enforcement (`.github/workflows/quality-enforcement.yml`)
-- **Purpose**: Uncompromising quality enforcement
-- **Triggers**: PR events, pushes to main/develop
-- **Outputs**: Blocking status checks
-
-### 2. Quality Gates (`.github/workflows/quality-gates.yml`)  
-- **Purpose**: Comprehensive quality analysis
-- **Features**: Multi-platform testing, detailed reporting
-- **Integration**: Works with enforcement workflow
-
-## 🔐 Branch Protection Configuration
-
-### Protected Branches
-- `main` - Production branch
-- `develop` - Development branch
-
-### Protection Rules
-- ✅ **Require status checks**: All quality gates must pass
-- ✅ **Require up-to-date branches**: PRs must be current
-- ✅ **Require pull request reviews**: 1 approving review minimum
-- ✅ **Enforce for admins**: No admin overrides allowed
-- ❌ **Allow force pushes**: Completely disabled
-- ❌ **Allow deletions**: Completely disabled  
-- ✅ **Require linear history**: No merge commits
-
-### Required Status Checks
-```javascript
-// These checks MUST pass before merge
-[
-  'Quality Gate Enforcement / 🚫 BLOCKING - Compilation Enforcement',
-  'Quality Gate Enforcement / 🚫 BLOCKING - Test Enforcement',
-  'Quality Gate Enforcement / 🚫 BLOCKING - Code Quality Enforcement', 
-  'Quality Gate Enforcement / 🚫 BLOCKING - Security Enforcement',
-  'Quality Gate Enforcement / 🚫 FINAL ENFORCEMENT GATE',
-  // ... plus all CI checks
-]
+```text
+Required PR Gate / required
 ```
 
-## 👥 Team Workflow
+Issue #1364 owns adding `.github/workflows/pr-gate.yml` to produce that status
+and updating `.github/branch-protection.json`. Do not apply real GitHub branch
+protection requiring this status until the workflow exists and has run at least
+once.
 
-### For Developers
+The required PR gate must include:
 
-1. **Before Creating PR**:
-   ```bash
-   # Run local quality checks
-   cargo check --all-features
-   cargo test --all-features  
-   cargo fmt --all
-   cargo clippy --all-targets --all-features
-   cargo audit
-   ```
-
-2. **PR Creation**:
-   - Quality gates automatically run
-   - All gates MUST pass before review
-   - Performance benchmarks compared
-
-3. **PR Review**:
-   - Code review required from team member
-   - Quality gate results visible in PR
-   - No merge possible until all gates pass
-
-4. **Merge Process**:
-   - Final enforcement gate validates all checks
-   - Auto-merge disabled - manual verification required
-   - Linear history maintained
-
-### For Reviewers
-
-1. **Review Checklist**:
-   - ✅ All quality gates passed
-   - ✅ Performance benchmarks acceptable
-   - ✅ Code changes appropriate
-   - ✅ Tests comprehensive
-
-2. **Quality Gate Failures**:
-   - PR automatically blocked from merge
-   - Developer must fix ALL issues
-   - Re-review required after fixes
-
-## 🧪 Testing Quality Gates
-
-### Manual Testing
 ```bash
-# Test with intentional failures
-git checkout -b test-quality-gates
-
-# Introduce compilation warning
-echo "fn unused_function() {}" >> src/lib.rs
-
-# Introduce test failure  
-echo '#[test] fn failing_test() { assert!(false); }' >> src/lib.rs
-
-# Introduce formatting issue
-echo "fn badly_formatted(){println!(\"test\");}" >> src/lib.rs
-
-# Push and observe blocking behavior
-git add . && git commit -m "Test quality gate blocking"
-git push origin test-quality-gates
+cargo clippy --package cqlite-core --all-targets --all-features -- -D warnings
 ```
 
-### Automated Testing
+This Clippy command is a hard gate. A green `cargo test` run is not sufficient
+for `cqlite-core` changes.
+
+## Retired Global Requirements
+
+These legacy contexts remain in `.github/branch-protection.json` during Wave 1
+so the checked-in config does not require a missing workflow:
+
+- `CI / test`
+- `CI: Core Library (minimal) / m1-core-validation`
+- `CI: Core Library (minimal) / sstabledump-parity-m1`
+- `CI: SSTableDump Parity Gate / sstabledump-parity`
+
+They should be retired as global branch-protection requirements when #1364
+lands. They may continue to run as targeted, nightly, or release checks, but
+they must not be reintroduced as globally required PR checks after the migration.
+
+## Quality-Gates Workflow
+
+`.github/workflows/quality-gates.yml` is a nightly and manually runnable
+coordination workflow for this migration. It must not call missing workflows. If
+it later delegates to another workflow, that workflow must exist and expose
+`workflow_call`.
+
+The quality-gates workflow may run essential validation such as:
+
+- Cargo metadata checks.
+- `cargo check --package cqlite-core --all-features`.
+- `cargo fmt --all -- --check`.
+- `cargo clippy --package cqlite-core --all-targets --all-features -- -D warnings`.
+
+It is not the globally required PR gate unless it is explicitly changed to meet
+the Required PR tier contract and branch protection is updated to its aggregate
+status name.
+
+## Nightly And Release Gates
+
+Nightly deep validation is the backstop for reduced PR fan-out. Deep workflows
+must expose `workflow_dispatch`, use staggered schedules, upload triage artifacts
+with at least 30 days of retention, and write a step summary that names the next
+artifact or log to inspect.
+
+Release readiness is enforced by policy, not by branch protection. The release
+owner must collect the full release gate evidence listed in
+`docs/ci/ci-tier-policy.md`: full parity, ingestion/readback, supported matrices,
+coverage, performance, and publish dry-runs. Publish workflows must not be
+scheduled, and nightly validation must not publish packages, images, or release
+assets.
+
+## Setup
+
+To inspect the checked-in branch protection configuration:
+
 ```bash
-# Run the quality gate test script
-./.github/test-quality-gates.sh
+ruby -e 'require "json"; JSON.parse(File.read(".github/branch-protection.json")); puts "branch protection JSON ok"'
+node -e 'const cfg = require("./.github/branch-protection.json"); console.log(cfg.required_status_checks.contexts)'
 ```
 
-## 🔧 Setup Instructions
+To apply branch protection after the required workflow exists:
 
-### 1. Install Dependencies
 ```bash
-# Ensure you have required tools
-cargo install cargo-audit
-cargo install critcmp
-npm install @octokit/rest
-```
-
-### 2. Configure Branch Protection
-```bash
-# Set GitHub token with admin permissions
-export GITHUB_TOKEN="your_github_token_here"
-
-# Run branch protection setup
 node .github/setup-branch-protection.js
 ```
 
-### 3. Verify Configuration
-```bash
-# Check branch protection status
-gh api repos/pmcfadin/cqlite/branches/main/protection
-```
+Do not use the setup script as part of this policy-only migration unless the
+repository is ready to enforce the configured required status.
 
-## 🚨 Troubleshooting
+## Emergency Handling
 
-### Common Issues
-
-#### "Quality gates failed but I need to merge urgently"
-- **Solution**: Fix the issues. No exceptions allowed.
-- **Alternative**: Use hotfix process with separate review
-
-#### "Performance benchmarks are flaky"
-- **Solution**: Run benchmarks multiple times
-- **Alternative**: Temporarily disable performance gate for specific PR
-
-#### "Clippy is too strict"
-- **Solution**: Fix the lints or add `#[allow(...)]` with justification
-- **Alternative**: Update clippy configuration if necessary
-
-### Emergency Procedures
-
-#### Critical Security Fix
-1. Create hotfix branch from main
-2. Apply minimal fix
-3. Request emergency review
-4. Use permissive enforcement mode temporarily
-5. Follow up with proper fix addressing quality issues
-
-#### Infrastructure Issues
-1. Check GitHub Actions status
-2. Verify runner availability
-3. Review dependency availability
-4. Consider local quality check alternative
-
-## 📊 Monitoring and Metrics
-
-### Quality Gate Success Rates
-- Track pass/fail rates for each gate
-- Identify common failure patterns
-- Monitor performance trends
-
-### Developer Experience
-- Track time from PR creation to merge
-- Monitor blocked PR resolution time
-- Collect developer feedback
-
-### Performance Impact
-- Monitor CI/CD pipeline execution time
-- Track resource usage
-- Optimize gate execution order
-
-## 🔄 Continuous Improvement
-
-### Regular Reviews
-- Monthly quality gate effectiveness review
-- Quarterly enforcement policy review
-- Annual tool and process evaluation
-
-### Feedback Integration
-- Developer experience surveys
-- Quality metrics analysis
-- Process optimization based on data
-
-### Tool Updates
-- Keep quality tools updated
-- Monitor for new quality gate opportunities
-- Integrate emerging Rust ecosystem tools
-
-## 🎯 Success Metrics
-
-### Code Quality
-- Zero post-merge bug reports related to quality issues
-- Consistent code formatting across codebase
-- No security vulnerabilities in production
-
-### Developer Productivity  
-- Reduced time spent on post-merge fixes
-- Improved confidence in main branch stability
-- Faster feature development cycle
-
-### Release Quality
-- Zero rollbacks due to quality issues
-- Consistent performance characteristics
-- Reliable deployment process
-
----
-
-## ⚠️ IMPORTANT REMINDERS
-
-1. **Quality gates are UNCOMPROMISING** - they cannot be bypassed
-2. **All team members** must follow the same quality standards
-3. **Local testing** is essential before creating PRs
-4. **Quality over speed** - take time to do it right
-5. **Ask for help** if you're struggling with quality gate failures
-
-**Remember: These quality gates exist to maintain the high standard of the CQLite project and ensure we never ship broken code again.**
+Quality gate failures should be fixed, not bypassed. If GitHub Actions itself is
+unavailable, maintainers may use local validation evidence while waiting for CI
+to recover, but branch protection policy must not be weakened in repo config as
+a workaround.

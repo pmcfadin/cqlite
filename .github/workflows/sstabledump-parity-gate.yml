@@ -3,19 +3,15 @@ name: "CI: SSTableDump Parity Gate"
 on:
   pull_request:
     branches: [main, develop]
-    paths:
-      - '.github/workflows/sstabledump-parity-gate.yml'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'cqlite-core/**'
-      - 'tests/**'
-      - 'test-data/**'
-      - 'scripts/**'
+    # This job still publishes a globally required legacy context. Keep PR
+    # triggers unfiltered until branch protection moves to Required PR Gate.
   push:
     branches: [main, develop]
     paths:
       - '.github/workflows/sstabledump-parity-gate.yml'
+      - '.github/actions/setup-rust-ci/**'
+      - '.github/actions/restore-canonical-datasets/**'
+      - '.github/actions/setup-sstabledump/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
@@ -23,14 +19,26 @@ on:
       - 'tests/**'
       - 'test-data/**'
       - 'scripts/**'
+  workflow_dispatch:
+    inputs:
+      parity_tier:
+        description: "SSTableDump parity tier to run"
+        required: true
+        type: choice
+        default: full
+        options:
+          - full
+          - smoke
+  schedule:
+    - cron: '17 9 * * *'
+  release:
+    types: [published, prereleased]
 
 permissions:
-  issues: write
-  pull-requests: write
   contents: read
 
 concurrency:
-  group: sstabledump-parity-${{ github.ref }}
+  group: sstabledump-parity-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -38,15 +46,247 @@ env:
   DATASET_ASSET: cassandra5-small-full-v3.4.tar.gz
   DATASET_SHA256: 3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33
   CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
-  # Fail-closed switch (issue #1024): strict parity lanes must PANIC instead of
-  # skipping when dataset binaries are absent. A vanished/unfetched dataset can
-  # never silently green the required parity gate.
+  # Fail closed: strict parity lanes must panic instead of skipping when dataset
+  # binaries are absent. A vanished/unfetched dataset can never silently green a
+  # required parity gate.
   CQLITE_PARITY_REQUIRE_DATASETS: '1'
 
 jobs:
   sstabledump-parity:
-    name: Real M5 SSTableDump parity validation
+    name: sstabledump-parity
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && inputs.parity_tier == 'smoke')
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Classify PR parity scope
+        id: scope
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run_smoke=true" >> "$GITHUB_OUTPUT"
+            echo "Manual smoke run requested."
+            exit 0
+          fi
+
+          git diff --name-only \
+            "${{ github.event.pull_request.base.sha }}" \
+            "${{ github.event.pull_request.head.sha }}" > changed-files.txt
+
+          echo "Changed files:"
+          sed 's/^/  - /' changed-files.txt
+
+          smoke_regex='^(\.github/workflows/sstabledump-parity-gate\.yml|\.github/actions/(setup-rust-ci|restore-canonical-datasets|setup-sstabledump)/|Cargo\.toml|Cargo\.lock|rust-toolchain\.toml|cqlite-core/Cargo\.toml|cqlite-core/src/|cqlite-core/tests/|test-data/|scripts/ci/)'
+          run_smoke=false
+          if grep -Eq "$smoke_regex" changed-files.txt; then
+            run_smoke=true
+          fi
+
+          echo "run_smoke=${run_smoke}" >> "$GITHUB_OUTPUT"
+
+      - name: PR outside SSTableDump smoke scope
+        if: steps.scope.outputs.run_smoke != 'true'
+        run: |
+          echo "No storage/write/parity-impacting changes detected."
+          echo "Full SSTableDump parity runs on nightly, manual full, release, and mainline triggers."
+
+      - name: Setup Rust toolchain
+        if: steps.scope.outputs.run_smoke == 'true'
+        uses: ./.github/actions/setup-rust-ci
+        with:
+          toolchain: stable
+          cache-key: sstabledump-parity-smoke
+
+      - name: Start dataset restore timer
+        if: steps.scope.outputs.run_smoke == 'true'
+        run: date +%s > "${RUNNER_TEMP}/sstabledump-smoke-dataset-start"
+
+      - name: Fetch canonical full datasets
+        id: restore_datasets
+        if: steps.scope.outputs.run_smoke == 'true'
+        uses: ./.github/actions/restore-canonical-datasets
+        with:
+          dataset-tag: ${{ env.DATASET_TAG }}
+          dataset-asset: ${{ env.DATASET_ASSET }}
+          dataset-sha256: ${{ env.DATASET_SHA256 }}
+          dataset-root: ${{ env.CQLITE_DATASETS_ROOT }}
+
+      - name: Record dataset restore timing
+        if: always() && steps.scope.outputs.run_smoke == 'true'
+        run: |
+          set -euo pipefail
+          start="$(cat "${RUNNER_TEMP}/sstabledump-smoke-dataset-start" 2>/dev/null || date +%s)"
+          duration="$(($(date +%s) - start))"
+          bash scripts/ci/ci-timing-summary.sh note \
+            "restore canonical datasets" \
+            "${{ steps.restore_datasets.outcome }}" \
+            "${duration}"
+
+      - name: Dataset provenance gate
+        if: steps.scope.outputs.run_smoke == 'true'
+        run: |
+          bash scripts/ci/ci-timing-summary.sh measure "dataset provenance gate" -- bash <<'BASH'
+          set -euo pipefail
+          scripts/ci/ensure_real_dataset.sh \
+            "${{ env.CQLITE_DATASETS_ROOT }}" \
+            "${{ env.DATASET_ASSET }}" \
+            "sstabledump parity smoke"
+          BASH
+
+      - name: Dataset smoke component diagnostics
+        if: steps.scope.outputs.run_smoke == 'true'
+        shell: bash
+        run: |
+          bash scripts/ci/ci-timing-summary.sh measure "dataset smoke diagnostics" -- bash <<'BASH'
+          set -euo pipefail
+
+          data_count=$(find "${CQLITE_DATASETS_ROOT}" -name '*-Data.db' | wc -l)
+          index_count=$(find "${CQLITE_DATASETS_ROOT}" -name '*-Index.db' | wc -l)
+          summary_count=$(find "${CQLITE_DATASETS_ROOT}" -name '*-Summary.db' | wc -l)
+          statistics_count=$(find "${CQLITE_DATASETS_ROOT}" -name '*-Statistics.db' | wc -l)
+          compression_count=$(find "${CQLITE_DATASETS_ROOT}" -name '*-CompressionInfo.db' | wc -l)
+          ttl_jsonl_count=$(find "${CQLITE_DATASETS_ROOT}" -path '*ttl*' -name '*-Data.db.jsonl' | wc -l)
+
+          echo "CQLITE_DATASETS_ROOT=${CQLITE_DATASETS_ROOT}"
+          echo "Data.db count: ${data_count}"
+          echo "Index.db count: ${index_count}"
+          echo "Summary.db count: ${summary_count}"
+          echo "Statistics.db count: ${statistics_count}"
+          echo "CompressionInfo.db count: ${compression_count}"
+          echo "TTL JSONL reference count: ${ttl_jsonl_count}"
+
+          if [ "${data_count}" -eq 0 ]; then
+            echo "FAIL-CLOSED: zero *-Data.db under ${CQLITE_DATASETS_ROOT}" >&2
+            exit 1
+          fi
+          if [ "${index_count}" -eq 0 ]; then
+            echo "FAIL-CLOSED: zero *-Index.db under ${CQLITE_DATASETS_ROOT}" >&2
+            exit 1
+          fi
+          if [ "${summary_count}" -eq 0 ]; then
+            echo "FAIL-CLOSED: zero *-Summary.db under ${CQLITE_DATASETS_ROOT}" >&2
+            exit 1
+          fi
+          if [ "${statistics_count}" -eq 0 ]; then
+            echo "FAIL-CLOSED: zero *-Statistics.db under ${CQLITE_DATASETS_ROOT}" >&2
+            exit 1
+          fi
+          if [ "${compression_count}" -eq 0 ]; then
+            echo "FAIL-CLOSED: zero *-CompressionInfo.db under ${CQLITE_DATASETS_ROOT}" >&2
+            exit 1
+          fi
+          if [ "${ttl_jsonl_count}" -eq 0 ]; then
+            echo "FAIL-CLOSED: zero TTL Data.db JSONL references under ${CQLITE_DATASETS_ROOT}" >&2
+            exit 1
+          fi
+          BASH
+
+      - name: Setup sstabledump
+        if: steps.scope.outputs.run_smoke == 'true'
+        uses: ./.github/actions/setup-sstabledump
+
+      - name: Build smoke parity targets
+        if: steps.scope.outputs.run_smoke == 'true'
+        run: |
+          bash scripts/ci/ci-timing-summary.sh measure "build smoke parity targets" -- bash <<'BASH'
+          set -euo pipefail
+          cargo test --no-run --package cqlite-core --features write-support,cli-helpers \
+            --test sstabledump_parity_data \
+            --test sstabledump_parity_index \
+            --test sstabledump_parity_summary \
+            --test sstable_parity_statistics_db_strict_test \
+            --test sstable_parity_compression_info_test \
+            --test issue_694_writetime_ttl_parity
+          BASH
+
+      - name: Smoke Data.db JSONL parity
+        if: steps.scope.outputs.run_smoke == 'true'
+        run: |
+          bash scripts/ci/ci-timing-summary.sh measure "smoke Data.db JSONL parity" -- bash <<'BASH'
+          set -euo pipefail
+          cargo test --package cqlite-core --features write-support \
+            --test sstabledump_parity_data \
+            test_data_db_jsonl_reference_parity \
+            -- --nocapture
+          BASH
+
+      - name: Smoke Index.db parity
+        if: steps.scope.outputs.run_smoke == 'true'
+        run: |
+          bash scripts/ci/ci-timing-summary.sh measure "smoke Index.db parity" -- bash <<'BASH'
+          set -euo pipefail
+          cargo test --package cqlite-core --features write-support \
+            --test sstabledump_parity_index \
+            test_index_db_parity_comprehensive \
+            -- --nocapture
+          BASH
+
+      - name: Smoke Summary.db parity
+        if: steps.scope.outputs.run_smoke == 'true'
+        run: |
+          bash scripts/ci/ci-timing-summary.sh measure "smoke Summary.db parity" -- bash <<'BASH'
+          set -euo pipefail
+          cargo test --package cqlite-core --features write-support \
+            --test sstabledump_parity_summary \
+            test_summary_db_parity_comprehensive \
+            -- --nocapture
+          BASH
+
+      - name: Smoke Statistics.db strict parity
+        if: steps.scope.outputs.run_smoke == 'true'
+        run: |
+          bash scripts/ci/ci-timing-summary.sh measure "smoke Statistics.db strict parity" -- bash <<'BASH'
+          set -euo pipefail
+          cargo test --package cqlite-core --features write-support \
+            --test sstable_parity_statistics_db_strict_test \
+            statistics_db_strict_core_metadata_parity \
+            -- --nocapture
+          BASH
+
+      - name: Smoke compression parity
+        if: steps.scope.outputs.run_smoke == 'true'
+        run: |
+          bash scripts/ci/ci-timing-summary.sh measure "smoke compression parity" -- bash <<'BASH'
+          set -euo pipefail
+          cargo test --package cqlite-core --features write-support \
+            --test sstable_parity_compression_info_test \
+            compression_info_strict_metadata_and_chunk_parity \
+            -- --nocapture
+          BASH
+
+      - name: Smoke WRITETIME/TTL parity
+        if: steps.scope.outputs.run_smoke == 'true'
+        run: |
+          bash scripts/ci/ci-timing-summary.sh measure "smoke WRITETIME/TTL parity" -- bash <<'BASH'
+          set -euo pipefail
+          cargo test --package cqlite-core --features write-support,cli-helpers \
+            --test issue_694_writetime_ttl_parity \
+            writetime_parity_test_basic_ttl_test_table \
+            -- --nocapture
+          BASH
+
+      - name: Smoke parity timing summary
+        if: always()
+        run: bash scripts/ci/ci-timing-summary.sh summary "SSTableDump smoke parity timing"
+
+  sstabledump-parity-full:
+    name: sstabledump-parity-full
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'release' ||
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.parity_tier == 'full')
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
 
     steps:
       - name: Checkout repository
@@ -55,91 +295,159 @@ jobs:
           fetch-depth: 0
 
       - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: ./.github/actions/setup-rust-ci
         with:
           toolchain: stable
+          cache-key: sstabledump-parity-full
 
-      - name: Cache Rust dependencies
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Cache canonical full datasets
-        uses: actions/cache@v5
-        with:
-          path: test-data/datasets/
-          key: ${{ runner.os }}-datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
+      - name: Start dataset restore timer
+        run: date +%s > "${RUNNER_TEMP}/sstabledump-full-dataset-start"
 
       - name: Fetch canonical full datasets
-        run: bash ./test-data/scripts/fetch-datasets.sh
+        id: restore_datasets_full
+        uses: ./.github/actions/restore-canonical-datasets
+        with:
+          dataset-tag: ${{ env.DATASET_TAG }}
+          dataset-asset: ${{ env.DATASET_ASSET }}
+          dataset-sha256: ${{ env.DATASET_SHA256 }}
+          dataset-root: ${{ env.CQLITE_DATASETS_ROOT }}
+
+      - name: Record dataset restore timing
+        if: always()
+        run: |
+          set -euo pipefail
+          start="$(cat "${RUNNER_TEMP}/sstabledump-full-dataset-start" 2>/dev/null || date +%s)"
+          duration="$(($(date +%s) - start))"
+          bash scripts/ci/ci-timing-summary.sh note \
+            "restore canonical datasets" \
+            "${{ steps.restore_datasets_full.outcome }}" \
+            "${duration}"
 
       - name: Dataset provenance gate
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "dataset provenance gate" -- bash <<'BASH'
+          set -euo pipefail
           scripts/ci/ensure_real_dataset.sh \
             "${{ env.CQLITE_DATASETS_ROOT }}" \
             "${{ env.DATASET_ASSET }}" \
-            "sstabledump parity validation"
+            "sstabledump full parity validation"
+          BASH
 
-      - name: Dataset diagnostics
+      - name: Dataset full component diagnostics
+        shell: bash
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "dataset full diagnostics" -- bash <<'BASH'
           set -euo pipefail
 
           data_count=$(find "${CQLITE_DATASETS_ROOT}" -name '*-Data.db' | wc -l)
           index_count=$(find "${CQLITE_DATASETS_ROOT}" -name '*-Index.db' | wc -l)
           summary_count=$(find "${CQLITE_DATASETS_ROOT}" -name '*-Summary.db' | wc -l)
           statistics_count=$(find "${CQLITE_DATASETS_ROOT}" -name '*-Statistics.db' | wc -l)
+          compression_count=$(find "${CQLITE_DATASETS_ROOT}" -name '*-CompressionInfo.db' | wc -l)
+          test_comp_data_count=$(find "${CQLITE_DATASETS_ROOT}/sstables/test_comp" -name '*-Data.db' 2>/dev/null | wc -l)
+          corruption_data_count=$(find "${CQLITE_DATASETS_ROOT}/corruption/test_comp_corrupt" -name '*-Data.db' 2>/dev/null | wc -l)
+          missing_fixture=0
 
           echo "CQLITE_DATASETS_ROOT=${CQLITE_DATASETS_ROOT}"
           echo "Data.db count: ${data_count}"
           echo "Index.db count: ${index_count}"
           echo "Summary.db count: ${summary_count}"
           echo "Statistics.db count: ${statistics_count}"
+          echo "CompressionInfo.db count: ${compression_count}"
+          echo "test_comp Data.db count: ${test_comp_data_count}"
+          echo "test_comp_corrupt Data.db count: ${corruption_data_count}"
 
-          # Fail closed (issue #1024): a dataset root that resolves to ZERO of any
-          # required component is a hard gate failure, never a silent pass. The
-          # explicit messages make the cause unambiguous in the job log.
+          require_glob() {
+            local description="$1"
+            local pattern="$2"
+            if ! compgen -G "$pattern" > /dev/null; then
+              echo "FAIL-CLOSED: missing ${description}: ${pattern}" >&2
+              missing_fixture=1
+            fi
+          }
+
+          for table in \
+            deflate_table \
+            incompressible_uncompressed_chunk \
+            lz4_table \
+            short_final_chunk \
+            snappy_table \
+            uncompressed_table \
+            zstd_table
+          do
+            require_glob "test_comp ${table} Data.db" \
+              "${CQLITE_DATASETS_ROOT}/sstables/test_comp/${table}-*/*-Data.db"
+          done
+
+          for table in \
+            deflate_table \
+            incompressible_uncompressed_chunk \
+            lz4_table \
+            short_final_chunk \
+            snappy_table \
+            zstd_table
+          do
+            require_glob "test_comp ${table} CompressionInfo.db" \
+              "${CQLITE_DATASETS_ROOT}/sstables/test_comp/${table}-*/*-CompressionInfo.db"
+          done
+
+          for fixture in \
+            bti_partitions_footer_flip \
+            bti_rows_truncation \
+            compression_info_bad_offset \
+            data_db_bit_flip \
+            data_db_truncation \
+            digest_crc32_mismatch \
+            index_db_bit_flip_big \
+            statistics_db_header_damage \
+            summary_db_truncation \
+            toc_missing_component
+          do
+            require_glob "test_comp_corrupt ${fixture} Data.db" \
+              "${CQLITE_DATASETS_ROOT}/corruption/test_comp_corrupt/${fixture}/*-Data.db"
+          done
+
           if [ "${data_count}" -eq 0 ]; then
-            echo "❌ FAIL-CLOSED: zero *-Data.db under ${CQLITE_DATASETS_ROOT} — datasets missing/unfetched" >&2
+            echo "FAIL-CLOSED: zero *-Data.db under ${CQLITE_DATASETS_ROOT}" >&2
             exit 1
           fi
           if [ "${index_count}" -eq 0 ]; then
-            echo "❌ FAIL-CLOSED: zero *-Index.db under ${CQLITE_DATASETS_ROOT}" >&2
+            echo "FAIL-CLOSED: zero *-Index.db under ${CQLITE_DATASETS_ROOT}" >&2
             exit 1
           fi
           if [ "${summary_count}" -eq 0 ]; then
-            echo "❌ FAIL-CLOSED: zero *-Summary.db under ${CQLITE_DATASETS_ROOT}" >&2
+            echo "FAIL-CLOSED: zero *-Summary.db under ${CQLITE_DATASETS_ROOT}" >&2
             exit 1
           fi
           if [ "${statistics_count}" -eq 0 ]; then
-            echo "❌ FAIL-CLOSED: zero *-Statistics.db under ${CQLITE_DATASETS_ROOT}" >&2
+            echo "FAIL-CLOSED: zero *-Statistics.db under ${CQLITE_DATASETS_ROOT}" >&2
             exit 1
           fi
+          if [ "${compression_count}" -eq 0 ]; then
+            echo "FAIL-CLOSED: zero *-CompressionInfo.db under ${CQLITE_DATASETS_ROOT}" >&2
+            exit 1
+          fi
+          if [ "${test_comp_data_count}" -eq 0 ]; then
+            echo "FAIL-CLOSED: zero test_comp *-Data.db binaries under ${CQLITE_DATASETS_ROOT}" >&2
+            exit 1
+          fi
+          if [ "${corruption_data_count}" -eq 0 ]; then
+            echo "FAIL-CLOSED: zero test_comp_corrupt *-Data.db binaries under ${CQLITE_DATASETS_ROOT}" >&2
+            exit 1
+          fi
+          if [ "${missing_fixture}" -ne 0 ]; then
+            echo "FAIL-CLOSED: full compression/corruption fixture corpus is incomplete" >&2
+            exit 1
+          fi
+          BASH
 
-      - name: Setup Java 17
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "17"
+      - name: Setup sstabledump
+        uses: ./.github/actions/setup-sstabledump
 
-      - name: Install sstabledump
+      - name: Build full parity test targets
         run: |
-          bash ./scripts/ci/install-sstabledump.sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-      - name: Verify sstabledump installation
-        run: |
-          output="$(sstabledump --help 2>&1 || true)"
-          echo "$output"
-          echo "$output" | grep -q "usage: sstabledump"
-
-      - name: Build parity test targets
-        run: |
+          bash scripts/ci/ci-timing-summary.sh measure "build full parity targets" -- bash <<'BASH'
+          set -euo pipefail
           cargo test --no-run --package cqlite-core --features write-support,cli-helpers \
             --test sstabledump_parity_data \
             --test sstabledump_parity_index \
@@ -167,104 +475,138 @@ jobs:
             --test issue_694_writetime_ttl_parity \
             --test v5_compressed_legacy_parity_test \
             --test v5_compressed_legacy_row_count_parity
+          BASH
 
       - name: Run Data.db parity tests
         id: data_parity
         continue-on-error: true
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "full Data.db parity" -- bash <<'BASH'
+          set -euo pipefail
           cargo test --package cqlite-core --features write-support \
             --test sstabledump_parity_data \
             test_data_db_jsonl_reference_parity \
             -- --nocapture
+          BASH
 
       - name: Run Index.db parity tests
         id: index_parity
         continue-on-error: true
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "full Index.db parity" -- bash <<'BASH'
+          set -euo pipefail
           cargo test --package cqlite-core --features write-support \
             --test sstabledump_parity_index \
             -- --nocapture
+          BASH
 
       - name: Run Summary.db parity tests
         id: summary_parity
         continue-on-error: true
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "full Summary.db parity" -- bash <<'BASH'
+          set -euo pipefail
           cargo test --package cqlite-core --features write-support \
             --test sstabledump_parity_summary \
             -- --nocapture
+          BASH
 
       - name: Run Statistics.db parity tests
         id: statistics_parity
         continue-on-error: true
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "full Statistics.db parity" -- bash <<'BASH'
+          set -euo pipefail
           cargo test --package cqlite-core --features write-support \
             --test sstabledump_parity_statistics \
             -- --nocapture
+          BASH
 
       - name: Run TOC.txt + Digest.crc32 strict parity tests
         id: toc_component_parity
         continue-on-error: true
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "full TOC/Digest strict parity" -- bash <<'BASH'
+          set -euo pipefail
           cargo test --package cqlite-core --features write-support \
             --test sstable_parity_toc_component_test \
             -- --nocapture
+          BASH
 
       - name: Run Index.db strict parity tests
         id: index_db_strict_parity
         continue-on-error: true
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "full Index.db strict parity" -- bash <<'BASH'
+          set -euo pipefail
           cargo test --package cqlite-core --features write-support \
             --test sstable_parity_index_db_test \
             -- --nocapture
+          BASH
 
       - name: Run Statistics.db strict parity tests
         id: statistics_db_strict_parity
         continue-on-error: true
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "full Statistics.db strict parity" -- bash <<'BASH'
+          set -euo pipefail
           cargo test --package cqlite-core --features write-support \
             --test sstable_parity_statistics_db_strict_test \
             -- --nocapture
+          BASH
 
       - name: Run CompressionInfo.db parity tests
         id: compression_info_parity
         continue-on-error: true
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "full CompressionInfo.db parity" -- bash <<'BASH'
+          set -euo pipefail
           cargo test --package cqlite-core --features write-support \
             --test sstable_parity_compression_info_test \
             -- --nocapture
+          BASH
 
       - name: Run CompressionInfo.db strict parity tests
         id: compression_info_strict_parity
         continue-on-error: true
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "full CompressionInfo.db strict parity" -- bash <<'BASH'
+          set -euo pipefail
           cargo test --package cqlite-core --features write-support \
             --test sstable_parity_compression_info_db_strict_test \
             -- --nocapture
+          BASH
 
       - name: Run Filter.db strict parity tests
         id: filter_db_parity
         continue-on-error: true
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "full Filter.db strict parity" -- bash <<'BASH'
+          set -euo pipefail
           cargo test --package cqlite-core --features write-support \
             --test sstable_parity_filter_db_test \
             -- --nocapture
+          BASH
 
       - name: Run repaired-metadata strict parity tests
         id: repaired_metadata_parity
         continue-on-error: true
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "full repaired-metadata strict parity" -- bash <<'BASH'
+          set -euo pipefail
           cargo test --package cqlite-core --features write-support \
             --test sstable_parity_repaired_metadata_test \
             -- --nocapture
+          BASH
 
-      - name: Run compression / corruption parity tests (epic #970)
-        # These tests skip-clean when the test_comp fixtures are absent from the
-        # published bundle, so they are informational on the PR gate. The
-        # authoritative strict run (regenerate + assert fixtures) lives in
-        # .github/workflows/compression-corruption-parity.yml (nightly + dispatch).
+      - name: Run compression / corruption parity tests
         id: compression_corruption_parity
         continue-on-error: true
+        env:
+          CQLITE_REQUIRE_FIXTURES: '1'
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "full compression/corruption parity" -- bash <<'BASH'
+          set -euo pipefail
           cargo test --package cqlite-core --features write-support,cli-helpers \
             --test issue_997_compressioninfo_parity \
             --test issue_998_inline_crc_trailers \
@@ -272,84 +614,93 @@ jobs:
             --test issue_1001_reject_unknown_compression \
             --test issue_1082_deflate_zlib \
             -- --nocapture
+          BASH
 
-      - name: Run Data.db row framing / VInt / flag byte parity tests (issue #990)
+      - name: Run Data.db row framing / VInt / flag byte parity tests
         id: row_framing_parity
         continue-on-error: true
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "full Data.db row framing parity" -- bash <<'BASH'
+          set -euo pipefail
           cargo test --package cqlite-core --features write-support \
             --test issue_990_data_db_row_framing_parity \
             -- --nocapture
+          BASH
 
-      - name: Run static-row / clustering-bound parity tests (issue #991)
+      - name: Run static-row / clustering-bound parity tests
         id: static_clustering_parity
         continue-on-error: true
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "full static-row/clustering-bound parity" -- bash <<'BASH'
+          set -euo pipefail
           cargo test --package cqlite-core --features write-support \
             --test issue_991_static_clustering_parity \
             -- --nocapture
+          BASH
 
-      - name: Run TTL / tombstone / range-marker parity tests (issue #992)
+      - name: Run TTL / tombstone / range-marker parity tests
         id: ttl_tombstone_range_parity
         continue-on-error: true
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "full TTL/tombstone/range-marker parity" -- bash <<'BASH'
+          set -euo pipefail
           cargo test --package cqlite-core --features write-support \
             --test issue_992_ttl_tombstone_parity \
             --test issue_992_range_boundary_grammar \
             -- --nocapture
+          BASH
 
-      - name: Run wide-partition promoted-index parity tests (issue #993)
-        # Canonical-semantic JSONL checks run on every push against the committed
-        # golden; the byte-level Index.db assertions skip-clean because the
-        # test_big.wide_partition binaries are local-only (not in the CI pin).
+      - name: Run wide-partition promoted-index parity tests
         id: wide_partition_promoted_index_parity
         continue-on-error: true
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "full wide-partition promoted-index parity" -- bash <<'BASH'
+          set -euo pipefail
           cargo test --package cqlite-core --features write-support \
             --test issue_993_wide_partition_promoted_index_parity \
             -- --nocapture
+          BASH
 
-      - name: Run differential-compaction SELF-CONSISTENCY tests (issues #819 / #933)
-        # SCOPE (issue #1242 finding 1): these tests run CQLite's OWN compaction
-        # merge round-trips (gen1-vs-gen2, one-shot-vs-hand-driven, resurrection
-        # safety) by default. The Cassandra-reference comparison
-        # (differential_vs_live_cassandra_env_gated) is env-gated behind
-        # CQLITE_DIFFERENTIAL_CASSANDRA=1, which this workflow does NOT set, so this
-        # step proves SELF-CONSISTENCY only — it does NOT prove Cassandra parity. The
-        # related cass.compaction_merge.* manifest scenarios were demoted from
-        # required_parity to manual_debug (no required scenario maps to this step;
-        # the #1228 workflow-check lint therefore does not depend on it). It still
-        # runs as a regression guard against self-consistency defects.
+      - name: Run differential-compaction self-consistency tests
         id: differential_compaction_parity
         continue-on-error: true
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "full differential-compaction parity" -- bash <<'BASH'
+          set -euo pipefail
           cargo test --package cqlite-core --features write-support \
             --test issue_819_differential_compaction \
             --test issue_933_range_tombstone_compaction \
             -- --nocapture
+          BASH
 
-      - name: Run WRITETIME / TTL / local-deletion-time parity tests (issue #694)
+      - name: Run WRITETIME / TTL / local-deletion-time parity tests
         id: writetime_ttl_parity
         continue-on-error: true
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "full WRITETIME/TTL parity" -- bash <<'BASH'
+          set -euo pipefail
           cargo test --package cqlite-core --features write-support,cli-helpers \
             --test issue_694_writetime_ttl_parity \
             -- --nocapture
+          BASH
 
       - name: Run V5CompressedLegacy compression / row-count parity tests
         id: v5_compressed_legacy_parity
         continue-on-error: true
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "full V5CompressedLegacy parity" -- bash <<'BASH'
+          set -euo pipefail
           cargo test --package cqlite-core --features write-support \
             --test v5_compressed_legacy_parity_test \
             --test v5_compressed_legacy_row_count_parity \
             -- --nocapture
+          BASH
 
       - name: Generate parity summary
         if: always()
         run: |
           cat > parity_summary.md <<EOF
-          # SSTableDump Parity Validation Results
+          # SSTableDump Full Parity Results
 
           - Data.db: ${{ steps.data_parity.outcome }}
           - Index.db: ${{ steps.index_parity.outcome }}
@@ -366,20 +717,24 @@ jobs:
           - Static-row / clustering-bound parity (issue #991): ${{ steps.static_clustering_parity.outcome }}
           - TTL / tombstone / range-marker parity (issue #992): ${{ steps.ttl_tombstone_range_parity.outcome }}
           - Wide-partition promoted-index parity (issue #993): ${{ steps.wide_partition_promoted_index_parity.outcome }}
-          - Differential-compaction parity (issues #819/#933/#992): ${{ steps.differential_compaction_parity.outcome }}
+          - Differential-compaction self-consistency (issues #819/#933/#992): ${{ steps.differential_compaction_parity.outcome }}
           - WRITETIME / TTL / local-deletion-time parity (issue #694): ${{ steps.writetime_ttl_parity.outcome }}
           - V5CompressedLegacy compression / row-count parity: ${{ steps.v5_compressed_legacy_parity.outcome }}
-          - Compression/corruption parity (epic #970, informational): ${{ steps.compression_corruption_parity.outcome }}
+          - Compression/corruption parity (epic #970): ${{ steps.compression_corruption_parity.outcome }}
 
           Dataset:
           - Tag: ${{ env.DATASET_TAG }}
           - Asset: ${{ env.DATASET_ASSET }}
           - Root: ${{ env.CQLITE_DATASETS_ROOT }}
 
-          This workflow is the blocking M5 parity gate for Issue #440 and should only pass when the real dataset-backed parity suite is green.
+          This full parity tier runs on nightly, manual full, release, and mainline triggers.
           EOF
 
-      - name: Upload parity artifacts
+      - name: Full parity timing summary
+        if: always()
+        run: bash scripts/ci/ci-timing-summary.sh summary "SSTableDump full parity timing"
+
+      - name: Upload full parity artifacts
         if: always()
         uses: actions/upload-artifact@v6
         with:
@@ -503,17 +858,32 @@ jobs:
               body: summary
             });
 
-      - name: Fail build on parity differences
-        if: always() && (steps.data_parity.outcome != 'success' || steps.index_parity.outcome != 'success' || steps.summary_parity.outcome != 'success' || steps.statistics_parity.outcome != 'success' || steps.toc_component_parity.outcome != 'success' || steps.index_db_strict_parity.outcome != 'success' || steps.statistics_db_strict_parity.outcome != 'success' || steps.compression_info_parity.outcome != 'success' || steps.compression_info_strict_parity.outcome != 'success' || steps.filter_db_parity.outcome != 'success' || steps.repaired_metadata_parity.outcome != 'success' || steps.row_framing_parity.outcome != 'success' || steps.static_clustering_parity.outcome != 'success' || steps.ttl_tombstone_range_parity.outcome != 'success' || steps.wide_partition_promoted_index_parity.outcome != 'success' || steps.differential_compaction_parity.outcome != 'success' || steps.writetime_ttl_parity.outcome != 'success' || steps.v5_compressed_legacy_parity.outcome != 'success')
+      - name: Fail build on full parity differences
+        if: >-
+          always() && (
+            steps.data_parity.outcome != 'success' ||
+            steps.index_parity.outcome != 'success' ||
+            steps.summary_parity.outcome != 'success' ||
+            steps.statistics_parity.outcome != 'success' ||
+            steps.toc_component_parity.outcome != 'success' ||
+            steps.index_db_strict_parity.outcome != 'success' ||
+            steps.statistics_db_strict_parity.outcome != 'success' ||
+            steps.compression_info_parity.outcome != 'success' ||
+            steps.compression_info_strict_parity.outcome != 'success' ||
+            steps.filter_db_parity.outcome != 'success' ||
+            steps.repaired_metadata_parity.outcome != 'success' ||
+            steps.compression_corruption_parity.outcome != 'success' ||
+            steps.row_framing_parity.outcome != 'success' ||
+            steps.static_clustering_parity.outcome != 'success' ||
+            steps.ttl_tombstone_range_parity.outcome != 'success' ||
+            steps.wide_partition_promoted_index_parity.outcome != 'success' ||
+            steps.differential_compaction_parity.outcome != 'success' ||
+            steps.writetime_ttl_parity.outcome != 'success' ||
+            steps.v5_compressed_legacy_parity.outcome != 'success'
+          )
+        shell: bash
         run: |
-          echo "❌ M5 parity gate failed"
-          echo "Data.db row framing / VInt / flags (issue #990): ${{ steps.row_framing_parity.outcome }}"
-          echo "Static-row / clustering-bound parity (issue #991): ${{ steps.static_clustering_parity.outcome }}"
-          echo "TTL / tombstone / range-marker parity (issue #992): ${{ steps.ttl_tombstone_range_parity.outcome }}"
-          echo "Wide-partition promoted-index parity (issue #993): ${{ steps.wide_partition_promoted_index_parity.outcome }}"
-          echo "Differential-compaction parity (issues #819/#933/#992): ${{ steps.differential_compaction_parity.outcome }}"
-          echo "WRITETIME / TTL / local-deletion-time parity (issue #694): ${{ steps.writetime_ttl_parity.outcome }}"
-          echo "V5CompressedLegacy compression / row-count parity: ${{ steps.v5_compressed_legacy_parity.outcome }}"
+          echo "Full SSTableDump parity failed; inspect parity-test-results artifacts."
           echo "Data.db: ${{ steps.data_parity.outcome }}"
           echo "Index.db: ${{ steps.index_parity.outcome }}"
           echo "Summary.db: ${{ steps.summary_parity.outcome }}"
@@ -525,4 +895,12 @@ jobs:
           echo "CompressionInfo.db (strict): ${{ steps.compression_info_strict_parity.outcome }}"
           echo "Filter.db (strict): ${{ steps.filter_db_parity.outcome }}"
           echo "Repaired-metadata (strict): ${{ steps.repaired_metadata_parity.outcome }}"
+          echo "Compression/corruption parity: ${{ steps.compression_corruption_parity.outcome }}"
+          echo "Data.db row framing / VInt / flags: ${{ steps.row_framing_parity.outcome }}"
+          echo "Static-row / clustering-bound parity: ${{ steps.static_clustering_parity.outcome }}"
+          echo "TTL / tombstone / range-marker parity: ${{ steps.ttl_tombstone_range_parity.outcome }}"
+          echo "Wide-partition promoted-index parity: ${{ steps.wide_partition_promoted_index_parity.outcome }}"
+          echo "Differential-compaction self-consistency: ${{ steps.differential_compaction_parity.outcome }}"
+          echo "WRITETIME / TTL / local-deletion-time parity: ${{ steps.writetime_ttl_parity.outcome }}"
+          echo "V5CompressedLegacy compression / row-count parity: ${{ steps.v5_compressed_legacy_parity.outcome }}"
           exit 1

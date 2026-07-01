@@ -7,12 +7,15 @@ name: Docs Site
 #
 # On pull_request touching the same paths: build only (link check runs, no deploy).
 #
-# workflow_dispatch: manual trigger for out-of-band deploys.
+# workflow_dispatch: manual trigger for out-of-band full validation.
 #
 # Requires GitHub Pages enabled with "Deploy from a branch" → gh-pages source
 # (Settings → Pages). This is a one-time maintainer action.
 
 on:
+  schedule:
+    # Nightly full docs validation at 05:20 UTC
+    - cron: '20 5 * * *'
   push:
     branches:
       - main
@@ -21,12 +24,15 @@ on:
       - 'docs/**'
       - 'scripts/docs-examples-smoke.sh'
       - 'scripts/docs-site-check.sh'
+      - '.github/workflows/docs-site.yml'
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
     paths:
       - 'website/**'
       - 'docs/**'
       - 'scripts/docs-examples-smoke.sh'
       - 'scripts/docs-site-check.sh'
+      - '.github/workflows/docs-site.yml'
   workflow_dispatch:
 
 permissions:
@@ -45,6 +51,12 @@ jobs:
   build:
     name: Build docs site
     runs-on: ubuntu-latest
+    env:
+      RUN_FULL: >-
+        ${{
+          github.event_name != 'pull_request' ||
+          contains(github.event.pull_request.labels.*.name, 'ci:docs-full')
+        }}
     defaults:
       run:
         working-directory: website
@@ -75,8 +87,25 @@ jobs:
           path: website/dist/
           retention-days: 1
 
+      - name: Write CI tier summary
+        if: always()
+        run: |
+          {
+            echo "## Docs site CI tier"
+            echo ""
+            echo "- Ordinary PRs build the Astro site and validate agent plumbing."
+            echo "- Recipe smoke tests, CLI build, and dataset fetch run on push to main, nightly schedule, workflow_dispatch, or PRs labeled \`ci:docs-full\`."
+            echo "- GitHub Pages deploy remains push-to-main only."
+            echo "- Current full-tier decision: ${RUN_FULL}."
+          } >> "$GITHUB_STEP_SUMMARY"
+
   smoke:
     name: Recipe smoke tests
+    if: >-
+      ${{
+        github.event_name != 'pull_request' ||
+        contains(github.event.pull_request.labels.*.name, 'ci:docs-full')
+      }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

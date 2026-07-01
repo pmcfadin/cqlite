@@ -6,6 +6,10 @@
 # loaded using the read-sstable command. It provides a comprehensive health check
 # of parsing coverage across all data types, collection types, and table structures.
 #
+# CI TIERING (issue #1368): all-table smoke is intentionally off ordinary PR
+# fan-out. Run it nightly, manually, or when this workflow / the smoke script
+# changes.
+#
 # Expected Pass Rate:
 #   - Current: 8/33 tables (baseline)
 #   - Target: 33/33 tables (100% coverage)
@@ -18,28 +22,20 @@
 name: Smoke Tests - All Tables
 
 on:
+  schedule:
+    # Nightly at 03:15 UTC
+    - cron: '15 3 * * *'
+  workflow_dispatch:
   push:
     branches: [main]
     paths:
       - '.github/workflows/smoke-tests.yml'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'cqlite-core/**'
-      - 'cqlite-cli/**'
-      - 'test-data/**'
-      - 'scripts/**'
+      - 'test-data/scripts/smoke-test-all-tables.sh'
   pull_request:
     branches: [main]
     paths:
       - '.github/workflows/smoke-tests.yml'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'cqlite-core/**'
-      - 'cqlite-cli/**'
-      - 'test-data/**'
-      - 'scripts/**'
+      - 'test-data/scripts/smoke-test-all-tables.sh'
 
 concurrency:
   group: smoke-tests-${{ github.ref }}
@@ -101,14 +97,14 @@ jobs:
           set -euo pipefail
           echo "📦 Downloading dataset: ${DATASET_ASSET}"
           mkdir -p test-data/datasets
-          curl -fsSL -o /tmp/${DATASET_ASSET} \
-            https://github.com/pmcfadin/cqlite/releases/download/${DATASET_TAG}/${DATASET_ASSET}
+          curl -fsSL -o "/tmp/${DATASET_ASSET}" \
+            "https://github.com/pmcfadin/cqlite/releases/download/${DATASET_TAG}/${DATASET_ASSET}"
 
           echo "🔐 Verifying checksum..."
           echo "${DATASET_SHA256}  /tmp/${DATASET_ASSET}" | sha256sum -c -
 
           echo "📂 Extracting dataset..."
-          tar -xzf /tmp/${DATASET_ASSET} -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
+          tar -xzf "/tmp/${DATASET_ASSET}" -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
 
           # Issue #1335: stamp the .dataset-pin that fetch-datasets.sh writes so
           # the shared `datasets-${DATASET_TAG}-${DATASET_SHA256}` cache entry is
@@ -203,17 +199,27 @@ jobs:
       - name: Summary comment
         if: always()
         run: |
+          {
+            echo "## All-table smoke tier"
+            echo ""
+            echo "- Runs nightly, manually, and when all-table smoke workflow/script logic changes."
+            echo "- Ordinary PRs should use faster targeted checks; use workflow_dispatch for ad hoc full-table coverage."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
           echo "📊 Smoke Test Summary"
           echo ""
 
           if [ '${{ job.status }}' == 'success' ]; then
             echo "✅ All tables passed smoke testing"
+            echo "✅ All tables passed smoke testing" >> "$GITHUB_STEP_SUMMARY"
             echo ""
             echo "Next steps:"
             echo "  - Review validation matrix: test-data/validation-matrix.md"
             echo "  - Check coverage across all keyspaces and data types"
           else
             echo "❌ Some tables failed smoke testing"
+            echo "❌ Some tables failed smoke testing" >> "$GITHUB_STEP_SUMMARY"
             echo ""
             echo "Debugging:"
             echo "  1. Download smoke-test-results artifact for detailed output"

@@ -17,18 +17,22 @@ on:
       - 'examples/**'
   pull_request:
     branches: [ main ]
-    paths:
-      - '.github/workflows/ci.yml'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'cqlite-core/**'
-      - 'cqlite-cli/**'
-      - 'tests/**'
-      - 'test-data/**'
-      - 'scripts/**'
-      - 'tools/**'
-      - 'examples/**'
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+    # Keep the legacy required "CI / test" context emitted for every PR until
+    # branch protection moves to "Required PR Gate / required". The broad lanes
+    # below opt in separately via the ci:broad label.
+    paths-ignore:
+      - '__required_ci_context_never_matches__'
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: 'CI coverage scope to run'
+        required: true
+        default: broad
+        type: choice
+        options:
+          - broad
+          - required-context-only
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -43,6 +47,12 @@ env:
 jobs:
   core_lib_doc_tests:
     name: Core lib/doc tests
+    if: >-
+      ${{
+        github.event_name == 'push' ||
+        (github.event_name == 'workflow_dispatch' && inputs.scope == 'broad') ||
+        (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:broad'))
+      }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -87,7 +97,10 @@ jobs:
         # Do NOT trust cache-hit alone (#1097): a restored cache can be partial.
         # Keep the CI path on the shared fetch script so binary fixtures and
         # git-tracked JSONL reference files are validated together.
-        run: bash ./test-data/scripts/fetch-datasets.sh
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "fetch datasets"
+          -- bash ./test-data/scripts/fetch-datasets.sh
 
       - name: Sanity check dataset
         run: |
@@ -152,22 +165,28 @@ jobs:
           CQLITE_PARITY_REQUIRE_DATASETS: "1"
           RUST_LOG: debug
           RUST_BACKTRACE: full
-        run: bash scripts/ci/run-core-test-group.sh lib-doc
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "core lib/doc tests"
+          -- bash scripts/ci/run-core-test-group.sh lib-doc
+
+      - name: CI runtime timing summary
+        if: always()
+        run: bash scripts/ci/ci-timing-summary.sh summary "CI core lib/doc timing"
 
       - name: Show sccache stats
         if: always()
         run: ${SCCACHE_PATH:-sccache} --show-stats
 
-  core_integration_shards:
-    name: Core integration tests shard ${{ matrix.shard }}
+  core_integration_archive:
+    name: Core integration nextest archive
+    if: >-
+      ${{
+        github.event_name == 'push' ||
+        (github.event_name == 'workflow_dispatch' && inputs.scope == 'broad') ||
+        (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:broad'))
+      }}
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [0, 1, 2]
-    env:
-      CORE_TEST_SHARD_INDEX: ${{ matrix.shard }}
-      CORE_TEST_SHARD_TOTAL: 3
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -182,6 +201,11 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.10
@@ -207,7 +231,10 @@ jobs:
           key: datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
 
       - name: Fetch datasets if required fixture data missing
-        run: bash ./test-data/scripts/fetch-datasets.sh
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "fetch datasets"
+          -- bash ./test-data/scripts/fetch-datasets.sh
 
       - name: Sanity check dataset
         run: |
@@ -225,27 +252,210 @@ jobs:
           fi
           echo "✅ Core fixture present: ${CORE_FIXTURE}"
           echo "✅ Required JSONL golden present: ${GOLDEN_JSONL}"
+          bash test-data/scripts/check-dataset-manifest.sh test-data/datasets
 
-      - name: Run core integration shard with timings
+      - name: Archive core integration tests
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          CQLITE_REQUIRE_FIXTURES: "1"
+          CQLITE_PARITY_REQUIRE_DATASETS: "1"
           RUST_LOG: debug
           RUST_BACKTRACE: full
-        run: bash scripts/ci/run-core-test-group.sh integration-shard
+        run: |
+          bash scripts/ci/ci-timing-summary.sh measure "core integration archive" -- bash <<'BASH'
+          set -euo pipefail
+          ARCHIVE_FILE="target/nextest/core-integration-tests.tar.zst"
+          mapfile -t integration_tests < <(
+            find cqlite-core/tests -maxdepth 1 -type f -name '*.rs' -print \
+              | sed 's#^cqlite-core/tests/##; s#\.rs$##' \
+              | sort
+          )
+          if [ "${#integration_tests[@]}" -eq 0 ]; then
+            echo "No cqlite-core integration test targets found" >&2
+            exit 1
+          fi
+
+          cmd=(
+            cargo nextest archive
+            --package cqlite-core
+            --features cli-helpers
+            --archive-file "$ARCHIVE_FILE"
+          )
+          for test_name in "${integration_tests[@]}"; do
+            cmd+=(--test "$test_name")
+          done
+
+          mkdir -p "$(dirname "$ARCHIVE_FILE")"
+          "${cmd[@]}"
+          test -s "$ARCHIVE_FILE"
+          {
+            echo "### Core integration nextest archive"
+            echo
+            echo "- Archive: \`$ARCHIVE_FILE\`"
+            echo "- Target set: ${#integration_tests[@]} explicit \`cqlite-core/tests/*.rs\` integration targets"
+          } >> "$GITHUB_STEP_SUMMARY"
+          BASH
+
+      - name: Upload core integration test archive
+        uses: actions/upload-artifact@v6
+        with:
+          name: core-integration-nextest-archive
+          path: target/nextest/core-integration-tests.tar.zst
+          if-no-files-found: error
+          retention-days: 3
 
       - name: Show sccache stats
         if: always()
         run: ${SCCACHE_PATH:-sccache} --show-stats
+
+      - name: CI runtime timing summary
+        if: always()
+        run: bash scripts/ci/ci-timing-summary.sh summary "CI core integration archive timing"
+
+  core_integration_partitions:
+    name: Core integration nextest partition ${{ matrix.partition }}/3
+    if: >-
+      ${{
+        github.event_name == 'push' ||
+        (github.event_name == 'workflow_dispatch' && inputs.scope == 'broad') ||
+        (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:broad'))
+      }}
+    runs-on: ubuntu-latest
+    needs:
+      - core_integration_archive
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Free disk space (issue #722)
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h / | tail -1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Download core integration test archive
+        uses: actions/download-artifact@v6
+        with:
+          name: core-integration-nextest-archive
+          path: target/nextest
+
+      - name: Restore dataset cache
+        uses: actions/cache@v5
+        with:
+          path: test-data/datasets
+          key: datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
+
+      - name: Fetch datasets if required fixture data missing
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "fetch datasets"
+          -- bash ./test-data/scripts/fetch-datasets.sh
+
+      - name: Sanity check dataset
+        run: |
+          set -euo pipefail
+          test -f test-data/datasets/metadata.yml
+          CORE_FIXTURE=$(find test-data/datasets/sstables/test_basic -path '*simple_table-*-Data.db' 2>/dev/null || true)
+          if [ -z "$CORE_FIXTURE" ]; then
+            echo "❌ Core fixture test_basic/simple_table-*/*-Data.db missing after fetch" >&2
+            exit 1
+          fi
+          GOLDEN_JSONL="test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl"
+          if [ ! -s "$GOLDEN_JSONL" ]; then
+            echo "❌ Required JSONL golden missing after fetch: ${GOLDEN_JSONL}" >&2
+            exit 1
+          fi
+          echo "✅ Core fixture present: ${CORE_FIXTURE}"
+          echo "✅ Required JSONL golden present: ${GOLDEN_JSONL}"
+          bash test-data/scripts/check-dataset-manifest.sh test-data/datasets
+
+      - name: Run core integration nextest partition
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          CQLITE_REQUIRE_FIXTURES: "1"
+          CQLITE_PARITY_REQUIRE_DATASETS: "1"
+          RUST_LOG: debug
+          RUST_BACKTRACE: full
+        run: |
+          set -euo pipefail
+          ARCHIVE_FILE="target/nextest/core-integration-tests.tar.zst"
+          PARTITION="count:${{ matrix.partition }}/3"
+          OUTPUT_FILE="target/nextest/partition-${{ matrix.partition }}.log"
+          test -s "$ARCHIVE_FILE"
+
+          start="$(date +%s)"
+          set +e
+          cargo nextest run \
+            --archive-file "$ARCHIVE_FILE" \
+            --workspace-remap "$GITHUB_WORKSPACE" \
+            --partition "$PARTITION" \
+            --no-tests fail \
+            --no-fail-fast \
+            -E 'not test(test_legacy_format_allows_blob_fallback_with_feature)' \
+            2>&1 | tee "$OUTPUT_FILE"
+          status="${PIPESTATUS[0]}"
+          set -e
+          end="$(date +%s)"
+          duration="$((end - start))"
+
+          starting_line="$(grep -E 'Starting [0-9]+ tests?' "$OUTPUT_FILE" | tail -1 || true)"
+          summary_line="$(grep -E 'Summary .* tests? run' "$OUTPUT_FILE" | tail -1 || true)"
+
+          {
+            echo "### Core integration nextest partition ${{ matrix.partition }}/3"
+            echo
+            echo "- Partition: \`$PARTITION\`"
+            echo "- Duration: ${duration}s"
+            echo "- Status: ${status}"
+            if [ -n "$starting_line" ]; then
+              echo "- Started: \`$starting_line\`"
+            fi
+            if [ -n "$summary_line" ]; then
+              echo "- Summary: \`$summary_line\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          bash scripts/ci/ci-timing-summary.sh note \
+            "core integration partition ${{ matrix.partition }}/3" \
+            "$status" \
+            "$duration"
+
+          exit "$status"
+
+      - name: CI runtime timing summary
+        if: always()
+        run: bash scripts/ci/ci-timing-summary.sh summary "CI core integration partition timing"
 
   core_tests:
     name: Core tests
     runs-on: ubuntu-latest
     needs:
       - core_lib_doc_tests
-      - core_integration_shards
-    if: ${{ always() }}
+      - core_integration_archive
+      - core_integration_partitions
+    if: >-
+      ${{
+        always() &&
+        (
+          github.event_name == 'push' ||
+          (github.event_name == 'workflow_dispatch' && inputs.scope == 'broad') ||
+          (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:broad'))
+        )
+      }}
     steps:
-      - name: Check core test shards
+      - name: Check core test jobs
         run: |
           set -euo pipefail
           failed=0
@@ -262,11 +472,18 @@ jobs:
           }
 
           check_result "core_lib_doc_tests" "${{ needs.core_lib_doc_tests.result }}"
-          check_result "core_integration_shards" "${{ needs.core_integration_shards.result }}"
+          check_result "core_integration_archive" "${{ needs.core_integration_archive.result }}"
+          check_result "core_integration_partitions" "${{ needs.core_integration_partitions.result }}"
           exit "$failed"
 
   integration_tests:
     name: Integration tests
+    if: >-
+      ${{
+        github.event_name == 'push' ||
+        (github.event_name == 'workflow_dispatch' && inputs.scope == 'broad') ||
+        (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:broad'))
+      }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -305,7 +522,10 @@ jobs:
           key: datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
 
       - name: Fetch datasets if required fixture data missing
-        run: bash ./test-data/scripts/fetch-datasets.sh
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "fetch datasets"
+          -- bash ./test-data/scripts/fetch-datasets.sh
 
       - name: Sanity check dataset
         run: |
@@ -331,6 +551,8 @@ jobs:
           CQLITE_REQUIRE_FIXTURES: "1"
           CQLITE_PARITY_REQUIRE_DATASETS: "1"
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "integration tests" -- bash <<'BASH'
+          set -euo pipefail
           echo "Running revived orphan integration tests (issue #514)..."
           # Run the seven golden-path / chunked-reader / component tests that were
           # revived in issue #514.  The CRC-corruption and compression-matrix tests
@@ -344,6 +566,11 @@ jobs:
             --test golden_path_partition_lookup_tests \
             --test golden_path_scan_operations_tests \
             --test golden_path_summary_index_integration_tests
+          BASH
+
+      - name: CI runtime timing summary
+        if: always()
+        run: bash scripts/ci/ci-timing-summary.sh summary "CI integration timing"
 
       - name: Show sccache stats
         if: always()
@@ -351,6 +578,12 @@ jobs:
 
   write_support_tests:
     name: Write-support tests
+    if: >-
+      ${{
+        github.event_name == 'push' ||
+        (github.event_name == 'workflow_dispatch' && inputs.scope == 'broad') ||
+        (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:broad'))
+      }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -384,6 +617,8 @@ jobs:
 
       - name: Run write-support tests (issue #552)
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "write-support tests" -- bash <<'BASH'
+          set -euo pipefail
           echo "Running write-support unit + roundtrip + compaction tests (issue #552)..."
           # These targets are self-contained: the lib unit tests, the write/read
           # roundtrip suite, and the compaction integration suite all build their own
@@ -394,6 +629,11 @@ jobs:
           # Issue #1074: static cells must land in the partition static row, not be
           # folded into clustering rows (fully synthetic — no fixtures required).
           cargo test --package cqlite-core --features write-support --test issue_1074_static_write_parity
+          BASH
+
+      - name: CI runtime timing summary
+        if: always()
+        run: bash scripts/ci/ci-timing-summary.sh summary "CI write-support timing"
 
       - name: Show sccache stats
         if: always()
@@ -401,6 +641,12 @@ jobs:
 
   delta_scan_tests:
     name: Delta-scan tests
+    if: >-
+      ${{
+        github.event_name == 'push' ||
+        (github.event_name == 'workflow_dispatch' && inputs.scope == 'broad') ||
+        (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:broad'))
+      }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -428,11 +674,18 @@ jobs:
 
       - name: Run delta-scan tests (issue #697)
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "delta-scan tests" -- bash <<'BASH'
+          set -euo pipefail
           echo "Running delta-scan unit tests (issue #697)..."
           # The delta-scan feature flag gates DeltaRecord, RangeBound, and related
           # delta_scan module tests.  These are self-contained unit tests that do
           # not require fixture data.
           cargo test --package cqlite-core --features delta-scan --lib
+          BASH
+
+      - name: CI runtime timing summary
+        if: always()
+        run: bash scripts/ci/ci-timing-summary.sh summary "CI delta-scan timing"
 
       - name: Show sccache stats
         if: always()
@@ -440,6 +693,12 @@ jobs:
 
   cli_smoke_tests:
     name: CLI tests and smoke
+    if: >-
+      ${{
+        github.event_name == 'push' ||
+        (github.event_name == 'workflow_dispatch' && inputs.scope == 'broad') ||
+        (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:broad'))
+      }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -478,7 +737,10 @@ jobs:
           key: datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
 
       - name: Fetch datasets if required fixture data missing
-        run: bash ./test-data/scripts/fetch-datasets.sh
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "fetch datasets"
+          -- bash ./test-data/scripts/fetch-datasets.sh
 
       - name: Sanity check dataset
         run: |
@@ -501,13 +763,18 @@ jobs:
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "CLI unit tests" -- bash <<'BASH'
+          set -euo pipefail
           echo "Running CLI unit tests (Issue #20)..."
           cargo test --package cqlite-cli --test unit_tests
+          BASH
 
       - name: Run CLI write→read content round-trip tests (issue #1231)
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "CLI write-read round-trip tests" -- bash <<'BASH'
+          set -euo pipefail
           echo "Running CLI write-path content round-trips (issue #1231)..."
           # Drives the FULL public CLI chain: CQL INSERT/UPDATE/DELETE → WAL →
           # flush → SSTable → independent reopen → SELECT → assert decoded VALUES,
@@ -516,11 +783,15 @@ jobs:
           # SSTables in a tempdir, so no fixture corpus is required.
           cargo test --package cqlite-cli --features write-support \
             --test write_readback_content_tests
+          BASH
 
       - name: Build CLI for one-shot smoke tests
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "CLI release build" -- bash <<'BASH'
+          set -euo pipefail
           echo "🔨 Building CLI binary for smoke tests..."
           cargo build --package cqlite-cli --release
+          BASH
 
       - name: Run one-shot smoke tests with snapshots
         env:
@@ -529,11 +800,14 @@ jobs:
           CQLITE_CLI: ${{ github.workspace }}/target/release/cqlite
           GOLDEN_DIR: ${{ github.workspace }}/test-data/scripts/smoke-test-snapshots
         run: |
+          bash scripts/ci/ci-timing-summary.sh measure "CLI one-shot smoke tests" -- bash <<'BASH'
+          set -euo pipefail
           echo "🔍 Running one-shot CLI smoke tests..."
           echo "CQLITE_DATA_DIR=$CQLITE_DATA_DIR"
           echo "CQLITE_SCHEMA=$CQLITE_SCHEMA"
           chmod +x test-data/scripts/ci-one-shot-smoke.sh
           test-data/scripts/ci-one-shot-smoke.sh
+          BASH
 
       - name: Upload smoke test artifacts on failure
         if: failure()
@@ -547,6 +821,10 @@ jobs:
         if: always()
         run: ${SCCACHE_PATH:-sccache} --show-stats
 
+      - name: CI runtime timing summary
+        if: always()
+        run: bash scripts/ci/ci-timing-summary.sh summary "CI CLI smoke timing"
+
   test:
     name: test
     runs-on: ubuntu-latest
@@ -557,10 +835,46 @@ jobs:
       - delta_scan_tests
       - cli_smoke_tests
     if: ${{ always() }}
+    env:
+      RUN_BROAD: >-
+        ${{
+          github.event_name == 'push' ||
+          (github.event_name == 'workflow_dispatch' && inputs.scope == 'broad') ||
+          (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:broad'))
+        }}
     steps:
+      - name: Checkout for transitional required context
+        if: ${{ env.RUN_BROAD != 'true' }}
+        uses: actions/checkout@v5
+
+      - name: Setup Rust for transitional required context
+        if: ${{ env.RUN_BROAD != 'true' }}
+        uses: ./.github/actions/setup-rust-ci
+        with:
+          components: rustfmt,clippy
+          cache-key: ci-required-context
+
+      - name: Run transitional required context
+        if: ${{ env.RUN_BROAD != 'true' }}
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "transitional pre-merge fast"
+          -- bash scripts/local/pre-merge.sh fast
+
+      - name: CI runtime timing summary
+        if: ${{ always() && env.RUN_BROAD != 'true' }}
+        run: bash scripts/ci/ci-timing-summary.sh summary "CI transitional required context timing"
+
       - name: Check split test jobs
         run: |
           set -euo pipefail
+
+          if [ "${RUN_BROAD}" != "true" ]; then
+            echo "CI / test is retained as a transitional required context."
+            echo "Required Rust fmt/clippy/build/fast tests now run in Required PR Gate / required."
+            echo "Add the ci:broad label, push to main, or dispatch this workflow with scope=broad to run the broad CI lanes."
+            exit 0
+          fi
 
           failed=0
           check_result() {
@@ -606,6 +920,12 @@ jobs:
   # on the index, so it is verified at publish time, not here.
   publish-dry-run:
     name: crates.io publish dry-run (cqlite-core)
+    if: >-
+      ${{
+        github.event_name == 'push' ||
+        (github.event_name == 'workflow_dispatch' && inputs.scope == 'broad') ||
+        (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:broad'))
+      }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -632,20 +952,33 @@ jobs:
           key: cargo-${{ runner.os }}-publish-dryrun-${{ hashFiles('**/Cargo.lock') }}
 
       - name: cargo publish --dry-run (cqlite-core)
-        run: cargo publish --package cqlite-core --dry-run
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "cqlite-core publish dry-run"
+          -- cargo publish --package cqlite-core --dry-run
 
       - name: Show sccache stats
         if: always()
         run: ${SCCACHE_PATH:-sccache} --show-stats
 
+      - name: CI runtime timing summary
+        if: always()
+        run: bash scripts/ci/ci-timing-summary.sh summary "CI publish dry-run timing"
+
   # Guards the delivery-pipeline tooling itself (issue #1162). The flow-finalize
   # cleanup destroyed an unrelated active claim via an issue-<N>-* glob on
   # 2026-06-27 (the #1143 incident). This pure-git test (no Rust build) pins the
-  # guardrails so the regression can't return. Fast: seconds, runs every PR.
-  # Runs on macOS too: flow-finalize's real production target is the macOS system
-  # bash (3.2), so the script's 3.2 compatibility is validated, not just asserted.
+  # guardrails so the regression can't return when broad CI is requested.
+  # Runs on macOS too when enabled: flow-finalize's real production target is the
+  # macOS system bash (3.2), so compatibility is validated, not just asserted.
   flow-tooling-tests:
     name: Flow tooling guardrails
+    if: >-
+      ${{
+        github.event_name == 'push' ||
+        (github.event_name == 'workflow_dispatch' && inputs.scope == 'broad') ||
+        (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:broad'))
+      }}
     strategy:
       fail-fast: false
       matrix:
@@ -656,4 +989,11 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Run flow-finalize cleanup guardrail tests (${{ matrix.os }} /bin/bash)
-        run: /bin/bash scripts/flow/tests/finalize-cleanup.test.sh
+        run: >-
+          bash scripts/ci/ci-timing-summary.sh measure
+          "flow-finalize guardrail tests"
+          -- /bin/bash scripts/flow/tests/finalize-cleanup.test.sh
+
+      - name: CI runtime timing summary
+        if: always()
+        run: bash scripts/ci/ci-timing-summary.sh summary "CI flow tooling timing"

@@ -5,6 +5,9 @@ name: Trino Connector CI
 # auto-provisions the JDK 25 toolchain via the foojay resolver.
 
 on:
+  schedule:
+    # Nightly full Trino connector coverage at 04:55 UTC
+    - cron: '55 4 * * *'
   push:
     branches: [ main ]
     paths:
@@ -12,6 +15,7 @@ on:
       - '.github/workflows/trino-connector-ci.yml'
   pull_request:
     branches: [ main ]
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
     paths:
       - 'trino-connector/**'
       - '.github/workflows/trino-connector-ci.yml'
@@ -26,8 +30,14 @@ concurrency:
 
 jobs:
   build:
-    name: gradle test + plugin
+    name: gradle test (+ optional plugin)
     runs-on: ubuntu-latest
+    env:
+      RUN_FULL: >-
+        ${{
+          github.event_name != 'pull_request' ||
+          contains(github.event.pull_request.labels.*.name, 'ci:trino-full')
+        }}
     steps:
       - uses: actions/checkout@v5
 
@@ -44,10 +54,12 @@ jobs:
         run: ./gradlew --no-daemon test
 
       - name: Assemble plugin
+        if: env.RUN_FULL == 'true'
         working-directory: trino-connector
         run: ./gradlew --no-daemon installPlugin
 
       - name: Upload plugin artifact
+        if: env.RUN_FULL == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: cqlite-trino-plugin
@@ -61,3 +73,15 @@ jobs:
           name: trino-connector-test-reports
           path: trino-connector/build/reports/tests
           if-no-files-found: ignore
+
+      - name: Write CI tier summary
+        if: always()
+        run: |
+          {
+            echo "## Trino connector CI tier"
+            echo ""
+            echo "- Ordinary PRs run Gradle tests only."
+            echo "- Plugin assembly and artifact upload run on push to main, nightly schedule, workflow_dispatch, or PRs labeled \`ci:trino-full\`."
+            echo "- Full Docker E2E lives in flight-trino-e2e.yml and accepts \`ci:trino-full\`."
+            echo "- Current full-tier decision: ${RUN_FULL}."
+          } >> "$GITHUB_STEP_SUMMARY"

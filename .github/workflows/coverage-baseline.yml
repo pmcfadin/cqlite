@@ -1,13 +1,21 @@
 name: Coverage Baseline
 
 on:
+  schedule:
+    # Nightly baseline coverage at 02:45 UTC, between quality gates and binding matrices.
+    - cron: '45 2 * * *'
+  workflow_dispatch: {}
   pull_request:
     paths:
       - 'cqlite-core/src/**'
+      - '.github/workflows/coverage-baseline.yml'
+
+permissions:
+  contents: read
 
 concurrency:
   group: coverage-baseline-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   coverage:
@@ -77,25 +85,40 @@ jobs:
             exit 1
           fi
 
+      - name: Upload baseline coverage report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-baseline-${{ github.sha }}
+          path: cobertura.xml
+          retention-days: 30
+          if-no-files-found: warn
+
       - name: Coverage summary
         if: always()
         run: |
-          echo "## Coverage Report Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Coverage Report Summary"
+            echo ""
+            echo "- **Event**: ${{ github.event_name }}"
+            echo "- **Commit**: ${{ github.sha }}"
+            echo "- **Artifact**: coverage-baseline-${{ github.sha }} (retained 30 days)"
+            echo ""
 
-          if [ -f cobertura.xml ]; then
-            COVERAGE=$(grep -oP 'line-rate="\K[0-9.]+' cobertura.xml | head -n 1)
-            COVERAGE_PCT=$(echo "$COVERAGE * 100" | bc)
+            if [ -f cobertura.xml ]; then
+              COVERAGE=$(grep -oP 'line-rate="\K[0-9.]+' cobertura.xml | head -n 1)
+              COVERAGE_PCT=$(echo "$COVERAGE * 100" | bc)
 
-            echo "- **Coverage**: ${COVERAGE_PCT}%" >> $GITHUB_STEP_SUMMARY
-            echo "- **Threshold**: 30% (lib-only)" >> $GITHUB_STEP_SUMMARY
+              echo "- **Coverage**: ${COVERAGE_PCT}%"
+              echo "- **Threshold**: 30% (lib-only)"
 
-            MEETS_THRESHOLD=$(echo "$COVERAGE_PCT >= 30" | bc)
-            if [ "$MEETS_THRESHOLD" -eq 1 ]; then
-              echo "- **Status**: ✓ PASS" >> $GITHUB_STEP_SUMMARY
+              MEETS_THRESHOLD=$(echo "$COVERAGE_PCT >= 30" | bc)
+              if [ "$MEETS_THRESHOLD" -eq 1 ]; then
+                echo "- **Status**: ✓ PASS"
+              else
+                echo "- **Status**: ✗ FAIL"
+              fi
             else
-              echo "- **Status**: ✗ FAIL" >> $GITHUB_STEP_SUMMARY
+              echo "- **Status**: ERROR - Coverage report not generated"
             fi
-          else
-            echo "- **Status**: ERROR - Coverage report not generated" >> $GITHUB_STEP_SUMMARY
-          fi
+          } >> "$GITHUB_STEP_SUMMARY"
