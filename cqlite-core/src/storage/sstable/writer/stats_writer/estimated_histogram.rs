@@ -22,14 +22,24 @@
 //!
 //! Cassandra's `MetadataCollector` seeds both histograms with
 //! `EstimatedHistogram.newEstimatedHistogram()` → a 155-offset series (156
-//! serialised buckets, matching the real-fixture annotated dump). The series
-//! starts at 1 and grows geometrically by a factor of `1.2`, rounding to the
-//! nearest integer and forcing strict monotonicity:
+//! serialised buckets, matching the real-fixture annotated dump). The
+//! CANONICAL series carries a LEADING DUPLICATE `1`, then grows geometrically
+//! by a factor of `1.2`, rounding to the nearest integer and forcing strict
+//! monotonicity thereafter:
 //!
 //! ```text
 //! offsets[0] = 1
-//! offsets[j] = max(round(offsets[j-1] * 1.2), offsets[j-1] + 1)
+//! offsets[1] = 1                                            // leading duplicate
+//! offsets[j] = max(round(offsets[j-1] * 1.2), offsets[j-1] + 1)   for j >= 2
 //! ```
+//!
+//! This yields `[1, 1, 2, 3, 4, 5, 6, 7, ...]`, matching the serialised offsets
+//! observed at the head of the STATS component in the committed annotated
+//! fixture `docs/sstables-definitive-guide/statistics-db-annotated-dump.txt`
+//! (STATS at 0x0b53: bucketCount `0x9c` = 156, then offsets `1, 1, 2, 3, 4, 5,
+//! 6, 7`). A strictly-monotonic `[1, 2, 3, ...]` series (no leading duplicate)
+//! shifts bucket placement for small values and is a semantic parity bug, not
+//! just a byte cosmetic.
 //!
 //! Authority: cassandra-5.0.0 `utils/EstimatedHistogram.java`
 //! (`newOffsets(size, considerZeroes=false)`, `EstimatedHistogramSerializer`)
@@ -56,7 +66,9 @@ const OVERFLOW_OFFSET: i64 = i64::MAX;
 /// what the reader decodes as `partition_count`.
 #[derive(Debug, Clone)]
 pub struct EstimatedHistogram {
-    /// Strictly increasing bucket boundaries (inclusive upper bounds).
+    /// Bucket boundaries (inclusive upper bounds). Non-decreasing: the canonical
+    /// Cassandra series carries a leading duplicate `1` (`[1, 1, 2, 3, ...]`) and
+    /// is strictly increasing thereafter.
     offsets: Vec<i64>,
     /// Per-bucket observation counts; length is `offsets.len() + 1` (the last
     /// element is the overflow bucket). `u64` cannot overflow for any real
@@ -126,19 +138,29 @@ impl EstimatedHistogram {
     }
 }
 
-/// Build the canonical geometric bucket-offset series of length `size`.
+/// Build the canonical `EstimatedHistogram` bucket-offset series of length
+/// `size`.
 ///
-/// `EstimatedHistogram.newOffsets(size, considerZeroes=false)`: `offsets[0] = 1`
-/// then each subsequent offset is `round(prev * 1.2)`, forced to be strictly
-/// greater than its predecessor.
+/// Matches Cassandra's `EstimatedHistogram.newOffsets(size, considerZeroes=false)`
+/// as observed serialised in the annotated fixture: the series carries a
+/// LEADING DUPLICATE `1` (`offsets[0] == offsets[1] == 1`), then each subsequent
+/// offset is `round(prev * 1.2)`, forced to be strictly greater than its
+/// predecessor. Result: `[1, 1, 2, 3, 4, 5, 6, 7, ...]`.
 fn new_offsets(size: usize) -> Vec<i64> {
     let mut offsets = Vec::with_capacity(size);
     if size == 0 {
         return offsets;
     }
+    // offsets[0] = 1
     let mut last: i64 = 1;
     offsets.push(last);
-    for _ in 1..size {
+    if size == 1 {
+        return offsets;
+    }
+    // offsets[1] = 1 (canonical leading duplicate); geometric growth resumes from
+    // this value.
+    offsets.push(last);
+    for _ in 2..size {
         // round(last * 1.2), matching Java Math.round (half-up on the .5 tie for
         // the small, always-positive values in this series).
         let scaled = (last as f64) * 1.2;
@@ -160,14 +182,23 @@ mod tests {
     fn default_offsets_match_cassandra_series() {
         let off = new_offsets(DEFAULT_OFFSET_COUNT);
         assert_eq!(off.len(), 155, "155 offsets => 156 serialised buckets");
-        assert_eq!(off[0], 1);
-        // Strictly increasing, geometric-ish.
-        for w in off.windows(2) {
-            assert!(w[1] > w[0], "offsets must be strictly increasing");
+        // Canonical leading-duplicate prefix, pinned to the serialised offsets at
+        // the head of the STATS component in the committed annotated fixture
+        // `docs/sstables-definitive-guide/statistics-db-annotated-dump.txt`
+        // (STATS at 0x0b53: bucketCount 0x9c=156, offsets 1, 1, 2, 3, 4, 5, 6, 7).
+        assert_eq!(
+            &off[..8],
+            &[1, 1, 2, 3, 4, 5, 6, 7],
+            "canonical Cassandra series has a LEADING DUPLICATE 1"
+        );
+        // Strictly increasing from the second offset onward (the leading pair is
+        // the sole duplicate).
+        for w in off[1..].windows(2) {
+            assert!(
+                w[1] > w[0],
+                "offsets must be strictly increasing after the leading duplicate"
+            );
         }
-        // Spot-check the first few against the hand-computed 1.2x series.
-        // 1, round(1.2)=1 -> +1 = 2, round(2.4)=2 -> +1 = 3, round(3.6)=4, ...
-        assert_eq!(&off[..5], &[1, 2, 3, 4, 5]);
     }
 
     #[test]
@@ -182,15 +213,58 @@ mod tests {
     #[test]
     fn add_routes_to_smallest_offset_at_or_above_value() {
         let mut h = EstimatedHistogram::new();
-        // value 1 lands in bucket 0 (offset 1, exact match).
-        h.add(1);
-        // value 0 also lands in bucket 0 (first offset >= 0 is offset[0]=1).
+        // With the canonical leading-duplicate offsets `[1, 1, 2, 3, ...]`:
+        //   value 0 -> insertion point 0 -> bucket 0 (offset 1).
+        //   value 1 -> exact match on the duplicate `1` -> bucket 0 or 1 (both
+        //              have offset 1, so routing is semantically equivalent).
+        // Assert on the OFFSET the observation was routed to, not the raw bucket
+        // index, so the test tracks Cassandra's bucket semantics rather than the
+        // arbitrary tie-break among equal offsets.
         h.add(0);
-        assert_eq!(h.counts[0], 2);
+        h.add(1);
+        assert_eq!(
+            h.counts[0] + h.counts[1],
+            2,
+            "values 0 and 1 both fall in an offset-1 bucket"
+        );
+        assert!(
+            h.offsets[0] == 1 && h.offsets[1] == 1,
+            "both leading buckets carry offset 1"
+        );
+        // value 2 lands in the offset-2 bucket (index 2).
+        h.add(2);
+        assert_eq!(h.counts[2], 1);
+        assert_eq!(h.offsets[2], 2);
         // A huge value lands in the overflow bucket (last slot).
         h.add(u64::MAX);
         assert_eq!(*h.counts.last().unwrap(), 1);
-        assert_eq!(h.total(), 3);
+        assert_eq!(h.total(), 4);
+    }
+
+    #[test]
+    fn serialized_offset_prefix_matches_canonical_fixture() {
+        // Regression for issue #1327 finding 1: the SERIALISED offsets must begin
+        // with the canonical leading-duplicate prefix `[1, 1, 2, 3, 4, 5, 6, 7]`,
+        // matching the annotated Statistics.db fixture
+        // (`docs/sstables-definitive-guide/statistics-db-annotated-dump.txt`,
+        // STATS component at 0x0b53). A strictly-monotonic `[1, 2, 3, ...]` prefix
+        // is a semantic parity bug.
+        let h = EstimatedHistogram::new();
+        let mut buf = Vec::new();
+        h.write_to(&mut buf);
+
+        let bucket_count = i32::from_be_bytes(buf[0..4].try_into().unwrap());
+        assert_eq!(bucket_count, 156);
+        let expected_offsets = [1i64, 1, 2, 3, 4, 5, 6, 7];
+        for (i, &want) in expected_offsets.iter().enumerate() {
+            let opos = 4 + i * 16;
+            let got = i64::from_be_bytes(buf[opos..opos + 8].try_into().unwrap());
+            assert_eq!(
+                got, want,
+                "serialised offset[{}] must match canonical fixture",
+                i
+            );
+        }
     }
 
     #[test]
