@@ -266,6 +266,44 @@ fn failed_corpus_audit_emits_audit_report_failure_artifact() {
         value["scenario_id"].as_str(),
         Some(audit_report::AUDIT_SCENARIO_ID)
     );
+
+    // Issue #1027 finding 2: EVERY pointer in the record resolves to a real
+    // file/dir inside the bundle (no dangling stdout/stderr/repro_bundle pointers).
+    let prov = &value["provenance"];
+    let stdout_ptr = prov["stdout"].as_str().expect("provenance.stdout");
+    let stderr_ptr = prov["stderr"].as_str().expect("provenance.stderr");
+    assert!(
+        bundle.join(stdout_ptr).is_file(),
+        "provenance.stdout must resolve to a file: {stdout_ptr}"
+    );
+    assert!(
+        bundle.join(stderr_ptr).is_file(),
+        "provenance.stderr must resolve to a file: {stderr_ptr}"
+    );
+
+    let repro_ptr = value["repro_bundle"].as_str().expect("repro_bundle");
+    let repro_dir = bundle.join(repro_ptr);
+    assert!(
+        repro_dir.is_dir(),
+        "repro_bundle must resolve to a directory: {repro_ptr}"
+    );
+    assert!(
+        repro_dir.join("command.sh").is_file(),
+        "repro/ must contain command.sh"
+    );
+    assert!(
+        repro_dir.join("INSTRUCTIONS.md").is_file(),
+        "repro/ must contain INSTRUCTIONS.md"
+    );
+
+    // Every diffs[].path resolves inside the bundle too.
+    for d in diffs {
+        let p = d["path"].as_str().expect("diff path");
+        assert!(
+            bundle.join(p).is_file(),
+            "diffs[].path must resolve to a file: {p}"
+        );
+    }
 }
 
 /// The `scenario_id` the audit-level bundle is keyed by MUST be a real

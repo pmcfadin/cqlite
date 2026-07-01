@@ -51,13 +51,29 @@ const DATASET_SHA_UNAVAILABLE: &str =
 /// the bundle is self-contained.
 pub const AUDIT_REPORT_DIFF_PATH: &str = "diffs/corpus-audit-report.txt";
 
-/// Build the failure-artifact record for a FAILED corpus audit. `report` MUST be
-/// a failed report (`!report.ok()`); callers only invoke this on failure. The
-/// `diffs[]` carries the single `audit_report` entry pointing at the lane's
-/// existing corpus-audit report text (reused, not duplicated).
+/// Bundle-relative pointer to the captured stdout, recorded as `provenance.stdout`.
+/// The corpus audit has no separate console stream to capture, so the audit report
+/// text is mirrored here (a real, resolvable file) rather than pointing at a path
+/// that is never written (issue #1027 finding 2).
+pub const STDOUT_FILE: &str = "stdout.txt";
+
+/// Bundle-relative pointer to the captured stderr, recorded as `provenance.stderr`.
+/// Same file body as [`STDOUT_FILE`]; both resolve inside the bundle.
+pub const STDERR_FILE: &str = "stderr.txt";
+
+/// Bundle-relative pointer to the reproduction directory, recorded as
+/// `repro_bundle`. [`write_audit_bundle`] materializes this directory with a
+/// `command.sh` and `INSTRUCTIONS.md`, consistent with the cqlite-core repro
+/// bundle, so the pointer always resolves (issue #1027 finding 2).
+pub const REPRO_DIR: &str = "repro/";
+
+/// Build the failure-artifact record for a FAILED corpus audit. Callers only
+/// invoke this on failure. The `diffs[]` carries the single `audit_report` entry
+/// pointing at the lane's existing corpus-audit report text (reused, not
+/// duplicated); the report body itself is written to the bundle by
+/// [`write_audit_bundle`].
 pub fn build_record(
     manifest: &Manifest,
-    report: &AuditReport,
     provenance: Option<&Provenance>,
     command_line: &str,
 ) -> FailureArtifact {
@@ -72,11 +88,6 @@ pub fn build_record(
         .filter(|s| is_sha256(s))
         .unwrap_or(DATASET_SHA_UNAVAILABLE)
         .to_string();
-
-    let detail = format!(
-        "corpus audit failed with {} finding(s); see the audit report",
-        report.findings.len()
-    );
 
     FailureArtifact {
         schema_version: SCHEMA_VERSION,
@@ -100,11 +111,11 @@ pub fn build_record(
             fixture_path: "test-data/datasets (regenerated corpus)".to_string(),
             component_list: Vec::new(),
             command_line: command_line.to_string(),
-            stdout: "corpus-audit-report.txt".to_string(),
-            stderr: "corpus-audit-report.txt".to_string(),
+            stdout: STDOUT_FILE.to_string(),
+            stderr: STDERR_FILE.to_string(),
         },
         diffs: vec![Diff::new("audit_report", AUDIT_REPORT_DIFF_PATH)],
-        repro_bundle: format!("repro/ ({detail})"),
+        repro_bundle: REPRO_DIR.to_string(),
     }
 }
 
@@ -114,6 +125,12 @@ pub fn build_record(
 /// corpus-audit report the lane already produced (`AuditReport::render()` output);
 /// it is copied verbatim into the bundle at [`AUDIT_REPORT_DIFF_PATH`] so the
 /// record's `audit_report` diff resolves and the bundle stands alone.
+///
+/// Every record pointer resolves to a real bundle file/dir (issue #1027
+/// finding 2): the audit report at [`AUDIT_REPORT_DIFF_PATH`], the mirrored
+/// `provenance.stdout`/`provenance.stderr` at [`STDOUT_FILE`]/[`STDERR_FILE`], and
+/// the `repro_bundle` [`REPRO_DIR`] materialized with `command.sh` +
+/// `INSTRUCTIONS.md` (consistent with the cqlite-core repro bundle).
 pub fn write_audit_bundle(
     parity_failures_root: &Path,
     manifest: &Manifest,
@@ -122,23 +139,71 @@ pub fn write_audit_bundle(
     audit_report_text: &str,
     command_line: &str,
 ) -> Result<PathBuf, EmitError> {
-    let record = build_record(manifest, report, provenance, command_line);
+    let record = build_record(manifest, provenance, command_line);
     let bundle = parity_failures_root
         .join("exhaustive_regeneration")
         .join(&record.scenario_id);
     let written = record.write_to_bundle(&bundle)?;
+
+    // diffs/corpus-audit-report.txt — the reused audit report.
     let report_path = bundle.join(AUDIT_REPORT_DIFF_PATH);
     if let Some(parent) = report_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| EmitError::Io {
-            path: parent.to_path_buf(),
-            source: e,
-        })?;
+        create_dir(parent)?;
     }
-    std::fs::write(&report_path, audit_report_text).map_err(|e| EmitError::Io {
-        path: report_path,
-        source: e,
-    })?;
+    write_bundle_file(&report_path, audit_report_text)?;
+
+    // provenance.stdout / provenance.stderr — the audit has no separate console
+    // stream, so mirror the report text into both (resolvable files, not dangling
+    // pointers).
+    write_bundle_file(&bundle.join(STDOUT_FILE), audit_report_text)?;
+    write_bundle_file(&bundle.join(STDERR_FILE), audit_report_text)?;
+
+    // repro/ — command.sh + INSTRUCTIONS.md (consistent with the cqlite-core repro
+    // bundle) so the repro_bundle pointer resolves to a real directory.
+    write_repro(&bundle.join(REPRO_DIR), command_line, report.findings.len())?;
+
     Ok(written)
+}
+
+/// Materialize the `repro/` directory: a `command.sh` that re-runs the audit and
+/// an `INSTRUCTIONS.md` explaining how to reproduce, mirroring the cqlite-core
+/// repro bundle shape.
+fn write_repro(
+    repro_dir: &Path,
+    command_line: &str,
+    finding_count: usize,
+) -> Result<(), EmitError> {
+    create_dir(repro_dir)?;
+    let command = format!(
+        "#!/usr/bin/env bash\nset -euo pipefail\n# Reproduce the failing corpus audit locally.\n{command_line}\n"
+    );
+    write_bundle_file(&repro_dir.join("command.sh"), &command)?;
+    let instructions = format!(
+        "# Reproducing this corpus-audit failure\n\n\
+         The exhaustive-regeneration corpus audit failed with {finding_count} finding(s); \
+         see `../diffs/corpus-audit-report.txt` for the full report.\n\n\
+         1. From the repo root, run `bash repro/command.sh` (the exact invocation is below).\n\
+         2. Inspect the reported findings and compare against the regenerated corpus.\n\n\
+         ```\n{command_line}\n```\n"
+    );
+    write_bundle_file(&repro_dir.join("INSTRUCTIONS.md"), &instructions)?;
+    Ok(())
+}
+
+/// Create a directory (and parents), mapping the IO error to [`EmitError`].
+fn create_dir(path: &Path) -> Result<(), EmitError> {
+    std::fs::create_dir_all(path).map_err(|e| EmitError::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })
+}
+
+/// Write a bundle file, mapping the IO error to [`EmitError`].
+fn write_bundle_file(path: &Path, body: &str) -> Result<(), EmitError> {
+    std::fs::write(path, body).map_err(|e| EmitError::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })
 }
 
 /// CLI-facing orchestration for a FAILED corpus audit: write the shared
