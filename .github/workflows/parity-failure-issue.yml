@@ -1,0 +1,157 @@
+name: Parity Failure Issue Automation
+
+# Signal routing only (issue #1028, epic #974). When a manifest-backed parity lane
+# completes with a `failure` conclusion on a SCHEDULED, MAIN-BRANCH, or MANUAL
+# (workflow_dispatch) run, this workflow files/updates ONE deduplicated `parity-failure`
+# tracking issue per distinct failing-scenario fingerprint. It does NOT run on
+# pull_request-triggered failures (those already comment on the PR — filing there would
+# spam one issue per PR).
+#
+# Design: openspec/changes/issue-1028-parity-failure-issue-automation/{proposal,design}.md
+#   D1 workflow_run trigger; act only on non-PR `failure` runs.
+#   D2 read the failed run's `parity-failures.json` artifact; a degraded summary/log
+#      parse is SURFACED (never silent); zero-failures-on-failure is an anomaly.
+#   D3 stable v1|sha256 fingerprint per scenario (scripts/parity-failure-issue.py).
+#   D4 dedup by body marker `<!-- PARITY-FAIL:<fp> -->` + `parity-failure` label; UPDATE,
+#      never duplicate.
+#   D5 NON-GATING + fail-open: this job never changes the parity lane's result; absent
+#      issue-write token -> `::notice::` + exit 0; never auto-closes.
+#
+# SECURITY: this workflow consumes an UNTRUSTED `workflow_run` payload. It never
+# interpolates event fields into a `run:` shell — every event value is passed via a
+# quoted env var, and the origin event is allowlist-validated fail-closed BEFORE any
+# token-bearing step runs.
+
+on:
+  workflow_run:
+    workflows:
+      - "CI: Compression / Corruption Parity (Nightly Docker, Epic #970)"
+      - "CI: CQL Type & Schema-Evolution Parity (Nightly Docker, Epic #971)"
+      - "CI: Tombstone / TTL Parity (Nightly Docker, Epic #972)"
+      - "Exhaustive Regeneration (parity corpus)"
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "workflow_run id to (re)process (manual replay)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: parity-failure-issue-${{ github.event.workflow_run.id || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  file-parity-failure-issue:
+    runs-on: ubuntu-latest
+    # D1: only react to a FAILED run whose origin event was schedule / push(main) /
+    # workflow_dispatch. This `if` is a coarse pre-filter over trusted GitHub-computed
+    # fields (event name / conclusion / branch); the Guard step below re-validates
+    # fail-closed before any token use. A manual workflow_dispatch of THIS workflow
+    # always proceeds (replay path).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'failure' &&
+       github.event.workflow_run.event != 'pull_request')
+    env:
+      # Pass untrusted payload fields as env vars, never inline into a run: shell.
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      WR_EVENT: ${{ github.event.workflow_run.event }}
+      WR_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+      WR_NAME: ${{ github.event.workflow_run.name }}
+      WR_URL: ${{ github.event.workflow_run.html_url }}
+      WR_ID: ${{ github.event.workflow_run.id }}
+      DISPATCH_RUN_ID: ${{ github.event.inputs.run_id }}
+      TRIGGER: ${{ github.event_name }}
+    steps:
+      - name: Guard token (fail-open, non-gating)
+        id: guard
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::notice::GITHUB_TOKEN absent — skipping parity-failure issue automation (non-gating no-op)."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate origin event (allowlist, fail-closed)
+        id: validate
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          # D1: allowlist the ORIGIN event. Never file for a pull_request-origin run.
+          # A workflow_dispatch of THIS automation (manual replay) is always allowed.
+          if [ "${TRIGGER}" = "workflow_dispatch" ]; then
+            echo "manual replay (workflow_dispatch) — proceeding"
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "${WR_EVENT}" in
+            schedule|push|workflow_dispatch)
+              echo "origin event '${WR_EVENT}' is allowlisted — proceeding"
+              echo "proceed=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::notice::origin event '${WR_EVENT}' is not schedule/push/workflow_dispatch — no issue filed."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Checkout (for the fingerprint/dedup script)
+        if: steps.guard.outputs.skip != 'true' && steps.validate.outputs.proceed == 'true'
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        if: steps.guard.outputs.skip != 'true' && steps.validate.outputs.proceed == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download failed run's parity-failures.json artifact
+        id: artifact
+        if: steps.guard.outputs.skip != 'true' && steps.validate.outputs.proceed == 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          # Which run to inspect: the triggering workflow_run, or a manual replay id.
+          RUN_ID="${WR_ID:-}"
+          if [ "${TRIGGER}" = "workflow_dispatch" ] && [ -n "${DISPATCH_RUN_ID:-}" ]; then
+            RUN_ID="${DISPATCH_RUN_ID}"
+          fi
+          if [ -z "${RUN_ID}" ]; then
+            echo "::notice::no run id to inspect — degraded path"
+            echo "have_artifact=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p artifacts
+          # RUN_ID is a GitHub-numeric run id; still pass via env, not inline.
+          if gh run download "${RUN_ID}" --name parity-failures --dir artifacts 2>/dev/null; then
+            if [ -f artifacts/parity-failures.json ]; then
+              echo "have_artifact=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "have_artifact=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "::notice::no parity-failures artifact on run ${RUN_ID} — degraded path"
+            echo "have_artifact=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: File / update the deduplicated parity-failure issue
+        if: steps.guard.outputs.skip != 'true' && steps.validate.outputs.proceed == 'true'
+        env:
+          HAVE_ARTIFACT: ${{ steps.artifact.outputs.have_artifact }}
+        run: |
+          set -euo pipefail
+          REPRO="See the failing run: ${WR_URL:-<run url unavailable>}"
+          ARGS=(file --run-url "${WR_URL:-}" --conclusion "${WR_CONCLUSION:-failure}" --repro "${REPRO}")
+          if [ "${HAVE_ARTIFACT:-false}" = "true" ]; then
+            ARGS+=(--failures-json artifacts/parity-failures.json)
+          fi
+          # Non-gating: never let a filing error red the automation. `|| true` keeps the
+          # job green; the anomaly / degraded notices are surfaced to the run summary by
+          # the script itself. (The parity lane's own conclusion is untouched regardless.)
+          python3 scripts/parity-failure-issue.py "${ARGS[@]}" || \
+            echo "::warning::parity-failure-issue script exited non-zero (non-gating; parity result unchanged)."

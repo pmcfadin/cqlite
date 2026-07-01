@@ -220,6 +220,31 @@ jobs:
             --corruption-manifest test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml \
             2>&1 | tee "$ARTIFACT_DIR/corpus-audit-report.txt"
 
+      # issue #1028: structured failure summary for the parity-failure-issue automation.
+      - name: Emit parity-failures.json (on failure)
+        if: failure()
+        run: |
+          set -euo pipefail
+          cat > parity-failures.json <<'JSON'
+          [
+            {
+              "scenario_id": "cass.exhaustive_regeneration.corpus_audit",
+              "workflow": "exhaustive-regeneration.yml",
+              "test_target": "cassandra-parity corpus-audit",
+              "component_path": "test-data/datasets",
+              "failure_class": "MissingComponent"
+            }
+          ]
+          JSON
+
+      - name: Upload parity-failures.json
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-failures
+          path: parity-failures.json
+          if-no-files-found: warn
+
       # One report artifact: provenance + audit report + generator logs. Always
       # uploaded (pass or fail) so a release can cite the run.
       - name: Upload regeneration report artifact

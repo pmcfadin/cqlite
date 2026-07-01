@@ -128,3 +128,32 @@ jobs:
               --test issue_1021_repaired_metadata_compaction_parity \
               --test sstable_parity_repaired_metadata_test \
               -- --nocapture
+
+      # issue #1028: on failure, emit a structured parity-failures.json so the
+      # parity-failure-issue automation fingerprints from structured fields (never a
+      # brittle Markdown scrape). One lane-level entry; the automation dedups per
+      # fingerprint. `failure_class: RowScanFailed` is a stable VerifyErrorClass code
+      # used as the lane-default when the specific class is not otherwise emitted.
+      - name: Emit parity-failures.json (on failure)
+        if: failure()
+        run: |
+          set -euo pipefail
+          cat > parity-failures.json <<'JSON'
+          [
+            {
+              "scenario_id": "cass.tombstone_ttl.nightly_docker_lane",
+              "workflow": "tombstone-ttl-parity.yml",
+              "test_target": "cqlite-core tombstone-ttl parity suite",
+              "component_path": "test-data/datasets/sstables/test_tomb,test_deltas",
+              "failure_class": "RowScanFailed"
+            }
+          ]
+          JSON
+
+      - name: Upload parity-failures.json
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-failures
+          path: parity-failures.json
+          if-no-files-found: warn
