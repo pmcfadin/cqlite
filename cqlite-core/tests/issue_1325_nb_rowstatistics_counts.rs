@@ -85,35 +85,83 @@ fn assert_counts(keyspace: &str, prefix: &str, want_partitions: u64, want_total_
 
     let bytes = fs::read(&stats_path)
         .unwrap_or_else(|e| panic!("read {} failed: {e}", stats_path.display()));
-    // Gates from the filename so the version-gated walk to `totalRows` succeeds.
-    let gates = VersionGates::from_path(&stats_path).ok();
 
-    let (_rest, stats) = parse_statistics_with_fallback(&bytes, gates.as_ref())
-        .unwrap_or_else(|e| panic!("parse {} failed: {e:?}", stats_path.display()));
+    // Path A — gates-provided: gates from the filename so the version-gated walk
+    // to `totalRows` succeeds via the caller-threaded path.
+    let gates = VersionGates::from_path(&stats_path).ok();
+    assert_row_counts(
+        keyspace,
+        prefix,
+        &bytes,
+        &stats_path,
+        gates.as_ref(),
+        "gates-provided",
+        want_partitions,
+        want_total_rows,
+    );
+
+    // Path B — None-gates (#1325 finding 2): a direct caller of
+    // `parse_statistics_with_fallback(.., None)` must ALSO get the authoritative
+    // counts, because the nb parser now defaults to the authoritative nb gates
+    // internally (we are definitively in the nb-format parser). This is the
+    // regression guard for the fix.
+    assert_row_counts(
+        keyspace,
+        prefix,
+        &bytes,
+        &stats_path,
+        None,
+        "None-gates",
+        want_partitions,
+        want_total_rows,
+    );
+
+    true
+}
+
+/// Parse `bytes` with the given `gates` and assert the authoritative counts.
+/// `path_label` distinguishes the gates-provided vs None-gates entry point in
+/// failure messages.
+#[allow(clippy::too_many_arguments)]
+fn assert_row_counts(
+    keyspace: &str,
+    prefix: &str,
+    bytes: &[u8],
+    stats_path: &std::path::Path,
+    gates: Option<&VersionGates>,
+    path_label: &str,
+    want_partitions: u64,
+    want_total_rows: u64,
+) {
+    let (_rest, stats) = parse_statistics_with_fallback(bytes, gates).unwrap_or_else(|e| {
+        panic!(
+            "parse {} [{path_label}] failed: {e:?}",
+            stats_path.display()
+        )
+    });
 
     let row = &stats.row_stats;
     assert_eq!(
         row.partition_count,
         want_partitions,
-        "{keyspace}/{prefix}: partition_count must be the authoritative STATS count \
-         (Σ estimatedPartitionSize buckets), not the old stub 0 ({})",
+        "{keyspace}/{prefix} [{path_label}]: partition_count must be the authoritative \
+         STATS count (Σ estimatedPartitionSize buckets), not the old stub 0 ({})",
         stats_path.display()
     );
     assert_eq!(
         row.total_rows,
         want_total_rows,
-        "{keyspace}/{prefix}: total_rows must be the authoritative STATS totalRows, \
-         not the old stub 0 ({})",
+        "{keyspace}/{prefix} [{path_label}]: total_rows must be the authoritative STATS \
+         totalRows, not the old stub 0 ({})",
         stats_path.display()
     );
     // `live_rows` is intentionally left 0 (not authoritatively derivable from
     // STATS as a value distinct from total_rows; #28 no-heuristics).
     assert_eq!(
         row.live_rows, 0,
-        "{keyspace}/{prefix}: live_rows is left 0 (not authoritatively derivable); \
-         a nonzero value would be a fabricated count"
+        "{keyspace}/{prefix} [{path_label}]: live_rows is left 0 (not authoritatively \
+         derivable); a nonzero value would be a fabricated count"
     );
-    true
 }
 
 /// #1325: real `nb` fixtures carry the authoritative row/partition counts.
@@ -140,8 +188,16 @@ fn nb_rowstatistics_carry_authoritative_counts() {
         asserted += 1;
     }
 
-    // With CQLITE_DATASETS_ROOT set, at least one fixture is expected present.
-    // If ALL three were genuinely absent we skipped cleanly above; that is only
-    // acceptable when the dataset truly lacks them (not a false-pass on zeros).
+    // With CQLITE_DATASETS_ROOT configured, at least one fixture MUST have been
+    // exercised. A configured-but-nothing-asserted run is a false-pass (the
+    // dataset is present but empty/wrong), which the project rule forbids —
+    // "never let a dataset-dependent test pass on an empty dataset". The clean
+    // skip is only allowed when no dataset root is configured at all (handled
+    // by the early return above).
     println!("[INFO] #1325: asserted authoritative counts for {asserted}/3 fixtures");
+    assert!(
+        asserted > 0,
+        "CQLITE_DATASETS_ROOT is configured but no #1325 fixture Statistics.db was \
+         exercised — refusing to false-pass on an empty/missing dataset"
+    );
 }

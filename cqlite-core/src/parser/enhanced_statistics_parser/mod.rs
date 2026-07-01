@@ -159,8 +159,28 @@ pub fn parse_nb_format_statistics_data(
             // input `read_table_counts` expects. This is strictly additive — an
             // Err is logged and the fields stay at 0 (a Statistics.db that parses
             // today must keep parsing).
+            //
+            // Default the gates locally when the caller threaded `None` (#1325
+            // finding 2). We are DEFINITIVELY inside the nb-format parser here, so
+            // `nb`'s gate values are AUTHORITATIVE — not a heuristic (#28): they
+            // are the literal BigFormat.java gates for version "nb". Without them
+            // `read_table_counts` cannot traverse the gated min/max block and would
+            // return `total_rows = None` (→ a silently-wrong 0) even for a real nb
+            // file. Reuse the canonical infallible `nb_fallback` constructor.
+            let nb_gates = crate::storage::sstable::version_gate::VersionGates::Big(
+                crate::storage::sstable::version_gate::BigVersionGates::nb_fallback(),
+            );
+            let effective_gates = gates.unwrap_or(&nb_gates);
             let (total_rows, partition_count) =
-                match crate::parser::repair_metadata::read_table_counts(full_input, gates) {
+                match crate::parser::repair_metadata::read_table_counts(
+                    full_input,
+                    Some(effective_gates),
+                ) {
+                    // `total_rows.unwrap_or(0)`: a `None` here means STATS does NOT
+                    // authoritatively expose `totalRows` (e.g. an unmodeled
+                    // improvedMinMax covered-Slice bound blocks the walk). The 0 is
+                    // therefore "not authoritatively available from STATS", NOT a
+                    // measured zero — never a guessed count (#1325, no-heuristics #28).
                     Ok(counts) => (counts.total_rows.unwrap_or(0), counts.partition_count),
                     Err(e) => {
                         log::debug!(
@@ -179,8 +199,13 @@ pub fn parse_nb_format_statistics_data(
 
             let row_stats = RowStatistics {
                 total_rows,
-                // Not authoritatively derivable from STATS as a value distinct
-                // from `total_rows`; left 0 (documented) rather than guessed (#28).
+                // `live_rows = 0` here means "NOT authoritatively available from
+                // STATS for nb", NOT a measured zero. STATS carries no per-SSTable
+                // live-row count that is authoritatively distinguishable from
+                // `total_rows`, so per #1325's acceptance criteria this unreachable
+                // field stays "0-with-documented-meaning" rather than being guessed
+                // or aliased to `total_rows` (no-heuristics mandate #28). Changing
+                // this field to `Option` is a broader API change tracked separately.
                 live_rows: 0,
                 tombstone_count: 0,
                 partition_count,
