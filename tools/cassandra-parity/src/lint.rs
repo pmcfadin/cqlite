@@ -93,10 +93,11 @@ fn parse_descriptor(desc: &str) -> Option<(&str, &str)> {
 /// full byte parity but still records the same byte/checksum diff shape.
 /// `jsonl_diff` is valid on `canonical_semantic` (or a `partial` semantic gap).
 /// The tier-scoped kinds (`live_logs`/`audit_report`/`reproduction_bundle`) are
-/// governed by TIER (checked separately), not evidence type, so they are accepted
-/// here regardless of evidence type. Mirrors the spec: byte/offset/checksum only
-/// on byte_for_byte; jsonl on canonical_semantic; live_log on nightly_docker;
-/// audit_report on exhaustive_regeneration.
+/// governed by TIER (checked separately by [`tier_scoped_kind_valid_for_tier`]),
+/// not evidence type, so they are accepted here regardless of evidence type.
+/// Mirrors the spec: byte/offset/checksum only on byte_for_byte; jsonl on
+/// canonical_semantic; live_log on nightly_docker; audit_report on
+/// exhaustive_regeneration.
 fn descriptor_kind_valid_for_evidence(kind: &str, evidence: &str) -> bool {
     match kind {
         "byte_diff" | "offset_diff" | "checksum_diff" | "component_inventory" => {
@@ -105,9 +106,28 @@ fn descriptor_kind_valid_for_evidence(kind: &str, evidence: &str) -> bool {
         "jsonl_diff" => matches!(evidence, "canonical_semantic" | "partial"),
         // Tier-scoped kinds: evidence-type-agnostic; the tier segment carries the
         // constraint (a `live_logs` descriptor must be tier=nightly_docker, etc.),
-        // which is enforced by the tier==ci.tier rule.
+        // which is enforced by `tier_scoped_kind_valid_for_tier`.
         "live_logs" | "audit_report" | "reproduction_bundle" => true,
         _ => false,
+    }
+}
+
+/// Whether a TIER-SCOPED descriptor `kind` is valid on `tier` (issue #1027).
+///
+/// The tier==ci.tier rule alone is not enough: it only proves the descriptor's
+/// `<tier>` segment matches the scenario's tier, so `artifact.required_parity.live_logs`
+/// (a live-log kind mislabelled onto the required_parity tier) would slip through.
+/// A tier-scoped kind is only meaningful on the tier that actually produces it:
+/// `live_logs` ONLY on `nightly_docker` (the live Docker lane) and `audit_report`
+/// ONLY on `exhaustive_regeneration` (the corpus-audit lane). Returns `None` when
+/// `kind` is not a recognised tier-scoped kind (evidence-scoped kinds are gated by
+/// [`descriptor_kind_valid_for_evidence`] instead); otherwise returns
+/// `Some(allowed_tier)` — the SINGLE tier on which that kind is valid.
+fn tier_scoped_kind_allowed_tier(kind: &str) -> Option<&'static str> {
+    match kind {
+        "live_logs" => Some("nightly_docker"),
+        "audit_report" => Some("exhaustive_regeneration"),
+        _ => None,
     }
 }
 
@@ -156,6 +176,21 @@ fn lint_failure_artifacts(s: &Scenario, out: &mut Vec<Finding>) {
                     s.ci.tier
                 ),
             ));
+        }
+        // Tier-scoped kinds (live_logs/audit_report) are only meaningful on the
+        // tier that produces them; the tier==ci.tier rule above does NOT catch a
+        // live-log/audit kind mislabelled onto the wrong tier (e.g.
+        // artifact.required_parity.live_logs), so reject those explicitly here.
+        if let Some(allowed_tier) = tier_scoped_kind_allowed_tier(kind) {
+            if tier != allowed_tier {
+                out.push(Finding::error(
+                    id,
+                    "evidence.failure_artifacts",
+                    format!(
+                        "descriptor kind '{kind}' is only valid on tier '{allowed_tier}', not '{tier}'"
+                    ),
+                ));
+            }
         }
         if !descriptor_kind_valid_for_evidence(kind, &s.evidence.kind) {
             out.push(Finding::error(

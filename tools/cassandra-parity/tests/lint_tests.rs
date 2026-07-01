@@ -428,6 +428,42 @@ fn descriptor_unknown_kind_is_rejected() {
 }
 
 #[test]
+fn descriptor_live_logs_on_wrong_tier_is_rejected() {
+    // Issue #1027 finding 3: a tier-scoped kind mislabelled onto the wrong tier
+    // must be rejected even though its <tier> segment equals ci.tier. `live_logs`
+    // is a nightly_docker-only kind; on a required_parity scenario it must fail.
+    let scenario = VALID_BYTE_SCENARIO.replace(
+        "        - artifact.required_parity.byte_diff\n",
+        "        - artifact.required_parity.live_logs\n",
+    );
+    let errs = descriptor_errors(&scenario);
+    assert!(
+        errs.iter().any(|e| e.contains("live_logs")
+            && e.contains("nightly_docker")
+            && e.contains("required_parity")),
+        "artifact.required_parity.live_logs must be rejected, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn descriptor_audit_report_on_wrong_tier_is_rejected() {
+    // Issue #1027 finding 3: `audit_report` is an exhaustive_regeneration-only
+    // kind; on a required_parity scenario it must fail even though the <tier>
+    // segment matches ci.tier.
+    let scenario = VALID_BYTE_SCENARIO.replace(
+        "        - artifact.required_parity.byte_diff\n",
+        "        - artifact.required_parity.audit_report\n",
+    );
+    let errs = descriptor_errors(&scenario);
+    assert!(
+        errs.iter().any(|e| e.contains("audit_report")
+            && e.contains("exhaustive_regeneration")
+            && e.contains("required_parity")),
+        "artifact.required_parity.audit_report must be rejected, got: {errs:#?}"
+    );
+}
+
+#[test]
 fn descriptor_kinds_match_schema_pattern() {
     // 1027: enums::ARTIFACT_DESCRIPTOR_KIND must equal the <kind> alternation in
     // the manifest schema's failure_artifacts item pattern, so drift between the
