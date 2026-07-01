@@ -289,10 +289,15 @@ impl StatisticsReader {
             "- Total rows: {}\n",
             self.statistics.row_stats.total_rows
         ));
-        report.push_str(&format!(
-            "- Live rows: {}\n",
-            self.statistics.row_stats.live_rows
-        ));
+        // `live_rows == 0` is the documented #1325 "not authoritatively
+        // available from STATS" sentinel (STATS has no per-SSTable live-row
+        // count), not a measured zero. Render it as `unavailable` for
+        // consistency with the overview live-data% above rather than a
+        // misleading `0` (#1352).
+        report.push_str(&match self.statistics.row_stats.live_rows {
+            0 => "- Live rows: unavailable\n".to_string(),
+            live => format!("- Live rows: {}\n", live),
+        });
         report.push_str(&format!(
             "- Tombstones: {}\n",
             self.statistics.row_stats.tombstone_count

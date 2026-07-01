@@ -677,12 +677,26 @@ impl StatisticsAnalyzer {
         Some((stats.row_stats.live_rows as f64 / stats.row_stats.total_rows as f64) * 100.0)
     }
 
-    fn calculate_data_efficiency(stats: &SSTableStatistics) -> f64 {
+    /// Overall data efficiency, or `None` when it is not authoritatively
+    /// derivable.
+    ///
+    /// Data efficiency blends the live-row ratio with compression and partition
+    /// efficiency, so it can only be computed when the live ratio is available.
+    /// `live_rows == 0` is the documented #1325 sentinel meaning "not
+    /// authoritatively available from STATS" (STATS has no per-SSTable live-row
+    /// count), and `total_rows == 0` would make the ratio `NaN`; in either case
+    /// we return `None` rather than a misleading concrete number. This reuses
+    /// the exact availability check of `live_data_percentage`. No heuristic
+    /// (#28); representation redesign is tracked by #1352.
+    fn calculate_data_efficiency(stats: &SSTableStatistics) -> Option<f64> {
+        if stats.row_stats.live_rows == 0 || stats.row_stats.total_rows == 0 {
+            return None;
+        }
         let live_ratio = stats.row_stats.live_rows as f64 / stats.row_stats.total_rows as f64;
         let compression_ratio = stats.compression_stats.ratio;
         let partition_efficiency = 1.0 - (stats.partition_stats.large_partition_percentage / 100.0);
 
-        (live_ratio + compression_ratio + partition_efficiency) / 3.0 * 100.0
+        Some((live_ratio + compression_ratio + partition_efficiency) / 3.0 * 100.0)
     }
 
     fn generate_query_hints(stats: &SSTableStatistics) -> Vec<String> {
@@ -692,7 +706,15 @@ impl StatisticsAnalyzer {
             hints.push("Consider reviewing partition key design - high percentage of large partitions detected".to_string());
         }
 
-        if stats.row_stats.tombstone_count > stats.row_stats.live_rows / 4 {
+        // The "high tombstone ratio" hint compares tombstones against the live
+        // row count. When `live_rows == 0` that is the documented #1325 sentinel
+        // for "not authoritatively available from STATS" (not a measured zero),
+        // so `live_rows / 4 == 0` would make ANY tombstone trip the hint. Skip
+        // the hint entirely when the live count is unavailable rather than emit
+        // a misleading recommendation. No heuristic (#28); see #1352.
+        if stats.row_stats.live_rows > 0
+            && stats.row_stats.tombstone_count > stats.row_stats.live_rows / 4
+        {
             hints.push("High tombstone ratio - consider running compaction".to_string());
         }
 
@@ -723,10 +745,15 @@ impl StatisticsAnalyzer {
     fn calculate_health_score(stats: &SSTableStatistics) -> f64 {
         let mut score = 100.0;
 
-        // Deduct for high tombstone ratio
-        let tombstone_ratio =
-            stats.row_stats.tombstone_count as f64 / stats.row_stats.total_rows as f64;
-        score -= tombstone_ratio * 30.0;
+        // Deduct for high tombstone ratio. This derives from `total_rows` (an
+        // authoritative STATS count), NOT the #1325 `live_rows` unavailable
+        // sentinel, so it stays a concrete score. Guard `total_rows == 0` so the
+        // ratio does not become `NaN` (which would poison the whole score).
+        if stats.row_stats.total_rows > 0 {
+            let tombstone_ratio =
+                stats.row_stats.tombstone_count as f64 / stats.row_stats.total_rows as f64;
+            score -= tombstone_ratio * 30.0;
+        }
 
         // Deduct for poor compression
         if stats.compression_stats.ratio < 0.5 {
@@ -757,7 +784,11 @@ pub struct StatisticsSummary {
     pub compression_efficiency: f64,
     pub timestamp_range_days: f64,
     pub largest_partition_mb: f64,
-    pub data_efficiency: f64,
+    /// Blended data-efficiency score, or `None` when the live-row ratio is not
+    /// authoritatively available (the #1325 `live_rows == 0` sentinel, or
+    /// `total_rows == 0`); see `StatisticsAnalyzer::calculate_data_efficiency`
+    /// and #1352.
+    pub data_efficiency: Option<f64>,
     pub query_performance_hints: Vec<String>,
     pub storage_recommendations: Vec<String>,
     pub health_score: f64,
@@ -918,8 +949,88 @@ mod tests {
             summary.live_data_percentage, None,
             "live_rows==0 sentinel with total_rows>0 must report None, not 0.00%"
         );
+        // Data efficiency is derived from the live ratio, so it must be
+        // unavailable under the same sentinel (not an artificially low number).
+        assert_eq!(
+            summary.data_efficiency, None,
+            "data_efficiency must be None when live_rows is the unavailable sentinel"
+        );
         // Authoritative counts are unaffected.
         assert_eq!(summary.total_rows, 1000);
+        // Health score derives from total_rows (authoritative), not live_rows,
+        // so it stays a concrete, finite value.
+        assert!(
+            summary.health_score.is_finite(),
+            "health_score must stay finite when live_rows is the sentinel"
+        );
+    }
+
+    /// #1325 sweep: the "high tombstone ratio" query hint compares tombstones
+    /// against `live_rows`. When `live_rows == 0` (unavailable sentinel), the
+    /// old `live_rows / 4 == 0` comparison would trip the hint for ANY
+    /// tombstone. It must be suppressed instead. No heuristic (#28); see #1352.
+    #[test]
+    fn test_query_hint_suppressed_when_live_rows_sentinel() {
+        let mut stats = create_test_statistics();
+        stats.row_stats.total_rows = 1000;
+        stats.row_stats.live_rows = 0; // unavailable sentinel
+        stats.row_stats.tombstone_count = 500; // would trip vs. live_rows/4 == 0
+
+        let summary = StatisticsAnalyzer::analyze(&stats);
+
+        assert!(
+            !summary
+                .query_performance_hints
+                .iter()
+                .any(|h| h.contains("tombstone")),
+            "tombstone hint must be suppressed when live_rows is the unavailable sentinel"
+        );
+    }
+
+    /// #1325 sweep: when `live_rows` is a real count, the tombstone hint and
+    /// data-efficiency stay concrete (non-vacuous positive path).
+    #[test]
+    fn test_derived_metrics_available_when_live_rows_present() {
+        let mut stats = create_test_statistics();
+        stats.row_stats.total_rows = 1000;
+        stats.row_stats.live_rows = 100; // real count; live_rows/4 == 25
+        stats.row_stats.tombstone_count = 500; // 500 > 25 -> hint fires
+
+        let summary = StatisticsAnalyzer::analyze(&stats);
+
+        assert!(
+            summary.live_data_percentage.is_some(),
+            "live_data_percentage must be Some when live_rows > 0"
+        );
+        let eff = summary
+            .data_efficiency
+            .expect("data_efficiency must be Some when live_rows > 0");
+        assert!(eff.is_finite());
+        assert!(
+            summary
+                .query_performance_hints
+                .iter()
+                .any(|h| h.contains("tombstone")),
+            "tombstone hint must fire when tombstones exceed live_rows/4"
+        );
+    }
+
+    /// #1325 sweep: health score must not become `NaN` when `total_rows == 0`
+    /// (guard the div-by-zero in the tombstone-ratio deduction).
+    #[test]
+    fn test_health_score_finite_when_total_rows_zero() {
+        let mut stats = create_test_statistics();
+        stats.row_stats.total_rows = 0;
+        stats.row_stats.live_rows = 0;
+        stats.row_stats.tombstone_count = 0;
+
+        let summary = StatisticsAnalyzer::analyze(&stats);
+
+        assert!(
+            summary.health_score.is_finite(),
+            "health_score must be finite (not NaN) when total_rows == 0"
+        );
+        assert!((0.0..=100.0).contains(&summary.health_score));
     }
 
     #[test]
