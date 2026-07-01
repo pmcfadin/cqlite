@@ -266,6 +266,85 @@ fn byte_mismatch_emits_scenario_id_keyed_bundle() {
     assert!(out.bundle_dir.join("repro").is_dir());
 }
 
+/// Finding 3 (issue #1027): re-emitting for the SAME scenario_id starts clean —
+/// the second run's bundle contains only the second run's files, with no stale
+/// diff/raw artifacts left over from the first (the emitter remove-and-recreates
+/// the scenario dir before writing).
+#[test]
+fn re_emit_same_scenario_leaves_only_second_runs_files() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    // First failure: a byte_for_byte bundle (writes Statistics.db.* + checksums +
+    // component_inventory under diffs/).
+    let first = emit_byte_bundle(tmp.path(), synthetic_fixture(tmp.path()));
+    let diffs = first.bundle_dir.join("diffs");
+    assert!(diffs.join("Statistics.db.byte-diff.txt").is_file());
+    assert!(diffs.join("checksums.txt").is_file());
+    assert!(diffs.join("component_inventory.txt").is_file());
+
+    // Second failure for the SAME scenario_id, but a canonical_semantic bundle
+    // (writes a disjoint file set: jsonl.diff + reference/candidate.jsonl). Reuse
+    // BYTE_SCENARIO explicitly so both runs key the same directory.
+    let reference = vec![r#"{"partition":"a","cells":[]}"#.to_string()];
+    let candidate = vec![r#"{"partition":"a","cells":[{"name":"v","value":1}]}"#.to_string()];
+    let second = FailureBundle::new(
+        tmp.path(),
+        BYTE_SCENARIO,
+        LANE,
+        "required_parity",
+        "canonical_semantic",
+        byte_repro(synthetic_fixture(tmp.path())),
+    )
+    .artifacts_compared(["jsonl"])
+    .jsonl(
+        jsonl_diff_body(&reference, &candidate),
+        reference.join("\n"),
+        candidate.join("\n"),
+    )
+    .emit()
+    .expect("second bundle emits");
+
+    assert_eq!(
+        first.bundle_dir, second.bundle_dir,
+        "both runs must key the same scenario dir"
+    );
+    let diffs = second.bundle_dir.join("diffs");
+
+    // The second run's files are present.
+    assert!(diffs.join("jsonl.diff").is_file());
+    assert!(diffs.join("reference.jsonl").is_file());
+    assert!(diffs.join("candidate.jsonl").is_file());
+
+    // The first run's files are GONE (no stale artifacts).
+    assert!(
+        !diffs.join("Statistics.db.byte-diff.txt").exists(),
+        "stale byte-diff from the first run must be removed"
+    );
+    assert!(
+        !diffs.join("Statistics.db.offset-diff.txt").exists(),
+        "stale offset-diff from the first run must be removed"
+    );
+    assert!(
+        !diffs.join("checksums.txt").exists(),
+        "stale checksums from the first run must be removed"
+    );
+    assert!(
+        !diffs.join("component_inventory.txt").exists(),
+        "stale component_inventory from the first run must be removed"
+    );
+
+    // The record reflects only the second run (evidence_type + diffs[] kinds).
+    let record = read_record(&second.bundle_dir);
+    assert_eq!(record["evidence_type"].as_str(), Some("canonical_semantic"));
+    let kinds: Vec<String> = record["diffs"]
+        .as_array()
+        .expect("diffs array")
+        .iter()
+        .filter_map(|d| d["kind"].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(kinds, vec!["jsonl_diff".to_string()]);
+}
+
 /// Every emitted record validates against the Wave 1 schema.
 #[test]
 fn emitted_record_validates_against_wave1_schema() {

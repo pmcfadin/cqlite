@@ -297,6 +297,11 @@ impl FailureBundle {
             .join("parity-failures")
             .join(&self.tier)
             .join(&self.scenario_id);
+        // Start clean so a re-run for the same scenario_id does not leave stale
+        // diff/raw files from a prior failure (matches the Java emitter's
+        // clean-write; issue #1027 finding 3). remove_dir_all on a missing dir is
+        // an error, so ignore NotFound and surface any other I/O error.
+        remove_dir_all_if_exists(&bundle_dir)?;
         create_dir(&bundle_dir)?;
 
         // stdout / stderr pointers.
@@ -401,6 +406,19 @@ fn write_repro(
     write_file(&inputs_dir.join("fixtures.txt"), &fixtures)?;
 
     Ok(())
+}
+
+/// Remove `path` and everything under it, tolerating a not-yet-existing dir.
+/// Any error other than "not found" is surfaced as a typed [`BundleError`].
+fn remove_dir_all_if_exists(path: &Path) -> Result<(), BundleError> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(BundleError::Io {
+            path: path.to_path_buf(),
+            source: e,
+        }),
+    }
 }
 
 fn create_dir(path: &Path) -> Result<(), BundleError> {
