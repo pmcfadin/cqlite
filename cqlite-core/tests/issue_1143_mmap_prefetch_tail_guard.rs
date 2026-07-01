@@ -136,6 +136,20 @@ async fn setup_db(mode: DiskAccessMode) -> Database {
         .database
 }
 
+/// RAII guard that signals the page-cache pressure loop to stop on EVERY exit
+/// path — including a panic/`expect` failure in a reader task. Without it, an
+/// unwind from `measure_tail` would skip the `stop.store(true, ..)` and leave
+/// the `spawn_blocking` churn loop running forever (tokio cannot abort an
+/// already-running blocking task), hanging the test instead of reporting the
+/// regression.
+struct StopGuard(Arc<AtomicBool>);
+
+impl Drop for StopGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
 /// Nearest-rank percentile of a latency sample (sorts in place).
 fn percentile(samples: &mut [Duration], pct: f64) -> Duration {
     if samples.is_empty() {
@@ -153,6 +167,9 @@ fn percentile(samples: &mut [Duration], pct: f64) -> Duration {
 /// (fixture present but empty -> caller fails, never a vacuous pass).
 async fn measure_tail(db: Arc<Database>, sql: Arc<String>) -> Option<(Duration, Duration)> {
     let stop = Arc::new(AtomicBool::new(false));
+    // Set `stop` on ALL exit paths (incl. a reader-task panic/error) before this
+    // function unwinds, so the blocking pressure loop below always terminates.
+    let _stop_guard = StopGuard(Arc::clone(&stop));
 
     // Page-cache pressure: repeatedly touch a large buffer so the kernel is
     // forced to reclaim, which is what makes `MADV_SEQUENTIAL` drop-behind
@@ -199,16 +216,27 @@ async fn measure_tail(db: Arc<Database>, sql: Arc<String>) -> Option<(Duration, 
         }));
     }
 
+    // Collect every reader result WITHOUT propagating a panic yet, so a failed
+    // reader cannot unwind before we signal stop. (The `_stop_guard` above is the
+    // belt-and-suspenders backstop; collecting first keeps the happy path from
+    // relying on unwind-time drop ordering.)
+    let mut reader_results = Vec::with_capacity(READERS);
+    for h in reader_handles {
+        reader_results.push(h.await);
+    }
+
+    // Signal stop and drain the pressure task before touching any reader outcome.
+    stop.store(true, Ordering::Relaxed);
+    let pressure_applied = pressure.await.expect("pressure task");
+
     let mut latencies: Vec<Duration> = Vec::with_capacity(READERS * SCANS_PER_READER);
     let mut min_rows = usize::MAX;
-    for h in reader_handles {
-        let (samples, rows) = h.await.expect("reader task");
+    for r in reader_results {
+        let (samples, rows) = r.expect("reader task");
         latencies.extend(samples);
         min_rows = min_rows.min(rows);
     }
 
-    stop.store(true, Ordering::Relaxed);
-    let pressure_applied = pressure.await.expect("pressure task");
     if !pressure_applied {
         return None; // host could not force reclaim -> skip
     }
