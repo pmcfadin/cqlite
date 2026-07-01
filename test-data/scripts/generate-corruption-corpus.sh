@@ -340,14 +340,36 @@ PY
 # rename, a content change, an added file, nor a removed file can collide. Only
 # regular files directly under the fixture dir (maxdepth 1) are hashed — the same
 # loadable-component set the generator commits (no subdirs exist in a fixture dir).
+#
+# Exclusion filter (issue #1294 roborev Medium finding): non-component sidecars
+# that the copy-cleanup step below (~line 645, `find ... -delete`) already strips
+# before a fixture is committed MUST be excluded here too, byte-identically to
+# that filter. Without this, a stray `.DS_Store` / AppleDouble `._*` file left by
+# a macOS checkout (or a macOS-built tarball — a known incident class in this
+# project) would fold into the hash and trip the now-unconditional-fatal MODE 1
+# dir-sha check with a misleading "a NON-mutated committed component changed"
+# message. KEEP THIS PREDICATE IN SYNC with the `find -delete` pattern AND with
+# the Rust helper `cqlite-core/tests/common/fixture_dir_hash.rs` — a change to
+# any one of the three is a prompt to update the other two.
 fixture_dir_sha256() {
   # $1 = fixture directory
   python3 - "$1" <<'PY'
 import sys, os, hashlib
+
+def is_sidecar(name):
+    # Mirrors the copy-cleanup `find ... -delete` filter (generate-corruption-corpus.sh
+    # ~line 645-647): non-component sidecars stripped before a fixture is committed.
+    return (
+        name == ".DS_Store"
+        or name.startswith("._")
+        or name.endswith(".db.jsonl")
+        or name.endswith(".db.txt")
+    )
+
 d = sys.argv[1]
 names = sorted(
     n for n in os.listdir(d)
-    if os.path.isfile(os.path.join(d, n))
+    if os.path.isfile(os.path.join(d, n)) and not is_sidecar(n)
 )
 h = hashlib.sha256()
 for n in names:
@@ -642,6 +664,13 @@ for spec in "${FIXTURES[@]}"; do
     # components: *.db binaries (gitignored) plus the text components TOC.txt,
     # Digest.crc32 and CRC.db. The corrupted TOC.txt / Digest.crc32 fixtures ARE
     # the corruption artifact and are intentionally committed.
+    #
+    # SOURCE OF TRUTH for the sidecar pattern set: `fixture_dir_sha256()`'s
+    # `is_sidecar()` (below) and the Rust helper
+    # `cqlite-core/tests/common/fixture_dir_hash.rs` both mirror this exact
+    # filter so the dir-hash never trips fatal on a leftover sidecar (issue
+    # #1294 roborev Medium finding). Changing this pattern is a prompt to
+    # update BOTH of those.
     find "$dest" -maxdepth 1 -type f \
       \( -name '*.db.jsonl' -o -name '*.db.txt' -o -name '.DS_Store' -o -name '._*' \) \
       -delete 2>/dev/null || true

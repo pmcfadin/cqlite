@@ -10,9 +10,27 @@
 
 use std::path::Path;
 
+/// `true` for non-component sidecars that the generator's copy-cleanup step
+/// (`find "$dest" -maxdepth 1 -type f \( -name '*.db.jsonl' -o -name '*.db.txt' \
+/// -o -name '.DS_Store' -o -name '._*' \) -delete` in
+/// `generate-corruption-corpus.sh`, ~line 645-647) already strips before a
+/// fixture is committed. MUST mirror that filter and the bash `is_sidecar()`
+/// inside `fixture_dir_sha256()` byte-for-byte (issue #1294 roborev Medium
+/// finding) — without this a stray `.DS_Store` / AppleDouble `._*` file from a
+/// macOS checkout would fold into the hash and trip the unconditional-fatal
+/// MODE 1 dir-sha check. Changing this predicate is a prompt to update BOTH the
+/// bash `is_sidecar()` and the `find -delete` pattern it mirrors.
+fn is_sidecar(name: &str) -> bool {
+    name == ".DS_Store"
+        || name.starts_with("._")
+        || name.ends_with(".db.jsonl")
+        || name.ends_with(".db.txt")
+}
+
 /// Deterministic hash over an ENTIRE fixture directory, byte-for-byte identical
 /// to `fixture_dir_sha256()` in `generate-corruption-corpus.sh` (issue #1294
-/// Item 1): sorted regular-file names directly under the dir; for each mix in the
+/// Item 1): sorted regular-file names directly under the dir (excluding the
+/// non-component sidecars in `is_sidecar()`); for each mix in the
 /// NUL-terminated relative name then the 8-byte-big-endian length + file bytes;
 /// finally the 8-byte-big-endian file count. This binds the captured verdict to
 /// the COMPLETE set of bytes `sstableverify` reads, not just the mutated component.
@@ -26,6 +44,7 @@ pub fn fixture_dir_sha256(dir: &Path) -> String {
         .flatten()
         .filter(|e| e.path().is_file())
         .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+        .filter(|n| !is_sidecar(n))
         .collect();
     names.sort();
     let mut h = Sha256::new();
