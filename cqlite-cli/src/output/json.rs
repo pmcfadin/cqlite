@@ -444,7 +444,7 @@ mod tests {
         )];
 
         // Row with missing value (should be null)
-        let values = HashMap::new(); // Empty - no value for nullable_col
+        let values = HashMap::<String, Value>::new(); // Empty - no value for nullable_col
         let row = QueryRow::with_values(RowKey::new(vec![1]), values);
         result.rows.push(row);
 

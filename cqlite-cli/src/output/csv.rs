@@ -246,9 +246,9 @@ mod tests {
             .into_iter()
             .enumerate()
             .map(|(idx, row_data)| {
-                let mut values = HashMap::new();
+                let mut values: HashMap<std::sync::Arc<str>, Value> = HashMap::new();
                 for (col_name, value) in row_data {
-                    values.insert(col_name.to_string(), value);
+                    values.insert(col_name.into(), value);
                 }
                 QueryRow {
                     values,

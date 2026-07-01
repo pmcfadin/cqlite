@@ -711,8 +711,8 @@ mod tests {
     }
 
     fn row_bigint(v: i64) -> QueryRow {
-        let mut values = HashMap::new();
-        values.insert("v".to_string(), Value::BigInt(v));
+        let mut values: HashMap<std::sync::Arc<str>, Value> = HashMap::new();
+        values.insert("v".into(), Value::BigInt(v));
         QueryRow {
             values,
             key: RowKey(Vec::new()),
@@ -766,8 +766,8 @@ mod tests {
     }
 
     fn row_double(d: f64) -> QueryRow {
-        let mut values = HashMap::new();
-        values.insert("d".to_string(), Value::Float(d));
+        let mut values: HashMap<std::sync::Arc<str>, Value> = HashMap::new();
+        values.insert("d".into(), Value::Float(d));
         QueryRow {
             values,
             key: RowKey(Vec::new()),

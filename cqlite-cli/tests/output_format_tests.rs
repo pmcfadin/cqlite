@@ -49,7 +49,7 @@ fn create_single_value_result(col_name: &str, value: Value, data_type: DataType)
     };
 
     let mut values = HashMap::new();
-    values.insert(col_name.to_string(), value);
+    values.insert(col_name.into(), value);
 
     let row = QueryRow {
         values,
@@ -90,7 +90,7 @@ fn create_result_with_columns(
 
     let mut values = HashMap::new();
     for (col_name, value) in row_values {
-        values.insert(col_name.to_string(), value);
+        values.insert(col_name.into(), value);
     }
 
     let row = QueryRow {

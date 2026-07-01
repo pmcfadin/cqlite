@@ -107,7 +107,7 @@ async fn setup_db(schema_file: &str, keyspace: &str) -> Result<Database, String>
 }
 
 /// A comparable, order-independent-within-a-row snapshot of a result row.
-type RowSnapshot = (Vec<u8>, HashMap<String, Value>);
+type RowSnapshot = (Vec<u8>, HashMap<std::sync::Arc<str>, Value>);
 
 fn snapshot_key(key: &RowKey) -> Vec<u8> {
     key.as_bytes().to_vec()

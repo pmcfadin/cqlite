@@ -174,7 +174,7 @@ async fn setup_db() -> Database {
         .database
 }
 
-type RowSnapshot = (Vec<u8>, HashMap<String, Value>);
+type RowSnapshot = (Vec<u8>, HashMap<std::sync::Arc<str>, Value>);
 
 fn snapshot_key(key: &RowKey) -> Vec<u8> {
     key.as_bytes().to_vec()
