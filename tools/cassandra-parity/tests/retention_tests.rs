@@ -8,8 +8,10 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use cassandra_parity::retention::{
-    binding_minimum, check_workflow, parse_documented_minimums, upload_retention_days,
+    binding_minimum, check_workflow, check_workflow_detailed, parse_documented_minimums,
+    run_repo_check, upload_retention_days,
 };
+use cassandra_parity::model::Manifest;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -191,4 +193,122 @@ fn parser_only_reads_upload_artifact_steps() {
     let wf = upload_workflow("30");
     let days = upload_retention_days(&wf);
     assert_eq!(days, vec![Some(30)], "only the one upload step counts");
+}
+
+/// A workflow that gates parity scenarios (has a binding tier minimum) but has NO
+/// `actions/upload-artifact` step at all.
+fn no_upload_workflow() -> String {
+    "name: x\n\
+     on: [push]\n\
+     jobs:\n\
+    \x20 j:\n\
+    \x20   runs-on: ubuntu-latest\n\
+    \x20   steps:\n\
+    \x20     - uses: actions/checkout@v4\n\
+    \x20     - name: run parity suite\n\
+    \x20       run: cargo test --test parity\n"
+        .to_string()
+}
+
+/// Finding 1: a required/nightly parity-gating lane with NO upload-artifact step
+/// that is NOT on the #1353 allowlist must FAIL retention-check (visible gap), not
+/// pass vacuously. Names the "retains no failure artifacts" gap and the minimum.
+#[test]
+fn no_upload_non_allowlisted_lane_is_a_finding() {
+    let wf = no_upload_workflow();
+    let findings = check_workflow(
+        ".github/workflows/some-new-parity-lane.yml",
+        &wf,
+        &["nightly_docker".to_string()],
+        &minimums(),
+    );
+    assert_eq!(
+        findings.len(),
+        1,
+        "a non-allowlisted no-upload parity lane must be a finding, got: {findings:#?}"
+    );
+    let f = &findings[0];
+    assert_eq!(f.tier, "nightly_docker");
+    assert_eq!(f.minimum, 30);
+    assert_eq!(f.found, None);
+    assert!(
+        f.message.contains("retains no failure artifacts")
+            && f.message.contains("some-new-parity-lane.yml"),
+        "message must name the gap + the workflow, got: {}",
+        f.message
+    );
+
+    // The detailed disposition is a finding with no note (it is a hard finding, not
+    // an OK-with-a-note).
+    let detailed = check_workflow_detailed(
+        ".github/workflows/some-new-parity-lane.yml",
+        &wf,
+        &["nightly_docker".to_string()],
+        &minimums(),
+    );
+    assert_eq!(detailed.findings.len(), 1);
+    assert!(
+        detailed.note.is_none(),
+        "a non-allowlisted lane must not get an OK-with-a-note"
+    );
+}
+
+/// Finding 1: an ALLOWLISTED lane (#1353 no-emitter) with no upload step is
+/// OK-with-a-note — no finding — so retention-check stays green while the gap is
+/// visibly tracked.
+#[test]
+fn no_upload_allowlisted_lane_is_ok_with_note() {
+    let wf = no_upload_workflow();
+    let detailed = check_workflow_detailed(
+        ".github/workflows/cql-type-parity.yml",
+        &wf,
+        &["nightly_docker".to_string()],
+        &minimums(),
+    );
+    assert!(
+        detailed.findings.is_empty(),
+        "allowlisted no-emitter lane must not be a finding, got: {:#?}",
+        detailed.findings
+    );
+    let note = detailed
+        .note
+        .as_deref()
+        .expect("allowlisted no-upload lane must carry an OK-with-a-note");
+    assert!(
+        note.contains("#1353") && note.contains("cql-type-parity.yml"),
+        "note must reference #1353 + the workflow, got: {note}"
+    );
+}
+
+/// Finding 1: the real repo retention-check stays GREEN — the 6+ known
+/// non-emitting parity lanes are allowlisted (reported as notes) and the 3 emitting
+/// lanes meet their tier minimums, so `run_repo_check` reports OK with zero
+/// findings and at least one allowlist note.
+#[test]
+fn real_repo_retention_check_is_green_with_allowlist_notes() {
+    let root = repo_root();
+    let text = std::fs::read_to_string(root.join("test-data/cassandra-parity-manifest.yml"))
+        .expect("manifest exists");
+    let manifest = Manifest::from_yaml(&text).expect("manifest parses");
+    let result = run_repo_check(&manifest, &root, &minimums());
+    assert!(
+        result.ok(),
+        "real-repo retention-check must be green, findings: {:#?}",
+        result.findings
+    );
+    assert!(
+        !result.notes.is_empty(),
+        "expected allowlisted no-emitter lanes to be reported as notes"
+    );
+    assert!(
+        result.notes.iter().all(|n| n.contains("#1353")),
+        "every allowlist note must reference #1353, got: {:#?}",
+        result.notes
+    );
+    // The three emitting lanes are among the checked fixture-retaining workflows.
+    assert!(
+        result.checked >= 3,
+        "expected at least the 3 emitting lanes checked, got {}",
+        result.checked
+    );
 }

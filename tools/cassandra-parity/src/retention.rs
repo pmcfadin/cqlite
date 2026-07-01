@@ -24,6 +24,53 @@ use crate::model::Manifest;
 /// `parity-ci-tiers.md`.
 const DOC_FENCE_TAG: &str = "parity-retention-minimums";
 
+/// Parity-gating lanes that intentionally retain NO failure artifacts yet, because
+/// their suites use plain `assert!`/`panic!` and do not route through the shared
+/// failure-artifact emitter. Wiring them to emit is deferred to follow-up issue
+/// #1353. Until then these lanes report OK-with-a-note (not a silent pass, not a
+/// hard finding) when they have a binding retention minimum but no
+/// `actions/upload-artifact` step.
+///
+/// This allowlist is the ONLY escape hatch: a NEW parity-gating lane added later
+/// WITHOUT an upload step (and without being added here) FAILS retention-check —
+/// making the "gates parity but retains nothing" gap visible and intentional.
+///
+/// See issue #1353 (wire these lanes to the shared emitter, then remove them here).
+const NO_EMITTER_ALLOWLIST: &[&str] = &[
+    // Wave 2f removed the `parity-failures-*` uploads from these six lanes because
+    // their suites use plain `assert!`/`panic!` (they do not route through the
+    // shared emitter). Wiring them to emit is deferred to #1353.
+    ".github/workflows/cql-type-parity.yml",
+    ".github/workflows/tombstone-ttl-parity.yml",
+    ".github/workflows/compression-corruption-parity.yml",
+    ".github/workflows/live-cell-compaction-parity.yml",
+    ".github/workflows/e2e-readback.yml",
+    ".github/workflows/cassandra-validation.yml",
+    // `cassandra-parity.yml` is the manifest meta-lint lane (lint / tier-contract /
+    // retention-check / coverage / unit tests). It gates an
+    // `exhaustive_regeneration` scenario via the manifest but runs no per-fixture
+    // parity suite that diffs, so it has no failure-artifact emitter — deferred to
+    // #1353 along with the assert-based suites above.
+    ".github/workflows/cassandra-parity.yml",
+    // `delta-roundtrip.yml` runs the delta round-trip `cargo test` suite
+    // (assert-based, does not route through the shared emitter) — same #1353 defer.
+    ".github/workflows/delta-roundtrip.yml",
+];
+
+/// True when `workflow_path` names a lane on the #1353 no-emitter allowlist. The
+/// manifest may reference a workflow by a bare filename or a repo-relative path, so
+/// match on the trailing path component too.
+fn is_allowlisted_no_emitter(workflow_path: &str) -> bool {
+    NO_EMITTER_ALLOWLIST.iter().any(|allowed| {
+        *allowed == workflow_path
+            || allowed
+                .rsplit('/')
+                .next()
+                .map(|base| base == workflow_path || workflow_path.ends_with(base))
+                .unwrap_or(false)
+    })
+}
+
 /// Errors that prevent the retention check from running (as opposed to a
 /// below-minimum finding the check is designed to report).
 #[derive(Debug, Error)]
@@ -163,22 +210,78 @@ pub fn binding_minimum(
         .max_by_key(|(_, m)| *m)
 }
 
+/// Outcome of checking one workflow: below-minimum findings plus any OK-with-a-note
+/// disposition (an allowlisted lane that gates parity but has no emitter yet).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct WorkflowCheck {
+    /// Below-minimum (or gates-but-retains-nothing) findings for this workflow.
+    pub findings: Vec<RetentionFinding>,
+    /// A non-failing note explaining an intentional gap (e.g. an allowlisted
+    /// no-emitter lane deferred to #1353). Empty when there is nothing to note.
+    pub note: Option<String>,
+}
+
 /// Check one workflow's upload-artifact retention against the minimum for the
 /// tiers it gates. `lane_tiers` is the set of `ci.tier` values of the manifest
 /// scenarios whose `ci.workflow` is this workflow. Returns one finding per
 /// offending upload step (empty == OK). A lane whose binding minimum is `None`
 /// (no fixture-retaining tier) is never flagged.
+///
+/// A lane with a binding minimum but ZERO `actions/upload-artifact` steps gates
+/// parity scenarios yet retains no failure artifacts: that gap is made VISIBLE as a
+/// finding UNLESS the lane is on the documented [`NO_EMITTER_ALLOWLIST`] (deferred
+/// to #1353), in which case it is an OK-with-a-note disposition, never a silent
+/// pass. Use [`check_workflow_detailed`] to observe the note; this thin wrapper
+/// returns only the findings.
 pub fn check_workflow(
     workflow_path: &str,
     workflow_text: &str,
     lane_tiers: &[String],
     minimums: &BTreeMap<String, u32>,
 ) -> Vec<RetentionFinding> {
-    let mut out = Vec::new();
+    check_workflow_detailed(workflow_path, workflow_text, lane_tiers, minimums).findings
+}
+
+/// Like [`check_workflow`] but also surfaces the OK-with-a-note disposition for an
+/// allowlisted no-emitter lane.
+pub fn check_workflow_detailed(
+    workflow_path: &str,
+    workflow_text: &str,
+    lane_tiers: &[String],
+    minimums: &BTreeMap<String, u32>,
+) -> WorkflowCheck {
+    let mut out = WorkflowCheck::default();
     let Some((tier, minimum)) = binding_minimum(lane_tiers, minimums) else {
         return out;
     };
-    for found in upload_retention_days(workflow_text) {
+
+    let uploads = upload_retention_days(workflow_text);
+
+    // Gates parity scenarios but retains NO failure artifacts (no upload step).
+    if uploads.is_empty() {
+        if is_allowlisted_no_emitter(workflow_path) {
+            out.note = Some(format!(
+                "{workflow_path}: gates `{tier}` parity scenarios but has no failure-artifact \
+                 emitter yet — deferred to #1353 (allowlisted)"
+            ));
+        } else {
+            out.findings.push(RetentionFinding {
+                workflow: workflow_path.to_string(),
+                tier: tier.clone(),
+                minimum,
+                found: None,
+                message: format!(
+                    "{workflow_path}: gates `{tier}` parity scenarios but retains no failure \
+                     artifacts (no `actions/upload-artifact` step). Add an upload step with \
+                     `retention-days: >= {minimum}`, or add the lane to the #1353 no-emitter \
+                     allowlist if it intentionally does not emit yet"
+                ),
+            });
+        }
+        return out;
+    }
+
+    for found in uploads {
         let below = match found {
             Some(days) => days < minimum,
             // No explicit retention-days on a lane that must retain fixtures: the
@@ -196,7 +299,7 @@ pub fn check_workflow(
                      requires an explicit `retention-days: >= {minimum}`"
                 ),
             };
-            out.push(RetentionFinding {
+            out.findings.push(RetentionFinding {
                 workflow: workflow_path.to_string(),
                 tier: tier.clone(),
                 minimum,
@@ -209,11 +312,15 @@ pub fn check_workflow(
 }
 
 /// Outcome of a whole-repo retention check: how many fixture-retaining workflows
-/// were checked and every below-minimum finding.
+/// were checked, every below-minimum finding, and any OK-with-a-note dispositions
+/// (allowlisted no-emitter lanes deferred to #1353).
 #[derive(Debug, Default)]
 pub struct RepoCheck {
     pub checked: usize,
     pub findings: Vec<RetentionFinding>,
+    /// Non-failing notes (e.g. allowlisted no-emitter lanes). Surfaced in `render`
+    /// so the intentional gap is visible, but they do not flip `ok()` to false.
+    pub notes: Vec<String>,
 }
 
 impl RepoCheck {
@@ -222,13 +329,16 @@ impl RepoCheck {
         self.findings.is_empty()
     }
 
-    /// Human + machine readable summary (findings, then a final status line).
+    /// Human + machine readable summary (findings, notes, then a final status line).
     pub fn render(&self) -> String {
         let mut lines: Vec<String> = self
             .findings
             .iter()
             .map(|f| format!("RETENTION {}", f.message))
             .collect();
+        for note in &self.notes {
+            lines.push(format!("RETENTION-NOTE {note}"));
+        }
         if self.ok() {
             lines.push(format!(
                 "retention-check: OK — {} fixture-retaining parity workflow(s) meet their tier \
@@ -276,9 +386,11 @@ pub fn run_repo_check(
             continue;
         };
         result.checked += 1;
-        result
-            .findings
-            .extend(check_workflow(wf, &text, &tiers_vec, minimums));
+        let check = check_workflow_detailed(wf, &text, &tiers_vec, minimums);
+        result.findings.extend(check.findings);
+        if let Some(note) = check.note {
+            result.notes.push(note);
+        }
     }
     result
 }
