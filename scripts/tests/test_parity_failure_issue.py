@@ -443,6 +443,73 @@ class ResolveTests(unittest.TestCase):
         self.assertNotIn("57", commented)
         self.assertFalse(any("close" in c for c in calls))
 
+    def _run_resolve(self, calls_sink, open_issues, workflow, run_url):
+        """Run a lane-scoped green resolve against `open_issues`; return the call log slice."""
+        with tempfile.TemporaryDirectory() as d:
+            oj = _write(Path(d), "open.json", open_issues)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = pfi.cmd_resolve(_args(
+                    failures_json=None, open_issues_json=oj,
+                    workflow=workflow, run_url=run_url, dry_run=False))
+            self.assertEqual(rc, 0)
+        return out.getvalue()
+
+    @staticmethod
+    def _body_after_resolve(calls, number: str):
+        """Extract the body written by the last `gh issue edit #<number> --body ...`."""
+        for c in reversed(calls):
+            if len(c) >= 6 and c[1] == "issue" and c[2] == "edit" and c[3] == number:
+                return c[5]
+        return None
+
+    def test_green_resolve_is_idempotent_one_comment_per_transition(self):
+        # Fix B (round 7): two consecutive green resolves on the SAME still-open issue
+        # (never auto-closed) must post EXACTLY ONE resolution comment. The first resolve
+        # stamps a resolved marker; the second sees it and skips (no duplicate comment).
+        wf = "compression-corruption-parity.yml"
+        issue_body = f"<!-- PARITY-FAIL:aaaaaaaaaaaa -->\n**Workflow:** `{wf}`\n"
+        # Green run #1.
+        calls = self._capture_gh()
+        self._run_resolve(calls, [{"number": 55, "body": issue_body}], wf, "https://gh/run/G1")
+        comment1 = [c for c in calls if len(c) > 2 and c[2] == "comment"]
+        self.assertEqual(len(comment1), 1, "first green run comments exactly once")
+        stamped = self._body_after_resolve(calls, "55")
+        self.assertIsNotNone(stamped)
+        self.assertTrue(pfi.is_resolved(stamped), "first resolve stamps the resolved marker")
+        # Green run #2 sees the stamped body (issue never closed) → no duplicate comment.
+        calls2 = self._capture_gh()
+        out = self._run_resolve(calls2, [{"number": 55, "body": stamped}], wf, "https://gh/run/G2")
+        comment2 = [c for c in calls2 if len(c) > 2 and c[2] == "comment"]
+        self.assertEqual(len(comment2), 0, "second green run must NOT re-comment (idempotent)")
+        self.assertIn("already marked resolved", out)
+        self.assertFalse(any("close" in c for c in calls + calls2))
+
+    def test_failure_recurrence_re_arms_resolution_comment(self):
+        # Fix B: a failure recurrence BETWEEN two green runs clears the resolved marker, so
+        # the second green run posts a resolution comment AGAIN (transition re-armed).
+        wf = "compression-corruption-parity.yml"
+        failure = _failure(workflow=wf)
+        fp = pfi.compute_fingerprint(failure)
+        base_body = f"{pfi.marker(fp)}\n**Workflow:** `{wf}`\n{pfi.latest_failure_section('https://gh/run/OLD')}"
+        # Green run #1 stamps the resolved marker.
+        calls = self._capture_gh()
+        self._run_resolve(calls, [{"number": 60, "body": base_body}], wf, "https://gh/run/G1")
+        resolved_body = self._body_after_resolve(calls, "60")
+        self.assertTrue(pfi.is_resolved(resolved_body))
+        # A NEW failure recurs (the `file` path) → the update plan clears the resolved marker.
+        plan = pfi._plan_failure(failure, [{"number": 60, "body": resolved_body}],
+                                 _args(run_url="https://gh/run/NEWFAIL"))
+        self.assertEqual(plan["action"], "update")
+        self.assertFalse(pfi.is_resolved(plan["new_body"]),
+                         "recurrence must clear the resolved marker (re-arm)")
+        # Green run #2 sees the re-armed (unresolved) body → comments once again.
+        calls2 = self._capture_gh()
+        self._run_resolve(calls2, [{"number": 60, "body": plan["new_body"]}], wf, "https://gh/run/G2")
+        comment2 = [c for c in calls2 if len(c) > 2 and c[2] == "comment"]
+        self.assertEqual(len(comment2), 1, "re-armed green run comments exactly once")
+        self.assertFalse(any("close" in c for c in calls + calls2))
+
     def test_green_lane_resolve_unmatched_workflow_is_noop(self):
         # A green lane whose filename matches no open issue resolves nothing (and never
         # falls back to an all-lane sweep). Mirrors the workflow passing a lane filename.

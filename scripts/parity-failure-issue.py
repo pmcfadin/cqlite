@@ -19,14 +19,19 @@ Design (see openspec/changes/issue-1028-parity-failure-issue-automation/):
       the match (dated comment + refreshed run link), never open a duplicate. Warn
       loudly if the open-issue lookup hits its cap (no silent truncation).
   D5  non-gating, fail-open: absent issue-write token -> `::notice::` + exit 0; a
-      subsequent green run posts a "resolved" comment but does NOT auto-close.
+      subsequent green run posts a "resolved" comment (IDEMPOTENTLY — at most one per
+      failure→green transition, see Fix B) but does NOT auto-close.
   R4  the `resolve` subcommand implements the green-run path: with `--failures-json` it
       resolves only the matching fingerprints; without it (the green-lane wiring) it posts
       a resolution comment on the open `parity-failure` issues belonging to the now-green
       lane — scoped by `--workflow <filename>` (the lane's `.github/workflows/<file>`,
       matched against the body's `**Workflow:**` record), never closing any. The workflow
       always passes the completed lane's filename so one green lane never comments on
-      another lane's issues; an empty `--workflow` (unmapped lane) resolves nothing.
+      another lane's issues; an empty `--workflow` (unmapped lane) resolves nothing. The
+      resolve is IDEMPOTENT (Fix B): it stamps a `<!-- PARITY-RESOLVED:... -->` body marker
+      and skips any issue already carrying it, so a lane that stays green does not re-post a
+      resolution comment every scheduled run; a new failure clears the marker (`clear_resolved`
+      on the file path), re-arming the next green run to comment once (one per transition).
 
 The GitHub-touching paths sit behind explicit seams (`--open-issues-json`,
 `--failures-json`) so the unit tests run with no network. This mirrors
@@ -82,6 +87,55 @@ def short_fingerprint(fingerprint: str) -> str:
 def marker(fingerprint: str) -> str:
     """Body marker embedded in every tracking issue (D4)."""
     return f"<!-- PARITY-FAIL:{short_fingerprint(fingerprint)} -->"
+
+
+# A resolved-state marker written onto the issue body when a green run resolves it, so a
+# later green run is IDEMPOTENT (Fix B, round 7): the resolution comment is posted at most
+# once per failure→green transition. A subsequent failure recurrence CLEARS this marker
+# (via `clear_resolved`) so the next green run comments again — one comment per transition.
+RESOLVED_MARKER_PREFIX = "<!-- PARITY-RESOLVED:"
+RESOLVED_MARKER_SUFFIX = " -->"
+
+
+def resolved_marker(run_url: str) -> str:
+    """Body marker recording that this issue has been resolved on `run_url` (Fix B)."""
+    return f"{RESOLVED_MARKER_PREFIX}{run_url}{RESOLVED_MARKER_SUFFIX}"
+
+
+def is_resolved(body: str) -> bool:
+    """True if the issue body already carries a resolved marker (Fix B idempotency)."""
+    return RESOLVED_MARKER_PREFIX in (body or "")
+
+
+def set_resolved(body: str, run_url: str) -> str:
+    """Return `body` with a single up-to-date resolved marker (Fix B).
+
+    Any pre-existing resolved marker is replaced so the body never accumulates stale
+    resolution markers across (re-armed) transitions.
+    """
+    cleared = clear_resolved(body)
+    sep = "" if not cleared or cleared.endswith("\n") else "\n"
+    return f"{cleared}{sep}{resolved_marker(run_url)}\n"
+
+
+def clear_resolved(body: str) -> str:
+    """Strip any resolved marker line(s) from `body` (Fix B: re-arm on recurrence).
+
+    Called on the failure path so a new failure after a resolve flips the issue back to
+    the unresolved state — the next green run then posts exactly one fresh resolution
+    comment (one comment per failure→green transition).
+    """
+    if not body or RESOLVED_MARKER_PREFIX not in body:
+        return body or ""
+    kept = [
+        line for line in body.splitlines()
+        if not line.strip().startswith(RESOLVED_MARKER_PREFIX)
+    ]
+    result = "\n".join(kept)
+    # Preserve a trailing newline if the original body had one.
+    if body.endswith("\n") and not result.endswith("\n"):
+        result += "\n"
+    return result
 
 
 # --------------------------------------------------------------------------- failure input
@@ -245,7 +299,9 @@ def _plan_failure(failure: dict, open_issues: list[dict], args) -> dict:
         # D4: refresh the body's "Latest failure" section (run link + timestamp) on the
         # existing issue, THEN post the dated recurrence comment. Marker + all other
         # sections stay intact.
-        old_body = existing.get("body") or ""
+        # Fix B: a recurrence RE-ARMS the resolved state — strip any resolved marker so the
+        # next green run posts exactly one fresh resolution comment (one per transition).
+        old_body = clear_resolved(existing.get("body") or "")
         return {
             "action": "update",
             "fingerprint": fingerprint,
@@ -390,11 +446,23 @@ def load_degraded(summary_file: str | None, workflow_file: str | None = None) ->
 
 
 def _resolve_one(existing: dict, run_url: str, dry_run: bool) -> None:
-    """Post ONE resolution comment; NEVER close (D5 / R4)."""
+    """Post ONE resolution comment + stamp the resolved marker; NEVER close (D5 / R4).
+
+    Fix B (idempotency): in addition to the resolution comment, the issue body is edited
+    to carry a `<!-- PARITY-RESOLVED:<run_url> -->` marker. A later green run sees that
+    marker and SKIPS re-commenting (see `cmd_resolve`), so we comment at most once per
+    failure→green transition. A subsequent failure clears the marker (`clear_resolved` on
+    the file path), re-arming the next green run to comment once again.
+    """
+    new_body = set_resolved(existing.get("body") or "", run_url)
     if dry_run:
         print("--- DRY RUN (resolve) ---")
+        print(f"edit #{existing['number']}: stamped resolved marker")
         print(f"comment #{existing['number']}: {resolution_comment(run_url)}")
         return
+    # Stamp the resolved marker on the body first, then post the (single) resolution
+    # comment. Body edit + comment only — never close (a human confirms + closes).
+    _gh(["gh", "issue", "edit", str(existing["number"]), "--body", new_body])
     _gh(["gh", "issue", "comment", str(existing["number"]),
          "--body", resolution_comment(run_url)])
     print(f"resolved-comment: #{existing['number']} (not closed)")
@@ -429,23 +497,39 @@ def cmd_resolve(args) -> int:
             return 0
         for failure in failures:
             existing = find_existing(open_issues, compute_fingerprint(failure))
-            if existing is not None:
+            if existing is not None and not is_resolved(existing.get("body") or ""):
+                # Fix B: same idempotency guard — skip an already-resolved issue.
                 _resolve_one(existing, args.run_url, args.dry_run)
         return 0
 
     # Lane-scoped resolve (green-run path): comment on every open parity-failure issue
     # belonging to the now-green lane (or all, if no lane filter given).
+    #
+    # Fix B (idempotency): SKIP any issue already carrying a resolved marker. Because
+    # issues are never auto-closed, a lane that stays green would otherwise post a fresh
+    # resolution comment on EVERY scheduled green run (comment spam). The marker (stamped by
+    # `_resolve_one`, cleared on a new failure via `clear_resolved`) makes resolution post
+    # at most once per failure→green transition.
     workflow = (getattr(args, "workflow", None) or "").strip()
     resolved = 0
+    skipped = 0
     for issue in open_issues:
         body = issue.get("body") or ""
         if workflow and workflow not in body:
+            continue
+        if is_resolved(body):
+            # Already resolved with no intervening failure recurrence — no duplicate comment.
+            skipped += 1
             continue
         _resolve_one(issue, args.run_url, args.dry_run)
         resolved += 1
     if resolved == 0:
         scope = f"for lane '{workflow}'" if workflow else "for any lane"
-        print(f"no open {PARITY_LABEL} issues to resolve {scope} — nothing to do")
+        if skipped:
+            print(f"no NEW open {PARITY_LABEL} issues to resolve {scope} — "
+                  f"{skipped} already marked resolved (idempotent; no duplicate comment)")
+        else:
+            print(f"no open {PARITY_LABEL} issues to resolve {scope} — nothing to do")
     return 0
 
 
