@@ -9,8 +9,8 @@ use std::path::PathBuf;
 
 use cassandra_parity::model::Manifest;
 use cassandra_parity::retention::{
-    binding_minimum, check_workflow, check_workflow_detailed, parse_documented_minimums,
-    run_repo_check, upload_retention_days,
+    binding_minimum, check_workflow, check_workflow_detailed, no_emitter_allowlist,
+    parse_documented_minimums, run_repo_check, upload_retention_days,
 };
 
 fn repo_root() -> PathBuf {
@@ -262,6 +262,55 @@ fn unrelated_upload_non_allowlisted_lane_is_a_finding() {
     assert!(
         detailed.note.is_none(),
         "a non-allowlisted lane must not get an OK-with-a-note"
+    );
+}
+
+/// Finding 3 (issue #1027): the aspirational-descriptor lane list documented in
+/// `parity-failure-artifacts.md` is tied to the retention no-emitter allowlist +
+/// #1353 so triage never reads a descriptor on a non-emitting lane as a production
+/// guarantee, and the doc + code cannot silently drift.
+#[test]
+fn aspirational_lanes_doc_matches_retention_allowlist() {
+    let doc =
+        std::fs::read_to_string(repo_root().join("docs/development/parity-failure-artifacts.md"))
+            .expect("parity-failure-artifacts.md exists");
+
+    // The doc must explicitly tie the aspirational descriptors to #1353.
+    assert!(
+        doc.contains("ASPIRATIONAL pending")
+            && doc.contains("#1353")
+            && doc.contains("no_emitter_allowlist"),
+        "doc must mark descriptors aspirational + reference #1353 + the code source"
+    );
+
+    // Extract the machine-checked list between the markers.
+    let begin = "<!-- aspirational-no-emitter-lanes:begin";
+    let end = "<!-- aspirational-no-emitter-lanes:end -->";
+    let start = doc.find(begin).expect("aspirational list begin marker");
+    let after_begin = doc[start..]
+        .find("-->")
+        .map(|i| start + i + 3)
+        .expect("begin close");
+    let stop = doc.find(end).expect("aspirational list end marker");
+    let block = &doc[after_begin..stop];
+    let documented: Vec<String> = block
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("- "))
+        .map(|s| s.trim().trim_matches('`').to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let mut expected: Vec<String> = no_emitter_allowlist()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let mut actual = documented.clone();
+    expected.sort();
+    actual.sort();
+    assert_eq!(
+        actual, expected,
+        "the aspirational-lane list in parity-failure-artifacts.md must equal \
+         retention::no_emitter_allowlist() (add/remove in the same change as #1353 wiring)"
     );
 }
 

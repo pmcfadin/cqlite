@@ -66,6 +66,17 @@ const NO_EMITTER_ALLOWLIST: &[&str] = &[
     ".github/workflows/nightly-docker-parity.yml",
 ];
 
+/// The lanes whose manifest artifact descriptors are ASPIRATIONAL pending #1353:
+/// the scenario legitimately declares its evidence-type descriptor, but the LANE
+/// does not (yet) route through the shared failure-artifact emitter, so no
+/// `parity-failures/**` bundle is produced. This is the SAME set the retention
+/// check treats as OK-with-a-note. Exposed so the doc (`parity-failure-artifacts.md`)
+/// and a test can tie the aspirational-descriptor list to the retention allowlist +
+/// #1353 and prevent silent drift (issue #1027 finding 3).
+pub fn no_emitter_allowlist() -> &'static [&'static str] {
+    NO_EMITTER_ALLOWLIST
+}
+
 /// True when `workflow_path` names a lane on the #1353 no-emitter allowlist. The
 /// manifest may reference a workflow by a bare filename or a repo-relative path, so
 /// match on the trailing path component too.

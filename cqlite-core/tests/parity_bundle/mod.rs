@@ -249,8 +249,11 @@ impl FailureBundle {
     /// Statistics.db CRC32 site, which has real scalar checksum fields but no raw
     /// component bytes — so ONLY this kind is emitted (issue #1027 finding 1).
     pub fn checksum_diff_only(mut self, body: String) -> Self {
-        self.diff_files
-            .push(("checksum_diff".to_string(), "checksums.txt".to_string(), body));
+        self.diff_files.push((
+            "checksum_diff".to_string(),
+            "checksums.txt".to_string(),
+            body,
+        ));
         self
     }
 

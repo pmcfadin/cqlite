@@ -512,10 +512,7 @@ async fn big_index_db_entry_byte_and_field_parity() {
                         // offset delta) pair. This site has no raw bytes to
                         // checksum, so the bundle emits ONLY a genuine offset_diff
                         // kind — never a fabricated byte/checksum diff (finding 1).
-                        .offset_evidence(
-                            "Index.db",
-                            vec![(pos_delta as i64, off_delta as i64)],
-                        )
+                        .offset_evidence("Index.db", vec![(pos_delta as i64, off_delta as i64)])
                         .detail(format!(
                             "{}: offset delta {off_delta} != JSONL position delta {pos_delta} at \
                              partition {n}\n{diff}",

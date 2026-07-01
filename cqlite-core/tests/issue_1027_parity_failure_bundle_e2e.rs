@@ -112,7 +112,12 @@ fn real_parity_failure_panic_emits_scenario_id_keyed_bundle() {
         .iter()
         .map(|d| d["kind"].as_str().expect("kind"))
         .collect();
-    for k in ["byte_diff", "offset_diff", "checksum_diff", "component_inventory"] {
+    for k in [
+        "byte_diff",
+        "offset_diff",
+        "checksum_diff",
+        "component_inventory",
+    ] {
         assert!(kinds.contains(&k), "byte_for_byte must promise {k}");
     }
     let byte_diff = std::fs::read_to_string(diffs_dir.join("Statistics.db.byte-diff.txt"))
@@ -159,7 +164,8 @@ fn canonical_semantic_failure_preserves_real_jsonl_sides() {
     let tmp = tempfile::tempdir().expect("tempdir");
     std::env::set_var("CQLITE_PARITY_FAILURES_ROOT", tmp.path());
 
-    let desc = bundle_descriptor_for_suite(scenario::DATA_DB_JSONL).expect("data_db suite is wired");
+    let desc =
+        bundle_descriptor_for_suite(scenario::DATA_DB_JSONL).expect("data_db suite is wired");
     let bundle = tmp
         .path()
         .join("parity-failures")
@@ -186,7 +192,10 @@ fn canonical_semantic_failure_preserves_real_jsonl_sides() {
             .panic();
     }));
     assert!(result.is_err(), "panic() must abort the failing lane");
-    assert!(record_path.is_file(), "canonical_semantic must emit a bundle");
+    assert!(
+        record_path.is_file(),
+        "canonical_semantic must emit a bundle"
+    );
 
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&record_path).expect("record"))

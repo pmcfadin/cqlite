@@ -132,6 +132,43 @@ A descriptor's `<tier>` segment MUST equal the scenario's `ci.tier`, and its
 `<kind>` MUST be a diff/bundle kind the scenario's `evidence_type` is allowed to
 emit. `cassandra-parity lint` enforces both rules.
 
+### Aspirational descriptors on non-emitting lanes (deferred to #1353)
+
+> [!IMPORTANT]
+> A typed `artifact.<tier>.<kind>` descriptor declares the evidence a scenario's
+> `evidence_type` *would* produce on a red gate — it is **not**, on its own, a
+> guarantee that the emitting workflow actually writes a `parity-failures/**`
+> bundle. Some parity-gating lanes still terminate their suites with plain
+> `assert!`/`panic!` and do not route through the shared failure-artifact emitter,
+> so their scenarios' descriptors are **ASPIRATIONAL pending [#1353](https://github.com/pmcfadin/cqlite/issues/1353)**.
+> Triage must read a descriptor on one of these lanes as "this is the evidence
+> shape once the lane is wired", not as a production guarantee that the artifact
+> exists today.
+
+The aspirational lanes are exactly the retention **no-emitter allowlist** — the
+single source of truth is `NO_EMITTER_ALLOWLIST` in
+[`tools/cassandra-parity/src/retention.rs`](../../tools/cassandra-parity/src/retention.rs)
+(exposed as `retention::no_emitter_allowlist()`), the same set `retention-check`
+reports OK-with-a-note for:
+
+<!-- aspirational-no-emitter-lanes:begin (single source: retention::no_emitter_allowlist) -->
+- `.github/workflows/cql-type-parity.yml`
+- `.github/workflows/tombstone-ttl-parity.yml`
+- `.github/workflows/compression-corruption-parity.yml`
+- `.github/workflows/live-cell-compaction-parity.yml`
+- `.github/workflows/e2e-readback.yml`
+- `.github/workflows/cassandra-validation.yml`
+- `.github/workflows/cassandra-parity.yml`
+- `.github/workflows/delta-roundtrip.yml`
+- `.github/workflows/nightly-docker-parity.yml`
+<!-- aspirational-no-emitter-lanes:end -->
+
+The list above is verified against `retention::no_emitter_allowlist()` by the
+`aspirational_lanes_doc_matches_retention_allowlist` test in
+`tools/cassandra-parity/tests/retention_tests.rs`, so the doc and the code cannot
+silently drift. When #1353 wires a lane to the shared emitter, remove it from
+`NO_EMITTER_ALLOWLIST` and this list in the same change.
+
 ## Workflow upload + retention
 
 Every parity workflow uploads the whole `parity-failures/**` tree as a
