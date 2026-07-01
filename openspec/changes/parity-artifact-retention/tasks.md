@@ -69,23 +69,28 @@
 
 ## 6. Wire the existing workflows
 
-- [ ] 6.1 `sstabledump-parity-gate.yml`: upload `parity-failures/**` as `parity-failures-sstabledump-parity-gate`,
-      `if: always()`, retention >= required_parity minimum. Surface: the workflow.
-- [ ] 6.2 `compaction-parity.yml`: upload `parity-failures-compaction-parity` from the scenario-id tree,
-      retention >= required_parity minimum. Surface: the workflow.
-- [ ] 6.3 `compression-corruption-parity.yml`, `cql-type-parity.yml`, `tombstone-ttl-parity.yml`: same
-      shared upload. Surface: each workflow.
-- [ ] 6.4 `exhaustive-regeneration.yml`: ensure the audit report flows into an `audit_report` diff entry;
-      keep 90-day retention. Surface: the workflow.
-- [ ] 6.5 Nightly Docker lane: emit `live_log` and upload under the shared name, retention >= 30.
-      Surface: the nightly workflow.
+- [x] 6.1 `sstabledump-parity-gate.yml`: upload `parity-failures/**` as `parity-failures-sstabledump-parity-gate`,
+      `if: always()`, retention 14 (required_parity minimum). Surface: the workflow.
+- [x] 6.2 `compaction-parity.yml`: upload `parity-failures-compaction-parity` from the scenario-id tree,
+      retention 30 (lane also gates nightly_docker); also raised the existing
+      `compaction-parity-reports` upload 14→30. Surface: the workflow.
+- [x] 6.3 `compression-corruption-parity.yml` (90, exhaustive_regeneration), `cql-type-parity.yml` (30),
+      `tombstone-ttl-parity.yml` (30): shared `parity-failures-<basename>` upload, `if: always()`.
+      Also added `live-cell-compaction-parity.yml` (14, required_parity). Surface: each workflow.
+- [x] 6.4 `exhaustive-regeneration.yml`: added a shared `parity-failures-exhaustive-regeneration`
+      upload (audit_report bundle) at 90-day retention alongside the existing report artifact.
+- [x] 6.5 Nightly Docker lanes (`cassandra-validation.yml`, `e2e-readback.yml`): raised retention
+      14→30 and added the shared `parity-failures-<basename>` upload (live_log bundle), retention 30.
+      Wired `retention-check` into CI in `cassandra-parity.yml` (fail-closed enforcement).
 
 ## 7. Docs + cross-links
 
-- [ ] 7.1 Document the failure-artifact schema + bundle layout beside the gate-contract page; mirror to
-      the agent-developer site (issue #1022 cross-link). Surface: `docs/` + website mirror.
-- [ ] 7.2 Reference failure bundles by scenario id in `docs/development/parity-release-checklist.md`.
-      Surface: the checklist.
+- [x] 7.1 Added `docs/development/parity-failure-artifacts.md` (record schema, bundle layout,
+      per-evidence-type contents, descriptor family, upload+retention) and cross-linked it from
+      `docs/development/parity-ci-tiers.md`. The `agents-developing/` website mirror is maintained
+      separately (issue #1022) and points back to this canonical page.
+- [x] 7.2 Referenced failure bundles by scenario id in `docs/development/parity-release-checklist.md`
+      (a near-release red-gate triage section cites `parity-failures/<tier>/<scenario_id>/`).
 
 ## 8. Closing gates (the standard quality bar)
 
