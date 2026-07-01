@@ -316,17 +316,21 @@ impl StatisticsReader {
         ));
         // `avg_rows_per_partition == 0.0` is the documented #1325 unavailable
         // sentinel: the parser leaves it 0.0 whenever `total_rows` is not
-        // authoritatively reachable (so no real average could be computed).
-        // Render it as `unavailable` in that case rather than a misleading
-        // `0.0` (#1352). No heuristic (#28).
-        report.push_str(&if self.statistics.row_stats.total_rows == 0 {
-            "- Average rows per partition: unavailable\n\n".to_string()
-        } else {
-            format!(
-                "- Average rows per partition: {:.1}\n\n",
-                self.statistics.row_stats.avg_rows_per_partition
-            )
-        });
+        // authoritatively reachable OR `partition_count == 0` (the average is
+        // `total_rows / partition_count`, so BOTH must be positive for the value
+        // to be real). Render it as `unavailable` unless both counts are positive
+        // rather than a misleading `0.0` (#1352). Availability guard is
+        // single-sourced via `avg_rows_available`. No heuristic (#28).
+        report.push_str(
+            &if crate::parser::statistics::avg_rows_available(&self.statistics) {
+                format!(
+                    "- Average rows per partition: {:.1}\n\n",
+                    self.statistics.row_stats.avg_rows_per_partition
+                )
+            } else {
+                "- Average rows per partition: unavailable\n\n".to_string()
+            },
+        );
 
         // Timestamp information
         if self.statistics.timestamp_stats.min_timestamp != 0 {
@@ -839,6 +843,33 @@ mod tests {
         assert!(
             compact.contains("Rows: 1000"),
             "compact summary must render the real total_rows: {compact}"
+        );
+    }
+
+    /// #1374 roborev finding: `avg_rows_per_partition` is
+    /// `total_rows / partition_count`, so its `0.0` unavailable sentinel also
+    /// occurs when `total_rows > 0` but `partition_count == 0`. The report must
+    /// render "unavailable" in that case (guard requires BOTH counts positive).
+    /// Total rows itself is real here, so it must still render concretely.
+    #[tokio::test]
+    async fn test_report_renders_avg_unavailable_when_partition_count_zero() {
+        let mut stats = stats_with(1000, 900, 0.0);
+        stats.row_stats.partition_count = 0; // avg is the unavailable sentinel
+        let reader = super::StatisticsReader::from_statistics_for_test(stats).await;
+
+        let report = reader.generate_report(false);
+        assert!(
+            report.contains("Average rows per partition: unavailable"),
+            "avg rows/partition must render unavailable when partition_count == 0:\n{report}"
+        );
+        assert!(
+            !report.contains("Average rows per partition: 0.0"),
+            "must NOT render the misleading concrete 0.0 avg:\n{report}"
+        );
+        // Total rows is authoritative here, so it must still render concretely.
+        assert!(
+            report.contains("Total rows: 1000"),
+            "row-stats Total rows must still render the real count:\n{report}"
         );
     }
 }

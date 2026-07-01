@@ -252,6 +252,11 @@ fn nb_rowstatistics_carry_authoritative_counts() {
 /// sorted for determinism. Callers iterate candidates because a single fixture's
 /// gated `total_rows` can legitimately be unavailable (an unmodeled improved
 /// min/max block blocks the walk) even though the file is valid.
+///
+/// Every table directory is scanned exhaustively: ALL generations' matching
+/// `*-Statistics.db` files are collected, not just the first (`find_statistics_db`
+/// stops at the first hit, which could miss the oa/da SSTable that proves the
+/// gated-nonzero path or that would violate the None-gates safety assertion).
 fn find_all_stats_db_for_versions(versions: &[&str]) -> Vec<PathBuf> {
     let Some(root) = datasets_root() else {
         return Vec::new();
@@ -273,11 +278,23 @@ fn find_all_stats_db_for_versions(versions: &[&str]) -> Vec<PathBuf> {
             if !tbl_path.is_dir() {
                 continue;
             }
-            if let Some(stats) = find_statistics_db(&tbl_path) {
-                let name = stats.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            // Enumerate EVERY entry in the table dir and keep every matching
+            // `*-Statistics.db` (all generations), not just the first one.
+            let Ok(file_iter) = fs::read_dir(&tbl_path) else {
+                continue;
+            };
+            for file in file_iter.flatten() {
+                let name_os = file.file_name();
+                let name = name_os.to_str().unwrap_or("");
+                if name.starts_with("._") {
+                    continue;
+                }
+                if !name.ends_with("-Statistics.db") || name.ends_with("-Statistics.db.txt") {
+                    continue;
+                }
                 let version = name.split('-').next().unwrap_or("");
                 if versions.contains(&version) {
-                    found.push(stats);
+                    found.push(file.path());
                 }
             }
         }

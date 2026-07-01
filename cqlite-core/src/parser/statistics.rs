@@ -637,6 +637,19 @@ fn parse_vint_as_u64(input: &[u8]) -> IResult<&[u8], u64> {
     Ok((input, value as u64))
 }
 
+/// Whether `avg_rows_per_partition` holds a REAL derived value rather than the
+/// documented #1325 unavailable sentinel `0.0`.
+///
+/// The average is `total_rows / partition_count`; the parser leaves it `0.0`
+/// whenever EITHER `total_rows` is not authoritatively reachable from STATS OR
+/// `partition_count == 0`. So the value is only real when BOTH counts are
+/// positive. Single-sourced here and reused by every consumer (recommendations
+/// in this module and the report renderer in `statistics_reader`) to keep the
+/// availability condition from drifting. No heuristic (#28); see #1352.
+pub(crate) fn avg_rows_available(stats: &SSTableStatistics) -> bool {
+    stats.row_stats.total_rows > 0 && stats.row_stats.partition_count > 0
+}
+
 /// Statistics analyzer for enhanced reporting
 pub struct StatisticsAnalyzer;
 
@@ -735,14 +748,15 @@ impl StatisticsAnalyzer {
 
         // `avg_rows_per_partition == 0.0` is the documented #1325 unavailable
         // sentinel: the parser leaves it 0.0 whenever `total_rows` is not
-        // authoritatively reachable from STATS (or `partition_count == 0`). Only
-        // emit the granularity recommendation when the average is a REAL derived
-        // value — i.e. `total_rows > 0` (so the average was actually computed).
-        // Otherwise the sentinel `0.0 < 10.0` would always trip this hint on nb
-        // SSTables whose gated walk can't reach `totalRows`, a misleading
-        // recommendation from a non-value. No heuristic (#28); see #1352.
-        let avg_rows_available = stats.row_stats.total_rows > 0;
-        if avg_rows_available && stats.row_stats.avg_rows_per_partition < 10.0 {
+        // authoritatively reachable from STATS OR `partition_count == 0` (the
+        // average is `total_rows / partition_count`). Only emit the granularity
+        // recommendation when the average is a REAL derived value — i.e. BOTH
+        // `total_rows > 0` AND `partition_count > 0` (so the average was actually
+        // computed). Otherwise the sentinel `0.0 < 10.0` would always trip this
+        // hint (e.g. on nb SSTables whose gated walk can't reach `totalRows`, or
+        // when `partition_count == 0`), a misleading recommendation from a
+        // non-value. No heuristic (#28); see #1352.
+        if avg_rows_available(stats) && stats.row_stats.avg_rows_per_partition < 10.0 {
             recommendations.push(
                 "Low average rows per partition - partition key may be too granular".to_string(),
             );
@@ -1106,6 +1120,37 @@ mod tests {
                 .iter()
                 .any(|r| r.contains("too granular")),
             "granularity recommendation must NOT fire for a REAL high avg_rows_per_partition"
+        );
+    }
+
+    /// #1374 roborev finding: `avg_rows_per_partition` is `total_rows /
+    /// partition_count`, so the `0.0` unavailable sentinel also occurs when
+    /// `total_rows > 0` but `partition_count == 0`. The availability guard must
+    /// require BOTH counts positive; a stats object with real `total_rows` but
+    /// zero partitions must still SUPPRESS the "too granular" recommendation.
+    #[test]
+    fn test_granularity_recommendation_suppressed_when_partition_count_zero() {
+        let mut stats = create_test_statistics();
+        stats.row_stats.total_rows = 8; // real authoritative count
+        stats.row_stats.partition_count = 0; // but no partitions -> avg is sentinel
+        stats.row_stats.avg_rows_per_partition = 0.0;
+        stats.table_stats.disk_size = 1024;
+
+        // The shared availability helper must report unavailable.
+        assert!(
+            !avg_rows_available(&stats),
+            "avg_rows must be unavailable when partition_count == 0 despite total_rows > 0"
+        );
+
+        let summary = StatisticsAnalyzer::analyze(&stats);
+
+        assert!(
+            !summary
+                .storage_recommendations
+                .iter()
+                .any(|r| r.contains("too granular")),
+            "granularity recommendation must be suppressed when partition_count == 0 \
+             (avg_rows_per_partition is the unavailable sentinel)"
         );
     }
 
