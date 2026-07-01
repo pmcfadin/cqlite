@@ -5,6 +5,7 @@ pub mod claim_scan;
 pub mod corpus_audit;
 pub mod coverage;
 pub mod enums;
+pub mod failure_artifact;
 pub mod lint;
 pub mod model;
 pub mod report;

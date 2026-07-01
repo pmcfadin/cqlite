@@ -120,6 +120,21 @@ pub const OUT_OF_SCOPE_CATEGORY: &[&str] = &[
 /// Artifacts that count as byte-level evidence for a `byte_for_byte` claim.
 pub const BYTE_LEVEL_ARTIFACTS: &[&str] = &["bytes", "offsets", "checksums", "component_files"];
 
+/// The closed set of `diffs[].kind` values in a `failure-artifact.json` record
+/// (issue #1027). Mirrors the `diffs.items.properties.kind.enum` in
+/// `test-data/parity-failure-artifact.schema.json`; the `failure_artifact_kind_enum_matches_schema`
+/// cross-check test keeps this in sync with the schema file, exactly as
+/// `schema_enums_match_lint_enums` does for the manifest enums and `CI_TIER`.
+pub const FAILURE_ARTIFACT_KIND: &[&str] = &[
+    "byte_diff",
+    "offset_diff",
+    "checksum_diff",
+    "jsonl_diff",
+    "component_inventory",
+    "live_log",
+    "audit_report",
+];
+
 /// Closed set of public-claim kinds (issue #1023). `safe` = manifest-backed
 /// wording the project may publish; `blocked` = unqualified over-claim phrase the
 /// claim-scan lint rejects in release-facing docs unless explicitly scoped.

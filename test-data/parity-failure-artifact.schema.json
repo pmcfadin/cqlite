@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/pmcfadin/cqlite/test-data/parity-failure-artifact.schema.json",
+  "title": "CQLite Parity Failure-Artifact Record",
+  "description": "The uniform per-failed-scenario forensic record (failure-artifact.json) emitted by every strict and live parity surface on failure (issue #1027). It joins back to the parity manifest via scenario_id; its tier and evidence_type enums are the same closed sets as test-data/cassandra-parity-manifest.schema.json.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "scenario_id",
+    "lane",
+    "tier",
+    "evidence_type",
+    "artifacts_compared",
+    "provenance",
+    "diffs",
+    "repro_bundle"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "scenario_id": {
+      "type": "string",
+      "pattern": "^cass\\.[a-z0-9_]+(\\.[A-Za-z0-9_]+)+$",
+      "description": "The failing manifest scenario id (the join key back to the manifest)."
+    },
+    "lane": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The emitting workflow file, e.g. sstabledump-parity-gate.yml."
+    },
+    "tier": {
+      "enum": ["fast_pr", "required_parity", "nightly_docker", "exhaustive_regeneration", "manual_debug"],
+      "description": "The manifest ci.tier value; same closed set as the manifest schema."
+    },
+    "evidence_type": {
+      "enum": ["byte_for_byte", "canonical_semantic", "smoke", "partial", "out_of_scope"],
+      "description": "The manifest evidence.type value; same closed set as the manifest schema."
+    },
+    "artifacts_compared": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "What was compared, e.g. [\"bytes\", \"offsets\", \"checksums\", \"component_files\"]."
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cassandra_version",
+        "cassandra_git_sha",
+        "dataset_sha256",
+        "fixture_path",
+        "component_list",
+        "command_line",
+        "stdout",
+        "stderr"
+      ],
+      "properties": {
+        "cassandra_version": { "type": "string", "minLength": 1 },
+        "cassandra_git_sha": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
+        "dataset_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "fixture_path": { "type": "string", "minLength": 1 },
+        "component_list": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "command_line": { "type": "string", "minLength": 1 },
+        "stdout": { "type": "string", "minLength": 1, "description": "Pointer relative to the bundle dir, e.g. stdout.txt." },
+        "stderr": { "type": "string", "minLength": 1, "description": "Pointer relative to the bundle dir, e.g. stderr.txt." }
+      }
+    },
+    "diffs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "path"],
+        "properties": {
+          "kind": {
+            "enum": [
+              "byte_diff",
+              "offset_diff",
+              "checksum_diff",
+              "jsonl_diff",
+              "component_inventory",
+              "live_log",
+              "audit_report"
+            ]
+          },
+          "path": { "type": "string", "minLength": 1, "description": "Pointer relative to the bundle dir, e.g. diffs/Data.db.byte-diff.txt." }
+        }
+      }
+    },
+    "repro_bundle": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Pointer to the repro/ directory (fixture paths + dataset SHA256 + command + instructions)."
+    }
+  }
+}
