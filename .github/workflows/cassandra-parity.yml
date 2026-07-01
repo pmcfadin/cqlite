@@ -239,7 +239,10 @@ jobs:
           fi
           # The regen step writes only the report. Refuse to proceed if anything
           # else changed (defensive; keeps the heal PR to a single file — D4).
-          changed=$(git diff --name-only)
+          # Stage all changes first so the guard also sees a newly-created (untracked)
+          # report — `git diff --name-only` alone omits untracked files (issue #1338).
+          git add -A
+          changed=$(git diff --cached --name-only)
           if [ -z "$changed" ]; then
             echo "Report already in sync after regeneration; nothing to do."
             exit 0
@@ -252,6 +255,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           # Force-update the fixed bot branch so we never stack duplicate PRs (D4).
+          # The staged report survives the branch switch (same HEAD, index preserved).
           git checkout -B "$REGEN_BRANCH"
           git add "$REPORT_PATH"
           git commit -m "chore(parity): regenerate stale cassandra-test-parity report"
