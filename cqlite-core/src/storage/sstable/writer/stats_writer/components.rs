@@ -100,10 +100,12 @@ impl StatisticsWriter {
     pub(super) fn build_stats_component(&self, metadata: &StatisticsMetadata) -> Result<Vec<u8>> {
         let mut buffer = Vec::new();
 
-        // 1-2. EstimatedHistogram estimatedPartitionSize and estimatedCellPerPartitionCount
-        // Minimal valid histogram: size=2, one offset/count pair
-        self.write_estimated_histogram(&mut buffer)?;
-        self.write_estimated_histogram(&mut buffer)?;
+        // 1-2. EstimatedHistogram estimatedPartitionSize and
+        // estimatedCellPerPartitionCount. Populated with one observation per
+        // partition (issue #1327) so Σ estimatedPartitionSize bucket counts ==
+        // partition_count (the authoritative read-side decode, issue #944).
+        metadata.estimated_partition_size.write_to(&mut buffer);
+        metadata.estimated_cell_count.write_to(&mut buffer);
 
         // 3. CommitLogPosition commitLogUpperBound (NONE = segmentId=-1, position=0)
         buffer.write_all(&(-1i64).to_be_bytes())?; // segmentId
@@ -232,8 +234,10 @@ impl StatisticsWriter {
         let mut buffer = Vec::new();
 
         // 1-2. EstimatedHistogram estimatedPartitionSize / estimatedCellPerPartitionCount
-        self.write_estimated_histogram(&mut buffer)?;
-        self.write_estimated_histogram(&mut buffer)?;
+        // Populated per partition (issue #1327): Σ estimatedPartitionSize bucket
+        // counts == partition_count for the authoritative read-side decode.
+        metadata.estimated_partition_size.write_to(&mut buffer);
+        metadata.estimated_cell_count.write_to(&mut buffer);
 
         // 3. CommitLogPosition commitLogUpperBound (NONE)
         buffer.write_all(&(-1i64).to_be_bytes())?; // segmentId
@@ -361,28 +365,6 @@ impl StatisticsWriter {
         Ok(buffer)
     }
 
-    /// Write an EstimatedHistogram (EstimatedHistogram.java lines 414-429)
-    ///
-    /// Format:
-    /// - int: bucket count (we use 2 for minimal valid histogram)
-    /// - for each bucket: long offset + long count
-    ///
-    /// Minimal valid: 2 buckets (size-1=1 offset, size=2 counts)
-    fn write_estimated_histogram(&self, buffer: &mut Vec<u8>) -> Result<()> {
-        // Bucket count
-        buffer.write_all(&2i32.to_be_bytes())?;
-
-        // Bucket 0: offset=1, count=0
-        buffer.write_all(&1i64.to_be_bytes())?; // offset
-        buffer.write_all(&0i64.to_be_bytes())?; // count
-
-        // Bucket 1: offset=1 (gets overwritten per spec), count=0
-        buffer.write_all(&1i64.to_be_bytes())?; // offset (overwrite of offsets[0])
-        buffer.write_all(&0i64.to_be_bytes())?; // count
-
-        Ok(())
-    }
-
     /// Serialise a `TombstoneHistogram` using Cassandra's legacy format (nb/mc).
     ///
     /// Binary layout (matches `TombstoneHistogram.LegacyHistogramSerializer`):
@@ -508,7 +490,10 @@ mod tests {
 
         // STATS component now has a complex binary format (nb version)
         // It should contain:
-        // - 2x EstimatedHistogram (2 buckets each = 36 bytes each)
+        // - estimatedPartitionSize EstimatedHistogram — 156 buckets (issue #1327):
+        //   4 + 156*16 = 2500 bytes
+        // - estimatedCellPerPartitionCount EstimatedHistogram — 119 buckets
+        //   (EH(118), distinct Cassandra shape, issue #1327): 4 + 119*16 = 1908 bytes
         // - CommitLogPosition upper bound (12 bytes)
         // - min/max timestamps (16 bytes)
         // - min/max deletion times (8 bytes)
@@ -526,11 +511,20 @@ mod tests {
         // - pendingRepair (1 byte)
         // - isTransient (1 byte)
         // - originatingHostId (1 byte)
-        // Total: 36+36+12+16+8+8+8+8+4+8+8+1+8+8+12+4+1+1+1 = 188 bytes
-        assert_eq!(data.len(), 188);
+        let partition_size_bytes = 4 + 156 * 16; // 2500
+        let cell_count_bytes = 4 + 119 * 16; // 1908 (EH(118) — distinct shape)
+        let two_histograms = partition_size_bytes + cell_count_bytes; // 4408
+        let fixed_tail = 12 + 16 + 8 + 8 + 8 + 8 + 4 + 8 + 8 + 1 + 8 + 8 + 12 + 4 + 1 + 1 + 1;
+        let expected_len = two_histograms + fixed_tail;
+        assert_eq!(data.len(), expected_len);
 
-        // Verify the row count is present (at offset 36+36+12+16+8+8+8+8+4+8+8+1+8 = 161)
-        let row_count_offset = 161;
+        // Verify totalRows: it follows the two histograms + the fixed prefix up to
+        // (but excluding) totalRows itself.
+        //   commitLogUpper(12) + min/maxTs(16) + min/maxLDT(8) + min/maxTTL(8) +
+        //   compressionRatio(8) + tombstoneHistogram empty(8) + sstableLevel(4) +
+        //   repairedAt(8) + min clustering(4) + max clustering(4) +
+        //   hasLegacyCounterShards(1) + totalColumnsSet(8)
+        let row_count_offset = two_histograms + 12 + 16 + 8 + 8 + 8 + 8 + 4 + 8 + 4 + 4 + 1 + 8;
         let row_count_bytes = &data[row_count_offset..row_count_offset + 8];
         let row_count = u64::from_be_bytes(row_count_bytes.try_into().unwrap());
         assert_eq!(row_count, 100);

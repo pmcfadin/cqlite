@@ -539,13 +539,11 @@ impl crate::storage::write_engine::WriteEngine {
 
 /// Read partition and row counts from Statistics.db and Index.db
 ///
-/// Reads the STATS component (MetadataType ordinal 2) from the exported
-/// Statistics.db to extract totalRows. Partition count is derived from the
-/// number of index entries in the exported Index.db.
-///
-/// The STATS component layout is fixed (written by our StatisticsWriter):
-/// - Offset 153 from component start: totalColumnsSet (u64 BE)
-/// - Offset 161 from component start: totalRows (u64 BE)
+/// `totalRows` is decoded from the STATS component via the authoritative gated
+/// reader [`crate::parser::repair_metadata::read_table_counts`] (issue #944),
+/// which dynamically skips the two leading `EstimatedHistogram`s AND the
+/// tombstone histogram before reading the count (issue #1327). Partition count
+/// is derived from the number of index entries in the exported Index.db.
 ///
 /// Index.db format (BIG format, NB variant):
 /// - Each entry: u16 BE key_len + key_bytes + VInt position + VInt promoted_size
@@ -566,75 +564,31 @@ fn read_statistics_from_export(components: &[PathBuf]) -> Result<(u64, u64)> {
     let file_data = std::fs::read(stats_path)
         .map_err(|e| Error::Storage(format!("Failed to read Statistics.db: {}", e)))?;
 
-    // TOC structure: 4 (count) + 4 (checksum) + N*8 (entries) + 4 (checksum)
-    // We need the STATS component offset (type ordinal 2)
-    if file_data.len() < 8 {
-        log::warn!("Statistics.db too small to parse, returning zero counts");
-        return Ok((0, 0));
-    }
-
-    let num_components =
-        u32::from_be_bytes([file_data[0], file_data[1], file_data[2], file_data[3]]) as usize;
-
-    // Find STATS component (type == 2) offset from TOC entries
-    let mut stats_offset: Option<usize> = None;
-    for i in 0..num_components {
-        let entry_base = 8 + i * 8; // past count(4) + checksum(4)
-        if entry_base + 8 > file_data.len() {
-            break;
-        }
-        let comp_type = u32::from_be_bytes([
-            file_data[entry_base],
-            file_data[entry_base + 1],
-            file_data[entry_base + 2],
-            file_data[entry_base + 3],
-        ]);
-        if comp_type == 2 {
-            stats_offset = Some(u32::from_be_bytes([
-                file_data[entry_base + 4],
-                file_data[entry_base + 5],
-                file_data[entry_base + 6],
-                file_data[entry_base + 7],
-            ]) as usize);
-            break;
-        }
-    }
-
-    let stats_offset = match stats_offset {
-        Some(o) => o,
-        None => {
-            log::warn!("STATS component not found in Statistics.db TOC");
-            return Ok((0, 0));
-        }
-    };
-
-    // totalRows is at byte offset 161 within the STATS component data.
-    // Layout: 2×histogram(36ea) + CommitLog(12) + timestamps(16) +
-    //         delTimes(8) + ttls(8) + compression(8) + tombHist(8) +
-    //         level(4) + repaired(8) + minCK(4) + maxCK(4) +
-    //         legacyCounter(1) + totalColumnsSet(8) + totalRows(8)
-    const TOTAL_ROWS_OFFSET: usize = 161;
-    let abs_offset = stats_offset + TOTAL_ROWS_OFFSET;
-
-    if abs_offset + 8 > file_data.len() {
-        log::warn!(
-            "Statistics.db STATS component too short for totalRows (need {} + 8, have {})",
-            abs_offset,
-            file_data.len()
-        );
-        return Ok((0, 0));
-    }
-
-    let row_count = u64::from_be_bytes([
-        file_data[abs_offset],
-        file_data[abs_offset + 1],
-        file_data[abs_offset + 2],
-        file_data[abs_offset + 3],
-        file_data[abs_offset + 4],
-        file_data[abs_offset + 5],
-        file_data[abs_offset + 6],
-        file_data[abs_offset + 7],
-    ]);
+    // Issue #1327: reuse the AUTHORITATIVE gated STATS reader (`read_table_counts`,
+    // issue #944) instead of a parallel hand-rolled layout walk. That reader
+    // dynamically skips BOTH leading `EstimatedHistogram`s AND the tombstone
+    // histogram (`estimatedTombstoneDropTime`), then decodes `totalRows` from the
+    // version-gated body. The old hand-rolled walk hardcoded an EMPTY tombstone
+    // histogram in its fixed post-histogram prefix, so a writer-produced
+    // Statistics.db carrying a non-empty tombstone histogram read `totalRows` from
+    // the wrong offset (finding 2). Authoritative gates come from the exported
+    // Statistics.db filename (`nb-{gen}-big-Statistics.db`).
+    let gates = crate::storage::sstable::version_gate::VersionGates::from_path(stats_path).ok();
+    let row_count =
+        match crate::parser::repair_metadata::read_table_counts(&file_data, gates.as_ref()) {
+            Ok(counts) => counts.total_rows.unwrap_or_else(|| {
+                // `total_rows` is None only when the version-gated walk could not reach
+                // field 12 (e.g. unmodeled improved-min-max bounds). `nb` exports use
+                // the legacy min/max branch, which is always traversable, so this is a
+                // fail-safe rather than an expected path.
+                log::warn!("Statistics.db STATS walk could not reach totalRows; defaulting to 0");
+                0
+            }),
+            Err(e) => {
+                log::warn!("Failed to read totalRows from Statistics.db: {e}; defaulting to 0");
+                0
+            }
+        };
 
     // Count partitions from Index.db entries
     let partition_count = count_index_entries(components).unwrap_or_else(|e| {
@@ -932,6 +886,177 @@ mod tests {
             !compression_info_file.exists(),
             "CompressionInfo.db must NOT be included for uncompressed data"
         );
+    }
+
+    /// Regression for issue #1327 finding 2: the exported-Statistics.db
+    /// `totalRows` reader must skip the tombstone histogram DYNAMICALLY.
+    ///
+    /// When a write-produced Statistics.db carries a NON-EMPTY
+    /// `estimatedTombstoneDropTime` histogram, the old hand-rolled walk (which
+    /// hardcoded an 8-byte EMPTY tombstone histogram in its fixed post-histogram
+    /// prefix) read `totalRows` from the wrong offset. This test writes rows AND
+    /// cell tombstones so the tombstone histogram is non-empty, exports, and
+    /// asserts the read-back row count matches the report — and that the OLD
+    /// hardcoded-prefix walk would have produced a DIFFERENT (wrong) value.
+    #[tokio::test]
+    async fn test_export_row_count_with_nonempty_tombstone_histogram() {
+        let temp_dir = TempDir::new().unwrap();
+        let export_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+
+        let mut engine = WriteEngine::new(config).unwrap();
+
+        // INDEPENDENTLY-KNOWN row count: the test controls exactly how many rows
+        // it writes, so we anchor the read-back assertion to that literal — NOT to
+        // `report.row_count`, which `export_sstable` itself derives from the same
+        // shared `read_statistics_from_export` reader (issue #1327 finding 2: a
+        // broken reader would satisfy a `row_count == report.row_count` check
+        // circularly). 4 live rows + 4 cell-tombstone rows (each tombstone lands
+        // on a distinct new partition, creating one row) == 8 totalRows.
+        const LIVE_ROWS: i32 = 4;
+        const TOMBSTONE_ROWS: i32 = 4;
+        const EXPECTED_TOTAL_ROWS: u64 = (LIVE_ROWS + TOMBSTONE_ROWS) as u64;
+
+        // Live rows.
+        for i in 0..LIVE_ROWS {
+            let mutation = create_test_mutation(i, &format!("User{}", i), 1_000_000 + i as i64);
+            engine.write(mutation).unwrap();
+        }
+        // Cell tombstones with explicit local-deletion-times → non-empty
+        // `estimatedTombstoneDropTime` histogram in the flushed Statistics.db.
+        for i in 100..(100 + TOMBSTONE_ROWS) {
+            let table_id = TableId::new("test_ks", "test_table");
+            let pk = PartitionKey::single("id", Value::Integer(i));
+            let ops = vec![CellOperation::Delete {
+                column: "name".to_string(),
+                local_deletion_time: Some(1_600_000_000 + i),
+            }];
+            let mutation = Mutation::new(table_id, pk, None, ops, 2_000_000 + i as i64, None);
+            engine.write(mutation).unwrap();
+        }
+
+        engine.flush().await.unwrap();
+
+        let options = ExportOptions::new("test_ks", "test_table", 1)
+            .skip_validation()
+            .skip_compaction();
+        let report = engine
+            .export_sstable(export_dir.path(), options)
+            .await
+            .unwrap();
+
+        // Read the exported Statistics.db back through the production read path.
+        let (_partitions, row_count) = read_statistics_from_export(&report.components).unwrap();
+
+        // Assert against the INDEPENDENTLY-KNOWN written count, so a broken reader
+        // is actually caught. Cross-checking `report.row_count` here would be
+        // circular (it comes from the same reader), so we additionally assert the
+        // report agrees with the same independent anchor.
+        assert_eq!(
+            row_count, EXPECTED_TOTAL_ROWS,
+            "read-back totalRows must equal the number of rows the test WROTE \
+             ({EXPECTED_TOTAL_ROWS}) when the tombstone histogram is non-empty; a \
+             broken dynamic tombstone-histogram skip would read a different value"
+        );
+        assert_eq!(
+            report.row_count, EXPECTED_TOTAL_ROWS,
+            "export report row_count must also equal the independently-known \
+             written count ({EXPECTED_TOTAL_ROWS})"
+        );
+
+        // Prove the tombstone histogram is actually non-empty AND that the OLD
+        // hardcoded-89-byte-prefix walk would have read a DIFFERENT value from the
+        // wrong offset (the bug this fix addresses).
+        let stats_path = report
+            .components
+            .iter()
+            .find(|p| p.to_string_lossy().ends_with("Statistics.db"))
+            .unwrap();
+        let data = std::fs::read(stats_path).unwrap();
+        let (buggy_row_count, tombstone_bucket_count) =
+            legacy_hardcoded_prefix_row_count(&data).expect("STATS component present");
+        assert!(
+            tombstone_bucket_count > 0,
+            "test precondition: tombstone histogram must be non-empty (got {} buckets)",
+            tombstone_bucket_count
+        );
+        assert_ne!(
+            buggy_row_count, row_count,
+            "the old hardcoded-empty-tombstone walk must read the WRONG totalRows \
+             when the tombstone histogram is non-empty (regression pin)"
+        );
+    }
+
+    /// Reproduces the PRE-#1327-fix read: skip the two leading histograms
+    /// dynamically but then apply the OLD fixed 89-byte post-histogram prefix
+    /// (which assumed an EMPTY 8-byte tombstone histogram) before reading
+    /// `totalRows`. Returns `(buggy_row_count, tombstone_bucket_count)`. Used only
+    /// to prove the regression; the production reader no longer does this.
+    fn legacy_hardcoded_prefix_row_count(data: &[u8]) -> Option<(u64, i32)> {
+        // Locate STATS component (type == 2) via the TOC.
+        let num = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        let mut stats_offset = None;
+        for i in 0..num {
+            let base = 8 + i * 8;
+            if base + 8 > data.len() {
+                return None;
+            }
+            let ty =
+                u32::from_be_bytes([data[base], data[base + 1], data[base + 2], data[base + 3]]);
+            if ty == 2 {
+                stats_offset = Some(u32::from_be_bytes([
+                    data[base + 4],
+                    data[base + 5],
+                    data[base + 6],
+                    data[base + 7],
+                ]) as usize);
+                break;
+            }
+        }
+        let mut cur = stats_offset?;
+        let hist_len = |off: usize| -> Option<usize> {
+            let bc = i32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+            if bc < 0 {
+                return None;
+            }
+            Some(4 + (bc as usize) * 16)
+        };
+        // The tombstone histogram's bucket count (after the two leading histograms)
+        // — proves the test precondition (non-empty when > 0).
+        let after_two = cur + hist_len(cur)? + hist_len(cur + hist_len(cur)?)?;
+        cur = after_two;
+        // Old fixed prefix assumed an EMPTY (8-byte) tombstone histogram; the
+        // tombstone bucket count sits after the fixed non-histogram fields:
+        //   commitLog(12)+minTs(8)+maxTs(8)+min/maxLDT(8)+min/maxTTL(8)+ratio(8) = 52.
+        let tomb_bc_off = after_two + 52;
+        let tombstone_bucket_count = i32::from_be_bytes([
+            data[tomb_bc_off],
+            data[tomb_bc_off + 1],
+            data[tomb_bc_off + 2],
+            data[tomb_bc_off + 3],
+        ]);
+        const OLD_FIXED_PREFIX: usize = 89;
+        let abs = cur + OLD_FIXED_PREFIX;
+        if abs + 8 > data.len() {
+            return None;
+        }
+        let rc = u64::from_be_bytes([
+            data[abs],
+            data[abs + 1],
+            data[abs + 2],
+            data[abs + 3],
+            data[abs + 4],
+            data[abs + 5],
+            data[abs + 6],
+            data[abs + 7],
+        ]);
+        Some((rc, tombstone_bucket_count))
     }
 
     #[tokio::test]

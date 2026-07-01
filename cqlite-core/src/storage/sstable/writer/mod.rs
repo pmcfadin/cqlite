@@ -738,7 +738,7 @@ impl SSTableWriter {
         // the incrementally-growing stats of this partition would raise the
         // baseline and corrupt delta encoding for earlier partitions.
         if !self.baselines_locked {
-            self.data_writer.update_stats(self.stats.clone());
+            self.data_writer.update_stats_from_metadata(&self.stats);
         }
 
         // Extract partition tombstone and range tombstones from mutations.
@@ -777,6 +777,19 @@ impl SSTableWriter {
         // Cassandra `Row.isEmpty()` / `Row.columnCount()`.
         self.stats.row_count += emit_counts.rows;
         self.stats.column_count += emit_counts.columns;
+
+        // Issue #1327: record this partition's serialized Data.db size and cell
+        // count into the estimatedPartitionSize / estimatedCellPerPartitionCount
+        // EstimatedHistograms (one observation per partition). `data_offset` is
+        // this partition's start offset in Data.db and `data_writer.position()`
+        // is the running Data.db length after the write, so their difference is
+        // the exact serialized partition byte length — the value Cassandra's
+        // MetadataCollector records. Σ estimatedPartitionSize bucket counts then
+        // equals the SSTable partition count for the authoritative read-side
+        // decode (`read_table_counts`, issue #944).
+        let partition_serialized_size = self.data_writer.position().saturating_sub(data_offset);
+        self.stats
+            .record_partition(partition_serialized_size, emit_counts.columns);
 
         // Add partition to Index.db and get entry info.
         // Pass promoted blocks (writer gates on >= 2 blocks before emitting payload).
@@ -854,7 +867,7 @@ impl SSTableWriter {
         self.stats.min_ttl = min_ttl;
         // Push final baselines to DataWriter immediately so the very first
         // write_partition call uses them.
-        self.data_writer.update_stats(self.stats.clone());
+        self.data_writer.update_stats_from_metadata(&self.stats);
         // Lock baselines: write_partition will not call update_stats again.
         self.baselines_locked = true;
     }

@@ -182,8 +182,8 @@ pub struct DataWriter {
     data_path: Option<PathBuf>,
     /// Bytes already flushed to `sink`. Always 0 in in-memory mode.
     position: u64,
-    /// Statistics metadata for delta encoding
-    stats: StatisticsMetadata,
+    /// Encoding baselines used for delta encoding.
+    stats: EncodingStatsBaselines,
 }
 
 mod cells;
@@ -219,6 +219,28 @@ pub(crate) use schema_helpers::*;
 pub(crate) use types::*;
 pub(crate) use udt_canon::{canonicalize_static_value, canonicalize_udt_value};
 
+/// Delta-encoding baselines needed by the Data.db row/cell serializers.
+///
+/// `StatisticsMetadata` also owns Statistics.db-only accumulators such as
+/// estimated histograms. Keeping only these three baseline fields in the hot
+/// DataWriter avoids cloning those larger accumulators on every partition.
+#[derive(Debug, Clone, Copy)]
+struct EncodingStatsBaselines {
+    min_timestamp: i64,
+    min_ttl: i32,
+    min_local_deletion_time: i32,
+}
+
+impl From<&StatisticsMetadata> for EncodingStatsBaselines {
+    fn from(stats: &StatisticsMetadata) -> Self {
+        Self {
+            min_timestamp: stats.min_timestamp,
+            min_ttl: stats.min_ttl,
+            min_local_deletion_time: stats.min_local_deletion_time,
+        }
+    }
+}
+
 impl DataWriter {
     /// Create a new in-memory Data.db writer.
     ///
@@ -233,7 +255,7 @@ impl DataWriter {
             sink: None,
             data_path: None,
             position: 0,
-            stats,
+            stats: EncodingStatsBaselines::from(&stats),
         }
     }
 
@@ -253,7 +275,7 @@ impl DataWriter {
             sink: None,
             data_path: Some(data_path),
             position: 0,
-            stats,
+            stats: EncodingStatsBaselines::from(&stats),
         }
     }
 
@@ -303,7 +325,15 @@ impl DataWriter {
     /// but before writing any partition data. The stats are used for
     /// delta encoding of timestamps, TTL, and local deletion times.
     pub fn update_stats(&mut self, stats: StatisticsMetadata) {
-        self.stats = stats;
+        self.update_stats_from_metadata(&stats);
+    }
+
+    /// Update only the Data.db encoding baselines from full Statistics metadata.
+    ///
+    /// The estimated histograms added for Statistics.db are intentionally not
+    /// copied into `DataWriter`; they are unrelated to Data.db delta encoding.
+    pub fn update_stats_from_metadata(&mut self, stats: &StatisticsMetadata) {
+        self.stats = EncodingStatsBaselines::from(stats);
     }
 
     /// Finish writing and return the Data.db bytes (in-memory mode).
