@@ -377,6 +377,36 @@ class ResolveTests(unittest.TestCase):
             self.assertIn("#55", body)
             self.assertIn("Not auto-closed", pfi.resolution_comment("u"))
 
+    def test_fingerprint_resolve_dedups_duplicate_inputs_within_run(self):
+        # LOW fix (round 10): the resolve --failures-json path must dedup its inputs by
+        # fingerprint WITHIN one invocation. Two entries sharing a fingerprint that map to
+        # the SAME open issue must post EXACTLY ONE resolution comment (not two), matching
+        # the within-run dedup already applied to `cmd_file`.
+        calls = self._capture_gh()
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            failure = _failure()
+            fp = pfi.compute_fingerprint(failure)
+            # Two duplicate entries (case/whitespace-normalized to the same fingerprint).
+            dup = _failure(scenario_id="  CASS.Compression.LZ4_Roundtrip ",
+                           failure_class="digestmismatch")
+            self.assertEqual(fp, pfi.compute_fingerprint(dup))
+            fj = _write(tmp, "failures.json", [failure, dup])
+            oj = _write(tmp, "open.json", [{"number": 55, "body": pfi.marker(fp)}])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = pfi.cmd_resolve(_args(
+                    failures_json=fj, open_issues_json=oj,
+                    run_url="https://gh/run/DUP", dry_run=False))
+            self.assertEqual(rc, 0)
+        comment_calls = [c for c in calls
+                         if len(c) > 2 and c[1] == "issue" and c[2] == "comment"]
+        self.assertEqual(len(comment_calls), 1,
+                         "duplicate fingerprints must yield exactly one resolution comment")
+        self.assertEqual(comment_calls[0][3], "55")
+        self.assertFalse(any("close" in c for c in calls),
+                         "resolve must never close an issue")
+
     def _capture_gh(self):
         """Patch pfi._gh to record argv and never touch GitHub; returns the call log."""
         calls = []

@@ -500,8 +500,16 @@ def cmd_resolve(args) -> int:
             print("::notice::parity-failure-issue: resolve had no structured failures — "
                   "nothing to resolve", file=sys.stderr)
             return 0
+        # Within-run dedup (resolve-path analog of R1 on `cmd_file`): collapse
+        # same-fingerprint entries BEFORE resolving, so two+ input entries sharing a
+        # fingerprint that map to one open issue post exactly ONE resolution comment in
+        # this invocation (not one per duplicate). Insertion-ordered by fingerprint for
+        # deterministic output; cross-run idempotency (marker + re-arm) is unchanged.
+        deduped: dict[str, dict] = {}
         for failure in failures:
-            existing = find_existing(open_issues, compute_fingerprint(failure))
+            deduped[compute_fingerprint(failure)] = failure
+        for fingerprint, _failure in deduped.items():
+            existing = find_existing(open_issues, fingerprint)
             if existing is not None and not is_resolved(existing.get("body") or ""):
                 # Fix B: same idempotency guard — skip an already-resolved issue.
                 _resolve_one(existing, args.run_url, args.dry_run)
