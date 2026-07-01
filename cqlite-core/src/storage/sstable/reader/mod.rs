@@ -239,19 +239,36 @@ const fn direct_io_available() -> bool {
     ))
 }
 
-/// Resolve [`PrefetchMode::Auto`] into the concrete advice the mmap backend
-/// should issue, or `None` for "no advice".
+/// Resolve a [`PrefetchMode`] into the concrete advice the mmap backend should
+/// issue, or `None` for "no advice".
 ///
 /// `memmap2::Advice` / `Mmap::advise` (madvise) are Unix-only, so this and its
 /// single call site are gated to `#[cfg(unix)]`. On non-Unix targets the mmap
 /// backend simply issues no read-ahead advice.
+///
+/// [`PrefetchMode::Auto`] deliberately issues **no** madvise (issue #1143).
+/// `MADV_SEQUENTIAL` couples aggressive read-ahead with *drop-behind*: pages are
+/// evicted from the page cache as soon as the scan moves past them. In isolation
+/// that is fine (mmap scans are ~40% faster than buffered), but under concurrent
+/// write load the page-cache pressure means the just-dropped pages are gone by
+/// the time an overlapping scan needs them again, so re-reads take *synchronous*
+/// major page faults on the tokio worker thread and the read-side p99 tail blows
+/// up (~2x regression). Relying on the kernel's default read-ahead (no
+/// drop-behind) keeps the isolated mmap win while letting the page cache retain
+/// hot pages, which collapses that tail. Callers who genuinely want the
+/// drop-behind behaviour can still request `Sequential` explicitly
+/// (`CQLITE_PREFETCH=sequential` / [`StorageConfig::prefetch`]).
 #[cfg(unix)]
 fn mmap_advice_for(prefetch: PrefetchMode) -> Option<memmap2::Advice> {
     match prefetch {
-        PrefetchMode::Off => None,
-        // Sequential is the right default for full-file scans: aggressive
-        // read-ahead plus drop-behind so a scan does not pin the whole file.
-        PrefetchMode::Sequential | PrefetchMode::Auto => Some(memmap2::Advice::Sequential),
+        // No madvise: rely on the kernel's default read-ahead. Chosen for `Auto`
+        // to avoid `MADV_SEQUENTIAL` drop-behind evicting hot pages under
+        // concurrent write load (issue #1143).
+        PrefetchMode::Off | PrefetchMode::Auto => None,
+        // Explicit opt-in to aggressive read-ahead + drop-behind. Best for a
+        // one-shot full scan that will not be re-read and should not pin the
+        // whole file in the page cache.
+        PrefetchMode::Sequential => Some(memmap2::Advice::Sequential),
         PrefetchMode::WillNeed => Some(memmap2::Advice::WillNeed),
     }
 }

@@ -188,8 +188,13 @@ pub enum PrefetchMode {
     Sequential,
     /// Hint that the mapped/region bytes will be needed soon (eager fault-in).
     WillNeed,
-    /// Let the backend choose: sequential advice for mmap, windowed read-ahead
-    /// for direct I/O.
+    /// Let the backend choose. For mmap this issues **no** madvise and relies on
+    /// the kernel's default read-ahead: `MADV_SEQUENTIAL`'s drop-behind evicts
+    /// hot pages under concurrent write load and inflates the read-side p99 tail
+    /// (issue #1143), so `Auto` avoids it while keeping the isolated mmap win.
+    /// For direct I/O it enables the windowed read-ahead
+    /// ([`StorageConfig::direct_io_prefetch_bytes`]). Request
+    /// [`PrefetchMode::Sequential`] explicitly for `MADV_SEQUENTIAL` behaviour.
     #[default]
     Auto,
 }
