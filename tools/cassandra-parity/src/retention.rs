@@ -79,15 +79,14 @@ pub fn no_emitter_allowlist() -> &'static [&'static str] {
 
 /// True when `workflow_path` names a lane on the #1353 no-emitter allowlist. The
 /// manifest may reference a workflow by a bare filename or a repo-relative path, so
-/// match on the trailing path component too.
+/// compare the trailing path component (basename) EXACTLY — never a suffix match,
+/// which would wrongly allowlist e.g. `new-cql-type-parity.yml` against
+/// `cql-type-parity.yml` and let a new lane skip the shared-upload requirement.
 fn is_allowlisted_no_emitter(workflow_path: &str) -> bool {
+    let wf_base = workflow_path.rsplit('/').next().unwrap_or(workflow_path);
     NO_EMITTER_ALLOWLIST.iter().any(|allowed| {
-        *allowed == workflow_path
-            || allowed
-                .rsplit('/')
-                .next()
-                .map(|base| base == workflow_path || workflow_path.ends_with(base))
-                .unwrap_or(false)
+        let allowed_base = allowed.rsplit('/').next().unwrap_or(allowed);
+        *allowed == workflow_path || allowed_base == wf_base
     })
 }
 
@@ -602,4 +601,29 @@ pub fn run_repo_check(
 /// cannot be canonicalized (e.g. it does not exist). Pure helper: never panics.
 fn canonicalize_or_owned(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allowlist_matches_bare_and_repo_relative_but_not_suffix_superset() {
+        // A bare allowlisted basename matches.
+        assert!(is_allowlisted_no_emitter("cql-type-parity.yml"));
+        // A repo-relative path to the same lane matches (basename compared exactly).
+        assert!(is_allowlisted_no_emitter(
+            ".github/workflows/cql-type-parity.yml"
+        ));
+        // A NEW lane whose name is a SUFFIX-superset must NOT be allowlisted
+        // (regression: was previously matched via `ends_with`).
+        assert!(!is_allowlisted_no_emitter("new-cql-type-parity.yml"));
+        assert!(!is_allowlisted_no_emitter(
+            ".github/workflows/new-cql-type-parity.yml"
+        ));
+        // An unrelated lane is not allowlisted.
+        assert!(!is_allowlisted_no_emitter(
+            ".github/workflows/sstabledump-parity-gate.yml"
+        ));
+    }
 }
