@@ -11,7 +11,18 @@ lanes already exist; dataset preflight required).
   `agent-gate.sh` → a lane reds), and a path-independent full-gate run exists.
 - **Non-goal:** redefining the gate, or adding the full gate as a required check to every core PR.
 
-## Decision — RECOMMENDED (owner to approve / redirect at Seam 1)
+## Design pivot (post-Seam-1, after epic #1360 / PR #1377)
+
+This design originally recommended **Option C** (scoped required PR lane + nightly backstop). After Seam
+1, **PR #1377 (epic #1360)** landed the tiered CI model: the ONE required, always-running PR check is the
+light `.github/workflows/pr-gate.yml`, with heavy checks moved to nightly and **path-filtered heavy lanes
+explicitly not required**. A heavy, required, path-filtered PR lane (Option C's PR half) would contradict
+that model, so the decision was pivoted to **nightly-backstop-only**: `gate.yml` keeps only the
+`schedule:` cron + `workflow_dispatch` and drops the `pull_request` trigger. The sections below record the
+original option analysis for provenance; the implemented shape is the nightly backstop half of Option C
+(the PR half is dropped in favor of the light required `pr-gate.yml`).
+
+## Decision — RECOMMENDED (superseded by the pivot above)
 
 **Option C: scoped PR-triggered gate lane + nightly full-gate cron backstop.**
 

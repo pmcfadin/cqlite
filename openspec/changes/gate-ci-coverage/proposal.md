@@ -29,13 +29,23 @@ Audit facts that constrain the design:
 - No composite/reusable "setup-rust+cache" action exists; the de-facto pattern is inline
   `Swatinem/rust-cache@v2` (bindings) / `sccache` (workspace).
 
+## Design pivot (post-#1360)
+
+The original design recommended **Option C** (a scoped, required PR-triggered lane on gate-defining
+inputs **plus** a nightly cron backstop). After Seam 1, **PR #1377 (epic #1360)** merged the tiered CI
+model: the ONE required, always-running PR check is the light `.github/workflows/pr-gate.yml` (fmt +
+cqlite-core clippy `-D warnings` + all-feature build + fast tests; no Docker/datasets/agent-gate), with
+heavy checks moved to nightly and **path-filtered heavy lanes explicitly not required**. A heavy,
+required, path-filtered PR lane would directly contradict that model. This change therefore pivots to
+**nightly-backstop-only**: `gate.yml` drops its `pull_request` trigger entirely and keeps only the
+`schedule:` cron + `workflow_dispatch`, complementing (not duplicating) the required light `pr-gate.yml`.
+
 ## What Changes
 
 - **Add CI coverage for the authoritative gate** so a change that breaks a gate component is caught by a
-  CI lane instead of merging silently. The recommended shape (see `design.md`) is a **scoped
-  PR-triggered lane** on the gate-defining inputs (`scripts/agent-gate.sh`, its self-tests,
-  `bindings/**` build inputs) **plus a nightly full-gate cron backstop** that runs the complete gate
-  path-independently. The owner approves the lane + strictness at Seam 1.
+  CI run instead of going unverified. The lane is a **nightly, path-independent full-gate deep-check
+  backstop** (`schedule:` cron + `workflow_dispatch`), NOT a required per-PR check — it complements the
+  light required `pr-gate.yml` from epic #1360 rather than layering a heavy required lane on top of it.
 - The lane fetches the pinned datasets and sets `CQLITE_DATASETS_ROOT` so dataset-dependent components
   actually execute (never silently skip).
 
@@ -43,8 +53,9 @@ Audit facts that constrain the design:
 
 - **No change to `scripts/agent-gate.sh` behavior or its component set.** This wires CI around the
   existing gate; it does not redefine the gate.
-- **No making the full gate a required check on every `cqlite-core/**` PR.** Core regressions already red
-  `ci.yml` + `node-ci`/`python-ci`; piling a ~25-min full gate onto every core PR is out of scope and
-  costly. (This is the rejected Option A — see design.)
+- **No making the full gate a required per-PR check at all.** Post-#1360 the required PR check is the
+  light `pr-gate.yml`; the full gate stays a nightly/on-demand backstop. Piling a ~25-min full gate onto
+  PRs (as a broad Option A, or even a path-filtered required lane per Option C) is out of scope and would
+  contradict epic #1360's tiered model.
 - **No new composite action / CI refactor** beyond what this lane needs (reuse the inline cache pattern).
 - **No change to the 8 existing cron parity lanes.**

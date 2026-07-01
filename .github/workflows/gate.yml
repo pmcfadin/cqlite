@@ -1,75 +1,44 @@
-name: Agent Gate
+name: Nightly agent-gate (deep check)
 
-# CI coverage for the authoritative pre-PR gate `scripts/agent-gate.sh` (issue #1269).
+# Nightly deep-check backstop for the authoritative gate `scripts/agent-gate.sh`
+# (issue #1269, reconciled with epic #1360 / PR #1377).
 #
-# The gate has 16 components (fmt, clippy, core/integration/write/cli tests,
-# python-bindings, node-bindings, smoke, ...) but until now NO GitHub Actions
-# workflow ran it — a PR that edited the gate itself or a binding build input
-# could break a gate component and red NOTHING in CI. This lane closes that gap.
+# Under epic #1360's tiered CI model the ONE required, always-running PR check is
+# the light `.github/workflows/pr-gate.yml` (fmt + cqlite-core clippy -D warnings
+# + all-feature build + fast tests; no Docker/datasets/agent-gate). Heavy checks
+# live on a nightly schedule, and path-filtered heavy lanes are NOT required.
 #
-# Design: Option C (owner-approved at Seam 1) — a scoped PR lane on the
-# gate-defining inputs plus a nightly full-gate backstop.
-#   - pull_request: filtered to the gate script, its self-tests, bindings/**,
-#     and this workflow's own file. This is the narrow set of PRs that can
-#     actually break a gate component (so we do not tax every cqlite-core PR).
-#   - schedule: a nightly cron backstop that runs the full gate
-#     path-independently (catches breakage the path filter misses).
-#   - workflow_dispatch: on-demand runs.
+# Accordingly this lane is a NIGHTLY, PATH-INDEPENDENT deep-check backstop — NOT a
+# required per-PR check. It runs the full `scripts/agent-gate.sh` (16 components:
+# fmt, clippy, core/integration/write/cli tests, python-bindings, node-bindings,
+# smoke, ...) so that gate-component breakage a light PR check cannot see (e.g. a
+# regression in the gate script itself or a binding build input) is still caught
+# within 24h and surfaces on the Actions dashboard. There is no PR trigger.
 #
 # The lane always runs the FULL gate (`bash scripts/agent-gate.sh`, never
 # `--only`) so the run "counts" — a `--only` run is stamped PARTIAL and
 # explicitly does not count as the gate.
 
 on:
-  pull_request:
-    branches: [main]
-    # Direct gate inputs. The gate runs scripts/agent-gate.sh, but also
-    # exercises scripts/delivery-telemetry.py (delivery-telemetry component)
-    # and test-data/scripts/* (dataset provisioning + smoke), so scripts/**
-    # and test-data/scripts/** must trigger this lane too — otherwise a PR
-    # editing them could break a gate component with nothing red until the
-    # nightly backstop. scripts/** subsumes agent-gate.sh and scripts/tests/**;
-    # they are kept explicit for readability.
-    #
-    # Beyond the scripts, the gate directly CONSUMES a few non-script data files;
-    # a PR editing any of them could break a gate component with nothing red
-    # until the nightly backstop, so they are listed as SPECIFIC entries:
-    #   - docs/reports/delivery-telemetry.schema.json — validated by the
-    #     delivery-telemetry component.
-    #   - tools/cassandra-parity/** + test-data/cassandra-parity-manifest.yml +
-    #     docs/reports/cassandra-test-parity.md — inputs/output the parity-report
-    #     component renders and staleness-checks.
-    # These are named files, NOT a broad docs/**: a generic docs page
-    # (docs/somethingelse.md) or a website/** change still does NOT match this
-    # filter, so a docs-only PR still does not trigger the lane.
-    paths:
-      - 'scripts/**'
-      - 'scripts/agent-gate.sh'
-      - 'scripts/tests/**'
-      - 'test-data/scripts/**'
-      - 'bindings/**'
-      - 'docs/reports/delivery-telemetry.schema.json'
-      - 'tools/cassandra-parity/**'
-      - 'test-data/cassandra-parity-manifest.yml'
-      - 'docs/reports/cassandra-test-parity.md'
-      - '.github/workflows/gate.yml'
   schedule:
-    # Nightly backstop, 03:37 UTC — slotted off-peak between the existing
+    # Nightly deep-check, 03:37 UTC — slotted off-peak between the existing
     # e2e-readback (02:30) and cql-type-parity (04:31) cron lanes to avoid
     # collision.
     - cron: '37 3 * * *'
   workflow_dispatch:
 
-# Least-privilege token (issue #1269). This lane checks out PR-controlled code
-# and runs PR-controlled scripts (fetch-datasets.sh, scripts/agent-gate.sh) — it
-# only needs to read the repo. Artifact upload via actions/upload-artifact does
-# NOT require write repo scope. Set at the top level so it applies to every job.
+# Least-privilege token (issue #1269). This lane checks out repo code and runs
+# in-repo scripts (fetch-datasets.sh, scripts/agent-gate.sh) — it only needs to
+# read the repo. Artifact upload via actions/upload-artifact does NOT require
+# write repo scope. Set at the top level so it applies to every job.
 permissions:
   contents: read
 
 concurrency:
+  # Scheduled + workflow_dispatch runs only; there is no pull_request context to
+  # key on. github.ref is stable per branch/dispatch, so serialize per-ref.
   group: gate-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -86,7 +55,7 @@ jobs:
     # COLD cache (first run, or after GH's 7-day cache eviction / branch
     # scoping) the workspace compiles from scratch before any tests run; an
     # observed cold run reached ~11/17 components in 45m before timing out.
-    # Warm runs (Swatinem cache restored) are far faster, but a required check
+    # Warm runs (Swatinem cache restored) are far faster, but a nightly backstop
     # must not depend on a warm cache, so budget for the cold case.
     timeout-minutes: 75
 
@@ -110,14 +79,14 @@ jobs:
         with:
           # Full history so scripts/agent-gate.sh can resolve origin/main for
           # its file-size ratchet component. The default shallow checkout
-          # leaves that ref unavailable in PR runs, silently degrading the
-          # ratchet to advisory-only (the gate could PASS on over-threshold
-          # Rust file growth). Matches quality-gates.yml.
+          # leaves that ref unavailable, silently degrading the ratchet to
+          # advisory-only (the gate could PASS on over-threshold Rust file
+          # growth). Matches quality-gates.yml.
           fetch-depth: 0
-          # Do not persist the GitHub token into .git/config: this lane then
-          # runs PR-controlled scripts (fetch-datasets.sh, agent-gate.sh) and
-          # they should not have ambient access to a repo-scoped credential
-          # (issue #1269). fetch-depth: 0 already fetches full history here, so
+          # Do not persist the GitHub token into .git/config: this lane runs
+          # in-repo scripts (fetch-datasets.sh, agent-gate.sh) and they should
+          # not have ambient access to a repo-scoped credential (issue #1269).
+          # fetch-depth: 0 already fetches full history here, so
           # origin/main is present locally for the gate's file-size ratchet —
           # the gate only READS origin/main and issues no authenticated
           # `git fetch`, so dropping persisted credentials is safe.
@@ -128,8 +97,8 @@ jobs:
       # dataset corpus, AND — after #1269 — provisions a large swapfile on /mnt
       # for OOM headroom, so free disk is a co-factor in the observed runner
       # kills. Reclaim the big unused toolchains with an INLINE cleanup rather
-      # than a third-party action: this job validates PR-controlled code, so a
-      # mutable `@main` action ref (a moving target that could be tampered with
+      # than a third-party action: this job runs in-repo scripts, so a mutable
+      # `@main` action ref (a moving target that could be tampered with
       # upstream) has no business running before the gate (roborev). Strips
       # dotnet, android, haskell, unused /usr/local dirs, and the CodeQL
       # sub-tree of the hosted toolcache — ~20-30 GB reclaimed with only in-repo
