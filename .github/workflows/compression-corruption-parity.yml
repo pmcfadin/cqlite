@@ -189,3 +189,31 @@ jobs:
               --test issue_1104_compaction_incompressible_chunks \
               --test sstable_parity_corruption_verify \
               -- --nocapture
+
+      # issue #1028: structured failure summary for the parity-failure-issue automation.
+      - name: Emit parity-failures.json (on failure)
+        if: failure()
+        run: |
+          set -euo pipefail
+          # scenario_id/test_target/component_path here are intentionally lane-scoped v1
+          # placeholders (stable per lane so cross-run dedup works). Per-scenario,
+          # manifest-backed emission is tracked in issue #1345.
+          cat > parity-failures.json <<'JSON'
+          [
+            {
+              "scenario_id": "cass.compression_corruption.nightly_docker_lane",
+              "workflow": "compression-corruption-parity.yml",
+              "test_target": "sstable_parity_corruption_verify",
+              "component_path": "test-data/datasets/corruption/test_comp_corrupt",
+              "failure_class": "DigestMismatch"
+            }
+          ]
+          JSON
+
+      - name: Upload parity-failures.json
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-failures
+          path: parity-failures.json
+          if-no-files-found: warn

@@ -7145,6 +7145,157 @@ scenarios:
       workflow: .github/workflows/cassandra-parity.yml
     scope: {}
 
+  # Parity-failure-issue automation (issue #1028, epic #974). Five mirrored tooling
+  # scenarios recording the failure->issue automation surface. Modeled byte-for-byte on
+  # parity_manifest_lint_and_report above (CQLite-native CI tooling, no Cassandra source
+  # mirror). The fingerprint + dedup logic is unit-tested; smoke evidence.
+  - id: cass.cli_reporting.failure_issue_required_parity
+    title: Required-parity failure signal routing (blocks the build)
+    status: mirrored
+    capability: cli_reporting
+    priority: P2
+    risk: tooling_only
+    cassandra:
+      category: other
+      relevance: low
+      files:
+        - "n/a — CQLite-native CI tooling"
+    cqlite:
+      coverage:
+        tests:
+          - scripts/tests/test_parity_failure_issue.py
+        notes: >-
+          required_parity failures already block the build; the fingerprint/dedup
+          tool records them without opening a duplicate tracking issue.
+    fixtures: {}
+    evidence:
+      type: smoke
+      artifacts: [generated_report, logs]
+      known_limitations: >-
+        Validates the failure-routing tooling itself, not Cassandra on-disk parity.
+    ci:
+      tier: fast_pr
+      workflow: .github/workflows/parity-failure-issue-tests.yml
+    scope: {}
+
+  - id: cass.cli_reporting.failure_issue_nightly_docker
+    title: Nightly-docker parity failure files or updates a tracking issue
+    status: mirrored
+    capability: cli_reporting
+    priority: P2
+    risk: tooling_only
+    cassandra:
+      category: other
+      relevance: low
+      files:
+        - "n/a — CQLite-native CI tooling"
+    cqlite:
+      coverage:
+        tests:
+          - scripts/tests/test_parity_failure_issue.py
+        notes: >-
+          A nightly-docker parity lane that concludes failure on a scheduled/main
+          run creates or updates one deduplicated parity-failure issue.
+    fixtures: {}
+    evidence:
+      type: smoke
+      artifacts: [generated_report, logs]
+      known_limitations: >-
+        Validates the failure-routing tooling itself, not Cassandra on-disk parity.
+    ci:
+      tier: fast_pr
+      workflow: .github/workflows/parity-failure-issue-tests.yml
+    scope: {}
+
+  - id: cass.cli_reporting.failure_issue_exhaustive_regeneration
+    title: Exhaustive-regeneration failure files or updates a tracking issue
+    status: mirrored
+    capability: cli_reporting
+    priority: P2
+    risk: tooling_only
+    cassandra:
+      category: other
+      relevance: low
+      files:
+        - "n/a — CQLite-native CI tooling"
+    cqlite:
+      coverage:
+        tests:
+          - scripts/tests/test_parity_failure_issue.py
+        notes: >-
+          A failed exhaustive-regeneration run emits parity-failures.json which the
+          automation fingerprints and routes to a deduplicated tracking issue.
+    fixtures: {}
+    evidence:
+      type: smoke
+      artifacts: [generated_report, logs]
+      known_limitations: >-
+        Validates the failure-routing tooling itself, not Cassandra on-disk parity.
+    ci:
+      tier: fast_pr
+      workflow: .github/workflows/parity-failure-issue-tests.yml
+    scope: {}
+
+  - id: cass.cli_reporting.failure_issue_bloom_fpr
+    title: Structured-artifact fingerprinting with a surfaced degraded fallback
+    status: mirrored
+    capability: cli_reporting
+    priority: P2
+    risk: tooling_only
+    cassandra:
+      category: other
+      relevance: low
+      files:
+        - "n/a — CQLite-native CI tooling"
+    cqlite:
+      coverage:
+        tests:
+          - scripts/tests/test_parity_failure_issue.py
+        notes: >-
+          Fingerprints are computed from the structured parity-failures.json; a
+          missing artifact falls back to a summary/log parse that is surfaced (never
+          silent), and zero failures parsed from a failure-concluded run is an anomaly.
+    fixtures: {}
+    evidence:
+      type: smoke
+      artifacts: [generated_report, logs]
+      known_limitations: >-
+        Validates the failure-routing tooling itself, not Cassandra on-disk parity.
+    ci:
+      tier: fast_pr
+      workflow: .github/workflows/parity-failure-issue-tests.yml
+    scope: {}
+
+  - id: cass.cli_reporting.failure_issue_dedup
+    title: Deduplicated failure tracking (update, never duplicate; no auto-close)
+    status: mirrored
+    capability: cli_reporting
+    priority: P2
+    risk: tooling_only
+    cassandra:
+      category: other
+      relevance: low
+      files:
+        - "n/a — CQLite-native CI tooling"
+    cqlite:
+      coverage:
+        tests:
+          - scripts/tests/test_parity_failure_issue.py
+        notes: >-
+          A repeat failure whose fingerprint matches an open parity-failure issue
+          updates it (dated comment + refreshed run link) instead of opening a
+          duplicate; a green run posts a resolution comment but never auto-closes.
+    fixtures: {}
+    evidence:
+      type: smoke
+      artifacts: [generated_report, logs]
+      known_limitations: >-
+        Validates the failure-routing tooling itself, not Cassandra on-disk parity.
+    ci:
+      tier: fast_pr
+      workflow: .github/workflows/parity-failure-issue-tests.yml
+    scope: {}
+
   # ----------------------------------------------------------------------------
   # out_of_scope — node behaviors CQLite intentionally does not mirror
   # ----------------------------------------------------------------------------

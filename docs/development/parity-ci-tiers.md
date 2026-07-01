@@ -126,7 +126,14 @@ P0 data-loss path without a recorded gap is a contract violation.
   must run on its schedule; a chronically skipped/disabled nightly invalidates
   the "recent nightly pass" release requirement.
 - **Failure policy.** Non-blocking for in-flight PRs, but a failure files/updates
-  a tracking issue and blocks release until resolved (see release checklist).
+  a tracking issue and blocks release until resolved (see release checklist). That
+  filing/updating is implemented by
+  [`.github/workflows/parity-failure-issue.yml`](../../.github/workflows/parity-failure-issue.yml)
+  (issue #1028): a `workflow_run`-triggered, non-gating automation that, when a lane
+  concludes `failure` on a scheduled/main run, computes a stable per-scenario
+  fingerprint (`scripts/parity-failure-issue.py`) and creates or updates one
+  deduplicated `parity-failure` issue per fingerprint. It never gates the parity result
+  and never auto-closes; a subsequent green run posts a resolution comment only.
 - **Artifact retention.** Retain regenerated fixtures and logs for the comparison
   window (>= 30 days recommended) so a release can cite a recent pass.
 - **Promotion.** Scenarios do not "promote" out of `nightly_docker`; rather, a
