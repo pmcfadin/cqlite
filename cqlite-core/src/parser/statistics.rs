@@ -733,7 +733,16 @@ impl StatisticsAnalyzer {
                 .push("Large SSTable detected - consider more frequent compaction".to_string());
         }
 
-        if stats.row_stats.avg_rows_per_partition < 10.0 {
+        // `avg_rows_per_partition == 0.0` is the documented #1325 unavailable
+        // sentinel: the parser leaves it 0.0 whenever `total_rows` is not
+        // authoritatively reachable from STATS (or `partition_count == 0`). Only
+        // emit the granularity recommendation when the average is a REAL derived
+        // value — i.e. `total_rows > 0` (so the average was actually computed).
+        // Otherwise the sentinel `0.0 < 10.0` would always trip this hint on nb
+        // SSTables whose gated walk can't reach `totalRows`, a misleading
+        // recommendation from a non-value. No heuristic (#28); see #1352.
+        let avg_rows_available = stats.row_stats.total_rows > 0;
+        if avg_rows_available && stats.row_stats.avg_rows_per_partition < 10.0 {
             recommendations.push(
                 "Low average rows per partition - partition key may be too granular".to_string(),
             );
@@ -1031,6 +1040,73 @@ mod tests {
             "health_score must be finite (not NaN) when total_rows == 0"
         );
         assert!((0.0..=100.0).contains(&summary.health_score));
+    }
+
+    /// #1325 roborev finding: the "partition key may be too granular" storage
+    /// recommendation compares `avg_rows_per_partition < 10.0`. When
+    /// `total_rows == 0` the parser leaves `avg_rows_per_partition == 0.0` as the
+    /// documented unavailable sentinel, so `0.0 < 10.0` would ALWAYS trip the
+    /// recommendation on nb SSTables whose gated walk cannot reach `totalRows`.
+    /// It must be suppressed. No heuristic (#28); see #1352.
+    #[test]
+    fn test_granularity_recommendation_suppressed_when_avg_rows_sentinel() {
+        let mut stats = create_test_statistics();
+        // Unavailable sentinel: no authoritative total_rows -> avg left 0.0.
+        stats.row_stats.total_rows = 0;
+        stats.row_stats.avg_rows_per_partition = 0.0;
+        // Keep disk_size small so the "large SSTable" recommendation does not fire.
+        stats.table_stats.disk_size = 1024;
+
+        let summary = StatisticsAnalyzer::analyze(&stats);
+
+        assert!(
+            !summary
+                .storage_recommendations
+                .iter()
+                .any(|r| r.contains("too granular")),
+            "granularity recommendation must be suppressed when avg_rows_per_partition \
+             is the unavailable sentinel (total_rows == 0)"
+        );
+    }
+
+    /// #1325 sweep (non-vacuous positive path): with a REAL low average
+    /// (total_rows > 0), the granularity recommendation still fires.
+    #[test]
+    fn test_granularity_recommendation_fires_when_avg_rows_real_and_low() {
+        let mut stats = create_test_statistics();
+        stats.row_stats.total_rows = 8; // real authoritative count
+        stats.row_stats.partition_count = 4;
+        stats.row_stats.avg_rows_per_partition = 2.0; // real, genuinely low (< 10)
+        stats.table_stats.disk_size = 1024;
+
+        let summary = StatisticsAnalyzer::analyze(&stats);
+
+        assert!(
+            summary
+                .storage_recommendations
+                .iter()
+                .any(|r| r.contains("too granular")),
+            "granularity recommendation must fire for a REAL low avg_rows_per_partition"
+        );
+    }
+
+    /// #1325 sweep (non-vacuous): with a real HIGH average the recommendation
+    /// does NOT fire — proving the guard did not just always-suppress.
+    #[test]
+    fn test_granularity_recommendation_absent_when_avg_rows_real_and_high() {
+        let mut stats = create_test_statistics();
+        stats.row_stats.total_rows = 1000; // real; default avg is 20.0 (>= 10)
+        stats.table_stats.disk_size = 1024;
+
+        let summary = StatisticsAnalyzer::analyze(&stats);
+
+        assert!(
+            !summary
+                .storage_recommendations
+                .iter()
+                .any(|r| r.contains("too granular")),
+            "granularity recommendation must NOT fire for a REAL high avg_rows_per_partition"
+        );
     }
 
     #[test]
