@@ -45,6 +45,14 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+// The shared scenario-id-keyed failure-bundle emitter (issue #1027 Wave 2a). It
+// lives beside this module; including it here routes the REAL required-parity
+// failure terminal ([`ParityFailure::panic`]) through the same emitter the
+// synthetic test exercises, so a real red gate produces
+// `parity-failures/<tier>/<scenario_id>/failure-artifact.json`.
+#[path = "../parity_bundle/mod.rs"]
+mod parity_bundle;
+
 /// CI fail-closed switch.
 ///
 /// Returns `true` when `CQLITE_PARITY_REQUIRE_DATASETS=1` is set. In that mode a
@@ -68,6 +76,77 @@ pub mod scenario {
     pub const COMPONENT_MANIFEST: &str = "sstable_parity_component_manifest";
     pub const COMPRESSION_INFO_CHUNKS: &str = "sstable_parity_compression_info_chunks";
     pub const DELTA_SCAN: &str = "sstable_parity_delta_scan";
+}
+
+/// The manifest join data the shared failure-artifact bundle needs but a
+/// suite-keyed [`ParityFailure`] does not itself carry (issue #1027 finding 1).
+///
+/// A `ParityFailure` is keyed by the manifest *suite* (e.g.
+/// `sstable_parity_data_db_jsonl`), but the uniform failure-artifact record is
+/// keyed by a manifest `cass.*` *scenario id* and needs a `tier` + `evidence_type`.
+/// A suite spans many `cass.*` scenarios; we bind each wired suite to ONE
+/// representative REAL manifest scenario so a red required-parity run emits a
+/// bundle that joins straight back to the manifest (never an invented id).
+#[derive(Clone, Copy, Debug)]
+pub struct BundleDescriptor {
+    /// A REAL `cass.*` manifest scenario id for this suite (schema join key).
+    pub cass_scenario_id: &'static str,
+    /// The manifest `ci.tier` for that scenario.
+    pub tier: &'static str,
+    /// The manifest `evidence.type` for that scenario.
+    pub evidence_type: &'static str,
+    /// What the scenario compares (record `artifacts_compared`).
+    pub artifacts_compared: &'static [&'static str],
+}
+
+/// Map a wired suite id to its representative manifest [`BundleDescriptor`], or
+/// `None` for suites not wired to the shared bundle (e.g. the `manual_debug`
+/// delta-scan suite). The `cass_scenario_id`s are asserted to exist in the real
+/// manifest by the wiring test `bundle_descriptors_are_real_manifest_ids`.
+pub fn bundle_descriptor_for_suite(suite: &str) -> Option<BundleDescriptor> {
+    const BYTE: &[&str] = &["bytes", "offsets", "checksums", "component_files"];
+    const JSONL: &[&str] = &["jsonl"];
+    let d = match suite {
+        s if s == scenario::INDEX_DB_BIG => BundleDescriptor {
+            cass_scenario_id: "cass.index_db.RowIndexEntryTest.partition_offsets",
+            tier: "required_parity",
+            evidence_type: "byte_for_byte",
+            artifacts_compared: BYTE,
+        },
+        s if s == scenario::SUMMARY_DB_BIG => BundleDescriptor {
+            cass_scenario_id: "cass.summary_db.IndexSummaryTest.serialization_round_trip",
+            tier: "required_parity",
+            evidence_type: "byte_for_byte",
+            artifacts_compared: BYTE,
+        },
+        s if s == scenario::STATISTICS_DB => BundleDescriptor {
+            cass_scenario_id: "cass.statistics_db.MetadataSerializerTest.metadata_components",
+            tier: "required_parity",
+            evidence_type: "byte_for_byte",
+            artifacts_compared: BYTE,
+        },
+        s if s == scenario::DATA_DB_JSONL => BundleDescriptor {
+            cass_scenario_id: "cass.data_db_decode.row_cell_flags_and_vint",
+            tier: "required_parity",
+            evidence_type: "canonical_semantic",
+            artifacts_compared: JSONL,
+        },
+        s if s == scenario::COMPONENT_MANIFEST => BundleDescriptor {
+            cass_scenario_id: "cass.sstable_format.toc_component_manifest",
+            tier: "fast_pr",
+            evidence_type: "byte_for_byte",
+            artifacts_compared: BYTE,
+        },
+        s if s == scenario::COMPRESSION_INFO_CHUNKS => BundleDescriptor {
+            cass_scenario_id:
+                "cass.compression_info.CompressionMetadataTest.metadata_serialization",
+            tier: "required_parity",
+            evidence_type: "byte_for_byte",
+            artifacts_compared: BYTE,
+        },
+        _ => return None,
+    };
+    Some(d)
 }
 
 /// Structured parity-failure / fail-closed diagnostic.
@@ -174,6 +253,13 @@ impl ParityFailure {
     /// rendered diagnostic to `target/cassandra-parity/<lane>.diff` and records a
     /// `Fail` row in `summary.json`, so the CI artifact upload captures a
     /// structured diff for the failure before the test process aborts.
+    ///
+    /// Issue #1027 finding 1: this is the SINGLE common failure terminal for every
+    /// concrete required-parity mismatch site, so it ALSO emits the shared,
+    /// scenario-id-keyed failure bundle (`parity-failures/<tier>/<scenario_id>/`)
+    /// through the same emitter the synthetic test exercises — a real red gate now
+    /// produces the same `failure-artifact.json` the workflow upload globs collect.
+    /// Both the bundle and the legacy `target/cassandra-parity/**` diff are kept.
     pub fn panic(&self) -> ! {
         let rendered = self.render();
         if let Some(lane) = &self.lane {
@@ -181,8 +267,94 @@ impl ParityFailure {
             let artifacts: Vec<PathBuf> = artifact.into_iter().collect();
             let _ = write_summary(lane, LaneStatus::Fail, &self.scenario_id, &artifacts);
         }
+        self.emit_failure_bundle(&rendered);
         panic!("{rendered}")
     }
+
+    /// Best-effort: emit the shared scenario-id-keyed failure bundle for this
+    /// failure. No-ops (logging to stderr) rather than masking the parity panic if
+    /// the suite is not wired to the bundle, no fixture was attached (its dataset
+    /// SHA-256 is a schema-required field), or the write fails — the panic below
+    /// still fails the build regardless (fail-closed, owner decision 2).
+    fn emit_failure_bundle(&self, rendered: &str) {
+        let Some(desc) = bundle_descriptor_for_suite(&self.scenario_id) else {
+            return;
+        };
+        let Some(fixture) = self.fixture.clone() else {
+            eprintln!(
+                "issue-1027: no fixture on ParityFailure[{}]; skipping shared bundle emit",
+                self.scenario_id
+            );
+            return;
+        };
+        let repro = parity_bundle::ReproContext {
+            cassandra_version: "5.0.2".to_string(),
+            cassandra_git_sha: "f278f6774fc76465c182041e081982105c3e7dbb".to_string(),
+            fixture_path: fixture,
+            component_list: self.components.clone(),
+            command_line: self
+                .repro
+                .clone()
+                .unwrap_or_else(|| "see the parity test source".to_string()),
+        };
+        let mut bundle = parity_bundle::FailureBundle::new(
+            parity_failures_root(),
+            desc.cass_scenario_id,
+            "sstabledump-parity-gate.yml",
+            desc.tier,
+            desc.evidence_type,
+            repro,
+        )
+        .artifacts_compared(desc.artifacts_compared.iter().copied())
+        .stdout(rendered.to_string())
+        .stderr(rendered.to_string());
+        // Attach the already-rendered diagnostic as the evidence diff for this
+        // evidence type so the bundle's diffs[] resolves.
+        bundle = match desc.evidence_type {
+            "canonical_semantic" => {
+                bundle.jsonl(rendered.to_string(), String::new(), String::new())
+            }
+            _ => bundle.byte_for_byte_component(
+                self.components
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or("component"),
+                rendered.to_string(),
+                rendered.to_string(),
+                rendered.to_string(),
+                rendered.to_string(),
+            ),
+        };
+        match bundle.emit() {
+            Ok(emitted) => eprintln!(
+                "issue-1027: wrote failure bundle {}",
+                emitted.bundle_dir.display()
+            ),
+            Err(e) => eprintln!(
+                "issue-1027: ERROR writing failure bundle for {}: {e}",
+                desc.cass_scenario_id
+            ),
+        }
+    }
+}
+
+/// The deterministic root the shared failure bundle is written beneath, chosen so
+/// the emitted `parity-failures/**` tree matches the workflow upload globs
+/// (`parity-failures/**` and `cqlite-core/parity-failures/**`) in
+/// `sstabledump-parity-gate.yml` / `compaction-parity.yml`.
+///
+/// Resolves to the workspace root (the `CARGO_MANIFEST_DIR` parent, exactly as
+/// [`parity_artifact_dir`] resolves `target/`) so `<root>/parity-failures/` sits
+/// at the repo root regardless of the test binary's cwd. Overridable via
+/// `CQLITE_PARITY_FAILURES_ROOT` (the e2e test points it at a tempdir).
+fn parity_failures_root() -> PathBuf {
+    if let Ok(dir) = std::env::var("CQLITE_PARITY_FAILURES_ROOT") {
+        return PathBuf::from(dir);
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// Per-lane status recorded in `summary.json`.
