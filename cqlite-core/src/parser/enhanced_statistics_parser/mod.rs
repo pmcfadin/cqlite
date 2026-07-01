@@ -160,22 +160,31 @@ pub fn parse_nb_format_statistics_data(
             // Err is logged and the fields stay at 0 (a Statistics.db that parses
             // today must keep parsing).
             //
-            // Default the gates locally when the caller threaded `None` (#1325
-            // finding 2). We are DEFINITIVELY inside the nb-format parser here, so
-            // `nb`'s gate values are AUTHORITATIVE — not a heuristic (#28): they
-            // are the literal BigFormat.java gates for version "nb". Without them
-            // `read_table_counts` cannot traverse the gated min/max block and would
-            // return `total_rows = None` (→ a silently-wrong 0) even for a real nb
-            // file. Reuse the canonical infallible `nb_fallback` constructor.
-            let nb_gates = crate::storage::sstable::version_gate::VersionGates::Big(
-                crate::storage::sstable::version_gate::BigVersionGates::nb_fallback(),
-            );
-            let effective_gates = gates.unwrap_or(&nb_gates);
+            // No-heuristics gate discipline (#28, #1325 roborev finding): the
+            // version-gated `read_table_counts` walk MUST run with gates that match
+            // the file's actual on-disk layout — Statistics.db does NOT self-describe
+            // its SSTable version (the version comes from the filename → the gates).
+            // The `nb` and `oa`/`da` STATS min/max blocks have DIFFERENT layouts, so
+            // synthesizing `nb` gates for a file whose format we have not
+            // authoritatively established would mis-walk an `oa`/`da` buffer and could
+            // read a BOGUS nonzero `totalRows`. This function is the SINGLE entry point
+            // for `parse_statistics_with_fallback`, which is a public API reachable with
+            // `None` gates for ANY format (standalone tools, tests) — there is no
+            // format-detection dispatch that guarantees only `nb` bytes arrive here.
+            //
+            // Therefore we pass the caller's gates through UNCHANGED and NEVER
+            // synthesize a version:
+            //   * `Some(gates)` — the caller (e.g. `StatisticsReader::open`) derived
+            //     these from the filename, so they are authoritative for the file's
+            //     real version (nb / oa / da). The gated walk reaches `totalRows`.
+            //   * `None` — the format is UNKNOWN. We cannot authoritatively establish
+            //     it, so `read_table_counts` stops before the gated min/max block and
+            //     reports `total_rows = None`. We surface that as `0` meaning "not
+            //     authoritatively available", NEVER a guessed count. This is strictly
+            //     safer than the old `nb` synthesis, which could fabricate a nonzero
+            //     count for an oa/da file.
             let (total_rows, partition_count) =
-                match crate::parser::repair_metadata::read_table_counts(
-                    full_input,
-                    Some(effective_gates),
-                ) {
+                match crate::parser::repair_metadata::read_table_counts(full_input, gates) {
                     // `total_rows.unwrap_or(0)`: a `None` here means STATS does NOT
                     // authoritatively expose `totalRows` (e.g. an unmodeled
                     // improvedMinMax covered-Slice bound blocks the walk). The 0 is
