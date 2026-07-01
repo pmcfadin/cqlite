@@ -99,7 +99,18 @@ diff and breaks 1:1:1:1. Instead:
   it — never `checkout`/`reset` the root to "fix" it.
 - **Finalize cleans up YOUR worktree only** (`git worktree remove`), then deletes the origin lock branch.
   Never `git checkout main` / `git reset` the shared root checkout as part of cleanup.
-- The gate is the only run that counts — paste its summary block.
+- The gate is the only run that counts — paste its summary block. **But `agent-gate.sh`
+  PASS ≠ CI green** (L2, flow-meta #1310): the local gate does NOT run every CI lane —
+  it uses pre-existing datasets and a subset of test targets. When a change touches a
+  **regenerate path, a fixture parser, or a fail-closed CI guard**, reproduce the
+  **actual CI lane** locally before relying on the gate — regenerate sources from the
+  live container → run corpus gen → run the lane's exact `--test` target (e.g.
+  `compression-corruption-parity` = regenerate + require-fixtures; `parity-manifest` =
+  `cargo test -p cassandra-parity --test corpus_audit_tests`). Two PRs (#1236, #1199)
+  passed the gate and then failed CI on lanes the gate never ran. Related: #1269
+  reconciles the gate's component set with the CI lane set. And never gate a
+  non-deterministically-regenerated source on a whole-file byte identity — gate the
+  semantic verdict (validation playbook, L1).
 - Merge autonomously on green; do NOT wait for a human merge. Escalate to the owner ONLY for: a genuine
   design-call roborev finding, a scope/product question, or anything outside your issue.
 - Never close an epic or change scope/title. Surface those; don't act.

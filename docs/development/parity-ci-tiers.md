@@ -185,6 +185,54 @@ P0 data-loss path without a recorded gap is a contract violation.
   `required_parity` once it is made deterministic and dataset-free (for
   `fast_pr`) or backed by committed goldens (for `required_parity`).
 
+## Derived-report staleness: the merge-race hazard and its safeguard (issue #1338)
+
+`docs/reports/cassandra-test-parity.md` is a **committed derived artifact** —
+rendered from `test-data/cassandra-parity-manifest.yml` by
+`cargo run -p cassandra-parity -- report`. Every PR that edits the manifest also
+regenerates the report in the same commit, and the `parity-manifest` workflow's
+`Report is not stale` step (`report ... --check`) blocks any PR whose report drifts
+from a fresh render. Authors regenerate correctly per PR.
+
+Even so, the report can go **stale on `main`** via a **semantic merge race** that no
+per-PR check can catch:
+
+1. PR A and PR C both change manifest scenario counts; each renders the report
+   against its base and is green on its own `--check`.
+2. C merges to `main`. A merges next — git sees no textual conflict (different
+   lines), so it keeps A's report, which was rendered *without* C's manifest
+   entries. `main` now has a report matching neither branch's view → stale.
+3. GitHub does not require a branch to be up to date with `main` before merging, so
+   a report regenerated against a stale base regresses silently on merge.
+
+Because the staleness exists **only post-merge**, a per-PR `--check` is structurally
+incapable of catching it, and a single stale report blocks the **entire** PR queue
+(PR CI merges against `main`'s tip).
+
+**Safeguards (two layers):**
+
+- **Post-merge self-healing.** `.github/workflows/cassandra-parity.yml` has a
+  `parity-report-heal` job that runs only on push to `main`: when `report --check`
+  is stale, it regenerates the report and opens (or force-updates) a single
+  regeneration PR from the fixed bot branch `auto/parity-report-regen` — it never
+  pushes to protected `main` directly. The PR touches only the report; merging it
+  makes `--check` green on the new tip, terminating the cycle. **The heal job
+  authenticates with a dedicated PAT/GitHub-App token (repo secret
+  `PARITY_HEAL_TOKEN`, `contents` + `pull-requests` write)** — a PR opened by the
+  default `GITHUB_TOKEN` does not trigger `pull_request` CI (GitHub's recursion
+  guard), so it would land with no checks. When the secret is absent the job SKIPs
+  with a `::notice::` (and the report must be regenerated manually) rather than
+  opening a check-less PR; provision the secret to enable full self-healing. The
+  existing `parity-manifest` `--check` step stays as the detector (and a plain
+  failing gate on PRs). If self-healing proves noisy, the documented fallback is to
+  require
+  branches be up to date before merge (a branch-protection/merge-queue toggle),
+  which defeats the race by forcing a re-render against tip.
+- **Local/gate coverage of the single-PR case.** `scripts/agent-gate.sh` includes a
+  SKIP-aware `parity-report` component that runs the same `--check` so a forgotten
+  single-PR regeneration is caught locally, before push — the layer the post-merge
+  healer does not cover.
+
 ## Promotion ladder (summary)
 
 ```

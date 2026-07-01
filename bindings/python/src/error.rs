@@ -371,6 +371,7 @@ mod tests {
                 Error::Corruption(_) => { /* Maps to CqliteError */ }
                 Error::InvalidFormat(_) => { /* Maps to CqliteError */ }
                 Error::UnsupportedFormat(_) => { /* Maps to CqliteError */ }
+                Error::UnsupportedVersion { .. } => { /* Maps to CqliteError */ }
                 Error::InvalidPath(_) => { /* Maps to CqliteError */ }
                 Error::TypeConversion(_) => { /* Maps to CqliteError */ }
                 Error::Storage(_) => { /* Maps to CqliteError */ }

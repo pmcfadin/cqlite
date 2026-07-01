@@ -35,8 +35,8 @@ concurrency:
 
 env:
   DATASET_TAG: datasets-v3
-  DATASET_ASSET: cassandra5-small-full-v3.2.tar.gz
-  DATASET_SHA256: bebc763752c8d68c7fb0483a1b31294b4d1d21343d3f7d124da069e5073202fa
+  DATASET_ASSET: cassandra5-small-full-v3.4.tar.gz
+  DATASET_SHA256: 3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33
   CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
   # Fail-closed switch (issue #1024): strict parity lanes must PANIC instead of
   # skipping when dataset binaries are absent. A vanished/unfetched dataset can
@@ -159,7 +159,8 @@ jobs:
             --test issue_1082_deflate_zlib \
             --test issue_990_data_db_row_framing_parity \
             --test issue_991_static_clustering_parity \
-            --test issue_992_ttl_tombstone_range_parity \
+            --test issue_992_ttl_tombstone_parity \
+            --test issue_992_range_boundary_grammar \
             --test issue_993_wide_partition_promoted_index_parity \
             --test issue_819_differential_compaction \
             --test issue_933_range_tombstone_compaction \
@@ -293,7 +294,8 @@ jobs:
         continue-on-error: true
         run: |
           cargo test --package cqlite-core --features write-support \
-            --test issue_992_ttl_tombstone_range_parity \
+            --test issue_992_ttl_tombstone_parity \
+            --test issue_992_range_boundary_grammar \
             -- --nocapture
 
       - name: Run wide-partition promoted-index parity tests (issue #993)
@@ -471,7 +473,7 @@ jobs:
             cargo test --package cqlite-core --features write-support --test sstable_parity_repaired_metadata_test -- --nocapture
             cargo test --package cqlite-core --features write-support --test issue_990_data_db_row_framing_parity -- --nocapture
             cargo test --package cqlite-core --features write-support --test issue_991_static_clustering_parity -- --nocapture
-            cargo test --package cqlite-core --features write-support --test issue_992_ttl_tombstone_range_parity -- --nocapture
+            cargo test --package cqlite-core --features write-support --test issue_992_ttl_tombstone_parity --test issue_992_range_boundary_grammar -- --nocapture
             cargo test --package cqlite-core --features write-support --test issue_993_wide_partition_promoted_index_parity -- --nocapture
             cargo test --package cqlite-core --features write-support --test issue_819_differential_compaction --test issue_933_range_tombstone_compaction -- --nocapture
             cargo test --package cqlite-core --features write-support,cli-helpers --test issue_694_writetime_ttl_parity -- --nocapture

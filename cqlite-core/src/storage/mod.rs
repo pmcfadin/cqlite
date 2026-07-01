@@ -314,6 +314,24 @@ impl StorageEngine {
             .await
     }
 
+    /// Reverse single-partition clustering scan for a BIG (`nb`) wide partition
+    /// (Issue #1184). Returns `Ok(Some(rows))` in DESCENDING clustering order when
+    /// the BIG promoted-index reverse iterator applied, or `Ok(None)` to tell the
+    /// caller to keep the in-memory `ORDER BY DESC` sort (small / BTI /
+    /// multi-generation cases). Delegates to
+    /// [`SSTableManager::scan_partition_clustering_reverse`].
+    #[cfg(not(feature = "tombstones"))]
+    pub async fn scan_partition_clustering_reverse(
+        &self,
+        table_id: &TableId,
+        partition_key: &[u8],
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<Option<Vec<(RowKey, Value)>>> {
+        self.sstables
+            .scan_partition_clustering_reverse(table_id, partition_key, schema)
+            .await
+    }
+
     /// Partition-targeted, metadata-carrying scan for a fully-constrained
     /// `WHERE pk = ?` WRITETIME/TTL projection (Issue #962).
     ///

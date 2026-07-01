@@ -8,8 +8,8 @@
 
 use super::super::SSTableReader;
 use super::model::{
-    bti_lookup_step, sort_by_token_order_with_meta, table_ids_match_strict, BtiLookupStep,
-    SCAN_FOR_KEY_CALLS,
+    bti_lookup_step, sort_by_token_order_with_meta, table_header_consistent_for_seek,
+    BtiLookupStep, SCAN_FOR_KEY_CALLS,
 };
 use crate::types::{CellWriteMetadata, TableId, Value};
 use crate::{Error, Result, RowKey};
@@ -97,6 +97,12 @@ impl SSTableReader {
         table_id: &TableId,
         partition_key: &[u8],
         clustering: Option<&ClusteringSlice>,
+        // `true` iff the manager resolved this reader by an EXACT fully-qualified
+        // `keyspace.table` match (or the query is unqualified). `false` means a
+        // fully-qualified query reached this reader via the bare-name fallback, in
+        // which case the seek guard keeps STRICT keyspace matching so it can never
+        // return rows from a different keyspace whose table name collides (#1284).
+        fully_qualified_match: bool,
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Option<(Vec<(RowKey, Value)>, bool)>> {
         // 1. Resolve the partition's uncompressed Data.db offset, and record
@@ -140,39 +146,38 @@ impl SSTableReader {
 
         let schema_opt = self.get_table_schema(schema);
 
-        // Issue #954: when a single-column clustering slice is requested AND this
-        // is a BTI (`da`) reader, consult the target partition's authoritative
-        // row index to bound BOTH the decode and the decompression to the
-        // row-index block(s) covering the requested clustering range. Returns the
-        // row-body byte window (relative to the partition start, the same domain
-        // the parser sees when it parses `window[within..]`) plus a tightened
-        // decompression end. `clustering_engaged` is `true` only when the row
-        // index actually narrowed the decode.
-        let mut clustering_engaged = false;
-        let mut row_body_window: Option<(usize, usize)> = None;
-        let mut decode_end_bound = end_bound;
-        if is_bti {
-            if let Some(slice) = clustering {
-                if let Some(narrow) =
-                    self.bti_clustering_row_window(partition_key, slice, schema_opt.as_ref())?
-                {
-                    // `narrow.body_end_rel` is relative to the partition start; the
-                    // absolute Data.db decompression end is `offset + body_end_rel`,
-                    // clamped to the authoritative partition end (`end_bound`). A
-                    // `usize::MAX` end means "to the partition end" (the last block),
-                    // so we leave `decode_end_bound` at the partition bound and only
-                    // tighten the decompression for a bounded end (the common
-                    // `ck < b` / two-bound case) — `saturating_add` guards overflow.
-                    if narrow.body_end_rel != usize::MAX {
-                        let abs_end = (offset as usize).saturating_add(narrow.body_end_rel);
-                        decode_end_bound = Some(match end_bound {
-                            Some(e) => abs_end.min(e),
-                            None => abs_end,
-                        });
-                    }
-                    row_body_window = Some((narrow.body_start_rel, narrow.body_end_rel));
-                    clustering_engaged = true;
+        // Issue #954 / #1184: resolve the within-partition row-body byte window for a
+        // single-column clustering slice from the authoritative index (BTI `Rows.db`
+        // trie or BIG promoted `IndexInfo` blocks). The unified resolver lives in
+        // `big_promoted.rs` (campsite: keeps this over-threshold file from growing).
+        let (row_body_window, decode_end_bound, clustering_engaged) = self
+            .resolve_clustering_seek_window(
+                is_bti,
+                partition_key,
+                offset,
+                clustering,
+                schema_opt.as_ref(),
+                end_bound,
+            )?;
+
+        // Issue #1184: an engaged BIG clustering narrowing decodes the selected block
+        // window via `big_promoted.rs` (partition-key-bytes guard, not the BTI strict
+        // table-id match that rejects writer-header SSTables). BTI keeps its decoder.
+        if !is_bti && clustering_engaged {
+            if let Some(rows) = self
+                .big_decode_clustering_window(
+                    partition_key,
+                    offset,
+                    decode_end_bound,
+                    row_body_window,
+                    schema_opt.as_ref(),
+                )
+                .await?
+            {
+                if !rows.is_empty() {
+                    super::super::super::work_counters::add_partition_decoded();
                 }
+                return Ok(Some((rows, true)));
             }
         }
 
@@ -202,6 +207,7 @@ impl SSTableReader {
                 row_body_window,
                 &key,
                 table_id,
+                fully_qualified_match,
                 schema_opt.as_ref(),
                 &parser,
             )
@@ -284,7 +290,7 @@ impl SSTableReader {
     /// fallback: correctness is preserved by decoding the full partition and
     /// letting the post-scan backstop filter.
     #[cfg(not(feature = "tombstones"))]
-    fn bti_clustering_row_window(
+    pub(super) fn bti_clustering_row_window(
         &self,
         partition_key: &[u8],
         slice: &ClusteringSlice,
@@ -450,10 +456,20 @@ impl SSTableReader {
     /// - **Prefix-collision guard**: the trie may return a candidate for a
     ///   prefix-colliding key, so the decoded partition key is verified to equal
     ///   the queried key before any row is returned.
+    ///
+    /// `fully_qualified_match` is the authoritative resolution-mode signal threaded
+    /// from the manager's `resolve_reader_list` (issue #1321, mirroring #1284's
+    /// seek path): `true` iff the query's fully-qualified `keyspace.table` key
+    /// matched this reader's map slot EXACTLY (or the query was unqualified),
+    /// `false` iff a fully-qualified query reached this reader via the bare-name
+    /// fallback. It gates the per-row table-consistency guard in
+    /// `bti_decompress_and_parse_target`: an exact FQ match may relax across a
+    /// header-keyspace divergence, while a fallback keeps strict keyspace matching.
     pub(super) async fn bti_point_lookup(
         &self,
         table_id: &TableId,
         key: &RowKey,
+        fully_qualified_match: bool,
     ) -> Result<Option<Value>> {
         // 1. Resolve the uncompressed Data.db offset via the trie.
         let offset = match self.lookup_partition_via_bti_trie(key.as_bytes())? {
@@ -477,7 +493,14 @@ impl SSTableReader {
         let parser = self.build_v5_parser();
 
         let found = self
-            .bti_decompress_and_parse_target(offset, key, table_id, schema_opt.as_ref(), &parser)
+            .bti_decompress_and_parse_target(
+                offset,
+                key,
+                table_id,
+                fully_qualified_match,
+                schema_opt.as_ref(),
+                &parser,
+            )
             .await?;
 
         match found {
@@ -537,6 +560,13 @@ impl SSTableReader {
         offset: usize,
         key: &RowKey,
         table_id: &TableId,
+        // Issue #1321: authoritative resolution mode (see `bti_point_lookup`).
+        // Gates the per-row table-consistency guard exactly like the seek path
+        // (#1284): an EXACT fully-qualified resolution may accept rows across a
+        // benign header-keyspace divergence on a consistent table name, while a
+        // fully-qualified query resolved via the bare-name fallback keeps STRICT
+        // keyspace matching (no wrong-keyspace rows).
+        fully_qualified_match: bool,
         schema_opt: Option<&crate::schema::TableSchema>,
         parser: &crate::storage::sstable::reader::parsing::V5CompressedLegacyParser,
     ) -> Result<Option<Value>> {
@@ -688,10 +718,16 @@ impl SSTableReader {
                 self,
                 |(tid, entry_key, entry_value)| {
                     emitted = true;
-                    // Verify BOTH the emitted table id matches the queried table
-                    // (a wrong-table query never returns a row, issue #831 review)
-                    // AND the parser-decoded partition key equals the queried key.
-                    if table_ids_match_strict(&tid, table_id)
+                    // Verify BOTH the emitted table id is consistent with the
+                    // queried table AND the parser-decoded partition key equals the
+                    // queried key. The table check is resolution-mode-aware (issue
+                    // #1321, mirroring the seek path #1284): an EXACT fully-qualified
+                    // resolution accepts a consistent table name across a benign
+                    // header-keyspace divergence; a fully-qualified query resolved via
+                    // the bare-name fallback keeps STRICT keyspace matching so it can
+                    // never return another keyspace's same-named rows. A genuinely
+                    // different table name is always rejected (issue #831).
+                    if table_header_consistent_for_seek(&tid, table_id, fully_qualified_match)
                         && entry_key.as_bytes() == key.as_bytes()
                     {
                         found = Some(entry_value);
@@ -792,6 +828,10 @@ impl SSTableReader {
         row_body_window: Option<(usize, usize)>,
         key: &RowKey,
         table_id: &TableId,
+        // See `bti_collect_partition_rows`: `true` iff the manager resolved this
+        // reader by an exact fully-qualified `keyspace.table` match (or the query
+        // was unqualified). Threaded into the seek table-consistency guard (#1284).
+        fully_qualified_match: bool,
         schema_opt: Option<&crate::schema::TableSchema>,
         parser: &crate::storage::sstable::reader::parsing::V5CompressedLegacyParser,
     ) -> Result<Option<Vec<Value>>> {
@@ -938,6 +978,7 @@ impl SSTableReader {
                     row_body_window,
                     key,
                     table_id,
+                    fully_qualified_match,
                     schema_opt,
                     parser,
                 )
@@ -959,6 +1000,7 @@ impl SSTableReader {
             row_body_window,
             key,
             table_id,
+            fully_qualified_match,
             schema_opt,
             parser,
         )
@@ -1041,6 +1083,11 @@ impl SSTableReader {
         row_body_window: Option<(usize, usize)>,
         key: &RowKey,
         table_id: &TableId,
+        // Whether the manager resolved this reader by an EXACT fully-qualified
+        // `keyspace.table` match (or an unqualified query). When `false` a
+        // fully-qualified query reached this reader via the bare-name fallback, so
+        // the seek guard keeps STRICT keyspace matching (#1284 review).
+        fully_qualified_match: bool,
         schema_opt: Option<&crate::schema::TableSchema>,
         parser: &crate::storage::sstable::reader::parsing::V5CompressedLegacyParser,
     ) -> Result<(Vec<Value>, bool)> {
@@ -1060,9 +1107,12 @@ impl SSTableReader {
             clamped_window,
             |(tid, entry_key, entry_value)| {
                 if entry_key.as_bytes() == key.as_bytes() {
-                    // A row of the TARGET partition. Verify the table id matches
-                    // (a wrong-table query never returns a row, issue #831).
-                    if table_ids_match_strict(&tid, table_id) {
+                    // Header-authoritative table consistency: wrong-table rejected
+                    // (#831); a keyspace-divergent same-table query is served ONLY
+                    // when resolution was an exact fully-qualified match — a
+                    // fallback-resolved query keeps strict keyspace matching so it
+                    // never returns another keyspace's same-named rows (#1284).
+                    if table_header_consistent_for_seek(&tid, table_id, fully_qualified_match) {
                         rows.push(entry_value);
                     }
                     Ok(std::ops::ControlFlow::Continue(()))

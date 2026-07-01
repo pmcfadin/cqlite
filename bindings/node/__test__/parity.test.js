@@ -4,8 +4,12 @@
  * Issue #307: Validate Node.js binding output against sstabledump JSONL reference files.
  *
  * Test Tiers:
- * - Tier 1: Row count parity for all 33 tables
+ * - Tier 1: Row count parity for the dynamically-discovered executable corpus
  * - Tier 2: Value parity for representative tables
+ *
+ * Issue #1229: the table set is enumerated from the committed corpus (no
+ * hand-typed allowlist, no tautological count assertions). Skip-set + rationale
+ * in test-data/corpus-coverage-policy.md.
  *
  * Adapted from Python bindings (bindings/python/tests/test_parity.py) patterns.
  */
@@ -24,7 +28,48 @@ const {
   ALL_TABLES,
   OA_TABLES,
   getKnownIssue,
+  inScopeKeyspaces,
+  unclassifiedKeyspaces,
+  isSystemKeyspace,
+  SKIP_KEYSPACES,
 } = require('./parity-utils.js');
+
+// =============================================================================
+// Guarded test.each registration (Issue #1229 round-2)
+//
+// Under Jest 29 an empty `test.each([])` is a COLLECTION-TIME error, which
+// bypasses the intended graceful dataset-absent skip. `guardedTestEach` guards
+// the dynamic registration:
+//   * cases present            -> normal `test.each(cases)(...)`
+//   * cases empty + no datasets -> a single `test.skip` placeholder
+//   * cases empty + datasets present -> a single FAILING test (the disk-derived
+//     enumeration is unexpectedly empty — a real bug, not a skip)
+// This mirrors the Python fail-vs-skip distinction.
+// =============================================================================
+
+const fsForGuard = require('fs');
+
+function datasetsPresent() {
+  return fsForGuard.existsSync(global.testPaths.SSTABLES_DIR);
+}
+
+function guardedTestEach(label, cases, name, fn) {
+  if (Array.isArray(cases) && cases.length > 0) {
+    test.each(cases)(name, fn);
+    return;
+  }
+  if (datasetsPresent()) {
+    // Datasets are on disk but enumeration produced nothing: fail loudly.
+    test(`${label} enumeration is non-empty`, () => {
+      throw new Error(
+        `${label}: datasets are present but the disk-derived corpus is empty; ` +
+          'dynamic enumeration is broken (#1229)'
+      );
+    });
+  } else {
+    test.skip(`${label} (datasets absent — skipped)`, () => {});
+  }
+}
 
 // =============================================================================
 // Schema Mapping for Keyspaces
@@ -69,7 +114,7 @@ afterAll(async () => {
 
 describe('Tier 1: Row Count Parity (Issue #307)', () => {
   describe('test_basic keyspace', () => {
-    test.each(ALL_TABLES.test_basic)('%s row count matches JSONL', async (table) => {
+    guardedTestEach('test_basic', ALL_TABLES.test_basic, '%s row count matches JSONL', async (table) => {
       const jsonlPath = findJsonlFile('test_basic', table);
       if (!jsonlPath) {
         console.log(`  Skipping ${table}: JSONL file not found`);
@@ -96,7 +141,7 @@ describe('Tier 1: Row Count Parity (Issue #307)', () => {
   });
 
   describe('test_collections keyspace', () => {
-    test.each(ALL_TABLES.test_collections)('%s row count matches JSONL', async (table) => {
+    guardedTestEach('test_collections', ALL_TABLES.test_collections, '%s row count matches JSONL', async (table) => {
       const jsonlPath = findJsonlFile('test_collections', table);
       if (!jsonlPath) {
         console.log(`  Skipping ${table}: JSONL file not found`);
@@ -131,7 +176,7 @@ describe('Tier 1: Row Count Parity (Issue #307)', () => {
   });
 
   describe('test_timeseries keyspace', () => {
-    test.each(ALL_TABLES.test_timeseries)('%s row count matches JSONL', async (table) => {
+    guardedTestEach('test_timeseries', ALL_TABLES.test_timeseries, '%s row count matches JSONL', async (table) => {
       const jsonlPath = findJsonlFile('test_timeseries', table);
       if (!jsonlPath) {
         console.log(`  Skipping ${table}: JSONL file not found`);
@@ -157,7 +202,7 @@ describe('Tier 1: Row Count Parity (Issue #307)', () => {
   });
 
   describe('test_wide_rows keyspace', () => {
-    test.each(ALL_TABLES.test_wide_rows)('%s row count matches JSONL', async (table) => {
+    guardedTestEach('test_wide_rows', ALL_TABLES.test_wide_rows, '%s row count matches JSONL', async (table) => {
       const jsonlPath = findJsonlFile('test_wide_rows', table);
       if (!jsonlPath) {
         console.log(`  Skipping ${table}: JSONL file not found`);
@@ -323,13 +368,15 @@ describe('Tier 2: Column and Type Validation (Issue #307)', () => {
 // Summary Test
 // =============================================================================
 
-describe('Parity Summary (Issue #307)', () => {
-  test('All 33 tables have JSONL reference files', () => {
+describe('Parity Summary (Issue #307 / dynamic enumeration #1229)', () => {
+  test('Every discovered executable table has a JSONL reference file', () => {
     let missing = [];
     let found = 0;
+    let total = 0;
 
     for (const [keyspace, tables] of Object.entries(ALL_TABLES)) {
       for (const table of tables) {
+        total++;
         const jsonlPath = findJsonlFile(keyspace, table);
         if (jsonlPath) {
           found++;
@@ -339,20 +386,65 @@ describe('Parity Summary (Issue #307)', () => {
       }
     }
 
+    if (total === 0) {
+      // No corpus discovered (CI without fetched datasets) — nothing to assert.
+      console.log('  No executable tables discovered; skipping JSONL coverage check');
+      return;
+    }
+
     if (missing.length > 0) {
       console.log(`  Missing JSONL files: ${missing.join(', ')}`);
     }
 
-    console.log(`  Found ${found}/33 JSONL reference files`);
-    expect(found).toBe(33);
+    console.log(`  Found ${found}/${total} JSONL reference files (discovered, not hard-coded)`);
+    // Every discovered executable table must have a golden — not a literal count.
+    expect(found).toBe(total);
   });
 
-  test('Total table count is 33', () => {
-    let total = 0;
-    for (const tables of Object.values(ALL_TABLES)) {
-      total += tables.length;
+  test('Every committed keyspace is classified (in-scope or documented skip-set)', () => {
+    if (inScopeKeyspaces().length === 0) {
+      console.log('  No keyspaces discovered; skipping classification check');
+      return;
     }
-    expect(total).toBe(33);
+    const unclassified = unclassifiedKeyspaces();
+    if (unclassified.length > 0) {
+      console.log(`  Unclassified keyspaces: ${unclassified.join(', ')}`);
+    }
+    // A newly-committed keyspace that nobody classified reds the suite instead
+    // of being silently uncovered (replaces the old tautological toBe(33)).
+    expect(unclassified).toEqual([]);
+  });
+
+  test('All system* keyspaces are excluded by prefix (not enumerated)', () => {
+    // The prefix rule must cover every system* keyspace, including ones a
+    // dataset subset ships beyond the hard-named three (#1229).
+    for (const ks of [
+      'system',
+      'system_auth',
+      'system_schema',
+      'system_distributed',
+      'system_traces',
+      'system_views',
+      'system_anything_future',
+    ]) {
+      expect(isSystemKeyspace(ks)).toBe(true);
+    }
+    // system* must NOT be enumerated in the exact-name skip-set (prefix-only).
+    for (const k of Object.keys(SKIP_KEYSPACES)) {
+      expect(isSystemKeyspace(k)).toBe(false);
+    }
+    // A non-system test keyspace is not caught by the prefix.
+    expect(isSystemKeyspace('test_brandnew')).toBe(false);
+  });
+
+  test('A genuinely-unknown keyspace still trips the classification guard', () => {
+    // The guard must NOT be neutered: a fake, never-classified keyspace name is
+    // neither in any explicit bucket nor a system* keyspace, so the
+    // classification logic must treat it as unclassified.
+    const fake = 'test_brandnew';
+    const classified =
+      fake in SKIP_KEYSPACES || isSystemKeyspace(fake);
+    expect(classified).toBe(false);
   });
 });
 
@@ -417,7 +509,7 @@ describe('VG6: OA Format Parity — Row Count (Issue #672)', () => {
   });
 
   // All 6 oa tables now enforce row count parity (VG6, Issue #672)
-  test.each(OA_TABLES)('test_oa.%s row count matches JSONL golden', async (table) => {
+  guardedTestEach('test_oa', OA_TABLES, 'test_oa.%s row count matches JSONL golden', async (table) => {
     if (!dbOa) {
       console.log(`  Skipping test_oa.${table}: oa binaries absent (run fetch-datasets.sh)`);
       return; // graceful skip (no assert failures)

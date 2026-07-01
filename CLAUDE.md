@@ -26,6 +26,7 @@ Full contributor doctrine is published at `https://pmcfadin.github.io/cqlite/age
 - [Gate contract](https://pmcfadin.github.io/cqlite/agents-developing/gate-contract/) — `scripts/agent-gate.sh`, summary-block format
   - Parity CI tier contracts: `docs/development/parity-ci-tiers.md` (what each Cassandra parity CI tier promises; gate-strength smoke/canonical-semantic/byte-for-byte) + `docs/development/parity-release-checklist.md` (gates public parity claims). Belongs alongside the gate-contract page on the `agents-developing/` site — mirror there when the site page lands (issue #1022).
     - The `exhaustive_regeneration` tier is backed by `.github/workflows/exhaustive-regeneration.yml` (weekly + `workflow_dispatch`, never on PRs; issue #1026), which regenerates the corpus and runs `cargo run -p cassandra-parity -- corpus-audit` (hard-fails on corpus/manifest or provenance drift).
+    - `docs/reports/cassandra-test-parity.md` is a **committed derived artifact** rendered from `test-data/cassandra-parity-manifest.yml`. It can go stale on `main` via a **semantic merge race** (two manifest-changing PRs each regenerate correctly vs their base, but the squash-merge leaves the report rendered against a stale base) — no per-PR `--check` can catch this. Two safeguards (issue #1338): the SKIP-aware `parity-report` agent-gate component (`scripts/agent-gate.sh`) catches the single-PR forgot-to-regenerate case locally before push; the `parity-report-heal` push-to-`main` job in `.github/workflows/cassandra-parity.yml` self-heals the merge race by opening/updating a single regeneration PR from `auto/parity-report-regen` (never pushing to protected `main`). The heal job needs repo secret `PARITY_HEAL_TOKEN` (a PAT/App token with `contents`+`pull-requests` write) so the regen PR triggers CI — a PR opened by the default `GITHUB_TOKEN` gets no checks; absent the secret the job SKIPs with a `::notice::` (regenerate manually) instead of opening a check-less PR. See `docs/development/parity-ci-tiers.md`.
 - [No-heuristics mandate](https://pmcfadin.github.io/cqlite/agents-developing/no-heuristics/) — authoritative metadata only (issue #28)
 - [Test data](https://pmcfadin.github.io/cqlite/agents-developing/test-data/) — fetching, dataset pins, CQLITE_DATASETS_ROOT
 - [Key source paths](https://pmcfadin.github.io/cqlite/agents-developing/source-map/) — parsers, writers, query engine, bindings
@@ -204,6 +205,15 @@ cargo run --package cqlite-cli --features write-support -- \
   --schema test-data/schemas/basic-types.cql \
   --flush
 
+# Issue #1253: a single combined invocation persists durably. `--execute` DML
+# now runs BEFORE the flush within the same invocation, so the inserted row
+# lands in Data.db (not just the WAL):
+cargo run --package cqlite-cli --features write-support -- \
+  --writable --write-dir /tmp/cqlite-write \
+  --schema test-data/schemas/basic-types.cql \
+  --execute "INSERT INTO test_basic.simple_table (id, name) VALUES (33333333-3333-3333-3333-333333333333, 'Carol')" \
+  --flush
+
 # Write subcommands
 cargo run --package cqlite-cli --features write-support -- \
   maintenance --budget-ms 100 \
@@ -362,6 +372,14 @@ Use authoritative metadata only — no type guessing. Schema-aware decoding when
 present. Legacy heuristics behind opt-in `experimental` feature flag only.
 See canonical doctrine: [no-heuristics mandate](https://pmcfadin.github.io/cqlite/agents-developing/no-heuristics/)
 
+### Supported formats (version floor)
+CQLite targets Cassandra 5.0 — `na`+/`nb` BIG and `oa`/`da` BTI are in scope; pre-`na`
+(`ma`–`me`, Cassandra 3.x) is out of scope and SHALL NOT be introduced, supported, or
+reviewed for correctness (this guidance is for reviewers incl. roborev too). The floor is
+enforced in code: `BigVersionGates::from_version` rejects `< na` and `BtiVersionGates::from_version`
+rejects non-`da`, both with `Error::UnsupportedVersion`; `SSTableReader::open` propagates that
+error rather than falling back. Do not re-litigate pre-`na` "regressions."
+
 ### Code Quality
 - `RUSTFLAGS="-D warnings"` must pass
 - No `unwrap()`/`expect()` in library code
@@ -493,6 +511,16 @@ bash test-data/scripts/fetch-datasets.sh
 - Clear roborev findings (run /roborev-fix) before handing an issue off.
 - Stay within your assigned issue's scope; flag cross-cutting changes to the lead instead of editing another teammate's files.
 - An issue is "done" only when tests pass, coverage meets threshold, roborev is clean, and both the spec-auditor and coverage-reviewer sign off.
+
+### Pre-roborev self-check (common findings to pre-empt)
+`roborev_findings` is the #1 recurring delivery cost (telemetry retro). Before reporting an implementation done, scan your diff for these recurring finding classes and fix them up front — every one avoided is a review round saved. Full guidance: https://pmcfadin.github.io/cqlite/agents-developing/roborev-findings/.
+- **GitHub Actions command injection** — never interpolate `${{ inputs.* }}` / `${{ steps.*.outputs.* }}` directly into a `run:` shell (worst in a step holding secrets). Allowlist-validate the value fail-closed *before* any secret step, then pass it via a quoted env var (`-Pversion="$VAR"`), not inline `${{ }}`.
+- **clippy `manual_range_contains`** — `x >= a && x <= b` fails under `-D warnings`. Write `(a..=b).contains(&x)`.
+- **Integer overflow / saturation** — decoding into `i128`/fixed width and saturating (decimal unscaled values, scale math) loses data. Use `num_bigint::BigInt` (already a dep); bound the computation by comparing signs/adjusted-exponents *before* any large power-of-ten — never materialize `10^scale` with an unbounded exponent (DoS/OOM).
+- **Float ordering vs Java** — Rust `total_cmp` ≠ Java `Float/Double.compare`: Rust puts negative NaN first, Java sorts NaN last; also signed-zero differs. When matching Cassandra, use an explicit comparator (NaN last, `-0.0 < +0.0`).
+- **Wall-clock races in tests** — never assert a value sampled at one instant against a window captured at another (one-second boundary flakes). Capture the window to cover *all* sampled operations.
+- **No-heuristics violations** — never infer type/behavior from byte patterns; use authoritative schema/`Statistics.db` metadata (see no-heuristics mandate).
+- **Gitignored reference binaries / dirty-tree gate** — byte-parity tests silently SKIP in a clean checkout when `.db` references are gitignored. Force-add the tiny reference binaries (`git add -f`) and verify the test against a fresh `git worktree add --detach HEAD`, not the dirty tree.
 
 ### Spec-driven work (OpenSpec)
 - OpenSpec is the front door for **design-driven** new work (bindings/M6, query-engine surface, CLI/REPL UX, perf/M7, process). **Oracle-driven** bug fixes (SSTable parsing, compaction/tombstone parity, type decode) stay as a GitHub issue + a pinned parity test — no OpenSpec change.

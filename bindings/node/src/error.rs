@@ -416,6 +416,7 @@ mod tests {
                 Error::Corruption(_) => {}
                 Error::InvalidFormat(_) => {}
                 Error::UnsupportedFormat(_) => {}
+                Error::UnsupportedVersion { .. } => {}
                 Error::InvalidPath(_) => {}
                 Error::TypeConversion(_) => {}
                 Error::Storage(_) => {}

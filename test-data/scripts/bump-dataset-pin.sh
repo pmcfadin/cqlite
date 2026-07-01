@@ -14,14 +14,14 @@
 #
 # Usage:
 #   test-data/scripts/bump-dataset-pin.sh --new-sha <sha256> \
-#     [--new-asset cassandra5-small-full-v3.2.tar.gz] \
+#     [--new-asset cassandra5-small-full-v3.5.tar.gz] \
 #     [--new-tag datasets-v3] \
-#     [--old-asset cassandra5-small-full-v3.1.tar.gz] \
-#     [--old-sha f5fa0b6599a27c1c493d7c6c063194d55d031cab417396947313e7245afc5ceb] \
+#     [--old-asset cassandra5-small-full-v3.4.tar.gz] \
+#     [--old-sha 3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33] \
 #     [--old-tag datasets-v3]
 #
-# Only --new-sha is required. Defaults below match the current (v3.1) pin and a
-# v3.2 asset uploaded to the SAME release tag (datasets-v3 can hold multiple
+# Only --new-sha is required. Defaults below match the current (v3.4) pin and a
+# v3.5 asset uploaded to the SAME release tag (datasets-v3 can hold multiple
 # assets). If you cut a NEW release tag instead, pass --new-tag (and --old-tag
 # if it differs).
 
@@ -32,11 +32,14 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WF_DIR="$REPO_ROOT/.github/workflows"
 
 # Current (to-be-replaced) pin — keep in sync with the committed workflows.
-OLD_ASSET="cassandra5-small-full-v3.1.tar.gz"
-OLD_SHA="f5fa0b6599a27c1c493d7c6c063194d55d031cab417396947313e7245afc5ceb"
+# This MUST match the asset/SHA actually committed across the workflows, or the
+# default next bump is a no-op/false-success. Currently v3.4 (issue #1185).
+OLD_ASSET="cassandra5-small-full-v3.4.tar.gz"
+OLD_SHA="3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33"
 OLD_TAG="datasets-v3"
 
-NEW_ASSET="cassandra5-small-full-v3.2.tar.gz"
+# Next (to-be-written) pin — bump the asset version and pass the new --new-sha.
+NEW_ASSET="cassandra5-small-full-v3.5.tar.gz"
 NEW_SHA=""
 NEW_TAG="datasets-v3"
 

@@ -3,7 +3,7 @@ title: Key Source Paths
 description: Where parsers, writers, query engine, bindings, and test infrastructure live in the CQLite codebase.
 sidebar:
   label: Key source paths
-  order: 4
+  order: 5
 ---
 
 Use this page to locate code before reading. Grep in the right subtree rather than

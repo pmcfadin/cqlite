@@ -21,8 +21,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   DATASET_TAG: datasets-v3
-  DATASET_ASSET: cassandra5-small-full-v3.2.tar.gz
-  DATASET_SHA256: bebc763752c8d68c7fb0483a1b31294b4d1d21343d3f7d124da069e5073202fa
+  DATASET_ASSET: cassandra5-small-full-v3.4.tar.gz
+  DATASET_SHA256: 3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33
 
 jobs:
   build-only-wheels:
@@ -207,7 +207,13 @@ jobs:
           mkdir -p test-data/datasets
           curl -fsSL -o /tmp/${DATASET_ASSET} \
             https://github.com/pmcfadin/cqlite/releases/download/${DATASET_TAG}/${DATASET_ASSET}
-          echo "${DATASET_SHA256}  /tmp/${DATASET_ASSET}" | sha256sum -c -
+          # Issue #1324: portable checksum — GitHub's macOS runners ship `shasum`
+          # (perl), not GNU coreutils `sha256sum`. Match release.yml's idiom.
+          if command -v sha256sum >/dev/null 2>&1; then
+            echo "${DATASET_SHA256}  /tmp/${DATASET_ASSET}" | sha256sum -c -
+          else
+            echo "${DATASET_SHA256}  /tmp/${DATASET_ASSET}" | shasum -a 256 -c -
+          fi
           tar -xzf /tmp/${DATASET_ASSET} -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
 
       - name: Fetch datasets if cache miss (Windows)

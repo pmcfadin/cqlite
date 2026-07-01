@@ -147,11 +147,83 @@ fn jsonl_golden_path() -> Option<PathBuf> {
     None
 }
 
+/// CI fail-closed switch (issue #1185). Returns `true` when
+/// `CQLITE_PARITY_REQUIRE_DATASETS=1` is set — the same env idiom used by every
+/// other strict parity lane (`cqlite-core/tests/parity_support/mod.rs`,
+/// `sstable_parity_index_db_test.rs`). In that mode a missing wide_partition
+/// binary is a HARD FAILURE (panic), never a skip, because these scenarios are
+/// pinned `byte_for_byte` in `test-data/cassandra-parity-manifest.yml` and the
+/// fixture is now part of the pinned CI dataset (v3.4). Locally (env unset) the
+/// byte-level checks keep their skip-on-absence behavior.
+fn parity_datasets_required() -> bool {
+    std::env::var("CQLITE_PARITY_REQUIRE_DATASETS")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+/// The exact binary components every byte-level scenario depends on. Their
+/// absence under `CQLITE_PARITY_REQUIRE_DATASETS=1` is a gate failure (the
+/// wide_partition fixture is now pinned in the CI dataset, v3.4).
+const REQUIRED_BINARY_COMPONENTS: [&str; 4] =
+    ["Data.db", "Index.db", "Digest.crc32", "CompressionInfo.db"];
+
 /// Whether the binary components needed by a byte-level test are present. The
 /// committed tree always carries the JSONL/TOC; the binaries (Data.db/Index.db)
 /// are gitignored and only present after a dataset fetch.
 fn binaries_present() -> bool {
     component("Data.db").exists() && component("Index.db").exists()
+}
+
+/// List the exact strict components that are missing on disk (empty when all
+/// present). Used by the fail-closed guard so the failure names precisely which
+/// reference binary is absent.
+fn missing_required_components() -> Vec<String> {
+    REQUIRED_BINARY_COMPONENTS
+        .iter()
+        .filter(|suffix| !component(suffix).exists())
+        .map(|suffix| format!("{PREFIX}-{suffix}"))
+        .collect()
+}
+
+/// Gate a byte-level scenario on fixture presence. Returns `true` when the
+/// caller should proceed (binaries present), `false` when it should skip.
+///
+/// Fail-closed contract (issue #1185): under `CQLITE_PARITY_REQUIRE_DATASETS=1`
+/// (the REQUIRED "Real M5 SSTableDump parity validation" CI lane sets it) the
+/// absence of the EXACT wide_partition reference binaries is a HARD FAILURE — it
+/// must NOT skip-and-green. With the env unset (local dev without the fetched
+/// binaries) the byte-level checks skip cleanly while the JSONL canonical-semantic
+/// tier still runs.
+fn require_or_skip_binaries(test: &str) -> bool {
+    // Strict CI lane: enforce the FULL required-component set, not just the
+    // Data.db+Index.db subset that `binaries_present()` checks. A partial fixture
+    // (e.g. missing Digest.crc32 or CompressionInfo.db) must turn the required
+    // lane red, never skip-and-green. Invariant: strict mode passing ⇒ every
+    // component in REQUIRED_BINARY_COMPONENTS was present.
+    if parity_datasets_required() {
+        let missing = missing_required_components();
+        assert!(
+            missing.is_empty(),
+            "{test}: CQLITE_PARITY_REQUIRE_DATASETS=1 but the wide_partition byte-parity \
+             reference is incomplete at {} (missing {} of {} required component(s): {:?}) — \
+             these scenarios are pinned `byte_for_byte` in \
+             test-data/cassandra-parity-manifest.yml and the fixture is in the pinned CI \
+             dataset (v3.4). The required parity gate must FAIL CLOSED here, not skip. \
+             Fetch the dataset: bash test-data/scripts/fetch-datasets.sh",
+            fixture_dir().display(),
+            missing.len(),
+            REQUIRED_BINARY_COMPONENTS.len(),
+            missing,
+        );
+        return true;
+    }
+    // Local dev (env unset): the byte-level decode only needs Data.db+Index.db;
+    // skip cleanly when those are absent while the JSONL semantic tier still runs.
+    if binaries_present() {
+        return true;
+    }
+    byte_level_skip(test);
+    false
 }
 
 /// Emit a uniform line noting the byte-level checks are skipped (binaries absent)
@@ -412,8 +484,7 @@ fn jsonl_golden_canonical_semantics() {
 #[tokio::test]
 async fn row_boundaries_index_info_offsets() {
     let test = "row_boundaries_index_info_offsets";
-    if !binaries_present() {
-        byte_level_skip(test);
+    if !require_or_skip_binaries(test) {
         return;
     }
 
@@ -570,8 +641,7 @@ async fn row_boundaries_index_info_offsets() {
 #[tokio::test]
 async fn clustering_bounds() {
     let test = "clustering_bounds";
-    if !binaries_present() {
-        byte_level_skip(test);
+    if !require_or_skip_binaries(test) {
         return;
     }
 
@@ -639,8 +709,7 @@ async fn clustering_bounds() {
 #[tokio::test]
 async fn range_tombstone_boundary_at_block_edge() {
     let test = "range_tombstone_boundary_at_block_edge";
-    if !binaries_present() {
-        byte_level_skip(test);
+    if !require_or_skip_binaries(test) {
         return;
     }
 
@@ -726,29 +795,21 @@ async fn range_tombstone_boundary_at_block_edge() {
 /// reversal preserves the same row set), but this does NOT exercise a true
 /// reverse SSTable iterator — see the GAP note below.
 ///
-// GAP (scenario `forward_reverse_bounds`): CQLite has no true reverse partition
-// scan for the BIG ("nb") format. The only "reverse" available is a post-fetch
-// in-memory `ORDER BY ck DESC` sort
-// (`query::select_executor::execute_sort`, `SortDirection::Descending`), which
-// reads the whole partition FORWARD via `get_all_entries`/`scan` and then sorts
-// the materialized rows. It never drives the promoted index to seek blocks in
-// reverse, so it cannot prove that reverse block decoding via the promoted index
-// is correct. There is no `scan_reverse` / reverse iterator at the
-// `SSTableReader` data-access layer (only `is_reversed` clustering-ORDER-encoding
-// helpers in `reader/data_access/{bti,model}.rs`, which encode DESC clustering
-// columns, not a runtime reverse traversal).
-//
-// next_step: implement a BIG-format reverse partition iterator that uses the
-// promoted IndexInfo blocks to seek and decode blocks back-to-front (mirroring
-// Cassandra `SSTableReversedIterator`), then assert forward and reverse scans of
-// pk=1 return the identical 290-row clustering set with no rows lost adjacent to
-// the deleted block. Manifest scenario `forward_reverse_bounds` should be marked
-// `partial` until then.
+// RESOLVED (issue #1184): the BIG ("nb") reverse partition iterator is now real —
+// `SSTableReader::big_reverse_partition_rows` walks the promoted IndexInfo blocks
+// back-to-front (mirroring Cassandra `SSTableReversedIterator`), routed through the
+// production query path for single-partition `ORDER BY <ck> DESC` so the in-memory
+// sort is skipped (and remains the fallback for small / BTI / multi-generation).
+// The forward==reverse equality (identical clustering set, exact reverse ordering,
+// block-by-block decode bounded to one block) is pinned in CI on a multi-block BIG
+// wide partition built by the write engine in
+// `tests/issue_1184_big_promoted_read_seek.rs`; the byte-level 290-row equality on
+// this real fixture runs locally when the binaries are present (skip-on-absence).
+// Manifest scenario `forward_reverse_bounds` is now `mirrored`.
 #[tokio::test]
 async fn forward_bounds_completeness() {
     let test = "forward_bounds_completeness";
-    if !binaries_present() {
-        byte_level_skip(test);
+    if !require_or_skip_binaries(test) {
         return;
     }
 

@@ -918,5 +918,19 @@ fn coverage_finds_high_relevance_files() {
         "expected many high-relevance files, got {}",
         cov.high_total
     );
-    assert!(cov.high_classified > 0, "expected some classified files");
+    // Issue #1199: every high-relevance Cassandra index file must be classified by
+    // a manifest scenario (mirrored/partial/planned/out_of_scope). An unclassified
+    // high-relevance file fails `coverage --strict` in CI; assert the same fully
+    // here so the manifest can never silently regress below full coverage.
+    assert!(
+        cov.unclassified_high.is_empty(),
+        "every high-relevance file must be classified; {} unclassified: {:#?}",
+        cov.unclassified_high.len(),
+        cov.unclassified_high
+    );
+    assert_eq!(
+        cov.high_classified, cov.high_total,
+        "all {} high-relevance files must be classified, only {} are",
+        cov.high_total, cov.high_classified
+    );
 }

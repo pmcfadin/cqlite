@@ -748,6 +748,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::sync::atomic::AtomicUsize;
+    use tempfile::TempDir;
 
     // =========================================================================
     // ASCII corruption detection tests
@@ -916,8 +917,8 @@ mod tests {
     #[tokio::test]
     async fn test_read_block_direct_empty() {
         // Test reading zero bytes
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join("test_empty_block.bin");
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let temp_file = temp_dir.path().join("test_empty_block.bin");
 
         // Create empty file
         tokio::fs::write(&temp_file, b"").await.unwrap();
@@ -928,15 +929,12 @@ mod tests {
         let result = read_block_direct(&file, 0).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 0);
-
-        // Cleanup
-        tokio::fs::remove_file(&temp_file).await.ok();
     }
 
     #[tokio::test]
     async fn test_read_block_direct_small() {
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join("test_small_block.bin");
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let temp_file = temp_dir.path().join("test_small_block.bin");
 
         // Create test file with known content
         let test_data = b"Hello, World! This is test data.";
@@ -948,15 +946,12 @@ mod tests {
         let result = read_block_direct(&file, test_data.len()).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), test_data);
-
-        // Cleanup
-        tokio::fs::remove_file(&temp_file).await.ok();
     }
 
     #[tokio::test]
     async fn test_read_uncompressed_data_block() {
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join("test_uncompressed_block.bin");
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let temp_file = temp_dir.path().join("test_uncompressed_block.bin");
 
         // Create test file
         let test_data = b"Uncompressed test data block content";
@@ -973,15 +968,12 @@ mod tests {
         let data = result.unwrap();
         assert!(data.is_some());
         assert_eq!(data.unwrap(), test_data);
-
-        // Cleanup
-        tokio::fs::remove_file(&temp_file).await.ok();
     }
 
     #[tokio::test]
     async fn test_read_uncompressed_data_block_eof() {
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join("test_uncompressed_eof.bin");
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let temp_file = temp_dir.path().join("test_uncompressed_eof.bin");
 
         // Create empty file
         tokio::fs::write(&temp_file, b"").await.unwrap();
@@ -994,15 +986,12 @@ mod tests {
         let result = read_uncompressed_data_block(&file, &config, false).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
-
-        // Cleanup
-        tokio::fs::remove_file(&temp_file).await.ok();
     }
 
     #[tokio::test]
     async fn test_read_legacy_format_block_header_eof() {
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join("test_legacy_header_eof.bin");
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let temp_file = temp_dir.path().join("test_legacy_header_eof.bin");
 
         // Create file with only 4 bytes (incomplete header)
         tokio::fs::write(&temp_file, &[0x00, 0x00, 0x10, 0x00])
@@ -1016,15 +1005,12 @@ mod tests {
         let result = read_legacy_format_block_header(&file).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
-
-        // Cleanup
-        tokio::fs::remove_file(&temp_file).await.ok();
     }
 
     #[tokio::test]
     async fn test_read_legacy_format_block_header_valid() {
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join("test_legacy_header_valid.bin");
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let temp_file = temp_dir.path().join("test_legacy_header_valid.bin");
 
         // Create valid 8-byte header
         let header = [0x00, 0x00, 0x10, 0x00, 0x12, 0x34, 0x56, 0x78];
@@ -1040,15 +1026,12 @@ mod tests {
         assert_eq!(size, 4096);
         assert_eq!(checksum, 0x12345678);
         assert_eq!(pos, 0);
-
-        // Cleanup
-        tokio::fs::remove_file(&temp_file).await.ok();
     }
 
     #[tokio::test]
     async fn test_read_bti_format_block_header_valid() {
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join("test_bti_header_valid.bin");
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let temp_file = temp_dir.path().join("test_bti_header_valid.bin");
 
         // Create valid 12-byte BTI header
         let header = [
@@ -1068,15 +1051,12 @@ mod tests {
         assert_eq!(size, 2048);
         assert_eq!(checksum, 0xABCDEF12);
         assert_eq!(pos, 0);
-
-        // Cleanup
-        tokio::fs::remove_file(&temp_file).await.ok();
     }
 
     #[tokio::test]
     async fn test_read_large_block_streaming() {
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join("test_large_block.bin");
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let temp_file = temp_dir.path().join("test_large_block.bin");
 
         // Create larger test file (128KB)
         let size = 128 * 1024;
@@ -1098,9 +1078,6 @@ mod tests {
         let data = result.unwrap();
         assert_eq!(data.len(), size);
         assert_eq!(data, test_data);
-
-        // Cleanup
-        tokio::fs::remove_file(&temp_file).await.ok();
     }
 
     /// Issue #592: the transient read scratch buffer must stay capped at
@@ -1175,8 +1152,8 @@ mod tests {
     /// compaction read stays memory-bounded.
     #[tokio::test]
     async fn uncompressed_data_block_streams_large_block_byte_identical() {
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join("issue_592_uncompressed_large.bin");
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let temp_file = temp_dir.path().join("issue_592_uncompressed_large.bin");
 
         // 3.5 piece-caps so several pieces plus a short tail are returned.
         let size = UNCOMPRESSED_READ_PIECE_BYTES * 3 + UNCOMPRESSED_READ_PIECE_BYTES / 2;
@@ -1214,8 +1191,6 @@ mod tests {
             pieces >= 4,
             "expected the section to be split into multiple bounded pieces, got {pieces}"
         );
-
-        tokio::fs::remove_file(&temp_file).await.ok();
     }
 
     /// Issue #827 Finding 2: the CONTIGUOUS `read_uncompressed_data_block`
@@ -1228,8 +1203,10 @@ mod tests {
     /// assertion below.
     #[tokio::test]
     async fn uncompressed_data_block_contiguous_returns_whole_section_in_one_call() {
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join("issue_827_uncompressed_contiguous.bin");
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let temp_file = temp_dir
+            .path()
+            .join("issue_827_uncompressed_contiguous.bin");
 
         // Larger than several piece-caps — a single partition this size would be
         // shredded if the read split it.
@@ -1267,8 +1244,6 @@ mod tests {
             next.is_none(),
             "Finding 2: after a contiguous full-section read the next call must be EOF"
         );
-
-        tokio::fs::remove_file(&temp_file).await.ok();
     }
 
     /// Issue #827 Finding 2 (dispatch-level): `read_next_block` for the
@@ -1281,8 +1256,8 @@ mod tests {
     async fn read_next_block_v5_0_uncompressed_returns_contiguous_section() {
         use crate::parser::header::CassandraVersion;
 
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join("issue_827_v5_uncompressed_block.bin");
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let temp_file = temp_dir.path().join("issue_827_v5_uncompressed_block.bin");
 
         // A >64 KiB "partition" body. We position the reader at offset 0 (the
         // dispatch reads from the current stream position to EOF).
@@ -1339,8 +1314,6 @@ mod tests {
             next.is_none(),
             "Finding 2: second V5_0Uncompressed read is EOF"
         );
-
-        tokio::fs::remove_file(&temp_file).await.ok();
     }
 
     #[tokio::test]

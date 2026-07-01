@@ -856,3 +856,208 @@ async fn truncated_big_index_db_is_not_silently_full_or_empty() {
         "truncated_big_index_db_is_not_silently_full_or_empty: {checked} fixture(s) verified"
     );
 }
+
+// ============================================================================
+// Issue #1309: wide-partition (promoted-index + range-tombstone) offset parity
+// ============================================================================
+//
+// #1309 reported a suspected off-by-3-byte discrepancy between cqlite's
+// Index.db-derived partition offset and sstabledump's `position` for the
+// partition that *follows* a wide (promoted-index) + range-tombstone partition
+// (fixture `test_big.wide_partition`, gen `nb-2-big`).
+//
+// Oracle-driven byte-level investigation (recorded here as a permanent guard):
+//
+//   * Raw Index.db RowIndexEntry decode (independent reparse, BIG `nb` layout
+//     `[key_len u16][key][data_offset vint][promoted_len vint][promoted block]`):
+//       key=1  data_offset = 0        promoted_len = 233
+//       key=2  data_offset = 598601   promoted_len = 233   (vint bytes c9 22 49)
+//       key=3  data_offset = 1217819  promoted_len = 233
+//
+//   * sstabledump JSONL `position`: key=1 -> 0, key=2 -> 598601, key=3 -> 1217819.
+//
+//   * The TRUE uncompressed Data.db layout — recovered by decompressing every
+//     LZ4 chunk via CompressionInfo.db (chunk_len 16384, data_len 1837037,
+//     114 chunks; each on-disk chunk = `[u32 LE size][lz4 block][u32 CRC32]`) —
+//     places the int-keyed partition headers at:
+//       uncompressed 0       => 00 04 | 00 00 00 01  (partition key int 1)
+//       uncompressed 598601  => 00 04 | 00 00 00 02  (partition key int 2)
+//       uncompressed 1217819 => 00 04 | 00 00 00 03  (partition key int 3)
+//     The 3 bytes ending partition 1 are at [598598,598601): `63 32 01`
+//     (cell-value tail "c2" `63 32`, then the 1-byte END_OF_PARTITION marker
+//     `01`). Partition 2's header begins AT 598601 — it is the unique occurrence
+//     of `00 04 00 00 00 02` in the whole decompressed stream, and the
+//     decompressed length equals CompressionInfo.db's declared data_length
+//     (1837037) exactly. (NB: a relayed parallel verdict claimed 598604 with a
+//     vint `c9 22 4c`; that byte sequence does not exist in this fixture — the
+//     on-disk vint is `c9 22 49` and the END_OF_PARTITION boundary sits at 598600,
+//     so partition 2 starts at 598601. The bytes are authoritative here.)
+//
+// CONCLUSION: cqlite's RowIndexEntry decode, the raw Index.db bytes, sstabledump,
+// and the actual decompressed on-disk partition headers ALL agree — the true
+// uncompressed start offset of partition key=2 is exactly 598601. There is NO
+// off-by-3, and NO sstabledump artifact: `Index.db.RowIndexEntry.position` and
+// `sstabledump.position` are by definition the same quantity (the partition's
+// uncompressed Data.db start; Cassandra 5.0 `org.apache.cassandra.io.sstable.format.big.RowIndexEntry`,
+// guide Ch.6 "Index.db" + Appendix B VInt). So the generic section-3c assertion
+// (`big_index_db_entry_byte_and_field_parity`) MUST stay unrestricted for
+// promoted-index partitions — adding a `promoted_total == 0` exclusion would
+// have hidden a real correctness check. This test pins that conclusion: if a
+// future regression reintroduces an off-by-N for the partition following a
+// promoted-index/range-tombstone partition, both halves below fail.
+
+/// Pin the exact, oracle-verified partition offsets for the wide_partition
+/// fixture so any future off-by-N in promoted-index/range-tombstone offset
+/// accounting fails closed. Skips cleanly only when the binary fixture is not
+/// fetched (committed tree carries TOC.txt + JSONL but no Data.db/Index.db).
+#[tokio::test]
+#[cfg(feature = "lz4")]
+async fn issue_1309_wide_partition_following_offset_is_not_off_by_three() {
+    let dir = datasets_sstables_root()
+        .join("test_big")
+        .join("wide_partition-ffe2ee50733111f19e8f6d08b8e7a294");
+    let index_path = dir.join("nb-2-big-Index.db");
+    let data_path = dir.join("nb-2-big-Data.db");
+    let ci_path = dir.join("nb-2-big-CompressionInfo.db");
+    let jsonl_path = dir.join("nb-2-big-Data.db.jsonl");
+
+    // Skip-on-absence: a fresh checkout that has not fetched the dataset would carry
+    // only TOC.txt + JSONL. The reference binaries for THIS fixture are force-committed
+    // (git add -f) so the guard runs without any dataset fetch — but a CQLITE_DATASETS_ROOT
+    // override could still point at a tree lacking them. When datasets are MANDATED
+    // (CQLITE_PARITY_REQUIRE_DATASETS=1) a missing binary is a hard failure, never a skip,
+    // so the required parity gate cannot pass without exercising this guard
+    // (mirrors `big_index_db_entry_byte_and_field_parity`).
+    if !index_path.exists() || !data_path.exists() || !ci_path.exists() {
+        if parity_datasets_required() {
+            panic!(
+                "CQLITE_PARITY_REQUIRE_DATASETS=1 but no wide_partition binaries were present \
+                 at {} (Index.db/Data.db/CompressionInfo.db) — required parity gate must not \
+                 skip when datasets are mandated",
+                dir.display()
+            );
+        }
+        eprintln!(
+            "issue_1309_wide_partition_following_offset_is_not_off_by_three: SKIP — \
+             wide_partition binaries not fetched"
+        );
+        return;
+    }
+
+    // Oracle-verified absolute uncompressed offsets (see module-level evidence).
+    const KEY1_OFF: u64 = 0;
+    const KEY2_OFF: u64 = 598_601;
+    const KEY3_OFF: u64 = 1_217_819;
+
+    // --- (1) cqlite's production IndexReader must report these exact offsets. ---
+    let reader = open_reader(&index_path)
+        .await
+        .expect("IndexReader::open(wide_partition Index.db)");
+    let entries = reader.get_partition_entries();
+    assert_eq!(entries.len(), 3, "wide_partition has 3 partitions");
+    assert_eq!(
+        entries[0].data_offset, KEY1_OFF,
+        "key=1 Index.db data_offset"
+    );
+    assert_eq!(
+        entries[1].data_offset, KEY2_OFF,
+        "key=2 Index.db data_offset (the partition FOLLOWING the promoted-index + \
+         range-tombstone partition) — must be 598601, not 598604 (off-by-3 #1309)"
+    );
+    assert_eq!(
+        entries[2].data_offset, KEY3_OFF,
+        "key=3 Index.db data_offset"
+    );
+
+    // Every partition carries a promoted index here — the off-by-3 was alleged
+    // precisely for the entry following a promoted block, so prove the promoted
+    // metadata is present (the class section-3c must NOT exclude).
+    let raw_entries = reparse_big_index(&std::fs::read(&index_path).expect("read Index.db"))
+        .expect("reparse Index.db");
+    assert!(
+        raw_entries.iter().all(|e| e.promoted_len > 0),
+        "wide_partition fixture must exercise promoted-index entries"
+    );
+
+    // sstabledump JSONL `position` must equal those same offsets.
+    let parts = parse_jsonl(&jsonl_path).expect("parse JSONL");
+    assert_eq!(parts.len(), 3);
+    assert_eq!(parts[1].position, KEY2_OFF, "sstabledump position(key=2)");
+
+    // --- (2) Independently confirm the TRUE uncompressed offset of key=2 by
+    //         decompressing the LZ4-compressed Data.db and reading the partition
+    //         header bytes at 598601 — they must be the int-2 partition key. ---
+    let ci = std::fs::read(&ci_path).expect("read CompressionInfo.db");
+    let data = std::fs::read(&data_path).expect("read Data.db");
+    let out = decompress_big_lz4_data(&ci, &data);
+    // BIG partition header begins with [key_len: u16 BE][raw key bytes].
+    let header = |off: u64| -> [u8; 6] {
+        let o = off as usize;
+        out[o..o + 6].try_into().expect("6-byte partition header")
+    };
+    assert_eq!(
+        header(KEY1_OFF),
+        [0x00, 0x04, 0x00, 0x00, 0x00, 0x01],
+        "uncompressed offset 0 must be partition key int 1"
+    );
+    assert_eq!(
+        header(KEY2_OFF),
+        [0x00, 0x04, 0x00, 0x00, 0x00, 0x02],
+        "TRUE uncompressed offset 598601 must be partition key int 2 — confirms \
+         Index.db/sstabledump are authoritative (no off-by-3)"
+    );
+    assert_eq!(
+        header(KEY3_OFF),
+        [0x00, 0x04, 0x00, 0x00, 0x00, 0x03],
+        "uncompressed offset 1217819 must be partition key int 3"
+    );
+}
+
+/// Fully decompress a BIG-format LZ4 Data.db using its CompressionInfo.db sidecar.
+/// CompressionInfo.db layout (Cassandra 5.0 `CompressionMetadata.Writer`): `[name_len
+/// u16][name][options_count i32][k/v pairs][chunk_length i32][max_compressed_length
+/// i32][data_length i64][chunk_count i32][chunk offsets: i64 * chunk_count]`. Each
+/// on-disk chunk is `[u32 LE uncompressed size][lz4 block][u32 BE CRC32]`.
+#[cfg(feature = "lz4")]
+fn decompress_big_lz4_data(ci: &[u8], data: &[u8]) -> Vec<u8> {
+    let rd_u16 = |b: &[u8], i: usize| u16::from_be_bytes([b[i], b[i + 1]]);
+    let rd_i32 = |b: &[u8], i: usize| i32::from_be_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+    let rd_i64 =
+        |b: &[u8], i: usize| i64::from_be_bytes(b[i..i + 8].try_into().expect("8-byte i64"));
+
+    let mut i = 0usize;
+    let nlen = rd_u16(ci, i) as usize;
+    i += 2 + nlen;
+    let opt_count = rd_i32(ci, i);
+    i += 4;
+    assert_eq!(opt_count, 0, "fixture has no compression options");
+    let _chunk_length = rd_i32(ci, i);
+    i += 4;
+    i += 4; // max_compressed_length sentinel (0x7fffffff)
+    let data_length = rd_i64(ci, i) as usize;
+    i += 8;
+    let chunk_count = rd_i32(ci, i) as usize;
+    i += 4;
+
+    let mut offsets = Vec::with_capacity(chunk_count + 1);
+    for j in 0..chunk_count {
+        offsets.push(rd_i64(ci, i + 8 * j) as usize);
+    }
+    offsets.push(data.len());
+
+    let mut out = Vec::with_capacity(data_length);
+    for j in 0..chunk_count {
+        let start = offsets[j];
+        let end = offsets[j + 1];
+        // Drop the trailing 4-byte CRC32 checksum; body is [u32 LE size][lz4 block].
+        let body = &data[start..end - 4];
+        let dec = lz4_flex::decompress_size_prepended(body).expect("LZ4 chunk decompress");
+        out.extend_from_slice(&dec);
+    }
+    assert_eq!(
+        out.len(),
+        data_length,
+        "decompressed length matches metadata"
+    );
+    out
+}

@@ -14,17 +14,25 @@ use std::path::Path;
 pub(crate) fn extract_generation_from_path(path: &Path) -> u64 {
     let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
-    // Common Cassandra SSTable filename patterns:
+    // Common Cassandra SSTable filename patterns (na+ floor, #1249):
     // nb-1-big-Data.db -> generation 1
-    // mc-1-big-Data.db -> generation 1
-    // la-123-big-Data.db -> generation 123
+    // oa-123-big-Data.db -> generation 123
+    // da-2-bti-Data.db -> generation 2
     // keyspace-table-nb-456-big-Data.db -> generation 456
+    //
+    // Only the na+ supported version letters are recognized here. Pre-`na`
+    // (`mc`) and 2.x (`la`) prefixes are NOT modeled — a below-floor SSTable is
+    // rejected with `UnsupportedVersion` at `SSTableReader::open` long before
+    // generation extraction runs, so this helper never legitimately sees them.
+
+    /// na+ BIG/BTI version letters this read-path helper recognizes (#1249).
+    const SUPPORTED_VERSION_PREFIXES: [&str; 4] = ["na", "nb", "oa", "da"];
 
     // Try to find generation number in different patterns
     let parts: Vec<&str> = filename.split('-').collect();
 
-    // Pattern 1: nb-{generation}-big-Data.db
-    if parts.len() >= 3 && (parts[0] == "nb" || parts[0] == "mc" || parts[0] == "la") {
+    // Pattern 1: {version}-{generation}-big-Data.db
+    if parts.len() >= 3 && SUPPORTED_VERSION_PREFIXES.contains(&parts[0]) {
         if let Ok(generation) = parts[1].parse::<u64>() {
             debug!(
                 "Extracted generation {} from pattern 1: {}",
@@ -34,10 +42,10 @@ pub(crate) fn extract_generation_from_path(path: &Path) -> u64 {
         }
     }
 
-    // Pattern 2: keyspace-table-nb-{generation}-big-Data.db
+    // Pattern 2: keyspace-table-{version}-{generation}-big-Data.db
     if parts.len() >= 5 {
         for i in 0..parts.len() - 2 {
-            if (parts[i] == "nb" || parts[i] == "mc" || parts[i] == "la") && i + 1 < parts.len() {
+            if SUPPORTED_VERSION_PREFIXES.contains(&parts[i]) && i + 1 < parts.len() {
                 if let Ok(generation) = parts[i + 1].parse::<u64>() {
                     log::debug!(
                         "Extracted generation {} from pattern 2: {}",

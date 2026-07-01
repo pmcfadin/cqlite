@@ -53,36 +53,121 @@ use tempfile::TempDir;
 /// `--entrypoint`.
 const SSTABLEDUMP: &str = "/opt/cassandra/tools/bin/sstabledump";
 
-/// Pick a usable `cassandra:5.0*` image, or `None` if Docker is unavailable or no
-/// 5.0 image is present. Mirrors the honest gating of the other Cassandra e2e
-/// paths: a missing daemon/image is a SKIP, never a failure.
-fn cassandra_5_image() -> Option<String> {
+/// `true` when `CQLITE_REQUIRE_FIXTURES` is set to a truthy value ("1"/"true").
+/// In strict mode (the `nightly_docker` parity lane, issue #1025) the live BTI
+/// `sstabledump` checks are a HARD leg: a run that would otherwise SKIP because
+/// Docker / the pinned `cassandra:5.0` image is unavailable must PANIC instead,
+/// so the HARD leg can never vacuously pass without actually exercising the real
+/// Cassandra 5 reader (issue #28 no-heuristics / #1024 fail-closed mandate).
+/// Mirrors the `CQLITE_REQUIRE_FIXTURES` convention used by the Bloom leg.
+fn require_live_strict() -> bool {
+    matches!(
+        std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
+/// Single source of truth for the Cassandra image the BTI leg validates against.
+/// The `nightly_docker` workflow sets `CASSANDRA_IMAGE` (and pulls exactly that
+/// tag) so the hard BTI leg can never validate against a DIFFERENT image than the
+/// stated pin. Defaults to the corpus pin `cassandra:5.0.2` when unset (matching
+/// docker-compose-cassandra5.yml / the committed corpus — NOT a second pin).
+fn pinned_cassandra_image() -> String {
+    std::env::var("CASSANDRA_IMAGE")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "cassandra:5.0.2".to_string())
+}
+
+/// Return `true` if the exact image tag is present locally.
+fn image_present_locally(listing: &str, image: &str) -> bool {
+    listing.lines().any(|line| line.trim() == image)
+}
+
+/// Resolve a usable Cassandra 5 image, returning the image tag and the reason it
+/// is unavailable when it is not. `None` (an `Err`) means a clean local SKIP
+/// outside strict mode.
+///
+/// In strict mode (`CQLITE_REQUIRE_FIXTURES=1`, the `nightly_docker` HARD leg) we
+/// REQUIRE the EXACT pinned image (`CASSANDRA_IMAGE`, default `cassandra:5.0.2`):
+/// we do NOT fall back to a looser `cassandra:5.0` (or any other `5.0.*`) tag, so
+/// the hard leg validates against the stated pin and never a different image that
+/// merely happens to be on the runner. Outside strict mode we keep the lenient
+/// local-tag discovery (exact pin, then `cassandra:5.0`, then any `cassandra:5.0.*`)
+/// for dev convenience.
+fn try_cassandra_5_image() -> Result<String, String> {
+    let pinned = pinned_cassandra_image();
     // 1. Docker daemon reachable?
-    let info = Command::new("docker").arg("info").output().ok()?;
-    if !info.status.success() {
-        return None;
+    let info = Command::new("docker").arg("info").output();
+    match info {
+        Ok(out) if out.status.success() => {}
+        Ok(_) => return Err("docker daemon not reachable (`docker info` failed)".to_string()),
+        Err(_) => return Err("docker binary not available".to_string()),
     }
-    // 2. A cassandra:5.0* image present locally? (We do not pull — CI provisions it.)
+    // 2. List images present locally. (We do not pull — CI provisions the pin.)
     let images = Command::new("docker")
         .args(["images", "--format", "{{.Repository}}:{{.Tag}}"])
-        .output()
-        .ok()?;
-    if !images.status.success() {
-        return None;
-    }
+        .output();
+    let images = match images {
+        Ok(out) if out.status.success() => out,
+        _ => return Err("`docker images` failed".to_string()),
+    };
     let listing = String::from_utf8_lossy(&images.stdout);
-    // Prefer an exact "cassandra:5.0", else any "cassandra:5.0.*".
+
+    // STRICT: the exact pinned image MUST be present. No looser fallback — the
+    // hard leg must validate against the stated pin, not a different local tag.
+    if require_live_strict() {
+        if image_present_locally(&listing, &pinned) {
+            return Ok(pinned);
+        }
+        return Err(format!(
+            "strict mode requires the EXACT pinned image '{pinned}' (CASSANDRA_IMAGE) but it is \
+             not present locally; the lane must pull '{pinned}' before this leg (no fallback to a \
+             looser cassandra:5.0 tag)"
+        ));
+    }
+
+    // Non-strict (dev convenience): prefer the exact pin, then "cassandra:5.0",
+    // then any "cassandra:5.0.*".
+    if image_present_locally(&listing, &pinned) {
+        return Ok(pinned);
+    }
     let mut candidate: Option<String> = None;
     for line in listing.lines() {
         let line = line.trim();
         if line == "cassandra:5.0" {
-            return Some(line.to_string());
+            return Ok(line.to_string());
         }
         if line.starts_with("cassandra:5.0.") && candidate.is_none() {
             candidate = Some(line.to_string());
         }
     }
-    candidate
+    candidate.ok_or_else(|| {
+        format!("no usable Cassandra 5 image present locally (looked for '{pinned}', cassandra:5.0, cassandra:5.0.*)")
+    })
+}
+
+/// Pick a usable `cassandra:5.0*` image, or `None` if Docker is unavailable or no
+/// 5.0 image is present. Mirrors the honest gating of the other Cassandra e2e
+/// paths: a missing daemon/image is a SKIP, never a failure — EXCEPT under
+/// strict mode (`CQLITE_REQUIRE_FIXTURES=1`, the `nightly_docker` HARD leg, issue
+/// #1025), where an unavailable Cassandra is a FAIL (panic) so the HARD leg can
+/// never pass without actually running the live `sstabledump` check.
+fn cassandra_5_image() -> Option<String> {
+    match try_cassandra_5_image() {
+        Ok(image) => Some(image),
+        Err(reason) => {
+            if require_live_strict() {
+                panic!(
+                    "CQLITE_REQUIRE_FIXTURES=1 (strict nightly_docker BTI leg) but the live \
+                     Cassandra 5 sstabledump check cannot run: {reason}. The BTI HARD leg must \
+                     not vacuously pass — the workflow must provision Docker + the pinned \
+                     cassandra:5.0.2 image before this leg (issue #1025 fail-closed mandate)."
+                );
+            }
+            None
+        }
+    }
 }
 
 /// Run `sstabledump <data>` inside the image with the SSTable directory mounted

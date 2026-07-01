@@ -37,6 +37,7 @@ use tracing::Instrument;
 use crate::filter::{FilterError, ScanSpec};
 use crate::obs::{rpc_span, RpcMetrics};
 use crate::producer::{DirSource, MergeProducer, ProducerError};
+use crate::stats::{gather_table_stats, StatsError, TableStatsRequest, TABLE_STATS_ACTION};
 use crate::ticket::{FlightTicket, TicketError};
 
 /// Boxed server response stream alias.
@@ -77,6 +78,24 @@ impl From<ProducerError> for Status {
 impl From<FilterError> for Status {
     fn from(e: FilterError) -> Self {
         Status::invalid_argument(e.to_string())
+    }
+}
+
+/// Map a `table_stats` gather failure (issue #944) to a gRPC status: a bad
+/// request body is a client error; a missing table directory is `not_found`; a
+/// platform-init failure is internal.
+impl From<StatsError> for Status {
+    fn from(e: StatsError) -> Self {
+        let msg = e.to_string();
+        match e {
+            StatsError::Decode(_) => Status::invalid_argument(msg),
+            StatsError::Discovery { source, .. }
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Status::not_found(msg)
+            }
+            StatsError::Discovery { .. } => Status::internal(msg),
+        }
     }
 }
 
@@ -264,12 +283,12 @@ impl FlightService for CqliteFlightService {
     ) -> Result<Response<Self::DoActionStream>, Status> {
         let span = rpc_span("do_action", &request);
         let mut metrics = RpcMetrics::start("do_action");
-        span.in_scope(|| {
-            finish(
-                &mut metrics,
-                Err(Status::unimplemented("do_action is not supported")),
-            )
-        })
+        async {
+            let result = self.do_action_inner(request).await;
+            finish(&mut metrics, result)
+        }
+        .instrument(span)
+        .await
     }
 
     async fn list_actions(
@@ -279,10 +298,16 @@ impl FlightService for CqliteFlightService {
         let span = rpc_span("list_actions", &request);
         let mut metrics = RpcMetrics::start("list_actions");
         span.in_scope(|| {
-            finish(
-                &mut metrics,
-                Err(Status::unimplemented("list_actions is not supported")),
-            )
+            // Advertise the one action this server supports (issue #944).
+            let action = ActionType {
+                r#type: TABLE_STATS_ACTION.to_string(),
+                description: "Per-table aggregate statistics (Σ live_rows, Σ partition_count, \
+                              SSTable count) for aggregation-pushdown planning."
+                    .to_string(),
+            };
+            let stream: BoxStream<ActionType> =
+                Box::pin(futures::stream::once(async move { Ok(action) }));
+            finish(&mut metrics, Ok(Response::new(stream)))
         })
     }
 }
@@ -378,6 +403,54 @@ impl CqliteFlightService {
             .map(|res| res.map_err(|e| Status::internal(e.to_string())));
 
         Ok(Response::new(Box::pin(encoded)))
+    }
+
+    /// Body of [`FlightService::do_action`], run inside the RPC span (issue #944).
+    ///
+    /// The only supported action is [`TABLE_STATS_ACTION`]: its body is a
+    /// [`TableStatsRequest`] JSON, and the single emitted result is a
+    /// [`TableStatsResponse`] JSON carrying the AUTHORITATIVE per-table sums
+    /// (Σ live_rows, Σ partition_count, SSTable count) the Java connector uses to
+    /// drive its AUTOMATIC aggregation-pushdown gate. Any other action type is
+    /// `unimplemented`.
+    async fn do_action_inner(
+        &self,
+        request: Request<Action>,
+    ) -> Result<Response<<Self as FlightService>::DoActionStream>, Status> {
+        let action = request.into_inner();
+        if action.r#type != TABLE_STATS_ACTION {
+            return Err(Status::unimplemented(format!(
+                "unsupported action type: {}",
+                action.r#type
+            )));
+        }
+
+        let req = TableStatsRequest::from_bytes(&action.body)
+            .map_err(|e| Status::invalid_argument(format!("invalid table_stats request: {e}")))?;
+        let dir = DirSource::resolve(
+            &self.data_dir,
+            &req.keyspace,
+            &req.table,
+            req.snapshot.as_deref(),
+        )
+        .into_dir();
+
+        // `gather_table_stats` is synchronous blocking fs I/O (read_dir + read of
+        // every Statistics.db). Run it off the async runtime so a table with many
+        // SSTables / slow storage cannot stall unrelated Flight RPCs — mirroring the
+        // `do_get` merge offload above. Outer `?` maps a task panic; inner `?` keeps
+        // the `StatsError` -> `Status` mapping (`From<StatsError> for Status`).
+        let stats = tokio::task::spawn_blocking(move || gather_table_stats(&dir))
+            .await
+            .map_err(|e| Status::internal(format!("table_stats task panicked: {e}")))??;
+        let body = stats
+            .to_bytes()
+            .map_err(|e| Status::internal(format!("encode table_stats response: {e}")))?;
+
+        let result = arrow_flight::Result { body: body.into() };
+        let stream: BoxStream<arrow_flight::Result> =
+            Box::pin(futures::stream::once(async move { Ok(result) }));
+        Ok(Response::new(stream))
     }
 }
 
@@ -563,6 +636,95 @@ mod tests {
             .await
             .expect_err("unknown predicate column must error");
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn do_action_table_stats_returns_one_result_per_table() {
+        use crate::stats::{TableStatsRequest, TableStatsResponse, TABLE_STATS_ACTION};
+        let schema = simple_schema();
+        // Two write-engine SSTables. Their StatisticsWriter emits empty estimated
+        // histograms, so the authoritative counts assertion lives in the
+        // dataset-backed stats unit test; here we assert the action plumbing:
+        // one Result, decodable, with the SSTable count.
+        let (_temp, data_dir, _dir) = build_sstables(
+            &schema,
+            vec![
+                vec![write_row(1, "a", 1, 100), write_row(2, "b", 2, 100)],
+                vec![write_row(1, "a2", 3, 200), write_row(3, "c", 4, 200)],
+            ],
+        );
+        let svc = CqliteFlightService::new(data_dir, 1024);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let resp = rt.block_on(async {
+            let req = TableStatsRequest {
+                keyspace: KS.into(),
+                table: TBL.into(),
+                snapshot: None,
+            };
+            let action = Action {
+                r#type: TABLE_STATS_ACTION.into(),
+                body: req.to_bytes().unwrap().into(),
+            };
+            let mut stream = svc
+                .do_action(Request::new(action))
+                .await
+                .expect("do_action")
+                .into_inner();
+            let first = stream.next().await.expect("one result").expect("ok");
+            assert!(stream.next().await.is_none(), "exactly one Result");
+            TableStatsResponse::from_bytes(&first.body).expect("decode")
+        });
+
+        assert_eq!(resp.sstable_count, 2);
+    }
+
+    #[tokio::test]
+    async fn do_action_unknown_type_is_unimplemented() {
+        let svc = CqliteFlightService::new(std::env::temp_dir(), 1024);
+        let action = Action {
+            r#type: "not_a_real_action".into(),
+            body: Vec::new().into(),
+        };
+        let err = match svc.do_action(Request::new(action)).await {
+            Ok(_) => panic!("unknown action must error"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code(), tonic::Code::Unimplemented);
+    }
+
+    #[tokio::test]
+    async fn do_action_table_stats_missing_table_is_not_found() {
+        use crate::stats::{TableStatsRequest, TABLE_STATS_ACTION};
+        let svc = CqliteFlightService::new(std::env::temp_dir(), 1024);
+        let req = TableStatsRequest {
+            keyspace: "no_such_ks".into(),
+            table: "no_such_table".into(),
+            snapshot: None,
+        };
+        let action = Action {
+            r#type: TABLE_STATS_ACTION.into(),
+            body: req.to_bytes().unwrap().into(),
+        };
+        let err = match svc.do_action(Request::new(action)).await {
+            Ok(_) => panic!("missing table must error"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code(), tonic::Code::NotFound, "got: {err:?}");
+    }
+
+    #[tokio::test]
+    async fn list_actions_advertises_table_stats() {
+        use crate::stats::TABLE_STATS_ACTION;
+        let svc = CqliteFlightService::new(std::env::temp_dir(), 1024);
+        let mut stream = svc
+            .list_actions(Request::new(Empty {}))
+            .await
+            .expect("list_actions")
+            .into_inner();
+        let action = stream.next().await.expect("one action").expect("ok");
+        assert_eq!(action.r#type, TABLE_STATS_ACTION);
+        assert!(stream.next().await.is_none(), "only one action advertised");
     }
 
     #[test]

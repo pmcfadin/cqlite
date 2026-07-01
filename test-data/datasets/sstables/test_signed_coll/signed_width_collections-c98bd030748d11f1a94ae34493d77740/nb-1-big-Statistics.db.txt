@@ -1,0 +1,65 @@
+SSTable: /data/test_signed_coll/signed_width_collections-c98bd030748d11f1a94ae34493d77740/nb-1-big
+Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
+Bloom Filter FP chance: 0.01
+Minimum timestamp: 06/30/2026 14:12:55 (1782828775900643)
+Maximum timestamp: 06/30/2026 14:12:55 (1782828775900644)
+Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
+SSTable min local deletion time: 06/30/2026 14:12:55 (1782828775)
+SSTable max local deletion time: no tombstones (9223372036854775807)
+Compressor: -
+TTL min: 0
+TTL max: 0
+First token: -4069959284402364209 (1)
+Last token: -4069959284402364209 (1)
+Covered clusterings: ALL
+Estimated droppable tombstones: 0.17647058823529413
+SSTable Level: 0
+Repaired at: 0
+Originating host id: 93bec73c-31bf-4724-966e-3b40d93c1283
+Pending repair: --
+Replay positions covered: {CommitLogPosition(segmentId=1782828716947, position=66149)=CommitLogPosition(segmentId=1782828716947, position=71195)}
+totalColumnsSet: 3
+totalRows: 1
+Estimated tombstone drop times: 
+   Drop Time                        | Count  (%)  Histogram 
+   1782828780 (06/30/2026 14:13:00) |     3 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      1996099046 (04/02/2033 23:57:26)
+   75th      1996099046 (04/02/2033 23:57:26)
+   95th      1996099046 (04/02/2033 23:57:26)
+   98th      1996099046 (04/02/2033 23:57:26)
+   99th      1996099046 (04/02/2033 23:57:26)
+   Min       1663415873 (09/17/2022 11:57:53)
+   Max       1996099046 (04/02/2033 23:57:26)
+Partition Size: 
+   Size (bytes) | Count  (%)  Histogram 
+   124 (124 B)  |     1 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      124 (124 B)
+   75th      124 (124 B)
+   95th      124 (124 B)
+   98th      124 (124 B)
+   99th      124 (124 B)
+   Min       104 (104 B)
+   Max       124 (124 B)
+Column Count: 
+   Columns | Count  (%)  Histogram 
+   17      |     1 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      17
+   75th      17
+   95th      17
+   98th      17
+   99th      17
+   Min       15
+   Max       17
+Local token space coverage: NaN
+Estimated cardinality: 1
+EncodingStats minTTL: 0
+EncodingStats minLocalDeletionTime: 06/30/2026 14:12:55 (1782828775)
+EncodingStats minTimestamp: 06/30/2026 14:12:55 (1782828775900643)
+KeyType: org.apache.cassandra.db.marshal.Int32Type
+ClusteringTypes: []
+StaticColumns: 
+RegularColumns: ss:org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.ShortType), st:org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.ByteType), sb:org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.LongType)
+IsTransient: false

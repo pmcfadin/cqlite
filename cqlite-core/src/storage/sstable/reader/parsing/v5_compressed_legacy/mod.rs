@@ -96,6 +96,151 @@ type ParsedRow = (
 /// Each element is `(table_id, row_key, value_map, cell_metadata_map)`.
 type ParsedBlockWithMeta = Vec<(TableId, RowKey, Value, HashMap<String, CellWriteMetadata>)>;
 
+/// One on-disk column to decode, in serialization-header order.
+///
+/// `schema` is the resolved supplied-schema `Column` (drives column identity /
+/// emit name) or `None` for a DROPPED / evolved-away column present on disk but
+/// absent from the supplied schema — its bytes are still consumed to keep the
+/// trailing columns byte-aligned (issue #1080 Part 2), but no cell is emitted.
+///
+/// `header_type` is the AUTHORITATIVE on-disk SerializationHeader marshal type
+/// (`ColumnInfo.column_type`), the no-heuristics source of truth (issue #28) used
+/// to decide complex-ness and to decode complex values. It is `None` only on the
+/// header-empty fallback path (synthetic SSTables) where the supplied schema type
+/// is all we have.
+///
+/// Both fields borrow: `schema` from the per-call `TableSchema`, `header_type`
+/// from `reader.header`. The owning [`RowColumnResolution`] therefore borrows
+/// from both for `'a`.
+pub(super) struct ColumnToParse<'a> {
+    pub(super) schema: Option<&'a crate::schema::Column>,
+    pub(super) header_type: Option<&'a str>,
+}
+
+/// Pre-resolved header→schema column ordering for a whole SSTable block.
+///
+/// Issue #1046 (the true hoist): the header→schema-column resolution is CONSTANT
+/// for every row in an SSTable — the serialization header is fixed and the
+/// supplied schema does not change between rows. Building it once per block and
+/// reusing it across every partition/row means the per-row decode performs ZERO
+/// schema-lookup allocations (no per-row `HashMap`, no per-row `String` clone, no
+/// per-row `Vec` of columns). The expensive `O(header_cols × schema_cols)` name
+/// resolution + the `Vec` allocations happen ONCE per block, not once per row.
+///
+/// Two orderings are precomputed because the on-disk column group differs by row
+/// kind (Cassandra's `missing_columns_bitmap` covers only the static columns for
+/// a static row and only the regular columns for a regular row — issue #702):
+///   - `regular`: header columns with `is_static == false`
+///   - `static_`: header columns with `is_static == true`
+///
+/// The per-row missing-columns bitmap filter is applied by iterating the chosen
+/// slice and skipping bitmapped-out indices INLINE (no per-row `Vec`), so the
+/// row body still allocates nothing for column resolution.
+///
+/// Lifetime: borrows the header-type strings from `reader.header` and the
+/// `Column`s from the supplied `schema`; both outlive the block's row loops
+/// (resolution is built at the top of each `parse_block_emit*` / per-partition
+/// driver, where `reader` and `schema` are in scope). This is a per-BLOCK hoist —
+/// allocations scale with block count, not row count.
+pub(super) struct RowColumnResolution<'a> {
+    /// On-disk regular (non-static) columns in serialization-header order.
+    regular: Vec<ColumnToParse<'a>>,
+    /// On-disk static columns in serialization-header order.
+    static_: Vec<ColumnToParse<'a>>,
+}
+
+impl<'a> RowColumnResolution<'a> {
+    /// Build the resolution ONCE for a block from the on-disk serialization
+    /// header (`reader.header`) and the supplied `schema`.
+    ///
+    /// Resolution is an exact column-name match, keep-FIRST on a duplicate name
+    /// (Cassandra schemas cannot have duplicate column names, so this is purely
+    /// defensive and matches the prior per-row `HashMap`/`iter().find()`
+    /// semantics). On the header-empty fallback path (synthetic SSTables) the
+    /// supplied schema order is used directly, every column schema-present by
+    /// construction.
+    pub(super) fn build(
+        schema: &'a TableSchema,
+        reader: &'a crate::storage::sstable::reader::types::SSTableReader,
+    ) -> Self {
+        if !reader.header.columns.is_empty() {
+            // O(header_cols × schema_cols) name resolution, but ONCE per block via
+            // a borrowed-key map (keys are `&str` slices into `schema.columns[].name`,
+            // no `String` clones; values are `&Column`). Both borrow for `'a`.
+            let mut resolve_lookup: HashMap<&'a str, &'a crate::schema::Column> =
+                HashMap::with_capacity(schema.columns.len());
+            for col in &schema.columns {
+                resolve_lookup.entry(col.name.as_str()).or_insert(col);
+            }
+
+            let build_for = |want_static: bool| -> Vec<ColumnToParse<'a>> {
+                reader
+                    .header
+                    .columns
+                    .iter()
+                    .filter(|col_info| {
+                        !col_info.is_primary_key
+                            && !col_info.is_clustering
+                            && col_info.is_static == want_static
+                    })
+                    .map(|col_info| ColumnToParse {
+                        schema: resolve_lookup.get(col_info.name.as_str()).copied(),
+                        header_type: Some(col_info.column_type.as_str()),
+                    })
+                    .collect()
+            };
+
+            RowColumnResolution {
+                regular: build_for(false),
+                static_: build_for(true),
+            }
+        } else {
+            // Fallback to schema order when header is empty (shouldn't happen for
+            // real SSTables). Filter out partition/clustering keys (regular columns
+            // only carry cell data) and split by row kind.
+            log::warn!("V5CompressedLegacy: reader.header.columns is empty, falling back to schema order (may cause column misalignment)");
+            let partition_key_names: std::collections::HashSet<&str> = schema
+                .partition_keys
+                .iter()
+                .map(|k| k.name.as_str())
+                .collect();
+            let clustering_key_names: std::collections::HashSet<&str> = schema
+                .clustering_keys
+                .iter()
+                .map(|k| k.name.as_str())
+                .collect();
+            let build_for = |want_static: bool| -> Vec<ColumnToParse<'a>> {
+                schema
+                    .columns
+                    .iter()
+                    .filter(|col| {
+                        !partition_key_names.contains(col.name.as_str())
+                            && !clustering_key_names.contains(col.name.as_str())
+                            && col.is_static == want_static
+                    })
+                    .map(|col| ColumnToParse {
+                        schema: Some(col),
+                        header_type: None,
+                    })
+                    .collect()
+            };
+            RowColumnResolution {
+                regular: build_for(false),
+                static_: build_for(true),
+            }
+        }
+    }
+
+    /// The pre-resolved on-disk column ordering for a row of the given kind.
+    pub(super) fn columns_for(&self, is_static: bool) -> &[ColumnToParse<'a>] {
+        if is_static {
+            &self.static_
+        } else {
+            &self.regular
+        }
+    }
+}
+
 /// Per-column complex-element capture for the compaction read path (epic #899).
 ///
 /// Maps a complex (non-frozen collection / UDT) column name to its optional

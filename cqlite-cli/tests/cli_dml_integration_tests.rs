@@ -396,3 +396,154 @@ fn test_cli_execute_insert_then_flush() {
         "Should print OK for INSERT. stdout: {stdout}"
     );
 }
+
+/// Issue #1253: a SINGLE combined `--execute INSERT ... --flush` invocation must
+/// persist the inserted row's VALUE into the produced SSTable. Previously the
+/// `--flush` handler ran before `--execute`, flushing an empty memtable; the row
+/// only landed in the WAL, never in Data.db. This is a content assertion: it
+/// reopens the produced SSTable read-only and reads the row back.
+#[test]
+fn test_cli_execute_insert_and_flush_single_invocation_persists_value() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema_path = create_simple_schema(&temp_dir);
+    let write_dir = temp_dir.path().join("write_data");
+
+    // Single invocation: INSERT + flush together.
+    let output = run_write_cli(&[
+        "--writable",
+        "--write-dir",
+        write_dir.to_str().unwrap(),
+        "--schema",
+        schema_path.to_str().unwrap(),
+        "--execute",
+        "INSERT INTO test_write.users (id, name, age) VALUES (7, 'Grace', 42)",
+        "--flush",
+    ]);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "Combined INSERT + flush should succeed. stderr: {stderr}"
+    );
+
+    // The flush must produce a real Data.db (not an empty-memtable no-op).
+    let data_db = write_dir.join("data/test_write/users/nb-1-big-Data.db");
+    assert!(
+        data_db.exists(),
+        "Combined INSERT + flush must produce Data.db. stdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // Reopen the produced SSTable READ-ONLY and assert the inserted VALUE is present.
+    let read_output = run_write_cli(&[
+        "--schema",
+        schema_path.to_str().unwrap(),
+        "--data-dir",
+        write_dir.join("data").to_str().unwrap(),
+        "--execute",
+        "SELECT * FROM test_write.users",
+        "--out",
+        "json",
+    ]);
+    let read_stdout = String::from_utf8_lossy(&read_output.stdout);
+    let read_stderr = String::from_utf8_lossy(&read_output.stderr);
+    assert!(
+        read_output.status.success(),
+        "Read-back SELECT should succeed. stderr: {read_stderr}"
+    );
+    assert!(
+        read_stdout.contains("\"Grace\"") && read_stdout.contains("42"),
+        "Inserted row value must be persisted in the SSTable and readable back. \
+         Got read stdout: {read_stdout}\nread stderr: {read_stderr}"
+    );
+}
+
+/// Issue #1253 (roborev follow-up): the standalone `--flush` must run even when
+/// the same invocation carries a DML `--execute`, IF `--file` is also present.
+///
+/// `--file` is handled BEFORE `--execute` and returns early, so the `--execute`
+/// DML branch (which performs the deferred flush) never runs. If we still defer
+/// the flush in that case, the flush is silently dropped. This test seeds the
+/// memtable via a prior `--execute INSERT` (WAL only), then runs a combined
+/// `--flush --file <noop> --execute "INSERT ..."` invocation and asserts the
+/// PRIOR row is persisted to the SSTable — proving the standalone `--flush` ran.
+#[test]
+fn test_cli_flush_runs_when_file_short_circuits_execute() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema_path = create_simple_schema(&temp_dir);
+    let write_dir = temp_dir.path().join("write_data");
+
+    // Step 1: seed the WAL/memtable with a row (no flush — WAL only).
+    let seed = run_write_cli(&[
+        "--writable",
+        "--write-dir",
+        write_dir.to_str().unwrap(),
+        "--schema",
+        schema_path.to_str().unwrap(),
+        "--execute",
+        "INSERT INTO test_write.users (id, name, age) VALUES (9, 'Heidi', 55)",
+    ]);
+    assert!(
+        seed.status.success(),
+        "Seed INSERT should succeed. stderr: {}",
+        String::from_utf8_lossy(&seed.stderr)
+    );
+
+    // A no-op script file (comment only → zero statements).
+    let script_path = temp_dir.path().join("noop.cql");
+    std::fs::write(&script_path, "-- no-op script\n").expect("write script file");
+
+    // Step 2: combined `--flush --file <noop> --execute INSERT`. `--file` takes
+    // precedence and returns early; the `--execute` DML branch never runs. The
+    // standalone `--flush` MUST still run and persist the seeded row.
+    let output = run_write_cli(&[
+        "--writable",
+        "--write-dir",
+        write_dir.to_str().unwrap(),
+        "--schema",
+        schema_path.to_str().unwrap(),
+        "--flush",
+        "--file",
+        script_path.to_str().unwrap(),
+        "--execute",
+        "INSERT INTO test_write.users (id, name, age) VALUES (10, 'Ivan', 66)",
+    ]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "Combined --flush --file --execute should succeed. \
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // The flush must have produced a real Data.db for the seeded row.
+    let data_db = write_dir.join("data/test_write/users/nb-1-big-Data.db");
+    assert!(
+        data_db.exists(),
+        "--flush must run (not be deferred) when --file short-circuits --execute. \
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // Reopen read-only and confirm the SEEDED row reached the SSTable.
+    let read_output = run_write_cli(&[
+        "--schema",
+        schema_path.to_str().unwrap(),
+        "--data-dir",
+        write_dir.join("data").to_str().unwrap(),
+        "--execute",
+        "SELECT * FROM test_write.users",
+        "--out",
+        "json",
+    ]);
+    let read_stdout = String::from_utf8_lossy(&read_output.stdout);
+    let read_stderr = String::from_utf8_lossy(&read_output.stderr);
+    assert!(
+        read_output.status.success(),
+        "Read-back SELECT should succeed. stderr: {read_stderr}"
+    );
+    assert!(
+        read_stdout.contains("\"Heidi\"") && read_stdout.contains("55"),
+        "The seeded row must be flushed/persisted when --file short-circuits --execute. \
+         Got read stdout: {read_stdout}\nread stderr: {read_stderr}"
+    );
+}

@@ -828,7 +828,7 @@ scenarios:
       coverage:
         suite: compaction_parity_tombstone_ttl
         tests:
-          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+          - cqlite-core/tests/issue_992_ttl_tombstone_parity.rs
         notes: >-
           A TTL row sets HAS_TIMESTAMP | HAS_TTL and writes
           `[ts delta][ttl delta][localDeletionTime delta]` (all UNSIGNED VInt from
@@ -855,7 +855,7 @@ scenarios:
       comparison_command: >-
         env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
         cargo test -p cqlite-core
-        --features write-support --test issue_992_ttl_tombstone_range_parity
+        --features write-support --test issue_992_ttl_tombstone_parity
         ttl_row_preserves fixture_ttl_row
       reference_paths:
         - test-data/datasets/sstables/test_deltas/ttl_cells-299c9220701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
@@ -895,7 +895,7 @@ scenarios:
       coverage:
         suite: compaction_parity_tombstone_ttl
         tests:
-          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+          - cqlite-core/tests/issue_992_ttl_tombstone_parity.rs
         notes: >-
           A partition deletion is written in the partition HEADER as a FIXED
           `[i32 localDeletionTime BE][i64 markedForDeleteAt BE]` immediately after
@@ -923,7 +923,7 @@ scenarios:
       comparison_command: >-
         env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
         cargo test -p cqlite-core
-        --features write-support --test issue_992_ttl_tombstone_range_parity
+        --features write-support --test issue_992_ttl_tombstone_parity
         partition_deletion live_partition fixture_partition_tombstone
       reference_paths:
         - test-data/datasets/sstables/test_deltas/partition_tombstones-299258f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
@@ -963,7 +963,7 @@ scenarios:
       coverage:
         suite: compaction_parity_tombstone_ttl
         tests:
-          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+          - cqlite-core/tests/issue_992_ttl_tombstone_parity.rs
         notes: >-
           A HAS_DELETION row writes `[markedForDeleteAt delta][localDeletionTime
           delta]` (both UNSIGNED VInt) after the clustering prefix + row_size /
@@ -991,7 +991,7 @@ scenarios:
       comparison_command: >-
         env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
         cargo test -p cqlite-core
-        --features write-support --test issue_992_ttl_tombstone_range_parity
+        --features write-support --test issue_992_ttl_tombstone_parity
         row_tombstone fixture_row_tombstone
       reference_paths:
         - test-data/datasets/sstables/test_deltas/row_tombstones-297f1f10701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
@@ -1029,7 +1029,7 @@ scenarios:
       coverage:
         suite: compaction_parity_tombstone_ttl
         tests:
-          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+          - cqlite-core/tests/issue_992_ttl_tombstone_parity.rs
         notes: >-
           A deleted cell sets IS_DELETED | HAS_EMPTY_VALUE, writes its OWN
           `[timestamp delta][localDeletionTime delta]` (UNSIGNED VInt, NOT
@@ -1056,7 +1056,7 @@ scenarios:
       comparison_command: >-
         env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
         cargo test -p cqlite-core
-        --features write-support --test issue_992_ttl_tombstone_range_parity
+        --features write-support --test issue_992_ttl_tombstone_parity
         cell_tombstone fixture_cell_tombstone
       reference_paths:
         - test-data/datasets/sstables/test_deltas/cell_tombstones-29733830701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
@@ -1095,7 +1095,7 @@ scenarios:
       coverage:
         suite: compaction_parity_tombstone_ttl
         tests:
-          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+          - cqlite-core/tests/issue_992_range_boundary_grammar.rs
         notes: >-
           A range-tombstone BOUND marker is
           `[IS_MARKER 0x02][kind ordinal u8][cluster_count u16 BE][clustering prefix]
@@ -1124,7 +1124,7 @@ scenarios:
       comparison_command: >-
         env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
         cargo test -p cqlite-core
-        --features write-support --test issue_992_ttl_tombstone_range_parity
+        --features write-support --test issue_992_range_boundary_grammar
         range_bound_markers_exact fixture_range_bound_markers fixture_range_inclusive_end
       reference_paths:
         - test-data/datasets/sstables/test_deltas/range_tombstones-298894f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
@@ -1165,7 +1165,7 @@ scenarios:
       coverage:
         suite: compaction_parity_tombstone_ttl
         tests:
-          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+          - cqlite-core/tests/issue_992_range_boundary_grammar.rs
         notes: >-
           A range-tombstone BOUNDARY marker (kind 2 = EXCL_END_INCL_START_BOUNDARY
           or 5 = INCL_END_EXCL_START_BOUNDARY) closes one range and opens the next
@@ -1202,7 +1202,7 @@ scenarios:
       comparison_command: >-
         env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
         cargo test -p cqlite-core
-        --features write-support --test issue_992_ttl_tombstone_range_parity
+        --features write-support --test issue_992_range_boundary_grammar
         range_boundary
       reference_paths:
         - test-data/datasets/sstables/test_deltas/adjacent_ranges-29bdd5c0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
@@ -1402,7 +1402,7 @@ scenarios:
 
   - id: cass.index_db.RowIndexEntryTest.promoted_index_entries
     title: BIG Index.db promoted-index (wide-partition) boundary metadata
-    status: partial
+    status: mirrored
     capability: index_summary
     priority: P0
     risk: p1_correctness
@@ -1426,39 +1426,31 @@ scenarios:
       references:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
     evidence:
-      type: partial
+      type: byte_for_byte
+      strict: true
       artifacts: [bytes, offsets]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
+      comparison_command: >-
+        env CQLITE_PARITY_REQUIRE_DATASETS=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_993_wide_partition_promoted_index_parity
+        row_boundaries_index_info_offsets
       reference_paths:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/wide-partition-promoted-index-diff.log
       known_limitations: >-
-        The BIG promoted IndexInfo[] decode is implemented and proven byte-for-byte
-        LOCALLY against the real Cassandra wide-partition fixture (see
-        cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs). The
-        committed-JSONL canonical-semantic checks (3 partitions, live counts
-        290/300/300, pk=1 missing exactly ck 30..39, ascending clustering) ARE
-        enforced in the required CI lane on every run; the byte-level Index.db
-        promoted-offset/bounds assertions are NOT in the required lane because they
-        depend on local-only binaries absent from the pinned CI dataset.
+        Byte-level promoted-index parity now runs fail-closed in the required lane:
+        issue #1185 pins the test_big.wide_partition binaries into the CI dataset.
+        Validation is scoped to the single-int clustering schema, where the on-disk
+        clustering prefix length (6 bytes) is unambiguous.
     ci:
-      tier: manual_debug
-    scope:
-      gap: >-
-        This scenario's proving evidence is the byte-level Index.db promoted-index
-        decode (offsets, widths, clustering bounds), which SKIPS in CI because the
-        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
-        in progress). Marking it required_parity would report coverage for a check
-        that does not run; the only CI-running assertion in this test binary is the
-        JSONL canonical-semantic check, which does not decode the promoted index and
-        so does not satisfy this scenario's evidence on its own.
-      next_step: >-
-        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
-        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
-        so the byte-level promoted-index assertions actually run fail-closed.
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
 
   - id: cass.index_db.SSTableReaderTest.point_lookup_offsets
     title: BIG Index.db point/absent-key lookup offsets
@@ -1667,7 +1659,7 @@ scenarios:
 
   - id: cass.index_db.big.wide_partition_promoted_entries
     title: BIG Index.db wide-partition promoted entries
-    status: partial
+    status: mirrored
     capability: index_summary
     priority: P1
     risk: p1_correctness
@@ -1693,43 +1685,35 @@ scenarios:
       references:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
     evidence:
-      type: partial
+      type: byte_for_byte
+      strict: true
       artifacts: [bytes, offsets]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
+      comparison_command: >-
+        env CQLITE_PARITY_REQUIRE_DATASETS=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_993_wide_partition_promoted_index_parity
+        row_boundaries_index_info_offsets
       reference_paths:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/wide-partition-promoted-index-diff.log
       known_limitations: >-
-        The BIG promoted IndexInfo[] decode is implemented and proven byte-for-byte
-        LOCALLY against the real Cassandra wide-partition fixture (see
-        cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs). The
-        committed-JSONL canonical-semantic checks (3 partitions, live counts
-        290/300/300, pk=1 missing exactly ck 30..39, ascending clustering) ARE
-        enforced in the required CI lane on every run; the byte-level Index.db
-        promoted-offset/bounds assertions are NOT in the required lane because they
-        depend on local-only binaries absent from the pinned CI dataset.
+        Byte-level promoted-index parity now runs fail-closed in the required lane:
+        issue #1185 pins the test_big.wide_partition binaries into the CI dataset.
+        Validation is scoped to the single-int clustering schema, where the on-disk
+        clustering prefix length (6 bytes) is unambiguous.
     ci:
-      tier: manual_debug
-    scope:
-      gap: >-
-        This scenario's proving evidence is the byte-level Index.db promoted-index
-        decode (offsets, widths, clustering bounds), which SKIPS in CI because the
-        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
-        in progress). Marking it required_parity would report coverage for a check
-        that does not run; the only CI-running assertion in this test binary is the
-        JSONL canonical-semantic check, which does not decode the promoted index and
-        so does not satisfy this scenario's evidence on its own.
-      next_step: >-
-        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
-        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
-        so the byte-level promoted-index assertions actually run fail-closed.
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
 
   - id: cass.data_db_decode.wide_partition.row_boundaries
     title: Wide-partition Data.db row boundaries align with promoted-index offsets
-    status: partial
+    status: mirrored
     capability: data_db_decode
     priority: P0
     risk: p1_correctness
@@ -1753,43 +1737,35 @@ scenarios:
       references:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
     evidence:
-      type: partial
+      type: byte_for_byte
+      strict: true
       artifacts: [bytes, offsets, jsonl]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
+      comparison_command: >-
+        env CQLITE_PARITY_REQUIRE_DATASETS=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_993_wide_partition_promoted_index_parity
+        row_boundaries_index_info_offsets
       reference_paths:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/wide-partition-promoted-index-diff.log
       known_limitations: >-
-        The BIG promoted IndexInfo[] decode is implemented and proven byte-for-byte
-        LOCALLY against the real Cassandra wide-partition fixture (see
-        cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs). The
-        committed-JSONL canonical-semantic checks (3 partitions, live counts
-        290/300/300, pk=1 missing exactly ck 30..39, ascending clustering) ARE
-        enforced in the required CI lane on every run; the byte-level Index.db
-        promoted-offset/bounds assertions are NOT in the required lane because they
-        depend on local-only binaries absent from the pinned CI dataset.
+        Byte-level promoted-index parity now runs fail-closed in the required lane:
+        issue #1185 pins the test_big.wide_partition binaries into the CI dataset.
+        Validation is scoped to the single-int clustering schema, where the on-disk
+        clustering prefix length (6 bytes) is unambiguous.
     ci:
-      tier: manual_debug
-    scope:
-      gap: >-
-        This scenario's proving evidence is the byte-level Index.db promoted-index
-        decode (offsets, widths, clustering bounds), which SKIPS in CI because the
-        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
-        in progress). Marking it required_parity would report coverage for a check
-        that does not run; the only CI-running assertion in this test binary is the
-        JSONL canonical-semantic check, which does not decode the promoted index and
-        so does not satisfy this scenario's evidence on its own.
-      next_step: >-
-        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
-        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
-        so the byte-level promoted-index assertions actually run fail-closed.
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
 
   - id: cass.index_db.promoted_index.index_info_offsets
     title: BIG promoted-index IndexInfo Data.db offsets and width chain
-    status: partial
+    status: mirrored
     capability: index_summary
     priority: P0
     risk: p1_correctness
@@ -1812,43 +1788,35 @@ scenarios:
       references:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
     evidence:
-      type: partial
+      type: byte_for_byte
+      strict: true
       artifacts: [bytes, offsets]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
+      comparison_command: >-
+        env CQLITE_PARITY_REQUIRE_DATASETS=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_993_wide_partition_promoted_index_parity
+        row_boundaries_index_info_offsets
       reference_paths:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/wide-partition-promoted-index-diff.log
       known_limitations: >-
-        The BIG promoted IndexInfo[] decode is implemented and proven byte-for-byte
-        LOCALLY against the real Cassandra wide-partition fixture (see
-        cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs). The
-        committed-JSONL canonical-semantic checks (3 partitions, live counts
-        290/300/300, pk=1 missing exactly ck 30..39, ascending clustering) ARE
-        enforced in the required CI lane on every run; the byte-level Index.db
-        promoted-offset/bounds assertions are NOT in the required lane because they
-        depend on local-only binaries absent from the pinned CI dataset.
+        Byte-level promoted-index parity now runs fail-closed in the required lane:
+        issue #1185 pins the test_big.wide_partition binaries into the CI dataset.
+        Validation is scoped to the single-int clustering schema, where the on-disk
+        clustering prefix length (6 bytes) is unambiguous.
     ci:
-      tier: manual_debug
-    scope:
-      gap: >-
-        This scenario's proving evidence is the byte-level Index.db promoted-index
-        decode (offsets, widths, clustering bounds), which SKIPS in CI because the
-        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
-        in progress). Marking it required_parity would report coverage for a check
-        that does not run; the only CI-running assertion in this test binary is the
-        JSONL canonical-semantic check, which does not decode the promoted index and
-        so does not satisfy this scenario's evidence on its own.
-      next_step: >-
-        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
-        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
-        so the byte-level promoted-index assertions actually run fail-closed.
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
 
   - id: cass.index_db.promoted_index.clustering_bounds
     title: BIG promoted-index IndexInfo clustering bounds ordering and coverage
-    status: partial
+    status: mirrored
     capability: index_summary
     priority: P0
     risk: p1_correctness
@@ -1873,43 +1841,35 @@ scenarios:
       references:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
     evidence:
-      type: partial
+      type: byte_for_byte
+      strict: true
       artifacts: [bytes, offsets]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
+      comparison_command: >-
+        env CQLITE_PARITY_REQUIRE_DATASETS=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_993_wide_partition_promoted_index_parity
+        clustering_bounds
       reference_paths:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/wide-partition-promoted-index-diff.log
       known_limitations: >-
-        The BIG promoted IndexInfo[] decode is implemented and proven byte-for-byte
-        LOCALLY against the real Cassandra wide-partition fixture (see
-        cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs). The
-        committed-JSONL canonical-semantic checks (3 partitions, live counts
-        290/300/300, pk=1 missing exactly ck 30..39, ascending clustering) ARE
-        enforced in the required CI lane on every run; the byte-level Index.db
-        promoted-offset/bounds assertions are NOT in the required lane because they
-        depend on local-only binaries absent from the pinned CI dataset.
+        Byte-level promoted-index parity now runs fail-closed in the required lane:
+        issue #1185 pins the test_big.wide_partition binaries into the CI dataset.
+        Validation is scoped to the single-int clustering schema, where the on-disk
+        clustering prefix length (6 bytes) is unambiguous.
     ci:
-      tier: manual_debug
-    scope:
-      gap: >-
-        This scenario's proving evidence is the byte-level Index.db promoted-index
-        decode across the range-tombstone block edge, which SKIPS in CI because the
-        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
-        in progress). The CI-running JSONL canonical-semantic check does assert pk=1
-        is missing exactly ck 30..39 (the range-tombstone fact), but it does NOT
-        decode the promoted index across the block boundary — the headline claim of
-        this scenario — so the running part alone does not justify required_parity.
-      next_step: >-
-        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
-        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
-        so the byte-level promoted-index block-edge assertions actually run fail-closed.
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
 
   - id: cass.index_db.promoted_index.range_tombstone_boundary_at_block_edge
     title: BIG promoted-index decode across a range-tombstone block boundary
-    status: partial
+    status: mirrored
     capability: index_summary
     priority: P0
     risk: p1_correctness
@@ -1934,43 +1894,35 @@ scenarios:
       references:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
     evidence:
-      type: partial
+      type: byte_for_byte
+      strict: true
       artifacts: [bytes, offsets, jsonl]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/gen-wide-big.sh
+      comparison_command: >-
+        env CQLITE_PARITY_REQUIRE_DATASETS=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test issue_993_wide_partition_promoted_index_parity
+        range_tombstone_boundary_at_block_edge
       reference_paths:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/wide-partition-promoted-index-diff.log
       known_limitations: >-
-        The BIG promoted IndexInfo[] decode is implemented and proven byte-for-byte
-        LOCALLY against the real Cassandra wide-partition fixture (see
-        cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs). The
-        committed-JSONL canonical-semantic checks (3 partitions, live counts
-        290/300/300, pk=1 missing exactly ck 30..39, ascending clustering) ARE
-        enforced in the required CI lane on every run; the byte-level Index.db
-        promoted-offset/bounds assertions are NOT in the required lane because they
-        depend on local-only binaries absent from the pinned CI dataset.
+        Byte-level promoted-index parity now runs fail-closed in the required lane:
+        issue #1185 pins the test_big.wide_partition binaries into the CI dataset.
+        Validation is scoped to the single-int clustering schema, where the on-disk
+        clustering prefix length (6 bytes) is unambiguous.
     ci:
-      tier: manual_debug
-    scope:
-      gap: >-
-        This scenario's proving evidence is the byte-level Index.db promoted-index
-        decode (offsets, widths, clustering bounds), which SKIPS in CI because the
-        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
-        in progress). Marking it required_parity would report coverage for a check
-        that does not run; the only CI-running assertion in this test binary is the
-        JSONL canonical-semantic check, which does not decode the promoted index and
-        so does not satisfy this scenario's evidence on its own.
-      next_step: >-
-        Re-promote to required_parity once issue #1185 pins the test_big.wide_partition
-        binaries into the CI dataset (regenerate the tarball + update DATASET_SHA256)
-        so the byte-level promoted-index assertions actually run fail-closed.
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
 
   - id: cass.sstable_scan.wide_partition.forward_reverse_bounds
     title: Wide-partition forward and reverse scan boundary parity
-    status: partial
+    status: mirrored
     capability: index_summary
     priority: P1
     risk: p1_correctness
@@ -1985,16 +1937,26 @@ scenarios:
         suite: sstable_parity_index_db_big
         tests:
           - cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs
+          - cqlite-core/tests/issue_1184_big_promoted_read_seek.rs
         notes: >-
-          Forward-scan completeness is proven: forward scans return exactly
-          290/300/300 live rows with no rows lost across promoted-index block
-          boundaries or the deleted range. Reverse-iteration parity is not yet
-          provable (see gap).
+          Reverse iteration is now real (issue #1184): the BIG reverse partition
+          iterator walks the promoted IndexInfo blocks back-to-front
+          (SSTableReader::big_reverse_partition_rows), routed through the production
+          query path for single-partition `ORDER BY <ck> DESC`. issue_1184 pins
+          forward==reverse on a multi-block BIG wide partition built via the write
+          engine (identical clustering set, exact reverse ordering, block-by-block
+          decode with per-iteration memory bounded to one block), plus the forward
+          promoted-index clustering-range seek (AccessPath::ClusteringSlice) and a
+          ranged read keeping the rows adjacent to a clustering gap. issue_993 pins
+          the forward 290/300/300 completeness and, when the local-only Cassandra
+          binaries are present, the byte-level forward==reverse 290-row equality on
+          the real test_big.wide_partition fixture (skip-on-absence until the
+          dataset re-pin).
     fixtures:
       references:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
     evidence:
-      type: partial
+      type: canonical_semantic
       artifacts: [offsets, jsonl]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
@@ -2003,29 +1965,35 @@ scenarios:
         bash test-data/scripts/gen-wide-big.sh
       reference_paths:
         - test-data/datasets/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl
+      normalization: >-
+        Forward (ASC) and reverse (DESC) single-partition scans are normalized to
+        the per-partition clustering set and ordering: the live clustering values
+        and their sequence are compared (forward == reverse-of-DESC), ignoring
+        presentation/whitespace. Proven in CI via the production reverse iterator on
+        a write-engine multi-block BIG wide partition (issue_1184); the real
+        test_big.wide_partition byte-level 290-row equality runs locally on absence.
       known_limitations: >-
-        Only forward-scan completeness is proven. Local-only fixture
-        (gen-wide-big.sh) pending dataset re-pin; test skips-on-absence.
+        The CI-runnable forward==reverse proof (issue_1184) uses a write-engine-built
+        multi-block BIG wide partition. The byte-level forward==reverse equality on
+        the real Cassandra test_big.wide_partition fixture is a local-only check
+        (gen-wide-big.sh) that skips-on-absence until the dataset re-pin promotes
+        the binaries into the release tarball.
     ci:
-      tier: manual_debug
+      tier: fast_pr
     scope:
       gap: >-
-        Forward-scan completeness is backed by forward_bounds_completeness, which
-        reads the binary Data.db and therefore SKIPS in CI because the
-        test_big/wide_partition binaries are not in the pinned dataset (issue #1185
-        in progress); the CI-running JSONL canonical-semantic check proves live
-        counts but not scan completeness across promoted-index block boundaries.
-        Reverse SSTable iteration is additionally not implemented for BIG wide
-        partitions (only a post-fetch in-memory ORDER BY DESC sort exists, which
-        does not exercise reverse promoted-index block decoding).
+        Reverse SSTable iteration for BIG wide partitions is now implemented and
+        proven in CI (issue_1184, production reverse iterator over a write-engine
+        multi-block BIG wide partition). The remaining gap is byte-level coverage on
+        the real fixture: the test_big.wide_partition forward==reverse 290-row
+        equality reads the binary Data.db and therefore SKIPS in CI because those
+        binaries are not in the pinned dataset (issue #1185 in progress); the
+        CI-running JSONL canonical-semantic check proves live counts but not
+        byte-level completeness across promoted-index block boundaries.
       next_step: >-
-        First re-promote to required_parity once issue #1185 pins the
-        test_big.wide_partition binaries into the CI dataset so forward-scan
-        completeness runs fail-closed; then implement a BIG-format reverse partition
-        iterator that uses the promoted IndexInfo blocks to seek/decode blocks
-        back-to-front (mirroring Cassandra SSTableReversedIterator) and assert
-        forward and reverse scans of pk=1 return the identical 290-row clustering set
-        with no rows lost adjacent to the deleted block.
+        Add the test_big.wide_partition binaries to the dataset release pin (issue
+        #1185) so the byte-level forward==reverse 290-row equality runs in the
+        required_parity lane rather than skip-on-absence.
 
   - id: cass.index_db.bti.index_component_discovery
     title: BTI index-component discovery and classification
@@ -4139,7 +4107,9 @@ scenarios:
       category: scrub-verify
       relevance: high
       files:
-        - VerifyTest.java
+        # Path-precise (#1199): the high-relevance VerifyTest lives under io/sstable;
+        # a bare basename also matches the tools/nodetool/VerifyTest.java twin.
+        - test/unit/org/apache/cassandra/io/sstable/VerifyTest.java
         - StandaloneVerifier.java
     cqlite:
       coverage:
@@ -4502,7 +4472,7 @@ scenarios:
 
   - id: cass.filter_db.statistical_false_positive_rate
     title: Filter.db empirical false-positive-rate report
-    status: planned
+    status: mirrored
     capability: filter_db_bloom
     priority: P2
     risk: p2_coverage
@@ -4520,8 +4490,16 @@ scenarios:
           filter_db_statistical_false_positive_rate_slow probes a large deterministic
           absent-key sample (50k keys, fixed seed + per-fixture salt) and reports the
           measured FPR per fixture, asserting only a generous saturation ceiling
-          (< 0.50). It is gated behind CQLITE_FILTER_FPR_SLOW=1 so the required lane
-          stays fast — false positives are legal and never a correctness failure.
+          (< 0.50). It is gated behind CQLITE_FILTER_FPR_SLOW=1 so the per-PR lane
+          stays fast — false positives are legal and never a correctness failure. It
+          runs in the dedicated nightly_docker lane
+          (.github/workflows/nightly-docker-parity.yml), whose runner
+          (test-data/scripts/nightly-docker-parity.sh) reports the measured FPR per
+          fixture against the configured bloom_filter_fp_chance in its Bloom FPR
+          summary. The FPR threshold is ADVISORY at first (owner fork F4): a breach
+          does NOT fail the lane while advisory. The companion no-false-negative gate
+          (filter_db_strict_parameters_and_no_false_negative) is ALWAYS hard-fail in
+          the same lane (cass.filter_db.no_false_negative_membership).
     fixtures:
       datasets:
         - test-data/datasets/sstables
@@ -4539,19 +4517,24 @@ scenarios:
         --test sstable_parity_filter_db_test
         filter_db_statistical_false_positive_rate_slow -- --nocapture
       known_limitations: >-
-        The measured FPR is reported, not gated against Cassandra's target fp_chance,
-        because the committed fixtures are tiny (single-long bitsets) where the
-        analytic FPR is dominated by quantization, not the configured fp_chance.
+        The measured FPR is reported (in the nightly lane's Bloom FPR summary)
+        against the configured fp_chance, but the threshold is ADVISORY at first
+        (owner fork F4): a breach does not fail the lane, because the committed
+        fixtures are tiny (single-long bitsets) where the analytic FPR is dominated
+        by quantization, not the configured fp_chance. The no-false-negative
+        property is hard-fail regardless.
     ci:
-      tier: manual_debug
+      tier: nightly_docker
+      workflow: .github/workflows/nightly-docker-parity.yml
     scope:
       target_issue: 987
       gap: >-
-        No gated comparison of measured FPR against Cassandra's configured
-        bloom_filter_fp_chance.
+        The measured-FPR threshold is advisory, not yet a gated comparison against
+        Cassandra's configured bloom_filter_fp_chance.
       next_step: >-
-        Add larger-cardinality fixtures and assert the measured FPR tracks the
-        configured fp_chance within a documented statistical tolerance.
+        Add larger-cardinality fixtures and promote the advisory FPR threshold to a
+        hard-fail once the measured FPR tracks the configured fp_chance within a
+        documented statistical tolerance.
 
   # ----------------------------------------------------------------------------
   # tombstone_ttl
@@ -5417,7 +5400,7 @@ scenarios:
         to a hard gate once compaction output is byte-stable.
     ci:
       tier: nightly_docker
-      workflow: .github/workflows/compaction-parity.yml
+      workflow: .github/workflows/nightly-docker-parity.yml
     scope:
       target_issue: 842
       gap: >-
@@ -5586,7 +5569,7 @@ scenarios:
         `planned`, not a gated byte-for-byte claim.
     ci:
       tier: nightly_docker
-      workflow: .github/workflows/compaction-parity.yml
+      workflow: .github/workflows/nightly-docker-parity.yml
     scope:
       target_issue: 842
       gap: >-
@@ -7031,7 +7014,7 @@ scenarios:
         writer parity remains tracked under epic #969.
     ci:
       tier: nightly_docker
-      workflow: .github/workflows/cassandra-validation.yml
+      workflow: .github/workflows/nightly-docker-parity.yml
     scope:
       gap: >-
         Semantic readback only; no byte comparison of CQLite writer output.
@@ -7126,7 +7109,7 @@ scenarios:
         trie nodes is not gated.
     ci:
       tier: nightly_docker
-      workflow: .github/workflows/e2e-readback.yml
+      workflow: .github/workflows/nightly-docker-parity.yml
     scope: {}
 
   # ----------------------------------------------------------------------------
@@ -12950,7 +12933,7 @@ scenarios:
   # timestamp writer defect was fixed); the cass.tombstone_ttl.* and
   # cass.compaction_merge.GcCompactionTest.* entries anchor the deterministic +
   # fixture TTL / partition-tombstone / range-marker delta parity covered by
-  # issue_992_ttl_tombstone_range_parity.rs. (The issue listed two ids under a
+  # issue_992_ttl_tombstone_parity.rs + issue_992_range_boundary_grammar.rs. (The issue listed two ids under a
   # cqlite.issue_819.* namespace; remapped here to schema-conforming cass.* ids
   # with existing capability enum values — there is no `compaction` capability.)
   # ============================================================================
@@ -12970,7 +12953,7 @@ scenarios:
       coverage:
         suite: compaction_parity_tombstone_ttl
         tests:
-          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+          - cqlite-core/tests/issue_992_ttl_tombstone_parity.rs
         notes: >-
           A TTL row sets HAS_TIMESTAMP | HAS_TTL and writes
           `[ts delta][ttl delta][localDeletionTime delta]` (all UNSIGNED VInt
@@ -12994,7 +12977,7 @@ scenarios:
         bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
       comparison_command: >-
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
-        --features write-support --test issue_992_ttl_tombstone_range_parity
+        --features write-support --test issue_992_ttl_tombstone_parity
         ttl_row
       reference_paths:
         - test-data/datasets/sstables/test_deltas/ttl_cells-299c9220701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
@@ -13030,7 +13013,8 @@ scenarios:
       coverage:
         suite: compaction_parity_tombstone_ttl
         tests:
-          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+          - cqlite-core/tests/issue_992_ttl_tombstone_parity.rs
+          - cqlite-core/tests/issue_992_range_boundary_grammar.rs
         notes: >-
           The four tombstone families each write their own deltas with no value
           bytes: partition deletion uses the FIXED-header form (not a delta), and
@@ -13057,7 +13041,7 @@ scenarios:
         bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
       comparison_command: >-
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
-        --features write-support --test issue_992_ttl_tombstone_range_parity
+        --features write-support --test issue_992_ttl_tombstone_parity --test issue_992_range_boundary_grammar
       reference_paths:
         - test-data/datasets/sstables/test_deltas/partition_tombstones-299258f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
         - test-data/datasets/sstables/test_deltas/row_tombstones-297f1f10701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
@@ -13094,7 +13078,7 @@ scenarios:
       coverage:
         suite: compaction_parity_tombstone_ttl
         tests:
-          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+          - cqlite-core/tests/issue_992_range_boundary_grammar.rs
         notes: >-
           Range-tombstone bound markers follow an exact on-disk grammar (bound
           kind byte + clustering prefix + `markedForDeleteAt`/`localDeletionTime`
@@ -13118,7 +13102,7 @@ scenarios:
         bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
       comparison_command: >-
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
-        --features write-support --test issue_992_ttl_tombstone_range_parity
+        --features write-support --test issue_992_range_boundary_grammar
         range
       reference_paths:
         - test-data/datasets/sstables/test_deltas/range_tombstones-298894f0701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
@@ -13155,7 +13139,7 @@ scenarios:
         suite: compaction_parity_tombstone_ttl
         tests:
           - cqlite-core/tests/issue_819_differential_compaction.rs
-          - cqlite-core/tests/issue_992_ttl_tombstone_range_parity.rs
+          - cqlite-core/tests/issue_992_ttl_tombstone_parity.rs
         notes: >-
           Compacting overlapping inputs that carry partition / row / cell
           tombstones must preserve each tombstone's deletion time and shadow only
@@ -13663,6 +13647,1932 @@ scenarios:
         Commission a live-cluster PendingAntiCompaction fixture (an SSTable with a
         real pendingRepair UUID) + sstablemetadata goldens, then assert the decoded
         UUID against the reference to promote to mirrored.
+
+  # ----------------------------------------------------------------------------
+  # Issue #1199: classify the remaining high-relevance Cassandra index files so
+  # `cassandra-parity coverage --strict` reaches full high-relevance coverage.
+  # Conservative: planned where parity is in-domain but not yet mirrored;
+  # out_of_scope only for node/coordinator/tooling/streaming/memtable-internals.
+  # ----------------------------------------------------------------------------
+  - id: cass.compaction.CompactionColumnDeleteAndPurgeTest.cell_delete_purge
+    title: "Cell delete + gc purge during compaction merge"
+    status: planned
+    capability: compaction_merge
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CompactionColumnDeleteAndPurgeTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+        notes: >-
+          CQLite has byte/semantic compaction-merge parity for tombstone/TTL purge, but does not yet mirror this Cassandra cell-delete-and-purge case as its own fixture+goldens.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        No dedicated fixture mirrors this specific cell-delete-then-gc-purge case; the general purge path is covered by the compaction_parity_tombstone_ttl suite.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        No dedicated fixture mirrors this specific cell-delete-then-gc-purge case; the general purge path is covered by the compaction_parity_tombstone_ttl suite.
+      next_step: >-
+        Commission a Cassandra fixture for cell deletion + gc purge and add per-case sstabledump goldens to the compaction parity suite.
+      target_suite: compaction_parity_tombstone_ttl
+      target_issue: 968
+
+  - id: cass.compaction.CompactionColumnTest.cell_merge_lww
+    title: "Per-column last-write-wins cell merge during compaction"
+    status: planned
+    capability: compaction_merge
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CompactionColumnTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+        notes: >-
+          Column-level last-write-wins merge is exercised by the compaction parity suite generally; this specific Cassandra case is not yet mirrored with its own fixture.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        No dedicated fixture mirrors this specific per-column LWW merge case.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        No dedicated fixture mirrors this specific per-column LWW merge case.
+      next_step: >-
+        Commission a fixture for per-column LWW merge and assert per-case goldens.
+      target_suite: compaction_parity_tombstone_ttl
+      target_issue: 968
+
+  - id: cass.compaction.CompactionControllerTest.purgeable_timestamp_boundary
+    title: "Purgeable-timestamp boundary computation during compaction"
+    status: planned
+    capability: compaction_merge
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CompactionControllerTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+        notes: >-
+          CQLite computes purge boundaries during compaction; the precise purgeable-timestamp boundary cases from this Cassandra test are not yet mirrored as their own goldens.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        No dedicated fixture mirrors the CompactionController purgeable-timestamp boundary cases.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        No dedicated fixture mirrors the CompactionController purgeable-timestamp boundary cases.
+      next_step: >-
+        Commission fixtures spanning the purgeable-timestamp boundary and assert per-case goldens.
+      target_suite: compaction_parity_tombstone_ttl
+      target_issue: 968
+
+  - id: cass.compaction.CompactionDeleteAndPurgePKTest.partition_delete_purge
+    title: "Partition delete + gc purge during compaction"
+    status: planned
+    capability: compaction_merge
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CompactionDeleteAndPurgePKTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+        notes: >-
+          Partition-level deletion and purge are covered by the compaction parity suite; this specific case is not yet mirrored with its own fixture.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        No dedicated fixture mirrors this partition-delete-then-purge case.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        No dedicated fixture mirrors this partition-delete-then-purge case.
+      next_step: >-
+        Commission a partition-delete + gc-purge fixture and assert per-case goldens.
+      target_suite: compaction_parity_tombstone_ttl
+      target_issue: 968
+
+  - id: cass.compaction.CompactionDeleteAndPurgeRowTest.row_delete_purge
+    title: "Row delete + gc purge during compaction"
+    status: planned
+    capability: compaction_merge
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CompactionDeleteAndPurgeRowTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+        notes: >-
+          Row-level deletion and purge are covered by the compaction parity suite; this specific case is not yet mirrored with its own fixture.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        No dedicated fixture mirrors this row-delete-then-purge case.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        No dedicated fixture mirrors this row-delete-then-purge case.
+      next_step: >-
+        Commission a row-delete + gc-purge fixture and assert per-case goldens.
+      target_suite: compaction_parity_tombstone_ttl
+      target_issue: 968
+
+  - id: cass.compaction.CompactionDeletePKTest.partition_delete_preserved
+    title: "Partition deletion preserved across compaction"
+    status: planned
+    capability: compaction_merge
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CompactionDeletePKTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+        notes: >-
+          Partition-deletion preservation across compaction is covered by the compaction parity suite; this specific Cassandra case is not yet mirrored.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        No dedicated fixture mirrors this partition-delete-preservation case.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        No dedicated fixture mirrors this partition-delete-preservation case.
+      next_step: >-
+        Commission a fixture asserting partition deletions survive compaction and add goldens.
+      target_suite: compaction_parity_tombstone_ttl
+      target_issue: 968
+
+  - id: cass.compaction.CompactionDeleteRowRangeTest.range_tombstone_merge
+    title: "Overlapping range-tombstone merge during compaction"
+    status: planned
+    capability: compaction_merge
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CompactionDeleteRowRangeTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+        notes: >-
+          Range-tombstone merge is exercised by the compaction parity suite; this specific overlapping-range case is not yet mirrored.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        No dedicated fixture mirrors this overlapping range-tombstone merge case.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        No dedicated fixture mirrors this overlapping range-tombstone merge case.
+      next_step: >-
+        Commission overlapping range-tombstone fixtures and assert per-case goldens.
+      target_suite: compaction_parity_tombstone_ttl
+      target_issue: 968
+
+  - id: cass.compaction.CompactionDeleteRowTest.row_deletion_marker_preserved
+    title: "Row deletion markers preserved across compaction"
+    status: planned
+    capability: compaction_merge
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CompactionDeleteRowTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+        notes: >-
+          Row deletion-marker preservation is covered by the compaction parity suite; this specific Cassandra case is not yet mirrored.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        No dedicated fixture mirrors this row-deletion-marker-preservation case.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        No dedicated fixture mirrors this row-deletion-marker-preservation case.
+      next_step: >-
+        Commission a row-deletion fixture and assert markers survive compaction.
+      target_suite: compaction_parity_tombstone_ttl
+      target_issue: 968
+
+  - id: cass.compaction.CompactionOverlappingSSTableTest.partial_space_constrained_merge
+    title: "Partial space-constrained compaction does not drop live rows"
+    status: planned
+    capability: compaction_merge
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CompactionOverlappingSSTableTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+        notes: >-
+          Overlapping-source merges are covered by the compaction parity suite; the space-constrained partial-compaction case is not yet mirrored.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        No dedicated fixture mirrors the disk-space-constrained partial-compaction case.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        No dedicated fixture mirrors the disk-space-constrained partial-compaction case.
+      next_step: >-
+        Commission overlapping-SSTable fixtures under a space constraint and assert live-row preservation.
+      target_suite: compaction_parity_tombstone_ttl
+      target_issue: 968
+
+  - id: cass.compaction.CompactionsCQLTest.negative_ldts_suspect_table
+    title: "Negative-LDTS detection / suspect-table handling in compaction"
+    status: planned
+    capability: compaction_merge
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CompactionsCQLTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+        notes: >-
+          CQLite validates deletion-time metadata during compaction; the negative-LDTS suspect-table cases from this Cassandra CQL test are not yet mirrored.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        No dedicated fixture mirrors the negative-LDTS suspect-table cases.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        No dedicated fixture mirrors the negative-LDTS suspect-table cases.
+      next_step: >-
+        Commission fixtures with negative local-deletion-time metadata and assert detection/goldens.
+      target_suite: compaction_parity_tombstone_ttl
+      target_issue: 968
+
+  - id: cass.compaction.ForceCompactionTest.major_compaction_tombstone_purge
+    title: "Forced/major compaction tombstone + TTL purge"
+    status: planned
+    capability: compaction_merge
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - ForceCompactionTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+        notes: >-
+          Major-compaction tombstone/TTL purge is covered by the compaction parity suite; the forced-major-compaction case is not yet mirrored with its own fixture.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        No dedicated fixture mirrors the forced/major-compaction purge case.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        No dedicated fixture mirrors the forced/major-compaction purge case.
+      next_step: >-
+        Commission a major-compaction fixture and assert tombstone/TTL purge goldens.
+      target_suite: compaction_parity_tombstone_ttl
+      target_issue: 968
+
+  - id: cass.compaction.PartialCompactionsTest.tombstone_not_purged_excluded_sources
+    title: "Tombstone not purged when source SSTables are excluded"
+    status: planned
+    capability: compaction_merge
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - PartialCompactionsTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+        notes: >-
+          Resurrection-safety across partial/excluded sources is covered by cass.compaction_merge.resurrection_safety.overlapping_sources; this specific Cassandra case is not yet individually mirrored.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        No dedicated fixture mirrors this excluded-source tombstone-retention case.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        No dedicated fixture mirrors this excluded-source tombstone-retention case.
+      next_step: >-
+        Commission a partial-compaction fixture excluding sources and assert tombstones are retained.
+      target_suite: compaction_parity_tombstone_ttl
+      target_issue: 968
+
+  - id: cass.compaction.SSTablesIteratedTest.merge_no_shadow_without_timestamp
+    title: "Merge does not let newer deletions shadow older live cells without timestamp ordering"
+    status: planned
+    capability: compaction_merge
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - SSTablesIteratedTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+        notes: >-
+          Timestamp-ordered shadowing during merge is covered by the compaction parity suite; this specific Cassandra iteration-count case is not yet mirrored.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        No dedicated fixture mirrors the SSTablesIterated shadow-ordering case.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        No dedicated fixture mirrors the SSTablesIterated shadow-ordering case.
+      next_step: >-
+        Commission overlapping fixtures and assert no live cell is shadowed without timestamp ordering.
+      target_suite: compaction_parity_tombstone_ttl
+      target_issue: 968
+
+  - id: cass.compaction.ShardedCompactionWriterTest.shard_boundary_row_preservation
+    title: "Sharded compaction writer preserves rows across shard boundaries"
+    status: planned
+    capability: compaction_merge
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - ShardedCompactionWriterTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+        notes: >-
+          CQLite writes compaction output; sharded-writer shard-boundary row preservation is not yet mirrored against Cassandra goldens.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        No dedicated fixture mirrors sharded-compaction-writer shard-boundary preservation.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        No dedicated fixture mirrors sharded-compaction-writer shard-boundary preservation.
+      next_step: >-
+        Commission sharded-writer fixtures and assert no partition is orphaned across shard boundaries.
+      target_suite: compaction_parity_tombstone_ttl
+      target_issue: 968
+
+  - id: cass.compaction.ShardedMultiWriterTest.flush_sharding_row_count
+    title: "Flush-triggered sharded multi-writer row-count integrity"
+    status: planned
+    capability: compaction_merge
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - ShardedMultiWriterTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+        notes: >-
+          Flush-time sharding row-count integrity is not yet mirrored against Cassandra goldens.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        No dedicated fixture mirrors flush-triggered sharded multi-writer row counts.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        No dedicated fixture mirrors flush-triggered sharded multi-writer row counts.
+      next_step: >-
+        Commission flush-sharding fixtures and assert each partition yields the expected row count.
+      target_suite: compaction_parity_tombstone_ttl
+      target_issue: 968
+
+  - id: cass.compaction.LeveledCompactionStrategyTest.non_overlapping_levels
+    title: "Leveled compaction strategy: non-overlapping per-level ordering"
+    status: planned
+    capability: compaction_merge
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - LeveledCompactionStrategyTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+        notes: >-
+          CQLite implements STCS compaction; leveled-strategy merge ordering is in-domain for read/merge parity but the strategy itself is not yet mirrored.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        CQLite does not yet run a leveled compaction strategy; merge output parity for LCS-produced inputs is unmirrored.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        CQLite does not yet run a leveled compaction strategy; merge output parity for LCS-produced inputs is unmirrored.
+      next_step: >-
+        Implement/mirror leveled-strategy merge ordering or assert read parity over LCS-produced fixtures.
+      target_suite: compaction_parity_tombstone_ttl
+      target_issue: 968
+
+  - id: cass.compaction.LeveledGenerationsTest.level_generation_merge_order
+    title: "Leveled-generation SSTable merge order"
+    status: planned
+    capability: compaction_merge
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - LeveledGenerationsTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+        notes: >-
+          Leveled-generation merge ordering is in-domain for merge parity but not yet mirrored.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        CQLite does not yet model leveled generations; merge-order parity is unmirrored.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        CQLite does not yet model leveled generations; merge-order parity is unmirrored.
+      next_step: >-
+        Mirror leveled-generation merge ordering or assert read parity over generation-tagged fixtures.
+      target_suite: compaction_parity_tombstone_ttl
+      target_issue: 968
+
+  - id: cass.compaction.LongLeveledCompactionStrategyTest.concurrent_level_merge_safety
+    title: "Concurrent leveled-compaction overlapping-range safety"
+    status: planned
+    capability: compaction_merge
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - LongLeveledCompactionStrategyTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+        notes: >-
+          Concurrent leveled-compaction merge safety is in-domain for merge correctness but not yet mirrored.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        CQLite does not yet run concurrent leveled compaction; overlapping-range merge safety is unmirrored.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        CQLite does not yet run concurrent leveled compaction; overlapping-range merge safety is unmirrored.
+      next_step: >-
+        Mirror concurrent leveled-compaction merge safety or assert read parity over the produced fixtures.
+      target_suite: compaction_parity_tombstone_ttl
+      target_issue: 968
+
+  - id: cass.compaction.TimeWindowCompactionStrategyTest.ttl_window_expiry_purge
+    title: "Time-window compaction TTL/window expiry purge"
+    status: planned
+    capability: compaction_merge
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - TimeWindowCompactionStrategyTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+        notes: >-
+          TWCS window expiry / TTL purge merge semantics are in-domain but not yet mirrored.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        CQLite does not yet run a time-window compaction strategy; window-expiry purge parity is unmirrored.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        CQLite does not yet run a time-window compaction strategy; window-expiry purge parity is unmirrored.
+      next_step: >-
+        Mirror TWCS window-expiry purge semantics or assert read parity over TWCS-produced fixtures.
+      target_suite: compaction_parity_tombstone_ttl
+      target_issue: 968
+
+  - id: cass.compaction.UnifiedCompactionStrategyTest.gc_grace_purge_boundary
+    title: "Unified compaction strategy gc_grace purge boundary"
+    status: planned
+    capability: compaction_merge
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - UnifiedCompactionStrategyTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+        notes: >-
+          UCS gc_grace purge-boundary merge semantics are in-domain but not yet mirrored.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        CQLite does not yet run the unified compaction strategy; gc_grace purge-boundary parity is unmirrored.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        CQLite does not yet run the unified compaction strategy; gc_grace purge-boundary parity is unmirrored.
+      next_step: >-
+        Mirror UCS gc_grace purge boundary or assert read parity over UCS-produced fixtures.
+      target_suite: compaction_parity_tombstone_ttl
+      target_issue: 968
+
+  - id: cass.compaction.UnifiedCompactionDensitiesTest.sstable_density_distribution
+    title: "Unified compaction SSTable density distribution"
+    status: planned
+    capability: compaction_merge
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - UnifiedCompactionDensitiesTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+        notes: >-
+          UCS density-distribution output sizing is a strategy behavior; resulting SSTables remain in-domain for read/merge parity but the density logic is not mirrored.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        CQLite does not implement UCS density distribution; output sizing parity is unmirrored.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        CQLite does not implement UCS density distribution; output sizing parity is unmirrored.
+      next_step: >-
+        Mirror UCS density distribution or assert read parity over the produced SSTables.
+      target_suite: compaction_parity_tombstone_ttl
+      target_issue: 968
+
+  - id: cass.compaction.SingleSSTableLCSTaskTest.single_table_uplevel_metadata_readable
+    title: "Single-SSTable LCS uplevel: metadata readable before promotion"
+    status: planned
+    capability: compaction_merge
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - SingleSSTableLCSTaskTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+        notes: >-
+          Single-SSTable LCS uplevel metadata validation is in-domain for metadata read parity but not yet mirrored.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        CQLite does not run LCS uplevel tasks; the single-table uplevel metadata path is unmirrored.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        CQLite does not run LCS uplevel tasks; the single-table uplevel metadata path is unmirrored.
+      next_step: >-
+        Mirror single-SSTable LCS uplevel metadata validation or assert metadata read parity.
+      target_suite: compaction_parity_tombstone_ttl
+      target_issue: 968
+
+  - id: cass.compaction.ParallelizedTasksTest.sharded_row_partition_integrity
+    title: "Parallelized compaction: row/partition integrity across shards"
+    status: planned
+    capability: compaction_merge
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - ParallelizedTasksTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+        notes: >-
+          Row/partition integrity across shard boundaries is in-domain for compaction-output parity; the parallel task scheduling itself is node runtime, but the on-disk row/partition integrity is unmirrored.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        CQLite does not run parallelized compaction tasks; sharded row/partition integrity over the produced output is unmirrored.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        CQLite does not run parallelized compaction tasks; sharded row/partition integrity over the produced output is unmirrored.
+      next_step: >-
+        Mirror sharded row/partition integrity or assert read parity over parallelized-compaction fixtures.
+      target_suite: compaction_parity_tombstone_ttl
+      target_issue: 968
+
+  - id: cass.write_load_path.FlushingTest.flush_no_phantom_rows
+    title: "Flush produces no phantom rows; tombstones land correctly"
+    status: planned
+    capability: write_load_path
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: memtable-flush
+      relevance: high
+      files:
+        - FlushingTest.java
+    cqlite:
+      coverage:
+        suite: sstable_writer_cassandra_fixture_parity
+        tests: []
+        notes: >-
+          CQLite has Cassandra-fixture write/flush byte-parity for several scenarios; this specific phantom-row/tombstone-on-flush case is not yet mirrored.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        No dedicated fixture mirrors the flush phantom-row / tombstone-placement case.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        No dedicated fixture mirrors the flush phantom-row / tombstone-placement case.
+      next_step: >-
+        Commission a flush fixture and assert no phantom rows and correct tombstone placement vs Cassandra output.
+      target_suite: sstable_writer_cassandra_fixture_parity
+      target_issue: 1190
+
+  - id: cass.write_load_path.MemtableQuickTest.flush_living_cells_survive
+    title: "Living cells survive flush; tombstones do not over-purge"
+    status: planned
+    capability: write_load_path
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: memtable-flush
+      relevance: high
+      files:
+        - MemtableQuickTest.java
+    cqlite:
+      coverage:
+        suite: sstable_writer_cassandra_fixture_parity
+        tests: []
+        notes: >-
+          Living-cell survival across flush is in-domain for the write/flush path; this Cassandra case is not yet mirrored against goldens.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        No dedicated fixture mirrors the living-cells-survive-flush case.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        No dedicated fixture mirrors the living-cells-survive-flush case.
+      next_step: >-
+        Commission a flush fixture asserting living cells survive and tombstones do not over-purge.
+      target_suite: sstable_writer_cassandra_fixture_parity
+      target_issue: 1190
+
+  - id: cass.index_db.RowIndexTest.row_index_sort_order
+    title: "RowIndex sort order and duplicate-key handling"
+    status: planned
+    capability: data_db_decode
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: index-sai-sasi
+      relevance: high
+      files:
+        - RowIndexTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_index_db_big
+        tests: []
+        notes: >-
+          CQLite reads Index.db row-index entries; the RowIndex sort-order / duplicate-key cases from this Cassandra test are not yet mirrored as their own goldens.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        No dedicated fixture mirrors the RowIndex out-of-order / duplicate-key cases.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        No dedicated fixture mirrors the RowIndex out-of-order / duplicate-key cases.
+      next_step: >-
+        Commission RowIndex fixtures with out-of-order/duplicate keys and assert offset/order goldens.
+      target_suite: sstable_parity_index_db_big
+      target_issue: 968
+
+  - id: cass.sstable_format.VersionSupportedFeaturesTest.version_feature_matrix
+    title: "SSTable version / supported-features matrix"
+    status: planned
+    capability: sstable_format
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: sstable-format
+      relevance: high
+      files:
+        # Path-precise (#1199): the high-relevance file is the Big-format twin; a
+        # bare basename also matches the Med-relevance format/bti/ twin.
+        - test/unit/org/apache/cassandra/io/sstable/format/big/VersionSupportedFeaturesTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_component_manifest
+        tests: []
+        notes: >-
+          CQLite resolves storage-format versions (nb/oa/da/big/bti) from descriptors; the full version/supported-features matrix from this Cassandra test is not yet mirrored.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        No dedicated fixture mirrors the complete version/supported-features matrix.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        No dedicated fixture mirrors the complete version/supported-features matrix.
+      next_step: >-
+        Commission fixtures spanning the version matrix and assert feature-support resolution goldens.
+      target_suite: sstable_parity_component_manifest
+      target_issue: 968
+
+  - id: cass.filter_db_bloom.SerializationsTest.bloom_filter_deserialization
+    title: "Bloom filter serialization round-trip / no false negatives"
+    status: planned
+    capability: filter_db_bloom
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: bloom-filter
+      relevance: high
+      files:
+        # Path-precise (#1199): the high-relevance bloom-filter SerializationsTest is
+        # utils/SerializationsTest.java; bare basename also matches the Med
+        # (service/) and Low (gms/) twins.
+        - test/unit/org/apache/cassandra/utils/SerializationsTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_filter_db_bloom
+        tests: []
+        notes: >-
+          CQLite validates Filter.db bloom membership (no false negatives); the legacy/serialization round-trip cases from this Cassandra test are not yet mirrored as their own goldens.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        No dedicated fixture mirrors the bloom-filter serialization round-trip cases from SerializationsTest.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        No dedicated fixture mirrors the bloom-filter serialization round-trip cases from SerializationsTest.
+      next_step: >-
+        Commission bloom-filter serialization fixtures and assert deserialized membership goldens.
+      target_suite: sstable_parity_filter_db_bloom
+      target_issue: 968
+
+  - id: cass.compression.CompressionUpgradeTest.codec_compat_across_upgrade
+    title: "Compression codec compatibility across upgrades"
+    status: planned
+    capability: compression_checksum
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: compression
+      relevance: high
+      files:
+        - CompressionUpgradeTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_compression_info_chunks
+        tests: []
+        notes: >-
+          CQLite decompresses LZ4/Snappy/Deflate/Zstd chunks; cross-upgrade codec-compatibility cases from this Cassandra test are not yet mirrored as their own fixtures.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        No dedicated fixture mirrors compressed SSTables produced across an upgrade boundary.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        No dedicated fixture mirrors compressed SSTables produced across an upgrade boundary.
+      next_step: >-
+        Commission pre/post-upgrade compressed fixtures and assert decompression read parity.
+      target_suite: sstable_parity_compression_info_chunks
+      target_issue: 970
+
+  - id: cass.sstable_format.SSTableIdGenerationTest.mixed_id_scheme_readable
+    title: "Mixed sequential/UUID SSTable id schemes are readable"
+    status: planned
+    capability: component_discovery
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: sstable-format
+      relevance: high
+      files:
+        - SSTableIdGenerationTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_component_manifest
+        tests: []
+        notes: >-
+          CQLite resolves SSTable generation/id from descriptor filenames; mixing sequential and UUID id schemes (and reading both) is in-domain but not yet mirrored.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        No dedicated fixture mirrors a mixed sequential/UUID id-scheme generation set.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        No dedicated fixture mirrors a mixed sequential/UUID id-scheme generation set.
+      next_step: >-
+        Commission a fixture mixing sequential and UUID SSTable ids and assert all generations are discovered/readable.
+      target_suite: sstable_parity_component_manifest
+      target_issue: 968
+
+  - id: cass.write_load_path.SSTableWriterTransactionTest.writer_output_components
+    title: "SSTable writer output component integrity"
+    status: planned
+    capability: write_load_path
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: sstable-io
+      relevance: high
+      files:
+        - SSTableWriterTransactionTest.java
+    cqlite:
+      coverage:
+        suite: sstable_writer_cassandra_fixture_parity
+        tests: []
+        notes: >-
+          CQLite's writer emits SSTable components; the committed-output component integrity asserted by this Cassandra test is in-domain for write parity but not yet mirrored (the abort/transaction-log lifecycle is node runtime).
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        No dedicated fixture mirrors committed writer-output component integrity for this case.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        No dedicated fixture mirrors committed writer-output component integrity for this case.
+      next_step: >-
+        Commission a writer fixture and assert committed output components match Cassandra (transaction-log abort lifecycle remains out of scope).
+      target_suite: sstable_writer_cassandra_fixture_parity
+      target_issue: 1190
+
+  - id: cass.tombstone_ttl.RangeTombstoneBurnTest.range_partition_column_deletes_readable
+    title: "Range/partition/column deletes serialize and read back correctly"
+    status: planned
+    capability: tombstone_ttl
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - RangeTombstoneBurnTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+        notes: >-
+          CQLite reads range/partition/column tombstones from Data.db; the high-volume burn cases from this Cassandra test are not yet mirrored as their own goldens.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        No dedicated burn-scale fixture mirrors the RangeTombstoneBurn cases.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        No dedicated burn-scale fixture mirrors the RangeTombstoneBurn cases.
+      next_step: >-
+        Commission a range-tombstone burn fixture and assert deletes serialize and read back vs Cassandra.
+      target_suite: compaction_parity_tombstone_ttl
+      target_issue: 972
+
+  - id: cass.tombstone_ttl.ViewComplexTombstoneTest.cell_tombstone_not_purged
+    title: "Cell (null-column) tombstones not prematurely purged"
+    status: planned
+    capability: tombstone_ttl
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - ViewComplexTombstoneTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+        notes: >-
+          Cell-tombstone retention is covered by the compaction parity suite; the materialized-view complex-tombstone cases are not yet mirrored. (MV maintenance itself is a coordinator behavior; the on-disk cell-tombstone read/merge is in-domain.)
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        No dedicated fixture mirrors the view complex cell-tombstone cases; MV maintenance is coordinator-side.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: >-
+        No dedicated fixture mirrors the view complex cell-tombstone cases; MV maintenance is coordinator-side.
+      next_step: >-
+        Commission a fixture with view-style cell tombstones and assert they are not prematurely purged on merge.
+      target_suite: compaction_parity_tombstone_ttl
+      target_issue: 972
+
+  - id: cass.compaction.AntiCompactionBytemanTest.repair_driven_anticompaction
+    title: "Repair-driven anti-compaction SSTable lifecycle (Byteman)"
+    status: out_of_scope
+    capability: compaction_merge
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - AntiCompactionBytemanTest.java
+    cqlite:
+      coverage:
+        notes: >-
+          CQLite reads and compacts on-disk SSTables; it does not run repair sessions or the anti-compaction lifecycle that splits SSTables by repair status.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts: [logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: repair_coordinator
+      rationale: >-
+        Anti-compaction splits SSTables by repaired/unrepaired status under a live repair session, with Byteman fault injection of the node's SSTable lifecycle transitions. This is a repair-coordinator/node-runtime behavior, not on-disk read/write/compact format.
+      cqlite_boundary: >-
+        CQLite reads and compacts on-disk SSTables; it does not run repair sessions or the anti-compaction lifecycle that splits SSTables by repair status.
+      safe_claim: >-
+        CQLite reads any SSTable Cassandra wrote, including post-anti-compaction outputs; it does not perform repair-driven anti-compaction.
+      related_in_scope_scenarios:
+        - cass.compaction_merge.byte_for_byte_output
+        - cass.compaction_merge.tombstone_ttl_shadowing
+        - cass.compaction.harness_logical_tier
+
+  - id: cass.commitlog.CommitLogStressTest.replay_round_trip
+    title: "Commitlog stress replay round-trip"
+    status: out_of_scope
+    capability: write_load_path
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: commitlog
+      relevance: high
+      files:
+        - CommitLogStressTest.java
+    cqlite:
+      coverage:
+        notes: >-
+          CQLite reads and writes SSTable components; it does not write or replay the commit log.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts: [logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: commitlog_replay
+      rationale: >-
+        This test writes mutations to the commit log, restarts, replays all segments, and verifies a round-trip hash. Commit-log replay is a node durability/recovery behavior outside CQLite's SSTable read/write/compact scope.
+      cqlite_boundary: >-
+        CQLite reads and writes SSTable components; it does not write or replay the commit log.
+      safe_claim: >-
+        CQLite reads any SSTable produced after a commitlog-driven flush; it does not implement commit-log replay.
+      related_in_scope_scenarios:
+        - cass.write_load_path.cassandra_sstable_writer_fixtures
+
+  - id: cass.compaction.CompactionsBytemanTest.fault_injected_compaction
+    title: "Byteman fault-injected compaction internals"
+    status: out_of_scope
+    capability: compaction_merge
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CompactionsBytemanTest.java
+    cqlite:
+      coverage:
+        notes: >-
+          CQLite performs deterministic compaction over on-disk inputs; it does not model the node's fault-injection / in-flight compaction orchestration.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts: [logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: not_sstable_reader_writer_compactor
+      rationale: >-
+        This test uses Byteman to inject faults into the live node's compaction execution (expired-SSTable purging under space constraints, in-flight failure handling). It exercises node-runtime compaction orchestration rather than on-disk merge output.
+      cqlite_boundary: >-
+        CQLite performs deterministic compaction over on-disk inputs; it does not model the node's fault-injection / in-flight compaction orchestration.
+      safe_claim: >-
+        CQLite produces correct merged output for the inputs it is given; it does not reproduce the node's fault-injection compaction internals.
+      related_in_scope_scenarios:
+        - cass.compaction_merge.byte_for_byte_output
+        - cass.compaction_merge.tombstone_ttl_shadowing
+        - cass.compaction.harness_logical_tier
+
+  - id: cass.streaming.EntireSSTableStreamConcurrentComponentMutationTest.zero_copy_stream_mutation
+    title: "Entire-SSTable zero-copy streaming under concurrent component mutation"
+    status: out_of_scope
+    capability: sstable_format
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: streaming
+      relevance: high
+      files:
+        - EntireSSTableStreamConcurrentComponentMutationTest.java
+    cqlite:
+      coverage:
+        notes: >-
+          CQLite reads complete SSTable components from disk; it does not stream SSTables between nodes or detect concurrent stream-time mutations.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts: [logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: streaming_protocol
+      rationale: >-
+        This test validates the entire-SSTable (zero-copy) streaming path detecting concurrent component-file mutations during repair/bootstrap. Streaming is a node-to-node protocol outside CQLite's local read/write/compact scope.
+      cqlite_boundary: >-
+        CQLite reads complete SSTable components from disk; it does not stream SSTables between nodes or detect concurrent stream-time mutations.
+      safe_claim: >-
+        CQLite reads any SSTable a node streamed and persisted; it does not implement the streaming protocol.
+      related_in_scope_scenarios:
+        - cass.sstable_format.descriptor_component_resolution
+        - cass.statistics_metadata.serialization_header
+
+  - id: cass.streaming.SSTableZeroCopyWriterTest.zero_copy_component_roundtrip
+    title: "Zero-copy streaming writer component round-trip"
+    status: out_of_scope
+    capability: sstable_format
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: streaming
+      relevance: high
+      files:
+        - SSTableZeroCopyWriterTest.java
+    cqlite:
+      coverage:
+        notes: >-
+          CQLite writes SSTable components locally; it does not implement the zero-copy streaming receive/writer path.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts: [logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: streaming_protocol
+      rationale: >-
+        This test validates the zero-copy streaming writer that materializes streamed SSTable components on the receiving node. It is part of the node-to-node streaming protocol, not local SSTable read/write/compact.
+      cqlite_boundary: >-
+        CQLite writes SSTable components locally; it does not implement the zero-copy streaming receive/writer path.
+      safe_claim: >-
+        CQLite reads any SSTable materialized by zero-copy streaming; it does not implement the streaming writer.
+      related_in_scope_scenarios:
+        - cass.write_load_path.cassandra_sstable_writer_fixtures
+
+  - id: cass.read_repair.ReadRepairCollectionQueriesTest.collection_divergence_repair
+    title: "Read-repair of divergent replica collections"
+    status: out_of_scope
+    capability: cql_types
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: read-repair
+      relevance: high
+      files:
+        - ReadRepairCollectionQueriesTest.java
+    cqlite:
+      coverage:
+        notes: >-
+          CQLite decodes collections from a single SSTable set; it does not coordinate or repair replica divergence.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts: [logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: read_repair_coordinator
+      rationale: >-
+        This test exercises coordinator-side read-repair reconciling divergent collection values across replicas. Read-repair is a distributed coordinator behavior outside CQLite's local SSTable scope.
+      cqlite_boundary: >-
+        CQLite decodes collections from a single SSTable set; it does not coordinate or repair replica divergence.
+      safe_claim: >-
+        CQLite decodes any collection cells Cassandra wrote; it does not perform coordinator read-repair.
+      related_in_scope_scenarios:
+        - cass.data_db_decode.tombstone.partition_deletion_time
+        - cass.data_db_decode.range_tombstone.bound_markers
+
+  - id: cass.read_repair.SSTableAndMemTableDigestMatchTest.digest_match
+    title: "SSTable/memtable digest match for read-repair"
+    status: out_of_scope
+    capability: data_db_decode
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: read-repair
+      relevance: high
+      files:
+        - SSTableAndMemTableDigestMatchTest.java
+    cqlite:
+      coverage:
+        notes: >-
+          CQLite reads SSTable images; it does not maintain a memtable for digest comparison or drive read-repair.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts: [logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: read_repair_coordinator
+      rationale: >-
+        This test asserts digest equality between an SSTable image and the in-memory memtable for read-repair purposes. The read-repair digest comparison and memtable maintenance are coordinator/node-runtime behaviors.
+      cqlite_boundary: >-
+        CQLite reads SSTable images; it does not maintain a memtable for digest comparison or drive read-repair.
+      safe_claim: >-
+        CQLite reads any SSTable Cassandra flushed; it does not compute read-repair digests against a live memtable.
+      related_in_scope_scenarios:
+        - cass.sstable_format.descriptor_component_resolution
+        - cass.statistics_metadata.serialization_header
+
+  - id: cass.repair.RepairJobTest.merkle_tree_sync
+    title: "Repair job merkle-tree synchronization"
+    status: out_of_scope
+    capability: data_db_decode
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: repair
+      relevance: high
+      files:
+        - RepairJobTest.java
+    cqlite:
+      coverage:
+        notes: >-
+          CQLite reads and compacts local SSTables; it does not build merkle trees or run repair jobs.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts: [logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: repair_coordinator
+      rationale: >-
+        This test validates merkle-tree difference detection and synchronization scheduling within a repair job. Repair coordination is a distributed node behavior outside CQLite's scope.
+      cqlite_boundary: >-
+        CQLite reads and compacts local SSTables; it does not build merkle trees or run repair jobs.
+      safe_claim: >-
+        CQLite reads any SSTable produced before/after repair; it does not implement repair coordination.
+      related_in_scope_scenarios:
+        - cass.compaction_merge.byte_for_byte_output
+        - cass.compaction_merge.tombstone_ttl_shadowing
+        - cass.compaction.harness_logical_tier
+
+  - id: cass.compaction.EarlyOpenCompactionTest.early_open_intermediate_readers
+    title: "Early-open compaction intermediate readers"
+    status: out_of_scope
+    capability: compaction_merge
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - EarlyOpenCompactionTest.java
+    cqlite:
+      coverage:
+        notes: >-
+          CQLite reads completed SSTables; it does not expose partially written compaction outputs as early-open intermediate readers.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts: [logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: node_lifecycle
+      rationale: >-
+        Early-open exposes a partially written compaction output as a live reader before the compaction completes. This is a node-runtime read-availability optimization (SSTable lifecycle), not an on-disk format behavior.
+      cqlite_boundary: >-
+        CQLite reads completed SSTables; it does not expose partially written compaction outputs as early-open intermediate readers.
+      safe_claim: >-
+        CQLite reads any completed SSTable a compaction produced; it does not implement early-open intermediate reader exposure.
+      related_in_scope_scenarios:
+        - cass.compaction_merge.byte_for_byte_output
+        - cass.compaction_merge.tombstone_ttl_shadowing
+        - cass.compaction.harness_logical_tier
+
+  - id: cass.scrub_verify.ScrubToolTest.scrub_corrupt_partitions
+    title: "Standalone scrub tool (corrupt-partition skip/fail)"
+    status: out_of_scope
+    capability: corruption_verify
+    priority: P2
+    risk: tooling_only
+    cassandra:
+      category: scrub-verify
+      relevance: high
+      files:
+        - ScrubToolTest.java
+    cqlite:
+      coverage:
+        notes: >-
+          CQLite verifies checksums and detects corruption on read; it does not implement a standalone scrub/rewrite tool.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts: [logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: java_tooling
+      rationale: >-
+        ScrubToolTest exercises Cassandra's standalone scrub tool (garbage injection, partition skip/rewrite). Scrub is out of CQLite's scope per issue #1281; CQLite detects corruption on read rather than running a scrub/rewrite tool.
+      cqlite_boundary: >-
+        CQLite verifies checksums and detects corruption on read; it does not implement a standalone scrub/rewrite tool.
+      safe_claim: >-
+        CQLite detects on-disk corruption during reads; it does not provide a scrub tool that rewrites corrupted SSTables.
+      related_in_scope_scenarios:
+        - cass.index_db.CorruptPrimaryIndexTest.big_primary_index_corruption
+
+  - id: cass.tools_cli.StandaloneUpgraderOnSStablesTest.standalone_upgrade
+    title: "Standalone SSTable upgrader tool"
+    status: out_of_scope
+    capability: cli_reporting
+    priority: P2
+    risk: tooling_only
+    cassandra:
+      category: tools-cli
+      relevance: high
+      files:
+        - StandaloneUpgraderOnSStablesTest.java
+    cqlite:
+      coverage:
+        notes: >-
+          CQLite reads nb/oa/da/big/bti formats directly; it does not run a standalone JVM upgrader that rewrites SSTables in place.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts: [logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: java_tooling
+      rationale: >-
+        This test drives Cassandra's standalone sstableupgrade JVM tool that rewrites SSTables to a newer on-disk version. CQLite reads multiple on-disk versions directly and does not rewrite/upgrade SSTables via a node-side tool.
+      cqlite_boundary: >-
+        CQLite reads nb/oa/da/big/bti formats directly; it does not run a standalone JVM upgrader that rewrites SSTables in place.
+      safe_claim: >-
+        CQLite reads legacy and current SSTable versions directly; it does not implement Cassandra's standalone upgrader tool.
+      related_in_scope_scenarios:
+        - cass.sstable_format.descriptor_component_resolution
+        - cass.statistics_metadata.serialization_header
+
+  - id: cass.memtable_flush.MemtableNegativeReleasedCQLReproTest.memtable_memory_accounting
+    title: "Memtable negative-released memory accounting repro"
+    status: out_of_scope
+    capability: write_load_path
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: memtable-flush
+      relevance: high
+      files:
+        - MemtableNegativeReleasedCQLReproTest.java
+    cqlite:
+      coverage:
+        notes: >-
+          CQLite does not maintain a node memtable or its memory pool; it reads/writes on-disk SSTable components.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts: [logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: memtable_internals
+      rationale: >-
+        This test reproduces a memtable memory-accounting assertion (negative released bytes) during flush. It targets the node's in-memory memtable allocator, not the on-disk SSTable the flush produces.
+      cqlite_boundary: >-
+        CQLite does not maintain a node memtable or its memory pool; it reads/writes on-disk SSTable components.
+      safe_claim: >-
+        CQLite reads any SSTable produced by a flush; it does not model the node's memtable memory accounting.
+      related_in_scope_scenarios:
+        - cass.write_load_path.cassandra_sstable_writer_fixtures
+
+  - id: cass.memtable_flush.NonSplittablePartitionerTrieMemtableFlushSetTest.trie_memtable_flushset
+    title: "Non-splittable-partitioner trie-memtable FlushSet metadata"
+    status: out_of_scope
+    capability: write_load_path
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: memtable-flush
+      relevance: high
+      files:
+        - NonSplittablePartitionerTrieMemtableFlushSetTest.java
+    cqlite:
+      coverage:
+        notes: >-
+          CQLite reads/writes on-disk SSTable components; it does not implement the trie-memtable FlushSet enumeration.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts: [logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: memtable_internals
+      rationale: >-
+        This test validates the trie-memtable getFlushSet() partition enumeration/metadata for a non-splittable partitioner. It targets the in-memory trie-memtable structure, not the resulting on-disk SSTable.
+      cqlite_boundary: >-
+        CQLite reads/writes on-disk SSTable components; it does not implement the trie-memtable FlushSet enumeration.
+      safe_claim: >-
+        CQLite reads any SSTable the trie memtable flushed; it does not implement the trie-memtable internals.
+      related_in_scope_scenarios:
+        - cass.write_load_path.cassandra_sstable_writer_fixtures
+
+  - id: cass.memtable_flush.SplittablePartitionerTrieMemtableFlushSetTest.trie_memtable_flushset_split
+    title: "Splittable-partitioner trie-memtable FlushSet enumeration"
+    status: out_of_scope
+    capability: write_load_path
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: memtable-flush
+      relevance: high
+      files:
+        - SplittablePartitionerTrieMemtableFlushSetTest.java
+    cqlite:
+      coverage:
+        notes: >-
+          CQLite reads/writes on-disk SSTable components; it does not implement the trie-memtable FlushSet enumeration.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts: [logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: memtable_internals
+      rationale: >-
+        This test validates complete partition enumeration from the splittable-partitioner trie-memtable getFlushSet(). It targets the in-memory memtable structure, not the on-disk SSTable produced.
+      cqlite_boundary: >-
+        CQLite reads/writes on-disk SSTable components; it does not implement the trie-memtable FlushSet enumeration.
+      safe_claim: >-
+        CQLite reads any SSTable the trie memtable flushed; it does not implement the trie-memtable internals.
+      related_in_scope_scenarios:
+        - cass.write_load_path.cassandra_sstable_writer_fixtures
+
+  - id: cass.memtable_flush.SSTableFlushObserverTest.secondary_index_observer
+    title: "SSTable flush observer (secondary-index callbacks)"
+    status: out_of_scope
+    capability: write_load_path
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: memtable-flush
+      relevance: high
+      files:
+        - SSTableFlushObserverTest.java
+    cqlite:
+      coverage:
+        notes: >-
+          CQLite writes the primary SSTable components; it does not run secondary-index flush observers or build SAI/SASI indexes.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts: [logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: sai_sasi_query
+      rationale: >-
+        This test validates that secondary-index flush observers receive complete partition/cell-position callbacks during flush. Secondary-index building is part of the SAI/SASI index path, which is out of CQLite's read/write/compact scope.
+      cqlite_boundary: >-
+        CQLite writes the primary SSTable components; it does not run secondary-index flush observers or build SAI/SASI indexes.
+      safe_claim: >-
+        CQLite reads the primary SSTable components a flush produced; it does not build secondary indexes.
+      related_in_scope_scenarios:
+        - cass.write_load_path.cassandra_sstable_writer_fixtures
+
+  # ----------------------------------------------------------------------------
+  # Issue #1199 (coverage soundness fix): exact-basename matching in
+  # `cassandra-parity coverage` revealed two high-relevance files that were
+  # previously only substring-"classified" by longer scenario filenames
+  # (AntiCompactionTest by PendingAntiCompactionTest; TombstonesTest by
+  # RepairedDataTombstonesTest). Both describe node-side write/repair/query
+  # guardrail behavior that CQLite (read/write/compact of on-disk SSTables)
+  # does not implement, so each is conservatively out_of_scope with the
+  # in-scope semantics they border named under related_in_scope_scenarios.
+  # ----------------------------------------------------------------------------
+  - id: cass.compaction.AntiCompactionTest.range_split_repair_state
+    title: Anticompaction range-split of SSTables into pending-repair / unrepaired sets
+    status: out_of_scope
+    capability: compaction_merge
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - AntiCompactionTest.java
+    cqlite:
+      coverage:
+        notes: >-
+          Anticompaction is a node-side repair operation that physically splits
+          an SSTable's partitions by token range into pending-repair and
+          unrepaired output sets and stamps the repair-state flags. CQLite reads
+          and merges whatever SSTables anticompaction produced; it does not run
+          anticompaction, own repair sessions, or split by token range.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts: [logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: not_sstable_reader_writer_compactor
+      rationale: >-
+        Anticompaction (splitting SSTables by token range during incremental
+        repair, managing repair-session lifecycle and transient/full replica
+        ranges) is a node-side repair behavior. CQLite is a read/write/compact
+        library over on-disk SSTables and never executes anticompaction.
+      cqlite_boundary: >-
+        CQLite parses and preserves the repair-state metadata (repairedAt /
+        pendingRepair UUID) an SSTable carries and rejects mixed-repair-state
+        compaction; it does not perform the token-range split or run a repair
+        session.
+      safe_claim: >-
+        CQLite reads and compacts the pending-repair and unrepaired SSTables
+        anticompaction produced, honoring their repair-state metadata; it does
+        not reproduce the anticompaction split itself.
+      related_in_scope_scenarios:
+        - cass.repair.PendingAntiCompactionTest.pending_repair_metadata
+        - cass.tombstone_ttl.RepairedDataTombstonesTest.repair_metadata_gates_purge
+
+  - id: cass.tombstone_ttl.TombstonesTest.overwhelming_threshold_guardrail
+    title: Tombstone-overwhelming query guardrail (warn/fail thresholds + metrics)
+    status: out_of_scope
+    capability: tombstone_ttl
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - TombstonesTest.java
+    cqlite:
+      coverage:
+        notes: >-
+          TombstonesTest exercises the query-time tombstone-overwhelming
+          guardrail: raising TombstoneOverwhelmingException and incrementing
+          warn/fail metrics once a read scans more tombstones than a configured
+          threshold. That is a node-side query-execution guardrail. The
+          underlying correctness semantics it relies on — tombstone shadowing by
+          partition/row deletes and gc_grace expiry exclusion — ARE in CQLite's
+          domain and are covered by the related in-scope scenarios below.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts: [logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: not_sstable_reader_writer_compactor
+      rationale: >-
+        The warn/fail tombstone-count thresholds, TombstoneOverwhelmingException,
+        and the associated read-failure metrics are a node-side query-execution
+        guardrail enforced by the coordinator/read path, not an on-disk SSTable
+        read/write/compaction behavior.
+      cqlite_boundary: >-
+        CQLite reads tombstones from SSTables and applies shadowing and gc_grace
+        expiry during scans/merges; it does not enforce a per-query tombstone
+        budget or raise TombstoneOverwhelmingException.
+      safe_claim: >-
+        CQLite correctly filters tombstones shadowed by partition/row deletes and
+        excludes gc_grace-expired tombstones during reads and compaction; it does
+        not implement the query-time tombstone-overwhelming threshold guardrail.
+      related_in_scope_scenarios:
+        - cass.tombstone_ttl.gc_grace.partition_row_cell
+        - cass.tombstone_ttl.skipped_sstable.partition_delete_shadows_older_rows
 
 # ==============================================================================
 # Public/release-facing parity claims (issue #1023).

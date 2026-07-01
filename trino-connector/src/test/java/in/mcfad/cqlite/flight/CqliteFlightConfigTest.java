@@ -26,6 +26,26 @@ class CqliteFlightConfigTest {
         assertEquals(GroupByPushdownPolicy.AUTOMATIC, config.groupByPushdown());
         assertEquals(CqliteFlightConfig.DEFAULT_MAX_GROUP_RATIO, config.maxGroupRatio());
         assertEquals(CqliteFlightConfig.DEFAULT_FLIGHT_PORT, config.flightPort());
+        assertEquals(CqliteFlightConfig.DEFAULT_TABLE_STATS_TIMEOUT_MILLIS,
+                config.tableStatsTimeoutMillis());
+    }
+
+    @Test
+    void parsesTableStatsTimeout() {
+        Map<String, String> m = base();
+        m.put("cqlite.table-stats-timeout-ms", "1500");
+        assertEquals(1500L, CqliteFlightConfig.fromMap(m).tableStatsTimeoutMillis());
+    }
+
+    @Test
+    void rejectsNonPositiveTableStatsTimeout() {
+        Map<String, String> m = base();
+        m.put("cqlite.table-stats-timeout-ms", "0");
+        assertThrows(IllegalArgumentException.class, () -> CqliteFlightConfig.fromMap(m));
+
+        Map<String, String> n = base();
+        n.put("cqlite.table-stats-timeout-ms", "-5");
+        assertThrows(IllegalArgumentException.class, () -> CqliteFlightConfig.fromMap(n));
     }
 
     @Test

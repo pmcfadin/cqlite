@@ -341,6 +341,81 @@ class CqliteFlightMetadataApplyAggregationTest {
                 GroupByPushdownPolicy.AUTOMATIC, java.util.OptionalDouble.of(0.5), maxRatio));
     }
 
+    // --- Fix 2 (issue #944): fetch stats only for OTHERWISE-PUSHABLE aggregations ---
+
+    /**
+     * AUTOMATIC-policy metadata that records whether the planning-time stats fetch
+     * (overridable {@link CqliteFlightMetadata#fetchTableStats} seam) was invoked, without
+     * any live Sidecar/Flight. A supported GROUP BY must reach the fetch; an aggregation
+     * declined for an unsupported function/argument must NOT.
+     */
+    private static final class FetchSpyMetadata extends CqliteFlightMetadata {
+        int fetchCalls = 0;
+
+        FetchSpyMetadata() {
+            super(CqliteFlightConfig.fromMap(Map.of(
+                    "cqlite.sidecar-uri", "http://localhost:9043",
+                    "cqlite.aggregation-pushdown-group-by", "automatic")), null, null);
+        }
+
+        @Override
+        TableStats fetchTableStats(CqliteFlightTableHandle handle) {
+            fetchCalls++;
+            // An UNBOUNDED grouping shape → empty group ratio → AUTOMATIC pushes. We only
+            // assert WHETHER this ran, so the returned stats just need to be complete.
+            return new TableStats(1000, 100, 1, true, 0);
+        }
+    }
+
+    @Test
+    void unsupportedAggregationDoesNotTriggerStatsFetch() {
+        // GROUP BY c1 with an UNSUPPORTED aggregate (sum on a non-FULL column). The
+        // aggregate-support validation declines it, so under Fix 2 the network stats
+        // fetch + group-ratio gate must NEVER run.
+        FetchSpyMetadata spy = new FetchSpyMetadata();
+        assertTrue(spy.applyAggregation(
+                null, TABLE, List.of(agg("sum", BIGINT, new Variable("y", BIGINT))),
+                ASSIGN, List.of(List.of(C1))).isEmpty(),
+                "unsupported aggregate must be declined");
+        assertEquals(0, spy.fetchCalls,
+                "an aggregation declined for an unsupported argument must NOT fetch stats");
+    }
+
+    @Test
+    void unsupportedFunctionWithGroupByDoesNotTriggerStatsFetch() {
+        // GROUP BY c1 with an UNSUPPORTED function. Declined before any stats I/O.
+        FetchSpyMetadata spy = new FetchSpyMetadata();
+        assertTrue(spy.applyAggregation(
+                null, TABLE, List.of(agg("approx_distinct", BIGINT, new Variable("x", BIGINT))),
+                ASSIGN, List.of(List.of(C1))).isEmpty(),
+                "unsupported function must be declined");
+        assertEquals(0, spy.fetchCalls,
+                "an aggregation declined for an unsupported function must NOT fetch stats");
+    }
+
+    @Test
+    void supportedGroupByDoesTriggerStatsFetch() {
+        // A supported, otherwise-pushable AUTOMATIC GROUP BY DOES consult stats: the
+        // group-ratio gate needs them. (Unbounded shape → empty ratio → still pushes.)
+        FetchSpyMetadata spy = new FetchSpyMetadata();
+        assertTrue(spy.applyAggregation(
+                null, TABLE, List.of(agg("count", BIGINT)),
+                ASSIGN, List.of(List.of(C1))).isPresent(),
+                "supported GROUP BY count(*) must push");
+        assertEquals(1, spy.fetchCalls,
+                "a supported AUTOMATIC GROUP BY must fetch stats for the group-ratio gate");
+    }
+
+    @Test
+    void globalAggregateDoesNotTriggerStatsFetch() {
+        // Globals bypass the group-ratio gate entirely (no GROUP BY), so no stats fetch.
+        FetchSpyMetadata spy = new FetchSpyMetadata();
+        assertTrue(spy.applyAggregation(
+                null, TABLE, List.of(agg("count", BIGINT)), ASSIGN, List.of(List.of()))
+                .isPresent(), "global aggregate must push");
+        assertEquals(0, spy.fetchCalls, "a global aggregate must NOT fetch stats");
+    }
+
     @Test
     void applyFilterDeclinesOnAggregatedHandle() {
         // After aggregation pushdown, a later filter must NOT be pushed: it would

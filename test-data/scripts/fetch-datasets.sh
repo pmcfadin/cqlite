@@ -5,12 +5,23 @@ set -euo pipefail
 # Usage: DATASET_TAG=datasets-v2 DATASET_ASSET=cassandra5-small-full.tar.gz DATASET_SHA256=<sha> ./test-data/scripts/fetch-datasets.sh
 
 TAG="${DATASET_TAG:-datasets-v3}"
-ASSET="${DATASET_ASSET:-cassandra5-small-full-v3.2.tar.gz}"
-SHA256_EXPECTED="${DATASET_SHA256:-bebc763752c8d68c7fb0483a1b31294b4d1d21343d3f7d124da069e5073202fa}"
+ASSET="${DATASET_ASSET:-cassandra5-small-full-v3.4.tar.gz}"
+SHA256_EXPECTED="${DATASET_SHA256:-3cae644360e0142a6bb5e96ddab445ff18e3478e7058104842ce1a455fba8a33}"
 DATASET_ROOT="${CQLITE_DATASETS_ROOT:-test-data/datasets}"
 PIN_FILE="${DATASET_ROOT}/.dataset-pin"
 ASSET_PATH="/tmp/${ASSET}"
-WIDE_PARTITION_GOLDEN="${DATASET_ROOT}/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294/nb-2-big-Data.db.jsonl"
+WIDE_PARTITION_DIR="${DATASET_ROOT}/sstables/test_big/wide_partition-ffe2ee50733111f19e8f6d08b8e7a294"
+WIDE_PARTITION_GOLDEN="${WIDE_PARTITION_DIR}/nb-2-big-Data.db.jsonl"
+# Exact promoted wide_partition reference binaries the byte_for_byte parity
+# scenarios + the digest strict test require (mirrors REQUIRED_BINARY_COMPONENTS
+# in cqlite-core/tests/issue_993_wide_partition_promoted_index_parity.rs). A
+# dataset missing any of these must force a re-fetch (issue #1185 fail-closed).
+WIDE_PARTITION_REQUIRED_COMPONENTS=(
+  "nb-2-big-Data.db"
+  "nb-2-big-Index.db"
+  "nb-2-big-Digest.crc32"
+  "nb-2-big-CompressionInfo.db"
+)
 
 if [ -z "${DATASET_ROOT}" ] || [ "${DATASET_ROOT}" = "/" ]; then
   echo "ERROR: unsafe CQLITE_DATASETS_ROOT='${DATASET_ROOT}'" >&2
@@ -50,7 +61,12 @@ restore_ci_tracked_dataset_files() {
   fi
 }
 
-has_required_dataset() {
+# Validates the dataset CONTENT only (no pin tag/asset/sha checks). A freshly
+# extracted archive is in exactly this state — content present but the pin not
+# yet stamped — so the post-extraction validation uses this to confirm the
+# archive is complete (incl. the exact wide_partition reference binaries) before
+# write_pin runs.
+has_required_content() {
   [ -f "${DATASET_ROOT}/metadata.yml" ] || return 1
   [ -s "${WIDE_PARTITION_GOLDEN}" ] || return 1
 
@@ -69,11 +85,28 @@ has_required_dataset() {
   [ "${summary_count}" -gt 0 ] || return 1
   [ "${statistics_count}" -gt 0 ] || return 1
 
-  if [ -f "${PIN_FILE}" ]; then
-    grep -qx "tag=${TAG}" "${PIN_FILE}" || return 1
-    grep -qx "asset=${ASSET}" "${PIN_FILE}" || return 1
-    grep -qx "sha256=${SHA256_EXPECTED}" "${PIN_FILE}" || return 1
-  fi
+  # The global counts above can be satisfied by other tables; explicitly require
+  # the EXACT promoted wide_partition reference binaries so a partial/stale
+  # dataset (other tables present, wide_partition absent) cannot be accepted and
+  # stamped as the new pin (issue #1185 fail-closed).
+  local component
+  for component in "${WIDE_PARTITION_REQUIRED_COMPONENTS[@]}"; do
+    [ -f "${WIDE_PARTITION_DIR}/${component}" ] || return 1
+  done
+}
+
+# Strict fast-path check: content present AND pinned to the expected v3.4 tag/
+# asset/sha. The skip-download path requires BOTH so a stale/unpinned dataset
+# forces a re-fetch (issue #1185 fail-closed).
+has_required_dataset() {
+  has_required_content || return 1
+
+  # The pin file MUST exist and match. A missing pin is NOT acceptable — it would
+  # otherwise let an unverified dataset fall through and be re-stamped (#1185).
+  [ -f "${PIN_FILE}" ] || return 1
+  grep -qx "tag=${TAG}" "${PIN_FILE}" || return 1
+  grep -qx "asset=${ASSET}" "${PIN_FILE}" || return 1
+  grep -qx "sha256=${SHA256_EXPECTED}" "${PIN_FILE}" || return 1
 }
 
 restore_ci_tracked_dataset_files
@@ -120,7 +153,10 @@ restore_ci_tracked_dataset_files
 # suffix (e.g., `*-Data.db` matches both the real file and `._..-Data.db`).
 find "${DATASET_ROOT}" \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev/null || true
 
-if ! has_required_dataset; then
+# Validate the freshly extracted CONTENT (not the pin — package_datasets.sh does
+# not embed a .dataset-pin in the archive). A bad/partial archive still fails
+# loudly here; the pin is stamped only after content is confirmed.
+if ! has_required_content; then
   echo "ERROR: dataset extraction did not produce required Cassandra SSTable components in ${DATASET_ROOT}" >&2
   exit 1
 fi
