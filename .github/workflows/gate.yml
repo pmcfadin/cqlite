@@ -29,14 +29,29 @@ on:
     # and test-data/scripts/** must trigger this lane too — otherwise a PR
     # editing them could break a gate component with nothing red until the
     # nightly backstop. scripts/** subsumes agent-gate.sh and scripts/tests/**;
-    # they are kept explicit for readability. This set contains NO docs/** or
-    # website/** paths, so a docs-only PR still does not trigger the lane.
+    # they are kept explicit for readability.
+    #
+    # Beyond the scripts, the gate directly CONSUMES a few non-script data files;
+    # a PR editing any of them could break a gate component with nothing red
+    # until the nightly backstop, so they are listed as SPECIFIC entries:
+    #   - docs/reports/delivery-telemetry.schema.json — validated by the
+    #     delivery-telemetry component.
+    #   - tools/cassandra-parity/** + test-data/cassandra-parity-manifest.yml +
+    #     docs/reports/cassandra-test-parity.md — inputs/output the parity-report
+    #     component renders and staleness-checks.
+    # These are named files, NOT a broad docs/**: a generic docs page
+    # (docs/somethingelse.md) or a website/** change still does NOT match this
+    # filter, so a docs-only PR still does not trigger the lane.
     paths:
       - 'scripts/**'
       - 'scripts/agent-gate.sh'
       - 'scripts/tests/**'
       - 'test-data/scripts/**'
       - 'bindings/**'
+      - 'docs/reports/delivery-telemetry.schema.json'
+      - 'tools/cassandra-parity/**'
+      - 'test-data/cassandra-parity-manifest.yml'
+      - 'docs/reports/cassandra-test-parity.md'
       - '.github/workflows/gate.yml'
   schedule:
     # Nightly backstop, 03:37 UTC — slotted off-peak between the existing
@@ -116,14 +131,23 @@ jobs:
       # than a third-party action: this job validates PR-controlled code, so a
       # mutable `@main` action ref (a moving target that could be tampered with
       # upstream) has no business running before the gate (roborev). Strips
-      # dotnet, android, haskell, the large hosted toolcache, and unused
-      # /usr/local dirs — ~20-30 GB reclaimed with only in-repo shell.
+      # dotnet, android, haskell, unused /usr/local dirs, and the CodeQL
+      # sub-tree of the hosted toolcache — ~20-30 GB reclaimed with only in-repo
+      # shell.
+      #
+      # Deliberately does NOT remove "$AGENT_TOOLSDIRECTORY"
+      # (/opt/hostedtoolcache) itself: that is the tool-cache ROOT that the
+      # subsequent actions/setup-node and actions/setup-python steps use as their
+      # writable cache root. Deleting the root can leave those setup actions
+      # without an expected/writable directory and fail the job before the gate
+      # even runs (roborev). We remove only the specific large, unused CodeQL
+      # sub-tree of the toolcache and leave the root in place.
       - name: Free disk space (issue #722, #1269)
         run: |
           df -h / | tail -1
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
             /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
-            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+            /usr/local/share/boost || true
           sudo docker image prune --all --force || true
           df -h / | tail -1
 
