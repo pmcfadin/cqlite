@@ -18,16 +18,25 @@
 
 ## 2. Bundle layout + emission from the Rust required_parity checks
 
-- [ ] 2.1 Emit a scenario-id-keyed bundle (`parity-failures/<tier>/<scenario_id>/`) from the Rust
+- [x] 2.1 Emit a scenario-id-keyed bundle (`parity-failures/<tier>/<scenario_id>/`) from the Rust
       byte/offset/checksum/JSONL parity checks on failure. Surface: `cqlite-core` parity test harness
-      helper; an integration test that forces a mismatch and asserts the bundle + record exist.
-- [ ] 2.2 Byte_for_byte diffs: write per-component `byte-diff.txt`, `offset-diff.txt`, `checksums.txt`,
-      `component_inventory.txt`. Surface: `cqlite-core` byte-parity test (e.g. the digest/component
-      strict tests); assert all four files + matching `diffs[]` entries.
-- [ ] 2.3 Canonical_semantic diffs: write `jsonl.diff` + raw `reference.jsonl` + `candidate.jsonl`.
-      Surface: the data_db JSONL parity test; assert the three files + `jsonl_diff` entry.
-- [ ] 2.4 Repro bundle: write `repro/command.sh`, `repro/INSTRUCTIONS.md`, `repro/inputs/` (paths +
-      dataset SHA256, no full dataset copy). Surface: shared emitter; assert `repro_bundle` resolves.
+      helper (`cqlite-core/tests/parity_bundle/mod.rs`, `FailureBundle`, wrapping the Wave 1
+      `cassandra_parity::failure_artifact` emitter); an integration test that forces a mismatch and
+      asserts the bundle + record exist
+      (`cqlite-core/tests/issue_1027_parity_failure_bundle.rs::byte_mismatch_emits_scenario_id_keyed_bundle`,
+      `::emitted_record_validates_against_wave1_schema`).
+- [x] 2.2 Byte_for_byte diffs: write per-component `byte-diff.txt`, `offset-diff.txt`, `checksums.txt`,
+      `component_inventory.txt`. Surface: `FailureBundle::byte_for_byte_component` + body formatters;
+      evidence test `::byte_mismatch_emits_all_four_diff_kinds` (all four files + matching `diffs[]`
+      entries whose paths resolve inside the bundle).
+- [x] 2.3 Canonical_semantic diffs: write `jsonl.diff` + raw `reference.jsonl` + `candidate.jsonl`.
+      Surface: `FailureBundle::jsonl`; evidence test `::jsonl_mismatch_emits_jsonl_diff_and_raw_sources`
+      (three files + `jsonl_diff` entry).
+- [x] 2.4 Repro bundle: write `repro/command.sh`, `repro/INSTRUCTIONS.md`, `repro/inputs/` (paths +
+      dataset SHA256, no full dataset copy). Surface: shared emitter (`write_repro`); evidence test
+      `::repro_bundle_names_command_and_fixture_inputs` (`repro_bundle` resolves; inputs names fixture
+      path + dataset SHA256; asserts no dataset copy). Passing-writes-no-bundle covered by
+      `::passing_scenario_writes_no_bundle`.
 
 ## 3. Compaction (Java harness) alignment
 
