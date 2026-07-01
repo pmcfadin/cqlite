@@ -521,8 +521,7 @@ mod tests {
         //   compressionRatio(8) + tombstoneHistogram empty(8) + sstableLevel(4) +
         //   repairedAt(8) + min clustering(4) + max clustering(4) +
         //   hasLegacyCounterShards(1) + totalColumnsSet(8)
-        let row_count_offset =
-            two_histograms + 12 + 16 + 8 + 8 + 8 + 8 + 4 + 8 + 4 + 4 + 1 + 8;
+        let row_count_offset = two_histograms + 12 + 16 + 8 + 8 + 8 + 8 + 4 + 8 + 4 + 4 + 1 + 8;
         let row_count_bytes = &data[row_count_offset..row_count_offset + 8];
         let row_count = u64::from_be_bytes(row_count_bytes.try_into().unwrap());
         assert_eq!(row_count, 100);

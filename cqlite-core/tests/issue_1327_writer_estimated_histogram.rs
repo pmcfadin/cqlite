@@ -83,8 +83,7 @@ fn live_row(pk: i32, payload: &str, ts: i64) -> Mutation {
 /// Write `n` distinct single-row partitions into a fresh SSTable of `format`.
 async fn write_n_partitions(dir: &Path, n: i32, format: SSTableFormat) -> SSTableInfo {
     let schema = simple_schema();
-    let mut writer =
-        SSTableWriter::with_format(dir.to_path_buf(), 1, &schema, 16, format).unwrap();
+    let mut writer = SSTableWriter::with_format(dir.to_path_buf(), 1, &schema, 16, format).unwrap();
 
     // Partitions must be written in ascending token order, so collect + sort by
     // the decorated key's token first.

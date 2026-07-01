@@ -787,8 +787,7 @@ impl SSTableWriter {
         // MetadataCollector records. Σ estimatedPartitionSize bucket counts then
         // equals the SSTable partition count for the authoritative read-side
         // decode (`read_table_counts`, issue #944).
-        let partition_serialized_size =
-            self.data_writer.position().saturating_sub(data_offset);
+        let partition_serialized_size = self.data_writer.position().saturating_sub(data_offset);
         self.stats
             .record_partition(partition_serialized_size, emit_counts.columns);
 

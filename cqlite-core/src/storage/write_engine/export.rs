@@ -543,9 +543,9 @@ impl crate::storage::write_engine::WriteEngine {
 /// Statistics.db to extract totalRows. Partition count is derived from the
 /// number of index entries in the exported Index.db.
 ///
-/// The STATS component layout is fixed (written by our StatisticsWriter):
-/// - Offset 153 from component start: totalColumnsSet (u64 BE)
-/// - Offset 161 from component start: totalRows (u64 BE)
+/// The STATS component layout has two variable-length leading
+/// `EstimatedHistogram`s (issue #1327), measured dynamically, followed by a
+/// fixed prefix up to `totalRows` (u64 BE) with an empty tombstone histogram.
 ///
 /// Index.db format (BIG format, NB variant):
 /// - Each entry: u16 BE key_len + key_bytes + VInt position + VInt promoted_size
@@ -608,13 +608,31 @@ fn read_statistics_from_export(components: &[PathBuf]) -> Result<(u64, u64)> {
         }
     };
 
-    // totalRows is at byte offset 161 within the STATS component data.
-    // Layout: 2×histogram(36ea) + CommitLog(12) + timestamps(16) +
-    //         delTimes(8) + ttls(8) + compression(8) + tombHist(8) +
-    //         level(4) + repaired(8) + minCK(4) + maxCK(4) +
-    //         legacyCounter(1) + totalColumnsSet(8) + totalRows(8)
-    const TOTAL_ROWS_OFFSET: usize = 161;
-    let abs_offset = stats_offset + TOTAL_ROWS_OFFSET;
+    // totalRows sits after the two leading `EstimatedHistogram`s and a fixed
+    // prefix. Issue #1327: the histograms are now the canonical Cassandra
+    // 156-bucket series (not the old empty 36-byte stubs), so their combined
+    // length is variable and MUST be measured, not hardcoded. Each histogram is
+    // `i32 bucketCount` + `bucketCount × (i64 offset, i64 count)` (16 bytes/bucket).
+    //
+    // The remaining prefix up to `totalRows` (with an EMPTY tombstone histogram,
+    // which a fresh export always writes) is fixed:
+    //   CommitLog(12) + minTs(8) + maxTs(8) + min/maxLDT(8) + min/maxTTL(8) +
+    //   compressionRatio(8) + tombstoneHistogram empty(8) + sstableLevel(4) +
+    //   repairedAt(8) + minClustering(4) + maxClustering(4) +
+    //   hasLegacyCounterShards(1) + totalColumnsSet(8)  = 89 bytes.
+    const FIXED_PREFIX_AFTER_HISTOGRAMS: usize = 89;
+
+    let mut cur = stats_offset;
+    for _ in 0..2 {
+        match estimated_histogram_byte_len(&file_data, cur) {
+            Some(len) => cur += len,
+            None => {
+                log::warn!("Statistics.db STATS component truncated in leading histograms");
+                return Ok((0, 0));
+            }
+        }
+    }
+    let abs_offset = cur + FIXED_PREFIX_AFTER_HISTOGRAMS;
 
     if abs_offset + 8 > file_data.len() {
         log::warn!(
@@ -649,6 +667,31 @@ fn read_statistics_from_export(components: &[PathBuf]) -> Result<(u64, u64)> {
     );
 
     Ok((partition_count, row_count))
+}
+
+/// Byte length of a serialized `EstimatedHistogram` starting at `off`.
+///
+/// Wire form: `i32 bucketCount` then `bucketCount × (i64 offset, i64 count)`
+/// = `4 + bucketCount * 16` bytes. Returns `None` when the buffer is truncated
+/// or the count is negative (fails closed). Issue #1327: the leading STATS
+/// histograms are now variable-length, so the `totalRows` reader must measure
+/// them instead of assuming the old 36-byte empty stub.
+#[cfg(feature = "write-support")]
+fn estimated_histogram_byte_len(data: &[u8], off: usize) -> Option<usize> {
+    let end = off.checked_add(4)?;
+    if end > data.len() {
+        return None;
+    }
+    let bucket_count = i32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+    if bucket_count < 0 {
+        return None;
+    }
+    let body = (bucket_count as usize).checked_mul(16)?;
+    let total = body.checked_add(4)?;
+    if off.checked_add(total)? > data.len() {
+        return None;
+    }
+    Some(total)
 }
 
 /// Count the number of partition entries in Index.db
