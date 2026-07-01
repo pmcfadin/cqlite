@@ -65,8 +65,33 @@ impl SSTableReader {
             && self.header.cassandra_version.is_nb_format()
     }
 
-    /// Get a value by key from the SSTable
+    /// Get a value by key from the SSTable.
+    ///
+    /// Resolution-mode-agnostic entry point: callers that do not carry the
+    /// manager's `resolve_reader_list` signal (e.g. the per-reader helpers in
+    /// `partition_lookup`, `schema_aware_reader`, and benchmarks) get the STRICT
+    /// table-consistency guard — `fully_qualified_match = false` reproduces exactly
+    /// today's `table_ids_match_strict` behavior on the BTI point-lookup path, so
+    /// this is a behavior-preserving conservative default. The manager's `get()`
+    /// calls [`SSTableReader::get_with_resolution`] with the authoritative signal so
+    /// an exact fully-qualified match can accept rows across a benign header-keyspace
+    /// divergence (issue #1321, mirroring the seek path #1284).
     pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
+        self.get_with_resolution(table_id, key, false).await
+    }
+
+    /// Get a value by key, threading the authoritative resolution mode
+    /// (`fully_qualified_match`) into the BTI point-lookup guard (issue #1321).
+    ///
+    /// See [`SSTableReader::get`] for the resolution-mode contract. Only the BTI
+    /// ("da") point-lookup path consults `fully_qualified_match`; the bloom/Index.db/
+    /// sequential fallbacks are unaffected by it.
+    pub async fn get_with_resolution(
+        &self,
+        table_id: &TableId,
+        key: &RowKey,
+        fully_qualified_match: bool,
+    ) -> Result<Option<Value>> {
         use crate::observability::{self as obs, catalog};
 
         // Issue #831 / #909: BTI ("da") readers resolve partitions via the
@@ -80,7 +105,9 @@ impl SSTableReader {
         // partitions (the writer→reader roundtrip #909 must read back). It also
         // guarantees a BTI get() can never fall through to scan_for_key.
         if self.bti_partitions_db.is_some() {
-            return self.bti_point_lookup(table_id, key).await;
+            return self
+                .bti_point_lookup(table_id, key, fully_qualified_match)
+                .await;
         }
 
         // First check bloom filter if available

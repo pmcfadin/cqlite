@@ -263,11 +263,10 @@ pub(super) fn table_ids_match_strict(entry_table_id: &TableId, query_table_id: &
 /// This is no-heuristic: it relies only on the authoritative header identity, the
 /// query id, and the authoritative resolution mode — never on guessing.
 ///
-/// Compiled only for the default (`not(tombstones)`) build: its only caller,
-/// `bti_collect_partition_rows`, exists only there (the manager's seek-driven
-/// `scan_partition` is gated the same way), so under `tombstones` this would be
-/// dead code.
-#[cfg(not(feature = "tombstones"))]
+/// Used by BOTH the single-partition SEEK (`bti_collect_partition_rows`,
+/// `not(tombstones)` only) and the `get()` POINT-LOOKUP decoder
+/// (`bti_decompress_and_parse_target`, all feature builds, issue #1321). The
+/// point-lookup caller exists in every build, so this helper is NOT gated.
 pub(super) fn table_header_consistent_for_seek(
     entry_table_id: &TableId,
     query_table_id: &TableId,
@@ -404,7 +403,6 @@ mod tests {
     /// the reader via the bare-name FALLBACK keeps STRICT keyspace matching, so a
     /// wrong-keyspace query can never return another keyspace's same-named rows.
     /// A different table name always rejects (the #831 wrong-table guard).
-    #[cfg(not(feature = "tombstones"))]
     #[test]
     fn test_table_header_consistent_for_seek_gates_on_resolution_mode() {
         // The seek builds `entry` from the SSTable's authoritative header.
@@ -472,6 +470,70 @@ mod tests {
             &header,
             &query_unqualified_wrong,
             /*fq_match=*/ true
+        ));
+    }
+
+    /// Issue #1321: the `get()` POINT-LOOKUP decoder
+    /// (`bti_decompress_and_parse_target`) now applies the SAME
+    /// resolution-mode-aware guard the SEEK path adopted in #1284 — replacing its
+    /// previous unconditional `table_ids_match_strict`. This exercises the exact
+    /// row-acceptance predicate the get path evaluates per emitted partition:
+    ///   - ACCEPT: an EXACT fully-qualified resolution with a consistent table name
+    ///     even when the reader's header keyspace diverges (the #1321 goal);
+    ///   - REJECT (fallback): a fully-qualified query that reached the reader via
+    ///     the bare-name fallback whose header keyspace differs — no wrong-keyspace
+    ///     rows on get() either;
+    ///   - REJECT (different table): a genuinely different table name (#831).
+    #[test]
+    fn test_get_point_lookup_guard_gates_on_resolution_mode() {
+        // The get() decoder builds `entry` (`tid`) from the parser-emitted partition,
+        // whose table id is this reader's authoritative serialization header.
+        let header = TableId::new("ks_a.users".to_string());
+
+        // ACCEPT: exact FQ match, header keyspace diverges, same table name. The old
+        // strict-only get guard would WRONGLY reject this (the #1321 false rejection).
+        let query_div_exact = TableId::new("ks_b.users".to_string());
+        assert!(
+            !table_ids_match_strict(&header, &query_div_exact),
+            "precondition: the old get() guard (strict) rejects this divergence"
+        );
+        assert!(
+            table_header_consistent_for_seek(&header, &query_div_exact, /*fq_match=*/ true),
+            "Issue #1321: get() must accept rows when resolution was an exact FQ match \
+             and only the header keyspace diverges"
+        );
+
+        // REJECT (fallback): fully-qualified query resolved via the bare-name
+        // fallback, header keyspace differs — must NOT surface another keyspace's rows.
+        assert!(
+            !table_header_consistent_for_seek(&header, &query_div_exact, /*fq_match=*/ false),
+            "Issue #1321: a fully-qualified get() resolved via the bare-name fallback must \
+             still REJECT a wrong-keyspace reader (strict keyspace match preserved)"
+        );
+
+        // REJECT (different table): a genuinely different table never matches,
+        // regardless of resolution mode (#831 wrong-table guard survives).
+        let query_wrong_table = TableId::new("ks_a.accounts".to_string());
+        assert!(
+            !table_header_consistent_for_seek(&header, &query_wrong_table, /*fq_match=*/ true),
+            "Issue #831: get() must still reject a different table name (exact match)"
+        );
+        assert!(
+            !table_header_consistent_for_seek(
+                &header,
+                &query_wrong_table,
+                /*fq_match=*/ false
+            ),
+            "Issue #831: get() must still reject a different table name (fallback)"
+        );
+
+        // Sanity: the existing strict default (fq_match=false) the unchanged per-reader
+        // `get()` callers pass is exactly today's behavior for a consistent FQ query.
+        let query_same = TableId::new("ks_a.users".to_string());
+        assert!(table_header_consistent_for_seek(
+            &header,
+            &query_same,
+            /*fq_match=*/ false
         ));
     }
 
