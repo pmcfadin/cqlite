@@ -4,8 +4,9 @@
 > RECOMMENDED Option C (scoped PR lane + nightly backstop); adjust if the owner picks A or B.
 
 ## 1. Gate CI workflow
-- [x] 1.1 Add `.github/workflows/gate.yml` with: (a) `pull_request` trigger filtered to
-  `scripts/agent-gate.sh`, `scripts/tests/**`, `bindings/**`, and the workflow's own file; (b) a
+- [x] 1.1 Add `.github/workflows/gate.yml` with: (a) `pull_request` trigger filtered to the direct
+  gate inputs — `scripts/**` (incl. explicit `scripts/agent-gate.sh`, `scripts/tests/**`),
+  `test-data/scripts/**`, `bindings/**`, and the workflow's own file (NO docs/website paths); (b) a
   `schedule:` cron (slotted off-peak alongside the existing nightly lanes — 03:37 UTC); (c)
   `workflow_dispatch`.
 - [x] 1.2 Job: checkout, set up `@stable` Rust. NOTE: this lane RUNS the gate's clippy + fmt
@@ -23,7 +24,8 @@
   `node-bindings` break and confirm `gate.yml` fails (capture the run URL in the PR); revert it.
   (Live-CI demonstration handled by the owner at PR time.)
 - [x] 2.2 Confirm a docs-only change does NOT trigger `gate.yml` (path filter correctness — filter is
-  scoped to `scripts/agent-gate.sh`, `scripts/tests/**`, `bindings/**`, and the workflow's own file).
+  scoped to the direct gate inputs `scripts/**`, `test-data/scripts/**`, `bindings/**`, and the
+  workflow's own file; contains no `docs/**` or `website/**` path).
 
 ## 3. Doctrine / discoverability
 - [x] 3.1 Note the new gate CI lane in the gate-contract doctrine

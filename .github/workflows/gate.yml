@@ -23,9 +23,19 @@ name: Agent Gate
 on:
   pull_request:
     branches: [main]
+    # Direct gate inputs. The gate runs scripts/agent-gate.sh, but also
+    # exercises scripts/delivery-telemetry.py (delivery-telemetry component)
+    # and test-data/scripts/* (dataset provisioning + smoke), so scripts/**
+    # and test-data/scripts/** must trigger this lane too — otherwise a PR
+    # editing them could break a gate component with nothing red until the
+    # nightly backstop. scripts/** subsumes agent-gate.sh and scripts/tests/**;
+    # they are kept explicit for readability. This set contains NO docs/** or
+    # website/** paths, so a docs-only PR still does not trigger the lane.
     paths:
+      - 'scripts/**'
       - 'scripts/agent-gate.sh'
       - 'scripts/tests/**'
+      - 'test-data/scripts/**'
       - 'bindings/**'
       - '.github/workflows/gate.yml'
   schedule:
@@ -57,6 +67,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          # Full history so scripts/agent-gate.sh can resolve origin/main for
+          # its file-size ratchet component. The default shallow checkout
+          # leaves that ref unavailable in PR runs, silently degrading the
+          # ratchet to advisory-only (the gate could PASS on over-threshold
+          # Rust file growth). Matches quality-gates.yml.
+          fetch-depth: 0
 
       # Rust test jobs can sit near the standard runner's disk ceiling (issue
       # #722). Dropping preinstalled toolchains we never use frees ~14 GB —
