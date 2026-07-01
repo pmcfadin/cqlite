@@ -100,12 +100,13 @@ fn bench_read_scan(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 
 /// Representative write/merge flow: ingest a fixed batch of rows into a fresh
-/// `WriteEngine` and flush them to an SSTable. This crosses the instrumented
-/// write boundaries (`write.mutation`, `memtable.insert`, `wal.append`/`wal.sync`,
-/// `flush.memtable`, `writer.*`) and emits the `cqlite.write.*` / `cqlite.flush.*`
-/// catalog metrics. The flush exercises the SSTable writer (the "merge"-shaped
-/// output path) without needing a multi-SSTable compaction setup, keeping the
-/// bench deterministic and fast. Mirrors the proven `write/flush` bench pattern.
+/// `WriteEngine` and flush them to an SSTable. WAL durability is disabled here
+/// to keep this strict overhead gate focused on CPU/memtable/flush/writer
+/// instrumentation; per-row fsync latency is runner-I/O noise and is tracked by
+/// the advisory WAL-on write bench instead. The flush exercises the SSTable
+/// writer (the "merge"-shaped output path) without needing a multi-SSTable
+/// compaction setup, keeping the bench deterministic and fast. Mirrors the
+/// proven `write/flush` bench pattern.
 #[cfg(feature = "write-support")]
 fn bench_write_merge(c: &mut Criterion) {
     use criterion::{black_box, BatchSize, Throughput};
@@ -141,7 +142,7 @@ fn bench_write_merge(c: &mut Criterion) {
                 let tmp = tempfile::TempDir::new().expect("temp dir for write overhead bench");
                 // usize::MAX flush threshold so ingest never auto-flushes; we
                 // flush explicitly in the routine.
-                let engine = fixtures::open_write_engine(tmp.path(), usize::MAX);
+                let engine = fixtures::open_write_engine_wal_off(tmp.path(), usize::MAX);
                 (tmp, engine)
             },
             // ROUTINE (timed): ingest ROWS rows then flush to an SSTable.

@@ -9,6 +9,7 @@
 //! The public re-exports live in [`crate::observability`]; everything here is
 //! reached through those.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -33,6 +34,7 @@ const SCOPE: &str = "cqlite";
 /// When `init` is not called (or is inert), a default no-export provider is
 /// lazily created so the layer type stays monomorphic and simply drops spans.
 static TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
+static METRICS_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Build the OTel `Resource` describing this process.
 fn build_resource(cfg: &ObservabilityConfig) -> Resource {
@@ -146,6 +148,7 @@ impl Drop for ObservabilityGuard {
         if let Some(mp) = &self.meter_provider {
             let _ = mp.force_flush();
             let _ = mp.shutdown();
+            METRICS_ACTIVE.store(false, Ordering::Relaxed);
         }
     }
 }
@@ -187,11 +190,17 @@ pub fn init(cfg: ObservabilityConfig) -> Result<ObservabilityGuard> {
         .with_resource(resource)
         .build();
     global::set_meter_provider(meter_provider.clone());
+    METRICS_ACTIVE.store(true, Ordering::Relaxed);
 
     Ok(ObservabilityGuard {
         tracer_provider: Some(tracer_provider),
         meter_provider: Some(meter_provider),
     })
+}
+
+#[inline]
+pub(crate) fn metrics_active() -> bool {
+    METRICS_ACTIVE.load(Ordering::Relaxed)
 }
 
 /// Return the `tracing` layer that bridges spans/events into OpenTelemetry, or

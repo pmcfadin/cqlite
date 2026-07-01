@@ -159,7 +159,13 @@ fn to_key_values(attrs: &[Attr]) -> Vec<opentelemetry::KeyValue> {
 #[inline]
 pub fn add_counter(name: &'static str, value: u64, attrs: &[Attr]) {
     #[cfg(feature = "observability")]
-    otel::add_counter(name, value, &to_key_values(attrs));
+    {
+        if otel::metrics_active() {
+            otel::add_counter(name, value, &to_key_values(attrs));
+        } else {
+            let _ = (name, value, attrs);
+        }
+    }
     #[cfg(not(feature = "observability"))]
     {
         let _ = (name, value, attrs);
@@ -171,7 +177,13 @@ pub fn add_counter(name: &'static str, value: u64, attrs: &[Attr]) {
 #[inline]
 pub fn record_histogram(name: &'static str, value: f64, attrs: &[Attr]) {
     #[cfg(feature = "observability")]
-    otel::record_histogram(name, value, &to_key_values(attrs));
+    {
+        if otel::metrics_active() {
+            otel::record_histogram(name, value, &to_key_values(attrs));
+        } else {
+            let _ = (name, value, attrs);
+        }
+    }
     #[cfg(not(feature = "observability"))]
     {
         let _ = (name, value, attrs);
@@ -183,7 +195,13 @@ pub fn record_histogram(name: &'static str, value: f64, attrs: &[Attr]) {
 #[inline]
 pub fn record_gauge(name: &'static str, value: i64, attrs: &[Attr]) {
     #[cfg(feature = "observability")]
-    otel::record_gauge(name, value, &to_key_values(attrs));
+    {
+        if otel::metrics_active() {
+            otel::record_gauge(name, value, &to_key_values(attrs));
+        } else {
+            let _ = (name, value, attrs);
+        }
+    }
     #[cfg(not(feature = "observability"))]
     {
         let _ = (name, value, attrs);
@@ -202,15 +220,19 @@ pub fn record_gauge(name: &'static str, value: i64, attrs: &[Attr]) {
 pub fn record_error(err: &Error, subsystem: &'static str) {
     #[cfg(feature = "observability")]
     {
-        let attrs = [
-            opentelemetry::KeyValue::new(
-                catalog::attr::ERROR_CATEGORY,
-                err.obs_category().as_str(),
-            ),
-            opentelemetry::KeyValue::new(catalog::attr::SUBSYSTEM, subsystem),
-        ];
-        otel::add_counter(catalog::ERRORS_TOTAL, 1, &attrs);
-        otel::mark_span_error(err.obs_category());
+        if otel::metrics_active() {
+            let attrs = [
+                opentelemetry::KeyValue::new(
+                    catalog::attr::ERROR_CATEGORY,
+                    err.obs_category().as_str(),
+                ),
+                opentelemetry::KeyValue::new(catalog::attr::SUBSYSTEM, subsystem),
+            ];
+            otel::add_counter(catalog::ERRORS_TOTAL, 1, &attrs);
+            otel::mark_span_error(err.obs_category());
+        } else {
+            let _ = (err, subsystem);
+        }
     }
     #[cfg(not(feature = "observability"))]
     {
