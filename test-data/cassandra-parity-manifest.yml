@@ -4472,7 +4472,7 @@ scenarios:
 
   - id: cass.filter_db.statistical_false_positive_rate
     title: Filter.db empirical false-positive-rate report
-    status: planned
+    status: mirrored
     capability: filter_db_bloom
     priority: P2
     risk: p2_coverage
@@ -4490,8 +4490,16 @@ scenarios:
           filter_db_statistical_false_positive_rate_slow probes a large deterministic
           absent-key sample (50k keys, fixed seed + per-fixture salt) and reports the
           measured FPR per fixture, asserting only a generous saturation ceiling
-          (< 0.50). It is gated behind CQLITE_FILTER_FPR_SLOW=1 so the required lane
-          stays fast — false positives are legal and never a correctness failure.
+          (< 0.50). It is gated behind CQLITE_FILTER_FPR_SLOW=1 so the per-PR lane
+          stays fast — false positives are legal and never a correctness failure. It
+          runs in the dedicated nightly_docker lane
+          (.github/workflows/nightly-docker-parity.yml), whose runner
+          (test-data/scripts/nightly-docker-parity.sh) reports the measured FPR per
+          fixture against the configured bloom_filter_fp_chance in its Bloom FPR
+          summary. The FPR threshold is ADVISORY at first (owner fork F4): a breach
+          does NOT fail the lane while advisory. The companion no-false-negative gate
+          (filter_db_strict_parameters_and_no_false_negative) is ALWAYS hard-fail in
+          the same lane (cass.filter_db.no_false_negative_membership).
     fixtures:
       datasets:
         - test-data/datasets/sstables
@@ -4509,19 +4517,24 @@ scenarios:
         --test sstable_parity_filter_db_test
         filter_db_statistical_false_positive_rate_slow -- --nocapture
       known_limitations: >-
-        The measured FPR is reported, not gated against Cassandra's target fp_chance,
-        because the committed fixtures are tiny (single-long bitsets) where the
-        analytic FPR is dominated by quantization, not the configured fp_chance.
+        The measured FPR is reported (in the nightly lane's Bloom FPR summary)
+        against the configured fp_chance, but the threshold is ADVISORY at first
+        (owner fork F4): a breach does not fail the lane, because the committed
+        fixtures are tiny (single-long bitsets) where the analytic FPR is dominated
+        by quantization, not the configured fp_chance. The no-false-negative
+        property is hard-fail regardless.
     ci:
-      tier: manual_debug
+      tier: nightly_docker
+      workflow: .github/workflows/nightly-docker-parity.yml
     scope:
       target_issue: 987
       gap: >-
-        No gated comparison of measured FPR against Cassandra's configured
-        bloom_filter_fp_chance.
+        The measured-FPR threshold is advisory, not yet a gated comparison against
+        Cassandra's configured bloom_filter_fp_chance.
       next_step: >-
-        Add larger-cardinality fixtures and assert the measured FPR tracks the
-        configured fp_chance within a documented statistical tolerance.
+        Add larger-cardinality fixtures and promote the advisory FPR threshold to a
+        hard-fail once the measured FPR tracks the configured fp_chance within a
+        documented statistical tolerance.
 
   # ----------------------------------------------------------------------------
   # tombstone_ttl
@@ -5387,7 +5400,7 @@ scenarios:
         to a hard gate once compaction output is byte-stable.
     ci:
       tier: nightly_docker
-      workflow: .github/workflows/compaction-parity.yml
+      workflow: .github/workflows/nightly-docker-parity.yml
     scope:
       target_issue: 842
       gap: >-
@@ -5556,7 +5569,7 @@ scenarios:
         `planned`, not a gated byte-for-byte claim.
     ci:
       tier: nightly_docker
-      workflow: .github/workflows/compaction-parity.yml
+      workflow: .github/workflows/nightly-docker-parity.yml
     scope:
       target_issue: 842
       gap: >-
@@ -7001,7 +7014,7 @@ scenarios:
         writer parity remains tracked under epic #969.
     ci:
       tier: nightly_docker
-      workflow: .github/workflows/cassandra-validation.yml
+      workflow: .github/workflows/nightly-docker-parity.yml
     scope:
       gap: >-
         Semantic readback only; no byte comparison of CQLite writer output.
@@ -7096,7 +7109,7 @@ scenarios:
         trie nodes is not gated.
     ci:
       tier: nightly_docker
-      workflow: .github/workflows/e2e-readback.yml
+      workflow: .github/workflows/nightly-docker-parity.yml
     scope: {}
 
   # ----------------------------------------------------------------------------
