@@ -151,43 +151,62 @@ fn fixture_dir_sha256(dir: &Path) -> String {
     format!("{:x}", h.finalize())
 }
 
-/// Validate the full-fixture-dir binding (issue #1294 Item 1): the on-disk fixture
-/// dir hash vs the manifest's captured-against dir hash. FAILS on the Item-1 hole
-/// (mutated component byte-stable but a NON-mutated component changed). Advisory
-/// for legitimate whole-source regeneration drift (mutated component also moved),
-/// matching the generator. Skipped for pre-#1294 manifests (empty binding).
+/// Validate the full-fixture-dir binding (issue #1294 Item 1, roborev Finding 1):
+/// the on-disk fixture-dir hash vs the manifest's captured-against dir hash.
+///
+/// The committed corruption fixtures are BYTE-STABLE in git, so the captured
+/// `verdict_captured_for_dir_sha256` must ALWAYS equal the on-disk full-dir hash.
+/// ANY drift means the bytes `sstableverify` actually reads no longer match the
+/// bytes the Cassandra verdict was captured against — the oracle is stale and no
+/// longer bound to the bytes under test. So we fail UNCONDITIONALLY on any
+/// mismatch, regardless of whether the mutated component itself also changed.
+///
+/// The earlier revision only failed when the mutated component was byte-stable
+/// (treating "both moved" as advisory regeneration drift). That left a hole: if
+/// the mutated component ALSO drifted, the test continued with a stale verdict and
+/// the verdict/class assertions below could pass by coincidence. On a byte-stable
+/// committed tree there is no benign drift, so we no longer special-case it here.
+/// (The GENERATOR still rebinds the dir-sha on benign live-Cassandra regeneration;
+/// that path is `--verify-only`-distinguished there, not here.)
+///
+/// Skipped only for pre-#1294 manifests that recorded no full-dir binding.
 fn check_full_dir_binding(fx: &Fixture, dir: &Path) {
     if fx.verdict_captured_for_dir_sha256.trim().is_empty() {
         return; // pre-#1294 manifest: no full-dir binding recorded.
     }
     let on_disk_dir = fixture_dir_sha256(dir);
-    if on_disk_dir == fx.verdict_captured_for_dir_sha256.trim() {
-        return; // bytes under test == bytes the verdict was captured against.
-    }
-    // Dir hash drifted. Is the MUTATED component byte-stable against its binding?
-    let mutated = dir.join(fx.component.trim());
-    let mutated_stable = mutated.is_file()
-        && !fx.verdict_captured_for_sha256.trim().is_empty()
-        && sha256_file(&mutated) == fx.verdict_captured_for_sha256.trim();
-    assert!(
-        !mutated_stable,
-        "fixture {}: full-fixture-dir hash drifted (captured {} != on-disk {}) while the \
-         mutated component '{}' is UNCHANGED (sha still {}). A NON-mutated component changed, \
-         so the captured Cassandra verdict '{}' is stale for the bytes sstableverify reads. \
-         Re-capture and update verdict_captured_for_dir_sha256 (issue #1294 Item 1).",
+    assert_eq!(
+        on_disk_dir,
+        fx.verdict_captured_for_dir_sha256.trim(),
+        "fixture {}: full-fixture-dir hash drifted (captured {} != on-disk {}). The \
+         committed fixtures are byte-stable, so the captured Cassandra verdict '{}' is \
+         stale for the bytes sstableverify reads — a NON-mutated and/or the mutated \
+         component changed. Re-capture and update verdict_captured_for_dir_sha256 \
+         (issue #1294 Item 1; unconditional per roborev Finding 1).",
         fx.name,
         fx.verdict_captured_for_dir_sha256.trim(),
         on_disk_dir,
-        fx.component.trim(),
-        fx.verdict_captured_for_sha256.trim(),
         fx.cassandra_verdict,
     );
-    // Both moved together => regeneration drift (advisory).
-    eprintln!(
-        "[dir-binding] {} full-dir hash drifted with the mutated component (regeneration \
-         drift); advisory — verdict-correctness enforced by the verify assertions below.",
-        fx.name
-    );
+    // Additive (kept from #1236): the MUTATED component must also still match its
+    // own captured sha when one is recorded. Redundant once the dir-sha matches
+    // (the mutated component is part of the dir hash), but it pins the per-component
+    // binding directly so a future change that loosens the dir hash cannot silently
+    // drop mutated-component coverage.
+    if !fx.verdict_captured_for_sha256.trim().is_empty() {
+        let mutated = dir.join(fx.component.trim());
+        if mutated.is_file() {
+            assert_eq!(
+                sha256_file(&mutated),
+                fx.verdict_captured_for_sha256.trim(),
+                "fixture {}: mutated component '{}' drifted from its captured sha {} \
+                 (verdict_captured_for_sha256); the captured Cassandra verdict is stale.",
+                fx.name,
+                fx.component.trim(),
+                fx.verdict_captured_for_sha256.trim(),
+            );
+        }
+    }
 }
 
 async fn make_platform(config: &Config) -> Arc<Platform> {

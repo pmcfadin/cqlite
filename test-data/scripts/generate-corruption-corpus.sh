@@ -850,9 +850,15 @@ captured against (issue #1294 Item 1)."
   fi
   if [[ "$dir_sha" != "$verdict_dir_sha" ]]; then
     if [[ "$VERIFY_ONLY" -eq 1 ]]; then
-      # Byte-stable / committed source: a drift with a byte-stable mutated
-      # component is the Item-1 hole (a non-mutated component tampered without
-      # re-capturing the verdict). FATAL — no live Cassandra to recapture from.
+      # Byte-stable / committed source (no regeneration): the on-disk bytes ARE the
+      # committed fixture. ANY full-dir drift means the captured Cassandra verdict is
+      # stale for the bytes sstableverify reads — whether a NON-mutated component, the
+      # mutated component, or both drifted. FATAL UNCONDITIONALLY (issue #1294 roborev
+      # Finding 1): there is no live Cassandra to recapture from on this path, and the
+      # earlier "both moved => advisory" carve-out let a stale verdict slip through
+      # when the mutated component also changed. This mirrors the committed-fixture
+      # parity test (sstable_parity_corruption_verify.rs::check_full_dir_binding),
+      # which fails unconditionally against the byte-stable git tree.
       if [[ "$corr_sha" == "$verdict_sha" ]]; then
         fail "$name: full-fixture-dir hash drifted ($verdict_dir_sha -> $dir_sha) while \
 the mutated component ($comp) is UNCHANGED (corrupted_sha256 still $verdict_sha). A \
@@ -861,13 +867,15 @@ verdict ('$cass_verdict') is now stale for the bytes sstableverify reads. Re-cap
 verdict (capture-cassandra-verify-verdicts.sh) and update verdict_captured_for_dir_sha256 \
 (issue #1294 Item 1)."
       fi
-      # Both shas moved on a byte-stable source: the committed mutated component
-      # ALSO changed — likewise stale; advisory because the per-component binding
-      # already governs that case and the parity test enforces correctness.
-      log "::notice::$name: full-dir hash drifted with the mutated component on a \
-byte-stable source (verify-only). Captured verdict bound to dir-sha $verdict_dir_sha \
-but on-disk dir hashes to $dir_sha. Advisory; verdict-correctness is enforced by the \
-sstable_parity_corruption_verify test."
+      # Both shas moved on a byte-stable source: the committed mutated component ALSO
+      # changed alongside the dir. The verdict is equally stale — FATAL too (issue
+      # #1294 roborev Finding 1), not advisory.
+      fail "$name: full-fixture-dir hash drifted ($verdict_dir_sha -> $dir_sha) AND the \
+mutated component ($comp) changed (corrupted_sha256 $verdict_sha -> $corr_sha) on a \
+byte-stable source (verify-only). The captured Cassandra verdict ('$cass_verdict') is \
+stale for the bytes sstableverify reads. Re-capture the verdict \
+(capture-cassandra-verify-verdicts.sh) and update verdict_captured_for_dir_sha256 + \
+verdict_captured_for_sha256 (issue #1294 Item 1)."
     else
       # REGENERATION path: the clean source was re-derived from live Cassandra and
       # siblings drift non-deterministically (Statistics.db / BTI / Summary.db). A

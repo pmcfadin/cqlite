@@ -67,6 +67,23 @@ jobs:
       - name: Fetch dataset binaries (clean sources)
         run: bash test-data/scripts/fetch-datasets.sh
 
+      # Issue #1294 roborev Finding 2: enforce the COMMITTED full-fixture-dir binding
+      # BEFORE regeneration overwrites the manifest. The post-regeneration drift guard
+      # (extract-corruption-oracle.py) deliberately OMITS verdict_captured_for_dir_sha256
+      # because the generator REBINDS it on benign live-Cassandra sibling drift — so a PR
+      # that edits ONLY the committed dir-sha would otherwise be silently rebound away and
+      # pass. The fetched (committed) corruption binaries + committed manifest coexist at
+      # this point, so we recompute each active fixture's on-disk full-dir hash with the
+      # identical algorithm and fail closed on any mismatch with the committed dir-sha.
+      # This catches a committed-dir-sha-only edit; INVARIANT C (benign regen rebind) is
+      # untouched because this runs PRE-regeneration against the committed bytes.
+      - name: Guard — committed full-dir binding matches committed bytes (issue #1294 Finding 2)
+        run: |
+          set -euo pipefail
+          python3 test-data/scripts/validate-committed-dir-binding.py \
+            test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml \
+            "$CQLITE_DATASETS_ROOT/corruption/test_comp_corrupt"
+
       # Snapshot the committed reference-golden checksums BEFORE regeneration.
       # After regeneration we recompute the same set; the audit's
       # "unexpected component change" check flags any golden whose bytes drifted
