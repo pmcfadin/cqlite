@@ -185,6 +185,10 @@ pub struct StatisticsMetadata {
 
     /// `estimatedCellPerPartitionCount` EstimatedHistogram — one observation per
     /// partition of its cell count. Serialised as the SECOND STATS field.
+    /// Seeded with its OWN authoritative shape (118 offsets → 119 buckets), which
+    /// is DISTINCT from the partition-size histogram's 155/156 shape (issue #1327
+    /// finding 1; cassandra-5.0.0
+    /// `MetadataCollector.defaultCellPerPartitionCountHistogram` → `EstimatedHistogram(118)`).
     /// Populated by [`Self::record_partition`].
     pub estimated_cell_count: EstimatedHistogram,
 }
@@ -209,8 +213,12 @@ impl Default for StatisticsMetadata {
             repaired_at: 0,
             pending_repair: None,
             is_transient: false,
-            estimated_partition_size: EstimatedHistogram::new(),
-            estimated_cell_count: EstimatedHistogram::new(),
+            // Two DISTINCT Cassandra-canonical shapes (issue #1327 finding 1):
+            // partition-size seeds EH(155) (156 buckets), cell-count seeds
+            // EH(118) (119 buckets). cassandra-5.0.0 MetadataCollector
+            // defaultPartitionSizeHistogram / defaultCellPerPartitionCountHistogram.
+            estimated_partition_size: EstimatedHistogram::partition_size(),
+            estimated_cell_count: EstimatedHistogram::cell_per_partition_count(),
         }
     }
 }
