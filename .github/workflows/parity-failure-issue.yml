@@ -40,6 +40,10 @@ on:
 permissions:
   contents: read
   issues: write
+  # `gh run download` reads ANOTHER workflow run's artifacts; that requires the
+  # actions:read scope. Without it artifact download 401s and issue filing silently
+  # falls to the degraded path (files nothing useful). Minimal + complete for this job.
+  actions: read
 
 concurrency:
   group: parity-failure-issue-${{ github.event.workflow_run.id || github.run_id }}
