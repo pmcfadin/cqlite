@@ -551,8 +551,18 @@ run_parity_report() {
   else
     status=FAIL
     OVERALL=FAIL
-    echo "--- [$name] FAILED: $report is STALE vs the manifest."
-    echo "    Regenerate: cargo run -p cassandra-parity -- report --manifest $manifest --output $report"
+    # A nonzero --check exit is either a genuine render mismatch (the tool prints
+    # "report: STALE — ...") or an invalid manifest (lint errors bail before any
+    # render). Only the former is fixed by regenerating; mirror the CI heal job's
+    # distinction so the advice is not misleading. grep on the captured $log is
+    # injection/quoting-safe (fixed pattern, no interpolation).
+    if grep -q 'STALE' "$log"; then
+      echo "--- [$name] FAILED: $report is STALE vs the manifest."
+      echo "    Regenerate: cargo run -p cassandra-parity -- report --manifest $manifest --output $report"
+    else
+      echo "--- [$name] FAILED: cannot render $report — the manifest is invalid."
+      echo "    Fix the manifest lint/validity error before regenerating: $manifest"
+    fi
     echo "--- last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
