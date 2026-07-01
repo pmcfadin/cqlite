@@ -75,6 +75,20 @@ jobs:
     # must not depend on a warm cache, so budget for the cold case.
     timeout-minutes: 75
 
+    # Cap peak compile memory pressure (issue #1269). The full gate compiles the
+    # workspace + both binding modules and runs the full test set; the runner
+    # was OOM-killed twice mid-`Run full agent gate` (23m51s and 40m — both well
+    # under the 75m timeout, with no step conclusion, no summary artifact, and
+    # no logs: the classic runner-process-killed signature). Bounding cargo's
+    # codegen parallelism (2 jobs on the 4-vCPU standard runner) and disabling
+    # incremental compilation drops peak RAM substantially, trading a little
+    # wall-clock for headroom. Combined with the provisioned swapfile below this
+    # keeps the job under the memory ceiling. These are set job-level so every
+    # cargo/clippy invocation the gate spawns inherits them.
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -95,14 +109,24 @@ jobs:
           persist-credentials: false
 
       # Rust test jobs can sit near the standard runner's disk ceiling (issue
-      # #722). Dropping preinstalled toolchains we never use frees ~14 GB —
-      # this lane builds the workspace, both binding modules, and pulls the
-      # dataset corpus, so the headroom matters.
-      - name: Free disk space (issue #722)
-        run: |
-          df -h / | tail -1
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android /opt/hostedtoolcache/CodeQL
-          df -h / | tail -1
+      # #722). This lane builds the workspace, both binding modules, pulls the
+      # dataset corpus, AND — after #1269 — provisions a large swapfile on /mnt
+      # for OOM headroom, so free disk is a co-factor in the observed runner
+      # kills. Use the well-known jlumbroso/free-disk-space action, which strips
+      # far more than the old hand-rolled rm -rf (dotnet, android, haskell, the
+      # large hosted toolcache, and unused /usr/local dirs), reclaiming ~20-30
+      # GB on both / and /mnt. Pinned to @main to match this repo's tag-based
+      # action-pinning convention (no commit-SHA pins elsewhere).
+      - name: Free disk space (issue #722, #1269)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
 
       # This lane RUNS the gate's clippy + fmt components, so it needs a
       # toolchain that has clippy + rustfmt. Follow the quality-gates.yml
@@ -157,6 +181,37 @@ jobs:
       - name: Verify dataset corpus
         run: bash test-data/scripts/check-dataset-manifest.sh test-data/datasets
 
+      # OOM headroom (issue #1269) — the real fix for the two runner kills. The
+      # standard ubuntu-latest runner has ~16 GB RAM and only a small default
+      # swap; the peak of the parallel Rust compile + the test set exceeds it and
+      # the runner process is OOM-killed (no step conclusion, no artifact, no
+      # logs). Provision a 13 GB swapfile on /mnt (the larger ephemeral disk,
+      # freed further by the free-disk-space step above) so peak memory spills to
+      # swap instead of triggering the OOM killer. Inline (no external action
+      # dependency); guarded so a residual runner-provided swap does not error.
+      - name: Add swap space
+        run: |
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile || true
+          sudo fallocate -l 13G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
+
+      # Legibility (issue #1269) — snapshot memory + disk immediately before the
+      # gate so a future failure has a baseline. An OOM-kill may prevent
+      # post-hoc prints from flushing, so we record state up front; the swapfile
+      # above is the actual remedy.
+      - name: Resource snapshot before gate
+        run: |
+          echo '=== free -h ==='
+          free -h
+          echo '=== df -h ==='
+          df -h
+          echo '=== swapon --show ==='
+          swapon --show || true
+
       # Run the FULL gate (never --only). The gate exports CQLITE_DATASETS_ROOT
       # itself (defaulting to $REPO_ROOT/test-data/datasets), but we set it
       # explicitly so intent is visible and any tool reading it agrees. The
@@ -171,6 +226,19 @@ jobs:
           CQLITE_REQUIRE_FIXTURES: '1'
           AGENT_GATE_SUMMARY_FILE: ${{ github.workspace }}/agent-gate-summary.txt
         run: bash scripts/agent-gate.sh
+
+      # Legibility (issue #1269) — resource state after the gate, on success or
+      # a clean component failure. (A hard OOM-kill of the runner process may
+      # abort before this runs and its output may not flush; that case is
+      # what the swapfile above is meant to prevent. This step covers the
+      # non-OOM failure modes so peak/residual usage is still inspectable.)
+      - name: Resource snapshot after gate
+        if: always()
+        run: |
+          echo '=== free -h ==='
+          free -h
+          echo '=== df -h ==='
+          df -h
 
       # Always publish the SUMMARY block (even on failure) so the exact
       # per-component result table is inspectable from the run.
