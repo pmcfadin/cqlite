@@ -93,19 +93,28 @@ OpenSpec change `<slug>` (design-driven only).
    # run the flow-board detection snippet first (switches to the project-capable account), then
    # gh project item-edit ... Status=In Review when have_project=1; else the label above + loud ⚠️ warning.
    ```
-9. **Merge autonomously, then finalize.** Workers run the issue to completion — there is no human merge
-   click. Before merging:
+9. **Terminal state — arm merge-on-green, then STOP.** The worker's terminal state for an issue is
+   **PR-open + `agent-gate.sh` PASS + (design-driven) spec-auditor C PASS + roborev clean**. At that point
+   you arm the merge-on-green mechanism and **end your turn** — there is no human merge click, and you do
+   NOT poll the PR's own external CI. Steps:
    - **Check the manager's orders**: read the issue's `🧭 MANAGER <!-- MGR:... -->` comments. If the
-     latest order is `HOLD: merge after #N`, **block** until #N is merged (poll its state); obey `ORDER`.
-   - **Confirm green**: `agent-gate.sh` PASS + (design-driven) spec-auditor C PASS + roborev clean + CI
-     required checks green. Rebase on current `origin/main`; resolve any conflict in your own worktree.
-   - Then squash-merge:
-     ```bash
-     gh auth switch --user pmcfadin >/dev/null 2>&1   # EMU guard
-     gh pr merge <pr> --squash --delete-branch
-     ```
-   - Run **`flow-finalize <N>`** to archive any OpenSpec change, remove the worktree, delete the origin
-     claim lock, and close the issue with a traceable comment.
-   Escalate to the owner (do NOT merge) only for: an unresolved roborev finding that's a genuine design
-   call, a scope/product question, or anything outside this issue. Report the merge + gate/C/roborev
-   summary.
+     latest order is `HOLD: merge after #N`, keep merge-on-green **gated behind #N** (the manager sequences
+     it); obey `ORDER`.
+   - Rebase on current `origin/main`; resolve any conflict in your own worktree.
+   - **Arm merge-on-green and END your turn — do NOT busy-poll CI.** Do not schedule repeated
+     `ScheduleWakeup` cycles to watch the PR's cross-platform CI matrix after the work is done; that is the
+     token bleed this doctrine forbids. Landing on green is delegated:
+     - **Primary today — the manager-owned poller.** `main` has no required status checks (`contexts=[]`),
+       so `gh pr merge --auto` would merge instantly against an empty check set (forbidden). Hand the PR
+       off to the manager-owned poller/merge-engine, which gates on an explicit lane set and lands it on
+       green. Log that you armed the poller path.
+     - **Once required status checks are configured on `main`** — arm `gh pr merge --auto --squash
+       --delete-branch` (GitHub lands it natively when the required checks pass, zero tokens). Log that path.
+   - **`flow-finalize <N>`** runs on the merge event (archive any OpenSpec change, stamp the telemetry
+     ledger, remove the worktree, delete the origin claim lock, close the issue with a traceable comment) —
+     triggered by the merge, not by a CI busy-wait.
+   Escalate to the owner (do NOT arm merge-on-green) only for: an unresolved roborev finding that's a
+   genuine design call, a scope/product question, or anything outside this issue. Report the terminal state
+   + gate/C/roborev summary + which merge-on-green path you armed.
+   (`ScheduleWakeup` remains valid for genuinely external, harness-untracked state — just not for polling a
+   PR's own CI after the work is complete.)
