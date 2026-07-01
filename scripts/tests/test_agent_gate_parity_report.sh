@@ -42,7 +42,7 @@ bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 inf() { printf 'info - %s\n' "$1"; }
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-parity.XXXXXX")
-trap 'rm -rf "$tmp"; rm -f "$MUT"' EXIT
+trap 'rm -rf "$tmp"; rm -f "$MUT"' EXIT INT TERM
 
 # parity_status <summary-file>: print the component's status token (PASS/FAIL/SKIP)
 # from the SUMMARY block, or empty if absent.

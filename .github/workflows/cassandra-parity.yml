@@ -159,19 +159,20 @@ jobs:
       # NOTE: the PAT/App token (secret PARITY_HEAL_TOKEN) is NOT exported job-wide.
       # It is set as step-level `env:` only on the final `gh`-invoking step, so the
       # `cargo build`/`cargo run` steps (which execute third-party crate build
-      # scripts) never see it — narrowing blast radius (issue #1338 roborev). The
-      # checkout step still receives it via its `token:` input so the later
-      # `git push` is authenticated as the PAT (which makes the regen PR fire CI).
+      # scripts) never see it as an env var. Combined with `persist-credentials:
+      # false` on checkout (below) the PAT is also NOT written to .git/config, so a
+      # build script in the cargo dependency tree cannot read it off disk either —
+      # the credential exists only inside the final gh/push step (issue #1338 roborev).
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
-          # Persist the bot token so the `git push` below is authenticated as the
-          # PAT/App (which makes the resulting PR trigger CI). Falls back to the
-          # default token for read/clone when the secret is unset; the push itself
-          # is gated on the token being present in the heal step.
-          token: ${{ secrets.PARITY_HEAL_TOKEN || github.token }}
+          # Do NOT persist any credential into .git/config: otherwise the token
+          # would be readable on disk by the later cargo build/run steps for the
+          # whole job. The clone uses the default token; the regen push is
+          # authenticated explicitly, in-step, with $GH_TOKEN (issue #1338 roborev).
+          persist-credentials: false
 
       # Same clippy-conflict avoidance as the parity-manifest job (issue #1209/#1217).
       - name: Remove preinstalled clippy (avoid clippy-preview install conflict)
@@ -263,7 +264,13 @@ jobs:
           git checkout -B "$REGEN_BRANCH"
           git add "$REPORT_PATH"
           git commit -m "chore(parity): regenerate stale cassandra-test-parity report"
-          git push --force origin "$REGEN_BRANCH"
+          # Authenticate the push in-step (checkout used persist-credentials: false,
+          # so `origin` has no stored credential). $GH_TOKEN is a masked secret and
+          # $GITHUB_REPOSITORY is a trusted default env var — no untrusted value is
+          # interpolated. Pushing with the PAT is what makes the regen PR fire CI.
+          git push --force \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "HEAD:refs/heads/$REGEN_BRANCH"
           # Open a PR only if none is already open for this branch; otherwise the
           # force-push above has already updated the existing PR (idempotent — D4).
           existing=$(gh pr list --head "$REGEN_BRANCH" --state open --json number --jq 'length')
