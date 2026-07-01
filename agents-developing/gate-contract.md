@@ -12,6 +12,17 @@ not count. This rule exists because epic #646 shipped three false-green reports 
 ambiguity about "which commands count" — specifically, feature-gated tests silently
 skipping and partial runs reported as full runs.
 
+**CI-enforced as a nightly deep-check (issue #1269, reconciled with epic #1360).** The gate is no longer
+local-only: `.github/workflows/gate.yml` runs the *full* `scripts/agent-gate.sh` (never `--only`) in CI
+as a **nightly, path-independent deep-check backstop** (`schedule:` cron + `workflow_dispatch` for
+on-demand runs). It is **NOT** a required per-PR check — under epic #1360's tiered model the ONE required,
+always-running PR check is the light `.github/workflows/pr-gate.yml` (fmt + cqlite-core clippy
+`-D warnings` + all-feature build + fast tests; no Docker/datasets/agent-gate). The nightly `gate.yml`
+lane fetches the pinned datasets and sets `CQLITE_DATASETS_ROOT` so the dataset-dependent components
+execute rather than skip, and uploads the SUMMARY block as an artifact. So a change that breaks a gate
+component (e.g. `node-bindings`) that the light PR check cannot see is still caught within 24h and
+surfaces on the Actions dashboard.
+
 ## Components
 
 The gate mirrors the enforced CI gates (`.github/workflows/ci.yml`,

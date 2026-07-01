@@ -84,6 +84,16 @@ run this script and pasted its summary block verbatim. Ad-hoc <code dir="auto">c
 not count. This rule exists because epic #646 shipped three false-green reports from
 ambiguity about “which commands count” — specifically, feature-gated tests silently
 skipping and partial runs reported as full runs.</p>
+<p><strong>CI-enforced as a nightly deep-check (issue #1269, reconciled with epic #1360).</strong> The gate is no longer
+local-only: <code dir="auto">.github/workflows/gate.yml</code> runs the <em>full</em> <code dir="auto">scripts/agent-gate.sh</code> (never <code dir="auto">--only</code>) in CI
+as a <strong>nightly, path-independent deep-check backstop</strong> (<code dir="auto">schedule:</code> cron + <code dir="auto">workflow_dispatch</code> for
+on-demand runs). It is <strong>NOT</strong> a required per-PR check — under epic #1360’s tiered model the ONE required,
+always-running PR check is the light <code dir="auto">.github/workflows/pr-gate.yml</code> (fmt + cqlite-core clippy
+<code dir="auto">-D warnings</code> + all-feature build + fast tests; no Docker/datasets/agent-gate). The nightly <code dir="auto">gate.yml</code>
+lane fetches the pinned datasets and sets <code dir="auto">CQLITE_DATASETS_ROOT</code> so the dataset-dependent components
+execute rather than skip, and uploads the SUMMARY block as an artifact. So a change that breaks a gate
+component (e.g. <code dir="auto">node-bindings</code>) that the light PR check cannot see is still caught within 24h and
+surfaces on the Actions dashboard.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="components">Components</h2><a class="sl-anchor-link" href="#components"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Components”</span></a></div>
 <p>The gate mirrors the enforced CI gates (<code dir="auto">.github/workflows/ci.yml</code>,
 <code dir="auto">ci-minimal-features.yml</code>) plus the local smoke suite:</p>
