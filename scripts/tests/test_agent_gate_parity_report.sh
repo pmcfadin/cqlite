@@ -87,7 +87,11 @@ fi
 # YAML valid. --output stays the canonical committed report, which --check only
 # READS, so the working tree is never modified.
 mut="$tmp/manifest-mutated.yml"
-sed 's/ref: cassandra-5\.0\.2/ref: cassandra-5.0.99-staleness-probe/' "$MANIFEST" >"$mut"
+# Match the cassandra_source.ref by KEY, not by its current pinned value, so a
+# routine `ref:` bump does not silently turn this into a no-op (which would make
+# the FAIL case unexercised and hard-FAIL the whole gate for an unrelated reason).
+# roborev finding (#1338): value-coupled `sed` on `cassandra-5.0.2` was brittle.
+sed -E 's/^(  ref: ).*/\1cassandra-5.0.99-staleness-probe/' "$MANIFEST" >"$mut"
 if cmp -s "$MANIFEST" "$mut"; then
   bad "could not mutate manifest copy (cassandra_source.ref not found); FAIL case not exercised"
 else
