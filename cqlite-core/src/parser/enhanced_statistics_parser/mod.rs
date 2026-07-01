@@ -135,13 +135,56 @@ pub fn parse_nb_format_statistics_data(
                 regular_columns,
             ),
         )) => {
-            // Create minimal statistics with only timestamp data populated
+            // Populate the authoritative row/partition counts from the STATS
+            // component (issue #1325). We reuse the single source of truth added
+            // in #944 — `repair_metadata::read_table_counts` — rather than
+            // re-deriving the walk here:
+            //   * `partition_count` = Σ `estimatedPartitionSize` histogram bucket
+            //     counts (self-describing; always decodable).
+            //   * `total_rows`      = STATS `totalRows` via the version-gated walk,
+            //     `None` when not authoritatively traversable (e.g. a clustered
+            //     covered-Slice whose bound values are not modeled).
+            // No-heuristics mandate (#28): when a value is NOT authoritatively
+            // reachable we leave the documented 0 rather than fabricating a count.
+            //   * `total_rows`: `None` from `read_table_counts` → 0 (meaning
+            //     "not authoritatively reachable", never a guessed count).
+            //   * `live_rows`: STATS carries no per-SSTable live-row count that is
+            //     authoritatively distinguishable from `total_rows` here, so it is
+            //     left as 0 (documented "not authoritatively derivable") rather
+            //     than guessed. (Consumers that need an upper bound use
+            //     `total_rows`; see cqlite-flight `read_table_counts` doctrine.)
+            //   * `avg_rows_per_partition`: computed only when BOTH counts are
+            //     authoritative and `partition_count > 0`; otherwise left 0.0.
+            // `full_input` is the raw Statistics.db buffer (with TOC), exactly the
+            // input `read_table_counts` expects. This is strictly additive — an
+            // Err is logged and the fields stay at 0 (a Statistics.db that parses
+            // today must keep parsing).
+            let (total_rows, partition_count) =
+                match crate::parser::repair_metadata::read_table_counts(full_input, gates) {
+                    Ok(counts) => (counts.total_rows.unwrap_or(0), counts.partition_count),
+                    Err(e) => {
+                        log::debug!(
+                            "Best-effort authoritative row/partition-count decode failed; \
+                             leaving RowStatistics counts at 0: {:?}",
+                            e
+                        );
+                        (0, 0)
+                    }
+                };
+            let avg_rows_per_partition = if partition_count > 0 && total_rows > 0 {
+                total_rows as f64 / partition_count as f64
+            } else {
+                0.0
+            };
+
             let row_stats = RowStatistics {
-                total_rows: 0,
+                total_rows,
+                // Not authoritatively derivable from STATS as a value distinct
+                // from `total_rows`; left 0 (documented) rather than guessed (#28).
                 live_rows: 0,
                 tombstone_count: 0,
-                partition_count: 0,
-                avg_rows_per_partition: 0.0,
+                partition_count,
+                avg_rows_per_partition,
                 row_size_histogram: vec![],
             };
 
