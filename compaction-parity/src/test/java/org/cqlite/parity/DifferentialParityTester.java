@@ -197,6 +197,19 @@ public abstract class DifferentialParityTester extends CQLTester
         artifacts.write("cqlite-compact.stdout", res.stdout);
         artifacts.write("cqlite-compact.stderr", res.stderr);
 
+        // ── EARLY-EXIT PATH (a): non-zero `cqlite compact` exit ──
+        // Emit the shared scenario-id-keyed bundle BEFORE the assertion so this
+        // failure mode also produces a manifest-joinable record (issue #1027
+        // finding 1). No typed byte/offset bodies exist here, so the bundle carries
+        // a diagnostic.txt + empty diffs[] (never a fabricated diff kind).
+        if (!res.succeeded())
+        {
+            emitDiagnosticFailureBundle(res, null,
+                "cqlite compact failed (exit " + res.exitCode + ")\n\n"
+                + "## command\n" + res.commandLine() + "\n\n"
+                + "## stdout\n" + res.stdout + "\n\n"
+                + "## stderr\n" + res.stderr + "\n");
+        }
         assertTrue("cqlite compact failed (exit " + res.exitCode + "):\n" + res.stderr + res.stdout,
                    res.succeeded());
         // Single walk for the candidate output. Mirror the reference "exactly one
@@ -205,6 +218,18 @@ public abstract class DifferentialParityTester extends CQLTester
         // directly, not stay hidden inside the swallowed byte-tier block (where a
         // duplicate-kind would otherwise be suppressed on PRs).
         List<Path> candidateDataList = candidateDataFiles(outputDir);
+        // ── EARLY-EXIT PATH (b): zero or multiple candidate Data.db files ──
+        // A writer regression that emits 0 or >1 SSTable generations is a real
+        // divergence; emit the shared bundle before the assertion (issue #1027
+        // finding 1). Diagnostic-only (empty diffs[]): no per-component bytes to diff.
+        if (candidateDataList.size() != 1)
+        {
+            emitDiagnosticFailureBundle(res, null,
+                "wrong candidate Data.db count: expected exactly 1 (one SSTable generation), "
+                + "found " + candidateDataList.size() + " under " + outputDir + "\n\n"
+                + "## candidate Data.db files\n" + candidateDataList + "\n\n"
+                + "## command\n" + res.commandLine() + "\n");
+        }
         assertEquals("expected exactly one cqlite output Data.db (one SSTable generation) under "
                      + outputDir, 1, candidateDataList.size());
         Path candidateData = candidateDataList.get(0);
@@ -227,7 +252,21 @@ public abstract class DifferentialParityTester extends CQLTester
         catch (Exception e)
         {
             if (byteTierEnabled())
+            {
+                // ── EARLY-EXIT PATH (c): byte-comparison threw on the asserting
+                // (byte) tier ── emit the shared bundle BEFORE rethrowing so this
+                // failure mode also yields a manifest-joinable record (issue #1027
+                // finding 1). Diagnostic-only: the typed byte/offset bodies could
+                // not be computed (that is why compare() threw), so diffs[] is empty.
+                java.io.StringWriter sw = new java.io.StringWriter();
+                e.printStackTrace(new java.io.PrintWriter(sw));
+                emitDiagnosticFailureBundle(res, candidateData,
+                    "byte-comparison threw before a typed diff could be produced "
+                    + "(cassandra-output vs cqlite-output):\n\n"
+                    + "## exception\n" + sw + "\n"
+                    + "## command\n" + res.commandLine() + "\n");
                 throw e; // byteParity is the asserting tier: surface the failure.
+            }
             byteResult = null;
             // Visible, greppable signal so a suppressed byte-tier failure on the
             // logical PR path is never silently invisible in the CI log.
@@ -318,6 +357,47 @@ public abstract class DifferentialParityTester extends CQLTester
         catch (Exception e)
         {
             System.err.println("WARN: could not emit byte failure bundle (#1027): " + e);
+        }
+    }
+
+    /**
+     * Issue #1027 (finding 1): emit a diagnostic-only shared bundle for a compaction
+     * failure that exits BEFORE the typed byte/offset/checksum or JSONL diff can be
+     * produced — a non-zero {@code cqlite compact} exit, a wrong candidate Data.db
+     * count, or a byte-comparison exception. The bundle carries a rendered
+     * {@code diagnostic.txt} and an EMPTY {@code diffs[]} (never a fabricated diff
+     * kind), mirroring the Rust side's diagnostic-only approach. It is keyed by the
+     * currently-active asserting tier so it lands under the same scenario id as a
+     * normal failure. Best-effort: it must never mask the real assertion/throw that
+     * follows (the run still FAILs).
+     *
+     * @param res          the (possibly failed) cqlite compact result for provenance
+     * @param candidateData the candidate Data.db if one was resolved, else {@code null}
+     * @param diagnostic   the rendered human-readable diagnostic body
+     */
+    private void emitDiagnosticFailureBundle(CqliteCompactionRunner.Result res,
+                                             Path candidateData,
+                                             String diagnostic)
+    {
+        try
+        {
+            boolean byteTier = byteTierEnabled();
+            List<String> candKinds = candidateData != null
+                ? ParityFailureArtifact.componentKinds(candidateData.getParent())
+                : new ArrayList<>();
+            Path dir = ParityFailureBundle.forMethod(scenarioLabel(), byteTier, LANE)
+                .stdout(res.stdout)
+                .stderr(res.stderr)
+                .artifactsCompared("diagnostic")
+                .provenance(cassandraVersion(), cassandraGitSha(), candidateData,
+                            candKinds, res.commandLine())
+                .diagnostic(diagnostic)
+                .emit();
+            System.out.println("[parity] diagnostic failure bundle: " + dir);
+        }
+        catch (Exception e)
+        {
+            System.err.println("WARN: could not emit diagnostic failure bundle (#1027): " + e);
         }
     }
 

@@ -180,6 +180,22 @@ final class ParityFailureBundle
     }
 
     /**
+     * Add a diagnostic-only bundle file ({@code diffs/diagnostic.txt}) that is NOT
+     * a record {@code diffs[]} pointer (issue #1027 finding 1). Used by the early
+     * compaction-failure exit paths (non-zero {@code cqlite compact} exit, wrong
+     * candidate Data.db count, byte-comparison exception) where the typed byte/
+     * offset/checksum bodies are not available: the run still emits a
+     * scenario-id-keyed bundle with a rendered diagnostic and an EMPTY {@code diffs[]}
+     * rather than fabricating a diff kind. Mirrors the Rust side's
+     * {@code raw_bundle_file("diagnostic.txt", ...)} diagnostic-only approach.
+     */
+    ParityFailureBundle diagnostic(String body)
+    {
+        rawFiles.add(new RawFile("diagnostic.txt", body == null ? "" : body));
+        return this;
+    }
+
+    /**
      * Add the {@code canonical_semantic} artifacts: the normalized {@code jsonl.diff}
      * (record {@code diffs[]} entry, kind jsonl_diff) plus raw {@code reference.jsonl}
      * and {@code candidate.jsonl} bundle files.

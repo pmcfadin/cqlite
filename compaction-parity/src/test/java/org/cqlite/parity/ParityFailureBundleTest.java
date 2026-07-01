@@ -194,6 +194,66 @@ public class ParityFailureBundleTest
         }
     }
 
+    /**
+     * Finding 1 (issue #1027): a diagnostic-only bundle (an early compaction-failure
+     * exit before a typed diff exists — non-zero compact exit, wrong candidate
+     * Data.db count, or a byte-comparison exception) produces a conforming bundle
+     * with a {@code diffs/diagnostic.txt} file and an EMPTY {@code diffs[]} array
+     * (no fabricated diff kind), keyed by the active tier's manifest scenario id.
+     */
+    @Test
+    public void diagnosticOnlyBundleIsConformingWithEmptyDiffs() throws IOException
+    {
+        Path root = tmp.newFolder("failures-root-diagnostic").toPath();
+        System.setProperty("parity.failures.dir", root.toString());
+        try
+        {
+            // Byte tier (nightly_docker / byte_for_byte), NO fixture (null) — the
+            // early-exit paths may have no resolvable candidate Data.db.
+            Path bundleDir = ParityFailureBundle.forMethod(
+                        "BasicDifferentialTest.liveRowsLastWriteWinsAcrossTwoSSTables",
+                        true, "compaction-parity.yml")
+                .stdout("child stdout\n").stderr("child stderr\n")
+                .artifactsCompared("diagnostic")
+                .provenance("5.0.2", "f278f6774fc76465c182041e081982105c3e7dbb",
+                            null, java.util.Collections.emptyList(),
+                            "cd compaction-parity && gradle --no-daemon byteParity")
+                .diagnostic("cqlite compact failed (exit 1)\n## stderr\nboom\n")
+                .emit();
+
+            assertEquals(ParityScenarioMap.BYTE_SCENARIO,
+                         bundleDir.getFileName().toString());
+            assertEquals("nightly_docker", bundleDir.getParent().getFileName().toString());
+
+            // The diagnostic file is present as a raw bundle file under diffs/.
+            assertTrue(Files.isRegularFile(bundleDir.resolve("diffs/diagnostic.txt")));
+
+            String json = Files.readString(bundleDir.resolve("failure-artifact.json"));
+            // Required top-level + provenance fields present, valid tier/evidence,
+            // repro/ resolves — but NO diffs[] pointer requirement.
+            assertTrue("schema_version must be 1", json.contains("\"schema_version\": 1"));
+            for (String field : new String[]{"scenario_id", "lane", "tier", "evidence_type",
+                                             "artifacts_compared", "provenance", "diffs",
+                                             "repro_bundle"})
+                assertTrue("record must contain top-level field " + field,
+                           json.contains("\"" + field + "\""));
+            assertTrue(json.contains("\"tier\": \"nightly_docker\""));
+            assertTrue(json.contains("\"evidence_type\": \"byte_for_byte\""));
+            // diffs[] MUST be empty (no fabricated kind); the diagnostic is a raw file.
+            assertTrue("diffs[] must be empty for a diagnostic-only bundle",
+                       json.matches("(?s).*\"diffs\": \\[\\s*\\].*"));
+            // A null fixture still yields a schema-valid 64-hex all-zero dataset_sha256.
+            assertTrue("dataset_sha256 must be 64 hex chars",
+                       json.matches("(?s).*\"dataset_sha256\": \"[0-9a-f]{64}\".*"));
+            assertTrue("repro/ pointer must resolve",
+                       Files.isDirectory(bundleDir.resolve("repro")));
+        }
+        finally
+        {
+            System.clearProperty("parity.failures.dir");
+        }
+    }
+
     /** The scenario_id map returns valid manifest ids + matching tier/evidence. */
     @Test
     public void scenarioMapKeysByManifestId()
