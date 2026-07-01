@@ -118,6 +118,21 @@ fun Test.configureParityHarness(label: String) {
         "parity.artifacts.dir",
         layout.buildDirectory.dir("parity-artifacts-$label").get().asFile.absolutePath,
     )
+    // Issue #1027: the SHARED, scenario-id-keyed failure-bundle root. On a failure
+    // the harness writes <root>/parity-failures/<tier>/<scenario_id>/failure-artifact.json
+    // (+ diffs/ + repro/). The root is `build/`, so the bundle lands at
+    // compaction-parity/build/parity-failures/<tier>/<scenario_id>/ — exactly the
+    // glob compaction-parity.yml uploads (Wave 2b). A single shared root across
+    // both tiers is safe because the logical (required_parity) and byte
+    // (nightly_docker) tiers key into distinct tier subdirectories.
+    systemProperty(
+        "parity.failures.dir",
+        layout.buildDirectory.get().asFile.absolutePath,
+    )
+    // Pinned Cassandra provenance recorded in the failure-artifact record so it is
+    // comparable to the manifest cassandra_source pin (issue #1027).
+    systemProperty("parity.cassandra.version", "5.0.2")
+    systemProperty("parity.cassandra.git.sha", "f278f6774fc76465c182041e081982105c3e7dbb")
 
     maxParallelForks = 1
 
