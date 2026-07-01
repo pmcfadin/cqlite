@@ -650,9 +650,8 @@ impl StatisticsAnalyzer {
 
         StatisticsSummary {
             total_rows: stats.row_stats.total_rows,
-            live_data_percentage: (stats.row_stats.live_rows as f64
-                / stats.row_stats.total_rows as f64)
-                * 100.0,
+            // `None` when not authoritatively available; see `live_data_percentage`.
+            live_data_percentage: Self::live_data_percentage(stats),
             compression_efficiency: stats.compression_stats.ratio * 100.0,
             timestamp_range_days: Self::calculate_timestamp_range_days(stats),
             largest_partition_mb: stats.partition_stats.max_partition_size as f64 / 1_048_576.0,
@@ -661,6 +660,21 @@ impl StatisticsAnalyzer {
             storage_recommendations,
             health_score,
         }
+    }
+
+    /// Live-data percentage, or `None` when it is not authoritatively available.
+    ///
+    /// `live_rows == 0` is the documented #1325 sentinel meaning "not
+    /// authoritatively derivable from STATS" (STATS has no per-SSTable live-row
+    /// count), so we return `None` rather than a misleading concrete `0.00%`.
+    /// A genuinely fully-tombstoned SSTable also reads as unavailable here —
+    /// honest, since we cannot distinguish it from "unknown" until the
+    /// `RowStatistics` representation is redesigned (#1352). No heuristic (#28).
+    fn live_data_percentage(stats: &SSTableStatistics) -> Option<f64> {
+        if stats.row_stats.live_rows == 0 || stats.row_stats.total_rows == 0 {
+            return None;
+        }
+        Some((stats.row_stats.live_rows as f64 / stats.row_stats.total_rows as f64) * 100.0)
     }
 
     fn calculate_data_efficiency(stats: &SSTableStatistics) -> f64 {
@@ -736,7 +750,10 @@ impl StatisticsAnalyzer {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatisticsSummary {
     pub total_rows: u64,
-    pub live_data_percentage: f64,
+    /// Percentage of live (non-tombstoned) data, or `None` when not
+    /// authoritatively available (the #1325 `live_rows == 0` sentinel; see
+    /// `StatisticsAnalyzer::live_data_percentage` and #1352).
+    pub live_data_percentage: Option<f64>,
     pub compression_efficiency: f64,
     pub timestamp_range_days: f64,
     pub largest_partition_mb: f64,
@@ -878,7 +895,31 @@ mod tests {
 
         assert!(summary.total_rows > 0);
         assert!(summary.health_score >= 0.0 && summary.health_score <= 100.0);
-        assert!(summary.live_data_percentage >= 0.0 && summary.live_data_percentage <= 100.0);
+        let live_pct = summary
+            .live_data_percentage
+            .expect("fixture has authoritative live_rows > 0");
+        assert!((0.0..=100.0).contains(&live_pct));
+    }
+
+    /// #1325 roborev finding: when `live_rows` is the documented "not
+    /// authoritatively available from STATS" sentinel (0) but `total_rows` is a
+    /// real authoritative count, the analyzer MUST report live-data% as
+    /// unavailable (`None`) rather than a misleading concrete `0.00%`. Other
+    /// authoritative fields (`total_rows`) stay intact. See #1352.
+    #[test]
+    fn test_live_data_percentage_unavailable_when_live_rows_sentinel() {
+        let mut stats = create_test_statistics();
+        stats.row_stats.total_rows = 1000; // real authoritative count
+        stats.row_stats.live_rows = 0; // documented "unavailable" sentinel
+
+        let summary = StatisticsAnalyzer::analyze(&stats);
+
+        assert_eq!(
+            summary.live_data_percentage, None,
+            "live_rows==0 sentinel with total_rows>0 must report None, not 0.00%"
+        );
+        // Authoritative counts are unaffected.
+        assert_eq!(summary.total_rows, 1000);
     }
 
     #[test]

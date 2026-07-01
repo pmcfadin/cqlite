@@ -434,7 +434,10 @@ mod tests {
 
         // Validate analysis results
         assert_eq!(analysis.total_rows, 1000);
-        assert!(analysis.live_data_percentage > 0.0 && analysis.live_data_percentage <= 100.0);
+        let live_pct = analysis
+            .live_data_percentage
+            .expect("fixture has authoritative live_rows > 0");
+        assert!(live_pct > 0.0 && live_pct <= 100.0);
         assert!(analysis.compression_efficiency > 0.0);
         assert!(analysis.health_score >= 0.0 && analysis.health_score <= 100.0);
         assert!(analysis.timestamp_range_days >= 0.0);

@@ -259,10 +259,13 @@ impl StatisticsReader {
         // Overview section
         report.push_str("## Overview\n");
         report.push_str(&format!("- **Total Rows**: {}\n", summary.total_rows));
-        report.push_str(&format!(
-            "- **Live Data**: {:.2}%\n",
-            summary.live_data_percentage
-        ));
+        // `live_data_percentage` is `None` when `live_rows` is the documented
+        // #1325 "not authoritatively available from STATS" sentinel; render it as
+        // unavailable rather than a misleading concrete 0.00% (#1352).
+        report.push_str(&match summary.live_data_percentage {
+            Some(pct) => format!("- **Live Data**: {:.2}%\n", pct),
+            None => "- **Live Data**: unavailable\n".to_string(),
+        });
         report.push_str(&format!(
             "- **Compression Efficiency**: {:.2}%\n",
             summary.compression_efficiency
@@ -420,10 +423,16 @@ impl StatisticsReader {
     /// Get a compact summary for CLI display
     pub fn compact_summary(&self) -> String {
         let summary = self.analyze();
+        // See `generate_report`: `None` = live-data% not authoritatively available
+        // (#1325 sentinel), rendered as "?% live" instead of a misleading 0.0%.
+        let live = match summary.live_data_percentage {
+            Some(pct) => format!("{:.1}% live", pct),
+            None => "?% live".to_string(),
+        };
         format!(
-            "Rows: {} ({:.1}% live) | Compression: {:.1}% | Health: {:.0}/100 | Size: {:.2} MB",
+            "Rows: {} ({}) | Compression: {:.1}% | Health: {:.0}/100 | Size: {:.2} MB",
             summary.total_rows,
-            summary.live_data_percentage,
+            live,
             summary.compression_efficiency,
             summary.health_score,
             self.statistics.table_stats.disk_size as f64 / 1_048_576.0
