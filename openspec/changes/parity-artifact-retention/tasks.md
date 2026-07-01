@@ -7,12 +7,12 @@
 
 ## 1. Schema + record model
 
-- [ ] 1.1 Add `test-data/parity-failure-artifact.schema.json` (the failure-artifact record schema).
+- [x] 1.1 Add `test-data/parity-failure-artifact.schema.json` (the failure-artifact record schema).
       Surface: schema file + a schema-validation unit test in `tools/cassandra-parity`.
-- [ ] 1.2 Add a Rust model + emitter for the record in `tools/cassandra-parity` (or a shared lib the
+- [x] 1.2 Add a Rust model + emitter for the record in `tools/cassandra-parity` (or a shared lib the
       Rust parity tests can call). Surface: `cassandra-parity` library API + round-trip unit test
       (emit → validate against 1.1's schema).
-- [ ] 1.3 Define the `diffs[].kind` enum (`byte_diff`/`offset_diff`/`checksum_diff`/`jsonl_diff`/
+- [x] 1.3 Define the `diffs[].kind` enum (`byte_diff`/`offset_diff`/`checksum_diff`/`jsonl_diff`/
       `component_inventory`/`live_log`/`audit_report`) in `enums.rs` next to `CI_TIER`. Surface: enum
       cross-check test mirroring the existing tier-enum cross-check.
 
@@ -40,21 +40,21 @@
 
 ## 4. Manifest descriptors + lint
 
-- [ ] 4.1 Extend `test-data/cassandra-parity-manifest.schema.json`: define the `artifact.<tier>.<kind>`
+- [x] 4.1 Extend `test-data/cassandra-parity-manifest.schema.json`: define the `artifact.<tier>.<kind>`
       descriptor family (per the design table) and migrate `evidence.failure_artifacts` per the owner's
       chosen migration strategy. Surface: manifest schema + `cassandra-parity lint`.
-- [ ] 4.2 `cassandra-parity lint`: descriptor `<tier>` must equal `ci.tier`; `<kind>` must be valid for
+- [x] 4.2 `cassandra-parity lint`: descriptor `<tier>` must equal `ci.tier`; `<kind>` must be valid for
       `evidence_type`. Surface: `lint.rs` + lint unit tests for the mismatch + valid cases.
-- [ ] 4.3 Convert the existing `failure_artifacts` free-text entries in
+- [x] 4.3 Convert the existing `failure_artifacts` free-text entries in
       `test-data/cassandra-parity-manifest.yml` to typed descriptors (scope per owner OPEN QUESTION 3).
       Surface: the manifest YAML; `cassandra-parity lint` green afterward.
 
 ## 5. Retention policy doc + enforcement
 
-- [ ] 5.1 Promote the tier-contract §"Artifact retention" bullets into a single enforced retention
+- [x] 5.1 Promote the tier-contract §"Artifact retention" bullets into a single enforced retention
       table in `docs/development/parity-ci-tiers.md` (durations per owner OPEN QUESTION 1). Surface: the
       doc + the tier-contract-check if it can cover the table.
-- [ ] 5.2 Add a retention check (in `cassandra-parity` or a workflow-lint step) that parses each parity
+- [x] 5.2 Add a retention check (in `cassandra-parity` or a workflow-lint step) that parses each parity
       workflow's `upload-artifact` `retention-days` against its tier minimum. Surface: the check +
       a unit test over a below-minimum and an at-minimum fixture workflow.
 
