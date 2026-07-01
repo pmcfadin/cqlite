@@ -67,9 +67,13 @@ jobs:
     name: Full agent gate
     runs-on: ubuntu-latest
     # A full gate run (napi + maturin builds, full workspace test set, smoke
-    # over the corpus) is comparable in weight to node-ci/python-ci (~25 min);
-    # give it headroom.
-    timeout-minutes: 45
+    # over the corpus) is comparable in weight to node-ci/python-ci. On a
+    # COLD cache (first run, or after GH's 7-day cache eviction / branch
+    # scoping) the workspace compiles from scratch before any tests run; an
+    # observed cold run reached ~11/17 components in 45m before timing out.
+    # Warm runs (Swatinem cache restored) are far faster, but a required check
+    # must not depend on a warm cache, so budget for the cold case.
+    timeout-minutes: 75
 
     steps:
       - name: Checkout
