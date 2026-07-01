@@ -72,12 +72,20 @@ onto its own branch). Rules, non-negotiable:
    PASS, returning the summary block; spawn `spec-auditor` for **C** PASS (it audits the impl against
    `openspec/changes/<slug>/specs/**`); run roborev (`--agent claude-code --model opus`) to clean. You
    coordinate and read summaries; you do not open the source yourself.
-7. **Before merging**: re-check for an open `HOLD: merge after #N` → block until #N is merged. Confirm
-   gate PASS + C PASS (design) + roborev clean + CI green. Rebase on `origin/main`; resolve any conflict
-   in YOUR worktree.
-8. **Merge + finalize**: `gh pr merge <pr> --squash --delete-branch`, then `flow-finalize <N>` (archive
-   OpenSpec if any, remove worktree, delete origin lock, close issue with a traceable comment).
-9. Report `#N: merged (<commit>)` and loop to step 2.
+7. **Terminal state — arm merge-on-green, then STOP.** Your terminal state is **PR-open + gate PASS +
+   C PASS (design) + roborev clean**. Re-check for an open `HOLD: merge after #N` → keep merge-on-green
+   gated behind #N (the manager sequences it). Rebase on `origin/main`; resolve any conflict in YOUR
+   worktree. Then **arm merge-on-green and END your turn — do NOT poll the PR's own external CI in a
+   yield/wake loop (repeated `ScheduleWakeup` cycles).** Landing is delegated:
+   - **Primary today — the manager-owned poller.** `main` has no required checks (`contexts=[]`), so
+     `gh pr merge --auto` would merge instantly against an empty check set (forbidden). Hand the PR off to
+     the manager-owned poller/merge-engine, which gates on an explicit lane set and lands it on green.
+   - **Once required checks are configured on `main`** — arm `gh pr merge --auto --squash --delete-branch`
+     (native, zero-token). Log which path you armed.
+8. **Finalize on merge**: once the mechanism lands the PR on green, `flow-finalize <N>` (archive OpenSpec
+   if any, remove worktree, delete origin lock, close issue with a traceable comment) — triggered by the
+   merge event, not a CI busy-wait.
+9. Report `#N: armed merge-on-green (<path>)` and loop to step 2.
 
 ## Discovered bugs & scope (never silently absorb scope creep)
 A bug you find that is **outside the current issue's scope** does not get fixed inline — that bloats the
@@ -111,7 +119,9 @@ diff and breaks 1:1:1:1. Instead:
   reconciles the gate's component set with the CI lane set. And never gate a
   non-deterministically-regenerated source on a whole-file byte identity — gate the
   semantic verdict (validation playbook, L1).
-- Merge autonomously on green; do NOT wait for a human merge. Escalate to the owner ONLY for: a genuine
-  design-call roborev finding, a scope/product question, or anything outside your issue.
+- **Arm merge-on-green and end your turn**; the mechanism lands the PR on green (no human merge click, and
+  **no worker CI busy-wait** — never `ScheduleWakeup`-poll your PR's own external CI after the work is
+  done). Escalate to the owner ONLY for: a genuine design-call roborev finding, a scope/product question,
+  or anything outside your issue.
 - Never close an epic or change scope/title. Surface those; don't act.
 - Doctrine: `docs/development/pm-operating-loop.md`.
