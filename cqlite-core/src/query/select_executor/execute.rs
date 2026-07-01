@@ -131,6 +131,32 @@ impl SelectExecutor {
                         intermediate_results = self
                             .execute_sort(intermediate_results, order_by, &mut context)
                             .await?;
+                    } else {
+                        // Issue #1307 (hardening): skipping this Sort is sound ONLY
+                        // because `reverse_served` is set exclusively by
+                        // `targeted_partition_rows`, which serves the reverse
+                        // promoted-index iterator precisely when `statement.order_by`
+                        // requests the reverse of the stored clustering order — and
+                        // the planner emits EXACTLY ONE `Sort` step, cloned from that
+                        // same `statement.order_by` (see `select_optimizer.rs`). So
+                        // the reverse scan's ordering matches this step's `order_by`,
+                        // and skipping it drops a redundant sort rather than a
+                        // different ordering. What would break the invariant: a
+                        // multi-table / join plan (or any plan) that reused the flag
+                        // across a Sort NOT derived from the reverse-served scan's
+                        // `statement.order_by` — such a plan must clear
+                        // `reverse_served` before this step. The debug_assert pins
+                        // the property (the skipped Sort's key equals the statement's
+                        // order_by); it is debug-only and never alters release
+                        // behavior.
+                        debug_assert!(
+                            plan.statement.order_by.as_ref() == Some(order_by),
+                            "reverse_served Sort-skip invariant violated: the skipped \
+                             Sort's order_by must be the statement's order_by that drove \
+                             the reverse-served scan (single-table plan); a plan whose \
+                             Sort is not the reverse scan's matching Sort must clear \
+                             reverse_served first",
+                        );
                     }
                 }
                 ExecutionStep::Aggregate { plan: agg_plan, .. } => {
