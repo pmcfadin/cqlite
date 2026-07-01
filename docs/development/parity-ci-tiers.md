@@ -209,9 +209,16 @@ incapable of catching it, and a single stale report blocks the **entire** PR que
   is stale, it regenerates the report and opens (or force-updates) a single
   regeneration PR from the fixed bot branch `auto/parity-report-regen` — it never
   pushes to protected `main` directly. The PR touches only the report; merging it
-  makes `--check` green on the new tip, terminating the cycle. The existing
-  `parity-manifest` `--check` step stays as the detector (and a plain failing gate
-  on PRs). If self-healing proves noisy, the documented fallback is to require
+  makes `--check` green on the new tip, terminating the cycle. **The heal job
+  authenticates with a dedicated PAT/GitHub-App token (repo secret
+  `PARITY_HEAL_TOKEN`, `contents` + `pull-requests` write)** — a PR opened by the
+  default `GITHUB_TOKEN` does not trigger `pull_request` CI (GitHub's recursion
+  guard), so it would land with no checks. When the secret is absent the job SKIPs
+  with a `::notice::` (and the report must be regenerated manually) rather than
+  opening a check-less PR; provision the secret to enable full self-healing. The
+  existing `parity-manifest` `--check` step stays as the detector (and a plain
+  failing gate on PRs). If self-healing proves noisy, the documented fallback is to
+  require
   branches be up to date before merge (a branch-protection/merge-queue toggle),
   which defeats the race by forcing a re-render against tip.
 - **Local/gate coverage of the single-PR case.** `scripts/agent-gate.sh` includes a

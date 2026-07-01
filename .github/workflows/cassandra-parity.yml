@@ -150,12 +150,25 @@ jobs:
       REGEN_BRANCH: auto/parity-report-regen
       REPORT_PATH: docs/reports/cassandra-test-parity.md
       MANIFEST_PATH: test-data/cassandra-parity-manifest.yml
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # A PR opened with the default GITHUB_TOKEN does NOT trigger `pull_request`
+      # CI (GitHub's built-in recursion guard), so the regen PR would land with no
+      # checks and could not merge via the green-check flow. Use a dedicated
+      # PAT/GitHub-App token (repo secret PARITY_HEAL_TOKEN, with `contents` +
+      # `pull-requests` write on this repo) so the regen PR fires CI normally.
+      # Same precedent as PROJECTS_TOKEN in project-board-sync.yml. When the secret
+      # is absent the heal step SKIPs with a ::notice:: rather than opening a
+      # check-less PR (issue #1338 roborev finding).
+      GH_TOKEN: ${{ secrets.PARITY_HEAL_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          # Persist the bot token so the `git push` below is authenticated as the
+          # PAT/App (which makes the resulting PR trigger CI). Falls back to the
+          # default token for read/clone when the secret is unset; the push itself
+          # is gated on the token being present in the heal step.
+          token: ${{ secrets.PARITY_HEAL_TOKEN || github.token }}
 
       # Same clippy-conflict avoidance as the parity-manifest job (issue #1209/#1217).
       - name: Remove preinstalled clippy (avoid clippy-preview install conflict)
@@ -200,6 +213,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # A PR opened by the default GITHUB_TOKEN gets no CI (GitHub recursion
+          # guard). Without the PAT/App token we cannot open a mergeable PR, so
+          # SKIP loudly instead of opening a check-less one (issue #1338).
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::notice::PARITY_HEAL_TOKEN not set — report drifted on main but the auto-regeneration PR was skipped. Add a PAT/App token (contents + pull-requests write) as repo secret PARITY_HEAL_TOKEN to enable self-healing; until then regenerate manually: cargo run -p cassandra-parity -- report --output $REPORT_PATH"
+            exit 0
+          fi
           # The regen step writes only the report. Refuse to proceed if anything
           # else changed (defensive; keeps the heal PR to a single file — D4).
           changed=$(git diff --name-only)

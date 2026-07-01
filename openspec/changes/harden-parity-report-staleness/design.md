@@ -74,9 +74,14 @@ merge produces a `main` where `--check` is green — terminating the cycle.
 
 ## Risks / Trade-offs
 
-- **Auto-PR token scope.** Opening a PR from CI needs a token with `pull-requests: write`. Mitigation: use
-  the workflow's `GITHUB_TOKEN` with `permissions: { contents: write, pull-requests: write }`; the branch
-  is a bot branch, the PR follows normal review/merge. No direct protected-branch push.
+- **Auto-PR token scope (RESOLVED — roborev #1338).** A PR opened with the default `GITHUB_TOKEN` does
+  NOT trigger `pull_request` CI (GitHub's recursion guard), so the regen PR would land with no checks and
+  be unmergeable via the green-check flow. Resolution (owner-approved): authenticate the heal job's
+  checkout/push/`gh pr create` with a dedicated PAT/GitHub-App token, repo secret `PARITY_HEAL_TOKEN`
+  (`contents` + `pull-requests` write), mirroring `PROJECTS_TOKEN` in `project-board-sync.yml`. When the
+  secret is absent the job SKIPs with a `::notice::` (report regenerated manually) rather than opening a
+  check-less PR — so the workflow is safe to merge before the secret is provisioned and activates fully
+  once it is.
 - **Brief red window.** Between a stale merge and the auto-PR landing, `main`'s `parity-manifest` is red,
   so the queue is briefly blocked — but recovery is automatic (minutes), not a manual fire drill. The D2
   local check shrinks how often this triggers at all.
