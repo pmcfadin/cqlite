@@ -45,6 +45,13 @@ on:
     - cron: '37 3 * * *'
   workflow_dispatch:
 
+# Least-privilege token (issue #1269). This lane checks out PR-controlled code
+# and runs PR-controlled scripts (fetch-datasets.sh, scripts/agent-gate.sh) — it
+# only needs to read the repo. Artifact upload via actions/upload-artifact does
+# NOT require write repo scope. Set at the top level so it applies to every job.
+permissions:
+  contents: read
+
 concurrency:
   group: gate-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -74,6 +81,14 @@ jobs:
           # ratchet to advisory-only (the gate could PASS on over-threshold
           # Rust file growth). Matches quality-gates.yml.
           fetch-depth: 0
+          # Do not persist the GitHub token into .git/config: this lane then
+          # runs PR-controlled scripts (fetch-datasets.sh, agent-gate.sh) and
+          # they should not have ambient access to a repo-scoped credential
+          # (issue #1269). fetch-depth: 0 already fetches full history here, so
+          # origin/main is present locally for the gate's file-size ratchet —
+          # the gate only READS origin/main and issues no authenticated
+          # `git fetch`, so dropping persisted credentials is safe.
+          persist-credentials: false
 
       # Rust test jobs can sit near the standard runner's disk ceiling (issue
       # #722). Dropping preinstalled toolchains we never use frees ~14 GB —
