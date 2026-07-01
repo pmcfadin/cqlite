@@ -72,6 +72,7 @@ jobs:
       WR_NAME: ${{ github.event.workflow_run.name }}
       WR_URL: ${{ github.event.workflow_run.html_url }}
       WR_ID: ${{ github.event.workflow_run.id }}
+      WR_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
       DISPATCH_RUN_ID: ${{ github.event.inputs.run_id }}
       TRIGGER: ${{ github.event_name }}
     steps:
@@ -97,9 +98,21 @@ jobs:
             exit 0
           fi
           case "${WR_EVENT}" in
-            schedule|push|workflow_dispatch)
+            schedule|workflow_dispatch)
               echo "origin event '${WR_EVENT}' is allowlisted — proceeding"
               echo "proceed=true" >> "$GITHUB_OUTPUT"
+              ;;
+            push)
+              # D1: a push-origin run files ONLY when it targets main. Feature-branch
+              # pushes (and any non-main push) are fail-closed no-ops. WR_HEAD_BRANCH is
+              # untrusted workflow_run payload -> compared via a quoted env var.
+              if [ "${WR_HEAD_BRANCH:-}" = "main" ]; then
+                echo "push origin on main — proceeding"
+                echo "proceed=true" >> "$GITHUB_OUTPUT"
+              else
+                echo "::notice::push origin on non-main branch '${WR_HEAD_BRANCH:-<none>}' — no issue filed."
+                echo "proceed=false" >> "$GITHUB_OUTPUT"
+              fi
               ;;
             *)
               echo "::notice::origin event '${WR_EVENT}' is not schedule/push/workflow_dispatch — no issue filed."
