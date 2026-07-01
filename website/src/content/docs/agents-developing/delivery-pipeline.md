@@ -155,9 +155,13 @@ dataset binaries). Two supported ways to still drive work from the phone:
   `test-data/scripts/cloud-setup.sh` first — it installs `openspec` + `gh` and fetches the dataset
   (`fetch-datasets.sh`) so `flow-implement` can run the gate in the cloud.
 
-The **two human seams are GitHub-mobile-native** regardless of how you drive: approve the spec in the
-session, and merge the PR from the GitHub mobile app / web UI (the merge automation then moves the board
-item to `Done`).
+**Spec approval is the only standing human seam, and it is GitHub-mobile-native** regardless of how you
+drive: approve the OpenSpec spec + design in the session (Seam 1). For worker-owned issues **merge is no
+longer a hand-merge step** — the PR auto-lands via [merge-on-green](#merge-on-green-no-ci-busy-wait)
+(the manager-owned poller today; `gh pr merge --auto` once required checks are configured on `main`), and
+the merge event moves the board item to `Done`. The owner intervenes on merge (from the mobile app / web
+UI) **only on escalation** — a genuine design-call roborev finding, a scope/product question, or work
+outside the issue.
 
 ## Self-improvement loop (telemetry + retro)
 
