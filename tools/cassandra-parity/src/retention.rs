@@ -175,20 +175,29 @@ struct JobYaml {
 #[derive(Debug, Default, Deserialize)]
 struct StepYaml {
     #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
     uses: Option<String>,
     #[serde(default)]
     with: BTreeMap<String, serde_yaml::Value>,
 }
 
-/// True when an `actions/upload-artifact` step uploads the SHARED parity-failure
-/// bundle (issue #1027 finding 2). A lane's binding retention minimum is satisfied
-/// ONLY by such an upload — an unrelated upload (e.g. `sstableloader-test-results`)
-/// does not count. The shared bundle is identified by its artifact `name`
-/// (`parity-failures-*`, the convention every emitting lane uses) or by a `path`
-/// that globs `parity-failures/` (where the emitter writes the bundle tree). The
-/// step-level `name:` (the human label) is a fallback signal only.
+/// True when an `actions/upload-artifact` step uploads the SHARED #1027 parity-failure
+/// forensic bundle. A lane's binding retention minimum is satisfied ONLY by such an
+/// upload — an unrelated upload (e.g. `sstableloader-test-results`) does not count,
+/// and NEITHER does issue #1028's automation-summary upload (a single FILE
+/// `parity-failures.json` under artifact `name: parity-failures`), which is NOT the
+/// scenario-id-keyed forensic bundle #1027's retention policy governs.
+///
+/// The #1027 bundle is identified STRICTLY by:
+///   * artifact `name` starting with `parity-failures-` (the trailing-dash
+///     `parity-failures-<workflow>` convention every #1027 emitting lane uses — this
+///     does NOT match #1028's bare `name: parity-failures`), OR
+///   * a `path` containing `parity-failures/` (the directory glob where the emitter
+///     writes the bundle tree — this does NOT match #1028's `path: parity-failures.json`,
+///     a file with no slash).
+///
+/// The step-level `name:` human label is deliberately NOT consulted: #1028's step is
+/// labelled "Upload parity-failures.json", so a label-substring match would falsely
+/// subject #1028's summary to #1027's retention policy.
 fn is_parity_failure_upload(step: &StepYaml) -> bool {
     let with_name = step
         .with
@@ -199,19 +208,10 @@ fn is_parity_failure_upload(step: &StepYaml) -> bool {
     if with_name.starts_with("parity-failures-") {
         return true;
     }
-    let path_matches = step
-        .with
+    step.with
         .get("path")
         .and_then(|v| v.as_str())
         .map(|p| p.contains("parity-failures/"))
-        .unwrap_or(false);
-    if path_matches {
-        return true;
-    }
-    // Fallback: the human-readable step label mentions the parity-failures bundle.
-    step.name
-        .as_deref()
-        .map(|n| n.contains("parity failure") || n.contains("parity-failures"))
         .unwrap_or(false)
 }
 

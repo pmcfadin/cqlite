@@ -341,6 +341,106 @@ fn unrelated_upload_allowlisted_lane_is_ok_with_note() {
     );
 }
 
+/// Issue #1028's automation-summary upload: a SINGLE FILE `parity-failures.json`
+/// under artifact `name: parity-failures` (NO trailing dash), step labelled
+/// "Upload parity-failures.json". This is NOT the #1027 scenario-id forensic bundle.
+fn issue_1028_summary_upload_workflow() -> String {
+    "name: x\n\
+     on: [push]\n\
+     jobs:\n\
+    \x20 j:\n\
+    \x20   runs-on: ubuntu-latest\n\
+    \x20   steps:\n\
+    \x20     - uses: actions/checkout@v4\n\
+    \x20     - name: run parity suite\n\
+    \x20       run: cargo test --test parity\n\
+    \x20     - name: Upload parity-failures.json\n\
+    \x20       uses: actions/upload-artifact@v4\n\
+    \x20       if: always()\n\
+    \x20       with:\n\
+    \x20         name: parity-failures\n\
+    \x20         path: parity-failures.json\n\
+    \x20         if-no-files-found: warn\n"
+        .to_string()
+}
+
+/// Bug fix (issue #1027): the retention matcher must scope ONLY to the #1027 shared
+/// forensic bundle and NOT to issue #1028's `parity-failures.json` summary upload.
+/// A lane whose ONLY upload is the #1028 summary (bare `name: parity-failures`, file
+/// `path: parity-failures.json`, step label "Upload parity-failures.json") must be
+/// treated as having NO #1027 emitter — the label/name must not false-match.
+#[test]
+fn issue_1028_summary_upload_is_not_a_1027_bundle() {
+    let wf = issue_1028_summary_upload_workflow();
+    let days = upload_retention_days(&wf);
+    assert!(
+        days.is_empty(),
+        "issue #1028's parity-failures.json summary must not count as a #1027 \
+         forensic-bundle upload, got: {days:#?}"
+    );
+}
+
+/// The #1028 summary upload, on an ALLOWLISTED lane (the three real deferred lanes:
+/// compression-corruption / cql-type / tombstone-ttl), falls back to the no-emitter
+/// allowlist disposition (OK-with-a-note), NOT a retention finding.
+#[test]
+fn issue_1028_summary_on_allowlisted_lane_is_ok_with_note() {
+    let wf = issue_1028_summary_upload_workflow();
+    let detailed = check_workflow_detailed(
+        ".github/workflows/cql-type-parity.yml",
+        &wf,
+        &["nightly_docker".to_string()],
+        &minimums(),
+    );
+    assert!(
+        detailed.findings.is_empty(),
+        "an allowlisted lane whose only upload is the #1028 summary must not be a \
+         finding, got: {:#?}",
+        detailed.findings
+    );
+    assert!(
+        detailed
+            .note
+            .as_deref()
+            .is_some_and(|n| n.contains("#1353")),
+        "expected an OK-with-a-note referencing #1353, got: {:?}",
+        detailed.note
+    );
+}
+
+/// The #1028 summary upload on a NON-allowlisted parity lane is still a finding (it
+/// does not vacuously satisfy the lane) — proving the scoping change did not turn the
+/// summary into a silent pass.
+#[test]
+fn issue_1028_summary_on_non_allowlisted_lane_is_a_finding() {
+    let wf = issue_1028_summary_upload_workflow();
+    let findings = check_workflow(
+        ".github/workflows/some-new-parity-lane.yml",
+        &wf,
+        &["nightly_docker".to_string()],
+        &minimums(),
+    );
+    assert_eq!(
+        findings.len(),
+        1,
+        "a #1028-summary-only non-allowlisted parity lane must be a finding, got: {findings:#?}"
+    );
+    assert!(findings[0].message.contains("retains no failure artifacts"));
+}
+
+/// The #1027 forensic bundle IS recognised: `name: parity-failures-foo` (trailing
+/// dash) with `path: parity-failures/**` (directory glob) counts as a shared upload.
+#[test]
+fn issue_1027_forensic_bundle_is_recognised() {
+    let wf = upload_workflow("90");
+    let days = upload_retention_days(&wf);
+    assert_eq!(
+        days,
+        vec![Some(90)],
+        "a #1027 bundle (name parity-failures-*, path parity-failures/**) must count"
+    );
+}
+
 /// A workflow that gates parity scenarios (has a binding tier minimum) but has NO
 /// `actions/upload-artifact` step at all.
 fn no_upload_workflow() -> String {
