@@ -371,6 +371,7 @@ pub fn metrics_capture() -> MetricsCapture {
             let reader = PeriodicReader::builder(exporter.clone()).build();
             let provider = SdkMeterProvider::builder().with_reader(reader).build();
             opentelemetry::global::set_meter_provider(provider.clone());
+            super::otel::set_metrics_active_for_testing();
             MetricsCapture { exporter, provider }
         })
         .clone()

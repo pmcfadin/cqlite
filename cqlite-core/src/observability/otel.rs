@@ -203,6 +203,11 @@ pub(crate) fn metrics_active() -> bool {
     METRICS_ACTIVE.load(Ordering::Relaxed)
 }
 
+#[cfg(feature = "observability-testing")]
+pub(crate) fn set_metrics_active_for_testing() {
+    METRICS_ACTIVE.store(true, Ordering::Relaxed);
+}
+
 /// Return the `tracing` layer that bridges spans/events into OpenTelemetry, or
 /// `None` if observability has not been initialised.
 ///
