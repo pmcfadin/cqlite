@@ -12,10 +12,13 @@
 //! The check is pure text-in / findings-out (doc text, workflow YAML, manifest
 //! tiers) so it is trivially unit-testable, mirroring [`crate::workflow_check`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use serde::Deserialize;
 use thiserror::Error;
+
+use crate::model::Manifest;
 
 /// The fence tag marking the machine-parseable retention-minimums block in
 /// `parity-ci-tiers.md`.
@@ -203,4 +206,79 @@ pub fn check_workflow(
         }
     }
     out
+}
+
+/// Outcome of a whole-repo retention check: how many fixture-retaining workflows
+/// were checked and every below-minimum finding.
+#[derive(Debug, Default)]
+pub struct RepoCheck {
+    pub checked: usize,
+    pub findings: Vec<RetentionFinding>,
+}
+
+impl RepoCheck {
+    /// True when no upload step is below its tier minimum.
+    pub fn ok(&self) -> bool {
+        self.findings.is_empty()
+    }
+
+    /// Human + machine readable summary (findings, then a final status line).
+    pub fn render(&self) -> String {
+        let mut lines: Vec<String> = self
+            .findings
+            .iter()
+            .map(|f| format!("RETENTION {}", f.message))
+            .collect();
+        if self.ok() {
+            lines.push(format!(
+                "retention-check: OK — {} fixture-retaining parity workflow(s) meet their tier \
+                 retention minimums",
+                self.checked
+            ));
+        } else {
+            lines.push(format!(
+                "retention-check: FAILED — {} workflow upload step(s) below the tier minimum",
+                self.findings.len()
+            ));
+        }
+        lines.join("\n")
+    }
+}
+
+/// Run the retention check across every workflow named by a manifest scenario.
+/// Groups scenarios by `ci.workflow` → the set of `ci.tier` they gate, reads each
+/// referenced workflow file relative to `repo_root`, and checks its upload steps
+/// against the strictest minimum for the tiers it gates. A lane that gates only
+/// no-minimum tiers, or whose workflow file is missing (already reported by
+/// `lint`'s path-existence check), is skipped.
+pub fn run_repo_check(
+    manifest: &Manifest,
+    repo_root: &Path,
+    minimums: &BTreeMap<String, u32>,
+) -> RepoCheck {
+    let mut lane_tiers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for s in &manifest.scenarios {
+        if let Some(wf) = &s.ci.workflow {
+            lane_tiers
+                .entry(wf.clone())
+                .or_default()
+                .insert(s.ci.tier.clone());
+        }
+    }
+
+    let mut result = RepoCheck::default();
+    for (wf, tiers) in &lane_tiers {
+        let tiers_vec: Vec<String> = tiers.iter().cloned().collect();
+        if binding_minimum(&tiers_vec, minimums).is_none() {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(repo_root.join(wf)) else {
+            continue;
+        };
+        result.checked += 1;
+        result
+            .findings
+            .extend(check_workflow(wf, &text, &tiers_vec, minimums));
+    }
+    result
 }

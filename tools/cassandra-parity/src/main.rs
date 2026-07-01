@@ -4,6 +4,14 @@
 //! No Docker, live Cassandra, or downloaded dataset binaries required: this tool
 //! only reads the manifest, the repository tree, and the assessment report.
 //!
+//! NOTE (campsite rule / epics #1116, #1135): this file is over the source
+//! threshold, dominated by the corpus-audit CLI I/O helpers added under #1026
+//! (`walk_relative`, `read_sha256_file`, `read_corruption_fixtures` + their inline
+//! tests). Issue #1027 (Wave 1) only adds the thin `retention-check` subcommand
+//! (~21 lines); splitting the pre-existing corpus-audit I/O into its own module is
+//! out of this issue's scope, so the growth is acknowledged via
+//! `CQLITE_ALLOW_FILE_GROWTH=1`. A dedicated CLI-I/O split belongs to #1116.
+//!
 //! Usage:
 //!   cassandra-parity lint     [--manifest PATH]
 //!   cassandra-parity coverage [--manifest PATH] [--strict]
@@ -257,49 +265,12 @@ fn cmd_retention_check(args: &Args) -> Result<ExitCode> {
     let minimums =
         retention::parse_documented_minimums(&doc).context("parsing retention minimums")?;
 
-    // Group each named workflow to the set of ci.tier values it gates.
-    let mut lane_tiers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for s in &m.scenarios {
-        if let Some(wf) = &s.ci.workflow {
-            lane_tiers
-                .entry(wf.clone())
-                .or_default()
-                .insert(s.ci.tier.clone());
-        }
-    }
-
-    let mut findings = Vec::new();
-    let mut checked = 0usize;
-    for (wf, tiers) in &lane_tiers {
-        let tiers_vec: Vec<String> = tiers.iter().cloned().collect();
-        // A lane that gates only no-minimum tiers needs no retention check.
-        if retention::binding_minimum(&tiers_vec, &minimums).is_none() {
-            continue;
-        }
-        let path = root.join(wf);
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            // A missing/unreadable named workflow is already reported by `lint`'s
-            // path-existence check; do not double-report here.
-            continue;
-        };
-        checked += 1;
-        findings.extend(retention::check_workflow(wf, &text, &tiers_vec, &minimums));
-    }
-
-    if findings.is_empty() {
-        println!(
-            "retention-check: OK — {checked} fixture-retaining parity workflow(s) meet their \
-             tier retention minimums"
-        );
+    let result = retention::run_repo_check(&m, &root, &minimums);
+    if result.ok() {
+        println!("{}", result.render());
         Ok(ExitCode::SUCCESS)
     } else {
-        for f in &findings {
-            eprintln!("RETENTION {}", f.message);
-        }
-        eprintln!(
-            "retention-check: FAILED — {} workflow upload step(s) below the tier minimum",
-            findings.len()
-        );
+        eprintln!("{}", result.render());
         Ok(ExitCode::FAILURE)
     }
 }
