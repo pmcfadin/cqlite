@@ -94,10 +94,82 @@ jobs:
         run: |
           set -euo pipefail
           # D1: allowlist the ORIGIN event. Never file for a pull_request-origin run.
-          # A workflow_dispatch of THIS automation (manual replay) is always allowed.
+          #
+          # A manual workflow_dispatch (replay) is NOT trusted just because it targets
+          # THIS automation: the caller supplies an arbitrary run_id. Before any artifact
+          # download or issue filing we must independently validate the *target* run the
+          # SAME way the automatic workflow_run path is validated — otherwise a replay
+          # pointed at an unrelated / PR-origin run that merely exposes a
+          # `parity-failures`-named artifact could file parity-failure issues.
           if [ "${TRIGGER}" = "workflow_dispatch" ]; then
-            echo "manual replay (workflow_dispatch) — proceeding"
-            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            # Fail-closed: a manual replay MUST supply a numeric run_id.
+            if [ -z "${DISPATCH_RUN_ID:-}" ]; then
+              echo "::warning::workflow_dispatch replay requires a 'run_id' input — none given; no issue filed."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if ! printf '%s' "${DISPATCH_RUN_ID}" | grep -Eq '^[0-9]+$'; then
+              echo "::warning::workflow_dispatch run_id '${DISPATCH_RUN_ID}' is not a numeric run id — no issue filed."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            # Fetch the TARGET run's authoritative metadata. `gh run view` reads the run
+            # GitHub recorded; DISPATCH_RUN_ID is passed via a quoted env var, never inline.
+            # Fail-open on a fetch error (network/permissions): non-gating no-op.
+            META="$(gh run view "${DISPATCH_RUN_ID}" \
+              --json workflowName,headBranch,event,conclusion,databaseId,url 2>/dev/null)" || META=""
+            if [ -z "${META}" ]; then
+              echo "::warning::could not fetch metadata for run ${DISPATCH_RUN_ID} (gh run view failed) — no issue filed."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            R_NAME="$(printf '%s' "${META}" | jq -r '.workflowName // ""')"
+            R_BRANCH="$(printf '%s' "${META}" | jq -r '.headBranch // ""')"
+            R_EVENT="$(printf '%s' "${META}" | jq -r '.event // ""')"
+            R_CONCLUSION="$(printf '%s' "${META}" | jq -r '.conclusion // ""')"
+            R_URL="$(printf '%s' "${META}" | jq -r '.url // ""')"
+            # (a) tracked-workflow allowlist — the target run must belong to one of the 4
+            # tracked parity lanes (matched by workflow NAME, the same names the auto
+            # workflow_run trigger allowlists above).
+            case "${R_NAME}" in
+              "CI: Compression / Corruption Parity (Nightly Docker, Epic #970)"|\
+              "CI: CQL Type & Schema-Evolution Parity (Nightly Docker, Epic #971)"|\
+              "CI: Tombstone / TTL Parity (Nightly Docker, Epic #972)"|\
+              "Exhaustive Regeneration (parity corpus)")
+                : ;;
+              *)
+                echo "::warning::replay target run ${DISPATCH_RUN_ID} workflow '${R_NAME:-<none>}' is not a tracked parity lane — no issue filed."
+                echo "proceed=false" >> "$GITHUB_OUTPUT"
+                exit 0 ;;
+            esac
+            # (b) event != pull_request.
+            if [ "${R_EVENT}" = "pull_request" ]; then
+              echo "::warning::replay target run ${DISPATCH_RUN_ID} is a pull_request-origin run — no issue filed."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            # (c) if event == push, headBranch must be main.
+            if [ "${R_EVENT}" = "push" ] && [ "${R_BRANCH}" != "main" ]; then
+              echo "::warning::replay target run ${DISPATCH_RUN_ID} is a push on non-main branch '${R_BRANCH:-<none>}' — no issue filed."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            # (d) conclusion == failure (the file path). A non-failure replay is a no-op
+            # (the auto success/resolve path is workflow_run-only, never a manual replay).
+            if [ "${R_CONCLUSION}" != "failure" ]; then
+              echo "::notice::replay target run ${DISPATCH_RUN_ID} concluded '${R_CONCLUSION:-<none>}' (not 'failure') — no issue filed."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "manual replay validated (workflow '${R_NAME}', event '${R_EVENT}', conclusion '${R_CONCLUSION}') — proceeding"
+            # Publish the validated target-run identity so downstream steps use the run's
+            # REAL metadata (never the empty workflow_run payload) — all via step outputs.
+            {
+              echo "proceed=true"
+              echo "validated_name=${R_NAME}"
+              echo "validated_conclusion=${R_CONCLUSION}"
+              echo "validated_run_url=${R_URL}"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
           case "${WR_EVENT}" in
@@ -129,13 +201,21 @@ jobs:
         env:
           REPO: ${{ github.repository }}
           SERVER_URL: ${{ github.server_url }}
+          # Validated target-run identity (workflow_dispatch replay only): the real run
+          # URL + workflow name fetched by the `validate` step from `gh run view`. Empty
+          # on the auto workflow_run path. Passed via quoted env vars, never inlined.
+          VALIDATED_RUN_URL: ${{ steps.validate.outputs.validated_run_url }}
+          VALIDATED_NAME: ${{ steps.validate.outputs.validated_name }}
         run: |
           set -euo pipefail
           # Fix C: on a workflow_dispatch replay the workflow_run payload is empty, so
-          # WR_URL is blank. Reconstruct the run link from the manual DISPATCH_RUN_ID so a
-          # replay-created/updated issue still records a real "Latest failure" link. All
-          # inputs are passed via quoted env vars — never inlined as workflow expressions.
+          # WR_URL is blank. Prefer the REAL run url the `validate` step fetched from
+          # `gh run view` for the validated target run; else reconstruct from the numeric
+          # DISPATCH_RUN_ID. All inputs are passed via quoted env vars — never inlined.
           RUN_URL="${WR_URL:-}"
+          if [ -z "${RUN_URL}" ]; then
+            RUN_URL="${VALIDATED_RUN_URL:-}"
+          fi
           if [ -z "${RUN_URL}" ] && [ -n "${DISPATCH_RUN_ID:-}" ]; then
             # DISPATCH_RUN_ID is untrusted workflow_dispatch input; require it be numeric
             # (fail-closed) before assembling a URL from it.
@@ -150,13 +230,15 @@ jobs:
           # Fix A: map the completed run's identity to its workflow FILENAME so the
           # green-lane resolve is scoped to THAT lane only (never all open issues). Prefer
           # the payload `path` (`.github/workflows/<file>`); fall back to a name→filename
-          # lookup for the 4 tracked lanes. WR_PATH / WR_NAME are untrusted -> quoted env.
+          # lookup for the 4 tracked lanes. On a replay, WR_NAME/WR_PATH are empty — use
+          # the validated target-run workflow name. WR_PATH/WR_NAME/VALIDATED_NAME are
+          # untrusted -> quoted env.
           LANE_FILE=""
           if [ -n "${WR_PATH:-}" ]; then
             LANE_FILE="$(basename "${WR_PATH}")"
           fi
           if [ -z "${LANE_FILE}" ]; then
-            case "${WR_NAME:-}" in
+            case "${WR_NAME:-${VALIDATED_NAME:-}}" in
               "CI: Compression / Corruption Parity (Nightly Docker, Epic #970)")
                 LANE_FILE="compression-corruption-parity.yml" ;;
               "CI: CQL Type & Schema-Evolution Parity (Nightly Docker, Epic #971)")
