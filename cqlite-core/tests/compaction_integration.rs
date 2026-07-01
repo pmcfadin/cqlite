@@ -493,17 +493,15 @@ fn compaction_3_sstables_read_back_correctness() {
     let key_11: Vec<u8> = 11_i32.to_be_bytes().into();
     if let Some(row_value) = result_map.get(&key_11) {
         match row_value {
-            Value::Map(pairs) => {
-                for (col_key, col_val) in pairs {
-                    if let Value::Text(col_name) = col_key {
-                        if col_name == "score" {
-                            assert!(
-                                matches!(col_val, Value::Null | Value::Tombstone(_)),
-                                "PK=11 score column was cell-deleted by C (ts=300) \
-                                 but has live value: {:?} (Issue #505)",
-                                col_val
-                            );
-                        }
+            Value::Row(cells) => {
+                for (name, col_val) in cells {
+                    if name.as_ref() == "score" {
+                        assert!(
+                            matches!(col_val, Value::Null | Value::Tombstone(_)),
+                            "PK=11 score column was cell-deleted by C (ts=300) \
+                             but has live value: {:?} (Issue #505)",
+                            col_val
+                        );
                     }
                 }
             }
@@ -611,16 +609,14 @@ fn compaction_3_sstables_tombstone_shadowing() {
     let key_11: Vec<u8> = 11_i32.to_be_bytes().into();
     if let Some(row_value) = result_map.get(&key_11) {
         match row_value {
-            Value::Map(pairs) => {
-                for (col_key, col_val) in pairs {
-                    if let Value::Text(col_name) = col_key {
-                        if col_name == "score" {
-                            assert!(
-                                matches!(col_val, Value::Null | Value::Tombstone(_)),
-                                "PK=11 score column was cell-deleted by C but has value: {:?}",
-                                col_val
-                            );
-                        }
+            Value::Row(cells) => {
+                for (name, col_val) in cells {
+                    if name.as_ref() == "score" {
+                        assert!(
+                            matches!(col_val, Value::Null | Value::Tombstone(_)),
+                            "PK=11 score column was cell-deleted by C but has value: {:?}",
+                            col_val
+                        );
                     }
                 }
             }
@@ -788,9 +784,9 @@ fn row_tombstone_shadows_live_row_after_compaction() {
         )
     });
     match pk3 {
-        Value::Map(pairs) => {
-            let name = pairs.iter().find_map(|(k, v)| match (k, v) {
-                (Value::Text(col), Value::Text(val)) if col == "name" => Some(val.clone()),
+        Value::Row(cells) => {
+            let name = cells.iter().find_map(|(k, v)| match v {
+                Value::Text(val) if k.as_ref() == "name" => Some(val.clone()),
                 _ => None,
             });
             assert_eq!(
@@ -801,7 +797,7 @@ fn row_tombstone_shadows_live_row_after_compaction() {
             );
         }
         other => panic!(
-            "PK=3 must be a live row (Value::Map) carrying the ts=300 write, got {:?} (Issue #505)",
+            "PK=3 must be a live row (Value::Row) carrying the ts=300 write, got {:?} (Issue #505)",
             other
         ),
     }
@@ -935,9 +931,9 @@ fn row_deletion_coexists_with_newer_cell_after_compaction() {
     });
 
     match pk7 {
-        Value::Map(pairs) => {
-            let name = pairs.iter().find_map(|(k, v)| match (k, v) {
-                (Value::Text(col), Value::Text(val)) if col == "name" => Some(val.clone()),
+        Value::Row(cells) => {
+            let name = cells.iter().find_map(|(k, v)| match v {
+                Value::Text(val) if k.as_ref() == "name" => Some(val.clone()),
                 _ => None,
             });
             assert_eq!(
@@ -947,8 +943,8 @@ fn row_deletion_coexists_with_newer_cell_after_compaction() {
             );
             // The older score (ts=50 <= deletion ts=100) must be shadowed by the
             // preserved row deletion and must NOT resurrect.
-            let score = pairs.iter().find_map(|(k, v)| match (k, v) {
-                (Value::Text(col), Value::Integer(val)) if col == "score" => Some(*val),
+            let score = cells.iter().find_map(|(k, v)| match v {
+                Value::Integer(val) if k.as_ref() == "score" => Some(*val),
                 _ => None,
             });
             assert!(
@@ -959,7 +955,7 @@ fn row_deletion_coexists_with_newer_cell_after_compaction() {
             );
         }
         other => panic!(
-            "PK=7 must read back as a live row (Value::Map) carrying name='new', got {:?} — \
+            "PK=7 must read back as a live row (Value::Row) carrying name='new', got {:?} — \
              Issue #932 (coexistence row collapsed to a pure tombstone)",
             other
         ),
@@ -1216,10 +1212,12 @@ fn disjoint_columns_survive_compaction() {
     // Helper: extract a named text/int column from a row's Value::Map.
     fn find_col<'a>(row: &'a Value, col: &str) -> Option<&'a Value> {
         match row {
-            Value::Map(pairs) => pairs.iter().find_map(|(k, v)| match k {
-                Value::Text(name) if name == col => Some(v),
-                _ => None,
-            }),
+            // Issue #1334: rows decode to `Value::Row` keyed by `Arc<str>`.
+            Value::Row(cells) => {
+                cells
+                    .iter()
+                    .find_map(|(k, v)| if k.as_ref() == col { Some(v) } else { None })
+            }
             _ => None,
         }
     }

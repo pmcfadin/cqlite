@@ -1144,8 +1144,10 @@ pub(crate) fn convert_column_to_array(
             | CqlType::Map(_, _)
             | CqlType::Tuple(_)
             | CqlType::Udt(_, _) => {
-                let column_values: Vec<Option<&Value>> =
-                    rows.iter().map(|row| row.values.get(col.name.as_str())).collect();
+                let column_values: Vec<Option<&Value>> = rows
+                    .iter()
+                    .map(|row| row.values.get(col.name.as_str()))
+                    .collect();
                 return build_typed_value_array(cql_type, &column_values);
             }
             // All other complex/collection types fall through to the flat dispatch.

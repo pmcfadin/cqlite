@@ -490,11 +490,13 @@ impl SelectExecutor {
     /// Evaluate SELECT expression against a row
     fn evaluate_select_expression(&self, expr: &SelectExpression, row: &QueryRow) -> Result<Value> {
         match expr {
-            SelectExpression::Column(col_ref) => {
-                row.values.get(col_ref.column.as_str()).cloned().ok_or_else(|| {
+            SelectExpression::Column(col_ref) => row
+                .values
+                .get(col_ref.column.as_str())
+                .cloned()
+                .ok_or_else(|| {
                     Error::query_execution(format!("Column not found: {}", col_ref.column))
-                })
-            }
+                }),
             SelectExpression::Literal(value) => Ok(value.clone()),
             // Issue #961: a `?` placeholder must be bound to a concrete value
             // before execution. Reaching here means binding was skipped, which is

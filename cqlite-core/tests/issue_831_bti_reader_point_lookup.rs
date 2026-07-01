@@ -128,12 +128,11 @@ async fn open_reader(data_db: &Path) -> SSTableReader {
 
 /// Extract a named cell value from the `Value::Map` a BTI partition row decodes to.
 fn cell<'a>(value: &'a Value, name: &str) -> Option<&'a Value> {
-    if let Value::Map(entries) = value {
+    // Issue #1334: rows decode to `Value::Row` keyed by `Arc<str>`.
+    if let Value::Row(entries) = value {
         for (k, v) in entries {
-            if let Value::Text(s) = k {
-                if s == name {
-                    return Some(v);
-                }
+            if k.as_ref() == name {
+                return Some(v);
             }
         }
     }

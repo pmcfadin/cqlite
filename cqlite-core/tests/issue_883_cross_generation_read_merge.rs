@@ -129,10 +129,10 @@ fn count_data_files(dir: &std::path::Path) -> usize {
 /// Extract a column value from a scan row (`Value::Map` of `(Text(col), value)`).
 fn col<'a>(row: &'a Value, name: &str) -> Option<&'a Value> {
     match row {
-        Value::Map(pairs) => pairs.iter().find_map(|(k, v)| match k {
-            Value::Text(c) if c == name => Some(v),
-            _ => None,
-        }),
+        // Issue #1334: rows decode to `Value::Row` keyed by `Arc<str>`.
+        Value::Row(cells) => cells
+            .iter()
+            .find_map(|(k, v)| if k.as_ref() == name { Some(v) } else { None }),
         _ => None,
     }
 }

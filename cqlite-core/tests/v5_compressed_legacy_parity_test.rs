@@ -793,12 +793,12 @@ async fn test_v5_compressed_legacy_jsonl_parity() {
             }
         };
 
-        // Extract cells from parser output (Value::Map)
+        // Extract cells from parser output (issue #1334: `Value::Row` keyed by `Arc<str>`)
         let parser_cells = match value {
-            cqlite_core::Value::Map(entries) => entries,
+            cqlite_core::Value::Row(entries) => entries,
             _ => {
                 println!(
-                    "  ⚠️  Entry {}: UUID={} is not a Map (got {:?}), skipping",
+                    "  ⚠️  Entry {}: UUID={} is not a Row (got {:?}), skipping",
                     i, uuid_str, value
                 );
                 continue;
@@ -808,9 +808,7 @@ async fn test_v5_compressed_legacy_jsonl_parity() {
         // Build lookup map for parser cells: column_name -> value
         let mut parser_cell_map: HashMap<String, &cqlite_core::Value> = HashMap::new();
         for (key, val) in parser_cells {
-            if let cqlite_core::Value::Text(col_name) = key {
-                parser_cell_map.insert(col_name.clone(), val);
-            }
+            parser_cell_map.insert(key.to_string(), val);
         }
 
         println!(

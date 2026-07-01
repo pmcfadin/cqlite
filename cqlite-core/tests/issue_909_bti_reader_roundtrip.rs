@@ -212,10 +212,11 @@ async fn open_reader(data_path: &Path, schema: &TableSchema) -> SSTableReader {
 
 /// Extract the `payload` column text from a row `Value::Map`.
 fn payload_of(value: &Value) -> Option<String> {
-    if let Value::Map(entries) = value {
+    // Issue #1334: rows decode to `Value::Row` keyed by `Arc<str>`.
+    if let Value::Row(entries) = value {
         for (k, v) in entries {
-            if let (Value::Text(name), Value::Text(text)) = (k, v) {
-                if name == "payload" {
+            if k.as_ref() == "payload" {
+                if let Value::Text(text) = v {
                     return Some(text.clone());
                 }
             }
@@ -233,13 +234,12 @@ fn payload_of(value: &Value) -> Option<String> {
 /// either name (the column-naming difference is orthogonal to #909's RowsOffset
 /// resolution being exercised here).
 fn ck_of(value: &Value) -> Option<i32> {
-    if let Value::Map(entries) = value {
+    // Issue #1334: rows decode to `Value::Row` keyed by `Arc<str>`.
+    if let Value::Row(entries) = value {
         for (k, v) in entries {
-            if let Value::Text(name) = k {
-                if name == "ck" || name == "clustering_key" {
-                    if let Value::Integer(i) = v {
-                        return Some(*i);
-                    }
+            if k.as_ref() == "ck" || k.as_ref() == "clustering_key" {
+                if let Value::Integer(i) = v {
+                    return Some(*i);
                 }
             }
         }

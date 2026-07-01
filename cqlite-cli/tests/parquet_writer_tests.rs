@@ -4356,7 +4356,8 @@ fn test_udt_legacy_path_no_cql_type() {
     };
 
     let mut values = HashMap::new();
-    values.insert("u".into(),
+    values.insert(
+        "u".into(),
         Value::Udt(UdtValue {
             keyspace: "ks".to_string(),
             type_name: "point".to_string(),
@@ -4544,14 +4545,16 @@ fn make_parity_fixture() -> QueryResult {
     let mut values = HashMap::new();
     values.insert("d".into(), Value::Date(19358)); // 2023-01-01
     values.insert("t".into(), Value::Time(36_000_000_000_000_i64)); // 10:00:00
-    values.insert("dec".into(),
+    values.insert(
+        "dec".into(),
         Value::Decimal {
             scale: 2,
             unscaled: vec![0x04, 0xD2], // 1234 → 12.34
         },
     );
     values.insert("uid".into(), Value::Uuid(uuid_bytes));
-    values.insert("dur".into(),
+    values.insert(
+        "dur".into(),
         Value::Duration {
             months: 1,
             days: 2,
@@ -4562,29 +4565,34 @@ fn make_parity_fixture() -> QueryResult {
     values.insert("ip".into(), Value::Inet(vec![127, 0, 0, 1]));
     values.insert("cnt".into(), Value::Counter(42));
     values.insert("txt".into(), Value::Text("hello".to_string()));
-    values.insert("li".into(),
+    values.insert(
+        "li".into(),
         Value::List(vec![
             Value::Integer(1),
             Value::Integer(2),
             Value::Integer(3),
         ]),
     );
-    values.insert("se".into(),
+    values.insert(
+        "se".into(),
         Value::Set(vec![
             Value::Text("a".to_string()),
             Value::Text("b".to_string()),
         ]),
     );
-    values.insert("mp".into(),
+    values.insert(
+        "mp".into(),
         Value::Map(vec![
             (Value::Text("k1".to_string()), Value::Integer(10)),
             (Value::Text("k2".to_string()), Value::Integer(20)),
         ]),
     );
-    values.insert("tup".into(),
+    values.insert(
+        "tup".into(),
         Value::Tuple(vec![Value::Integer(99), Value::Text("t".to_string())]),
     );
-    values.insert("udt_col".into(),
+    values.insert(
+        "udt_col".into(),
         Value::Udt(UdtValue {
             keyspace: "ks".to_string(),
             type_name: "point".to_string(),

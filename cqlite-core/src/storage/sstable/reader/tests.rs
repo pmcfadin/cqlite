@@ -457,10 +457,8 @@ mod tests {
                 );
 
                 // Extract field names from map entries (first element of each tuple)
-                let field_names: Vec<String> = map_entries
-                    .iter()
-                    .map(|(key, _)| key.to_string())
-                    .collect();
+                let field_names: Vec<String> =
+                    map_entries.iter().map(|(key, _)| key.to_string()).collect();
 
                 eprintln!("Extracted field names: {:?}", field_names);
 
@@ -493,9 +491,8 @@ mod tests {
                 }
 
                 // Check for age column (should be Int, not Blob)
-                if let Some((_, age_value)) = map_entries
-                    .iter()
-                    .find(|(key, _)| key.as_ref() == "age")
+                if let Some((_, age_value)) =
+                    map_entries.iter().find(|(key, _)| key.as_ref() == "age")
                 {
                     eprintln!("age value: {:?}", age_value);
                     match age_value {
@@ -514,9 +511,8 @@ mod tests {
                 }
 
                 // Check for active column (should be Boolean, not Blob)
-                if let Some((_, active_value)) = map_entries
-                    .iter()
-                    .find(|(key, _)| key.as_ref() == "active")
+                if let Some((_, active_value)) =
+                    map_entries.iter().find(|(key, _)| key.as_ref() == "active")
                 {
                     eprintln!("active value: {:?}", active_value);
                     match active_value {
@@ -536,10 +532,7 @@ mod tests {
                 panic!("❌ V5CompressedLegacy parser returned Null value (should return row with cells!)");
             }
             other => {
-                panic!(
-                    "❌ Expected Value::Row (row carrier), got {:?}",
-                    other
-                );
+                panic!("❌ Expected Value::Row (row carrier), got {:?}", other);
             }
         }
 

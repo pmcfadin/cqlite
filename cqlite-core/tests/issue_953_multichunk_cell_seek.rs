@@ -233,7 +233,7 @@ fn pk_value(row: &QueryRow) -> Option<i32> {
 fn row_fingerprint(row: &QueryRow) -> BTreeMap<String, String> {
     row.values
         .iter()
-        .map(|(k, v)| (k.clone(), format!("{v:?}")))
+        .map(|(k, v)| (k.to_string(), format!("{v:?}")))
         .collect()
 }
 

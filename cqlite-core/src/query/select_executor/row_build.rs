@@ -173,10 +173,7 @@ mod tests {
     #[test]
     fn build_row_from_scan_materialises_single_text_pk() {
         let key = RowKey::new(b"k0000000000000000".to_vec());
-        let value = Value::Row(vec![(
-            Arc::from("name"),
-            Value::Text("name-0".to_string()),
-        )]);
+        let value = Value::Row(vec![(Arc::from("name"), Value::Text("name-0".to_string()))]);
         let schema = single_pk_schema("id", "text");
 
         let row = build_row_from_scan(key, value, &[], Some(&schema))

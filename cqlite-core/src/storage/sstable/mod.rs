@@ -1483,14 +1483,16 @@ impl SSTableManager {
                     match entry.row_data {
                         RowData::Live { cells } => {
                             // Drop cell tombstones: a deleted column must be
-                            // absent from the merged row, not surfaced.
-                            let map: Vec<(Value, Value)> = cells
+                            // absent from the merged row, not surfaced. Issue
+                            // #1334: emit the interned-name row carrier
+                            // (`Value::Row`) the read path consumes.
+                            let row_cells: Vec<(Arc<str>, Value)> = cells
                                 .into_iter()
                                 .filter(|c| !matches!(c.value, Value::Tombstone(_)))
-                                .map(|c| (Value::Text(c.column), c.value))
+                                .map(|c| (Arc::from(c.column.as_str()), c.value))
                                 .collect();
-                            if !map.is_empty() {
-                                out.push((row_key.clone(), Value::Map(map)));
+                            if !row_cells.is_empty() {
+                                out.push((row_key.clone(), Value::Row(row_cells)));
                             }
                         }
                         // Row tombstone: the row is deleted across all
@@ -1622,7 +1624,9 @@ impl SSTableManager {
                 }
                 for entry in rows {
                     if let RowData::Live { cells } = entry.row_data {
-                        let mut map: Vec<(Value, Value)> = Vec::with_capacity(cells.len());
+                        // Issue #1334: emit the interned-name row carrier
+                        // (`Value::Row`) the read path consumes.
+                        let mut row_cells: Vec<(Arc<str>, Value)> = Vec::with_capacity(cells.len());
                         let mut timestamps: Vec<(String, i64)> = Vec::with_capacity(cells.len());
                         for c in cells {
                             // Drop cell tombstones: a deleted column is absent.
@@ -1630,10 +1634,10 @@ impl SSTableManager {
                                 continue;
                             }
                             timestamps.push((c.column.clone(), c.timestamp));
-                            map.push((Value::Text(c.column), c.value));
+                            row_cells.push((Arc::from(c.column.as_str()), c.value));
                         }
-                        if !map.is_empty() {
-                            out.push((key.key.clone(), Value::Map(map), timestamps));
+                        if !row_cells.is_empty() {
+                            out.push((key.key.clone(), Value::Row(row_cells), timestamps));
                         }
                     }
                     // Row tombstones suppress the row entirely (no emission).

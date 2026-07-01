@@ -76,6 +76,11 @@ fn find_udt_values(value: &Value, results: &mut Vec<Value>) {
                 find_udt_values(v, results);
             }
         }
+        Value::Row(cells) => {
+            for (_, v) in cells {
+                find_udt_values(v, results);
+            }
+        }
         Value::Frozen(inner) => find_udt_values(inner, results),
         _ => {}
     }
@@ -101,6 +106,11 @@ fn find_timestamp_values(value: &Value, results: &mut Vec<i64>) {
                 find_timestamp_values(v, results);
             }
         }
+        Value::Row(cells) => {
+            for (_, v) in cells {
+                find_timestamp_values(v, results);
+            }
+        }
         Value::Frozen(inner) => find_timestamp_values(inner, results),
         _ => {}
     }
@@ -123,6 +133,11 @@ fn find_date_values(value: &Value, results: &mut Vec<i32>) {
         Value::Map(pairs) => {
             for (k, v) in pairs {
                 find_date_values(k, results);
+                find_date_values(v, results);
+            }
+        }
+        Value::Row(cells) => {
+            for (_, v) in cells {
                 find_date_values(v, results);
             }
         }
@@ -247,7 +262,8 @@ async fn test_column_values_typed_correctly_guards_129_140() {
     let mut blob_values = 0;
 
     for (_table_id, _row_key, value) in &entries {
-        if let Value::Map(columns) = value {
+        // Issue #1334: rows decode to `Value::Row` keyed by `Arc<str>`.
+        if let Value::Row(columns) = value {
             for (_col_key, col_val) in columns {
                 total_values += 1;
                 match col_val {

@@ -642,6 +642,13 @@ impl SSTableDataManager {
             // Extract each (column_name, column_value) pair from the map
             // Performance optimization: consume value instead of cloning (no ref)
             let columns = match value {
+                // Issue #1334: rows decode to `Value::Row` keyed by the interned
+                // `Arc<str>` column-name handle; materialise `String` keys for the
+                // `DataRow` column map.
+                Value::Row(cells) => cells
+                    .into_iter()
+                    .map(|(name, val)| (name.to_string(), val))
+                    .collect(),
                 Value::Map(map_entries) => map_entries
                     .into_iter()
                     .filter_map(|(key, val)| match key {

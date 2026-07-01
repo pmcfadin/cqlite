@@ -874,31 +874,17 @@ impl V5CompressedLegacyParser {
                         } else if cells.is_empty() {
                             Value::Null
                         } else {
-                            // Compaction/delta emit path (issue #1334): this row
-                            // carrier is consumed by the compaction merge/writer,
-                            // which expects `Value::Map`, so materialise the
-                            // interned name into a `Value::Text(String)` here. This
-                            // is the cold compaction path, NOT the user-facing read
-                            // hot path (that path emits `Value::Row` with the shared
-                            // `Arc<str>` handle and no per-cell allocation).
-                            let mut map_entries: Vec<(Value, Value)> = cells
-                                .into_iter()
-                                .map(|(name, value)| (Value::Text(name.to_string()), value))
-                                .collect();
-                            map_entries.sort_by(|a, b| {
-                                let a_key = if let Value::Text(s) = &a.0 {
-                                    s.as_str()
-                                } else {
-                                    ""
-                                };
-                                let b_key = if let Value::Text(s) = &b.0 {
-                                    s.as_str()
-                                } else {
-                                    ""
-                                };
-                                a_key.cmp(b_key)
-                            });
-                            Value::Map(map_entries)
+                            // Issue #1334: carry the interned `Arc<str>` name
+                            // handles straight into the row carrier (no
+                            // `Value::Text(String)` round-trip / per-cell
+                            // `.to_string()` re-allocation). This path drives BOTH
+                            // the user-facing streaming scan (`scan_stream_windowed`,
+                            // via `build_row_from_scan`) and the compaction read
+                            // (`from_legacy_value`); both consume `Value::Row`.
+                            // Emit-time alphabetical ordering preserved exactly.
+                            let mut row_cells: Vec<(Arc<str>, Value)> = cells.into_iter().collect();
+                            row_cells.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
+                            Value::Row(row_cells)
                         };
 
                         // Finding 1: buffer the row instead of forwarding it now.

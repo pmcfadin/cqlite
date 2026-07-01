@@ -68,6 +68,34 @@ impl CompactionRow {
                     clustering: Vec::new(),
                 }
             }
+            // Issue #1334: the row carrier is `Value::Row(Vec<(Arc<str>, Value)>)`
+            // keyed by the interned column-name handle.
+            Value::Row(entries) => {
+                let simple = entries
+                    .into_iter()
+                    .map(|(k, v)| {
+                        let timestamp = match &v {
+                            Value::Tombstone(info) => info.deletion_time,
+                            _ => row_timestamp,
+                        };
+                        SimpleCell {
+                            column: k.to_string(),
+                            value: v,
+                            timestamp,
+                            ttl: None,
+                            local_deletion_time: None,
+                        }
+                    })
+                    .collect();
+                CompactionRowData::Live {
+                    simple,
+                    complex: Vec::new(),
+                    // The legacy collapsed-value fallback never carries a
+                    // coexisting row deletion (a `Value::Tombstone` row maps to
+                    // `Tombstone` above; a `Value::Row` row is purely live).
+                    row_deletion: None,
+                }
+            }
             Value::Map(entries) => {
                 let simple = entries
                     .into_iter()

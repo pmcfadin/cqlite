@@ -1633,7 +1633,10 @@ mod tests {
             .as_object()
             .expect("values is a JSON object keyed by column name");
         assert!(values_obj.contains_key("id"), "object keyed by column name");
-        assert!(values_obj.contains_key("name"), "object keyed by column name");
+        assert!(
+            values_obj.contains_key("name"),
+            "object keyed by column name"
+        );
 
         // Deserialize back → identical names and values.
         let back: QueryResult = serde_json::from_value(json).expect("deserialise QueryResult");

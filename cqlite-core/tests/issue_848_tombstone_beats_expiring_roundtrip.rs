@@ -114,10 +114,10 @@ fn delete_v(id: i32, ts: i64) -> Mutation {
 
 fn col<'a>(row: &'a Value, name: &str) -> Option<&'a Value> {
     match row {
-        Value::Map(pairs) => pairs.iter().find_map(|(k, v)| match k {
-            Value::Text(c) if c == name => Some(v),
-            _ => None,
-        }),
+        // Issue #1334: rows decode to `Value::Row` keyed by `Arc<str>`.
+        Value::Row(cells) => cells
+            .iter()
+            .find_map(|(k, v)| if k.as_ref() == name { Some(v) } else { None }),
         _ => None,
     }
 }

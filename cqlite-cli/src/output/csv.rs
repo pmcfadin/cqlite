@@ -81,7 +81,8 @@ impl CSVWriter {
                 .columns
                 .iter()
                 .map(|col| {
-                    row.values.get(col.name.as_str())
+                    row.values
+                        .get(col.name.as_str())
                         .map(|v| {
                             let formatted = ValueFormatter::format_value(v);
                             // For CSV, convert "null" to empty string

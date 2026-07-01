@@ -607,7 +607,10 @@ impl QueryExecutor {
 
     /// Evaluate a condition against a row
     fn evaluate_condition(&self, row: &QueryRow, condition: &Condition) -> Result<bool> {
-        let row_value = row.values.get(condition.column.as_str()).unwrap_or(&Value::Null);
+        let row_value = row
+            .values
+            .get(condition.column.as_str())
+            .unwrap_or(&Value::Null);
 
         match condition.operator {
             ComparisonOperator::Equal => Ok(row_value == &condition.value),

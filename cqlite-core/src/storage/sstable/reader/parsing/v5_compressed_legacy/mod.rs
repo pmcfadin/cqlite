@@ -202,7 +202,9 @@ impl<'a> RowColumnResolution<'a> {
                         // supplied-schema column name when matched, else the
                         // on-disk header name for a DROPPED column (never emitted).
                         let name: Arc<str> = Arc::from(
-                            schema.map(|c| c.name.as_str()).unwrap_or(col_info.name.as_str()),
+                            schema
+                                .map(|c| c.name.as_str())
+                                .unwrap_or(col_info.name.as_str()),
                         );
                         ColumnToParse {
                             schema,

@@ -540,31 +540,21 @@ pub async fn read_back_column_with_udt_registry(
     let row_value = rows.into_iter().next().unwrap();
 
     match &row_value {
-        Value::Map(entries) => {
-            for (key, value) in entries {
-                if let Value::Text(name) = key {
-                    if name == col_name {
-                        return value.clone();
-                    }
+        // Issue #1334: the scan carries rows as `Value::Row` keyed by `Arc<str>`.
+        Value::Row(entries) => {
+            for (name, value) in entries {
+                if name.as_ref() == col_name {
+                    return value.clone();
                 }
             }
             panic!(
                 "Column '{}' not found in row. Available columns: {:?}",
                 col_name,
-                entries
-                    .iter()
-                    .filter_map(|(k, _)| {
-                        if let Value::Text(n) = k {
-                            Some(n.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
+                entries.iter().map(|(k, _)| k.as_ref()).collect::<Vec<_>>()
             );
         }
         other => panic!(
-            "Expected Map row for column '{}', got {:?}",
+            "Expected Row row for column '{}', got {:?}",
             col_name, other
         ),
     }
@@ -580,33 +570,22 @@ pub async fn read_back_column_with_udt_registry(
 pub async fn read_back_column(temp_dir: &TempDir, schema: &TableSchema, col_name: &str) -> Value {
     let row_value = read_back_raw_row(temp_dir, schema).await;
 
-    // Row is Value::Map(Vec<(Value::Text(col_name), value)>)
+    // Issue #1334: the scan carries a row as `Value::Row(Vec<(Arc<str>, value)>)`.
     match &row_value {
-        Value::Map(entries) => {
-            for (key, value) in entries {
-                if let Value::Text(name) = key {
-                    if name == col_name {
-                        return value.clone();
-                    }
+        Value::Row(entries) => {
+            for (name, value) in entries {
+                if name.as_ref() == col_name {
+                    return value.clone();
                 }
             }
             panic!(
                 "Column '{}' not found in row. Available columns: {:?}",
                 col_name,
-                entries
-                    .iter()
-                    .filter_map(|(k, _)| {
-                        if let Value::Text(n) = k {
-                            Some(n.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
+                entries.iter().map(|(k, _)| k.as_ref()).collect::<Vec<_>>()
             );
         }
         other => panic!(
-            "Expected row to be Value::Map, got {:?}",
+            "Expected row to be Value::Row, got {:?}",
             std::mem::discriminant(other)
         ),
     }
