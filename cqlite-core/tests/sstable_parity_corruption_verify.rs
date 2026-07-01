@@ -151,23 +151,28 @@ fn fixture_dir_sha256(dir: &Path) -> String {
     format!("{:x}", h.finalize())
 }
 
-/// Validate the full-fixture-dir binding (issue #1294 Item 1, roborev Finding 1):
-/// the on-disk fixture-dir hash vs the manifest's captured-against dir hash.
+/// Validate the fixture bindings against the COMMITTED bytes (issue #1294 Item 1,
+/// roborev Finding 1) — this is always **MODE 1** of the unified two-mode model.
 ///
-/// The committed corruption fixtures are BYTE-STABLE in git, so the captured
-/// `verdict_captured_for_dir_sha256` must ALWAYS equal the on-disk full-dir hash.
-/// ANY drift means the bytes `sstableverify` actually reads no longer match the
-/// bytes the Cassandra verdict was captured against — the oracle is stale and no
-/// longer bound to the bytes under test. So we fail UNCONDITIONALLY on any
-/// mismatch, regardless of whether the mutated component itself also changed.
+/// This test only ever runs against the committed / fetched byte-stable git tree
+/// (it never regenerates), so it is the MODE 1 (committed byte-stable validation)
+/// enforcement point. In MODE 1 the captured verdict MUST still match the bytes it
+/// was observed against, so EVERY binding is FATAL on any drift:
+///   * the full-fixture-dir hash (`verdict_captured_for_dir_sha256`) vs the on-disk
+///     dir hash — ANY drift means a mutated and/or NON-mutated component changed and
+///     the oracle is stale for the bytes `sstableverify` reads; and
+///   * the MUTATED component hash (`verdict_captured_for_sha256`) vs the on-disk
+///     mutated file.
 ///
-/// The earlier revision only failed when the mutated component was byte-stable
-/// (treating "both moved" as advisory regeneration drift). That left a hole: if
-/// the mutated component ALSO drifted, the test continued with a stale verdict and
-/// the verdict/class assertions below could pass by coincidence. On a byte-stable
-/// committed tree there is no benign drift, so we no longer special-case it here.
-/// (The GENERATOR still rebinds the dir-sha on benign live-Cassandra regeneration;
-/// that path is `--verify-only`-distinguished there, not here.)
+/// Both are FATAL unconditionally here.
+///
+/// The GENERATOR treats the SAME two bindings as **MODE 2** (rebind, not fatal) ONLY
+/// on the live-Cassandra regeneration path (`VERIFY_ONLY=0`), where the mutated
+/// component itself can be non-byte-reproducible (BTI `da` trie: Partitions.db /
+/// Rows.db) — see generate-corruption-corpus.sh. That is why the mutated-sha is
+/// rebound there and EXCLUDED from the post-regen drift guard, while it stays fatal
+/// here. The two never disagree: MODE 1 (this test + `--verify-only` + the pre-regen
+/// dir-binding guard) is fatal; MODE 2 (regeneration) rebinds.
 ///
 /// Skipped only for pre-#1294 manifests that recorded no full-dir binding.
 fn check_full_dir_binding(fx: &Fixture, dir: &Path) {
@@ -188,11 +193,14 @@ fn check_full_dir_binding(fx: &Fixture, dir: &Path) {
         on_disk_dir,
         fx.cassandra_verdict,
     );
-    // Additive (kept from #1236): the MUTATED component must also still match its
-    // own captured sha when one is recorded. Redundant once the dir-sha matches
-    // (the mutated component is part of the dir hash), but it pins the per-component
-    // binding directly so a future change that loosens the dir hash cannot silently
-    // drop mutated-component coverage.
+    // MODE 1 (committed byte-stable): the MUTATED component must ALSO still match its
+    // own captured sha (`verdict_captured_for_sha256`) — FATAL, consistent with the
+    // dir-sha above and with generate-corruption-corpus.sh's `--verify-only` branch.
+    // Redundant once the dir-sha matches (the mutated component is part of the dir
+    // hash), but it pins the per-component binding directly so a future change that
+    // loosens the dir hash cannot silently drop mutated-component coverage. This is
+    // the MODE 1 counterpart of the generator's MODE 2 rebind of the same field on
+    // regeneration (issue #1294 roborev Finding 1).
     if !fx.verdict_captured_for_sha256.trim().is_empty() {
         let mutated = dir.join(fx.component.trim());
         if mutated.is_file() {

@@ -69,20 +69,26 @@ jobs:
 
       # Issue #1294 roborev Finding 2: enforce the COMMITTED full-fixture-dir binding
       # BEFORE regeneration overwrites the manifest. The post-regeneration drift guard
-      # (extract-corruption-oracle.py) deliberately OMITS verdict_captured_for_dir_sha256
-      # because the generator REBINDS it on benign live-Cassandra sibling drift — so a PR
-      # that edits ONLY the committed dir-sha would otherwise be silently rebound away and
-      # pass. The fetched (committed) corruption binaries + committed manifest coexist at
-      # this point, so we recompute each active fixture's on-disk full-dir hash with the
-      # identical algorithm and fail closed on any mismatch with the committed dir-sha.
-      # This catches a committed-dir-sha-only edit; INVARIANT C (benign regen rebind) is
-      # untouched because this runs PRE-regeneration against the committed bytes.
+      # (extract-corruption-oracle.py) deliberately OMITS both verdict_captured_for_dir_sha256
+      # AND verdict_captured_for_sha256 because the generator REBINDS them on benign
+      # live-Cassandra drift (MODE 2) — so a PR that edits ONLY the committed dir-sha would
+      # otherwise be silently rebound away and pass. The fetched (committed) corruption
+      # binaries + committed manifest coexist at this point (this step runs AFTER
+      # fetch-datasets.sh), so we recompute each active fixture's on-disk full-dir hash with
+      # the identical algorithm and fail closed on any mismatch with the committed dir-sha.
+      # `--require` makes the guard fail-closed on an EMPTY/absent fixture set too (never
+      # pass on zero validated): with binaries present it validates >=1 committed binding,
+      # and if none could be validated (binaries missing) it is a hard error rather than a
+      # silent no-op (roborev Finding 2). This catches a committed-dir-sha-only edit; the
+      # MODE 2 benign regen rebind is untouched because this runs PRE-regeneration against
+      # the committed bytes (MODE 1).
       - name: Guard — committed full-dir binding matches committed bytes (issue #1294 Finding 2)
         run: |
           set -euo pipefail
           python3 test-data/scripts/validate-committed-dir-binding.py \
             test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml \
-            "$CQLITE_DATASETS_ROOT/corruption/test_comp_corrupt"
+            "$CQLITE_DATASETS_ROOT/corruption/test_comp_corrupt" \
+            --require
 
       # Snapshot the committed reference-golden checksums BEFORE regeneration.
       # After regeneration we recompute the same set; the audit's

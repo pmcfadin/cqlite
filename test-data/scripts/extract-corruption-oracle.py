@@ -33,23 +33,27 @@ WHAT IS PROJECTED (the authoritative, human-edited oracle — deterministic, NOT
 regeneration-rebound):
   name, manifest_key, status, component, expected_failing_component,
   expected_error_class, rationale, cassandra_verdict, verdict_parity, verdict_note,
-  verdict_captured_for_sha256, verdict_byte_stable
+  verdict_byte_stable
 
 WHAT IS DELIBERATELY EXCLUDED (drifts/rebinds across regeneration — NOT a guardable
 human-authored oracle field):
   corrupted_sha256, original_sha256, fixture_dir_sha256, *_size_bytes,
   byte_offset, *_bytes_hex, clean_source_path (regenerated table UUID),
-  corrupted_path (the OBSERVED bytes), AND verdict_captured_for_dir_sha256 — the
-  latter is a regeneration-DEPENDENT hash the generator REBINDS to the fresh
-  full-dir hash on benign drift, so it cannot be guarded here without contradicting
-  the generator; its integrity is enforced by the parity test instead.
+  corrupted_path (the OBSERVED bytes), AND BOTH machine-computed verdict-bindings:
+  verdict_captured_for_dir_sha256 AND verdict_captured_for_sha256.
 
-  NOTE on verdict_captured_for_sha256 (KEPT in the projection): the generator treats
-  the per-component verdict sha-binding as advisory but NEVER rebinds it — on every
-  regeneration path it emits the COMMITTED value verbatim (deterministic mutation ->
-  stable mutated-component sha). It is therefore regeneration-STABLE and IS a
-  human-authored oracle field safe to guard. Only the FULL-DIR sha is rebound, hence
-  only it is excluded.
+  Both bindings are regeneration-DEPENDENT hashes the generator REBINDS on the MODE 2
+  (VERIFY_ONLY=0) live-Cassandra regeneration path (issue #1294 roborev Finding 1):
+  the full-dir sha rebinds on any non-deterministic SIBLING drift, and the mutated-
+  component sha rebinds when the MUTATED component is itself non-byte-reproducible
+  (the BTI `da` trie fixtures bti_partitions_footer_flip -> Partitions.db and
+  bti_rows_truncation -> Rows.db serialize non-deterministically; Statistics.db
+  embeds wall-clock metadata). Guarding either here would make this guard contradict
+  the generator (a benign regeneration would false-fail CI). Their integrity is
+  enforced in MODE 1 instead — against the committed byte-stable tree — by the parity
+  test (sstable_parity_corruption_verify.rs::check_full_dir_binding, both hashes
+  FATAL), the generator's own `--verify-only` branch, and validate-committed-dir-
+  binding.py (committed dir-sha, PRE-regeneration).
 
 Usage:
   extract-corruption-oracle.py <manifest.yml>     # prints the canonical projection
@@ -69,12 +73,15 @@ ORACLE_KEYS = [
     "cassandra_verdict",
     "verdict_parity",
     "verdict_note",
-    "verdict_captured_for_sha256",
-    # verdict_captured_for_dir_sha256 is DELIBERATELY OMITTED: the generator rebinds
-    # it to the freshly-regenerated full-dir hash on benign sibling drift, so it is
-    # regeneration-dependent and cannot be guarded here without contradicting the
-    # generator. Its integrity is enforced by the parity test
-    # (sstable_parity_corruption_verify.rs::check_full_dir_binding), not this guard.
+    # BOTH verdict_captured_for_sha256 AND verdict_captured_for_dir_sha256 are
+    # DELIBERATELY OMITTED (issue #1294 roborev Finding 1): the generator REBINDS both
+    # on the MODE 2 (VERIFY_ONLY=0) regeneration path — the dir-sha on any
+    # non-deterministic sibling drift, and the mutated-component sha when the mutated
+    # component is itself non-byte-reproducible (BTI `da` trie / Statistics.db). A
+    # rebound field is regeneration-dependent and cannot be guarded here without
+    # contradicting the generator. Their integrity is enforced in MODE 1 by the parity
+    # test (sstable_parity_corruption_verify.rs::check_full_dir_binding — both FATAL),
+    # the generator's `--verify-only` branch, and validate-committed-dir-binding.py.
     "verdict_byte_stable",
 ]
 
