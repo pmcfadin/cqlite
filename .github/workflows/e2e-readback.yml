@@ -162,20 +162,17 @@ jobs:
           path: /tmp/e2e-artifacts/
           retention-days: 30
 
-      # Issue #1027: shared, scenario-id-keyed failure bundle for the
-      # nightly_docker live BTI (da) write/read comparison. The record carries a
-      # `live_log` diff entry (the failing comparison's stdout/stderr).
-      # retention-days meets the nightly_docker tier minimum (30).
-      - name: Upload parity failure bundle (issue #1027)
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: parity-failures-e2e-readback
-          path: |
-            parity-failures/**
-            /tmp/e2e-artifacts/parity-failures/**
-          if-no-files-found: ignore
-          retention-days: 30
+      # Issue #1027 convergence audit: the e2e live-readback lane's terminal is a
+      # shell script (e2e-cassandra-readback.sh) that does NOT emit a
+      # scenario-id-keyed parity-failures/** bundle, so a `parity-failures-*`
+      # upload here would advertise a bundle that never appears (even with
+      # `if-no-files-found: ignore`, the artifact promise is false). The
+      # speculative upload was removed; the "Upload failure artifacts" step above
+      # already captures this lane's real forensics (log + workdir + container
+      # logs). FOLLOW-UP: to emit the shared bundle for the live BTI (da)
+      # write/read comparison, teach the readback script to write a `live_log`
+      # failure-artifact record (out of scope for #1027, which standardises the
+      # artifact system, not each lane's terminal).
 
       # Best-effort container cleanup (the script's EXIT trap handles the
       # happy path; this catches runner-level abrupt termination).

@@ -217,21 +217,17 @@ jobs:
             test_summary.md
           retention-days: 30
 
-      # Issue #1027: shared, scenario-id-keyed failure bundle for the
-      # nightly_docker live-readback comparison. Uploaded on failure
-      # (if: always()); the record carries a `live_log` diff entry (the failing
-      # comparison's stdout/stderr). retention-days meets the nightly_docker
-      # tier minimum (30).
-      - name: Upload parity failure bundle (issue #1027)
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: parity-failures-cassandra-validation
-          path: |
-            parity-failures/**
-            cqlite-core/parity-failures/**
-          if-no-files-found: ignore
-          retention-days: 30
+      # Issue #1027 convergence audit: this lane's sstableloader_integration tests
+      # use plain assert!/assert_eq! terminals — they do NOT route through
+      # ParityFailure::panic and have no scenario-id-keyed bundle emitter — so a
+      # `parity-failures-*` upload here would advertise a bundle that never
+      # appears (even with `if-no-files-found: ignore`, the artifact promise is
+      # false). The speculative upload was removed; the "Upload Test Artifacts"
+      # step above already captures this lane's real forensics (tier results +
+      # summary). FOLLOW-UP: to emit the shared bundle for the live-readback
+      # comparison, route the failure terminal through the shared
+      # ParityFailure/FailureBundle emitter (out of scope for #1027, which
+      # standardises the artifact system, not each lane's terminal).
 
       - name: Comment on PR (Success)
         if: success() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository

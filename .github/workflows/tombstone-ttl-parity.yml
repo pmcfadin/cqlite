@@ -143,19 +143,12 @@ jobs:
               --test sstable_parity_repaired_metadata_test \
               -- --nocapture
 
-      # Issue #1027: shared, scenario-id-keyed failure bundle. Uploaded on
-      # failure (if: always()) so a red run yields one predictably-named
-      # artifact whose subdirectories are the failed `cass.*` scenario ids.
-      # This lane gates required_parity AND nightly_docker scenarios, so its
-      # binding retention minimum is the stricter 30 days (nightly_docker) —
-      # see docs/development/parity-ci-tiers.md.
-      - name: Upload parity failure bundle (issue #1027)
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: parity-failures-tombstone-ttl-parity
-          path: |
-            parity-failures/**
-            cqlite-core/parity-failures/**
-          if-no-files-found: ignore
-          retention-days: 30
+      # Issue #1027 convergence audit: this lane's tombstone/TTL parity tests use
+      # plain assert!/assert_eq! terminals — they do NOT route through
+      # ParityFailure::panic and have no scenario-id-keyed bundle emitter — so a
+      # speculative `parity-failures-*` upload here would advertise a bundle that
+      # never appears (even with `if-no-files-found: ignore`, the artifact promise
+      # is false). The upload was removed rather than left misleading. FOLLOW-UP:
+      # to restore it, first route these tests' failure terminals through the
+      # shared ParityFailure/FailureBundle emitter (out of scope for #1027, which
+      # only standardises the artifact system, not each suite's assertion sites).
