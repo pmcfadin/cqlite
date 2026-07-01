@@ -253,6 +253,22 @@ jobs:
           fi
           echo "lane_file=${LANE_FILE}" >> "$GITHUB_OUTPUT"
 
+          # Fix A (round 7): derive the lane's CI TIER from its workflow FILENAME so the
+          # filed issue records the correct tier (spec R1). The exhaustive-regeneration
+          # lane is tier `exhaustive_regeneration`; the three nightly parity lanes are
+          # tier `nightly_docker` (the script's default). An unmapped lane leaves the tier
+          # empty so the `file` step falls back to the script default rather than guessing.
+          LANE_TIER=""
+          case "${LANE_FILE}" in
+            exhaustive-regeneration.yml)
+              LANE_TIER="exhaustive_regeneration" ;;
+            compression-corruption-parity.yml|cql-type-parity.yml|tombstone-ttl-parity.yml)
+              LANE_TIER="nightly_docker" ;;
+            *)
+              : ;;
+          esac
+          echo "lane_tier=${LANE_TIER}" >> "$GITHUB_OUTPUT"
+
       - name: Checkout (for the fingerprint/dedup script)
         if: steps.guard.outputs.skip != 'true' && steps.validate.outputs.proceed == 'true'
         uses: actions/checkout@v4
@@ -332,10 +348,20 @@ jobs:
           # degraded-filed issue carries the KNOWN lane identity — resolvable by the green
           # `resolve --workflow` filter and with a stable, lane-aligned fingerprint.
           LANE_FILE: ${{ steps.identity.outputs.lane_file }}
+          # Fix A (round 7): the lane's CI tier derived from its workflow filename
+          # (exhaustive_regeneration for the exhaustive lane; nightly_docker for the three
+          # nightly parity lanes). Recorded in the filed issue body (spec R1). Passed via a
+          # quoted env var, never inlined as an expression.
+          LANE_TIER: ${{ steps.identity.outputs.lane_tier }}
         run: |
           set -euo pipefail
           REPRO="See the failing run: ${RUN_URL:-<run url unavailable>}"
           ARGS=(file --run-url "${RUN_URL:-}" --conclusion "${WR_CONCLUSION:-failure}" --repro "${REPRO}")
+          # Record the correct CI tier for the failing lane (spec R1). If the lane could
+          # not be mapped to a tier, omit --tier so the script keeps its documented default.
+          if [ -n "${LANE_TIER:-}" ]; then
+            ARGS+=(--tier "${LANE_TIER}")
+          fi
           if [ "${HAVE_ARTIFACT:-false}" = "true" ]; then
             ARGS+=(--failures-json artifacts/parity-failures.json)
           elif [ -n "${SUMMARY_FILE:-}" ]; then

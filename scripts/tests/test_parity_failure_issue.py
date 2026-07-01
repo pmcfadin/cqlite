@@ -198,6 +198,35 @@ class DedupTests(unittest.TestCase):
         self.assertIn("some notes without the section", refreshed)
 
 
+class TierTests(unittest.TestCase):
+    def _created_body(self, tier: str, workflow: str) -> str:
+        # File one failure (no pre-existing issue) at the given tier; return the create body.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            failure = _failure(workflow=workflow)
+            fj = _write(tmp, "failures.json", [failure])
+            oj = _write(tmp, "open.json", [])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = pfi.cmd_file(_args(
+                    failures_json=fj, open_issues_json=oj, tier=tier))
+            self.assertEqual(rc, 0)
+            return out.getvalue()
+
+    def test_exhaustive_lane_records_exhaustive_tier(self):
+        # Fix A (round 7): the exhaustive-regeneration lane must record tier
+        # `exhaustive_regeneration` in the filed issue body (spec R1).
+        body = self._created_body("exhaustive_regeneration", "exhaustive-regeneration.yml")
+        self.assertIn("**CI tier:** `exhaustive_regeneration`", body)
+        self.assertNotIn("**CI tier:** `nightly_docker`", body)
+
+    def test_nightly_lane_records_nightly_tier(self):
+        # A nightly parity lane records the default `nightly_docker` tier.
+        body = self._created_body("nightly_docker", "tombstone-ttl-parity.yml")
+        self.assertIn("**CI tier:** `nightly_docker`", body)
+        self.assertNotIn("exhaustive_regeneration", body)
+
+
 class DegradedFallbackTests(unittest.TestCase):
     def test_missing_artifact_surfaces_notice_and_uses_summary(self):
         with tempfile.TemporaryDirectory() as d:
