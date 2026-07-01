@@ -683,27 +683,37 @@ impl SSTableManager {
     /// Get a value by key from all SSTables with proper tombstone merging
     #[cfg(feature = "tombstones")]
     pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
-        let readers = self.readers.read().await;
-        let mut all_values = Vec::new();
-
-        // Compute the SAME authoritative resolution-mode signal the non-tombstones
-        // `get()` path uses (issue #1321) so the BTI point-lookup guard relaxes
-        // identically in both feature builds. It is derived once from the queried
-        // table name and the fully-qualified `table_readers` map: an unqualified
-        // query has no keyspace to mismatch (treated as an exact match), and a
-        // fully-qualified `keyspace.table` query is an exact match iff that exact
-        // key exists in the map (otherwise it can only reach a reader via the
-        // bare-name fallback, which keeps STRICT keyspace matching). The per-reader
-        // table filtering/tombstone merging below is unchanged — we only thread the
-        // resolution signal into each reader's row-acceptance guard.
+        // Resolve the applicable reader list FIRST, exactly like the non-tombstones
+        // `get()` path (issue #1321). The previous code iterated EVERY reader in
+        // `self.readers` and passed one global relaxed `fully_qualified_match` flag
+        // to all of them, so same-named tables in OTHER keyspaces passed the relaxed
+        // BTI guard and wrongly contributed values/tombstones to the merge — a
+        // cross-keyspace data-bleed bug. `resolve_reader_list` returns precisely the
+        // readers for the resolved target table across generations, so the relaxed
+        // guard can only ever apply to the readers that ARE the target table; a
+        // wrong-keyspace same-named reader is never in the merge set.
+        let table_readers = self.table_readers.read().await;
         let table_name = table_id.name();
-        let fully_qualified_match = {
-            let table_readers = self.table_readers.read().await;
-            Self::fully_qualified_match(&table_readers, table_name)
+
+        let Some(reader_list) = Self::resolve_reader_list(&table_readers, table_name) else {
+            return Ok(None);
         };
 
-        // Collect values from all SSTables
-        for (_sstable_id, reader) in readers.iter() {
+        // Authoritative resolution-mode signal, shared verbatim with the
+        // non-tombstones path: an exact fully-qualified match (or an unqualified
+        // query) may relax the per-row table guard across a benign header-keyspace
+        // divergence; a fully-qualified query resolved via the bare-name fallback
+        // keeps STRICT keyspace matching. Because the merge set is now the resolved
+        // list, this only ever relaxes readers that are the resolved target table.
+        let fully_qualified_match = Self::fully_qualified_match(&table_readers, table_name);
+
+        let mut all_values = Vec::new();
+
+        // Collect each applicable generation's value (tombstone-merge semantics are
+        // unchanged: still build a `GenerationValue` per reader and resolve via
+        // `TombstoneMerger::merge_generations`). Only the SET of readers being merged
+        // changed — the resolved list instead of every reader globally.
+        for reader in reader_list {
             if let Some(value) = reader
                 .get_with_resolution(table_id, key, fully_qualified_match)
                 .await?
@@ -2379,6 +2389,107 @@ mod tests {
         assert!(
             SSTableManager::fully_qualified_match(&table_readers, "users"),
             "unqualified query must signal an exact match (relax)"
+        );
+    }
+
+    /// Open a real `SSTableReader` from the dataset for `keyspace.table`, or
+    /// `None` if datasets are not present (so the test can skip in CI lanes
+    /// without binaries). Used to obtain distinct `Arc<SSTableReader>` objects
+    /// for the cross-keyspace bleed test below.
+    async fn open_dataset_reader(
+        keyspace: &str,
+        table: &str,
+    ) -> Option<Arc<reader::SSTableReader>> {
+        let datasets_root = std::env::var("CQLITE_DATASETS_ROOT").ok()?;
+        let keyspace_dir = PathBuf::from(datasets_root).join("sstables").join(keyspace);
+        let table_prefix = format!("{}-", table);
+        for entry in std::fs::read_dir(&keyspace_dir).ok()?.flatten() {
+            let path = entry.path();
+            let file_name = path.file_name()?.to_str()?.to_string();
+            if file_name.starts_with(&table_prefix) {
+                let data_file = std::fs::read_dir(&path)
+                    .ok()?
+                    .flatten()
+                    .find(|e| {
+                        e.file_name()
+                            .to_str()
+                            .map(|s| s.ends_with("-Data.db"))
+                            .unwrap_or(false)
+                    })?
+                    .path();
+                let config = Config::default();
+                let platform = Arc::new(Platform::new(&config).await.ok()?);
+                return reader::SSTableReader::open(&data_file, &config, platform)
+                    .await
+                    .ok()
+                    .map(Arc::new);
+            }
+        }
+        None
+    }
+
+    /// Issue #1321 (roborev HIGH, cross-keyspace bleed): the `tombstones`-build
+    /// manager `get()` builds its tombstone-merge set from `resolve_reader_list`
+    /// (the resolved target table across generations) rather than iterating EVERY
+    /// reader in `self.readers`. This pins the bleed-prevention invariant at the
+    /// reader-set-resolution level: a fully-qualified query for `ks_a.users`
+    /// resolves to a merge set containing ONLY the `ks_a.users` reader and NEVER
+    /// the same-named `ks_b.users` reader.
+    ///
+    /// This would FAIL against the pre-fix b469818e behavior, where `get()`
+    /// iterated `self.readers` (which holds BOTH readers) and — because the
+    /// global relaxed `fully_qualified_match` flag was `true` (the FQ key existed)
+    /// — admitted the wrong-keyspace reader's rows/tombstones into the merge.
+    ///
+    /// Uses two distinct real readers as the two keyspaces' SSTables; skips when
+    /// datasets are absent (CI lanes without binaries).
+    #[tokio::test]
+    async fn test_tombstones_get_resolves_only_target_keyspace_readers() {
+        // Two distinct on-disk readers stand in for same-named tables in two
+        // different keyspaces (only their distinct identity matters here).
+        let Some(reader_a) = open_dataset_reader("test_basic", "simple_table").await else {
+            eprintln!("skipping: CQLITE_DATASETS_ROOT / test_basic.simple_table absent");
+            return;
+        };
+        let Some(reader_b) = open_dataset_reader("test_basic", "counters").await else {
+            eprintln!("skipping: CQLITE_DATASETS_ROOT / test_basic.counters absent");
+            return;
+        };
+        assert!(
+            !Arc::ptr_eq(&reader_a, &reader_b),
+            "the two stand-in keyspace readers must be distinct Arcs"
+        );
+
+        // Register them as same-named tables under two distinct keyspaces — the
+        // exact `table_readers` layout that produced the bleed (Issue #680 keying).
+        let mut table_readers: HashMap<String, Vec<Arc<reader::SSTableReader>>> = HashMap::new();
+        table_readers.insert("ks_a.users".to_string(), vec![Arc::clone(&reader_a)]);
+        table_readers.insert("ks_b.users".to_string(), vec![Arc::clone(&reader_b)]);
+
+        // The merge set the new tombstones get() iterates: ONLY ks_a's readers.
+        let resolved = SSTableManager::resolve_reader_list(&table_readers, "ks_a.users")
+            .expect("ks_a.users resolves");
+        assert_eq!(
+            resolved.len(),
+            1,
+            "merge set must be exactly ks_a's readers"
+        );
+        assert!(
+            Arc::ptr_eq(&resolved[0], &reader_a),
+            "resolved merge set must contain the ks_a reader"
+        );
+        // The bleed assertion: the ks_b (wrong-keyspace) reader must NEVER be in
+        // the ks_a merge set — even though `self.readers` (which the old code
+        // iterated) contained it and the FQ flag was relaxed.
+        assert!(
+            !resolved.iter().any(|r| Arc::ptr_eq(r, &reader_b)),
+            "Issue #1321: a ks_a.users query must NOT merge the same-named ks_b.users reader"
+        );
+
+        // And the relaxation signal stays correct for the FQ query (exact hit).
+        assert!(
+            SSTableManager::fully_qualified_match(&table_readers, "ks_a.users"),
+            "exact FQ key present → relaxed guard, applied only to the resolved (ks_a) set"
         );
     }
 }
