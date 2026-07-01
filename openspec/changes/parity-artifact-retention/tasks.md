@@ -40,12 +40,24 @@
 
 ## 3. Compaction (Java harness) alignment
 
-- [ ] 3.1 Map the existing `compaction-parity/build/parity-artifacts-<task>/<Class>.<method>/` bundle
+- [x] 3.1 Map the existing `compaction-parity/build/parity-artifacts-<task>/<Class>.<method>/` bundle
       onto the shared `parity-failures/<tier>/<scenario_id>/` layout + emit `failure-artifact.json`.
-      Surface: `compaction-parity` Gradle harness + a harness test that a forced byte mismatch produces
-      the conforming bundle.
-- [ ] 3.2 Live-cell compaction lane (`live-cell-compaction-parity.yml`) emits a `live_log` diff entry.
-      Surface: that workflow's harness output.
+      Surface: `compaction-parity` Gradle harness (`ParityFailureArtifact` — the Java counterpart of the
+      Rust `failure_artifact` record, identical JSON shape; `ParityScenarioMap` — explicit test-method →
+      manifest scenario_id map: byte tier → `cass.compaction.harness_byte_tier_artifacts`, logical tier →
+      `cass.compaction.CompactionIteratorTest.differential_compaction_loop`; `ParityFailureBundle` —
+      assembles the scenario-id-keyed bundle under `build/parity-failures/<tier>/<scenario_id>/` with
+      byte/offset/checksum/component_inventory diffs + repro/; `DifferentialParityTester` emits it on
+      byte- and logical-tier mismatch, best-effort). Evidence: harness test
+      `ParityFailureBundleTest::forcedByteMismatchEmitsConformingScenarioIdKeyedBundle` (forced byte
+      mismatch → scenario-id-keyed dir + schema-conforming `failure-artifact.json` with all four byte
+      diff kinds) and `::forcedLogicalMismatchEmitsCanonicalSemanticBundle`.
+- [x] 3.2 Live-cell / nightly_docker compaction byte tier (`gradle byteParity`, uploaded by
+      `compaction-parity.yml`) emits a `live_log` diff entry (kind `live_log`, tier `nightly_docker`)
+      capturing the failing comparison's stdout/stderr (owner decision 5 — NOT the full container log).
+      Surface: `ParityFailureBundle::liveLog` + `DifferentialParityTester::emitByteFailureBundle`.
+      Evidence: `ParityFailureBundleTest::forcedByteMismatchEmitsConformingScenarioIdKeyedBundle`
+      asserts a `live_log` `diffs[]` entry + `diffs/live-log.txt`.
 
 ## 4. Manifest descriptors + lint
 
