@@ -225,6 +225,9 @@ jobs:
         if: failure()
         run: |
           set -euo pipefail
+          # scenario_id/test_target/component_path here are intentionally lane-scoped v1
+          # placeholders (stable per lane so cross-run dedup works). Per-scenario,
+          # manifest-backed emission is tracked in issue #1345.
           cat > parity-failures.json <<'JSON'
           [
             {
