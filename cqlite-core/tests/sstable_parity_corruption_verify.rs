@@ -21,9 +21,12 @@
 //! zero-fixtures-evaluated-when-present as a failure. `CQLITE_REQUIRE_FIXTURES=1`
 //! turns the skip into a hard failure (full-dataset CI / nightly).
 //!
-//! Out of scope (no CQLite VerifyErrorClass today, no parity claimed): out-of-order
-//! key/row, negative/overflowed local-deletion-time, and scrub/recovery. See the
-//! manifest scenario `cass.corruption_verify.component_corruption_detection`.
+//! Out-of-order key/row and negative/overflowed local-deletion-time are now
+//! classified (issue #1282, `VerifyErrorClass::OutOfOrderKeyOrRow` /
+//! `InvalidLocalDeletionTime`) and covered end-to-end through this same
+//! `verify_sstable` surface by `sstable_parity_verify_order_ldt.rs`. Still out of
+//! scope here (no CQLite VerifyErrorClass, no parity claimed): scrub/recovery. See
+//! the manifest scenario `cass.corruption_verify.component_corruption_detection`.
 
 use cqlite_core::platform::Platform;
 use cqlite_core::storage::sstable::verify::{verify_sstable, VerifyMode, VerifyReport};

@@ -978,6 +978,24 @@ impl SSTableReader {
         }
     }
 
+    /// Whether the on-disk `DeletionTime` uses the Cassandra 5.0 UNSIGNED
+    /// `localDeletionTime` serializer (`oa`/`da`, `hasUIntDeletionTime`) rather
+    /// than the legacy SIGNED `i32` form (`nb`).
+    ///
+    /// The verifier uses this to interpret a raw partition-level
+    /// `localDeletionTime`: on the legacy signed form a NEGATIVE value (that is
+    /// not the `i32::MAX` live sentinel) is unambiguously corrupt, whereas on the
+    /// unsigned form a value in `[2^31, 2^32)` is a legitimate far-future
+    /// deletion time and must NOT be flagged (no heuristics — the format decides).
+    ///
+    /// Authority: `BigFormat.java:409` (`hasUIntDeletionTime`), `DeletionTime.java`.
+    pub fn has_uint_deletion_time(&self) -> bool {
+        match *self.version_gates {
+            VersionGates::Big(ref g) => g.has_uint_deletion_time,
+            VersionGates::Bti(ref g) => g.has_uint_deletion_time,
+        }
+    }
+
     /// Get the SSTable format version string
     pub fn format_version(&self) -> Result<String> {
         let filename = self
@@ -1009,6 +1027,16 @@ impl SSTableReader {
     /// Returns `None` for legacy formats or if schema extraction failed.
     pub fn schema(&self) -> Option<&TableSchema> {
         self.schema.as_deref()
+    }
+
+    /// The effective table schema the read/verify paths decode with — the same
+    /// four-tier resolution `partition_clustering_verify_scan` uses (issue #1282).
+    ///
+    /// Returned owned because the registry-fallback tier constructs a schema; the
+    /// verifier needs it to drive the authoritative clustering comparator
+    /// ([`crate::storage::write_engine::mutation::ClusteringKey::compare`]).
+    pub fn effective_schema(&self) -> Option<TableSchema> {
+        self.get_table_schema(None)
     }
 
     /// Extract write time from entry metadata
