@@ -110,6 +110,14 @@ jobs:
           echo "📂 Extracting dataset..."
           tar -xzf /tmp/${DATASET_ASSET} -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
 
+          # Issue #1335: stamp the .dataset-pin that fetch-datasets.sh writes so
+          # the shared `datasets-${DATASET_TAG}-${DATASET_SHA256}` cache entry is
+          # accepted by has_required_dataset() in jobs that use fetch-datasets.sh
+          # (no needless re-download; a genuinely stale pin still forces refetch).
+          printf 'tag=%s\nasset=%s\nsha256=%s\n' \
+            "${DATASET_TAG}" "${DATASET_ASSET}" "${DATASET_SHA256}" \
+            > test-data/datasets/.dataset-pin
+
           echo "✅ Dataset ready"
 
       - name: Sanity check dataset exists
