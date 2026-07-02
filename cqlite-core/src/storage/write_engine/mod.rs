@@ -183,6 +183,19 @@ pub struct WriteEngineConfig {
     /// (the default), a column whose `data_type` is a bare UDT name is written
     /// as a single simple cell (documented fallback).
     pub udt_registry: Option<UdtRegistry>,
+    /// Whether the engine installs a default STCS compaction policy so that
+    /// [`WriteEngine::maintenance_step`] performs size-tiered compaction
+    /// (issue #1619). Defaults to `true` (compaction on). Set to `false` to
+    /// disable compaction entirely — `maintenance_step` then becomes a no-op.
+    pub auto_compaction: bool,
+    /// Minimum number of SSTables in a size bucket required to trigger a
+    /// compaction (STCS `min_threshold`). Defaults to `4`. Ignored when
+    /// [`WriteEngineConfig::auto_compaction`] is `false`.
+    pub compaction_min_threshold: usize,
+    /// Maximum number of SSTables compacted together in one step (STCS
+    /// `max_threshold`). Defaults to `32`. Ignored when
+    /// [`WriteEngineConfig::auto_compaction`] is `false`.
+    pub compaction_max_threshold: usize,
 }
 
 #[cfg(feature = "write-support")]
@@ -191,6 +204,10 @@ impl WriteEngineConfig {
     pub const DEFAULT_FLUSH_THRESHOLD: usize = 64 * 1024 * 1024;
     /// Default hard limit (256 MB)
     pub const DEFAULT_HARD_LIMIT: usize = 256 * 1024 * 1024;
+    /// Default STCS `min_threshold` (issue #1619)
+    pub const DEFAULT_COMPACTION_MIN_THRESHOLD: usize = 4;
+    /// Default STCS `max_threshold` (issue #1619)
+    pub const DEFAULT_COMPACTION_MAX_THRESHOLD: usize = 32;
 
     /// Create a new configuration with default flush threshold
     pub fn new(data_dir: PathBuf, wal_dir: PathBuf, schema: TableSchema) -> Self {
@@ -202,6 +219,9 @@ impl WriteEngineConfig {
             schema,
             durability: Durability::default(),
             udt_registry: None,
+            auto_compaction: true,
+            compaction_min_threshold: Self::DEFAULT_COMPACTION_MIN_THRESHOLD,
+            compaction_max_threshold: Self::DEFAULT_COMPACTION_MAX_THRESHOLD,
         }
     }
 
@@ -240,6 +260,19 @@ impl WriteEngineConfig {
     /// ```
     pub fn with_durability(mut self, durability: Durability) -> Self {
         self.durability = durability;
+        self
+    }
+
+    /// Apply a [`crate::config::CompactionConfig`] onto this write-engine
+    /// configuration (issue #1619). This makes `Config.storage.compaction`
+    /// authoritative for the write path: `auto_compaction = false` disables the
+    /// default STCS policy so [`WriteEngine::maintenance_step`] becomes a no-op.
+    ///
+    /// The compaction thresholds (`compaction_min_threshold` /
+    /// `compaction_max_threshold`) keep their defaults; only the on/off switch
+    /// is surfaced through the public `Config` today.
+    pub fn with_compaction_config(mut self, compaction: &crate::config::CompactionConfig) -> Self {
+        self.auto_compaction = compaction.auto_compaction;
         self
     }
 }
@@ -555,6 +588,23 @@ impl WriteEngine {
         // Determine next generation number by scanning data directory
         let generation = Self::determine_next_generation(&config.data_dir)?;
 
+        // Install the default STCS compaction policy so `maintenance_step`
+        // performs size-tiered compaction out of the box (issue #1619). The
+        // off-switch is `WriteEngineConfig::auto_compaction = false`, which
+        // leaves the policy unset and makes `maintenance_step` a no-op. Read the
+        // config values into locals BEFORE the struct-init moves `config`.
+        let merge_policy: Option<Box<dyn MergePolicy>> = if config.auto_compaction {
+            Some(Box::new(STCSPolicy::new(
+                config.compaction_min_threshold,
+                config.compaction_max_threshold,
+                0.5,
+                1.5,
+                STCSPolicy::DEFAULT_MIN_SSTABLE_SIZE,
+            )?))
+        } else {
+            None
+        };
+
         Ok(Self {
             config,
             wal,
@@ -563,7 +613,7 @@ impl WriteEngine {
             generation,
             closed: AtomicBool::new(false),
             active_merge: None,
-            merge_policy: None,
+            merge_policy,
             cumulative_stats: CompactionStats::default(),
             rows_written: 0,
             l0_count: 0,

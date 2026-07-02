@@ -628,15 +628,18 @@ mod tests {
 
     #[test]
     fn test_maintenance_step_no_policy() {
-        // Without a merge policy, maintenance_step should do nothing
+        // Without a merge policy, maintenance_step should do nothing.
+        // Since #1619 makes STCS the default, disable auto_compaction so this
+        // test still validates the None branch (no-policy -> no work).
         let temp_dir = TempDir::new().unwrap();
         let schema = create_test_schema();
 
-        let config = WriteEngineConfig::new(
+        let mut config = WriteEngineConfig::new(
             temp_dir.path().join("data"),
             temp_dir.path().join("wal"),
             schema,
         );
+        config.auto_compaction = false;
 
         let mut engine = WriteEngine::new(config).unwrap();
 
@@ -1352,6 +1355,128 @@ mod tests {
              found: {:?}",
             leftover_tmp.iter().map(|e| e.path()).collect::<Vec<_>>()
         );
+    }
+
+    /// Issue #1619 WIRING EVIDENCE: `WriteEngine::new` must install a default
+    /// STCS policy so `maintenance_step` compacts WITHOUT any `set_merge_policy`
+    /// call. This test uses ONLY the public constructor — that is the whole
+    /// point of the fix (STCS on by default). Before the fix `merge_policy` was
+    /// hard-coded to `None`, so `rows_merged == 0` and no L0 reduction occurred.
+    #[test]
+    fn test_maintenance_step_default_policy_compacts_via_public_ctor() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        // Default config: auto_compaction = true (no set_merge_policy call).
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+
+        let mut engine = WriteEngine::new(config).unwrap();
+
+        // Flush 4 distinct L0 SSTables (>= min_threshold = 4). The tiny test
+        // files are all below DEFAULT_MIN_SSTABLE_SIZE, so STCS groups them via
+        // the "both small" rule into one eligible bucket.
+        let input_paths = flush_n_sstables_sync(&mut engine, 4);
+        assert_eq!(input_paths.len(), 4, "Expected 4 flushed SSTables");
+
+        let before = engine.scan_sstable_candidates().unwrap().len();
+        assert_eq!(before, 4, "Expected 4 L0 SSTables before compaction");
+
+        // NO set_merge_policy call — the public ctor must have wired STCS.
+        let report = engine.maintenance_step(Duration::from_secs(60)).unwrap();
+
+        assert!(
+            report.rows_merged > 0,
+            "default STCS policy must merge rows via the public ctor (rows_merged = {})",
+            report.rows_merged
+        );
+
+        let after = engine.scan_sstable_candidates().unwrap().len();
+        assert!(
+            after < before,
+            "on-disk L0 SSTable count must drop after compaction (before = {}, after = {})",
+            before,
+            after
+        );
+    }
+
+    /// Issue #1619 OFF-SWITCH: with `auto_compaction = false`, `WriteEngine::new`
+    /// installs NO policy, so `maintenance_step` is a no-op even with enough L0
+    /// SSTables to trigger a compaction. Proves the documented off-switch works.
+    #[test]
+    fn test_maintenance_step_auto_compaction_disabled_is_noop() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        let mut config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+        config.auto_compaction = false;
+
+        let mut engine = WriteEngine::new(config).unwrap();
+
+        let input_paths = flush_n_sstables_sync(&mut engine, 4);
+        assert_eq!(input_paths.len(), 4, "Expected 4 flushed SSTables");
+
+        let before = engine.scan_sstable_candidates().unwrap().len();
+        assert_eq!(before, 4, "Expected 4 L0 SSTables before compaction");
+
+        let report = engine.maintenance_step(Duration::from_secs(60)).unwrap();
+
+        assert_eq!(
+            report.rows_merged, 0,
+            "off-switch: no policy means no rows merged"
+        );
+        assert!(
+            !report.pending_compaction,
+            "off-switch: no policy means no pending compaction"
+        );
+
+        let after = engine.scan_sstable_candidates().unwrap().len();
+        assert_eq!(
+            after, before,
+            "off-switch: L0 SSTable count must be unchanged (before = {}, after = {})",
+            before, after
+        );
+    }
+
+    /// Issue #1619 AH1: `Config.storage.compaction` must be non-decorative.
+    /// A `CompactionConfig` with `auto_compaction = false` mapped onto the
+    /// WriteEngineConfig must disable the default policy end-to-end (no rows
+    /// merged, no L0 reduction) — proving the config wiring reaches behavior.
+    #[test]
+    fn test_compaction_config_disables_default_policy() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        let compaction = crate::config::CompactionConfig {
+            auto_compaction: false,
+        };
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        )
+        .with_compaction_config(&compaction);
+        assert!(
+            !config.auto_compaction,
+            "config mapping must disable compaction"
+        );
+
+        let mut engine = WriteEngine::new(config).unwrap();
+        flush_n_sstables_sync(&mut engine, 4);
+        let before = engine.scan_sstable_candidates().unwrap().len();
+
+        let report = engine.maintenance_step(Duration::from_secs(60)).unwrap();
+        assert_eq!(report.rows_merged, 0, "disabled config: no rows merged");
+
+        let after = engine.scan_sstable_candidates().unwrap().len();
+        assert_eq!(after, before, "disabled config: L0 count unchanged");
     }
 
     // Startup orphan-sweep coverage lives in `write_engine::sweep` (issue #1393),

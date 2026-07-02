@@ -243,36 +243,25 @@ impl Default for StorageConfig {
     }
 }
 
-/// Compaction strategy configuration
+/// Compaction strategy configuration.
+///
+/// The write engine implements Size-Tiered Compaction Strategy (STCS) and
+/// installs it by default (issue #1619). `auto_compaction` is the authoritative
+/// on/off switch consumed by the write path via
+/// `WriteEngineConfig::with_compaction_config`. Previously this struct also
+/// carried `strategy`/`max_sstables`/`size_ratio`/`max_threads`/
+/// `background_interval` fields that were never read by any behavior; they were
+/// removed (issue #1619) rather than left decorative.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionConfig {
-    /// Compaction strategy to use
-    pub strategy: CompactionStrategy,
-
-    /// Maximum number of SSTables before triggering compaction
-    pub max_sstables: usize,
-
-    /// Size ratio for triggering compaction
-    pub size_ratio: f64,
-
-    /// Maximum compaction threads
-    pub max_threads: usize,
-
-    /// Compaction interval for background compaction
-    pub background_interval: Duration,
-
-    /// Enable automatic background compaction
+    /// Enable automatic (STCS) compaction. When `false`, the write engine
+    /// installs no merge policy and `maintenance_step` is a no-op.
     pub auto_compaction: bool,
 }
 
 impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
-            strategy: CompactionStrategy::Leveled,
-            max_sstables: 10,
-            size_ratio: 2.0,
-            max_threads: 2,
-            background_interval: Duration::from_secs(300), // 5 minutes
             auto_compaction: true,
         }
     }
@@ -565,17 +554,6 @@ impl Default for CompressionConfig {
     }
 }
 
-/// Compaction strategies
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum CompactionStrategy {
-    /// Simple size-based compaction
-    Size,
-    /// Leveled compaction (like LevelDB)
-    Leveled,
-    /// Universal compaction
-    Universal,
-}
-
 /// Durability sync modes
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SyncMode {
@@ -666,7 +644,6 @@ impl Config {
 
         // Reduce timeouts for faster test execution
         config.query.max_execution_time = std::time::Duration::from_secs(1);
-        config.storage.compaction.background_interval = std::time::Duration::from_secs(10);
 
         // Smaller memory usage for tests
         config.memory.max_memory = 64 * 1024 * 1024; // 64MB

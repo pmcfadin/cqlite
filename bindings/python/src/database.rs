@@ -816,6 +816,13 @@ pub fn open(
 
     let core_config = config_from_py(py, config)?;
 
+    // Capture the compaction settings before `core_config` is moved into
+    // ingestion / Database::open, so the write engine can honor
+    // `config={"storage": {"compaction": {"auto_compaction": false}}}` (issue
+    // #1619). This makes `Config.storage.compaction` authoritative for the
+    // Python write path rather than decorative.
+    let compaction_config = core_config.storage.compaction.clone();
+
     // Open the read-side database and capture the schema registry when present.
     // We always use ingestion when a schema file is provided because that path
     // performs the SSTable discovery and populates the schema registry.
@@ -884,7 +891,8 @@ pub fn open(
             wd.join("data"),
             wd.join("wal"),
             table_schema,
-        );
+        )
+        .with_compaction_config(&compaction_config);
 
         let engine = cqlite_core::storage::write_engine::WriteEngine::new(engine_config)
             .map_err(to_py_err)?;
@@ -892,7 +900,7 @@ pub fn open(
         Some(Mutex::new(PyWriteEngine::new(engine)))
     } else {
         // Silence unused-variable warning
-        let _ = (write_dir, schema_registry_opt);
+        let _ = (write_dir, schema_registry_opt, compaction_config);
         None
     };
 
