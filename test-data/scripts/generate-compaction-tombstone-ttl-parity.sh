@@ -240,6 +240,15 @@ insert_rt_cross_gen() {
   cql "INSERT INTO rt_cross_gen (id, ck, v) VALUES (1, 5, 'a-1-5') USING TIMESTAMP $T_A"
   cql "DELETE FROM rt_cross_gen USING TIMESTAMP $T_DEL WHERE id = 1 AND ck >= 10 AND ck <= 20"
   flush_ks
+  # localDeletionTime is second-granularity WALL CLOCK (not pinned by USING
+  # TIMESTAMP). The cross-generation RT-merge byte-parity test reads the two
+  # range-tombstone LDTs out of the golden and stamps CQLite's two inputs with
+  # DISTINCT LDTs (ldts[0] != ldts[1]); the strict fixture guard likewise asserts
+  # two distinct LDTs. Without this pause the two back-to-back DELETEs can land in
+  # the SAME wall-clock second, collapsing to a single LDT and failing a valid
+  # regeneration. Sleep >1s so the group-B RT LDT is deterministically a later
+  # second than group A's (issue #1387 wall-clock-race fix).
+  run sleep 2
   log "=== rt_cross_gen: group B (overlapping range [15,25] + live row) ==="
   cql "INSERT INTO rt_cross_gen (id, ck, v) VALUES (1, 30, 'b-1-30') USING TIMESTAMP $T_B"
   cql "DELETE FROM rt_cross_gen USING TIMESTAMP $((T_DEL + 1)) WHERE id = 1 AND ck >= 15 AND ck <= 25"
