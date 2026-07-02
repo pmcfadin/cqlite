@@ -24,7 +24,7 @@
 #                     Labels: basic-primitives, collections, udt,
 #                             static-columns, ttl,
 #                             cell-delete, row-delete, range-tombstone,
-#                             partition-tombstone
+#                             partition-tombstone, wal-recovered
 #   --bin PATH        Path to a pre-built cqlite binary.
 #   --self-test       Run a negative self-test that proves a value in the
 #                     wrong column causes verification to FAIL, then exit.
@@ -448,6 +448,7 @@ generate_mutations() {
     row-delete)          gen_row_delete        "$out_jsonl" "$out_spec" ;;
     range-tombstone)     gen_range_tombstone   "$out_jsonl" "$out_spec" ;;
     partition-tombstone) gen_partition_tombstone "$out_jsonl" "$out_spec" ;;
+    wal-recovered)       gen_wal_recovered     "$out_jsonl" "$out_spec" ;;
     *) fail "Unknown table label: $label" ;;
   esac
 }
@@ -1091,6 +1092,101 @@ with open(jsonl_path, "w") as f, open(spec_path, "w") as sf:
 PY
 }
 
+# ----- WAL-recovery generator (Issue #1395) -----------------------------
+#
+# The recovered set deliberately spans three liveness classes so that a
+# replay bug that corrupts ordering / timestamps / liveness would surface
+# as a Cassandra readback divergence rather than being silently tolerated
+# by CQLite's own reader:
+#   Row A — plain live cells (survivor).
+#   Row B — a TTL cell (WriteWithTtl); it must read back its value (the TTL
+#           is far in the future, so it has NOT expired).
+#   Row C — a cell tombstone: 'age' is written then cell-deleted at a higher
+#           timestamp, so it must read back absent (absence directive asserted).
+# Row count stays 3 (only a cell is deleted, no partition/row is removed).
+#
+# The crash/replay flow itself is driven by write_and_export_recovered()
+# below — this generator only produces the mutation JSONL + verifier spec,
+# exactly like the clean-engine generators.
+gen_wal_recovered() {
+  local jsonl="$1" spec="$2"
+  py_run "$jsonl" "$spec" <<'PY'
+import json, sys
+jsonl_path, spec_path = sys.argv[1], sys.argv[2]
+WRITE_TS  = 1704067200000000  # 2024-01-01T00:00:00Z
+DELETE_TS = 1704067200000001  # +1 µs: cell tombstone wins over the write
+TTL_SECS  = 86400             # 1 day: TTL cell stays live for the whole CI run
+
+def uuid_bytes(hexstr):
+    return [int(hexstr[i:i+2], 16) for i in range(0, 32, 2)]
+
+def cql(hexstr):
+    return "-".join([hexstr[0:8], hexstr[8:12], hexstr[12:16],
+                     hexstr[16:20], hexstr[20:32]])
+
+ROW_A = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"  # plain survivor
+ROW_B = "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"  # TTL cell
+ROW_C = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"  # cell tombstone
+
+def base(hexstr, ops, ts, ttl=None):
+    return {
+        "table": {"keyspace": "test_basic", "table": "simple_table"},
+        "partition_key": {"columns": [["id", {"Uuid": uuid_bytes(hexstr)}]]},
+        "clustering_key": None,
+        "operations": ops,
+        "timestamp_micros": ts,
+        "ttl_seconds": ttl,
+        "partition_tombstone": None,
+        "range_tombstones": [],
+    }
+
+with open(jsonl_path, "w") as f, open(spec_path, "w") as sf:
+    sf.write("row_count=3\n")
+
+    # Row A: plain live cells (survivor)
+    f.write(json.dumps(base(ROW_A, [
+        {"Write": {"column": "name",   "value": {"Text":    "RecoverAlice"}}},
+        {"Write": {"column": "age",    "value": {"Integer": 30}}},
+        {"Write": {"column": "active", "value": {"Boolean": True}}},
+    ], WRITE_TS)) + "\n")
+
+    # Row B: TTL cell on 'name' (still live), plain 'age'
+    f.write(json.dumps(base(ROW_B, [
+        {"WriteWithTtl": {"column": "name",
+                          "value": {"Text": "Ttl-Bob"},
+                          "ttl_seconds": TTL_SECS}},
+        {"Write": {"column": "age",    "value": {"Integer": 31}}},
+        {"Write": {"column": "active", "value": {"Boolean": True}}},
+    ], WRITE_TS, ttl=TTL_SECS)) + "\n")
+
+    # Row C: write name/age/active, then cell-delete 'age' at a higher timestamp
+    f.write(json.dumps(base(ROW_C, [
+        {"Write": {"column": "name",   "value": {"Text":    "RecoverCharlie"}}},
+        {"Write": {"column": "age",    "value": {"Integer": 32}}},
+        {"Write": {"column": "active", "value": {"Boolean": True}}},
+    ], WRITE_TS)) + "\n")
+    f.write(json.dumps(base(ROW_C, [
+        {"Delete": {"column": "age"}},
+    ], DELETE_TS)) + "\n")
+
+    a, b, c = cql(ROW_A), cql(ROW_B), cql(ROW_C)
+
+    sf.write(f"row.id={a}\n")
+    sf.write(f'col[{a}].name={json.dumps("RecoverAlice")}\n')
+    sf.write(f"col[{a}].age={json.dumps(30)}\n")
+    sf.write(f"col[{a}].active={json.dumps(True)}\n")
+
+    sf.write(f"row.id={b}\n")
+    sf.write(f'col[{b}].name={json.dumps("Ttl-Bob")}\n')  # TTL cell, still live
+    sf.write(f"col[{b}].age={json.dumps(31)}\n")
+
+    sf.write(f"row.id={c}\n")
+    sf.write(f'col[{c}].name={json.dumps("RecoverCharlie")}\n')
+    sf.write(f"col[{c}].active={json.dumps(True)}\n")
+    sf.write(f"absent_col[{c}].age\n")  # cell tombstone: 'age' must be absent
+PY
+}
+
 # ----- SSTable export and copy ------------------------------------------
 write_and_export() {
   local label="$1" ks="$2" tbl="$3" schema="$4" mutations="$5"
@@ -1118,6 +1214,59 @@ write_and_export() {
   local sstdir="$exportdir/$ks/$tbl"
   ls "$sstdir"/nb-*-big-Data.db >/dev/null 2>&1 \
     || fail "[$label] No Data.db produced under $sstdir"
+  printf '%s' "$sstdir"
+}
+
+# ----- WAL-recovery write path (Issue #1395) ----------------------------
+# Unlike write_and_export (which flushes with a clean engine in one shot),
+# this driver produces an SSTable from a WAL-RECOVERED memtable so that the
+# recovery path is validated by Cassandra readback:
+#
+#   Phase 1 (simulated crash): apply the mutations WITHOUT --flush. The CLI
+#     process appends to the WAL, then exits, dropping the in-memory memtable
+#     — exactly a crash between write-ack and flush. No SSTable exists yet.
+#   Phase 2 (recovery): a fresh CLI invocation reopens the same write-dir.
+#     WriteEngine::new replays the WAL into a new memtable, then --flush
+#     writes the recovered SSTable (this also truncates the WAL).
+#   Phase 3 (export): export the recovered-then-flushed SSTable as usual.
+write_and_export_recovered() {
+  local label="$1" ks="$2" tbl="$3" schema="$4" mutations="$5"
+  local writedir="$WORKDIR/$label/wd"
+  local exportdir="$WORKDIR/$label/export"
+  mkdir -p "$writedir" "$exportdir"
+
+  # --- Phase 1: apply mutations, NO flush, drop the engine (simulated crash) ---
+  log "[$label] crash sim: cqlite apply mutations (NO flush; engine dropped) ($mutations)"
+  "$CQLITE_BIN" \
+    --writable --write-dir "$writedir" \
+    --schema "$schema" \
+    --mutations-file "$mutations" 1>&2
+
+  # Invariant: nothing was flushed, so no Data.db may exist yet. If one does,
+  # the crash was not actually simulated (and the lane would not exercise
+  # recovery), so fail loudly.
+  if find "$writedir/data" -name 'nb-*-big-Data.db' 2>/dev/null | grep -q .; then
+    fail "[$label] crash-sim invariant violated: an SSTable was flushed before recovery"
+  fi
+
+  # --- Phase 2: reopen (WAL replay repopulates the memtable) then flush ---
+  log "[$label] recovery: reopen write-dir (WAL replay) + flush"
+  "$CQLITE_BIN" \
+    --writable --write-dir "$writedir" \
+    --schema "$schema" \
+    --flush 1>&2
+
+  # --- Phase 3: export the recovered-then-flushed SSTable ---
+  log "[$label] cqlite export-sstable (recovered SSTable) -> $exportdir"
+  "$CQLITE_BIN" \
+    --writable --write-dir "$writedir" \
+    --schema "$schema" \
+    export-sstable "$exportdir" \
+    --keyspace "$ks" --table "$tbl" 1>&2
+
+  local sstdir="$exportdir/$ks/$tbl"
+  ls "$sstdir"/nb-*-big-Data.db >/dev/null 2>&1 \
+    || fail "[$label] No Data.db produced under $sstdir (recovery flush failed)"
   printf '%s' "$sstdir"
 }
 
@@ -1272,8 +1421,15 @@ process_table() {
   fi
   log "[$label] Table is empty after TRUNCATE"
 
+  # The wal-recovered lane (Issue #1395) builds its SSTable from a
+  # WAL-recovered memtable (crash → replay → flush) instead of a clean-engine
+  # single-shot flush, so that the recovery path is validated by Cassandra.
   local sstdir
-  sstdir="$(write_and_export "$label" "$ks" "$tbl" "$schema_file" "$mutations")"
+  if [[ "$label" == "wal-recovered" ]]; then
+    sstdir="$(write_and_export_recovered "$label" "$ks" "$tbl" "$schema_file" "$mutations")"
+  else
+    sstdir="$(write_and_export "$label" "$ks" "$tbl" "$schema_file" "$mutations")"
+  fi
 
   local uuid_nodash
   uuid_nodash="$(get_table_uuid_nodash "$ks" "$tbl")" \
@@ -1326,6 +1482,11 @@ declare -a TEST_MATRIX=(
   "row-delete|test_basic|static_columns_table|basic-types.cql|partition_key"
   "range-tombstone|test_basic|static_columns_table|basic-types.cql|partition_key"
   "partition-tombstone|test_basic|simple_table|basic-types.cql|id"
+  # WAL crash-recovery coverage (Issue #1395): the SSTable is built from a
+  # WAL-recovered memtable (write → simulated crash → replay → flush), and it
+  # carries a TTL cell and a cell tombstone so a lossy/misordered replay is
+  # caught by Cassandra readback.
+  "wal-recovered|test_basic|simple_table|basic-types.cql|id"
 )
 
 selected_for_run() {

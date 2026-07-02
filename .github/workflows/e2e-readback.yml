@@ -27,7 +27,7 @@ on:
   workflow_dispatch:
     inputs:
       tables:
-        description: 'Comma-separated table subset (default: all). Labels: basic-primitives,collections,udt,static-columns,ttl'
+        description: 'Comma-separated table subset (default: all). Labels: basic-primitives,collections,udt,static-columns,ttl,cell-delete,row-delete,range-tombstone,partition-tombstone,wal-recovered'
         required: false
         default: ''
       keep_running:
