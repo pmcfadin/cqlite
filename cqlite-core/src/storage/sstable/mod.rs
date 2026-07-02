@@ -68,7 +68,12 @@ use self::tombstone_merger::{EntryMetadata, GenerationValue, TombstoneMerger};
 use crate::platform::Platform;
 #[cfg(not(feature = "tombstones"))]
 use crate::types::CellWriteMetadata;
-use crate::{types::TableId, Config, Result, RowCells, RowKey, ScanRow, Value};
+use crate::{types::TableId, Config, Result, RowKey, ScanRow};
+// `RowCells`/`Value` are only referenced by the write-support merge read path
+// (`merge_generations_for_read` and the metadata scan); gate the import so the
+// minimal build does not flag them unused (issue #1334).
+#[cfg(feature = "write-support")]
+use crate::{RowCells, Value};
 
 /// Maximum directory depth when scanning for SSTable files.
 ///

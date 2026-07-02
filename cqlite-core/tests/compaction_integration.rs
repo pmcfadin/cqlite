@@ -458,7 +458,8 @@ fn compaction_3_sstables_read_back_correctness() {
     );
 
     // Build a map of raw PK bytes → Value for per-PK assertions.
-    let result_map: HashMap<Vec<u8>, Value> = results.into_iter().map(|(k, v)| (k.0, v)).collect();
+    let result_map: HashMap<Vec<u8>, ScanRow> =
+        results.into_iter().map(|(k, v)| (k.0, v)).collect();
 
     // Issue #505: PK 1..=5 must be ABSENT — row-deleted by SSTable C at ts=300.
     for id in 1_i32..=5 {
@@ -506,7 +507,7 @@ fn compaction_3_sstables_read_back_correctness() {
                     }
                 }
             }
-            Value::Tombstone(_) => {
+            ScanRow::Marker(Value::Tombstone(_)) => {
                 panic!("PK=11 row should be live (only score is deleted) but returned Tombstone");
             }
             _ => {
@@ -594,7 +595,8 @@ fn compaction_3_sstables_tombstone_shadowing() {
         .block_on(manager.scan(&table_id, None, None, None, Some(&schema)))
         .expect("post-compaction scan must not error");
 
-    let result_map: HashMap<Vec<u8>, Value> = results.into_iter().map(|(k, v)| (k.0, v)).collect();
+    let result_map: HashMap<Vec<u8>, ScanRow> =
+        results.into_iter().map(|(k, v)| (k.0, v)).collect();
 
     // PK 1..=5 must be absent (row-deleted by C at ts=300).
     for id in 1_i32..=5 {
@@ -621,7 +623,7 @@ fn compaction_3_sstables_tombstone_shadowing() {
                     }
                 }
             }
-            Value::Tombstone(_) => {
+            ScanRow::Marker(Value::Tombstone(_)) => {
                 panic!("PK=11 row should be live (only score is deleted) but returned Tombstone");
             }
             _ => {
@@ -756,7 +758,8 @@ fn row_tombstone_shadows_live_row_after_compaction() {
         row_count
     );
 
-    let result_map: HashMap<Vec<u8>, Value> = results.into_iter().map(|(k, v)| (k.0, v)).collect();
+    let result_map: HashMap<Vec<u8>, ScanRow> =
+        results.into_iter().map(|(k, v)| (k.0, v)).collect();
 
     // PK=1 must be ABSENT: the row tombstone at ts=300 shadows the live row at ts=100.
     let key_1: Vec<u8> = 1_i32.to_be_bytes().into();
@@ -921,7 +924,8 @@ fn row_deletion_coexists_with_newer_cell_after_compaction() {
         .block_on(manager.scan(&table_id, None, None, None, Some(&schema)))
         .expect("post-compaction scan");
 
-    let result_map: HashMap<Vec<u8>, Value> = results.into_iter().map(|(k, v)| (k.0, v)).collect();
+    let result_map: HashMap<Vec<u8>, ScanRow> =
+        results.into_iter().map(|(k, v)| (k.0, v)).collect();
 
     let key_7: Vec<u8> = 7_i32.to_be_bytes().into();
     let pk7 = result_map.get(&key_7).unwrap_or_else(|| {
@@ -1077,7 +1081,8 @@ fn test_real_merger_delete_wins_at_equal_timestamp() {
         .block_on(manager.scan(&table_id, None, None, None, Some(&schema)))
         .expect("post-compaction scan");
 
-    let result_map: HashMap<Vec<u8>, Value> = results.into_iter().map(|(k, v)| (k.0, v)).collect();
+    let result_map: HashMap<Vec<u8>, ScanRow> =
+        results.into_iter().map(|(k, v)| (k.0, v)).collect();
 
     // PK=1 must be ABSENT: equal-timestamp tombstone wins (Cassandra reconcile).
     let key_1: Vec<u8> = 1_i32.to_be_bytes().into();
@@ -1208,10 +1213,11 @@ fn disjoint_columns_survive_compaction() {
         .block_on(manager.scan(&table_id, None, None, None, Some(&schema)))
         .expect("post-compaction scan");
 
-    let result_map: HashMap<Vec<u8>, Value> = results.into_iter().map(|(k, v)| (k.0, v)).collect();
+    let result_map: HashMap<Vec<u8>, ScanRow> =
+        results.into_iter().map(|(k, v)| (k.0, v)).collect();
 
     // Helper: extract a named text/int column from a row's Value::Map.
-    fn find_col<'a>(row: &'a Value, col: &str) -> Option<&'a Value> {
+    fn find_col<'a>(row: &'a ScanRow, col: &str) -> Option<&'a Value> {
         match row {
             // Issue #1334: rows decode to `ScanRow::Row` keyed by `Arc<str>`.
             ScanRow::Row(cells) => {

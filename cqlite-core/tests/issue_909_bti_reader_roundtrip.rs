@@ -212,7 +212,7 @@ async fn open_reader(data_path: &Path, schema: &TableSchema) -> SSTableReader {
 }
 
 /// Extract the `payload` column text from a row `Value::Map`.
-fn payload_of(value: &Value) -> Option<String> {
+fn payload_of(value: &ScanRow) -> Option<String> {
     // Issue #1334: rows decode to `ScanRow::Row` keyed by `Arc<str>`.
     if let ScanRow::Row(entries) = value {
         for (k, v) in entries {
@@ -234,7 +234,7 @@ fn payload_of(value: &Value) -> Option<String> {
 /// synthetic `clustering_key`. Both carry the same integer value, so we accept
 /// either name (the column-naming difference is orthogonal to #909's RowsOffset
 /// resolution being exercised here).
-fn ck_of(value: &Value) -> Option<i32> {
+fn ck_of(value: &ScanRow) -> Option<i32> {
     // Issue #1334: rows decode to `ScanRow::Row` keyed by `Arc<str>`.
     if let ScanRow::Row(entries) = value {
         for (k, v) in entries {
@@ -289,7 +289,7 @@ async fn bti_writer_reader_full_scan_roundtrip() {
     let wide_payload = "x".repeat(WIDE_PAYLOAD);
 
     // Narrow partition: exactly one row with the small payload.
-    let narrow_rows: Vec<&Value> = rows
+    let narrow_rows: Vec<&ScanRow> = rows
         .iter()
         .filter(|(_k, v)| payload_of(v).as_ref() == Some(&narrow_payload))
         .map(|(_k, v)| v)

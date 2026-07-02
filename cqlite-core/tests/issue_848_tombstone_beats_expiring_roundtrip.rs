@@ -113,7 +113,7 @@ fn delete_v(id: i32, ts: i64) -> Mutation {
     Mutation::new(TableId::new(KS, TBL), pk, None, ops, ts, None)
 }
 
-fn col<'a>(row: &'a Value, name: &str) -> Option<&'a Value> {
+fn col<'a>(row: &'a ScanRow, name: &str) -> Option<&'a Value> {
     match row {
         // Issue #1334: rows decode to `ScanRow::Row` keyed by `Arc<str>`.
         ScanRow::Row(cells) => {
