@@ -19,6 +19,10 @@ pub enum TicketError {
     /// The ticket bytes were not valid UTF-8 JSON or did not match the schema.
     #[error("invalid flight ticket: {0}")]
     Decode(#[from] serde_json::Error),
+    /// A path-bearing field (`keyspace`/`table`/`snapshot`) failed path-safety
+    /// validation (issue #1430) — e.g. `../` traversal or an absolute component.
+    #[error("invalid flight ticket field: {0}")]
+    InvalidField(#[from] crate::pathsafe::PathSafetyError),
 }
 
 /// Current ticket wire-format version. Bump when the JSON contract changes in a
@@ -281,8 +285,30 @@ impl Default for FlightTicket {
 
 impl FlightTicket {
     /// Parse a ticket from its on-the-wire JSON bytes.
+    ///
+    /// Rejects tickets whose path-bearing fields (`keyspace`/`table`/`snapshot`)
+    /// would traverse out of or replace the server's data directory (issue #1430)
+    /// — this is the PRIMARY guard against path-traversal / arbitrary-file
+    /// disclosure.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, TicketError> {
-        Ok(serde_json::from_slice(bytes)?)
+        let ticket: Self = serde_json::from_slice(bytes)?;
+        ticket.validate()?;
+        Ok(ticket)
+    }
+
+    /// Validate the path-bearing fields against the path-safety grammar.
+    ///
+    /// `keyspace`/`table` must be Cassandra unquoted identifiers
+    /// (`[A-Za-z0-9_]+`); `snapshot`, when present, additionally allows `-`. This
+    /// inherently rejects `.`, `/`, `\`, NUL, and absolute paths, so no field can
+    /// escape the data directory when joined as a path component.
+    pub fn validate(&self) -> Result<(), TicketError> {
+        crate::pathsafe::validate_identifier("keyspace", &self.keyspace)?;
+        crate::pathsafe::validate_identifier("table", &self.table)?;
+        if let Some(snapshot) = &self.snapshot {
+            crate::pathsafe::validate_snapshot(snapshot)?;
+        }
+        Ok(())
     }
 
     /// Serialize this ticket to its on-the-wire JSON bytes.
@@ -436,6 +462,44 @@ mod tests {
         // Missing required field `ddl`.
         let missing = json!({"keyspace": "k", "table": "t"}).to_string();
         assert!(FlightTicket::from_bytes(missing.as_bytes()).is_err());
+    }
+
+    // ---- Issue #1430: path-traversal / absolute-path field rejection ----
+
+    #[test]
+    fn rejects_path_traversal_and_absolute_fields() {
+        // Each malicious ticket must be rejected at parse time.
+        let cases: Vec<serde_json::Value> = vec![
+            json!({"keyspace": "a/../b", "table": "t", "ddl": "d"}),
+            json!({"keyspace": "", "table": "t", "ddl": "d"}),
+            json!({"keyspace": "/abs", "table": "t", "ddl": "d"}),
+            json!({"keyspace": "k", "table": "../x", "ddl": "d"}),
+            json!({"keyspace": "k", "table": "t", "ddl": "d", "snapshot": "../y"}),
+            json!({"keyspace": "k", "table": "t", "ddl": "d", "snapshot": "/etc/passwd"}),
+            json!({"keyspace": "k\u{0000}b", "table": "t", "ddl": "d"}),
+            json!({"keyspace": "a.b", "table": "t", "ddl": "d"}),
+        ];
+        for c in cases {
+            let raw = c.to_string();
+            assert!(
+                FlightTicket::from_bytes(raw.as_bytes()).is_err(),
+                "malicious ticket must be rejected: {raw}"
+            );
+        }
+
+        // A fully-valid ticket (identifier keyspace/table + hyphenated snapshot)
+        // must still parse successfully.
+        let ok = json!({
+            "keyspace": "test_basic",
+            "table": "simple_table",
+            "ddl": "CREATE TABLE test_basic.simple_table (id uuid PRIMARY KEY, name text)",
+            "snapshot": "cqlite-abc"
+        })
+        .to_string();
+        assert!(
+            FlightTicket::from_bytes(ok.as_bytes()).is_ok(),
+            "valid ticket must still parse"
+        );
     }
 
     #[test]
