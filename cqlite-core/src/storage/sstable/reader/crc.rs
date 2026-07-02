@@ -239,6 +239,90 @@ mod tests {
         }
     }
 
+    /// R1 (issue #1396): parse a REAL Cassandra-written `CRC.db` from an
+    /// uncompressed BIG fixture and assert the parsed chunk-size header is
+    /// Cassandra's 65536 AND every per-chunk CRC32 byte-agrees with the CRC32
+    /// recomputed over the corresponding raw `chunk_size` block of that fixture's
+    /// `Data.db`. This is the no-heuristics anchor — verification consumes the
+    /// authoritative `CRC.db` bytes, not inferred-from-content values.
+    ///
+    /// Fixture-gated: skip-clean when the dataset binaries are absent.
+    #[tokio::test]
+    async fn parses_real_cassandra_crc_db_and_byte_agrees_with_data_db() {
+        use std::path::PathBuf;
+
+        // Locate the datasets root (CQLITE_DATASETS_ROOT or the repo's test-data).
+        let root = std::env::var("CQLITE_DATASETS_ROOT")
+            .ok()
+            .map(PathBuf::from)
+            .filter(|p| p.is_dir())
+            .or_else(|| {
+                let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()?
+                    .join("test-data/datasets");
+                p.is_dir().then_some(p)
+            });
+        let Some(root) = root else {
+            eprintln!("SKIP: no datasets root for the real CRC.db byte-agreement test.");
+            return;
+        };
+
+        // Find any uncompressed_table-*/nb-1-big-CRC.db with its Data.db present
+        // (Cassandra writes CRC.db for every uncompressed BIG SSTable).
+        let mut found: Option<(PathBuf, PathBuf)> = None;
+        for ks in ["test_basic", "test_comp"] {
+            let base = root.join("sstables").join(ks);
+            let Ok(rd) = std::fs::read_dir(&base) else {
+                continue;
+            };
+            for entry in rd.flatten() {
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else { continue };
+                if !name.starts_with("uncompressed_table-") {
+                    continue;
+                }
+                let crc = entry.path().join("nb-1-big-CRC.db");
+                let data = entry.path().join("nb-1-big-Data.db");
+                if crc.is_file() && data.is_file() {
+                    found = Some((crc, data));
+                    break;
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+        let Some((crc_path, data_path)) = found else {
+            eprintln!("SKIP: no Cassandra-written uncompressed_table CRC.db+Data.db fixture found.");
+            return;
+        };
+
+        let crc = CrcDb::open(&crc_path).await.expect("parse real CRC.db");
+        assert_eq!(
+            crc.chunk_size(),
+            65536,
+            "Cassandra uncompressed CRC.db chunk size must be 65536 (0x00010000)"
+        );
+
+        let data = tokio::fs::read(&data_path).await.expect("read Data.db");
+        let cs = crc.chunk_size() as usize;
+        let expected_chunks = data.len().div_ceil(cs);
+        assert!(
+            crc.chunk_count() >= expected_chunks,
+            "CRC.db must have at least one entry per Data.db chunk ({} >= {})",
+            crc.chunk_count(),
+            expected_chunks
+        );
+        for (i, block) in data.chunks(cs).enumerate() {
+            let recomputed = crc32fast::hash(block);
+            assert_eq!(
+                crc.crc_for_chunk(i).unwrap(),
+                recomputed,
+                "chunk {i}: stored CRC.db value must byte-agree with CRC32 over the raw Data.db chunk"
+            );
+        }
+    }
+
     /// Compaction trailer (issue #1222) appends one trailing `0` entry; the reader
     /// exposes it as an extra entry that a real read never dereferences.
     #[tokio::test]
