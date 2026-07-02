@@ -524,6 +524,11 @@ pub(crate) fn build_typed_value_array(
                     let v = unwrap_frozen_value(*opt)?;
                     Some(match v {
                         Value::Float32(f) => Ok(Some(*f)),
+                        // A CQL `float` (32-bit) may be carried as the wider
+                        // `Value::Float` (f64) by the decode path; narrow it
+                        // back (lossless for genuine f32 values), mirroring the
+                        // Double arm which accepts both float variants.
+                        Value::Float(f) => Ok(Some(*f as f32)),
                         Value::Null => Ok(None),
                         other => Err(ArrowConvertError::InvalidValue(format!(
                             "expected Float value in element, got {:?}",
@@ -1367,6 +1372,10 @@ fn build_float32_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, 
         .map(|row| match row.values.get(col.name.as_str()) {
             None => Ok(None),
             Some(Value::Float32(f)) => Ok(Some(*f)),
+            // A CQL `float` (32-bit) may be carried as the wider `Value::Float`
+            // (f64) by the decode path; narrow it back (lossless for genuine
+            // f32 values), mirroring build_float64_array which accepts both.
+            Some(Value::Float(f)) => Ok(Some(*f as f32)),
             Some(Value::Null) => Ok(None),
             Some(other) => Err(ArrowConvertError::InvalidValue(format!(
                 "column '{}': expected Float value, got {:?}",
@@ -1895,5 +1904,37 @@ mod tests {
             .expect("Int32Array");
         assert_eq!(arr.value(0), 42);
         assert_eq!(arr.null_count(), 0);
+    }
+
+    /// (6) Regression: a CQL `float` (32-bit) column whose value is carried as
+    /// the wider `Value::Float` (f64) by the decode path must convert (narrowed
+    /// to f32), NOT be rejected as a type mismatch. Real data (e.g. a `height`
+    /// float column) surfaces `Value::Float`; the old silent `_ => None`
+    /// dropped it to NULL. Covers both the typed and flat float32 arms.
+    #[test]
+    fn float32_column_accepts_wide_float_value() {
+        // Flat path (cql_type = None -> build_float32_array).
+        let flat = vec![col("h", DataType::Float32, None)];
+        let rows = vec![row_one("h", Value::Float(1.84f32 as f64))];
+        let batch = rows_to_record_batch(&flat, &rows).expect("wide float must narrow, not error");
+        let arr = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .expect("Float32Array");
+        assert_eq!(arr.value(0), 1.84f32);
+        assert_eq!(arr.null_count(), 0);
+
+        // Typed high-fidelity path (CqlType::Float -> build_typed_value_array).
+        let typed = vec![col("h", DataType::Float32, Some(CqlType::Float))];
+        let rows = vec![row_one("h", Value::Float(1.84f32 as f64))];
+        let batch =
+            rows_to_record_batch(&typed, &rows).expect("wide float (typed) must narrow, not error");
+        let arr = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .expect("Float32Array");
+        assert_eq!(arr.value(0), 1.84f32);
     }
 }
