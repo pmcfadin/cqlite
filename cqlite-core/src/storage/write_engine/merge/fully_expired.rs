@@ -14,8 +14,9 @@
 //! whole point of the optimization (dropping must not pay a scan) and the
 //! no-heuristics-compliant path. Trust in `Statistics.db` is already load-bearing
 //! across the write engine (`compute_baseline_min`, `compute_max_purgeable_timestamp`).
-
-#![cfg(feature = "write-support")]
+//!
+//! The whole module is gated `#[cfg(feature = "write-support")]` at its `mod`
+//! declaration in the parent, so no inner `#![cfg]` is needed here.
 
 use std::path::{Path, PathBuf};
 
@@ -87,21 +88,36 @@ fn read_timestamp_stats(data_path: &Path) -> Option<TimestampStatistics> {
 /// 1. **Fully expired** — `max_deletion_time < gc_before_secs` (see
 ///    [`is_fully_expired`]).
 /// 2. **Overlap-safe** — its `max_timestamp` is STRICTLY LESS THAN the minimum
-///    write timestamp across every OUTSIDE overlapping SSTable, so nothing it holds
-///    (tombstone or data) can shadow older data living outside the compaction set
-///    (dropping it can never resurrect data). The outside bound is the identical
-///    coarse global-`min_timestamp` bound [`compute_max_purgeable_timestamp`]
-///    computes (issue #935 gate; OQ-2 → (A), key-range precision deferred).
+///    write timestamp across every overlapping SSTable that is NOT itself
+///    fully-expired: both the OUTSIDE overlapping SSTables (`outside_paths`) AND
+///    the NON-EXPIRED inputs of THIS compaction. If the candidate's newest write
+///    predates all of them, nothing it holds (tombstone or data) can shadow live
+///    data that would otherwise survive, so dropping it can never resurrect data.
+///    Mirrors Cassandra `CompactionController.getFullyExpiredSSTables`, which folds
+///    the min write timestamp of the non-fully-expired *compacting* SSTables into
+///    the same overlap bound as the non-compacting overlapping ones. The
+///    non-compacting bound reuses [`compute_max_purgeable_timestamp`] (the coarse
+///    global-`min_timestamp` #935 gate; OQ-2 → (A), key-range precision deferred).
+///
+/// A non-expired INPUT is included in the bound because dropping a fully-expired
+/// SSTable whose tombstone shadows an OLDER live cell in a *co-compacting* input
+/// would resurrect that cell: the tombstone (dropped) no longer purges it, and the
+/// co-input's live cell is merged into the output. (A fully-expired co-input is NOT
+/// folded in: its own data is past `gcBefore` and would be purged anyway, so a
+/// tombstone shadowing it can never resurrect surviving data.)
 ///
 /// Conservatism (never resurrect data, never drop live data):
 /// - `gc_before_secs == None` (invalid/absent gc_grace disables purging) ⇒ empty
 ///   drop-set.
-/// - An empty `outside_paths` (a FULL/major compaction: nothing outside to shadow)
-///   ⇒ the overlap bound is `+inf` ⇒ every fully-expired candidate is droppable.
+/// - An empty `outside_paths` AND no non-expired inputs (e.g. a FULL/major
+///   compaction of only-expired SSTables) ⇒ the bound is `+inf` ⇒ every candidate
+///   is droppable.
 /// - A non-empty `outside_paths` whose bound is UNKNOWN
 ///   (`compute_max_purgeable_timestamp` returned `None` because an outside
 ///   `Statistics.db` was unreadable) ⇒ empty drop-set (cannot prove safety).
-/// - A candidate whose own `Statistics.db` is absent/unreadable ⇒ not droppable.
+/// - A candidate whose own `Statistics.db` is absent/unreadable ⇒ not droppable
+///   (it is treated as non-expired, and its `min_timestamp` is unknown, so it also
+///   cannot lower the bound — the whole drop-set is disabled to stay safe).
 ///
 /// The returned paths are a subset of `input_paths`, in input order.
 pub fn fully_expired_sstables(
@@ -115,11 +131,20 @@ pub fn fully_expired_sstables(
         return Vec::new();
     };
 
-    // Overlap bound. An empty outside set (full/major compaction) has nothing to
-    // shadow ⇒ +inf bound (i64::MAX): every fully-expired candidate is droppable.
-    // A non-empty outside set with an UNKNOWN bound (an outside Statistics.db could
-    // not be read/parsed) ⇒ we cannot prove safety ⇒ drop nothing.
-    let outside_bound: i64 = if outside_paths.is_empty() {
+    // Read each input's timestamp stats ONCE. A candidate whose own Statistics.db
+    // is unreadable is treated as non-expired (not droppable) AND, because its
+    // min_timestamp is then unknown, it cannot be safely folded into the overlap
+    // bound — so an unreadable INPUT disables the whole drop-set (conservative).
+    let mut input_stats: Vec<(&PathBuf, Option<TimestampStatistics>)> =
+        Vec::with_capacity(input_paths.len());
+    for p in input_paths {
+        input_stats.push((p, read_timestamp_stats(p)));
+    }
+
+    // Outside overlap bound (non-compacting overlapping SSTables). An empty outside
+    // set contributes +inf; a non-empty set with an UNKNOWN bound (an outside
+    // Statistics.db unreadable) ⇒ cannot prove safety ⇒ drop nothing.
+    let mut overlap_bound: i64 = if outside_paths.is_empty() {
         i64::MAX
     } else {
         match compute_max_purgeable_timestamp(outside_paths) {
@@ -128,17 +153,31 @@ pub fn fully_expired_sstables(
         }
     };
 
-    input_paths
-        .iter()
-        .filter(|data_path| {
-            let Some(stats) = read_timestamp_stats(data_path) else {
-                // Unknown candidate metadata ⇒ not droppable.
-                return false;
-            };
-            // Fully expired AND provably shadows nothing outside the set.
-            is_fully_expired(&stats, gc_before) && stats.max_timestamp < outside_bound
+    // Fold in the min write timestamp of every NON-EXPIRED input of THIS
+    // compaction (Cassandra parity). A fully-expired input does not constrain the
+    // bound (its own data is past gcBefore and purged anyway). An input whose
+    // stats could not be read is NON-expired with an UNKNOWN min_timestamp, which
+    // we cannot fold safely ⇒ disable the drop-set.
+    for (_, stats) in &input_stats {
+        match stats {
+            Some(s) if is_fully_expired(s, gc_before) => {}
+            Some(s) => overlap_bound = overlap_bound.min(s.min_timestamp),
+            None => return Vec::new(),
+        }
+    }
+
+    input_stats
+        .into_iter()
+        .filter_map(|(path, stats)| {
+            let stats = stats?;
+            // Fully expired AND provably shadows nothing that would otherwise
+            // survive (its newest write predates every non-expired overlap).
+            if is_fully_expired(&stats, gc_before) && stats.max_timestamp < overlap_bound {
+                Some(path.clone())
+            } else {
+                None
+            }
         })
-        .cloned()
         .collect()
 }
 
@@ -285,12 +324,17 @@ mod tests {
     }
 
     /// R2 scenario: a major/full compaction (empty outside set) drops every
-    /// fully-expired candidate (+inf overlap bound), keeping live.
+    /// fully-expired candidate whose newest write predates the co-compacting live
+    /// input's oldest write, keeping the live input. Expired data is OLDER than the
+    /// live data (the realistic case), so both expired inputs are droppable.
     #[test]
-    fn major_compaction_empty_outside_drops_all_expired() {
+    fn major_compaction_empty_outside_drops_expired_older_than_live() {
         let tmp = TempDir::new().expect("temp dir");
-        let expired_a = write_expiry_stats(tmp.path(), 1, 500, 10_000, 5_000);
-        let expired_b = write_expiry_stats(tmp.path(), 2, 800, i64::MAX, 5_000);
+        // Expired inputs at LOW write timestamps (older than the live input).
+        let expired_a = write_expiry_stats(tmp.path(), 1, 500, 3_000, 1_000);
+        let expired_b = write_expiry_stats(tmp.path(), 2, 800, 4_000, 1_000);
+        // Live co-input at a HIGHER min write ts (5_000): the expired tombstones
+        // (max_ts 3_000/4_000) predate it, so dropping them resurrects nothing.
         let live = write_expiry_stats(tmp.path(), 3, i32::MAX, 10_000, 5_000);
         let dropped = fully_expired_sstables(
             &[expired_a.clone(), live, expired_b.clone()],
@@ -300,7 +344,27 @@ mod tests {
         assert_eq!(
             dropped,
             vec![expired_a, expired_b],
-            "a major compaction drops every fully-expired input (+inf bound), keeping live"
+            "a major compaction drops fully-expired inputs older than the live co-input, keeping live"
+        );
+    }
+
+    /// R2 scenario (Cassandra parity / #1384 regression guard): a fully-expired
+    /// input whose tombstone could shadow OLDER live data in a CO-COMPACTING input
+    /// is NOT dropped — even in a full compaction (empty outside set). Folding the
+    /// non-expired input's min write timestamp into the overlap bound prevents the
+    /// resurrection that dropping the tombstone whole would otherwise cause.
+    #[test]
+    fn co_input_shadowing_expired_sstable_not_dropped() {
+        let tmp = TempDir::new().expect("temp dir");
+        // Fully-expired input holding a tombstone at a HIGH write ts (10_000): it
+        // would shadow the live co-input's older data.
+        let expired = write_expiry_stats(tmp.path(), 1, 500, 10_000, 9_000);
+        // Live co-input with OLDER data (min write ts 5_000 <= tombstone max_ts).
+        let live = write_expiry_stats(tmp.path(), 2, i32::MAX, 8_000, 5_000);
+        let dropped = fully_expired_sstables(&[expired, live], &[], Some(1_000));
+        assert!(
+            dropped.is_empty(),
+            "an expired input whose tombstone shadows a co-input's older live data must not be dropped"
         );
     }
 
