@@ -263,3 +263,53 @@ class TestRepr:
         if result.columns:
             repr_str = repr(result.columns[0])
             assert "ColumnInfo" in repr_str or result.columns[0].name in repr_str
+
+
+class TestRowSelectOrder:
+    """Row must return columns in SELECT order, not hash order (issue #1445)."""
+
+    def test_row_keys_match_select_order(self, db):
+        """keys()/to_dict()/items() must all follow result.columns order."""
+        result = db.execute("SELECT * FROM test_basic.simple_table LIMIT 5")
+        assert len(result) > 0, (
+            "fixture present but returned 0 rows - datasets unreadable/empty"
+        )
+        expected = [c.name for c in result.columns]
+        assert expected, "SELECT * must expose column metadata"
+        for row in result.rows:
+            assert list(row.keys()) == expected
+            assert list(row.to_dict().keys()) == expected
+            assert [k for k, _ in row.items()] == expected
+            # values() must align positionally with keys()
+            assert list(row.values()) == [row[k] for k in expected]
+
+    def test_row_keys_match_explicit_select_order(self, db):
+        """An explicit column list that differs from storage order is honored."""
+        # Storage/definition order is (id, name, age, ...); request a reorder.
+        result = db.execute(
+            "SELECT name, id, age FROM test_basic.simple_table LIMIT 5"
+        )
+        assert len(result) > 0, (
+            "fixture present but returned 0 rows - datasets unreadable/empty"
+        )
+        expected = ["name", "id", "age"]
+        assert [c.name for c in result.columns] == expected
+        for row in result.rows:
+            assert list(row.keys()) == expected
+            assert list(row.to_dict().keys()) == expected
+            assert [k for k, _ in row.items()] == expected
+
+    def test_row_getitem_and_contains_still_work(self, db):
+        """O(1) lookups by name remain correct after the ordered rewrite."""
+        result = db.execute("SELECT * FROM test_basic.simple_table LIMIT 1")
+        assert len(result) > 0
+        row = result.rows[0]
+        assert "id" in row
+        assert "definitely_not_a_column" not in row
+        # get() with default falls back for a missing column
+        sentinel = object()
+        assert row.get("definitely_not_a_column", sentinel) is sentinel
+        # __getitem__ raises KeyError for a missing column
+        with pytest.raises(KeyError):
+            _ = row["definitely_not_a_column"]
+        assert len(row) == len(result.columns)

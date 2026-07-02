@@ -9,9 +9,9 @@
 
 use pyo3::exceptions::PyStopIteration;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyDict, PyList, PyString};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::error::to_py_err;
 use crate::runtime::block_on;
@@ -171,12 +171,18 @@ impl QueryResult {
             .map(ColumnInfo::from_core)
             .collect();
 
+        // Build the shared column ordering + name index ONCE for the whole
+        // result (issue #1445), from the authoritative SELECT order. Every row
+        // shares it by reference-count instead of re-cloning column-name
+        // Strings per row.
+        let shape = build_row_shape(py, &result.metadata.columns);
+
         // Convert all rows eagerly and wrap in Py<Row>
         let rows: Vec<Py<Row>> = result
             .rows
             .iter()
             .map(|row| {
-                let row_obj = Row::from_core(py, row)?;
+                let row_obj = Row::from_core(py, row, shape.clone())?;
                 Py::new(py, row_obj)
             })
             .collect::<PyResult<Vec<_>>>()?;
@@ -216,6 +222,41 @@ impl QueryResultIter {
     }
 }
 
+/// Column ordering + name index shared by every `Row` in one result (issue #1445).
+///
+/// Built **once per result** from `metadata.columns` (the authoritative SELECT
+/// order) and shared by reference-count (`Arc`) with every row, so a wide-table
+/// scan no longer re-clones each column-name `String` per row. `keys` drives the
+/// SELECT-ordered iteration surface (`keys()`/`items()`/`to_dict()`); `index`
+/// gives O(1) name→position lookup for `__getitem__`/`get`/`__contains__`.
+#[derive(Clone)]
+struct RowShape {
+    /// Interned column-name handles in SELECT order.
+    keys: Arc<[Py<PyString>]>,
+    /// name -> position in `keys`, for O(1) lookup by column name.
+    index: Arc<HashMap<String, usize>>,
+}
+
+/// Build the shared per-result row shape from core column metadata.
+///
+/// `columns` is the authoritative SELECT order (`QueryMetadata.columns`); the
+/// name `String`s and `PyString` handles are allocated exactly once here.
+fn build_row_shape(py: Python<'_>, columns: &[cqlite_core::query::result::ColumnInfo]) -> RowShape {
+    let keys: Arc<[Py<PyString>]> = columns
+        .iter()
+        .map(|c| PyString::new(py, &c.name).unbind())
+        .collect();
+    let index: HashMap<String, usize> = columns
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.name.clone(), i))
+        .collect();
+    RowShape {
+        keys,
+        index: Arc::new(index),
+    }
+}
+
 /// A single row from query results with dict-like access.
 ///
 /// Supports both dict-style indexing and method access:
@@ -223,6 +264,9 @@ impl QueryResultIter {
 /// - `row.get("column", default)` - Get with fallback
 /// - `row.keys()` - Get column names
 /// - `"column" in row` - Check if column exists
+///
+/// Columns are returned in **SELECT order** (the order of `result.columns`),
+/// matching the CLI's ordered JSON output (issue #1445).
 ///
 /// # Example
 ///
@@ -235,50 +279,62 @@ impl QueryResultIter {
 /// ```
 #[pyclass(module = "cqlite")]
 pub struct Row {
-    /// Column values as Python objects, keyed by column name
-    values: HashMap<String, PyObject>,
+    /// Column ordering + name→position index, shared by every row in the result.
+    shape: RowShape,
+    /// Positional values aligned to `shape.keys` (SELECT order).
+    values: Vec<PyObject>,
 }
 
 #[pymethods]
 impl Row {
     /// Dict-style access: `row["column_name"]`
     ///
-    /// Raises KeyError if column doesn't exist.
+    /// Raises KeyError if column doesn't exist. O(1) via the shared name index.
     fn __getitem__(&self, py: Python<'_>, key: &str) -> PyResult<PyObject> {
-        self.values
+        self.shape
+            .index
             .get(key)
-            .map(|v| v.clone_ref(py))
+            .map(|&pos| self.values[pos].clone_ref(py))
             .ok_or_else(|| key_error(key))
     }
 
     /// Membership test: `"column" in row`
     fn __contains__(&self, key: &str) -> bool {
-        self.values.contains_key(key)
+        self.shape.index.contains_key(key)
     }
 
-    /// Get all column names.
-    fn keys(&self) -> Vec<String> {
-        self.values.keys().cloned().collect()
-    }
-
-    /// Get all values.
-    fn values(&self, py: Python<'_>) -> Vec<PyObject> {
-        self.values.values().map(|v| v.clone_ref(py)).collect()
-    }
-
-    /// Get all (key, value) pairs.
-    fn items(&self, py: Python<'_>) -> Vec<(String, PyObject)> {
-        self.values
+    /// Get all column names, in SELECT order.
+    fn keys(&self, py: Python<'_>) -> Vec<String> {
+        self.shape
+            .keys
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone_ref(py)))
+            .map(|k| k.bind(py).to_string())
             .collect()
     }
 
-    /// Convert to Python dict.
+    /// Get all values, in SELECT order.
+    fn values(&self, py: Python<'_>) -> Vec<PyObject> {
+        self.values.iter().map(|v| v.clone_ref(py)).collect()
+    }
+
+    /// Get all (key, value) pairs, in SELECT order.
+    fn items(&self, py: Python<'_>) -> Vec<(String, PyObject)> {
+        self.shape
+            .keys
+            .iter()
+            .zip(self.values.iter())
+            .map(|(k, v)| (k.bind(py).to_string(), v.clone_ref(py)))
+            .collect()
+    }
+
+    /// Convert to Python dict, in SELECT order.
+    ///
+    /// `PyDict` preserves insertion order, so the returned dict iterates in
+    /// SELECT order.
     fn to_dict(&self, py: Python<'_>) -> PyResult<PyObject> {
         let dict = PyDict::new(py);
-        for (key, value) in &self.values {
-            dict.set_item(key, value.clone_ref(py))?;
+        for (key, value) in self.shape.keys.iter().zip(self.values.iter()) {
+            dict.set_item(key.bind(py), value.clone_ref(py))?;
         }
         Ok(dict.into_any().unbind())
     }
@@ -288,21 +344,26 @@ impl Row {
     /// Returns the value for key if it exists, otherwise returns default.
     #[pyo3(signature = (key, default=None))]
     fn get(&self, py: Python<'_>, key: &str, default: Option<PyObject>) -> PyObject {
-        self.values
+        self.shape
+            .index
             .get(key)
-            .map(|v| v.clone_ref(py))
+            .map(|&pos| self.values[pos].clone_ref(py))
             .unwrap_or_else(|| default.unwrap_or_else(|| py.None()))
     }
 
     /// Number of columns.
     fn __len__(&self) -> usize {
-        self.values.len()
+        self.shape.keys.len()
     }
 
-    /// String representation.
-    fn __repr__(&self) -> String {
-        let mut keys: Vec<&str> = self.values.keys().map(|s| s.as_str()).collect();
-        keys.sort(); // Sort for deterministic output
+    /// String representation (columns shown in SELECT order).
+    fn __repr__(&self, py: Python<'_>) -> String {
+        let keys: Vec<String> = self
+            .shape
+            .keys
+            .iter()
+            .map(|k| k.bind(py).to_string())
+            .collect();
         if keys.len() <= 5 {
             format!("Row({{{}}})", keys.join(", "))
         } else {
@@ -316,17 +377,29 @@ impl Row {
 }
 
 impl Row {
-    /// Convert from cqlite_core QueryRow.
+    /// Convert from a core `QueryRow`, placing values positionally per `shape`.
+    ///
+    /// `shape` carries the SELECT order + name index shared across the whole
+    /// result (built once by [`build_row_shape`]); values are placed by name
+    /// lookup so the row is correct even if the core row's `HashMap` iteration
+    /// order differs from column order. A column present in `shape` but absent
+    /// from the row becomes Python `None`.
     pub(crate) fn from_core(
         py: Python<'_>,
         row: &cqlite_core::query::result::QueryRow,
+        shape: RowShape,
     ) -> PyResult<Self> {
-        let mut values = HashMap::with_capacity(row.values.len());
-        for (key, value) in &row.values {
-            let py_value = value_to_py(py, value)?;
-            values.insert(key.to_string(), py_value);
+        let mut slots: Vec<Option<PyObject>> = (0..shape.keys.len()).map(|_| None).collect();
+        for (name, value) in &row.values {
+            if let Some(&pos) = shape.index.get(name.as_ref()) {
+                slots[pos] = Some(value_to_py(py, value)?);
+            }
         }
-        Ok(Self { values })
+        let values = slots
+            .into_iter()
+            .map(|v| v.unwrap_or_else(|| py.None()))
+            .collect();
+        Ok(Self { shape, values })
     }
 }
 
@@ -454,6 +527,10 @@ pub struct StreamingIterator {
     /// referenced iterator has already exported its span before a later
     /// `Database.close()` flushes telemetry.
     span: Mutex<Option<tracing::Span>>,
+    /// Shared per-stream row shape (SELECT order + name index), built lazily on
+    /// the first `__next__` from the iterator's `metadata.columns` and reused by
+    /// every streamed row so column names are interned once (issue #1445).
+    row_shape: Mutex<Option<RowShape>>,
 }
 
 impl StreamingIterator {
@@ -471,6 +548,7 @@ impl StreamingIterator {
         Self {
             inner: Mutex::new(iter),
             span: Mutex::new(Some(span)),
+            row_shape: Mutex::new(None),
         }
     }
 
@@ -481,6 +559,26 @@ impl StreamingIterator {
     /// and from `Drop`; the `.take()` makes the second caller a no-op, so the
     /// count is never recorded twice. Poisoned locks are skipped rather than
     /// risking a double panic.
+    /// Return the shared row shape for this stream, building it once from the
+    /// iterator's `metadata.columns` (the authoritative SELECT order) and
+    /// caching it for every subsequent row (issue #1445).
+    fn row_shape(
+        &self,
+        py: Python<'_>,
+        iter: &cqlite_core::query::result::QueryResultIterator,
+    ) -> PyResult<RowShape> {
+        let mut slot = self
+            .row_shape
+            .lock()
+            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Row shape lock poisoned"))?;
+        if let Some(shape) = slot.as_ref() {
+            return Ok(shape.clone());
+        }
+        let shape = build_row_shape(py, &iter.metadata.columns);
+        *slot = Some(shape.clone());
+        Ok(shape)
+    }
+
     fn finalize_span(&self) {
         let Ok(mut span_slot) = self.span.lock() else {
             return;
@@ -529,8 +627,11 @@ impl StreamingIterator {
 
         match next_result {
             Some(Ok(row)) => {
-                // Convert core row to Python Row
-                let py_row = Row::from_core(py, &row)?;
+                // Convert core row to Python Row, sharing the per-stream ordered
+                // shape (built once) so column names are interned per stream, not
+                // per row, and columns stay in SELECT order (issue #1445).
+                let shape = self.row_shape(py, &iter)?;
+                let py_row = Row::from_core(py, &row, shape)?;
                 Py::new(py, py_row)
             }
             Some(Err(e)) => Err(to_py_err(e)),
