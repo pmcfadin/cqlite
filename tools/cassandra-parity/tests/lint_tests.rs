@@ -265,6 +265,99 @@ fn out_of_scope_missing_required_fields_is_rejected() {
     );
 }
 
+// ----------------------------------------------------------------------------
+// Boundary-field correctness for out_of_scope EVIDENCE (issue #1402, epic #1381).
+// The field requirements above key on `status`; these guard the status/evidence
+// mismatch where `evidence.type: out_of_scope` carries a null boundary category
+// while `status` is something else (e.g. planned) — the exact mis-encoding fixed
+// by #1402.
+// ----------------------------------------------------------------------------
+
+/// A scenario whose `evidence.type` is out_of_scope but whose `status` is not,
+/// with a NULL out_of_scope_category. Before #1402 this slipped past every rule
+/// (the status match only enforces the category when status == out_of_scope).
+const MISMATCHED_OOS_NULL_CATEGORY: &str = r#"  - id: cass.compression_info.example_mismatch
+    title: Mismatched out_of_scope evidence with null category
+    status: planned
+    capability: compression_checksum
+    priority: P2
+    risk: p2_coverage
+    cassandra:
+      category: compression
+      relevance: med
+      files: [CompressionMetadataTest.java]
+    cqlite:
+      coverage:
+        suite: sstable_parity_compression_info_chunks
+        tests: [cqlite-core/tests/foo.rs]
+    fixtures: {}
+    evidence:
+      type: out_of_scope
+      known_limitations: no real fixture in corpus
+    ci:
+      tier: manual_debug
+    scope:
+      target_suite: sstable_parity_compression_info_chunks
+      gap: no real fixture
+"#;
+
+#[test]
+fn out_of_scope_evidence_with_null_category_is_rejected() {
+    let errs = errors(&wrap(MISMATCHED_OOS_NULL_CATEGORY));
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("scope.out_of_scope_category")),
+        "a status/evidence-mismatched out_of_scope with a null category must fail; got: {errs:#?}"
+    );
+}
+
+#[test]
+fn out_of_scope_evidence_high_relevance_without_boundary_is_rejected() {
+    // Category present but relevance high and no cqlite_boundary: only the
+    // boundary rule should fire, isolating the high-relevance requirement.
+    let scenario = MISMATCHED_OOS_NULL_CATEGORY
+        .replace("relevance: med", "relevance: high")
+        .replace(
+            "      target_suite: sstable_parity_compression_info_chunks",
+            "      out_of_scope_category: unsupported_compression_dictionary\n\
+             \x20     target_suite: sstable_parity_compression_info_chunks",
+        );
+    let errs = errors(&wrap(&scenario));
+    assert!(
+        errs.iter().any(|e| e.contains("scope.cqlite_boundary")),
+        "high-relevance out_of_scope evidence without a cqlite_boundary must fail; got: {errs:#?}"
+    );
+    assert!(
+        !errs
+            .iter()
+            .any(|e| e.contains("scope.out_of_scope_category")),
+        "category is present, so it must not be reported missing; got: {errs:#?}"
+    );
+}
+
+#[test]
+fn well_formed_out_of_scope_evidence_on_non_oos_status_passes_boundary_rule() {
+    // status: planned + evidence.type: out_of_scope with BOTH a boundary category
+    // and (for high relevance) a cqlite_boundary must not trip the boundary-field
+    // rule — no false positives on well-formed entries.
+    let scenario = MISMATCHED_OOS_NULL_CATEGORY
+        .replace("relevance: med", "relevance: high")
+        .replace(
+            "      target_suite: sstable_parity_compression_info_chunks",
+            "      out_of_scope_category: unsupported_compression_dictionary\n\
+             \x20     cqlite_boundary: CQLite decodes the codec but no fixture exists to byte-compare.\n\
+             \x20     target_suite: sstable_parity_compression_info_chunks",
+        );
+    let errs = errors(&wrap(&scenario));
+    assert!(
+        !errs
+            .iter()
+            .any(|e| e.contains("scope.out_of_scope_category")
+                || e.contains("scope.cqlite_boundary")),
+        "well-formed out_of_scope evidence must not trip the boundary-field rule; got: {errs:#?}"
+    );
+}
+
 #[test]
 fn byte_for_byte_without_evidence_is_rejected() {
     let scenario = VALID_SCENARIO

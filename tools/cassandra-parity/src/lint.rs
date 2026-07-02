@@ -576,6 +576,43 @@ fn lint_scenario(s: &Scenario, repo_root: Option<&Path>, out: &mut Vec<Finding>)
                 ));
             }
         }
+        "out_of_scope" => {
+            // Boundary-field correctness (issue #1402, epic #1381 parity audit).
+            // An `evidence.type: out_of_scope` claim asserts that a Cassandra
+            // behavior lies OUTSIDE CQLite's reader/writer/compactor boundary, so
+            // it MUST name the boundary category (and, for high-relevance 🔴
+            // behavior, describe the boundary) — irrespective of the scenario
+            // `status`. The field requirements above (in the status match's
+            // "out_of_scope" arm) only fire when `status == "out_of_scope"`; two
+            // scenarios (the compression_info deflate/zstd real_fixture_chunks
+            // entries) slipped through with `status: planned` + `evidence.type:
+            // out_of_scope` and a NULL out_of_scope_category — the only such
+            // manifest-wide entries. Enforcing this here, keyed on
+            // `evidence.type`, fail-closes that status/evidence mismatch so a
+            // null-category out_of_scope can never recur. Guard on status to avoid
+            // double-reporting the status arm's identical finding for the
+            // well-formed `status == "out_of_scope"` case.
+            if s.status != "out_of_scope" {
+                if !non_empty(&s.scope.out_of_scope_category) {
+                    out.push(Finding::error(
+                        id,
+                        "scope.out_of_scope_category",
+                        "out_of_scope evidence requires a non-null scope.out_of_scope_category \
+                         (boundary category), even when status is not out_of_scope",
+                    ));
+                }
+                // High-relevance (🔴) Cassandra behavior needs an explicit
+                // boundary statement so the out_of_scope claim stays auditable.
+                if s.cassandra.relevance == "high" && !non_empty(&s.scope.cqlite_boundary) {
+                    out.push(Finding::error(
+                        id,
+                        "scope.cqlite_boundary",
+                        "out_of_scope evidence for a high-relevance Cassandra file requires \
+                         scope.cqlite_boundary describing the reader/writer/compactor boundary",
+                    ));
+                }
+            }
+        }
         "partial" => {
             if !non_empty(&s.evidence.known_limitations) {
                 out.push(Finding::error(

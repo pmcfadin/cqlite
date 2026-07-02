@@ -3587,86 +3587,21 @@ scenarios:
       workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
-  - id: cass.compression_info.deflate.real_fixture_chunks
-    title: DeflateCompressor real-fixture chunk + CRC parity (no fixture available)
-    status: planned
-    capability: compression_checksum
-    priority: P2
-    risk: p2_coverage
-    cassandra:
-      category: compression
-      relevance: med
-      files:
-        - CompressionMetadataTest.java
-    cqlite:
-      coverage:
-        suite: sstable_parity_compression_info_chunks
-        tests:
-          - cqlite-core/tests/sstable_parity_compression_info_test.rs
-        notes: >-
-          CQLite decodes DeflateCompressor, but the committed corpus carries NO
-          Cassandra-written Deflate fixture. The lane classifies Deflate explicitly
-          as no-fixture-available and logs it rather than faking synthetic reference
-          data — no byte_for_byte claim is made.
-    fixtures: {}
-    evidence:
-      type: out_of_scope
-      known_limitations: >-
-        No Cassandra-generated DeflateCompressor SSTable exists in the corpus
-        (only LZ4Compressor and SnappyCompressor). Parity is unproven until such a
-        fixture is added.
-    ci:
-      tier: manual_debug
-    scope:
-      target_issue: 986
-      target_suite: sstable_parity_compression_info_chunks
-      gap: >-
-        No real DeflateCompressor CompressionInfo.db / Data.db fixture in the
-        committed corpus, so chunk + CRC parity cannot be byte-compared.
-      next_step: >-
-        Generate a DeflateCompressor SSTable via regenerate-datasets.sh and let the
-        existing test exercise it (the codec dispatch already handles it).
-
-  - id: cass.compression_info.zstd.real_fixture_chunks
-    title: ZstdCompressor real-fixture chunk + CRC parity (no fixture available)
-    status: planned
-    capability: compression_checksum
-    priority: P2
-    risk: p2_coverage
-    cassandra:
-      category: compression
-      relevance: med
-      files:
-        - CompressionMetadataTest.java
-    cqlite:
-      coverage:
-        suite: sstable_parity_compression_info_chunks
-        tests:
-          - cqlite-core/tests/sstable_parity_compression_info_test.rs
-        notes: >-
-          CQLite decodes ZstdCompressor, but the committed corpus carries NO
-          Cassandra-written Zstd fixture. The lane classifies Zstd explicitly as
-          no-fixture-available and logs it rather than faking synthetic reference
-          data — no byte_for_byte claim is made. Zstd dictionary compression remains
-          out of scope per issue #986.
-    fixtures: {}
-    evidence:
-      type: out_of_scope
-      known_limitations: >-
-        No Cassandra-generated ZstdCompressor SSTable exists in the corpus (only
-        LZ4Compressor and SnappyCompressor). Parity is unproven until such a fixture
-        is added; Zstd dictionary compression stays out of scope.
-    ci:
-      tier: manual_debug
-    scope:
-      target_issue: 986
-      target_suite: sstable_parity_compression_info_chunks
-      gap: >-
-        No real ZstdCompressor CompressionInfo.db / Data.db fixture in the
-        committed corpus, so chunk + CRC parity cannot be byte-compared.
-      next_step: >-
-        Generate a ZstdCompressor SSTable via regenerate-datasets.sh and let the
-        existing test exercise it (the codec dispatch already handles it).
+  # NOTE (issue #1402, epic #1381 parity audit): the two former non-strict
+  # entries here — `cass.compression_info.deflate.real_fixture_chunks` and
+  # `cass.compression_info.zstd.real_fixture_chunks` — were the ONLY manifest-wide
+  # scenarios carrying `evidence.type: out_of_scope` with a NULL out_of_scope_category
+  # (a mis-encoding: an out_of_scope claim with no boundary category and no
+  # cqlite_boundary). They were not truly out of scope — they tracked the same
+  # "no real Deflate/Zstd fixture in the corpus" gap as the stronger `.strict`
+  # variants below (`cass.compression_info.deflate.real_fixture_chunks.strict`
+  # and `.zstd.real_fixture_chunks.strict`), which make a proper `partial`
+  # (bytes + checksums) claim on the required_parity tier over the identical gap
+  # and therefore fully supersede them. They were folded into those strict
+  # variants and deleted (per AC1 of #1402). The boundary-field lint rule added
+  # in tools/cassandra-parity/src/lint.rs now fail-closes any future
+  # out_of_scope evidence that omits out_of_scope_category, so this class of
+  # mis-encoding cannot recur.
 
   # ----------------------------------------------------------------------------
   # compression_info (strict CompressionInfo.db + chunk byte parity, issue #986 / epic #968)
