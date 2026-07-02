@@ -713,6 +713,7 @@ impl SSTableWriter {
                         timestamp_micros,
                         ttl_seconds,
                         local_deletion_time,
+                        is_deleted,
                         ..
                     } => {
                         self.stats.update_timestamp(*timestamp_micros);
@@ -722,8 +723,44 @@ impl SSTableWriter {
                         if let Some(ldt) = local_deletion_time {
                             self.stats.update_local_deletion_time(*ldt);
                         }
+                        // Issue #1728 (roborev finding 2): a LIVE complex element
+                        // (not deleted, not expiring, no explicit LDT) carries
+                        // Cassandra's `NO_DELETION_TIME` sentinel just like a simple
+                        // live `Write`, so it must lift `maxLocalDeletionTime` to the
+                        // sentinel in a mixed SSTable. Authoritative liveness comes
+                        // from the verbatim `is_deleted` flag (never re-derived from
+                        // `value`, per the no-heuristics mandate / roborev #885).
+                        if !*is_deleted && ttl_seconds.is_none() && local_deletion_time.is_none() {
+                            self.stats.note_live_local_deletion_time();
+                        }
                     }
-                    crate::storage::write_engine::mutation::CellOperation::Write { .. } => {}
+                    // Issue #1728: a live, non-TTL `Write` cell carries Cassandra's
+                    // `Cell.NO_DELETION_TIME` (`Integer.MAX_VALUE`) as its
+                    // localDeletionTime. Cassandra's MetadataCollector folds that
+                    // sentinel into `maxLocalDeletionTime`, so any SSTable holding a
+                    // live non-TTL cell finalizes `maxLocalDeletionTime` == the live
+                    // sentinel — including a MIXED SSTable that also carries older
+                    // tombstones with a smaller real LDT. The dedicated chokepoint
+                    // raises the max ALONE (never poisoning minLocalDeletionTime or
+                    // the tombstone drop-time histogram, issue #851).
+                    //
+                    // Two cases must NOT fold the live sentinel (roborev #1728):
+                    //   * `mutation.ttl_seconds.is_some()` — a plain `Write` under a
+                    //     row-level TTL is emitted as an EXPIRING cell with a real
+                    //     `now + ttl` LDT (data_writer::rows), which the mutation-TTL
+                    //     block above (`if let Some(ttl) = mutation.ttl_seconds`)
+                    //     already folded; overwriting max with the sentinel would
+                    //     clobber that real expiring LDT.
+                    //   * `value == Null` — a null `Write` is skipped by
+                    //     `write_merged_cells` (no cell is emitted), so it confers no
+                    //     LDT at all.
+                    crate::storage::write_engine::mutation::CellOperation::Write { value, .. } => {
+                        if mutation.ttl_seconds.is_none()
+                            && !matches!(value, crate::types::Value::Null)
+                        {
+                            self.stats.note_live_local_deletion_time();
+                        }
+                    }
                 }
             }
             // Track stats for partition tombstones
@@ -1921,6 +1958,64 @@ mod tests {
         let _info = writer.finish().await.unwrap();
     }
 
+    /// Issue #1728 (roborev finding 2): a LIVE complex element (`is_deleted:
+    /// false`, `ttl_seconds: None`, `local_deletion_time: None`) carries the
+    /// `NO_DELETION_TIME` sentinel just like a simple live `Write`. In a MIXED
+    /// row (a `ComplexDeletion` marker at a real LDT plus a live element) the
+    /// finalized `max_local_deletion_time` must be the live sentinel (`i32::MAX`),
+    /// while `min_local_deletion_time` stays at the real marker LDT (issue #851).
+    #[tokio::test]
+    async fn test_live_complex_element_plus_marker_max_ldt_is_live_sentinel() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_complex_schema();
+        let mut writer = SSTableWriter::new(temp_dir.path().to_path_buf(), 1, &schema).unwrap();
+
+        const MARKER_LDT: i32 = 1_500;
+        let table_id = TableId::new("test_ks", "test_complex");
+        let pk = PartitionKey::single("id", Value::Integer(3));
+        let ck = ClusteringKey::single("ck", Value::Integer(1));
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            Some(ck),
+            vec![
+                // Older complex-deletion marker at a real LDT.
+                CellOperation::ComplexDeletion {
+                    column: "tags".to_string(),
+                    marked_for_delete_at: 1_000_000,
+                    local_deletion_time: MARKER_LDT,
+                },
+                // A LIVE element (not deleted, not expiring, no explicit LDT).
+                CellOperation::WriteComplexElement {
+                    column: "tags".to_string(),
+                    cell_path: b"live".to_vec(),
+                    value: None,
+                    timestamp_micros: 5_000_000,
+                    ttl_seconds: None,
+                    local_deletion_time: None,
+                    is_deleted: false,
+                },
+            ],
+            5_000_000,
+            None,
+        );
+        let key = mutation.decorated_key(&schema).unwrap();
+        writer.write_partition(key, vec![mutation]).unwrap();
+
+        assert_eq!(
+            writer.stats.max_local_deletion_time,
+            i32::MAX,
+            "a live complex element must lift max_local_deletion_time to the \
+             NO_DELETION_TIME sentinel even alongside an older ComplexDeletion marker"
+        );
+        assert_eq!(
+            writer.stats.min_local_deletion_time, MARKER_LDT,
+            "the live sentinel must not poison min_local_deletion_time (issue #851)"
+        );
+
+        let _info = writer.finish().await.unwrap();
+    }
+
     /// Issue #887: the PRE-SEEDED baseline path (`compute_mutations_baseline_stats`,
     /// issue #729 two-pass flush) must fold the same marker/element timestamps the
     /// DataWriter delta-encodes. A marker LDT or element ts/ttl BELOW the mutation's
@@ -2121,6 +2216,115 @@ mod tests {
         assert_eq!(
             writer.stats.max_local_deletion_time, HIGHER_LDT,
             "max_local_deletion_time must reflect the higher per-cell Delete LDT"
+        );
+
+        let _info = writer.finish().await.unwrap();
+    }
+
+    /// Issue #1728: a MIXED SSTable (an older cell tombstone at a real, smaller
+    /// local-deletion-time PLUS a live non-TTL `Write` cell) must finalize
+    /// `max_local_deletion_time` at Cassandra's live `NO_DELETION_TIME` sentinel
+    /// (`i32::MAX`), NOT the tombstone LDT. Cassandra stamps every live non-TTL
+    /// cell with `Cell.NO_DELETION_TIME` and its MetadataCollector folds that into
+    /// `maxLocalDeletionTime`, so any SSTable containing a live cell reports the
+    /// sentinel there. The tombstone chokepoint invariants (issue #851) must
+    /// still hold: `min_local_deletion_time` and the tombstone drop-time histogram
+    /// describe the REAL tombstone only, never the live sentinel.
+    /// RED before the fix: the live `Write` arm was a no-op, so a mixed SSTable
+    /// kept `max_local_deletion_time` at the tombstone LDT and diverged from
+    /// Cassandra.
+    #[tokio::test]
+    async fn test_live_write_plus_tombstone_max_ldt_is_live_sentinel() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_two_regular_schema();
+        let mut writer = SSTableWriter::new(temp_dir.path().to_path_buf(), 1, &schema).unwrap();
+
+        // A real (non-sentinel) tombstone LDT, well below i32::MAX.
+        const TOMBSTONE_LDT: i32 = 1_500_000_000;
+        const ROW_TS_MICROS: i64 = 5_000_000;
+
+        let table_id = TableId::new("test_ks", "test_two_regular");
+        let pk = PartitionKey::single("id", Value::Integer(7));
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            None,
+            vec![
+                // An older cell tombstone at a real LDT.
+                CellOperation::Delete {
+                    column: "name".to_string(),
+                    local_deletion_time: Some(TOMBSTONE_LDT),
+                },
+                // A live, non-TTL cell in the SAME (mixed) SSTable.
+                CellOperation::Write {
+                    column: "age".to_string(),
+                    value: Value::Integer(42),
+                },
+            ],
+            ROW_TS_MICROS,
+            None,
+        );
+        let key = mutation.decorated_key(&schema).unwrap();
+        writer.write_partition(key, vec![mutation]).unwrap();
+
+        assert_eq!(
+            writer.stats.max_local_deletion_time,
+            i32::MAX,
+            "a live non-TTL cell must lift max_local_deletion_time to the NO_DELETION_TIME \
+             sentinel even alongside an older tombstone with a smaller real LDT"
+        );
+        assert_eq!(
+            writer.stats.min_local_deletion_time, TOMBSTONE_LDT,
+            "the live sentinel must not poison min_local_deletion_time (issue #851 chokepoint)"
+        );
+        assert_eq!(
+            writer.stats.tombstone_histogram.size(),
+            1,
+            "only the real tombstone enters the drop-time histogram, not the live cell"
+        );
+
+        let _info = writer.finish().await.unwrap();
+    }
+
+    /// Issue #1728 (roborev finding 1): a plain `Write` under a ROW-LEVEL TTL is
+    /// emitted as an EXPIRING cell with a real `now + ttl` local-deletion-time,
+    /// NOT a live cell. The mutation-TTL block folds that real expiring LDT into
+    /// `max_local_deletion_time`; the live-cell fold must NOT run and clobber it
+    /// with the `i32::MAX` sentinel. With ONLY a TTL'd write (no live non-TTL cell,
+    /// no tombstone), the finalized max must equal the real expiring LDT, which is
+    /// strictly below the sentinel.
+    #[tokio::test]
+    async fn test_ttl_row_write_does_not_fold_live_sentinel() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_two_regular_schema();
+        let mut writer = SSTableWriter::new(temp_dir.path().to_path_buf(), 1, &schema).unwrap();
+
+        let table_id = TableId::new("test_ks", "test_two_regular");
+        let pk = PartitionKey::single("id", Value::Integer(7));
+        // Row-level TTL: the plain `Write` becomes an expiring cell.
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            None,
+            vec![CellOperation::Write {
+                column: "age".to_string(),
+                value: Value::Integer(42),
+            }],
+            5_000_000,
+            Some(3600),
+        );
+        let key = mutation.decorated_key(&schema).unwrap();
+        writer.write_partition(key, vec![mutation]).unwrap();
+
+        assert!(
+            writer.stats.max_local_deletion_time < i32::MAX,
+            "a row-TTL Write is an expiring cell: its real LDT must NOT be clobbered \
+             by the live NO_DELETION_TIME sentinel (got {})",
+            writer.stats.max_local_deletion_time
+        );
+        assert!(
+            writer.stats.max_local_deletion_time > 0,
+            "the expiring cell's real (now+ttl) LDT must be recorded"
         );
 
         let _info = writer.finish().await.unwrap();
