@@ -701,8 +701,7 @@ mod tests {
         push_element(&mut data, &t0.to_be_bytes());
         push_element(&mut data, &t1.to_be_bytes());
 
-        let comparator =
-            ComparatorType::List(Box::new(ComparatorType::Custom("time".to_string())));
+        let comparator = ComparatorType::List(Box::new(ComparatorType::Custom("time".to_string())));
         let result = parse_value_with_comparator(&data, &comparator).unwrap();
 
         assert_eq!(result, Value::List(vec![Value::Time(t0), Value::Time(t1)]));
@@ -717,14 +716,10 @@ mod tests {
         push_element(&mut data, &v4);
         push_element(&mut data, &v6);
 
-        let comparator =
-            ComparatorType::List(Box::new(ComparatorType::Custom("inet".to_string())));
+        let comparator = ComparatorType::List(Box::new(ComparatorType::Custom("inet".to_string())));
         let result = parse_value_with_comparator(&data, &comparator).unwrap();
 
-        assert_eq!(
-            result,
-            Value::List(vec![Value::Inet(v4), Value::Inet(v6)])
-        );
+        assert_eq!(result, Value::List(vec![Value::Inet(v4), Value::Inet(v6)]));
     }
 
     #[test]
@@ -761,14 +756,10 @@ mod tests {
         push_element(&mut data, &v4a);
         push_element(&mut data, &v4b);
 
-        let comparator =
-            ComparatorType::Set(Box::new(ComparatorType::Custom("inet".to_string())));
+        let comparator = ComparatorType::Set(Box::new(ComparatorType::Custom("inet".to_string())));
         let result = parse_value_with_comparator(&data, &comparator).unwrap();
 
-        assert_eq!(
-            result,
-            Value::Set(vec![Value::Inet(v4a), Value::Inet(v4b)])
-        );
+        assert_eq!(result, Value::Set(vec![Value::Inet(v4a), Value::Inet(v4b)]));
     }
 
     #[test]
