@@ -486,7 +486,7 @@ mod fixture_drain {
     /// sized by the caller's channel, not that it is the whole pipeline's resident
     /// bound. The full resident-row worst case ALSO includes the inherent
     /// `max_partition_size` term (the one confirmed partition `drain_scan_window`
-    /// materializes in `surviving` before batching — pre-existing #1156 behavior);
+    /// materializes in `scratch` before batching — pre-existing #1156 behavior);
     /// that term is documented on the constant and NOT asserted here.
     ///
     /// Dataset-dependent: skips when the fixture is absent. The pure
