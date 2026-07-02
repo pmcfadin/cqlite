@@ -854,7 +854,7 @@ fn run_production_partial(
     a_muts: Vec<Mutation>,
     b_muts: Vec<Mutation>,
     c_muts: Vec<Mutation>,
-) -> (TempDir, Vec<PathBuf>) {
+) -> ProductionResult {
     let temp = TempDir::new().unwrap();
     let data_dir = temp.path().join("data");
     let wal_dir = temp.path().join("wal");
@@ -878,7 +878,8 @@ fn run_production_partial(
     }
     r.block_on(engine.flush()).expect("flush C").expect("info");
 
-    let before = discover_inputs(&table_dir);
+    let before: std::collections::HashSet<PathBuf> =
+        discover_inputs(&table_dir).into_iter().collect();
     assert_eq!(
         before.len(),
         3,
@@ -902,15 +903,51 @@ fn run_production_partial(
     }
     r.block_on(engine.close()).expect("close");
 
-    // After the PARTIAL compaction, A and B are replaced by one output SSTable and
-    // C remains: the physical set a later read spans is {output, C}.
-    let after = discover_inputs(&table_dir);
+    // After the PARTIAL compaction, A and B are replaced by one NEW output SSTable
+    // and the excluded C persists unchanged. Isolate them: C is the surviving path
+    // that was ALSO present before the compaction; the output is the new path.
+    let after: Vec<PathBuf> = discover_inputs(&table_dir);
     assert_eq!(
         after.len(),
         2,
         "partial compaction must leave {{output, excluded C}} = 2 SSTables, got {after:?}"
     );
-    (temp, after)
+    let excluded_c: Vec<PathBuf> = after
+        .iter()
+        .filter(|p| before.contains(*p))
+        .cloned()
+        .collect();
+    let output: Vec<PathBuf> = after
+        .iter()
+        .filter(|p| !before.contains(*p))
+        .cloned()
+        .collect();
+    assert_eq!(
+        excluded_c.len(),
+        1,
+        "exactly the excluded C must persist unchanged, got {excluded_c:?}"
+    );
+    assert_eq!(
+        output.len(),
+        1,
+        "exactly one NEW compaction output must be produced, got {output:?}"
+    );
+    ProductionResult {
+        _temp: temp,
+        output,
+        all: after,
+    }
+}
+
+/// The isolatable products of a production PARTIAL compaction: the compaction
+/// OUTPUT alone (to assert what the compaction itself decided) and the full
+/// physical union {output, excluded C} (what a later read spans).
+struct ProductionResult {
+    _temp: TempDir,
+    /// The single NEW compaction output SSTable (A+B merged), C excluded.
+    output: Vec<PathBuf>,
+    /// The full surviving set {output, excluded C}.
+    all: Vec<PathBuf>,
 }
 
 /// PRODUCTION PATH — cell-tombstone zombie prevention. The real background
@@ -921,22 +958,29 @@ fn run_production_partial(
 #[test]
 fn production_partial_cell_tombstone_no_zombie() {
     let sch = schema_scalar();
-    let (_tmp, set) = run_production_partial(
+    let res = run_production_partial(
         &sch,
         vec![live_v("v1", TS_LIVE)],
         vec![cell_tomb_v()],
         vec![live_v("v1", TS_LIVE)],
     );
-    // Read the surviving physical set with expiry/purge disabled (raw on-disk
-    // state) — the tombstone must be present and no zombie `v1` may resurface.
-    let obs = observe(set, &sch, None, None, false, None);
+    // (i) The compaction OUTPUT ALONE must have RETAINED the cell tombstone — this
+    // proves the overlap gate blocked the purge, not that C masks it downstream.
+    let out = observe(res.output.clone(), &sch, None, None, false, None);
     assert!(
-        obs.v_cell_tombstone,
-        "production partial: the `v` cell tombstone MUST survive in {{output, C}}; got {obs:?}"
+        out.v_cell_tombstone,
+        "production partial: the `v` cell tombstone MUST be RETAINED in the compaction output \
+         alone (overlap gate blocks the purge); got {out:?}"
+    );
+    // (ii) The full physical set {output, C} shows `v` still DELETED — no zombie.
+    let all = observe(res.all, &sch, None, None, false, None);
+    assert!(
+        all.v_live.is_none(),
+        "ZOMBIE (production partial): `v` resurfaced live across {{output, C}}; got {all:?}"
     );
     assert!(
-        obs.v_live.is_none(),
-        "ZOMBIE (production partial): `v` resurfaced live across {{output, C}}; got {obs:?}"
+        all.v_cell_tombstone,
+        "the retained `v` cell tombstone must still shadow C's live `v1`; got {all:?}"
     );
 }
 
@@ -945,47 +989,64 @@ fn production_partial_cell_tombstone_no_zombie() {
 #[test]
 fn production_partial_row_tombstone_no_zombie() {
     let sch = schema_scalar();
-    let (_tmp, set) = run_production_partial(
+    let res = run_production_partial(
         &sch,
         vec![live_v("v1", TS_LIVE)],
         vec![row_tomb()],
         vec![live_v("v1", TS_LIVE)],
     );
-    let obs = observe(set, &sch, None, None, false, None);
+    // (i) The compaction OUTPUT ALONE must have RETAINED the row tombstone.
+    let out = observe(res.output.clone(), &sch, None, None, false, None);
     assert!(
-        obs.row_tombstone,
-        "production partial: the row tombstone MUST survive in {{output, C}}; got {obs:?}"
+        out.row_tombstone,
+        "production partial: the row tombstone MUST be RETAINED in the compaction output alone; \
+         got {out:?}"
+    );
+    // (ii) The full set {output, C} keeps the row dead — no zombie.
+    let all = observe(res.all, &sch, None, None, false, None);
+    assert!(
+        all.v_live.is_none(),
+        "ZOMBIE (production partial): the deleted row resurfaced live across {{output, C}}; \
+         got {all:?}"
     );
     assert!(
-        obs.v_live.is_none(),
-        "ZOMBIE (production partial): the deleted row resurfaced live across {{output, C}}; \
-         got {obs:?}"
+        all.row_tombstone,
+        "the retained row tombstone must still shadow C's live row; got {all:?}"
     );
 }
 
 /// PRODUCTION PATH — purge resumes when safe. C now holds a NEWER live `v2`@20s,
 /// so the production `compute_max_purgeable_timestamp` yields an overlap bound
 /// (20s) STRICTLY ABOVE the tombstone's mfda (10s); the background partial
-/// compaction PURGES the tombstone, and a read across {output, C} returns C's
-/// newer live `v2` (a legitimate winner, not a zombie).
+/// compaction PURGES the tombstone.
 #[test]
 fn production_partial_purge_resumes_when_safe() {
     let sch = schema_scalar();
-    let (_tmp, set) = run_production_partial(
+    let res = run_production_partial(
         &sch,
         vec![live_v("v1", TS_LIVE)],
         vec![cell_tomb_v()],
         vec![live_v("v2", TS_LIVE_NEWER)],
     );
-    let obs = observe(set, &sch, None, None, false, None);
+    // (i) Inspect the compaction OUTPUT ALONE: the `v` cell tombstone must be
+    // ABSENT (genuinely purged). This is the load-bearing assertion — reading it
+    // together with C would let C's newer `v2@20s` mask a still-retained tombstone
+    // and pass without proving the purge (roborev #1384).
+    let out = observe(res.output.clone(), &sch, None, None, false, None);
     assert!(
-        !obs.v_cell_tombstone,
-        "production partial: the cell tombstone MUST be purged when the overlap bound rises \
-         above its mfda; got {obs:?}"
+        !out.v_cell_tombstone,
+        "production partial: the cell tombstone MUST be PURGED from the compaction output alone \
+         once the overlap bound rises above its mfda; got {out:?}"
     );
+    assert!(
+        out.v_live.is_none(),
+        "no live `v` can exist in the {{A,B}} compaction output after the delete; got {out:?}"
+    );
+    // (ii) Then the full set {output, C}: C's newer live `v2` legitimately wins.
+    let all = observe(res.all, &sch, None, None, false, None);
     assert_eq!(
-        obs.v_live.as_deref(),
+        all.v_live.as_deref(),
         Some("v2"),
-        "C's newer live `v2` (ts=20s > delete@10s) must surface across {{output, C}}; got {obs:?}"
+        "C's newer live `v2` (ts=20s > delete@10s) must surface across {{output, C}}; got {all:?}"
     );
 }
