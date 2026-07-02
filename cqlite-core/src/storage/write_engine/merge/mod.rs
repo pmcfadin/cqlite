@@ -2306,6 +2306,10 @@ impl KWayMerger {
                 &self.schema.dropped_columns,
                 effective_gc_before,
                 max_purgeable_timestamp,
+                // #1382: TTL expiry uses the merger's pinned evaluation instant,
+                // the SAME `now` that drove `compute_gc_before` so expiry and
+                // gc-grace purging agree deterministically.
+                self.now_secs,
                 &mut purges,
             ) {
                 // Issue #933: shadow cells covered by a range tombstone. The merge
@@ -3173,6 +3177,10 @@ impl KWayMerger {
             dropped_columns,
             gc_before_secs,
             max_purgeable_timestamp,
+            // #1382: this test-only wrapper keeps the pre-#1382 default of NO
+            // TTL expiry (`now_secs = None` = strict no-op). Tests that exercise
+            // TTL expiry drive the real `compact_sstables` surface instead.
+            None,
             &mut sink,
         )
     }
@@ -3208,6 +3216,12 @@ impl KWayMerger {
         // compaction; `i64::MIN` when purging is disabled (`gc_before_secs` is then
         // `None`, so this is unused).
         max_purgeable_timestamp: i64,
+        // Pinned TTL-expiry evaluation instant (`now`, GC-clock seconds), threaded
+        // from the merger (#1382). A live expiring cell whose `localDeletionTime`
+        // is STRICTLY LESS THAN this is turned into a cell tombstone (Step 3b′)
+        // and then purged by the SAME gc/overlap gate as any other cell tombstone.
+        // `None` disables expiry (a strict no-op), preserving pre-#1382 behavior.
+        now_secs: Option<i64>,
         // Tombstone-purge tally accumulated at the true purge decision points
         // (issue #1037). Never read here; only incremented.
         purges: &mut PurgeCounts,
@@ -3233,6 +3247,11 @@ impl KWayMerger {
         state.shadow_by_row_deletion();
         // Step 3b: dropped-column filtering (captures the phantom-row guard).
         state.filter_dropped_columns(dropped_columns);
+        // Step 3b′ (#1382): TTL expiry — convert expired live cells to cell
+        // tombstones BEFORE the gc-grace purge so an expired-past-grace cell is
+        // dropped by Step 3c and an expired-within-grace cell is emitted as a
+        // tombstone (its live value never resurfaces).
+        state.expire_ttl_cells(now_secs);
         // Step 3c: gc_grace / overlap-aware tombstone purging (tallies #1037).
         state.purge_gc_grace(gc_before_secs, max_purgeable_timestamp, purges);
         // Step 4: phantom-row guard + emit the merged entry.
