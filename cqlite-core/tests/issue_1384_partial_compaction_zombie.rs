@@ -68,8 +68,8 @@ use cqlite_core::storage::write_engine::merge::{
     compact_sstables, compute_max_purgeable_timestamp, CellData, MergeEntry, MergeStep, RowData,
 };
 use cqlite_core::storage::write_engine::{
-    CellOperation, ClusteringKey, KWayMerger, Mutation, PartitionKey, TableId, WriteEngine,
-    WriteEngineConfig,
+    CellOperation, ClusteringKey, KWayMerger, MergePolicy, Mutation, PartitionKey, TableId,
+    WriteEngine, WriteEngineConfig,
 };
 use cqlite_core::types::{TombstoneType, Value};
 use tempfile::TempDir;
@@ -133,6 +133,13 @@ fn schema_collection() -> TableSchema {
 }
 
 fn base_schema(columns: Vec<Column>) -> TableSchema {
+    let mut comments = HashMap::new();
+    // gc_grace_seconds = 0 makes the production path's `gcBefore = now`, so a
+    // tombstone whose on-disk `localDeletionTime` (`TOMB_LDT_SECS = 100`, tiny vs
+    // any real wall-clock `now`) is unconditionally gc-purgeable REGARDLESS of the
+    // wall clock the background compaction samples. The overlap gate is then the
+    // ONLY thing deciding the tombstone's fate — no gc-grace boundary race.
+    comments.insert("gc_grace_seconds".to_string(), "0".to_string());
     TableSchema {
         keyspace: "zk".to_string(),
         table: "t".to_string(),
@@ -148,7 +155,7 @@ fn base_schema(columns: Vec<Column>) -> TableSchema {
             order: ClusteringOrder::Asc,
         }],
         columns,
-        comments: HashMap::new(),
+        comments,
         dropped_columns: HashMap::new(),
     }
 }
@@ -792,5 +799,193 @@ fn full_compaction_purges_cell_tombstone_baseline() {
     assert!(
         obs.v_live.is_none(),
         "the deleted `v` must not resurrect in a full compaction output; got {obs:?}"
+    );
+}
+
+// ===========================================================================
+// PRODUCTION-PATH end-to-end coverage (roborev #1384): drive the real
+// `WriteEngine::maintenance_step → start_merge` background PARTIAL compaction,
+// which itself computes `max_purgeable_timestamp` (via
+// `compute_max_purgeable_timestamp` over the non-included set) and WRITES the
+// output SSTable — then read that output together with the excluded C.
+// ===========================================================================
+
+/// A merge policy that selects the two OLDEST-generation candidates (A, B),
+/// leaving the NEWEST (C) EXCLUDED. Because the selected set is a strict subset of
+/// the candidate set, `maintenance_step` classifies the merge as PARTIAL
+/// (`purge_safe == false`) and computes the overlap bound from C. Generation order
+/// affects only equal-timestamp last-write-wins ties; every timestamp here is
+/// distinct, so selecting by generation is safe.
+#[derive(Debug)]
+struct SelectOldestTwoPolicy;
+
+impl MergePolicy for SelectOldestTwoPolicy {
+    fn select_merge(&self, candidates: &[PathBuf]) -> Result<Vec<PathBuf>, cqlite_core::Error> {
+        // Take the two OLDEST generations (A gen1, B gen2), leaving the newest
+        // (C gen3) excluded. Return them NEWEST-to-OLDEST per the trait contract
+        // (input order drives only equal-timestamp LWW ties; all ts here differ).
+        let mut by_gen: Vec<(u64, PathBuf)> = candidates
+            .iter()
+            .filter_map(|p| gen_of(p).map(|g| (g, p.clone())))
+            .collect();
+        by_gen.sort_by_key(|(g, _)| *g);
+        let mut oldest_two: Vec<PathBuf> = by_gen.into_iter().take(2).map(|(_, p)| p).collect();
+        oldest_two.reverse(); // newest-to-oldest among the selected
+        Ok(oldest_two)
+    }
+}
+
+/// Parse the generation out of an `nb-<gen>-big-Data.db` path.
+fn gen_of(p: &Path) -> Option<u64> {
+    let name = p.file_name()?.to_str()?;
+    name.strip_prefix("nb-")?
+        .split("-big-")
+        .next()?
+        .parse::<u64>()
+        .ok()
+}
+
+/// Build A (gen1 older-live), B (gen2 tombstone), C (gen3 excluded-live) under ONE
+/// table data dir, then drive the production background PARTIAL compaction
+/// (`SelectOldestTwoPolicy` → {A, B}; C excluded). Returns the resulting Data.db
+/// set — the compaction output PLUS the excluded C — for a downstream read.
+fn run_production_partial(
+    sch: &TableSchema,
+    a_muts: Vec<Mutation>,
+    b_muts: Vec<Mutation>,
+    c_muts: Vec<Mutation>,
+) -> (TempDir, Vec<PathBuf>) {
+    let temp = TempDir::new().unwrap();
+    let data_dir = temp.path().join("data");
+    let wal_dir = temp.path().join("wal");
+    let table_dir = data_dir.join(&sch.keyspace).join(&sch.table);
+
+    let config = WriteEngineConfig::new(data_dir.clone(), wal_dir, sch.clone());
+    let mut engine = WriteEngine::new(config).expect("engine");
+    let r = rt();
+
+    // Flush A (gen1), B (gen2), C (gen3) as three separate SSTables under one dir.
+    for m in a_muts {
+        engine.write(m).expect("write A");
+    }
+    r.block_on(engine.flush()).expect("flush A").expect("info");
+    for m in b_muts {
+        engine.write(m).expect("write B");
+    }
+    r.block_on(engine.flush()).expect("flush B").expect("info");
+    for m in c_muts {
+        engine.write(m).expect("write C");
+    }
+    r.block_on(engine.flush()).expect("flush C").expect("info");
+
+    let before = discover_inputs(&table_dir);
+    assert_eq!(
+        before.len(),
+        3,
+        "expected three input SSTables (A, B, C), got {before:?}"
+    );
+
+    // Drive the PARTIAL background compaction to completion.
+    engine
+        .set_merge_policy(Box::new(SelectOldestTwoPolicy))
+        .expect("set policy");
+    let mut guard = 0;
+    loop {
+        let report = engine
+            .maintenance_step(std::time::Duration::from_millis(500))
+            .expect("maintenance step");
+        if !report.pending_compaction {
+            break;
+        }
+        guard += 1;
+        assert!(guard < 1000, "maintenance did not converge");
+    }
+    r.block_on(engine.close()).expect("close");
+
+    // After the PARTIAL compaction, A and B are replaced by one output SSTable and
+    // C remains: the physical set a later read spans is {output, C}.
+    let after = discover_inputs(&table_dir);
+    assert_eq!(
+        after.len(),
+        2,
+        "partial compaction must leave {{output, excluded C}} = 2 SSTables, got {after:?}"
+    );
+    (temp, after)
+}
+
+/// PRODUCTION PATH — cell-tombstone zombie prevention. The real background
+/// partial compaction retains the gc-purgeable `v` cell tombstone (its
+/// `markedForDeleteAt` is not strictly below C's min ts, computed by the
+/// production `compute_max_purgeable_timestamp`), and a read across
+/// {output, C} shows `v` DELETED.
+#[test]
+fn production_partial_cell_tombstone_no_zombie() {
+    let sch = schema_scalar();
+    let (_tmp, set) = run_production_partial(
+        &sch,
+        vec![live_v("v1", TS_LIVE)],
+        vec![cell_tomb_v()],
+        vec![live_v("v1", TS_LIVE)],
+    );
+    // Read the surviving physical set with expiry/purge disabled (raw on-disk
+    // state) — the tombstone must be present and no zombie `v1` may resurface.
+    let obs = observe(set, &sch, None, None, false, None);
+    assert!(
+        obs.v_cell_tombstone,
+        "production partial: the `v` cell tombstone MUST survive in {{output, C}}; got {obs:?}"
+    );
+    assert!(
+        obs.v_live.is_none(),
+        "ZOMBIE (production partial): `v` resurfaced live across {{output, C}}; got {obs:?}"
+    );
+}
+
+/// PRODUCTION PATH — row-tombstone zombie prevention through the real background
+/// partial compaction.
+#[test]
+fn production_partial_row_tombstone_no_zombie() {
+    let sch = schema_scalar();
+    let (_tmp, set) = run_production_partial(
+        &sch,
+        vec![live_v("v1", TS_LIVE)],
+        vec![row_tomb()],
+        vec![live_v("v1", TS_LIVE)],
+    );
+    let obs = observe(set, &sch, None, None, false, None);
+    assert!(
+        obs.row_tombstone,
+        "production partial: the row tombstone MUST survive in {{output, C}}; got {obs:?}"
+    );
+    assert!(
+        obs.v_live.is_none(),
+        "ZOMBIE (production partial): the deleted row resurfaced live across {{output, C}}; \
+         got {obs:?}"
+    );
+}
+
+/// PRODUCTION PATH — purge resumes when safe. C now holds a NEWER live `v2`@20s,
+/// so the production `compute_max_purgeable_timestamp` yields an overlap bound
+/// (20s) STRICTLY ABOVE the tombstone's mfda (10s); the background partial
+/// compaction PURGES the tombstone, and a read across {output, C} returns C's
+/// newer live `v2` (a legitimate winner, not a zombie).
+#[test]
+fn production_partial_purge_resumes_when_safe() {
+    let sch = schema_scalar();
+    let (_tmp, set) = run_production_partial(
+        &sch,
+        vec![live_v("v1", TS_LIVE)],
+        vec![cell_tomb_v()],
+        vec![live_v("v2", TS_LIVE_NEWER)],
+    );
+    let obs = observe(set, &sch, None, None, false, None);
+    assert!(
+        !obs.v_cell_tombstone,
+        "production partial: the cell tombstone MUST be purged when the overlap bound rises \
+         above its mfda; got {obs:?}"
+    );
+    assert_eq!(
+        obs.v_live.as_deref(),
+        Some("v2"),
+        "C's newer live `v2` (ts=20s > delete@10s) must surface across {{output, C}}; got {obs:?}"
     );
 }
