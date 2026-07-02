@@ -120,6 +120,17 @@ pub enum VerifyErrorClass {
     /// `[2^31, 2^32)`, so those are NOT flagged — the on-disk format, not a
     /// heuristic, decides.)
     InvalidLocalDeletionTime,
+    /// A parseable BIG `Filter.db` reports "not present" (`might_contain == false`)
+    /// for a partition key that IS present in the SSTable (its raw key bytes are
+    /// enumerated from the authoritative `Index.db`) — a Bloom-filter FALSE
+    /// NEGATIVE (issue #1398). Cassandra's `Filter.db` carries no checksum, so a
+    /// bit flipped from 1→0 inside the bit array is not detected on load and makes
+    /// a live partition silently invisible on the BIG point-lookup path
+    /// (`partition_lookup.rs` returns `Ok(None)` when the bloom says "miss"). Full
+    /// scans and BTI (`da`) lookups are UNAFFECTED (they never gate on this bloom),
+    /// so this is a detection tool Cassandra's `sstableverify` lacks — Cassandra
+    /// does not verify Filter.db contents and would report the same fixture clean.
+    FilterFalseNegative,
 }
 
 impl VerifyErrorClass {
@@ -140,6 +151,7 @@ impl VerifyErrorClass {
             VerifyErrorClass::RowScanFailed => "RowScanFailed",
             VerifyErrorClass::OutOfOrderKeyOrRow => "OutOfOrderKeyOrRow",
             VerifyErrorClass::InvalidLocalDeletionTime => "InvalidLocalDeletionTime",
+            VerifyErrorClass::FilterFalseNegative => "FilterFalseNegative",
         }
     }
 }
@@ -337,6 +349,22 @@ pub async fn verify_sstable(
         // ---- Check 6b: Summary.db parse (BIG only) -------------------------
         if components.format == SsTableFormat::Big {
             check_summary(dir, &components, platform.clone(), &mut findings).await;
+        }
+
+        // ---- Check 6c: Filter.db no-false-negative membership (BIG only) ----
+        //
+        // A parseable Filter.db with a bit flipped 1→0 inside the bit array is
+        // NOT detected on load (Cassandra's Filter.db has no checksum, and the
+        // read path is fail-open only for UNPARSEABLE filters) yet yields false
+        // negatives: `might_contain == false` for a present key makes the BIG
+        // point-lookup path return Ok(None) — a live partition silently invisible
+        // (issue #1398). Cassandra's sstableverify does not verify Filter.db
+        // contents, so this is a detection tool Cassandra lacks. BTI is immune
+        // (bloom bypassed for the trie) and full scans never gate on the bloom, so
+        // this check is BIG-only and probes the authoritative Index.db present
+        // keys against the decoded filter.
+        if components.format == SsTableFormat::Big {
+            check_filter_false_negatives(dir, &components, platform.clone(), &mut findings).await;
         }
 
         // ---- Check 7: full row scan (no silent empty on corruption) --------
@@ -1085,6 +1113,82 @@ async fn check_summary(
             VerifyErrorClass::SummaryCorrupt,
             "Summary.db",
             format!("Summary.db failed to parse: {}", e),
+        ));
+    }
+}
+
+/// Check 6c (FULL, BIG): the `Filter.db` Bloom filter must have NO false
+/// negatives over the present partition keys (issue #1398).
+///
+/// A false negative — `might_contain == false` for a key Cassandra actually wrote
+/// — makes that partition silently invisible on the BIG point-lookup path
+/// (`partition_lookup.rs` returns `Ok(None)` on a bloom "miss"). Because
+/// `Filter.db` carries no checksum, a bit flipped 1→0 inside the bit array is not
+/// caught on load; only re-probing every present key against the decoded filter
+/// surfaces it. The authoritative present-key set is the raw partition-key bytes
+/// in the sibling `Index.db` (`key_digest`, issue #552) — exactly the bytes
+/// Cassandra's Murmur3 hashed into the filter (no path/type heuristics).
+///
+/// Fail-open, safe direction (matches `component_loading.rs`): if `Filter.db` is
+/// absent or does not decode, this check records nothing — an absent/unparseable
+/// filter means the read path simply skips the bloom (no false negatives). Only a
+/// PARSEABLE filter that drops a present key is flagged. If `Index.db` is
+/// absent/corrupt the present-key set is unavailable, so nothing is probed here
+/// (that corruption is surfaced by [`check_big_index`]).
+async fn check_filter_false_negatives(
+    dir: &Path,
+    components: &ComponentSet,
+    platform: Arc<Platform>,
+    findings: &mut Vec<VerifyFinding>,
+) {
+    use crate::storage::sstable::bloom::BloomFilter;
+    use crate::storage::sstable::index_reader::IndexReader;
+
+    let filter_path = components.path(dir, "Filter.db");
+    let index_path = components.path(dir, "Index.db");
+    // Absent Filter.db → the read path skips the bloom entirely (no false
+    // negatives possible). Absent Index.db → no authoritative present-key source.
+    if !filter_path.exists() || !index_path.exists() {
+        return;
+    }
+
+    let Ok(filter_bytes) = std::fs::read(&filter_path) else {
+        return;
+    };
+    // Fail-open: an unparseable filter is the safe direction (component_loading.rs
+    // makes the bloom simply unavailable). Only a PARSEABLE-but-wrong filter is the
+    // silent false-negative hazard this check exists to catch.
+    let Ok(bloom) = BloomFilter::deserialize(&filter_bytes) else {
+        return;
+    };
+
+    // Enumerate the authoritative present keys from Index.db. A parse failure here
+    // is Index.db corruption, already surfaced by check_big_index — do not
+    // fabricate a filter finding from it.
+    let Ok(reader) = IndexReader::open(&index_path, platform).await else {
+        return;
+    };
+
+    let mut present = 0usize;
+    let mut false_negatives = 0usize;
+    for entry in reader.get_partition_entries() {
+        present += 1;
+        if !bloom.might_contain(&entry.key_digest) {
+            false_negatives += 1;
+        }
+    }
+
+    if false_negatives > 0 {
+        findings.push(VerifyFinding::new(
+            VerifyErrorClass::FilterFalseNegative,
+            "Filter.db",
+            format!(
+                "Bloom filter reported {false_negatives} false negative(s) over {present} present \
+                 partition key(s): a present key hashes to a bit the filter reports unset, so the \
+                 BIG point-lookup path would return no rows for a live partition (silent data \
+                 invisibility). Filter.db carries no checksum, so a 1→0 bit flip inside the bit \
+                 array is not caught on load; full scans and BTI lookups are unaffected."
+            ),
         ));
     }
 }
