@@ -871,16 +871,23 @@ pub(crate) mod length_decode_audit {
 /// | Data.db rows/cells/collections: `row_cell_state_machine`,    | flip-to-unsigned |
 /// |   `reader/parsing/{key_parsing,block_entries,value_parsing,  |   (Cassandra;    |
 /// |   comparator_value_parsing}`, `types/{collections,primitives,|   CQLite's own   |
-/// |   tombstones,udt}`, `optimized_complex_types`                |   writer also    |
+/// |   udt}`, `optimized_complex_types`                            |   writer also    |
 /// |                                                              |   uses           |
 /// |                                                              |   `encode_unsigned`) |
 /// | Statistics.db: `parser/statistics.rs` (superseded on the     | flip-to-unsigned |
 /// |   prod path by `enhanced_statistics_parser`, format-unsigned) |                  |
 /// | Header-spec field parser: `storage/.../header_spec.rs`        | flip-to-unsigned |
+/// |   `VBytes`/`Array`/`Map` — Cassandra structural length/count  |   (read-only     |
+/// |   (`writeUnsignedVInt`); read-only header spec, no CQLite     |    Cassandra     |
+/// |   ZigZag writer to pair with                                  |    spec parser)  |
 /// | Header round-trip: `parser/header.rs` standard body —         | KEEP-SIGNED →    |
 /// |   `serialize_sstable_header` writes lengths with `encode_vint`|   uses           |
 /// |   (ZigZag); a CQLite-internal format, short-circuited for     |   `parse_vint_length_signed` |
 /// |   real V5 data via `parse_cassandra5_simplified_header`       |                  |
+/// | Range-tombstone bounds: `types/tombstones.rs` range_start/    | KEEP-SIGNED →    |
+/// |   range_end lengths — paired writer `serialize_cql_value`     |   uses           |
+/// |   (`types/mod.rs`) encodes with ZigZag `encode_vint`; a       |   `parse_vint_length_signed` |
+/// |   self-consistent CQLite-internal round-trip                  |                  |
 ///
 /// # Safety
 /// Enforces a maximum length of 1GB ([`MAX_VINT_LENGTH`]) to prevent:

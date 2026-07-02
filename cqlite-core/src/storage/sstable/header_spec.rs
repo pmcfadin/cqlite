@@ -16,7 +16,7 @@ use crate::{
     error::{Error, Result},
     parser::{
         header::{parse_magic_and_version, CassandraVersion},
-        vint::{parse_vint, parse_vint_length_signed},
+        vint::{parse_vint, parse_vint_length},
     },
 };
 use nom::{
@@ -579,12 +579,13 @@ fn parse_header_field<'a>(
             (remaining, HeaderFieldValue::Bytes(bytes.to_vec()))
         }
         HeaderFieldType::VBytes => {
-            let (remaining, len) = parse_vint_length_signed(input)?;
+            // Cassandra structural length/count (writeUnsignedVInt); unsigned.
+            let (remaining, len) = parse_vint_length(input)?;
             let (remaining, bytes) = take(len)(remaining)?;
             (remaining, HeaderFieldValue::Bytes(bytes.to_vec()))
         }
         HeaderFieldType::Array(element_type) => {
-            let (remaining, count) = parse_vint_length_signed(input)?;
+            let (remaining, count) = parse_vint_length(input)?;
             let mut elements = Vec::new();
             let mut current = remaining;
 
@@ -597,7 +598,7 @@ fn parse_header_field<'a>(
             (current, HeaderFieldValue::Array(elements))
         }
         HeaderFieldType::Map(key_type, value_type) => {
-            let (remaining, count) = parse_vint_length_signed(input)?;
+            let (remaining, count) = parse_vint_length(input)?;
             let mut map = HashMap::new();
             let mut current = remaining;
 
