@@ -32,6 +32,7 @@ on:
       - "CI: Compression / Corruption Parity (Nightly Docker, Epic #970)"
       - "CI: CQL Type & Schema-Evolution Parity (Nightly Docker, Epic #971)"
       - "CI: Tombstone / TTL Parity (Nightly Docker, Epic #972)"
+      - "CI: Live-Cell Compaction Byte Parity (issue #1017, #1020)"
       - "Exhaustive Regeneration (parity corpus)"
     types: [completed]
   workflow_dispatch:
@@ -134,13 +135,14 @@ jobs:
             R_EVENT="$(printf '%s' "${META}" | jq -r '.event // ""')"
             R_CONCLUSION="$(printf '%s' "${META}" | jq -r '.conclusion // ""')"
             R_URL="$(printf '%s' "${META}" | jq -r '.url // ""')"
-            # (a) tracked-workflow allowlist — the target run must belong to one of the 4
+            # (a) tracked-workflow allowlist — the target run must belong to one of the 5
             # tracked parity lanes (matched by workflow NAME, the same names the auto
             # workflow_run trigger allowlists above).
             case "${R_NAME}" in
               "CI: Compression / Corruption Parity (Nightly Docker, Epic #970)"|\
               "CI: CQL Type & Schema-Evolution Parity (Nightly Docker, Epic #971)"|\
               "CI: Tombstone / TTL Parity (Nightly Docker, Epic #972)"|\
+              "CI: Live-Cell Compaction Byte Parity (issue #1017, #1020)"|\
               "Exhaustive Regeneration (parity corpus)")
                 : ;;
               *)
@@ -236,7 +238,7 @@ jobs:
           # Fix A: map the completed run's identity to its workflow FILENAME so the
           # green-lane resolve is scoped to THAT lane only (never all open issues). Prefer
           # the payload `path` (`.github/workflows/<file>`); fall back to a name→filename
-          # lookup for the 4 tracked lanes. On a replay, WR_NAME/WR_PATH are empty — use
+          # lookup for the 5 tracked lanes. On a replay, WR_NAME/WR_PATH are empty — use
           # the validated target-run workflow name. WR_PATH/WR_NAME/VALIDATED_NAME are
           # untrusted -> quoted env.
           LANE_FILE=""
@@ -251,6 +253,8 @@ jobs:
                 LANE_FILE="cql-type-parity.yml" ;;
               "CI: Tombstone / TTL Parity (Nightly Docker, Epic #972)")
                 LANE_FILE="tombstone-ttl-parity.yml" ;;
+              "CI: Live-Cell Compaction Byte Parity (issue #1017, #1020)")
+                LANE_FILE="live-cell-compaction-parity.yml" ;;
               "Exhaustive Regeneration (parity corpus)")
                 LANE_FILE="exhaustive-regeneration.yml" ;;
               *)
@@ -268,7 +272,7 @@ jobs:
           case "${LANE_FILE}" in
             exhaustive-regeneration.yml)
               LANE_TIER="exhaustive_regeneration" ;;
-            compression-corruption-parity.yml|cql-type-parity.yml|tombstone-ttl-parity.yml)
+            compression-corruption-parity.yml|cql-type-parity.yml|tombstone-ttl-parity.yml|live-cell-compaction-parity.yml)
               LANE_TIER="nightly_docker" ;;
             *)
               : ;;

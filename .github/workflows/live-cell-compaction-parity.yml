@@ -168,12 +168,41 @@ jobs:
               --test issue_1020_udt_frozen_compaction_byte_parity \
               -- --nocapture
 
-      # Issue #1027 convergence audit: this lane's live-cell/UDT compaction parity
-      # tests use plain assert!/assert_eq! terminals — they do NOT route through
-      # ParityFailure::panic and have no scenario-id-keyed bundle emitter — so a
-      # speculative `parity-failures-*` upload here would advertise a bundle that
-      # never appears (even with `if-no-files-found: ignore`, the artifact promise
-      # is false). The upload was removed rather than left misleading. FOLLOW-UP:
-      # to restore it, first route these tests' failure terminals through the
-      # shared ParityFailure/FailureBundle emitter (out of scope for #1027, which
-      # only standardises the artifact system, not each suite's assertion sites).
+      # Issue #1027 note (historical): this lane's tests use plain assert!/assert_eq!
+      # terminals — they do NOT route through the per-SCENARIO ParityFailure::panic
+      # bundle emitter, so a speculative scenario-id-keyed `parity-failures-*` bundle
+      # would advertise an artifact that never appears. That per-scenario bundle
+      # remains out of scope (tracked in #1345).
+      #
+      # Issue #1405: the parity-failure-issue automation only needs a LANE-SCOPED
+      # `parity-failures.json` (structured fields to fingerprint from), exactly as
+      # tombstone-ttl-parity.yml already emits. On a NIGHTLY failure this lets a real
+      # byte-parity regression file/update ONE deduped `parity-failure` issue rather
+      # than being discovered by manual log-reading. The scenario_id/test_target here
+      # are intentionally lane-scoped v1 placeholders (stable per lane so cross-run
+      # dedup works); per-scenario emission is the #1345 follow-up. This emits ONLY on
+      # failure, and the automation ignores pull_request-origin runs (it files for the
+      # scheduled/dispatch runs), so PRs still just surface the red check.
+      - name: Emit parity-failures.json (on failure)
+        if: failure()
+        run: |
+          set -euo pipefail
+          cat > parity-failures.json <<'JSON'
+          [
+            {
+              "scenario_id": "cass.compaction.byte_tier_pr_proxy.live_cell_udt_lane",
+              "workflow": "live-cell-compaction-parity.yml",
+              "test_target": "cqlite-core compaction byte-parity subset (issue_1017/1020/1240)",
+              "component_path": "test-data/datasets/sstables/test_compactionparity,test_compactionparityudt",
+              "failure_class": "ByteParityMismatch"
+            }
+          ]
+          JSON
+
+      - name: Upload parity-failures.json
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-failures
+          path: parity-failures.json
+          if-no-files-found: warn
