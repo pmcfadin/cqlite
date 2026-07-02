@@ -791,26 +791,45 @@ async fn gc_purge_grace0_major_compaction_purges_to_empty() {
 // Fixture-integrity guard for the #[ignore]-until-#1410 byte-parity references
 // ════════════════════════════════════════════════════════════════════════════
 
-/// Collect EVERY distinct `local_delete_time` (as epoch seconds) that appears in a
-/// golden JSONL — whether under a row/cell `deletion_info` or a range-marker
-/// (`start`/`end`) `deletion_info`. Used by the fixture-integrity guard to prove the
-/// JSONL sidecar the ignored byte-parity tests read from is present, valid JSON, and
-/// actually carries the LDT metadata those tests pin against. A malformed line or an
-/// unparseable ISO LDT PANICS (fail-closed), matching `ldt_secs_from_golden`.
-fn golden_ldts(ref_dir: &Path, table: &str) -> Vec<i32> {
+/// WHERE a scenario's tombstone `local_delete_time` lives in the golden JSONL — the
+/// SAME shape each byte-parity test reads from, so the fixture guard validates the
+/// exact LDT kind the ignored test will later pin (not merely "some LDT somewhere").
+#[derive(Clone, Copy)]
+enum LdtShape {
+    /// Row-level `rows[].deletion_info.local_delete_time` (shadow_row_delete).
+    RowDeletion,
+    /// Cell-level `rows[].cells[].deletion_info.local_delete_time` (ttl_expired_live).
+    CellDeletion,
+    /// Range-marker `rows[].{start,end}.deletion_info.local_delete_time` (rt_cross_gen).
+    RangeMarker,
+}
+
+/// Collect the DISTINCT `local_delete_time`s (epoch seconds) at exactly `shape`'s
+/// location in the golden JSONL — mirroring the shape-specific extractor each
+/// byte-parity test uses (`ldt_secs_from_golden` matchers / the rt_cross_gen
+/// start/end walk). A malformed line or an unparseable ISO LDT PANICS (fail-closed),
+/// matching `ldt_secs_from_golden`. Used by the fixture-integrity guard so a stale or
+/// wrong-shaped sidecar cannot pass strict CI while the byte-parity tests stay ignored.
+fn golden_ldts(ref_dir: &Path, table: &str, shape: LdtShape) -> Vec<i32> {
     let data = single_data_db(ref_dir)
         .unwrap_or_else(|| panic!("{table}: no compacted Data.db in a present fixture"));
     let jsonl = ref_dir.join(format!("{}Data.db.jsonl", descriptor_prefix(&data)));
     let text = std::fs::read_to_string(&jsonl)
         .unwrap_or_else(|e| panic!("{table}: golden JSONL {jsonl:?} unreadable: {e}"));
     let mut ldts: Vec<i32> = Vec::new();
-    let push_iso = |iso: &str, ldts: &mut Vec<i32>| {
+    let mut push_iso = |iso: &str| {
         let secs = iso_to_epoch_secs(iso).unwrap_or_else(|| {
             panic!("{table}: golden local_delete_time '{iso}' not parseable as ISO-8601 seconds")
         });
         if !ldts.contains(&secs) {
             ldts.push(secs);
         }
+    };
+    let ldt_of = |node: &serde_json::Value| -> Option<String> {
+        node.get("deletion_info")?
+            .get("local_delete_time")?
+            .as_str()
+            .map(str::to_string)
     };
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         let jv: serde_json::Value = serde_json::from_str(line)
@@ -819,34 +838,27 @@ fn golden_ldts(ref_dir: &Path, table: &str) -> Vec<i32> {
             continue;
         };
         for row in rows {
-            // Row/cell deletion_info (shadow_row_delete, ttl_expired_live).
-            if let Some(iso) = row
-                .get("deletion_info")
-                .and_then(|d| d.get("local_delete_time"))
-                .and_then(|v| v.as_str())
-            {
-                push_iso(iso, &mut ldts);
-            }
-            if let Some(cells) = row.get("cells").and_then(|c| c.as_array()) {
-                for cell in cells {
-                    if let Some(iso) = cell
-                        .get("deletion_info")
-                        .and_then(|d| d.get("local_delete_time"))
-                        .and_then(|v| v.as_str())
-                    {
-                        push_iso(iso, &mut ldts);
+            match shape {
+                LdtShape::RowDeletion => {
+                    if let Some(iso) = ldt_of(row) {
+                        push_iso(&iso);
                     }
                 }
-            }
-            // Range-marker deletion_info (rt_cross_gen).
-            for side in ["start", "end"] {
-                if let Some(iso) = row
-                    .get(side)
-                    .and_then(|s| s.get("deletion_info"))
-                    .and_then(|d| d.get("local_delete_time"))
-                    .and_then(|v| v.as_str())
-                {
-                    push_iso(iso, &mut ldts);
+                LdtShape::CellDeletion => {
+                    if let Some(cells) = row.get("cells").and_then(|c| c.as_array()) {
+                        for cell in cells {
+                            if let Some(iso) = ldt_of(cell) {
+                                push_iso(&iso);
+                            }
+                        }
+                    }
+                }
+                LdtShape::RangeMarker => {
+                    for side in ["start", "end"] {
+                        if let Some(iso) = row.get(side).and_then(ldt_of) {
+                            push_iso(&iso);
+                        }
+                    }
                 }
             }
         }
@@ -883,11 +895,16 @@ async fn byte_parity_reference_fixtures_present_and_consistent() {
         eprintln!("[issue_1387] CQLITE_DATASETS_ROOT unset; skipping fixture-integrity guard");
         return;
     }
-    // (table, minimum number of DISTINCT tombstone LDTs the byte-parity test pins).
-    for (t, min_distinct_ldts) in [
-        ("shadow_row_delete", 1usize),
-        ("ttl_expired_live", 1usize),
-        ("rt_cross_gen", 2usize),
+    // (table, LDT shape the byte-parity test reads, EXACT distinct-LDT count it pins).
+    //   * shadow_row_delete: one row-level tombstone LDT (row_tombstone at ldt).
+    //   * ttl_expired_live:  one cell-level tombstone LDT (expired cell collapse).
+    //   * rt_cross_gen:      two distinct range-marker LDTs (ldts[0] != ldts[1]).
+    // The guard reads the SAME shape as each test and asserts the EXACT count, so a
+    // stale/wrong-shaped sidecar cannot pass strict CI while the tests stay ignored.
+    for (t, shape, want_ldts) in [
+        ("shadow_row_delete", LdtShape::RowDeletion, 1usize),
+        ("ttl_expired_live", LdtShape::CellDeletion, 1usize),
+        ("rt_cross_gen", LdtShape::RangeMarker, 2usize),
     ] {
         let Some(ref_dir) = reference_dir(t) else {
             // reference_dir() already PANICs on present-but-incomplete; a plain
@@ -921,11 +938,12 @@ async fn byte_parity_reference_fixtures_present_and_consistent() {
                 "{t}: committed component {needed} present-but-empty — golden broken"
             );
         }
-        let ldts = golden_ldts(&ref_dir, t);
-        assert!(
-            ldts.len() >= min_distinct_ldts,
-            "{t}: golden JSONL must carry >= {min_distinct_ldts} distinct tombstone \
-             local_delete_time value(s) for the byte-parity test, got {ldts:?}"
+        let ldts = golden_ldts(&ref_dir, t, shape);
+        assert_eq!(
+            ldts.len(),
+            want_ldts,
+            "{t}: golden JSONL must carry EXACTLY {want_ldts} distinct tombstone \
+             local_delete_time value(s) at the shape the byte-parity test reads, got {ldts:?}"
         );
         eprintln!(
             "[issue_1387] {KEYSPACE}.{t}: fixture-integrity guard PASS \
