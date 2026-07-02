@@ -546,6 +546,94 @@ fn partial_without_gap_and_next_step_is_rejected() {
     );
 }
 
+/// A `partial`-evidence scenario with a full scope (gap + next_step) but NO
+/// `scope.target_issue` must be rejected (issue #1401): an untracked partial is
+/// orphaned debt with no open home. Note `next_step` cites an issue in prose but
+/// `target_issue` is absent — the machine field is what the fail-closed rule needs.
+const PARTIAL_UNTRACKED_SCENARIO: &str = r#"  - id: cass.tombstone_ttl.example_partial
+    title: Example partial scenario
+    status: partial
+    capability: tombstone_ttl
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files: [ExampleTest.java]
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+    fixtures: {}
+    evidence:
+      type: partial
+      known_limitations: no dedicated fixture yet
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: bash regen.sh
+    ci:
+      tier: manual_debug
+    scope:
+      gap: no dedicated fixture yet
+      next_step: "Commission a fixture (see #1387)."
+"#;
+
+#[test]
+fn partial_without_target_issue_is_rejected() {
+    let errs = errors(&wrap(PARTIAL_UNTRACKED_SCENARIO));
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("scope.target_issue") && e.contains("OPEN")),
+        "a partial scenario with no scope.target_issue must be rejected, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn partial_with_target_issue_but_next_step_missing_ref_is_rejected() {
+    // target_issue present, but next_step does not echo #<target_issue>.
+    let scenario = PARTIAL_UNTRACKED_SCENARIO.replace(
+        "      next_step: \"Commission a fixture (see #1387).\"\n",
+        "      next_step: Commission a fixture.\n      target_issue: 1387\n",
+    );
+    let errs = errors(&wrap(&scenario));
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("scope.next_step") && e.contains("#1387")),
+        "next_step that omits the target_issue #ref must be rejected, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn partial_next_step_ref_must_be_whole_token_not_prefix() {
+    // target_issue: 150, but next_step cites #1507 — a naive `contains("#150")`
+    // would false-match the #1507 prefix. The whole-token check must reject this.
+    let scenario = PARTIAL_UNTRACKED_SCENARIO.replace(
+        "      next_step: \"Commission a fixture (see #1387).\"\n",
+        "      next_step: \"Commission a fixture (see #1507).\"\n      target_issue: 150\n",
+    );
+    let errs = errors(&wrap(&scenario));
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("scope.next_step") && e.contains("#150")),
+        "a #1507 citation must NOT satisfy target_issue 150, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn partial_parked_on_open_issue_passes() {
+    // target_issue present AND echoed in next_step: the fail-closed rule is satisfied.
+    let scenario = PARTIAL_UNTRACKED_SCENARIO.replace(
+        "      next_step: \"Commission a fixture (see #1387).\"\n",
+        "      next_step: \"Commission a fixture (see #1387).\"\n      target_issue: 1387\n",
+    );
+    let errs = errors(&wrap(&scenario));
+    assert!(
+        errs.is_empty(),
+        "a partial parked on an open issue + citing it must pass, got: {errs:#?}"
+    );
+}
+
 #[test]
 fn missing_local_reference_path_is_rejected_when_checked() {
     // With repo_root set, a non-existent reference path must be flagged.
