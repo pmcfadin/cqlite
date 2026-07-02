@@ -52,7 +52,9 @@ mod serialization_header;
 /// `EncodingStats.DELETION_TIME_EPOCH` — the "no local deletion time" sentinel /
 /// merge identity (issue #1410). Re-exported so the compaction baseline seeder
 /// (`write_engine::merge::compute_baseline_min`) uses the SAME authoritative
-/// constant the parser reconstructs `min_deletion_time` against.
+/// constant the parser reconstructs `min_deletion_time` against. Gated on
+/// `write-support` (its only consumer); the minimal read-only build never needs it.
+#[cfg(feature = "write-support")]
 pub(crate) use encoding_stats::DELETION_TIME_EPOCH;
 pub use header::parse_nb_format_header;
 
