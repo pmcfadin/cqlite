@@ -364,6 +364,38 @@ fn reject_counter_cells(mutation: &Mutation) -> Result<()> {
 
 #[cfg(feature = "write-support")]
 impl WriteEngine {
+    /// Create `dir` (and any missing ancestors) and fsync its immediate parent
+    /// so that, if `dir` was just created, the new directory's own entry in its
+    /// parent is durable across a crash (issue #1392).
+    ///
+    /// `create_dir_all` succeeding guarantees the parent now exists, so we can
+    /// always fsync it; the call is idempotent and cheap when `dir` already
+    /// existed. The parent is user-/OS-supplied and pre-existing, so its own
+    /// dirent is already durable — we deliberately do NOT walk above the
+    /// immediate parent. When `dir` has no parent (a filesystem root) the FS
+    /// owns that entry and there is nothing for us to fsync.
+    fn create_dir_all_durable(dir: &Path, label: &str) -> Result<()> {
+        std::fs::create_dir_all(dir).map_err(|e| {
+            Error::Storage(format!(
+                "Failed to create {} directory {:?}: {}",
+                label, dir, e
+            ))
+        })?;
+
+        match dir.parent() {
+            // A relative single-component path (e.g. "data") has an empty
+            // parent; its real parent is the current working directory.
+            Some(parent) if parent.as_os_str().is_empty() => {
+                wal::sync_directory(Path::new("."))?;
+            }
+            Some(parent) => wal::sync_directory(parent)?,
+            // `dir` is a filesystem root: nothing above it for us to fsync.
+            None => {}
+        }
+
+        Ok(())
+    }
+
     /// Create a new write engine
     ///
     /// This initializes the WAL and memtable. If a WAL exists in the
@@ -384,20 +416,15 @@ impl WriteEngine {
     /// - Data directory doesn't exist
     /// - WAL replay fails
     pub fn new(config: WriteEngineConfig) -> Result<Self> {
-        // Ensure directories exist
-        std::fs::create_dir_all(&config.data_dir).map_err(|e| {
-            Error::Storage(format!(
-                "Failed to create data directory {:?}: {}",
-                config.data_dir, e
-            ))
-        })?;
-
-        std::fs::create_dir_all(&config.wal_dir).map_err(|e| {
-            Error::Storage(format!(
-                "Failed to create WAL directory {:?}: {}",
-                config.wal_dir, e
-            ))
-        })?;
+        // Ensure directories exist AND that each newly-created root's own dirent
+        // is durable. `create_dir_all` alone persists the entries *inside* a
+        // freshly-created root once we fsync the root, but NOT the root's own
+        // entry in its parent — so a crash after WAL truncation could lose the
+        // whole data/WAL root. Fsyncing each root's immediate parent at init
+        // completes the durability chain (SSTable component contents → leaf →
+        // ancestors → data_root → data_root's parent). See issue #1392.
+        Self::create_dir_all_durable(&config.data_dir, "data")?;
+        Self::create_dir_all_durable(&config.wal_dir, "WAL")?;
 
         // Acquire an exclusive advisory lock on the WAL directory to prevent
         // two WriteEngine / Database instances from sharing the same write_dir
@@ -1205,6 +1232,32 @@ mod tests {
         assert_eq!(engine.memtable_size(), 0);
         assert_eq!(engine.memtable_row_count(), 0);
         assert!(!engine.closed.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    /// Issue #1392: `create_dir_all_durable` is the init-time link in the
+    /// durability chain — it must create a fresh (possibly nested) root and
+    /// fsync its parent so the new root's own dirent is persisted. There is no
+    /// fs-op recorder seam on the init path, so this exercises the helper's
+    /// call path directly (create + parent fsync succeeds and is idempotent);
+    /// a crash-injection observation of the fsync would require a syscall seam
+    /// that does not exist here.
+    #[test]
+    fn test_create_dir_all_durable_fsyncs_parent() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Fresh nested root: parent (`root`) exists, `data` is newly created.
+        let root = temp_dir.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let data = root.join("data");
+        assert!(!data.exists());
+
+        WriteEngine::create_dir_all_durable(&data, "data").unwrap();
+        assert!(data.is_dir(), "new root directory must exist");
+
+        // Idempotent: re-running on an already-existing dir still succeeds and
+        // re-fsyncs the parent without error.
+        WriteEngine::create_dir_all_durable(&data, "data").unwrap();
+        assert!(data.is_dir());
     }
 
     #[test]
