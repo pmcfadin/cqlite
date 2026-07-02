@@ -16,6 +16,23 @@ use super::super::{
     types::SSTableReader,
 };
 
+/// Wrap a single decoded column cell for the scan → query channel (issue #1334).
+///
+/// A genuinely absent cell (`Value::Null`) or a tombstone stays a suppressible
+/// [`ScanRow::Marker`] — `build_row_from_scan`/`into_cells()` drop those from
+/// user-visible output. Any REAL decoded value becomes a live [`ScanRow::Row`]
+/// carrying the interned `Arc<str>` column name (a refcount bump, no per-cell
+/// `String` re-alloc) so it surfaces in SELECT/export output instead of being
+/// silently suppressed. This is the roborev-H fix: state-machine-parsed
+/// static/clustering values were previously mis-wrapped as `Marker` and would
+/// disappear from query results.
+fn live_cell_scan_row(column_name: &str, value: &Value) -> ScanRow {
+    match value {
+        Value::Null | Value::Tombstone(_) => ScanRow::Marker(value.clone()),
+        _ => ScanRow::Row(vec![(std::sync::Arc::from(column_name), value.clone())]),
+    }
+}
+
 impl SSTableReader {
     /// Parse block entries with optional schema parameter
     ///
@@ -309,6 +326,15 @@ impl SSTableReader {
             };
             offset += value_len;
 
+            // Genuine-marker-only for supported formats: this inline loop is the
+            // fallthrough reached ONLY when the data format is neither
+            // V5CompressedLegacy (nb → returns above) nor V5UncompressedOA (da BTI
+            // → state machine returns above), i.e. exclusively out-of-scope pre-`na`
+            // LegacyOA. `parse_column_value_enhanced` can only reach here with an
+            // empty value (`Value::Null`) — a genuine null marker — because
+            // `extract_column_name_from_context` always returns `None`, so any
+            // non-empty value errors out before the push. Nothing live for a
+            // supported (nb/da) format flows through here, so `Marker` is correct.
             entries.push((table_id, key, ScanRow::Marker(value)));
         }
 
@@ -515,7 +541,14 @@ impl SSTableReader {
                 static_key_bytes.extend_from_slice(column_name.as_bytes());
 
                 let static_key = RowKey::new(static_key_bytes);
-                entries.push((table_id.clone(), static_key, ScanRow::Marker(value.clone())));
+                // Live static-row value decoded by the state machine (supported
+                // da BTI / oa path): must surface as a `ScanRow::Row` cell, not a
+                // suppressed marker (issue #1334 / roborev H).
+                entries.push((
+                    table_id.clone(),
+                    static_key,
+                    live_cell_scan_row(column_name, value),
+                ));
             }
         }
 
@@ -528,10 +561,13 @@ impl SSTableReader {
                 compound_key_bytes.extend_from_slice(column_name.as_bytes());
 
                 let compound_key = RowKey::new(compound_key_bytes);
+                // Live clustering-bound value decoded by the state machine
+                // (supported da BTI / oa path): surface as a `ScanRow::Row` cell
+                // so it reaches SELECT/export output (issue #1334 / roborev H).
                 entries.push((
                     table_id.clone(),
                     compound_key,
-                    ScanRow::Marker(value.clone()),
+                    live_cell_scan_row(column_name, value),
                 ));
             }
         }
@@ -641,6 +677,14 @@ impl SSTableReader {
             };
             offset += value_len;
 
+            // Genuine-marker-only for supported formats: this is the
+            // state-machine remainder fallback. For da BTI (the only supported
+            // format that reaches it) a non-empty value errors out in
+            // `parse_column_value_enhanced` (the modern-format arm rejects the
+            // blob fallback, and `extract_column_name_from_context` always returns
+            // `None` so no schema-typed decode occurs). The only value that
+            // survives to this push is an empty-length `Value::Null` — a genuine
+            // null marker — so `Marker` is correct and drops no live data.
             entries.push((table_id, key, ScanRow::Marker(value)));
         }
 
@@ -1008,6 +1052,71 @@ mod tests {
             0,
             "Empty ParsedRow should produce no entries"
         );
+    }
+
+    /// Issue #1334 / roborev H: a live clustering-bound value decoded by the
+    /// state machine and turned into an entry by `convert_parsed_row_to_entries`
+    /// MUST reach user-visible output. Before the fix that value was wrapped as
+    /// `ScanRow::Marker`, which `build_row_from_scan` suppresses via
+    /// `into_cells()` — so the column silently disappeared from SELECT/export.
+    /// This drives the real conversion path and asserts the value surfaces; it
+    /// would fail (build_row_from_scan → None → panic) under marker-suppression.
+    #[tokio::test]
+    async fn convert_parsed_row_live_value_surfaces_via_build_row_from_scan() {
+        let reader = match create_test_reader("test_basic", "simple_table").await {
+            Some(r) => r,
+            None => {
+                eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set or test data unavailable");
+                return;
+            }
+        };
+
+        let mut cols = HashMap::new();
+        cols.insert("name".to_string(), Value::Text("alice".to_string()));
+        let clustering_rows = vec![(b"ck".to_vec(), cols)];
+        let parsed_row = create_test_parsed_row(b"pk".to_vec(), None, clustering_rows);
+
+        let entries = reader
+            .convert_parsed_row_to_entries(&parsed_row)
+            .expect("convert must succeed");
+        assert_eq!(entries.len(), 1, "one live clustering column -> one entry");
+
+        let (_, key, scan_row) = entries.into_iter().next().unwrap();
+        assert!(
+            matches!(scan_row, ScanRow::Row(_)),
+            "a live decoded value must be a ScanRow::Row, not a suppressed Marker"
+        );
+
+        // Interned Arc<str> cell name carried straight through (no String realloc).
+        let row = crate::query::build_row_from_scan(key, scan_row, &[], None)
+            .expect("roborev H: a live row must NOT be suppressed by into_cells()");
+        assert_eq!(
+            row.values.get("name"),
+            Some(&Value::Text("alice".to_string())),
+            "the real column value must survive the scan->query carrier"
+        );
+    }
+
+    /// A genuinely absent cell (`Value::Null`) still maps to a suppressed
+    /// `ScanRow::Marker` — the helper must only surface REAL values, so
+    /// null/tombstone placeholders remain hidden from user output.
+    #[test]
+    fn live_cell_scan_row_suppresses_null_but_surfaces_real_value() {
+        assert!(
+            matches!(
+                live_cell_scan_row("name", &Value::Null),
+                ScanRow::Marker(Value::Null)
+            ),
+            "a null cell must stay a suppressed marker"
+        );
+        match live_cell_scan_row("name", &Value::Text("bob".to_string())) {
+            ScanRow::Row(cells) => {
+                assert_eq!(cells.len(), 1);
+                assert_eq!(&*cells[0].0, "name", "interned real column name");
+                assert_eq!(cells[0].1, Value::Text("bob".to_string()));
+            }
+            ScanRow::Marker(_) => panic!("a real value must be a live Row, not a marker"),
+        }
     }
 
     // ========================================================================
