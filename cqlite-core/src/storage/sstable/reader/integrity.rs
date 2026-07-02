@@ -6,7 +6,7 @@
 use super::super::verify::{self, VerifyMode};
 use super::{IntegrityCheckResult, IntegrityStatus, SSTableReader, SSTableReaderHealthMetrics};
 use crate::types::{ScanRow, Value};
-use crate::{Error, Result};
+use crate::Result;
 
 use log::{debug, info};
 
@@ -54,25 +54,22 @@ impl SSTableReader {
     /// corrupt `Index.db` / `Digest.crc32` / `Summary.db` / `Filter.db` or
     /// out-of-order keys (all of which the verifier FAILs) read back `Healthy`
     /// here — a divergent verdict. We now run the authoritative verifier in
-    /// `Full` mode over the same SSTable directory and map its `VerifyReport` onto
-    /// the legacy `IntegrityCheckResult` shape the (test-only) consumers expect.
+    /// `Full` mode over the reader's EXACT generation (`self.file_path`, not merely
+    /// its parent directory — roborev #1283) and map its `VerifyReport` onto the
+    /// legacy `IntegrityCheckResult` shape the (test-only) consumers expect.
     pub async fn perform_integrity_check(&self) -> Result<IntegrityCheckResult> {
         debug!("Starting integrity check for {:?}", self.file_path);
 
-        // The verifier operates on the SSTable's directory (it resolves the
-        // generation's components); derive it from the open reader's Data.db path.
-        let dir = self.file_path.parent().ok_or_else(|| {
-            Error::corruption(format!(
-                "SSTable path {:?} has no parent directory to verify",
-                self.file_path
-            ))
-        })?;
-
-        // Delegate to the authoritative engine using the same Config/Platform the
-        // reader was opened with. Data corruption is reported as findings inside
-        // an Ok(report); only environmental problems return Err.
-        let report = verify::verify_sstable(
-            dir,
+        // Delegate to the authoritative engine, verifying the EXACT generation this
+        // reader is opened on (issue #1283, roborev). The directory may hold several
+        // generations; `verify_sstable` resolves the lexicographically-first
+        // `*-Data.db`, which would report the wrong SSTable's integrity here.
+        // `verify_sstable_generation` verifies precisely `self.file_path`'s
+        // generation. We use the SAME Config/Platform the reader was opened with.
+        // Data corruption is reported as findings inside an Ok(report); only
+        // environmental problems return Err.
+        let report = verify::verify_sstable_generation(
+            &self.file_path,
             VerifyMode::Full,
             &self.open_config,
             self.platform.clone(),
@@ -93,10 +90,15 @@ impl SSTableReader {
             IntegrityStatus::Corrupted
         };
 
+        // `checksum_mismatches` is a deprecated, always-0 compatibility field
+        // (issue #1283): the projection never populates it. The narrow allow keeps
+        // clippy `-D warnings` clean while the dead computation stays removed.
+        #[allow(deprecated)]
         let result = IntegrityCheckResult {
             file_path: self.file_path.clone(),
             total_blocks_checked: 0,
             corrupted_blocks: Vec::new(),
+            checksum_mismatches: 0,
             unreadable_blocks: 0,
             total_entries: report.rows_scanned.unwrap_or(0),
             parsing_errors,

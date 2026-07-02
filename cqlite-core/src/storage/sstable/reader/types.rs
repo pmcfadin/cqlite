@@ -66,6 +66,18 @@ pub struct IntegrityCheckResult {
     pub total_blocks_checked: usize,
     /// List of corrupted block numbers
     pub corrupted_blocks: Vec<usize>,
+    /// Number of checksum mismatches.
+    ///
+    /// Deprecated (issue #1283): the consolidated integrity check projects over the
+    /// authoritative verifier `verify::verify_sstable`, which does not surface a
+    /// per-block checksum-mismatch count. This field is retained for API
+    /// compatibility but is ALWAYS `0`; the dead computation that once populated it
+    /// has been removed. Inspect `parsing_errors` / `overall_status` instead.
+    #[deprecated(
+        since = "0.12.0",
+        note = "consolidated integrity check never populates this; it is always 0 (#1283) — use parsing_errors/overall_status"
+    )]
+    pub checksum_mismatches: usize,
     /// Number of unreadable blocks
     pub unreadable_blocks: usize,
     /// Total entries found
@@ -78,15 +90,27 @@ pub struct IntegrityCheckResult {
 
 /// Integrity status levels
 ///
-/// Only two states are reachable: the integrity check delegates to the
-/// authoritative verifier `verify::verify_sstable` (issue #1283), which reports
-/// either zero findings (`Healthy`) or one-or-more findings (`Corrupted`). The
-/// former `Degraded` state was driven by a `checksum_mismatches` counter that was
-/// never incremented — it was unreachable dead code and has been removed.
+/// Only two states are PRODUCED: the integrity check delegates to the authoritative
+/// verifier `verify::verify_sstable` (issue #1283), which reports either zero
+/// findings (`Healthy`) or one-or-more findings (`Corrupted`). The former `Degraded`
+/// state was driven by a `checksum_mismatches` counter that was never incremented —
+/// it was unreachable dead code. `Degraded` is retained as a deprecated variant for
+/// API compatibility but is NEVER returned by `perform_integrity_check`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IntegrityStatus {
     /// File is healthy (the verifier reported no findings)
     Healthy,
+    /// File has minor issues but is readable.
+    ///
+    /// Deprecated (issue #1283): the consolidated integrity check never produces
+    /// this status — it projects `verify::verify_sstable` findings onto exactly
+    /// `Healthy` (no findings) or `Corrupted` (≥1 finding). Retained for API
+    /// compatibility only.
+    #[deprecated(
+        since = "0.12.0",
+        note = "consolidated integrity check never produces Degraded; only Healthy|Corrupted (#1283)"
+    )]
+    Degraded,
     /// File has corruption (the verifier reported at least one finding)
     Corrupted,
 }

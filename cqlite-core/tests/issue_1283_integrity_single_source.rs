@@ -113,6 +113,113 @@ fn corrupt_digest(dir: &Path) {
     std::fs::write(&digest, recorded.wrapping_add(1).to_string()).expect("rewrite Digest.crc32");
 }
 
+/// Duplicate the `nb-1-big-*` generation already copied into `dir` as a SECOND
+/// generation `nb-0-big-*` (which sorts BEFORE `nb-1-big`). Every component file
+/// is copied verbatim under the new base name. Returns nothing — the caller works
+/// off the known base names.
+fn duplicate_as_prior_generation(dir: &Path) {
+    for entry in std::fs::read_dir(dir).expect("read temp dir").flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(component) = name.strip_prefix("nb-1-big-") else {
+            continue;
+        };
+        if !entry.path().is_file() {
+            continue;
+        }
+        let dest = dir.join(format!("nb-0-big-{component}"));
+        std::fs::copy(entry.path(), &dest).expect("copy component to prior generation");
+    }
+}
+
+/// Corrupt the `Digest.crc32` of a SPECIFIC generation `base` (e.g. `nb-0-big`) in
+/// `dir`, so it no longer matches `CRC32` of that generation's `Data.db`.
+fn corrupt_digest_of(dir: &Path, base: &str) {
+    let digest = dir.join(format!("{base}-Digest.crc32"));
+    let text = std::fs::read_to_string(&digest).expect("read Digest.crc32");
+    let recorded: u32 = text.trim().parse().expect("Digest.crc32 is a u32");
+    std::fs::write(&digest, recorded.wrapping_add(1).to_string()).expect("rewrite Digest.crc32");
+}
+
+/// Multi-generation regression (issue #1283, roborev HIGH): a directory holding
+/// TWO generations where the reader is opened on the generation that is NOT
+/// lexicographically first, and where the OTHER (first-sorted) generation is
+/// corrupt.
+///
+/// The reader is opened on the HEALTHY `nb-1-big` generation; a corrupt
+/// `nb-0-big` generation (which sorts first) sits in the same directory.
+/// `perform_integrity_check` must report the status of the READER's generation
+/// (`Healthy`), not the lexicographically-first one.
+///
+/// Pre-fix, `perform_integrity_check` passed the parent DIRECTORY to
+/// `verify_sstable`, which resolves the first-sorted `nb-0-big-Data.db` and
+/// reports its `DigestMismatch` → `Corrupted`. This test therefore FAILS pre-fix
+/// (asserts `Healthy`) and passes once the check verifies the reader's exact
+/// generation via `verify_sstable_generation(self.file_path, ..)`.
+#[tokio::test]
+async fn integrity_check_reports_readers_generation_not_first_sorted() {
+    let Some(root) = datasets_root() else {
+        eprintln!("SKIP: no datasets root; set CQLITE_DATASETS_ROOT.");
+        return;
+    };
+    let sstables = root.join("sstables");
+
+    // Find a candidate whose CLEAN copy verifies Healthy — that is our reader base.
+    let mut base: Option<(tempfile::TempDir, PathBuf)> = None;
+    for cand in CANDIDATES {
+        let Some(src) = resolve_table_dir(&sstables, cand) else {
+            continue;
+        };
+        let Ok((tmp, data_db)) = copy_sstable_components(&src) else {
+            continue;
+        };
+        let reader = open_reader(&data_db).await;
+        let report = reader
+            .perform_integrity_check()
+            .await
+            .expect("integrity check should run");
+        if report.overall_status == IntegrityStatus::Healthy {
+            base = Some((tmp, data_db));
+            break;
+        }
+    }
+
+    let Some((tmp, data_db)) = base else {
+        eprintln!(
+            "SKIP: no candidate dataset table available or verifying Healthy; \
+             fetch datasets (test-data/scripts/fetch-datasets.sh)."
+        );
+        return;
+    };
+
+    // Add a SECOND, corrupt generation that sorts BEFORE the reader's generation.
+    duplicate_as_prior_generation(tmp.path());
+    corrupt_digest_of(tmp.path(), "nb-0-big");
+
+    // The reader is opened on the HEALTHY, non-first `nb-1-big` generation.
+    assert!(
+        data_db.file_name().and_then(|n| n.to_str()) == Some("nb-1-big-Data.db"),
+        "test assumes the reader opens the nb-1-big generation"
+    );
+    let reader = open_reader(&data_db).await;
+    let report = reader
+        .perform_integrity_check()
+        .await
+        .expect("integrity check should run over the reader's generation");
+
+    assert_eq!(
+        report.overall_status,
+        IntegrityStatus::Healthy,
+        "integrity check must report the READER's (healthy nb-1-big) generation, \
+         not the corrupt first-sorted nb-0-big generation. report: {report:?}"
+    );
+    assert!(
+        report.parsing_errors.is_empty(),
+        "the reader's generation is intact — no findings expected: {:?}",
+        report.parsing_errors
+    );
+}
+
 /// A `Digest.crc32` corruption — invisible to the pre-#1283 Data.db block-walk
 /// (which read `Healthy`) — now makes `perform_integrity_check` report
 /// `Corrupted`, because it projects over the authoritative `verify_sstable`.

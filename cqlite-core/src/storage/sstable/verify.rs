@@ -311,7 +311,49 @@ pub async fn verify_sstable(
     platform: Arc<Platform>,
 ) -> Result<VerifyReport> {
     let components = resolve_components(dir)?;
+    verify_components(dir, components, mode, config, platform).await
+}
 
+/// Verify the EXACT SSTable generation identified by `data_db_path`.
+///
+/// Additive companion to [`verify_sstable`] (issue #1283, roborev). `verify_sstable`
+/// resolves the *lexicographically-first* `*-Data.db` in a directory, which is the
+/// wrong generation when a directory holds several: an `SSTableReader` opened on
+/// generation N would otherwise report the integrity of whichever `Data.db` sorts
+/// first. This entry point verifies precisely the generation whose components share
+/// `data_db_path`'s base name (e.g. `nb-2-big`), so a caller that already knows its
+/// own `Data.db` (an open reader) gets a verdict for THAT generation.
+///
+/// `data_db_path` must be an existing `*-Data.db` file; its parent directory supplies
+/// the sibling components. Returns a [`VerifyReport`] with the same corruption-as-
+/// findings contract as [`verify_sstable`].
+pub async fn verify_sstable_generation(
+    data_db_path: &Path,
+    mode: VerifyMode,
+    config: &Config,
+    platform: Arc<Platform>,
+) -> Result<VerifyReport> {
+    let dir = data_db_path.parent().ok_or_else(|| {
+        Error::invalid_path(format!(
+            "SSTable Data.db path {} has no parent directory",
+            data_db_path.display()
+        ))
+    })?;
+    let components = resolve_components_for_data_path(dir, data_db_path)?;
+    verify_components(dir, components, mode, config, platform).await
+}
+
+/// Shared verification body: runs all checks over an already-resolved
+/// [`ComponentSet`]. Both [`verify_sstable`] (first-generation resolution) and
+/// [`verify_sstable_generation`] (exact-generation resolution) delegate here so the
+/// check pipeline is defined exactly once (issue #1283).
+async fn verify_components(
+    dir: &Path,
+    components: ComponentSet,
+    mode: VerifyMode,
+    config: &Config,
+    platform: Arc<Platform>,
+) -> Result<VerifyReport> {
     let mut findings: Vec<VerifyFinding> = Vec::new();
 
     // ---- Check 1: TOC.txt completeness + component presence ----------------
@@ -469,8 +511,9 @@ pub async fn verify_sstable(
     })
 }
 
-/// Locate the SSTable generation in `dir` and enumerate its on-disk components.
-fn resolve_components(dir: &Path) -> Result<ComponentSet> {
+/// Read all regular files in `dir`, returning `(all_files, data_files)` where
+/// `data_files` is the subset ending in `-Data.db`.
+fn read_dir_files(dir: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     let entries = std::fs::read_dir(dir).map_err(|e| {
         Error::invalid_path(format!("Cannot read SSTable dir {}: {}", dir.display(), e))
     })?;
@@ -489,6 +532,16 @@ fn resolve_components(dir: &Path) -> Result<ComponentSet> {
             }
         }
     }
+    Ok((all_files, data_files))
+}
+
+/// Locate the SSTable generation in `dir` and enumerate its on-disk components.
+///
+/// If `dir` contains several generations, the lexicographically-first `*-Data.db`
+/// is selected (documented behavior of [`verify_sstable`]). To verify a SPECIFIC
+/// generation, use [`resolve_components_for_data_path`] / [`verify_sstable_generation`].
+fn resolve_components(dir: &Path) -> Result<ComponentSet> {
+    let (all_files, mut data_files) = read_dir_files(dir)?;
 
     data_files.sort();
     let data_path = data_files.into_iter().next().ok_or_else(|| {
@@ -498,6 +551,26 @@ fn resolve_components(dir: &Path) -> Result<ComponentSet> {
         ))
     })?;
 
+    build_component_set(&all_files, data_path)
+}
+
+/// Enumerate the components for the EXACT generation identified by `data_path`
+/// within `dir`. Unlike [`resolve_components`], this does not pick the first-sorted
+/// generation; it uses precisely the caller-supplied `data_path` (issue #1283).
+fn resolve_components_for_data_path(dir: &Path, data_path: &Path) -> Result<ComponentSet> {
+    if !data_path.is_file() {
+        return Err(Error::not_found(format!(
+            "SSTable Data.db component not found at {}",
+            data_path.display()
+        )));
+    }
+    let (all_files, _data_files) = read_dir_files(dir)?;
+    build_component_set(&all_files, data_path.to_path_buf())
+}
+
+/// Build a [`ComponentSet`] for `data_path`, indexing the sibling components in
+/// `all_files` that share its base name.
+fn build_component_set(all_files: &[PathBuf], data_path: PathBuf) -> Result<ComponentSet> {
     let data_name = data_path
         .file_name()
         .and_then(|n| n.to_str())
