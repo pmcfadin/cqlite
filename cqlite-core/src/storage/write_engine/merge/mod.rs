@@ -1208,27 +1208,48 @@ pub fn compute_baseline_min(input_paths: &[PathBuf]) -> (i64, i32, i32) {
                 // min to 0), which is INDISTINGUISHABLE from a genuine tombstone whose
                 // real LDT is 0 (an old row tombstone with a sub-second write timestamp)
                 // by the `min_deletion_time` VALUE alone. So we use an AUTHORITATIVE
-                // "has a tombstone" signal, NOT a heuristic on the value (#28): the
-                // STATS `estimatedTombstoneDropTime` histogram
-                // (`sstable_stats.tombstone_drop_times`), which CQLite's writer populates
+                // "has a tombstone" signal, NOT a heuristic on the value (#28): the STATS
+                // `estimatedTombstoneDropTime` histogram, which CQLite's writer populates
                 // (via `update_local_deletion_time`) and Cassandra writes for EVERY real
-                // tombstone LDT — empty iff the SSTable carries no tombstone. The histogram
-                // is the SOLE authority for "has a tombstone" here; we do NOT ALSO exclude
-                // by LDT value (roborev #1410 Finding 2): `DELETION_TIME_EPOCH`
+                // tombstone LDT — empty iff the SSTable carries no tombstone. We do NOT
+                // exclude by LDT value (roborev #1410 Finding 2): `DELETION_TIME_EPOCH`
                 // (2015-09-22) is a perfectly valid EXPLICIT tombstone `localDeletionTime`
-                // in this codebase, so unconditionally excluding it would drop a real
-                // tombstone from the baseline and make the writer reject/mis-encode it.
-                // The LIVE marker (`i32::MAX` / `NO_DELETION_TIME`) never reaches the
-                // histogram — `update_local_deletion_time` filters it — so an empty
-                // histogram already covers it.
-                //   * Empty histogram (no tombstone) → no-deletion input → EXCLUDE,
-                //     regardless of whether `min_deletion_time` decoded as `0`,
-                //     `DELETION_TIME_EPOCH` (Cassandra's live-only sentinel) or `i32::MAX`.
-                //   * Non-empty histogram → a genuine tombstone (INCLUDING a real LDT `0`
-                //     or a real LDT == `DELETION_TIME_EPOCH`) → INCLUDE, so the baseline
-                //     covers every LDT the merger re-emits.
+                // here, so excluding it by value would drop a real tombstone from the
+                // baseline and make the writer reject/mis-encode it. The LIVE marker
+                // (`i32::MAX` / `NO_DELETION_TIME`) never reaches the histogram
+                // (`update_local_deletion_time` filters it), so an empty histogram already
+                // covers every no-deletion representation (`0`, `DELETION_TIME_EPOCH`,
+                // `i32::MAX`).
+                //
+                // CONSERVATIVE on a decode failure (roborev #1410 Finding 3): we decode
+                // the histogram DIRECTLY here with `parse_stats_extras` and match on its
+                // `Result`, NOT `sstable_stats.tombstone_drop_times` — the latter is an
+                // EMPTY vec BOTH for a genuinely live-only SSTable AND for a best-effort
+                // extras PARSE FAILURE (corrupt / version-mismatched STATS extras), which
+                // must not be conflated. We only treat an input as no-tombstone when the
+                // extras decode SUCCEEDS with an empty histogram; on ANY decode error we
+                // INCLUDE its LDT (cannot prove live-only → never leave the baseline too
+                // high, so the merger's re-emitted tombstones stay >= baseline).
+                //   * `Ok` + empty histogram → no tombstone → EXCLUDE.
+                //   * `Ok` + non-empty histogram → genuine tombstone (incl. real LDT `0`
+                //     or `DELETION_TIME_EPOCH`) → INCLUDE.
+                //   * `Err` (unparseable extras) → cannot prove live-only → INCLUDE.
                 let ldt_bits = ts_stats.min_deletion_time as u32 as i32;
-                let has_tombstone = !sstable_stats.tombstone_drop_times.is_empty();
+                let has_tombstone =
+                    match crate::parser::repair_metadata::parse_stats_extras(&stats_bytes, None) {
+                        Ok(extras) => !extras.tombstone_drop_times.is_empty(),
+                        Err(e) => {
+                            // Unparseable extras: stay conservative and INCLUDE (do NOT skip
+                            // a possibly-real LDT baseline). `true` forces the `.min()` below.
+                            log::debug!(
+                                "STATS-extras decode failed for {:?} during baseline seeding; \
+                             conservatively including its LDT baseline: {:?}",
+                                stats_path,
+                                e
+                            );
+                            true
+                        }
+                    };
                 if has_tombstone {
                     baseline_min_ldt = baseline_min_ldt.min(ldt_bits);
                 }
