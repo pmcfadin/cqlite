@@ -1227,12 +1227,16 @@ mod tests {
 
     #[tokio::test]
     async fn verify_uncompressed_chunks_clean_multichunk_passes() {
-        let cs = 8u32; // tiny chunk size for the test
-        let data: Vec<u8> = (0..20u8).collect(); // 20 bytes -> chunks [0,8),[8,16),[16,20)
+        // Chunk size must be >= MIN_CRC_CHUNK_SIZE (4096, issue #1396 floor) so
+        // the synthetic CRC.db parses. 2.5 chunks -> 3 CRC entries.
+        let cs = 4096u32;
+        let csz = cs as usize;
+        let size = csz * 2 + csz / 2; // chunks [0,cs),[cs,2cs),[2cs,size)
+        let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
         let crcs = [
-            crc32fast::hash(&data[0..8]),
-            crc32fast::hash(&data[8..16]),
-            crc32fast::hash(&data[16..20]),
+            crc32fast::hash(&data[0..csz]),
+            crc32fast::hash(&data[csz..2 * csz]),
+            crc32fast::hash(&data[2 * csz..size]),
         ];
         let crc = CrcDb::parse(&synth_crc_db(cs, &crcs)).expect("parse");
         let (_dir, file) = blocksource_from(&data).await;
@@ -1244,16 +1248,19 @@ mod tests {
 
     #[tokio::test]
     async fn verify_uncompressed_chunks_flip_in_later_chunk_attributed_to_that_chunk() {
-        let cs = 8u32;
-        let mut data: Vec<u8> = (0..20u8).collect();
+        // >= MIN_CRC_CHUNK_SIZE (4096, issue #1396 floor); 3 chunks.
+        let cs = 4096u32;
+        let csz = cs as usize;
+        let size = csz * 2 + csz / 2;
+        let mut data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
         let crcs = [
-            crc32fast::hash(&data[0..8]),
-            crc32fast::hash(&data[8..16]),
-            crc32fast::hash(&data[16..20]),
+            crc32fast::hash(&data[0..csz]),
+            crc32fast::hash(&data[csz..2 * csz]),
+            crc32fast::hash(&data[2 * csz..size]),
         ];
         let crc = CrcDb::parse(&synth_crc_db(cs, &crcs)).expect("parse");
-        // Flip a byte inside chunk 1 ([8,16)).
-        data[10] ^= 0xFF;
+        // Flip a byte inside chunk 1 ([cs, 2cs)).
+        data[csz + 100] ^= 0xFF;
         let (_dir, file) = blocksource_from(&data).await;
         let err = verify_uncompressed_chunks(&file, &crc, &data, 0, data.len() as u64)
             .await
@@ -1264,19 +1271,23 @@ mod tests {
             "typed corruption: {msg}"
         );
         assert!(msg.contains("chunk 1"), "must name chunk 1: {msg}");
-        // chunk 1 starts at Data.db offset 8 == 0x8.
+        // chunk 1 starts at Data.db offset 4096 == 0x1000.
         assert!(
-            msg.contains("0x8"),
-            "must name the Data.db offset 0x8: {msg}"
+            msg.contains("0x1000"),
+            "must name the Data.db offset 0x1000: {msg}"
         );
     }
 
     #[tokio::test]
     async fn verify_uncompressed_chunks_truncated_crc_db_is_typed_error() {
-        let cs = 8u32;
-        let data: Vec<u8> = (0..20u8).collect(); // needs 3 CRC entries
-                                                 // Only provide 1 entry -> chunk 1/2 have no CRC -> truncation error.
-        let crc = CrcDb::parse(&synth_crc_db(cs, &[crc32fast::hash(&data[0..8])])).expect("parse");
+        // >= MIN_CRC_CHUNK_SIZE (4096, issue #1396 floor); needs 3 CRC entries.
+        let cs = 4096u32;
+        let csz = cs as usize;
+        let size = csz * 2 + csz / 2;
+        let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        // Only provide 1 entry -> chunk 1/2 have no CRC -> truncation error.
+        let crc =
+            CrcDb::parse(&synth_crc_db(cs, &[crc32fast::hash(&data[0..csz])])).expect("parse");
         let (_dir, file) = blocksource_from(&data).await;
         let err = verify_uncompressed_chunks(&file, &crc, &data, 0, data.len() as u64)
             .await
@@ -1294,12 +1305,15 @@ mod tests {
     /// offset), not the verify helper in isolation.
     #[tokio::test]
     async fn header_offset_read_still_verifies_chunk_0_prefix() {
-        let cs = 8u32; // tiny chunks: [0,8),[8,16),[16,20)
-        let clean: Vec<u8> = (0..20u8).collect();
+        // >= MIN_CRC_CHUNK_SIZE (4096, issue #1396 floor); 3 chunks.
+        let cs = 4096u32;
+        let csz = cs as usize;
+        let size = csz * 2 + csz / 2;
+        let clean: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
         let crcs = [
-            crc32fast::hash(&clean[0..8]),
-            crc32fast::hash(&clean[8..16]),
-            crc32fast::hash(&clean[16..20]),
+            crc32fast::hash(&clean[0..csz]),
+            crc32fast::hash(&clean[csz..2 * csz]),
+            crc32fast::hash(&clean[2 * csz..size]),
         ];
         let crc = CrcDb::parse(&synth_crc_db(cs, &crcs)).expect("parse");
         let config = SSTableReaderConfig::default();
