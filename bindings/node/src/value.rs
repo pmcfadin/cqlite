@@ -29,7 +29,7 @@
 //! | Udt | `object` with `_type`, `_keyspace`, and field properties |
 
 use cqlite_core::types::Value;
-use napi::{Env, JsFunction, JsObject, JsUnknown, Result};
+use napi::{Env, JsFunction, JsObject, JsString, JsUnknown, Result};
 
 /// Convert a CQL Value to a JavaScript value with native types.
 ///
@@ -431,17 +431,37 @@ fn udt_to_object(env: &Env, udt: &cqlite_core::UdtValue) -> Result<JsUnknown> {
     Ok(obj.into_unknown())
 }
 
-/// Convert row values to a JavaScript object.
+/// Intern the SELECT-order column names into reusable JS key handles.
 ///
-/// This is a convenience function for converting query result rows.
+/// Issue #1446: build each column-name `JsString` **once per result set** so a
+/// wide-table scan does not re-intern `O(rows × columns)` identical strings at
+/// the FFI boundary. The returned pairs are `(lookup_name, js_key)`, kept in
+/// authoritative SELECT order; `row_to_object` consumes a borrow of this slice
+/// for every row. `JsString` is a `Copy` handle valid for the enclosing scope.
+pub fn intern_column_keys(env: &Env, names: &[String]) -> Result<Vec<(String, JsString)>> {
+    names
+        .iter()
+        .map(|name| Ok((name.clone(), env.create_string(name)?)))
+        .collect()
+}
+
+/// Convert row values to a JavaScript object in authoritative SELECT order.
+///
+/// Issue #1446: property insertion order equals `columns` order (V8 preserves
+/// string-key insertion order), so `Object.keys(row)` matches
+/// `columns.map(c => c.name)` — not `HashMap` hash order. `keys` are the
+/// pre-interned handles from [`intern_column_keys`], reused across every row.
 pub fn row_to_object(
     env: &Env,
+    keys: &[(String, JsString)],
     values: &std::collections::HashMap<String, Value>,
 ) -> Result<JsObject> {
     let mut obj = env.create_object()?;
-    for (col_name, value) in values {
-        let js_value = value_to_napi(env, value)?;
-        obj.set_named_property(col_name, js_value)?;
+    for (col_name, js_key) in keys {
+        if let Some(value) = values.get(col_name) {
+            let js_value = value_to_napi(env, value)?;
+            obj.set_property(*js_key, js_value)?;
+        }
     }
     Ok(obj)
 }

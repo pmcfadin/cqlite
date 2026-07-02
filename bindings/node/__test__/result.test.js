@@ -241,3 +241,57 @@ describe('QueryResult and ColumnInfo Tests (Issue #303)', () => {
     });
   });
 });
+
+describe('Row property order matches SELECT order (Issue #1446)', () => {
+  let db = null;
+
+  beforeAll(async () => {
+    skipIfNoDatasets();
+    db = await Database.open(global.testPaths.SSTABLES_DIR, {
+      schema: global.testPaths.SCHEMA_BASIC_TYPES,
+    });
+  });
+
+  afterAll(async () => {
+    if (db) {
+      await db.close();
+      db = null;
+    }
+  });
+
+  test('executeNative: Object.keys(row) matches SELECT column order (SELECT *)', async () => {
+    const result = await db.executeNative(
+      'SELECT * FROM test_basic.simple_table LIMIT 5'
+    );
+    // Dataset rule: present-but-empty fixtures FAIL loudly, never skip.
+    expect(result.rowCount).toBeGreaterThan(0);
+    const expected = result.columns.map((c) => c.name);
+    for (const row of result.rows) {
+      expect(Object.keys(row)).toEqual(expected);
+    }
+  });
+
+  test('executeNative: Object.keys(row) honors an explicit reordered projection', async () => {
+    const result = await db.executeNative(
+      'SELECT name, id, age FROM test_basic.simple_table LIMIT 5'
+    );
+    expect(result.rowCount).toBeGreaterThan(0);
+    expect(result.columns.map((c) => c.name)).toEqual(['name', 'id', 'age']);
+    for (const row of result.rows) {
+      expect(Object.keys(row)).toEqual(['name', 'id', 'age']);
+    }
+  });
+
+  test('executeStreaming: Object.keys(row) matches SELECT column order', async () => {
+    const stream = db.executeStreaming(
+      'SELECT name, id, age FROM test_basic.simple_table LIMIT 5'
+    );
+    let seen = 0;
+    for await (const row of stream) {
+      expect(Object.keys(row)).toEqual(['name', 'id', 'age']);
+      seen += 1;
+    }
+    // Present-but-empty fixtures FAIL loudly, never skip.
+    expect(seen).toBeGreaterThan(0);
+  });
+});

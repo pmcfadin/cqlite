@@ -41,7 +41,7 @@ use napi_derive::napi;
 
 use crate::database::ColumnInfo;
 use crate::error::to_napi_error;
-use crate::value::row_to_object;
+use crate::value::{intern_column_keys, row_to_object};
 
 /// Streaming query result iterator.
 ///
@@ -71,6 +71,9 @@ pub struct StreamingResult {
     inner: Arc<Mutex<Option<cqlite_core::query::result::QueryResultIterator>>>,
     /// Cached column metadata for the result set.
     columns: Vec<ColumnInfo>,
+    /// Authoritative SELECT-order column names, shared with each `next()` task so
+    /// rows are emitted in column order rather than HashMap hash order (#1446).
+    column_names: Arc<Vec<String>>,
     /// Per-stream span (issue #1040). Shared with each `next()` task so rows
     /// yielded across iterations accumulate, and finalised on
     /// exhaustion/close. `Span` is cheap to clone and is a no-op when telemetry
@@ -100,9 +103,12 @@ impl StreamingResult {
             })
             .collect();
 
+        let column_names = Arc::new(columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>());
+
         Ok(Self {
             inner: Arc::new(Mutex::new(Some(iter))),
             columns,
+            column_names,
             span,
         })
     }
@@ -126,6 +132,9 @@ pub enum NextResult {
 /// Async task for fetching the next row.
 pub struct NextTask {
     inner: Arc<Mutex<Option<cqlite_core::query::result::QueryResultIterator>>>,
+    /// SELECT-order column names for this stream, used to emit the yielded row's
+    /// properties in column order rather than HashMap hash order (#1446).
+    column_names: Arc<Vec<String>>,
     /// Stream span, finalised with the row count when the stream ends or errors
     /// (issue #1040).
     span: tracing::Span,
@@ -191,7 +200,8 @@ impl napi::Task for NextTask {
 
         match output {
             NextResult::Value(values) => {
-                let row_obj = row_to_object(&env, &values)?;
+                let col_keys = intern_column_keys(&env, &self.column_names)?;
+                let row_obj = row_to_object(&env, &col_keys, &values)?;
                 result.set_named_property("value", row_obj)?;
                 result.set_named_property("done", env.get_boolean(false)?)?;
             }
@@ -222,6 +232,7 @@ impl StreamingResult {
         // Clone the Arc reference + span to share with the task
         AsyncTask::new(NextTask {
             inner: self.inner.clone(),
+            column_names: self.column_names.clone(),
             span: self.span.clone(),
         })
     }
