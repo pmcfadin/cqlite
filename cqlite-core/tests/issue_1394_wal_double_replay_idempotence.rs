@@ -244,11 +244,30 @@ fn scan_reconciled(
         .block_on(manager.scan(&table_id, None, None, None, Some(schema)))
         .expect("scan must not error");
 
-    let by_pk: HashMap<Vec<u8>, Value> = results
-        .iter()
-        .map(|(k, v)| (k.0.clone(), v.clone()))
+    // #1334 interned per-cell column names, changing `scan` to yield
+    // `(RowKey, ScanRow)` (was `(RowKey, Value)`). Reassemble each live row's
+    // interned cells (`ScanRow::into_cells` → `Vec<(Arc<str>, Value)>`) back into
+    // the `Value::Map` shape the `col()` helper reads, and suppress non-row
+    // markers (tombstones/nulls) exactly as user-visible output does — this keeps
+    // the reconciled-scan semantics identical to the pre-#1334 API (a deleted
+    // partition contributes no entry, so AC3's `row_count == 1` still holds).
+    // `live` keeps one entry per returned live row, so a duplicated partition key
+    // makes `live.len() > by_pk.len()` and still trips the "no duplicate PKs"
+    // assertions.
+    let live: Vec<(Vec<u8>, Value)> = results
+        .into_iter()
+        .filter_map(|(k, row)| {
+            row.into_cells().map(|cells| {
+                let map = cells
+                    .into_iter()
+                    .map(|(name, v)| (Value::Text(name.to_string()), v))
+                    .collect();
+                (k.0, Value::Map(map))
+            })
+        })
         .collect();
-    (results.len(), by_pk)
+    let by_pk: HashMap<Vec<u8>, Value> = live.iter().cloned().collect();
+    (live.len(), by_pk)
 }
 
 fn pk_bytes(id: i32) -> Vec<u8> {
