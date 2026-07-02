@@ -114,11 +114,14 @@ pub async fn validate_sstable(
                                     for entry in entries.iter() {
                                         let key = entry.key.clone();
                                         // Issue #1334: parse_entry consumes the
-                                        // `ScanRow` carrier; this mock path has no
-                                        // decoded row, so wrap as a marker.
-                                        let value = cqlite_core::types::ScanRow::Marker(
+                                        // `ScanRow` carrier. This is a LIVE synthetic
+                                        // value (pre-#1334 passed a `Value::Text`), so
+                                        // it must be a live `ScanRow::Row` — a `Marker`
+                                        // is reserved for a genuine null/row-tombstone.
+                                        let value = cqlite_core::types::ScanRow::Row(vec![(
+                                            std::sync::Arc::from("data"),
                                             cqlite_core::Value::Text(format!("{:?}", entry.key)),
-                                        );
+                                        )]);
 
                                         if parser.parse_entry(&key, &value).is_err() {
                                             parsing_errors += 1;

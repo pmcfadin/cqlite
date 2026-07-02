@@ -253,4 +253,31 @@ mod tests {
             "a marker (tombstone/null) row must be suppressed from user output"
         );
     }
+
+    /// Issue #1334 (roborev round 9, finding 2): the canonical query consumer
+    /// SUPPRESSES a `ScanRow::Marker` but SURFACES a live `ScanRow::Row`. This is
+    /// exactly why the CLI `read`/`inspect`/`benchmark` bulletproof-reader fallback
+    /// producers must NOT wrap a LIVE synthetic value in `Marker` — doing so drops
+    /// it from user-visible output. The SAME live value must survive as a `Row`.
+    #[test]
+    fn live_value_dropped_as_marker_surfaces_as_row() {
+        let key = RowKey::new(b"k".to_vec());
+        let live = Value::Text("synthetic-fallback".to_string());
+
+        // Wrapped as a Marker (the pre-fix producer): dropped entirely.
+        assert!(
+            build_row_from_scan(key.clone(), ScanRow::Marker(live.clone()), &[], None).is_none(),
+            "a LIVE value mis-wrapped as Marker is dropped — the bug the producers must avoid"
+        );
+
+        // Wrapped as a live Row (the fixed producer): surfaces under its cell name.
+        let row = build_row_from_scan(
+            key,
+            ScanRow::Row(vec![(Arc::from("data"), live.clone())]),
+            &[],
+            None,
+        )
+        .expect("a live Row must surface");
+        assert_eq!(row.values.get("data"), Some(&live));
+    }
 }

@@ -310,17 +310,25 @@ impl SchemaDiscovery {
         &self,
         reader: &SSTableReader,
     ) -> Result<Vec<HashMap<String, Value>>> {
+        // Header column names for the raw-fallback case (issue #1334): a
+        // `ScanRow::RawRow` is undecoded whole-row bytes, so — matching the
+        // pre-#1334 sampler — map it onto the first header column rather than a
+        // synthetic `"data"` blob that would infer a bogus column.
+        let header_first_column: Option<String> =
+            reader.header().columns.first().map(|c| c.name.clone());
+
         // Get all entries and sample up to max_rows
         let all_entries = reader.get_all_entries().await?;
 
         // Issue #1334: each entry carries a `ScanRow` row. Disassemble a live row's
-        // interned cells into a name→value map for type inference; suppress markers
-        // (row tombstone / null row) which carry no columns.
+        // interned cells into a name→value map for type inference; map a raw
+        // fallback row onto the header column name; suppress markers (row
+        // tombstone / null row) which carry no columns.
         let samples: Vec<HashMap<String, Value>> = all_entries
             .into_iter()
             .take(self.config.max_sample_rows)
             .filter_map(|(_table_id, _row_key, row)| {
-                let cells = row.into_cells()?;
+                let cells = row.into_sample_cells(header_first_column.as_deref())?;
                 if cells.is_empty() {
                     return None;
                 }

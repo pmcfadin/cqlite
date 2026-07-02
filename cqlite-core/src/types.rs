@@ -148,6 +148,26 @@ impl ScanRow {
         }
     }
 
+    /// Cells surfaced to a **schema-discovery sampler** (issue #1334).
+    ///
+    /// Like [`into_cells`](Self::into_cells), but a [`ScanRow::RawRow`] — undecoded
+    /// whole-row bytes — is mapped onto `fallback_column` (the SSTable header's
+    /// first column name) rather than a synthetic `"data"` blob. This matches the
+    /// pre-#1334 sampler, which mapped a raw single `Value` onto the first header
+    /// column for type inference. When no `fallback_column` is available the raw
+    /// row is skipped (`None`), exactly as the pre-#1334 sampler skipped an entry
+    /// with an empty header column list. Markers are suppressed (`None`).
+    pub fn into_sample_cells(self, fallback_column: Option<&str>) -> Option<RowCells> {
+        match self {
+            ScanRow::Row(cells) => Some(cells),
+            ScanRow::RawRow(bytes) => {
+                let name = fallback_column?;
+                Some(vec![(std::sync::Arc::from(name), Value::Blob(bytes))])
+            }
+            ScanRow::Marker(_) => None,
+        }
+    }
+
     /// True when this is a suppressed marker (row tombstone or absent/null row).
     pub fn is_marker(&self) -> bool {
         matches!(self, ScanRow::Marker(_))
@@ -1530,6 +1550,48 @@ mod tests {
         assert_eq!(Value::Integer(42).data_type(), CqlType::Int);
         assert_eq!(Value::Text("hello".to_string()).data_type(), CqlType::Text);
         assert_eq!(Value::Boolean(true).data_type(), CqlType::Boolean);
+    }
+
+    // Issue #1334 (roborev round 9, finding 1): a schema-discovery sampler that
+    // disassembles a `ScanRow::RawRow` via the no-schema `into_cells()` would infer
+    // a bogus `"data"` column instead of the SSTable header column name. The
+    // sampler-specific `into_sample_cells` must map a raw fallback row onto the
+    // header column, matching the pre-#1334 sampler.
+    #[test]
+    fn raw_row_sample_cells_use_header_column_not_data() {
+        let raw = ScanRow::RawRow(vec![1, 2, 3]);
+
+        // No-schema disassembly still yields the synthetic "data" blob...
+        let no_schema = raw.clone().into_cells().expect("raw yields cells");
+        assert_eq!(no_schema[0].0.as_ref(), "data");
+
+        // ...but the sampler path maps it onto the authoritative header column.
+        let sampled = raw
+            .into_sample_cells(Some("payload"))
+            .expect("raw with fallback column yields cells");
+        assert_eq!(sampled.len(), 1);
+        assert_eq!(
+            sampled[0].0.as_ref(),
+            "payload",
+            "a RawRow sample must use the header column name, never a synthetic \"data\" column"
+        );
+        assert_eq!(sampled[0].1, Value::Blob(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn sample_cells_pass_through_live_row_and_drop_markers() {
+        // A live row's decoded cells pass through verbatim regardless of fallback.
+        let live = ScanRow::Row(vec![(std::sync::Arc::from("name"), Value::Integer(7))]);
+        let cells = live.into_sample_cells(Some("payload")).expect("live cells");
+        assert_eq!(cells[0].0.as_ref(), "name");
+
+        // A marker (tombstone / null row) contributes no sample columns.
+        assert!(ScanRow::Marker(Value::Null)
+            .into_sample_cells(Some("payload"))
+            .is_none());
+
+        // A raw fallback with no header column is skipped (pre-#1334 behavior).
+        assert!(ScanRow::RawRow(vec![9]).into_sample_cells(None).is_none());
     }
 
     #[test]
