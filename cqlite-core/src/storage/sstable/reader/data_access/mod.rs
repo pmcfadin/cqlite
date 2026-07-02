@@ -22,6 +22,11 @@ mod bti;
 // `not(tombstones)` gated.
 #[cfg(not(feature = "tombstones"))]
 mod big_promoted;
+// In-crate proof that the promoted-index / reverse-lookup uncompressed read path
+// verifies CRC.db before parsing (issue #1396, roborev Fix 1). It calls the
+// pub(crate) `big_reverse_partition_rows`, so it cannot live in `tests/`.
+#[cfg(all(test, not(feature = "tombstones")))]
+mod big_promoted_crc_tests;
 mod compaction;
 mod model;
 mod sequential;
@@ -554,6 +559,53 @@ impl SSTableReader {
                 .insert(chunk);
         }
         Ok(())
+    }
+
+    /// The SINGLE CRC-checked chokepoint for reading a raw byte range from an
+    /// *uncompressed* Data.db section (issue #1396).
+    ///
+    /// EVERY uncompressed offset read MUST flow through here so that no public
+    /// read path can silently bypass `CRC.db` verification and hand corrupt
+    /// bytes to the parser. It runs the shared, memoized verifier
+    /// [`Self::verify_uncompressed_range`] over the covering chunk(s) BEFORE any
+    /// bytes are returned; a mismatch is the typed [`Error::Corruption`] naming
+    /// the failing chunk + Data.db offset. The verifier is a no-op when this
+    /// reader has no `CRC.db` (compressed tables carry inline per-chunk CRCs,
+    /// BTI ships none, an absent `CRC.db` is warn-and-proceed), so this helper is
+    /// also the correct accessor for the raw-read step of compressed offset reads.
+    ///
+    /// `offset` is an ABSOLUTE Data.db file offset (post-header). `file` is the
+    /// handle to read the range from — the shared point-read handle
+    /// ([`Self::file`]) or a scan-local cursor's private handle (issue #815).
+    /// CRC verification always uses the reader's own handle, so it is independent
+    /// of `file` and never disturbs a scan cursor's position.
+    ///
+    /// Future uncompressed offset reads MUST call this instead of doing their own
+    /// `seek` + `read_exact`, so the CRC check can never be forgotten again.
+    pub(in crate::storage::sstable::reader) async fn read_uncompressed_verified(
+        &self,
+        file: &tokio::sync::Mutex<super::source::BlockSource>,
+        offset: u64,
+        len: usize,
+    ) -> Result<Vec<u8>> {
+        use tokio::io::AsyncReadExt;
+
+        let size = u32::try_from(len).map_err(|_| {
+            Error::corruption(format!(
+                "uncompressed read length {len} exceeds u32 range for CRC verification \
+                 at Data.db offset 0x{offset:x}"
+            ))
+        })?;
+        // Verify the covering CRC.db chunk(s) BEFORE returning any bytes.
+        self.verify_uncompressed_range(offset, size).await?;
+
+        let mut buf = vec![0u8; len];
+        {
+            let mut guard = file.lock().await;
+            guard.seek(SeekFrom::Start(offset)).await?;
+            guard.read_exact(&mut buf).await?;
+        }
+        Ok(buf)
     }
 
     /// Mint a fresh, independent cursor for one scan (issue #815).

@@ -26,7 +26,7 @@
 //! (regeneration rot) FAILS unconditionally — the scan/verify tests assert the
 //! corruption reached the caller, so a clean result on a present fixture fails.
 
-use cqlite_core::storage::sstable::reader::SSTableReader;
+use cqlite_core::storage::sstable::reader::{IntegrityStatus, SSTableReader};
 use cqlite_core::storage::sstable::verify::{verify_sstable, VerifyErrorClass, VerifyMode};
 use cqlite_core::types::TableId;
 use cqlite_core::{Config, Error, Platform};
@@ -172,6 +172,68 @@ async fn plain_scan_over_bit_flipped_uncompressed_fixture_fails_fast() {
         ),
         Err(err) => assert_typed_uncompressed_chunk_corruption(&err),
     }
+}
+
+/// R2 (roborev Fix 1) — `iterate_all_partitions` (the index/summary-resolved
+/// partition-iteration public path, which reads uncompressed Data.db bytes via
+/// `parse_partition_at_offset`) over the bit-flipped uncompressed fixture returns
+/// the SAME typed corruption error, never corrupt rows. This closes the wiring
+/// gap where that read path bypassed CRC.db verification.
+#[tokio::test]
+async fn iterate_all_partitions_over_bit_flipped_uncompressed_fixture_fails_fast() {
+    let Some(path) = dataset_path_or_gate(CORRUPT_DATA_DB, "corrupt uncompressed fixture") else {
+        return;
+    };
+    let reader = open_reader(&path).await;
+
+    match reader.iterate_all_partitions().await {
+        Ok(rows) => panic!(
+            "FIXTURE ROT or read-path regression: iterate_all_partitions over the bit-flipped \
+             uncompressed chunk returned Ok with {} rows; it must return a typed corruption error.",
+            rows.len()
+        ),
+        Err(err) => assert_typed_uncompressed_chunk_corruption(&err),
+    }
+}
+
+/// R2 (roborev Fix 2) — the integrity check (`perform_integrity_check`) over the
+/// corrupt uncompressed fixture reports corruption rather than Healthy. Before
+/// the fix, a non-recoverable `read_next_block` error (the uncompressed CRC
+/// mismatch) was swallowed via `.ok().flatten()` and the file could still be
+/// reported Healthy. It must now surface the CRC error.
+#[tokio::test]
+async fn integrity_check_over_corrupt_uncompressed_fixture_reports_corruption() {
+    let Some(path) = dataset_path_or_gate(CORRUPT_DATA_DB, "corrupt uncompressed fixture") else {
+        return;
+    };
+    let reader = open_reader(&path).await;
+
+    let report = reader
+        .perform_integrity_check()
+        .await
+        .expect("integrity check should run to completion");
+
+    assert_ne!(
+        report.overall_status,
+        IntegrityStatus::Healthy,
+        "integrity check must NOT report Healthy for a bit-flipped uncompressed chunk; \
+         report: {report:?}"
+    );
+    assert_eq!(
+        report.overall_status,
+        IntegrityStatus::Corrupted,
+        "a CRC.db chunk mismatch is a Corrupted verdict; report: {report:?}"
+    );
+    let surfaced = report
+        .parsing_errors
+        .iter()
+        .any(|e| e.to_uppercase().contains("CRC") || e.contains("chunk 1"));
+    assert!(
+        surfaced,
+        "the integrity check must surface the uncompressed CRC chunk error, not swallow it; \
+         parsing_errors: {:?}",
+        report.parsing_errors
+    );
 }
 
 /// R2 — streaming scan surfaces the SAME typed error mid-iteration (terminal

@@ -72,8 +72,28 @@ impl SSTableReader {
             file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
         }
 
-        // Check each block
-        while let Some(block_data) = self.read_next_block(&cursor).await.ok().flatten() {
+        // Check each block. Match on `read_next_block` explicitly rather than
+        // `.ok().flatten()` (issue #1396/#1283): a non-recoverable read error —
+        // e.g. an uncompressed `CRC.db` chunk mismatch now surfaced by the read
+        // path — must be RECORDED as corruption, not silently swallowed into a
+        // clean end-of-stream that leaves the file reported Healthy.
+        loop {
+            let block_data = match self.read_next_block(&cursor).await {
+                Ok(Some(block)) => block,
+                Ok(None) => break, // clean end of the data section
+                Err(e) => {
+                    // The next block could not be read/verified: the file is
+                    // corrupt from here on. Record it and stop — subsequent
+                    // reads would fail the same way.
+                    let block_no = result.total_blocks_checked + 1;
+                    result.unreadable_blocks += 1;
+                    result
+                        .parsing_errors
+                        .push(format!("Block {}: {}", block_no, e));
+                    result.corrupted_blocks.push(block_no);
+                    break;
+                }
+            };
             result.total_blocks_checked += 1;
 
             // Try to parse block entries
