@@ -559,6 +559,31 @@ impl WriteEngine {
                 wal_path, preserved, e
             ))
         })?;
+
+        // Make the forensic copy durable BEFORE the caller resets/truncates the
+        // live WAL (issue #1391). `std::fs::copy` does not fsync; without this a
+        // crash after the copy but before it reaches disk could leave the live
+        // WAL already trimmed while the preserved copy is missing/incomplete —
+        // destroying the very evidence we set aside. Order: copy → fsync copy →
+        // fsync parent dir → (caller) reset live WAL.
+        {
+            let copy_file = std::fs::File::open(&preserved).map_err(|e| {
+                Error::Storage(format!(
+                    "Failed to open preserved corrupt WAL {:?} for fsync: {}",
+                    preserved, e
+                ))
+            })?;
+            copy_file.sync_all().map_err(|e| {
+                Error::Storage(format!(
+                    "Failed to fsync preserved corrupt WAL {:?}: {}",
+                    preserved, e
+                ))
+            })?;
+        }
+        if let Some(parent) = preserved.parent() {
+            wal::sync_directory(parent)?;
+        }
+
         Ok(preserved)
     }
 

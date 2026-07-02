@@ -132,7 +132,7 @@ enum WalStop {
 /// when `sync_all` is called on the file itself, so an explicit directory
 /// sync is unnecessary on Windows and we skip it.
 #[cfg(unix)]
-fn sync_directory(dir: &Path) -> Result<()> {
+pub(crate) fn sync_directory(dir: &Path) -> Result<()> {
     let dir_file = File::open(dir)
         .map_err(|e| Error::Storage(format!("Failed to open directory for sync: {}", e)))?;
 
@@ -144,7 +144,7 @@ fn sync_directory(dir: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn sync_directory(_dir: &Path) -> Result<()> {
+pub(crate) fn sync_directory(_dir: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -966,6 +966,22 @@ impl WriteAheadLog {
     /// Returns an error if serialization fails or the write fails.
     #[tracing::instrument(name = "wal.append", skip(self, mutation))]
     pub fn append(&mut self, mutation: &Mutation) -> Result<()> {
+        // Refuse to append while a mid-stream corrupt tail is still on disk
+        // (issue #1391). `open_existing` deliberately leaves the corrupt segment
+        // intact for evidence preservation and records the valid-prefix boundary
+        // in `pending_valid_prefix`. If a direct public-API consumer appended now
+        // (without the `WriteEngine::new` reset), the new entry would land AFTER
+        // the corrupt tail — exactly where the next `replay()` stops — so the
+        // acknowledged write would be silently lost. The caller must preserve the
+        // segment aside and call `reset_to_valid_prefix()` first (which clears
+        // this flag). `WriteEngine::new` already does this before any write.
+        if self.pending_valid_prefix.is_some() {
+            return Err(Error::Storage(
+                "WAL has an unreset corrupt tail; reset_to_valid_prefix required before appending"
+                    .to_string(),
+            ));
+        }
+
         // Serialize mutation using bincode
         let mutation_bytes = bincode::serialize(mutation)
             .map_err(|e| Error::Storage(format!("Failed to serialize mutation: {}", e)))?;
@@ -2365,6 +2381,100 @@ mod tests {
                 "replay must yield exactly [C] (garbage_len={garbage_len})"
             );
         }
+    }
+
+    /// Issue #1391 (roborev r2, Finding 2): a WAL opened with a mid-stream
+    /// corrupt tail (`pending_valid_prefix` set) must REFUSE `append()` until the
+    /// caller resets to the valid prefix. A direct public-WAL-API consumer that
+    /// does not go through `WriteEngine::new` (which resets first) would otherwise
+    /// append AFTER the corrupt entry — where the next `replay()` stops — silently
+    /// losing the acknowledged write. Verify: append errors while pending; after
+    /// `reset_to_valid_prefix()` the append succeeds and replays as [A, C].
+    #[test]
+    fn test_wal_append_rejected_until_reset_after_midstream_corruption() {
+        let temp_dir = TempDir::new().unwrap();
+        let (path, end_of_a, total) = write_two_entries(&temp_dir);
+
+        // Corrupt B's payload IN PLACE (flip its first payload byte) without
+        // changing any length — a fully-present entry with a bad CRC, which
+        // `scan_valid_prefix` classifies as `Corruption` (not a torn tail). The
+        // valid prefix ends at A, so `open_existing` records a pending corrupt
+        // tail rather than trimming it away.
+        let b_first_payload = end_of_a + 8;
+        assert!(
+            b_first_payload < total,
+            "test setup: B must have at least one payload byte"
+        );
+        {
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes[b_first_payload as usize] ^= 0xFF;
+            std::fs::write(&path, &bytes).unwrap();
+        }
+
+        // Open: the corrupt segment is left intact (evidence) and the valid
+        // prefix (end of A) is recorded as pending.
+        let mut wal = WriteAheadLog::open_existing(&path).unwrap();
+        assert!(
+            wal.has_pending_corrupt_tail(),
+            "mid-stream corruption must leave a pending valid prefix, not silently trim"
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            total,
+            "the corrupt segment must remain on disk for evidence preservation"
+        );
+
+        // Finding 2: appending BEFORE reset must fail-closed (otherwise the write
+        // lands after the corrupt tail and is lost on the next replay).
+        let err = wal
+            .append(&create_test_mutation(3, "Carol"))
+            .expect_err("append must be rejected while a corrupt tail is unreset");
+        match err {
+            Error::Storage(msg) => assert!(
+                msg.contains("reset_to_valid_prefix"),
+                "error must direct the caller to reset first, got: {msg}"
+            ),
+            other => panic!("expected Error::Storage, got {other:?}"),
+        }
+
+        // Reset to the valid prefix (clears the pending flag) and confirm the
+        // corrupt tail is gone from the LIVE log.
+        let reset_to = wal.reset_to_valid_prefix().unwrap();
+        assert_eq!(reset_to, Some(end_of_a), "reset trims back to the end of A");
+        assert!(
+            !wal.has_pending_corrupt_tail(),
+            "reset_to_valid_prefix must clear the pending flag"
+        );
+
+        // After reset, append succeeds and lands at the valid boundary.
+        wal.append(&create_test_mutation(3, "Carol")).unwrap();
+        wal.sync().unwrap();
+        drop(wal);
+
+        // Fresh reopen + replay must recover EXACTLY [A, C]: C landed at end_of_a,
+        // not after the (now removed) corrupt B.
+        let wal = WriteAheadLog::open_existing(&path).unwrap();
+        let report = wal.replay().unwrap();
+        assert!(
+            report.is_clean(),
+            "recovery must be clean after reset + post-recovery append"
+        );
+        let names: Vec<&str> = report
+            .mutations
+            .iter()
+            .map(|m| match &m.operations[0] {
+                CellOperation::Write {
+                    value: Value::Text(name),
+                    ..
+                } => name.as_str(),
+                other => panic!("expected Write op, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Alice", "Carol"],
+            "replay must yield exactly [A, C]"
+        );
     }
 
     #[test]
