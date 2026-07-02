@@ -137,6 +137,34 @@ fn is_path_qualified(reference: &str) -> bool {
     r.contains('/') || r.contains('\\')
 }
 
+/// True if a `cassandra.files` reference is a **test-kind** reference by the
+/// documented manifest file-kind naming convention (issue #1408): its basename
+/// ends in `Test.java`. Production sources (e.g. `BigTableWriter.java`), the
+/// `CQLTester.java` harness, category `#anchor` references, and the `n/a`
+/// placeholder are NOT test-kind and are therefore exempt from index resolution.
+pub fn is_test_reference(reference: &str) -> bool {
+    !reference.contains('#') && normalized_basename(reference).ends_with("Test.java")
+}
+
+/// True if a test-kind reference resolves to a detailed entry in the Cassandra
+/// test index (issue #1408): its basename carries at least one `**Path:**` entry,
+/// and — when the reference is itself path-qualified — that exact path is among
+/// the indexed paths for the basename (so a path-qualified reference never
+/// resolves against a same-basename twin at a different path).
+pub fn test_reference_resolves(corpus: &IndexCorpus, reference: &str) -> bool {
+    let base = normalized_basename(reference);
+    match corpus.basename_paths.get(base) {
+        None => false,
+        Some(paths) => {
+            if is_path_qualified(reference) {
+                paths.contains(&normalize_path(reference))
+            } else {
+                true
+            }
+        }
+    }
+}
+
 /// Normalize a reference to a comparable full-path key (trim only); path
 /// separators are left intact so distinct paths never collapse.
 fn normalize_path(reference: &str) -> String {
@@ -407,5 +435,59 @@ scenarios:
             covp.unclassified_high.is_empty(),
             "full-path reference classifies the High twin"
         );
+    }
+
+    // ---- issue #1408: file-kind convention + test-ref index resolution ----
+
+    #[test]
+    fn is_test_reference_recognizes_only_test_basenames() {
+        // test-kind: basename ends in Test.java
+        assert!(is_test_reference("CellTest.java"));
+        assert!(is_test_reference(
+            "test/unit/org/apache/cassandra/db/CellTest.java"
+        ));
+        // source: production .java not ending in Test.java
+        assert!(!is_test_reference("BigTableWriter.java"));
+        assert!(!is_test_reference("DeletionTime.java"));
+        // harness / anchor / placeholder
+        assert!(!is_test_reference("CQLTester.java"));
+        assert!(!is_test_reference("#compaction"));
+        assert!(!is_test_reference("n/a"));
+        // an anchor whose slug happens to contain the word is still not test-kind
+        assert!(!is_test_reference("cassandra_test_index.md#CellTest.java"));
+    }
+
+    const RESOLVE_INDEX: &str = "\
+#### 🔴 High · `CellTest.java`
+- **Path:** `test/unit/org/apache/cassandra/db/CellTest.java`
+#### 🟡 Med · `VersionSupportedFeaturesTest.java`
+- **Path:** `test/unit/org/apache/cassandra/io/sstable/format/bti/VersionSupportedFeaturesTest.java`
+#### 🔴 High · `VersionSupportedFeaturesTest.java`
+- **Path:** `test/unit/org/apache/cassandra/io/sstable/format/big/VersionSupportedFeaturesTest.java`
+";
+
+    #[test]
+    fn test_reference_resolves_by_basename_and_path() {
+        let corpus = parse_index(RESOLVE_INDEX);
+        // basename-only ref to a uniquely-named indexed test resolves.
+        assert!(test_reference_resolves(&corpus, "CellTest.java"));
+        // a *Test.java with no index entry does not resolve.
+        assert!(!test_reference_resolves(&corpus, "NoSuchPhantomTest.java"));
+        // ambiguous basename: basename-only still "resolves" (some entry exists),
+        // but a path-qualified ref must match an exact indexed path.
+        assert!(test_reference_resolves(
+            &corpus,
+            "VersionSupportedFeaturesTest.java"
+        ));
+        assert!(test_reference_resolves(
+            &corpus,
+            "test/unit/org/apache/cassandra/io/sstable/format/big/VersionSupportedFeaturesTest.java"
+        ));
+        // path-qualified ref to a path NOT in the index does not resolve, even
+        // though the basename exists at other paths.
+        assert!(!test_reference_resolves(
+            &corpus,
+            "test/unit/org/apache/cassandra/io/sstable/format/nowhere/VersionSupportedFeaturesTest.java"
+        ));
     }
 }

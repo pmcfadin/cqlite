@@ -83,6 +83,8 @@ pub fn lint(m: &Manifest, repo_root: Option<&Path>) -> Vec<Finding> {
         if let Ok(index_text) = std::fs::read_to_string(root.join(&m.cassandra_source.index)) {
             lint_ambiguous_basenames(m, &index_text, &mut out);
         }
+        // File-kind resolution (issue #1408).
+        lint_test_index_resolution(m, root, &mut out);
     }
 
     out
@@ -121,6 +123,40 @@ fn lint_ambiguous_basenames(m: &Manifest, index_text: &str, out: &mut Vec<Findin
                         ),
                     ));
                 }
+            }
+        }
+    }
+}
+
+/// Issue #1408: enforce the manifest file-kind naming convention — every
+/// *test-kind* `cassandra.files` reference (basename ending in `Test.java`) MUST
+/// resolve to a detailed entry in the Cassandra test index
+/// (`cassandra_source.index`). Production sources, the harness, category
+/// `#anchor` references, and the `n/a` placeholder are exempt by convention (see
+/// the manifest header and `docs/development/cassandra-parity-manifest.md`).
+///
+/// The index is read from `repo_root`; when it is absent (e.g. linting from a
+/// sub-tree without the docs) the check is skipped so the linter stays usable,
+/// mirroring the claim-scan graceful-skip contract.
+fn lint_test_index_resolution(m: &Manifest, repo_root: &Path, out: &mut Vec<Finding>) {
+    let Ok(index_text) = std::fs::read_to_string(repo_root.join(&m.cassandra_source.index)) else {
+        return;
+    };
+    let corpus = coverage::parse_index(&index_text);
+    for s in &m.scenarios {
+        for f in &s.cassandra.files {
+            if coverage::is_test_reference(f) && !coverage::test_reference_resolves(&corpus, f) {
+                out.push(Finding::error(
+                    &s.id,
+                    "cassandra.files",
+                    format!(
+                        "kind:test reference '{f}' does not resolve to a {} entry; catalog it in \
+                         the index, or — if it actually names a production source/harness/category \
+                         anchor — drop the 'Test' suffix / use the real name per the manifest \
+                         file-kind convention",
+                        m.cassandra_source.index
+                    ),
+                ));
             }
         }
     }

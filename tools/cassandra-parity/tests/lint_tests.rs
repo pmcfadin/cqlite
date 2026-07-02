@@ -769,6 +769,52 @@ fn real_manifest_lints_clean() {
     assert!(errs.is_empty(), "real manifest has lint errors: {errs:#?}");
 }
 
+/// Issue #1408: a `kind: test` reference (basename ending in `Test.java`) that
+/// does not resolve to a detailed entry in the real checked-in index is a lint
+/// error; a production-source reference (no `Test` suffix) is exempt.
+#[test]
+fn test_kind_reference_absent_from_index_is_rejected() {
+    let root = repo_root();
+    let text = std::fs::read_to_string(root.join("test-data/cassandra-parity-manifest.yml"))
+        .expect("real manifest exists");
+    // Inject a phantom test-kind reference into the first scenario's files.
+    let phantom = text.replacen(
+        "        - DescriptorTest.java",
+        "        - DescriptorTest.java\n        - NoSuchPhantom1408Test.java",
+        1,
+    );
+    assert_ne!(phantom, text, "expected to inject a phantom reference");
+    let m = Manifest::from_yaml(&phantom).expect("manifest parses");
+    let errs: Vec<String> = lint(&m, Some(&root))
+        .into_iter()
+        .filter(|f| f.level == Level::Error)
+        .map(|f| format!("[{}] {}: {}", f.id, f.field, f.message))
+        .collect();
+    assert!(
+        errs.iter().any(|e| e.contains("NoSuchPhantom1408Test.java")
+            && e.contains("cassandra.files")
+            && e.contains("does not resolve")),
+        "expected a kind:test index-resolution error, got: {errs:#?}"
+    );
+
+    // The same reference as a production SOURCE (no `Test` suffix) is exempt.
+    let src = text.replacen(
+        "        - DescriptorTest.java",
+        "        - DescriptorTest.java\n        - NoSuchPhantom1408.java",
+        1,
+    );
+    let ms = Manifest::from_yaml(&src).expect("manifest parses");
+    let src_errs: Vec<String> = lint(&ms, Some(&root))
+        .into_iter()
+        .filter(|f| f.level == Level::Error && f.message.contains("NoSuchPhantom1408"))
+        .map(|f| f.message)
+        .collect();
+    assert!(
+        src_errs.is_empty(),
+        "a production-source reference must be exempt from the index-resolution rule: {src_errs:#?}"
+    );
+}
+
 #[test]
 fn real_report_is_deterministic_and_up_to_date() {
     let root = repo_root();
