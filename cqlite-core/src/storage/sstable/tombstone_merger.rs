@@ -389,8 +389,9 @@ impl TombstoneMerger {
         // Issue #1334: generations now carry whole rows (`ScanRow`), not bare
         // collection values, so reconciliation reduces to last-write-wins with
         // tombstone shadowing (the per-element collection filtering that this
-        // helper used to perform never applied at the row grain).
-        for entry in sorted_entries {
+        // helper used to perform never applied at the row grain). The
+        // newest-by-write-time entry is authoritative.
+        if let Some(entry) = sorted_entries.into_iter().next() {
             if entry.tombstone_info().is_some() {
                 // Active (or expired) tombstone → the row is deleted.
                 return Ok(None);
@@ -643,7 +644,7 @@ mod tests {
 
         let tombstones = vec![
             GenerationValue {
-                value: Value::row_tombstone(1_000_000), // 1 second in microseconds
+                value: ScanRow::Marker(Value::row_tombstone(1_000_000)), // 1 second in microseconds
                 metadata: EntryMetadata {
                     write_time: 1_000_000,
                     generation: 1,
@@ -651,7 +652,7 @@ mod tests {
                 },
             },
             GenerationValue {
-                value: Value::cell_tombstone(8_000_000), // 8 seconds in microseconds
+                value: ScanRow::Marker(Value::cell_tombstone(8_000_000)), // 8 seconds in microseconds
                 metadata: EntryMetadata {
                     write_time: 8_000_000,
                     generation: 2,
@@ -741,7 +742,7 @@ mod tests {
 
         let values = vec![
             GenerationValue {
-                value: Value::Integer(10), // older value
+                value: ScanRow::Marker(Value::Integer(10)), // older value
                 metadata: EntryMetadata {
                     write_time: 1_000,
                     generation: 1,
@@ -749,7 +750,7 @@ mod tests {
                 },
             },
             GenerationValue {
-                value: Value::Integer(30), // newer value - should win
+                value: ScanRow::Marker(Value::Integer(30)), // newer value - should win
                 metadata: EntryMetadata {
                     write_time: 3_000,
                     generation: 2,

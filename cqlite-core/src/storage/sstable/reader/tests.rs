@@ -5,6 +5,7 @@
 mod tests {
     use super::super::compression::extract_sstable_base_name;
     use super::super::types::*;
+    use crate::types::ScanRow;
     use crate::RowKey;
     use std::path::PathBuf;
 
@@ -443,11 +444,11 @@ mod tests {
         eprintln!("Entry 0: row_key={:?}", row_key);
         eprintln!("Entry 0: value={:?}", value);
 
-        // CRITICAL ASSERTION: Value must be a row carrier with cells.
-        // Issue #1334: the row carrier is `Value::Row(Vec<(Arc<str>, Value)>)`
+        // CRITICAL ASSERTION: the scan value must be the live-row carrier with cells.
+        // Issue #1334: the row carrier is `ScanRow::Row(Vec<(Arc<str>, Value)>)`
         // keyed by the interned column-name handle.
         match value {
-            Value::Row(map_entries) => {
+            ScanRow::Row(map_entries) => {
                 eprintln!("Row has {} fields", map_entries.len());
 
                 // CRITICAL: Must extract >0 cells (not 0!)
@@ -528,11 +529,14 @@ mod tests {
                     }
                 }
             }
-            Value::Null => {
+            ScanRow::Marker(Value::Null) => {
                 panic!("❌ V5CompressedLegacy parser returned Null value (should return row with cells!)");
             }
-            other => {
-                panic!("❌ Expected Value::Row (row carrier), got {:?}", other);
+            ScanRow::Marker(other) => {
+                panic!(
+                    "❌ Expected ScanRow::Row (row carrier), got Marker({:?})",
+                    other
+                );
             }
         }
 

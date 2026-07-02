@@ -130,6 +130,34 @@ impl ScanRow {
     pub fn is_marker(&self) -> bool {
         matches!(self, ScanRow::Marker(_))
     }
+
+    /// Number of cells in a live row, or the marker value's byte length.
+    ///
+    /// Inspection convenience: a live [`ScanRow::Row`] reports its cell count; a
+    /// [`ScanRow::Marker`] delegates to the wrapped value's [`Value::len`].
+    pub fn len(&self) -> usize {
+        match self {
+            ScanRow::Row(cells) => cells.len(),
+            ScanRow::Marker(v) => v.len(),
+        }
+    }
+
+    /// True when a live row has no cells, or the marker value is empty/null.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            ScanRow::Row(cells) => cells.is_empty(),
+            ScanRow::Marker(v) => v.is_empty(),
+        }
+    }
+
+    /// Byte view of a marker's wrapped value (e.g. a raw `Value::Blob` from an
+    /// offset-read placeholder); `None` for a live row.
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            ScanRow::Marker(v) => v.as_bytes(),
+            ScanRow::Row(_) => None,
+        }
+    }
 }
 
 /// User Defined Type value with structured field access

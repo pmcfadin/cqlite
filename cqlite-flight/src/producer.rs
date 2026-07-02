@@ -24,7 +24,7 @@ use cqlite_core::query::{build_row_from_scan, ColumnInfo, QueryRow};
 use cqlite_core::schema::{CqlType, TableSchema};
 use cqlite_core::storage::write_engine::merge::{MergeStep, RowData};
 use cqlite_core::storage::write_engine::KWayMerger;
-use cqlite_core::types::{DataType, Value};
+use cqlite_core::types::{DataType, RowCells, ScanRow, Value};
 use cqlite_core::RowKey;
 
 use crate::agg::{AggError, AggPlan};
@@ -483,16 +483,20 @@ impl MergeProducer {
             RowData::Tombstone { .. } => return None,
         };
 
-        let map_entries: Vec<(Value, Value)> = cells
+        // Issue #1334: build the SAME `ScanRow::Row` carrier every scan producer
+        // builds, so `build_row_from_scan` disassembles it into real column values
+        // (previously this emitted `Value::Map`, which fell through to the non-row
+        // fallback and silently dropped every Flight column value — roborev H2).
+        let row_cells: RowCells = cells
             .into_iter()
             // A cell tombstone leaves the column absent → null in Arrow output,
             // matching the CLI's "emit null for tombstoned cells" behaviour.
             .filter(|c| !matches!(c.value, Value::Tombstone(_)))
-            .map(|c| (Value::Text(c.column), c.value))
+            .map(|c| (std::sync::Arc::from(c.column.as_str()), c.value))
             .collect();
 
         let key = RowKey(partition_key.to_vec());
-        build_row_from_scan(key, Value::Map(map_entries), &[], Some(&self.schema))
+        build_row_from_scan(key, ScanRow::Row(row_cells), &[], Some(&self.schema))
     }
 
     /// Merge `paths` WITHOUT the input prune, relying only on the per-partition
