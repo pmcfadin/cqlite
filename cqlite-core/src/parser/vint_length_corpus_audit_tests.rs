@@ -1,23 +1,51 @@
 //! Issue #1623 — corpus-differential test for `parse_vint_length`.
 //!
-//! This is the pinned parity test for the unsigned-length fix. It walks every
-//! real Cassandra SSTable under `$CQLITE_DATASETS_ROOT/sstables`, runs a full
-//! structural scan of each Data.db, and — via the `length_decode_audit` hook in
-//! `parse_vint_length` — tallies, at every real length/count decode offset,
-//! whether the OLD signed (ZigZag) decode would have AGREED with the fixed
-//! unsigned decode. A disagreement is a length field the pre-fix decoder was
-//! silently mis-reading.
+//! This is the pinned parity test for the unsigned-length fix. It proves, on
+//! REAL Cassandra corpus bytes, that the fixed unsigned decode reads length
+//! prefixes correctly where the OLD signed (ZigZag) decode silently mis-read
+//! them.
 //!
-//! It must be a LIB unit test (not an integration test): the audit hook is
-//! `#[cfg(test)]`, which is only compiled for the crate's own unit-test build.
+//! ## Why not "just scan and tally"
+//!
+//! The production full-scan hot path for the corpus formats (V5CompressedLegacy
+//! "nb", BTI "da") decodes every on-disk length/count field via `parse_vuint`
+//! directly, NOT via `parse_vint_length` — so arming the `length_decode_audit`
+//! hook inside `parse_vint_length` around a full scan records ZERO decodes and
+//! demonstrates nothing (roborev job 2718: the prior version of this test was
+//! vacuous for exactly this reason). See the producer-classification doc-comment
+//! on `parser::vint::parse_vint_length`.
+//!
+//! ## What this test actually does
+//!
+//! 1. It still opens and scans every corpus SSTable and asserts none error with
+//!    the unsigned length decoder (the structural-soundness property).
+//! 2. For the V5CompressedLegacy ("nb") tables it stitches + decompresses the
+//!    Data.db data section — the exact bytes the scan path parses — and, for each
+//!    authoritative decoded variable-length cell value (Text/Blob) of known
+//!    length `L`, locates the LITERAL on-disk `writeUnsignedVInt(L)` length
+//!    prefix that precedes the value bytes (confirmed byte-exact: the recovered
+//!    vint must occupy exactly the bytes ending where the value begins and
+//!    unsigned-decode to `L`).
+//! 3. It then routes those literal on-disk prefix bytes through
+//!    `parse_vint_length` (arming the differential audit) and asserts, at every
+//!    site, that the UNSIGNED decode equals the authoritative length `L`, while
+//!    the audit tallies how many of those real length prefixes the legacy signed
+//!    ZigZag decode would have mis-read.
+//!
+//! The test FAILS if it silently exercises nothing (`agree + disagree == 0`),
+//! guarding against a future 0-decode regression.
+//!
+//! It must be a LIB unit test (not an integration test): the audit hook and the
+//! `stitched_data_section_for_tests` accessor are `#[cfg(test)]`, only compiled
+//! for the crate's own unit-test build.
 //!
 //! Fixture-gating (repo doctrine): SKIPs cleanly when the dataset binaries are
 //! absent, but treats "present but zero tables" as a FAILURE. `CQLITE_DATASETS_ROOT`
 //! keyed; `CQLITE_REQUIRE_FIXTURES=1` turns the absent-corpus skip into a hard fail.
 
-use crate::parser::vint::length_decode_audit;
+use crate::parser::vint::{length_decode_audit, parse_vint_length};
 use crate::storage::sstable::reader::SSTableReader;
-use crate::types::TableId;
+use crate::types::{ScanRow, TableId, Value};
 use crate::{Config, Platform};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -94,6 +122,86 @@ fn collect_tables(sstables: &std::path::Path) -> Vec<(PathBuf, String)> {
     out
 }
 
+/// Find the first occurrence of `needle` in `haystack` starting at `from`.
+fn find_from(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    if needle.is_empty() || from >= haystack.len() {
+        return None;
+    }
+    haystack[from..]
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .map(|rel| from + rel)
+}
+
+/// Minimum authoritative value length we accept as an extraction anchor. A
+/// 6+-byte value makes a coincidental byte-sequence match (a false length
+/// prefix) vanishingly unlikely, so a confirmed hit is a genuine on-disk
+/// `writeUnsignedVInt` length prefix.
+const MIN_ANCHOR_LEN: usize = 6;
+
+/// Cap on confirmed differential sites — enough to be decisive, bounded so the
+/// naive substring search over multi-MB buffers stays fast.
+const MAX_SITES: usize = 256;
+
+/// Locate LITERAL on-disk `writeUnsignedVInt(L)` length prefixes in a
+/// decompressed V5 data section, cross-checked against the authoritative decoded
+/// value length `L`. Pushes `(prefix_bytes, expected_len)` for each confirmed
+/// site. Probing calls `parse_vint_length` while the audit is DISARMED, so it
+/// does not pollute the differential tally.
+fn extract_length_prefixes(
+    buffer: &[u8],
+    rows: &[(crate::RowKey, ScanRow)],
+    out: &mut Vec<(Vec<u8>, usize)>,
+) {
+    for (_key, row) in rows {
+        if out.len() >= MAX_SITES {
+            return;
+        }
+        let ScanRow::Row(cells) = row else {
+            continue;
+        };
+        for (_name, value) in cells {
+            if out.len() >= MAX_SITES {
+                return;
+            }
+            let vbytes: &[u8] = match value {
+                Value::Text(s) => s.as_bytes(),
+                Value::Blob(b) => b.as_slice(),
+                _ => continue,
+            };
+            let expected_len = vbytes.len();
+            if expected_len < MIN_ANCHOR_LEN {
+                continue;
+            }
+            // The on-disk cell layout is `writeUnsignedVInt(L)` immediately
+            // followed by the `L` value bytes. Find each occurrence of the value
+            // bytes and recover the unique unsigned vint that ends exactly where
+            // they begin and decodes to `L`.
+            let mut search_from = 0usize;
+            while let Some(p) = find_from(buffer, vbytes, search_from) {
+                search_from = p + 1;
+                for k in 1..=9usize {
+                    if k > p {
+                        continue;
+                    }
+                    let prefix = &buffer[p - k..p];
+                    if let Ok((rem, decoded)) = parse_vint_length(prefix) {
+                        // Byte-exact: the vint occupies the whole `k`-byte prefix
+                        // (rem empty) AND decodes to the authoritative length.
+                        if rem.is_empty() && decoded == expected_len {
+                            out.push((prefix.to_vec(), expected_len));
+                            break;
+                        }
+                    }
+                }
+                if out.len() >= MAX_SITES {
+                    return;
+                }
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn corpus_differential_unsigned_length_decode() {
     let Some(root) = datasets_root() else {
@@ -136,10 +244,12 @@ async fn corpus_differential_unsigned_length_decode() {
             .expect("platform init should succeed"),
     );
 
-    length_decode_audit::arm();
     let mut scanned = 0usize;
     let mut scans_ok = 0usize;
     let mut failures: Vec<String> = Vec::new();
+    // Confirmed literal on-disk unsigned-vint length prefixes + authoritative
+    // expected lengths, gathered while the audit is DISARMED.
+    let mut sites: Vec<(Vec<u8>, usize)> = Vec::new();
 
     for (data_db, table_name) in &tables {
         scanned += 1;
@@ -151,17 +261,52 @@ async fn corpus_differential_unsigned_length_decode() {
             }
         };
         let table_id = TableId::new(table_name.clone());
-        match reader.scan(&table_id, None, None, None, None).await {
-            Ok(_rows) => scans_ok += 1,
-            Err(e) => failures.push(format!("scan {}: {e}", data_db.display())),
+        let rows = match reader.scan(&table_id, None, None, None, None).await {
+            Ok(rows) => {
+                scans_ok += 1;
+                rows
+            }
+            Err(e) => {
+                failures.push(format!("scan {}: {e}", data_db.display()));
+                continue;
+            }
+        };
+
+        // Only the stitched V5CompressedLegacy ("nb") data section exposes the
+        // literal on-disk length prefixes we anchor on. Other formats
+        // (oa index-read placeholders, BTI) return None and are skipped here —
+        // the scan-soundness check above still covers them.
+        if sites.len() < MAX_SITES {
+            if let Ok(Some(buffer)) = reader.stitched_data_section_for_tests().await {
+                extract_length_prefixes(&buffer, &rows, &mut sites);
+            }
         }
     }
 
+    // Now run the differential over the confirmed literal on-disk prefixes.
+    // Arm the audit ONLY for this pass so the tally reflects exactly these real
+    // length-prefix decodes (probing above ran with the audit disarmed).
+    length_decode_audit::arm();
+    for (prefix, expected) in &sites {
+        let (rem, decoded) =
+            parse_vint_length(prefix).expect("confirmed on-disk prefix must decode");
+        assert!(
+            rem.is_empty(),
+            "confirmed prefix must be consumed whole (bytes={prefix:02x?})"
+        );
+        assert_eq!(
+            decoded, *expected,
+            "unsigned decode of real on-disk length prefix {prefix:02x?} must equal the \
+             authoritative value length {expected}"
+        );
+    }
     let (agree, disagree) = length_decode_audit::disarm();
 
     eprintln!(
         "Issue #1623 corpus differential: tables={scanned} scans_ok={scans_ok} \
-         length_decodes_agree={agree} length_decodes_disagree={disagree}"
+         real_length_prefix_sites={} length_decodes_agree={agree} \
+         length_decodes_disagree={disagree}",
+        sites.len()
     );
     if !failures.is_empty() {
         eprintln!("Issue #1623 scan failures ({}):", failures.len());
@@ -177,5 +322,19 @@ async fn corpus_differential_unsigned_length_decode() {
         failures.is_empty(),
         "{} corpus SSTable(s) failed to open/scan with the unsigned length decoder",
         failures.len()
+    );
+
+    // The whole point of the differential (roborev job 2718): the test must have
+    // actually decoded REAL Cassandra length prefixes. A zero tally means the
+    // test silently exercised nothing — fail rather than pass vacuously.
+    assert_eq!(
+        agree + disagree,
+        sites.len() as u64,
+        "every confirmed on-disk length prefix must be tallied exactly once"
+    );
+    assert!(
+        agree + disagree > 0,
+        "corpus present but NO real on-disk unsigned-vint length prefix was decoded — \
+         the differential exercised nothing (regression guard for the vacuous-test bug)"
     );
 }

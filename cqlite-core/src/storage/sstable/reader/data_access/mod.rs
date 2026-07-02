@@ -70,6 +70,29 @@ impl SSTableReader {
             && self.header.cassandra_version.is_nb_format()
     }
 
+    /// Test-only: return the fully stitched + decompressed Data.db data section
+    /// for a V5CompressedLegacy ("nb") SSTable, or `None` for any other format.
+    ///
+    /// This exposes the exact on-disk bytes (post-decompression) that the
+    /// production scan path parses, so the Issue #1623 corpus-differential test
+    /// can locate REAL Cassandra `writeUnsignedVInt` length prefixes and route
+    /// those literal bytes through [`crate::parser::vint::parse_vint_length`].
+    /// It replicates the seek + stitch preamble of `sequential_scan` exactly.
+    #[cfg(test)]
+    pub(crate) async fn stitched_data_section_for_tests(&self) -> Result<Option<Vec<u8>>> {
+        if !self.requires_chunk_stitching() {
+            return Ok(None);
+        }
+        let cursor = self.new_scan_cursor().await?;
+        let header_size = self.calculate_header_size();
+        {
+            let mut file_guard = cursor.file.lock().await;
+            file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
+        }
+        let stitched = self.stitch_all_chunks(&cursor).await?;
+        Ok(Some(stitched))
+    }
+
     /// Get a value by key from the SSTable.
     ///
     /// Resolution-mode-agnostic entry point: callers that do not carry the
