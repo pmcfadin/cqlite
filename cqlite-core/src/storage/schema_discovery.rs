@@ -310,32 +310,33 @@ impl SchemaDiscovery {
         &self,
         reader: &SSTableReader,
     ) -> Result<Vec<HashMap<String, Value>>> {
-        // Get column names from the header
-        let header = reader.header();
-        let column_names: Vec<String> = header.columns.iter().map(|col| col.name.clone()).collect();
+        // Header column names for the raw-fallback case (issue #1334): a
+        // `ScanRow::RawRow` is undecoded whole-row bytes, so — matching the
+        // pre-#1334 sampler — map it onto the first header column rather than a
+        // synthetic `"data"` blob that would infer a bogus column.
+        let header_first_column: Option<String> =
+            reader.header().columns.first().map(|c| c.name.clone());
 
         // Get all entries and sample up to max_rows
         let all_entries = reader.get_all_entries().await?;
 
-        // TODO(Issue #190): SSTableReader returns Vec<(TableId, RowKey, Value)> where Value
-        // is typically a single parsed value per entry. For schema discovery type inference,
-        // we map each entry's Value to the first column. Future enhancement: use scan()
-        // with schema-aware parsing for multi-column row data.
+        // Issue #1334: each entry carries a `ScanRow` row. Disassemble a live row's
+        // interned cells into a name→value map for type inference; map a raw
+        // fallback row onto the header column name; suppress markers (row
+        // tombstone / null row) which carry no columns.
         let samples: Vec<HashMap<String, Value>> = all_entries
             .into_iter()
             .take(self.config.max_sample_rows)
-            .filter_map(|(_table_id, _row_key, value)| {
-                // Convert entry to column-value map using actual column names
-                let mut row_data = HashMap::new();
-
-                if !column_names.is_empty() {
-                    // Map the single Value to the first column for type inference
-                    row_data.insert(column_names[0].clone(), value);
-                    Some(row_data)
-                } else {
-                    // If no column names available, skip this entry
-                    None
+            .filter_map(|(_table_id, _row_key, row)| {
+                let cells = row.into_sample_cells(header_first_column.as_deref())?;
+                if cells.is_empty() {
+                    return None;
                 }
+                let row_data: HashMap<String, Value> = cells
+                    .into_iter()
+                    .map(|(name, v)| (name.to_string(), v))
+                    .collect();
+                Some(row_data)
             })
             .collect();
 

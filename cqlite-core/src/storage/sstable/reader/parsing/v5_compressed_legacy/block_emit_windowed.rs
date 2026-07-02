@@ -39,7 +39,7 @@ impl V5CompressedLegacyParser {
         mut emit: F,
     ) -> Result<()>
     where
-        F: FnMut((TableId, RowKey, Value)) -> Result<std::ops::ControlFlow<()>>,
+        F: FnMut((TableId, RowKey, ScanRow)) -> Result<std::ops::ControlFlow<()>>,
     {
         if data.is_empty() {
             return Ok(());
@@ -231,7 +231,7 @@ impl V5CompressedLegacyParser {
                     // values must be merged into each clustering row that follows in the partition.
                     //
                     // We accumulate static cells here and inject them into every clustering row.
-                    let mut static_cells: HashMap<String, Value> = HashMap::new();
+                    let mut static_cells: HashMap<Arc<str>, Value> = HashMap::new();
                     let mut row_count = 0;
                     loop {
                         // Issue #954: stop at the clustering-slice end bound. The
@@ -375,9 +375,9 @@ impl V5CompressedLegacyParser {
                                                 "V5CompressedLegacy: Partition {} Row {} - emitting Tombstone(deletion_time={})",
                                                 partition_index, row_count, h.row_tombstone_deletion_time()
                                             );
-                                            h.row_tombstone()
+                                            ScanRow::Marker(h.row_tombstone())
                                         } else {
-                                            Value::Null
+                                            ScanRow::Marker(Value::Null)
                                         }
                                     } else if cells.is_empty() {
                                         warn!(
@@ -388,7 +388,7 @@ impl V5CompressedLegacyParser {
                                             row_count,
                                             partition_key.0.len()
                                         );
-                                        Value::Null
+                                        ScanRow::Marker(Value::Null)
                                     } else {
                                         // Convert HashMap<String, Value> to Vec<(Value, Value)> for Value::Map.
                                         //
@@ -409,24 +409,15 @@ impl V5CompressedLegacyParser {
                                         // alphabetical, matching Cassandra's on-disk column order exactly.
                                         // That would require threading the column order through ParsedRow
                                         // to this call site.
-                                        let mut map_entries: Vec<(Value, Value)> = cells
-                                            .into_iter()
-                                            .map(|(name, value)| (Value::Text(name), value))
-                                            .collect();
-                                        map_entries.sort_by(|a, b| {
-                                            let a_key = if let Value::Text(s) = &a.0 {
-                                                s.as_str()
-                                            } else {
-                                                ""
-                                            };
-                                            let b_key = if let Value::Text(s) = &b.0 {
-                                                s.as_str()
-                                            } else {
-                                                ""
-                                            };
-                                            a_key.cmp(b_key)
-                                        });
-                                        Value::Map(map_entries)
+                                        // Issue #1334: carry the interned `Arc<str>`
+                                        // column-name handles straight into the row
+                                        // carrier (no `Value::Text(String)` round-trip,
+                                        // no per-cell `.to_string()` re-allocation). The
+                                        // emit-time alphabetical ordering is preserved
+                                        // exactly (sort key is the name `str`).
+                                        let mut row_cells: RowCells = cells.into_iter().collect();
+                                        row_cells.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
+                                        ScanRow::Row(row_cells)
                                     };
 
                                     // Issue #954: count each clustering row actually
@@ -540,7 +531,7 @@ impl V5CompressedLegacyParser {
     /// Parse all partitions in a decompressed block, returning per-row timestamps.
     ///
     /// This is the compaction-specific variant of [`parse_block`].  It returns
-    /// `(TableId, RowKey, Value, row_timestamp_micros)` so that the k-way merger
+    /// `(TableId, RowKey, ScanRow, row_timestamp_micros)` so that the k-way merger
     /// can perform timestamp-accurate last-write-wins ordering rather than
     /// falling back to `SystemTime::now()`.
     ///
@@ -561,10 +552,10 @@ impl V5CompressedLegacyParser {
         data: &[u8],
         schema: Option<&TableSchema>,
         reader: &crate::storage::sstable::reader::types::SSTableReader,
-    ) -> Result<Vec<(TableId, RowKey, Value, i64)>> {
+    ) -> Result<Vec<(TableId, RowKey, ScanRow, i64)>> {
         // Thin wrapper that collects the streaming emit variant into a Vec, so
         // every existing caller/test is byte-for-byte unchanged (issue #827).
-        let mut results: Vec<(TableId, RowKey, Value, i64)> = Vec::new();
+        let mut results: Vec<(TableId, RowKey, ScanRow, i64)> = Vec::new();
         self.parse_block_with_timestamps_emit(data, schema, reader, |entry| {
             results.push(entry);
             Ok(std::ops::ControlFlow::Continue(()))
@@ -573,7 +564,7 @@ impl V5CompressedLegacyParser {
     }
 
     /// Streaming variant of [`parse_block_with_timestamps`]: invokes `emit` for
-    /// each parsed `(TableId, RowKey, Value, row_timestamp_micros)` entry rather
+    /// each parsed `(TableId, RowKey, ScanRow, row_timestamp_micros)` entry rather
     /// than collecting into a `Vec`, so the compaction read path can forward
     /// rows into a bounded channel without materialising the whole block at once
     /// (issue #827). Returning `ControlFlow::Break` from `emit` stops parsing
@@ -591,7 +582,7 @@ impl V5CompressedLegacyParser {
         mut emit: F,
     ) -> Result<()>
     where
-        F: FnMut((TableId, RowKey, Value, i64)) -> Result<std::ops::ControlFlow<()>>,
+        F: FnMut((TableId, RowKey, ScanRow, i64)) -> Result<std::ops::ControlFlow<()>>,
     {
         if data.is_empty() {
             return Ok(());
@@ -695,7 +686,7 @@ impl V5CompressedLegacyParser {
         emit: &mut F,
     ) -> Result<ParseStep>
     where
-        F: FnMut((TableId, RowKey, Value, i64)) -> Result<std::ops::ControlFlow<()>>,
+        F: FnMut((TableId, RowKey, ScanRow, i64)) -> Result<std::ops::ControlFlow<()>>,
     {
         if data.is_empty() {
             return Ok(ParseStep::Done);
@@ -759,7 +750,7 @@ impl V5CompressedLegacyParser {
             }
         };
 
-        let mut static_cells: HashMap<String, Value> = HashMap::new();
+        let mut static_cells: HashMap<Arc<str>, Value> = HashMap::new();
 
         // Finding 1 (#827): buffer this partition's emitted rows locally and only
         // forward them to the external `emit` once the partition is CONFIRMED
@@ -772,7 +763,7 @@ impl V5CompressedLegacyParser {
         // The buffer is bounded by ONE partition's rows (the documented
         // `max_partition_size` bound), not the whole file, so memory stays
         // bounded as required by the #827 deliverable.
-        let mut pending: Vec<(TableId, RowKey, Value, i64)> = Vec::new();
+        let mut pending: Vec<(TableId, RowKey, ScanRow, i64)> = Vec::new();
 
         // Flush the buffered rows to the external `emit`, honouring an early
         // `Break`. Returns the `ParseStep` to surface to the caller: on `Break`
@@ -876,30 +867,25 @@ impl V5CompressedLegacyParser {
                         // cells.
                         let has_data_cell = row_has_non_key_cell(&cells, schema);
                         let row_value = if row_tombstone.is_some() && !has_data_cell {
-                            row_tombstone
-                                .map(|h| h.row_tombstone())
-                                .unwrap_or(Value::Null)
+                            ScanRow::Marker(
+                                row_tombstone
+                                    .map(|h| h.row_tombstone())
+                                    .unwrap_or(Value::Null),
+                            )
                         } else if cells.is_empty() {
-                            Value::Null
+                            ScanRow::Marker(Value::Null)
                         } else {
-                            let mut map_entries: Vec<(Value, Value)> = cells
-                                .into_iter()
-                                .map(|(name, value)| (Value::Text(name), value))
-                                .collect();
-                            map_entries.sort_by(|a, b| {
-                                let a_key = if let Value::Text(s) = &a.0 {
-                                    s.as_str()
-                                } else {
-                                    ""
-                                };
-                                let b_key = if let Value::Text(s) = &b.0 {
-                                    s.as_str()
-                                } else {
-                                    ""
-                                };
-                                a_key.cmp(b_key)
-                            });
-                            Value::Map(map_entries)
+                            // Issue #1334: carry the interned `Arc<str>` name
+                            // handles straight into the row carrier (no
+                            // `Value::Text(String)` round-trip / per-cell
+                            // `.to_string()` re-allocation). This path drives BOTH
+                            // the user-facing streaming scan (`scan_stream_windowed`,
+                            // via `build_row_from_scan`) and the compaction read
+                            // (`from_legacy_value`); both consume the same `ScanRow`
+                            // carrier. Emit-time alphabetical ordering preserved exactly.
+                            let mut row_cells: RowCells = cells.into_iter().collect();
+                            row_cells.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
+                            ScanRow::Row(row_cells)
                         };
 
                         // Finding 1: buffer the row instead of forwarding it now.

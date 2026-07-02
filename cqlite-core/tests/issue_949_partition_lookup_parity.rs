@@ -91,7 +91,7 @@ fn text(row: &QueryRow, col: &str) -> Option<String> {
 fn row_fingerprint(row: &QueryRow) -> BTreeMap<String, String> {
     row.values
         .iter()
-        .map(|(k, v)| (k.clone(), format!("{v:?}")))
+        .map(|(k, v)| (k.to_string(), format!("{v:?}")))
         .collect()
 }
 

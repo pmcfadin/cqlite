@@ -28,6 +28,7 @@ use cqlite_core::testing::dataset_helpers::{
     derive_reference_paths_from_data_db, require_fixtures_strict, resolve_table_to_sstable_path,
     should_ignore_file, DatasetError,
 };
+use cqlite_core::ScanRow;
 use cqlite_core::{Config, Platform, Value};
 use num_bigint::BigInt;
 use num_traits::{Signed, ToPrimitive};
@@ -510,14 +511,13 @@ async fn run_parity_test(keyspace: &str, table: &str) -> Result<ParityResult, St
             matched_keys += 1;
 
             // Validate cell values
-            if let Value::Map(entries) = value {
-                for (col_key, col_val) in entries {
-                    if let Value::Text(col_name) = col_key {
-                        total_cells += 1;
-                        if let Some(ref_val) = ref_partition.cells.get(col_name) {
-                            if values_match(col_val, ref_val) {
-                                validated_cells += 1;
-                            }
+            // Issue #1334: rows decode to `ScanRow::Row` keyed by `Arc<str>`.
+            if let ScanRow::Row(entries) = value {
+                for (col_name, col_val) in entries {
+                    total_cells += 1;
+                    if let Some(ref_val) = ref_partition.cells.get(col_name.as_ref()) {
+                        if values_match(col_val, ref_val) {
+                            validated_cells += 1;
                         }
                     }
                 }

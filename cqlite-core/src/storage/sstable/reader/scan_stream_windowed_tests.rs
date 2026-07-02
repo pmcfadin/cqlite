@@ -7,6 +7,9 @@
 //! private items (which these guards drive directly).
 
 use super::*;
+// `ScanRow` comes via `super::*`; `Value` is needed for the marker payloads in
+// the batch fixtures below (issue #1334).
+use crate::types::Value;
 
 /// Issue #1143 finding 2 — pure decision guard. The blocking parse half runs
 /// its terminal (`at_final_chunk = true`) drain IFF the I/O half did NOT fail
@@ -76,13 +79,19 @@ fn max_inflight_batch_rows_matches_sizing_knobs() {
 /// rows arrive ahead of the terminal `Err`). Verified locally.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn finish_blocking_drain_flushes_pending_before_error() {
-    let (tx, mut rx) = mpsc::channel::<Result<Vec<(RowKey, Value)>>>(8);
+    let (tx, mut rx) = mpsc::channel::<Result<Vec<(RowKey, ScanRow)>>>(8);
 
     // Two confirmed rows sitting in the pending batch (fewer than BATCH_EMIT_ROWS,
     // so they were NOT yet flushed as a full batch) when a mid-stream error fires.
-    let mut batch: Vec<(RowKey, Value)> = vec![
-        (RowKey::from(b"k1".to_vec()), Value::Text("v1".into())),
-        (RowKey::from(b"k2".to_vec()), Value::Text("v2".into())),
+    let mut batch: Vec<(RowKey, ScanRow)> = vec![
+        (
+            RowKey::from(b"k1".to_vec()),
+            ScanRow::Marker(Value::Text("v1".into())),
+        ),
+        (
+            RowKey::from(b"k2".to_vec()),
+            ScanRow::Marker(Value::Text("v2".into())),
+        ),
     ];
     let drained: Result<()> = Err(Error::corruption("mid-stream decompress failure"));
 
@@ -132,9 +141,11 @@ async fn finish_blocking_drain_flushes_pending_before_error() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn finish_blocking_drain_flushes_trailing_batch_on_success() {
     // Consumer attached, clean finish: the trailing partial batch is delivered.
-    let (tx, mut rx) = mpsc::channel::<Result<Vec<(RowKey, Value)>>>(8);
-    let mut batch: Vec<(RowKey, Value)> =
-        vec![(RowKey::from(b"k".to_vec()), Value::Text("v".into()))];
+    let (tx, mut rx) = mpsc::channel::<Result<Vec<(RowKey, ScanRow)>>>(8);
+    let mut batch: Vec<(RowKey, ScanRow)> = vec![(
+        RowKey::from(b"k".to_vec()),
+        ScanRow::Marker(Value::Text("v".into())),
+    )];
     let handle =
         tokio::task::spawn_blocking(move || finish_blocking_drain(Ok(()), &mut batch, false, &tx));
     handle.await.expect("task").expect("clean finish");
@@ -148,9 +159,11 @@ async fn finish_blocking_drain_flushes_trailing_batch_on_success() {
     );
 
     // Consumer dropped (`broke`): nothing is flushed.
-    let (tx2, mut rx2) = mpsc::channel::<Result<Vec<(RowKey, Value)>>>(8);
-    let mut batch2: Vec<(RowKey, Value)> =
-        vec![(RowKey::from(b"k".to_vec()), Value::Text("v".into()))];
+    let (tx2, mut rx2) = mpsc::channel::<Result<Vec<(RowKey, ScanRow)>>>(8);
+    let mut batch2: Vec<(RowKey, ScanRow)> = vec![(
+        RowKey::from(b"k".to_vec()),
+        ScanRow::Marker(Value::Text("v".into())),
+    )];
     let handle2 =
         tokio::task::spawn_blocking(move || finish_blocking_drain(Ok(()), &mut batch2, true, &tx2));
     handle2.await.expect("task2").expect("clean finish (broke)");
@@ -272,7 +285,7 @@ mod fixture_drain {
         drop(raw_tx);
         // Output channel now carries batched rows (issue #1143). Big enough
         // that `blocking_send` never blocks here; count rows ACROSS batches.
-        let (out_tx, mut out_rx) = mpsc::channel::<Result<Vec<(RowKey, Value)>>>(4096);
+        let (out_tx, mut out_rx) = mpsc::channel::<Result<Vec<(RowKey, ScanRow)>>>(4096);
         let flag = Arc::new(AtomicBool::new(io_failed));
         reader
             .drain_scan_window_blocking(ctx, raw_rx, out_tx, flag)
@@ -350,7 +363,7 @@ mod fixture_drain {
 
         // Large output channel so `blocking_send` never blocks; we count rows
         // delivered ACROSS batches BEFORE the terminal error.
-        let (out_tx, mut out_rx) = mpsc::channel::<Result<Vec<(RowKey, Value)>>>(4096);
+        let (out_tx, mut out_rx) = mpsc::channel::<Result<Vec<(RowKey, ScanRow)>>>(4096);
         let flag = Arc::new(AtomicBool::new(false));
         let result = reader.drain_scan_window_blocking(ctx, raw_rx, out_tx, flag);
 
@@ -556,7 +569,8 @@ mod fixture_drain {
         }
         drop(raw_tx);
         // PRODUCTION-sized batch channel, deliberately left undrained.
-        let (out_tx, mut out_rx) = mpsc::channel::<Result<Vec<(RowKey, Value)>>>(BATCH_CHANNEL_CAP);
+        let (out_tx, mut out_rx) =
+            mpsc::channel::<Result<Vec<(RowKey, ScanRow)>>>(BATCH_CHANNEL_CAP);
         let flag = Arc::new(AtomicBool::new(false));
         let r = Arc::clone(&reader);
         let drain_handle =

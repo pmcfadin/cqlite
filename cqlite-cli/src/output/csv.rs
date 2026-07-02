@@ -82,7 +82,7 @@ impl CSVWriter {
                 .iter()
                 .map(|col| {
                     row.values
-                        .get(&col.name)
+                        .get(col.name.as_str())
                         .map(|v| {
                             let formatted = ValueFormatter::format_value(v);
                             // For CSV, convert "null" to empty string
@@ -180,7 +180,7 @@ impl<W: Write + Send> StreamingWriter for StreamingCSVWriter<W> {
                 .iter()
                 .map(|col| {
                     row.values
-                        .get(col)
+                        .get(col.as_str())
                         .map(|v| {
                             let formatted = ValueFormatter::format_value(v);
                             // For CSV, convert "null" to empty string
@@ -247,9 +247,9 @@ mod tests {
             .into_iter()
             .enumerate()
             .map(|(idx, row_data)| {
-                let mut values = HashMap::new();
+                let mut values: HashMap<std::sync::Arc<str>, Value> = HashMap::new();
                 for (col_name, value) in row_data {
-                    values.insert(col_name.to_string(), value);
+                    values.insert(col_name.into(), value);
                 }
                 QueryRow {
                     values,

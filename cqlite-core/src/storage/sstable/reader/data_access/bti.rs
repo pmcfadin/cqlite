@@ -11,7 +11,7 @@ use super::model::{
     bti_lookup_step, sort_by_token_order_with_meta, table_header_consistent_for_seek,
     BtiLookupStep, SCAN_FOR_KEY_CALLS,
 };
-use crate::types::{CellWriteMetadata, TableId, Value};
+use crate::types::{CellWriteMetadata, ScanRow, TableId};
 use crate::{Error, Result, RowKey};
 use log::debug;
 use std::io::SeekFrom;
@@ -104,7 +104,7 @@ impl SSTableReader {
         // return rows from a different keyspace whose table name collides (#1284).
         fully_qualified_match: bool,
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<Option<(Vec<(RowKey, Value)>, bool)>> {
+    ) -> Result<Option<(Vec<(RowKey, ScanRow)>, bool)>> {
         // 1. Resolve the partition's uncompressed Data.db offset, and record
         //    whether THIS path's "decoded nothing" is authoritative absence (BTI
         //    trie) or merely inconclusive (BIG Index.db).
@@ -232,7 +232,7 @@ impl SSTableReader {
             // (`sequential_scan`/`bti_scan_with_metadata` both apply it),
             // applied per-row so a row tombstone is dropped while live rows in
             // the same partition survive.
-            let rows: Vec<(RowKey, Value)> = decoded_rows
+            let rows: Vec<(RowKey, ScanRow)> = decoded_rows
                 .into_iter()
                 .filter(|value| self.filter_tombstone(value))
                 .map(|value| (key.clone(), value))
@@ -470,7 +470,7 @@ impl SSTableReader {
         table_id: &TableId,
         key: &RowKey,
         fully_qualified_match: bool,
-    ) -> Result<Option<Value>> {
+    ) -> Result<Option<ScanRow>> {
         // 1. Resolve the uncompressed Data.db offset via the trie.
         let offset = match self.lookup_partition_via_bti_trie(key.as_bytes())? {
             Some(off) => off as usize,
@@ -569,7 +569,7 @@ impl SSTableReader {
         fully_qualified_match: bool,
         schema_opt: Option<&crate::schema::TableSchema>,
         parser: &crate::storage::sstable::reader::parsing::V5CompressedLegacyParser,
-    ) -> Result<Option<Value>> {
+    ) -> Result<Option<ScanRow>> {
         use crate::storage::sstable::compression::Compression;
 
         // Issue #815: each lookup uses its own cursor so concurrent lookups on
@@ -710,7 +710,7 @@ impl SSTableReader {
             // detects the next partition boundary / 0x01 end-of-partition marker and
             // stops; we break after the first emitted entry. A complete partition
             // means: parse returned Ok AND the closure fired.
-            let mut found: Option<Value> = None;
+            let mut found: Option<ScanRow> = None;
             let mut emitted = false;
             let parse_result = parser.parse_block_emit(
                 &window[within..],
@@ -812,7 +812,7 @@ impl SSTableReader {
     /// Returns:
     /// - `Ok(Some(rows))` — the partition's rows (empty when the trie/index
     ///   candidate was a prefix collision for an absent key). The caller wraps each
-    ///   in a `(RowKey, Value)` and applies the same tombstone suppression the scan
+    ///   in a `(RowKey, ScanRow)` and applies the same tombstone suppression the scan
     ///   path applies.
     /// - `Ok(None)` — could not bound the (last) partition authoritatively; the
     ///   caller must fall back to a full scan + retain.
@@ -834,7 +834,7 @@ impl SSTableReader {
         fully_qualified_match: bool,
         schema_opt: Option<&crate::schema::TableSchema>,
         parser: &crate::storage::sstable::reader::parsing::V5CompressedLegacyParser,
-    ) -> Result<Option<Vec<Value>>> {
+    ) -> Result<Option<Vec<ScanRow>>> {
         // Issue #815: each lookup uses its own cursor so concurrent lookups on
         // this reader never share a mutable file position / chunk index.
         let cursor = self.new_scan_cursor().await?;
@@ -1090,8 +1090,8 @@ impl SSTableReader {
         fully_qualified_match: bool,
         schema_opt: Option<&crate::schema::TableSchema>,
         parser: &crate::storage::sstable::reader::parsing::V5CompressedLegacyParser,
-    ) -> Result<(Vec<Value>, bool)> {
-        let mut rows: Vec<Value> = Vec::new();
+    ) -> Result<(Vec<ScanRow>, bool)> {
+        let mut rows: Vec<ScanRow> = Vec::new();
         let mut saw_next_partition = false;
         // Clamp the window's end to the available bytes (`usize::MAX` means "to the
         // partition end"); the start is already within-partition-relative, which is
@@ -1205,7 +1205,7 @@ impl SSTableReader {
     ) -> Result<
         Vec<(
             RowKey,
-            Value,
+            ScanRow,
             std::collections::HashMap<String, CellWriteMetadata>,
         )>,
     > {

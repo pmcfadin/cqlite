@@ -378,42 +378,33 @@ fn parse_cql_type_string(type_str: &str) -> cqlite_core::types::DataType {
 #[cfg(feature = "state_machine")]
 fn convert_entry_to_query_row(
     row_key: &cqlite_core::RowKey,
-    value: &cqlite_core::Value,
+    value: &cqlite_core::types::ScanRow,
     schema: &TableSchema,
 ) -> cqlite_core::query::QueryRow {
     use cqlite_core::query::{QueryRow, RowMetadata};
+    use cqlite_core::types::ScanRow;
     use cqlite_core::Value;
     use std::collections::HashMap;
 
     let mut values: HashMap<String, Value> = HashMap::new();
 
-    // Extract values from the Value (which is typically a Map for parsed rows)
+    // Issue #1334: the scan delivers the single `ScanRow` row carrier. A live row
+    // carries every regular column as a decoded `(name, value)` cell; a marker
+    // (row tombstone / null row) contributes no cells (the null-fill below covers
+    // the schema columns).
     match value {
-        Value::Map(pairs) => {
-            // Each pair is (key_value, column_value)
-            for (k, v) in pairs {
-                if let Value::Text(col_name) = k {
-                    values.insert(col_name.clone(), v.clone());
-                }
+        ScanRow::Row(cells) => {
+            for (name, v) in cells {
+                values.insert(name.to_string(), v.clone());
             }
         }
-        Value::Blob(data) => {
-            // For raw blob data, assign to first regular column if available
-            if let Some(first_col) = schema.columns.first() {
-                values.insert(first_col.name.clone(), Value::Blob(data.clone()));
-            }
+        // A raw undecoded fallback row surfaces its bytes as a single "data" blob
+        // so it is never silently dropped from the export.
+        ScanRow::RawRow(bytes) => {
+            values.insert("data".to_string(), Value::Blob(bytes.clone()));
         }
-        Value::Text(s) => {
-            if let Some(first_col) = schema.columns.first() {
-                values.insert(first_col.name.clone(), Value::Text(s.clone()));
-            }
-        }
-        other => {
-            // For other value types, assign to first column
-            if let Some(first_col) = schema.columns.first() {
-                values.insert(first_col.name.clone(), other.clone());
-            }
-        }
+        // A marker (row tombstone / null row) contributes no cells.
+        ScanRow::Marker(_) => {}
     }
 
     // Ensure all schema columns have entries (use Null for missing)
@@ -427,10 +418,7 @@ fn convert_entry_to_query_row(
         values.entry(col.name.clone()).or_insert(Value::Null);
     }
 
-    QueryRow {
-        values,
-        key: row_key.clone(),
-        metadata: RowMetadata::default(),
-        cell_metadata: None,
-    }
+    let mut row = QueryRow::with_values(row_key.clone(), values);
+    row.set_metadata(RowMetadata::default());
+    row
 }

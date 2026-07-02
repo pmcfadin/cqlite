@@ -24,7 +24,7 @@ use cqlite_core::query::{build_row_from_scan, ColumnInfo, QueryRow};
 use cqlite_core::schema::{CqlType, TableSchema};
 use cqlite_core::storage::write_engine::merge::{MergeStep, RowData};
 use cqlite_core::storage::write_engine::KWayMerger;
-use cqlite_core::types::{DataType, Value};
+use cqlite_core::types::{DataType, RowCells, ScanRow, Value};
 use cqlite_core::RowKey;
 
 use crate::agg::{AggError, AggPlan};
@@ -483,16 +483,20 @@ impl MergeProducer {
             RowData::Tombstone { .. } => return None,
         };
 
-        let map_entries: Vec<(Value, Value)> = cells
+        // Issue #1334: build the SAME `ScanRow::Row` carrier every scan producer
+        // builds, so `build_row_from_scan` disassembles it into real column values
+        // (previously this emitted `Value::Map`, which fell through to the non-row
+        // fallback and silently dropped every Flight column value — roborev H2).
+        let row_cells: RowCells = cells
             .into_iter()
             // A cell tombstone leaves the column absent → null in Arrow output,
             // matching the CLI's "emit null for tombstoned cells" behaviour.
             .filter(|c| !matches!(c.value, Value::Tombstone(_)))
-            .map(|c| (Value::Text(c.column), c.value))
+            .map(|c| (std::sync::Arc::from(c.column.as_str()), c.value))
             .collect();
 
         let key = RowKey(partition_key.to_vec());
-        build_row_from_scan(key, Value::Map(map_entries), &[], Some(&self.schema))
+        build_row_from_scan(key, ScanRow::Row(row_cells), &[], Some(&self.schema))
     }
 
     /// Merge `paths` WITHOUT the input prune, relying only on the per-partition
@@ -837,6 +841,57 @@ mod tests {
             .expect("id=2 present");
         assert!(!scores.is_null(idx2));
         assert_eq!(scores.value(idx2), 50);
+    }
+
+    /// Issue #1334 / roborev H2: the Flight producer's row path must return the
+    /// REAL column values, not drop them. Before the carrier unification the
+    /// producer emitted a `Value::Map` that fell through `build_row_from_scan`'s
+    /// non-row fallback and silently lost every column value. This produces two
+    /// fully-populated rows and asserts both the text (`name`) and int (`score`)
+    /// column values survive end-to-end through `produce`.
+    #[test]
+    fn flight_row_path_returns_real_column_values() {
+        use arrow::array::Array;
+        let schema = simple_schema();
+        let (_temp, _data, dir) = build_sstables(
+            &schema,
+            vec![vec![
+                write_row(1, "alice", 42, 100),
+                write_row(2, "bob", 7, 100),
+            ]],
+        );
+        let producer = MergeProducer::new(schema, 1024).unwrap();
+        let batches = producer.produce(&DirSource::new(&dir)).unwrap();
+        assert_eq!(total_rows(&batches), 2);
+
+        let batch = &batches[0];
+        let ids = batch
+            .column_by_name("id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap();
+        let names = batch
+            .column_by_name("name")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .expect("name column must be a populated string array, not dropped (H2)");
+        let scores = batch
+            .column_by_name("score")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap();
+
+        let idx1 = (0..ids.len()).find(|&i| ids.value(i) == 1).unwrap();
+        assert!(!names.is_null(idx1), "H2: name value must not be dropped");
+        assert_eq!(names.value(idx1), "alice");
+        assert_eq!(scores.value(idx1), 42);
+
+        let idx2 = (0..ids.len()).find(|&i| ids.value(i) == 2).unwrap();
+        assert_eq!(names.value(idx2), "bob");
+        assert_eq!(scores.value(idx2), 7);
     }
 
     #[test]

@@ -26,6 +26,7 @@ use cqlite_core::storage::write_engine::{
 use cqlite_core::types::TableId as CqlTableId;
 use cqlite_core::types::Value;
 use cqlite_core::Config;
+use cqlite_core::ScanRow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -127,12 +128,14 @@ fn count_data_files(dir: &std::path::Path) -> usize {
 }
 
 /// Extract a column value from a scan row (`Value::Map` of `(Text(col), value)`).
-fn col<'a>(row: &'a Value, name: &str) -> Option<&'a Value> {
+fn col<'a>(row: &'a ScanRow, name: &str) -> Option<&'a Value> {
     match row {
-        Value::Map(pairs) => pairs.iter().find_map(|(k, v)| match k {
-            Value::Text(c) if c == name => Some(v),
-            _ => None,
-        }),
+        // Issue #1334: rows decode to `ScanRow::Row` keyed by `Arc<str>`.
+        ScanRow::Row(cells) => {
+            cells
+                .iter()
+                .find_map(|(k, v)| if k.as_ref() == name { Some(v) } else { None })
+        }
         _ => None,
     }
 }
@@ -205,7 +208,7 @@ fn select_star_merges_generations_with_lww_and_tombstone_suppression() {
     // ── Reconciled state: live rows are exactly {1, 3, 4, 5, 6} ───────────────
     // Before the fix this scan returned duplicates (PK1/PK3 from several
     // generations) and resurrected PK2/score@PK4 from gen1.
-    let by_pk: HashMap<Vec<u8>, Value> = results
+    let by_pk: HashMap<Vec<u8>, ScanRow> = results
         .iter()
         .map(|(k, v)| (k.0.clone(), v.clone()))
         .collect();

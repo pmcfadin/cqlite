@@ -2,7 +2,7 @@
 // Direct SSTable reading and display with intelligent formatting
 
 use anyhow::{Context, Result};
-use cqlite_core::types::TableId;
+use cqlite_core::types::{ScanRow, TableId};
 use cqlite_core::{storage::sstable::reader::SSTableReader, Config as CoreConfig, RowKey, Value};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
@@ -142,7 +142,7 @@ fn create_progress_bar(message: &str) -> ProgressBar {
 
 /// Display entries in table format
 fn display_table_format(
-    entries: &[(TableId, RowKey, Value)],
+    entries: &[(TableId, RowKey, ScanRow)],
     keys_only: bool,
     raw: bool,
 ) -> Result<()> {
@@ -190,7 +190,7 @@ fn display_table_format(
 
 /// Display entries in JSON format
 fn display_json_format(
-    entries: &[(TableId, RowKey, Value)],
+    entries: &[(TableId, RowKey, ScanRow)],
     keys_only: bool,
     raw: bool,
 ) -> Result<()> {
@@ -223,7 +223,7 @@ fn display_json_format(
 
 /// Display entries in CSV format
 fn display_csv_format(
-    entries: &[(TableId, RowKey, Value)],
+    entries: &[(TableId, RowKey, ScanRow)],
     keys_only: bool,
     raw: bool,
 ) -> Result<()> {
@@ -260,13 +260,28 @@ fn format_row_key(key: &RowKey, _raw: bool) -> String {
     format!("{:?}", key)
 }
 
-/// Format a value for display
-fn format_value(value: &Value, raw: bool) -> String {
+/// Format a scanned row's value for display.
+///
+/// Issue #1334: the scan carries the row as a [`ScanRow`]. A live row is rendered
+/// as a `{name: value, …}` object (using each cell value's `Display`); a marker
+/// (row tombstone / null row) renders its inner value.
+fn format_value(value: &ScanRow, raw: bool) -> String {
     if raw {
         // Show raw representation
-        format!("{:?}", value)
-    } else {
-        // Use Display trait for user-friendly output
-        format!("{}", value)
+        return format!("{:?}", value);
+    }
+    match value {
+        ScanRow::Row(cells) => {
+            let inner: Vec<String> = cells
+                .iter()
+                .map(|(name, v)| format!("{}: {}", name, v))
+                .collect();
+            format!("{{{}}}", inner.join(", "))
+        }
+        // A raw undecoded fallback row renders its bytes as a single "data" blob.
+        ScanRow::RawRow(bytes) => {
+            format!("{{data: {}}}", cqlite_core::Value::Blob(bytes.clone()))
+        }
+        ScanRow::Marker(v) => format!("{}", v),
     }
 }

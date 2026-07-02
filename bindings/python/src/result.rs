@@ -324,7 +324,7 @@ impl Row {
         let mut values = HashMap::with_capacity(row.values.len());
         for (key, value) in &row.values {
             let py_value = value_to_py(py, value)?;
-            values.insert(key.clone(), py_value);
+            values.insert(key.to_string(), py_value);
         }
         Ok(Self { values })
     }

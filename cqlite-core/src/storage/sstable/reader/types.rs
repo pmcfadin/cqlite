@@ -14,7 +14,7 @@ use crate::{
     platform::Platform,
     schema::{TableSchema, UdtRegistry},
     types::TableId,
-    RowKey, Value,
+    RowKey, ScanRow,
 };
 
 use super::super::{
@@ -197,7 +197,7 @@ pub struct CachedBlock {
     /// Decompressed block data
     pub data: Vec<u8>,
     /// Parsed entries (lazy-loaded)
-    pub entries: Option<Vec<(TableId, RowKey, Value)>>,
+    pub entries: Option<Vec<(TableId, RowKey, ScanRow)>>,
     /// Last access time for LRU eviction
     pub last_access: std::time::Instant,
 }

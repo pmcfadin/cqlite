@@ -212,21 +212,20 @@ impl SelectExecutor {
                 .map(|s| format!("{}.{}", s.keyspace, s.table));
 
             for (idx, col_name) in col_names.iter().enumerate() {
+                let col_name: &str = col_name;
                 // Look up CQL type from schema; derive flat DataType from it (Issue #674).
-                let col_info = match schema_opt.as_ref().and_then(|schema| {
-                    schema
-                        .columns
-                        .iter()
-                        .find(|c| c.name.as_str() == col_name.as_str())
-                }) {
+                let col_info = match schema_opt
+                    .as_ref()
+                    .and_then(|schema| schema.columns.iter().find(|c| c.name.as_str() == col_name))
+                {
                     Some(schema_col) => column_info_from_type_str(
-                        (*col_name).clone(),
+                        col_name.to_string(),
                         &schema_col.data_type,
                         idx,
                         table_name_for_meta.clone(),
                     ),
                     None => ColumnInfo {
-                        name: (*col_name).clone(),
+                        name: col_name.to_string(),
                         data_type: crate::types::DataType::Text,
                         nullable: true,
                         position: idx,

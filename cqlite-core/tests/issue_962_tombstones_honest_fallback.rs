@@ -150,7 +150,7 @@ fn uuid_to_literal(bytes: &[u8; 16]) -> String {
 fn row_fingerprint(row: &QueryRow) -> BTreeMap<String, String> {
     row.values
         .iter()
-        .map(|(k, v)| (k.clone(), format!("{v:?}")))
+        .map(|(k, v)| (k.to_string(), format!("{v:?}")))
         .collect()
 }
 

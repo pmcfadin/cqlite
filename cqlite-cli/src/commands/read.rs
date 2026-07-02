@@ -94,10 +94,17 @@ pub async fn read_sstable(
                     break;
                 }
 
-                // Create mock key and value from bulletproof entry for compatibility
+                // Create mock key and value from bulletproof entry for compatibility.
+                // Issue #1334: parse_entry consumes the `ScanRow` carrier. This is a
+                // LIVE synthetic value (the pre-#1334 path passed a `Value::Text`), so
+                // it must be a live `ScanRow::Row` — a `Marker` would be treated as a
+                // tombstone/null and drop the value from user-visible output. Surface
+                // it as a single "data" cell.
                 let key = entry.key.clone();
-                let value =
-                    cqlite_core::Value::Text(format!("{:?}|{}", entry.key, entry.format_info));
+                let value = cqlite_core::types::ScanRow::Row(vec![(
+                    std::sync::Arc::from("data"),
+                    cqlite_core::Value::Text(format!("{:?}|{}", entry.key, entry.format_info)),
+                )]);
 
                 match parser.parse_entry(&key, &value) {
                     Ok(parsed_row) => {

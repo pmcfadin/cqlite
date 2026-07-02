@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// Encode bytes as standard base64 (used across JSON serializers below).
@@ -64,8 +65,16 @@ pub struct QueryResult {
 /// Individual row in query result
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryRow {
-    /// Column values mapped by column name
-    pub values: HashMap<String, Value>,
+    /// Column values mapped by column name.
+    ///
+    /// Keyed by a shared `Arc<str>` column-name handle (issue #1334) interned
+    /// once by the decoder, so carrying a decoded cell's name into the row is a
+    /// reference-count bump rather than a per-cell heap `String` allocation.
+    /// `Arc<str>: Borrow<str>`, so all name-based reads (`get(&str)`, `keys()`,
+    /// iteration) are source-compatible with the prior `String` key. serde's
+    /// `rc` feature makes this (de)serialize with the identical name→value JSON
+    /// object shape.
+    pub values: HashMap<Arc<str>, Value>,
     /// Original row key
     pub key: RowKey,
     /// Row metadata
@@ -522,16 +531,16 @@ impl QueryResult {
             for col in &self.metadata.columns {
                 let value_json = row
                     .values
-                    .get(&col.name)
+                    .get(col.name.as_str())
                     .map_or(serde_json::Value::Null, ToJson::to_json);
                 result.insert(col.name.clone(), value_json);
             }
         } else {
-            let mut sorted_keys: Vec<&String> = row.values.keys().collect();
+            let mut sorted_keys: Vec<&Arc<str>> = row.values.keys().collect();
             sorted_keys.sort();
             for key in sorted_keys {
-                if let Some(value) = row.values.get(key) {
-                    result.insert(key.clone(), value.to_json());
+                if let Some(value) = row.values.get(key.as_ref()) {
+                    result.insert(key.to_string(), value.to_json());
                 }
             }
         }
@@ -560,8 +569,30 @@ impl QueryRow {
         }
     }
 
-    /// Create a row with values
+    /// Create a row with values.
+    ///
+    /// Concrete over `HashMap<String, Value>` so existing callers (including
+    /// `QueryRow::with_values(key, HashMap::new())`) infer the key type without
+    /// annotations (issue #1334); the string keys are interned into shared
+    /// `Arc<str>` handles once here. Callers that already hold interned
+    /// `Arc<str>` keys should use [`QueryRow::with_interned_values`] to skip the
+    /// re-allocation.
     pub fn with_values(key: RowKey, values: HashMap<String, Value>) -> Self {
+        Self {
+            values: values.into_iter().map(|(k, v)| (Arc::from(k), v)).collect(),
+            key,
+            metadata: RowMetadata::default(),
+            cell_metadata: None,
+        }
+    }
+
+    /// Create a row from already-interned `Arc<str>` column-name handles.
+    ///
+    /// The interned-key counterpart of [`QueryRow::with_values`] (issue #1334):
+    /// the storage/scan path already carries interned `Arc<str>` names, so the
+    /// handles move straight in with only a reference-count bump — no per-cell
+    /// `String` allocation.
+    pub fn with_interned_values(key: RowKey, values: HashMap<Arc<str>, Value>) -> Self {
         Self {
             values,
             key,
@@ -573,10 +604,12 @@ impl QueryRow {
     /// Create a row from a column name → value map, using a synthetic empty key.
     ///
     /// Convenience constructor used by CLI utilities that do not track a raw
-    /// partition key.  The key is set to an empty byte vector.
+    /// partition key.  The key is set to an empty byte vector. Concrete over
+    /// `HashMap<String, Value>` so `HashMap::new()` callers infer without
+    /// annotations (issue #1334); the string keys are interned here.
     pub fn from_map(values: HashMap<String, Value>) -> Self {
         Self {
-            values,
+            values: values.into_iter().map(|(k, v)| (Arc::from(k), v)).collect(),
             key: RowKey::new(vec![]),
             metadata: RowMetadata::default(),
             cell_metadata: None,
@@ -588,14 +621,17 @@ impl QueryRow {
         self.values.get(column)
     }
 
-    /// Set a value for a column
-    pub fn set(&mut self, column: String, value: Value) {
-        self.values.insert(column, value);
+    /// Set a value for a column.
+    ///
+    /// Accepts anything convertible into the shared `Arc<str>` key (issue
+    /// #1334): a `String`, `&str`, or an existing `Arc<str>` handle.
+    pub fn set(&mut self, column: impl Into<Arc<str>>, value: Value) {
+        self.values.insert(column.into(), value);
     }
 
     /// Get all column names
     pub fn column_names(&self) -> Vec<String> {
-        self.values.keys().cloned().collect()
+        self.values.keys().map(|k| k.to_string()).collect()
     }
 
     /// Get the row key
@@ -644,7 +680,7 @@ impl QueryRow {
         let mut result = serde_json::Map::new();
 
         for (column, value) in &self.values {
-            result.insert(column.clone(), value.to_json());
+            result.insert(column.to_string(), value.to_json());
         }
 
         result.insert(
@@ -904,7 +940,7 @@ impl fmt::Display for QueryResult {
             .map(|col_name| {
                 self.rows
                     .iter()
-                    .filter_map(|row| row.values.get(col_name))
+                    .filter_map(|row| row.values.get(col_name.as_str()))
                     .map(|v| format!("{}", v).len())
                     .max()
                     .unwrap_or(0)
@@ -930,7 +966,7 @@ impl fmt::Display for QueryResult {
             for (i, (col_name, width)) in column_names.iter().zip(col_widths.iter()).enumerate() {
                 let value = row
                     .values
-                    .get(col_name)
+                    .get(col_name.as_str())
                     .map(|v| format!("{}", v))
                     .unwrap_or_else(|| "NULL".to_string());
                 write!(f, " {:width$} ", value, width = width)?;
@@ -1562,5 +1598,59 @@ mod tests {
             !json.contains("cell_metadata"),
             "cell_metadata must be absent from JSON when None (backward compat)"
         );
+    }
+
+    // =========================================================================
+    // Issue #1334: interned Arc<str> column-name keys in QueryRow.values
+    // =========================================================================
+
+    /// Cells are addressable by `&str` even though the key type is now
+    /// `Arc<str>` (via `Arc<str>: Borrow<str>`), and values are unchanged.
+    #[test]
+    fn test_row_values_addressable_by_str_key() {
+        let mut row = QueryRow::new(RowKey::new(vec![1]));
+        row.set("id", Value::Integer(7)); // &str key
+        row.set("name".to_string(), Value::Text("Zoe".to_string())); // String key
+
+        // `get(&str)` works unchanged.
+        assert_eq!(row.get("id"), Some(&Value::Integer(7)));
+        assert_eq!(row.get("name"), Some(&Value::Text("Zoe".to_string())));
+        assert_eq!(row.get("absent"), None);
+
+        // The key type is a shared Arc<str> handle.
+        let key: &Arc<str> = row.values.keys().next().expect("a key");
+        let _: &str = key; // Deref/Borrow to str compiles.
+    }
+
+    /// serde round-trip of a `QueryResult` (requires serde's `rc` feature for
+    /// the `Arc<str>` key): names and values survive and the JSON object shape
+    /// (name→value) is unchanged.
+    #[test]
+    fn test_query_result_serde_round_trip_preserves_names_and_values() {
+        let mut row = QueryRow::new(RowKey::new(vec![1]));
+        row.set("id", Value::Integer(42));
+        row.set("name", Value::Text("Alice".to_string()));
+        let result = QueryResult::with_rows(vec![row]);
+
+        // Serialize → the values object is keyed by the plain column-name string
+        // (an Arc<str> serializes as its str, requiring serde's `rc` feature),
+        // NOT by any Arc-wrapper shape. The per-value encoding is serde's derived
+        // enum form (unchanged by this change); we only assert the name→value
+        // OBJECT SHAPE here and rely on the round-trip below for value equality.
+        let json = serde_json::to_value(&result).expect("serialise QueryResult");
+        let values_obj = json["rows"][0]["values"]
+            .as_object()
+            .expect("values is a JSON object keyed by column name");
+        assert!(values_obj.contains_key("id"), "object keyed by column name");
+        assert!(
+            values_obj.contains_key("name"),
+            "object keyed by column name"
+        );
+
+        // Deserialize back → identical names and values.
+        let back: QueryResult = serde_json::from_value(json).expect("deserialise QueryResult");
+        let r = &back.rows[0];
+        assert_eq!(r.get("id"), Some(&Value::Integer(42)));
+        assert_eq!(r.get("name"), Some(&Value::Text("Alice".to_string())));
     }
 }

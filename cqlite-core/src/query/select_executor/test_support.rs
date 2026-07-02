@@ -54,8 +54,9 @@ pub(crate) fn composite_pk_schema(
 
 /// Build a one-column `QueryRow` for predicate-evaluation tests.
 pub(crate) fn row_with_int(column: &str, value: i64) -> QueryRow {
-    let mut values = std::collections::HashMap::new();
-    values.insert(column.to_string(), Value::Integer(value as i32));
+    let mut values: std::collections::HashMap<std::sync::Arc<str>, Value> =
+        std::collections::HashMap::new();
+    values.insert(column.into(), Value::Integer(value as i32));
     QueryRow {
         values,
         key: RowKey::new(Vec::new()),

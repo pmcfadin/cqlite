@@ -27,8 +27,12 @@ use tokio::sync::RwLock;
 use crate::platform::Platform;
 use crate::{
     types::{CellWriteMetadata, TableId},
-    Config, Result, RowKey, Value,
+    Config, Result, RowKey, ScanRow,
 };
+// `Value` is only referenced by the experimental write API (`put` / `BatchOperation`);
+// gate the import so the default build does not flag it unused (issue #1334).
+#[cfg(feature = "experimental")]
+use crate::types::Value;
 
 /// Main storage engine that coordinates all storage components
 ///
@@ -225,7 +229,7 @@ impl StorageEngine {
     }
 
     /// Get a value by key
-    pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
+    pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<ScanRow>> {
         // Check SSTables
         self.sstables.get(table_id, key).await
     }
@@ -258,7 +262,7 @@ impl StorageEngine {
         end_key: Option<&RowKey>,
         limit: Option<usize>,
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<Vec<(RowKey, Value)>> {
+    ) -> Result<Vec<(RowKey, ScanRow)>> {
         // Scan SSTables directly
         self.sstables
             .scan(table_id, start_key, end_key, limit, schema)
@@ -284,7 +288,7 @@ impl StorageEngine {
         table_id: &TableId,
         partition_key: &[u8],
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<(Vec<(RowKey, Value)>, bool)> {
+    ) -> Result<(Vec<(RowKey, ScanRow)>, bool)> {
         self.sstables
             .scan_partition(table_id, partition_key, schema)
             .await
@@ -308,7 +312,7 @@ impl StorageEngine {
         partition_key: &[u8],
         clustering: Option<&crate::storage::sstable::reader::ClusteringSlice>,
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<(Vec<(RowKey, Value)>, bool)> {
+    ) -> Result<(Vec<(RowKey, ScanRow)>, bool)> {
         self.sstables
             .scan_partition_clustering(table_id, partition_key, clustering, schema)
             .await
@@ -326,7 +330,7 @@ impl StorageEngine {
         table_id: &TableId,
         partition_key: &[u8],
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<Option<Vec<(RowKey, Value)>>> {
+    ) -> Result<Option<Vec<(RowKey, ScanRow)>>> {
         self.sstables
             .scan_partition_clustering_reverse(table_id, partition_key, schema)
             .await
@@ -357,7 +361,7 @@ impl StorageEngine {
     ) -> Result<(
         Vec<(
             RowKey,
-            Value,
+            ScanRow,
             std::collections::HashMap<String, CellWriteMetadata>,
         )>,
         bool,
@@ -381,7 +385,7 @@ impl StorageEngine {
     ) -> Result<
         Vec<(
             RowKey,
-            Value,
+            ScanRow,
             std::collections::HashMap<String, CellWriteMetadata>,
         )>,
     > {
@@ -391,7 +395,7 @@ impl StorageEngine {
     }
 
     /// Streaming scan (issue #790): return a bounded channel that yields
-    /// `(RowKey, Value)` entries lazily in key (token) order, instead of the
+    /// `(RowKey, ScanRow)` entries lazily in key (token) order, instead of the
     /// materializing [`scan`](Self::scan) that returns the whole `Vec`.
     ///
     /// Live heap is bounded by `buffer_size` rows rather than growing O(rows),
@@ -406,7 +410,7 @@ impl StorageEngine {
         end_key: Option<&RowKey>,
         schema: Option<&crate::schema::TableSchema>,
         buffer_size: usize,
-    ) -> Result<tokio::sync::mpsc::Receiver<Result<(RowKey, Value)>>> {
+    ) -> Result<tokio::sync::mpsc::Receiver<Result<(RowKey, ScanRow)>>> {
         self.sstables
             .scan_stream(table_id, start_key, end_key, schema, buffer_size)
             .await

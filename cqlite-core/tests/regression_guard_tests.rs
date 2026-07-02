@@ -25,6 +25,7 @@
 
 use cqlite_core::storage::sstable::reader::SSTableReader;
 use cqlite_core::testing::dataset_helpers::{resolve_table_to_sstable_path, should_ignore_file};
+use cqlite_core::ScanRow;
 use cqlite_core::{Config, Platform, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -81,6 +82,16 @@ fn find_udt_values(value: &Value, results: &mut Vec<Value>) {
     }
 }
 
+/// Issue #1334: entries decode to the `ScanRow` carrier. Search a live row's
+/// cell values for UDTs; a marker (tombstone/null) contributes none.
+fn find_udt_values_in_row(row: &ScanRow, results: &mut Vec<Value>) {
+    if let ScanRow::Row(cells) = row {
+        for (_, v) in cells {
+            find_udt_values(v, results);
+        }
+    }
+}
+
 /// Helper to recursively find Timestamp values
 fn find_timestamp_values(value: &Value, results: &mut Vec<i64>) {
     match value {
@@ -106,6 +117,16 @@ fn find_timestamp_values(value: &Value, results: &mut Vec<i64>) {
     }
 }
 
+/// Issue #1334: entries decode to the `ScanRow` carrier. Search a live row's
+/// cell values for `Timestamp`s; a marker (tombstone/null) contributes none.
+fn find_timestamp_values_in_row(row: &ScanRow, results: &mut Vec<i64>) {
+    if let ScanRow::Row(cells) = row {
+        for (_, v) in cells {
+            find_timestamp_values(v, results);
+        }
+    }
+}
+
 /// Helper to recursively find Date values
 fn find_date_values(value: &Value, results: &mut Vec<i32>) {
     match value {
@@ -128,6 +149,16 @@ fn find_date_values(value: &Value, results: &mut Vec<i32>) {
         }
         Value::Frozen(inner) => find_date_values(inner, results),
         _ => {}
+    }
+}
+
+/// Issue #1334: entries decode to the `ScanRow` carrier. Search a live row's
+/// cell values for `Date`s; a marker (tombstone/null) contributes none.
+fn find_date_values_in_row(row: &ScanRow, results: &mut Vec<i32>) {
+    if let ScanRow::Row(cells) = row {
+        for (_, v) in cells {
+            find_date_values(v, results);
+        }
     }
 }
 
@@ -247,7 +278,8 @@ async fn test_column_values_typed_correctly_guards_129_140() {
     let mut blob_values = 0;
 
     for (_table_id, _row_key, value) in &entries {
-        if let Value::Map(columns) = value {
+        // Issue #1334: rows decode to `ScanRow::Row` keyed by `Arc<str>`.
+        if let ScanRow::Row(columns) = value {
             for (_col_key, col_val) in columns {
                 total_values += 1;
                 match col_val {
@@ -332,7 +364,7 @@ async fn test_udt_in_collection_has_fields_guards_238_239() {
 
     for (_table_id, _row_key, value) in &entries {
         let mut udts = Vec::new();
-        find_udt_values(value, &mut udts);
+        find_udt_values_in_row(value, &mut udts);
 
         for udt in udts {
             udt_count += 1;
@@ -407,7 +439,7 @@ async fn test_date_values_are_date_type_guards_240() {
 
     for (_table_id, _row_key, value) in &entries {
         let mut dates = Vec::new();
-        find_date_values(value, &mut dates);
+        find_date_values_in_row(value, &mut dates);
         date_count += dates.len();
 
         // Also verify dates are in reasonable range (not garbage from wrong parsing)
@@ -483,7 +515,7 @@ async fn test_timestamps_in_valid_range_guards_258() {
 
     for (_table_id, _row_key, value) in &entries {
         let mut timestamps = Vec::new();
-        find_timestamp_values(value, &mut timestamps);
+        find_timestamp_values_in_row(value, &mut timestamps);
 
         for ts in timestamps {
             timestamp_count += 1;
@@ -560,7 +592,7 @@ async fn test_udt_has_named_fields_guards_220() {
 
     for (_table_id, _row_key, value) in &entries {
         let mut udts = Vec::new();
-        find_udt_values(value, &mut udts);
+        find_udt_values_in_row(value, &mut udts);
 
         for udt in udts {
             if let Value::Udt(udt_value) = udt {

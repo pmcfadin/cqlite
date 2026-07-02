@@ -59,6 +59,7 @@ use cqlite_core::storage::write_engine::{
 use cqlite_core::types::TableId as CqlTableId;
 use cqlite_core::types::Value;
 use cqlite_core::Config;
+use cqlite_core::ScanRow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -457,7 +458,8 @@ fn compaction_3_sstables_read_back_correctness() {
     );
 
     // Build a map of raw PK bytes → Value for per-PK assertions.
-    let result_map: HashMap<Vec<u8>, Value> = results.into_iter().map(|(k, v)| (k.0, v)).collect();
+    let result_map: HashMap<Vec<u8>, ScanRow> =
+        results.into_iter().map(|(k, v)| (k.0, v)).collect();
 
     // Issue #505: PK 1..=5 must be ABSENT — row-deleted by SSTable C at ts=300.
     for id in 1_i32..=5 {
@@ -493,21 +495,19 @@ fn compaction_3_sstables_read_back_correctness() {
     let key_11: Vec<u8> = 11_i32.to_be_bytes().into();
     if let Some(row_value) = result_map.get(&key_11) {
         match row_value {
-            Value::Map(pairs) => {
-                for (col_key, col_val) in pairs {
-                    if let Value::Text(col_name) = col_key {
-                        if col_name == "score" {
-                            assert!(
-                                matches!(col_val, Value::Null | Value::Tombstone(_)),
-                                "PK=11 score column was cell-deleted by C (ts=300) \
-                                 but has live value: {:?} (Issue #505)",
-                                col_val
-                            );
-                        }
+            ScanRow::Row(cells) => {
+                for (name, col_val) in cells {
+                    if name.as_ref() == "score" {
+                        assert!(
+                            matches!(col_val, Value::Null | Value::Tombstone(_)),
+                            "PK=11 score column was cell-deleted by C (ts=300) \
+                             but has live value: {:?} (Issue #505)",
+                            col_val
+                        );
                     }
                 }
             }
-            Value::Tombstone(_) => {
+            ScanRow::Marker(Value::Tombstone(_)) => {
                 panic!("PK=11 row should be live (only score is deleted) but returned Tombstone");
             }
             _ => {
@@ -595,7 +595,8 @@ fn compaction_3_sstables_tombstone_shadowing() {
         .block_on(manager.scan(&table_id, None, None, None, Some(&schema)))
         .expect("post-compaction scan must not error");
 
-    let result_map: HashMap<Vec<u8>, Value> = results.into_iter().map(|(k, v)| (k.0, v)).collect();
+    let result_map: HashMap<Vec<u8>, ScanRow> =
+        results.into_iter().map(|(k, v)| (k.0, v)).collect();
 
     // PK 1..=5 must be absent (row-deleted by C at ts=300).
     for id in 1_i32..=5 {
@@ -611,20 +612,18 @@ fn compaction_3_sstables_tombstone_shadowing() {
     let key_11: Vec<u8> = 11_i32.to_be_bytes().into();
     if let Some(row_value) = result_map.get(&key_11) {
         match row_value {
-            Value::Map(pairs) => {
-                for (col_key, col_val) in pairs {
-                    if let Value::Text(col_name) = col_key {
-                        if col_name == "score" {
-                            assert!(
-                                matches!(col_val, Value::Null | Value::Tombstone(_)),
-                                "PK=11 score column was cell-deleted by C but has value: {:?}",
-                                col_val
-                            );
-                        }
+            ScanRow::Row(cells) => {
+                for (name, col_val) in cells {
+                    if name.as_ref() == "score" {
+                        assert!(
+                            matches!(col_val, Value::Null | Value::Tombstone(_)),
+                            "PK=11 score column was cell-deleted by C but has value: {:?}",
+                            col_val
+                        );
                     }
                 }
             }
-            Value::Tombstone(_) => {
+            ScanRow::Marker(Value::Tombstone(_)) => {
                 panic!("PK=11 row should be live (only score is deleted) but returned Tombstone");
             }
             _ => {
@@ -759,7 +758,8 @@ fn row_tombstone_shadows_live_row_after_compaction() {
         row_count
     );
 
-    let result_map: HashMap<Vec<u8>, Value> = results.into_iter().map(|(k, v)| (k.0, v)).collect();
+    let result_map: HashMap<Vec<u8>, ScanRow> =
+        results.into_iter().map(|(k, v)| (k.0, v)).collect();
 
     // PK=1 must be ABSENT: the row tombstone at ts=300 shadows the live row at ts=100.
     let key_1: Vec<u8> = 1_i32.to_be_bytes().into();
@@ -788,9 +788,9 @@ fn row_tombstone_shadows_live_row_after_compaction() {
         )
     });
     match pk3 {
-        Value::Map(pairs) => {
-            let name = pairs.iter().find_map(|(k, v)| match (k, v) {
-                (Value::Text(col), Value::Text(val)) if col == "name" => Some(val.clone()),
+        ScanRow::Row(cells) => {
+            let name = cells.iter().find_map(|(k, v)| match v {
+                Value::Text(val) if k.as_ref() == "name" => Some(val.clone()),
                 _ => None,
             });
             assert_eq!(
@@ -801,7 +801,7 @@ fn row_tombstone_shadows_live_row_after_compaction() {
             );
         }
         other => panic!(
-            "PK=3 must be a live row (Value::Map) carrying the ts=300 write, got {:?} (Issue #505)",
+            "PK=3 must be a live row (ScanRow::Row) carrying the ts=300 write, got {:?} (Issue #505)",
             other
         ),
     }
@@ -924,7 +924,8 @@ fn row_deletion_coexists_with_newer_cell_after_compaction() {
         .block_on(manager.scan(&table_id, None, None, None, Some(&schema)))
         .expect("post-compaction scan");
 
-    let result_map: HashMap<Vec<u8>, Value> = results.into_iter().map(|(k, v)| (k.0, v)).collect();
+    let result_map: HashMap<Vec<u8>, ScanRow> =
+        results.into_iter().map(|(k, v)| (k.0, v)).collect();
 
     let key_7: Vec<u8> = 7_i32.to_be_bytes().into();
     let pk7 = result_map.get(&key_7).unwrap_or_else(|| {
@@ -935,9 +936,9 @@ fn row_deletion_coexists_with_newer_cell_after_compaction() {
     });
 
     match pk7 {
-        Value::Map(pairs) => {
-            let name = pairs.iter().find_map(|(k, v)| match (k, v) {
-                (Value::Text(col), Value::Text(val)) if col == "name" => Some(val.clone()),
+        ScanRow::Row(cells) => {
+            let name = cells.iter().find_map(|(k, v)| match v {
+                Value::Text(val) if k.as_ref() == "name" => Some(val.clone()),
                 _ => None,
             });
             assert_eq!(
@@ -947,8 +948,8 @@ fn row_deletion_coexists_with_newer_cell_after_compaction() {
             );
             // The older score (ts=50 <= deletion ts=100) must be shadowed by the
             // preserved row deletion and must NOT resurrect.
-            let score = pairs.iter().find_map(|(k, v)| match (k, v) {
-                (Value::Text(col), Value::Integer(val)) if col == "score" => Some(*val),
+            let score = cells.iter().find_map(|(k, v)| match v {
+                Value::Integer(val) if k.as_ref() == "score" => Some(*val),
                 _ => None,
             });
             assert!(
@@ -959,7 +960,7 @@ fn row_deletion_coexists_with_newer_cell_after_compaction() {
             );
         }
         other => panic!(
-            "PK=7 must read back as a live row (Value::Map) carrying name='new', got {:?} — \
+            "PK=7 must read back as a live row (ScanRow::Row) carrying name='new', got {:?} — \
              Issue #932 (coexistence row collapsed to a pure tombstone)",
             other
         ),
@@ -1080,7 +1081,8 @@ fn test_real_merger_delete_wins_at_equal_timestamp() {
         .block_on(manager.scan(&table_id, None, None, None, Some(&schema)))
         .expect("post-compaction scan");
 
-    let result_map: HashMap<Vec<u8>, Value> = results.into_iter().map(|(k, v)| (k.0, v)).collect();
+    let result_map: HashMap<Vec<u8>, ScanRow> =
+        results.into_iter().map(|(k, v)| (k.0, v)).collect();
 
     // PK=1 must be ABSENT: equal-timestamp tombstone wins (Cassandra reconcile).
     let key_1: Vec<u8> = 1_i32.to_be_bytes().into();
@@ -1211,15 +1213,18 @@ fn disjoint_columns_survive_compaction() {
         .block_on(manager.scan(&table_id, None, None, None, Some(&schema)))
         .expect("post-compaction scan");
 
-    let result_map: HashMap<Vec<u8>, Value> = results.into_iter().map(|(k, v)| (k.0, v)).collect();
+    let result_map: HashMap<Vec<u8>, ScanRow> =
+        results.into_iter().map(|(k, v)| (k.0, v)).collect();
 
     // Helper: extract a named text/int column from a row's Value::Map.
-    fn find_col<'a>(row: &'a Value, col: &str) -> Option<&'a Value> {
+    fn find_col<'a>(row: &'a ScanRow, col: &str) -> Option<&'a Value> {
         match row {
-            Value::Map(pairs) => pairs.iter().find_map(|(k, v)| match k {
-                Value::Text(name) if name == col => Some(v),
-                _ => None,
-            }),
+            // Issue #1334: rows decode to `ScanRow::Row` keyed by `Arc<str>`.
+            ScanRow::Row(cells) => {
+                cells
+                    .iter()
+                    .find_map(|(k, v)| if k.as_ref() == col { Some(v) } else { None })
+            }
             _ => None,
         }
     }

@@ -40,7 +40,7 @@ use log::{debug, error, warn};
 
 use crate::{
     schema::{ClusteringColumn, Column, KeyColumn, TableSchema},
-    Error, Result, RowKey, Value,
+    Error, Result, RowCells, RowKey, ScanRow, Value,
 };
 
 use super::{super::row_cell_state_machine::ParsedRow, types::SSTableReader};
@@ -281,7 +281,7 @@ impl SSTableReader {
         &self,
         data: &[u8],
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<Option<Vec<(RowKey, Value)>>> {
+    ) -> Result<Option<Vec<(RowKey, ScanRow)>>> {
         if data.is_empty() {
             return Ok(Some(Vec::new()));
         }
@@ -393,47 +393,39 @@ impl SSTableReader {
     pub(in crate::storage::sstable::reader) fn extract_value_from_parsed_row_fallback(
         &self,
         parsed_row: &ParsedRow,
-    ) -> Result<Value> {
-        // Extract the primary value from the row's cells
-        // For tables with multiple columns, this might be a UDT or JSON representation
+    ) -> Result<ScanRow> {
+        use std::sync::Arc;
 
-        // First, try to get value from cells (the new flattened structure)
-        if !parsed_row.cells.is_empty() {
-            // Return the first non-null cell value
-            for cell in &parsed_row.cells {
-                if let Some(ref value) = cell.value {
-                    return Ok(value.clone());
-                }
+        // Issue #1334: assemble the single `ScanRow` row carrier the read path
+        // consumes from whatever named cells the schema-less parse recovered. This
+        // replaces the prior "return the first cell value" stand-in (which forced a
+        // degenerate one-column row downstream); every recovered `(name, value)`
+        // is carried instead.
+        let mut row_cells: RowCells = Vec::new();
+        for cell in &parsed_row.cells {
+            if let Some(ref value) = cell.value {
+                row_cells.push((Arc::from(cell.column_name.as_str()), value.clone()));
             }
         }
-
-        // Fallback: try to extract from clustering rows
-        if !parsed_row.clustering_rows.is_empty() {
-            let first_row = &parsed_row.clustering_rows[0];
-            if !first_row.columns.is_empty() {
-                // Return the first column value
-                if let Some((_, value)) = first_row.columns.iter().next() {
-                    return Ok(value.clone());
-                }
+        for clustering_row in &parsed_row.clustering_rows {
+            for (name, value) in &clustering_row.columns {
+                row_cells.push((Arc::from(name.as_str()), value.clone()));
             }
         }
-
-        // Fallback: try static row data
         if let Some(ref static_row) = parsed_row.static_row {
-            if !static_row.columns.is_empty() {
-                if let Some((_, value)) = static_row.columns.iter().next() {
-                    return Ok(value.clone());
-                }
+            for (name, value) in &static_row.columns {
+                row_cells.push((Arc::from(name.as_str()), value.clone()));
             }
         }
 
-        // Final fallback: return metadata about the row
-        let cell_count = parsed_row.cells.len();
-        let cluster_count = parsed_row.clustering_rows.len();
-        Ok(Value::Text(format!(
-            "row_with_{}_cells_{}_clusters",
-            cell_count, cluster_count
-        )))
+        if row_cells.is_empty() {
+            // Nothing decodable without a schema — a suppressed marker so no
+            // synthetic row surfaces (the prior code emitted a placeholder text).
+            return Ok(ScanRow::Marker(Value::Null));
+        }
+
+        row_cells.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
+        Ok(ScanRow::Row(row_cells))
     }
 
     /// Extract typed value from parsed row using schema information
@@ -444,7 +436,7 @@ impl SSTableReader {
         &self,
         parsed_row: &ParsedRow,
         schema: &crate::schema::TableSchema,
-    ) -> Result<Value> {
+    ) -> Result<ScanRow> {
         use std::collections::HashMap;
 
         let mut columns: HashMap<String, Value> = HashMap::new();
@@ -646,25 +638,16 @@ impl SSTableReader {
             columns.len()
         );
 
-        // Convert columns HashMap to UDT fields
-        let fields = columns
+        // Issue #1334: return the single `ScanRow` row carrier the read path
+        // consumes (previously this path returned a `Value::Udt` stand-in because
+        // no row carrier existed). Names become interned `Arc<str>` handles; the
+        // emit-time alphabetical ordering matches the other scan producers.
+        let mut row_cells: RowCells = columns
             .into_iter()
-            .map(|(name, value)| crate::types::UdtField {
-                name,
-                value: Some(value),
-            })
+            .map(|(name, value)| (std::sync::Arc::from(name.as_str()), value))
             .collect();
-
-        // Return as UDT value representing the row
-        // NOTE: We use Value::Udt to represent table rows because Value::Row doesn't
-        // exist in the current type system. The query executor treats UDT values with
-        // type_name matching the table name as row representations. This is semantically
-        // imperfect but structurally sound. Consider adding Value::Row in M3 type system refactor.
-        Ok(Value::Udt(crate::types::UdtValue {
-            keyspace: schema.keyspace.clone(),
-            type_name: schema.table.clone(), // Table name as UDT type name
-            fields,
-        }))
+        row_cells.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
+        Ok(ScanRow::Row(row_cells))
     }
 
     /// Parse partition data at a specific offset in the Data.db file
@@ -675,13 +658,15 @@ impl SSTableReader {
         &self,
         offset: u64,
         size: u32,
-    ) -> Result<Option<Vec<(RowKey, Value)>>> {
+    ) -> Result<Option<Vec<(RowKey, ScanRow)>>> {
         // Issue #1396: route the uncompressed Data.db read through the single
         // CRC-checked accessor so a corrupt chunk yields a typed
         // Error::Corruption BEFORE the bytes are parsed/returned — never corrupt
         // rows. This is the `iterate_all_partitions` (index-resolved) read path.
         // The accessor's CRC step is a no-op for compressed tables (crc_reader is
         // None), so it is also correct for the raw-read step below.
+        // Issue #1334: this producer emits the `ScanRow` carrier; the CRC-verified
+        // read above is orthogonal to the carrier shape and preserved intact.
         let buffer = self
             .read_uncompressed_verified(&self.file, offset, size as usize)
             .await?;

@@ -68,7 +68,7 @@ impl TableWriter {
                     // Look up value by column name from metadata
                     // If missing, treat as null (empty string per contract)
                     row.values
-                        .get(&col.name)
+                        .get(col.name.as_str())
                         .map(|v| ValueFormatter::format_value(v))
                         .unwrap_or_else(|| String::new())
                 })

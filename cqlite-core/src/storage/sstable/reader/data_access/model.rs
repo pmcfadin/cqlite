@@ -6,7 +6,7 @@
 //! `scan_for_key` invocation counter. Each read-path submodule (`bti`,
 //! `sequential`, `compaction`) reaches these via `super::model::*`.
 
-use crate::types::{CellWriteMetadata, TableId, Value};
+use crate::types::{CellWriteMetadata, ScanRow, TableId, Value};
 use crate::util::cassandra_murmur3::cassandra_murmur3_token;
 #[cfg(not(feature = "tombstones"))]
 use crate::Result;
@@ -332,9 +332,9 @@ pub(super) fn bti_lookup_step(
 /// physical order (spec §5, Appendix B §313) and the write engine's `PartitionPosition::cmp`.
 ///
 /// Computes each key's token once to avoid O(n log n) recomputation inside the comparator.
-pub(super) fn sort_by_token_order(results: &mut Vec<(RowKey, Value)>) {
-    // Map to (token, RowKey, Value), sort, then reassemble.
-    let mut tagged: Vec<(i64, RowKey, Value)> = results
+pub(super) fn sort_by_token_order(results: &mut Vec<(RowKey, ScanRow)>) {
+    // Map to (token, RowKey, ScanRow), sort, then reassemble.
+    let mut tagged: Vec<(i64, RowKey, ScanRow)> = results
         .drain(..)
         .map(|(k, v)| {
             let t = cassandra_murmur3_token(k.as_bytes());
@@ -345,18 +345,18 @@ pub(super) fn sort_by_token_order(results: &mut Vec<(RowKey, Value)>) {
     results.extend(tagged.into_iter().map(|(_, k, v)| (k, v)));
 }
 
-/// Sort `(RowKey, Value, CellMeta)` triples by Cassandra Murmur3 token order.
+/// Sort `(RowKey, ScanRow, CellMeta)` triples by Cassandra Murmur3 token order.
 pub(super) fn sort_by_token_order_with_meta(
     results: &mut Vec<(
         RowKey,
-        Value,
+        ScanRow,
         std::collections::HashMap<String, CellWriteMetadata>,
     )>,
 ) {
     let mut tagged: Vec<(
         i64,
         RowKey,
-        Value,
+        ScanRow,
         std::collections::HashMap<String, CellWriteMetadata>,
     )> = results
         .drain(..)

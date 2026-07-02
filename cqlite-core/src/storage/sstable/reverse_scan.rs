@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use super::{reader, SSTableManager};
 use crate::schema::TableSchema;
-use crate::types::{TableId, Value};
+use crate::types::{ScanRow, TableId};
 use crate::{Result, RowKey};
 
 impl SSTableManager {
@@ -35,7 +35,7 @@ impl SSTableManager {
         table_id: &TableId,
         partition_key: &[u8],
         schema: Option<&TableSchema>,
-    ) -> Result<Option<Vec<(RowKey, Value)>>> {
+    ) -> Result<Option<Vec<(RowKey, ScanRow)>>> {
         let table_readers = self.table_readers.read().await;
         let Some(reader_list) = Self::resolve_reader_list(&table_readers, table_id.name()) else {
             return Ok(None);

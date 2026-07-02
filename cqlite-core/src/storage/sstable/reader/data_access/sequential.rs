@@ -10,7 +10,7 @@ use super::super::SSTableReader;
 use super::model::{
     sort_by_token_order, sort_by_token_order_with_meta, table_ids_match, SCAN_FOR_KEY_CALLS,
 };
-use crate::types::{CellWriteMetadata, TableId, Value};
+use crate::types::{CellWriteMetadata, ScanRow, TableId};
 use crate::{Result, RowKey};
 use std::io::SeekFrom;
 use tokio::io::AsyncSeekExt;
@@ -34,7 +34,7 @@ impl SSTableReader {
         end_key: Option<&RowKey>,
         limit: Option<usize>,
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<Vec<(RowKey, Value)>> {
+    ) -> Result<Vec<(RowKey, ScanRow)>> {
         log::debug!("SSTableReader::scan - Starting scan");
         log::debug!("SSTableReader::scan - File path: {:?}", self.file_path);
         log::debug!("SSTableReader::scan - Table ID: {}", table_id);
@@ -167,7 +167,7 @@ impl SSTableReader {
     /// [`Self::iterate_all_partitions_for_compaction`], which preserves
     /// `Value::Tombstone` entries (with their authoritative deletion timestamps)
     /// so that tombstone-shadowing semantics can be applied during the merge.
-    pub async fn get_all_entries(&self) -> Result<Vec<(TableId, RowKey, Value)>> {
+    pub async fn get_all_entries(&self) -> Result<Vec<(TableId, RowKey, ScanRow)>> {
         // Issue #660: BTI ("da") tables have no Index.db; route through the
         // whole-Data.db BTI scan, which resolves schema via get_table_schema
         // (header/registry) and decodes every partition. It mints its own
@@ -221,7 +221,7 @@ impl SSTableReader {
         Ok(results)
     }
 
-    /// Streaming scan (issue #790): yield `(RowKey, Value)` entries lazily
+    /// Streaming scan (issue #790): yield `(RowKey, ScanRow)` entries lazily
     /// through a bounded channel instead of materializing the whole result in a
     /// `Vec`. Live heap is bounded by `buffer_size` rows (plus the stitched
     /// data-section buffer) rather than growing O(rows).
@@ -234,7 +234,7 @@ impl SSTableReader {
     /// In-flight bound (chunk-stitching SSTables): the windowed pipeline (issue
     /// #1143) materializes one confirmed partition at a time and batches its rows to
     /// amortize the cross-thread wake, so against a stalled consumer the resident
-    /// `(RowKey, Value)` count is the SUM of three inherent terms, not one constant:
+    /// `(RowKey, ScanRow)` count is the SUM of three inherent terms, not one constant:
     /// `buffer_size` (this channel) `+ max_partition_size` (the one fully-materialized
     /// confirmed partition — a pre-existing #1156 windowed-scan term, inherent to any
     /// row-materializing partition scan) `+`
@@ -243,7 +243,7 @@ impl SSTableReader {
     /// regardless of `buffer_size`, holding even for `buffer_size == 1`).
     /// `MAX_INFLIGHT_BATCH_ROWS` bounds the batching subsystem alone, NOT the
     /// `max_partition_size` materialization term. Non-stitching SSTables parse a
-    /// whole block before forwarding its rows, so the resident `(RowKey, Value)`
+    /// whole block before forwarding its rows, so the resident `(RowKey, ScanRow)`
     /// count is bounded by `buffer_size + (one parsed block's entries)`.
     pub fn scan_stream(
         self: std::sync::Arc<Self>,
@@ -252,7 +252,7 @@ impl SSTableReader {
         end_key: Option<RowKey>,
         schema: Option<crate::schema::TableSchema>,
         buffer_size: usize,
-    ) -> mpsc::Receiver<Result<(RowKey, Value)>> {
+    ) -> mpsc::Receiver<Result<(RowKey, ScanRow)>> {
         let (tx, rx) = mpsc::channel(buffer_size.max(1));
         tokio::spawn(async move {
             if let Err(e) = self
@@ -272,7 +272,7 @@ impl SSTableReader {
         start_key: Option<RowKey>,
         end_key: Option<RowKey>,
         schema: Option<crate::schema::TableSchema>,
-        tx: mpsc::Sender<Result<(RowKey, Value)>>,
+        tx: mpsc::Sender<Result<(RowKey, ScanRow)>>,
     ) -> Result<()> {
         // Issue #815: independent per-scan cursor — no cross-scan serialization.
         let cursor = self.new_scan_cursor().await?;
@@ -331,7 +331,7 @@ impl SSTableReader {
         &self,
         table_id: &TableId,
         key: &RowKey,
-    ) -> Result<Option<Value>> {
+    ) -> Result<Option<ScanRow>> {
         // Issue #831: record the call so tests can assert the BTI point-lookup
         // path never reaches the sequential scan.
         SCAN_FOR_KEY_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -439,7 +439,7 @@ impl SSTableReader {
         end_key: Option<&RowKey>,
         limit: Option<usize>,
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<Vec<(RowKey, Value)>> {
+    ) -> Result<Vec<(RowKey, ScanRow)>> {
         log::debug!("SSTableReader::sequential_scan - Starting sequential scan");
         log::debug!("SSTableReader::sequential_scan - Table ID: {}", table_id);
         log::debug!(
@@ -640,7 +640,7 @@ impl SSTableReader {
     ) -> Result<
         Vec<(
             RowKey,
-            Value,
+            ScanRow,
             std::collections::HashMap<String, CellWriteMetadata>,
         )>,
     > {

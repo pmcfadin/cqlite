@@ -36,6 +36,7 @@
 //! ```
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use log::{debug, warn};
 
@@ -47,7 +48,7 @@ use crate::{
         CellExpiration, CellWriteMetadata, TableId, TombstoneInfo, TombstoneType, UdtField,
         UdtTypeDef, UdtValue,
     },
-    Error, Result, RowKey, Value,
+    Error, Result, RowCells, RowKey, ScanRow, Value,
 };
 
 /// Maximum reasonable size for frozen collections to prevent DoS from corrupted data.
@@ -83,7 +84,7 @@ const MAX_TYPE_NESTING_DEPTH: usize = 10;
 /// always `Some` when `want_cell_metadata == true` and the row contains
 /// collection columns; always `None` when `want_cell_metadata == false`.
 type ParsedRow = (
-    HashMap<String, Value>,
+    HashMap<Arc<str>, Value>,
     Option<HashMap<String, CellWriteMetadata>>,
     Option<RowHeader>,
     usize,
@@ -94,7 +95,7 @@ type ParsedRow = (
 /// Return type for [`V5CompressedLegacy::parse_block_with_cell_metadata`].
 ///
 /// Each element is `(table_id, row_key, value_map, cell_metadata_map)`.
-type ParsedBlockWithMeta = Vec<(TableId, RowKey, Value, HashMap<String, CellWriteMetadata>)>;
+type ParsedBlockWithMeta = Vec<(TableId, RowKey, ScanRow, HashMap<String, CellWriteMetadata>)>;
 
 /// One on-disk column to decode, in serialization-header order.
 ///
@@ -115,6 +116,13 @@ type ParsedBlockWithMeta = Vec<(TableId, RowKey, Value, HashMap<String, CellWrit
 pub(super) struct ColumnToParse<'a> {
     pub(super) schema: Option<&'a crate::schema::Column>,
     pub(super) header_type: Option<&'a str>,
+    /// The column's emit name, interned ONCE per block as a shared `Arc<str>`
+    /// (issue #1334). Populating a decoded cell with its name is then an
+    /// `Arc::clone` refcount bump instead of a per-cell, per-row heap `String`
+    /// allocation. For an emitted column this is the supplied-schema column
+    /// name; for a DROPPED column (never emitted) it mirrors the on-disk header
+    /// name and is unused.
+    pub(super) name: Arc<str>,
 }
 
 /// Pre-resolved header→schema column ordering for a whole SSTable block.
@@ -147,6 +155,11 @@ pub(super) struct RowColumnResolution<'a> {
     regular: Vec<ColumnToParse<'a>>,
     /// On-disk static columns in serialization-header order.
     static_: Vec<ColumnToParse<'a>>,
+    /// Clustering-key names interned once per block as shared `Arc<str>` handles
+    /// (issue #1334), positionally aligned with `schema.clustering_keys`. Reused
+    /// so the per-row clustering-key cell insert is an `Arc::clone`, not a
+    /// `String` allocation.
+    clustering: Vec<Arc<str>>,
 }
 
 impl<'a> RowColumnResolution<'a> {
@@ -183,9 +196,21 @@ impl<'a> RowColumnResolution<'a> {
                             && !col_info.is_clustering
                             && col_info.is_static == want_static
                     })
-                    .map(|col_info| ColumnToParse {
-                        schema: resolve_lookup.get(col_info.name.as_str()).copied(),
-                        header_type: Some(col_info.column_type.as_str()),
+                    .map(|col_info| {
+                        let schema = resolve_lookup.get(col_info.name.as_str()).copied();
+                        // Intern the emit name ONCE per block (issue #1334): the
+                        // supplied-schema column name when matched, else the
+                        // on-disk header name for a DROPPED column (never emitted).
+                        let name: Arc<str> = Arc::from(
+                            schema
+                                .map(|c| c.name.as_str())
+                                .unwrap_or(col_info.name.as_str()),
+                        );
+                        ColumnToParse {
+                            schema,
+                            header_type: Some(col_info.column_type.as_str()),
+                            name,
+                        }
                     })
                     .collect()
             };
@@ -193,6 +218,11 @@ impl<'a> RowColumnResolution<'a> {
             RowColumnResolution {
                 regular: build_for(false),
                 static_: build_for(true),
+                clustering: schema
+                    .clustering_keys
+                    .iter()
+                    .map(|k| Arc::from(k.name.as_str()))
+                    .collect(),
             }
         } else {
             // Fallback to schema order when header is empty (shouldn't happen for
@@ -221,14 +251,27 @@ impl<'a> RowColumnResolution<'a> {
                     .map(|col| ColumnToParse {
                         schema: Some(col),
                         header_type: None,
+                        name: Arc::from(col.name.as_str()),
                     })
                     .collect()
             };
             RowColumnResolution {
                 regular: build_for(false),
                 static_: build_for(true),
+                clustering: schema
+                    .clustering_keys
+                    .iter()
+                    .map(|k| Arc::from(k.name.as_str()))
+                    .collect(),
             }
         }
+    }
+
+    /// The interned clustering-key name at position `i` (issue #1334), or `None`
+    /// when out of range. Cloning the returned handle into the cells map is an
+    /// `Arc::clone`, not a `String` allocation.
+    pub(super) fn clustering_name(&self, i: usize) -> Option<&Arc<str>> {
+        self.clustering.get(i)
     }
 
     /// The pre-resolved on-disk column ordering for a row of the given kind.
@@ -452,10 +495,11 @@ const ROW_HAS_EXTENDED_FLAGS: u8 = 0x80;
 /// identity; they are NOT row data. A row carrying `HAS_DELETION` is a PURE row
 /// tombstone only when no such data cell survives — otherwise the row deletion
 /// COEXISTS with surviving (strictly-newer) cells and the row displays as live.
-fn row_has_non_key_cell(cells: &HashMap<String, Value>, schema: &TableSchema) -> bool {
+fn row_has_non_key_cell(cells: &HashMap<Arc<str>, Value>, schema: &TableSchema) -> bool {
     cells.keys().any(|name| {
-        !schema.partition_keys.iter().any(|k| &k.name == name)
-            && !schema.clustering_keys.iter().any(|c| &c.name == name)
+        let name: &str = name;
+        !schema.partition_keys.iter().any(|k| k.name == name)
+            && !schema.clustering_keys.iter().any(|c| c.name == name)
     })
 }
 

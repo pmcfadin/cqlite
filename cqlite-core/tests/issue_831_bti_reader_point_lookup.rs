@@ -21,6 +21,7 @@
 //! CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test --test issue_831_bti_reader_point_lookup
 //! ```
 
+use cqlite_core::ScanRow;
 use cqlite_core::{storage::sstable::reader::SSTableReader, types::TableId, Config, RowKey, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -127,13 +128,12 @@ async fn open_reader(data_db: &Path) -> SSTableReader {
 }
 
 /// Extract a named cell value from the `Value::Map` a BTI partition row decodes to.
-fn cell<'a>(value: &'a Value, name: &str) -> Option<&'a Value> {
-    if let Value::Map(entries) = value {
+fn cell<'a>(value: &'a ScanRow, name: &str) -> Option<&'a Value> {
+    // Issue #1334: rows decode to `ScanRow::Row` keyed by `Arc<str>`.
+    if let ScanRow::Row(entries) = value {
         for (k, v) in entries {
-            if let Value::Text(s) = k {
-                if s == name {
-                    return Some(v);
-                }
+            if k.as_ref() == name {
+                return Some(v);
             }
         }
     }

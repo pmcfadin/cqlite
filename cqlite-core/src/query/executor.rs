@@ -19,7 +19,8 @@ use super::{
     ComparisonOperator, Condition,
 };
 use crate::{
-    schema::SchemaManager, storage::StorageEngine, Config, Error, Result, RowKey, TableId, Value,
+    schema::SchemaManager, storage::StorageEngine, Config, Error, Result, RowKey, ScanRow, TableId,
+    Value,
 };
 use crossbeam::channel;
 use std::cmp::Ordering;
@@ -269,7 +270,7 @@ impl QueryExecutor {
     }
 
     /// Convert a `(key, data)` pair from `StorageEngine::scan` into rows.
-    fn scan_pairs_to_rows(&self, pairs: Vec<(RowKey, Value)>) -> Result<Vec<QueryRow>> {
+    fn scan_pairs_to_rows(&self, pairs: Vec<(RowKey, ScanRow)>) -> Result<Vec<QueryRow>> {
         let mut rows = Vec::with_capacity(pairs.len());
         for (row_key, row_data) in pairs {
             rows.push(self.storage_data_to_query_row(row_data, &row_key)?);
@@ -581,8 +582,8 @@ impl QueryExecutor {
         };
 
         rows.sort_by(|a, b| {
-            let a_val = a.values.get(sort_column).unwrap_or(&Value::Null);
-            let b_val = b.values.get(sort_column).unwrap_or(&Value::Null);
+            let a_val = a.values.get(sort_column.as_str()).unwrap_or(&Value::Null);
+            let b_val = b.values.get(sort_column.as_str()).unwrap_or(&Value::Null);
             self.compare_values(a_val, b_val).unwrap_or(Ordering::Equal)
         });
         rows
@@ -594,7 +595,7 @@ impl QueryExecutor {
             .map(|row| {
                 let mut projected_values = HashMap::with_capacity(step.columns.len());
                 for column in &step.columns {
-                    if let Some(value) = row.values.get(column) {
+                    if let Some(value) = row.values.get(column.as_str()) {
                         projected_values.insert(column.clone(), value.clone());
                     }
                 }
@@ -607,7 +608,10 @@ impl QueryExecutor {
 
     /// Evaluate a condition against a row
     fn evaluate_condition(&self, row: &QueryRow, condition: &Condition) -> Result<bool> {
-        let row_value = row.values.get(&condition.column).unwrap_or(&Value::Null);
+        let row_value = row
+            .values
+            .get(condition.column.as_str())
+            .unwrap_or(&Value::Null);
 
         match condition.operator {
             ComparisonOperator::Equal => Ok(row_value == &condition.value),
@@ -736,29 +740,35 @@ impl QueryExecutor {
     }
 
     /// Convert storage data to query row
-    fn storage_data_to_query_row(&self, data: Value, key: &RowKey) -> Result<QueryRow> {
-        let mut values = HashMap::new();
+    fn storage_data_to_query_row(&self, data: ScanRow, key: &RowKey) -> Result<QueryRow> {
+        use std::sync::Arc;
+        let mut values: HashMap<Arc<str>, Value> = HashMap::new();
 
-        // Storage path stores rows as `Value::Map` keyed by column name (Text).
+        // Storage path carries rows via the `ScanRow` carrier (issue #1334).
+        // * `Row` — decoded cells keyed by the interned `Arc<str>` column-name
+        //   handle; move the handle straight in (no `String` re-allocation).
+        // * `RawRow` — a raw undecoded fallback with no schema here; surface the
+        //   bytes as a single "data" blob, the exact pre-#1334 `other =>
+        //   insert("data", ..)` shape.
+        // * `Marker` (row tombstone / null) carries no columns.
         match data {
-            Value::Map(map) => {
-                for (map_key, map_value) in map {
-                    if let Value::Text(column_name) = map_key {
-                        values.insert(column_name, map_value);
-                    }
+            ScanRow::Row(cells) => {
+                for (name, cell_value) in cells {
+                    values.insert(name, cell_value);
                 }
             }
-            other => {
-                values.insert("data".to_string(), other);
+            ScanRow::RawRow(bytes) => {
+                values.insert(Arc::from("data"), Value::Blob(bytes));
             }
+            ScanRow::Marker(_) => {}
         }
 
         // If no values were extracted, surface the row key for visibility.
         if values.is_empty() {
-            values.insert("id".to_string(), Value::Text(format!("{:?}", key)));
+            values.insert(Arc::from("id"), Value::Text(format!("{:?}", key)));
         }
 
-        Ok(QueryRow::with_values(key.clone(), values))
+        Ok(QueryRow::with_interned_values(key.clone(), values))
     }
 
     // -- experimental write paths ------------------------------------------
@@ -1094,5 +1104,43 @@ mod tests {
             .condition_to_row_key(&name_condition)
             .expect("fallback key");
         assert_eq!(key.as_bytes(), b"carol");
+    }
+
+    /// Issue #1334 / roborev H1: the offset-read placeholder
+    /// (`data_access::read_value_at_offset`) surfaces its raw bytes to
+    /// SELECT/export through `get()` → `storage_data_to_query_row` as a single
+    /// column keyed `"data"` — exactly the behaviour a bare `Value::Blob` had
+    /// pre-#1334. The producer now emits explicit `ScanRow::RawRow` provenance;
+    /// this pins that a `RawRow` keeps surfacing the value under `"data"`, while
+    /// the equivalent `ScanRow::Marker` is SUPPRESSED (drops the blob to an
+    /// id-only fallback) — the regression a `Marker` here would cause.
+    #[tokio::test]
+    async fn offset_read_row_surfaces_data_marker_is_suppressed() {
+        let (_tmp, executor, _) = make_executor().await;
+        let key = RowKey::new(vec![7]);
+        let raw = vec![0xde, 0xad, 0xbe, 0xef];
+
+        // The fixed producer output: the raw fallback surfaces its bytes as "data".
+        let live = ScanRow::RawRow(raw.clone());
+        let row = executor
+            .storage_data_to_query_row(live, &key)
+            .expect("raw offset-read row must convert");
+        assert_eq!(
+            row.values.get("data"),
+            Some(&Value::Blob(raw.clone())),
+            "a live offset/indexed read must surface its raw value as the \"data\" column"
+        );
+
+        // Marker (the pre-fix producer output): the blob is dropped; the row
+        // falls back to an id-only shape with NO "data" column — proving a Marker
+        // here would lose data that previously reached SELECT/export.
+        let marker = ScanRow::Marker(Value::Blob(raw));
+        let suppressed = executor
+            .storage_data_to_query_row(marker, &key)
+            .expect("marker row must still convert");
+        assert!(
+            !suppressed.values.contains_key("data"),
+            "a Marker must NOT surface the raw blob (this is the suppression the fix avoids)"
+        );
     }
 }

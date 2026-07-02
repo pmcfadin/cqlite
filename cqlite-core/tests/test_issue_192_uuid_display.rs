@@ -5,7 +5,7 @@
 //! Value::List of integers.
 
 use cqlite_core::storage::sstable::reader::SSTableReader;
-use cqlite_core::{Config, Platform, Value};
+use cqlite_core::{Config, Platform, ScanRow, Value};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -79,20 +79,14 @@ async fn test_uuid_partition_key_parsing() {
                     row_key.0.len()
                 );
 
-                // Validate value structure - should be Value::Map with column names as keys
-                if let Value::Map(cells) = value {
-                    println!("  Value is a Map with {} entries", cells.len());
+                // Validate value structure — issue #1334: `ScanRow::Row` keyed by `Arc<str>`.
+                if let ScanRow::Row(cells) = value {
+                    println!("  Value is a Row with {} entries", cells.len());
 
-                    // Find UUID columns in the map
+                    // Find UUID columns in the row.
                     let uuid_columns: Vec<_> = cells
                         .iter()
-                        .filter(|(name, _)| {
-                            if let Value::Text(n) = name {
-                                n == "id" || n == "session_id"
-                            } else {
-                                false
-                            }
-                        })
+                        .filter(|(name, _)| name.as_ref() == "id" || name.as_ref() == "session_id")
                         .collect();
 
                     println!(
@@ -101,7 +95,8 @@ async fn test_uuid_partition_key_parsing() {
                     );
 
                     for (col_name, col_value) in uuid_columns {
-                        if let Value::Text(name) = col_name {
+                        {
+                            let name = col_name.as_ref();
                             // CRITICAL VALIDATION: UUID columns should be Value::Uuid([u8; 16])
                             match col_value {
                                 Value::Uuid(uuid_bytes) => {
@@ -154,7 +149,7 @@ async fn test_uuid_partition_key_parsing() {
                     }
                 } else {
                     panic!(
-                        "❌ Row value should be Value::Map, got {:?}",
+                        "❌ Row value should be ScanRow::Row, got {:?}",
                         std::mem::discriminant(value)
                     );
                 }
@@ -215,17 +210,12 @@ async fn test_timeuuid_column_parsing() {
             );
 
             // Check for TimeUUID column (session_id)
-            if let Some((_table_id, _row_key, Value::Map(cells))) = entries.first() {
+            if let Some((_table_id, _row_key, ScanRow::Row(cells))) = entries.first() {
                 // Find session_id column (TimeUUID type)
-                let session_id = cells.iter().find(|(name, _)| {
-                    if let Value::Text(n) = name {
-                        n == "session_id"
-                    } else {
-                        false
-                    }
-                });
+                let session_id = cells.iter().find(|(name, _)| name.as_ref() == "session_id");
 
-                if let Some((Value::Text(name), col_value)) = session_id {
+                if let Some((name, col_value)) = session_id {
+                    let name = name.as_ref();
                     // TimeUUID should also be Value::Uuid
                     match col_value {
                         Value::Uuid(uuid_bytes) => {

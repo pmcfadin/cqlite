@@ -80,7 +80,7 @@ fn create_result_with_column_order(
         .map(|(idx, row_data)| {
             let mut values = HashMap::new();
             for (col_name, value) in row_data {
-                values.insert(col_name.to_string(), value);
+                values.insert(col_name.into(), value);
             }
             QueryRow {
                 values,

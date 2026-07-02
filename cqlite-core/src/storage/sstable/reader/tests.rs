@@ -5,6 +5,7 @@
 mod tests {
     use super::super::compression::extract_sstable_base_name;
     use super::super::types::*;
+    use crate::types::ScanRow;
     use crate::RowKey;
     use std::path::PathBuf;
 
@@ -443,10 +444,11 @@ mod tests {
         eprintln!("Entry 0: row_key={:?}", row_key);
         eprintln!("Entry 0: value={:?}", value);
 
-        // CRITICAL ASSERTION: Value must be a row (Map representation) with cells
-        // Value::Map format: Vec<(Value::Text(column_name), column_value)>
+        // CRITICAL ASSERTION: the scan value must be the live-row carrier with cells.
+        // Issue #1334: the row carrier is `ScanRow::Row(Vec<(Arc<str>, Value)>)`
+        // keyed by the interned column-name handle.
         match value {
-            Value::Map(map_entries) => {
+            ScanRow::Row(map_entries) => {
                 eprintln!("Row has {} fields", map_entries.len());
 
                 // CRITICAL: Must extract >0 cells (not 0!)
@@ -456,20 +458,15 @@ mod tests {
                 );
 
                 // Extract field names from map entries (first element of each tuple)
-                let field_names: Vec<String> = map_entries
-                    .iter()
-                    .filter_map(|(key, _)| match key {
-                        Value::Text(name) => Some(name.clone()),
-                        _ => None,
-                    })
-                    .collect();
+                let field_names: Vec<String> =
+                    map_entries.iter().map(|(key, _)| key.to_string()).collect();
 
                 eprintln!("Extracted field names: {:?}", field_names);
 
                 // Check for ascii_field (first cell in hex dump)
                 let ascii_field = map_entries
                     .iter()
-                    .find(|(key, _)| matches!(key, Value::Text(name) if name == "ascii_field"))
+                    .find(|(key, _)| key.as_ref() == "ascii_field")
                     .expect("Must have 'ascii_field' column");
 
                 eprintln!("ascii_field value: {:?}", ascii_field.1);
@@ -495,9 +492,8 @@ mod tests {
                 }
 
                 // Check for age column (should be Int, not Blob)
-                if let Some((_, age_value)) = map_entries
-                    .iter()
-                    .find(|(key, _)| matches!(key, Value::Text(name) if name == "age"))
+                if let Some((_, age_value)) =
+                    map_entries.iter().find(|(key, _)| key.as_ref() == "age")
                 {
                     eprintln!("age value: {:?}", age_value);
                     match age_value {
@@ -516,9 +512,8 @@ mod tests {
                 }
 
                 // Check for active column (should be Boolean, not Blob)
-                if let Some((_, active_value)) = map_entries
-                    .iter()
-                    .find(|(key, _)| matches!(key, Value::Text(name) if name == "active"))
+                if let Some((_, active_value)) =
+                    map_entries.iter().find(|(key, _)| key.as_ref() == "active")
                 {
                     eprintln!("active value: {:?}", active_value);
                     match active_value {
@@ -534,12 +529,15 @@ mod tests {
                     }
                 }
             }
-            Value::Null => {
+            ScanRow::RawRow(_) => {
+                panic!("❌ V5CompressedLegacy parser returned a raw undecoded RawRow (should return a decoded row with cells!)");
+            }
+            ScanRow::Marker(Value::Null) => {
                 panic!("❌ V5CompressedLegacy parser returned Null value (should return row with cells!)");
             }
-            other => {
+            ScanRow::Marker(other) => {
                 panic!(
-                    "❌ Expected Value::Map (row representation), got {:?}",
+                    "❌ Expected ScanRow::Row (row carrier), got Marker({:?})",
                     other
                 );
             }

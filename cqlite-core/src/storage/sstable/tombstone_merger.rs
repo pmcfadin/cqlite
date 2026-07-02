@@ -6,7 +6,7 @@
 // Feature flag handled at parent module level
 
 use crate::{
-    types::{RowKey, TableId, TombstoneInfo, TombstoneType, Value},
+    types::{RowKey, ScanRow, TableId, TombstoneInfo, TombstoneType, Value},
     Result,
 };
 use std::collections::HashMap;
@@ -25,10 +25,26 @@ pub struct EntryMetadata {
 /// Multi-generation value with metadata
 #[derive(Debug, Clone)]
 pub struct GenerationValue {
-    /// The actual value
-    pub value: Value,
+    /// The scanned row payload (issue #1334): a live row (`ScanRow::Row`) or a
+    /// suppressed marker (`ScanRow::Marker`, e.g. a row tombstone). Carrying the
+    /// whole row here lets the merger reconcile generations without a `Value::Row`
+    /// variant on the public enum.
+    pub value: ScanRow,
     /// Entry metadata
     pub metadata: EntryMetadata,
+}
+
+impl GenerationValue {
+    /// The active tombstone carried by this generation's payload, if any.
+    ///
+    /// A tombstone always arrives as `ScanRow::Marker(Value::Tombstone(..))`
+    /// (issue #1334); a live `ScanRow::Row` is never a tombstone.
+    fn tombstone_info(&self) -> Option<&TombstoneInfo> {
+        match &self.value {
+            ScanRow::Marker(Value::Tombstone(info)) => Some(info),
+            _ => None,
+        }
+    }
 }
 
 /// Tombstone merger for handling multi-generation data
@@ -55,7 +71,7 @@ impl TombstoneMerger {
 
     /// Merge values from multiple generations, applying tombstone semantics
     /// Enhanced with proper Cassandra 5.0 deletion semantics
-    pub fn merge_generations(&self, values: Vec<GenerationValue>) -> Result<Option<Value>> {
+    pub fn merge_generations(&self, values: Vec<GenerationValue>) -> Result<Option<ScanRow>> {
         if values.is_empty() {
             return Ok(None);
         }
@@ -75,7 +91,7 @@ impl TombstoneMerger {
 
         // First pass: find the most recent active tombstone
         for gen_value in &sorted_values {
-            if let Value::Tombstone(tombstone_info) = &gen_value.value {
+            if let Some(tombstone_info) = gen_value.tombstone_info() {
                 if !self.is_tombstone_expired(tombstone_info) {
                     // Update latest tombstone if this one is newer
                     if latest_tombstone_time.is_none_or(|t| tombstone_info.deletion_time > t) {
@@ -88,44 +104,39 @@ impl TombstoneMerger {
 
         // Second pass: apply tombstone logic and find the newest valid value
         for gen_value in sorted_values {
-            match &gen_value.value {
-                Value::Tombstone(tombstone_info) => {
-                    // Skip expired tombstones - they don't affect data visibility
-                    if self.is_tombstone_expired(tombstone_info) {
+            if let Some(tombstone_info) = gen_value.tombstone_info() {
+                // Skip expired tombstones - they don't affect data visibility
+                if self.is_tombstone_expired(tombstone_info) {
+                    continue;
+                }
+
+                // If this is the most recent active tombstone, data is deleted
+                if let Some(latest_time) = latest_tombstone_time {
+                    if tombstone_info.deletion_time == latest_time {
+                        return Ok(None);
+                    }
+                }
+            } else {
+                // Check if this value was written before the latest tombstone
+                if let Some(tombstone_time) = latest_tombstone_time {
+                    if gen_value.metadata.write_time <= tombstone_time {
+                        // Value is deleted by tombstone
                         continue;
                     }
-
-                    // If this is the most recent active tombstone, data is deleted
-                    if let Some(latest_time) = latest_tombstone_time {
-                        if tombstone_info.deletion_time == latest_time {
-                            return Ok(None);
-                        }
-                    }
                 }
-                value => {
-                    // Check if this value was written before the latest tombstone
-                    if let Some(tombstone_time) = latest_tombstone_time {
-                        if gen_value.metadata.write_time <= tombstone_time {
-                            // Value is deleted by tombstone
-                            continue;
-                        }
-                    }
 
-                    // Check if this value has expired due to TTL
-                    if self.is_value_expired(&gen_value.metadata) {
-                        // Value has expired, create TTL tombstone
-                        let expiration_time =
-                            gen_value.metadata.write_time + gen_value.metadata.ttl.unwrap_or(0);
-                        let ttl_tombstone = Value::ttl_tombstone(
-                            expiration_time,
-                            gen_value.metadata.ttl.unwrap_or(0),
-                        );
-                        return Ok(Some(ttl_tombstone));
-                    }
-
-                    // Return the first valid, non-expired value that wasn't deleted by tombstone
-                    return Ok(Some(value.clone()));
+                // Check if this value has expired due to TTL
+                if self.is_value_expired(&gen_value.metadata) {
+                    // Value has expired, create TTL tombstone
+                    let expiration_time =
+                        gen_value.metadata.write_time + gen_value.metadata.ttl.unwrap_or(0);
+                    let ttl_tombstone =
+                        Value::ttl_tombstone(expiration_time, gen_value.metadata.ttl.unwrap_or(0));
+                    return Ok(Some(ScanRow::Marker(ttl_tombstone)));
                 }
+
+                // Return the first valid, non-expired value that wasn't deleted by tombstone
+                return Ok(Some(gen_value.value));
             }
         }
 
@@ -139,14 +150,14 @@ impl TombstoneMerger {
         _table_id: &TableId,
         _row_key: &RowKey,
         entries: Vec<GenerationValue>,
-    ) -> Result<Option<Value>> {
+    ) -> Result<Option<ScanRow>> {
         // Check for row-level tombstones first
         let mut row_tombstone_time: Option<i64> = None;
         let mut cell_values = Vec::new();
 
         for entry in entries {
-            match &entry.value {
-                Value::Tombstone(info) if info.tombstone_type == TombstoneType::RowTombstone => {
+            match entry.tombstone_info() {
+                Some(info) if info.tombstone_type == TombstoneType::RowTombstone => {
                     if !self.is_tombstone_expired(info) {
                         // Track the latest row tombstone
                         if let Some(existing_time) = row_tombstone_time {
@@ -213,7 +224,7 @@ impl TombstoneMerger {
         // Pre-process and sort range tombstones by deletion time (newest first)
         let mut active_range_tombstones = Vec::new();
         for range_tombstone_entry in range_tombstones {
-            if let Value::Tombstone(tombstone_info) = &range_tombstone_entry.value {
+            if let Some(tombstone_info) = range_tombstone_entry.tombstone_info() {
                 if tombstone_info.tombstone_type == TombstoneType::RangeTombstone
                     && !self.is_tombstone_expired(tombstone_info)
                 {
@@ -278,7 +289,7 @@ impl TombstoneMerger {
     }
 
     /// Resolve conflicts between multiple values using timestamp ordering
-    pub fn resolve_conflict(&self, values: Vec<GenerationValue>) -> Result<Option<Value>> {
+    pub fn resolve_conflict(&self, values: Vec<GenerationValue>) -> Result<Option<ScanRow>> {
         if values.is_empty() {
             return Ok(None);
         }
@@ -291,12 +302,9 @@ impl TombstoneMerger {
                 // Check if the latest value is expired
                 if self.is_value_expired(&gen_value.metadata) {
                     Ok(None)
-                } else if let Value::Tombstone(tombstone) = &gen_value.value {
-                    if self.is_tombstone_expired(tombstone) {
-                        Ok(None)
-                    } else {
-                        Ok(None) // Active tombstone means deleted
-                    }
+                } else if gen_value.tombstone_info().is_some() {
+                    // Active (or expired) tombstone means deleted.
+                    Ok(None)
                 } else {
                     Ok(Some(gen_value.value))
                 }
@@ -309,7 +317,7 @@ impl TombstoneMerger {
     pub fn merge_cell_tombstones(
         &self,
         column_values: HashMap<String, Vec<GenerationValue>>,
-    ) -> Result<HashMap<String, Option<Value>>> {
+    ) -> Result<HashMap<String, Option<ScanRow>>> {
         let mut result = HashMap::new();
 
         for (column_name, values) in column_values {
@@ -326,7 +334,7 @@ impl TombstoneMerger {
         &self,
         entries: Vec<(RowKey, Vec<GenerationValue>)>,
         batch_size: usize,
-    ) -> Result<Vec<(RowKey, Option<Value>)>> {
+    ) -> Result<Vec<(RowKey, Option<ScanRow>)>> {
         let mut results = Vec::with_capacity(entries.len());
 
         // Process in batches to control memory usage
@@ -354,7 +362,7 @@ impl TombstoneMerger {
         let gc_grace_micros = gc_grace_seconds * 1_000_000; // Convert to microseconds
 
         for tombstone_entry in tombstones {
-            if let Value::Tombstone(tombstone_info) = &tombstone_entry.value {
+            if let Some(tombstone_info) = tombstone_entry.tombstone_info() {
                 // Check if tombstone has passed GC grace period
                 let tombstone_age = self.current_time - tombstone_info.deletion_time;
 
@@ -373,82 +381,40 @@ impl TombstoneMerger {
     pub fn merge_collection_with_tombstones(
         &self,
         collection_entries: Vec<GenerationValue>,
-    ) -> Result<Option<Value>> {
+    ) -> Result<Option<ScanRow>> {
         // Sort by write time (newest first)
         let mut sorted_entries = collection_entries;
         sorted_entries.sort_by(|a, b| b.metadata.write_time.cmp(&a.metadata.write_time));
 
+        // Issue #1334: generations now carry whole rows (`ScanRow`), not bare
+        // collection values, so reconciliation reduces to last-write-wins with
+        // tombstone shadowing (the per-element collection filtering that this
+        // helper used to perform never applied at the row grain). Walk
+        // newest→oldest: a LIVE tombstone shadows the row (deleted), but an
+        // EXPIRED TTL tombstone deletes nothing — skip it and continue to the
+        // next (older) generation so an older live value survives (roborev round
+        // 8 finding 2 — the pre-#1334 behavior this branch regressed).
         for entry in sorted_entries {
-            match &entry.value {
-                Value::Tombstone(info) => {
-                    if !self.is_tombstone_expired(info) {
-                        // Collection is deleted
-                        return Ok(None);
-                    }
+            if let Some(tombstone_info) = entry.tombstone_info() {
+                if self.is_tombstone_expired(tombstone_info) {
+                    // Expired TTL tombstone: deletes nothing; fall through to the
+                    // next older generation.
+                    continue;
                 }
-                Value::List(elements) | Value::Set(elements) => {
-                    // Check for element-level tombstones within collections
-                    let filtered_elements: Vec<Value> = elements
-                        .iter()
-                        .filter(|element| {
-                            // Keep element if it's not a tombstone
-                            !element.is_tombstone()
-                        })
-                        .cloned()
-                        .collect();
-
-                    if entry.value.is_expired(self.current_time) {
-                        // Collection has expired
-                        let ttl_tombstone = Value::ttl_tombstone(
-                            entry.metadata.write_time + entry.metadata.ttl.unwrap_or(0),
-                            entry.metadata.ttl.unwrap_or(0),
-                        );
-                        return Ok(Some(ttl_tombstone));
-                    }
-
-                    // Return filtered collection
-                    return Ok(Some(match &entry.value {
-                        Value::List(_) => Value::List(filtered_elements),
-                        Value::Set(_) => Value::Set(filtered_elements),
-                        _ => entry.value.clone(),
-                    }));
-                }
-                Value::Map(pairs) => {
-                    // Filter out tombstone pairs
-                    let filtered_pairs: Vec<(Value, Value)> = pairs
-                        .iter()
-                        .filter(|(key, value)| {
-                            !key.is_tombstone()
-                                && !value.is_tombstone()
-                                && !key.is_expired(self.current_time)
-                                && !value.is_expired(self.current_time)
-                        })
-                        .cloned()
-                        .collect();
-
-                    if entry.value.is_expired(self.current_time) {
-                        let ttl_tombstone = Value::ttl_tombstone(
-                            entry.metadata.write_time + entry.metadata.ttl.unwrap_or(0),
-                            entry.metadata.ttl.unwrap_or(0),
-                        );
-                        return Ok(Some(ttl_tombstone));
-                    }
-
-                    return Ok(Some(Value::Map(filtered_pairs)));
-                }
-                _ => {
-                    // Regular value - check expiration
-                    if self.is_value_expired(&entry.metadata) {
-                        let ttl_tombstone = Value::ttl_tombstone(
-                            entry.metadata.write_time + entry.metadata.ttl.unwrap_or(0),
-                            entry.metadata.ttl.unwrap_or(0),
-                        );
-                        return Ok(Some(ttl_tombstone));
-                    }
-
-                    return Ok(Some(entry.value.clone()));
-                }
+                // Live tombstone → the row is deleted.
+                return Ok(None);
             }
+
+            // Regular row - check TTL expiration.
+            if self.is_value_expired(&entry.metadata) {
+                let ttl_tombstone = Value::ttl_tombstone(
+                    entry.metadata.write_time + entry.metadata.ttl.unwrap_or(0),
+                    entry.metadata.ttl.unwrap_or(0),
+                );
+                return Ok(Some(ScanRow::Marker(ttl_tombstone)));
+            }
+
+            return Ok(Some(entry.value));
         }
 
         Ok(None)
@@ -492,7 +458,7 @@ mod tests {
         // Regular value followed by tombstone
         let values = vec![
             GenerationValue {
-                value: Value::Integer(42),
+                value: ScanRow::Marker(Value::Integer(42)),
                 metadata: EntryMetadata {
                     write_time: 1000,
                     generation: 1,
@@ -500,7 +466,7 @@ mod tests {
                 },
             },
             GenerationValue {
-                value: Value::row_tombstone(2000),
+                value: ScanRow::Marker(Value::row_tombstone(2000)),
                 metadata: EntryMetadata {
                     write_time: 2000,
                     generation: 2,
@@ -521,7 +487,7 @@ mod tests {
 
         // Value with expired TTL
         let values = vec![GenerationValue {
-            value: Value::Integer(42),
+            value: ScanRow::Marker(Value::Integer(42)),
             metadata: EntryMetadata {
                 write_time: 1000,
                 generation: 1,
@@ -531,8 +497,7 @@ mod tests {
 
         let result = merger.merge_generations(values)?;
         // Should return TTL tombstone
-        assert!(result.is_some());
-        assert!(result.unwrap().is_tombstone());
+        assert!(matches!(result, Some(ScanRow::Marker(v)) if v.is_tombstone()));
 
         Ok(())
     }
@@ -568,7 +533,7 @@ mod tests {
 
         let entries = vec![
             GenerationValue {
-                value: Value::Integer(42),
+                value: ScanRow::Marker(Value::Integer(42)),
                 metadata: EntryMetadata {
                     write_time: 1000,
                     generation: 1,
@@ -576,7 +541,7 @@ mod tests {
                 },
             },
             GenerationValue {
-                value: Value::row_tombstone(2000),
+                value: ScanRow::Marker(Value::row_tombstone(2000)),
                 metadata: EntryMetadata {
                     write_time: 2000,
                     generation: 2,
@@ -584,7 +549,7 @@ mod tests {
                 },
             },
             GenerationValue {
-                value: Value::Text("newer_value".to_string()),
+                value: ScanRow::Marker(Value::Text("newer_value".to_string())),
                 metadata: EntryMetadata {
                     write_time: 3000,
                     generation: 3,
@@ -598,8 +563,10 @@ mod tests {
             .unwrap();
 
         // The newer value should survive the row tombstone
-        assert!(result.is_some());
-        assert_eq!(result.unwrap(), Value::Text("newer_value".to_string()));
+        assert_eq!(
+            result,
+            Some(ScanRow::Marker(Value::Text("newer_value".to_string())))
+        );
     }
 
     #[test]
@@ -609,7 +576,7 @@ mod tests {
         // Test complex scenario with multiple generations and types
         let values = vec![
             GenerationValue {
-                value: Value::Integer(10),
+                value: ScanRow::Marker(Value::Integer(10)),
                 metadata: EntryMetadata {
                     write_time: 1000,
                     generation: 1,
@@ -617,7 +584,7 @@ mod tests {
                 },
             },
             GenerationValue {
-                value: Value::cell_tombstone(2000),
+                value: ScanRow::Marker(Value::cell_tombstone(2000)),
                 metadata: EntryMetadata {
                     write_time: 2000,
                     generation: 2,
@@ -625,7 +592,7 @@ mod tests {
                 },
             },
             GenerationValue {
-                value: Value::Integer(20),
+                value: ScanRow::Marker(Value::Integer(20)),
                 metadata: EntryMetadata {
                     write_time: 1500,
                     generation: 1,
@@ -633,7 +600,7 @@ mod tests {
                 },
             },
             GenerationValue {
-                value: Value::Integer(30),
+                value: ScanRow::Marker(Value::Integer(30)),
                 metadata: EntryMetadata {
                     write_time: 3000,
                     generation: 3,
@@ -645,8 +612,7 @@ mod tests {
         let result = merger.merge_generations(values)?;
 
         // The newest value (30 at time 3000) should win
-        assert!(result.is_some());
-        assert_eq!(result.unwrap(), Value::Integer(30));
+        assert_eq!(result, Some(ScanRow::Marker(Value::Integer(30))));
 
         Ok(())
     }
@@ -660,7 +626,7 @@ mod tests {
         for i in 0..10000 {
             let key = RowKey::from(format!("key_{}", i));
             let values = vec![GenerationValue {
-                value: Value::Integer(i),
+                value: ScanRow::Marker(Value::Integer(i)),
                 metadata: EntryMetadata {
                     write_time: 1000 + i as i64,
                     generation: 1,
@@ -686,7 +652,7 @@ mod tests {
 
         let tombstones = vec![
             GenerationValue {
-                value: Value::row_tombstone(1_000_000), // 1 second in microseconds
+                value: ScanRow::Marker(Value::row_tombstone(1_000_000)), // 1 second in microseconds
                 metadata: EntryMetadata {
                     write_time: 1_000_000,
                     generation: 1,
@@ -694,7 +660,7 @@ mod tests {
                 },
             },
             GenerationValue {
-                value: Value::cell_tombstone(8_000_000), // 8 seconds in microseconds
+                value: ScanRow::Marker(Value::cell_tombstone(8_000_000)), // 8 seconds in microseconds
                 metadata: EntryMetadata {
                     write_time: 8_000_000,
                     generation: 2,
@@ -717,13 +683,14 @@ mod tests {
     fn test_collection_tombstone_handling() {
         let merger = TombstoneMerger::with_time(5000);
 
+        let list_row = ScanRow::Marker(Value::List(vec![
+            Value::Integer(1),
+            Value::Integer(2),
+            Value::cell_tombstone(2000), // Deleted element
+            Value::Integer(3),
+        ]));
         let collection_entries = vec![GenerationValue {
-            value: Value::List(vec![
-                Value::Integer(1),
-                Value::Integer(2),
-                Value::cell_tombstone(2000), // Deleted element
-                Value::Integer(3),
-            ]),
+            value: list_row.clone(),
             metadata: EntryMetadata {
                 write_time: 3000,
                 generation: 1,
@@ -735,14 +702,77 @@ mod tests {
             .merge_collection_with_tombstones(collection_entries)
             .unwrap();
 
-        assert!(result.is_some());
-        if let Some(Value::List(elements)) = result {
-            // Should have filtered out the tombstone element
-            assert_eq!(elements.len(), 3);
-            assert!(elements.iter().all(|e| !e.is_tombstone()));
-        } else {
-            panic!("Expected list result");
-        }
+        // Issue #1334: generations carry whole rows, so the newest live payload
+        // wins as-is (row-grain LWW); per-element collection filtering no longer
+        // applies on this path.
+        assert_eq!(result, Some(list_row));
+    }
+
+    /// roborev round 8 finding 2: an EXPIRED TTL tombstone must NOT delete the
+    /// row. The merge must skip it and continue to the next (older) generation so
+    /// an older live value survives. Before the fix `merge_collection_with_tombstones`
+    /// treated ANY newest tombstone (expired included) as deleting the row.
+    #[test]
+    fn expired_ttl_tombstone_does_not_delete_older_live_value() -> Result<()> {
+        let merger = TombstoneMerger::with_time(5000);
+
+        let live = ScanRow::Row(vec![(std::sync::Arc::from("v"), Value::Integer(7))]);
+        let entries = vec![
+            // Newest by write_time: a TTL tombstone that expired at 2000 < 5000.
+            GenerationValue {
+                value: ScanRow::Marker(Value::ttl_tombstone(1000, 1000)),
+                metadata: EntryMetadata {
+                    write_time: 3000,
+                    generation: 2,
+                    ttl: Some(1000),
+                },
+            },
+            // Older, still-live value that must survive the expired tombstone.
+            GenerationValue {
+                value: live.clone(),
+                metadata: EntryMetadata {
+                    write_time: 1000,
+                    generation: 1,
+                    ttl: None,
+                },
+            },
+        ];
+
+        let result = merger.merge_collection_with_tombstones(entries)?;
+        assert_eq!(
+            result,
+            Some(live),
+            "expired TTL tombstone must be skipped; older live value survives"
+        );
+        Ok(())
+    }
+
+    /// A LIVE (non-expired) tombstone still shadows the row on the same path.
+    #[test]
+    fn live_tombstone_deletes_row_on_collection_merge() -> Result<()> {
+        let merger = TombstoneMerger::with_time(5000);
+
+        let entries = vec![
+            GenerationValue {
+                value: ScanRow::Marker(Value::row_tombstone(3000)),
+                metadata: EntryMetadata {
+                    write_time: 3000,
+                    generation: 2,
+                    ttl: None,
+                },
+            },
+            GenerationValue {
+                value: ScanRow::Row(vec![(std::sync::Arc::from("v"), Value::Integer(7))]),
+                metadata: EntryMetadata {
+                    write_time: 1000,
+                    generation: 1,
+                    ttl: None,
+                },
+            },
+        ];
+
+        assert_eq!(merger.merge_collection_with_tombstones(entries)?, None);
+        Ok(())
     }
 
     #[test]
@@ -787,7 +817,7 @@ mod tests {
 
         let values = vec![
             GenerationValue {
-                value: Value::Integer(10), // older value
+                value: ScanRow::Marker(Value::Integer(10)), // older value
                 metadata: EntryMetadata {
                     write_time: 1_000,
                     generation: 1,
@@ -795,7 +825,7 @@ mod tests {
                 },
             },
             GenerationValue {
-                value: Value::Integer(30), // newer value - should win
+                value: ScanRow::Marker(Value::Integer(30)), // newer value - should win
                 metadata: EntryMetadata {
                     write_time: 3_000,
                     generation: 2,
@@ -808,7 +838,7 @@ mod tests {
         let result = merger.merge_generations(values)?;
         assert_eq!(
             result,
-            Some(Value::Integer(30)),
+            Some(ScanRow::Marker(Value::Integer(30))),
             "LWW merge must pick the newer value (write_time=3000)"
         );
 
@@ -826,7 +856,7 @@ mod tests {
         // TTL of 1000 µs written at write_time=5_000 → expires at 6_000.
         // current_time=100_000 > 6_000, so expired.
         let values = vec![GenerationValue {
-            value: Value::Text("expiring".to_string()),
+            value: ScanRow::Marker(Value::Text("expiring".to_string())),
             metadata: EntryMetadata {
                 write_time: 5_000,
                 generation: 1,
@@ -836,9 +866,8 @@ mod tests {
 
         let result = merger.merge_generations(values)?;
         // Should be a TTL tombstone, not the original value.
-        assert!(result.is_some(), "expired TTL must produce a TTL tombstone");
         assert!(
-            result.unwrap().is_tombstone(),
+            matches!(result, Some(ScanRow::Marker(v)) if v.is_tombstone()),
             "result for expired TTL cell must be a tombstone"
         );
 
@@ -856,7 +885,7 @@ mod tests {
         let entries = vec![
             // Older SSTable: row tombstone at time 1_000
             GenerationValue {
-                value: Value::row_tombstone(1_000),
+                value: ScanRow::Marker(Value::row_tombstone(1_000)),
                 metadata: EntryMetadata {
                     write_time: 1_000,
                     generation: 1,
@@ -865,7 +894,7 @@ mod tests {
             },
             // Newer SSTable: live value at time 5_000 → wins over the tombstone
             GenerationValue {
-                value: Value::Integer(99),
+                value: ScanRow::Marker(Value::Integer(99)),
                 metadata: EntryMetadata {
                     write_time: 5_000,
                     generation: 2,
@@ -877,7 +906,7 @@ mod tests {
         let result = merger.merge_row_entries(&table_id, &row_key, entries)?;
         assert_eq!(
             result,
-            Some(Value::Integer(99)),
+            Some(ScanRow::Marker(Value::Integer(99))),
             "a live value written after the row tombstone must survive the merge"
         );
 

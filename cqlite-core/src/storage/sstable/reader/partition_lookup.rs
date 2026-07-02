@@ -5,7 +5,7 @@
 
 use super::SSTableReader;
 use crate::schema::registry::ParsingContext;
-use crate::types::{TableId, Value};
+use crate::types::{ScanRow, TableId};
 use crate::{Error, Result, RowKey};
 use log::debug;
 
@@ -486,7 +486,7 @@ impl SSTableReader {
     /// When that happens we fall back to `sequential_scan`, which walks Data.db
     /// directly. For V5CompressedLegacy NB SSTables (the format the writer emits),
     /// `sequential_scan` uses the chunk-stitching path and returns every partition.
-    pub async fn iterate_all_partitions(&self) -> Result<Vec<(RowKey, Value)>> {
+    pub async fn iterate_all_partitions(&self) -> Result<Vec<(RowKey, ScanRow)>> {
         if let Some(summary_reader) = &self.summary_reader {
             let entries = summary_reader.get_entries();
             let mut results = Vec::new();
@@ -592,7 +592,7 @@ impl SSTableReader {
         &self,
         _start_token: i64,
         _end_token: i64,
-    ) -> Result<Vec<(RowKey, Value)>> {
+    ) -> Result<Vec<(RowKey, ScanRow)>> {
         // Token values are not stored in Summary.db (Issue #218)
         // Delegate to all-partition iteration
         self.iterate_all_partitions().await
@@ -633,7 +633,7 @@ impl SSTableReader {
         &self,
         table_id: &TableId,
         key: &RowKey,
-    ) -> Result<Option<Value>> {
+    ) -> Result<Option<ScanRow>> {
         use crate::observability::{self as obs, catalog};
 
         // Issue #1034: BTI ("da") readers resolve partitions via the Partitions.db
@@ -689,7 +689,7 @@ impl SSTableReader {
         table_id: &TableId,
         key: &RowKey,
         parsing_context: &ParsingContext,
-    ) -> Result<Option<Value>> {
+    ) -> Result<Option<ScanRow>> {
         use crate::observability::{self as obs, catalog};
 
         // Issue #1034: BTI ("da") readers resolve partitions via the Partitions.db

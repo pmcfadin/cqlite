@@ -73,7 +73,7 @@ fn create_query_result(
         .map(|(idx, row_values)| {
             let mut values = HashMap::new();
             for (col_name, value) in row_values {
-                values.insert(col_name.to_string(), value);
+                values.insert(col_name.into(), value);
             }
             QueryRow {
                 values,
@@ -934,7 +934,7 @@ fn test_parquet_wide_table() {
 
     let mut values = HashMap::new();
     for (i, name) in column_names.iter().enumerate() {
-        values.insert(name.clone(), Value::Integer(i as i32));
+        values.insert(name.as_str().into(), Value::Integer(i as i32));
     }
 
     let row = QueryRow {
@@ -997,7 +997,7 @@ fn col_with_cql_type(
 /// Create a QueryResult from a single ColumnInfo and a single value.
 fn single_cql_typed_result(col: ColumnInfo, value: Value) -> QueryResult {
     let mut values = HashMap::new();
-    values.insert(col.name.clone(), value);
+    values.insert(col.name.as_str().into(), value);
     let row = QueryRow {
         values,
         key: RowKey::new(vec![1]),
@@ -1737,7 +1737,7 @@ fn test_no_cql_type_fallback_unchanged() {
         cql_type: None,
     };
     let mut values = HashMap::new();
-    values.insert("big".to_string(), Value::BigInt(1234567890));
+    values.insert("big".into(), Value::BigInt(1234567890));
     let row = QueryRow {
         values,
         key: RowKey::new(vec![1]),
@@ -1803,7 +1803,7 @@ fn single_col_multi_row_result(col: ColumnInfo, values: Vec<Value>) -> QueryResu
         .enumerate()
         .map(|(i, v)| {
             let mut map = HashMap::new();
-            map.insert(col.name.clone(), v);
+            map.insert(col.name.as_str().into(), v);
             QueryRow {
                 values: map,
                 key: RowKey::new(vec![i as u8]),
@@ -3236,7 +3236,7 @@ fn test_map_legacy_path_no_cql_type() {
 
     let mut values = HashMap::new();
     values.insert(
-        "m".to_string(),
+        "m".into(),
         Value::Map(vec![
             (Value::Text("a".to_string()), Value::Integer(1)),
             (Value::Text("b".to_string()), Value::Integer(2)),
@@ -4315,7 +4315,7 @@ fn test_tuple_legacy_path_no_cql_type() {
 
     let mut values = HashMap::new();
     values.insert(
-        "t".to_string(),
+        "t".into(),
         Value::Tuple(vec![Value::Integer(1), Value::Text("a".to_string())]),
     );
     let row = QueryRow {
@@ -4357,7 +4357,7 @@ fn test_udt_legacy_path_no_cql_type() {
 
     let mut values = HashMap::new();
     values.insert(
-        "u".to_string(),
+        "u".into(),
         Value::Udt(UdtValue {
             keyspace: "ks".to_string(),
             type_name: "point".to_string(),
@@ -4543,18 +4543,18 @@ fn make_parity_fixture() -> QueryResult {
         0x00,
     ];
     let mut values = HashMap::new();
-    values.insert("d".to_string(), Value::Date(19358)); // 2023-01-01
-    values.insert("t".to_string(), Value::Time(36_000_000_000_000_i64)); // 10:00:00
+    values.insert("d".into(), Value::Date(19358)); // 2023-01-01
+    values.insert("t".into(), Value::Time(36_000_000_000_000_i64)); // 10:00:00
     values.insert(
-        "dec".to_string(),
+        "dec".into(),
         Value::Decimal {
             scale: 2,
             unscaled: vec![0x04, 0xD2], // 1234 → 12.34
         },
     );
-    values.insert("uid".to_string(), Value::Uuid(uuid_bytes));
+    values.insert("uid".into(), Value::Uuid(uuid_bytes));
     values.insert(
-        "dur".to_string(),
+        "dur".into(),
         Value::Duration {
             months: 1,
             days: 2,
@@ -4562,11 +4562,11 @@ fn make_parity_fixture() -> QueryResult {
         },
     );
     // inet: 4-byte IPv4 127.0.0.1
-    values.insert("ip".to_string(), Value::Inet(vec![127, 0, 0, 1]));
-    values.insert("cnt".to_string(), Value::Counter(42));
-    values.insert("txt".to_string(), Value::Text("hello".to_string()));
+    values.insert("ip".into(), Value::Inet(vec![127, 0, 0, 1]));
+    values.insert("cnt".into(), Value::Counter(42));
+    values.insert("txt".into(), Value::Text("hello".to_string()));
     values.insert(
-        "li".to_string(),
+        "li".into(),
         Value::List(vec![
             Value::Integer(1),
             Value::Integer(2),
@@ -4574,25 +4574,25 @@ fn make_parity_fixture() -> QueryResult {
         ]),
     );
     values.insert(
-        "se".to_string(),
+        "se".into(),
         Value::Set(vec![
             Value::Text("a".to_string()),
             Value::Text("b".to_string()),
         ]),
     );
     values.insert(
-        "mp".to_string(),
+        "mp".into(),
         Value::Map(vec![
             (Value::Text("k1".to_string()), Value::Integer(10)),
             (Value::Text("k2".to_string()), Value::Integer(20)),
         ]),
     );
     values.insert(
-        "tup".to_string(),
+        "tup".into(),
         Value::Tuple(vec![Value::Integer(99), Value::Text("t".to_string())]),
     );
     values.insert(
-        "udt_col".to_string(),
+        "udt_col".into(),
         Value::Udt(UdtValue {
             keyspace: "ks".to_string(),
             type_name: "point".to_string(),

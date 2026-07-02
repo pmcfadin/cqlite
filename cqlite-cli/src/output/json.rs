@@ -62,7 +62,7 @@ impl JSONWriter {
 
             // Iterate columns in metadata order, NOT HashMap order!
             for col in &result.metadata.columns {
-                let value_opt = row.values.get(&col.name);
+                let value_opt = row.values.get(col.name.as_str());
                 let json_value = match value_opt {
                     Some(value) => Self::value_to_json(value),
                     None => JsonValue::Null,
@@ -274,7 +274,7 @@ impl<W: Write> StreamingJSONWriter<W> {
 
         // Iterate columns in metadata order, NOT HashMap order
         for col in &self.columns {
-            let value_opt = row.values.get(col);
+            let value_opt = row.values.get(col.as_str());
             let json_value = match value_opt {
                 Some(value) => JSONWriter::value_to_json(value),
                 None => JsonValue::Null,

@@ -10,6 +10,7 @@ pub use comparator::ComparatorType;
 use crate::schema::CqlType;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::Arc;
 
 // Size constants for fixed-size types
 const BOOL_SIZE: usize = 1;
@@ -81,6 +82,148 @@ pub enum Value {
     Tombstone(TombstoneInfo),
     /// IP address (4 bytes for IPv4, 16 bytes for IPv6)
     Inet(Vec<u8>),
+}
+
+/// Ordered interned cells of a single decoded row (issue #1334).
+///
+/// Each entry is `(column_name, value)` where the name is a shared `Arc<str>`
+/// handle interned once by the row decoder. Carrying a cell's name into
+/// `QueryRow.values` is therefore a reference-count bump — NOT a per-cell heap
+/// `String` allocation. Entries are ordered exactly as the producer emits them
+/// (emit-time alphabetical by column name).
+pub type RowCells = Vec<(Arc<str>, Value)>;
+
+/// Payload of a single scanned row as it crosses the storage → query boundary
+/// (issue #1334).
+///
+/// This is a **dedicated internal carrier — deliberately NOT a variant of the
+/// public [`Value`] enum**. Keeping it off `Value` keeps the public value type
+/// closed (no breaking variant, no defensive match arms) and lets the interned
+/// [`RowCells`] names reach `QueryRow.values` without ever round-tripping
+/// through a `String`.
+///
+/// There is exactly ONE row-carrier path: every scan/compaction producer builds
+/// a `ScanRow` and every consumer disassembles a `ScanRow`, so a live row's
+/// column values can never silently fall through to a non-row fallback.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScanRow {
+    /// A live row: its interned cells, ordered exactly as emitted (emit-time
+    /// alphabetical by column name). These cells are ALREADY DECODED — a
+    /// consumer surfaces them as-is (never re-decoding a cell value).
+    Row(RowCells),
+    /// A RAW, UNDECODED whole-row value carried with explicit provenance
+    /// (issue #1334). Emitted only by the fallback producers — the `data_access`
+    /// offset-read placeholder and the legacy `parse_block_entries*` fallback —
+    /// which pre-#1334 returned a bare `Value::Blob` of a row's raw value bytes.
+    ///
+    /// This is DELIBERATELY distinct from [`ScanRow::Row`]: it tells a consumer,
+    /// by provenance (not by inspecting cell name/shape), that the bytes still
+    /// need schema-decoding. A schema-aware consumer schema-decodes these bytes
+    /// into the table's columns; a no-schema consumer surfaces them as the exact
+    /// pre-#1334 shape (a single `"data"` [`Value::Blob`] column). An already
+    /// decoded row — even one whose only non-key column is a blob column named
+    /// `"data"` — is a [`ScanRow::Row`] and is NEVER treated as raw.
+    RawRow(Vec<u8>),
+    /// A non-row scan marker carried on the same channel — a row tombstone
+    /// (`Value::Tombstone`), an absent/null row (`Value::Null`), or a synthetic
+    /// compaction carrier value. Suppressed from user-visible output but
+    /// preserved so the compaction merge can reconcile deletions.
+    Marker(Value),
+}
+
+impl ScanRow {
+    /// Cells surfaced to a no-schema consumer: a live row's interned cells, the
+    /// single synthetic `"data"` blob for a raw fallback row, or `None` for a
+    /// marker (tombstone/null).
+    ///
+    /// A [`ScanRow::RawRow`] surfaces as one `("data", Value::Blob(bytes))` cell —
+    /// the exact pre-#1334 bare-`Value::Blob` shape a no-schema consumer produced.
+    pub fn into_cells(self) -> Option<RowCells> {
+        match self {
+            ScanRow::Row(cells) => Some(cells),
+            ScanRow::RawRow(bytes) => {
+                Some(vec![(std::sync::Arc::from("data"), Value::Blob(bytes))])
+            }
+            ScanRow::Marker(_) => None,
+        }
+    }
+
+    /// Cells surfaced to a **schema-discovery sampler** (issue #1334).
+    ///
+    /// Like [`into_cells`](Self::into_cells), but a [`ScanRow::RawRow`] — undecoded
+    /// whole-row bytes — is mapped onto `fallback_column` (the SSTable header's
+    /// first column name) rather than a synthetic `"data"` blob. This matches the
+    /// pre-#1334 sampler, which mapped a raw single `Value` onto the first header
+    /// column for type inference. When no `fallback_column` is available the raw
+    /// row is skipped (`None`), exactly as the pre-#1334 sampler skipped an entry
+    /// with an empty header column list. Markers are suppressed (`None`).
+    pub fn into_sample_cells(self, fallback_column: Option<&str>) -> Option<RowCells> {
+        match self {
+            ScanRow::Row(cells) => Some(cells),
+            ScanRow::RawRow(bytes) => {
+                let name = fallback_column?;
+                Some(vec![(std::sync::Arc::from(name), Value::Blob(bytes))])
+            }
+            ScanRow::Marker(_) => None,
+        }
+    }
+
+    /// True when this is a suppressed marker (row tombstone or absent/null row).
+    pub fn is_marker(&self) -> bool {
+        matches!(self, ScanRow::Marker(_))
+    }
+
+    /// Number of cells in a live row, or the byte length of a raw/marker value.
+    ///
+    /// Inspection convenience: a live [`ScanRow::Row`] reports its cell count; a
+    /// [`ScanRow::RawRow`] reports its undecoded byte length; a
+    /// [`ScanRow::Marker`] delegates to the wrapped value's [`Value::len`].
+    pub fn len(&self) -> usize {
+        match self {
+            ScanRow::Row(cells) => cells.len(),
+            ScanRow::RawRow(bytes) => bytes.len(),
+            ScanRow::Marker(v) => v.len(),
+        }
+    }
+
+    /// True when a live row has no cells, a raw row has no bytes, or the marker
+    /// value is empty/null.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            ScanRow::Row(cells) => cells.is_empty(),
+            ScanRow::RawRow(bytes) => bytes.is_empty(),
+            ScanRow::Marker(v) => v.is_empty(),
+        }
+    }
+
+    /// Byte view of a raw fallback row's undecoded bytes, or a marker's wrapped
+    /// value bytes; `None` for a decoded live row.
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            ScanRow::RawRow(bytes) => Some(bytes),
+            ScanRow::Marker(v) => v.as_bytes(),
+            ScanRow::Row(_) => None,
+        }
+    }
+
+    /// Classifier that maps a single ALREADY-DECODED named cell onto the
+    /// scan → query row carrier (issue #1334). Used by the block-emit producers
+    /// for genuine static/clustering cells so a live value can never be
+    /// mis-wrapped as a suppressed marker.
+    ///
+    /// A genuinely absent cell ([`Value::Null`]) or a tombstone
+    /// ([`Value::Tombstone`]) stays a suppressible [`ScanRow::Marker`] —
+    /// `build_row_from_scan`/`into_cells()` drop those from user-visible output.
+    /// ANY other (decoded, live) value becomes a live single-cell
+    /// [`ScanRow::Row`] under `column_name` (interned `Arc<str>`) so it surfaces
+    /// in SELECT/export/schema-discovery. This is for DECODED cells only; a raw
+    /// undecoded whole-row value uses [`ScanRow::RawRow`] instead.
+    pub fn classify_cell(column_name: &str, value: Value) -> ScanRow {
+        match value {
+            Value::Null | Value::Tombstone(_) => ScanRow::Marker(value),
+            _ => ScanRow::Row(vec![(std::sync::Arc::from(column_name), value)]),
+        }
+    }
 }
 
 /// User Defined Type value with structured field access
@@ -1407,6 +1550,48 @@ mod tests {
         assert_eq!(Value::Integer(42).data_type(), CqlType::Int);
         assert_eq!(Value::Text("hello".to_string()).data_type(), CqlType::Text);
         assert_eq!(Value::Boolean(true).data_type(), CqlType::Boolean);
+    }
+
+    // Issue #1334 (roborev round 9, finding 1): a schema-discovery sampler that
+    // disassembles a `ScanRow::RawRow` via the no-schema `into_cells()` would infer
+    // a bogus `"data"` column instead of the SSTable header column name. The
+    // sampler-specific `into_sample_cells` must map a raw fallback row onto the
+    // header column, matching the pre-#1334 sampler.
+    #[test]
+    fn raw_row_sample_cells_use_header_column_not_data() {
+        let raw = ScanRow::RawRow(vec![1, 2, 3]);
+
+        // No-schema disassembly still yields the synthetic "data" blob...
+        let no_schema = raw.clone().into_cells().expect("raw yields cells");
+        assert_eq!(no_schema[0].0.as_ref(), "data");
+
+        // ...but the sampler path maps it onto the authoritative header column.
+        let sampled = raw
+            .into_sample_cells(Some("payload"))
+            .expect("raw with fallback column yields cells");
+        assert_eq!(sampled.len(), 1);
+        assert_eq!(
+            sampled[0].0.as_ref(),
+            "payload",
+            "a RawRow sample must use the header column name, never a synthetic \"data\" column"
+        );
+        assert_eq!(sampled[0].1, Value::Blob(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn sample_cells_pass_through_live_row_and_drop_markers() {
+        // A live row's decoded cells pass through verbatim regardless of fallback.
+        let live = ScanRow::Row(vec![(std::sync::Arc::from("name"), Value::Integer(7))]);
+        let cells = live.into_sample_cells(Some("payload")).expect("live cells");
+        assert_eq!(cells[0].0.as_ref(), "name");
+
+        // A marker (tombstone / null row) contributes no sample columns.
+        assert!(ScanRow::Marker(Value::Null)
+            .into_sample_cells(Some("payload"))
+            .is_none());
+
+        // A raw fallback with no header column is skipped (pre-#1334 behavior).
+        assert!(ScanRow::RawRow(vec![9]).into_sample_cells(None).is_none());
     }
 
     #[test]

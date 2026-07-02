@@ -63,6 +63,7 @@ use cqlite_core::storage::write_engine::{
 };
 use cqlite_core::types::Value;
 use cqlite_core::Config;
+use cqlite_core::ScanRow;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -403,7 +404,7 @@ pub fn read_file_bytes(path: &Path) -> Vec<u8> {
 /// Opens SSTableManager on the data directory, scans the table,
 /// and returns the raw Value for the first (and only) row.
 /// Panics if the scan returns anything other than exactly 1 row.
-pub async fn read_back_raw_row(temp_dir: &TempDir, schema: &TableSchema) -> Value {
+pub async fn read_back_raw_row(temp_dir: &TempDir, schema: &TableSchema) -> ScanRow {
     let mut rows = read_back_all_rows(temp_dir, schema).await;
     assert_eq!(
         rows.len(),
@@ -421,7 +422,7 @@ pub async fn read_back_raw_row(temp_dir: &TempDir, schema: &TableSchema) -> Valu
 /// Opens SSTableManager on the data directory, scans the table,
 /// and returns the raw Value for every row found.
 /// Useful when testing multi-row partitions (e.g., clustering key tests).
-pub async fn read_back_all_rows(temp_dir: &TempDir, schema: &TableSchema) -> Vec<Value> {
+pub async fn read_back_all_rows(temp_dir: &TempDir, schema: &TableSchema) -> Vec<ScanRow> {
     let data_dir = temp_dir.path().join("data");
     let config = Config::default();
     let platform = Arc::new(
@@ -461,7 +462,7 @@ pub async fn read_back_all_rows_with_udt_registry(
     temp_dir: &TempDir,
     schema: &TableSchema,
     udt_registry: UdtRegistry,
-) -> Vec<Value> {
+) -> Vec<ScanRow> {
     use tokio::sync::RwLock;
 
     let data_dir = temp_dir.path().join("data");
@@ -540,31 +541,21 @@ pub async fn read_back_column_with_udt_registry(
     let row_value = rows.into_iter().next().unwrap();
 
     match &row_value {
-        Value::Map(entries) => {
-            for (key, value) in entries {
-                if let Value::Text(name) = key {
-                    if name == col_name {
-                        return value.clone();
-                    }
+        // Issue #1334: the scan carries rows as `ScanRow::Row` keyed by `Arc<str>`.
+        ScanRow::Row(entries) => {
+            for (name, value) in entries {
+                if name.as_ref() == col_name {
+                    return value.clone();
                 }
             }
             panic!(
                 "Column '{}' not found in row. Available columns: {:?}",
                 col_name,
-                entries
-                    .iter()
-                    .filter_map(|(k, _)| {
-                        if let Value::Text(n) = k {
-                            Some(n.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
+                entries.iter().map(|(k, _)| k.as_ref()).collect::<Vec<_>>()
             );
         }
         other => panic!(
-            "Expected Map row for column '{}', got {:?}",
+            "Expected Row row for column '{}', got {:?}",
             col_name, other
         ),
     }
@@ -580,33 +571,22 @@ pub async fn read_back_column_with_udt_registry(
 pub async fn read_back_column(temp_dir: &TempDir, schema: &TableSchema, col_name: &str) -> Value {
     let row_value = read_back_raw_row(temp_dir, schema).await;
 
-    // Row is Value::Map(Vec<(Value::Text(col_name), value)>)
+    // Issue #1334: the scan carries a row as `ScanRow::Row(Vec<(Arc<str>, value)>)`.
     match &row_value {
-        Value::Map(entries) => {
-            for (key, value) in entries {
-                if let Value::Text(name) = key {
-                    if name == col_name {
-                        return value.clone();
-                    }
+        ScanRow::Row(entries) => {
+            for (name, value) in entries {
+                if name.as_ref() == col_name {
+                    return value.clone();
                 }
             }
             panic!(
                 "Column '{}' not found in row. Available columns: {:?}",
                 col_name,
-                entries
-                    .iter()
-                    .filter_map(|(k, _)| {
-                        if let Value::Text(n) = k {
-                            Some(n.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
+                entries.iter().map(|(k, _)| k.as_ref()).collect::<Vec<_>>()
             );
         }
         other => panic!(
-            "Expected row to be Value::Map, got {:?}",
+            "Expected row to be ScanRow::Row, got {:?}",
             std::mem::discriminant(other)
         ),
     }

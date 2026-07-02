@@ -43,7 +43,7 @@ pub(super) fn build_group_key(row: &QueryRow, group_by_columns: &[String]) -> Ve
     }
     group_by_columns
         .iter()
-        .map(|col| row.values.get(col).cloned().unwrap_or(Value::Null))
+        .map(|col| row.values.get(col.as_str()).cloned().unwrap_or(Value::Null))
         .collect()
 }
 
@@ -91,7 +91,7 @@ pub(super) fn update_aggregate(
     let value: Option<&Value> = if is_star {
         None
     } else {
-        row.values.get(&agg_comp.column)
+        row.values.get(agg_comp.column.as_str())
     };
     let is_null = !is_star && value.is_none_or(Value::is_null);
 
@@ -139,11 +139,11 @@ pub(super) fn finalize_group(
     group_aggregates: Vec<AggregateValue>,
     agg_plan: &AggregationPlan,
 ) -> QueryRow {
-    let mut row_values = HashMap::new();
+    let mut row_values: HashMap<std::sync::Arc<str>, Value> = HashMap::new();
 
     for (i, col) in agg_plan.group_by_columns.iter().enumerate() {
         if let Some(v) = group_key.get(i) {
-            row_values.insert(col.clone(), v.clone());
+            row_values.insert(col.as_str().into(), v.clone());
         }
     }
 
@@ -160,7 +160,7 @@ pub(super) fn finalize_group(
             }
             AggregateValue::Min(val) | AggregateValue::Max(val) => val.clone(),
         };
-        row_values.insert(agg_comp.alias.clone(), result_value);
+        row_values.insert(agg_comp.alias.as_str().into(), result_value);
     }
 
     QueryRow {

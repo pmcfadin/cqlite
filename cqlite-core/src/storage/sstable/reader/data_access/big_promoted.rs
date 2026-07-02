@@ -34,7 +34,7 @@ use crate::parser::types::{parse_cql_value, CqlTypeId};
 use crate::parser::vint::parse_vuint;
 use crate::schema::{CqlType, TableSchema};
 use crate::storage::sstable::promoted_index_reader::{DecodedIndexInfo, DecodedPromotedIndex};
-use crate::types::Value;
+use crate::types::{ScanRow, Value};
 use crate::{Error, Result, RowKey};
 use log::debug;
 use std::io::SeekFrom;
@@ -335,7 +335,7 @@ impl SSTableReader {
         &self,
         partition_key: &[u8],
         schema: Option<&TableSchema>,
-    ) -> Result<Option<Vec<(RowKey, Value)>>> {
+    ) -> Result<Option<Vec<(RowKey, ScanRow)>>> {
         let Some(schema) = schema else {
             return Ok(None);
         };
@@ -376,14 +376,14 @@ impl SSTableReader {
         let parser = self.build_v5_parser();
         let key = RowKey::from(partition_key.to_vec());
         let avail = window.len().saturating_sub(within);
-        let mut out: Vec<(RowKey, Value)> = Vec::new();
+        let mut out: Vec<(RowKey, ScanRow)> = Vec::new();
 
         for block in decoded.entries.iter().rev() {
             let body_start = (block.offset as usize).min(avail);
             let body_end = (block.offset as usize)
                 .saturating_add(block.width as usize)
                 .min(avail);
-            let mut block_rows: Vec<Value> = Vec::new();
+            let mut block_rows: Vec<ScanRow> = Vec::new();
             parser.parse_block_emit_windowed(
                 &window[within..],
                 Some(schema),
@@ -430,7 +430,7 @@ impl SSTableReader {
         end_bound: Option<usize>,
         row_body_window: Option<(usize, usize)>,
         schema: Option<&TableSchema>,
-    ) -> Result<Option<Vec<(RowKey, Value)>>> {
+    ) -> Result<Option<Vec<(RowKey, ScanRow)>>> {
         let Some((window, within)) = self
             .decompress_partition_window(offset as usize, end_bound)
             .await?
@@ -441,7 +441,7 @@ impl SSTableReader {
         let key = RowKey::from(partition_key.to_vec());
         let avail = window.len().saturating_sub(within);
         let clamped = row_body_window.map(|(s, e)| (s.min(avail), e.min(avail)));
-        let mut rows: Vec<(RowKey, Value)> = Vec::new();
+        let mut rows: Vec<(RowKey, ScanRow)> = Vec::new();
         parser.parse_block_emit_windowed(
             &window[within..],
             schema,
