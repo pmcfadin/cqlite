@@ -1323,6 +1323,74 @@ mod tests {
         assert!(engine.memtable_size() > 0);
     }
 
+    /// Issue #1390 criterion 5: engine-level crash simulation through the
+    /// WriteEngine (not just the WAL unit). Write A (fsync-acknowledged), crash
+    /// (drop without flush), inject a torn tail into the commitlog, recover in a
+    /// new engine, write C (fsync-acknowledged), crash again, then recover once
+    /// more and assert every acknowledged mutation is present exactly once.
+    ///
+    /// Before the fix, C lands AFTER the retained torn bytes and is silently
+    /// lost on the second recovery.
+    #[test]
+    fn test_write_engine_recovers_across_torn_tail_crash() {
+        use std::io::Write as _;
+
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+
+        // 1. Write A and "crash" (drop without flush). Default durability is
+        //    SyncEachWrite, so A is fsync'd to the WAL.
+        {
+            let mut engine = WriteEngine::new(config.clone()).unwrap();
+            engine
+                .write(create_test_mutation(1, "Alice", 1_000_000))
+                .unwrap();
+        }
+
+        // 2. Inject a torn tail: a complete 8-byte header declaring a 100-byte
+        //    payload, followed by only 10 payload bytes (interrupted append).
+        let wal_file = config.wal_dir.join(WriteAheadLog::WAL_FILENAME);
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&wal_file)
+                .unwrap();
+            f.write_all(&100u32.to_le_bytes()).unwrap();
+            f.write_all(&0u32.to_le_bytes()).unwrap();
+            f.write_all(&[0xAB; 10]).unwrap();
+            f.sync_all().unwrap();
+        }
+
+        // 3. Recover: the torn tail must be trimmed. Then write C and crash.
+        {
+            let mut engine = WriteEngine::new(config.clone()).unwrap();
+            assert_eq!(
+                engine.memtable_row_count(),
+                1,
+                "must recover A across the torn tail"
+            );
+            engine
+                .write(create_test_mutation(3, "Carol", 3_000_000))
+                .unwrap();
+        }
+
+        // 4. Recover again: both acknowledged mutations must be present exactly
+        //    once (2 distinct partition keys => 2 memtable rows).
+        {
+            let engine = WriteEngine::new(config).unwrap();
+            assert_eq!(
+                engine.memtable_row_count(),
+                2,
+                "both A and C must survive the second recovery (C must not be lost)"
+            );
+        }
+    }
+
     #[test]
     fn test_write_engine_generation_tracking() {
         let temp_dir = TempDir::new().unwrap();
