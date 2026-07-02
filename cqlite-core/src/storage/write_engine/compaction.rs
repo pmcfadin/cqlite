@@ -13,6 +13,23 @@ use crate::error::{Error, Result};
 use std::path::PathBuf;
 use std::time::Instant;
 
+// Test-only crash-injection seam (issue #1393).
+//
+// When set on the thread that drives `finalize_merge_async`, the finalizer
+// aborts *after* the tmp component files have been written but *before* the
+// atomic publication rename — and deliberately leaves the `.compaction-tmp-*`
+// directory on disk, exactly as a real process crash mid-compaction would. The
+// startup orphan sweep is then exercised end-to-end against genuine partial
+// output. It is a `thread_local` (not a global) so parallel tests cannot see
+// each other's injection: the sweep e2e test runs `maintenance_step`
+// synchronously with no ambient runtime, so `block_on_async` polls the
+// finalizer on the very thread that set the flag.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FAIL_COMPACTION_BEFORE_RENAME: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
 impl WriteEngine {
     /// Start a new merge operation (M5.2 helper, Issue #474)
     ///
@@ -299,6 +316,19 @@ impl WriteEngine {
             tmp_info.data_size,
             tmp_info.partition_count
         );
+
+        // Test-only crash injection (issue #1393): simulate a process crash after
+        // the tmp component files are on disk but before the publication rename.
+        // We intentionally do NOT clean up `merge.tmp_dir` — a real crash leaves
+        // it for the startup orphan sweep to reclaim. Inputs are still intact
+        // (no rename or delete has run yet).
+        #[cfg(test)]
+        if FAIL_COMPACTION_BEFORE_RENAME.with(|f| f.get()) {
+            return Err(Error::Storage(
+                "injected compaction crash before publication rename (test seam, issue #1393)"
+                    .to_string(),
+            ));
+        }
 
         // Step 2: Atomically rename each component from the tmp sub-directory to
         // the final SSTable directory. Because both directories are under the same
