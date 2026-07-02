@@ -444,7 +444,21 @@ impl ReconcileState {
     /// LDT NORMALIZATION (#921 finding 2): on-disk `localDeletionTime` is an
     /// UNSIGNED 32-bit GC-clock second count carried as a wrapped `i32`;
     /// reinterpret the bits as unsigned (`i64::from(ldt as u32)`) before every
-    /// compare so a far-future tombstone is not purged immediately.
+    /// compare so a far-future tombstone is not purged immediately. All three
+    /// sites below (cell / row / complex-deletion), plus the expiring-cell check
+    /// in `expire_ttl_cells`, MUST widen unsigned — a signed compare would treat
+    /// a value in `[2^31, 2^32)` (a negative `i32`, e.g. `i32::MIN == 2^31`) as
+    /// ANCIENT and purge a not-yet-expired far-future tombstone, resurrecting any
+    /// older cells it shadows. Pinned by `tests/issue_1386_wrapped_negative_ldt.rs`.
+    ///
+    /// DIVERGENCE FROM CASSANDRA — RECORDED DECISION (#1386): CQLite SILENTLY
+    /// reinterprets the LDT bits as unsigned (year-2106 GC-clock semantics) and
+    /// never flags the value as "suspect". Cassandra 5.0's deletion-time handling
+    /// additionally treats an out-of-range `localDeletionTime` as suspicious
+    /// (e.g. `Cell`/`DeletionTime` validation paths log / mark it). CQLite's
+    /// posture is deliberately reinterpret-unsigned WITHOUT suspect-marking: a
+    /// far-future tombstone round-trips and purges purely on the unsigned GC-clock
+    /// compare, matching Cassandra's PURGE DECISION while omitting its diagnostics.
     ///
     /// Each genuine gc/overlap-safe purge increments the matching `purges` field
     /// (issue #1037); last-write-wins reconciliation collapse is NOT counted.
