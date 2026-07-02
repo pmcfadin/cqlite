@@ -1134,17 +1134,23 @@ mod tests {
         let err = verify_uncompressed_chunks(&crc, &data, 0, data.len() as u64)
             .expect_err("corrupt chunk must error");
         let msg = err.to_string();
-        assert!(matches!(err, Error::Corruption(_)), "typed corruption: {msg}");
+        assert!(
+            matches!(err, Error::Corruption(_)),
+            "typed corruption: {msg}"
+        );
         assert!(msg.contains("chunk 1"), "must name chunk 1: {msg}");
         // chunk 1 starts at Data.db offset 8 == 0x8.
-        assert!(msg.contains("0x8"), "must name the Data.db offset 0x8: {msg}");
+        assert!(
+            msg.contains("0x8"),
+            "must name the Data.db offset 0x8: {msg}"
+        );
     }
 
     #[test]
     fn verify_uncompressed_chunks_truncated_crc_db_is_typed_error() {
         let cs = 8u32;
         let data: Vec<u8> = (0..20u8).collect(); // needs 3 CRC entries
-        // Only provide 1 entry -> chunk 1/2 have no CRC -> truncation error.
+                                                 // Only provide 1 entry -> chunk 1/2 have no CRC -> truncation error.
         let crc = CrcDb::parse(&synth_crc_db(cs, &[crc32fast::hash(&data[0..8])])).expect("parse");
         let err = verify_uncompressed_chunks(&crc, &data, 0, data.len() as u64)
             .expect_err("truncated CRC.db must error");

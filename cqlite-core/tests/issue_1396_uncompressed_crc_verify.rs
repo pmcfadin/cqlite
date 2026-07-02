@@ -46,7 +46,9 @@ fn require_fixtures() -> bool {
         std::env::var("CQLITE_REQUIRE_FIXTURES").ok().as_deref(),
         Some("1") | Some("true") | Some("TRUE")
     ) || matches!(
-        std::env::var("CQLITE_PARITY_REQUIRE_DATASETS").ok().as_deref(),
+        std::env::var("CQLITE_PARITY_REQUIRE_DATASETS")
+            .ok()
+            .as_deref(),
         Some("1") | Some("true") | Some("TRUE")
     )
 }
@@ -69,9 +71,11 @@ fn datasets_root() -> Option<PathBuf> {
 /// fixture even when `CQLITE_DATASETS_ROOT` points at a shared cache whose
 /// manifest predates it).
 fn worktree_manifest() -> Option<PathBuf> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().map(|p| {
-        p.join("test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml")
-    })?;
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|p| {
+            p.join("test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml")
+        })?;
     p.is_file().then_some(p)
 }
 
@@ -348,12 +352,14 @@ async fn absent_crc_db_warns_and_proceeds() {
     }
     let data = tmp.path().join(clean.file_name().unwrap());
     assert!(
-        !tmp.path().join(
-            data.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .replace("Data.db", "CRC.db")
-        ).exists(),
+        !tmp.path()
+            .join(
+                data.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace("Data.db", "CRC.db")
+            )
+            .exists(),
         "CRC.db must be absent in the temp fixture"
     );
     let reader = open_reader(&data).await;
@@ -394,7 +400,8 @@ async fn truncated_crc_db_surfaces_typed_error_on_read() {
     }
     // Truncate CRC.db to the 4-byte header only (zero per-chunk CRC entries).
     let crc_name = crc_name.expect("clean fixture must ship a CRC.db");
-    std::fs::write(tmp.path().join(&crc_name), [0x00, 0x01, 0x00, 0x00]).expect("write header-only CRC.db");
+    std::fs::write(tmp.path().join(&crc_name), [0x00, 0x01, 0x00, 0x00])
+        .expect("write header-only CRC.db");
 
     let data = tmp.path().join(clean.file_name().unwrap());
     let reader = open_reader(&data).await;

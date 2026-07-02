@@ -11,12 +11,12 @@
 // Submodules
 mod block_io;
 mod cache;
-/// `CRC.db` reader for uncompressed BIG read-time integrity (issue #1396).
-pub(crate) mod crc;
 /// Per-element / per-cell compaction read contract (epic #899, Phase A).
 pub mod compaction_row;
 mod component_loading;
 mod compression;
+/// `CRC.db` reader for uncompressed BIG read-time integrity (issue #1396).
+pub(crate) mod crc;
 mod data_access;
 /// Delta-scan record model (Epic #696, Issue #697).
 /// Only compiled when the `delta-scan` feature is enabled.

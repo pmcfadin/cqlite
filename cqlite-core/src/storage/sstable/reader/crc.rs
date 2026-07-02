@@ -293,7 +293,9 @@ mod tests {
             }
         }
         let Some((crc_path, data_path)) = found else {
-            eprintln!("SKIP: no Cassandra-written uncompressed_table CRC.db+Data.db fixture found.");
+            eprintln!(
+                "SKIP: no Cassandra-written uncompressed_table CRC.db+Data.db fixture found."
+            );
             return;
         };
 
