@@ -239,7 +239,7 @@ fn metadata_scan_merges_generations_with_lww_and_tombstone_suppression() {
     );
 
     // Helper: fetch (value, metadata) for a PK.
-    let row = |id: i32| -> &(Value, HashMap<String, CellWriteMetadata>) {
+    let row = |id: i32| -> &(ScanRow, HashMap<String, CellWriteMetadata>) {
         by_pk.get(&pk(id)).expect("row present")
     };
     let writetime = |meta: &HashMap<String, CellWriteMetadata>, c: &str| -> i64 {
