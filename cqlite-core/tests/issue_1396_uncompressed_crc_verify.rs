@@ -1,0 +1,557 @@
+//! Issue #1396 (Epic #1380): read-time integrity for **uncompressed** BIG (`nb`)
+//! SSTables — verify each Data.db chunk against `CRC.db` on every read, default-on.
+//!
+//! Before this change, `read_uncompressed_data_block` returned raw bytes with no
+//! integrity check: a single-bit flip inside an uncompressed Data.db chunk was
+//! decoded into wrong values and returned silently (compressed tables, by
+//! contrast, get an unconditional inline per-chunk CRC). This suite proves the
+//! gap is closed end-to-end, on the PLAIN public query surface — not a helper
+//! unit test.
+//!
+//! ## Fixture (real Cassandra 5.0.2 bytes, one deterministic bit flip)
+//!
+//! `corruption/test_comp_corrupt/uncompressed_data_bit_flip/nb-1-big-Data.db` — a
+//! single-bit flip (byte offset 70000, `0x62`→`0x63`) inside **chunk 1** (the
+//! 64 KiB block `[65536, 131072)`) of `test_comp/uncompressed_table` (a ~190 KiB /
+//! 3-chunk uncompressed table that ships a real Cassandra-written `CRC.db`). Apache
+//! Cassandra 5.0.2 `sstableverify -e` rejects this exact file ("Corrupted file:
+//! integrity check (digest) failed … → Invalid SSTable"), while the clean source
+//! verifies clean — both captured into `corruption-manifest.yml`
+//! (`uncompressed_data_bit_flip`, `cassandra_verdict: corrupt`).
+//!
+//! ## Fixture-gating (issue #1094 doctrine)
+//!
+//! Skip-clean when the corpus binary is absent; `CQLITE_REQUIRE_FIXTURES=1` turns
+//! that skip into a hard failure. A fixture that is *present but no longer corrupt*
+//! (regeneration rot) FAILS unconditionally — the scan/verify tests assert the
+//! corruption reached the caller, so a clean result on a present fixture fails.
+
+use cqlite_core::storage::sstable::reader::{IntegrityStatus, SSTableReader};
+use cqlite_core::storage::sstable::verify::{verify_sstable, VerifyErrorClass, VerifyMode};
+use cqlite_core::types::TableId;
+use cqlite_core::{Config, Error, Platform};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+/// Relative path of the corrupt uncompressed Data.db under the datasets root.
+const CORRUPT_DATA_DB: &str =
+    "corruption/test_comp_corrupt/uncompressed_data_bit_flip/nb-1-big-Data.db";
+/// Directory of the corrupt fixture (for `verify_sstable`).
+const CORRUPT_DIR: &str = "corruption/test_comp_corrupt/uncompressed_data_bit_flip";
+/// Fully-qualified table the fixture was derived from.
+const TABLE: &str = "test_comp.uncompressed_table";
+
+fn require_fixtures() -> bool {
+    matches!(
+        std::env::var("CQLITE_REQUIRE_FIXTURES").ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE")
+    ) || matches!(
+        std::env::var("CQLITE_PARITY_REQUIRE_DATASETS")
+            .ok()
+            .as_deref(),
+        Some("1") | Some("true") | Some("TRUE")
+    )
+}
+
+/// Datasets root: `CQLITE_DATASETS_ROOT`, else the worktree `test-data/datasets`.
+fn datasets_root() -> Option<PathBuf> {
+    if let Ok(root) = std::env::var("CQLITE_DATASETS_ROOT") {
+        let p = PathBuf::from(root);
+        if p.is_dir() {
+            return Some(p);
+        }
+    }
+    let fallback = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|p| p.join("test-data/datasets"))?;
+    fallback.is_dir().then_some(fallback)
+}
+
+/// The worktree's committed corruption manifest (always carries this branch's
+/// fixture even when `CQLITE_DATASETS_ROOT` points at a shared cache whose
+/// manifest predates it).
+fn worktree_manifest() -> Option<PathBuf> {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|p| {
+            p.join("test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml")
+        })?;
+    p.is_file().then_some(p)
+}
+
+/// Resolve a path under the datasets root, applying the fail-closed gate.
+fn dataset_path_or_gate(rel: &str, what: &str) -> Option<PathBuf> {
+    let path = datasets_root().map(|r| r.join(rel));
+    match path {
+        Some(p) if p.exists() => Some(p),
+        _ => {
+            assert!(
+                !require_fixtures(),
+                "CQLITE_REQUIRE_FIXTURES=1 but {what} is absent: {rel}. Regenerate the corpus \
+                 (test-data/scripts/generate-corruption-corpus.sh)."
+            );
+            eprintln!("SKIP: {what} absent ({rel}); set CQLITE_REQUIRE_FIXTURES=1 to enforce.");
+            None
+        }
+    }
+}
+
+/// Glob the clean `test_comp/uncompressed_table-*/nb-1-big-Data.db` source.
+fn clean_source_data_db() -> Option<PathBuf> {
+    let base = datasets_root()?.join("sstables/test_comp");
+    let rd = std::fs::read_dir(&base).ok()?;
+    for entry in rd.flatten() {
+        let name = entry.file_name();
+        let name = name.to_str()?;
+        if name.starts_with("uncompressed_table-") {
+            let candidate = entry.path().join("nb-1-big-Data.db");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+async fn open_reader(path: &Path) -> SSTableReader {
+    let config = Config::default();
+    let platform = Arc::new(
+        Platform::new(&config)
+            .await
+            .expect("platform init should succeed"),
+    );
+    SSTableReader::open(path, &config, platform)
+        .await
+        .expect("opening the (structurally valid) uncompressed fixture should succeed")
+}
+
+/// Assert an error is the typed, non-recoverable corruption naming the failing
+/// uncompressed chunk index + its Data.db byte offset (issue #1396 R2).
+fn assert_typed_uncompressed_chunk_corruption(err: &Error) {
+    assert!(
+        matches!(err, Error::Corruption(_)),
+        "uncompressed CRC mismatch must be Error::Corruption, got: {err}"
+    );
+    assert!(
+        !err.is_recoverable(),
+        "a bad chunk is non-recoverable, got recoverable: {err}"
+    );
+    let msg = err.to_string();
+    // Flip is in chunk 1; chunk 1 begins at Data.db offset 65536 == 0x10000.
+    assert!(
+        msg.contains("chunk 1"),
+        "corruption error must name the failing chunk ('chunk 1'), got: {msg}"
+    );
+    assert!(
+        msg.to_lowercase().contains("offset") && msg.contains("0x10000"),
+        "corruption error must name the Data.db chunk offset (0x10000), got: {msg}"
+    );
+    assert!(
+        msg.to_uppercase().contains("CRC"),
+        "corruption error should identify the CRC mismatch, got: {msg}"
+    );
+}
+
+/// R2 — the PLAIN public query surface (`SSTableReader::scan`) over the
+/// bit-flipped uncompressed fixture returns `Error::Corruption` naming the chunk
+/// + offset, and yields NO rows first. (This is the wiring-evidence test: a
+/// helper-only unit test is not sufficient.)
+#[tokio::test]
+async fn plain_scan_over_bit_flipped_uncompressed_fixture_fails_fast() {
+    let Some(path) = dataset_path_or_gate(CORRUPT_DATA_DB, "corrupt uncompressed fixture") else {
+        return;
+    };
+    let reader = open_reader(&path).await;
+    let table_id = TableId::new(TABLE.to_string());
+
+    match reader.scan(&table_id, None, None, None, None).await {
+        Ok(rows) => panic!(
+            "FIXTURE ROT or read-path regression: scan over the bit-flipped uncompressed \
+             chunk returned Ok with {} rows; it must return a typed corruption error.",
+            rows.len()
+        ),
+        Err(err) => assert_typed_uncompressed_chunk_corruption(&err),
+    }
+}
+
+/// R2 (roborev Fix 1) — `iterate_all_partitions` (the index/summary-resolved
+/// partition-iteration public path, which reads uncompressed Data.db bytes via
+/// `parse_partition_at_offset`) over the bit-flipped uncompressed fixture returns
+/// the SAME typed corruption error, never corrupt rows. This closes the wiring
+/// gap where that read path bypassed CRC.db verification.
+#[tokio::test]
+async fn iterate_all_partitions_over_bit_flipped_uncompressed_fixture_fails_fast() {
+    let Some(path) = dataset_path_or_gate(CORRUPT_DATA_DB, "corrupt uncompressed fixture") else {
+        return;
+    };
+    let reader = open_reader(&path).await;
+
+    match reader.iterate_all_partitions().await {
+        Ok(rows) => panic!(
+            "FIXTURE ROT or read-path regression: iterate_all_partitions over the bit-flipped \
+             uncompressed chunk returned Ok with {} rows; it must return a typed corruption error.",
+            rows.len()
+        ),
+        Err(err) => assert_typed_uncompressed_chunk_corruption(&err),
+    }
+}
+
+/// R2 (roborev Fix 1, chunk-0 soundness) — a byte flipped inside **chunk 0** of a
+/// real uncompressed fixture is caught by the plain `SSTableReader::scan` path,
+/// naming chunk 0. The clean `uncompressed_table` source is copied to a temp dir,
+/// one Data.db byte inside chunk 0 (`[0, 65536)`) is flipped while its
+/// Cassandra-written `CRC.db` is kept intact, so chunk 0's stored CRC no longer
+/// matches. This proves the first chunk is verified end-to-end (it was previously
+/// skipped when a read began after `actual_header_size`), never silently returned.
+/// Skip-clean when the clean source is absent.
+#[tokio::test]
+async fn plain_scan_over_chunk0_flipped_uncompressed_fixture_fails_fast() {
+    let Some(clean) = clean_source_data_db() else {
+        assert!(
+            !require_fixtures(),
+            "CQLITE_REQUIRE_FIXTURES=1 but the clean uncompressed_table source is absent"
+        );
+        eprintln!("SKIP: clean uncompressed_table source absent.");
+        return;
+    };
+    let src_dir = clean.parent().expect("dir");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut data_name: Option<String> = None;
+    for entry in std::fs::read_dir(src_dir).expect("read src").flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy().to_string();
+        if name_str.ends_with(".db.jsonl") {
+            continue; // drop bulky sidecar
+        }
+        std::fs::copy(entry.path(), tmp.path().join(&name_str)).expect("copy component");
+        if name_str.ends_with("-Data.db") {
+            data_name = Some(name_str);
+        }
+    }
+    let data = tmp
+        .path()
+        .join(data_name.expect("fixture must ship a Data.db"));
+
+    // Flip one byte inside chunk 0 ([0, 65536)) but well past the parsed header
+    // buffer (4096) so open() still succeeds; the mismatch surfaces on scan.
+    let mut bytes = std::fs::read(&data).expect("read Data.db");
+    assert!(
+        bytes.len() > 40_000,
+        "uncompressed_table Data.db should span multiple 64 KiB chunks"
+    );
+    let flip_at = 40_000usize; // inside chunk 0
+    bytes[flip_at] ^= 0xFF;
+    std::fs::write(&data, &bytes).expect("write chunk-0-flipped Data.db");
+
+    let reader = open_reader(&data).await;
+    let table_id = TableId::new(TABLE.to_string());
+    match reader.scan(&table_id, None, None, None, None).await {
+        Ok(rows) => panic!(
+            "read-path regression: scan over a chunk-0-flipped uncompressed Data.db returned Ok \
+             with {} rows; the first chunk must be verified (typed corruption naming chunk 0).",
+            rows.len()
+        ),
+        Err(err) => {
+            assert!(
+                matches!(err, Error::Corruption(_)),
+                "chunk-0 mismatch must be Error::Corruption, got: {err}"
+            );
+            let msg = err.to_string();
+            assert!(
+                msg.contains("chunk 0"),
+                "error must name chunk 0 (proving the first chunk is no longer skipped): {msg}"
+            );
+            assert!(
+                msg.to_uppercase().contains("CRC"),
+                "error should identify the CRC mismatch: {msg}"
+            );
+        }
+    }
+}
+
+/// R2 (roborev Fix 2) — the integrity check (`perform_integrity_check`) over the
+/// corrupt uncompressed fixture reports corruption rather than Healthy. Before
+/// the fix, a non-recoverable `read_next_block` error (the uncompressed CRC
+/// mismatch) was swallowed via `.ok().flatten()` and the file could still be
+/// reported Healthy. It must now surface the CRC error.
+#[tokio::test]
+async fn integrity_check_over_corrupt_uncompressed_fixture_reports_corruption() {
+    let Some(path) = dataset_path_or_gate(CORRUPT_DATA_DB, "corrupt uncompressed fixture") else {
+        return;
+    };
+    let reader = open_reader(&path).await;
+
+    let report = reader
+        .perform_integrity_check()
+        .await
+        .expect("integrity check should run to completion");
+
+    assert_ne!(
+        report.overall_status,
+        IntegrityStatus::Healthy,
+        "integrity check must NOT report Healthy for a bit-flipped uncompressed chunk; \
+         report: {report:?}"
+    );
+    assert_eq!(
+        report.overall_status,
+        IntegrityStatus::Corrupted,
+        "a CRC.db chunk mismatch is a Corrupted verdict; report: {report:?}"
+    );
+    let surfaced = report
+        .parsing_errors
+        .iter()
+        .any(|e| e.to_uppercase().contains("CRC") || e.contains("chunk 1"));
+    assert!(
+        surfaced,
+        "the integrity check must surface the uncompressed CRC chunk error, not swallow it; \
+         parsing_errors: {:?}",
+        report.parsing_errors
+    );
+}
+
+/// R2 — streaming scan surfaces the SAME typed error mid-iteration (terminal
+/// `Err`, not a silent end-of-stream), emitting zero `Ok` rows beforehand for the
+/// corrupt chunk.
+#[tokio::test]
+async fn streaming_scan_over_corrupt_uncompressed_chunk_terminates_with_error() {
+    let Some(path) = dataset_path_or_gate(CORRUPT_DATA_DB, "corrupt uncompressed fixture") else {
+        return;
+    };
+    let reader = Arc::new(open_reader(&path).await);
+    let table_id = TableId::new(TABLE.to_string());
+
+    let mut rx = reader.scan_stream(table_id, None, None, None, 4);
+    let mut terminal_err: Option<Error> = None;
+    while let Some(item) = rx.recv().await {
+        if let Err(e) = item {
+            terminal_err = Some(e);
+            break;
+        }
+    }
+    let err = terminal_err.expect(
+        "streaming scan over the corrupt uncompressed chunk must end with a terminal Err item, \
+         NOT a silent end-of-stream",
+    );
+    assert_typed_uncompressed_chunk_corruption(&err);
+}
+
+/// R2 — the CLEAN uncompressed source verifies and returns rows (verification of
+/// correct data never rejects it; clean-path parity).
+#[tokio::test]
+async fn clean_uncompressed_scan_verifies_and_returns_rows() {
+    let Some(path) = clean_source_data_db() else {
+        assert!(
+            !require_fixtures(),
+            "CQLITE_REQUIRE_FIXTURES=1 but the clean uncompressed_table source is absent"
+        );
+        eprintln!("SKIP: clean uncompressed_table source absent.");
+        return;
+    };
+    let reader = open_reader(&path).await;
+    let table_id = TableId::new(TABLE.to_string());
+    let rows = reader
+        .scan(&table_id, None, None, None, None)
+        .await
+        .expect("clean uncompressed scan with CRC verification on must succeed");
+    assert!(
+        !rows.is_empty(),
+        "clean uncompressed_table must return rows (CRC verification must not drop any)"
+    );
+}
+
+/// R3 — `verify --mode full` reports the checksum-mismatch class naming the chunk
+/// on the corrupt fixture, and reports NONE on the clean source.
+#[tokio::test]
+async fn verify_full_reports_uncompressed_chunk_crc_mismatch() {
+    let Some(dir) = dataset_path_or_gate(CORRUPT_DIR, "corrupt uncompressed fixture dir") else {
+        return;
+    };
+    let config = Config::default();
+    let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+    let report = verify_sstable(&dir, VerifyMode::Full, &config, platform)
+        .await
+        .expect("verify_sstable should run");
+
+    let crc_finding = report
+        .findings
+        .iter()
+        .find(|f| f.class == VerifyErrorClass::UncompressedChunkCrcMismatch)
+        .unwrap_or_else(|| {
+            panic!(
+                "verify --mode full must report UncompressedChunkCrcMismatch on the corrupt \
+                 fixture; findings were: {:?}",
+                report.findings
+            )
+        });
+    assert!(
+        crc_finding.detail.contains("chunk 1"),
+        "finding must name the failing chunk: {}",
+        crc_finding.detail
+    );
+    assert!(
+        crc_finding.component == "Data.db" || crc_finding.component == "CRC.db",
+        "finding must name the Data.db/CRC.db component, got: {}",
+        crc_finding.component
+    );
+}
+
+/// R3 — `verify --mode full` reports NO checksum-mismatch on the clean source.
+#[tokio::test]
+async fn verify_full_clean_uncompressed_has_no_crc_mismatch() {
+    let Some(data) = clean_source_data_db() else {
+        eprintln!("SKIP: clean uncompressed_table source absent.");
+        return;
+    };
+    let dir = data.parent().expect("fixture dir").to_path_buf();
+    let config = Config::default();
+    let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+    let report = verify_sstable(&dir, VerifyMode::Full, &config, platform)
+        .await
+        .expect("verify_sstable should run");
+    assert!(
+        !report
+            .findings
+            .iter()
+            .any(|f| f.class == VerifyErrorClass::UncompressedChunkCrcMismatch),
+        "clean uncompressed source must have no UncompressedChunkCrcMismatch: {:?}",
+        report.findings
+    );
+}
+
+/// R3 — the corpus manifest carries the captured Cassandra `sstableverify` verdict
+/// as the oracle, and CQLite's verify verdict matches it for this class.
+#[tokio::test]
+async fn manifest_carries_cassandra_oracle_and_cqlite_matches() {
+    // The manifest is read from the WORKTREE (this branch's committed copy), which
+    // always carries the fixture even when CQLITE_DATASETS_ROOT is a shared cache.
+    let Some(manifest_path) = worktree_manifest() else {
+        eprintln!("SKIP: worktree corruption manifest not found.");
+        return;
+    };
+    let text = std::fs::read_to_string(&manifest_path).expect("read manifest");
+
+    // Locate the uncompressed_data_bit_flip block and its cassandra_verdict.
+    let block = text
+        .split("\n  - name: ")
+        .find(|b| b.starts_with("uncompressed_data_bit_flip"))
+        .expect("manifest must contain the uncompressed_data_bit_flip fixture");
+    let verdict_line = block
+        .lines()
+        .find(|l| l.trim_start().starts_with("cassandra_verdict:"))
+        .expect("fixture must record a cassandra_verdict");
+    let cassandra_verdict = verdict_line.split(':').nth(1).unwrap().trim();
+    assert_eq!(
+        cassandra_verdict, "corrupt",
+        "captured Cassandra 5.0.2 oracle for this bit flip is 'corrupt'"
+    );
+    assert!(
+        block.contains("expected_error_class: UncompressedChunkCrcMismatch"),
+        "fixture must declare the UncompressedChunkCrcMismatch class"
+    );
+
+    // CQLite's verdict must match the Cassandra oracle (corrupt == corrupt).
+    let Some(dir) = dataset_path_or_gate(CORRUPT_DIR, "corrupt uncompressed fixture dir") else {
+        return;
+    };
+    let config = Config::default();
+    let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+    let report = verify_sstable(&dir, VerifyMode::Full, &config, platform)
+        .await
+        .expect("verify_sstable should run");
+    assert!(
+        !report.is_ok(),
+        "CQLite verify verdict must be 'corrupt' to match the captured Cassandra oracle"
+    );
+}
+
+/// R5 — absent `CRC.db` is the owner-pinned warn-and-proceed decision: a plain
+/// scan over an uncompressed SSTable whose `CRC.db` was removed still returns the
+/// correct rows (unverified), it does NOT hard-fail. Pins the decision so it
+/// cannot drift silently (also recorded in the parity manifest).
+#[tokio::test]
+async fn absent_crc_db_warns_and_proceeds() {
+    let Some(clean) = clean_source_data_db() else {
+        eprintln!("SKIP: clean uncompressed_table source absent.");
+        return;
+    };
+    let src_dir = clean.parent().expect("dir");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // Copy every component EXCEPT CRC.db into a temp dir.
+    for entry in std::fs::read_dir(src_dir).expect("read src").flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.ends_with("-CRC.db") || name_str.ends_with(".db.jsonl") {
+            continue; // drop CRC.db (and bulky sidecar)
+        }
+        std::fs::copy(entry.path(), tmp.path().join(&*name)).expect("copy component");
+    }
+    let data = tmp.path().join(clean.file_name().unwrap());
+    assert!(
+        !tmp.path()
+            .join(
+                data.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace("Data.db", "CRC.db")
+            )
+            .exists(),
+        "CRC.db must be absent in the temp fixture"
+    );
+    let reader = open_reader(&data).await;
+    let table_id = TableId::new(TABLE.to_string());
+    let rows = reader
+        .scan(&table_id, None, None, None, None)
+        .await
+        .expect("absent CRC.db must warn-and-proceed (return rows), not hard-fail");
+    assert!(
+        !rows.is_empty(),
+        "warn-and-proceed must still return the rows (unverified)"
+    );
+}
+
+/// R5 — a truncated `CRC.db` (header only, zero per-chunk entries) surfaces a
+/// typed corruption error on the plain read path for a chunk that needs a CRC
+/// entry — never a panic, never a silently-verified chunk.
+#[tokio::test]
+async fn truncated_crc_db_surfaces_typed_error_on_read() {
+    let Some(clean) = clean_source_data_db() else {
+        eprintln!("SKIP: clean uncompressed_table source absent.");
+        return;
+    };
+    let src_dir = clean.parent().expect("dir");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut crc_name: Option<String> = None;
+    for entry in std::fs::read_dir(src_dir).expect("read src").flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy().to_string();
+        if name_str.ends_with(".db.jsonl") {
+            continue;
+        }
+        if name_str.ends_with("-CRC.db") {
+            crc_name = Some(name_str.clone());
+            continue; // write a truncated copy below
+        }
+        std::fs::copy(entry.path(), tmp.path().join(&name_str)).expect("copy");
+    }
+    // Truncate CRC.db to the 4-byte header only (zero per-chunk CRC entries).
+    let crc_name = crc_name.expect("clean fixture must ship a CRC.db");
+    std::fs::write(tmp.path().join(&crc_name), [0x00, 0x01, 0x00, 0x00])
+        .expect("write header-only CRC.db");
+
+    let data = tmp.path().join(clean.file_name().unwrap());
+    let reader = open_reader(&data).await;
+    let table_id = TableId::new(TABLE.to_string());
+    match reader.scan(&table_id, None, None, None, None).await {
+        Err(Error::Corruption(msg)) => {
+            assert!(
+                msg.to_uppercase().contains("CRC") || msg.contains("truncat"),
+                "truncated CRC.db error should reference CRC.db truncation: {msg}"
+            );
+        }
+        Err(other) => panic!("expected Error::Corruption for a truncated CRC.db, got: {other}"),
+        Ok(rows) => panic!(
+            "a truncated CRC.db (0 entries) must not silently verify chunk 0; got Ok({} rows)",
+            rows.len()
+        ),
+    }
+}

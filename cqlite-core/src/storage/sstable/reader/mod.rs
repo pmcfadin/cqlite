@@ -15,6 +15,8 @@ mod cache;
 pub mod compaction_row;
 mod component_loading;
 mod compression;
+/// `CRC.db` reader for uncompressed BIG read-time integrity (issue #1396).
+pub(crate) mod crc;
 mod data_access;
 /// Delta-scan record model (Epic #696, Issue #697).
 /// Only compiled when the `delta-scan` feature is enabled.
@@ -531,6 +533,15 @@ impl SSTableReader {
         // Load CompressionInfo.db for chunked decompression (if it exists)
         let compression_info = Self::load_compression_info_metadata(path, &platform).await?;
 
+        // Load CRC.db per-chunk checksums for uncompressed BIG read-time integrity
+        // (issue #1396). Only for uncompressed tables (compression_info None);
+        // compressed tables carry inline per-chunk CRCs instead.
+        let crc_reader = if compression_info.is_none() {
+            Self::load_crc_reader(path, &header, file_size).await?
+        } else {
+            None
+        };
+
         // Pre-validate component architecture for better error handling
         let components = Self::detect_component_files(path).await?;
         if !components.is_empty() {
@@ -684,6 +695,8 @@ impl SSTableReader {
             schema,
             udt_registry: None, // Will be set when available for UDT-aware parsing
             compression_info: compression_info.map(Arc::new),
+            crc_reader,
+            verified_uncompressed_chunks: std::sync::Mutex::new(std::collections::HashSet::new()),
             version_gates,
             bti_partitions_db,
             bti_rows_db,
@@ -891,6 +904,67 @@ impl SSTableReader {
         }
 
         Ok(None)
+    }
+
+    /// Load the `CRC.db` per-chunk checksum sidecar for read-time integrity of
+    /// **uncompressed** BIG SSTables (issue #1396).
+    ///
+    /// Called only when `compression_info` is `None` (compressed tables carry
+    /// inline per-chunk CRCs and no `CRC.db`). Returns:
+    /// - `Some(crc)` for an uncompressed BIG SSTable that ships a `CRC.db`
+    ///   (Cassandra writes one for every uncompressed BIG table) — verification is
+    ///   then default-on for every uncompressed chunk read.
+    /// - `None` for BTI (`da`) tables (Cassandra emits no `CRC.db`) or an
+    ///   uncompressed BIG table whose `CRC.db` is absent. The absent case is the
+    ///   owner-pinned **warn-and-proceed** decision (design D4): a `log::warn!` is
+    ///   emitted so the missing integrity component is visible, and the read
+    ///   proceeds unverified rather than hard-failing.
+    ///
+    /// A present-but-malformed `CRC.db` is a hard [`Error`] at open time (never a
+    /// silent fall-through to unverified reads), mirroring the CompressionInfo.db
+    /// fail-fast posture (#1001).
+    async fn load_crc_reader(
+        path: &Path,
+        header: &SSTableHeader,
+        data_len: u64,
+    ) -> Result<Option<Arc<crc::CrcDb>>> {
+        // BTI (`da`) never ships a CRC.db; nothing to load.
+        if matches!(header.cassandra_version, CassandraVersion::V5_0Bti) {
+            return Ok(None);
+        }
+
+        let parent_dir = path.parent().unwrap_or(Path::new("."));
+        let Some(base) = compression::extract_sstable_base_name(path) else {
+            return Ok(None);
+        };
+        let crc_path = parent_dir.join(format!("{}-CRC.db", base));
+        if !crc_path.exists() {
+            // Absent CRC.db on an uncompressed BIG SSTable: warn-and-proceed
+            // (owner-pinned, design D4). Cassandra 5.0 writes a CRC.db for every
+            // uncompressed BIG SSTable, so its absence is notable but not fatal —
+            // reads proceed unverified rather than hard-failing.
+            log::warn!(
+                "CRC.db absent for uncompressed SSTable {} — proceeding without \
+                 read-time per-chunk CRC verification (warn-and-proceed, issue #1396)",
+                path.display()
+            );
+            return Ok(None);
+        }
+
+        let crc = crc::CrcDb::open(&crc_path, data_len).await.map_err(|e| {
+            Error::corruption(format!(
+                "Failed to parse CRC.db at {}: {}",
+                crc_path.display(),
+                e
+            ))
+        })?;
+        log::debug!(
+            "Loaded CRC.db for {}: chunk_size={}, chunks={}",
+            path.display(),
+            crc.chunk_size(),
+            crc.chunk_count()
+        );
+        Ok(Some(Arc::new(crc)))
     }
 
     /// Set the schema registry for schema-driven operations

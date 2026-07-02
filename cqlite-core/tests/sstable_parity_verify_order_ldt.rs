@@ -142,6 +142,32 @@ fn build_fixture(src: &Path, dst: &Path, mutate: impl FnOnce(&mut [u8])) {
     let crc = crc32fast::hash(&data);
     std::fs::write(dst.join("nb-1-big-Digest.crc32"), crc.to_string())
         .expect("write recomputed digest");
+
+    // Recompute CRC.db over the mutated Data.db too (issue #1396). An uncompressed
+    // BIG SSTable ships a per-chunk CRC.db that CQLite now verifies on every read
+    // AND in `verify --mode full`. If we left the source CRC.db (which matches the
+    // CLEAN bytes) in place, the mutation would trip UncompressedChunkCrcMismatch
+    // and MASK the class under test (out-of-order key / negative LDT) — the exact
+    // masking this helper already guards against for Digest.crc32. Rewrite CRC.db
+    // in Cassandra's ChecksumWriter layout (4-byte BE i32 chunk-size header + one
+    // BE u32 CRC32 per 64 KiB chunk, flush-path = no trailing entry) so the
+    // corruption stays isolated to the target class.
+    const CRC_CHUNK_SIZE: usize = 64 * 1024;
+    let crc_name = std::fs::read_dir(dst)
+        .expect("read dst")
+        .flatten()
+        .find_map(|e| {
+            let n = e.file_name().to_string_lossy().to_string();
+            n.ends_with("-CRC.db").then_some(n)
+        });
+    if let Some(crc_name) = crc_name {
+        let mut crc_bytes = Vec::with_capacity(4 + 4 * data.len().div_ceil(CRC_CHUNK_SIZE));
+        crc_bytes.extend_from_slice(&(CRC_CHUNK_SIZE as i32).to_be_bytes());
+        for chunk in data.chunks(CRC_CHUNK_SIZE) {
+            crc_bytes.extend_from_slice(&crc32fast::hash(chunk).to_be_bytes());
+        }
+        std::fs::write(dst.join(&crc_name), crc_bytes).expect("write recomputed CRC.db");
+    }
 }
 
 async fn verify_full(dir: &Path) -> cqlite_core::storage::sstable::verify::VerifyReport {
