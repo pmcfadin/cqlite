@@ -647,16 +647,18 @@ mod tests {
     #[test]
     fn test_parse_list_of_ints() {
         // List with 2 elements: [1, 2]
-        // Format: element_count (VInt) + (element_length (VInt) + element_bytes)*
-        // Note: VInt uses zigzag encoding, so value 4 is encoded as 8 (0x08)
+        // Format: element_count (unsigned VInt) + (element_length (unsigned VInt)
+        // + element_bytes)*
+        // Issue #1623: Cassandra writes counts/lengths with writeUnsignedVInt, so
+        // small values are their own byte (count 2 = 0x02, length 4 = 0x04).
         let mut data = vec![
-            0x04, // count = 2 (zigzag_encode(2) = 4)
+            0x02, // count = 2 (unsigned VInt)
         ];
         // Element 1: length=4, value=0x00000001 (1 as big-endian i32)
-        data.push(0x08); // length (zigzag_encode(4) = 8)
+        data.push(0x04); // length = 4 (unsigned VInt)
         data.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]); // value
                                                            // Element 2: length=4, value=0x00000002 (2 as big-endian i32)
-        data.push(0x08); // length (zigzag_encode(4) = 8)
+        data.push(0x04); // length = 4 (unsigned VInt)
         data.extend_from_slice(&[0x00, 0x00, 0x00, 0x02]); // value
 
         let comparator = ComparatorType::List(Box::new(ComparatorType::Int));

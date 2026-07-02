@@ -444,7 +444,7 @@ pub(crate) fn parse_key_with_schema_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::vint::encode_vint;
+    use crate::parser::vint::encode_vuint;
     use crate::schema::KeyColumn;
     use std::collections::HashMap;
 
@@ -495,11 +495,11 @@ mod tests {
         let mut key = Vec::new();
 
         // Encode component count
-        key.extend_from_slice(&encode_vint(components.len() as i64));
+        key.extend_from_slice(&encode_vuint(components.len() as u64));
 
         // Encode each component with its length
         for component in components {
-            key.extend_from_slice(&encode_vint(component.len() as i64));
+            key.extend_from_slice(&encode_vuint(component.len() as u64));
             key.extend_from_slice(component);
         }
 
@@ -560,10 +560,10 @@ mod tests {
 
         let mut key_data = Vec::new();
         // Add UUID component with VInt length
-        key_data.extend_from_slice(&encode_vint(uuid_bytes.len() as i64));
+        key_data.extend_from_slice(&encode_vuint(uuid_bytes.len() as u64));
         key_data.extend_from_slice(&uuid_bytes);
         // Add Int component with VInt length
-        key_data.extend_from_slice(&encode_vint(int_bytes.len() as i64));
+        key_data.extend_from_slice(&encode_vuint(int_bytes.len() as u64));
         key_data.extend_from_slice(&int_bytes);
 
         let schema = create_composite_key_schema(&["uuid", "int"]);
@@ -585,9 +585,9 @@ mod tests {
         let bigint_bytes = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x23];
 
         let mut key_data = Vec::new();
-        key_data.extend_from_slice(&encode_vint(text_bytes.len() as i64));
+        key_data.extend_from_slice(&encode_vuint(text_bytes.len() as u64));
         key_data.extend_from_slice(text_bytes);
-        key_data.extend_from_slice(&encode_vint(bigint_bytes.len() as i64));
+        key_data.extend_from_slice(&encode_vuint(bigint_bytes.len() as u64));
         key_data.extend_from_slice(&bigint_bytes);
 
         let schema = create_composite_key_schema(&["text", "bigint"]);
@@ -746,7 +746,7 @@ mod tests {
     fn test_parse_composite_key_too_large() {
         // Create a key with 300 components (>256 limit)
         let mut key_data = Vec::new();
-        key_data.extend_from_slice(&encode_vint(300));
+        key_data.extend_from_slice(&encode_vuint(300));
 
         let result = parse_composite_key_v5_format_impl(&key_data);
         assert!(result.is_err());
@@ -787,9 +787,9 @@ mod tests {
     #[test]
     fn test_parse_composite_key_v5_format_zero_components() {
         // Build proper v5 format with zero components
-        // encode_vint(0) = [0x00] (1 byte), but we need at least 2 bytes
+        // encode_vuint(0) = [0x00] (1 byte), but we need at least 2 bytes
         // So let's add a dummy byte to pass length check
-        let mut key_data = encode_vint(0); // Zero components
+        let mut key_data = encode_vuint(0); // Zero components
         key_data.push(0x00); // Add extra byte to pass length check
 
         let result = parse_composite_key_v5_format_impl(&key_data);
@@ -837,8 +837,8 @@ mod tests {
     #[test]
     fn test_parse_composite_key_v5_format_component_length_overflow() {
         let mut key_data = Vec::new();
-        key_data.extend_from_slice(&encode_vint(1)); // 1 component
-        key_data.extend_from_slice(&encode_vint(1000)); // Component length > remaining data
+        key_data.extend_from_slice(&encode_vuint(1)); // 1 component
+        key_data.extend_from_slice(&encode_vuint(1000)); // Component length > remaining data
         key_data.extend_from_slice(b"short"); // Only 5 bytes
 
         let result = parse_composite_key_v5_format_impl(&key_data);

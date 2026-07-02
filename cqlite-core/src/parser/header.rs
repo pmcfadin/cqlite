@@ -3,7 +3,13 @@
 //! This module handles parsing of SSTable headers which contain metadata
 //! about the table structure, compression, and other essential information.
 
-use super::vint::{parse_vint, parse_vint_length};
+// Issue #1623: this module's `parse_*` standard body reads a CQLite-INTERNAL
+// header format produced by `serialize_sstable_header`, whose length prefixes
+// are written with the ZigZag encoder `encode_vint`. It is short-circuited for
+// real Cassandra V5 data via `parse_cassandra5_simplified_header`. These sites
+// therefore use `parse_vint_length_signed` (ZigZag) to preserve that
+// self-consistent round-trip — NOT the unsigned `parse_vint_length`.
+use super::vint::{parse_vint, parse_vint_length_signed};
 use crate::error::Result;
 use nom::{
     bytes::complete::take,
@@ -533,7 +539,7 @@ pub fn parse_magic_and_version_legacy(input: &[u8]) -> IResult<&[u8], u16> {
 
 /// Parse a length-prefixed string using VInt encoding
 pub fn parse_vstring(input: &[u8]) -> IResult<&[u8], String> {
-    let (input, length) = parse_vint_length(input)?;
+    let (input, length) = parse_vint_length_signed(input)?;
     let (input, bytes) = take(length)(input)?;
     let string = String::from_utf8(bytes.to_vec()).map_err(|_| {
         nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
@@ -545,7 +551,7 @@ pub fn parse_vstring(input: &[u8]) -> IResult<&[u8], String> {
 pub fn parse_compression_info(input: &[u8]) -> IResult<&[u8], CompressionInfo> {
     let (input, algorithm) = parse_vstring(input)?;
     let (input, chunk_size) = be_u32(input)?;
-    let (input, param_count) = parse_vint_length(input)?;
+    let (input, param_count) = parse_vint_length_signed(input)?;
 
     let mut parameters = HashMap::new();
     let mut remaining = input;
@@ -576,7 +582,7 @@ pub fn parse_sstable_stats(input: &[u8]) -> IResult<&[u8], SSTableStats> {
     let (input, compression_ratio_bits) = be_u64(input)?;
     let compression_ratio = f64::from_bits(compression_ratio_bits);
 
-    let (input, histogram_size) = parse_vint_length(input)?;
+    let (input, histogram_size) = parse_vint_length_signed(input)?;
     let (input, row_size_histogram) = count(be_u64, histogram_size)(input)?;
 
     Ok((
@@ -667,10 +673,10 @@ pub fn parse_sstable_header(input: &[u8]) -> IResult<&[u8], SSTableHeader> {
     let (input, compression) = parse_compression_info(input)?;
     let (input, stats) = parse_sstable_stats(input)?;
 
-    let (input, column_count) = parse_vint_length(input)?;
+    let (input, column_count) = parse_vint_length_signed(input)?;
     let (input, columns) = count(parse_column_info, column_count)(input)?;
 
-    let (input, prop_count) = parse_vint_length(input)?;
+    let (input, prop_count) = parse_vint_length_signed(input)?;
     let mut properties = HashMap::new();
     let mut remaining = input;
 

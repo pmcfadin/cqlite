@@ -111,7 +111,10 @@ async fn corpus_differential_unsigned_length_decode() {
             "CQLITE_REQUIRE_FIXTURES=1 but {}/sstables is absent",
             root.display()
         );
-        eprintln!("SKIP: {}/sstables absent; corpus-differential test skipped.", root.display());
+        eprintln!(
+            "SKIP: {}/sstables absent; corpus-differential test skipped.",
+            root.display()
+        );
         return;
     }
 

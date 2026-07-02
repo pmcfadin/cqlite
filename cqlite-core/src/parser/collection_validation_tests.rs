@@ -264,7 +264,11 @@ mod cassandra_format_tests {
             content
         };
 
-        sstable_data.extend_from_slice(&encode_vint(collection_content.len() as i64));
+        // Issue #1623: the outer SSTable cell value length is a real Cassandra
+        // unsigned length (read below via the unsigned `parse_vint_length`), so
+        // encode it unsigned. The inner collection body is the legacy
+        // `parse_list` format (signed), so its count/lengths stay `encode_vint`.
+        sstable_data.extend_from_slice(&super::vint::encode_vuint(collection_content.len() as u64));
         sstable_data.extend_from_slice(&collection_content);
 
         // Parse as if reading from SSTable

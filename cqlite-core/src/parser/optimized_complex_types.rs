@@ -8,7 +8,9 @@
 //! - Latency: <10ms additional latency for complex type queries
 
 use super::types::{parse_cql_value, CqlTypeId};
-use super::vint::{parse_vint, parse_vint_length};
+// Issue #1623: mirrors the legacy type parsers (CQLite-internal ZigZag pair),
+// so length/count reads use the signed helper.
+use super::vint::{parse_vint, parse_vint_length_signed};
 use crate::types::Value;
 use nom::{bytes::complete::take, combinator::map_res, number::complete::be_u8, IResult};
 use std::collections::HashMap;
@@ -67,7 +69,7 @@ impl OptimizedComplexTypeParser {
     pub fn parse_optimized_list<'a>(&'a self, input: &'a [u8]) -> IResult<&'a [u8], Value> {
         let start_time = std::time::Instant::now();
 
-        let (input, count) = parse_vint_length(input)?;
+        let (input, count) = parse_vint_length_signed(input)?;
         let (input, element_type) = map_res(be_u8, CqlTypeId::try_from)(input)?;
 
         if count == 0 {
@@ -305,7 +307,7 @@ impl OptimizedComplexTypeParser {
     pub fn parse_optimized_map<'a>(&self, input: &'a [u8]) -> IResult<&'a [u8], Value> {
         let start_time = std::time::Instant::now();
 
-        let (input, count) = parse_vint_length(input)?;
+        let (input, count) = parse_vint_length_signed(input)?;
         let (input, key_type) = map_res(be_u8, CqlTypeId::try_from)(input)?;
         let (input, value_type) = map_res(be_u8, CqlTypeId::try_from)(input)?;
 
@@ -366,20 +368,20 @@ impl OptimizedComplexTypeParser {
     pub fn parse_optimized_udt<'a>(&self, input: &'a [u8]) -> IResult<&'a [u8], Value> {
         let start_time = std::time::Instant::now();
 
-        let (input, type_name_len) = parse_vint_length(input)?;
+        let (input, type_name_len) = parse_vint_length_signed(input)?;
         let (input, type_name_bytes) = take(type_name_len)(input)?;
         let type_name = String::from_utf8(type_name_bytes.to_vec()).map_err(|_| {
             nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
         })?;
 
-        let (input, field_count) = parse_vint_length(input)?;
+        let (input, field_count) = parse_vint_length_signed(input)?;
 
         // Use HashMap with pre-allocated capacity for better performance
         let mut fields = HashMap::with_capacity(field_count);
         let mut remaining_input = input;
 
         for _ in 0..field_count {
-            let (new_input, field_name_len) = parse_vint_length(remaining_input)?;
+            let (new_input, field_name_len) = parse_vint_length_signed(remaining_input)?;
             let (new_input, field_name_bytes) = take(field_name_len)(new_input)?;
             let field_name = String::from_utf8(field_name_bytes.to_vec()).map_err(|_| {
                 nom::Err::Error(nom::error::Error::new(
@@ -435,7 +437,7 @@ impl OptimizedComplexTypeParser {
 
     /// Parse a tuple with memory-efficient layout
     pub fn parse_optimized_tuple<'a>(&self, input: &'a [u8]) -> IResult<&'a [u8], Value> {
-        let (input, element_count) = parse_vint_length(input)?;
+        let (input, element_count) = parse_vint_length_signed(input)?;
 
         let mut elements = Vec::with_capacity(element_count);
         let mut remaining_input = input;

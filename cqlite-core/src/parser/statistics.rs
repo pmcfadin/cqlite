@@ -4,7 +4,10 @@
 //! detailed metadata about SSTable contents including row counts, min/max timestamps,
 //! column statistics, and other metadata for efficient query planning.
 
-use super::vint::{parse_vint, parse_vint_length};
+// Issue #1623: this legacy Statistics.db parser is superseded on the prod path
+// by enhanced_statistics_parser; its self-tests use CQLite's ZigZag encoder, so
+// keep the signed length helper here (no real-data impact).
+use super::vint::{parse_vint, parse_vint_length_signed};
 use crate::error::{Error, Result};
 use nom::{
     bytes::complete::take,
@@ -432,11 +435,11 @@ pub fn parse_column_statistics(
 
 /// Parse statistics for a single column
 pub fn parse_single_column_statistics(input: &[u8]) -> IResult<&[u8], ColumnStatistics> {
-    let (input, name_len) = parse_vint_length(input)?;
+    let (input, name_len) = parse_vint_length_signed(input)?;
     let (input, name_bytes) = take(name_len)(input)?;
     let name = String::from_utf8_lossy(name_bytes).to_string();
 
-    let (input, type_len) = parse_vint_length(input)?;
+    let (input, type_len) = parse_vint_length_signed(input)?;
     let (input, type_bytes) = take(type_len)(input)?;
     let column_type = String::from_utf8_lossy(type_bytes).to_string();
 
@@ -445,9 +448,9 @@ pub fn parse_single_column_statistics(input: &[u8]) -> IResult<&[u8], ColumnStat
 
     let (input, has_min_max) = be_u8(input)?;
     let (input, min_value, max_value) = if has_min_max != 0 {
-        let (input, min_len) = parse_vint_length(input)?;
+        let (input, min_len) = parse_vint_length_signed(input)?;
         let (input, min_bytes) = take(min_len)(input)?;
-        let (input, max_len) = parse_vint_length(input)?;
+        let (input, max_len) = parse_vint_length_signed(input)?;
         let (input, max_bytes) = take(max_len)(input)?;
         (input, Some(min_bytes.to_vec()), Some(max_bytes.to_vec()))
     } else {
@@ -531,7 +534,7 @@ pub fn parse_partition_statistics(input: &[u8]) -> IResult<&[u8], PartitionStati
 
 /// Parse compression performance statistics
 pub fn parse_compression_statistics(input: &[u8]) -> IResult<&[u8], CompressionStatistics> {
-    let (input, algorithm_len) = parse_vint_length(input)?;
+    let (input, algorithm_len) = parse_vint_length_signed(input)?;
     let (input, algorithm_bytes) = take(algorithm_len)(input)?;
     let algorithm = String::from_utf8_lossy(algorithm_bytes).to_string();
 
@@ -563,11 +566,11 @@ pub fn parse_metadata_section(input: &[u8]) -> IResult<&[u8], HashMap<String, St
 
     let mut remaining = input;
     for _ in 0..metadata_count {
-        let (next, key_len) = parse_vint_length(remaining)?;
+        let (next, key_len) = parse_vint_length_signed(remaining)?;
         let (next, key_bytes) = take(key_len)(next)?;
         let key = String::from_utf8_lossy(key_bytes).to_string();
 
-        let (next, value_len) = parse_vint_length(next)?;
+        let (next, value_len) = parse_vint_length_signed(next)?;
         let (next, value_bytes) = take(value_len)(next)?;
         let value = String::from_utf8_lossy(value_bytes).to_string();
 
@@ -616,7 +619,7 @@ pub fn parse_partition_size_bucket(input: &[u8]) -> IResult<&[u8], PartitionSize
 
 /// Parse a value frequency entry
 pub fn parse_value_frequency(input: &[u8]) -> IResult<&[u8], ValueFrequency> {
-    let (input, value_len) = parse_vint_length(input)?;
+    let (input, value_len) = parse_vint_length_signed(input)?;
     let (input, value_bytes) = take(value_len)(input)?;
     let (input, frequency) = parse_vint_as_u64(input)?;
     let (input, percentage) = be_f64(input)?;
