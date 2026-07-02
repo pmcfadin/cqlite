@@ -655,29 +655,45 @@ impl WriteAheadLog {
         })
     }
 
-    /// Scan the WAL and return the byte offset at the end of the last CRC-valid
-    /// entry — the boundary at which future appends must resume.
+    /// Scan the WAL and return the byte offset at the end of the last
+    /// structurally-COMPLETE entry — the boundary past which only a torn
+    /// (partially written) tail remains and at which future appends must resume.
     ///
     /// Reads entries sequentially using the same length-prefixed + CRC32 framing
-    /// as [`replay`](Self::replay). Scanning stops (the valid prefix ends) at the
-    /// first entry that is:
+    /// as [`replay`](Self::replay). This trims ONLY a torn tail, i.e. it stops
+    /// (the recoverable prefix ends) at the first record that is
+    /// structurally-INCOMPLETE at the physical tail:
     /// - missing/short in its 8-byte header (torn header),
-    /// - declaring an implausible length (> [`MAX_ENTRY_LENGTH`], garbage tail),
-    /// - short in its payload (torn body), or
-    /// - CRC-invalid (corrupt framing — offsets past it cannot be trusted).
+    /// - declaring an implausible length (> [`MAX_ENTRY_LENGTH`]): the framing is
+    ///   garbage and cannot be trusted to locate the next entry, or
+    /// - short in its payload (fewer bytes than the declared length remain — a
+    ///   torn body).
+    ///
+    /// Crucially, a structurally-COMPLETE entry (full declared payload present)
+    /// advances the prefix REGARDLESS of CRC validity. A complete-but-CRC-corrupt
+    /// entry that still has further entries after it is NOT a torn tail (issue
+    /// #1390 is scoped to torn tails only); truncating at it would permanently
+    /// lose the acknowledged entries that follow. [`replay`](Self::replay)
+    /// already skips a CRC-corrupt entry and continues past it, so leaving such
+    /// an entry in place is correct. (Surfacing that mid-stream loss to callers
+    /// is issue #1391, out of scope here.)
     ///
     /// The returned offset is therefore the end of a contiguous run of fully
-    /// written, CRC-valid entries. Bytes beyond it are a partial/corrupt tail
-    /// left by an interrupted append and must not be retained ahead of new
-    /// appends.
+    /// written entries. Only the bytes beyond it — a partial record left by an
+    /// interrupted append — are trimmed ahead of new appends.
     fn scan_last_valid_offset(path: &Path) -> Result<u64> {
         let mut file = File::open(path)
             .map_err(|e| Error::Storage(format!("Failed to open WAL for scan: {}", e)))?;
+        let file_len = file
+            .metadata()
+            .map_err(|e| Error::Storage(format!("Failed to read WAL metadata for scan: {}", e)))?
+            .len();
 
         let mut offset = 0u64;
 
         loop {
-            // Read entry header: [length][crc32].
+            // Read entry header: [length][crc32]. A short/absent header means the
+            // tail was cut mid-header — the recoverable prefix ends here.
             let mut header = [0u8; 8];
             match file.read_exact(&mut header) {
                 Ok(_) => {}
@@ -691,35 +707,39 @@ impl WriteAheadLog {
             }
 
             let entry_length = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
-            let expected_crc = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
 
-            // Implausible length => torn/garbage tail.
+            // An implausible declared length means the framing at this point is
+            // garbage (a torn/partial header write). We cannot trust it to locate
+            // the next entry, so the recoverable prefix ends here.
             if entry_length > MAX_ENTRY_LENGTH {
                 break;
             }
 
-            // Read the declared payload; a short read means a torn body.
-            let mut payload = vec![0u8; entry_length as usize];
-            match file.read_exact(&mut payload) {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => {
-                    return Err(Error::Storage(format!(
-                        "Failed to scan WAL payload at offset {}: {}",
-                        offset, e
-                    )));
-                }
-            }
-
-            // Verify CRC: a mismatch means the framing (including the length we
-            // just trusted) is unreliable, so the valid prefix ends here.
-            let mut hasher = Hasher::new();
-            hasher.update(&payload);
-            if hasher.finalize() != expected_crc {
+            // A payload shorter than the declared length is a torn body: the tail
+            // was cut mid-entry. (Header read above already advanced the cursor by
+            // 8, so `offset + 8` is the payload start.)
+            let payload_end = offset
+                .saturating_add(8)
+                .saturating_add(u64::from(entry_length));
+            if payload_end > file_len {
                 break;
             }
 
-            offset += 8 + entry_length as u64;
+            // Skip the payload WITHOUT inspecting its CRC. A structurally-complete
+            // entry advances the recoverable prefix regardless of CRC validity: a
+            // complete-but-CRC-corrupt entry with further entries after it is not a
+            // torn tail, and `replay` skips it and continues. Only a
+            // structurally-incomplete record at the physical tail (handled by the
+            // breaks above) ends the prefix.
+            file.seek(SeekFrom::Current(i64::from(entry_length)))
+                .map_err(|e| {
+                    Error::Storage(format!(
+                        "Failed to advance past WAL payload at offset {}: {}",
+                        offset, e
+                    ))
+                })?;
+
+            offset = payload_end;
         }
 
         Ok(offset)
@@ -1939,6 +1959,83 @@ mod tests {
         }
         let wal = WriteAheadLog::open_existing(&path).unwrap();
         assert_eq!(wal.replay().unwrap().len(), 3);
+    }
+
+    /// Regression (#1390 roborev finding): a COMPLETE but CRC-corrupt entry in
+    /// the MIDDLE of the log is NOT a torn tail. `open_existing` must trim only a
+    /// structurally-incomplete tail, so it must NOT truncate at a mid-stream
+    /// CRC-corrupt entry — the acknowledged entries after it must survive.
+    ///
+    /// WAL = [valid A][complete CRC-corrupt B][valid C]: the file length is
+    /// preserved through C (no truncation), and `replay` surfaces A and C (B
+    /// skipped on CRC), so C is never lost. Before the fix, `scan_last_valid_offset`
+    /// stopped at B's CRC mismatch and `open_existing` truncated back to the end
+    /// of A, permanently discarding the acknowledged C.
+    #[test]
+    fn test_wal_open_existing_preserves_entries_after_midstream_crc_corruption() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // [A][B][C], all synced. Capture the end-of-A offset (start of B's frame)
+        // and the total size.
+        let (path, end_of_a, total) = {
+            let mut wal = WriteAheadLog::create(temp_dir.path()).unwrap();
+            wal.append(&create_test_mutation(1, "Alice")).unwrap();
+            wal.sync().unwrap();
+            let end_of_a = wal.size();
+            wal.append(&create_test_mutation(2, "Bob")).unwrap();
+            wal.sync().unwrap();
+            wal.append(&create_test_mutation(3, "Carol")).unwrap();
+            wal.sync().unwrap();
+            let total = wal.size();
+            let path = wal.path().to_path_buf();
+            drop(wal);
+            (path, end_of_a, total)
+        };
+
+        // Corrupt B's CRC (the 4 bytes at end_of_a+4) with a guaranteed-different
+        // value via a bit flip. B stays structurally complete (header + full
+        // payload intact); only its checksum is wrong.
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.seek(SeekFrom::Start(end_of_a + 4)).unwrap();
+        let mut crc = [0u8; 4];
+        file.read_exact(&mut crc).unwrap();
+        crc[0] ^= 0xFF;
+        file.seek(SeekFrom::Start(end_of_a + 4)).unwrap();
+        file.write_all(&crc).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        // open_existing must NOT truncate: B is complete and has bytes (C) after
+        // it, so it is not a torn tail.
+        let wal = WriteAheadLog::open_existing(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            total,
+            "a mid-stream CRC-corrupt (but structurally complete) entry must NOT be trimmed"
+        );
+        assert_eq!(wal.size(), total);
+
+        // replay skips B (CRC mismatch) and still surfaces A and C — C survives.
+        let mutations = wal.replay().unwrap();
+        let names: Vec<&str> = mutations
+            .iter()
+            .map(|m| match &m.operations[0] {
+                CellOperation::Write {
+                    value: Value::Text(name),
+                    ..
+                } => name.as_str(),
+                other => panic!("expected Write op, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Alice", "Carol"],
+            "B is skipped on CRC; the acknowledged C after it must be preserved, not lost"
+        );
     }
 
     #[test]
