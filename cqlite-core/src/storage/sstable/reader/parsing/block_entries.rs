@@ -27,6 +27,30 @@ fn live_cell_scan_row(column_name: &str, value: &Value) -> ScanRow {
     ScanRow::classify_cell(column_name, value.clone())
 }
 
+/// Classify the WHOLE-ROW raw value that the legacy `parse_block_entries*`
+/// fallback decodes (issue #1334 / roborev round 8 finding 1).
+///
+/// The prior fix decoded the value via `parse_column_value_enhanced` and then
+/// DISCARDED it, always emitting `ScanRow::RawRow` — so a schema-decoded typed
+/// value silently degraded to the synthetic `"data"` blob. The authoritative
+/// rule (no heuristic):
+///
+/// - A column name resolves from the key context (`extract_column_name_from_context`,
+///   the same resolution `parse_column_value_enhanced` used to schema-decode) →
+///   surface the DECODED value as a typed live cell via [`ScanRow::classify_cell`]
+///   (a genuine `Value::Null`/tombstone stays a suppressed marker). The decoded
+///   value is NEVER dropped.
+/// - No column name resolves → the bytes remain effectively UNDECODED (blob
+///   fallback / decode not possible); carry them with explicit RAW provenance
+///   ([`ScanRow::RawRow`]) so a schema-aware consumer re-decodes and a no-schema
+///   consumer surfaces the exact pre-#1334 `"data"` blob.
+fn fallback_value_scan_row(column_name: Option<&str>, decoded: Value, raw_bytes: &[u8]) -> ScanRow {
+    match column_name {
+        Some(name) => ScanRow::classify_cell(name, decoded),
+        None => ScanRow::RawRow(raw_bytes.to_vec()),
+    }
+}
+
 impl SSTableReader {
     /// Parse block entries with optional schema parameter
     ///
@@ -318,13 +342,17 @@ impl SSTableReader {
                 let value_data = &data[offset..offset + value_len];
                 // Enforce the modern-format contract: V5 without schema must NOT
                 // fall back to a raw blob (`parse_column_value_enhanced` errors and
-                // we propagate). This legacy path carries the WHOLE row's raw value
-                // bytes; hand them downstream with explicit RAW provenance
-                // (issue #1334) so a schema-aware consumer schema-decodes them
-                // (pre-#1334 point-lookup behavior) and a no-schema consumer
-                // surfaces a single "data" blob — no downstream shape-guessing.
-                self.parse_column_value_enhanced(value_data, &table_id, &key, schema)?;
-                ScanRow::RawRow(value_data.to_vec())
+                // we propagate). When a schema DOES decode a typed value AND a
+                // column name resolves from the key context, surface that decoded
+                // value as a typed live cell (issue #1334 / roborev round 8 finding
+                // 1 — never drop it). Only when no column name resolves do we hand
+                // the raw bytes downstream with explicit RAW provenance so a
+                // schema-aware consumer re-decodes and a no-schema consumer surfaces
+                // a single "data" blob — no downstream shape-guessing.
+                let decoded =
+                    self.parse_column_value_enhanced(value_data, &table_id, &key, schema)?;
+                let column_name = self.extract_column_name_from_context(&table_id, &key);
+                fallback_value_scan_row(column_name.as_deref(), decoded, value_data)
             };
             offset += value_len;
 
@@ -667,12 +695,17 @@ impl SSTableReader {
             } else {
                 let value_data = &data[offset..offset + value_len];
                 // Enforce the modern-format contract (V5 without schema errors and
-                // we propagate). This legacy path carries the WHOLE row's raw value
-                // bytes; hand them downstream with explicit RAW provenance
-                // (issue #1334) so a schema-aware consumer schema-decodes them and a
-                // no-schema consumer surfaces a single "data" blob — no shape guess.
-                self.parse_column_value_enhanced(value_data, &table_id, &key, schema)?;
-                ScanRow::RawRow(value_data.to_vec())
+                // we propagate). When a schema DOES decode a typed value AND a
+                // column name resolves from the key context, surface that decoded
+                // value as a typed live cell (issue #1334 / roborev round 8 finding
+                // 1 — never drop it). Only when no column name resolves do we hand
+                // the raw bytes downstream with explicit RAW provenance so a
+                // schema-aware consumer re-decodes and a no-schema consumer surfaces
+                // a single "data" blob — no shape guess.
+                let decoded =
+                    self.parse_column_value_enhanced(value_data, &table_id, &key, schema)?;
+                let column_name = self.extract_column_name_from_context(&table_id, &key);
+                fallback_value_scan_row(column_name.as_deref(), decoded, value_data)
             };
             offset += value_len;
 
@@ -1111,6 +1144,68 @@ mod tests {
             }
             ScanRow::Marker(_) => panic!("a real value must be a live Row, not a marker"),
         }
+    }
+
+    /// Issue #1334 / roborev round 8 finding 1: when the legacy
+    /// `parse_block_entries*` fallback SCHEMA-DECODES a typed value AND a column
+    /// name resolves from the key context, that decoded value must surface as a
+    /// TYPED `ScanRow::Row` cell — not be discarded and re-emitted as a synthetic
+    /// `"data"` blob. Before the fix the site decoded then discarded the value and
+    /// always emitted `ScanRow::RawRow`, so a schema-aware non-stitching scan lost
+    /// the typed column value.
+    #[test]
+    fn fallback_decoded_value_with_name_surfaces_as_typed_row() {
+        let decoded = Value::Integer(42);
+        let raw = vec![0x00, 0x00, 0x00, 0x2a];
+
+        let scan_row = fallback_value_scan_row(Some("age"), decoded.clone(), &raw);
+        match &scan_row {
+            ScanRow::Row(cells) => {
+                assert_eq!(cells.len(), 1, "one decoded cell -> one row cell");
+                assert_eq!(&*cells[0].0, "age", "resolved column name is carried");
+                assert_eq!(
+                    cells[0].1, decoded,
+                    "the DECODED typed value is not dropped"
+                );
+            }
+            other => panic!("expected a typed ScanRow::Row, got {:?}", other),
+        }
+
+        // Surfaced end-to-end through the public consumer as the typed column,
+        // NOT a "data" blob (the pre-fix RawRow shape).
+        let row =
+            crate::query::build_row_from_scan(RowKey::new(b"pk".to_vec()), scan_row, &[], None)
+                .expect("a decoded typed row must not be suppressed");
+        assert_eq!(
+            row.values.get("age"),
+            Some(&Value::Integer(42)),
+            "the typed value must surface under its resolved column name"
+        );
+        assert!(
+            !row.values.contains_key("data"),
+            "a decoded typed value must NOT degrade to a synthetic \"data\" blob"
+        );
+    }
+
+    /// Companion to the finding-1 fix: with NO resolvable column name the bytes
+    /// genuinely remain UNDECODED, so the fallback carries them with explicit RAW
+    /// provenance (the true pre-#1334 raw-blob fallback), and a genuine null stays
+    /// a suppressed marker.
+    #[test]
+    fn fallback_without_name_stays_raw_and_null_is_marker() {
+        let raw = vec![0xde, 0xad, 0xbe, 0xef];
+        assert_eq!(
+            fallback_value_scan_row(None, Value::Blob(raw.clone()), &raw),
+            ScanRow::RawRow(raw.clone()),
+            "no resolvable column name -> undecoded RAW provenance"
+        );
+        assert!(
+            matches!(
+                fallback_value_scan_row(Some("age"), Value::Null, &raw),
+                ScanRow::Marker(Value::Null)
+            ),
+            "a genuine null decodes to a suppressed marker"
+        );
     }
 
     /// Issue #1334: the legacy `parse_block_entries*` fallback push sites carry a

@@ -389,11 +389,19 @@ impl TombstoneMerger {
         // Issue #1334: generations now carry whole rows (`ScanRow`), not bare
         // collection values, so reconciliation reduces to last-write-wins with
         // tombstone shadowing (the per-element collection filtering that this
-        // helper used to perform never applied at the row grain). The
-        // newest-by-write-time entry is authoritative.
-        if let Some(entry) = sorted_entries.into_iter().next() {
-            if entry.tombstone_info().is_some() {
-                // Active (or expired) tombstone → the row is deleted.
+        // helper used to perform never applied at the row grain). Walk
+        // newest→oldest: a LIVE tombstone shadows the row (deleted), but an
+        // EXPIRED TTL tombstone deletes nothing — skip it and continue to the
+        // next (older) generation so an older live value survives (roborev round
+        // 8 finding 2 — the pre-#1334 behavior this branch regressed).
+        for entry in sorted_entries {
+            if let Some(tombstone_info) = entry.tombstone_info() {
+                if self.is_tombstone_expired(tombstone_info) {
+                    // Expired TTL tombstone: deletes nothing; fall through to the
+                    // next older generation.
+                    continue;
+                }
+                // Live tombstone → the row is deleted.
                 return Ok(None);
             }
 
@@ -698,6 +706,73 @@ mod tests {
         // wins as-is (row-grain LWW); per-element collection filtering no longer
         // applies on this path.
         assert_eq!(result, Some(list_row));
+    }
+
+    /// roborev round 8 finding 2: an EXPIRED TTL tombstone must NOT delete the
+    /// row. The merge must skip it and continue to the next (older) generation so
+    /// an older live value survives. Before the fix `merge_collection_with_tombstones`
+    /// treated ANY newest tombstone (expired included) as deleting the row.
+    #[test]
+    fn expired_ttl_tombstone_does_not_delete_older_live_value() -> Result<()> {
+        let merger = TombstoneMerger::with_time(5000);
+
+        let live = ScanRow::Row(vec![(std::sync::Arc::from("v"), Value::Integer(7))]);
+        let entries = vec![
+            // Newest by write_time: a TTL tombstone that expired at 2000 < 5000.
+            GenerationValue {
+                value: ScanRow::Marker(Value::ttl_tombstone(1000, 1000)),
+                metadata: EntryMetadata {
+                    write_time: 3000,
+                    generation: 2,
+                    ttl: Some(1000),
+                },
+            },
+            // Older, still-live value that must survive the expired tombstone.
+            GenerationValue {
+                value: live.clone(),
+                metadata: EntryMetadata {
+                    write_time: 1000,
+                    generation: 1,
+                    ttl: None,
+                },
+            },
+        ];
+
+        let result = merger.merge_collection_with_tombstones(entries)?;
+        assert_eq!(
+            result,
+            Some(live),
+            "expired TTL tombstone must be skipped; older live value survives"
+        );
+        Ok(())
+    }
+
+    /// A LIVE (non-expired) tombstone still shadows the row on the same path.
+    #[test]
+    fn live_tombstone_deletes_row_on_collection_merge() -> Result<()> {
+        let merger = TombstoneMerger::with_time(5000);
+
+        let entries = vec![
+            GenerationValue {
+                value: ScanRow::Marker(Value::row_tombstone(3000)),
+                metadata: EntryMetadata {
+                    write_time: 3000,
+                    generation: 2,
+                    ttl: None,
+                },
+            },
+            GenerationValue {
+                value: ScanRow::Row(vec![(std::sync::Arc::from("v"), Value::Integer(7))]),
+                metadata: EntryMetadata {
+                    write_time: 1000,
+                    generation: 1,
+                    ttl: None,
+                },
+            },
+        ];
+
+        assert_eq!(merger.merge_collection_with_tombstones(entries)?, None);
+        Ok(())
     }
 
     #[test]
