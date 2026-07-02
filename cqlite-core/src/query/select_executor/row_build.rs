@@ -205,4 +205,52 @@ mod tests {
             "Issue #586: WHERE id = '<literal>' must match the reconstructed PK column"
         );
     }
+
+    /// Issue #1334 / roborev H2: a multi-column live `ScanRow::Row` must
+    /// disassemble into EVERY named column value — never collapse into a
+    /// synthetic `"data"` fallback (the bug where a non-`ScanRow::Row` carrier
+    /// dropped all column values). This pins the single-carrier contract:
+    /// `build_row_from_scan` yields the real columns and NO fallback key.
+    #[test]
+    fn build_row_from_scan_multi_column_row_has_no_data_fallback() {
+        let key = RowKey::new(b"k0000000000000000".to_vec());
+        let value = ScanRow::Row(vec![
+            (Arc::from("name"), Value::Text("alice".to_string())),
+            (Arc::from("score"), Value::Integer(42)),
+        ]);
+
+        // No schema → no partition-key reconstruction; only the row's own cells.
+        let row = build_row_from_scan(key, value, &[], None)
+            .expect("a live row must build (not tombstoned)");
+
+        assert_eq!(
+            row.values.get("name"),
+            Some(&Value::Text("alice".to_string())),
+            "real text column value must survive the row-carrier disassembly"
+        );
+        assert_eq!(
+            row.values.get("score"),
+            Some(&Value::Integer(42)),
+            "real int column value must survive the row-carrier disassembly"
+        );
+        assert!(
+            !row.values.contains_key("data"),
+            "roborev H2: column values must NOT collapse into a synthetic 'data' fallback"
+        );
+        assert_eq!(
+            row.values.len(),
+            2,
+            "exactly the two real columns, no extras"
+        );
+    }
+
+    /// A suppressed marker (row tombstone / null row) yields no user-visible row.
+    #[test]
+    fn build_row_from_scan_marker_is_suppressed() {
+        let key = RowKey::new(b"k".to_vec());
+        assert!(
+            build_row_from_scan(key, ScanRow::Marker(Value::Null), &[], None).is_none(),
+            "a marker (tombstone/null) row must be suppressed from user output"
+        );
+    }
 }
