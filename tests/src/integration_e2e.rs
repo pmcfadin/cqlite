@@ -828,10 +828,25 @@ async fn test_edge_cases_and_error_recovery() -> Result<(), Box<dyn std::error::
 
     let large_blob_result = storage.get(&table_id, &large_blob_key).await?;
     assert!(large_blob_result.is_some());
-    // Issue #1334: get() returns the ScanRow carrier; the raw offset-read path
-    // carries a blob as a marker value.
-    if let Some(cqlite_core::ScanRow::Marker(Value::Blob(retrieved_data))) = large_blob_result {
-        assert_eq!(retrieved_data.len(), large_blob_data.len());
+    // Issue #1334: get() returns the ScanRow carrier. A live blob surfaces as a
+    // `ScanRow::Row` carrying a single synthetic `"data"` cell (the offset-read
+    // fallback classifier). Extract that cell as a `Value::Blob` and assert its
+    // length. Any other shape must panic, not silently skip, so the length check
+    // can never be bypassed again (roborev round 5, finding 1).
+    match large_blob_result.expect("large blob must be present after put") {
+        cqlite_core::ScanRow::Row(cells) => {
+            let (_, data_value) = cells
+                .iter()
+                .find(|(name, _)| name.as_ref() == "data")
+                .expect("live blob row must carry a synthetic \"data\" cell");
+            match data_value {
+                Value::Blob(retrieved_data) => {
+                    assert_eq!(retrieved_data.len(), large_blob_data.len());
+                }
+                other => panic!("expected \"data\" cell to be Value::Blob, got {other:?}"),
+            }
+        }
+        other => panic!("expected large blob to surface as ScanRow::Row, got {other:?}"),
     }
 
     // Test 4: Maximum and minimum values
@@ -1488,23 +1503,45 @@ async fn test_sstable_round_trip_validation() -> Result<(), Box<dyn std::error::
 
     // Validate data integrity after flush
     println!("   Validating data integrity after flush...");
-    for (key, _expected_value) in &test_data {
+    for (key, expected_value) in &test_data {
         let retrieved = storage.get(&table_id, key).await?;
         assert!(
             retrieved.is_some(),
             "Data missing after flush for key: {key:?}"
         );
 
-        // Issue #1334: get() returns the ScanRow carrier. Full value comparison is
-        // out of scope here (as before); verify the row is present and not a
-        // null/tombstone marker.
-        let retrieved_value = retrieved.unwrap();
-        assert!(
-            !matches!(
-                retrieved_value,
-                cqlite_core::ScanRow::Marker(Value::Null | Value::Tombstone(_))
-            ),
-            "Value missing/null after flush for key: {key:?}"
+        // Issue #1334: get() returns the ScanRow carrier. Recover the underlying
+        // value (the pre-#1334 bare `Value` shape) and compare BOTH its value and
+        // its type against the stored `expected_value`. All rows in `test_data`
+        // are live and non-null, so any `Marker` here is an unexpected carrier
+        // shape and must panic rather than pass (roborev round 5, finding 2).
+        let retrieved_value = match retrieved.expect("row must be present after flush") {
+            cqlite_core::ScanRow::Row(cells) => {
+                // A live value surfaces as its single interned cell; unwrap it so
+                // the equality check sees the same `Value` shape that was stored.
+                assert_eq!(
+                    cells.len(),
+                    1,
+                    "expected a single-cell live row for key {key:?}, got {cells:?}"
+                );
+                cells
+                    .into_iter()
+                    .next()
+                    .map(|(_, v)| v)
+                    .expect("single-cell row must yield its cell value")
+            }
+            cqlite_core::ScanRow::Marker(v) => {
+                panic!("expected live ScanRow::Row for key {key:?}, got Marker({v:?})")
+            }
+        };
+        assert_eq!(
+            std::mem::discriminant(&retrieved_value),
+            std::mem::discriminant(expected_value),
+            "Value type mismatch for key: {key:?}"
+        );
+        assert_eq!(
+            &retrieved_value, expected_value,
+            "Value content mismatch after flush for key: {key:?}"
         );
     }
 
