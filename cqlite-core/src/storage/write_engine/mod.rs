@@ -58,6 +58,8 @@ pub use wal::{RecoveryReport, WriteAheadLog};
 #[cfg(feature = "write-support")]
 mod compaction;
 #[cfg(feature = "write-support")]
+pub(crate) mod durability;
+#[cfg(feature = "write-support")]
 mod maintenance;
 #[cfg(feature = "write-support")]
 mod stats;
@@ -362,6 +364,54 @@ fn reject_counter_cells(mutation: &Mutation) -> Result<()> {
 
 #[cfg(feature = "write-support")]
 impl WriteEngine {
+    /// Create `dir` (and any missing ancestors), then fsync the FULL parent
+    /// chain from `dir`'s parent walking UP to and including the filesystem
+    /// root — unconditionally, on every call (issue #1392).
+    ///
+    /// We deliberately do NOT track "what this invocation created." Across a
+    /// crash that is unknowable: a prior startup may have created the whole
+    /// nested `data_dir`/`wal_dir` tree but crashed partway through the
+    /// parent-fsync sequence, leaving higher ancestors' dirents unpersisted. A
+    /// retry that inspected "already exists" and re-fsynced only the immediate
+    /// parent would leave those ancestors un-durable forever — the "which
+    /// ancestor is durable on retry" hole.
+    ///
+    /// Instead we fsync EVERY ancestor unconditionally. Fsyncing an
+    /// already-durable directory is idempotent and cheap, and the walk
+    /// terminates at the filesystem root (`Path::parent()` returns `None`), so
+    /// no ancestor level is ever left unsynced and there is no per-attempt
+    /// state to track. Every ancestor of a successfully-created directory
+    /// exists, so each fsync targets a real, present directory. Together with
+    /// the flush-path barrier (which fsyncs leaf → data_root on every publish),
+    /// this makes the full durability chain persistent on first flush AND on
+    /// any retry after a partial crash.
+    fn create_dir_all_durable(dir: &Path, label: &str) -> Result<()> {
+        std::fs::create_dir_all(dir).map_err(|e| {
+            Error::Storage(format!(
+                "Failed to create {} directory {:?}: {}",
+                label, dir, e
+            ))
+        })?;
+
+        // Ascend the parent chain, fsyncing each ancestor's dirent. The walk
+        // strictly shrinks (one component per step) and ends when `parent()`
+        // yields `None` at the filesystem root, so it always terminates.
+        let mut next = dir.parent();
+        while let Some(cur) = next {
+            if cur.as_os_str().is_empty() {
+                // A relative single-component path (e.g. "data") has an empty
+                // parent whose real directory is the current working
+                // directory. Fsync "." and stop: it has no ancestor to ascend.
+                wal::sync_directory(Path::new("."))?;
+                break;
+            }
+            wal::sync_directory(cur)?;
+            next = cur.parent();
+        }
+
+        Ok(())
+    }
+
     /// Create a new write engine
     ///
     /// This initializes the WAL and memtable. If a WAL exists in the
@@ -382,20 +432,20 @@ impl WriteEngine {
     /// - Data directory doesn't exist
     /// - WAL replay fails
     pub fn new(config: WriteEngineConfig) -> Result<Self> {
-        // Ensure directories exist
-        std::fs::create_dir_all(&config.data_dir).map_err(|e| {
-            Error::Storage(format!(
-                "Failed to create data directory {:?}: {}",
-                config.data_dir, e
-            ))
-        })?;
-
-        std::fs::create_dir_all(&config.wal_dir).map_err(|e| {
-            Error::Storage(format!(
-                "Failed to create WAL directory {:?}: {}",
-                config.wal_dir, e
-            ))
-        })?;
+        // Ensure directories exist AND that EVERY ancestor's own dirent is
+        // durable. `create_dir_all` alone persists the entries *inside* a
+        // freshly-created root once we fsync the root, but NOT the dirents of
+        // the newly-created directories themselves in their parents — and it
+        // may create several missing ancestors at once. Fsyncing only the
+        // immediate parent would leave intermediate dirents unpersisted, so a
+        // crash after WAL truncation could still lose the whole data/WAL root.
+        // `create_dir_all_durable` fsyncs the FULL parent chain up to and
+        // including the filesystem root, unconditionally on every call — this
+        // closes the "which ancestor is durable on a partial-crash retry" hole
+        // and completes the durability chain (SSTable component contents →
+        // leaf → ancestors → data_root → every ancestor up to root). #1392.
+        Self::create_dir_all_durable(&config.data_dir, "data")?;
+        Self::create_dir_all_durable(&config.wal_dir, "WAL")?;
 
         // Acquire an exclusive advisory lock on the WAL directory to prevent
         // two WriteEngine / Database instances from sharing the same write_dir
@@ -942,16 +992,28 @@ impl WriteEngine {
             info.data_size
         );
 
-        // Truncate WAL (data now persisted to SSTable)
-        // If truncate fails, log warning but don't fail - data is already in SSTable
-        if let Err(e) = self.wal.truncate() {
-            log::warn!(
-                "Failed to truncate WAL after successful SSTable flush: {}. \
-                Data is safe in SSTable, but WAL cleanup failed.",
-                e
-            );
-            // Don't return error - SSTable write succeeded, which is the important part
-        }
+        // Durability handoff (issue #1392): fsync the SSTable's parent directory
+        // BEFORE truncating the WAL. See `durability::finalize_flush_durability`.
+        //
+        // A `?`-propagated error here (e.g. a directory fsync failure) happens
+        // BEFORE the WAL is truncated, so the WAL is still intact and replayable:
+        // returning early WITHOUT advancing the generation is correct, because a
+        // retry re-flushes to the same generation and the untouched WAL still
+        // recovers the data on a crash mid-retry.
+        let durability_outcome = durability::finalize_flush_durability(
+            &durability::RealDurabilityBarrier,
+            &info.data_path,
+            &self.config.data_dir,
+            &mut self.wal,
+        )?;
+
+        // The SSTable is now durably published. Commit flush state — clear the
+        // memtable and advance the generation — for BOTH outcomes, including
+        // `WalTruncateFailedAfterCommit`. In that case the WAL has already been
+        // zeroed, so the published SSTable is the ONLY durable copy of these
+        // mutations; committing state guarantees a retry writes a NEW generation
+        // and never lets `File::create` overwrite the sole durable copy (which
+        // would lose the data on a crash mid-retry). See issue #1392.
 
         // Clear memtable
         self.memtable.clear();
@@ -979,7 +1041,15 @@ impl WriteEngine {
         }
         self.record_memtable_gauges();
 
-        Ok(Some(info))
+        // Surface a post-mutation WAL-truncate failure AFTER state has been
+        // committed above (issue #1392). The data is durable in the published
+        // SSTable and the generation has advanced, so a retry cannot overwrite
+        // it; the error informs the caller that the WAL is no longer a valid
+        // replay marker.
+        match durability_outcome {
+            durability::FlushDurabilityOutcome::Durable => Ok(Some(info)),
+            durability::FlushDurabilityOutcome::WalTruncateFailedAfterCommit(err) => Err(err),
+        }
     }
 
     /// Close the write engine
@@ -996,9 +1066,21 @@ impl WriteEngine {
     ///
     /// # Errors
     ///
-    /// Returns an error if the final flush fails. If the WAL truncate fails
-    /// after a successful SSTable write, a warning is logged but no error
-    /// is returned (the data is already persisted).
+    /// Returns an error if the final flush fails.
+    ///
+    /// WAL-truncate handling during that flush is phase-aware (issue #1392):
+    ///
+    /// * A truncate failure that leaves the WAL intact (it faulted *before*
+    ///   mutating the WAL) is logged and swallowed — the WAL stays a valid,
+    ///   idempotent replay marker, so no error is surfaced.
+    /// * A truncate failure *after* `set_len(0)` has already zeroed the WAL
+    ///   (`WalTruncateFailedAfterCommit`) is **propagated**. By then flush state
+    ///   has already been committed — the SSTable is durable and the generation
+    ///   has advanced — so the data is safe, but the error is surfaced so the
+    ///   caller knows the WAL is no longer a replay marker.
+    ///
+    /// When the WAL is already empty (e.g. `Durability::Disabled`) the truncate
+    /// phase is skipped, so no truncate-phase error can arise.
     pub async fn close(&mut self) -> Result<()> {
         // Check if already closed (idempotent)
         if self.closed.swap(true, Ordering::SeqCst) {
@@ -1183,6 +1265,105 @@ mod tests {
         assert_eq!(engine.memtable_size(), 0);
         assert_eq!(engine.memtable_row_count(), 0);
         assert!(!engine.closed.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    /// Issue #1392: `create_dir_all_durable` is the init-time link in the
+    /// durability chain — it must create a fresh (possibly nested) root and
+    /// fsync its parent so the new root's own dirent is persisted. There is no
+    /// fs-op recorder seam on the init path, so this exercises the helper's
+    /// call path directly (create + parent fsync succeeds and is idempotent);
+    /// a crash-injection observation of the fsync would require a syscall seam
+    /// that does not exist here.
+    #[test]
+    fn test_create_dir_all_durable_fsyncs_parent() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Fresh nested root: parent (`root`) exists, `data` is newly created.
+        let root = temp_dir.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let data = root.join("data");
+        assert!(!data.exists());
+
+        WriteEngine::create_dir_all_durable(&data, "data").unwrap();
+        assert!(data.is_dir(), "new root directory must exist");
+
+        // Idempotent: re-running on an already-existing dir still succeeds and
+        // re-fsyncs the parent without error.
+        WriteEngine::create_dir_all_durable(&data, "data").unwrap();
+        assert!(data.is_dir());
+    }
+
+    /// Issue #1392 (roborev HIGH): the "track what this attempt created"
+    /// approach had a retry hole — if a PRIOR startup created the nested tree
+    /// but crashed partway through its parent-fsync sequence, a retry sees the
+    /// tree already exists, records an empty newly-created set, and re-fsyncs
+    /// only the immediate parent, leaving higher ancestors un-durable forever.
+    ///
+    /// The definitive fix is to stop tracking anything and fsync the FULL
+    /// parent chain (up to and including the filesystem root) on EVERY call.
+    /// This test simulates that partial-crash retry: it pre-creates the entire
+    /// `base/a/b/data` tree first, so nothing is "newly created" on the call,
+    /// then asserts every ancestor is still openable/fsyncable up to the root.
+    ///
+    /// Red-before: the tracking helper would fsync only `data`'s immediate
+    /// parent (`b`) on the already-exists path, leaving `a`/`base` unsynced.
+    /// Green-after: the unconditional full-chain walk fsyncs `b`, `a`, `base`,
+    /// and every ancestor up to the filesystem root.
+    #[test]
+    fn test_create_dir_all_durable_fsyncs_full_chain_on_existing_tree() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Simulate a prior partial-crash: the ENTIRE nested tree already exists
+        // before the call, so no directory is "newly created" this invocation.
+        let base = temp_dir.path().join("base");
+        let a = base.join("a");
+        let b = a.join("b");
+        let data = b.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        assert!(data.is_dir(), "precondition: full tree pre-exists");
+
+        // The unconditional full-chain fsync must succeed on the already-exists
+        // path — it walks `data`'s parent up to the filesystem root, fsyncing
+        // every ancestor regardless of what (if anything) this call created.
+        WriteEngine::create_dir_all_durable(&data, "data").unwrap();
+
+        // Every ancestor from the leaf's parent up to the root is a real,
+        // present directory that the walk fsynced (open-for-sync would fail on
+        // a missing/non-durable dirent). Assert the whole chain is present.
+        for ancestor in [b.as_path(), a.as_path(), base.as_path()] {
+            assert!(
+                ancestor.is_dir(),
+                "ancestor {:?} must be present and fsyncable up the full chain",
+                ancestor
+            );
+        }
+
+        // Idempotent: a second unconditional pass still succeeds.
+        WriteEngine::create_dir_all_durable(&data, "data").unwrap();
+        assert!(data.is_dir());
+    }
+
+    /// Issue #1392: the full-chain walk must TERMINATE at the filesystem root
+    /// (a path whose `parent()` is `None`) rather than looping. Exercising the
+    /// helper against an absolute nested path implicitly walks to `/`; this
+    /// test guards the termination contract by confirming the call returns
+    /// (does not hang) and the root itself has no parent to ascend into.
+    #[test]
+    fn test_create_dir_all_durable_walk_terminates_at_root() {
+        let temp_dir = TempDir::new().unwrap();
+        let data = temp_dir.path().join("a").join("b").join("data");
+
+        // Absolute path: the parent chain ascends through `b`, `a`, the temp
+        // dir, ... up to `/`. `Path::new("/").parent()` is `None`, so the walk
+        // stops there — no infinite loop. The call simply returns.
+        WriteEngine::create_dir_all_durable(&data, "data").unwrap();
+        assert!(data.is_dir());
+
+        // Contract the walk relies on: the filesystem root terminates the walk.
+        assert!(
+            std::path::Path::new("/").parent().is_none(),
+            "filesystem root must have no parent so the fsync walk terminates"
+        );
     }
 
     #[test]
@@ -2475,6 +2656,125 @@ mod tests {
             engine2.is_ok(),
             "WriteEngine must acquire lock after the previous engine was dropped: {:?}",
             engine2.err()
+        );
+    }
+
+    // Issue #1392 (roborev r4): when the WAL truncate fails AFTER `set_len(0)`
+    // has already zeroed the WAL, the just-published SSTable is the ONLY durable
+    // copy of the flushed mutations. The flush must therefore treat the SSTable
+    // handoff as COMMITTED for state purposes — clear the memtable and advance
+    // the generation BEFORE surfacing the error — so that a retry writes a NEW
+    // generation instead of `File::create`-overwriting the published SSTable
+    // (which would lose the data on a crash mid-retry).
+    //
+    // This drives the real `RealDurabilityBarrier` path via the WAL's test-only
+    // post-`set_len(0)` sync fault, then proves: (1) the flush surfaces the
+    // error, (2) state is committed (memtable cleared, generation advanced),
+    // (3) the published gen-1 SSTable survives byte-for-byte, (4) a subsequent
+    // flush writes a NEW generation, and (5) a full read returns each mutation
+    // exactly once — crash-safe, no loss, no duplication.
+    #[tokio::test]
+    async fn post_mutation_truncate_failure_commits_and_retry_writes_new_generation() {
+        use crate::platform::Platform;
+        use crate::storage::sstable::SSTableManager;
+        use crate::Config;
+        use std::sync::Arc;
+
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let data_dir = temp_dir.path().join("data");
+        let config = WriteEngineConfig::new(
+            data_dir.clone(),
+            temp_dir.path().join("wal"),
+            schema.clone(),
+        );
+        let mut engine = WriteEngine::new(config).unwrap();
+
+        // Write the first mutation, then arm a post-set_len(0) WAL-truncate fault
+        // so the flush finalize hits the `AfterMutation` path.
+        engine
+            .write(create_test_mutation(1, "Alice", 1_000_000))
+            .unwrap();
+        let gen_before = engine.generation();
+        engine.wal.set_fail_sync_after_truncate(true);
+
+        let err = engine
+            .flush()
+            .await
+            .expect_err("a post-mutation WAL-truncate failure must surface as an error");
+        assert!(
+            matches!(err, Error::Storage(_)),
+            "post-mutation truncate failure must surface as a storage error, got {err:?}"
+        );
+
+        // State is COMMITTED despite the error: the memtable is cleared and the
+        // generation has advanced, so a retry cannot reuse the published gen.
+        assert_eq!(
+            engine.memtable_row_count(),
+            0,
+            "memtable must be cleared once the SSTable is durably published"
+        );
+        assert_eq!(
+            engine.generation(),
+            gen_before + 1,
+            "generation must advance so a retry writes a NEW generation"
+        );
+
+        // The published gen-1 SSTable exists on disk. Snapshot its bytes to prove
+        // a later flush does NOT overwrite it.
+        let sstable_dir = data_dir.join("test_ks").join("test_table");
+        let gen1_data = sstable_dir.join("nb-1-big-Data.db");
+        assert!(
+            gen1_data.exists(),
+            "the published gen-1 Data.db must exist on disk after the faulted flush"
+        );
+        let gen1_bytes = std::fs::read(&gen1_data).unwrap();
+
+        // Disarm the fault and flush a SECOND mutation: it must write a NEW
+        // generation and leave the first SSTable byte-for-byte intact.
+        engine.wal.set_fail_sync_after_truncate(false);
+        engine
+            .write(create_test_mutation(2, "Bob", 2_000_000))
+            .unwrap();
+        engine
+            .flush()
+            .await
+            .expect("second flush must succeed")
+            .expect("second flush must produce an SSTable");
+
+        let gen2_data = sstable_dir.join("nb-2-big-Data.db");
+        assert!(
+            gen2_data.exists(),
+            "the retry must write a NEW generation (nb-2), not overwrite nb-1"
+        );
+        assert_eq!(
+            std::fs::read(&gen1_data).unwrap(),
+            gen1_bytes,
+            "the retry must NOT overwrite the published gen-1 SSTable"
+        );
+
+        // Full read across both generations: each mutation appears exactly once.
+        let cqlite_config = Config::default();
+        let platform = Arc::new(Platform::new(&cqlite_config).await.unwrap());
+        let manager = SSTableManager::new(
+            &data_dir,
+            &cqlite_config,
+            platform,
+            #[cfg(feature = "state_machine")]
+            None,
+        )
+        .await
+        .expect("SSTableManager must load both published generations");
+
+        let table_id = crate::types::TableId::from("test_ks.test_table");
+        let rows = manager
+            .scan(&table_id, None, None, None, Some(&schema))
+            .await
+            .expect("scan across both generations must succeed");
+        assert_eq!(
+            rows.len(),
+            2,
+            "both mutations must be readable exactly once (no loss, no duplication)"
         );
     }
 }

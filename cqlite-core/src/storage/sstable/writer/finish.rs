@@ -47,7 +47,13 @@ impl SSTableWriter {
         // `finish_streaming()` can move `self.data_writer` out below.
         let sstable_dir = self.sstable_dir.clone();
         let sstable_dir = sstable_dir.as_path();
-        tokio::fs::create_dir_all(sstable_dir).await?;
+        // Ensure the keyspace/table directory tree exists (an empty flush never
+        // opened a streaming sink, so this may be the point of creation). The
+        // flush durability barrier later fsyncs the full leaf→data-root ancestor
+        // chain unconditionally before truncating the WAL, so directory
+        // *creation* no longer needs to record which ancestors it made (issue
+        // #1392).
+        crate::storage::write_engine::durability::create_dir_all(sstable_dir)?;
 
         // Finalize statistics metadata (normalize sentinel values)
         self.stats.finalize();
@@ -72,6 +78,9 @@ impl SSTableWriter {
             StatisticsWriter::new(stats_path.clone())
         };
         stats_writer.write(&self.stats, Some(&self.schema))?;
+        // fsync Statistics.db contents (issue #1392): stats_writer uses
+        // std::fs::write, which does not fsync.
+        Self::fsync_component(&stats_path).await?;
 
         // 2. Finalize Data.db (Issue #492)
         // The DataWriter has been streaming each partition to disk as it was
@@ -83,9 +92,13 @@ impl SSTableWriter {
         // The BTI `Data.db` row/partition serialization is identical to BIG in
         // Cassandra 5 (issue #908); only the filename descriptor differs.
         let data_path = cpath("Data.db");
+        // The streamed Data.db is fsynced inside `finish_streaming` (issue
+        // #1392). The empty-Data fallback below is written via tokio::fs::write
+        // (no fsync), so it is fsynced explicitly.
         let data_size = self.data_writer.finish_streaming()?;
         if data_size == 0 && !data_path.exists() {
             tokio::fs::write(&data_path, b"").await?;
+            Self::fsync_component(&data_path).await?;
         }
 
         // 3. Finalize Index.db (Issue #753) — BIG only.
@@ -136,6 +149,8 @@ impl SSTableWriter {
         } else {
             let path = cpath("Summary.db");
             tokio::fs::write(&path, summary_bytes).await?;
+            // fsync Summary.db contents (issue #1392).
+            Self::fsync_component(&path).await?;
             Some(path)
         };
 
@@ -182,7 +197,11 @@ impl SSTableWriter {
             } else {
                 CrcTrailer::None
             };
-            Some(crc_writer::write_crc_db(&data_path, cpath("CRC.db"), trailer).await?)
+            let crc_path = crc_writer::write_crc_db(&data_path, cpath("CRC.db"), trailer).await?;
+            // fsync CRC.db contents (issue #1392): write_crc_db uses
+            // tokio::fs::write, which does not fsync.
+            Self::fsync_component(&crc_path).await?;
+            Some(crc_path)
         };
 
         // 7. Write TOC.txt (LAST - publication barrier).
@@ -248,6 +267,38 @@ impl SSTableWriter {
             crc_path,
             partition_count: self.partition_count,
             data_size,
+        })
+    }
+
+    /// Fsync a component file's *contents* to the storage device (issue #1392).
+    ///
+    /// Components written via `tokio::fs::write` / `std::fs::write` (Statistics,
+    /// Summary, CRC, Rows, Partitions, and the empty-Data fallback) only reach
+    /// the OS page cache; a crash after the WAL is truncated could lose their
+    /// contents even though the directory entry was persisted. This reopens the
+    /// finished file and calls `sync_all` so the bytes are durable before the
+    /// caller (`SSTableWriter::finish`) returns — and therefore before the
+    /// flush's directory fsync and WAL truncate run. (Data.db and Index.db are
+    /// fsynced at their streaming-writer finish; Filter/Digest/TOC fsync inside
+    /// their own writers — none are re-synced here.)
+    pub(super) async fn fsync_component(path: &Path) -> Result<()> {
+        // Reopen with write access, not read-only: `sync_all` on a read-only
+        // handle can fail on Windows (issue #1392, FINDING 2). `read(true)` is
+        // kept so behavior is identical on unix (the file is only fsynced, never
+        // written through this handle).
+        let file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .await
+            .map_err(|e| {
+                crate::error::Error::Storage(format!(
+                    "Failed to open {} for fsync: {e}",
+                    path.display()
+                ))
+            })?;
+        file.sync_all().await.map_err(|e| {
+            crate::error::Error::Storage(format!("Failed to fsync {}: {e}", path.display()))
         })
     }
 

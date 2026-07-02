@@ -288,7 +288,11 @@ impl DataWriter {
         }
         if let Some(path) = self.data_path.clone() {
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
+                // Create the keyspace/table tree. The flush durability barrier
+                // fsyncs the full leaf→data-root chain unconditionally before
+                // the WAL truncate, so this creation need not track which
+                // ancestors it made (issue #1392).
+                crate::storage::write_engine::durability::create_dir_all(parent)?;
             }
             let file = std::fs::File::create(&path)?;
             // Use a large BufWriter so a partition's bytes coalesce into a few
@@ -365,13 +369,20 @@ impl DataWriter {
                 "finish_streaming() called on an in-memory DataWriter".to_string(),
             ));
         }
-        // Flush any residual scratch (normally empty), then flush the sink so all
-        // bytes reach the OS file (the subsequent Digest CRC re-read of the same
-        // file sees them via the page cache). This matches the durability of the
-        // previous `tokio::fs::write`, which did not fsync either.
+        // Flush any residual scratch (normally empty), then flush the BufWriter
+        // so all bytes reach the OS file, and fsync the file so its *contents*
+        // are durable on the storage device (issue #1392). A plain `flush()`
+        // only pushes bytes into the page cache; without the fsync a crash after
+        // the WAL is truncated could lose the Data.db contents even though the
+        // directory entry was persisted. This fsync (plus the per-component
+        // fsyncs in `SSTableWriter::finish`) is the durability guarantee for
+        // both the flush and compaction write paths.
         self.flush_partition()?;
         if let Some(mut sink) = self.sink.take() {
             sink.flush()?;
+            sink.get_ref()
+                .sync_all()
+                .map_err(|e| Error::Storage(format!("Failed to fsync Data.db contents: {e}")))?;
         }
         Ok(self.position)
     }

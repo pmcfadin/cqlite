@@ -1453,6 +1453,63 @@ mod tests {
             .contains("nb-1-big-Data.db"));
     }
 
+    /// Issue #1392: a NON-EMPTY first flush into a brand-new keyspace/table path
+    /// must have its full leaf→data-root ancestor chain fsynced by the flush
+    /// durability barrier BEFORE the WAL is truncated, so a crash cannot lose the
+    /// freshly created directory tree.
+    ///
+    /// The end-to-end handoff through `finalize_flush_durability` fsyncs the leaf
+    /// SSTable dir, its parents up to the data root, and only THEN truncates the
+    /// WAL — regardless of which attempt created the directories (roborev r6:
+    /// the full chain is synced unconditionally).
+    #[tokio::test]
+    async fn nonempty_first_flush_fsyncs_ancestor_dirs_before_wal_truncate() {
+        use crate::storage::write_engine::durability::{
+            finalize_flush_durability, RealDurabilityBarrier,
+        };
+        use crate::storage::write_engine::wal::WriteAheadLog;
+
+        let root = TempDir::new().unwrap();
+        let data_dir = root.path();
+        let schema = create_test_schema();
+
+        // Brand-new nested SSTable dir: data_dir/test_ks/test_table (neither the
+        // keyspace nor the table directory exists yet). A non-empty flush creates
+        // this whole tree via the streaming writers' `ensure_sink`.
+        let ks_dir = data_dir.join("test_ks");
+        let leaf_dir = ks_dir.join("test_table");
+        assert!(!ks_dir.exists() && !leaf_dir.exists());
+
+        // A real WAL at the data_dir root, with an entry that must survive until
+        // the SSTable's dirents are durable.
+        let mut wal = WriteAheadLog::create(data_dir).unwrap();
+        let mutation = create_test_mutation("test_ks", "test_table", 1, "Alice", 1_000_000);
+        wal.append(&mutation).unwrap();
+        wal.sync().unwrap();
+
+        let mut writer = SSTableWriter::new(leaf_dir.clone(), 1, &schema).unwrap();
+        let key = mutation.decorated_key(&schema).unwrap();
+        writer.write_partition(key, vec![mutation]).unwrap();
+        let info = writer.finish().await.unwrap();
+
+        // The non-empty flush created the whole tree; the barrier fsyncs the
+        // full leaf→data-root chain before dropping the WAL copy.
+        assert!(info.data_size > 0, "flush must be non-empty");
+        assert!(ks_dir.is_dir() && leaf_dir.is_dir());
+
+        // End-to-end handoff: fsync the leaf + every ancestor up to the data
+        // root (deepest-first) then truncate the WAL.
+        finalize_flush_durability(&RealDurabilityBarrier, &info.data_path, data_dir, &mut wal)
+            .unwrap();
+
+        // The WAL truncate ran only after the dir fsyncs succeeded.
+        assert_eq!(
+            wal.replay().unwrap().mutations.len(),
+            0,
+            "WAL must be truncated after the ancestor dirs are fsynced"
+        );
+    }
+
     /// Issue #852: a table with `bloom_filter_fp_chance = 1.0` disables the
     /// bloom filter (Cassandra's AlwaysPresentFilter). The writer must not
     /// panic, must emit NO Filter.db component, and must omit Filter from TOC.txt

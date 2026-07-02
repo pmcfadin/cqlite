@@ -145,6 +145,51 @@ enum WalStop {
     Corruption,
 }
 
+/// Outcome of a failed [`WriteAheadLog::truncate_checked`], distinguishing a
+/// failure that leaves the WAL intact from one that has already destroyed it
+/// (issue #1392).
+///
+/// `set_len(0)` is the point of no return: once it succeeds the on-disk WAL is
+/// empty and is no longer a replayable recovery marker, even if a subsequent
+/// fsync/seek fails. Swallowing such a post-mutation failure as if the WAL were
+/// still intact would let the caller clear the memtable and report a durable,
+/// replayable WAL that no longer exists — silent data loss.
+#[derive(Debug)]
+pub enum TruncateError {
+    /// Failure at or before `set_len(0)`: the WAL contents were not mutated and
+    /// remain a valid replay marker. Safe to leave the WAL in place.
+    BeforeMutation(Error),
+    /// Failure after `set_len(0)` zeroed the WAL: the WAL is no longer a valid
+    /// replay marker. Callers MUST NOT treat the WAL as intact.
+    AfterMutation(Error),
+}
+
+impl TruncateError {
+    /// Unwrap to the underlying [`Error`], discarding the phase distinction.
+    /// Used by the phase-agnostic [`WriteAheadLog::truncate`] wrapper.
+    pub fn into_inner(self) -> Error {
+        match self {
+            TruncateError::BeforeMutation(e) | TruncateError::AfterMutation(e) => e,
+        }
+    }
+}
+
+impl std::fmt::Display for TruncateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TruncateError::BeforeMutation(e) => {
+                write!(f, "WAL truncate failed before mutation (WAL intact): {e}")
+            }
+            TruncateError::AfterMutation(e) => write!(
+                f,
+                "WAL truncate failed after mutation (WAL contents already zeroed): {e}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TruncateError {}
+
 /// Sync directory metadata to ensure file entries are persisted
 ///
 /// On POSIX systems this is critical for crash safety - without syncing the
@@ -631,6 +676,26 @@ pub struct WriteAheadLog {
     /// (where a synced write would be lost on the next replay). `None` for a
     /// freshly created WAL, a clean reopen, or a torn tail (already trimmed).
     pending_valid_prefix: Option<u64>,
+    /// Set when a post-`set_len(0)` restore step (issue #1392, FINDING 1) left
+    /// the WAL in a state where the file cursor's position no longer
+    /// authoritatively matches `current_size`. The canonical case is a failed
+    /// `seek(0)` after truncation: the cursor may remain at the stale OLD
+    /// end-of-file while `current_size` has been reset to 0, so a later
+    /// `append()` would write at that stale offset over the now-zeroed file,
+    /// producing a sparse / misparsed WAL (silent corruption). Once poisoned,
+    /// every `append`/`sync`/`truncate` fails closed with a typed
+    /// [`Error::Storage`] until the WAL is reopened.
+    poisoned: Option<String>,
+    /// Test-only fault injection: when set, force the `sync_all` performed
+    /// *after* `set_len(0)` inside [`WriteAheadLog::truncate_checked`] to fail,
+    /// exercising the `AfterMutation` state-restore path (issue #1392).
+    #[cfg(test)]
+    fail_sync_after_truncate: bool,
+    /// Test-only fault injection: when set, force the `seek(0)` performed
+    /// *after* `set_len(0)` inside [`WriteAheadLog::truncate_checked`] to fail,
+    /// exercising the poison-on-partial-failure path (issue #1392, FINDING 1).
+    #[cfg(test)]
+    fail_seek_after_truncate: bool,
 }
 
 impl WriteAheadLog {
@@ -690,6 +755,11 @@ impl WriteAheadLog {
             buffer_size,
             current_size: 0,
             pending_valid_prefix: None,
+            poisoned: None,
+            #[cfg(test)]
+            fail_sync_after_truncate: false,
+            #[cfg(test)]
+            fail_seek_after_truncate: false,
         })
     }
 
@@ -791,6 +861,11 @@ impl WriteAheadLog {
             buffer_size: Self::DEFAULT_BUFFER_SIZE,
             current_size,
             pending_valid_prefix,
+            poisoned: None,
+            #[cfg(test)]
+            fail_sync_after_truncate: false,
+            #[cfg(test)]
+            fail_seek_after_truncate: false,
         })
     }
 
@@ -1022,6 +1097,11 @@ impl WriteAheadLog {
     /// Returns an error if serialization fails or the write fails.
     #[tracing::instrument(name = "wal.append", skip(self, mutation))]
     pub fn append(&mut self, mutation: &Mutation) -> Result<()> {
+        // Fail closed if a prior truncate poisoned the WAL (issue #1392,
+        // FINDING 1): appending at a stale cursor over a zeroed file would
+        // produce a sparse / misparsed WAL.
+        self.ensure_not_poisoned()?;
+
         // Refuse to append while a mid-stream corrupt tail is still on disk
         // (issue #1391). `open_existing` deliberately leaves the corrupt segment
         // intact for evidence preservation and records the valid-prefix boundary
@@ -1094,6 +1174,10 @@ impl WriteAheadLog {
     /// Returns an error if the flush or sync operation fails.
     #[tracing::instrument(name = "wal.sync", skip(self))]
     pub fn sync(&mut self) -> Result<()> {
+        // Fail closed if the WAL was poisoned by a partial truncate-restore
+        // (issue #1392, FINDING 1): its buffered/cursor state is not trustworthy.
+        self.ensure_not_poisoned()?;
+
         self.file
             .flush()
             .map_err(|e| Error::Storage(format!("Failed to flush WAL buffer: {}", e)))?;
@@ -1297,32 +1381,99 @@ impl WriteAheadLog {
     ///
     /// # Errors
     ///
-    /// Returns an error if the truncate operation fails.
+    /// Returns an error if the truncate operation fails. This flattens the
+    /// phase distinction of [`WriteAheadLog::truncate_checked`]; the
+    /// durability handoff (issue #1392) calls `truncate_checked` directly so it
+    /// can react differently to a failure that occurs *after* the WAL contents
+    /// have already been zeroed.
     pub fn truncate(&mut self) -> Result<()> {
-        // Flush any pending writes first
-        self.file
-            .flush()
-            .map_err(|e| Error::Storage(format!("Failed to flush before truncate: {}", e)))?;
+        self.truncate_checked().map_err(TruncateError::into_inner)
+    }
 
-        // Truncate the file to zero length
-        self.file
-            .get_mut()
-            .set_len(0)
-            .map_err(|e| Error::Storage(format!("Failed to truncate WAL: {}", e)))?;
+    /// Truncate the WAL, distinguishing failures **before** the WAL contents
+    /// are mutated from failures **after** `set_len(0)` has already zeroed it
+    /// (issue #1392).
+    ///
+    /// The sequence is: flush pending writes, `set_len(0)`, fsync, seek to
+    /// start. The `set_len(0)` call is the point of no return: once it
+    /// succeeds the on-disk WAL is empty and is **no longer a replayable
+    /// recovery marker**, even if a following fsync/seek fails.
+    ///
+    /// * A failure at or before `set_len(0)` returns
+    ///   [`TruncateError::BeforeMutation`] — the WAL is still intact and can be
+    ///   safely left in place for replay.
+    /// * A failure after `set_len(0)` returns [`TruncateError::AfterMutation`]
+    ///   — the WAL has been zeroed and callers MUST NOT treat it as intact.
+    pub fn truncate_checked(&mut self) -> std::result::Result<(), TruncateError> {
+        // A previously poisoned WAL cannot be truncated: its cursor/size state is
+        // untrustworthy (issue #1392, FINDING 1). Fail closed as AfterMutation so
+        // the caller does not treat the WAL as an intact replay marker.
+        if let Some(reason) = &self.poisoned {
+            return Err(TruncateError::AfterMutation(Error::Storage(format!(
+                "WAL is poisoned and cannot be truncated: {reason}"
+            ))));
+        }
 
-        // Fsync after truncate to ensure operation is persisted
-        self.file
-            .get_ref()
-            .sync_all()
-            .map_err(|e| Error::Storage(format!("Failed to sync after truncate: {}", e)))?;
+        // Flush any pending writes first (before mutation).
+        self.file.flush().map_err(|e| {
+            TruncateError::BeforeMutation(Error::Storage(format!(
+                "Failed to flush before truncate: {}",
+                e
+            )))
+        })?;
 
-        // Seek to beginning
-        self.file
-            .get_mut()
-            .seek(SeekFrom::Start(0))
-            .map_err(|e| Error::Storage(format!("Failed to seek after truncate: {}", e)))?;
+        // Truncate the file to zero length. This is the point of no return:
+        // after it succeeds the WAL contents are gone.
+        self.file.get_mut().set_len(0).map_err(|e| {
+            TruncateError::BeforeMutation(Error::Storage(format!("Failed to truncate WAL: {}", e)))
+        })?;
 
+        // From here on the WAL has already been mutated (zeroed). Any failure
+        // is AfterMutation: the WAL is no longer a valid replay marker.
+        //
+        // The post-mutation restore sequence (sync_all + seek(0) +
+        // current_size=0) must be atomic-in-effect (issue #1392, FINDING 1): we
+        // must never leave the WAL in a state where a later `append()` writes at
+        // a stale cursor over the zeroed file (a SPARSE / misparsed WAL). We run
+        // both fallible steps, then reconcile:
+        //
+        // * `seek(0)` succeeds  -> the file cursor is authoritatively at offset
+        //   0 and matches the reset `current_size`, so a subsequent append is
+        //   safe. A `sync_all` failure here only means the zeroing is not yet
+        //   durable, which we surface as AfterMutation (the WAL is still no
+        //   longer a replay marker) — but the handle remains usable.
+        // * `seek(0)` fails     -> the cursor may remain at the stale OLD
+        //   end-of-file while `current_size` was reset to 0. Rather than allow a
+        //   corrupting append, we POISON the WAL: every future
+        //   append/sync/truncate fails closed with a typed error until the WAL
+        //   is reopened (which re-establishes an authoritative cursor).
+        let sync_res = self.sync_after_truncate();
+        let seek_res = self.seek_after_truncate();
         self.current_size = 0;
+
+        // Post-mutation restore reconciliation (issue #1392, FINDING 1). These
+        // checks run BEFORE the #1391 corrupt-tail guard is lifted below: on a
+        // failure we return early with `pending_valid_prefix` still set, so the
+        // guard is cleared ONLY after a fully successful truncate.
+        if let Err(e) = seek_res {
+            // Cursor position is now unknown/stale while size was reset. Poison
+            // so no later append can silently create a sparse WAL.
+            let reason = format!("seek after truncate failed: {e}");
+            self.poisoned = Some(reason);
+            return Err(TruncateError::AfterMutation(Error::Storage(format!(
+                "Failed to seek after truncate; WAL poisoned to prevent a sparse \
+                 append: {e}"
+            ))));
+        }
+
+        // Seek succeeded: cursor is authoritatively at 0. Surface a sync failure
+        // (durability of the zeroing) as AfterMutation, but the WAL stays usable.
+        if let Err(e) = sync_res {
+            return Err(TruncateError::AfterMutation(Error::Storage(format!(
+                "Failed to sync after truncate: {}",
+                e
+            ))));
+        }
 
         // Clear any pending corrupt-tail guard (issue #1391, roborev r4). If this
         // WAL was opened over a mid-stream corrupt tail, `open_existing` recorded
@@ -1332,11 +1483,69 @@ impl WriteAheadLog {
         // gone from the LIVE log — leaving the guard set would wrongly reject ALL
         // future appends against a now-empty WAL (deadlocked appends). The guard is
         // lifted only HERE, after the flush/set_len/fsync/seek steps have all
-        // succeeded; any earlier failure returns via `?` with the guard still set,
+        // succeeded; any earlier failure returns early with the guard still set,
         // so the on-disk state and the fail-closed guard remain consistent.
         self.pending_valid_prefix = None;
 
         Ok(())
+    }
+
+    /// Return an error if the WAL has been poisoned by a partial
+    /// truncate-restore failure (issue #1392, FINDING 1).
+    fn ensure_not_poisoned(&self) -> Result<()> {
+        if let Some(reason) = &self.poisoned {
+            return Err(Error::Storage(format!(
+                "WAL is poisoned after a failed truncate-restore and must be \
+                 reopened before further writes: {reason}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Perform the post-`set_len(0)` fsync, with a test-only fault hook.
+    ///
+    /// In production this simply calls `sync_all` on the underlying file. Under
+    /// `cfg(test)` a fault can be injected (see `fail_sync_after_truncate`) so
+    /// the `AfterMutation` state-restore path in `truncate_checked` can be
+    /// exercised deterministically (issue #1392, FINDING 2).
+    fn sync_after_truncate(&self) -> std::io::Result<()> {
+        #[cfg(test)]
+        if self.fail_sync_after_truncate {
+            return Err(std::io::Error::other("injected post-set_len(0) sync fault"));
+        }
+        self.file.get_ref().sync_all()
+    }
+
+    /// Perform the post-`set_len(0)` seek back to the start of the now-empty
+    /// file, with a test-only fault hook.
+    ///
+    /// In production this seeks the underlying handle to offset 0. Under
+    /// `cfg(test)` a fault can be injected (see `fail_seek_after_truncate`) so
+    /// the poison-on-partial-failure path in `truncate_checked` can be exercised
+    /// deterministically (issue #1392, FINDING 1).
+    fn seek_after_truncate(&mut self) -> std::io::Result<u64> {
+        #[cfg(test)]
+        if self.fail_seek_after_truncate {
+            return Err(std::io::Error::other("injected post-set_len(0) seek fault"));
+        }
+        self.file.get_mut().seek(SeekFrom::Start(0))
+    }
+
+    /// Test-only: arm/disarm the post-truncate sync fault (issue #1392).
+    ///
+    /// `pub(crate)` so the sibling `write_engine` modules' `#[cfg(test)]` tests
+    /// (e.g. the WriteEngine-level post-mutation-truncate regression) can drive
+    /// the `AfterMutation` path through the real durability barrier.
+    #[cfg(test)]
+    pub(crate) fn set_fail_sync_after_truncate(&mut self, fail: bool) {
+        self.fail_sync_after_truncate = fail;
+    }
+
+    /// Test-only: arm/disarm the post-truncate seek fault (issue #1392,
+    /// FINDING 1), driving the poison-on-partial-failure path.
+    #[cfg(test)]
+    pub(crate) fn set_fail_seek_after_truncate(&mut self, fail: bool) {
+        self.fail_seek_after_truncate = fail;
     }
 
     /// Get the current size of the WAL in bytes
@@ -1526,6 +1735,135 @@ mod tests {
 
         let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 0);
+    }
+
+    // Issue #1392 (FINDING 2): a `truncate_checked` whose `sync_all` fails
+    // AFTER `set_len(0)` has already zeroed the WAL must (a) report
+    // `AfterMutation` so the flush error propagates, and (b) still restore the
+    // in-memory + file-handle state to offset 0. Otherwise a subsequent append
+    // lands at the stale OLD end-of-file, producing a SPARSE WAL that replay
+    // skips or misparses. This test injects that post-`set_len(0)` sync fault,
+    // then performs a fresh append and verifies replay returns exactly that
+    // write (no sparse / lost / misparsed WAL).
+    #[test]
+    fn truncate_post_setlen_sync_failure_resets_state_for_replay() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut wal = WriteAheadLog::create(temp_dir.path()).unwrap();
+
+        // Seed a few entries so the OLD end-of-file is well past offset 0.
+        for i in 0..3 {
+            wal.append(&create_test_mutation(i, &format!("Old{}", i)))
+                .unwrap();
+        }
+        wal.sync().unwrap();
+        assert!(wal.size() > 0);
+
+        // Arm the fault: the sync AFTER set_len(0) will fail.
+        wal.set_fail_sync_after_truncate(true);
+        let err = wal
+            .truncate_checked()
+            .expect_err("post-set_len(0) sync fault must surface");
+        assert!(
+            matches!(err, TruncateError::AfterMutation(_)),
+            "a failure after set_len(0) must be AfterMutation (WAL already zeroed)"
+        );
+
+        // Despite the propagated error, in-memory state was restored to the
+        // start of the now-empty file.
+        assert_eq!(wal.size(), 0, "current_size must be reset to 0");
+
+        // Disarm the fault and perform a subsequent write, as the still-usable
+        // engine would after the propagated flush error.
+        wal.set_fail_sync_after_truncate(false);
+        wal.append(&create_test_mutation(42, "New")).unwrap();
+        wal.sync().unwrap();
+
+        // Replay must return exactly the new entry, read from offset 0 — proving
+        // the append landed at 0 (not the stale old EOF) and the WAL is neither
+        // sparse nor misparsed.
+        let mutations = wal.replay().unwrap().mutations;
+        assert_eq!(
+            mutations.len(),
+            1,
+            "replay must return exactly the post-fault write, with no sparse gap"
+        );
+        assert_eq!(mutations[0].table.keyspace, "test_ks");
+        assert_eq!(
+            mutations[0].partition_key.columns[0].1,
+            Value::Integer(42),
+            "the replayed entry must be the new write, correctly parsed"
+        );
+    }
+
+    // Issue #1392 (FINDING 1): if the `seek(0)` performed AFTER `set_len(0)`
+    // fails, the file cursor may remain at the stale OLD end-of-file while
+    // `current_size` has been reset to 0. A naive implementation would let a
+    // later `append()` land at that stale offset over the now-zeroed file,
+    // producing a SPARSE / misparsed WAL (silent corruption). The truncate must
+    // instead POISON the WAL so a subsequent append fails closed rather than
+    // corrupting it. This test injects that post-`set_len(0)` seek fault, then
+    // proves the subsequent append (and sync) fail closed.
+    #[test]
+    fn truncate_post_setlen_seek_failure_poisons_wal_no_sparse_append() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut wal = WriteAheadLog::create(temp_dir.path()).unwrap();
+
+        // Seed a few entries so the OLD end-of-file is well past offset 0.
+        for i in 0..3 {
+            wal.append(&create_test_mutation(i, &format!("Old{i}")))
+                .unwrap();
+        }
+        wal.sync().unwrap();
+        assert!(wal.size() > 0);
+
+        // Arm the fault: set_len(0) + sync succeed, but the seek back to 0 fails,
+        // leaving the cursor at the stale OLD end-of-file.
+        wal.set_fail_seek_after_truncate(true);
+        let err = wal
+            .truncate_checked()
+            .expect_err("post-set_len(0) seek fault must surface");
+        assert!(
+            matches!(err, TruncateError::AfterMutation(_)),
+            "a failure after set_len(0) must be AfterMutation (WAL already zeroed)"
+        );
+
+        // The WAL is now poisoned. Disarm the seek fault to prove the fail-closed
+        // behavior comes from the poison state, NOT the injected fault.
+        wal.set_fail_seek_after_truncate(false);
+
+        // A subsequent append MUST fail closed rather than silently write at the
+        // stale cursor and create a sparse WAL.
+        let append_err = wal
+            .append(&create_test_mutation(42, "New"))
+            .expect_err("append on a poisoned WAL must fail closed");
+        assert!(
+            matches!(append_err, Error::Storage(_)),
+            "poisoned-WAL append must return a typed storage error, got {append_err:?}"
+        );
+
+        // sync must likewise fail closed.
+        assert!(
+            wal.sync().is_err(),
+            "sync on a poisoned WAL must fail closed"
+        );
+
+        // And re-truncation must fail closed as AfterMutation (untrustworthy).
+        assert!(
+            matches!(wal.truncate_checked(), Err(TruncateError::AfterMutation(_))),
+            "truncate on a poisoned WAL must fail closed as AfterMutation"
+        );
+
+        // The on-disk WAL is empty (set_len(0) succeeded) and no corrupting
+        // append occurred, so replay from a freshly opened handle yields nothing
+        // — proving no sparse / misparsed entry was written.
+        let wal_path = wal.path().to_path_buf();
+        drop(wal);
+        let reopened = WriteAheadLog::open_existing(&wal_path).unwrap();
+        assert_eq!(
+            reopened.replay().unwrap().mutations.len(),
+            0,
+            "no sparse / lost / misparsed entry may exist after a poisoned truncate"
+        );
     }
 
     #[test]

@@ -423,6 +423,41 @@ fn test_streaming_writer_bounds_memory_to_one_partition() {
         );
 }
 
+/// Issue #1392: `finish_streaming` must fsync the Data.db contents (not merely
+/// `flush()` them to the page cache) so the bytes are durable before the flush
+/// handoff fsyncs the directory and truncates the WAL. fsync is not directly
+/// observable, but the durable contract is: after `finish_streaming` returns,
+/// the on-disk file exists with the full reported length and the exact bytes,
+/// with no writer handle still buffering. Regression guard for the previous
+/// flush-only path.
+#[test]
+fn finish_streaming_persists_data_db_contents() {
+    let schema = create_test_schema();
+    let partitions = streaming_test_partitions();
+
+    let dir = tempfile::tempdir().unwrap();
+    let data_path = dir.path().join("nb-1-big-Data.db");
+    let mut writer = DataWriter::with_sink(create_test_stats(), data_path.clone());
+    for (key, mutations) in &partitions {
+        writer
+            .write_partition(key, mutations, &schema, None, &[])
+            .unwrap();
+    }
+    let data_size = writer.finish_streaming().unwrap();
+
+    // The file length on disk equals the reported size (all bytes durable).
+    let meta = std::fs::metadata(&data_path).unwrap();
+    assert_eq!(
+        meta.len(),
+        data_size,
+        "on-disk Data.db length must equal finish_streaming()'s reported size"
+    );
+    assert!(data_size > 0, "streamed Data.db must be non-empty");
+    // And the content is fully readable (writer handle released, bytes flushed).
+    let on_disk = std::fs::read(&data_path).unwrap();
+    assert_eq!(on_disk.len() as u64, data_size);
+}
+
 /// (a) Two elements at DIFFERENT per-element timestamps must produce two
 /// cells, each carrying its OWN explicit timestamp delta (NOT
 /// USE_ROW_TIMESTAMP, NOT a single promoted row timestamp).

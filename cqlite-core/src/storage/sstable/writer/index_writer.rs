@@ -287,7 +287,11 @@ impl IndexWriter {
         }
         if let Some(path) = self.index_path.clone() {
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
+                // Create the keyspace/table tree. The flush durability barrier
+                // fsyncs the full leaf→data-root chain unconditionally before
+                // the WAL truncate, so this creation need not track which
+                // ancestors it made (issue #1392).
+                crate::storage::write_engine::durability::create_dir_all(parent)?;
             }
             let file = std::fs::File::create(&path)?;
             self.sink = Some(std::io::BufWriter::with_capacity(
@@ -492,9 +496,14 @@ impl IndexWriter {
         }
         // Flush any residual scratch (normally empty after per-entry flushes).
         self.flush_entry()?;
-        // Flush the BufWriter so all bytes reach the OS file.
+        // Flush the BufWriter so all bytes reach the OS file, then fsync so the
+        // Index.db *contents* are durable on the storage device (issue #1392),
+        // not merely resident in the page cache.
         if let Some(mut sink) = self.sink.take() {
             sink.flush()?;
+            sink.get_ref()
+                .sync_all()
+                .map_err(|e| Error::Storage(format!("Failed to fsync Index.db contents: {e}")))?;
         }
         Ok(self.position)
     }
