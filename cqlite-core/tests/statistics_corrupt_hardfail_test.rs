@@ -56,6 +56,27 @@ fn find_file_suffix(dir: &Path, suffix: &str) -> Option<PathBuf> {
         })
 }
 
+/// `CQLITE_REQUIRE_FIXTURES=1` (the strict CI lanes) makes a missing fixture a
+/// HARD failure so a renamed/dropped fixture can never let this hard-fail guard
+/// false-pass. Without it, the test skips cleanly (fresh checkout, binaries
+/// absent). Mirrors the repo-wide convention (see `issue_1007_complex_type_parity`).
+fn require_fixtures_strict() -> bool {
+    std::env::var("CQLITE_REQUIRE_FIXTURES")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false)
+}
+
+/// Skip when the fixture is absent — unless strict mode is on, in which case
+/// fail loud so the scenario cannot false-pass as exercised. Returns `true` when
+/// the caller should skip.
+fn skip_or_fail(reason: &str) -> bool {
+    if require_fixtures_strict() {
+        panic!("CQLITE_REQUIRE_FIXTURES=1 but #1626 fixture unavailable: {reason}");
+    }
+    eprintln!("SKIP: {reason}");
+    true
+}
+
 async fn platform() -> (Config, Arc<Platform>) {
     let config = Config::default();
     let platform = Arc::new(
@@ -75,25 +96,26 @@ const FIXTURE_REL: &str = "sstables/test_basic/simple_table-6aa08200a25111f0a3fe
 #[tokio::test]
 async fn corrupt_statistics_hard_fails_open() {
     let fixture = datasets_root().join(FIXTURE_REL);
-    let src_data = match find_file_suffix(&fixture, "-Data.db") {
-        Some(p) if p.exists() => p,
+    match find_file_suffix(&fixture, "-Data.db") {
+        Some(p) if p.exists() => {}
         _ => {
-            eprintln!(
-                "SKIP: fixture Data.db not present under {} (dataset not fetched)",
+            if skip_or_fail(&format!(
+                "fixture Data.db not present under {} (dataset not fetched)",
                 fixture.display()
-            );
-            return;
+            )) {
+                return;
+            }
         }
     };
     // Guard: the fixture ships a Statistics.db to corrupt.
-    if find_file_suffix(&fixture, "-Statistics.db").is_none() {
-        eprintln!(
-            "SKIP: fixture has no Statistics.db under {}",
+    if find_file_suffix(&fixture, "-Statistics.db").is_none()
+        && skip_or_fail(&format!(
+            "fixture has no Statistics.db under {}",
             fixture.display()
-        );
+        ))
+    {
         return;
     }
-    let _ = src_data; // presence check only; we copy the whole dir below
 
     let tmp = tempfile::tempdir().expect("create tempdir");
     let dst = tmp.path().join("sstable");
@@ -145,17 +167,17 @@ async fn corrupt_statistics_hard_fails_open() {
 #[tokio::test]
 async fn healthy_statistics_still_opens_ok() {
     let fixture = datasets_root().join(FIXTURE_REL);
-    let src_data = match find_file_suffix(&fixture, "-Data.db") {
-        Some(p) if p.exists() => p,
+    match find_file_suffix(&fixture, "-Data.db") {
+        Some(p) if p.exists() => {}
         _ => {
-            eprintln!(
-                "SKIP: fixture Data.db not present under {} (dataset not fetched)",
+            if skip_or_fail(&format!(
+                "fixture Data.db not present under {} (dataset not fetched)",
                 fixture.display()
-            );
-            return;
+            )) {
+                return;
+            }
         }
     };
-    let _ = src_data;
 
     let tmp = tempfile::tempdir().expect("create tempdir");
     let dst = tmp.path().join("sstable");

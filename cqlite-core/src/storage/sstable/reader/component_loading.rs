@@ -252,14 +252,20 @@ impl SSTableReader {
             }
             // A missing Statistics.db keeps prior behavior: proceed without it.
             Err(Error::NotFound(_)) => Ok(None),
-            // A present-but-unparseable Statistics.db (Corruption, UnsupportedVersion,
-            // IO, ...) must abort open() — name the component path AND include the
-            // underlying parse error.
-            Err(e) => Err(Error::corruption(format!(
+            // A genuine PARSE failure is data corruption: keep the `Corruption`
+            // kind but add the component path + underlying error for diagnosis.
+            Err(e @ Error::Corruption(_)) => Err(Error::corruption(format!(
                 "Failed to load Statistics.db from {}: {}",
                 statistics_path.display(),
                 e
             ))),
+            // Any other failure of a PRESENT Statistics.db (IO read error, a
+            // below-floor `UnsupportedVersion`, ...) must still abort open()
+            // (issue #1626), but propagate the ORIGINAL error unchanged so its
+            // category/source is preserved rather than mislabeled as data
+            // corruption. `UnsupportedVersion` already names version + floor; an
+            // IO error keeps its `System` category.
+            Err(e) => Err(e),
         }
     }
 
