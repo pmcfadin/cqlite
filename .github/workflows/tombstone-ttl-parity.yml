@@ -55,6 +55,8 @@ on:
       - 'test-data/scripts/generate-tombstone-parity.sh'
       - 'test-data/scripts/generate-deltas.sh'
       - 'test-data/scripts/generate-compaction-tombstone-ttl-parity.sh'
+      - 'test-data/schemas/compaction-tombstone-ttl-parity.cql'
+      - 'test-data/datasets/sstables/test_compaction_tombstone_ttl/**'
       - 'cqlite-core/tests/issue_1387_tombstone_ttl_compaction_byte_parity.rs'
       - '.github/workflows/tombstone-ttl-parity.yml'
 
@@ -152,9 +154,11 @@ jobs:
         # The three byte-for-byte scenarios (shadow_row_delete, ttl_expired_live,
         # rt_cross_gen) are #[ignore = "blocked on #1410"] until the
         # compute_baseline_min localDeletionTime baseline bug is fixed, so a default
-        # `cargo test` runs only the gc-purge SEMANTIC scenario. Under
-        # CQLITE_REQUIRE_FIXTURES=1 the fixture-presence guard is fail-closed: a
-        # missing/incomplete fixture PANICS rather than skip-passing.
+        # `cargo test` runs the gc-purge SEMANTIC scenario PLUS the NON-ignored
+        # byte_parity_reference_fixtures_present_and_consistent guard. Under
+        # CQLITE_REQUIRE_FIXTURES=1 that guard fail-closes: a missing/incomplete
+        # byte-parity reference PANICS rather than skip-passing, so this lane
+        # enforces fixture integrity even while the byte diffs stay ignored.
         run: |
           env CQLITE_REQUIRE_FIXTURES=1 \
             CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \

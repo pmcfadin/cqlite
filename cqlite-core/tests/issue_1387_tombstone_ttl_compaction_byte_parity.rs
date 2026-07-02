@@ -786,3 +786,44 @@ async fn gc_purge_grace0_major_compaction_purges_to_empty() {
          to empty output, matching Cassandra's fully-purged major compaction."
     );
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Fixture-integrity guard for the #[ignore]-until-#1410 byte-parity references
+// ════════════════════════════════════════════════════════════════════════════
+
+/// The three byte-parity scenarios are `#[ignore = "blocked on #1410"]`, so a
+/// default `cargo test` (including the nightly Docker strict lane) never executes
+/// their `reference_dir()` presence/consistency guards. Without this NON-ignored
+/// test a missing or corrupt `shadow_row_delete` / `ttl_expired_live` /
+/// `rt_cross_gen` reference would silently pass the "strict" lane (roborev finding).
+///
+/// This test does NOT compare CQLite compaction output (that is what the ignored
+/// byte-parity tests do once #1410 lands) — it only asserts the committed golden
+/// fixtures exist and are internally consistent: exactly one `{table}-*` dir with a
+/// non-empty `Data.db` whose CRC32 matches the committed `Digest.crc32`. Under
+/// `CQLITE_REQUIRE_FIXTURES=1` a missing reference is a PANIC (via `reference_dir`),
+/// so the strict lane fail-closes on fixture regressions.
+#[tokio::test]
+async fn byte_parity_reference_fixtures_present_and_consistent() {
+    let strict = require_fixtures_strict();
+    if std::env::var("CQLITE_DATASETS_ROOT").is_err() {
+        if strict {
+            panic!("CQLITE_REQUIRE_FIXTURES=1 but CQLITE_DATASETS_ROOT unset");
+        }
+        eprintln!("[issue_1387] CQLITE_DATASETS_ROOT unset; skipping fixture-integrity guard");
+        return;
+    }
+    for t in ["shadow_row_delete", "ttl_expired_live", "rt_cross_gen"] {
+        let Some(ref_dir) = reference_dir(t) else {
+            // reference_dir() already PANICs on present-but-incomplete; a plain
+            // None means the dir is absent. Strict mode must fail-close.
+            if strict {
+                panic!("CQLITE_REQUIRE_FIXTURES=1 but {KEYSPACE}.{t} reference absent");
+            }
+            eprintln!("[issue_1387] {t} reference absent; skipping fixture-integrity guard");
+            continue;
+        };
+        assert_digest_consistent_with_data(t, &ref_dir);
+        eprintln!("[issue_1387] {KEYSPACE}.{t}: fixture-integrity guard PASS ({ref_dir:?})");
+    }
+}
