@@ -84,7 +84,7 @@ mod fully_expired;
 #[cfg(feature = "write-support")]
 pub use fully_expired::fully_expired_sstables;
 #[cfg(feature = "write-support")]
-pub(crate) use fully_expired::split_merge_and_dropped;
+pub(crate) use fully_expired::{reclaim_dropped_whole, split_merge_and_dropped};
 
 /// Repair-state classification + mixed-state rejection for compaction
 /// (issue #1021). Reads each input's persisted repair state from `Statistics.db`
@@ -1900,7 +1900,13 @@ pub async fn compact_sstables_with_registry(
     // WriteEngine background compaction uses for merged inputs. Deletion is
     // best-effort: a failure leaves an invisible orphan (its TOC.txt is removed
     // first) reclaimed on next startup, never a hard error — the output is correct.
-    for dropped in &dropped_whole {
+    //
+    // The one-shot CLI surface deletes NO merge inputs (the operator owns the input
+    // dir; the output lands in a separate `--output` dir), so `already_deleted` is
+    // EMPTY: in the degenerate all-expired case the SSTable the all-dropped guard
+    // retained as a merge input is ALSO in `dropped_whole` and IS reclaimed here
+    // (roborev #1388 Medium — closes the former "all-expired input left on disk").
+    fully_expired::reclaim_dropped_whole(&dropped_whole, &[], |dropped| {
         if let Err(e) =
             crate::storage::write_engine::WriteEngine::delete_sstable_files_static(dropped)
         {
@@ -1911,7 +1917,7 @@ pub async fn compact_sstables_with_registry(
                 e
             );
         }
-    }
+    });
     // Record the drop decision in the report/stats (issue #1388, R4), distinct from
     // the merged inputs so it is assertable from the plan, not just output absence.
     stats.dropped_whole = dropped_whole;

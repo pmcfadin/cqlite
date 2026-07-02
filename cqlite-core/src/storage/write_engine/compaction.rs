@@ -488,16 +488,26 @@ impl WriteEngine {
         // reclamation happens here — AFTER the merged output published — via the
         // same best-effort component-delete path as the merged inputs. A failure is
         // an invisible orphan (TOC.txt removed first) reclaimed on next startup.
-        for dropped in &merge.dropped_whole {
-            if let Err(e) = self.delete_sstable_files(dropped) {
-                log::warn!(
-                    "Failed to delete dropped-whole compaction input {:?}: {} \
-                     (merge output is valid; leftover is an invisible orphan)",
-                    dropped,
-                    e
-                );
-            }
-        }
+        //
+        // This surface already deleted EVERY merge input above, so pass
+        // `already_deleted = merge.input_paths`: in the degenerate all-expired case
+        // the SSTable the all-dropped guard retained as a merge input is ALSO in
+        // `dropped_whole`, and the loop above already reclaimed it — the dedup skips
+        // it here to avoid a double-delete + spurious orphan warning (roborev #1388).
+        crate::storage::write_engine::merge::reclaim_dropped_whole(
+            &merge.dropped_whole,
+            &merge.input_paths,
+            |dropped| {
+                if let Err(e) = self.delete_sstable_files(dropped) {
+                    log::warn!(
+                        "Failed to delete dropped-whole compaction input {:?}: {} \
+                         (merge output is valid; leftover is an invisible orphan)",
+                        dropped,
+                        e
+                    );
+                }
+            },
+        );
 
         // Step 4: Remove the now-empty tmp directory (best effort).
         if let Err(e) = std::fs::remove_dir_all(&merge.tmp_dir) {

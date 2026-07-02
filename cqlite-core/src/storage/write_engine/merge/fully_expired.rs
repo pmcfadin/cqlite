@@ -235,14 +235,19 @@ fn classify_drop_set(
 /// (a subset of `input_paths`, e.g. from [`fully_expired_sstables`]).
 ///
 /// `merge_inputs` is `input_paths` minus the drop-set — the SSTables the K-way
-/// merger will actually read. `dropped_whole` is the SSTables to exclude and
-/// reclaim after publish.
+/// merger will actually read. `dropped_whole` is the FULL drop-set: the SSTables
+/// proven fully expired + overlap-safe, to be reported and reclaimed after
+/// publish.
 ///
 /// Degenerate all-dropped guard: the merger requires at least one input, so when
 /// the drop-set is EVERY input (a major compaction of an only-expired input set),
-/// one dropped SSTable is retained in `merge_inputs` (its rows purge to empty
-/// through the normal merge path) and removed from `dropped_whole`. Correctness is
-/// preserved and no read cost is paid for the remaining dropped SSTables.
+/// ONE dropped SSTable is ALSO retained in `merge_inputs` (its rows purge to empty
+/// through the normal merge path) so the merger has a source. That retained
+/// SSTable stays in `dropped_whole` too, so the drop is reported honestly and
+/// reclaimed on both surfaces (roborev #1388 Medium): the reclaim loops dedupe
+/// against `merge_inputs` (which the core WriteEngine path deletes anyway) so the
+/// retained SSTable is deleted exactly once. Only the retained SSTable pays a read
+/// cost; the rest are still excluded from the merge.
 ///
 /// Shared by both compaction surfaces so the exclusion + all-dropped guard live in
 /// one place (issue #1388).
@@ -259,13 +264,43 @@ pub(crate) fn split_merge_and_dropped(
     if !merge_inputs.is_empty() {
         return (merge_inputs, drop_set);
     }
-    // Everything was dropped: retain one for the merger; the rest stay dropped.
-    // `pop` removes the retained SSTable from the drop-set in one step.
-    let mut dropped_whole = drop_set;
-    if let Some(retained) = dropped_whole.pop() {
-        merge_inputs.push(retained);
+    // Everything was dropped: retain one for the merger. It STAYS in the drop-set
+    // so the drop is reported/reclaimed honestly; reclaim sites dedupe against
+    // `merge_inputs` to delete it exactly once (roborev #1388 Medium).
+    if let Some(retained) = drop_set.first() {
+        merge_inputs.push(retained.clone());
     }
-    (merge_inputs, dropped_whole)
+    (merge_inputs, drop_set)
+}
+
+/// Reclaim (best-effort component-delete) each SSTable in `dropped_whole` that the
+/// caller is NOT already deleting via another path, calling `delete` on the
+/// survivors. The degenerate all-dropped guard retains one dropped SSTable in BOTH
+/// `dropped_whole` and `merge_inputs` (see [`split_merge_and_dropped`]), so it is
+/// reclaimed exactly once:
+///
+/// - Core WriteEngine surface: it deletes ALL merge inputs separately, so it
+///   passes `already_deleted = merge_inputs` here to skip the retained one (avoid a
+///   double-delete + spurious orphan warning).
+/// - CLI one-shot surface: it deletes NO merge inputs (the operator owns the input
+///   dir; output lands in a separate `--output` dir), so it passes an EMPTY
+///   `already_deleted` and the retained SSTable IS reclaimed here — closing the
+///   former "all-expired input left on disk" gap (roborev #1388 Medium).
+///
+/// `delete` is the surface's own best-effort delete (logs, never errors), so this
+/// helper only decides the set to reclaim.
+pub(crate) fn reclaim_dropped_whole<F: FnMut(&Path)>(
+    dropped_whole: &[PathBuf],
+    already_deleted: &[PathBuf],
+    mut delete: F,
+) {
+    let skip: std::collections::HashSet<&PathBuf> = already_deleted.iter().collect();
+    for dropped in dropped_whole {
+        if skip.contains(dropped) {
+            continue;
+        }
+        delete(dropped);
+    }
 }
 
 #[cfg(test)]
@@ -524,6 +559,76 @@ mod tests {
         assert_eq!(
             authoritative_max_timestamp(&ts_stats(0, i64::MIN + 1)),
             Some(i64::MIN + 1)
+        );
+    }
+
+    /// Roborev #1388 (Medium): the all-dropped guard retains ONE input for the
+    /// merger but keeps the FULL drop-set in `dropped_whole` (so nothing is
+    /// underreported or left unreclaimed). The retained input appears in BOTH
+    /// returned lists; reclaim sites dedup it.
+    #[test]
+    fn split_all_dropped_retains_one_but_reports_full_drop_set() {
+        let a = PathBuf::from("nb-1-big-Data.db");
+        let b = PathBuf::from("nb-2-big-Data.db");
+        let inputs = [a.clone(), b.clone()];
+        let drop_set = vec![a.clone(), b.clone()];
+
+        let (merge_inputs, dropped_whole) = split_merge_and_dropped(&inputs, drop_set);
+        assert_eq!(
+            merge_inputs.len(),
+            1,
+            "exactly one input is retained for the merger's at-least-one requirement"
+        );
+        assert_eq!(
+            dropped_whole,
+            vec![a, b],
+            "the FULL drop-set is still reported (no underreporting)"
+        );
+        assert!(
+            dropped_whole.contains(&merge_inputs[0]),
+            "the retained merger input is also in the reported drop-set"
+        );
+    }
+
+    /// A partial drop-set (a live input survives) leaves `merge_inputs` non-empty
+    /// and `dropped_whole` unchanged — the guard does not fire.
+    #[test]
+    fn split_partial_drop_leaves_live_input_and_full_drop_set() {
+        let expired = PathBuf::from("nb-1-big-Data.db");
+        let live = PathBuf::from("nb-2-big-Data.db");
+        let inputs = [expired.clone(), live.clone()];
+        let (merge_inputs, dropped_whole) = split_merge_and_dropped(&inputs, vec![expired.clone()]);
+        assert_eq!(merge_inputs, vec![live], "only the live input is merged");
+        assert_eq!(dropped_whole, vec![expired], "the expired input is dropped");
+    }
+
+    /// [`reclaim_dropped_whole`] deletes only the drops NOT already deleted by the
+    /// caller: the core surface (which deletes all merge inputs) skips the retained
+    /// one; the CLI surface (empty `already_deleted`) reclaims every drop.
+    #[test]
+    fn reclaim_dedups_against_already_deleted() {
+        let a = PathBuf::from("nb-1-big-Data.db");
+        let b = PathBuf::from("nb-2-big-Data.db");
+        let dropped_whole = [a.clone(), b.clone()];
+
+        // Core surface: `b` is the retained merge input (already deleted) ⇒ only `a`.
+        let mut core_deleted = Vec::new();
+        reclaim_dropped_whole(&dropped_whole, &[b.clone()], |p| {
+            core_deleted.push(p.to_path_buf())
+        });
+        assert_eq!(
+            core_deleted,
+            vec![a.clone()],
+            "core surface skips the retained merge input to avoid a double-delete"
+        );
+
+        // CLI surface: nothing pre-deleted ⇒ both reclaimed here.
+        let mut cli_deleted = Vec::new();
+        reclaim_dropped_whole(&dropped_whole, &[], |p| cli_deleted.push(p.to_path_buf()));
+        assert_eq!(
+            cli_deleted,
+            vec![a, b],
+            "CLI surface reclaims every drop (it deletes no merge inputs otherwise)"
         );
     }
 

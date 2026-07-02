@@ -254,3 +254,57 @@ fn compact_without_major_does_not_drop() {
         "a non-major compaction leaves its (merged) inputs in place; only drops are reclaimed"
     );
 }
+
+/// Roborev #1388 (Medium) regression: `compact --major` over an ALL-EXPIRED input
+/// set (no live co-input) reports EVERY expired SSTable in `dropped_whole` and
+/// reclaims every one from disk. The all-dropped guard retains one expired SSTable
+/// as the merger's required input, but it stays in `dropped_whole` and is reclaimed
+/// here (the CLI surface deletes no merge inputs otherwise), so nothing is
+/// underreported or left on disk.
+#[test]
+fn compact_major_all_expired_reports_and_reclaims_every_drop() {
+    let temp = TempDir::new().unwrap();
+    let input_dir = temp.path().join("input");
+    let out_dir = temp.path().join("out");
+    std::fs::create_dir_all(&input_dir).unwrap();
+
+    // TWO fully-expired SSTables, no live input.
+    let expired_a = flush_one(&input_dir, "exp_a", vec![delete_row(1, 0, TOMB_LDT, 100)]);
+    let expired_b = flush_one(&input_dir, "exp_b", vec![delete_row(2, 0, TOMB_LDT, 100)]);
+
+    let schema_path = write_schema_file(temp.path());
+    let args = CompactArgs {
+        input_dir: input_dir.clone(),
+        output: out_dir.clone(),
+        schema: schema_path,
+        gc_before: Some(GC_BEFORE),
+        now_sec: Some(NOW_SECS),
+        generation: 1,
+        major: true,
+    };
+
+    let result = rt()
+        .block_on(handle_compact(&args))
+        .expect("compact --major all-expired");
+
+    // BOTH expired SSTables are reported in the drop plan (no underreporting).
+    let mut reported = result.dropped_whole.clone();
+    reported.sort();
+    let mut expected = vec![expired_a.clone(), expired_b.clone()];
+    expected.sort();
+    assert_eq!(
+        reported, expected,
+        "an all-expired --major compaction must report EVERY dropped SSTable"
+    );
+    // BOTH are reclaimed from disk (including the one the all-dropped guard retained
+    // as the merger's input).
+    assert!(
+        !expired_a.exists() && !expired_b.exists(),
+        "every dropped-whole SSTable is reclaimed, including the retained merger input"
+    );
+    // The output is empty (both inputs purged to nothing).
+    assert_eq!(
+        result.output_rows, 0,
+        "an all-expired compaction produces an empty output"
+    );
+}
