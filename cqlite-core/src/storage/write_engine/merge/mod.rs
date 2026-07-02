@@ -328,68 +328,11 @@ pub trait SSTableRowIterator: Send {
     fn next(&mut self) -> Option<Result<MergeEntry>>;
 }
 
-/// Run an async future to completion from a synchronous context, safely whether
-/// or not a Tokio runtime is already running on the current thread.
-///
-/// This is the shared async-to-sync bridge for the write engine's blocking
-/// helpers: [`SSTableRowIteratorAdapter`] (the k-way merge readers),
-/// `WriteEngine::flush_internal`, and `WriteEngine::finalize_merge_blocking`.
-///
-/// ## Why not `Handle::block_on`?
-///
-/// When this bridge is reached from a thread that is already driving a Tokio
-/// runtime — anything under `#[tokio::main]` or `#[tokio::test]`, which is how
-/// the CLI (`maintenance`, `export-sstable --compact`) and any async caller
-/// reach compaction — `Handle::current().block_on()` panics with *"Cannot start
-/// a runtime from within a runtime"* (Issue #587). Compaction only reaches the
-/// bridge once a merge has input SSTables to read, which is why STCS worked in
-/// isolation but blew up from async callers.
-///
-/// `tokio::task::block_in_place` is not a general fix either: it panics on a
-/// current-thread runtime (e.g. the default `#[tokio::test]` flavor).
-///
-/// ## Strategy
-///
-/// - **No runtime on the current thread** (`Handle::try_current()` is `Err`):
-///   create a temporary runtime and block on it directly.
-/// - **Already inside a runtime** (`Ok`): hand the future to a dedicated scoped
-///   thread that owns a fresh runtime, then join it. That thread is free to
-///   block because it is not driving the caller's runtime, so this works for
-///   both the multi-thread and current-thread runtime flavors.
-///   [`std::thread::scope`] (rather than [`std::thread::spawn`]) lets the future
-///   borrow from the caller's stack — `flush_internal`/`finalize_merge_blocking`
-///   pass futures that borrow `&mut self` — so it need not be `'static`.
-///
-/// The future and its output must be `Send` because they cross a thread boundary
-/// in the in-runtime case.
+/// Async-to-sync bridge (`block_on_async`) with a cached, long-lived runtime
+/// (Issue #587 panic-safety, Issue #1670 no per-call runtime construction).
+mod async_bridge;
 #[cfg(feature = "write-support")]
-pub(crate) fn block_on_async<F, T>(future: F) -> Result<T>
-where
-    F: std::future::Future<Output = Result<T>> + Send,
-    T: Send,
-{
-    match tokio::runtime::Handle::try_current() {
-        // Already inside a runtime: a nested `block_on` on this thread would
-        // panic. Run the future on a scoped thread with its own runtime instead.
-        Ok(_) => std::thread::scope(|scope| {
-            scope
-                .spawn(|| {
-                    let rt = tokio::runtime::Runtime::new().map_err(|e| {
-                        Error::Storage(format!("Failed to create tokio runtime: {}", e))
-                    })?;
-                    rt.block_on(future)
-                })
-                .join()
-                .map_err(|_| Error::Storage("async-to-sync bridge thread panicked".to_string()))?
-        }),
-        // No runtime on this thread: safe to create one and block directly.
-        Err(_) => {
-            let rt = tokio::runtime::Runtime::new()
-                .map_err(|e| Error::Storage(format!("Failed to create tokio runtime: {}", e)))?;
-            rt.block_on(future)
-        }
-    }
-}
+pub(crate) use async_bridge::block_on_async;
 
 /// Adapter that wraps async SSTableReader into a true-streaming sync
 /// [`SSTableRowIterator`].
