@@ -12,7 +12,10 @@
 //! returns the typed corruption error. A refactor that reroutes the query path
 //! around `read_next_block_impl` (exactly what the offset-based point-lookup path
 //! already does — see #1411) would pass every other test while silently returning
-//! garbage. These tests break on such a reroute.
+//! garbage. The scan/stream tests break on such a reroute. The point-lookup
+//! expectation is captured as an `#[ignore]`d expected-behavior regression test
+//! (asserting the typed corruption error) that is un-ignored when #1411 lands — we
+//! do NOT codify today's `Ok(None)` defect.
 //!
 //! ## Fixture (real Cassandra 5.0.2 bytes, one deterministic bit flip)
 //!
@@ -213,21 +216,19 @@ async fn streaming_scan_terminates_with_error_not_silent_truncation() {
 
 /// AC #2 — point lookup whose target row lives in the corrupt chunk.
 ///
-/// EXPECTED behavior (issue #1397): a typed corruption error, NOT `Ok(None)`.
+/// EXPECTED behavior (issue #1397): a typed, non-recoverable corruption error naming
+/// the corrupt chunk index + offset — NOT `Ok(None)` and NOT garbage.
 ///
-/// ACTUAL behavior (characterized): `Ok(None)`. The point-lookup path
-/// (`get` → bloom(present) → `read_value_at_offset`/`get_cached_data`) reads raw
-/// bytes at an offset and LZ4-decodes them WITHOUT the inline per-chunk CRC check,
-/// so a bit-flipped chunk reads as "not found" instead of surfacing corruption.
-/// The identical `get([0,0,0,1])` returns `Ok(Some(_))` on the CLEAN fixture, so
-/// this is a read-path defect, not a wrong key.
-///
-// KNOWN LIMITATION: see #1411 — point lookup bypasses the inline chunk-CRC check
-// and returns Ok(None) on a corrupt COMPRESSED chunk. This is a CHARACTERIZATION
-// test asserting today's (wrong) behavior so the suite stays green; when #1411 is
-// fixed this test must flip to assert `assert_typed_chunk_corruption(&err)`.
+/// This test asserts that correct behavior. It is `#[ignore]`d today because the
+/// point-lookup path (`get` → bloom(present) → `read_value_at_offset`/`get_cached_data`)
+/// reads raw bytes at an offset and LZ4-decodes them WITHOUT the inline per-chunk CRC
+/// check, so a bit-flipped chunk currently reads as "not found" (`Ok(None)`) instead
+/// of surfacing corruption. Fixing that bypass is tracked as #1411; un-ignore this
+/// test when #1411 lands. The identical `get([0,0,0,1])` returns `Ok(Some(_))` on the
+/// CLEAN fixture, so the divergence is a read-path defect, not a wrong key.
 #[tokio::test]
-async fn point_lookup_into_corrupt_chunk_currently_returns_ok_none_see_1411() {
+#[ignore = "expected behavior; blocked on #1411 (point-lookup bypasses inline chunk-CRC check). Un-ignore when #1411 lands."]
+async fn point_lookup_into_corrupt_chunk_should_error_see_1411() {
     let Some(path) = corrupt_data_db_or_gate() else {
         return;
     };
@@ -238,27 +239,14 @@ async fn point_lookup_into_corrupt_chunk_currently_returns_ok_none_see_1411() {
     let result = reader.get(&table_id, &key).await;
 
     match result {
-        // Documented current defect (#1411).
-        Ok(None) => {
-            eprintln!(
-                "KNOWN LIMITATION #1411: point lookup for pk=1 over the corrupt chunk \
-                 returned Ok(None); expected a typed corruption error."
-            );
-        }
-        // If the read path ever starts surfacing the corruption here, #1411 is fixed
-        // — assert it is the correct typed error and update this test.
-        Err(err) => {
-            assert_typed_chunk_corruption(&err);
-            panic!(
-                "#1411 appears FIXED: point lookup now returns the typed corruption \
-                 error. Update this characterization test to assert Err unconditionally."
-            );
-        }
-        // Returning garbage from a corrupt chunk is never acceptable.
+        Err(err) => assert_typed_chunk_corruption(&err),
+        Ok(None) => panic!(
+            "point lookup for pk=1 over the corrupt chunk returned Ok(None); it must \
+             return a typed corruption error (see #1411)."
+        ),
         Ok(Some(v)) => panic!(
             "point lookup over the corrupt chunk returned Ok(Some({v:?})) — garbage \
-             from a bit-flipped chunk. Neither the current (#1411) nor the correct \
-             behavior; hard failure."
+             from a bit-flipped chunk; it must return a typed corruption error."
         ),
     }
 }
