@@ -5294,6 +5294,70 @@ mod tests {
         );
     }
 
+    /// #1410 (roborev Finding 3): when the STATS-extras histogram decode FAILS
+    /// (corrupt / version-mismatched STATS component) `compute_baseline_min` must
+    /// stay CONSERVATIVE and INCLUDE the input's LDT baseline — it must NOT treat an
+    /// extras PARSE FAILURE like an empty histogram (which would skip a possibly-real
+    /// LDT baseline and make the writer reject a re-emitted below-baseline tombstone).
+    ///
+    /// Setup: write a valid tombstone-carrying `Statistics.db`, then corrupt the FIRST
+    /// 4 bytes of the STATS component (the `estimatedPartitionSize` histogram bucket
+    /// count) to a negative i32 so `parse_stats_extras` fails with `Corruption`, while
+    /// the SERIALIZATION_HEADER EncodingStats (reached via its own TOC offset, a LATER
+    /// component) still decodes. Assert the tombstone LDT is included regardless.
+    #[test]
+    fn compute_baseline_min_conservative_when_stats_extras_unparseable() {
+        use crate::storage::sstable::writer::{StatisticsMetadata, StatisticsWriter};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("temp dir");
+        let data_path = tmp.path().join("nb-1-big-Data.db");
+        std::fs::write(&data_path, b"").expect("touch Data.db");
+        let stats_path = tmp.path().join("nb-1-big-Statistics.db");
+
+        let tomb_ldt: i32 = 1_782_950_059; // a real wall-clock tombstone LDT.
+        let mut meta = StatisticsMetadata::new();
+        meta.update_local_deletion_time(tomb_ldt);
+        StatisticsWriter::new(stats_path.clone())
+            .write(&meta, None)
+            .expect("write tombstone Statistics.db");
+
+        // Locate the STATS component (MetadataType ordinal 2) offset from the TOC and
+        // corrupt its first field (estimatedPartitionSize histogram bucket count) to a
+        // negative i32 so parse_stats_extras fails, without touching the header offset.
+        let mut bytes = std::fs::read(&stats_path).expect("read stats");
+        let count = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        let mut stats_offset = None;
+        for i in 0..count {
+            let entry = 8 + i * 8; // after count(4)+CRC(4); each entry = type(4)+offset(4)
+            let ty = u32::from_be_bytes([
+                bytes[entry],
+                bytes[entry + 1],
+                bytes[entry + 2],
+                bytes[entry + 3],
+            ]);
+            if ty == 2 {
+                stats_offset = Some(u32::from_be_bytes([
+                    bytes[entry + 4],
+                    bytes[entry + 5],
+                    bytes[entry + 6],
+                    bytes[entry + 7],
+                ]) as usize);
+            }
+        }
+        let off = stats_offset.expect("STATS component (type 2) in TOC");
+        // Negative bucket count → skip_estimated_histogram returns Corruption.
+        bytes[off..off + 4].copy_from_slice(&(-1i32).to_be_bytes());
+        std::fs::write(&stats_path, &bytes).expect("rewrite corrupted stats");
+
+        let (_ts, baseline_ldt, _ttl) = compute_baseline_min(&[data_path]);
+        assert_eq!(
+            baseline_ldt, tomb_ldt,
+            "an unparseable STATS-extras section must be treated conservatively \
+             (INCLUDE the LDT baseline), not as an empty no-tombstone histogram (#1410)"
+        );
+    }
+
     /// #935: `compute_max_purgeable_timestamp` returns the MIN write timestamp
     /// across the non-included overlapping SSTables (from each `Statistics.db`
     /// `min_timestamp`), so a tombstone older than that bound can be purged.
