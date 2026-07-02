@@ -43,7 +43,6 @@
 //! - test_collections/frozen_collections_table (frozen collections)
 
 use cqlite_core::storage::sstable::reader::SSTableReader;
-use cqlite_core::ScanRow;
 use cqlite_core::{Config, Platform};
 use num_bigint::BigInt;
 use num_traits::{Signed, ToPrimitive};
