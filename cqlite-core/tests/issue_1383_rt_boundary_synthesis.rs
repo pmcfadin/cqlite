@@ -614,47 +614,78 @@ fn crit4_readback_equivalence_compacted_vs_inputs() {
 // ════════════════════════════════════════════════════════════════════════════
 
 /// The keyspace under which the closest Cassandra-compacted range-tombstone-merge
-/// oracle would live (#1387's tombstone/TTL/RT byte-fixture family).
+/// oracles live (#1387's tombstone/TTL/RT byte-fixture family). This keyspace may
+/// ALREADY be present for OTHER #1387 fixtures (`rt_cross_gen`, `shadow_row_delete`,
+/// …) without the #1383-specific oracle existing — so presence is scoped to the
+/// specific table below, NOT the keyspace (roborev #2616 High).
 const ORACLE_KEYSPACE: &str = "test_compaction_tombstone_ttl";
 
-/// Whether the Cassandra oracle reference keyspace is present on disk. Returns
-/// `None` when `CQLITE_DATASETS_ROOT` is unset (dataset root unknown).
-fn oracle_keyspace_present() -> Option<bool> {
+/// The SPECIFIC table a #1383 open-ended two-gen boundary oracle would be written
+/// under (distinct from #1387's bounded `rt_cross_gen`). It does not exist yet; when
+/// committed, its directory is `{ORACLE_TABLE}-<uuid>/` carrying an `nb-*-big-Data.db`.
+const ORACLE_TABLE: &str = "rt_open_ended_boundary";
+
+/// Presence of the SPECIFIC #1383 open-ended-boundary oracle fixture:
+///   * `None`       → `CQLITE_DATASETS_ROOT` unset (dataset root unknown).
+///   * `Some(false)` → root known, but no `{ORACLE_TABLE}-*` dir with a Data.db (the
+///     #1383 oracle is absent — regardless of whether the keyspace exists for other
+///     #1387 fixtures).
+///   * `Some(true)`  → a `{ORACLE_TABLE}-*` dir with a compacted `nb-*-big-Data.db`.
+fn oracle_fixture_present() -> Option<bool> {
     let root = std::env::var("CQLITE_DATASETS_ROOT").ok()?;
     let base = Path::new(&root).join("sstables").join(ORACLE_KEYSPACE);
-    Some(
-        base.read_dir()
-            .ok()
-            .map(|mut d| d.next().is_some())
-            .unwrap_or(false),
+    let Ok(entries) = base.read_dir() else {
+        // Keyspace dir absent/unreadable ⇒ the specific oracle is absent.
+        return Some(false);
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with(&format!("{ORACLE_TABLE}-")) {
+            continue;
+        }
+        // Only a table dir carrying a compacted Data.db counts as "present".
+        if let Ok(inner) = entry.path().read_dir() {
+            let has_data = inner.flatten().any(|e| {
+                let n = e.file_name().to_string_lossy().to_string();
+                n.starts_with("nb-") && n.ends_with("-big-Data.db")
+            });
+            if has_data {
+                return Some(true);
+            }
+        }
+    }
+    Some(false)
+}
+
+/// Strict fixture lane. Accepts both `1` and `true` (suite convention; roborev
+/// #2616 Low).
+fn require_fixtures_strict() -> bool {
+    matches!(
+        std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref(),
+        Ok("1") | Ok("true")
     )
 }
 
-fn require_fixtures_strict() -> bool {
-    std::env::var("CQLITE_REQUIRE_FIXTURES")
-        .map(|v| v == "1")
-        .unwrap_or(false)
-}
-
 /// Fail-closed fixture-presence contract for the eventual Cassandra byte oracle
-/// (roborev #2613 Low). This test is NOT `#[ignore]`, so it runs in the normal AND
-/// strict (`CQLITE_REQUIRE_FIXTURES=1`) fixture lanes and actually enforces the
-/// contract the ignored byte-diff test documents but cannot execute:
-///   * oracle keyspace absent + not strict → SKIP (returns; local-only fixture);
-///   * oracle keyspace absent + `CQLITE_REQUIRE_FIXTURES=1` → PANIC (strict lane
-///     never silently passes on the missing oracle);
-///   * oracle keyspace PRESENT → surface the fixture GAP (no open-ended two-gen
-///     boundary fixture matching #1383 exists; #1387 `rt_cross_gen` uses bounded
-///     ranges). Present-but-mismatched must not masquerade as covered.
+/// (roborev #2613 Low, #2616 High). This test is NOT `#[ignore]`, so it runs in the
+/// normal AND strict (`CQLITE_REQUIRE_FIXTURES=1|true`) fixture lanes and enforces the
+/// contract the ignored byte-diff test documents but cannot execute. Presence is
+/// scoped to the SPECIFIC `{ORACLE_TABLE}` fixture, so a dataset that already carries
+/// the #1387 keyspace for OTHER fixtures does NOT trip this guard:
+///   * dataset root unset + not strict → SKIP;
+///   * #1383 oracle fixture absent + not strict → SKIP (local-only / not yet built);
+///   * absent + strict → PANIC (strict lane never silently passes on a missing
+///     oracle it claims to require — but only for the #1383-specific fixture);
+///   * #1383 oracle fixture PRESENT → surface the GAP: enable the byte-diff test.
 ///
-/// It deliberately does NOT attempt a byte diff (blocked on #1410 + fixture geometry
-/// mismatch); it only guards presence/shape so the strict-lane claim is real.
+/// It deliberately does NOT attempt a byte diff (blocked on #1410); it only guards
+/// presence/shape so the strict-lane claim is real.
 #[test]
 fn crit5_oracle_fixture_contract_guard() {
-    match oracle_keyspace_present() {
+    match oracle_fixture_present() {
         None => {
             if require_fixtures_strict() {
-                panic!("CQLITE_REQUIRE_FIXTURES=1 but CQLITE_DATASETS_ROOT unset");
+                panic!("CQLITE_REQUIRE_FIXTURES set but CQLITE_DATASETS_ROOT unset");
             }
             eprintln!(
                 "[issue_1383] crit5 guard SKIP: CQLITE_DATASETS_ROOT unset (Cassandra open-ended \
@@ -664,23 +695,22 @@ fn crit5_oracle_fixture_contract_guard() {
         Some(false) => {
             if require_fixtures_strict() {
                 panic!(
-                    "CQLITE_REQUIRE_FIXTURES=1 but Cassandra oracle keyspace {ORACLE_KEYSPACE} \
-                     absent. #1383 crit5 needs an OPEN-ENDED two-gen boundary fixture; the #1387 \
-                     rt_cross_gen fixture (bounded ranges) does not match this scenario."
+                    "CQLITE_REQUIRE_FIXTURES set but the #1383 open-ended two-gen boundary oracle \
+                     fixture {ORACLE_KEYSPACE}.{ORACLE_TABLE} is absent. It has not been \
+                     commissioned yet (the #1387 rt_cross_gen fixture uses BOUNDED ranges and does \
+                     not match this scenario); build it + land #1410 to enable the byte diff."
                 );
             }
             eprintln!(
-                "[issue_1383] crit5 guard SKIP: Cassandra oracle keyspace {ORACLE_KEYSPACE} absent \
-                 (local-only / not in the pinned CI dataset). See #1410 + the fixture gap \
-                 documented on crit5_cassandra_oracle_two_gen_open_ended_boundary."
+                "[issue_1383] crit5 guard SKIP: #1383 oracle fixture \
+                 {ORACLE_KEYSPACE}.{ORACLE_TABLE} absent (local-only / not yet built). See #1410 \
+                 + the fixture gap on crit5_cassandra_oracle_two_gen_open_ended_boundary."
             );
         }
         Some(true) => panic!(
-            "[issue_1383] crit5 guard: Cassandra oracle keyspace {ORACLE_KEYSPACE} is PRESENT, but \
-             no OPEN-ENDED two-gen boundary fixture matching #1383 exists yet (#1387 rt_cross_gen \
-             uses BOUNDED ranges — different marker geometry) and the byte diff is blocked on \
-             #1410. Commission an open-ended-RT two-gen fixture and land #1410, then enable \
-             crit5_cassandra_oracle_two_gen_open_ended_boundary."
+            "[issue_1383] crit5 guard: the #1383 oracle fixture {ORACLE_KEYSPACE}.{ORACLE_TABLE} \
+             is now PRESENT. Enable crit5_cassandra_oracle_two_gen_open_ended_boundary (drop its \
+             #[ignore] once #1410 has landed) and wire the byte diff."
         ),
     }
 }
@@ -717,15 +747,14 @@ fn crit5_cassandra_oracle_two_gen_open_ended_boundary() {
     // Enabling this test (dropping #[ignore]) requires BOTH #1410 fixed AND a
     // committed open-ended two-gen boundary fixture; until then the presence/shape
     // contract is guarded by crit5_oracle_fixture_contract_guard.
-    match oracle_keyspace_present() {
+    match oracle_fixture_present() {
         None | Some(false) => {
             eprintln!("[issue_1383] crit5 byte-diff SKIP: oracle fixture absent (see guard)");
         }
         Some(true) => panic!(
-            "[issue_1383] crit5: oracle keyspace {ORACLE_KEYSPACE} PRESENT but the open-ended \
-             two-gen boundary byte diff is not yet wired (blocked on #1410 + fixture geometry \
-             mismatch vs #1387 rt_cross_gen). Wire the Data.db/Index.db/Summary.db/Digest.crc32 \
-             diff here once #1410 lands and a matching fixture is committed."
+            "[issue_1383] crit5: oracle fixture {ORACLE_KEYSPACE}.{ORACLE_TABLE} PRESENT but the \
+             open-ended two-gen boundary byte diff is not yet wired (blocked on #1410). Wire the \
+             Data.db/Index.db/Summary.db/Digest.crc32 diff here once #1410 lands."
         ),
     }
 }
