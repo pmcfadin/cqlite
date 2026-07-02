@@ -224,7 +224,16 @@ pub fn parse_nb_format_statistics_data(
 
             let timestamp_stats = TimestampStatistics {
                 min_timestamp,
-                max_timestamp: min_timestamp, // Not parsed, use min as placeholder
+                // Fail-closed placeholder. The authoritative `maxTimestamp` is
+                // recovered from STATS field 4 by the best-effort post-pass in
+                // `parse_enhanced_statistics_file` (issue #1729). The inner
+                // EncodingStats parser does not reach field 4, so until the
+                // post-pass runs we use `i64::MIN` — Cassandra's "no max write
+                // timestamp recorded" sentinel — NOT the old `min_timestamp`
+                // placeholder (which silently reported the MIN as the max).
+                // A consumer that sees `i64::MIN` must treat the max as
+                // unavailable (do not proceed as if a real max were known).
+                max_timestamp: i64::MIN,
                 min_deletion_time,
                 max_deletion_time: min_deletion_time,
                 min_ttl,
@@ -337,16 +346,25 @@ pub fn parse_enhanced_statistics_file<'a>(
 
             // Best-effort STATS-extras decode over the FULL buffer (with TOC):
             // recover the authoritative maxLocalDeletionTime (the inner parser
-            // leaves it as a placeholder equal to min_deletion_time) and the
-            // estimated tombstone-drop-times histogram (Issue #1073). This is
-            // strictly additive — a Statistics.db that parses today must keep
-            // parsing, so an Err here is logged and the placeholders are kept.
+            // leaves it as a placeholder equal to min_deletion_time), the
+            // authoritative maxTimestamp (issue #1729 — the inner parser leaves
+            // it as the `i64::MIN` "unavailable" sentinel), and the estimated
+            // tombstone-drop-times histogram (Issue #1073). This is strictly
+            // additive — a Statistics.db that parses today must keep parsing, so
+            // an Err here is logged and the placeholders are kept. When
+            // maxTimestamp is unavailable (extras.max_timestamp == None, i.e.
+            // Cassandra's Long.MIN_VALUE sentinel) we deliberately leave the
+            // `i64::MIN` fail-closed sentinel in place rather than substituting
+            // the min — consumers requiring a real max must not proceed.
             let tombstone_drop_times =
                 match crate::parser::repair_metadata::parse_stats_extras(input, gates) {
                     Ok(extras) => {
                         // Only set max_deletion_time. Do NOT touch min_deletion_time
                         // (the EncodingStats min baseline consumed elsewhere).
                         timestamp_stats.max_deletion_time = extras.max_local_deletion_time;
+                        if let Some(max_ts) = extras.max_timestamp {
+                            timestamp_stats.max_timestamp = max_ts;
+                        }
                         extras.tombstone_drop_times
                     }
                     Err(e) => {
