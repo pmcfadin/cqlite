@@ -25,9 +25,16 @@
 //! A single long-lived bridge runtime is built lazily on first use and reused
 //! for every subsequent call (Issue #1670) — previously a fresh
 //! `Runtime::new()` was constructed and torn down on *every* flush/maintenance
-//! step. The cached runtime is a cheap `current_thread` flavor (it only ever
-//! drives one `block_on` at a time per calling thread) with all drivers
-//! (I/O, time, blocking pool) enabled.
+//! step. The cached runtime is a **multi-thread** runtime (worker threads =
+//! CPU count) with all drivers (I/O, time, blocking pool) enabled — the same
+//! flavor `Runtime::new()` built before #1670. This is deliberate: concurrent
+//! flush/compaction each bridge through `block_on_async`, and a single shared
+//! `current_thread` runtime would serialize those concurrent `block_on` calls
+//! (and any internal task fan-out within one future), regressing
+//! concurrent-flush/compaction throughput vs main. A multi-thread runtime
+//! preserves main's parallelism semantics: N threads can each drive a
+//! `block_on` on the shared runtime and its worker pool services them in
+//! parallel.
 //!
 //! - **No runtime on the current thread** (`Handle::try_current()` is `Err`):
 //!   block on the cached runtime directly. A panic in the future unwinds to the
@@ -85,7 +92,11 @@ static RUNTIME_BUILD_COUNT: AtomicU64 = AtomicU64::new(0);
 fn bridge_runtime() -> Result<&'static Runtime> {
     let built = BRIDGE_RUNTIME.get_or_init(|| {
         RUNTIME_BUILD_COUNT.fetch_add(1, Ordering::Relaxed);
-        tokio::runtime::Builder::new_current_thread()
+        // Multi-thread flavor (worker threads = CPU count), matching main's
+        // `Runtime::new()` semantics so concurrent `block_on_async` calls and
+        // in-future task fan-out run in parallel rather than being serialized by
+        // a shared single-threaded scheduler (Issue #1670).
+        tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .map_err(|e| format!("Failed to create tokio runtime: {}", e))
@@ -158,6 +169,72 @@ mod tests {
             runtime_build_count() <= 1,
             "bridge runtime constructed {} times across 16 calls; expected <= 1 (cached)",
             runtime_build_count()
+        );
+    }
+
+    /// Issue #1670: concurrent `block_on_async` calls from many OS threads on
+    /// the single shared runtime must all complete correctly and must NOT
+    /// serialize. Each future spawns inner tasks (task fan-out) and awaits a
+    /// short timer; a multi-thread runtime services them on its worker pool in
+    /// parallel. A shared `current_thread` runtime would serialize both the
+    /// top-level `block_on` calls and the inner fan-out — so this both proves
+    /// thread-safety of the shared handle and guards the multi-thread flavor.
+    #[test]
+    fn concurrent_block_on_from_many_threads_is_safe_and_parallel() {
+        use std::sync::Arc;
+
+        const THREADS: usize = 8;
+        // Prime the cache from the no-runtime path so all worker threads reuse
+        // one runtime rather than racing to build it.
+        let _: Result<u64> = block_on_async(async { Ok(0u64) });
+        let build_before = runtime_build_count();
+
+        let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+        let start = std::time::Instant::now();
+        let handles: Vec<_> = (0..THREADS)
+            .map(|i| {
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    block_on_async(async move {
+                        // Inner task fan-out: joined concurrently on the shared
+                        // worker pool, then a short timer to keep each future
+                        // in-flight while its peers run.
+                        let a = tokio::spawn(async move { i });
+                        let b = tokio::spawn(async move { i * 2 });
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        let (a, b) = (
+                            a.await.map_err(|e| Error::Storage(e.to_string()))?,
+                            b.await.map_err(|e| Error::Storage(e.to_string()))?,
+                        );
+                        Ok::<u64, Error>((a + b) as u64)
+                    })
+                })
+            })
+            .collect();
+
+        for (i, h) in handles.into_iter().enumerate() {
+            let got = h
+                .join()
+                .expect("worker thread did not panic")
+                .expect("concurrent block_on_async succeeds");
+            assert_eq!(got, (i * 3) as u64, "wrong result on thread {i}");
+        }
+
+        // All THREADS futures sleep 100ms and ran concurrently on the shared
+        // runtime; if they were serialized (a single-threaded scheduler) the
+        // wall time would approach THREADS * 100ms. A generous ceiling well
+        // below that proves non-serialization without being flake-prone.
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(100 * THREADS as u64 / 2),
+            "concurrent calls appear serialized: {elapsed:?} for {THREADS} x 100ms sleeps"
+        );
+        // Still the single cached runtime — no per-thread rebuild.
+        assert_eq!(
+            runtime_build_count(),
+            build_before,
+            "shared runtime was rebuilt under concurrent load"
         );
     }
 
