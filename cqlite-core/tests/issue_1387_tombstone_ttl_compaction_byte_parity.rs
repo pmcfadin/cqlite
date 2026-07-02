@@ -899,6 +899,28 @@ async fn byte_parity_reference_fixtures_present_and_consistent() {
             continue;
         };
         assert_digest_consistent_with_data(t, &ref_dir);
+        // Assert the FULL committed component set (the same set the byte-parity test
+        // diffs / requires present) exists and is non-empty. Without this, a fixture
+        // missing Index.db/Summary.db/TOC.txt/CRC.db/Filter.db/Statistics.db could
+        // pass the strict lane while the byte-parity tests stay ignored (roborev).
+        let present = component_suffixes(&ref_dir);
+        for needed in BYTE_FOR_BYTE_COMPONENTS
+            .iter()
+            .chain(PRESENT_NOT_DIFFED.iter())
+            .chain(["TOC.txt", "CRC.db"].iter())
+        {
+            assert!(
+                present.contains(*needed),
+                "{t}: reference missing committed component {needed}; have {present:?}. The \
+                 fixture is INCOMPLETE — regenerate with \
+                 bash test-data/scripts/generate-compaction-tombstone-ttl-parity.sh"
+            );
+            let bytes = read_component(&ref_dir, needed);
+            assert!(
+                !bytes.is_empty(),
+                "{t}: committed component {needed} present-but-empty — golden broken"
+            );
+        }
         let ldts = golden_ldts(&ref_dir, t);
         assert!(
             ldts.len() >= min_distinct_ldts,
