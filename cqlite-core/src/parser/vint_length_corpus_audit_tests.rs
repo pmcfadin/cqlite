@@ -9,11 +9,11 @@
 //!
 //! The production full-scan hot path for the corpus formats (V5CompressedLegacy
 //! "nb", BTI "da") decodes every on-disk length/count field via `parse_vuint`
-//! directly, NOT via `parse_vint_length` — so arming the `length_decode_audit`
-//! hook inside `parse_vint_length` around a full scan records ZERO decodes and
-//! demonstrates nothing (roborev job 2718: the prior version of this test was
-//! vacuous for exactly this reason). See the producer-classification doc-comment
-//! on `parser::vint::parse_vint_length`.
+//! directly, NOT via `parse_vint_length` — so instrumenting `parse_vint_length`
+//! around a full scan records ZERO decodes and demonstrates nothing (roborev job
+//! 2718: the prior version of this test was vacuous for exactly this reason).
+//! See the producer-classification doc-comment on
+//! `parser::vint::parse_vint_length`.
 //!
 //! ## What this test actually does
 //!
@@ -26,24 +26,26 @@
 //!    prefix that precedes the value bytes (confirmed byte-exact: the recovered
 //!    vint must occupy exactly the bytes ending where the value begins and
 //!    unsigned-decode to `L`).
-//! 3. It then routes those literal on-disk prefix bytes through
-//!    `parse_vint_length` (arming the differential audit) and asserts, at every
-//!    site, that the UNSIGNED decode equals the authoritative length `L`, while
-//!    the audit tallies how many of those real length prefixes the legacy signed
-//!    ZigZag decode would have mis-read.
+//! 3. It then decodes those literal on-disk prefix bytes with BOTH decoders,
+//!    per-site, into LOCAL counters: the UNSIGNED decode (`parse_vint_length`)
+//!    must equal the authoritative length `L`, while a LOCAL differential tallies
+//!    how many of those real length prefixes the legacy signed ZigZag decode
+//!    would have mis-read. The tally is LOCAL (never a crate-global counter), so
+//!    the assertion is deterministic even though Rust runs unit tests
+//!    concurrently in one binary (roborev job 2765).
 //!
 //! The test FAILS if it silently exercises nothing (`agree + disagree == 0`),
 //! guarding against a future 0-decode regression.
 //!
-//! It must be a LIB unit test (not an integration test): the audit hook and the
-//! `stitched_data_section_for_tests` accessor are `#[cfg(test)]`, only compiled
+//! It must be a LIB unit test (not an integration test): the
+//! `stitched_data_section_for_tests` accessor is `#[cfg(test)]`, only compiled
 //! for the crate's own unit-test build.
 //!
 //! Fixture-gating (repo doctrine): SKIPs cleanly when the dataset binaries are
 //! absent, but treats "present but zero tables" as a FAILURE. `CQLITE_DATASETS_ROOT`
 //! keyed; `CQLITE_REQUIRE_FIXTURES=1` turns the absent-corpus skip into a hard fail.
 
-use crate::parser::vint::{length_decode_audit, parse_vint_length};
+use crate::parser::vint::{parse_vint, parse_vint_length};
 use crate::storage::sstable::reader::SSTableReader;
 use crate::types::{ScanRow, TableId, Value};
 use crate::{Config, Platform};
@@ -146,8 +148,8 @@ const MAX_SITES: usize = 256;
 /// Locate LITERAL on-disk `writeUnsignedVInt(L)` length prefixes in a
 /// decompressed V5 data section, cross-checked against the authoritative decoded
 /// value length `L`. Pushes `(prefix_bytes, expected_len)` for each confirmed
-/// site. Probing calls `parse_vint_length` while the audit is DISARMED, so it
-/// does not pollute the differential tally.
+/// site. The differential tally is computed later from these confirmed sites
+/// using LOCAL counters, so this probing does not affect the tally.
 fn extract_length_prefixes(
     buffer: &[u8],
     rows: &[(crate::RowKey, ScanRow)],
@@ -248,7 +250,7 @@ async fn corpus_differential_unsigned_length_decode() {
     let mut scans_ok = 0usize;
     let mut failures: Vec<String> = Vec::new();
     // Confirmed literal on-disk unsigned-vint length prefixes + authoritative
-    // expected lengths, gathered while the audit is DISARMED.
+    // expected lengths.
     let mut sites: Vec<(Vec<u8>, usize)> = Vec::new();
 
     for (data_db, table_name) in &tables {
@@ -283,11 +285,15 @@ async fn corpus_differential_unsigned_length_decode() {
         }
     }
 
-    // Now run the differential over the confirmed literal on-disk prefixes.
-    // Arm the audit ONLY for this pass so the tally reflects exactly these real
-    // length-prefix decodes (probing above ran with the audit disarmed).
-    length_decode_audit::arm();
+    // Now run the differential over the confirmed literal on-disk prefixes using
+    // LOCAL counters (no crate-global armed hook). This keeps the tally
+    // deterministic even though Rust runs unit tests concurrently in one binary —
+    // no other test can perturb these local `usize` variables (roborev job 2765).
+    let mut agree = 0usize;
+    let mut disagree = 0usize;
     for (prefix, expected) in &sites {
+        // Fixed behaviour: UNSIGNED decode must consume the whole prefix and
+        // equal the authoritative on-disk length.
         let (rem, decoded) =
             parse_vint_length(prefix).expect("confirmed on-disk prefix must decode");
         assert!(
@@ -299,8 +305,19 @@ async fn corpus_differential_unsigned_length_decode() {
             "unsigned decode of real on-disk length prefix {prefix:02x?} must equal the \
              authoritative value length {expected}"
         );
+
+        // Legacy behaviour: signed ZigZag decode, rejecting negatives, as usize.
+        // Tally whether it AGREES or DISAGREES with the authoritative length —
+        // this is the real blast radius of the old ZigZag mis-read.
+        let legacy = parse_vint(prefix)
+            .ok()
+            .and_then(|(_, v)| usize::try_from(v).ok());
+        if legacy == Some(*expected) {
+            agree += 1;
+        } else {
+            disagree += 1;
+        }
     }
-    let (agree, disagree) = length_decode_audit::disarm();
 
     eprintln!(
         "Issue #1623 corpus differential: tables={scanned} scans_ok={scans_ok} \
@@ -329,7 +346,7 @@ async fn corpus_differential_unsigned_length_decode() {
     // test silently exercised nothing — fail rather than pass vacuously.
     assert_eq!(
         agree + disagree,
-        sites.len() as u64,
+        sites.len(),
         "every confirmed on-disk length prefix must be tallied exactly once"
     );
     assert!(

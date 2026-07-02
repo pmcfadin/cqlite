@@ -794,62 +794,6 @@ pub fn encode_vuint(value: u64) -> Vec<u8> {
     }
 }
 
-/// Test-only differential audit of length/count decodes (Issue #1623).
-///
-/// Every `parse_vint_length` call records whether the OLD signed (ZigZag)
-/// decode of the same bytes would have AGREED with the NEW unsigned decode.
-/// The verdict is intrinsic to the input bytes (not to the caller), so the
-/// counts remain correct even if unrelated tests decode concurrently. The
-/// corpus-differential test resets these around a full 33-table scan to report
-/// the real blast radius of the ZigZag mis-read.
-#[cfg(test)]
-pub(crate) mod length_decode_audit {
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-
-    pub(crate) static AGREE: AtomicU64 = AtomicU64::new(0);
-    pub(crate) static DISAGREE: AtomicU64 = AtomicU64::new(0);
-    static ENABLED: AtomicBool = AtomicBool::new(false);
-
-    /// Reset counters and arm recording for the current audit window.
-    pub(crate) fn arm() {
-        AGREE.store(0, Ordering::SeqCst);
-        DISAGREE.store(0, Ordering::SeqCst);
-        ENABLED.store(true, Ordering::SeqCst);
-    }
-
-    /// Disarm recording; returns `(agree, disagree)`.
-    pub(crate) fn disarm() -> (u64, u64) {
-        ENABLED.store(false, Ordering::SeqCst);
-        (
-            AGREE.load(Ordering::SeqCst),
-            DISAGREE.load(Ordering::SeqCst),
-        )
-    }
-
-    /// Compare the legacy signed decode against the unsigned decode of the same
-    /// bytes and tally the verdict. Only records while armed.
-    pub(crate) fn record(input: &[u8]) {
-        if !ENABLED.load(Ordering::Relaxed) {
-            return;
-        }
-        // Legacy behaviour: signed ZigZag decode, rejecting negatives, as a usize.
-        let signed =
-            super::parse_vint(input)
-                .ok()
-                .and_then(|(_, v)| if v >= 0 { Some(v as u64) } else { None });
-        // Fixed behaviour: unsigned decode.
-        let unsigned = super::parse_vuint(input).ok().map(|(_, v)| v);
-        match (signed, unsigned) {
-            (Some(s), Some(u)) if s == u => {
-                AGREE.fetch_add(1, Ordering::Relaxed);
-            }
-            _ => {
-                DISAGREE.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-    }
-}
-
 /// Parse an UNSIGNED VInt length/count field (Cassandra `writeUnsignedVInt`).
 ///
 /// # Producer classification (Issue #1623)
@@ -898,9 +842,6 @@ pub(crate) mod length_decode_audit {
 /// - Overflow on 32-bit platforms where usize is 4 bytes
 /// - Memory exhaustion attacks via malicious input claiming huge lengths
 pub fn parse_vint_length(input: &[u8]) -> IResult<&[u8], usize> {
-    #[cfg(test)]
-    length_decode_audit::record(input);
-
     let (remaining, value) = parse_vuint(input)?;
     // Safety: Prevent overflow on usize conversion and allocation attacks.
     // `value` is u64; MAX_VINT_LENGTH (1GB) is far below usize::MAX on all
