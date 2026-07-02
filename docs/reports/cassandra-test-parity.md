@@ -635,7 +635,7 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 
 Scenario counts above can overstate distinct proof: one backing test may exercise many scenario ids. The dedup view below counts unique test targets so the program is not read as more independent tests than exist (issue #1228).
 
-- Distinct backing tests: **66** across **252** scenarios that name a test.
+- Distinct backing tests: **67** across **258** scenarios that name a test.
 
 ### Tests backing more than one scenario
 
@@ -661,6 +661,7 @@ Scenario counts above can overstate distinct proof: one backing test may exercis
 | `cqlite-core/tests/sstable_parity_filter_db_test.rs` | 6 |
 | `cqlite-core/tests/sstable_parity_index_db_test.rs` | 6 |
 | `cqlite-core/tests/sstable_parity_repaired_metadata_test.rs` | 6 |
+| `cqlite-core/tests/sstable_zstd_dictionary_reject_test.rs` | 6 |
 | `cqlite-core/tests/sstabledump_parity_summary.rs` | 6 |
 | `cqlite-core/tests/issue_1008_counter_final_value_parity.rs` | 5 |
 | `cqlite-core/tests/issue_1009_canonical_jsonl_comparator.rs` | 5 |

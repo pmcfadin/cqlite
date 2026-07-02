@@ -140,6 +140,14 @@ libc = { workspace = true }
 num-traits = "0.2"  # Required for BigInt conversion methods
 # Full-fixture-dir hashing for the corruption-verify parity test (issue #1294).
 sha2 = "0.10"
+# Real zstd dictionary-frame generation for the zstd-dictionary fail-closed
+# rejection characterization test (issue #1399). Dev-only: proves CQLite's
+# decompression path rejects (never garbles) genuinely dictionary-compressed
+# zstd frames. `zdict_builder` (default) provides the trained-dictionary API.
+zstd = { version = "0.13", features = ["zdict_builder"] }
+# Inline-CRC32 framing for the hand-built Cassandra chunk image in that same
+# test (integration tests don't inherit the library's normal dependencies).
+crc32fast = { workspace = true }
 
 # In-process sampling CPU profiler for the criterion benches (signal-based, so
 # it works in containers and on CI runners where `perf` is unavailable).
