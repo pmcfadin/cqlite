@@ -5,7 +5,7 @@
 //! Value::List of integers.
 
 use cqlite_core::storage::sstable::reader::SSTableReader;
-use cqlite_core::{Config, Platform, Value};
+use cqlite_core::{Config, Platform, ScanRow, Value};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -79,8 +79,8 @@ async fn test_uuid_partition_key_parsing() {
                     row_key.0.len()
                 );
 
-                // Validate value structure — issue #1334: `Value::Row` keyed by `Arc<str>`.
-                if let Value::Row(cells) = value {
+                // Validate value structure — issue #1334: `ScanRow::Row` keyed by `Arc<str>`.
+                if let ScanRow::Row(cells) = value {
                     println!("  Value is a Row with {} entries", cells.len());
 
                     // Find UUID columns in the row.
@@ -149,7 +149,7 @@ async fn test_uuid_partition_key_parsing() {
                     }
                 } else {
                     panic!(
-                        "❌ Row value should be Value::Row, got {:?}",
+                        "❌ Row value should be ScanRow::Row, got {:?}",
                         std::mem::discriminant(value)
                     );
                 }
@@ -210,7 +210,7 @@ async fn test_timeuuid_column_parsing() {
             );
 
             // Check for TimeUUID column (session_id)
-            if let Some((_table_id, _row_key, Value::Row(cells))) = entries.first() {
+            if let Some((_table_id, _row_key, ScanRow::Row(cells))) = entries.first() {
                 // Find session_id column (TimeUUID type)
                 let session_id = cells.iter().find(|(name, _)| name.as_ref() == "session_id");
 

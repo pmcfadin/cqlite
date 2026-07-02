@@ -51,15 +51,6 @@ pub fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
         Value::Frozen(v) => value_to_py(py, v),
         Value::Inet(b) => inet_to_py(py, b),
         Value::Tombstone(_) => Ok(py.None()), // Treat deleted data as None
-        // Transient row carrier (issue #1334): expose as a name→value dict. It is
-        // disassembled into `QueryRow.values` before FFI, so this is defensive.
-        Value::Row(cells) => {
-            let dict = pyo3::types::PyDict::new(py);
-            for (name, v) in cells {
-                dict.set_item(name.as_ref(), value_to_py(py, v)?)?;
-            }
-            Ok(dict.into_any().unbind())
-        }
     }
 }
 

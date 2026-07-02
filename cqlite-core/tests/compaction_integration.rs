@@ -59,6 +59,7 @@ use cqlite_core::storage::write_engine::{
 use cqlite_core::types::TableId as CqlTableId;
 use cqlite_core::types::Value;
 use cqlite_core::Config;
+use cqlite_core::ScanRow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -493,7 +494,7 @@ fn compaction_3_sstables_read_back_correctness() {
     let key_11: Vec<u8> = 11_i32.to_be_bytes().into();
     if let Some(row_value) = result_map.get(&key_11) {
         match row_value {
-            Value::Row(cells) => {
+            ScanRow::Row(cells) => {
                 for (name, col_val) in cells {
                     if name.as_ref() == "score" {
                         assert!(
@@ -609,7 +610,7 @@ fn compaction_3_sstables_tombstone_shadowing() {
     let key_11: Vec<u8> = 11_i32.to_be_bytes().into();
     if let Some(row_value) = result_map.get(&key_11) {
         match row_value {
-            Value::Row(cells) => {
+            ScanRow::Row(cells) => {
                 for (name, col_val) in cells {
                     if name.as_ref() == "score" {
                         assert!(
@@ -784,7 +785,7 @@ fn row_tombstone_shadows_live_row_after_compaction() {
         )
     });
     match pk3 {
-        Value::Row(cells) => {
+        ScanRow::Row(cells) => {
             let name = cells.iter().find_map(|(k, v)| match v {
                 Value::Text(val) if k.as_ref() == "name" => Some(val.clone()),
                 _ => None,
@@ -797,7 +798,7 @@ fn row_tombstone_shadows_live_row_after_compaction() {
             );
         }
         other => panic!(
-            "PK=3 must be a live row (Value::Row) carrying the ts=300 write, got {:?} (Issue #505)",
+            "PK=3 must be a live row (ScanRow::Row) carrying the ts=300 write, got {:?} (Issue #505)",
             other
         ),
     }
@@ -931,7 +932,7 @@ fn row_deletion_coexists_with_newer_cell_after_compaction() {
     });
 
     match pk7 {
-        Value::Row(cells) => {
+        ScanRow::Row(cells) => {
             let name = cells.iter().find_map(|(k, v)| match v {
                 Value::Text(val) if k.as_ref() == "name" => Some(val.clone()),
                 _ => None,
@@ -955,7 +956,7 @@ fn row_deletion_coexists_with_newer_cell_after_compaction() {
             );
         }
         other => panic!(
-            "PK=7 must read back as a live row (Value::Row) carrying name='new', got {:?} — \
+            "PK=7 must read back as a live row (ScanRow::Row) carrying name='new', got {:?} — \
              Issue #932 (coexistence row collapsed to a pure tombstone)",
             other
         ),
@@ -1212,8 +1213,8 @@ fn disjoint_columns_survive_compaction() {
     // Helper: extract a named text/int column from a row's Value::Map.
     fn find_col<'a>(row: &'a Value, col: &str) -> Option<&'a Value> {
         match row {
-            // Issue #1334: rows decode to `Value::Row` keyed by `Arc<str>`.
-            Value::Row(cells) => {
+            // Issue #1334: rows decode to `ScanRow::Row` keyed by `Arc<str>`.
+            ScanRow::Row(cells) => {
                 cells
                     .iter()
                     .find_map(|(k, v)| if k.as_ref() == col { Some(v) } else { None })

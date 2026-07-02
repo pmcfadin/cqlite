@@ -25,6 +25,7 @@
 
 use cqlite_core::storage::sstable::reader::SSTableReader;
 use cqlite_core::testing::dataset_helpers::{resolve_table_to_sstable_path, should_ignore_file};
+use cqlite_core::ScanRow;
 use cqlite_core::{Config, Platform, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -76,7 +77,7 @@ fn find_udt_values(value: &Value, results: &mut Vec<Value>) {
                 find_udt_values(v, results);
             }
         }
-        Value::Row(cells) => {
+        ScanRow::Row(cells) => {
             for (_, v) in cells {
                 find_udt_values(v, results);
             }
@@ -106,7 +107,7 @@ fn find_timestamp_values(value: &Value, results: &mut Vec<i64>) {
                 find_timestamp_values(v, results);
             }
         }
-        Value::Row(cells) => {
+        ScanRow::Row(cells) => {
             for (_, v) in cells {
                 find_timestamp_values(v, results);
             }
@@ -136,7 +137,7 @@ fn find_date_values(value: &Value, results: &mut Vec<i32>) {
                 find_date_values(v, results);
             }
         }
-        Value::Row(cells) => {
+        ScanRow::Row(cells) => {
             for (_, v) in cells {
                 find_date_values(v, results);
             }
@@ -262,8 +263,8 @@ async fn test_column_values_typed_correctly_guards_129_140() {
     let mut blob_values = 0;
 
     for (_table_id, _row_key, value) in &entries {
-        // Issue #1334: rows decode to `Value::Row` keyed by `Arc<str>`.
-        if let Value::Row(columns) = value {
+        // Issue #1334: rows decode to `ScanRow::Row` keyed by `Arc<str>`.
+        if let ScanRow::Row(columns) = value {
             for (_col_key, col_val) in columns {
                 total_values += 1;
                 match col_val {

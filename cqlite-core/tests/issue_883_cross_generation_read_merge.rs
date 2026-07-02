@@ -26,6 +26,7 @@ use cqlite_core::storage::write_engine::{
 use cqlite_core::types::TableId as CqlTableId;
 use cqlite_core::types::Value;
 use cqlite_core::Config;
+use cqlite_core::ScanRow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -129,10 +130,12 @@ fn count_data_files(dir: &std::path::Path) -> usize {
 /// Extract a column value from a scan row (`Value::Map` of `(Text(col), value)`).
 fn col<'a>(row: &'a Value, name: &str) -> Option<&'a Value> {
     match row {
-        // Issue #1334: rows decode to `Value::Row` keyed by `Arc<str>`.
-        Value::Row(cells) => cells
-            .iter()
-            .find_map(|(k, v)| if k.as_ref() == name { Some(v) } else { None }),
+        // Issue #1334: rows decode to `ScanRow::Row` keyed by `Arc<str>`.
+        ScanRow::Row(cells) => {
+            cells
+                .iter()
+                .find_map(|(k, v)| if k.as_ref() == name { Some(v) } else { None })
+        }
         _ => None,
     }
 }

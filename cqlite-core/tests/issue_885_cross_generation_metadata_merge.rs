@@ -28,6 +28,7 @@ use cqlite_core::storage::write_engine::{
 use cqlite_core::types::TableId as CqlTableId;
 use cqlite_core::types::{CellWriteMetadata, Value};
 use cqlite_core::Config;
+use cqlite_core::ScanRow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -128,13 +129,15 @@ fn count_data_files(dir: &std::path::Path) -> usize {
         .count()
 }
 
-/// Extract a column value from a scan row (`Value::Map` of `(Text(col), value)`).
-fn col<'a>(row: &'a Value, name: &str) -> Option<&'a Value> {
+/// Extract a column value from a scan row (issue #1334: `ScanRow::Row`).
+fn col<'a>(row: &'a ScanRow, name: &str) -> Option<&'a Value> {
     match row {
-        // Issue #1334: rows decode to `Value::Row` keyed by `Arc<str>`.
-        Value::Row(cells) => cells
-            .iter()
-            .find_map(|(k, v)| if k.as_ref() == name { Some(v) } else { None }),
+        // Issue #1334: rows decode to `ScanRow::Row` keyed by `Arc<str>`.
+        ScanRow::Row(cells) => {
+            cells
+                .iter()
+                .find_map(|(k, v)| if k.as_ref() == name { Some(v) } else { None })
+        }
         _ => None,
     }
 }
@@ -208,7 +211,7 @@ fn metadata_scan_merges_generations_with_lww_and_tombstone_suppression() {
         .expect("metadata scan must not error");
 
     // ── Reconciled state: live rows are exactly {1, 3, 4, 5, 6} ───────────────
-    let by_pk: HashMap<Vec<u8>, (Value, HashMap<String, CellWriteMetadata>)> = results
+    let by_pk: HashMap<Vec<u8>, (ScanRow, HashMap<String, CellWriteMetadata>)> = results
         .iter()
         .map(|(k, v, m)| (k.0.clone(), (v.clone(), m.clone())))
         .collect();

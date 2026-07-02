@@ -43,6 +43,7 @@
 //! - test_collections/frozen_collections_table (frozen collections)
 
 use cqlite_core::storage::sstable::reader::SSTableReader;
+use cqlite_core::ScanRow;
 use cqlite_core::{Config, Platform};
 use num_bigint::BigInt;
 use num_traits::{Signed, ToPrimitive};
@@ -793,9 +794,9 @@ async fn test_v5_compressed_legacy_jsonl_parity() {
             }
         };
 
-        // Extract cells from parser output (issue #1334: `Value::Row` keyed by `Arc<str>`)
+        // Extract cells from parser output (issue #1334: `ScanRow::Row` keyed by `Arc<str>`)
         let parser_cells = match value {
-            cqlite_core::Value::Row(entries) => entries,
+            cqlite_core::ScanRow::Row(entries) => entries,
             _ => {
                 println!(
                     "  ⚠️  Entry {}: UUID={} is not a Row (got {:?}), skipping",
