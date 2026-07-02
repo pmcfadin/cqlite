@@ -933,6 +933,24 @@ pub fn parse_create_table(input: &str) -> IResult<&str, TableSchema> {
 
 /// Convert CQL type string to internal CqlTypeId
 pub fn cql_type_to_type_id(cql_type: &str) -> Result<CqlTypeId> {
+    cql_type_to_type_id_with_depth(cql_type, 0)
+}
+
+/// Recursive body of [`cql_type_to_type_id`], threading the current nesting
+/// `depth` so the `frozen<...>` unwrap is bounded at [`MAX_TYPE_NESTING_DEPTH`]
+/// (issue #1690). Without this bound a pathological `frozen<` × N string reaching
+/// this public conversion path (via `SchemaManager::cql_type_to_internal`) would
+/// recurse until the stack overflows and, under `panic = "abort"`, abort the
+/// whole process instead of returning an error. `depth` is 0 at the top level and
+/// increments by one per nesting level.
+fn cql_type_to_type_id_with_depth(cql_type: &str, depth: usize) -> Result<CqlTypeId> {
+    if depth > MAX_TYPE_NESTING_DEPTH {
+        return Err(Error::schema(format!(
+            "type nesting too deep (max {})",
+            MAX_TYPE_NESTING_DEPTH
+        )));
+    }
+
     let type_lower = cql_type.trim().to_lowercase();
 
     // Handle collection types
@@ -953,7 +971,7 @@ pub fn cql_type_to_type_id(cql_type: &str) -> Result<CqlTypeId> {
         if let Some(inner_start) = type_lower.find('<') {
             if let Some(inner_end) = type_lower.rfind('>') {
                 let inner_type = &type_lower[inner_start + 1..inner_end];
-                return cql_type_to_type_id(inner_type);
+                return cql_type_to_type_id_with_depth(inner_type, depth + 1);
             }
         }
     }
@@ -1476,6 +1494,39 @@ mod tests {
         assert!(
             cql_type(&bad_str).is_err(),
             "one level past the bound must return Err"
+        );
+    }
+
+    /// Issue #1690 (P0 safety): the public `cql_type_to_type_id` conversion path
+    /// (reached via `SchemaManager::cql_type_to_internal`) unwraps `frozen<...>`
+    /// recursively. Pathologically nested `frozen<` input must return `Err`, not
+    /// stack-overflow / abort. A leaf at the depth bound still resolves; one level
+    /// deeper errors.
+    #[test]
+    fn test_cql_type_to_type_id_deep_frozen_returns_err_not_abort() {
+        let s = "frozen<".repeat(50_000) + "int" + &">".repeat(50_000);
+        assert!(
+            cql_type_to_type_id(&s).is_err(),
+            "pathological frozen nesting must return Err, not abort"
+        );
+
+        let depth = MAX_TYPE_NESTING_DEPTH;
+        // frozen<...> unwrapping: `depth` frozen levels reach the leaf at `depth`,
+        // which is the last allowed level and must still resolve to the leaf id.
+        let ok_str = "frozen<".repeat(depth) + "int" + &">".repeat(depth);
+        assert_eq!(
+            cql_type_to_type_id(&ok_str).expect("frozen nesting at the bound must resolve"),
+            CqlTypeId::Int,
+            "the leaf type id must be unchanged"
+        );
+
+        let bad_str = "frozen<".repeat(depth + 1) + "int" + &">".repeat(depth + 1);
+        let err = cql_type_to_type_id(&bad_str)
+            .expect_err("one level past the bound must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("nesting") || msg.contains("deep"),
+            "error message must mention nesting/depth, got: {msg}"
         );
     }
 
