@@ -15,7 +15,10 @@
 #   scan-offload-guard cargo test -p cqlite-core --features cli-helpers,scan-offload-probe
 #                      --test issue_1143_scan_offload_thread (windowed-scan parse
 #                      runs off the async worker pool; probe is feature-gated so
-#                      the default core-tests run can't execute it — issue #1143)
+#                      the default core-tests run can't execute it — issue #1143).
+#                      Also runs --test issue_1333_scan_scratch_reuse (the
+#                      windowed scan's per-partition scratch Vec is reused, not
+#                      reallocated per partition — issue #1333); same feature gate.
 #   integration-tests  cargo test -p cqlite-integration-tests: compile ALL targets
 #                      (--no-run, whole package) then run the seven CI-enforced ones
 #   format-compat      cargo test -p format-compatibility-tests (the 'oa' format crate;
@@ -830,7 +833,8 @@ run_component tombstones-scan cargo test --package cqlite-core \
 # doesn't run in CI is not a guard.
 run_component scan-offload-guard cargo test --package cqlite-core \
   --features cli-helpers,scan-offload-probe \
-  --test issue_1143_scan_offload_thread
+  --test issue_1143_scan_offload_thread \
+  --test issue_1333_scan_scratch_reuse
 # Compile EVERY target in the package first (--no-run, whole package) so a
 # new/edited test file that doesn't compile can't hide behind the enumerated
 # run-list (issue #865); then execute the seven CI-enforced targets.
