@@ -178,7 +178,9 @@ fn single_data_db(dir: &Path) -> Option<PathBuf> {
     match found.len() {
         0 => None,
         1 => Some(found.pop().expect("len==1")),
-        n => panic!("{dir:?}: expected exactly ONE compacted nb-*-big-Data.db, found {n} ({found:?})"),
+        n => panic!(
+            "{dir:?}: expected exactly ONE compacted nb-*-big-Data.db, found {n} ({found:?})"
+        ),
     }
 }
 
@@ -233,7 +235,11 @@ fn hex(b: &[u8]) -> String {
 /// committed golden JSONL into epoch seconds. This is the AUTHORITATIVE LDT the
 /// CQLite side must stamp so both compactors byte-match. Fails (not skips) if the
 /// golden is present but the expected LDT field is missing/malformed.
-fn ldt_secs_from_golden(ref_dir: &Path, table: &str, matcher: impl Fn(&serde_json::Value) -> Option<String>) -> i32 {
+fn ldt_secs_from_golden(
+    ref_dir: &Path,
+    table: &str,
+    matcher: impl Fn(&serde_json::Value) -> Option<String>,
+) -> i32 {
     let data = single_data_db(ref_dir).expect("compacted Data.db");
     let jsonl = ref_dir.join(format!("{}Data.db.jsonl", descriptor_prefix(&data)));
     let text = std::fs::read_to_string(&jsonl)
@@ -243,7 +249,9 @@ fn ldt_secs_from_golden(ref_dir: &Path, table: &str, matcher: impl Fn(&serde_jso
             .unwrap_or_else(|e| panic!("{table}: golden JSONL not valid JSON: {e}"));
         if let Some(iso) = matcher(&jv) {
             return iso_to_epoch_secs(&iso).unwrap_or_else(|| {
-                panic!("{table}: golden local_delete_time '{iso}' not parseable as ISO-8601 seconds")
+                panic!(
+                    "{table}: golden local_delete_time '{iso}' not parseable as ISO-8601 seconds"
+                )
             });
         }
     }
@@ -372,11 +380,23 @@ async fn cqlite_compact(
     engine.close().await.expect("close engine");
 
     let inputs = discover_inputs(&data_dir);
-    assert_eq!(inputs.len(), 2, "expected exactly 2 input SSTables, got {inputs:?}");
+    assert_eq!(
+        inputs.len(),
+        2,
+        "expected exactly 2 input SSTables, got {inputs:?}"
+    );
 
-    let report = compact_sstables(inputs, &out_dir, schema, OUT_GENERATION, gc_before, now_secs, true)
-        .await
-        .expect("compaction must succeed");
+    let report = compact_sstables(
+        inputs,
+        &out_dir,
+        schema,
+        OUT_GENERATION,
+        gc_before,
+        now_secs,
+        true,
+    )
+    .await
+    .expect("compaction must succeed");
 
     // A fully-purged compaction may produce no Data.db.
     let data_path = report.output.data_path.clone();
@@ -427,8 +447,7 @@ fn collect(dir: &Path, out: &mut Vec<(u64, PathBuf)>, depth: usize) {
 // Shared byte-parity assertion
 // ════════════════════════════════════════════════════════════════════════════
 
-const BYTE_FOR_BYTE_COMPONENTS: &[&str] =
-    &["Data.db", "Index.db", "Summary.db", "Digest.crc32"];
+const BYTE_FOR_BYTE_COMPONENTS: &[&str] = &["Data.db", "Index.db", "Summary.db", "Digest.crc32"];
 const PRESENT_NOT_DIFFED: &[&str] = &["Statistics.db", "Filter.db"];
 
 /// Diff a CQLite compaction output against the Cassandra compacted reference for
@@ -625,7 +644,17 @@ async fn ttl_expired_live_compaction_byte_for_byte() {
 // (d) rt_cross_gen — overlapping cross-generation range-tombstone merge
 // ════════════════════════════════════════════════════════════════════════════
 
-fn rt(id: i32, lo: i32, hi: i32, mfda: i64, ldt: i32, table: &str, live_ck: i32, live_v: &str, live_ts: i64) -> Mutation {
+fn rt(
+    id: i32,
+    lo: i32,
+    hi: i32,
+    mfda: i64,
+    ldt: i32,
+    table: &str,
+    live_ck: i32,
+    live_v: &str,
+    live_ts: i64,
+) -> Mutation {
     let mut m = ck_row(table, id, live_ck, live_v, live_ts);
     m.range_tombstones.push(RangeTombstone {
         start: ClusteringBound::Inclusive(ClusteringKey::single("ck", Value::Integer(lo))),
@@ -709,7 +738,10 @@ async fn gc_purge_grace0_major_compaction_purges_to_empty() {
         let base = Path::new(&root).join("sstables").join(KEYSPACE);
         if let Ok(rd) = std::fs::read_dir(&base) {
             for e in rd.flatten() {
-                if e.file_name().to_string_lossy().starts_with(&format!("{t}-")) {
+                if e.file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!("{t}-"))
+                {
                     assert!(
                         single_data_db(&e.path()).is_none(),
                         "{t}: reference {:?} unexpectedly carries a Data.db — a gc_grace=0 major \
