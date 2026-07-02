@@ -91,6 +91,18 @@ pub enum VerifyErrorClass {
     /// An inline `Data.db` chunk CRC32 did not match, or a chunk could not be
     /// read / decompressed (truncation, bit flip).
     ChunkDecompressionError,
+    /// An **uncompressed** BIG `Data.db` chunk did not match its stored `CRC.db`
+    /// per-chunk CRC32 (issue #1396) — the uncompressed analogue of the compressed
+    /// path's inline chunk-CRC finding ([`ChunkDecompressionError`]). Cassandra
+    /// writes a `CRC.db` for every uncompressed BIG SSTable and verifies reads
+    /// against it; a bit flip inside an uncompressed chunk is detected here (and,
+    /// default-on, on every read). Also covers a truncated / short `CRC.db` (fewer
+    /// per-chunk CRC entries than the Data.db has chunks). Reported via a
+    /// `VerifyFinding` naming the failing chunk and the `CRC.db`/`Data.db`
+    /// component.
+    ///
+    /// [`ChunkDecompressionError`]: VerifyErrorClass::ChunkDecompressionError
+    UncompressedChunkCrcMismatch,
     /// A component was truncated and a required read hit end-of-file.
     UnexpectedEof,
     /// `Index.db` (BIG) is structurally corrupt.
@@ -142,6 +154,7 @@ impl VerifyErrorClass {
             VerifyErrorClass::CompressionInfoCorrupt => "CompressionInfoCorrupt",
             VerifyErrorClass::ChunkOffsetOutOfBounds => "ChunkOffsetOutOfBounds",
             VerifyErrorClass::ChunkDecompressionError => "ChunkDecompressionError",
+            VerifyErrorClass::UncompressedChunkCrcMismatch => "UncompressedChunkCrcMismatch",
             VerifyErrorClass::UnexpectedEof => "UnexpectedEof",
             VerifyErrorClass::IndexEntryCorrupt => "IndexEntryCorrupt",
             VerifyErrorClass::StatisticsHeaderCorrupt => "StatisticsHeaderCorrupt",
@@ -341,6 +354,14 @@ pub async fn verify_sstable(
         // ---- Check 5: inline Data.db chunk CRC validation (#998) -----------
         if let Some(info) = compression_info.as_ref() {
             check_inline_chunk_crc(&components, info, &mut findings)?;
+        } else if components.format == SsTableFormat::Big {
+            // ---- Check 5b: uncompressed CRC.db per-chunk validation (#1396) --
+            // An uncompressed BIG SSTable (no CompressionInfo.db) carries a CRC.db
+            // per-chunk checksum sidecar. Read it and validate every Data.db chunk
+            // — the uncompressed analogue of the inline chunk-CRC check above.
+            // Replaces the prior behavior where CRC.db was only name-whitelisted
+            // (recognized as a component) but never content-validated.
+            check_uncompressed_crc_db(dir, &components, &mut findings).await;
         }
 
         // ---- Check 6a: Statistics.db parse ---------------------------------
@@ -1240,6 +1261,119 @@ fn check_inline_chunk_crc(
         findings.push(classify_data_error("Data.db", &e));
     }
     Ok(())
+}
+
+/// Check 5b (FULL, uncompressed BIG only): read `CRC.db` and validate every
+/// uncompressed `Data.db` chunk against its stored per-chunk CRC32 (issue #1396).
+///
+/// This is the uncompressed analogue of [`check_inline_chunk_crc`]. Cassandra
+/// writes a `CRC.db` for every uncompressed BIG SSTable; a bit flip inside a
+/// chunk (or a truncated `CRC.db`) is reported as an
+/// [`VerifyErrorClass::UncompressedChunkCrcMismatch`] `VerifyFinding` naming the
+/// failing chunk. Streams the Data.db one `chunk_size` block at a time (bounded
+/// memory) rather than buffering the whole file. An absent `CRC.db` is the
+/// owner-pinned warn-and-proceed decision (design D4): no finding is recorded
+/// (its absence is surfaced by the TOC/presence check when listed).
+async fn check_uncompressed_crc_db(
+    dir: &Path,
+    components: &ComponentSet,
+    findings: &mut Vec<VerifyFinding>,
+) {
+    use crate::storage::sstable::reader::crc::CrcDb;
+    use tokio::io::AsyncReadExt;
+
+    let crc_path = components.path(dir, "CRC.db");
+    if !crc_path.exists() {
+        // Absent CRC.db: warn-and-proceed (design D4). Not a checksum-mismatch.
+        return;
+    }
+
+    let crc = match CrcDb::open(&crc_path).await {
+        Ok(c) => c,
+        Err(e) => {
+            findings.push(VerifyFinding::new(
+                VerifyErrorClass::UncompressedChunkCrcMismatch,
+                "CRC.db",
+                format!("CRC.db failed to parse: {e}"),
+            ));
+            return;
+        }
+    };
+
+    let chunk_size = crc.chunk_size() as usize;
+    let mut file = match tokio::fs::File::open(&components.data_path).await {
+        Ok(f) => f,
+        Err(e) => {
+            findings.push(VerifyFinding::new(
+                VerifyErrorClass::MissingComponent,
+                "Data.db",
+                format!("cannot open Data.db for CRC.db check: {e}"),
+            ));
+            return;
+        }
+    };
+
+    // Walk Data.db one chunk_size block at a time and compare each block's CRC32
+    // to the stored value (bounded memory, O(chunk_size)).
+    let mut chunk_index = 0usize;
+    let mut offset: u64 = 0;
+    let mut buf = vec![0u8; chunk_size];
+    loop {
+        let mut filled = 0usize;
+        // Accumulate a full chunk (or the short final chunk at EOF).
+        loop {
+            match file.read(&mut buf[filled..]).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    filled += n;
+                    if filled == chunk_size {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    findings.push(VerifyFinding::new(
+                        VerifyErrorClass::UncompressedChunkCrcMismatch,
+                        "Data.db",
+                        format!("read error verifying chunk {chunk_index} against CRC.db: {e}"),
+                    ));
+                    return;
+                }
+            }
+        }
+        if filled == 0 {
+            break; // clean EOF on a chunk boundary
+        }
+        let computed = crc32fast::hash(&buf[..filled]);
+        match crc.crc_for_chunk(chunk_index) {
+            Ok(expected) => {
+                if computed != expected {
+                    findings.push(VerifyFinding::new(
+                        VerifyErrorClass::UncompressedChunkCrcMismatch,
+                        "Data.db",
+                        format!(
+                            "uncompressed CRC32 mismatch for chunk {chunk_index} at Data.db offset 0x{offset:x} ({filled} bytes): expected=0x{expected:08x} (CRC.db), computed=0x{computed:08x}"
+                        ),
+                    ));
+                    // Report the first failing chunk and stop (matches the
+                    // fail-fast read-path posture; naming one chunk is sufficient).
+                    return;
+                }
+            }
+            Err(e) => {
+                findings.push(VerifyFinding::new(
+                    VerifyErrorClass::UncompressedChunkCrcMismatch,
+                    "CRC.db",
+                    format!("CRC.db has no entry for Data.db chunk {chunk_index} (truncated): {e}"),
+                ));
+                return;
+            }
+        }
+        offset += filled as u64;
+        chunk_index += 1;
+        if filled < chunk_size {
+            break; // short final chunk consumed
+        }
+    }
 }
 
 /// Check 6 (FULL): `Statistics.db` parses. Records a finding on failure but

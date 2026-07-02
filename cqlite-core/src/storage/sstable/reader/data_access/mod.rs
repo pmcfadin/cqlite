@@ -360,6 +360,15 @@ impl SSTableReader {
             )));
         }
 
+        // Read-time CRC verification for uncompressed BIG SSTables (issue #1396).
+        // The index-based scan and point-lookup paths reach Data.db here (bypassing
+        // read_next_block / read_uncompressed_data_block), so verify the CRC.db
+        // chunk(s) covering [offset, offset+size) BEFORE returning any bytes. A
+        // mismatch is a typed Error::Corruption naming the chunk + offset (never
+        // wrong values / never a silent result). No-op when no CRC.db is present
+        // (compressed tables / BTI / absent-CRC.db warn-and-proceed).
+        self.verify_uncompressed_range(offset, size).await?;
+
         // Use cached reading with metrics tracking
         let buffer = self.get_cached_data(offset, size).await?;
 
@@ -468,6 +477,85 @@ impl SSTableReader {
         Ok(data)
     }
 
+    /// Verify the `CRC.db` chunk(s) covering the uncompressed Data.db byte range
+    /// `[offset, offset + size)` against their stored per-chunk CRC32 (issue
+    /// #1396), on the offset-read path used by the index-based scan and point
+    /// lookups.
+    ///
+    /// A partition read touches a sub-range of one or more `chunk_size` blocks; a
+    /// chunk's CRC can only be checked over the WHOLE chunk, so this reads each
+    /// covering chunk (bounded to one `chunk_size` block at a time) and compares.
+    /// Each chunk is verified at most once per reader lifetime (memoized in
+    /// [`SSTableReader::verified_uncompressed_chunks`]), keeping the cost at the
+    /// budgeted one CRC32 pass per chunk even when many partitions share a chunk.
+    ///
+    /// No-op when this reader has no `CRC.db` (compressed tables carry inline
+    /// per-chunk CRCs; BTI ships none; an absent `CRC.db` is warn-and-proceed).
+    async fn verify_uncompressed_range(&self, offset: u64, size: u32) -> Result<()> {
+        use tokio::io::AsyncReadExt;
+
+        let Some(crc) = self.crc_reader.as_deref() else {
+            return Ok(());
+        };
+        if size == 0 {
+            return Ok(());
+        }
+        let cs = crc.chunk_size() as u64;
+        if cs == 0 {
+            return Err(Error::corruption(
+                "CRC.db chunk size is zero; cannot verify uncompressed read",
+            ));
+        }
+        let file_size = self.stats.file_size;
+        let first = offset / cs;
+        let last = (offset + size as u64 - 1) / cs;
+        for chunk in first..=last {
+            // Skip chunks already verified for this reader.
+            {
+                let seen = self
+                    .verified_uncompressed_chunks
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if seen.contains(&chunk) {
+                    continue;
+                }
+            }
+            let lo = chunk * cs;
+            let hi = ((chunk + 1) * cs).min(file_size);
+            if hi <= lo {
+                break; // range extends past EOF; nothing real to verify
+            }
+            let mut buf = vec![0u8; (hi - lo) as usize];
+            {
+                let mut file = self.file.lock().await;
+                file.seek(SeekFrom::Start(lo)).await?;
+                file.read_exact(&mut buf).await.map_err(|e| {
+                    Error::corruption(format!(
+                        "failed to read uncompressed chunk {chunk} at Data.db offset 0x{lo:x} for CRC verification: {e}"
+                    ))
+                })?;
+            }
+            let computed = crc32fast::hash(&buf);
+            let expected = crc.crc_for_chunk(chunk as usize)?;
+            if computed != expected {
+                return Err(Error::corruption(format!(
+                    "uncompressed CRC32 mismatch for chunk {} at Data.db offset 0x{:x} \
+                     ({} bytes): expected=0x{:08x}, computed=0x{:08x} (CRC.db)",
+                    chunk,
+                    lo,
+                    hi - lo,
+                    expected,
+                    computed
+                )));
+            }
+            self.verified_uncompressed_chunks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(chunk);
+        }
+        Ok(())
+    }
+
     /// Mint a fresh, independent cursor for one scan (issue #815).
     ///
     /// Each cursor owns a private file handle (or mmap cursor) and chunk index,
@@ -491,6 +579,7 @@ impl SSTableReader {
             &self.header.cassandra_version,
             &self.config,
             &self.compression_info,
+            self.crc_reader.as_deref(),
             &cursor.chunk_index,
             self.actual_header_size as u64,
         )

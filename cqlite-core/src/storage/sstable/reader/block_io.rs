@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::Mutex;
 
+use super::crc::CrcDb;
 use super::header::{detect_ascii_header_corruption, is_ascii_corruption_value};
 use super::source::BlockSource;
 use super::types::SSTableReaderConfig;
@@ -41,11 +42,13 @@ use crate::{Error, Result};
 const UNCOMPRESSED_READ_PIECE_BYTES: usize = 64 * 1024;
 
 /// Read next block with enhanced error handling and streaming support
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn read_next_block(
     file: &Arc<Mutex<BlockSource>>,
     cassandra_version: &crate::parser::header::CassandraVersion,
     config: &SSTableReaderConfig,
     compression_info: &Option<Arc<crate::storage::sstable::compression_info::CompressionInfo>>,
+    crc_reader: Option<&CrcDb>,
     current_chunk_index: &std::sync::atomic::AtomicUsize,
     header_offset: u64,
 ) -> Result<Option<Vec<u8>>> {
@@ -54,6 +57,7 @@ pub(crate) async fn read_next_block(
         cassandra_version,
         config,
         compression_info,
+        crc_reader,
         current_chunk_index,
         header_offset,
         3,
@@ -62,11 +66,13 @@ pub(crate) async fn read_next_block(
 }
 
 /// Read block with retry logic for handling transient I/O errors
+#[allow(clippy::too_many_arguments)]
 async fn read_next_block_with_retry(
     file: &Arc<Mutex<BlockSource>>,
     cassandra_version: &crate::parser::header::CassandraVersion,
     config: &SSTableReaderConfig,
     compression_info: &Option<Arc<crate::storage::sstable::compression_info::CompressionInfo>>,
+    crc_reader: Option<&CrcDb>,
     current_chunk_index: &std::sync::atomic::AtomicUsize,
     header_offset: u64,
     max_retries: usize,
@@ -79,6 +85,7 @@ async fn read_next_block_with_retry(
             cassandra_version,
             config,
             compression_info,
+            crc_reader,
             current_chunk_index,
             header_offset,
         )
@@ -86,6 +93,16 @@ async fn read_next_block_with_retry(
         {
             Ok(result) => return Ok(result),
             Err(e) => {
+                // Never retry a non-recoverable error (issue #1396). Retries exist
+                // for TRANSIENT I/O faults; a CRC/corruption error is deterministic
+                // and non-recoverable. Critically, the uncompressed piecewise read
+                // advances the stream position BEFORE verifying, so retrying a
+                // failed CRC would silently skip the corrupt piece and return the
+                // NEXT one — turning fail-fast corruption into a silent truncation.
+                // Surface it immediately instead.
+                if !e.is_recoverable() {
+                    return Err(e);
+                }
                 retry_count += 1;
                 if retry_count >= max_retries {
                     log::error!("Failed to read block after {} retries: {}", max_retries, e);
@@ -108,11 +125,13 @@ async fn read_next_block_with_retry(
 }
 
 /// Internal block reading implementation
+#[allow(clippy::too_many_arguments)]
 async fn read_next_block_impl(
     file: &Arc<Mutex<BlockSource>>,
     cassandra_version: &crate::parser::header::CassandraVersion,
     config: &SSTableReaderConfig,
     compression_info: &Option<Arc<crate::storage::sstable::compression_info::CompressionInfo>>,
+    crc_reader: Option<&CrcDb>,
     current_chunk_index: &std::sync::atomic::AtomicUsize,
     _header_offset: u64, // Unused for NB format; kept for potential future BTI/Legacy use
 ) -> Result<Option<Vec<u8>>> {
@@ -133,7 +152,10 @@ async fn read_next_block_impl(
         // as a self-contained unit, so return the whole data section contiguously
         // (issue #827 Finding 2). Piecewise here would silently truncate any
         // partition/row crossing a 64 KiB boundary.
-        return read_uncompressed_data_block(file, config, false).await;
+        //
+        // Read-time CRC verification (issue #1396): every returned chunk is
+        // verified against CRC.db (default-on) when a CRC.db is present.
+        return read_uncompressed_data_block(file, config, false, crc_reader).await;
     }
 
     // Issue #831: BTI ("da") Data.db is chunk-compressed exactly like NB — the
@@ -152,7 +174,8 @@ async fn read_next_block_impl(
         // BTI direct read is parsed as a self-contained unit (like V5_0Uncompressed
         // above), so return the whole data section contiguously (issue #827 Finding 2):
         // piecewise here would truncate any partition/row crossing a 64 KiB boundary.
-        return read_uncompressed_data_block(file, config, false).await;
+        // BTI ships no CRC.db, so `crc_reader` is `None` here (issue #1396).
+        return read_uncompressed_data_block(file, config, false, crc_reader).await;
     }
 
     if cassandra_version.is_nb_format() || is_bti {
@@ -177,6 +200,7 @@ async fn read_next_block_impl(
             file,
             config,
             compression_info,
+            crc_reader,
             current_chunk_index,
             file_size,
             0, // NB format: chunk offsets are relative to file start
@@ -276,10 +300,12 @@ async fn read_next_block_impl(
 /// The `header_offset` parameter is preserved for potential future BTI/Legacy format
 /// support where chunk offsets may be relative to compressed data start, but for
 /// NB format it should always be 0.
+#[allow(clippy::too_many_arguments)]
 async fn read_nb_format_chunk_data(
     file: &Arc<Mutex<BlockSource>>,
     config: &SSTableReaderConfig,
     compression_info: &Option<Arc<crate::storage::sstable::compression_info::CompressionInfo>>,
+    crc_reader: Option<&CrcDb>,
     current_chunk_index: &std::sync::atomic::AtomicUsize,
     file_size: u64,
     header_offset: u64,
@@ -296,7 +322,11 @@ async fn read_nb_format_chunk_data(
         // true for NB format): the sliding-window stitchers reassemble pieces and
         // handle NeedMore across boundaries, so piecewise reads keep their working
         // set bounded (issue #827) without truncating partitions.
-        return read_uncompressed_data_block(file, config, true).await;
+        //
+        // Read-time CRC verification (issue #1396): CQLite's own uncompressed `nb`
+        // write output ships a CRC.db (#1197); when present, `crc_reader` is `Some`
+        // and each piece is verified on chunk_size-aligned boundaries.
+        return read_uncompressed_data_block(file, config, true, crc_reader).await;
     };
 
     let chunk_idx = current_chunk_index.load(std::sync::atomic::Ordering::Relaxed);
@@ -648,6 +678,7 @@ async fn read_uncompressed_data_block(
     file: &Arc<Mutex<BlockSource>>,
     config: &SSTableReaderConfig,
     piecewise: bool,
+    crc_reader: Option<&CrcDb>,
 ) -> Result<Option<Vec<u8>>> {
     let (current_pos, file_size) = {
         let mut file_guard = file.lock().await;
@@ -740,7 +771,80 @@ async fn read_uncompressed_data_block(
         data.len()
     );
 
+    // Read-time CRC verification (issue #1396), default-on and unconditional when
+    // a CRC.db is present (Cassandra writes one for every uncompressed BIG
+    // SSTable). Verify every fully-covered chunk_size-aligned block of the returned
+    // bytes against the authoritative stored CRC32. A mismatch is a typed,
+    // non-recoverable corruption error naming the chunk index + Data.db offset —
+    // never returns the corrupt bytes / wrong values / a silent empty result. The
+    // compressed path is unaffected (it uses its own inline per-chunk CRC).
+    if let Some(crc) = crc_reader {
+        verify_uncompressed_chunks(crc, &data, current_pos, file_size)?;
+    }
+
     Ok(Some(data))
+}
+
+/// Verify each fully-covered `chunk_size`-aligned block of a just-read
+/// uncompressed Data.db range `[start_offset, start_offset + data.len())` against
+/// the authoritative `CRC.db` (issue #1396).
+///
+/// Verification is done on `chunk_size` boundaries independent of the read-piece
+/// size (`UNCOMPRESSED_READ_PIECE_BYTES` and `CRC_CHUNK_SIZE` may differ). Only a
+/// chunk whose FULL byte range (`[c*cs, min((c+1)*cs, file_size))`) lies inside
+/// the returned buffer is verified — a chunk only partially present in this read
+/// is left to the read that completes it (the sequential scan paths read on chunk
+/// boundaries, so every chunk is eventually fully covered exactly once).
+///
+/// The final short chunk is verified once its end reaches `file_size`. A chunk
+/// whose CRC entry is missing from a truncated `CRC.db` is a typed error (via
+/// [`CrcDb::crc_for_chunk`]); the harmless trailing compaction empty-final-chunk
+/// entry (issue #1222) maps beyond `file_size` and is never queried.
+///
+/// Memory: reads only from the already-resident data buffer and the tiny CRC
+/// sidecar — no new Data.db-file-sized allocation (issue #1396 memory budget).
+fn verify_uncompressed_chunks(
+    crc: &CrcDb,
+    data: &[u8],
+    start_offset: u64,
+    file_size: u64,
+) -> Result<()> {
+    let cs = crc.chunk_size() as u64;
+    if cs == 0 {
+        return Err(Error::corruption(
+            "CRC.db chunk size is zero; cannot verify uncompressed chunks",
+        ));
+    }
+    let end = start_offset + data.len() as u64;
+    let mut chunk = start_offset / cs;
+    loop {
+        let lo = chunk * cs;
+        if lo >= end {
+            break;
+        }
+        // True Data.db byte range of this chunk (final chunk is short).
+        let hi = ((chunk + 1) * cs).min(file_size);
+        // Verify only when the WHOLE chunk is present in this returned buffer.
+        if lo >= start_offset && hi <= end && hi > lo {
+            let rel_lo = (lo - start_offset) as usize;
+            let rel_hi = (hi - start_offset) as usize;
+            let computed = crc32fast::hash(&data[rel_lo..rel_hi]);
+            let expected = crc.crc_for_chunk(chunk as usize)?;
+            if computed != expected {
+                return Err(Error::corruption(format!(
+                    "uncompressed CRC32 mismatch for chunk {} at Data.db offset 0x{:x} \
+                     ({} bytes): expected=0x{:08x}, computed=0x{:08x} (CRC.db)",
+                    chunk,
+                    lo,
+                    hi - lo,
+                    expected,
+                    computed
+                )));
+            }
+        }
+        chunk += 1;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -962,7 +1066,7 @@ mod tests {
 
         let config = SSTableReaderConfig::default();
         // Contiguous (V5_0Uncompressed non-stitching) read.
-        let result = read_uncompressed_data_block(&file, &config, false).await;
+        let result = read_uncompressed_data_block(&file, &config, false, None).await;
         assert!(result.is_ok());
 
         let data = result.unwrap();
@@ -983,9 +1087,68 @@ mod tests {
 
         // Should return None for EOF
         let config = SSTableReaderConfig::default();
-        let result = read_uncompressed_data_block(&file, &config, false).await;
+        let result = read_uncompressed_data_block(&file, &config, false, None).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
+    }
+
+    // ========================================================================
+    // Uncompressed read-time CRC verification (issue #1396)
+    // ========================================================================
+
+    fn synth_crc_db(chunk_size: u32, crcs: &[u32]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&(chunk_size as i32).to_be_bytes());
+        for c in crcs {
+            v.extend_from_slice(&c.to_be_bytes());
+        }
+        v
+    }
+
+    #[test]
+    fn verify_uncompressed_chunks_clean_multichunk_passes() {
+        let cs = 8u32; // tiny chunk size for the test
+        let data: Vec<u8> = (0..20u8).collect(); // 20 bytes -> chunks [0,8),[8,16),[16,20)
+        let crcs = [
+            crc32fast::hash(&data[0..8]),
+            crc32fast::hash(&data[8..16]),
+            crc32fast::hash(&data[16..20]),
+        ];
+        let crc = CrcDb::parse(&synth_crc_db(cs, &crcs)).expect("parse");
+        // Whole-file contiguous read starting at offset 0.
+        verify_uncompressed_chunks(&crc, &data, 0, data.len() as u64).expect("clean data verifies");
+    }
+
+    #[test]
+    fn verify_uncompressed_chunks_flip_in_later_chunk_attributed_to_that_chunk() {
+        let cs = 8u32;
+        let mut data: Vec<u8> = (0..20u8).collect();
+        let crcs = [
+            crc32fast::hash(&data[0..8]),
+            crc32fast::hash(&data[8..16]),
+            crc32fast::hash(&data[16..20]),
+        ];
+        let crc = CrcDb::parse(&synth_crc_db(cs, &crcs)).expect("parse");
+        // Flip a byte inside chunk 1 ([8,16)).
+        data[10] ^= 0xFF;
+        let err = verify_uncompressed_chunks(&crc, &data, 0, data.len() as u64)
+            .expect_err("corrupt chunk must error");
+        let msg = err.to_string();
+        assert!(matches!(err, Error::Corruption(_)), "typed corruption: {msg}");
+        assert!(msg.contains("chunk 1"), "must name chunk 1: {msg}");
+        // chunk 1 starts at Data.db offset 8 == 0x8.
+        assert!(msg.contains("0x8"), "must name the Data.db offset 0x8: {msg}");
+    }
+
+    #[test]
+    fn verify_uncompressed_chunks_truncated_crc_db_is_typed_error() {
+        let cs = 8u32;
+        let data: Vec<u8> = (0..20u8).collect(); // needs 3 CRC entries
+        // Only provide 1 entry -> chunk 1/2 have no CRC -> truncation error.
+        let crc = CrcDb::parse(&synth_crc_db(cs, &[crc32fast::hash(&data[0..8])])).expect("parse");
+        let err = verify_uncompressed_chunks(&crc, &data, 0, data.len() as u64)
+            .expect_err("truncated CRC.db must error");
+        assert!(matches!(err, Error::Corruption(_)), "typed: {err}");
     }
 
     #[tokio::test]
@@ -1172,7 +1335,7 @@ mod tests {
         // pieces must reproduce the section byte-for-byte. EOF is Ok(None).
         let mut assembled = Vec::new();
         let mut pieces = 0;
-        while let Some(piece) = read_uncompressed_data_block(&file, &config, true)
+        while let Some(piece) = read_uncompressed_data_block(&file, &config, true, None)
             .await
             .expect("read should succeed")
         {
@@ -1223,7 +1386,7 @@ mod tests {
         };
 
         // piecewise = false: the FIRST call must return the whole section.
-        let first = read_uncompressed_data_block(&file, &config, false)
+        let first = read_uncompressed_data_block(&file, &config, false, None)
             .await
             .expect("read should succeed")
             .expect("a non-empty section");
@@ -1237,7 +1400,7 @@ mod tests {
         assert_eq!(first, test_data, "contiguous read must be byte-identical");
 
         // And the next call is EOF (the section was fully consumed).
-        let next = read_uncompressed_data_block(&file, &config, false)
+        let next = read_uncompressed_data_block(&file, &config, false, None)
             .await
             .expect("read should succeed");
         assert!(
@@ -1280,6 +1443,7 @@ mod tests {
             &CassandraVersion::V5_0Uncompressed,
             &config,
             &None, // no CompressionInfo
+            None,  // no CRC.db in this unit test
             &chunk_index,
             0,
         )
@@ -1305,6 +1469,7 @@ mod tests {
             &CassandraVersion::V5_0Uncompressed,
             &config,
             &None,
+            None,
             &chunk_index,
             0,
         )
