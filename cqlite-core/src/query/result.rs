@@ -571,13 +571,30 @@ impl QueryRow {
 
     /// Create a row with values.
     ///
-    /// Generic over the key type so existing callers passing a
-    /// `HashMap<String, Value>` remain source-compatible (issue #1334); the
-    /// keys are interned into shared `Arc<str>` handles once here. Callers that
-    /// already hold `Arc<str>` keys pay only an identity conversion.
-    pub fn with_values<K: Into<Arc<str>>>(key: RowKey, values: HashMap<K, Value>) -> Self {
+    /// Concrete over `HashMap<String, Value>` so existing callers (including
+    /// `QueryRow::with_values(key, HashMap::new())`) infer the key type without
+    /// annotations (issue #1334); the string keys are interned into shared
+    /// `Arc<str>` handles once here. Callers that already hold interned
+    /// `Arc<str>` keys should use [`QueryRow::with_interned_values`] to skip the
+    /// re-allocation.
+    pub fn with_values(key: RowKey, values: HashMap<String, Value>) -> Self {
         Self {
-            values: values.into_iter().map(|(k, v)| (k.into(), v)).collect(),
+            values: values.into_iter().map(|(k, v)| (Arc::from(k), v)).collect(),
+            key,
+            metadata: RowMetadata::default(),
+            cell_metadata: None,
+        }
+    }
+
+    /// Create a row from already-interned `Arc<str>` column-name handles.
+    ///
+    /// The interned-key counterpart of [`QueryRow::with_values`] (issue #1334):
+    /// the storage/scan path already carries interned `Arc<str>` names, so the
+    /// handles move straight in with only a reference-count bump — no per-cell
+    /// `String` allocation.
+    pub fn with_interned_values(key: RowKey, values: HashMap<Arc<str>, Value>) -> Self {
+        Self {
+            values,
             key,
             metadata: RowMetadata::default(),
             cell_metadata: None,
@@ -587,12 +604,12 @@ impl QueryRow {
     /// Create a row from a column name → value map, using a synthetic empty key.
     ///
     /// Convenience constructor used by CLI utilities that do not track a raw
-    /// partition key.  The key is set to an empty byte vector. Generic over the
-    /// key type so `HashMap<String, Value>` callers stay source-compatible
-    /// (issue #1334).
-    pub fn from_map<K: Into<Arc<str>>>(values: HashMap<K, Value>) -> Self {
+    /// partition key.  The key is set to an empty byte vector. Concrete over
+    /// `HashMap<String, Value>` so `HashMap::new()` callers infer without
+    /// annotations (issue #1334); the string keys are interned here.
+    pub fn from_map(values: HashMap<String, Value>) -> Self {
         Self {
-            values: values.into_iter().map(|(k, v)| (k.into(), v)).collect(),
+            values: values.into_iter().map(|(k, v)| (Arc::from(k), v)).collect(),
             key: RowKey::new(vec![]),
             metadata: RowMetadata::default(),
             cell_metadata: None,
@@ -1360,10 +1377,10 @@ mod tests {
             "cell_metadata must be None when no metadata is attached (hot-path, zero allocation)"
         );
 
-        let row2 = QueryRow::with_values(RowKey::new(vec![2]), HashMap::<String, Value>::new());
+        let row2 = QueryRow::with_values(RowKey::new(vec![2]), HashMap::new());
         assert!(row2.cell_metadata.is_none());
 
-        let row3 = QueryRow::from_map(HashMap::<String, Value>::new());
+        let row3 = QueryRow::from_map(HashMap::new());
         assert!(row3.cell_metadata.is_none());
     }
 

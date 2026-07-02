@@ -403,11 +403,20 @@ impl SSTableReader {
             buffer
         };
 
-        // TODO: Parse value using schema-driven type information
-        // For now, preserve raw data until schema is available. This offset-read
-        // placeholder path is not schema-decoded, so it carries the raw bytes as a
-        // suppressed `ScanRow::Marker` (issue #1334).
-        let row = ScanRow::Marker(Value::Blob(data.to_vec()));
+        // TODO: Parse value using schema-driven type information (issue #1334).
+        // For now, preserve raw data until schema is available. Pre-#1334 this
+        // offset-read placeholder returned a bare `Value::Blob`, which the query
+        // layer surfaced as a synthetic single-column *live* row keyed "data"
+        // (the `other => insert("data", ..)` arm in
+        // `executor::storage_data_to_query_row`). That raw blob reached
+        // SELECT/export as real data, so it must keep doing so: emit it as a live
+        // `ScanRow::Row` with the same "data" column. A `ScanRow::Marker` here
+        // would be SUPPRESSED (or reduced to an id-only row) downstream and would
+        // silently drop a value that previously surfaced.
+        let row = ScanRow::Row(vec![(
+            std::sync::Arc::from("data"),
+            Value::Blob(data.to_vec()),
+        )]);
 
         // Extract write time from value (placeholder - would need to be parsed from SSTable)
         let _write_time = std::time::SystemTime::now()

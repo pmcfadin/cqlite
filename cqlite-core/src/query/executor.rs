@@ -759,7 +759,7 @@ impl QueryExecutor {
             values.insert(Arc::from("id"), Value::Text(format!("{:?}", key)));
         }
 
-        Ok(QueryRow::with_values(key.clone(), values))
+        Ok(QueryRow::with_interned_values(key.clone(), values))
     }
 
     // -- experimental write paths ------------------------------------------
@@ -1095,5 +1095,45 @@ mod tests {
             .condition_to_row_key(&name_condition)
             .expect("fallback key");
         assert_eq!(key.as_bytes(), b"carol");
+    }
+
+    /// Issue #1334 / roborev H1: the offset-read placeholder
+    /// (`data_access::read_value_at_offset`) surfaces its raw bytes to
+    /// SELECT/export through `get()` → `storage_data_to_query_row` as a live
+    /// single-column row keyed `"data"` — exactly the behaviour a bare
+    /// `Value::Blob` had pre-#1334. This pins that a live `ScanRow::Row` carrying
+    /// that blob keeps surfacing the value, while the equivalent
+    /// `ScanRow::Marker` is SUPPRESSED (drops the blob to an id-only fallback).
+    /// The producer emitting a `Marker` here (the regression) would silently lose
+    /// data that previously reached the query result.
+    #[tokio::test]
+    async fn offset_read_row_surfaces_data_marker_is_suppressed() {
+        use std::sync::Arc;
+        let (_tmp, executor, _) = make_executor().await;
+        let key = RowKey::new(vec![7]);
+        let raw = vec![0xde, 0xad, 0xbe, 0xef];
+
+        // Live row (the fixed producer output): the raw blob surfaces as "data".
+        let live = ScanRow::Row(vec![(Arc::from("data"), Value::Blob(raw.clone()))]);
+        let row = executor
+            .storage_data_to_query_row(live, &key)
+            .expect("live offset-read row must convert");
+        assert_eq!(
+            row.values.get("data"),
+            Some(&Value::Blob(raw.clone())),
+            "a live offset/indexed read must surface its raw value as the \"data\" column"
+        );
+
+        // Marker (the pre-fix producer output): the blob is dropped; the row
+        // falls back to an id-only shape with NO "data" column — proving a Marker
+        // here would lose data that previously reached SELECT/export.
+        let marker = ScanRow::Marker(Value::Blob(raw));
+        let suppressed = executor
+            .storage_data_to_query_row(marker, &key)
+            .expect("marker row must still convert");
+        assert!(
+            !suppressed.values.contains_key("data"),
+            "a Marker must NOT surface the raw blob (this is the suppression the fix avoids)"
+        );
     }
 }
