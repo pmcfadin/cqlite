@@ -91,6 +91,18 @@ pub enum VerifyErrorClass {
     /// An inline `Data.db` chunk CRC32 did not match, or a chunk could not be
     /// read / decompressed (truncation, bit flip).
     ChunkDecompressionError,
+    /// An **uncompressed** BIG `Data.db` chunk did not match its stored `CRC.db`
+    /// per-chunk CRC32 (issue #1396) — the uncompressed analogue of the compressed
+    /// path's inline chunk-CRC finding ([`ChunkDecompressionError`]). Cassandra
+    /// writes a `CRC.db` for every uncompressed BIG SSTable and verifies reads
+    /// against it; a bit flip inside an uncompressed chunk is detected here (and,
+    /// default-on, on every read). Also covers a truncated / short `CRC.db` (fewer
+    /// per-chunk CRC entries than the Data.db has chunks). Reported via a
+    /// `VerifyFinding` naming the failing chunk and the `CRC.db`/`Data.db`
+    /// component.
+    ///
+    /// [`ChunkDecompressionError`]: VerifyErrorClass::ChunkDecompressionError
+    UncompressedChunkCrcMismatch,
     /// A component was truncated and a required read hit end-of-file.
     UnexpectedEof,
     /// `Index.db` (BIG) is structurally corrupt.
@@ -120,6 +132,17 @@ pub enum VerifyErrorClass {
     /// `[2^31, 2^32)`, so those are NOT flagged — the on-disk format, not a
     /// heuristic, decides.)
     InvalidLocalDeletionTime,
+    /// A parseable BIG `Filter.db` reports "not present" (`might_contain == false`)
+    /// for a partition key that IS present in the SSTable (its raw key bytes are
+    /// enumerated from the authoritative `Index.db`) — a Bloom-filter FALSE
+    /// NEGATIVE (issue #1398). Cassandra's `Filter.db` carries no checksum, so a
+    /// bit flipped from 1→0 inside the bit array is not detected on load and makes
+    /// a live partition silently invisible on the BIG point-lookup path
+    /// (`partition_lookup.rs` returns `Ok(None)` when the bloom says "miss"). Full
+    /// scans and BTI (`da`) lookups are UNAFFECTED (they never gate on this bloom),
+    /// so this is a detection tool Cassandra's `sstableverify` lacks — Cassandra
+    /// does not verify Filter.db contents and would report the same fixture clean.
+    FilterFalseNegative,
 }
 
 impl VerifyErrorClass {
@@ -131,6 +154,7 @@ impl VerifyErrorClass {
             VerifyErrorClass::CompressionInfoCorrupt => "CompressionInfoCorrupt",
             VerifyErrorClass::ChunkOffsetOutOfBounds => "ChunkOffsetOutOfBounds",
             VerifyErrorClass::ChunkDecompressionError => "ChunkDecompressionError",
+            VerifyErrorClass::UncompressedChunkCrcMismatch => "UncompressedChunkCrcMismatch",
             VerifyErrorClass::UnexpectedEof => "UnexpectedEof",
             VerifyErrorClass::IndexEntryCorrupt => "IndexEntryCorrupt",
             VerifyErrorClass::StatisticsHeaderCorrupt => "StatisticsHeaderCorrupt",
@@ -140,6 +164,7 @@ impl VerifyErrorClass {
             VerifyErrorClass::RowScanFailed => "RowScanFailed",
             VerifyErrorClass::OutOfOrderKeyOrRow => "OutOfOrderKeyOrRow",
             VerifyErrorClass::InvalidLocalDeletionTime => "InvalidLocalDeletionTime",
+            VerifyErrorClass::FilterFalseNegative => "FilterFalseNegative",
         }
     }
 }
@@ -329,6 +354,14 @@ pub async fn verify_sstable(
         // ---- Check 5: inline Data.db chunk CRC validation (#998) -----------
         if let Some(info) = compression_info.as_ref() {
             check_inline_chunk_crc(&components, info, &mut findings)?;
+        } else if components.format == SsTableFormat::Big {
+            // ---- Check 5b: uncompressed CRC.db per-chunk validation (#1396) --
+            // An uncompressed BIG SSTable (no CompressionInfo.db) carries a CRC.db
+            // per-chunk checksum sidecar. Read it and validate every Data.db chunk
+            // — the uncompressed analogue of the inline chunk-CRC check above.
+            // Replaces the prior behavior where CRC.db was only name-whitelisted
+            // (recognized as a component) but never content-validated.
+            check_uncompressed_crc_db(dir, &components, &mut findings).await;
         }
 
         // ---- Check 6a: Statistics.db parse ---------------------------------
@@ -337,6 +370,22 @@ pub async fn verify_sstable(
         // ---- Check 6b: Summary.db parse (BIG only) -------------------------
         if components.format == SsTableFormat::Big {
             check_summary(dir, &components, platform.clone(), &mut findings).await;
+        }
+
+        // ---- Check 6c: Filter.db no-false-negative membership (BIG only) ----
+        //
+        // A parseable Filter.db with a bit flipped 1→0 inside the bit array is
+        // NOT detected on load (Cassandra's Filter.db has no checksum, and the
+        // read path is fail-open only for UNPARSEABLE filters) yet yields false
+        // negatives: `might_contain == false` for a present key makes the BIG
+        // point-lookup path return Ok(None) — a live partition silently invisible
+        // (issue #1398). Cassandra's sstableverify does not verify Filter.db
+        // contents, so this is a detection tool Cassandra lacks. BTI is immune
+        // (bloom bypassed for the trie) and full scans never gate on the bloom, so
+        // this check is BIG-only and probes the authoritative Index.db present
+        // keys against the decoded filter.
+        if components.format == SsTableFormat::Big {
+            check_filter_false_negatives(dir, &components, platform.clone(), &mut findings).await;
         }
 
         // ---- Check 7: full row scan (no silent empty on corruption) --------
@@ -1089,6 +1138,82 @@ async fn check_summary(
     }
 }
 
+/// Check 6c (FULL, BIG): the `Filter.db` Bloom filter must have NO false
+/// negatives over the present partition keys (issue #1398).
+///
+/// A false negative — `might_contain == false` for a key Cassandra actually wrote
+/// — makes that partition silently invisible on the BIG point-lookup path
+/// (`partition_lookup.rs` returns `Ok(None)` on a bloom "miss"). Because
+/// `Filter.db` carries no checksum, a bit flipped 1→0 inside the bit array is not
+/// caught on load; only re-probing every present key against the decoded filter
+/// surfaces it. The authoritative present-key set is the raw partition-key bytes
+/// in the sibling `Index.db` (`key_digest`, issue #552) — exactly the bytes
+/// Cassandra's Murmur3 hashed into the filter (no path/type heuristics).
+///
+/// Fail-open, safe direction (matches `component_loading.rs`): if `Filter.db` is
+/// absent or does not decode, this check records nothing — an absent/unparseable
+/// filter means the read path simply skips the bloom (no false negatives). Only a
+/// PARSEABLE filter that drops a present key is flagged. If `Index.db` is
+/// absent/corrupt the present-key set is unavailable, so nothing is probed here
+/// (that corruption is surfaced by [`check_big_index`]).
+async fn check_filter_false_negatives(
+    dir: &Path,
+    components: &ComponentSet,
+    platform: Arc<Platform>,
+    findings: &mut Vec<VerifyFinding>,
+) {
+    use crate::storage::sstable::bloom::BloomFilter;
+    use crate::storage::sstable::index_reader::IndexReader;
+
+    let filter_path = components.path(dir, "Filter.db");
+    let index_path = components.path(dir, "Index.db");
+    // Absent Filter.db → the read path skips the bloom entirely (no false
+    // negatives possible). Absent Index.db → no authoritative present-key source.
+    if !filter_path.exists() || !index_path.exists() {
+        return;
+    }
+
+    let Ok(filter_bytes) = std::fs::read(&filter_path) else {
+        return;
+    };
+    // Fail-open: an unparseable filter is the safe direction (component_loading.rs
+    // makes the bloom simply unavailable). Only a PARSEABLE-but-wrong filter is the
+    // silent false-negative hazard this check exists to catch.
+    let Ok(bloom) = BloomFilter::deserialize(&filter_bytes) else {
+        return;
+    };
+
+    // Enumerate the authoritative present keys from Index.db. A parse failure here
+    // is Index.db corruption, already surfaced by check_big_index — do not
+    // fabricate a filter finding from it.
+    let Ok(reader) = IndexReader::open(&index_path, platform).await else {
+        return;
+    };
+
+    let mut present = 0usize;
+    let mut false_negatives = 0usize;
+    for entry in reader.get_partition_entries() {
+        present += 1;
+        if !bloom.might_contain(&entry.key_digest) {
+            false_negatives += 1;
+        }
+    }
+
+    if false_negatives > 0 {
+        findings.push(VerifyFinding::new(
+            VerifyErrorClass::FilterFalseNegative,
+            "Filter.db",
+            format!(
+                "Bloom filter reported {false_negatives} false negative(s) over {present} present \
+                 partition key(s): a present key hashes to a bit the filter reports unset, so the \
+                 BIG point-lookup path would return no rows for a live partition (silent data \
+                 invisibility). Filter.db carries no checksum, so a 1→0 bit flip inside the bit \
+                 array is not caught on load; full scans and BTI lookups are unaffected."
+            ),
+        ));
+    }
+}
+
 /// Check 5 (FULL): validate every inline `Data.db` chunk CRC32 (#998) and that
 /// each chunk decompresses. Uses the [`ChunkDecompressor`] stitch path so this
 /// exercises real LZ4/Snappy/Deflate/Zstd decoding.
@@ -1136,6 +1261,129 @@ fn check_inline_chunk_crc(
         findings.push(classify_data_error("Data.db", &e));
     }
     Ok(())
+}
+
+/// Check 5b (FULL, uncompressed BIG only): read `CRC.db` and validate every
+/// uncompressed `Data.db` chunk against its stored per-chunk CRC32 (issue #1396).
+///
+/// This is the uncompressed analogue of [`check_inline_chunk_crc`]. Cassandra
+/// writes a `CRC.db` for every uncompressed BIG SSTable; a bit flip inside a
+/// chunk (or a truncated `CRC.db`) is reported as an
+/// [`VerifyErrorClass::UncompressedChunkCrcMismatch`] `VerifyFinding` naming the
+/// failing chunk. Streams the Data.db one `chunk_size` block at a time (bounded
+/// memory) rather than buffering the whole file. An absent `CRC.db` is the
+/// owner-pinned warn-and-proceed decision (design D4): no finding is recorded
+/// (its absence is surfaced by the TOC/presence check when listed).
+async fn check_uncompressed_crc_db(
+    dir: &Path,
+    components: &ComponentSet,
+    findings: &mut Vec<VerifyFinding>,
+) {
+    use crate::storage::sstable::reader::crc::CrcDb;
+    use tokio::io::AsyncReadExt;
+
+    let crc_path = components.path(dir, "CRC.db");
+    if !crc_path.exists() {
+        // Absent CRC.db: warn-and-proceed (design D4). Not a checksum-mismatch.
+        return;
+    }
+
+    // Data.db length bounds the maximum plausible CRC.db size (issue #1396
+    // Fix 2): `CrcDb::open` rejects an oversized sidecar before reading its body.
+    let data_len = tokio::fs::metadata(&components.data_path)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let crc = match CrcDb::open(&crc_path, data_len).await {
+        Ok(c) => c,
+        Err(e) => {
+            findings.push(VerifyFinding::new(
+                VerifyErrorClass::UncompressedChunkCrcMismatch,
+                "CRC.db",
+                format!("CRC.db failed to parse: {e}"),
+            ));
+            return;
+        }
+    };
+
+    let chunk_size = crc.chunk_size() as usize;
+    let mut file = match tokio::fs::File::open(&components.data_path).await {
+        Ok(f) => f,
+        Err(e) => {
+            findings.push(VerifyFinding::new(
+                VerifyErrorClass::MissingComponent,
+                "Data.db",
+                format!("cannot open Data.db for CRC.db check: {e}"),
+            ));
+            return;
+        }
+    };
+
+    // Walk Data.db one chunk_size block at a time and compare each block's CRC32
+    // to the stored value (bounded memory, O(chunk_size)).
+    let mut chunk_index = 0usize;
+    let mut offset: u64 = 0;
+    // `chunk_size` is bounded by `MAX_CRC_CHUNK_SIZE` at parse time
+    // (`CrcDb::parse`, issue #1396) — a malformed sidecar advertising an absurd
+    // size was already rejected above as typed corruption, so this scratch
+    // allocation can never scale to an OOM.
+    let mut buf = vec![0u8; chunk_size];
+    loop {
+        let mut filled = 0usize;
+        // Accumulate a full chunk (or the short final chunk at EOF).
+        loop {
+            match file.read(&mut buf[filled..]).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    filled += n;
+                    if filled == chunk_size {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    findings.push(VerifyFinding::new(
+                        VerifyErrorClass::UncompressedChunkCrcMismatch,
+                        "Data.db",
+                        format!("read error verifying chunk {chunk_index} against CRC.db: {e}"),
+                    ));
+                    return;
+                }
+            }
+        }
+        if filled == 0 {
+            break; // clean EOF on a chunk boundary
+        }
+        let computed = crc32fast::hash(&buf[..filled]);
+        match crc.crc_for_chunk(chunk_index) {
+            Ok(expected) => {
+                if computed != expected {
+                    findings.push(VerifyFinding::new(
+                        VerifyErrorClass::UncompressedChunkCrcMismatch,
+                        "Data.db",
+                        format!(
+                            "uncompressed CRC32 mismatch for chunk {chunk_index} at Data.db offset 0x{offset:x} ({filled} bytes): expected=0x{expected:08x} (CRC.db), computed=0x{computed:08x}"
+                        ),
+                    ));
+                    // Report the first failing chunk and stop (matches the
+                    // fail-fast read-path posture; naming one chunk is sufficient).
+                    return;
+                }
+            }
+            Err(e) => {
+                findings.push(VerifyFinding::new(
+                    VerifyErrorClass::UncompressedChunkCrcMismatch,
+                    "CRC.db",
+                    format!("CRC.db has no entry for Data.db chunk {chunk_index} (truncated): {e}"),
+                ));
+                return;
+            }
+        }
+        offset += filled as u64;
+        chunk_index += 1;
+        if filled < chunk_size {
+            break; // short final chunk consumed
+        }
+    }
 }
 
 /// Check 6 (FULL): `Statistics.db` parses. Records a finding on failure but

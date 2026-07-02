@@ -22,6 +22,11 @@ mod bti;
 // `not(tombstones)` gated.
 #[cfg(not(feature = "tombstones"))]
 mod big_promoted;
+// In-crate proof that the promoted-index / reverse-lookup uncompressed read path
+// verifies CRC.db before parsing (issue #1396, roborev Fix 1). It calls the
+// pub(crate) `big_reverse_partition_rows`, so it cannot live in `tests/`.
+#[cfg(all(test, not(feature = "tombstones")))]
+mod big_promoted_crc_tests;
 mod compaction;
 mod model;
 mod sequential;
@@ -360,6 +365,15 @@ impl SSTableReader {
             )));
         }
 
+        // Read-time CRC verification for uncompressed BIG SSTables (issue #1396).
+        // The index-based scan and point-lookup paths reach Data.db here (bypassing
+        // read_next_block / read_uncompressed_data_block), so verify the CRC.db
+        // chunk(s) covering [offset, offset+size) BEFORE returning any bytes. A
+        // mismatch is a typed Error::Corruption naming the chunk + offset (never
+        // wrong values / never a silent result). No-op when no CRC.db is present
+        // (compressed tables / BTI / absent-CRC.db warn-and-proceed).
+        self.verify_uncompressed_range(offset, size).await?;
+
         // Use cached reading with metrics tracking
         let buffer = self.get_cached_data(offset, size).await?;
 
@@ -473,6 +487,147 @@ impl SSTableReader {
         Ok(data)
     }
 
+    /// Verify the `CRC.db` chunk(s) covering the uncompressed Data.db byte range
+    /// `[offset, offset + size)` against their stored per-chunk CRC32 (issue
+    /// #1396), on the offset-read path used by the index-based scan and point
+    /// lookups.
+    ///
+    /// A partition read touches a sub-range of one or more `chunk_size` blocks; a
+    /// chunk's CRC can only be checked over the WHOLE chunk, so this reads each
+    /// covering chunk (bounded to one `chunk_size` block at a time) and compares.
+    /// Each chunk is verified at most once per reader lifetime (memoized in
+    /// [`SSTableReader::verified_uncompressed_chunks`]), keeping the cost at the
+    /// budgeted one CRC32 pass per chunk even when many partitions share a chunk.
+    ///
+    /// No-op when this reader has no `CRC.db` (compressed tables carry inline
+    /// per-chunk CRCs; BTI ships none; an absent `CRC.db` is warn-and-proceed).
+    async fn verify_uncompressed_range(&self, offset: u64, size: u32) -> Result<()> {
+        use tokio::io::AsyncReadExt;
+
+        let Some(crc) = self.crc_reader.as_deref() else {
+            return Ok(());
+        };
+        if size == 0 {
+            return Ok(());
+        }
+        let cs = crc.chunk_size() as u64;
+        if cs == 0 {
+            return Err(Error::corruption(
+                "CRC.db chunk size is zero; cannot verify uncompressed read",
+            ));
+        }
+        let file_size = self.stats.file_size;
+        // Fix 3 (issue #1396): a corrupt on-disk offset/size can overflow
+        // `offset + size` (debug panic / wrapped range that misattributes CRC
+        // chunks) or point past EOF. Use checked arithmetic and reject a range
+        // that overflows or exceeds the Data.db length as typed corruption
+        // BEFORE deriving any chunk index. `size >= 1` here (0 handled above),
+        // so `end > offset` and `end - 1` never underflows.
+        let end = offset
+            .checked_add(size as u64)
+            .filter(|end| *end <= file_size)
+            .ok_or_else(|| {
+                Error::corruption(format!(
+                    "uncompressed read range [0x{offset:x}, +{size}) overflows or exceeds the \
+                     Data.db length {file_size}; refusing to verify a corrupt offset"
+                ))
+            })?;
+        let first = offset / cs;
+        let last = (end - 1) / cs;
+        for chunk in first..=last {
+            // Skip chunks already verified for this reader.
+            {
+                let seen = self
+                    .verified_uncompressed_chunks
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if seen.contains(&chunk) {
+                    continue;
+                }
+            }
+            let lo = chunk * cs;
+            let hi = ((chunk + 1) * cs).min(file_size);
+            if hi <= lo {
+                break; // range extends past EOF; nothing real to verify
+            }
+            let mut buf = vec![0u8; (hi - lo) as usize];
+            {
+                let mut file = self.file.lock().await;
+                file.seek(SeekFrom::Start(lo)).await?;
+                file.read_exact(&mut buf).await.map_err(|e| {
+                    Error::corruption(format!(
+                        "failed to read uncompressed chunk {chunk} at Data.db offset 0x{lo:x} for CRC verification: {e}"
+                    ))
+                })?;
+            }
+            let computed = crc32fast::hash(&buf);
+            let expected = crc.crc_for_chunk(chunk as usize)?;
+            if computed != expected {
+                return Err(Error::corruption(format!(
+                    "uncompressed CRC32 mismatch for chunk {} at Data.db offset 0x{:x} \
+                     ({} bytes): expected=0x{:08x}, computed=0x{:08x} (CRC.db)",
+                    chunk,
+                    lo,
+                    hi - lo,
+                    expected,
+                    computed
+                )));
+            }
+            self.verified_uncompressed_chunks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(chunk);
+        }
+        Ok(())
+    }
+
+    /// The SINGLE CRC-checked chokepoint for reading a raw byte range from an
+    /// *uncompressed* Data.db section (issue #1396).
+    ///
+    /// EVERY uncompressed offset read MUST flow through here so that no public
+    /// read path can silently bypass `CRC.db` verification and hand corrupt
+    /// bytes to the parser. It runs the shared, memoized verifier
+    /// [`Self::verify_uncompressed_range`] over the covering chunk(s) BEFORE any
+    /// bytes are returned; a mismatch is the typed [`Error::Corruption`] naming
+    /// the failing chunk + Data.db offset. The verifier is a no-op when this
+    /// reader has no `CRC.db` (compressed tables carry inline per-chunk CRCs,
+    /// BTI ships none, an absent `CRC.db` is warn-and-proceed), so this helper is
+    /// also the correct accessor for the raw-read step of compressed offset reads.
+    ///
+    /// `offset` is an ABSOLUTE Data.db file offset (post-header). `file` is the
+    /// handle to read the range from — the shared point-read handle
+    /// ([`Self::file`]) or a scan-local cursor's private handle (issue #815).
+    /// CRC verification always uses the reader's own handle, so it is independent
+    /// of `file` and never disturbs a scan cursor's position.
+    ///
+    /// Future uncompressed offset reads MUST call this instead of doing their own
+    /// `seek` + `read_exact`, so the CRC check can never be forgotten again.
+    pub(in crate::storage::sstable::reader) async fn read_uncompressed_verified(
+        &self,
+        file: &tokio::sync::Mutex<super::source::BlockSource>,
+        offset: u64,
+        len: usize,
+    ) -> Result<Vec<u8>> {
+        use tokio::io::AsyncReadExt;
+
+        let size = u32::try_from(len).map_err(|_| {
+            Error::corruption(format!(
+                "uncompressed read length {len} exceeds u32 range for CRC verification \
+                 at Data.db offset 0x{offset:x}"
+            ))
+        })?;
+        // Verify the covering CRC.db chunk(s) BEFORE returning any bytes.
+        self.verify_uncompressed_range(offset, size).await?;
+
+        let mut buf = vec![0u8; len];
+        {
+            let mut guard = file.lock().await;
+            guard.seek(SeekFrom::Start(offset)).await?;
+            guard.read_exact(&mut buf).await?;
+        }
+        Ok(buf)
+    }
+
     /// Mint a fresh, independent cursor for one scan (issue #815).
     ///
     /// Each cursor owns a private file handle (or mmap cursor) and chunk index,
@@ -496,6 +651,7 @@ impl SSTableReader {
             &self.header.cassandra_version,
             &self.config,
             &self.compression_info,
+            self.crc_reader.as_deref(),
             &cursor.chunk_index,
             self.actual_header_size as u64,
         )

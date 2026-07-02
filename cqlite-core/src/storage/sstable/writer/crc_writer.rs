@@ -74,7 +74,7 @@ pub const CRC_CHUNK_SIZE: usize = 64 * 1024;
 ///   zero-length buffer, appending one trailing `00000000` (`CRC32` of zero
 ///   bytes). This is the byte-identical match for the #1017 compacted goldens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum CrcTrailer {
+pub(crate) enum CrcTrailer {
     /// No trailing chunk — the flush path (default).
     None,
     /// Append one trailing empty-final-chunk `CRC32 = 0` — the compaction path.
@@ -166,7 +166,7 @@ pub(super) async fn build_crc_bytes(data_path: &Path, trailer: CrcTrailer) -> Re
 /// `trailer` selects the flush vs compaction tail (issue #1222): flush callers
 /// pass [`CrcTrailer::None`]; compaction callers pass
 /// [`CrcTrailer::EmptyFinalChunk`].
-pub(super) async fn write_crc_db(
+pub(crate) async fn write_crc_db(
     data_path: &Path,
     crc_path: PathBuf,
     trailer: CrcTrailer,

@@ -6,9 +6,9 @@ Two roles. One board. The manager orchestrates; the workers do everything else.
 
 | | **Manager** (one window, `/manager`) | **flow-lead workers** (N windows / machines) |
 |---|---|---|
-| Writes code / claims / merges? | **Never** | Yes — owns the issue end-to-end |
+| Writes code / claims / merges? | **Never by hand** (runs the merge-on-green poller for the fleet) | Yes — owns the issue end-to-end |
 | Board | Controls **Ready** (what + order); reconciles; reaps | Reads Ready; claims the oldest unlocked item |
-| Lifecycle | none | full **1:1:1:1**: claim → implement → gate → C → roborev → PR → **merge → cleanup** |
+| Lifecycle | none | full **1:1:1:1**: claim → implement → gate → C → roborev → PR → **arm merge-on-green → cleanup** |
 | Communication | signed **issue comments** (work orders) + Ready ordering | reads manager comments before acting; obeys the latest order |
 | Tempo | sets it via Ready throughput, WIP cap, and ordering | runs flat-out on its claimed issue |
 
@@ -40,11 +40,41 @@ ORDER: k                # queue rank when several are Ready at once
    implements + runs the gate). **Out-of-scope bug found** → a subagent files a new detailed issue (never fix
    it inline / never grow the diff); if it **blocks** completion, comment "blocked on #<new>" on your issue,
    pause, and surface to the manager (it sequences via `HOLD`/Ready) — fix it only as its own 1:1:1:1 claim.
-5. **Before merging**: re-check for an open `HOLD`. If `HOLD: merge after #N`, block until #N is merged.
-   Merge only on `agent-gate.sh` PASS + spec-auditor C PASS (design) + roborev clean + HOLD cleared.
-6. **Merge + clean up** (`flow-finalize`): squash-merge, archive any OpenSpec change, **stamp the
-   telemetry ledger**, remove the worktree, delete the origin claim branch, close the issue with a
-   traceable comment. Board → Done (built-in).
+5. **Terminal state — arm merge-on-green, then STOP.** The worker's terminal state for an issue is
+   **PR-open + `agent-gate.sh` PASS + spec-auditor C PASS (design) + roborev clean** (with any `HOLD`
+   cleared). At that point re-check for an open `HOLD` (if `HOLD: merge after #N`, the merge-on-green
+   mechanism stays gated behind #N — the manager sequences it), rebase on current `origin/main` and resolve
+   any conflict in your own worktree, then **arm the merge-on-green mechanism (below) and end your turn.**
+   Do **NOT** poll the PR's own external CI in a yield/wake loop (repeated `ScheduleWakeup` cycles) waiting
+   for the cross-platform matrix — once the work is done that is pure token bleed, and it is prohibited.
+6. **Merge-on-green lands it; finalize follows the merge.** The armed mechanism lands the PR when its
+   defined green signal passes; the merge event triggers `flow-finalize` (archive any OpenSpec change,
+   **stamp the telemetry ledger**, remove the worktree, delete the origin claim branch, close the issue
+   with a traceable comment). Board → Done (built-in). Finalize is driven by the merge event, not by a CI
+   busy-wait.
+
+## Merge-on-green (how a green PR lands — no worker CI busy-wait)
+
+A worker never busy-polls its PR's own CI. When it reaches its terminal state it **arms** one of two
+merge-on-green paths and stops; the mechanism watches the green signal for it:
+
+- **Primary today — the manager-owned poller.** `main` currently has **no required status checks**
+  (`contexts=[]`), so a naive `gh pr merge --auto` would merge the instant it is set, against an empty
+  check set (forbidden — see the green-signal guard below). So the worker hands the PR off to the
+  manager-owned poller/merge-engine, which gates on an explicit lane set and lands the PR on green. The
+  poller runs **once at the manager level for the whole fleet**, not N times per worker — that concentration
+  is the efficiency win.
+- **`gh pr merge --auto --squash --delete-branch` — primary once required checks are configured on `main`.**
+  When real required status checks exist for the PR's branch, `--auto` is the zero-token native path:
+  GitHub lands the PR the moment the required checks pass and auto-closes the issue via `Closes #N`. Until
+  then it is **not** used as the primary path.
+
+The worker **logs which path it armed**. **Green-signal guard:** merge-on-green SHALL only land a PR once a
+*defined* green signal exists — configured required checks, or the manager-poller's explicit lane set. It
+must never auto-land against an empty required-check set.
+
+**`ScheduleWakeup` is still valid** for genuinely external, harness-untracked state; what is forbidden is
+using it to busy-poll a PR's own external CI after the work is complete.
 
 ## Self-improvement loop (telemetry + retro)
 
@@ -76,7 +106,8 @@ worktree (the manager never rebases someone else's branch).
 - **Seam 1 — spec approval**: design-driven issues stop after `flow-activate` for owner approval.
 - **Exceptions / product calls**: scope, epic close, conflicting requirements → manager surfaces a
   **NEEDS-YOU** list; never decided autonomously.
-- Workers otherwise merge autonomously on green. There is no human merge click for worker-owned issues.
+- Workers otherwise **arm merge-on-green and stop**; the mechanism lands the PR on green. There is no human
+  merge click for worker-owned issues — and no worker CI busy-wait.
 
 ## Hard rules
 - The gate is the only run that counts; paste its summary block.

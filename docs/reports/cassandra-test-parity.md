@@ -10,11 +10,11 @@ Sources: [`docs/cassandra_test_index.md`](../../docs/cassandra_test_index.md) ·
 
 | Status | Scenarios |
 |---|---|
-| `mirrored` | 231 |
+| `mirrored` | 233 |
 | `partial` | 9 |
 | `planned` | 49 |
 | `out_of_scope` | 31 |
-| **total** | **320** |
+| **total** | **322** |
 
 ## Evidence counts
 
@@ -22,7 +22,7 @@ _Counts are per scenario; see [Distinct test backing](#distinct-test-backing-ded
 
 | Evidence | Scenarios |
 |---|---|
-| `byte_for_byte` | 124 |
+| `byte_for_byte` | 126 |
 | `canonical_semantic` | 99 |
 | `smoke` | 12 |
 | `partial` | 52 |
@@ -116,6 +116,7 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 | `cass.corruption.data_db.bit_flip` | corruption_verify | mirrored | byte_for_byte | `sstable_parity_corruption_verify` | p0_data_loss |
 | `cass.corruption.data_db.truncation` | corruption_verify | mirrored | byte_for_byte | `sstable_parity_corruption_verify` | p0_data_loss |
 | `cass.corruption.digest_crc32_mismatch` | corruption_verify | mirrored | byte_for_byte | `sstable_parity_corruption_verify` | p0_data_loss |
+| `cass.corruption.filter_db.bit_flip_big` | corruption_verify | mirrored | byte_for_byte | `sstable_parity_corruption_verify` | p0_data_loss |
 | `cass.corruption.index_db.bit_flip_big` | corruption_verify | mirrored | byte_for_byte | `sstable_parity_corruption_verify` | p0_data_loss |
 | `cass.corruption.statistics_db.header_damage` | corruption_verify | mirrored | byte_for_byte | `sstable_parity_corruption_verify` | p0_data_loss |
 | `cass.corruption_verify.component_corruption_detection` | corruption_verify | mirrored | canonical_semantic | `sstable_parity_corruption_verify` | p0_data_loss |
@@ -156,6 +157,7 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 | `cass.delta_scan.row_tombstones` | delta_scan | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p1_correctness |
 | `cass.delta_scan.static_with_rows` | delta_scan | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p1_correctness |
 | `cass.delta_scan.ttl_cells` | delta_scan | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p1_correctness |
+| `cass.filter_db.bit_flip_false_negative_exposure` | filter_db_bloom | mirrored | byte_for_byte | `sstable_parity_filter_db_bloom` | p0_data_loss |
 | `cass.filter_db.corruption_fails_closed` | filter_db_bloom | mirrored | byte_for_byte | `sstable_parity_filter_db_bloom` | p1_correctness |
 | `cass.filter_db.no_false_negative_membership` | filter_db_bloom | mirrored | byte_for_byte | `sstable_parity_filter_db_bloom` | p0_data_loss |
 | `cass.filter_db.serialization_round_trip` | filter_db_bloom | mirrored | byte_for_byte | `sstable_parity_filter_db_bloom` | p1_correctness |
@@ -288,6 +290,7 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.corruption.data_db.bit_flip` — Data.db single-bit flip is detected (LZ4 chunk decode / CRC)
 - `cass.corruption.data_db.truncation` — Data.db mid-stream truncation is detected
 - `cass.corruption.digest_crc32_mismatch` — Digest.crc32 mismatch is detected
+- `cass.corruption.filter_db.bit_flip_big` — BIG Filter.db bit-array bit flip — false negative detected by verify
 - `cass.corruption.index_db.bit_flip_big` — BIG Index.db bit flip is detected
 - `cass.corruption.statistics_db.header_damage` — Statistics.db header damage is detected
 - `cass.corruption.summary_db_truncation` — Summary.db truncation is detected
@@ -341,6 +344,8 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.data_db_decode.unfiltered_serializer.row_size_vints` — Data.db row-size and previous-size VInt framing parity
   - Normalization: row_size/prev_size are unsigned VInt deltas; the deterministic lane compares raw encoded bytes and decoded values at the exact width boundaries, the fixture lane compares the framing offsets of a real nb Data.db (FAIL CLOSED on a missing fixture).
 - `cass.data_db_decode.wide_partition.row_boundaries` — Wide-partition Data.db row boundaries align with promoted-index offsets
+- `cass.filter_db.bit_flip_false_negative_exposure` — Filter.db bit-array bit flip — false-negative exposure and verify detection
+  - Normalization: Present keys are the raw partition-key bytes from Index.db (key_digest, issue #552) — the exact bytes Cassandra's Murmur3 hashed into Filter.db. Cassandra's verdict is its ACTUAL captured sstableverify -e outcome (CLEAN: 'Verify ... succeeded. All 1 rows read successfully') recorded in corruption-manifest.yml (filter_db_bit_flip, verdict_parity: divergent).
 - `cass.filter_db.corruption_fails_closed` — Filter.db malformed-byte rejection (fail-closed)
 - `cass.filter_db.no_false_negative_membership` — Filter.db no-false-negative membership over Cassandra present keys
   - Normalization: Present keys are the raw partition-key bytes from Index.db (not the decoded CQL values), matching the bytes Cassandra's Murmur3 hashed into Filter.db. The reference_paths point at the committed per-fixture Data.db.jsonl siblings (the binary Filter.db and Index.db are gitignored, fetched on demand).
@@ -630,7 +635,7 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 
 Scenario counts above can overstate distinct proof: one backing test may exercise many scenario ids. The dedup view below counts unique test targets so the program is not read as more independent tests than exist (issue #1228).
 
-- Distinct backing tests: **65** across **250** scenarios that name a test.
+- Distinct backing tests: **67** across **258** scenarios that name a test.
 
 ### Tests backing more than one scenario
 
@@ -656,6 +661,7 @@ Scenario counts above can overstate distinct proof: one backing test may exercis
 | `cqlite-core/tests/sstable_parity_filter_db_test.rs` | 6 |
 | `cqlite-core/tests/sstable_parity_index_db_test.rs` | 6 |
 | `cqlite-core/tests/sstable_parity_repaired_metadata_test.rs` | 6 |
+| `cqlite-core/tests/sstable_zstd_dictionary_reject_test.rs` | 6 |
 | `cqlite-core/tests/sstabledump_parity_summary.rs` | 6 |
 | `cqlite-core/tests/issue_1008_counter_final_value_parity.rs` | 5 |
 | `cqlite-core/tests/issue_1009_canonical_jsonl_comparator.rs` | 5 |
@@ -674,6 +680,7 @@ Scenario counts above can overstate distinct proof: one backing test may exercis
 | `cqlite-core/tests/issue_990_data_db_row_framing_parity.rs` | 4 |
 | `cqlite-core/tests/issue_992_range_boundary_grammar.rs` | 4 |
 | `cqlite-core/tests/issue_1190_write_load_byte_parity.rs` | 3 |
+| `cqlite-core/tests/sstable_parity_corruption_verify.rs` | 3 |
 | `compaction-parity/src/test/java/org/cqlite/parity/ComponentByteComparatorTest.java` | 2 |
 | `compaction-parity/src/test/java/org/cqlite/parity/DifferentialParityTester.java` | 2 |
 | `cqlite-core/tests/issue_1073_statistics_max_ldt_tombstone_histogram_parity.rs` | 2 |
@@ -682,6 +689,7 @@ Scenario counts above can overstate distinct proof: one backing test may exercis
 | `cqlite-core/tests/issue_821_writer_byte_invariants.rs` | 2 |
 | `cqlite-core/tests/issue_899_per_element_survives_compaction.rs` | 2 |
 | `cqlite-core/tests/issue_921_background_compaction_dropped_column_header.rs` | 2 |
+| `cqlite-core/tests/sstable_parity_filter_bitflip_test.rs` | 2 |
 | `cqlite-core/tests/sstable_parity_integration_test.rs` | 2 |
 | `cqlite-core/tests/sstableloader_integration.rs` | 2 |
 
@@ -966,6 +974,7 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.corruption.data_db.bit_flip` | exhaustive_regeneration | .github/workflows/compression-corruption-parity.yml |
 | `cass.corruption.data_db.truncation` | exhaustive_regeneration | .github/workflows/compression-corruption-parity.yml |
 | `cass.corruption.digest_crc32_mismatch` | exhaustive_regeneration | .github/workflows/compression-corruption-parity.yml |
+| `cass.corruption.filter_db.bit_flip_big` | exhaustive_regeneration | .github/workflows/compression-corruption-parity.yml |
 | `cass.corruption.index_db.bit_flip_big` | exhaustive_regeneration | .github/workflows/compression-corruption-parity.yml |
 | `cass.corruption.statistics_db.header_damage` | exhaustive_regeneration | .github/workflows/compression-corruption-parity.yml |
 | `cass.corruption.summary_db_truncation` | exhaustive_regeneration | .github/workflows/compression-corruption-parity.yml |
@@ -1037,6 +1046,7 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.delta_scan.ttl_cells` | manual_debug | — |
 | `cass.delta_scan.wide_partition_corpus` | exhaustive_regeneration | .github/workflows/delta-roundtrip.yml |
 | `cass.distributed_consensus.paxos_accord_out_of_scope` | fast_pr | — |
+| `cass.filter_db.bit_flip_false_negative_exposure` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.filter_db.bti_membership` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.filter_db.corruption_fails_closed` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.filter_db.no_false_negative_membership` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
@@ -1291,6 +1301,7 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.corruption.data_db.bit_flip` | nb | test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml<br>test-data/datasets/corruption/test_comp_corrupt/corruption-sha256.txt<br>_fail:_ artifact.exhaustive_regeneration.audit_report |
 | `cass.corruption.data_db.truncation` | nb | test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml<br>test-data/datasets/corruption/test_comp_corrupt/corruption-sha256.txt<br>_fail:_ artifact.exhaustive_regeneration.audit_report |
 | `cass.corruption.digest_crc32_mismatch` | nb | test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml<br>test-data/datasets/corruption/test_comp_corrupt/corruption-sha256.txt<br>_fail:_ artifact.exhaustive_regeneration.audit_report |
+| `cass.corruption.filter_db.bit_flip_big` | nb | test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml<br>test-data/datasets/corruption/test_comp_corrupt/corruption-sha256.txt<br>_fail:_ artifact.exhaustive_regeneration.audit_report |
 | `cass.corruption.index_db.bit_flip_big` | nb | test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml<br>test-data/datasets/corruption/test_comp_corrupt/corruption-sha256.txt<br>_fail:_ artifact.exhaustive_regeneration.audit_report |
 | `cass.corruption.statistics_db.header_damage` | nb | test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml<br>test-data/datasets/corruption/test_comp_corrupt/corruption-sha256.txt<br>_fail:_ artifact.exhaustive_regeneration.audit_report |
 | `cass.corruption.summary_db_truncation` | nb | test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml<br>test-data/datasets/corruption/test_comp_corrupt/corruption-sha256.txt<br>_fail:_ artifact.exhaustive_regeneration.audit_report |
@@ -1362,6 +1373,7 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.delta_scan.ttl_cells` | nb | test-data/datasets/sstables/test_deltas/ttl_cells-299c9220701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl |
 | `cass.delta_scan.wide_partition_corpus` | nb | — |
 | `cass.distributed_consensus.paxos_accord_out_of_scope` | — | — |
+| `cass.filter_db.bit_flip_false_negative_exposure` | nb | test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml<br>test-data/datasets/corruption/test_comp_corrupt/corruption-sha256.txt<br>_fail:_ artifact.required_parity.byte_diff |
 | `cass.filter_db.bti_membership` | da | — |
 | `cass.filter_db.corruption_fails_closed` | nb, oa, da | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ artifact.required_parity.byte_diff |
 | `cass.filter_db.no_false_negative_membership` | nb, oa, da | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ artifact.required_parity.byte_diff |

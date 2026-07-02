@@ -585,6 +585,7 @@ jobs:
           set -euo pipefail
           cargo test --package cqlite-core --features write-support \
             --test sstable_parity_filter_db_test \
+            --test sstable_parity_filter_bitflip_test \
             -- --nocapture
           BASH
 

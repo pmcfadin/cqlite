@@ -268,6 +268,25 @@ pub struct SSTableReader {
     pub(crate) udt_registry: Option<UdtRegistry>,
     /// CompressionInfo metadata for chunked decompression (if compressed)
     pub compression_info: Option<Arc<CompressionInfo>>,
+    /// `CRC.db` per-chunk checksums for read-time integrity of **uncompressed**
+    /// BIG (`nb`) SSTables (issue #1396). `Some` when this is an uncompressed BIG
+    /// SSTable that ships a `CRC.db` (Cassandra writes one for every uncompressed
+    /// BIG table); `None` for compressed tables (they carry inline per-chunk CRCs
+    /// instead), BTI (`da`) tables (no `CRC.db`), or an uncompressed BIG table
+    /// whose `CRC.db` is absent (warn-and-proceed, owner-pinned decision D4).
+    /// When present, every uncompressed Data.db chunk returned by
+    /// `read_uncompressed_data_block` is verified against it, default-on.
+    pub(crate) crc_reader: Option<Arc<super::crc::CrcDb>>,
+    /// Memo of uncompressed Data.db chunk indices already CRC-verified on the
+    /// offset-read path (`read_value_at_offset`, used by the index-based scan and
+    /// point lookups). A partition read touches a sub-range of one or more chunks;
+    /// verifying a chunk requires the WHOLE chunk, so this set ensures each chunk
+    /// is read+checked at most once per reader lifetime — keeping the cost at the
+    /// budgeted "one CRC32 pass per chunk" (issue #1396) even when many small
+    /// partitions share a chunk. Only ever populated when [`Self::crc_reader`] is
+    /// `Some`. The contiguous scan path verifies inline in `block_io` and does not
+    /// use this memo.
+    pub(crate) verified_uncompressed_chunks: std::sync::Mutex<std::collections::HashSet<u64>>,
     /// Version-feature gates derived from the SSTable filename.
     ///
     /// Computed once in `SSTableReader::open` via `VersionGates::from_path` and

@@ -73,7 +73,7 @@
 //!   `StreamingConfig::buffer_size`.
 //! - **`max_partition_size`** — INHERENT to any row-materializing partition scan and
 //!   PRE-DATES this change: `drain_scan_window` parses one CONFIRMED partition fully
-//!   into a `surviving: Vec<(RowKey, ScanRow)>` before batching (the parser's `FnMut`
+//!   into a reused `scratch: Vec<(RowKey, ScanRow)>` before batching (the parser's `FnMut`
 //!   emit is synchronous, so a partition's rows cannot stream out mid-parse), so if
 //!   `blocking_send` stalls mid-iteration the producer still owns that Vec's
 //!   not-yet-batched tail. This is the pre-existing #1156 windowed-scan heap term
@@ -172,7 +172,7 @@ const RAW_CHUNK_CHANNEL_CAP: usize = 8;
 /// ~`BATCH_EMIT_ROWS`× (one wake per batch instead of one per row) while keeping
 /// the bounded-heap and backpressure guarantees: a batch holds at most this many
 /// `(RowKey, ScanRow)` already-owned entries (the same entries the prior code held
-/// transiently in `surviving`), and the batch channel is bounded
+/// transiently in `scratch`), and the batch channel is bounded
 /// ([`BATCH_CHANNEL_CAP`]) so a slow consumer still stops the parse loop, which
 /// still stops draining raw chunks, which still stops disk reads. Order is
 /// preserved (entries are pushed and drained FIFO, batches sent in order). A
@@ -200,7 +200,7 @@ const BATCH_CHANNEL_CAP: usize = 2;
 /// resident-row bound: the complete worst case (module doc) is
 /// `buffer_size + max_partition_size + MAX_INFLIGHT_BATCH_ROWS`, and this constant
 /// does NOT cover the inherent pre-existing-#1156 `max_partition_size` term (the one
-/// confirmed partition `drain_scan_window` materializes in `surviving` before
+/// confirmed partition `drain_scan_window` materializes in `scratch` before
 /// batching). It is named/tested so a future `BATCH_EMIT_ROWS`/`BATCH_CHANNEL_CAP`
 /// tweak cannot silently let batching run arbitrarily far ahead of a stalled consumer.
 ///
@@ -530,6 +530,17 @@ impl SSTableReader {
         // partition's worth of rows, so it stays within the sliding-window heap
         // bound.
         let mut batch: Vec<(RowKey, ScanRow)> = Vec::with_capacity(BATCH_EMIT_ROWS);
+        // Reused scratch buffer for ONE confirmed partition's surviving
+        // `(RowKey, ScanRow)` entries. Hoisted OUT of the per-partition loop in
+        // [`drain_scan_window`] (issue #1333, follow-up to #1046) and passed by
+        // `&mut` so it is allocated ONCE for the whole scan and `.clear()`-reused
+        // per partition. `clear()` drops the prior partition's entries but PRESERVES
+        // capacity, so a warmed buffer performs ZERO per-partition backing
+        // allocations — the #1046 "buffers should be reused, do not allocate as we
+        // iterate" mandate, extended to the per-partition scratch. Its peak size is
+        // still bounded by one partition's rows (`max_partition_size`), the same
+        // bound the transient per-partition `Vec::new()` had.
+        let mut scratch: Vec<(RowKey, ScanRow)> = Vec::new();
 
         // The parse loop + terminal drain are fallible; on ANY `Err` we must
         // first deliver the rows already buffered in `batch` (confirmed rows
@@ -565,6 +576,7 @@ impl SSTableReader {
                     false,
                     &tx,
                     &mut batch,
+                    &mut scratch,
                     &mut broke,
                 )?;
                 if broke {
@@ -612,6 +624,7 @@ impl SSTableReader {
                     true,
                     &tx,
                     &mut batch,
+                    &mut scratch,
                     &mut broke,
                 )?;
             }
@@ -668,6 +681,7 @@ impl SSTableReader {
         at_final_chunk: bool,
         tx: &mpsc::Sender<Result<Vec<(RowKey, ScanRow)>>>,
         batch: &mut Vec<(RowKey, ScanRow)>,
+        scratch: &mut Vec<(RowKey, ScanRow)>,
         broke: &mut bool,
     ) -> Result<()> {
         use crate::storage::sstable::reader::parsing::ParseStep;
@@ -677,12 +691,24 @@ impl SSTableReader {
                 return Ok(());
             }
 
-            // Buffer this partition's surviving entries, then forward them via
-            // `blocking_send` AFTER the parser returns.
-            // `parse_one_partition_with_timestamps` takes a synchronous `FnMut`
-            // emit, so we cannot send inside it; a partition's rows are bounded
-            // by `max_partition_size`, so this stays within the window bound.
-            let mut surviving: Vec<(RowKey, ScanRow)> = Vec::new();
+            // Buffer this partition's surviving entries in the caller's REUSED
+            // `scratch` buffer, then forward them via `blocking_send` AFTER the
+            // parser returns. `parse_one_partition_with_timestamps` takes a
+            // synchronous `FnMut` emit, so we cannot send inside it; a partition's
+            // rows are bounded by `max_partition_size`, so this stays within the
+            // window bound. `clear()` drops the previous partition's entries but
+            // PRESERVES the backing capacity, so after warmup this loop performs
+            // NO per-partition allocation for `scratch` (issue #1333, follow-up to
+            // #1046). NeedMore/Done leave `scratch` empty (the parser only invokes
+            // the emit closure on a CONFIRMED `Emitted`), so nothing leaks across
+            // partitions. Issue #1334: entries carry the `ScanRow` row carrier.
+            scratch.clear();
+            // Snapshot the (retained) capacity BEFORE this partition's pushes so
+            // the offload probe can count how many times `scratch` actually grows
+            // its backing store across the whole scan — the direct signal that the
+            // buffer is reused, not reallocated per partition (issue #1333 guard).
+            #[cfg(feature = "scan-offload-probe")]
+            let scratch_cap_before = scratch.capacity();
             let step = parser.parse_one_partition_with_timestamps(
                 window.as_slice(),
                 ctx.schema.as_ref(),
@@ -710,10 +736,19 @@ impl SSTableReader {
                     if !self.filter_tombstone(&value) {
                         return Ok(std::ops::ControlFlow::Continue(()));
                     }
-                    surviving.push((key, value));
+                    scratch.push((key, value));
                     Ok(std::ops::ControlFlow::Continue(()))
                 },
             )?;
+
+            // Record whether this partition forced `scratch` to (re)allocate its
+            // backing store. With the hoist this happens only while the buffer
+            // grows to its high-water mark (a small bounded number of times per
+            // scan); if the buffer were freshly allocated per partition it would
+            // grow from empty EVERY partition, so the count would scale with
+            // partition count — exactly what the #1333 guard asserts it does not.
+            #[cfg(feature = "scan-offload-probe")]
+            probe::note_scratch_capacity(scratch_cap_before, scratch.capacity());
 
             match step {
                 ParseStep::Emitted(consumed) => {
@@ -725,7 +760,7 @@ impl SSTableReader {
                     // backpressure as the prior per-row send (this runs on a
                     // spawn_blocking thread) but wakes the async forwarder once per
                     // batch instead of once per row (issue #1143).
-                    for entry in surviving {
+                    for entry in scratch.drain(..) {
                         batch.push(entry);
                         if batch.len() >= BATCH_EMIT_ROWS {
                             let full =
@@ -740,7 +775,7 @@ impl SSTableReader {
                 // NeedMore: the partition straddles this chunk boundary. The
                 // per-partition parser buffers a partition's rows internally and
                 // only invokes our emit closure on a CONFIRMED `Emitted` return,
-                // so on `NeedMore` our `surviving` buffer is empty — nothing was
+                // so on `NeedMore` our `scratch` buffer is empty — nothing was
                 // forwarded and nothing is dropped. The caller appends the next
                 // chunk and we re-parse this partition from its start, so no row
                 // is duplicated or lost across the boundary. Record the straddle
@@ -761,54 +796,15 @@ impl SSTableReader {
     }
 }
 
-/// Test-only probe (issue #1143): records the [`std::thread::ThreadId`] on which
-/// the windowed scan's decompress+parse half actually ran, so a guard test can
-/// deterministically prove that work executed on a `spawn_blocking` thread and
-/// NOT on a tokio async worker.
-///
-/// Compiled ONLY under the non-default `scan-offload-probe` feature. In a
-/// normal/default/release build this module, its statics, and its call-site do
-/// not exist at all — the probe never enters the crate's public surface and adds
-/// zero cost (issue #1143 finding 1).
+/// Test-only probe (issues #1143, #1333) for the windowed scan — see
+/// `scan_stream_windowed_probe.rs`. Compiled ONLY under the non-default
+/// `scan-offload-probe` feature, so it adds zero cost and no public surface in
+/// normal/release builds (issue #1143 finding 1); kept in a sibling file so this
+/// source stays under the campsite-rule size limit (epic #1116).
 #[cfg(feature = "scan-offload-probe")]
 #[doc(hidden)]
-pub mod probe {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Mutex;
-    use std::thread::ThreadId;
-
-    static ARMED: AtomicBool = AtomicBool::new(false);
-    static LAST_PARSE_THREAD: Mutex<Option<ThreadId>> = Mutex::new(None);
-
-    /// Arm the probe and clear any previously recorded thread. Call from a test
-    /// before driving a scan.
-    pub fn arm() {
-        if let Ok(mut g) = LAST_PARSE_THREAD.lock() {
-            *g = None;
-        }
-        ARMED.store(true, Ordering::SeqCst);
-    }
-
-    /// Disarm the probe (restores the production no-op state).
-    pub fn disarm() {
-        ARMED.store(false, Ordering::SeqCst);
-    }
-
-    /// Record the current thread as the parse thread, if armed. Called from the
-    /// blocking parse half after a scan's parse work completes.
-    pub(super) fn record_parse_thread() {
-        if ARMED.load(Ordering::Relaxed) {
-            if let Ok(mut g) = LAST_PARSE_THREAD.lock() {
-                *g = Some(std::thread::current().id());
-            }
-        }
-    }
-
-    /// The [`ThreadId`] recorded by the most recent parse, if any.
-    pub fn recorded_parse_thread() -> Option<ThreadId> {
-        LAST_PARSE_THREAD.lock().ok().and_then(|g| *g)
-    }
-}
+#[path = "scan_stream_windowed_probe.rs"]
+pub mod probe;
 
 // Unit + dataset-dependent guards live in a sibling file to keep this source
 // file under the campsite-rule size limit (issue #1143). `use super::*` in the

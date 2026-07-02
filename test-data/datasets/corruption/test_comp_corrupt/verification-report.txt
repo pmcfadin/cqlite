@@ -34,6 +34,13 @@ index_db_bit_flip_big          nb-1-big-Index.db    bitflip      7         OK
       corrupt SHA256   : d92731ebec124f46fbf51b83bba9da680aa7850bf39874c1a60710d0fa246c32  (86 bytes)
       mutation         : bitflip @ 7  (orig=4e mut=0e)
       single-mutation  : OK
+filter_db_bit_flip             nb-1-big-Filter.db   bitflip      8         OK
+  filter_db_bit_flip:
+      component        : nb-1-big-Filter.db
+      clean   SHA256   : 04d5b7c0b2c33c08d85bb833f61d521e30416d8009091881ea8a7ff05a0b202b  (16 bytes)
+      corrupt SHA256   : 5bad4443c287d42f9ccfcec1a151669549b4cf41bc4dc52e0bdb2fcf57dd2941  (16 bytes)
+      mutation         : bitflip @ 8  (orig=10 mut=00)
+      single-mutation  : OK
 bti_partitions_footer_flip     da-2-bti-Partitions.db bitflip      57        OK
   bti_partitions_footer_flip:
       component        : da-2-bti-Partitions.db
@@ -76,7 +83,14 @@ digest_crc32_mismatch          nb-1-big-Digest.crc32 digest       text      OK
       corrupt SHA256   : 3babd7a8e7d27188858449d00dbdbb413d75419a97b9fa4c43f0fb7af9b1e1c6  (10 bytes)
       mutation         : digest @ text  (orig=1177334624 mut=1177334620)
       single-mutation  : OK
+uncompressed_data_bit_flip     nb-1-big-Data.db     bitflip      70000     OK
+  uncompressed_data_bit_flip:
+      component        : nb-1-big-Data.db
+      clean   SHA256   : 627f17a1e0a7f3f5db113a30f10553a7cac0c4b376991fb558ebf2a4f9e395a0  (195018 bytes)
+      corrupt SHA256   : 8daa51d7fe8596eaf588eb69f53e4a5ae9103065f1975b8033d89f74ba8239d5  (195018 bytes)
+      mutation         : bitflip @ 70000  (orig=62 mut=63)
+      single-mutation  : OK
 ----------------------------------------------------------------------------------------
-active fixtures : 10  (data_db_bit_flip data_db_truncation compression_info_bad_offset index_db_bit_flip_big bti_partitions_footer_flip bti_rows_truncation statistics_db_header_damage summary_db_truncation toc_missing_component digest_crc32_mismatch)
+active fixtures : 12  (data_db_bit_flip data_db_truncation compression_info_bad_offset index_db_bit_flip_big filter_db_bit_flip bti_partitions_footer_flip bti_rows_truncation statistics_db_header_damage summary_db_truncation toc_missing_component digest_crc32_mismatch uncompressed_data_bit_flip)
 planned fixtures: 0  (none)
 ================================================================

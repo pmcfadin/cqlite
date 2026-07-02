@@ -38,7 +38,7 @@ use crate::types::{ScanRow, Value};
 use crate::{Error, Result, RowKey};
 use log::debug;
 use std::io::SeekFrom;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::AsyncSeekExt;
 
 /// `ClusteringPrefix.Kind.CLUSTERING` ordinal (a full row clustering name). Block
 /// `firstName`/`lastName` for a row carry this kind byte; range-bound names carry a
@@ -529,12 +529,13 @@ impl SSTableReader {
                     return Ok(None);
                 }
                 let span = (phys_end - phys_start) as usize;
-                let mut buf = vec![0u8; span];
-                {
-                    let mut file_guard = cursor.file.lock().await;
-                    file_guard.seek(SeekFrom::Start(phys_start)).await?;
-                    file_guard.read_exact(&mut buf).await?;
-                }
+                // Issue #1396: the promoted-index / reverse-lookup path reads
+                // uncompressed Data.db bytes directly; route it through the single
+                // CRC-checked accessor so a corrupt chunk yields a typed
+                // Error::Corruption instead of parsed corrupt bytes / Ok(None).
+                let buf = self
+                    .read_uncompressed_verified(&cursor.file, phys_start, span)
+                    .await?;
                 (offset, buf)
             }
         };

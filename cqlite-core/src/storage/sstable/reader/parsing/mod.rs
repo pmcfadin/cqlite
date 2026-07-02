@@ -659,15 +659,17 @@ impl SSTableReader {
         offset: u64,
         size: u32,
     ) -> Result<Option<Vec<(RowKey, ScanRow)>>> {
-        // Read data from file at specified offset
-        use tokio::io::{AsyncReadExt, AsyncSeekExt};
-
-        let mut file = self.file.lock().await;
-        file.seek(std::io::SeekFrom::Start(offset)).await?;
-
-        let mut buffer = vec![0u8; size as usize];
-        file.read_exact(&mut buffer).await?;
-        drop(file); // Release lock early
+        // Issue #1396: route the uncompressed Data.db read through the single
+        // CRC-checked accessor so a corrupt chunk yields a typed
+        // Error::Corruption BEFORE the bytes are parsed/returned — never corrupt
+        // rows. This is the `iterate_all_partitions` (index-resolved) read path.
+        // The accessor's CRC step is a no-op for compressed tables (crc_reader is
+        // None), so it is also correct for the raw-read step below.
+        // Issue #1334: this producer emits the `ScanRow` carrier; the CRC-verified
+        // read above is orthogonal to the carrier shape and preserved intact.
+        let buffer = self
+            .read_uncompressed_verified(&self.file, offset, size as usize)
+            .await?;
 
         // Decompress if needed
         let data = if let Some(compression_reader) = &self.compression_reader {

@@ -4422,6 +4422,81 @@ scenarios:
       workflow: .github/workflows/sstabledump-parity-gate.yml
     scope: {}
 
+  - id: cass.filter_db.bit_flip_false_negative_exposure
+    title: Filter.db bit-array bit flip — false-negative exposure and verify detection
+    status: mirrored
+    capability: filter_db_bloom
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: bloom-filter
+      relevance: high
+      files:
+        - BloomFilterTest.java
+        - VerifyTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_filter_db_bloom
+        tests:
+          - cqlite-core/tests/sstable_parity_filter_bitflip_test.rs
+          - cqlite-core/tests/sstable_parity_corruption_verify.rs
+        notes: >-
+          Corpus fixture filter_db_bit_flip (corruption-manifest.yml) flips one SET
+          bit inside the bit array of a real Cassandra BIG Filter.db (byte 8, the
+          first bitset byte past the valid 8-byte header; the header is left valid),
+          producing a Bloom-filter FALSE NEGATIVE for a present partition key. The
+          exposure pin (sstable_parity_filter_bitflip_test.rs) proves the false
+          negative is real (might_contain==false for a key Index.db proves present —
+          exactly the predicate partition_lookup.rs gates Ok(None) on), that a FULL
+          SCAN still reads the partition (scans never consult the bloom), and that
+          BTI (da) is IMMUNE (the trie is the presence oracle, bloom bypassed). It
+          also asserts cqlite verify --mode full reports a FilterFalseNegative
+          finding on Filter.db — a detection tool Cassandra lacks. The corpus verify
+          lane (sstable_parity_corruption_verify.rs) drives the SAME finding through
+          the shipped verify_sstable surface and asserts the recorded divergence vs
+          the captured Cassandra verdict.
+    fixtures:
+      references:
+        - test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml
+        - test-data/datasets/corruption/test_comp_corrupt/corruption-sha256.txt
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, component_files]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-corruption-corpus.sh
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test sstable_parity_filter_bitflip_test
+      failure_artifacts:
+        - artifact.required_parity.byte_diff
+      reference_paths:
+        - test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml
+        - test-data/datasets/corruption/test_comp_corrupt/corruption-sha256.txt
+      normalization: >-
+        Present keys are the raw partition-key bytes from Index.db (key_digest,
+        issue #552) — the exact bytes Cassandra's Murmur3 hashed into Filter.db.
+        Cassandra's verdict is its ACTUAL captured sstableverify -e outcome (CLEAN:
+        'Verify ... succeeded. All 1 rows read successfully') recorded in
+        corruption-manifest.yml (filter_db_bit_flip, verdict_parity: divergent).
+      known_limitations: >-
+        POSTURE (a), accepted exposure (issue #1398): the read-side false negative
+        on the BIG point-lookup path is Cassandra-EQUIVALENT — Filter.db carries no
+        checksum, and CQLite (like Cassandra) fails open only for an UNPARSEABLE
+        filter, so a parseable-but-wrong filter is not rejected at load. Cassandra's
+        sstableverify does NOT validate Filter.db bit-array contents (captured verdict:
+        clean), so this is a recorded verdict_parity: divergent — CQLite adds a
+        detection tool (verify --mode full ⇒ FilterFalseNegative) that Cassandra
+        lacks. A fail-closed Filter.db checksum at load (stronger than Cassandra) is
+        explicitly NOT implemented here; it is a design follow-up.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
   - id: cass.filter_db.bti_membership
     title: BTI (da) Filter.db no-false-negative membership
     status: partial
@@ -11658,6 +11733,58 @@ scenarios:
       workflow: .github/workflows/compression-corruption-parity.yml
     scope: {}
 
+  - id: cass.corruption.filter_db.bit_flip_big
+    title: BIG Filter.db bit-array bit flip — false negative detected by verify
+    status: mirrored
+    capability: corruption_verify
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: corruption-recovery
+      relevance: high
+      files:
+        - VerifyTest.java
+        - BloomFilterTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_corruption_verify
+        tests:
+          - cqlite-core/tests/sstable_parity_corruption_verify.rs
+          - cqlite-core/tests/sstable_parity_filter_bitflip_test.rs
+    fixtures:
+      references:
+        - test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml
+        - test-data/datasets/corruption/test_comp_corrupt/corruption-sha256.txt
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, checksums, component_files]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-corruption-corpus.sh
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test sstable_parity_corruption_verify
+      reference_paths:
+        - test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml
+        - test-data/datasets/corruption/test_comp_corrupt/corruption-sha256.txt
+      failure_artifacts:
+        - artifact.exhaustive_regeneration.audit_report
+      known_limitations: >-
+        A 1→0 bit flip inside the bit array (header left valid) is a Bloom-filter
+        FALSE NEGATIVE, not a structural corruption. Cassandra's sstableverify does
+        NOT validate Filter.db contents and reports this fixture CLEAN (captured
+        verdict), so verdict_parity is divergent: CQLite verify --mode full is
+        stricter and reports FilterFalseNegative. The read-side exposure (a present
+        partition silently invisible on a BIG point lookup) is Cassandra-equivalent;
+        full scans and BTI lookups are unaffected. See issue #1398.
+    ci:
+      tier: exhaustive_regeneration
+      workflow: .github/workflows/compression-corruption-parity.yml
+    scope: {}
+
   - id: cass.corruption.bti_partitions_footer_bit_flip
     title: BTI Partitions.db footer bit flip is detected
     status: planned
@@ -12702,6 +12829,18 @@ scenarios:
     cqlite:
       coverage:
         suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_zstd_dictionary_reject_test.rs
+        notes: >-
+          Boundary-enforcement evidence for issue #1399: CQLite fails closed
+          on zstd dictionary-compressed input rather than decoding it. The
+          always-run characterization test drives a real trained-dictionary
+          zstd frame through the shipped ChunkDecompressor and proves it is
+          rejected (never decoded to the original bytes); two fixture-gated
+          reader/verify oracle tests assert the same over a commissioned
+          Cassandra dictionary SSTable (fixture: #1413). Upgrading the generic
+          rejection to a typed dictionary-naming error / dedicated verify
+          class is tracked by #1414.
     fixtures: {}
     evidence:
       type: out_of_scope
@@ -12743,6 +12882,18 @@ scenarios:
     cqlite:
       coverage:
         suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_zstd_dictionary_reject_test.rs
+        notes: >-
+          Boundary-enforcement evidence for issue #1399: CQLite fails closed
+          on zstd dictionary-compressed input rather than decoding it. The
+          always-run characterization test drives a real trained-dictionary
+          zstd frame through the shipped ChunkDecompressor and proves it is
+          rejected (never decoded to the original bytes); two fixture-gated
+          reader/verify oracle tests assert the same over a commissioned
+          Cassandra dictionary SSTable (fixture: #1413). Upgrading the generic
+          rejection to a typed dictionary-naming error / dedicated verify
+          class is tracked by #1414.
     fixtures: {}
     evidence:
       type: out_of_scope
@@ -12781,6 +12932,18 @@ scenarios:
     cqlite:
       coverage:
         suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_zstd_dictionary_reject_test.rs
+        notes: >-
+          Boundary-enforcement evidence for issue #1399: CQLite fails closed
+          on zstd dictionary-compressed input rather than decoding it. The
+          always-run characterization test drives a real trained-dictionary
+          zstd frame through the shipped ChunkDecompressor and proves it is
+          rejected (never decoded to the original bytes); two fixture-gated
+          reader/verify oracle tests assert the same over a commissioned
+          Cassandra dictionary SSTable (fixture: #1413). Upgrading the generic
+          rejection to a typed dictionary-naming error / dedicated verify
+          class is tracked by #1414.
     fixtures: {}
     evidence:
       type: out_of_scope
@@ -12818,6 +12981,18 @@ scenarios:
     cqlite:
       coverage:
         suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_zstd_dictionary_reject_test.rs
+        notes: >-
+          Boundary-enforcement evidence for issue #1399: CQLite fails closed
+          on zstd dictionary-compressed input rather than decoding it. The
+          always-run characterization test drives a real trained-dictionary
+          zstd frame through the shipped ChunkDecompressor and proves it is
+          rejected (never decoded to the original bytes); two fixture-gated
+          reader/verify oracle tests assert the same over a commissioned
+          Cassandra dictionary SSTable (fixture: #1413). Upgrading the generic
+          rejection to a typed dictionary-naming error / dedicated verify
+          class is tracked by #1414.
     fixtures: {}
     evidence:
       type: out_of_scope
@@ -12855,6 +13030,18 @@ scenarios:
     cqlite:
       coverage:
         suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_zstd_dictionary_reject_test.rs
+        notes: >-
+          Boundary-enforcement evidence for issue #1399: CQLite fails closed
+          on zstd dictionary-compressed input rather than decoding it. The
+          always-run characterization test drives a real trained-dictionary
+          zstd frame through the shipped ChunkDecompressor and proves it is
+          rejected (never decoded to the original bytes); two fixture-gated
+          reader/verify oracle tests assert the same over a commissioned
+          Cassandra dictionary SSTable (fixture: #1413). Upgrading the generic
+          rejection to a typed dictionary-naming error / dedicated verify
+          class is tracked by #1414.
     fixtures: {}
     evidence:
       type: out_of_scope
@@ -12896,6 +13083,18 @@ scenarios:
     cqlite:
       coverage:
         suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_zstd_dictionary_reject_test.rs
+        notes: >-
+          Boundary-enforcement evidence for issue #1399: CQLite fails closed
+          on zstd dictionary-compressed input rather than decoding it. The
+          always-run characterization test drives a real trained-dictionary
+          zstd frame through the shipped ChunkDecompressor and proves it is
+          rejected (never decoded to the original bytes); two fixture-gated
+          reader/verify oracle tests assert the same over a commissioned
+          Cassandra dictionary SSTable (fixture: #1413). Upgrading the generic
+          rejection to a typed dictionary-naming error / dedicated verify
+          class is tracked by #1414.
     fixtures: {}
     evidence:
       type: out_of_scope
