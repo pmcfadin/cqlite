@@ -30,8 +30,11 @@
 //!
 //! No external Cassandra fixture is required for criteria 1–4: CQLite's writer emits
 //! the same on-disk markers Cassandra does and the reader/merge consume them. The
-//! Cassandra byte-oracle (criterion 5) is a fail-closed skip-on-absent test — see
-//! `crit5_cassandra_oracle_two_gen_open_ended_boundary` for why it is `#[ignore]`.
+//! Cassandra byte-oracle (criterion 5) is split in two: the eventual byte-diff lives
+//! in the `#[ignore]`d `crit5_cassandra_oracle_two_gen_open_ended_boundary` (blocked
+//! on #1410 + no matching open-ended fixture), while the NON-ignored
+//! `crit5_oracle_fixture_contract_guard` enforces the fail-closed skip-on-absent /
+//! strict-lane-panic contract in every lane.
 
 #![cfg(feature = "write-support")]
 
@@ -54,8 +57,18 @@ const TBL: &str = "rt_boundary_items";
 const PID: i32 = 1;
 
 // A within-grace local-deletion-time (far future) so gc-grace never purges any
-// marker in these tests, regardless of wall clock (no wall-clock race).
-const NEVER_PURGE_LDT: i32 = 2_000_000_000;
+// marker in these tests, regardless of wall clock (no wall-clock race). Each range
+// gets a DISTINCT far-future LDT (`NEVER_PURGE_LDT_BASE + ts`) so the test can prove
+// boundary synthesis preserves BOTH full deletion-time pairs (markedForDeleteAt AND
+// localDeletionTime) on each side — a regression that copied the wrong side's LDT
+// would be caught (roborev #2613 Medium). All variants stay far in the future.
+const NEVER_PURGE_LDT_BASE: i32 = 2_000_000_000;
+
+/// The distinct far-future local-deletion-time a range with deletion time `ts`
+/// carries. Injective in `ts` so the two sides of a boundary differ.
+fn ldt_for(ts: i64) -> i32 {
+    NEVER_PURGE_LDT_BASE + (ts as i32)
+}
 
 fn schema(order: ClusteringOrder) -> TableSchema {
     TableSchema {
@@ -115,8 +128,9 @@ fn write_row(ck: i32, name: &str, ts: i64) -> Mutation {
 }
 
 /// A range-tombstone-only mutation (no row content) for the pinned partition. The
-/// `local_deletion_time` is pinned far in the future so gc-grace never purges the
-/// marker.
+/// `local_deletion_time` is a DISTINCT far-future value (`ldt_for(ts)`) so gc-grace
+/// never purges the marker AND the two sides of a synthesized boundary carry
+/// different LDTs (so the test verifies both are preserved, not just mfda).
 fn range_delete(start: ClusteringBound, end: ClusteringBound, ts: i64) -> Mutation {
     let mut m = Mutation::new(
         TableId::new(KS, TBL),
@@ -130,7 +144,7 @@ fn range_delete(start: ClusteringBound, end: ClusteringBound, ts: i64) -> Mutati
         start,
         end,
         deletion_time: ts,
-        local_deletion_time: NEVER_PURGE_LDT,
+        local_deletion_time: ldt_for(ts),
     });
     m
 }
@@ -196,6 +210,7 @@ struct Marker {
     start: ClusteringBound,
     end: ClusteringBound,
     deletion_time: i64,
+    local_deletion_time: i32,
 }
 
 /// What a read-back of one or more SSTables yields through the compaction read
@@ -220,6 +235,7 @@ fn read_back(inputs: Vec<PathBuf>, schema: &TableSchema) -> ReadBack {
                             start: rt.start.clone(),
                             end: rt.end.clone(),
                             deletion_time: rt.deletion_time,
+                            local_deletion_time: rt.local_deletion_time,
                         });
                         continue;
                     }
@@ -304,7 +320,13 @@ fn assert_boundary_at(markers: &[Marker], boundary_ck: i32, close_ts: i64, open_
     );
     assert_eq!(
         closing.deletion_time, close_ts,
-        "closing range carries the CLOSE deletion time"
+        "closing range carries the CLOSE deletion time (markedForDeleteAt)"
+    );
+    assert_eq!(
+        closing.local_deletion_time,
+        ldt_for(close_ts),
+        "closing range carries the CLOSE side's OWN localDeletionTime — proving both full \
+         deletion-time pairs are preserved through synthesis, not just markedForDeleteAt"
     );
 
     // Opening range: [Inclusive(boundary_ck), Top] @ open_ts.
@@ -327,15 +349,27 @@ fn assert_boundary_at(markers: &[Marker], boundary_ck: i32, close_ts: i64, open_
     );
     assert_eq!(
         opening.deletion_time, open_ts,
-        "opening range carries the OPEN deletion time"
+        "opening range carries the OPEN deletion time (markedForDeleteAt)"
+    );
+    assert_eq!(
+        opening.local_deletion_time,
+        ldt_for(open_ts),
+        "opening range carries the OPEN side's OWN localDeletionTime (distinct from the close \
+         side's) — the two deletion-time pairs are not conflated"
     );
 
-    // BOTH deletion times are present in the decoded stream (the two halves of the
-    // boundary's two deletion-time pairs).
+    // BOTH deletion-time PAIRS are present in the decoded stream (the two halves of
+    // the boundary's two deletion-time pairs): distinct markedForDeleteAt AND
+    // distinct localDeletionTime per side.
     assert_ne!(
         close_ts, open_ts,
         "test precondition: the two ranges must carry DIFFERENT deletion times so this is a \
          genuine boundary (RT_INCL_END_EXCL_START class), not a same-ts coalesce"
+    );
+    assert_ne!(
+        closing.local_deletion_time, opening.local_deletion_time,
+        "test precondition: the two ranges carry DISTINCT localDeletionTimes so a swap of the \
+         wrong side's LDT would be detectable"
     );
 }
 
@@ -579,10 +613,82 @@ fn crit4_readback_equivalence_compacted_vs_inputs() {
 // Criterion 5 — CASSANDRA BYTE ORACLE (fail-closed skip-on-absent)
 // ════════════════════════════════════════════════════════════════════════════
 
+/// The keyspace under which the closest Cassandra-compacted range-tombstone-merge
+/// oracle would live (#1387's tombstone/TTL/RT byte-fixture family).
+const ORACLE_KEYSPACE: &str = "test_compaction_tombstone_ttl";
+
+/// Whether the Cassandra oracle reference keyspace is present on disk. Returns
+/// `None` when `CQLITE_DATASETS_ROOT` is unset (dataset root unknown).
+fn oracle_keyspace_present() -> Option<bool> {
+    let root = std::env::var("CQLITE_DATASETS_ROOT").ok()?;
+    let base = Path::new(&root).join("sstables").join(ORACLE_KEYSPACE);
+    Some(
+        base.read_dir()
+            .ok()
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false),
+    )
+}
+
+fn require_fixtures_strict() -> bool {
+    std::env::var("CQLITE_REQUIRE_FIXTURES")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+/// Fail-closed fixture-presence contract for the eventual Cassandra byte oracle
+/// (roborev #2613 Low). This test is NOT `#[ignore]`, so it runs in the normal AND
+/// strict (`CQLITE_REQUIRE_FIXTURES=1`) fixture lanes and actually enforces the
+/// contract the ignored byte-diff test documents but cannot execute:
+///   * oracle keyspace absent + not strict → SKIP (returns; local-only fixture);
+///   * oracle keyspace absent + `CQLITE_REQUIRE_FIXTURES=1` → PANIC (strict lane
+///     never silently passes on the missing oracle);
+///   * oracle keyspace PRESENT → surface the fixture GAP (no open-ended two-gen
+///     boundary fixture matching #1383 exists; #1387 `rt_cross_gen` uses bounded
+///     ranges). Present-but-mismatched must not masquerade as covered.
+///
+/// It deliberately does NOT attempt a byte diff (blocked on #1410 + fixture geometry
+/// mismatch); it only guards presence/shape so the strict-lane claim is real.
+#[test]
+fn crit5_oracle_fixture_contract_guard() {
+    match oracle_keyspace_present() {
+        None => {
+            if require_fixtures_strict() {
+                panic!("CQLITE_REQUIRE_FIXTURES=1 but CQLITE_DATASETS_ROOT unset");
+            }
+            eprintln!(
+                "[issue_1383] crit5 guard SKIP: CQLITE_DATASETS_ROOT unset (Cassandra open-ended \
+                 two-gen boundary oracle unavailable)"
+            );
+        }
+        Some(false) => {
+            if require_fixtures_strict() {
+                panic!(
+                    "CQLITE_REQUIRE_FIXTURES=1 but Cassandra oracle keyspace {ORACLE_KEYSPACE} \
+                     absent. #1383 crit5 needs an OPEN-ENDED two-gen boundary fixture; the #1387 \
+                     rt_cross_gen fixture (bounded ranges) does not match this scenario."
+                );
+            }
+            eprintln!(
+                "[issue_1383] crit5 guard SKIP: Cassandra oracle keyspace {ORACLE_KEYSPACE} absent \
+                 (local-only / not in the pinned CI dataset). See #1410 + the fixture gap \
+                 documented on crit5_cassandra_oracle_two_gen_open_ended_boundary."
+            );
+        }
+        Some(true) => panic!(
+            "[issue_1383] crit5 guard: Cassandra oracle keyspace {ORACLE_KEYSPACE} is PRESENT, but \
+             no OPEN-ENDED two-gen boundary fixture matching #1383 exists yet (#1387 rt_cross_gen \
+             uses BOUNDED ranges — different marker geometry) and the byte diff is blocked on \
+             #1410. Commission an open-ended-RT two-gen fixture and land #1410, then enable \
+             crit5_cassandra_oracle_two_gen_open_ended_boundary."
+        ),
+    }
+}
+
 /// A byte-compare against a Cassandra-compacted reference of the SAME two-generation
 /// open-ended-boundary fixture used by criteria 1–4.
 ///
-/// STATUS — no matching fixture yet; blocked on #1410.
+/// STATUS — `#[ignore]`: no matching fixture yet AND blocked on #1410.
 ///
 /// The #1387 tombstone/TTL/RT byte-fixture family (keyspace
 /// `test_compaction_tombstone_ttl`, scenario `rt_cross_gen`) is the closest existing
@@ -596,14 +702,10 @@ fn crit4_readback_equivalence_compacted_vs_inputs() {
 ///     (#1410), so its byte diff cannot pass until #1410 lands.
 ///
 /// A dedicated open-ended two-gen boundary byte fixture was NOT commissioned here
-/// (out of scope for this test-authoring issue). This test therefore:
-///   * SKIPs when the `test_compaction_tombstone_ttl` reference keyspace is absent
-///     (it is local-only / not in the pinned CI dataset today);
-///   * PANICs under `CQLITE_REQUIRE_FIXTURES=1` so a strict lane never silently
-///     passes on the missing oracle;
-///   * is `#[ignore]` because even WITH the reference present the byte compare is
-///     blocked on #1410 (the same LDT-baseline divergence class) — matching the
-///     doctrine in the issue brief to reference #1410 rather than file a duplicate.
+/// (out of scope for this test-authoring issue). Because this test is `#[ignore]`, it
+/// does NOT itself run in the strict fixture lane — the fail-closed presence contract
+/// is enforced by the NON-ignored `crit5_oracle_fixture_contract_guard` above, which
+/// runs in every lane. This test carries the eventual byte-diff body.
 ///
 /// When #1410 is fixed AND an open-ended two-gen boundary fixture is committed, drop
 /// the `#[ignore]` and diff Data.db/Index.db/Summary.db/Digest.crc32 as in
@@ -612,54 +714,18 @@ fn crit4_readback_equivalence_compacted_vs_inputs() {
 #[ignore = "blocked on #1410 (compute_baseline_min LDT-baseline byte divergence) + no matching \
             open-ended two-gen boundary Cassandra fixture (#1387 rt_cross_gen uses bounded ranges)"]
 fn crit5_cassandra_oracle_two_gen_open_ended_boundary() {
-    const ORACLE_KEYSPACE: &str = "test_compaction_tombstone_ttl";
-    let require_strict = std::env::var("CQLITE_REQUIRE_FIXTURES")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-
-    let root = match std::env::var("CQLITE_DATASETS_ROOT") {
-        Ok(r) => r,
-        Err(_) => {
-            if require_strict {
-                panic!("CQLITE_REQUIRE_FIXTURES=1 but CQLITE_DATASETS_ROOT unset");
-            }
-            eprintln!(
-                "[issue_1383] crit5 SKIP: CQLITE_DATASETS_ROOT unset (Cassandra open-ended \
-                 two-gen boundary oracle unavailable)"
-            );
-            return;
+    // Enabling this test (dropping #[ignore]) requires BOTH #1410 fixed AND a
+    // committed open-ended two-gen boundary fixture; until then the presence/shape
+    // contract is guarded by crit5_oracle_fixture_contract_guard.
+    match oracle_keyspace_present() {
+        None | Some(false) => {
+            eprintln!("[issue_1383] crit5 byte-diff SKIP: oracle fixture absent (see guard)");
         }
-    };
-
-    let base = Path::new(&root).join("sstables").join(ORACLE_KEYSPACE);
-    let present = base
-        .read_dir()
-        .ok()
-        .map(|mut d| d.next().is_some())
-        .unwrap_or(false);
-    if !present {
-        if require_strict {
-            panic!(
-                "CQLITE_REQUIRE_FIXTURES=1 but Cassandra oracle keyspace {ORACLE_KEYSPACE} absent \
-                 under {base:?}. #1383 crit5 needs an open-ended two-gen boundary fixture; the \
-                 #1387 rt_cross_gen fixture (bounded ranges) does not match this scenario."
-            );
-        }
-        eprintln!(
-            "[issue_1383] crit5 SKIP: Cassandra oracle keyspace {ORACLE_KEYSPACE} absent under \
-             {base:?} (local-only / not in the pinned CI dataset). See #1410 + the fixture gap \
-             documented on this test."
-        );
-        return;
+        Some(true) => panic!(
+            "[issue_1383] crit5: oracle keyspace {ORACLE_KEYSPACE} PRESENT but the open-ended \
+             two-gen boundary byte diff is not yet wired (blocked on #1410 + fixture geometry \
+             mismatch vs #1387 rt_cross_gen). Wire the Data.db/Index.db/Summary.db/Digest.crc32 \
+             diff here once #1410 lands and a matching fixture is committed."
+        ),
     }
-
-    // Reference present: the byte compare is still blocked on #1410 AND on a
-    // matching open-ended fixture (rt_cross_gen is bounded). Do NOT attempt a byte
-    // diff against a mismatched fixture — surface the gap instead.
-    panic!(
-        "[issue_1383] crit5: Cassandra oracle keyspace {ORACLE_KEYSPACE} is PRESENT, but no \
-         open-ended two-gen boundary fixture matching #1383 exists yet, and the byte compare is \
-         blocked on #1410. Commission an open-ended-RT two-gen fixture (distinct from #1387 \
-         rt_cross_gen's bounded ranges) and land #1410 before enabling this diff."
-    );
 }
