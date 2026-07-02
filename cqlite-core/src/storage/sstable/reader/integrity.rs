@@ -4,7 +4,7 @@
 //! and handling tombstone filtering.
 
 use super::{IntegrityCheckResult, IntegrityStatus, SSTableReader, SSTableReaderHealthMetrics};
-use crate::types::Value;
+use crate::types::{ScanRow, Value};
 use crate::Result;
 
 use log::{debug, info};
@@ -118,7 +118,15 @@ impl SSTableReader {
 
     /// Enhanced tombstone filtering using TombstoneMerger
     #[cfg(feature = "tombstones")]
-    pub(super) fn filter_tombstone(&self, value: &Value) -> bool {
+    pub(super) fn filter_tombstone(&self, row: &ScanRow) -> bool {
+        // Issue #1334: a live row (`ScanRow::Row`) is always kept here — row-level
+        // tombstone suppression only applies to markers. (Cell tombstones inside a
+        // live row are preserved for callers to inspect.) Only a marker carries a
+        // `Value` whose tombstone/TTL semantics this filter evaluates.
+        let value = match row {
+            ScanRow::Row(_) => return true,
+            ScanRow::Marker(v) => v,
+        };
         // Use the fast tombstone check for performance
         let write_time = self.extract_write_time_from_value(value);
 
@@ -163,12 +171,13 @@ impl SSTableReader {
     ///
     /// (Issue #505)
     #[cfg(not(feature = "tombstones"))]
-    pub(super) fn filter_tombstone(&self, value: &Value) -> bool {
+    pub(super) fn filter_tombstone(&self, row: &ScanRow) -> bool {
         use crate::types::TombstoneType;
-        // Filter out row-level tombstones; keep everything else.
+        // Issue #1334: a live row (`ScanRow::Row`) is always kept; filter out only a
+        // row-level tombstone marker.
         !matches!(
-            value,
-            Value::Tombstone(info)
+            row,
+            ScanRow::Marker(Value::Tombstone(info))
                 if info.tombstone_type == TombstoneType::RowTombstone
         )
     }
@@ -179,7 +188,7 @@ impl SSTableReader {
         &self,
         table_id: &TableId,
         entries: Vec<(RowKey, Vec<GenerationValue>)>,
-    ) -> Result<Vec<(RowKey, Value)>> {
+    ) -> Result<Vec<(RowKey, ScanRow)>> {
         let mut results = Vec::new();
 
         log::debug!(
@@ -228,38 +237,18 @@ impl SSTableReader {
 
     /// Enhanced filtering logic for post-merge values including collection validation
     #[cfg(feature = "tombstones")]
-    #[allow(clippy::only_used_in_recursion)]
     fn should_include_value_after_merge(
         &self,
-        value: &Value,
+        row: &ScanRow,
         _table_id: &TableId,
         _key: &RowKey,
     ) -> Result<bool> {
-        match value {
-            // Skip null values
-            Value::Null => Ok(false),
-
-            // For collections, check if they have valid content
-            Value::List(list) => Ok(!list.is_empty()),
-            Value::Set(set) => Ok(!set.is_empty()),
-            Value::Map(map) => Ok(!map.is_empty()),
-
-            // For UDTs, check if they have non-null fields
-            Value::Udt(udt) => {
-                let has_non_null_fields = udt.fields.iter().any(|field| field.value.is_some());
-                Ok(has_non_null_fields)
-            }
-
-            // For frozen values, recursively check the inner value
-            Value::Frozen(boxed_value) => {
-                self.should_include_value_after_merge(boxed_value, _table_id, _key)
-            }
-
-            // Tombstones should not be included in final results
-            Value::Tombstone(_) => Ok(false),
-
-            // All other value types are included
-            _ => Ok(true),
+        // Issue #1334: the merge now yields whole rows. A live row with at least one
+        // cell is included; a marker (row tombstone / null row) or an empty row is
+        // suppressed.
+        match row {
+            ScanRow::Row(cells) => Ok(!cells.is_empty()),
+            ScanRow::Marker(_) => Ok(false),
         }
     }
 

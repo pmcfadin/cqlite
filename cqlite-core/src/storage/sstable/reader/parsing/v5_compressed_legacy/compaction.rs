@@ -316,7 +316,7 @@ impl V5CompressedLegacyParser {
     /// [`Self::parse_one_partition_with_timestamps`] (epic #899). Identical
     /// sliding-window / `ParseStep` / buffering semantics, but emits a
     /// [`CompactionRow`] carrying per-element complex cells and the real complex
-    /// deletion instead of the collapsed `(RowKey, Value, ts)` tuple.
+    /// deletion instead of the collapsed `(RowKey, ScanRow, ts)` tuple.
     pub fn parse_one_partition_for_compaction<F>(
         &self,
         data: &[u8],

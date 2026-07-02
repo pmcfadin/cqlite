@@ -1059,14 +1059,6 @@ impl ToJson for Value {
                 serde_json::Value::Object(json_obj)
             }
             Value::Frozen(boxed) => boxed.to_json(),
-            // Transient row carrier (issue #1334): render as a name→value object.
-            Value::Row(cells) => {
-                let json_map: serde_json::Map<String, serde_json::Value> = cells
-                    .iter()
-                    .map(|(name, v)| (name.to_string(), v.to_json()))
-                    .collect();
-                serde_json::Value::Object(json_map)
-            }
             Value::Decimal { scale, unscaled } => json!({
                 "scale": *scale,
                 "unscaled": b64(unscaled),

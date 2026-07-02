@@ -117,8 +117,6 @@ impl TypeInferenceEngine {
             Value::Decimal { .. } => "decimal".to_string(),
             Value::Duration { .. } => "duration".to_string(),
             Value::Tombstone(_) => "tombstone".to_string(),
-            // Transient row carrier (issue #1334): never type-inferred on disk.
-            Value::Row(_) => "row".to_string(),
         }
     }
 

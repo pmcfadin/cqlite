@@ -37,7 +37,7 @@ pub(in crate::storage::sstable::reader) use model::table_ids_match;
 use super::source::ScanCursor;
 use super::SSTableReader;
 use crate::parser::DataFormat;
-use crate::types::{CellWriteMetadata, TableId, Value};
+use crate::types::{CellWriteMetadata, ScanRow, TableId, Value};
 use crate::{Error, Result, RowKey};
 use log::{debug, warn};
 use std::io::SeekFrom;
@@ -76,7 +76,7 @@ impl SSTableReader {
     /// calls [`SSTableReader::get_with_resolution`] with the authoritative signal so
     /// an exact fully-qualified match can accept rows across a benign header-keyspace
     /// divergence (issue #1321, mirroring the seek path #1284).
-    pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
+    pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<ScanRow>> {
         self.get_with_resolution(table_id, key, false).await
     }
 
@@ -91,7 +91,7 @@ impl SSTableReader {
         table_id: &TableId,
         key: &RowKey,
         fully_qualified_match: bool,
-    ) -> Result<Option<Value>> {
+    ) -> Result<Option<ScanRow>> {
         use crate::observability::{self as obs, catalog};
 
         // Issue #831 / #909: BTI ("da") readers resolve partitions via the
@@ -174,7 +174,7 @@ impl SSTableReader {
         &self,
         cursor: &ScanCursor,
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<Vec<(TableId, RowKey, Value)>> {
+    ) -> Result<Vec<(TableId, RowKey, ScanRow)>> {
         let stitched_buffer = self.stitch_all_chunks(cursor).await?;
         let parser = self.build_v5_parser();
 
@@ -210,7 +210,7 @@ impl SSTableReader {
         Vec<(
             TableId,
             RowKey,
-            Value,
+            ScanRow,
             std::collections::HashMap<String, CellWriteMetadata>,
         )>,
     > {
@@ -348,7 +348,7 @@ impl SSTableReader {
     }
 
     /// Read value at a specific offset with caching
-    pub async fn read_value_at_offset(&self, offset: u64, size: u32) -> Result<Option<Value>> {
+    pub async fn read_value_at_offset(&self, offset: u64, size: u32) -> Result<Option<ScanRow>> {
         use crate::parser::header::CassandraVersion;
         use crate::storage::sstable::compression::Compression;
 
@@ -404,8 +404,10 @@ impl SSTableReader {
         };
 
         // TODO: Parse value using schema-driven type information
-        // For now, preserve raw data until schema is available
-        let value = Value::Blob(data.to_vec());
+        // For now, preserve raw data until schema is available. This offset-read
+        // placeholder path is not schema-decoded, so it carries the raw bytes as a
+        // suppressed `ScanRow::Marker` (issue #1334).
+        let row = ScanRow::Marker(Value::Blob(data.to_vec()));
 
         // Extract write time from value (placeholder - would need to be parsed from SSTable)
         let _write_time = std::time::SystemTime::now()
@@ -417,11 +419,11 @@ impl SSTableReader {
             });
 
         // Filter out tombstones and expired data
-        if !self.filter_tombstone(&value) {
+        if !self.filter_tombstone(&row) {
             return Ok(None);
         }
 
-        Ok(Some(value))
+        Ok(Some(row))
     }
 
     /// Read block with caching support and hit/miss tracking

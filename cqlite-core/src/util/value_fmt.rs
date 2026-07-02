@@ -94,15 +94,6 @@ impl ValueFormatter {
 
             // Inet: IPv4 or IPv6 address
             Value::Inet(bytes) => Self::format_inet(bytes),
-
-            // Transient row carrier (issue #1334): render as a `{k: v}` map.
-            Value::Row(cells) => {
-                let inner: Vec<String> = cells
-                    .iter()
-                    .map(|(name, v)| format!("{}: {}", name, Self::format_value(v)))
-                    .collect();
-                format!("{{{}}}", inner.join(", "))
-            }
         }
     }
 

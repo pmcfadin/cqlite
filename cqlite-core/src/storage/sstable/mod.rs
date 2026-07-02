@@ -68,7 +68,7 @@ use self::tombstone_merger::{EntryMetadata, GenerationValue, TombstoneMerger};
 use crate::platform::Platform;
 #[cfg(not(feature = "tombstones"))]
 use crate::types::CellWriteMetadata;
-use crate::{types::TableId, Config, Result, RowKey, Value};
+use crate::{types::TableId, Config, Result, RowCells, RowKey, ScanRow, Value};
 
 /// Maximum directory depth when scanning for SSTable files.
 ///
@@ -663,7 +663,7 @@ impl SSTableManager {
     #[cfg(feature = "experimental")]
     pub async fn create_from_memtable(
         &self,
-        _data: Vec<(TableId, RowKey, Value)>,
+        _data: Vec<(TableId, RowKey, ScanRow)>,
     ) -> Result<SSTableId> {
         Err(crate::error::Error::unsupported_format(
             "SSTable writing removed in Issue #176 - writer.rs deleted",
@@ -673,7 +673,7 @@ impl SSTableManager {
     #[cfg(not(feature = "experimental"))]
     pub async fn create_from_memtable(
         &self,
-        _data: Vec<(TableId, RowKey, Value)>,
+        _data: Vec<(TableId, RowKey, ScanRow)>,
     ) -> Result<SSTableId> {
         Err(crate::error::Error::unsupported_format(
             "SSTable writing requires experimental feature",
@@ -682,7 +682,7 @@ impl SSTableManager {
 
     /// Get a value by key from all SSTables with proper tombstone merging
     #[cfg(feature = "tombstones")]
-    pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
+    pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<ScanRow>> {
         // Resolve the applicable reader list FIRST, exactly like the non-tombstones
         // `get()` path (issue #1321). The previous code iterated EVERY reader in
         // `self.readers` and passed one global relaxed `fully_qualified_match` flag
@@ -750,7 +750,7 @@ impl SSTableManager {
     ///   2. Unqualified table name (e.g. `"simple_table"`) — for backward compatibility
     ///      with flat/non-Cassandra directory layouts that have no keyspace parent.
     #[cfg(not(feature = "tombstones"))]
-    pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
+    pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<ScanRow>> {
         let table_readers = self.table_readers.read().await;
 
         let table_name = table_id.name();
@@ -826,7 +826,7 @@ impl SSTableManager {
         end_key: Option<&RowKey>,
         limit: Option<usize>,
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<Vec<(RowKey, Value)>> {
+    ) -> Result<Vec<(RowKey, ScanRow)>> {
         let table_readers = self.table_readers.read().await;
 
         log::debug!("SSTableManager::scan - Scanning table_id='{}'", table_id);
@@ -990,7 +990,7 @@ impl SSTableManager {
         table_id: &TableId,
         partition_key: &[u8],
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<(Vec<(RowKey, Value)>, bool)> {
+    ) -> Result<(Vec<(RowKey, ScanRow)>, bool)> {
         // The clustering-aware path always prunes via the bloom/BTI candidate
         // filter, so the partition-targeted access path is genuinely engaged
         // regardless of whether the within-partition clustering seek narrowed.
@@ -1049,7 +1049,7 @@ impl SSTableManager {
         partition_key: &[u8],
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<(
-        Vec<(RowKey, Value, HashMap<String, CellWriteMetadata>)>,
+        Vec<(RowKey, ScanRow, HashMap<String, CellWriteMetadata>)>,
         bool,
     )> {
         let table_readers = self.table_readers.read().await;
@@ -1080,7 +1080,7 @@ impl SSTableManager {
             return Ok((Vec::new(), true));
         }
 
-        let matches_key = |entry: &(RowKey, Value, HashMap<String, CellWriteMetadata>)| {
+        let matches_key = |entry: &(RowKey, ScanRow, HashMap<String, CellWriteMetadata>)| {
             entry.0.as_bytes() == partition_key
         };
 
@@ -1163,7 +1163,7 @@ impl SSTableManager {
     ) -> Result<(
         Vec<(
             RowKey,
-            Value,
+            ScanRow,
             HashMap<String, crate::types::CellWriteMetadata>,
         )>,
         bool,
@@ -1201,7 +1201,7 @@ impl SSTableManager {
         partition_key: &[u8],
         clustering: Option<&reader::ClusteringSlice>,
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<(Vec<(RowKey, Value)>, bool)> {
+    ) -> Result<(Vec<(RowKey, ScanRow)>, bool)> {
         let table_readers = self.table_readers.read().await;
         let table_name = table_id.name();
 
@@ -1238,7 +1238,7 @@ impl SSTableManager {
             return Ok((Vec::new(), false));
         }
 
-        let matches_key = |entry: &(RowKey, Value)| entry.0.as_bytes() == partition_key;
+        let matches_key = |entry: &(RowKey, ScanRow)| entry.0.as_bytes() == partition_key;
 
         // Multiple candidate generations may hold the same partition; reconcile
         // with the same authoritative k-way merge the full scan uses (write-support
@@ -1360,7 +1360,7 @@ impl SSTableManager {
         table_id: &TableId,
         partition_key: &[u8],
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<(Vec<(RowKey, Value)>, bool)> {
+    ) -> Result<(Vec<(RowKey, ScanRow)>, bool)> {
         let mut rows = self.scan(table_id, None, None, None, schema).await?;
         rows.retain(|entry| entry.0.as_bytes() == partition_key);
         Ok((rows, false))
@@ -1443,7 +1443,7 @@ impl SSTableManager {
         start_key: Option<&RowKey>,
         end_key: Option<&RowKey>,
         limit: Option<usize>,
-    ) -> Result<Vec<(RowKey, Value)>> {
+    ) -> Result<Vec<(RowKey, ScanRow)>> {
         use crate::storage::write_engine::merge::{KWayMerger, MergeStep, RowData};
 
         // Own the bounds so the merge body (and any later filtering) can use them
@@ -1459,7 +1459,7 @@ impl SSTableManager {
         let paths: Vec<PathBuf> = ordered.iter().map(|r| r.file_path.clone()).collect();
         let schema = schema.clone();
 
-        let mut merged = tokio::task::spawn_blocking(move || -> Result<Vec<(RowKey, Value)>> {
+        let mut merged = tokio::task::spawn_blocking(move || -> Result<Vec<(RowKey, ScanRow)>> {
             let mut merger = KWayMerger::new(paths, &schema)?;
             let mut out = Vec::new();
             while let MergeStep::Partition { key, rows } = merger.step()? {
@@ -1484,15 +1484,15 @@ impl SSTableManager {
                         RowData::Live { cells } => {
                             // Drop cell tombstones: a deleted column must be
                             // absent from the merged row, not surfaced. Issue
-                            // #1334: emit the interned-name row carrier
-                            // (`Value::Row`) the read path consumes.
-                            let row_cells: Vec<(Arc<str>, Value)> = cells
+                            // #1334: emit the interned-name `ScanRow` carrier
+                            // the read path consumes.
+                            let row_cells: RowCells = cells
                                 .into_iter()
                                 .filter(|c| !matches!(c.value, Value::Tombstone(_)))
                                 .map(|c| (Arc::from(c.column.as_str()), c.value))
                                 .collect();
                             if !row_cells.is_empty() {
-                                out.push((row_key.clone(), Value::Row(row_cells)));
+                                out.push((row_key.clone(), ScanRow::Row(row_cells)));
                             }
                         }
                         // Row tombstone: the row is deleted across all
@@ -1557,7 +1557,7 @@ impl SSTableManager {
         start_key: Option<&RowKey>,
         end_key: Option<&RowKey>,
         limit: Option<usize>,
-    ) -> Result<Vec<(RowKey, Value, HashMap<String, CellWriteMetadata>)>> {
+    ) -> Result<Vec<(RowKey, ScanRow, HashMap<String, CellWriteMetadata>)>> {
         use crate::storage::write_engine::merge::{KWayMerger, MergeStep, RowData};
         use crate::types::TableId as CqlTableId;
 
@@ -1599,8 +1599,8 @@ impl SSTableManager {
         let paths: Vec<PathBuf> = ordered.iter().map(|r| r.file_path.clone()).collect();
         let merge_schema = schema.clone();
 
-        // Returns (key bytes, Value::Map, [(column, write_timestamp_micros)]).
-        type MergedRow = (Vec<u8>, Value, Vec<(String, i64)>);
+        // Returns (key bytes, ScanRow row carrier, [(column, write_timestamp_micros)]).
+        type MergedRow = (Vec<u8>, ScanRow, Vec<(String, i64)>);
         let merged_rows = tokio::task::spawn_blocking(move || -> Result<Vec<MergedRow>> {
             let mut merger = KWayMerger::new(paths, &merge_schema)?;
             let mut out = Vec::new();
@@ -1624,9 +1624,9 @@ impl SSTableManager {
                 }
                 for entry in rows {
                     if let RowData::Live { cells } = entry.row_data {
-                        // Issue #1334: emit the interned-name row carrier
-                        // (`Value::Row`) the read path consumes.
-                        let mut row_cells: Vec<(Arc<str>, Value)> = Vec::with_capacity(cells.len());
+                        // Issue #1334: emit the interned-name `ScanRow` carrier
+                        // the read path consumes.
+                        let mut row_cells: RowCells = Vec::with_capacity(cells.len());
                         let mut timestamps: Vec<(String, i64)> = Vec::with_capacity(cells.len());
                         for c in cells {
                             // Drop cell tombstones: a deleted column is absent.
@@ -1637,7 +1637,7 @@ impl SSTableManager {
                             row_cells.push((Arc::from(c.column.as_str()), c.value));
                         }
                         if !row_cells.is_empty() {
-                            out.push((key.key.clone(), Value::Row(row_cells), timestamps));
+                            out.push((key.key.clone(), ScanRow::Row(row_cells), timestamps));
                         }
                     }
                     // Row tombstones suppress the row entirely (no emission).
@@ -1652,7 +1652,7 @@ impl SSTableManager {
 
         // Attach per-cell metadata: WRITETIME from the merge winner, TTL recovered
         // from the reader lookup only when its timestamp matches the winner.
-        let mut results: Vec<(RowKey, Value, HashMap<String, CellWriteMetadata>)> =
+        let mut results: Vec<(RowKey, ScanRow, HashMap<String, CellWriteMetadata>)> =
             Vec::with_capacity(merged_rows.len());
         for (key_bytes, value, timestamps) in merged_rows {
             let mut meta_map: HashMap<String, CellWriteMetadata> =
@@ -1698,7 +1698,7 @@ impl SSTableManager {
         end_key: Option<&RowKey>,
         limit: Option<usize>,
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<Vec<(RowKey, Value, HashMap<String, CellWriteMetadata>)>> {
+    ) -> Result<Vec<(RowKey, ScanRow, HashMap<String, CellWriteMetadata>)>> {
         let table_readers = self.table_readers.read().await;
         let table_name = table_id.name();
 
@@ -1784,7 +1784,7 @@ impl SSTableManager {
     ) -> Result<
         Vec<(
             RowKey,
-            Value,
+            ScanRow,
             HashMap<String, crate::types::CellWriteMetadata>,
         )>,
     > {
@@ -1861,7 +1861,7 @@ impl SSTableManager {
         end_key: Option<&RowKey>,
         schema: Option<&crate::schema::TableSchema>,
         buffer_size: usize,
-    ) -> Result<tokio::sync::mpsc::Receiver<Result<(RowKey, Value)>>> {
+    ) -> Result<tokio::sync::mpsc::Receiver<Result<(RowKey, ScanRow)>>> {
         let readers = self.resolve_table_readers(table_id).await;
 
         // Issue #957: keep the materializing `scan` and this streaming path
@@ -1920,7 +1920,7 @@ impl SSTableManager {
 
         tokio::spawn(async move {
             // Open one streaming scan per reader.
-            let mut streams: Vec<tokio::sync::mpsc::Receiver<Result<(RowKey, Value)>>> = readers
+            let mut streams: Vec<tokio::sync::mpsc::Receiver<Result<(RowKey, ScanRow)>>> = readers
                 .into_iter()
                 .map(|reader| {
                     reader.scan_stream(
@@ -1934,7 +1934,7 @@ impl SSTableManager {
                 .collect();
 
             // Prime one head per stream.
-            let mut heads: Vec<Option<(RowKey, Value)>> = Vec::with_capacity(streams.len());
+            let mut heads: Vec<Option<(RowKey, ScanRow)>> = Vec::with_capacity(streams.len());
             for stream in streams.iter_mut() {
                 match stream.recv().await {
                     Some(Ok(entry)) => heads.push(Some(entry)),
@@ -2007,7 +2007,7 @@ impl SSTableManager {
         end_key: Option<&RowKey>,
         schema: Option<&crate::schema::TableSchema>,
         buffer_size: usize,
-    ) -> Result<tokio::sync::mpsc::Receiver<Result<(RowKey, Value)>>> {
+    ) -> Result<tokio::sync::mpsc::Receiver<Result<(RowKey, ScanRow)>>> {
         let results = self
             .scan(table_id, start_key, end_key, None, schema)
             .await?;

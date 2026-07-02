@@ -497,8 +497,6 @@ impl TypeSerializer {
                 CqlType::Frozen(Box::new(Self::infer_cql_type(Some(inner))))
             }
             Some(Value::Tombstone(_)) | Some(Value::Json(_)) => CqlType::Text,
-            // Transient row carrier (issue #1334) never appears in a UDT field.
-            Some(Value::Row(_)) => CqlType::Text,
         }
     }
 

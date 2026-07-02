@@ -18,7 +18,7 @@ use crate::{
     platform::Platform,
     schema::{SchemaManager, TableSchema},
     storage::sstable::reader::SSTableReader,
-    Config, Error, Result, RowKey, Value,
+    Config, Error, Result, RowKey, ScanRow, Value,
 };
 
 /// Configuration for the SSTable data manager
@@ -609,7 +609,7 @@ impl SSTableDataManager {
 
     /// Load rows from a specific SSTable reader
     ///
-    /// Converts SSTableReader entries (TableId, RowKey, Value) to DataRow format.
+    /// Converts SSTableReader entries (TableId, RowKey, ScanRow) to DataRow format.
     ///
     /// # Value Type Handling
     /// - `Value::Map`: Normal case - extracts all column name/value pairs (Issue #191 fix)
@@ -641,42 +641,22 @@ impl SSTableDataManager {
             // FIXED (Issue #191): SSTableReader returns Value::Map with all columns
             // Extract each (column_name, column_value) pair from the map
             // Performance optimization: consume value instead of cloning (no ref)
-            let columns = match value {
-                // Issue #1334: rows decode to `Value::Row` keyed by the interned
-                // `Arc<str>` column-name handle; materialise `String` keys for the
-                // `DataRow` column map.
-                Value::Row(cells) => cells
+            let columns: HashMap<String, Value> = match value {
+                // Issue #1334: a live row's interned cells (`ScanRow::Row`) keyed
+                // by the `Arc<str>` column-name handle; materialise `String` keys
+                // for the `DataRow` column map.
+                ScanRow::Row(cells) => cells
                     .into_iter()
                     .map(|(name, val)| (name.to_string(), val))
                     .collect(),
-                Value::Map(map_entries) => map_entries
-                    .into_iter()
-                    .filter_map(|(key, val)| match key {
-                        Value::Text(column_name) => Some((column_name, val)),
-                        _ => {
-                            log::warn!(
-                                "Unexpected map key type for row {:?}: {:?}, skipping column",
-                                row_key,
-                                key
-                            );
-                            None
-                        }
-                    })
-                    .collect(),
-                Value::Null => {
-                    // Row was deleted or has no regular columns (tombstone)
-                    log::debug!("Skipping null row for key: {:?}", row_key);
-                    continue; // Skip this row entirely
-                }
-                _ => {
-                    // Unexpected value type - log warning but continue with fallback
-                    log::warn!(
-                        "Expected Value::Map from SSTableReader, got {:?} for key: {:?}",
-                        value,
-                        row_key
+                // Markers (row tombstone / null row) carry no columns.
+                ScanRow::Marker(marker) => {
+                    log::debug!(
+                        "Skipping non-row scan marker for key {:?}: {:?}",
+                        row_key,
+                        marker
                     );
-                    // Fallback: treat as single-column value (move instead of clone)
-                    HashMap::from([("value".to_string(), value)])
+                    continue; // Skip this row entirely
                 }
             };
 

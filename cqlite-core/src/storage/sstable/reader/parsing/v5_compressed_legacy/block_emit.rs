@@ -1,7 +1,7 @@
 use super::*;
 
 impl V5CompressedLegacyParser {
-    /// Parse decompressed block into (TableId, RowKey, Value) entries
+    /// Parse decompressed block into (TableId, RowKey, ScanRow) entries
     ///
     /// # Arguments
     /// * `data` - Decompressed block bytes
@@ -9,14 +9,14 @@ impl V5CompressedLegacyParser {
     /// * `reader` - Reference to SSTableReader for value parsing
     ///
     /// # Returns
-    /// * `Ok(Vec<(TableId, RowKey, Value)>)` - Parsed entries
+    /// * `Ok(Vec<(TableId, RowKey, ScanRow)>)` - Parsed entries
     /// * `Err(Error)` - Parse error with context
     pub fn parse_block(
         &self,
         data: &[u8],
         schema: Option<&TableSchema>,
         reader: &crate::storage::sstable::reader::types::SSTableReader,
-    ) -> Result<Vec<(TableId, RowKey, Value)>> {
+    ) -> Result<Vec<(TableId, RowKey, ScanRow)>> {
         let mut results = Vec::new();
         self.parse_block_emit(data, schema, reader, |entry| {
             results.push(entry);
@@ -55,7 +55,7 @@ impl V5CompressedLegacyParser {
     ) -> Result<()>
     where
         F: FnMut(
-            (TableId, RowKey, Value, HashMap<String, CellWriteMetadata>),
+            (TableId, RowKey, ScanRow, HashMap<String, CellWriteMetadata>),
         ) -> Result<std::ops::ControlFlow<()>>,
     {
         if data.is_empty() {
@@ -152,20 +152,21 @@ impl V5CompressedLegacyParser {
                             // non-primary-key cell survives.
                             let has_data_cell = row_has_non_key_cell(&cells, schema);
                             let row_value = if row_tombstone.is_some() && !has_data_cell {
-                                row_tombstone
-                                    .map(|h| h.row_tombstone())
-                                    .unwrap_or(Value::Null)
+                                ScanRow::Marker(
+                                    row_tombstone
+                                        .map(|h| h.row_tombstone())
+                                        .unwrap_or(Value::Null),
+                                )
                             } else if cells.is_empty() {
-                                Value::Null
+                                ScanRow::Marker(Value::Null)
                             } else {
                                 // Issue #1334: carry the interned `Arc<str>` name
                                 // handles straight into the row carrier (no
                                 // `Value::Text(String)` round-trip). Emit-time
                                 // alphabetical ordering preserved exactly.
-                                let mut row_cells: Vec<(Arc<str>, Value)> =
-                                    cells.into_iter().collect();
+                                let mut row_cells: RowCells = cells.into_iter().collect();
                                 row_cells.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
-                                Value::Row(row_cells)
+                                ScanRow::Row(row_cells)
                             };
 
                             match emit((
@@ -611,7 +612,7 @@ impl V5CompressedLegacyParser {
     }
 
     /// Streaming variant of [`parse_block`]: invokes `emit` for each parsed
-    /// `(TableId, RowKey, Value)` entry instead of collecting them into a `Vec`,
+    /// `(TableId, RowKey, ScanRow)` entry instead of collecting them into a `Vec`,
     /// so callers can forward rows into a bounded channel without materializing
     /// the whole block at once (issue #790). Returning `ControlFlow::Break` from
     /// `emit` stops parsing early — used when the streaming consumer is dropped.
@@ -623,7 +624,7 @@ impl V5CompressedLegacyParser {
         emit: F,
     ) -> Result<()>
     where
-        F: FnMut((TableId, RowKey, Value)) -> Result<std::ops::ControlFlow<()>>,
+        F: FnMut((TableId, RowKey, ScanRow)) -> Result<std::ops::ControlFlow<()>>,
     {
         // Whole-block decode: no within-partition row-body window narrowing.
         self.parse_block_emit_windowed(data, schema, reader, None, emit)

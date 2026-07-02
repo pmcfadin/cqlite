@@ -1,6 +1,6 @@
 //! Per-element / per-cell compaction read contract (epic #899, Phase A).
 //!
-//! The compaction read path historically emitted `(RowKey, Value, i64)` per row,
+//! The compaction read path historically emitted `(RowKey, ScanRow, i64)` per row,
 //! collapsing every non-frozen collection / UDT into a single nested [`Value`]
 //! with one row-level timestamp. That representation cannot reconcile two
 //! SSTables that wrote DISJOINT elements of the same multi-cell column (each
@@ -25,12 +25,12 @@
 //! - Far-future local deletion times in `[2^31, 2^32)` are preserved as the
 //!   wrapping `as u32 as i32` value — never widened to i64.
 
-use crate::types::{RowKey, TombstoneType, Value};
+use crate::types::{RowKey, ScanRow, TombstoneType, Value};
 
 /// One row surfaced by the compaction read path, carrying per-element complex
 /// cells and the real per-column complex deletion (epic #899, Phase A).
 ///
-/// This is the compaction-only counterpart of the old `(RowKey, Value, i64)`
+/// This is the compaction-only counterpart of the old `(RowKey, ScanRow, i64)`
 /// tuple. `row_timestamp` is the row-level write timestamp (for a tombstone it
 /// is `markedForDeleteAt`); `row_data` holds either a row tombstone or the live
 /// simple + complex cells.
@@ -46,31 +46,22 @@ pub struct CompactionRow {
 }
 
 impl CompactionRow {
-    /// Build a [`CompactionRow`] from the legacy collapsed `(RowKey, Value,
+    /// Build a [`CompactionRow`] from the legacy collapsed `(RowKey, ScanRow,
     /// timestamp)` representation (the non-V5 compaction fallback path).
     ///
     /// This loses per-element complex granularity (the legacy fallback has none
-    /// to begin with): a `Value::Map` row becomes simple cells, a
-    /// `Value::Tombstone(RowTombstone)` becomes a row tombstone, any other value
-    /// becomes a single `value` cell. The V5CompressedLegacy path bypasses this
-    /// and builds per-element rows directly.
-    pub fn from_legacy_value(key: RowKey, value: Value, row_timestamp: i64) -> Self {
-        let row_data = match value {
-            Value::Tombstone(info) if info.tombstone_type == TombstoneType::RowTombstone => {
-                CompactionRowData::Tombstone {
-                    deletion_time: info.deletion_time,
-                    local_deletion_time: 0,
-                    // The legacy collapsed-value fallback has no clustering capture
-                    // (the clustering prefix is not surfaced on this path), so the
-                    // tombstone lands in the partition's `None` clustering bucket
-                    // exactly as before (#912 carries clustering only on the V5
-                    // per-element path).
-                    clustering: Vec::new(),
-                }
-            }
-            // Issue #1334: the row carrier is `Value::Row(Vec<(Arc<str>, Value)>)`
-            // keyed by the interned column-name handle.
-            Value::Row(entries) => {
+    /// to begin with): a live `ScanRow::Row` becomes simple cells, a
+    /// `ScanRow::Marker(Value::Tombstone(RowTombstone))` becomes a row tombstone,
+    /// any other marker becomes a single `value` cell. The V5CompressedLegacy
+    /// path bypasses this and builds per-element rows directly.
+    ///
+    /// Issue #1334: the reader carries every row through the single [`ScanRow`]
+    /// carrier — this consumer disassembles that same carrier (no `Value::Map`
+    /// bifurcation).
+    pub fn from_legacy_value(key: RowKey, row: ScanRow, row_timestamp: i64) -> Self {
+        let row_data = match row {
+            // A live row's interned cells become simple cells.
+            ScanRow::Row(entries) => {
                 let simple = entries
                     .into_iter()
                     .map(|(k, v)| {
@@ -90,43 +81,29 @@ impl CompactionRow {
                 CompactionRowData::Live {
                     simple,
                     complex: Vec::new(),
-                    // The legacy collapsed-value fallback never carries a
-                    // coexisting row deletion (a `Value::Tombstone` row maps to
-                    // `Tombstone` above; a `Value::Row` row is purely live).
+                    // A live `ScanRow::Row` never carries a coexisting row deletion
+                    // (a row tombstone arrives as a `ScanRow::Marker`, handled below).
                     row_deletion: None,
                 }
             }
-            Value::Map(entries) => {
-                let simple = entries
-                    .into_iter()
-                    .map(|(k, v)| {
-                        let column = match k {
-                            Value::Text(s) => s,
-                            other => format!("{:?}", other),
-                        };
-                        let timestamp = match &v {
-                            Value::Tombstone(info) => info.deletion_time,
-                            _ => row_timestamp,
-                        };
-                        SimpleCell {
-                            column,
-                            value: v,
-                            timestamp,
-                            ttl: None,
-                            local_deletion_time: None,
-                        }
-                    })
-                    .collect();
-                CompactionRowData::Live {
-                    simple,
-                    complex: Vec::new(),
-                    // The legacy collapsed-value fallback never carries a
-                    // coexisting row deletion (a `Value::Tombstone` row maps to
-                    // `Tombstone` above; a `Value::Map` row is purely live).
-                    row_deletion: None,
+            // A row tombstone marker becomes a row tombstone.
+            ScanRow::Marker(Value::Tombstone(info))
+                if info.tombstone_type == TombstoneType::RowTombstone =>
+            {
+                CompactionRowData::Tombstone {
+                    deletion_time: info.deletion_time,
+                    local_deletion_time: 0,
+                    // The legacy collapsed-value fallback has no clustering capture
+                    // (the clustering prefix is not surfaced on this path), so the
+                    // tombstone lands in the partition's `None` clustering bucket
+                    // exactly as before (#912 carries clustering only on the V5
+                    // per-element path).
+                    clustering: Vec::new(),
                 }
             }
-            other => CompactionRowData::Live {
+            // Any other marker (null row, cell tombstone, …) collapses to a single
+            // `value` cell, exactly as the pre-#1334 fallback did.
+            ScanRow::Marker(other) => CompactionRowData::Live {
                 simple: vec![SimpleCell {
                     column: "value".to_string(),
                     value: other,

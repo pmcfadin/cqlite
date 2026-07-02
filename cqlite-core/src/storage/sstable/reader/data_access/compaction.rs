@@ -131,7 +131,7 @@ impl SSTableReader {
 
     /// Iterate all partitions with per-row timestamps, for use by the compaction merger.
     ///
-    /// Returns `(RowKey, Value, row_timestamp_micros)` for every row in the SSTable.
+    /// Returns `(RowKey, ScanRow, row_timestamp_micros)` for every row in the SSTable.
     /// Unlike [`iterate_all_partitions`]:
     ///
     /// - Row tombstones are returned as `Value::Tombstone(RowTombstone)` carrying
@@ -516,7 +516,7 @@ impl SSTableReader {
         }
     }
 
-    /// Streaming compaction read (issue #827): yield `(RowKey, Value, ts)`
+    /// Streaming compaction read (issue #827): yield `(RowKey, ScanRow, ts)`
     /// entries via `emit` one partition at a time, so peak memory is bounded by
     /// `max_partition_size + one_chunk` rather than by the total input size.
     ///

@@ -4,7 +4,9 @@
 //! including modern Cassandra 5+ format parsing with state machine integration
 //! and legacy format support.
 
-use crate::{parser::vint::parse_vint_length, types::TableId, Error, Result, RowKey, Value};
+use crate::{
+    parser::vint::parse_vint_length, types::TableId, Error, Result, RowKey, ScanRow, Value,
+};
 
 use super::super::{
     super::{
@@ -34,7 +36,7 @@ impl SSTableReader {
         &self,
         block_data: &[u8],
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<Vec<(TableId, RowKey, Value)>> {
+    ) -> Result<Vec<(TableId, RowKey, ScanRow)>> {
         // Pass the provided schema through to the parsing logic
         // This schema parameter flows through the call chain to get_table_schema()
         self.parse_block_entries(block_data, schema)
@@ -45,7 +47,7 @@ impl SSTableReader {
         &self,
         block_data: &[u8],
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<Vec<(TableId, RowKey, Value)>> {
+    ) -> Result<Vec<(TableId, RowKey, ScanRow)>> {
         log::debug!(
             "parse_block_entries: Starting parse (data size: {} bytes, version: {:?})",
             block_data.len(),
@@ -307,7 +309,7 @@ impl SSTableReader {
             };
             offset += value_len;
 
-            entries.push((table_id, key, value));
+            entries.push((table_id, key, ScanRow::Marker(value)));
         }
 
         Ok(entries)
@@ -318,7 +320,7 @@ impl SSTableReader {
         &self,
         data: &[u8],
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<Vec<(TableId, RowKey, Value)>> {
+    ) -> Result<Vec<(TableId, RowKey, ScanRow)>> {
         log::debug!("[DEBUG SSTableReader::parse_block_entries_with_state_machine] Starting");
         log::debug!(
             "[DEBUG SSTableReader::parse_block_entries_with_state_machine] Data size: {} bytes",
@@ -492,7 +494,7 @@ impl SSTableReader {
     pub(in crate::storage::sstable::reader) fn convert_parsed_row_to_entries(
         &self,
         parsed_row: &ParsedRow,
-    ) -> Result<Vec<(TableId, RowKey, Value)>> {
+    ) -> Result<Vec<(TableId, RowKey, ScanRow)>> {
         let mut entries = Vec::new();
 
         // Create table ID from keyspace and table name (would be better to get from header)
@@ -513,7 +515,7 @@ impl SSTableReader {
                 static_key_bytes.extend_from_slice(column_name.as_bytes());
 
                 let static_key = RowKey::new(static_key_bytes);
-                entries.push((table_id.clone(), static_key, value.clone()));
+                entries.push((table_id.clone(), static_key, ScanRow::Marker(value.clone())));
             }
         }
 
@@ -526,7 +528,11 @@ impl SSTableReader {
                 compound_key_bytes.extend_from_slice(column_name.as_bytes());
 
                 let compound_key = RowKey::new(compound_key_bytes);
-                entries.push((table_id.clone(), compound_key, value.clone()));
+                entries.push((
+                    table_id.clone(),
+                    compound_key,
+                    ScanRow::Marker(value.clone()),
+                ));
             }
         }
 
@@ -538,7 +544,7 @@ impl SSTableReader {
         &self,
         data: &[u8],
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<Vec<(TableId, RowKey, Value)>> {
+    ) -> Result<Vec<(TableId, RowKey, ScanRow)>> {
         let mut entries = Vec::new();
         let mut offset = 0;
 
@@ -635,7 +641,7 @@ impl SSTableReader {
             };
             offset += value_len;
 
-            entries.push((table_id, key, value));
+            entries.push((table_id, key, ScanRow::Marker(value)));
         }
 
         Ok(entries)

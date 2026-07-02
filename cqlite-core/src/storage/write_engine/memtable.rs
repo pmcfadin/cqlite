@@ -244,11 +244,6 @@ impl Memtable {
             Value::Json(json) => json.to_string().len(),
             Value::Frozen(inner) => Self::estimate_value_size_with_depth(inner, depth + 1) + 8,
             Value::Tombstone(_) => 24, // timestamp + type + ttl overhead
-            // Transient row carrier (issue #1334); never stored in the memtable.
-            Value::Row(cells) => cells
-                .iter()
-                .map(|(name, v)| name.len() + Self::estimate_value_size_with_depth(v, depth + 1))
-                .sum::<usize>(),
         }
     }
 

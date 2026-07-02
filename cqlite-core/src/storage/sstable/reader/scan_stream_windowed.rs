@@ -30,7 +30,7 @@
 //!     `spawn_blocking` task owns the parser, the schema, and the sliding
 //!     window. It pulls raw chunks with `blocking_recv`, decompresses, appends to
 //!     the window, drains every confirmed partition, and accumulates surviving
-//!     `(RowKey, Value)` entries into a BATCH of up to [`BATCH_EMIT_ROWS`], which
+//!     `(RowKey, ScanRow)` entries into a BATCH of up to [`BATCH_EMIT_ROWS`], which
 //!     it hands across the blocking→async seam via `tx.blocking_send` as ONE
 //!     `Vec` item. ALL decompress+parse CPU runs here, off the async worker pool.
 //!     Batching is the key contention fix: PR #1156 `blocking_send`'d one row at
@@ -65,7 +65,7 @@
 //!
 //! ## Worst-case resident rows (issue #1143, roborev)
 //!
-//! Be honest and COMPLETE: against a stalled consumer the resident `(RowKey, Value)`
+//! Be honest and COMPLETE: against a stalled consumer the resident `(RowKey, ScanRow)`
 //! count is the SUM of three inherent terms, not one constant —
 //! `buffer_size + max_partition_size + MAX_INFLIGHT_BATCH_ROWS`:
 //!
@@ -73,7 +73,7 @@
 //!   `StreamingConfig::buffer_size`.
 //! - **`max_partition_size`** — INHERENT to any row-materializing partition scan and
 //!   PRE-DATES this change: `drain_scan_window` parses one CONFIRMED partition fully
-//!   into a `surviving: Vec<(RowKey, Value)>` before batching (the parser's `FnMut`
+//!   into a `surviving: Vec<(RowKey, ScanRow)>` before batching (the parser's `FnMut`
 //!   emit is synchronous, so a partition's rows cannot stream out mid-parse), so if
 //!   `blocking_send` stalls mid-iteration the producer still owns that Vec's
 //!   not-yet-batched tail. This is the pre-existing #1156 windowed-scan heap term
@@ -126,7 +126,7 @@
 use super::data_access::table_ids_match;
 use super::source::ScanCursor;
 use super::SSTableReader;
-use crate::types::{TableId, Value};
+use crate::types::{ScanRow, TableId};
 use crate::{Error, Result, RowKey};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -156,7 +156,7 @@ use tokio::sync::mpsc;
 /// reads, so nothing buffers the whole file.
 const RAW_CHUNK_CHANNEL_CAP: usize = 8;
 
-/// Number of surviving `(RowKey, Value)` entries the blocking parse half buffers
+/// Number of surviving `(RowKey, ScanRow)` entries the blocking parse half buffers
 /// before it hands a batch across the blocking→async seam.
 ///
 /// PR #1156's blocking parse half `blocking_send`s ONE row at a time into the
@@ -171,7 +171,7 @@ const RAW_CHUNK_CHANNEL_CAP: usize = 8;
 /// Batching `BATCH_EMIT_ROWS` rows into a single `Vec` item amortizes that wake
 /// ~`BATCH_EMIT_ROWS`× (one wake per batch instead of one per row) while keeping
 /// the bounded-heap and backpressure guarantees: a batch holds at most this many
-/// `(RowKey, Value)` already-owned entries (the same entries the prior code held
+/// `(RowKey, ScanRow)` already-owned entries (the same entries the prior code held
 /// transiently in `surviving`), and the batch channel is bounded
 /// ([`BATCH_CHANNEL_CAP`]) so a slow consumer still stops the parse loop, which
 /// still stops draining raw chunks, which still stops disk reads. Order is
@@ -185,7 +185,7 @@ const BATCH_EMIT_ROWS: usize = 256;
 /// forwarder flattens batches into the public per-item channel roughly as fast as
 /// the parse half produces them. Live heap on this channel is at most
 /// `BATCH_CHANNEL_CAP * BATCH_EMIT_ROWS` entries; with the defaults that is
-/// ~512 small `(RowKey, Value)` entries — negligible against the <128MB budget.
+/// ~512 small `(RowKey, ScanRow)` entries — negligible against the <128MB budget.
 const BATCH_CHANNEL_CAP: usize = 2;
 
 /// Documented bound on the rows the windowed scan's BATCHING SUBSYSTEM may hold in
@@ -269,8 +269,8 @@ fn should_run_terminal_drain(io_failed: bool) -> bool {
 /// change must not silently drop confirmed-up-to-error rows.
 #[inline]
 fn flush_pending(
-    batch: &mut Vec<(RowKey, Value)>,
-    tx: &mpsc::Sender<Result<Vec<(RowKey, Value)>>>,
+    batch: &mut Vec<(RowKey, ScanRow)>,
+    tx: &mpsc::Sender<Result<Vec<(RowKey, ScanRow)>>>,
 ) {
     if !batch.is_empty() {
         let _ = tx.blocking_send(Ok(std::mem::take(batch)));
@@ -301,9 +301,9 @@ fn flush_pending(
 /// guarantees the error flush is exercised and FAILS if it is removed.
 fn finish_blocking_drain(
     drained: Result<()>,
-    batch: &mut Vec<(RowKey, Value)>,
+    batch: &mut Vec<(RowKey, ScanRow)>,
     broke: bool,
-    tx: &mpsc::Sender<Result<Vec<(RowKey, Value)>>>,
+    tx: &mpsc::Sender<Result<Vec<(RowKey, ScanRow)>>>,
 ) -> Result<()> {
     match drained {
         Err(e) => {
@@ -348,7 +348,7 @@ impl SSTableReader {
         end_key: Option<RowKey>,
         schema: Option<crate::schema::TableSchema>,
         cursor: &ScanCursor,
-        tx: &mpsc::Sender<Result<(RowKey, Value)>>,
+        tx: &mpsc::Sender<Result<(RowKey, ScanRow)>>,
     ) -> Result<()> {
         // Resolve everything the parser needs ONCE, here on the async side, so
         // the blocking task never touches the async runtime. Schema resolution
@@ -374,7 +374,8 @@ impl SSTableReader {
         // the expensive blocking→async wake happens once per batch instead of once
         // per row (issue #1143). The forwarder task flattens each batch into the
         // caller's per-item `tx`, preserving the public stream contract.
-        let (batch_tx, batch_rx) = mpsc::channel::<Result<Vec<(RowKey, Value)>>>(BATCH_CHANNEL_CAP);
+        let (batch_tx, batch_rx) =
+            mpsc::channel::<Result<Vec<(RowKey, ScanRow)>>>(BATCH_CHANNEL_CAP);
         // The batching subsystem (this bounded channel + the forwarder-held batch +
         // the producer's parked-in-send batch) holds at most `MAX_INFLIGHT_BATCH_ROWS`
         // confirmed rows ahead of a stalled caller, INDEPENDENT of `scan_stream`'s
@@ -499,7 +500,7 @@ impl SSTableReader {
     /// drain with `at_final_chunk = true`; on a close caused by a mid-stream read
     /// error (`io_failed` set by the I/O half before it dropped the sender) it
     /// SKIPS that terminal drain so a truncated window cannot emit a spurious
-    /// trailing partition (issue #1143 finding 2). Surviving `(RowKey, Value)`
+    /// trailing partition (issue #1143 finding 2). Surviving `(RowKey, ScanRow)`
     /// entries are accumulated into batches of up to [`BATCH_EMIT_ROWS`] and sent
     /// through `tx` (a `Vec`-batched channel) with `blocking_send`, mirroring the
     /// pre-#1156 `parse_stitched_stream` backpressure but amortizing the
@@ -514,7 +515,7 @@ impl SSTableReader {
         &self,
         ctx: WindowParseCtx,
         mut raw_rx: mpsc::Receiver<Vec<u8>>,
-        tx: mpsc::Sender<Result<Vec<(RowKey, Value)>>>,
+        tx: mpsc::Sender<Result<Vec<(RowKey, ScanRow)>>>,
         io_failed: Arc<AtomicBool>,
     ) -> Result<()> {
         use crate::storage::sstable::compression::Compression;
@@ -528,7 +529,7 @@ impl SSTableReader {
         // stream end (the partial tail). Bounded by `BATCH_EMIT_ROWS` + one
         // partition's worth of rows, so it stays within the sliding-window heap
         // bound.
-        let mut batch: Vec<(RowKey, Value)> = Vec::with_capacity(BATCH_EMIT_ROWS);
+        let mut batch: Vec<(RowKey, ScanRow)> = Vec::with_capacity(BATCH_EMIT_ROWS);
 
         // The parse loop + terminal drain are fallible; on ANY `Err` we must
         // first deliver the rows already buffered in `batch` (confirmed rows
@@ -644,7 +645,7 @@ impl SSTableReader {
     }
 
     /// Drain every confirmed partition from the front of the sliding `window`,
-    /// accumulating each surviving `(RowKey, Value)` into `batch` and flushing a
+    /// accumulating each surviving `(RowKey, ScanRow)` into `batch` and flushing a
     /// full `BATCH_EMIT_ROWS`-sized batch through `tx` (issue #1143).
     ///
     /// Synchronous (runs on the `spawn_blocking` thread). Drives
@@ -665,8 +666,8 @@ impl SSTableReader {
         ctx: &WindowParseCtx,
         window: &mut Vec<u8>,
         at_final_chunk: bool,
-        tx: &mpsc::Sender<Result<Vec<(RowKey, Value)>>>,
-        batch: &mut Vec<(RowKey, Value)>,
+        tx: &mpsc::Sender<Result<Vec<(RowKey, ScanRow)>>>,
+        batch: &mut Vec<(RowKey, ScanRow)>,
         broke: &mut bool,
     ) -> Result<()> {
         use crate::storage::sstable::reader::parsing::ParseStep;
@@ -681,7 +682,7 @@ impl SSTableReader {
             // `parse_one_partition_with_timestamps` takes a synchronous `FnMut`
             // emit, so we cannot send inside it; a partition's rows are bounded
             // by `max_partition_size`, so this stays within the window bound.
-            let mut surviving: Vec<(RowKey, Value)> = Vec::new();
+            let mut surviving: Vec<(RowKey, ScanRow)> = Vec::new();
             let step = parser.parse_one_partition_with_timestamps(
                 window.as_slice(),
                 ctx.schema.as_ref(),

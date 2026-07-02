@@ -379,8 +379,6 @@ pub(crate) fn infer_cql_type_from_value(value: Option<&Value>) -> CqlType {
         }
         Some(Value::Tombstone(_)) => CqlType::Text, // Tombstones shouldn't appear in UDT fields
         Some(Value::Json(_)) => CqlType::Text,      // JSON is stored as text
-        // Transient row carrier (issue #1334) never appears in a UDT field.
-        Some(Value::Row(_)) => CqlType::Text,
     }
 }
 

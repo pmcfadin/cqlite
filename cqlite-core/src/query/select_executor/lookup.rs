@@ -8,7 +8,7 @@
 
 use super::super::access_path::{AccessPath, FallbackReason};
 use super::super::select_optimizer::SSTablePredicate;
-use crate::types::{RowKey, Value};
+use crate::types::{RowKey, ScanRow, Value};
 
 /// Outcome of classifying whether a SELECT can use a partition-targeted lookup.
 ///
@@ -361,7 +361,7 @@ pub(super) fn classify_clustering_slice(
 /// keys. Uses the same `Murmur3Partitioner` token the rest of the codebase uses.
 /// Stability preserves each partition's clustering order, since one partition's
 /// rows arrive contiguously from a single `scan_partition` call.
-pub(super) fn sort_rows_by_token(rows: &mut [(RowKey, Value)]) {
+pub(super) fn sort_rows_by_token(rows: &mut [(RowKey, ScanRow)]) {
     rows.sort_by(|a, b| {
         let ta = crate::util::cassandra_murmur3::cassandra_murmur3_token(&a.0 .0);
         let tb = crate::util::cassandra_murmur3::cassandra_murmur3_token(&b.0 .0);
@@ -405,7 +405,7 @@ impl super::SelectExecutor {
     /// Serve a fully-constrained `WHERE pk = ?` (optionally with a single-column
     /// clustering restriction and/or `ORDER BY <ck>`) from a partition-targeted
     /// read, recording the honest access path (Issue #954 / #960 / #1184). The
-    /// returned raw `(RowKey, Value)` rows flow through the SAME post-scan row-build
+    /// returned raw `(RowKey, ScanRow)` rows flow through the SAME post-scan row-build
     /// + predicate backstop the caller applies, so output is byte-identical.
     ///
     /// `ORDER BY <ck>` whose direction is the REVERSE of the stored clustering order
@@ -422,7 +422,7 @@ impl super::SelectExecutor {
         order_by: Option<&crate::query::select_ast::OrderByClause>,
         schema: Option<&crate::schema::TableSchema>,
         context: &mut super::ExecutionContext,
-    ) -> crate::Result<Vec<(RowKey, Value)>> {
+    ) -> crate::Result<Vec<(RowKey, ScanRow)>> {
         let clustering = classify_clustering_slice(predicates, schema);
         // Reverse path: ORDER BY <first ck> opposite to the stored clustering order.
         if let (Some(order_by), Some(schema)) = (order_by, schema) {

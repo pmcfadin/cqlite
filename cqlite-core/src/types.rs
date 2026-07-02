@@ -82,20 +82,54 @@ pub enum Value {
     Tombstone(TombstoneInfo),
     /// IP address (4 bytes for IPv4, 16 bytes for IPv6)
     Inet(Vec<u8>),
-    /// Transient decoded-row carrier: an ordered list of `(column_name, value)`
-    /// cells whose names are shared `Arc<str>` handles interned once by the
-    /// decoder (issue #1334). This variant exists ONLY to carry a scanned row
-    /// from the SSTable read emit path (`block_emit*`) into `QueryRow.values`
-    /// WITHOUT re-allocating a `String` per column name — it replaces the prior
-    /// `Value::Map(vec![(Value::Text(String), _)…])` row carrier whose
-    /// `Value::Text` key forced a per-cell `String` allocation.
-    ///
-    /// It is never written to disk, never stored inside a CQL `map<>` column, and
-    /// never surfaces to end users as a cell value: `build_row_from_scan` /
-    /// `storage_data_to_query_row` disassemble it into `QueryRow.values` and the
-    /// `Arc<str>` handles move straight in. Entries are ordered exactly as the
-    /// producer emits them (emit-time alphabetical by column name).
-    Row(Vec<(Arc<str>, Value)>),
+}
+
+/// Ordered interned cells of a single decoded row (issue #1334).
+///
+/// Each entry is `(column_name, value)` where the name is a shared `Arc<str>`
+/// handle interned once by the row decoder. Carrying a cell's name into
+/// `QueryRow.values` is therefore a reference-count bump — NOT a per-cell heap
+/// `String` allocation. Entries are ordered exactly as the producer emits them
+/// (emit-time alphabetical by column name).
+pub type RowCells = Vec<(Arc<str>, Value)>;
+
+/// Payload of a single scanned row as it crosses the storage → query boundary
+/// (issue #1334).
+///
+/// This is a **dedicated internal carrier — deliberately NOT a variant of the
+/// public [`Value`] enum**. Keeping it off `Value` keeps the public value type
+/// closed (no breaking variant, no defensive match arms) and lets the interned
+/// [`RowCells`] names reach `QueryRow.values` without ever round-tripping
+/// through a `String`.
+///
+/// There is exactly ONE row-carrier path: every scan/compaction producer builds
+/// a `ScanRow` and every consumer disassembles a `ScanRow`, so a live row's
+/// column values can never silently fall through to a non-row fallback.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScanRow {
+    /// A live row: its interned cells, ordered exactly as emitted (emit-time
+    /// alphabetical by column name).
+    Row(RowCells),
+    /// A non-row scan marker carried on the same channel — a row tombstone
+    /// (`Value::Tombstone`), an absent/null row (`Value::Null`), or a synthetic
+    /// compaction carrier value. Suppressed from user-visible output but
+    /// preserved so the compaction merge can reconcile deletions.
+    Marker(Value),
+}
+
+impl ScanRow {
+    /// Interned cells of a live row, or `None` for a marker (tombstone/null).
+    pub fn into_cells(self) -> Option<RowCells> {
+        match self {
+            ScanRow::Row(cells) => Some(cells),
+            ScanRow::Marker(_) => None,
+        }
+    }
+
+    /// True when this is a suppressed marker (row tombstone or absent/null row).
+    pub fn is_marker(&self) -> bool {
+        matches!(self, ScanRow::Marker(_))
+    }
 }
 
 /// User Defined Type value with structured field access
@@ -448,9 +482,6 @@ impl Value {
             Value::Duration { .. } => CqlType::Duration,
             Value::Tombstone(_) => CqlType::Text, // Tombstones don't have a specific type
             Value::Inet(_) => CqlType::Inet,
-            // Transient row carrier (issue #1334): a decoded row, not a CQL value.
-            // It never has a CQL data type; report the map shape it stands in for.
-            Value::Row(_) => CqlType::Map(Box::new(CqlType::Text), Box::new(CqlType::Text)),
         }
     }
 
@@ -772,10 +803,6 @@ impl Value {
                 size
             }
             Value::Frozen(inner) => inner.size_estimate(),
-            // Transient row carrier (issue #1334): estimate as name bytes + cell values.
-            Value::Row(cells) => cells.iter().fold(VINT_LENGTH_PREFIX, |acc, (name, v)| {
-                acc + VINT_LENGTH_PREFIX + name.len() + v.size_estimate()
-            }),
         }
     }
 
@@ -972,17 +999,6 @@ impl fmt::Display for Value {
             Value::Udt(udt) => Self::fmt_udt(f, udt),
             Value::Frozen(inner) => Self::fmt_typed(f, "FROZEN", &**inner),
             Value::Tombstone(info) => Self::fmt_tombstone(f, info),
-            // Transient row carrier (issue #1334): render like a name→value map.
-            Value::Row(cells) => {
-                write!(f, "{{")?;
-                for (i, (name, value)) in cells.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "'{}': {}", name, value)?;
-                }
-                write!(f, "}}")
-            }
         }
     }
 }
@@ -1400,8 +1416,6 @@ impl std::hash::Hash for Value {
             Value::Frozen(f) => f.hash(state),
             Value::Tombstone(t) => t.hash(state),
             Value::Inet(i) => i.hash(state),
-            // Transient row carrier (issue #1334).
-            Value::Row(cells) => cells.hash(state),
         }
     }
 }

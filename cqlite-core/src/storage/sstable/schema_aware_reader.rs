@@ -22,7 +22,7 @@ use crate::{
         format_detector::SSTableFormat,
         reader::{SSTableReader, SSTableReaderStats},
     },
-    types::{ComparatorType, Value},
+    types::{ComparatorType, ScanRow, Value},
     Config, RowKey,
 };
 
@@ -388,37 +388,20 @@ impl SchemaAwareReader {
         Ok((partition_values, clustering_values))
     }
 
-    /// Parse a raw row value into column values
-    pub fn parse_row_value(&self, raw_value: &Value) -> Result<HashMap<String, Value>> {
-        let value_bytes = raw_value
-            .as_bytes()
-            .ok_or_else(|| Error::Schema("Row value is not binary data".to_string()))?;
-
+    /// Disassemble a scanned row into its column values.
+    ///
+    /// Issue #1334: the reader now delivers a fully decoded [`ScanRow`] whose
+    /// live variant already carries the row's `(column_name, value)` cells with
+    /// interned names — so this simply moves those cells into a `String`-keyed
+    /// map (no re-parsing from raw bytes). A marker (row tombstone / null row)
+    /// carries no columns and yields an empty map.
+    pub fn parse_row_value(&self, raw_value: &ScanRow) -> Result<HashMap<String, Value>> {
         let mut column_values = HashMap::new();
-        let mut offset = 0;
-
-        // Parse each column according to schema
-        for column in &self.context.schema.columns {
-            // Skip key columns as they're parsed separately
-            if self.context.schema.is_partition_key(&column.name)
-                || self.context.schema.is_clustering_key(&column.name)
-            {
-                continue;
+        if let ScanRow::Row(cells) = raw_value {
+            for (name, value) in cells {
+                column_values.insert(name.to_string(), value.clone());
             }
-
-            if offset >= value_bytes.len() {
-                break; // No more data
-            }
-
-            // Parse column value using schema parser with exact consumed-byte tracking
-            let (column_value, consumed) = self
-                .schema_parser
-                .parse_column_value(&column.name, &value_bytes[offset..])?;
-
-            offset += consumed;
-            column_values.insert(column.name.clone(), column_value);
         }
-
         Ok(column_values)
     }
 

@@ -81,7 +81,7 @@ use crate::{
         compression_info::CompressionInfo,
         version_gate::{BigVersionGates, VersionGates},
     },
-    Config, Error, Result, RowKey, Value,
+    Config, Error, Result, RowKey, ScanRow, Value,
 };
 
 // Structured logging
@@ -1040,11 +1040,11 @@ impl SSTableReader {
     }
 
     /// Extract write time from entry metadata
-    pub fn extract_write_time_from_entry(&self, _key: &RowKey, value: &Value) -> i64 {
+    pub fn extract_write_time_from_entry(&self, _key: &RowKey, row: &ScanRow) -> i64 {
         use log::warn;
 
-        match value {
-            Value::Tombstone(info) => info.deletion_time,
+        match row {
+            ScanRow::Marker(Value::Tombstone(info)) => info.deletion_time,
             _ => std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_micros() as i64)

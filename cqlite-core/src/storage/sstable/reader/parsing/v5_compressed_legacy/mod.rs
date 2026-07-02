@@ -48,7 +48,7 @@ use crate::{
         CellExpiration, CellWriteMetadata, TableId, TombstoneInfo, TombstoneType, UdtField,
         UdtTypeDef, UdtValue,
     },
-    Error, Result, RowKey, Value,
+    Error, Result, RowCells, RowKey, ScanRow, Value,
 };
 
 /// Maximum reasonable size for frozen collections to prevent DoS from corrupted data.
@@ -95,7 +95,7 @@ type ParsedRow = (
 /// Return type for [`V5CompressedLegacy::parse_block_with_cell_metadata`].
 ///
 /// Each element is `(table_id, row_key, value_map, cell_metadata_map)`.
-type ParsedBlockWithMeta = Vec<(TableId, RowKey, Value, HashMap<String, CellWriteMetadata>)>;
+type ParsedBlockWithMeta = Vec<(TableId, RowKey, ScanRow, HashMap<String, CellWriteMetadata>)>;
 
 /// One on-disk column to decode, in serialization-header order.
 ///

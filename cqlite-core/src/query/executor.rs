@@ -19,7 +19,8 @@ use super::{
     ComparisonOperator, Condition,
 };
 use crate::{
-    schema::SchemaManager, storage::StorageEngine, Config, Error, Result, RowKey, TableId, Value,
+    schema::SchemaManager, storage::StorageEngine, Config, Error, Result, RowKey, ScanRow, TableId,
+    Value,
 };
 use crossbeam::channel;
 use std::cmp::Ordering;
@@ -269,7 +270,7 @@ impl QueryExecutor {
     }
 
     /// Convert a `(key, data)` pair from `StorageEngine::scan` into rows.
-    fn scan_pairs_to_rows(&self, pairs: Vec<(RowKey, Value)>) -> Result<Vec<QueryRow>> {
+    fn scan_pairs_to_rows(&self, pairs: Vec<(RowKey, ScanRow)>) -> Result<Vec<QueryRow>> {
         let mut rows = Vec::with_capacity(pairs.len());
         for (row_key, row_data) in pairs {
             rows.push(self.storage_data_to_query_row(row_data, &row_key)?);
@@ -739,30 +740,17 @@ impl QueryExecutor {
     }
 
     /// Convert storage data to query row
-    fn storage_data_to_query_row(&self, data: Value, key: &RowKey) -> Result<QueryRow> {
+    fn storage_data_to_query_row(&self, data: ScanRow, key: &RowKey) -> Result<QueryRow> {
         use std::sync::Arc;
         let mut values: HashMap<Arc<str>, Value> = HashMap::new();
 
-        // Storage path carries rows as `Value::Row` keyed by the interned
-        // `Arc<str>` column-name handle (issue #1334); move the handle straight
-        // in (no per-cell `String` re-allocation of the name).
-        match data {
-            Value::Row(cells) => {
-                for (name, cell_value) in cells {
-                    values.insert(name, cell_value);
-                }
-            }
-            // Backward-compat: the experimental in-memory storage path still
-            // carries rows as `Value::Map` keyed by `Value::Text` column names.
-            Value::Map(map) => {
-                for (map_key, map_value) in map {
-                    if let Value::Text(column_name) = map_key {
-                        values.insert(Arc::from(column_name.as_str()), map_value);
-                    }
-                }
-            }
-            other => {
-                values.insert(Arc::from("data"), other);
+        // Storage path carries rows as the single `ScanRow::Row` carrier keyed by
+        // the interned `Arc<str>` column-name handle (issue #1334); move the handle
+        // straight in (no per-cell `String` re-allocation of the name). Markers
+        // (row tombstone / null) carry no columns.
+        if let ScanRow::Row(cells) = data {
+            for (name, cell_value) in cells {
+                values.insert(name, cell_value);
             }
         }
 

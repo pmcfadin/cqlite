@@ -1,6 +1,6 @@
 //! Row assembly and table-id/type helpers for the SELECT executor.
 //!
-//! [`build_row_from_scan`] turns a raw `(RowKey, Value)` scan entry into a
+//! [`build_row_from_scan`] turns a raw `(RowKey, ScanRow)` scan entry into a
 //! `QueryRow`, reconstructing partition-key columns from the raw key. It is part
 //! of the public surface (re-exported via `query::mod`) so other readers (e.g.
 //! the Arrow Flight compaction-merge producer) assemble rows identically.
@@ -9,7 +9,7 @@ use super::super::result::{cql_type_to_data_type, ColumnInfo, QueryRow};
 use crate::{
     parser::complex_types::ComplexTypeParser,
     schema::CqlType,
-    types::{RowKey, Value},
+    types::{RowKey, ScanRow, Value},
     TableId,
 };
 use std::collections::HashMap;
@@ -72,7 +72,7 @@ pub(super) fn column_info_from_type_str(
     col_info
 }
 
-/// Build a `QueryRow` from a single `(RowKey, Value)` produced by storage scan,
+/// Build a `QueryRow` from a single `(RowKey, ScanRow)` produced by storage scan,
 /// applying optional projection and synthesising partition-key columns from the
 /// raw key bytes when a schema is available.
 ///
@@ -88,67 +88,59 @@ pub(super) fn column_info_from_type_str(
 ///
 /// Exposed publicly so other readers (e.g. the Arrow Flight server's compaction
 /// merge producer) can assemble rows identically to the SELECT path, guaranteeing
-/// output parity. The `value` is expected to be a `Value::Map` of decoded
-/// non-partition-key cells; partition-key columns are reconstructed from `key`.
+/// output parity. The `row` carries the decoded non-partition-key cells as the
+/// single [`ScanRow`] row carrier (issue #1334); partition-key columns are
+/// reconstructed from `key`.
 pub fn build_row_from_scan(
     key: RowKey,
-    value: Value,
+    row: ScanRow,
     projection: &[String],
     schema: Option<&crate::schema::TableSchema>,
 ) -> Option<QueryRow> {
-    // Suppress tombstoned rows from user-visible output. A row tombstone reaches
-    // here as `Value::Tombstone` (Issue #505); before that change it was `Value::Null`.
-    // Both must be suppressed identically so deleted rows never appear in query results.
-    if matches!(value, Value::Null | Value::Tombstone(_)) {
-        return None;
-    }
+    // Suppress tombstoned / absent rows from user-visible output. A row tombstone
+    // or null row reaches here as `ScanRow::Marker` (Issue #505); it must never
+    // appear in query results. A live row is always `ScanRow::Row`, so there is
+    // exactly ONE row-carrier path — a live row's column values can never silently
+    // fall through to a non-row fallback (issue #1334 / roborev H2).
+    let cells = row.into_cells()?;
 
     let mut row_values: HashMap<Arc<str>, Value> = HashMap::new();
     let project = |name: &str| projection.is_empty() || projection.iter().any(|p| p == name);
 
-    if let Value::Row(cells) = value {
-        // Issue #1334: the decoder carries interned `Arc<str>` column-name
-        // handles in the row carrier; move them straight into `QueryRow.values`
-        // (an `Arc` move — NO `String` re-allocation of the name).
-        for (name, col_value) in cells {
-            if project(&name) {
-                row_values.insert(name, col_value);
-            }
+    // Issue #1334: the decoder carries interned `Arc<str>` column-name handles in
+    // the row carrier; move them straight into `QueryRow.values` (an `Arc` move —
+    // NO `String` re-allocation of the name).
+    for (name, col_value) in cells {
+        if project(&name) {
+            row_values.insert(name, col_value);
         }
-        // Cassandra never serialises partition-key columns in the cell payload;
-        // reconstruct them from the raw row key when the schema is known. We
-        // decode through the canonical codec shared with the write engine so
-        // single-component (raw bytes) and composite (`[u16 len][bytes][0x00]`)
-        // keys are handled identically on both paths (Issue #586).
-        if let Some(schema) = schema {
-            match crate::storage::partition_key_codec::decode_partition_key_columns(&key.0, schema)
-            {
-                Ok(pk_columns) => {
-                    for (name, value) in pk_columns {
-                        if project(&name) {
-                            row_values.insert(name.into(), value);
-                        }
+    }
+    // Cassandra never serialises partition-key columns in the cell payload;
+    // reconstruct them from the raw row key when the schema is known. We
+    // decode through the canonical codec shared with the write engine so
+    // single-component (raw bytes) and composite (`[u16 len][bytes][0x00]`)
+    // keys are handled identically on both paths (Issue #586).
+    if let Some(schema) = schema {
+        match crate::storage::partition_key_codec::decode_partition_key_columns(&key.0, schema) {
+            Ok(pk_columns) => {
+                for (name, value) in pk_columns {
+                    if project(&name) {
+                        row_values.insert(name.into(), value);
                     }
                 }
-                // Surface — never silently swallow — a decode failure, so a
-                // missing partition-key column can't ship invisibly (Issue #586).
-                Err(e) => {
-                    log::warn!(
-                        "Failed to reconstruct partition-key columns from row key \
-                         (len={} bytes) for {}.{}: {}",
-                        key.0.len(),
-                        schema.keyspace,
-                        schema.table,
-                        e
-                    );
-                }
             }
-        }
-    } else {
-        // Non-row fallback: expose the raw value plus a debug-formatted id.
-        row_values.insert(Arc::from("data"), value);
-        if project("id") {
-            row_values.insert(Arc::from("id"), Value::Text(format!("{:?}", key)));
+            // Surface — never silently swallow — a decode failure, so a
+            // missing partition-key column can't ship invisibly (Issue #586).
+            Err(e) => {
+                log::warn!(
+                    "Failed to reconstruct partition-key columns from row key \
+                     (len={} bytes) for {}.{}: {}",
+                    key.0.len(),
+                    schema.keyspace,
+                    schema.table,
+                    e
+                );
+            }
         }
     }
 
@@ -173,7 +165,7 @@ mod tests {
     #[test]
     fn build_row_from_scan_materialises_single_text_pk() {
         let key = RowKey::new(b"k0000000000000000".to_vec());
-        let value = Value::Row(vec![(Arc::from("name"), Value::Text("name-0".to_string()))]);
+        let value = ScanRow::Row(vec![(Arc::from("name"), Value::Text("name-0".to_string()))]);
         let schema = single_pk_schema("id", "text");
 
         let row = build_row_from_scan(key, value, &[], Some(&schema))
@@ -198,7 +190,7 @@ mod tests {
         use super::super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
 
         let key = RowKey::new(b"k0000000000000000".to_vec());
-        let value = Value::Row(vec![(Arc::from("age"), Value::Integer(0))]);
+        let value = ScanRow::Row(vec![(Arc::from("age"), Value::Integer(0))]);
         let schema = single_pk_schema("id", "text");
         let row = build_row_from_scan(key, value, &[], Some(&schema)).unwrap();
 
