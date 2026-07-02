@@ -640,6 +640,56 @@ mod tests {
         );
     }
 
+    /// Build a `Rows.db`-style trie that is a single-transition **chain** of
+    /// `n_links` `SingleNoPayload4` nodes descending to a `row_leaf_no_marker`
+    /// leaf at offset 0.  Returns `(trie_bytes, root_offset)`.
+    ///
+    /// Every BTI transition encodes exactly one key byte, so the leaf's
+    /// reconstructed clustering-key path is `n_links` bytes long.
+    fn row_chain_to_leaf(n_links: usize, leaf_pos: u8) -> (Vec<u8>, usize) {
+        let mut trie = Vec::new();
+        trie.extend_from_slice(&row_leaf_no_marker(leaf_pos)); // leaf at offset 0 (2 bytes)
+        let mut child_off = 0usize;
+        for i in 0..n_links {
+            let node_off = trie.len();
+            let delta = node_off - child_off;
+            assert!(
+                delta <= 0x0F,
+                "chain link delta {delta} does not fit a SingleNoPayload4 nibble"
+            );
+            // SingleNoPayload4 (ordinal 1): [0x10|delta] [transition]; no payload.
+            trie.push(0x10 | (delta as u8 & 0x0F));
+            trie.push((i % 255) as u8 + 1); // transition byte (nonzero, varies)
+            child_off = node_off;
+        }
+        let root = trie.len() - 2; // last chain node
+        (trie, root)
+    }
+
+    /// Issue #1629 (roborev "Rows.db regression"): a legitimate reconstructed
+    /// clustering-key path LONGER than the old `u16::MAX` (65535) cap must decode
+    /// WITHOUT error on the row side too.  This exercises the SAME shared
+    /// [`dfs_collect_in_order`] code path via `dfs_collect_row_entries`; the
+    /// trie-size-relative bounds accept a 70 000-byte encoded path (trie ~140 002
+    /// bytes).  FAILS on 846e1e03 (fixed 65535 cap), passes after.
+    #[test]
+    fn dfs_long_encoded_row_path_over_u16_max_decodes() {
+        let (trie, root) = row_chain_to_leaf(70_000, 7);
+        assert!(
+            70_000 > u16::MAX as usize,
+            "the path must exceed the removed u16::MAX cap to be a regression"
+        );
+        let entries = dfs_collect_row_entries(&trie, root)
+            .expect("a >65535-byte encoded clustering-key path must decode");
+        assert_eq!(entries.len(), 1, "the single row leaf must be emitted");
+        assert_eq!(
+            entries[0].0.len(),
+            70_000,
+            "reconstructed clustering-key path is 70000 bytes (one per transition)"
+        );
+        assert_eq!(entries[0].1.data_offset, 7);
+    }
+
     /// Finding 1 (issue #832): a Dense node whose FIRST real child is at
     /// absolute trie offset 0 AND that has a "no transition" gap elsewhere.
     #[test]

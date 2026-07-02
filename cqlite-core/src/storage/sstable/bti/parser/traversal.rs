@@ -3,7 +3,8 @@
 //! These free functions operate purely on in-memory trie bytes plus a root
 //! offset (mirroring [`walk_bti_trie`](super::partitions::walk_bti_trie)).  They
 //! enumerate *every* leaf/payload in **byte-comparable order** by performing an
-//! explicit, depth-capped, stack-based depth-first search.
+//! explicit, stack-based depth-first search whose termination bounds are all
+//! relative to the trie's own byte length (see [`dfs_collect_in_order`]).
 //!
 //! In-order semantics (matches Cassandra `Walker`/`ReverseValueIterator`):
 //!   - A node that carries its own payload sorts BEFORE all of its children
@@ -23,30 +24,6 @@ use crate::{
 use std::io::{Read, Seek, SeekFrom};
 
 use super::partitions::{parse_bti_node_for_traversal, read_node_payload, BtiPartitionLocation};
-
-/// Maximum accumulated key-path bytes along a single root→node path.
-///
-/// A BTI trie key path is a byte-comparable key (partition token prefix or
-/// clustering separator); Cassandra limits each partition/clustering key
-/// component to `u16::MAX` bytes (64 KiB − 1), so a reconstructed path longer
-/// than this is corruption — NOT a legitimate long key.  This replaces the old
-/// `DFS_MAX_DEPTH = 128` byte cap (issue #1629 defect 1), which spuriously
-/// rejected any legitimate key path longer than 128 bytes.
-const MAX_KEY_PATH_BYTES: usize = u16::MAX as usize;
-
-/// Maximum DFS **node** depth (stack depth), counted in NODES / transitions
-/// taken — NOT in accumulated key bytes.
-///
-/// In the BTI on-disk format every trie transition encodes exactly one key byte
-/// (there is no multi-byte "chain" node — see `node_decode`), so a leaf's node
-/// depth equals its key-path length + 1.  This cap must therefore be at least
-/// [`MAX_KEY_PATH_BYTES`] + 1, or it would re-introduce the very false positive
-/// this fix removes (issue #1629): the historical
-/// [`crate::storage::sstable::bti::MAX_TRIE_DEPTH`] value of 128 conflated node
-/// depth with key bytes and rejected legitimate long keys.  It is kept as a
-/// distinct, explicitly node-counted guard (defense in depth) alongside the
-/// key-byte and total-work bounds.
-const DFS_MAX_NODE_DEPTH: usize = MAX_KEY_PATH_BYTES + 1;
 
 /// Read the root offset from the 8-byte big-endian footer of a BTI file and
 /// load the entire trie (everything before the footer) into memory.
@@ -140,19 +117,32 @@ fn ordered_children(node: &BtiNode) -> Vec<(u8, usize)> {
 ///
 /// The traversal is iterative (explicit stack), bounds-checks every offset, and
 /// enforces three independent limits so corrupt or cyclic tries produce an error
-/// rather than an infinite loop, unbounded memory, or a panic:
+/// rather than an infinite loop, unbounded memory, or a panic.  **Every bound is
+/// relative to the trie's own byte length (`trie_data.len()`), never a fixed
+/// constant.**  The reason: on an acyclic trie every node on a root→node path is
+/// distinct and occupies at least one trie byte, so any legitimately reconstructed
+/// path length — and any legitimate node depth — is `<= trie_data.len()`.  A path
+/// or depth exceeding the trie's own byte length is structurally impossible
+/// without revisiting a node, i.e. proof of a cycle/corruption.  Bounding by
+/// `trie_data.len()` therefore can NEVER reject a key that legitimately fits in
+/// the file (unlike a fixed cap such as the old 128-byte or `u16::MAX` limits,
+/// which spuriously rejected long-but-legal byte-comparable encoded key paths —
+/// issue #1629), while still catching every cycle:
 ///
-/// 1. **Node depth** ([`DFS_MAX_NODE_DEPTH`]) — the number of nodes/transitions
-///    on the current root→node path (stack depth), counted in NODES, not bytes.
-/// 2. **Accumulated key bytes** ([`MAX_KEY_PATH_BYTES`]) — the length of the
-///    reconstructed key path; longer than a Cassandra key component (64 KiB − 1)
-///    is corruption.  (Because BTI encodes one key byte per transition, this and
-///    the node-depth cap are numerically coupled, but both are checked so each
-///    corruption mode has a precise, distinct error.)
-/// 3. **Total work** — a running `nodes_visited` counter.  Every distinct node
-///    occupies at least one trie byte, so `nodes_visited > trie_data.len()`
-///    proves reconvergence/cycling and terminates adversarial tries whose paths
-///    stay individually short but whose total node visits blow up.
+/// 1. **Total work** — a running `nodes_visited` counter across ALL paths.  Every
+///    distinct node occupies at least one trie byte, so `nodes_visited >
+///    trie_data.len()` proves reconvergence/cycling and terminates adversarial
+///    tries whose paths stay individually short but whose total node visits blow
+///    up.  This is the airtight cycle guard.
+/// 2. **Per-path key-path length** — `key_bytes.len() > trie_data.len()` is a
+///    structurally impossible reconstructed path on an acyclic trie.
+/// 3. **Node depth** — the number of nodes on the current root→node path (stack
+///    depth, root = 1).  A legal leaf's depth is at most `trie_data.len() + 1`
+///    (one distinct node per byte, plus the root count), so a greater depth
+///    proves a cycle.
+///
+/// Each guard carries a distinct error message so corruption modes stay
+/// diagnosable.
 pub(crate) fn dfs_collect_in_order<T, F>(
     trie_data: &[u8],
     root_offset: usize,
@@ -181,14 +171,17 @@ where
                 trie_data.len()
             )));
         }
-        if node_depth > DFS_MAX_NODE_DEPTH {
+        if key_bytes.len() > trie_data.len() {
             return Err(Error::Parse(format!(
-                "BTI DFS exceeded max node depth {DFS_MAX_NODE_DEPTH} (corrupt or cyclic trie)"
+                "BTI DFS key path exceeds trie size {} (corrupt or cyclic trie)",
+                trie_data.len()
             )));
         }
-        if key_bytes.len() > MAX_KEY_PATH_BYTES {
+        if node_depth > trie_data.len().saturating_add(1) {
             return Err(Error::Parse(format!(
-                "BTI DFS key path exceeded max {MAX_KEY_PATH_BYTES} bytes (corrupt trie)"
+                "BTI DFS exceeded node depth (path of {node_depth} nodes > trie size {} + 1; \
+                 corrupt or cyclic trie)",
+                trie_data.len()
             )));
         }
         if node_offset >= trie_data.len() {
@@ -450,6 +443,35 @@ mod tests {
         assert_eq!(entries[0].0.len(), 129);
     }
 
+    /// Issue #1629 (roborev regression): a legitimate reconstructed key path
+    /// LONGER than the old `u16::MAX` (65535) cap must decode WITHOUT error.
+    ///
+    /// This locks the fix for roborev's finding: the byte-comparable *encoded*
+    /// trie path (one transition byte per edge) can legitimately exceed the
+    /// 64 KiB−1 raw-component limit because OSS50 byte-comparable encoding adds
+    /// component terminators, 0x00/0xFF escapes and multi-component framing.  A
+    /// fixed `u16::MAX` cap therefore rejects a legal key.  The trie-size-relative
+    /// bounds accept it: here the reconstructed path is 70 000 bytes and the trie
+    /// is ~140 003 bytes, so no bound fires.  This FAILS on 846e1e03 (the 65535
+    /// cap rejects it) and passes with the trie-relative bounds.
+    #[test]
+    fn dfs_long_encoded_path_over_u16_max_decodes() {
+        let (trie, root) = partition_chain_to_leaf(70_000);
+        assert!(
+            70_000 > u16::MAX as usize,
+            "the path must exceed the removed u16::MAX cap to be a regression"
+        );
+        let entries = dfs_collect_partition_entries(&trie, root)
+            .expect("a >65535-byte encoded key path must decode (no fixed cap)");
+        assert_eq!(entries.len(), 1, "the single leaf must be emitted");
+        assert_eq!(
+            entries[0].0.len(),
+            70_000,
+            "reconstructed key path is 70000 bytes (one per transition)"
+        );
+        assert_eq!(entries[0].1, BtiPartitionLocation::DataOffset(0));
+    }
+
     /// Issue #1629 defect 2: an adversarial *reconverging* trie whose node visits
     /// grow super-linearly (each internal node has two transitions pointing at the
     /// SAME child) must terminate via the total-work bound rather than hang.  Every
@@ -485,22 +507,29 @@ mod tests {
         );
     }
 
-    /// Issue #1629: the node-depth cap still fires on a chain deeper than the cap.
-    /// In the BTI format node depth equals key-path length + 1, so the cap sits at
-    /// `u16::MAX + 1` nodes (see `DFS_MAX_NODE_DEPTH`); a chain past it errors with
-    /// the node-depth message (distinct from both the work-bound and the leaf
-    /// out-of-bounds errors).
+    /// Issue #1629: a genuinely CYCLIC trie (a back-edge self-loop) must error
+    /// with one of the trie-size-relative messages and must NOT hang.
+    ///
+    /// A `SingleNoPayload4` node whose transition points back at itself (delta 0)
+    /// creates an infinite root→node path.  Because in DFS every ancestor is
+    /// popped before its descendants, `nodes_visited` is always `>=` the current
+    /// node depth, so the airtight total-work bound (`nodes_visited >
+    /// trie_data.len()`) fires first — but any of the three trie-relative
+    /// messages is an acceptable, diagnosable outcome.  The key property is that
+    /// a fixed-constant cap is gone yet the cycle still terminates cleanly.
     #[test]
-    fn dfs_node_depth_cap_rejects_overlong_chain() {
-        // One node deeper than the cap: key path = DFS_MAX_NODE_DEPTH bytes,
-        // node depth = DFS_MAX_NODE_DEPTH + 1 (root..leaf) > the cap.
-        let (trie, root) = partition_chain_to_leaf(DFS_MAX_NODE_DEPTH);
-        let err = dfs_collect_partition_entries(&trie, root)
-            .expect_err("a chain past the node-depth cap must error");
+    fn dfs_cyclic_trie_errors_with_trie_relative_message() {
+        // SingleNoPayload4 (ordinal 1): [0x10 | delta][transition].  delta 0 ⇒
+        // child.distance resolves to this node's own offset ⇒ self-loop.
+        let trie = vec![0x10u8, 0x01u8];
+        let err = dfs_collect_partition_entries(&trie, 0)
+            .expect_err("a cyclic (self-looping) trie must error, not hang");
         let msg = format!("{err}");
         assert!(
-            msg.contains("node depth"),
-            "expected the node-depth error, got: {msg}"
+            msg.contains("total work bound")
+                || msg.contains("key path exceeds trie size")
+                || msg.contains("node depth"),
+            "expected a trie-size-relative error, got: {msg}"
         );
     }
 
