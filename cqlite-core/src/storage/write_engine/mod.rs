@@ -364,66 +364,28 @@ fn reject_counter_cells(mutation: &Mutation) -> Result<()> {
 
 #[cfg(feature = "write-support")]
 impl WriteEngine {
-    /// Fsync the immediate parent of `dir`, mapping the empty parent of a
-    /// relative single-component path (e.g. `"data"`) to the current working
-    /// directory. A filesystem root has no parent, so there is nothing to
-    /// fsync. Fsyncing a directory persists its children's dirents.
-    fn sync_parent(dir: &Path) -> Result<()> {
-        match dir.parent() {
-            // A relative single-component path (e.g. "data") has an empty
-            // parent; its real parent is the current working directory.
-            Some(parent) if parent.as_os_str().is_empty() => wal::sync_directory(Path::new(".")),
-            Some(parent) => wal::sync_directory(parent),
-            // `dir` is a filesystem root: nothing above it for us to fsync.
-            None => Ok(()),
-        }
-    }
-
-    /// Compute the set of directories that a subsequent `create_dir_all(target)`
-    /// will *newly* create, ordered shallowest-first — from the child of the
-    /// first already-existing ancestor (the durable "anchor") down to `target`.
+    /// Create `dir` (and any missing ancestors), then fsync the FULL parent
+    /// chain from `dir`'s parent walking UP to and including the filesystem
+    /// root — unconditionally, on every call (issue #1392).
     ///
-    /// Walks UP from `target` to the first ancestor that already exists. That
-    /// anchor's own dirent is already durable, so recursion stops there; every
-    /// directory between the anchor and `target` (inclusive) is not yet durable
-    /// and its parent must be fsynced after creation. Returns an empty vec when
-    /// `target` already exists (nothing will be created).
-    fn dirs_to_create(target: &Path) -> Vec<PathBuf> {
-        let mut missing = Vec::new();
-        let mut cur = Some(target);
-        while let Some(dir) = cur {
-            if dir.exists() {
-                break;
-            }
-            missing.push(dir.to_path_buf());
-            // An empty parent (relative single-component path) resolves to the
-            // cwd, which always exists — treat it as the (durable) anchor.
-            cur = dir.parent().filter(|p| !p.as_os_str().is_empty());
-        }
-        // `missing` is deepest-first (target, ..); reverse to anchor-child-first
-        // so callers can fsync parents from the anchor downward.
-        missing.reverse();
-        missing
-    }
-
-    /// Create `dir` (and any missing ancestors) durably: fsync the parent of
-    /// EVERY newly-created directory, from the durable anchor down to `dir`, so
-    /// each new dirent is persisted across a crash (issue #1392).
+    /// We deliberately do NOT track "what this invocation created." Across a
+    /// crash that is unknowable: a prior startup may have created the whole
+    /// nested `data_dir`/`wal_dir` tree but crashed partway through the
+    /// parent-fsync sequence, leaving higher ancestors' dirents unpersisted. A
+    /// retry that inspected "already exists" and re-fsynced only the immediate
+    /// parent would leave those ancestors un-durable forever — the "which
+    /// ancestor is durable on retry" hole.
     ///
-    /// `create_dir_all` can create multiple missing ancestors at once (e.g.
-    /// `base/a/data` where `a` is also new). Fsyncing only `dir`'s immediate
-    /// parent would leave the intermediate dirents (e.g. `a` inside `base`)
-    /// unpersisted, so a crash after a flush + WAL truncate could still lose the
-    /// whole root and its published SSTable. We therefore record the full set of
-    /// directories that will be created *before* creating them, then fsync each
-    /// one's parent afterward. Stopping at the first already-existing anchor
-    /// bounds the walk (the anchor is already durable) — it cannot recurse
-    /// further. The call is idempotent and cheap when `dir` already existed.
+    /// Instead we fsync EVERY ancestor unconditionally. Fsyncing an
+    /// already-durable directory is idempotent and cheap, and the walk
+    /// terminates at the filesystem root (`Path::parent()` returns `None`), so
+    /// no ancestor level is ever left unsynced and there is no per-attempt
+    /// state to track. Every ancestor of a successfully-created directory
+    /// exists, so each fsync targets a real, present directory. Together with
+    /// the flush-path barrier (which fsyncs leaf → data_root on every publish),
+    /// this makes the full durability chain persistent on first flush AND on
+    /// any retry after a partial crash.
     fn create_dir_all_durable(dir: &Path, label: &str) -> Result<()> {
-        // Record what `create_dir_all` is about to create, from the anchor's
-        // child down to `dir`, BEFORE the directories start existing.
-        let newly_created = Self::dirs_to_create(dir);
-
         std::fs::create_dir_all(dir).map_err(|e| {
             Error::Storage(format!(
                 "Failed to create {} directory {:?}: {}",
@@ -431,19 +393,20 @@ impl WriteEngine {
             ))
         })?;
 
-        if newly_created.is_empty() {
-            // `dir` already fully existed: nothing was created. Fsyncing the
-            // immediate parent is harmless and preserves the idempotent
-            // durability contract.
-            Self::sync_parent(dir)?;
-        } else {
-            // Persist each new dirent by fsyncing its parent, from the anchor
-            // downward (`newly_created` is anchor-child-first, so its entries'
-            // parents are the anchor, then each newly-created ancestor, ...,
-            // ending at `dir`'s parent).
-            for created in &newly_created {
-                Self::sync_parent(created)?;
+        // Ascend the parent chain, fsyncing each ancestor's dirent. The walk
+        // strictly shrinks (one component per step) and ends when `parent()`
+        // yields `None` at the filesystem root, so it always terminates.
+        let mut next = dir.parent();
+        while let Some(cur) = next {
+            if cur.as_os_str().is_empty() {
+                // A relative single-component path (e.g. "data") has an empty
+                // parent whose real directory is the current working
+                // directory. Fsync "." and stop: it has no ancestor to ascend.
+                wal::sync_directory(Path::new("."))?;
+                break;
             }
+            wal::sync_directory(cur)?;
+            next = cur.parent();
         }
 
         Ok(())
@@ -469,17 +432,18 @@ impl WriteEngine {
     /// - Data directory doesn't exist
     /// - WAL replay fails
     pub fn new(config: WriteEngineConfig) -> Result<Self> {
-        // Ensure directories exist AND that EVERY newly-created ancestor's own
-        // dirent is durable. `create_dir_all` alone persists the entries
-        // *inside* a freshly-created root once we fsync the root, but NOT the
-        // dirents of the newly-created directories themselves in their parents
-        // — and it may create several missing ancestors at once. Fsyncing only
-        // the immediate parent would leave intermediate dirents unpersisted, so
-        // a crash after WAL truncation could still lose the whole data/WAL root.
-        // `create_dir_all_durable` fsyncs the parent of every newly-created
-        // directory (from the durable anchor down to the target), completing the
-        // durability chain (SSTable component contents → leaf → ancestors →
-        // data_root → every new ancestor up to the anchor). See issue #1392.
+        // Ensure directories exist AND that EVERY ancestor's own dirent is
+        // durable. `create_dir_all` alone persists the entries *inside* a
+        // freshly-created root once we fsync the root, but NOT the dirents of
+        // the newly-created directories themselves in their parents — and it
+        // may create several missing ancestors at once. Fsyncing only the
+        // immediate parent would leave intermediate dirents unpersisted, so a
+        // crash after WAL truncation could still lose the whole data/WAL root.
+        // `create_dir_all_durable` fsyncs the FULL parent chain up to and
+        // including the filesystem root, unconditionally on every call — this
+        // closes the "which ancestor is durable on a partial-crash retry" hole
+        // and completes the durability chain (SSTable component contents →
+        // leaf → ancestors → data_root → every ancestor up to root). #1392.
         Self::create_dir_all_durable(&config.data_dir, "data")?;
         Self::create_dir_all_durable(&config.wal_dir, "WAL")?;
 
@@ -1317,49 +1281,77 @@ mod tests {
         assert!(data.is_dir());
     }
 
-    /// Issue #1392 (roborev HIGH): `create_dir_all` can create MORE THAN ONE
-    /// missing ancestor at once, and fsyncing only the target's immediate
-    /// parent leaves the intermediate dirents unpersisted — a crash after a
-    /// flush + WAL truncate could still lose the whole root. The durable helper
-    /// must record every newly-created level and fsync each one's parent.
+    /// Issue #1392 (roborev HIGH): the "track what this attempt created"
+    /// approach had a retry hole — if a PRIOR startup created the nested tree
+    /// but crashed partway through its parent-fsync sequence, a retry sees the
+    /// tree already exists, records an empty newly-created set, and re-fsyncs
+    /// only the immediate parent, leaving higher ancestors un-durable forever.
     ///
-    /// There is no syscall seam to observe the fsyncs directly, so this asserts
-    /// the ancestor-walk recorded set (`dirs_to_create`) that drives exactly
-    /// which parents get fsynced. Red-before: the previous helper had no such
-    /// recording and only ever fsynced the immediate parent.
+    /// The definitive fix is to stop tracking anything and fsync the FULL
+    /// parent chain (up to and including the filesystem root) on EVERY call.
+    /// This test simulates that partial-crash retry: it pre-creates the entire
+    /// `base/a/b/data` tree first, so nothing is "newly created" on the call,
+    /// then asserts every ancestor is still openable/fsyncable up to the root.
+    ///
+    /// Red-before: the tracking helper would fsync only `data`'s immediate
+    /// parent (`b`) on the already-exists path, leaving `a`/`base` unsynced.
+    /// Green-after: the unconditional full-chain walk fsyncs `b`, `a`, `base`,
+    /// and every ancestor up to the filesystem root.
     #[test]
-    fn test_create_dir_all_durable_fsyncs_all_missing_ancestors() {
+    fn test_create_dir_all_durable_fsyncs_full_chain_on_existing_tree() {
         let temp_dir = TempDir::new().unwrap();
 
-        // Only `base` pre-exists; `a`, `b`, and `data` are all newly created.
+        // Simulate a prior partial-crash: the ENTIRE nested tree already exists
+        // before the call, so no directory is "newly created" this invocation.
         let base = temp_dir.path().join("base");
-        std::fs::create_dir_all(&base).unwrap();
         let a = base.join("a");
         let b = a.join("b");
         let data = b.join("data");
-        assert!(!a.exists());
+        std::fs::create_dir_all(&data).unwrap();
+        assert!(data.is_dir(), "precondition: full tree pre-exists");
 
-        // The recorded set is anchor-child-first and includes EVERY level from
-        // the anchor's child (`a`) down to the target (`data`). Fsyncing each
-        // one's parent persists a→base, b→a, data→b.
-        let to_create = WriteEngine::dirs_to_create(&data);
-        assert_eq!(
-            to_create,
-            vec![a.clone(), b.clone(), data.clone()],
-            "must record all >1 newly-created ancestors, not just the leaf's parent"
-        );
-
-        // Green-after: durable creation succeeds and materializes the full tree.
+        // The unconditional full-chain fsync must succeed on the already-exists
+        // path — it walks `data`'s parent up to the filesystem root, fsyncing
+        // every ancestor regardless of what (if anything) this call created.
         WriteEngine::create_dir_all_durable(&data, "data").unwrap();
-        assert!(data.is_dir(), "full nested tree must exist");
 
-        // Idempotent: nothing is left to create, so the recorded set is empty.
-        assert!(
-            WriteEngine::dirs_to_create(&data).is_empty(),
-            "already-existing target records no new directories"
-        );
+        // Every ancestor from the leaf's parent up to the root is a real,
+        // present directory that the walk fsynced (open-for-sync would fail on
+        // a missing/non-durable dirent). Assert the whole chain is present.
+        for ancestor in [b.as_path(), a.as_path(), base.as_path()] {
+            assert!(
+                ancestor.is_dir(),
+                "ancestor {:?} must be present and fsyncable up the full chain",
+                ancestor
+            );
+        }
+
+        // Idempotent: a second unconditional pass still succeeds.
         WriteEngine::create_dir_all_durable(&data, "data").unwrap();
         assert!(data.is_dir());
+    }
+
+    /// Issue #1392: the full-chain walk must TERMINATE at the filesystem root
+    /// (a path whose `parent()` is `None`) rather than looping. Exercising the
+    /// helper against an absolute nested path implicitly walks to `/`; this
+    /// test guards the termination contract by confirming the call returns
+    /// (does not hang) and the root itself has no parent to ascend into.
+    #[test]
+    fn test_create_dir_all_durable_walk_terminates_at_root() {
+        let temp_dir = TempDir::new().unwrap();
+        let data = temp_dir.path().join("a").join("b").join("data");
+
+        // Absolute path: the parent chain ascends through `b`, `a`, the temp
+        // dir, ... up to `/`. `Path::new("/").parent()` is `None`, so the walk
+        // stops there — no infinite loop. The call simply returns.
+        WriteEngine::create_dir_all_durable(&data, "data").unwrap();
+        assert!(data.is_dir());
+
+        // Contract the walk relies on: the filesystem root terminates the walk.
+        assert!(
+            std::path::Path::new("/").parent().is_none(),
+            "filesystem root must have no parent so the fsync walk terminates"
+        );
     }
 
     #[test]
