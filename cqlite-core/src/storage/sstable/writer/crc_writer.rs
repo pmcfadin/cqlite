@@ -51,9 +51,13 @@
 //! `crc_file_pos = (offset / chunk_size) * 4 + 4`
 //! (`DataIntegrityMetadata.ChecksumValidator`).
 
-use std::path::{Path, PathBuf};
-
+// `Path`/`PathBuf`/`Result` are used only by the re-read oracle helpers
+// (`build_crc_bytes`/`write_crc_db`), which are test-only since the production
+// write path assembles `CRC.db` from streaming-accumulated chunk CRCs (#1663).
+#[cfg(test)]
 use crate::error::Result;
+#[cfg(test)]
+use std::path::{Path, PathBuf};
 
 /// Default uncompressed CRC chunk size, matching Cassandra's
 /// `SequentialWriterOption.Builder` default `bufferSize` of `64 * 1024`.
@@ -81,41 +85,129 @@ pub(crate) enum CrcTrailer {
     EmptyFinalChunk,
 }
 
-/// Compute the `CRC.db` bytes for an uncompressed `Data.db`.
+/// Assemble the on-disk `CRC.db` bytes from a slice of per-chunk CRC32 values.
+///
+/// This is the single source of truth for the `CRC.db` byte layout (issue
+/// #1663): a big-endian `i32` chunk-size header followed by one big-endian `u32`
+/// CRC32 per chunk, plus the issue-#1222 compaction trailer rule. Both the
+/// streaming write path (checksums accumulated during the write — see
+/// [`StreamingCrc`]) and the re-read [`build_crc_bytes`] oracle route their
+/// chunk CRCs through here, so the two paths are provably byte-identical.
+///
+/// Trailer rule (issue #1222):
+/// - [`CrcTrailer::None`] (flush path) appends nothing after the last chunk CRC.
+/// - [`CrcTrailer::EmptyFinalChunk`] (compaction path) appends ONE trailing
+///   `CRC32 = 0` (`00000000`) — Cassandra's compaction close-time zero-length
+///   buffer flush — but ONLY when at least one real chunk CRC was produced
+///   (non-empty `Data.db`). An empty `Data.db` stays header-only for BOTH
+///   trailers (there is no Cassandra golden for the empty-compaction case).
+pub(crate) fn assemble_crc_bytes(chunk_crcs: &[u32], trailer: CrcTrailer) -> Vec<u8> {
+    // header (4) + one u32 per chunk + optional trailing empty-chunk CRC (4).
+    let mut out = Vec::with_capacity(4 + chunk_crcs.len() * 4 + 4);
+    // Header: chunk size as a big-endian signed 32-bit int (DataOutput.writeInt).
+    out.extend_from_slice(&(CRC_CHUNK_SIZE as i32).to_be_bytes());
+    for crc in chunk_crcs {
+        out.extend_from_slice(&crc.to_be_bytes());
+    }
+    // Compaction-only trailing empty-final-chunk CRC32 (issue #1222): CRC32 of a
+    // zero-length buffer is 0. Gated on a real chunk having been produced so an
+    // empty Data.db keeps the documented header-only output for both trailers.
+    if matches!(trailer, CrcTrailer::EmptyFinalChunk) && !chunk_crcs.is_empty() {
+        out.extend_from_slice(&0u32.to_be_bytes());
+    }
+    out
+}
+
+/// Incremental `CRC.db` + `Digest.crc32` accumulator for the streaming write
+/// path (issue #1663).
+///
+/// The streaming Data.db writer feeds every byte it writes to disk through
+/// [`update`](Self::update) exactly once, in write order. This computes the
+/// whole-file CRC32 (the `Digest.crc32` value) and the per-chunk CRC32s
+/// (`CRC.db`) as the data streams by, so `finish()` never has to re-read the
+/// finished `Data.db` to checksum it. The chunk boundaries are fixed
+/// `CRC_CHUNK_SIZE` blocks of the RAW Data.db bytes and span partition
+/// boundaries — identical to what the re-read [`build_crc_bytes`] oracle
+/// produces — because `update` carries `chunk_filled` across calls.
+#[derive(Debug, Default)]
+pub(crate) struct StreamingCrc {
+    /// Whole-file CRC32 hasher (the `Digest.crc32` value).
+    whole: crc32fast::Hasher,
+    /// CRC32 hasher for the chunk currently being filled.
+    chunk: crc32fast::Hasher,
+    /// Bytes already fed into `chunk` toward the current `CRC_CHUNK_SIZE` block.
+    chunk_filled: usize,
+    /// Finalized per-chunk CRC32s, in order.
+    chunk_crcs: Vec<u32>,
+}
+
+impl StreamingCrc {
+    /// Create an empty accumulator.
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feed the next run of just-written Data.db bytes, in write order.
+    ///
+    /// Updates the whole-file hasher and slices `bytes` into the fixed
+    /// `CRC_CHUNK_SIZE` chunk grid, finalizing a chunk CRC every time a full
+    /// block is completed. `chunk_filled` carries across calls so a chunk that
+    /// straddles two `update` calls (i.e. two partition flushes) is checksummed
+    /// as one block — matching `build_crc_bytes`'s chunk boundaries exactly.
+    pub(crate) fn update(&mut self, bytes: &[u8]) {
+        self.whole.update(bytes);
+        let mut remaining = bytes;
+        while !remaining.is_empty() {
+            let take = (CRC_CHUNK_SIZE - self.chunk_filled).min(remaining.len());
+            self.chunk.update(&remaining[..take]);
+            self.chunk_filled += take;
+            remaining = &remaining[take..];
+            if self.chunk_filled == CRC_CHUNK_SIZE {
+                let done = std::mem::replace(&mut self.chunk, crc32fast::Hasher::new());
+                self.chunk_crcs.push(done.finalize());
+                self.chunk_filled = 0;
+            }
+        }
+    }
+
+    /// Finalize the accumulator, returning `(digest_crc32, chunk_crcs)`.
+    ///
+    /// `digest_crc32` is the whole-file CRC32 over every fed byte (the
+    /// `Digest.crc32` value). `chunk_crcs` is one CRC32 per `CRC_CHUNK_SIZE`
+    /// block, including a final short chunk if `chunk_filled > 0`. Pass
+    /// `chunk_crcs` to [`assemble_crc_bytes`] to obtain the `CRC.db` bytes.
+    pub(crate) fn finalize(mut self) -> (u32, Vec<u32>) {
+        if self.chunk_filled > 0 {
+            self.chunk_crcs.push(self.chunk.finalize());
+        }
+        (self.whole.finalize(), self.chunk_crcs)
+    }
+}
+
+/// Compute the `CRC.db` bytes for an uncompressed `Data.db` by RE-READING it.
 ///
 /// Streams `data_path` in `CRC_CHUNK_SIZE` blocks (bounded memory, independent
-/// of the total Data.db size — see the digest-streaming rationale in
-/// `finish.rs`) and emits the Cassandra `CRC.db` layout: a big-endian `i32`
-/// chunk-size header followed by one big-endian `u32` CRC32 per chunk.
+/// of the total Data.db size) to build the per-chunk CRC32s, then delegates the
+/// byte layout to [`assemble_crc_bytes`] so this re-read oracle and the
+/// streaming [`StreamingCrc`] path are provably byte-identical.
 ///
-/// When `trailer` is [`CrcTrailer::EmptyFinalChunk`] (the compaction path,
-/// issue #1222), one extra big-endian `u32` `CRC32 = 0` is appended after the
-/// last real chunk, matching Cassandra's compaction close-time empty-buffer
-/// flush. [`CrcTrailer::None`] (the flush path) appends nothing.
+/// Retained (issue #1663) as the golden oracle for the incremental path's
+/// byte-parity tests and to build a `CRC.db` for the reader-side tests; the
+/// production write path no longer re-reads Data.db and does NOT call this.
+/// Each invocation bumps the [`data_db_checksum_full_reads`] work counter so a
+/// regression that reintroduces the full-file re-read is caught.
 ///
-/// An empty `Data.db` yields just the 4-byte header (zero chunks), matching
-/// Cassandra's behaviour when no data buffer is ever flushed. This empty-file
-/// behaviour is preserved for BOTH trailers: the compaction trailing
-/// empty-final-chunk `CRC32 = 0` is appended only when at least one real data
-/// chunk was checksummed (non-empty `Data.db`). A compaction that purges all
-/// partitions and finalizes an empty BIG SSTable therefore still gets the
-/// documented header-only `CRC.db`, never a lone trailing `00000000` after the
-/// header — the trailing zero only makes sense after a real chunk, and we have
-/// no Cassandra golden for the empty-compaction case (issue #1222 roborev).
+/// [`data_db_checksum_full_reads`]: crate::storage::sstable::work_counters::data_db_checksum_full_reads
+#[cfg(test)]
 pub(super) async fn build_crc_bytes(data_path: &Path, trailer: CrcTrailer) -> Result<Vec<u8>> {
     use tokio::io::AsyncReadExt;
 
-    let mut out = Vec::new();
-    // Header: chunk size as a big-endian signed 32-bit int (DataOutput.writeInt).
-    out.extend_from_slice(&(CRC_CHUNK_SIZE as i32).to_be_bytes());
-
     let mut file = tokio::fs::File::open(data_path).await?;
+    // Full re-read of Data.db for checksums — count it (issue #1663).
+    crate::storage::sstable::work_counters::add_data_db_checksum_full_read();
+    let mut chunk_crcs = Vec::new();
     let mut buffer = vec![0u8; CRC_CHUNK_SIZE];
     let mut filled = 0usize;
-    // Track whether any real data-chunk CRC was emitted (non-empty Data.db). The
-    // compaction trailer is gated on this so an empty Data.db keeps the
-    // documented header-only output for both trailers (issue #1222).
-    let mut emitted_real_chunk = false;
     loop {
         // Fill up to a full chunk before checksumming so each CRC covers a
         // complete CRC_CHUNK_SIZE block (except the final, short chunk), exactly
@@ -126,8 +218,7 @@ pub(super) async fn build_crc_bytes(data_path: &Path, trailer: CrcTrailer) -> Re
             if filled > 0 {
                 let mut hasher = crc32fast::Hasher::new();
                 hasher.update(&buffer[..filled]);
-                out.extend_from_slice(&hasher.finalize().to_be_bytes());
-                emitted_real_chunk = true;
+                chunk_crcs.push(hasher.finalize());
             }
             break;
         }
@@ -135,37 +226,25 @@ pub(super) async fn build_crc_bytes(data_path: &Path, trailer: CrcTrailer) -> Re
         if filled == CRC_CHUNK_SIZE {
             let mut hasher = crc32fast::Hasher::new();
             hasher.update(&buffer[..filled]);
-            out.extend_from_slice(&hasher.finalize().to_be_bytes());
-            emitted_real_chunk = true;
+            chunk_crcs.push(hasher.finalize());
             filled = 0;
         }
     }
 
-    // Compaction-only trailing empty-final-chunk CRC32 (issue #1222). Cassandra's
-    // compaction close flushes the data writer once more over a zero-length
-    // buffer; CRC32 of zero bytes is 0, so emit one trailing `00000000`. The
-    // flush path (CrcTrailer::None) never reaches this. Gated on a real chunk
-    // having been emitted: an empty Data.db keeps the documented header-only
-    // output even on the compaction path (the trailing zero only makes sense
-    // after at least one real data chunk, and there is no empty-compaction
-    // golden to match).
-    if matches!(trailer, CrcTrailer::EmptyFinalChunk) && emitted_real_chunk {
-        let empty_crc = crc32fast::Hasher::new().finalize();
-        out.extend_from_slice(&empty_crc.to_be_bytes());
-    }
-
-    Ok(out)
+    Ok(assemble_crc_bytes(&chunk_crcs, trailer))
 }
 
-/// Write the `CRC.db` component for an uncompressed `Data.db`, returning the
-/// component path.
+/// Write a `CRC.db` component by re-reading `data_path` (test-only oracle,
+/// issue #1663).
 ///
-/// Computes the per-chunk CRC bytes (see [`build_crc_bytes`]) and writes them to
-/// `crc_path`. Callers add the returned path to `TOC.txt` and `SSTableInfo`.
+/// The production write path assembles `CRC.db` from streaming-accumulated chunk
+/// CRCs (see [`assemble_crc_bytes`] / [`StreamingCrc`]) and no longer calls this;
+/// it is retained to build `CRC.db` fixtures for the reader-side tests.
 ///
 /// `trailer` selects the flush vs compaction tail (issue #1222): flush callers
 /// pass [`CrcTrailer::None`]; compaction callers pass
 /// [`CrcTrailer::EmptyFinalChunk`].
+#[cfg(test)]
 pub(crate) async fn write_crc_db(
     data_path: &Path,
     crc_path: PathBuf,
@@ -306,5 +385,85 @@ mod tests {
             assert_eq!(stored, hasher.finalize());
             pos += 4;
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue #1663: the incremental (streaming-accumulated) checksums must be
+    // byte-identical to the re-read oracle for BOTH the flush (`CrcTrailer::None`)
+    // and compaction (`CrcTrailer::EmptyFinalChunk`) tails, across single-chunk,
+    // multi-chunk, and short-final-chunk sizes — regardless of how the byte
+    // stream is split across `update` calls (partition-flush boundaries), which
+    // proves chunks straddle partition boundaries exactly like `build_crc_bytes`.
+    // ---------------------------------------------------------------------
+
+    /// Feed `payload` through a `StreamingCrc` in `split`-sized runs (simulating
+    /// per-partition flushes), then assert the assembled `CRC.db` bytes and the
+    /// whole-file digest equal the re-read oracle (`build_crc_bytes` /
+    /// `SSTableWriter::compute_crc32`) over a file holding the same bytes.
+    async fn assert_incremental_matches_reread(payload: &[u8], trailer: CrcTrailer, split: usize) {
+        use crate::storage::sstable::writer::SSTableWriter;
+
+        // Incremental path: accumulate as the bytes "stream" by in `split` runs.
+        let mut acc = StreamingCrc::new();
+        for run in payload.chunks(split.max(1)) {
+            acc.update(run);
+        }
+        let (inc_digest, inc_chunk_crcs) = acc.finalize();
+        let inc_crc_db = assemble_crc_bytes(&inc_chunk_crcs, trailer);
+
+        // Re-read oracle over a file holding the identical bytes.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data = dir.path().join("Data.db");
+        tokio::fs::write(&data, payload).await.expect("write data");
+        let reread_crc_db = build_crc_bytes(&data, trailer)
+            .await
+            .expect("build_crc_bytes");
+        let reread_digest = SSTableWriter::compute_crc32(&data)
+            .await
+            .expect("compute_crc32");
+
+        assert_eq!(
+            inc_crc_db, reread_crc_db,
+            "incremental CRC.db must equal re-read oracle (len={}, trailer={trailer:?}, split={split})",
+            payload.len()
+        );
+        assert_eq!(
+            inc_digest,
+            reread_digest,
+            "incremental Digest.crc32 must equal re-read oracle (len={}, split={split})",
+            payload.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn incremental_checksums_match_reread_oracle_all_sizes() {
+        // single-chunk short, exactly one full chunk, multi + short final,
+        // exactly two full chunks, multi + short final again.
+        let sizes = [
+            100usize,
+            CRC_CHUNK_SIZE,
+            CRC_CHUNK_SIZE + 100,
+            CRC_CHUNK_SIZE * 2,
+            CRC_CHUNK_SIZE * 2 + 100,
+        ];
+        // A split that is NOT a multiple of CRC_CHUNK_SIZE forces chunks to
+        // straddle `update` (partition-flush) boundaries.
+        let splits = [1usize, 7_000, CRC_CHUNK_SIZE, usize::MAX];
+        for &len in &sizes {
+            let payload: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            for &trailer in &[CrcTrailer::None, CrcTrailer::EmptyFinalChunk] {
+                for &split in &splits {
+                    assert_incremental_matches_reread(&payload, trailer, split).await;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn incremental_empty_matches_reread_oracle() {
+        // Empty Data.db: header-only for both trailers, digest = CRC32 of zero
+        // bytes = 0 — must match the re-read oracle.
+        assert_incremental_matches_reread(&[], CrcTrailer::None, 1).await;
+        assert_incremental_matches_reread(&[], CrcTrailer::EmptyFinalChunk, 1).await;
     }
 }

@@ -95,7 +95,12 @@ impl SSTableWriter {
         // The streamed Data.db is fsynced inside `finish_streaming` (issue
         // #1392). The empty-Data fallback below is written via tokio::fs::write
         // (no fsync), so it is fsynced explicitly.
-        let data_size = self.data_writer.finish_streaming()?;
+        // `finish_streaming` returns the byte size plus the whole-file
+        // (`Digest.crc32`) and per-chunk (`CRC.db`) checksums accumulated during
+        // the streaming write, so finalization needs no full re-read of Data.db
+        // (issue #1663).
+        let stream = self.data_writer.finish_streaming()?;
+        let data_size = stream.data_size;
         if data_size == 0 && !data_path.exists() {
             tokio::fs::write(&data_path, b"").await?;
             Self::fsync_component(&data_path).await?;
@@ -169,10 +174,19 @@ impl SSTableWriter {
         // data is uncompressed. The compression_info_writer module is retained
         // for future compressed SSTable support.
 
-        // 6. Write Digest.crc32 (compute CRC32 of Data.db)
+        // 6. Write Digest.crc32 (whole-file CRC32 of Data.db).
+        // The streaming DataWriter accumulated this CRC as it wrote, so the
+        // finished Data.db is NOT re-read here (issue #1663). The empty-Data.db
+        // lazy path (no partitions streamed, an empty file written above) has no
+        // accumulated bytes; it recomputes over the just-written empty file via
+        // `compute_crc32` so the value stays correct (CRC32 of zero bytes = 0).
         let digest_path = cpath("Digest.crc32");
         let digest_writer = DigestWriter::new(digest_path.clone());
-        let crc32_value = Self::compute_crc32(&data_path).await?;
+        let crc32_value = if data_size == 0 {
+            Self::compute_crc32(&data_path).await?
+        } else {
+            stream.digest_crc32
+        };
         digest_writer.write(crc32_value)?;
 
         // 6.5. Write CRC.db — per-chunk CRC32 for uncompressed BIG (issue #1197).
@@ -197,9 +211,14 @@ impl SSTableWriter {
             } else {
                 CrcTrailer::None
             };
-            let crc_path = crc_writer::write_crc_db(&data_path, cpath("CRC.db"), trailer).await?;
-            // fsync CRC.db contents (issue #1392): write_crc_db uses
-            // tokio::fs::write, which does not fsync.
+            // Assemble CRC.db from the per-chunk CRCs accumulated during the
+            // streaming write — no re-read of the finished Data.db (issue #1663).
+            // The trailer selection (flush vs compaction, issue #1222) and the
+            // is_bti gate are unchanged; only the checksum INPUT SOURCE differs.
+            let crc_path = cpath("CRC.db");
+            let bytes = crc_writer::assemble_crc_bytes(&stream.chunk_crcs, trailer);
+            tokio::fs::write(&crc_path, bytes).await?;
+            // fsync CRC.db contents (issue #1392): tokio::fs::write does not fsync.
             Self::fsync_component(&crc_path).await?;
             Some(crc_path)
         };
@@ -365,6 +384,10 @@ impl SSTableWriter {
         const DIGEST_READ_BUFFER_BYTES: usize = 64 * 1024;
 
         let mut file = tokio::fs::File::open(file_path).await?;
+        // Full re-read of a finished component for checksums — count it so the
+        // issue-#1663 work guard catches a regression that reintroduces the
+        // finish-time Data.db re-read on the non-empty path.
+        crate::storage::sstable::work_counters::add_data_db_checksum_full_read();
         let mut hasher = crc32fast::Hasher::new();
         let mut buffer = vec![0u8; DIGEST_READ_BUFFER_BYTES];
         loop {
