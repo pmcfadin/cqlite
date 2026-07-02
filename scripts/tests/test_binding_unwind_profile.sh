@@ -15,7 +15,9 @@
 #
 # Definitions inspected (relative to the repo root):
 #   1. .github/workflows/python-release.yml   (maturin wheel-build args)
-#   2. bindings/python/pyproject.toml         ([tool.maturin] must not re-pin --release)
+#   2. bindings/python/pyproject.toml         ([tool.maturin] must PIN
+#                                              profile = "release-unwind" and not
+#                                              re-pin --release)
 #   3. bindings/node/package.json             ("build" script)
 #   4. .github/workflows/node-release.yml     (must not drive an abort build)
 #   5. Cargo.toml                             ([profile.release-unwind] must set panic = "unwind")
@@ -37,6 +39,15 @@ REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 
 UNWIND_PROFILE="release-unwind"
 UNWIND_FLAG="--profile ${UNWIND_PROFILE}"
+
+# A `[tool.maturin] profile = "release-unwind"` pin. maturin honors this key on
+# ALL build paths, crucially the PEP 517 backend (`maturin pep517 build-wheel`,
+# invoked by `pip install .` / sdist builds) whose DEFAULT profile is `release`
+# (panic = "abort"). The CI workflow `--profile release-unwind` override alone
+# does NOT cover source builds, so the pin is what makes the pyproject check
+# non-vacuous. Matches e.g. `profile = "release-unwind"` (optional surrounding
+# whitespace); requires the exact profile name.
+PROFILE_PIN_RE="^[[:space:]]*profile[[:space:]]*=[[:space:]]*\"${UNWIND_PROFILE}\"[[:space:]]*\$"
 
 # A `--release` token: bounded by start-of-value / EOL or a whitespace, quote
 # (" or '), or `=` delimiter. Matches `--release`, `"--release"`, `--release'`,
@@ -111,9 +122,20 @@ check_definitions() {
     if ! grep -qF '[tool.maturin]' "$pyproject"; then
       echo "FAIL - pyproject.toml has no [tool.maturin] table (fail-closed)"
       fails=$((fails + 1))
-    elif printf '%s\n' "$maturin_section" | grep -qE -- "$RELEASE_TOKEN_RE"; then
-      echo "FAIL - pyproject.toml [tool.maturin] re-pins '--release' (abort)"
-      fails=$((fails + 1))
+    else
+      # Positively require the profile pin. Without it, the PEP 517 backend that
+      # `pip install .` / sdist builds use defaults to profile `release`
+      # (panic = "abort") and a source-installed wheel would ship WITHOUT the FFI
+      # firewall while every other check still passed. Fail CLOSED if absent.
+      if ! printf '%s\n' "$maturin_section" | grep -qE -- "$PROFILE_PIN_RE"; then
+        echo "FAIL - pyproject.toml [tool.maturin] does not pin profile = \"${UNWIND_PROFILE}\" (source/PEP517 builds would default to release=abort)"
+        fails=$((fails + 1))
+      fi
+      # And it may not re-pin --release (abort) anywhere in the table.
+      if printf '%s\n' "$maturin_section" | grep -qE -- "$RELEASE_TOKEN_RE"; then
+        echo "FAIL - pyproject.toml [tool.maturin] re-pins '--release' (abort)"
+        fails=$((fails + 1))
+      fi
     fi
   fi
 
@@ -210,6 +232,7 @@ EOF
   cat >"$d/bindings/python/pyproject.toml" <<'EOF'
 [tool.maturin]
 features = ["pyo3/extension-module"]
+profile = "release-unwind"
 EOF
   cat >"$d/bindings/node/package.json" <<'EOF'
 {
@@ -367,6 +390,37 @@ EOF
     sok "python-release.yml comment-only profile w/ --release args fails closed"
   fi
 
+  # (j) pyproject [tool.maturin] WITHOUT the profile pin -> must FAIL closed.
+  #     This is the exact loophole the pin closes: the workflow override protects
+  #     only CI wheels, but a source/PEP517 build (`pip install .`) would default
+  #     to release=abort. A vacuous pyproject check (present before the pin
+  #     requirement) would wrongly PASS here.
+  local py_nopin="$tmp/py_nopin"
+  write_compliant_fixture "$py_nopin"
+  cat >"$py_nopin/bindings/python/pyproject.toml" <<'EOF'
+[tool.maturin]
+features = ["pyo3/extension-module"]
+EOF
+  if check_definitions "$py_nopin" >/dev/null; then
+    sbad "pyproject without profile = \"release-unwind\" pin should FAIL closed but passed"
+  else
+    sok "pyproject missing profile pin fails closed"
+  fi
+
+  # (k) pyproject pinning the WRONG profile (e.g. plain release=abort) -> FAIL.
+  local py_wrongpin="$tmp/py_wrongpin"
+  write_compliant_fixture "$py_wrongpin"
+  cat >"$py_wrongpin/bindings/python/pyproject.toml" <<'EOF'
+[tool.maturin]
+features = ["pyo3/extension-module"]
+profile = "release"
+EOF
+  if check_definitions "$py_wrongpin" >/dev/null; then
+    sbad "pyproject pinning profile = \"release\" (abort) should FAIL but passed"
+  else
+    sok "pyproject pinning wrong (abort) profile fails closed"
+  fi
+
   # Best-effort cleanup; the guard is offline so nothing else touches this dir.
   rm -rf "$tmp"
 
@@ -389,7 +443,7 @@ main() {
   findings=$(check_definitions "$REPO_ROOT")
   local real_fails=$?
   if [ "$real_fails" -eq 0 ]; then
-    echo "ok   - all binding build definitions select '${UNWIND_FLAG}' (no --release) and Cargo.toml [profile.release-unwind] pins panic = \"unwind\""
+    echo "ok   - all binding build definitions select '${UNWIND_FLAG}' (no --release), pyproject [tool.maturin] pins profile = \"${UNWIND_PROFILE}\" (source/PEP517 builds), and Cargo.toml [profile.release-unwind] pins panic = \"unwind\""
   else
     printf '%s\n' "$findings"
     echo "FAIL - $real_fails binding build definition(s) would ship an abort-compiled artifact"
