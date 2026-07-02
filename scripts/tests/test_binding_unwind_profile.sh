@@ -38,6 +38,16 @@ REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 UNWIND_PROFILE="release-unwind"
 UNWIND_FLAG="--profile ${UNWIND_PROFILE}"
 
+# A `--release` token: bounded by start-of-value / EOL or a whitespace, quote
+# (" or '), or `=` delimiter. Matches `--release`, `"--release"`, `--release'`,
+# `x=--release`. Does NOT match `--profile release-unwind` (no `--` before
+# `release`) nor `--release-unwind` (trailing `-` is not a delimiter). Using an
+# explicit delimiter class instead of `[[:space:]]|$` closes the loophole where
+# a quoted or `=`-delimited `--release` slipped past the abort-build negative
+# check. (In the double-quoted string \" is a literal ", ' is literal, and \$ is
+# the ERE end-of-line anchor.)
+RELEASE_TOKEN_RE="(^|[[:space:]\"'=])--release([[:space:]\"'=]|\$)"
+
 # ---------------------------------------------------------------------------
 # check_definitions <root> : inspect the four binding build definitions rooted
 # at <root>. Prints a "FAIL - <reason>" line for every violation and returns the
@@ -58,16 +68,31 @@ check_definitions() {
     echo "FAIL - python-release.yml missing (fail-closed): $py_wf"
     fails=$((fails + 1))
   else
-    # The wheel build must select the unwind profile ...
-    if ! grep -qF -- "$UNWIND_FLAG" "$py_wf"; then
-      echo "FAIL - python-release.yml does not select '${UNWIND_FLAG}' for the wheel build"
+    # Inspect ONLY the maturin-action `args:` value(s) that drive the build, not
+    # the whole file. A `#`-comment line (first non-space char is `#`) never
+    # begins with `args:` so it is excluded by the anchored match; a trailing
+    # ` #...` inline comment is stripped. This closes two false-negative gaps:
+    #   - a commented / unrelated `--profile release-unwind` mention elsewhere in
+    #     the YAML can no longer satisfy the positive (present) check, and
+    #   - a quoted / `=`-delimited `--release` can no longer slip past the
+    #     negative (absent) check.
+    # Fail CLOSED: if no `args:` line is found, treat it as non-compliant.
+    local py_args
+    py_args=$(grep -E '^[[:space:]]*args[[:space:]]*:' "$py_wf" | sed -E 's/[[:space:]]+#.*$//')
+    if [ -z "$py_args" ]; then
+      echo "FAIL - python-release.yml has no maturin-action 'args:' line (fail-closed)"
       fails=$((fails + 1))
-    fi
-    # ... and must never pass --release (abort). `--profile release-unwind`
-    # does not contain the substring `--release`, so this match is exact.
-    if grep -qE -- '--release([[:space:]]|$)' "$py_wf"; then
-      echo "FAIL - python-release.yml still passes '--release' (abort) to the wheel build"
-      fails=$((fails + 1))
+    else
+      # At least one args value must select the unwind profile (the wheel build).
+      if ! printf '%s\n' "$py_args" | grep -qF -- "$UNWIND_FLAG"; then
+        echo "FAIL - python-release.yml 'args:' does not select '${UNWIND_FLAG}' for the wheel build"
+        fails=$((fails + 1))
+      fi
+      # No args value may pass --release (abort).
+      if printf '%s\n' "$py_args" | grep -qE -- "$RELEASE_TOKEN_RE"; then
+        echo "FAIL - python-release.yml 'args:' still passes '--release' (abort) to the wheel build"
+        fails=$((fails + 1))
+      fi
     fi
   fi
 
@@ -86,7 +111,7 @@ check_definitions() {
     if ! grep -qF '[tool.maturin]' "$pyproject"; then
       echo "FAIL - pyproject.toml has no [tool.maturin] table (fail-closed)"
       fails=$((fails + 1))
-    elif printf '%s\n' "$maturin_section" | grep -qE -- '--release([[:space:]"'\'']|$)'; then
+    elif printf '%s\n' "$maturin_section" | grep -qE -- "$RELEASE_TOKEN_RE"; then
       echo "FAIL - pyproject.toml [tool.maturin] re-pins '--release' (abort)"
       fails=$((fails + 1))
     fi
@@ -108,7 +133,7 @@ check_definitions() {
         echo "FAIL - package.json \"build\" script does not select '${UNWIND_FLAG}'"
         fails=$((fails + 1))
       fi
-      if printf '%s\n' "$build_line" | grep -qE -- '--release([[:space:]"'\'']|$)'; then
+      if printf '%s\n' "$build_line" | grep -qE -- "$RELEASE_TOKEN_RE"; then
         echo "FAIL - package.json \"build\" script still passes '--release' (abort)"
         fails=$((fails + 1))
       fi
@@ -123,7 +148,7 @@ check_definitions() {
     echo "FAIL - node-release.yml missing (fail-closed): $node_wf"
     fails=$((fails + 1))
   else
-    if grep -qE -- '--release([[:space:]]|$)' "$node_wf"; then
+    if grep -qE -- "$RELEASE_TOKEN_RE" "$node_wf"; then
       echo "FAIL - node-release.yml drives an abort build with '--release'"
       fails=$((fails + 1))
     fi
@@ -304,6 +329,42 @@ EOF
     sbad "missing [profile.release-unwind] section should FAIL but passed"
   else
     sok "missing [profile.release-unwind] section fails closed"
+  fi
+
+  # (h) Python workflow whose wheel-build `args` uses a QUOTED "--release" ->
+  #     the quote is the token delimiter, so this must FAIL closed. The old
+  #     `--release([[:space:]]|$)` matcher missed it (quote != whitespace/EOL).
+  local py_quoted="$tmp/py_quoted"
+  write_compliant_fixture "$py_quoted"
+  cat >"$py_quoted/.github/workflows/python-release.yml" <<'EOF'
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          args: "--release --out dist"
+EOF
+  if check_definitions "$py_quoted" >/dev/null; then
+    sbad "python-release.yml quoted \"--release\" args should FAIL closed but passed"
+  else
+    sok "python-release.yml quoted \"--release\" args fails closed"
+  fi
+
+  # (i) Python workflow that mentions `--profile release-unwind` ONLY in a
+  #     COMMENT while the real `args` build with `--release` -> must FAIL closed.
+  #     The old whole-file positive match was satisfied by the comment and the
+  #     abort build slipped through.
+  local py_comment="$tmp/py_comment"
+  write_compliant_fixture "$py_comment"
+  cat >"$py_comment/.github/workflows/python-release.yml" <<'EOF'
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          # TODO: switch to --profile release-unwind (issue #1440)
+          args: --release --out dist
+EOF
+  if check_definitions "$py_comment" >/dev/null; then
+    sbad "python-release.yml comment-only profile w/ --release args should FAIL closed but passed"
+  else
+    sok "python-release.yml comment-only profile w/ --release args fails closed"
   fi
 
   # Best-effort cleanup; the guard is offline so nothing else touches this dir.
