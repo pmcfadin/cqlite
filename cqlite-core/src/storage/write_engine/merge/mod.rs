@@ -1184,7 +1184,9 @@ pub fn compute_baseline_min(input_paths: &[PathBuf]) -> (i64, i32, i32) {
                 let ts_stats = &sstable_stats.timestamp_stats;
                 baseline_min_ts = baseline_min_ts.min(ts_stats.min_timestamp);
                 // Local-deletion-time baseline seeding (#853/#886 branch-review,
-                // Finding 2). The parser reconstructs LDT as
+                // Finding 2; sentinel exclusion corrected in #1410).
+                //
+                // The parser reconstructs `min_deletion_time` as
                 // `readUnsignedVInt32() + DELETION_TIME_EPOCH` (EncodingStats.java:289),
                 // so a far-future LDT in [2^31, 2^32) surfaces here as an i64 ABOVE
                 // i32::MAX (e.g. 2^31+5). These are legitimate after the deletion-marker
@@ -1197,13 +1199,42 @@ pub fn compute_baseline_min(input_paths: &[PathBuf]) -> (i64, i32, i32) {
                 // straight to i32 would also work for the bits, but the explicit
                 // `as u32 as i32` documents the 32-bit unsigned normalization.
                 //
-                // 0 is the normalized "no tombstones" sentinel
-                // (StatisticsMetadata::finalize() maps i32::MAX→0); include it so the
-                // baseline stays safe for merger tombstones that also use
-                // local_deletion_time=0. SKIP only the live/no-deletion sentinel
-                // (i32::MAX, DeletionTime.LIVE), which must never lower the baseline.
+                // EXCLUDE any input whose `minLocalDeletionTime` is a
+                // "no local deletion time" sentinel from the merged LDT-min baseline —
+                // exactly what Cassandra's `EncodingStats.mergeWith` /
+                // `EncodingStats.merge` do (EncodingStats.java:113-115, 146): an input
+                // that carries no tombstone must NEVER lower the merged min, or every
+                // real tombstone LDT gets delta-encoded against a wrong (too-low)
+                // baseline and Data.db diverges (#1410, observed cass=99 vs ours=103,
+                // first diff at offset 24 where the row-tombstone LDT delta is emitted).
+                //
+                // The sentinel has THREE authoritative on-disk representations, all
+                // meaning "this SSTable has no local deletion time" — none of which is a
+                // real tombstone LDT (a Cassandra localDeletionTime is wall-clock seconds
+                // since the Unix epoch, always a large positive value, never 0 / EPOCH /
+                // MAX):
+                //   * `DELETION_TIME_EPOCH` — Cassandra's NO_STATS default and merge
+                //     identity (EncodingStats.java:74,78,97); a live-only Cassandra
+                //     SSTable reconstructs to exactly this.
+                //   * `i32::MAX` bit pattern — `DeletionTime.LIVE` / `Cell.NO_DELETION_TIME`.
+                //   * `0` — how CQLite's OWN writer records "no deletions" once
+                //     `StatisticsMetadata::finalize()` maps the unset `i32::MAX` min to 0
+                //     (stats_writer/metadata.rs), so a live-only CQLite input SSTable
+                //     reconstructs here as 0. This is the case #1410 actually hit: the
+                //     old code deliberately INCLUDED 0 and it dragged the baseline to 0.
+                //
+                // Comparison is on the raw parsed i64 for the `0` / `DELETION_TIME_EPOCH`
+                // sentinels (the authoritative values the parser reconstructs — no-
+                // heuristics #28) and on the 32-bit bit pattern for the `i32::MAX` LIVE
+                // marker. A genuine far-future LDT in [2^31, 2^32) surfaces as an i64
+                // above i32::MAX and is preserved as its negative-i32 bit pattern, which
+                // is exactly what the DataWriter delta-encodes against.
                 let ldt_bits = ts_stats.min_deletion_time as u32 as i32;
-                if ldt_bits != i32::MAX {
+                let is_no_deletion_sentinel = ts_stats.min_deletion_time == 0
+                    || ts_stats.min_deletion_time
+                        == crate::parser::enhanced_statistics_parser::DELETION_TIME_EPOCH
+                    || ldt_bits == i32::MAX;
+                if !is_no_deletion_sentinel {
                     baseline_min_ldt = baseline_min_ldt.min(ldt_bits);
                 }
                 if let Some(min_ttl) = ts_stats.min_ttl {
@@ -5146,6 +5177,75 @@ mod tests {
             baseline_ldt,
             i32::MAX,
             "live/no-deletion sentinel must not lower the seeded baseline"
+        );
+    }
+
+    /// #1410: a LIVE-ONLY CQLite input serializes its `minLocalDeletionTime` as `0`
+    /// (StatisticsMetadata::finalize maps the unset i32::MAX min to 0), and that `0`
+    /// no-deletion sentinel must NOT drag the merged LDT baseline down. When a
+    /// live-only input (LDT=0) is mixed with a tombstone-carrying input (a real
+    /// far-future/wall-clock LDT), the seeded baseline must equal the TOMBSTONE's
+    /// LDT — matching `EncodingStats.merge`, which treats the sentinel as the merge
+    /// identity. Regressing this re-introduces the #1410 wrong-delta (raw LDT
+    /// instead of `LDT - minLDT`) that diverged from Cassandra's Data.db.
+    #[test]
+    fn compute_baseline_min_skips_cqlite_zero_sentinel_mixed_with_tombstone() {
+        use crate::storage::sstable::writer::{StatisticsMetadata, StatisticsWriter};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("temp dir");
+
+        // Live-only input: no deletions recorded -> finalize records 0.
+        let live_data = tmp.path().join("nb-1-big-Data.db");
+        std::fs::write(&live_data, b"").expect("touch live Data.db");
+        let mut live_meta = StatisticsMetadata::new();
+        live_meta.min_local_deletion_time = 0;
+        StatisticsWriter::new(tmp.path().join("nb-1-big-Statistics.db"))
+            .write(&live_meta, None)
+            .expect("write live-only Statistics.db (LDT=0)");
+
+        // Tombstone-carrying input: a real wall-clock LDT (well above 0/EPOCH).
+        let tomb_ldt: i32 = 1_782_950_059; // 2026-07-01 (matches the #1387 fixture LDT).
+        let tomb_data = tmp.path().join("nb-2-big-Data.db");
+        std::fs::write(&tomb_data, b"").expect("touch tombstone Data.db");
+        let mut tomb_meta = StatisticsMetadata::new();
+        tomb_meta.min_local_deletion_time = tomb_ldt;
+        tomb_meta.max_local_deletion_time = tomb_ldt;
+        StatisticsWriter::new(tmp.path().join("nb-2-big-Statistics.db"))
+            .write(&tomb_meta, None)
+            .expect("write tombstone Statistics.db");
+
+        let (_ts, baseline_ldt, _ttl) = compute_baseline_min(&[live_data, tomb_data]);
+        assert_eq!(
+            baseline_ldt, tomb_ldt,
+            "the live-only input's 0 no-deletion sentinel must not lower the baseline \
+             below the tombstone input's real LDT (#1410)"
+        );
+    }
+
+    /// #1410: an ALL-live compaction (every input a no-deletion sentinel, incl. the
+    /// CQLite `0` form) leaves the LDT baseline at its `i32::MAX` "unseeded" value,
+    /// so the writer falls back to its own live-sentinel encoding rather than being
+    /// dragged to 0.
+    #[test]
+    fn compute_baseline_min_all_live_zero_stays_unseeded() {
+        use crate::storage::sstable::writer::{StatisticsMetadata, StatisticsWriter};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("temp dir");
+        let data_path = tmp.path().join("nb-1-big-Data.db");
+        std::fs::write(&data_path, b"").expect("touch Data.db");
+        let mut meta = StatisticsMetadata::new();
+        meta.min_local_deletion_time = 0; // CQLite "no deletions" form.
+        StatisticsWriter::new(tmp.path().join("nb-1-big-Statistics.db"))
+            .write(&meta, None)
+            .expect("write live-only Statistics.db (LDT=0)");
+
+        let (_ts, baseline_ldt, _ttl) = compute_baseline_min(&[data_path]);
+        assert_eq!(
+            baseline_ldt,
+            i32::MAX,
+            "an all-live compaction (0 sentinel) must leave the LDT baseline unseeded"
         );
     }
 

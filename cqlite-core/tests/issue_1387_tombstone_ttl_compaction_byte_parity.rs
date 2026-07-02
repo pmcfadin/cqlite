@@ -40,13 +40,20 @@
 //!     (histogram / HLL / bloom bookkeeping cannot byte-match across engines), per
 //!     issue #1017 AC6 / issue #1190.
 //!
-//! ## STATUS — blocked on #1410
-//! The three byte-parity scenarios are currently `#[ignore = "blocked on #1410"]`:
-//! building these fixtures REVEALED a real CQLite compaction bug — `compute_baseline_min`
-//! lets a live-only input's `min_deletion_time=0` sentinel corrupt the merged
-//! `localDeletionTime` baseline, so CQLite encodes a raw LDT delta instead of
-//! `LDT - minLDT`. See #1410. The gc-purge SEMANTIC scenario (c) is independent of
-//! that baseline bug and runs.
+//! ## STATUS — #1410 fixed the localDeletionTime baseline
+//! Building these fixtures REVEALED a real CQLite compaction bug — `compute_baseline_min`
+//! let a LIVE-ONLY input's no-deletion sentinel (CQLite serializes it as `0`) corrupt
+//! the merged `localDeletionTime` baseline, so CQLite encoded a raw LDT delta instead of
+//! `LDT - minLDT`. #1410 excludes that sentinel (matching `EncodingStats.merge`,
+//! EncodingStats.java:113-115,146) so the seeded baseline byte-matches Cassandra.
+//! After #1410:
+//!   * `shadow_row_delete` (a) and `rt_cross_gen` (d) — RUN and byte-match.
+//!   * `gc_purge_grace0` (c) — always ran (semantic, independent of the baseline bug).
+//!   * `ttl_expired_live` (b) — STILL `#[ignore]`, now blocked on #1538: byte parity
+//!     needs an EXPIRING `WriteWithTtl` cell with an AUTHORITATIVE pinned
+//!     `localExpirationTime` (the golden's `expires_at`); the current API derives it
+//!     from `SystemTime::now()`, so it cannot byte-match (and a `Delete` substitute
+//!     would prove the wrong thing). See the test's `#[ignore]` note.
 //!
 //! ## Dataset doctrine (issue #719 / parity mandate)
 //!   * `CQLITE_DATASETS_ROOT` unset OR the reference genuinely absent → SKIP.
@@ -559,11 +566,10 @@ fn assert_component_bytes(table: &str, ref_dir: &Path, out_dir: &Path, suffix: &
 /// Manifest: cass.compaction.CompactionDeleteAndPurgeRowTest.row_delete_purge,
 /// cass.compaction.CompactionDeletePKTest.partition_delete_preserved.
 ///
-/// BLOCKED on #1410: `compute_baseline_min` corrupts the merged localDeletionTime
-/// baseline when a live-only input contributes its `min_deletion_time=0` sentinel,
-/// so CQLite emits a raw LDT delta instead of `LDT - minLDT`.
+/// Fixed by #1410: `compute_baseline_min` now excludes a live-only input's
+/// `DELETION_TIME_EPOCH` no-deletion sentinel from the merged localDeletionTime
+/// baseline (matching `EncodingStats.merge`), so CQLite emits `LDT - minLDT`.
 #[tokio::test]
-#[ignore = "blocked on #1410 (compute_baseline_min localDeletionTime baseline bug)"]
 async fn shadow_row_delete_compaction_byte_for_byte() {
     let t = "shadow_row_delete";
     let Some(ref_dir) = reference_dir(t) else {
@@ -600,9 +606,27 @@ async fn shadow_row_delete_compaction_byte_for_byte() {
 
 /// Manifest: cass.compaction.TimeWindowCompactionStrategyTest.ttl_window_expiry_purge.
 ///
-/// BLOCKED on #1410 (same localDeletionTime baseline corruption path).
+/// The #1410 localDeletionTime baseline fix is NECESSARY for this scenario (lengths
+/// now match, cass=57 ours=57) but not SUFFICIENT: byte parity additionally requires
+/// rebuilding the older input as a genuine EXPIRING `WriteWithTtl` cell with an
+/// AUTHORITATIVE pinned `localExpirationTime` equal to the golden's `expires_at`
+/// (`INSERT ... USING TTL 1`) — NOT a `CellOperation::Delete` substitute, which
+/// bypasses the TTL-expiry path and emits the wrong row-liveness/cell shape (this is
+/// the #1387 roborev design finding folded into #1410).
+///
+/// BLOCKED on #1538 (WriteWithTtl authoritative-LDT public-API extension): the
+/// current `CellOperation::WriteWithTtl { column, value, ttl_seconds }` derives the
+/// expiring cell's `localExpirationTime` from `SystemTime::now() + ttl` (writer/mod.rs
+/// + data_writer), so it CANNOT be pinned to the golden's fixed `expires_at`. Without
+/// a way to supply the authoritative expiration, the two compactors cannot byte-match
+/// on the expiring-cell bytes, and a wall-clock-derived expiration would also be a
+/// flaky test. This test therefore stays `#[ignore]` pending #1538 rather than
+/// regressing to a `Delete` substitute (which would prove the wrong thing). The
+/// golden fixture is still covered by `byte_parity_reference_fixtures_present_and_consistent`.
+///
+/// See the #1410 return notes / #1538 for the design escalation.
 #[tokio::test]
-#[ignore = "blocked on #1410 (compute_baseline_min localDeletionTime baseline bug)"]
+#[ignore = "blocked on #1538: WriteWithTtl needs an authoritative pinned localExpirationTime to byte-match the expired-TTL golden (a Delete substitute proves the wrong thing)"]
 async fn ttl_expired_live_compaction_byte_for_byte() {
     let t = "ttl_expired_live";
     let Some(ref_dir) = reference_dir(t) else {
@@ -612,8 +636,20 @@ async fn ttl_expired_live_compaction_byte_for_byte() {
         eprintln!("[issue_1387] {t} reference absent; skipping");
         return;
     };
-    // LDT of the expired (1,1) cell tombstone, from the golden's cell deletion_info.
-    let ldt = ldt_secs_from_golden(&ref_dir, t, |jv| {
+    // Authoritative TTL + pinned localExpirationTime from the golden's expiring row
+    // liveness (`INSERT ... USING TTL 1`). The row liveness carries `ttl` and
+    // `expires_at`; the expired cell `v` carries its own `local_delete_time`. These
+    // are what an authoritative expiring-cell input must reproduce EXACTLY (no
+    // guessing) once #1538 lands a `WriteWithTtl` that accepts the pinned expiration.
+    let _expires_at = ldt_secs_from_golden(&ref_dir, t, |jv| {
+        jv.get("rows")?.as_array()?.iter().find_map(|row| {
+            row.get("liveness_info")?
+                .get("expires_at")?
+                .as_str()
+                .map(str::to_string)
+        })
+    });
+    let _cell_ldt = ldt_secs_from_golden(&ref_dir, t, |jv| {
         jv.get("rows")?.as_array()?.iter().find_map(|row| {
             row.get("cells")?.as_array()?.iter().find_map(|cell| {
                 cell.get("deletion_info")?
@@ -623,21 +659,14 @@ async fn ttl_expired_live_compaction_byte_for_byte() {
             })
         })
     });
-    // The expired TTL cell reconstructs as a cell tombstone at the read-back LDT.
-    let expired = Mutation::new(
-        TableId::new(KEYSPACE, t),
-        PartitionKey::single("id", Value::Integer(1)),
-        Some(ClusteringKey::single("ck", Value::Integer(1))),
-        vec![CellOperation::Delete {
-            column: "v".into(),
-            local_deletion_time: Some(ldt),
-        }],
-        T_A,
-        None,
-    );
-    let group_a = vec![expired];
-    let group_b = vec![ck_row(t, 1, 2, "b-1-2", T_B)];
-    assert_compaction_byte_parity(t, clustering_schema(t), group_a, group_b).await;
+    // #1538 (target shape once the authoritative-LDT WriteWithTtl API exists):
+    //   let expired = Mutation::new(.., vec![CellOperation::WriteWithTtl {
+    //       column: "v".into(), value: Value::Text("...".into()), ttl_seconds: 1,
+    //   }], T_A, None).with_ttl_local_expiration_time(_expires_at); // #1538 API
+    //   let group_a = vec![expired];
+    //   let group_b = vec![ck_row(t, 1, 2, "b-1-2", T_B)];
+    //   assert_compaction_byte_parity(t, clustering_schema(t), group_a, group_b).await;
+    unreachable!("blocked on #1538; see #[ignore] reason");
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -667,9 +696,8 @@ fn rt(
 
 /// Manifest: cass.compaction.CompactionDeleteRowRangeTest.range_tombstone_merge.
 ///
-/// BLOCKED on #1410 (same localDeletionTime baseline corruption path).
+/// Fixed by #1410 (localDeletionTime baseline sentinel exclusion).
 #[tokio::test]
-#[ignore = "blocked on #1410 (compute_baseline_min localDeletionTime baseline bug)"]
 async fn rt_cross_gen_compaction_byte_for_byte() {
     let t = "rt_cross_gen";
     let Some(ref_dir) = reference_dir(t) else {
@@ -788,7 +816,8 @@ async fn gc_purge_grace0_major_compaction_purges_to_empty() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// Fixture-integrity guard for the #[ignore]-until-#1410 byte-parity references
+// Fixture-integrity guard for the byte-parity references (kept post-#1410 as a
+// cheap always-on golden-consistency check alongside the now-running byte tests)
 // ════════════════════════════════════════════════════════════════════════════
 
 /// WHERE a scenario's tombstone `local_delete_time` lives in the golden JSONL — the
