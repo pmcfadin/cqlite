@@ -1335,3 +1335,86 @@ fn coverage_finds_high_relevance_files() {
         cov.high_total, cov.high_classified
     );
 }
+
+/// A scenario referencing a Cassandra file by `files: [<value>]`. The reference
+/// is otherwise valid `out_of_scope` (no path-existence checks on cassandra.files).
+fn oos_scenario_with_file(id_slug: &str, file_ref: &str) -> String {
+    format!(
+        r#"  - id: cass.sstable_format.{id_slug}
+    title: t
+    status: out_of_scope
+    capability: sstable_format
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: sstable-format
+      relevance: med
+      files:
+        - {file_ref}
+    cqlite:
+      coverage:
+        notes: n
+    evidence:
+      type: out_of_scope
+      artifacts: [logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: not_sstable_reader_writer_compactor
+      rationale: r
+      cqlite_boundary: b
+      safe_claim: s
+      related_in_scope_scenarios: [cass.sstable_format.descriptor_component_resolution]
+"#
+    )
+}
+
+const AMBIGUOUS_INDEX: &str = "\
+#### 🔴 High · `DupTest.java`
+- **Path:** `test/unit/org/apache/cassandra/io/sstable/DupTest.java`
+#### 🟡 Med · `DupTest.java`
+- **Path:** `test/unit/org/apache/cassandra/tools/DupTest.java`
+#### 🟡 Med · `SoloTest.java`
+- **Path:** `test/unit/org/apache/cassandra/db/SoloTest.java`
+";
+
+/// Issue #1407: a bare basename that maps to >1 index source path is rejected;
+/// a path-qualified reference and an unambiguous bare basename are accepted.
+#[test]
+fn ambiguous_bare_basename_is_rejected_when_index_present() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    std::fs::write(root.join("docs/cassandra_test_index.md"), AMBIGUOUS_INDEX).unwrap();
+
+    let scenarios = format!(
+        "{}{}{}",
+        oos_scenario_with_file("bare_ambiguous", "DupTest.java"),
+        oos_scenario_with_file(
+            "path_qualified",
+            "test/unit/org/apache/cassandra/io/sstable/DupTest.java"
+        ),
+        oos_scenario_with_file("bare_unambiguous", "SoloTest.java"),
+    );
+    let m = Manifest::from_yaml(&wrap(&scenarios)).unwrap();
+    let findings = lint(&m, Some(root));
+    let ambig: Vec<_> = findings
+        .iter()
+        .filter(|f| f.level == Level::Error && f.message.contains("ambiguous bare basename"))
+        .collect();
+
+    assert_eq!(
+        ambig.len(),
+        1,
+        "exactly one ambiguous-basename error expected, got: {ambig:#?}"
+    );
+    assert_eq!(ambig[0].id, "cass.sstable_format.bare_ambiguous");
+    assert!(ambig[0].message.contains("DupTest.java"));
+    // The path-qualified and unambiguous-bare scenarios must NOT be flagged.
+    assert!(!ambig
+        .iter()
+        .any(|f| f.id == "cass.sstable_format.path_qualified"
+            || f.id == "cass.sstable_format.bare_unambiguous"));
+}
