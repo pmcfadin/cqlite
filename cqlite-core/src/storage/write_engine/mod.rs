@@ -1066,9 +1066,21 @@ impl WriteEngine {
     ///
     /// # Errors
     ///
-    /// Returns an error if the final flush fails. If the WAL truncate fails
-    /// after a successful SSTable write, a warning is logged but no error
-    /// is returned (the data is already persisted).
+    /// Returns an error if the final flush fails.
+    ///
+    /// WAL-truncate handling during that flush is phase-aware (issue #1392):
+    ///
+    /// * A truncate failure that leaves the WAL intact (it faulted *before*
+    ///   mutating the WAL) is logged and swallowed — the WAL stays a valid,
+    ///   idempotent replay marker, so no error is surfaced.
+    /// * A truncate failure *after* `set_len(0)` has already zeroed the WAL
+    ///   (`WalTruncateFailedAfterCommit`) is **propagated**. By then flush state
+    ///   has already been committed — the SSTable is durable and the generation
+    ///   has advanced — so the data is safe, but the error is surfaced so the
+    ///   caller knows the WAL is no longer a replay marker.
+    ///
+    /// When the WAL is already empty (e.g. `Durability::Disabled`) the truncate
+    /// phase is skipped, so no truncate-phase error can arise.
     pub async fn close(&mut self) -> Result<()> {
         // Check if already closed (idempotent)
         if self.closed.swap(true, Ordering::SeqCst) {

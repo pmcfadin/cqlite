@@ -233,6 +233,14 @@ fn dirs_to_sync(leaf: &Path, data_root: &Path) -> Vec<PathBuf> {
 /// If any directory fsync fails, the error is propagated and the WAL is
 /// **not** truncated, so recovery can still replay from the WAL.
 ///
+/// When the WAL is already empty (`wal.size() == 0`) — e.g. a flush under
+/// `Durability::Disabled` or any flush whose mutations were never WAL'd — the
+/// truncate phase is skipped entirely and [`FlushDurabilityOutcome::Durable`]
+/// is returned (issue #1392). There is no recovery marker to preserve or
+/// destroy, so entering the truncate phase would only risk a spurious
+/// after-commit error on an already-durable flush. The directory-sync barrier
+/// above still runs unconditionally.
+///
 /// The WAL truncate is phase-aware (issue #1392):
 ///
 /// * [`TruncateError::BeforeMutation`] — the truncate failed without touching
@@ -275,6 +283,19 @@ pub(crate) fn finalize_flush_durability(
     }
 
     // Step 2: it is now durable-safe to truncate the WAL.
+    //
+    // Skip the truncate phase entirely when the WAL is already empty (issue
+    // #1392): a flush under `Durability::Disabled`, or any flush whose
+    // mutations were never WAL'd, has nothing to truncate — there is no
+    // recovery marker to preserve or destroy. Entering the truncate phase
+    // anyway would let a post-`set_len(0)` seek/sync fault surface as a
+    // spurious `WalTruncateFailedAfterCommit` on a flush that is already fully
+    // durable in the published SSTable. The directory-sync barrier above still
+    // runs unconditionally, so the durability guarantee is unchanged.
+    if wal.size() == 0 {
+        return Ok(FlushDurabilityOutcome::Durable);
+    }
+
     match barrier.truncate_wal(wal) {
         Ok(()) => Ok(FlushDurabilityOutcome::Durable),
         Err(TruncateError::BeforeMutation(e)) => {
@@ -538,6 +559,46 @@ mod tests {
             0,
             "the WAL was zeroed by set_len(0); it is no longer replayable, which \
              is why finalize must NOT report success"
+        );
+    }
+
+    // Issue #1392 (roborev LOW, FINDING 1): a flush whose WAL is already empty
+    // (e.g. `Durability::Disabled`, or any flush whose mutations were never
+    // WAL'd) must SKIP the WAL truncate phase entirely. The directory-sync
+    // barrier still runs, but `truncate_wal` is never invoked — so a
+    // truncate-phase fault cannot turn an already-durable flush into a spurious
+    // `WalTruncateFailedAfterCommit` error.
+    #[test]
+    fn empty_wal_skips_truncate_phase() {
+        let dir = TempDir::new().unwrap();
+        // A freshly created WAL with nothing appended has size 0.
+        let mut wal = WriteAheadLog::create(dir.path()).unwrap();
+        assert_eq!(wal.size(), 0, "a fresh, unwritten WAL must have size 0");
+
+        // Arm the truncate to fault AFTER mutating the WAL: if the truncate
+        // phase were entered at all, this would surface as
+        // `WalTruncateFailedAfterCommit`. Skipping the phase must avoid it.
+        let mut barrier = RecordingBarrier::new();
+        barrier.fail_truncate_after_mutation = true;
+
+        let outcome = finalize_flush_durability(
+            &barrier,
+            &dir.path().join("nb-1-big-Data.db"),
+            dir.path(),
+            &mut wal,
+        )
+        .expect("an empty-WAL flush must not enter the truncate phase");
+        assert!(
+            matches!(outcome, FlushDurabilityOutcome::Durable),
+            "empty WAL: the truncate phase is skipped, so the flush stays Durable"
+        );
+
+        // The directory was still synced, but the WAL truncate was never
+        // attempted (no WalTruncate op recorded and the armed fault never fired).
+        assert_eq!(
+            barrier.ops.into_inner(),
+            vec![FsOp::SyncDir(dir.path().to_path_buf())],
+            "dir fsync still runs; the truncate phase is skipped for an empty WAL"
         );
     }
 
