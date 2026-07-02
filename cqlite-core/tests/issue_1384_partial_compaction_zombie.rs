@@ -83,6 +83,10 @@ use tempfile::TempDir;
 /// the excluded SSTable's live data.
 const PK: i32 = 1;
 const CK: i32 = 0;
+/// A distinct clustering key for a SIBLING live row that is NEVER deleted. Used by
+/// the row / complex safe-purge tests to prove the compaction output is genuinely
+/// non-empty (preserves untouched data) even when the (PK, CK) row is purged away.
+const SIBLING_CK: i32 = 99;
 
 /// Write timestamp (micros) of the live cell in A and the EXCLUDED SSTable C
 /// (zombie scenario). The tombstone (`TS_TOMB`) is NEWER so it wins last-write-wins
@@ -202,6 +206,37 @@ fn live_v(value: &str, ts: i64) -> Mutation {
                 value: Value::Text("anchor".to_string()),
             },
         ],
+        ts,
+        None,
+    )
+}
+
+/// A SIBLING live row at `SIBLING_CK` (scalar schema) that is NEVER deleted, so it
+/// must survive any partial compaction — proving the output is not dropped whole.
+fn sibling_live_v(ts: i64) -> Mutation {
+    Mutation::new(
+        table_id(),
+        pk_key(),
+        Some(ClusteringKey::single("ck", Value::Integer(SIBLING_CK))),
+        vec![CellOperation::Write {
+            column: "v".to_string(),
+            value: Value::Text("sibling".to_string()),
+        }],
+        ts,
+        None,
+    )
+}
+
+/// A SIBLING live row at `SIBLING_CK` (collection schema), never deleted.
+fn sibling_live_tag(ts: i64) -> Mutation {
+    Mutation::new(
+        table_id(),
+        pk_key(),
+        Some(ClusteringKey::single("ck", Value::Integer(SIBLING_CK))),
+        vec![CellOperation::Write {
+            column: "tags".to_string(),
+            value: Value::Set(vec![Value::Integer(1)]),
+        }],
         ts,
         None,
     )
@@ -367,6 +402,13 @@ struct Observed {
     tags_complex_deletion: bool,
     /// A live `tags` element survived (a zombie if the marker should win).
     tags_live_element: bool,
+    /// The live `w` anchor survived (proves the compaction PRESERVED non-deleted
+    /// data while purging only the tombstone — guards against an empty/dropped
+    /// output masquerading as a successful purge).
+    w_live: Option<String>,
+    /// A SIBLING live row (at `SIBLING_CK`, never deleted) survived — proves a
+    /// row/complex purge did not drop the whole output (empty-output false pass).
+    sibling_live: bool,
 }
 
 /// Run a set of SSTables through the SAME merge read path the compactor uses, with
@@ -403,6 +445,20 @@ fn observe(
 }
 
 fn collapse(entry: &MergeEntry, obs: &mut Observed) {
+    // A SIBLING live row at a clustering key other than CK (used by the row/
+    // complex safe-purge tests): its survival proves the compaction output is
+    // genuinely non-empty even when the (PK, CK) row is legitimately purged away.
+    if entry_ck(entry) == Some(SIBLING_CK) {
+        if let RowData::Live { cells } = &entry.row_data {
+            if cells
+                .iter()
+                .any(|c| matches!(&c.value, Value::Text(_) | Value::Integer(_)) && c.column != "ck")
+            {
+                obs.sibling_live = true;
+            }
+        }
+        return; // sibling row is not the (PK, CK) entry under test
+    }
     if entry.complex_deletions.iter().any(|c| c.column == "tags") {
         obs.tags_complex_deletion = true;
     }
@@ -416,6 +472,18 @@ fn collapse(entry: &MergeEntry, obs: &mut Observed) {
     }
 }
 
+/// The clustering-key `ck` int of a merge entry, if any.
+fn entry_ck(entry: &MergeEntry) -> Option<i32> {
+    entry
+        .clustering_key
+        .as_ref()
+        .and_then(|c| c.columns.first())
+        .and_then(|(_, v)| match v {
+            Value::Integer(n) => Some(*n),
+            _ => None,
+        })
+}
+
 fn observe_cell(c: &CellData, obs: &mut Observed) {
     match c.column.as_str() {
         "v" => match &c.value {
@@ -425,6 +493,11 @@ fn observe_cell(c: &CellData, obs: &mut Observed) {
             }
             _ => {}
         },
+        "w" => {
+            if let Value::Text(t) = &c.value {
+                obs.w_live = Some(t.clone());
+            }
+        }
         "tags" => {
             let is_live_element = c.is_complex_element && !c.is_deleted;
             let is_live_set_value = matches!(&c.value, Value::Set(s) if !s.is_empty());
@@ -701,6 +774,14 @@ fn purge_resumes_when_overlap_bound_above_tombstone() {
     assert!(
         partial.v_live.is_none(),
         "no live `v` exists in the compaction set {{A,B}} after the delete; got {partial:?}"
+    );
+    // The purge removed ONLY the `v` tombstone: the live `w` anchor (from B@10s)
+    // must survive, proving the merge preserved non-deleted data rather than
+    // emitting an empty row (guards the empty-output false pass).
+    assert_eq!(
+        partial.w_live.as_deref(),
+        Some("anchor"),
+        "the live `w` anchor must survive the cell-tombstone purge; got {partial:?}"
     );
 
     // Full cross-generation read: C's NEWER live value wins (not a zombie — C's
@@ -1042,6 +1123,13 @@ fn production_partial_purge_resumes_when_safe() {
         out.v_live.is_none(),
         "no live `v` can exist in the {{A,B}} compaction output after the delete; got {out:?}"
     );
+    // The production compaction purged ONLY the `v` tombstone and PRESERVED the
+    // live `w` anchor — the output is genuinely non-empty, not dropped wholesale.
+    assert_eq!(
+        out.w_live.as_deref(),
+        Some("anchor"),
+        "the live `w` anchor must survive the production cell-tombstone purge; got {out:?}"
+    );
     // (ii) Then the full set {output, C}: C's newer live `v2` legitimately wins.
     let all = observe(res.all, &sch, None, None, false, None);
     assert_eq!(
@@ -1099,9 +1187,12 @@ fn production_partial_complex_deletion_no_zombie() {
 /// partial merge PURGES the row tombstone (absent from the output).
 #[test]
 fn purge_resumes_row_tombstone_when_bound_above() {
+    // A also carries a SIBLING live row (ck=SIBLING_CK) that B never touches, so
+    // the compaction output cannot be legitimately empty — its survival guards
+    // against an empty/dropped output masquerading as a successful purge.
     let s = Scenario::build(
         schema_scalar(),
-        vec![live_v("v1", TS_LIVE)],
+        vec![live_v("v1", TS_LIVE), sibling_live_v(TS_LIVE)],
         vec![row_tomb()],
         vec![live_v("v2", TS_LIVE_NEWER)],
     );
@@ -1122,6 +1213,13 @@ fn purge_resumes_row_tombstone_when_bound_above() {
         partial.v_live.is_none(),
         "purging the row tombstone must NOT resurrect A's covered in-set `v1`@5s; got {partial:?}"
     );
+    // The untouched sibling row survived: the purge dropped ONLY the deleted row,
+    // not the whole output.
+    assert!(
+        partial.sibling_live,
+        "the untouched sibling row must survive the row-tombstone purge (output not dropped \
+         wholesale); got {partial:?}"
+    );
 }
 
 /// Safe-purge, COMPLEX-deletion marker: with C newer the partial merge PURGES the
@@ -1130,7 +1228,7 @@ fn purge_resumes_row_tombstone_when_bound_above() {
 fn purge_resumes_complex_deletion_when_bound_above() {
     let s = Scenario::build(
         schema_collection(),
-        vec![live_tag_element(7, TS_LIVE)],
+        vec![live_tag_element(7, TS_LIVE), sibling_live_tag(TS_LIVE)],
         vec![complex_deletion_tags()],
         vec![live_tag_element(9, TS_LIVE_NEWER)],
     );
@@ -1150,5 +1248,12 @@ fn purge_resumes_complex_deletion_when_bound_above() {
         !partial.tags_live_element,
         "purging the complex-deletion marker must NOT resurrect A's covered in-set element \
          `tags={{7}}`@5s; got {partial:?}"
+    );
+    // The untouched sibling row survived: the purge dropped ONLY the marker's
+    // covered element, not the whole output.
+    assert!(
+        partial.sibling_live,
+        "the untouched sibling row must survive the complex-deletion purge (output not dropped \
+         wholesale); got {partial:?}"
     );
 }
