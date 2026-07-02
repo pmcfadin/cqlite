@@ -331,6 +331,13 @@ pub struct CompactResult {
     pub data_file_size: u64,
     /// Wall-clock execution time in milliseconds
     pub execution_time_ms: f64,
+    /// SSTables DROPPED WHOLE by the fully-expired fast path (issue #1388), by
+    /// input Data.db path. Distinct from the merged inputs: each was proven fully
+    /// expired (authoritative `Statistics.db` metadata) and overlap-safe under
+    /// `--major`, so it was excluded from the merge and reclaimed after publish.
+    /// Empty unless `--major` and at least one input is fully expired past
+    /// gc_grace. Assertable from the plan (not just output absence).
+    pub dropped_whole: Vec<std::path::PathBuf>,
 }
 
 #[cfg(feature = "write-support")]
@@ -346,6 +353,17 @@ impl CompactResult {
             "  partitions: {}, rows: {}, Data.db: {} bytes ({:.1}ms)",
             self.output_partitions, self.output_rows, self.data_file_size, self.execution_time_ms
         );
+        if !self.dropped_whole.is_empty() {
+            // Issue #1388: surface the fully-expired SSTables dropped whole
+            // (excluded from the merge, reclaimed after publish).
+            println!(
+                "  dropped whole (fully expired): {}",
+                self.dropped_whole.len()
+            );
+            for p in &self.dropped_whole {
+                println!("    - {}", p.display());
+            }
+        }
     }
 }
 
@@ -418,6 +436,7 @@ pub async fn handle_compact(args: &crate::cli_types::CompactArgs) -> Result<Comp
         output_rows: report.stats.output_rows,
         data_file_size: report.output.data_size,
         execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
+        dropped_whole: report.stats.dropped_whole.clone(),
     })
 }
 

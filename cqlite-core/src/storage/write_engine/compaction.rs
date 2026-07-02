@@ -58,17 +58,62 @@ impl WriteEngine {
     /// SSTables — see [`merge::compute_max_purgeable_timestamp`]. When `Some`, a
     /// tombstone older than every outside SSTable is purged even in a partial
     /// compaction; `None` keeps the conservative #921 behavior (no purging).
-    #[tracing::instrument(name = "compaction.start_merge", skip(self, input_paths, max_purgeable_timestamp), fields(inputs = input_paths.len()))]
+    #[tracing::instrument(name = "compaction.start_merge", skip(self, input_paths, max_purgeable_timestamp, outside_paths), fields(inputs = input_paths.len()))]
     pub(crate) fn start_merge(
         &mut self,
         input_paths: Vec<PathBuf>,
         purge_safe: bool,
         max_purgeable_timestamp: Option<i64>,
+        outside_paths: Vec<PathBuf>,
     ) -> Result<()> {
         log::info!(
             "Starting compaction merge of {} SSTables",
             input_paths.len()
         );
+
+        // gc_grace / gcBefore cutoff (issue #845): the fully-expired drop-set
+        // (issue #1388) needs the same cutoff the merger's purge stage uses, so
+        // compute it up front. `now_secs` is reused below for the merger.
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let gc_before_secs = merge::compute_gc_before(&self.config.schema, now_secs);
+
+        // Fully-expired SSTable drop (issue #1388): compute the subset of the
+        // selected inputs that are provably fully expired (authoritative
+        // `Statistics.db` `max_deletion_time < gcBefore`, no cell scan) AND
+        // overlap-safe against the outside set (`max_timestamp` below the outside
+        // min write timestamp — the same #935 coarse global bound). For a full
+        // compaction `outside_paths` is empty ⇒ +inf bound ⇒ every fully-expired
+        // input is droppable. These SSTables are EXCLUDED from the merger's input
+        // list below (never read/decoded — the perf win) and reclaimed after the
+        // merged output publishes.
+        let drop_set = merge::fully_expired_sstables(&input_paths, &outside_paths, gc_before_secs);
+        let dropped_lookup: std::collections::HashSet<&PathBuf> = drop_set.iter().collect();
+        let mut input_paths: Vec<PathBuf> = input_paths
+            .iter()
+            .filter(|p| !dropped_lookup.contains(*p))
+            .cloned()
+            .collect();
+        // Guard the degenerate all-dropped case: the merger requires at least one
+        // input, so retain the last dropped SSTable in the merge (its rows purge to
+        // empty through the normal path) rather than failing; the rest are still
+        // dropped whole. Correctness is preserved and no read cost is paid for the
+        // remaining dropped SSTables.
+        let dropped_whole: Vec<PathBuf> = if input_paths.is_empty() {
+            let mut all = drop_set.clone();
+            let retained = all.pop();
+            if let Some(r) = retained.clone() {
+                input_paths.push(r);
+            }
+            drop_set
+                .into_iter()
+                .filter(|p| Some(p) != retained.as_ref())
+                .collect()
+        } else {
+            drop_set
+        };
 
         // Measure total bytes read (sum of Data.db file sizes as an approximation)
         let bytes_read: u64 = input_paths
@@ -132,18 +177,13 @@ impl WriteEngine {
 
         // Create K-way merger.
         //
-        // gc_grace / gcBefore purging (issue #845): compute `gcBefore = now -
-        // gc_grace_seconds` from the table's `gc_grace_seconds` (read from the
-        // AUTHORITATIVE table schema's options, not the dropped-column-augmented
-        // `effective_schema`). When the table declares no `gc_grace_seconds`,
-        // `compute_gc_before` returns `None` and purging is a strict no-op,
-        // preserving the pre-#845 behavior. `now_secs` is the wall-clock used for
-        // both the purge boundary and TTL evaluation.
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let gc_before_secs = merge::compute_gc_before(&self.config.schema, now_secs);
+        // gc_grace / gcBefore purging (issue #845): `gcBefore = now -
+        // gc_grace_seconds` and `now_secs` were computed above (also used by the
+        // #1388 fully-expired drop-set). `compute_gc_before` returns `None` when the
+        // table declares no valid `gc_grace_seconds`, disabling purging (and, above,
+        // dropping) — preserving the pre-#845 behavior. `now_secs` is the wall-clock
+        // used for both the purge boundary and TTL evaluation.
+        //
         // Overlap-safety gate (#921 finding 1): only a major/full compaction
         // (one that spans every candidate SSTable for the table) may purge
         // tombstones. A partial compaction sets `purge_safe = false`, which
@@ -246,6 +286,7 @@ impl WriteEngine {
             bytes_read,
             started_at: Instant::now(),
             effective_schema,
+            dropped_whole,
         });
 
         Ok(())
@@ -463,6 +504,22 @@ impl WriteEngine {
             }
         }
 
+        // Reclaim the DROPPED-WHOLE SSTables (issue #1388): proven fully expired +
+        // overlap-safe, they were EXCLUDED from the merger (never read) so their
+        // reclamation happens here — AFTER the merged output published — via the
+        // same best-effort component-delete path as the merged inputs. A failure is
+        // an invisible orphan (TOC.txt removed first) reclaimed on next startup.
+        for dropped in &merge.dropped_whole {
+            if let Err(e) = self.delete_sstable_files(dropped) {
+                log::warn!(
+                    "Failed to delete dropped-whole compaction input {:?}: {} \
+                     (merge output is valid; leftover is an invisible orphan)",
+                    dropped,
+                    e
+                );
+            }
+        }
+
         // Step 4: Remove the now-empty tmp directory (best effort).
         if let Err(e) = std::fs::remove_dir_all(&merge.tmp_dir) {
             log::debug!(
@@ -519,6 +576,11 @@ impl WriteEngine {
         // Update per-step report
         report.completed_merges.push(final_data_path);
         report.bytes_written += total_bytes_written;
+        // Record the dropped-whole set (issue #1388, R4), distinct from the merged
+        // inputs, so the drop decision is assertable from the plan/stats.
+        report
+            .dropped_whole
+            .extend(merge.dropped_whole.iter().cloned());
 
         // Update cumulative lifetime stats
         self.cumulative_stats.compactions_completed += 1;

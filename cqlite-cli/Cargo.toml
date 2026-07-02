@@ -151,6 +151,11 @@ name = "duckdb_parquet_validation"
 path = "tests/duckdb_parquet_validation.rs"
 required-features = ["state_machine", "duckdb-tests"]
 
+[[test]]
+name = "issue_1388_compact_major_drop"
+path = "tests/issue_1388_compact_major_drop.rs"
+required-features = ["write-support"]
+
 [features]
 # M2+ production defaults: Interactive REPL with query engine
 default = ["interactive", "tui", "cli-helpers"]

@@ -15,6 +15,8 @@ use crate::types::Value;
 #[cfg(feature = "write-support")]
 use std::cmp::Ordering;
 #[cfg(feature = "write-support")]
+use std::path::PathBuf;
+#[cfg(feature = "write-support")]
 use std::time::Duration;
 
 /// Entry in the merge stream
@@ -415,4 +417,12 @@ pub struct MergeStats {
     pub bytes_written: u64,
     /// Elapsed time
     pub elapsed: Duration,
+    /// SSTables DROPPED WHOLE by the fully-expired fast path (issue #1388),
+    /// distinct from the merged inputs: each of these was proven fully expired by
+    /// authoritative `Statistics.db` metadata (`max_deletion_time < gcBefore`) and
+    /// overlap-safe, so it was EXCLUDED from the K-way merger's input list (never
+    /// read/decoded) and its components are reclaimed after the output publishes.
+    /// Empty for a compaction that drops nothing (byte-identical to pre-#1388
+    /// behavior). Paths are input Data.db paths.
+    pub dropped_whole: Vec<PathBuf>,
 }
