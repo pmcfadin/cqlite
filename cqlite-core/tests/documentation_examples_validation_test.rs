@@ -77,7 +77,7 @@ async fn test_documented_example_opening_and_reading_sstable() {
         // Just verify types are correct (matches documented API)
         let _: &cqlite_core::types::TableId = table_id;
         let _: &cqlite_core::RowKey = row_key;
-        let _: &cqlite_core::Value = value;
+        let _: &cqlite_core::ScanRow = value;
     }
 }
 

@@ -234,7 +234,8 @@ fn compact_sstables_merges_explicit_inputs_with_lww() {
     );
 
     // ids 6..=10 overlap; SSTable B (ts=200) wins over A (ts=100).
-    let by_pk: HashMap<Vec<u8>, Value> = results.into_iter().map(|(k, v)| (k.0, v)).collect();
+    let by_pk: HashMap<Vec<u8>, cqlite_core::ScanRow> =
+        results.into_iter().map(|(k, v)| (k.0, v)).collect();
     for id in 6_i32..=10 {
         let key: Vec<u8> = id.to_be_bytes().into();
         let row = by_pk
