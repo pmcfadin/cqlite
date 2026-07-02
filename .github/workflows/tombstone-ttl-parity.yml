@@ -54,6 +54,8 @@ on:
       - 'test-data/cassandra-parity-manifest.yml'
       - 'test-data/scripts/generate-tombstone-parity.sh'
       - 'test-data/scripts/generate-deltas.sh'
+      - 'test-data/scripts/generate-compaction-tombstone-ttl-parity.sh'
+      - 'cqlite-core/tests/issue_1387_tombstone_ttl_compaction_byte_parity.rs'
       - '.github/workflows/tombstone-ttl-parity.yml'
 
 env:
@@ -113,6 +115,9 @@ jobs:
       - name: Generate tombstone / TTL fixtures (test_tomb, epic #972)
         run: bash test-data/scripts/generate-tombstone-parity.sh
 
+      - name: Generate tombstone/TTL COMPACTION fixtures (test_compaction_tombstone_ttl, issue #1387)
+        run: bash test-data/scripts/generate-compaction-tombstone-ttl-parity.sh
+
       - name: Verify generated fixtures
         run: |
           echo "=== test_tomb Data.db files ==="
@@ -141,6 +146,20 @@ jobs:
               --test issue_1019_static_dropped_collection_compaction_parity \
               --test issue_1021_repaired_metadata_compaction_parity \
               --test sstable_parity_repaired_metadata_test \
+              -- --nocapture
+
+      - name: Run tombstone/TTL COMPACTION byte-parity (issue #1387, strict)
+        # The three byte-for-byte scenarios (shadow_row_delete, ttl_expired_live,
+        # rt_cross_gen) are #[ignore = "blocked on #1410"] until the
+        # compute_baseline_min localDeletionTime baseline bug is fixed, so a default
+        # `cargo test` runs only the gc-purge SEMANTIC scenario. Under
+        # CQLITE_REQUIRE_FIXTURES=1 the fixture-presence guard is fail-closed: a
+        # missing/incomplete fixture PANICS rather than skip-passing.
+        run: |
+          env CQLITE_REQUIRE_FIXTURES=1 \
+            CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
+            cargo test -p cqlite-core --features write-support \
+              --test issue_1387_tombstone_ttl_compaction_byte_parity \
               -- --nocapture
 
       # issue #1028: on failure, emit a structured parity-failures.json so the

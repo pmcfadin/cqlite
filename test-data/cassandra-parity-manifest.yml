@@ -14002,10 +14002,10 @@ scenarios:
 
   - id: cass.compaction.CompactionDeleteAndPurgeRowTest.row_delete_purge
     title: "Row delete + gc purge during compaction"
-    status: planned
+    status: partial
     capability: compaction_merge
     priority: P1
-    risk: p2_coverage
+    risk: p1_correctness
     cassandra:
       category: compaction
       relevance: high
@@ -14014,29 +14014,60 @@ scenarios:
     cqlite:
       coverage:
         suite: compaction_parity_tombstone_ttl
-        tests: []
+        tests:
+          - cqlite-core/tests/issue_1387_tombstone_ttl_compaction_byte_parity.rs
         notes: >-
-          Row-level deletion and purge are covered by the compaction parity suite; this specific case is not yet mirrored with its own fixture.
+          A dedicated Cassandra 5.0.2-COMPACTED fixture (test_compaction_tombstone_ttl.shadow_row_delete,
+          issue #1387) now mirrors a newer-generation ROW tombstone shadowing an
+          older-generation live row across a major compaction (gc_grace default so
+          the marker SURVIVES). The tombstone localDeletionTime is wall-clock-derived
+          by Cassandra; the byte-parity test reads it from the committed golden JSONL
+          (local_delete_time) and stamps CQLite's compaction inputs with the same LDT
+          (authoritative). The byte-for-byte assertion is currently #[ignore] blocked
+          on #1410: compute_baseline_min lets a live-only input's min_deletion_time=0
+          sentinel corrupt the merged localDeletionTime baseline, so CQLite emits a raw
+          LDT delta instead of LDT-minLDT.
     fixtures:
       datasets:
         - test-data/datasets/sstables
+      references:
+        - test-data/datasets/sstables/test_compaction_tombstone_ttl/shadow_row_delete-2b929be075a811f1a11c2f8df72ff67b/nb-3-big-Data.db.jsonl
     evidence:
       type: partial
-      artifacts: [bytes, offsets]
+      artifacts: [bytes, offsets, jsonl]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
-      storage_format_version: [nb, oa, big]
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-compaction-tombstone-ttl-parity.sh
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features write-support
+        --test issue_1387_tombstone_ttl_compaction_byte_parity
+        -- --ignored shadow_row_delete
+      reference_paths:
+        - test-data/datasets/sstables/test_compaction_tombstone_ttl/shadow_row_delete-2b929be075a811f1a11c2f8df72ff67b/nb-3-big-Data.db.jsonl
+      failure_artifacts:
+        - artifact.nightly_docker.byte_diff
       known_limitations: >-
-        No dedicated fixture mirrors this row-delete-then-purge case.
+        Fixture COMMITTED and the byte-parity test WIRED (Data.db / Index.db /
+        Summary.db / Digest.crc32), but the byte-for-byte claim is gated on #1410 — a
+        real CQLite compute_baseline_min localDeletionTime baseline bug that this
+        fixture revealed. The revealing test is #[ignore = "blocked on #1410"]; it flips
+        to byte_for_byte once #1410 lands.
     ci:
-      tier: manual_debug
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope:
       gap: >-
-        No dedicated fixture mirrors this row-delete-then-purge case.
+        Byte-for-byte parity blocked on #1410 (compute_baseline_min localDeletionTime
+        baseline corruption when a live-only input contributes its min_deletion_time=0
+        sentinel to the merge).
       next_step: >-
-        Commission a row-delete + gc-purge fixture and assert per-case goldens.
+        Fix #1410, un-#[ignore] shadow_row_delete_compaction_byte_for_byte, upgrade this
+        entry to byte_for_byte with strict: true.
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 968
+      target_issue: 1410
 
   - id: cass.compaction.CompactionDeletePKTest.partition_delete_preserved
     title: "Partition deletion preserved across compaction"
@@ -14078,10 +14109,10 @@ scenarios:
 
   - id: cass.compaction.CompactionDeleteRowRangeTest.range_tombstone_merge
     title: "Overlapping range-tombstone merge during compaction"
-    status: planned
+    status: partial
     capability: compaction_merge
     priority: P1
-    risk: p2_coverage
+    risk: p1_correctness
     cassandra:
       category: compaction
       relevance: high
@@ -14090,29 +14121,54 @@ scenarios:
     cqlite:
       coverage:
         suite: compaction_parity_tombstone_ttl
-        tests: []
+        tests:
+          - cqlite-core/tests/issue_1387_tombstone_ttl_compaction_byte_parity.rs
         notes: >-
-          Range-tombstone merge is exercised by the compaction parity suite; this specific overlapping-range case is not yet mirrored.
+          A dedicated Cassandra 5.0.2-COMPACTED fixture (test_compaction_tombstone_ttl.rt_cross_gen,
+          issue #1387) mirrors two OVERLAPPING range tombstones written in different
+          generations ([10,20] @ gen A, [15,25] @ gen B) plus live rows; the major
+          compaction synthesizes cross-generation open/close boundary markers
+          (range_tombstone_bound + range_tombstone_boundary) in the merged output. The
+          two wall-clock RT localDeletionTimes are read from the committed golden JSONL
+          and stamped on CQLite's inputs. The byte-for-byte assertion is #[ignore]
+          blocked on #1410 (compute_baseline_min localDeletionTime baseline corruption).
     fixtures:
       datasets:
         - test-data/datasets/sstables
+      references:
+        - test-data/datasets/sstables/test_compaction_tombstone_ttl/rt_cross_gen-2bd3757075a811f1a11c2f8df72ff67b/nb-3-big-Data.db.jsonl
     evidence:
       type: partial
-      artifacts: [bytes, offsets]
+      artifacts: [bytes, offsets, jsonl]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
-      storage_format_version: [nb, oa, big]
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-compaction-tombstone-ttl-parity.sh
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features write-support
+        --test issue_1387_tombstone_ttl_compaction_byte_parity
+        -- --ignored rt_cross_gen
+      reference_paths:
+        - test-data/datasets/sstables/test_compaction_tombstone_ttl/rt_cross_gen-2bd3757075a811f1a11c2f8df72ff67b/nb-3-big-Data.db.jsonl
+      failure_artifacts:
+        - artifact.nightly_docker.byte_diff
       known_limitations: >-
-        No dedicated fixture mirrors this overlapping range-tombstone merge case.
+        Fixture COMMITTED and the cross-generation range-tombstone byte-parity test
+        WIRED, but the byte-for-byte claim is gated on #1410 (compute_baseline_min
+        localDeletionTime baseline bug this fixture revealed). The revealing test is
+        #[ignore = "blocked on #1410"].
     ci:
-      tier: manual_debug
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope:
       gap: >-
-        No dedicated fixture mirrors this overlapping range-tombstone merge case.
+        Byte-for-byte overlapping range-tombstone compaction parity blocked on #1410.
       next_step: >-
-        Commission overlapping range-tombstone fixtures and assert per-case goldens.
+        Fix #1410, un-#[ignore] rt_cross_gen_compaction_byte_for_byte, upgrade to byte_for_byte.
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 968
+      target_issue: 1410
 
   - id: cass.compaction.CompactionDeleteRowTest.row_deletion_marker_preserved
     title: "Row deletion markers preserved across compaction"
@@ -14230,10 +14286,10 @@ scenarios:
 
   - id: cass.compaction.ForceCompactionTest.major_compaction_tombstone_purge
     title: "Forced/major compaction tombstone + TTL purge"
-    status: planned
+    status: partial
     capability: compaction_merge
     priority: P1
-    risk: p2_coverage
+    risk: p1_correctness
     cassandra:
       category: compaction
       relevance: high
@@ -14242,9 +14298,19 @@ scenarios:
     cqlite:
       coverage:
         suite: compaction_parity_tombstone_ttl
-        tests: []
+        tests:
+          - cqlite-core/tests/issue_1387_tombstone_ttl_compaction_byte_parity.rs
         notes: >-
-          Major-compaction tombstone/TTL purge is covered by the compaction parity suite; the forced-major-compaction case is not yet mirrored with its own fixture.
+          A dedicated Cassandra 5.0.2 scenario (test_compaction_tombstone_ttl.gc_purge_grace0,
+          issue #1387, gc_grace_seconds=0) writes two tombstone-only flushed generations
+          (row tombstones, nothing to shadow) and major-compacts them: gcBefore=now, so
+          BOTH tombstones are purgeable and Cassandra emits ZERO Data.db (the whole
+          SSTable is dropped). This is validated SEMANTICALLY by the ABSENCE of a
+          committed gc_purge_grace0-* Data.db, and CQLite's compact_sstables over the same
+          purgeable inputs (with gcBefore pinned) must likewise produce EMPTY output
+          (a zero-length or no Data.db). A NON-EMPTY output would mean a purgeable
+          tombstone was wrongly retained. This test PASSES (it is independent of the
+          #1410 localDeletionTime-delta bug that blocks the surviving byte-parity cases).
     fixtures:
       datasets:
         - test-data/datasets/sstables
@@ -14253,18 +14319,32 @@ scenarios:
       artifacts: [bytes, offsets]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
-      storage_format_version: [nb, oa, big]
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-compaction-tombstone-ttl-parity.sh
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features write-support
+        --test issue_1387_tombstone_ttl_compaction_byte_parity
+        gc_purge_grace0
       known_limitations: >-
-        No dedicated fixture mirrors the forced/major-compaction purge case.
+        SEMANTIC purge parity only (purgeable tombstones drop to empty output). This is
+        NOT byte-for-byte: a fully-purged major compaction has no surviving bytes to
+        diff, so the claim is the empty-output contract (Cassandra writes no Data.db;
+        CQLite writes a zero-length Data.db — both are "purged to empty"). The
+        surviving-tombstone byte-for-byte cases are the other three #1387 scenarios,
+        gated on #1410.
     ci:
-      tier: manual_debug
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope:
       gap: >-
-        No dedicated fixture mirrors the forced/major-compaction purge case.
+        Empty-output purge contract only; a fully-purged compaction has no bytes to diff.
       next_step: >-
-        Commission a major-compaction fixture and assert tombstone/TTL purge goldens.
+        Keep the semantic purge contract; byte-for-byte surviving-tombstone parity is
+        covered by the other three #1387 scenarios (blocked on #1410).
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 968
+      target_issue: 1387
 
   - id: cass.compaction.PartialCompactionsTest.tombstone_not_purged_excluded_sources
     title: "Tombstone not purged when source SSTables are excluded"
@@ -14534,10 +14614,10 @@ scenarios:
 
   - id: cass.compaction.TimeWindowCompactionStrategyTest.ttl_window_expiry_purge
     title: "Time-window compaction TTL/window expiry purge"
-    status: planned
+    status: partial
     capability: compaction_merge
     priority: P1
-    risk: p2_coverage
+    risk: p1_correctness
     cassandra:
       category: compaction
       relevance: high
@@ -14546,29 +14626,52 @@ scenarios:
     cqlite:
       coverage:
         suite: compaction_parity_tombstone_ttl
-        tests: []
+        tests:
+          - cqlite-core/tests/issue_1387_tombstone_ttl_compaction_byte_parity.rs
         notes: >-
-          TWCS window expiry / TTL purge merge semantics are in-domain but not yet mirrored.
+          A dedicated Cassandra 5.0.2-COMPACTED fixture (test_compaction_tombstone_ttl.ttl_expired_live,
+          issue #1387) mirrors an already-EXPIRED TTL cell coexisting with a live cell
+          across generations: on the major compaction the expired cell collapses to a
+          cell tombstone (gc_grace default, so it SURVIVES). The wall-clock-derived cell
+          localDeletionTime is read from the committed golden JSONL and stamped on
+          CQLite's compaction input. The byte-for-byte assertion is #[ignore] blocked on
+          #1410 (compute_baseline_min localDeletionTime baseline corruption).
     fixtures:
       datasets:
         - test-data/datasets/sstables
+      references:
+        - test-data/datasets/sstables/test_compaction_tombstone_ttl/ttl_expired_live-2bb2a70075a811f1a11c2f8df72ff67b/nb-3-big-Data.db.jsonl
     evidence:
       type: partial
-      artifacts: [bytes, offsets]
+      artifacts: [bytes, offsets, jsonl]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
-      storage_format_version: [nb, oa, big]
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-compaction-tombstone-ttl-parity.sh
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features write-support
+        --test issue_1387_tombstone_ttl_compaction_byte_parity
+        -- --ignored ttl_expired_live
+      reference_paths:
+        - test-data/datasets/sstables/test_compaction_tombstone_ttl/ttl_expired_live-2bb2a70075a811f1a11c2f8df72ff67b/nb-3-big-Data.db.jsonl
+      failure_artifacts:
+        - artifact.nightly_docker.byte_diff
       known_limitations: >-
-        CQLite does not yet run a time-window compaction strategy; window-expiry purge parity is unmirrored.
+        Fixture COMMITTED and the byte-parity test WIRED, but the byte-for-byte claim is
+        gated on #1410 (compute_baseline_min localDeletionTime baseline bug this fixture
+        revealed). The revealing test is #[ignore = "blocked on #1410"].
     ci:
-      tier: manual_debug
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope:
       gap: >-
-        CQLite does not yet run a time-window compaction strategy; window-expiry purge parity is unmirrored.
+        Byte-for-byte TTL-expiry compaction parity blocked on #1410.
       next_step: >-
-        Mirror TWCS window-expiry purge semantics or assert read parity over TWCS-produced fixtures.
+        Fix #1410, un-#[ignore] ttl_expired_live_compaction_byte_for_byte, upgrade to byte_for_byte.
       target_suite: compaction_parity_tombstone_ttl
-      target_issue: 968
+      target_issue: 1410
 
   - id: cass.compaction.UnifiedCompactionStrategyTest.gc_grace_purge_boundary
     title: "Unified compaction strategy gc_grace purge boundary"
