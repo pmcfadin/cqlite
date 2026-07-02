@@ -436,7 +436,7 @@ impl WriteEngine {
 
         // Initialize WAL
         let wal_path = config.wal_dir.join(WriteAheadLog::WAL_FILENAME);
-        let wal = if wal_path.exists() {
+        let mut wal = if wal_path.exists() {
             // Recover from existing WAL
             WriteAheadLog::open_existing(&wal_path)?
         } else {
@@ -451,21 +451,36 @@ impl WriteEngine {
         let mutations = std::mem::take(&mut wal_recovery.mutations);
 
         if !wal_recovery.is_clean() {
-            // Preserve the raw WAL segment aside BEFORE anything (a later flush)
-            // can truncate it, so the corruption evidence survives for manual
-            // recovery. The report is also retained on the engine and exposed
-            // via `wal_recovery()` so a caller sees the loss pre-truncate.
+            // Preserve the raw WAL segment aside BEFORE anything (a later flush,
+            // or the reset below) can truncate it, so the corruption evidence
+            // survives for manual recovery. The report is also retained on the
+            // engine and exposed via `wal_recovery()` so a caller sees the loss
+            // pre-truncate.
             let preserved = Self::preserve_corrupt_wal(&wal_path)?;
+
+            // With the evidence safely aside, trim the LIVE WAL back to its last
+            // CRC-valid prefix (issue #1391). Otherwise the engine would remain
+            // writable with the corrupt tail still on disk, and the FIRST synced
+            // write after this lossy recovery would be appended AFTER the corrupt
+            // entry — where the next replay stops — so that acknowledged write
+            // would be silently lost. Resetting to the valid prefix makes
+            // post-recovery appends land at a replayable position. (A torn tail
+            // was already trimmed in `open_existing`, so this only fires for
+            // mid-stream corruption.)
+            let reset_to = wal.reset_to_valid_prefix()?;
+
             log::error!(
                 "WAL recovery at {:?} was LOSSY: recovered {} mutation(s), {} corrupt entry \
                  (entries), stopped_early={}, {} byte(s) not recovered. Raw segment preserved at \
-                 {:?}. Investigate before relying on this data.",
+                 {:?}; live WAL reset to valid prefix ({:?}). Investigate before relying on this \
+                 data.",
                 wal_path,
                 mutations.len(),
                 wal_recovery.corrupt_entries,
                 wal_recovery.stopped_early,
                 wal_recovery.bytes_skipped,
                 preserved,
+                reset_to,
             );
         }
 
@@ -1593,6 +1608,105 @@ mod tests {
             "clean recovery: the WAL is truncated normally after flush"
         );
         assert_eq!(count_corrupt_aside(&config.wal_dir), 0);
+    }
+
+    /// Issue #1391 (Finding B): recovery-write-crash. After a LOSSY recovery the
+    /// engine stays writable, so a synced write issued right after recovery MUST
+    /// survive the next replay. Before the fix the live WAL still carried the
+    /// corrupt tail, so the acknowledged write landed AFTER the corrupt entry —
+    /// where replay stops — and was silently lost. With the valid-prefix reset,
+    /// the write lands at a replayable position: reopening the live WAL and
+    /// replaying must yield the valid prefix PLUS the post-recovery write (never
+    /// a set missing it), while the corrupt evidence is still preserved aside.
+    #[tokio::test]
+    async fn test_write_engine_reset_to_valid_prefix_keeps_post_recovery_write() {
+        use crate::types::Value;
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+
+        // Seed A, B, C then bit-flip B's payload → mid-stream corruption.
+        let end_a = seed_wal_abc(&config.wal_dir);
+        let wal_file = config.wal_dir.join(WriteAheadLog::WAL_FILENAME);
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&wal_file)
+                .unwrap();
+            f.seek(SeekFrom::Start(end_a + 8)).unwrap();
+            let mut byte = [0u8; 1];
+            f.read_exact(&mut byte).unwrap();
+            f.seek(SeekFrom::Start(end_a + 8)).unwrap();
+            f.write_all(&[byte[0] ^ 0x01]).unwrap();
+            f.sync_all().unwrap();
+        }
+
+        // Open the engine (recovery is lossy → evidence preserved, live WAL reset
+        // to the valid prefix [A]), then issue a synced post-recovery write D.
+        {
+            let mut engine = WriteEngine::new(config.clone()).unwrap();
+            assert!(!engine.wal_recovery().is_clean());
+            assert_eq!(engine.memtable_row_count(), 1, "valid prefix [A] recovered");
+            assert_eq!(
+                count_corrupt_aside(&config.wal_dir),
+                1,
+                "corrupt segment must be preserved aside"
+            );
+            // Default durability is SyncEachWrite, so D is fsync'd to the WAL.
+            engine
+                .write(create_test_mutation(4, "D", 4_000_000))
+                .unwrap();
+            drop(engine);
+        }
+
+        // Reopen the LIVE WAL directly and replay: it must recover [A, D] — the
+        // acknowledged post-recovery write is present, NOT lost behind the old
+        // corrupt tail.
+        let wal = WriteAheadLog::open_existing(&wal_file).unwrap();
+        let report = wal.replay().unwrap();
+        assert!(
+            report.is_clean(),
+            "the reset live WAL is a clean [A, D] prefix"
+        );
+        let names: Vec<&str> = report
+            .mutations
+            .iter()
+            .map(|m| match &m.operations[0] {
+                CellOperation::Write {
+                    value: Value::Text(name),
+                    ..
+                } => name.as_str(),
+                other => panic!("expected Write op, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec!["A", "D"],
+            "replay must yield the valid prefix AND the post-recovery write D, \
+             never a set missing D (and never the corrupt B/C)"
+        );
+        assert!(
+            !names.contains(&"B"),
+            "the corrupt entry B must not resurface"
+        );
+        assert!(
+            !names.contains(&"C"),
+            "C (behind corruption) must not resurface"
+        );
+
+        // The forensic evidence must still be on disk.
+        assert_eq!(
+            count_corrupt_aside(&config.wal_dir),
+            1,
+            "the corrupt WAL evidence must remain preserved aside after the reset"
+        );
     }
 
     #[test]
