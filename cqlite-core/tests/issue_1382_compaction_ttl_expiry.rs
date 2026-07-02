@@ -512,10 +512,17 @@ fn expired_ttl_matches_cassandra_byte_oracle_deferred_1387() {
         std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref(),
         Ok("1") | Ok("true")
     );
-    // Fixtures are commissioned in issue #1387; none exist yet. Fail closed only
-    // in strict mode so a CI gate cannot false-pass on missing data; otherwise
-    // skip cleanly. When #1387 lands, this test loads the Cassandra reference
-    // Data.db and byte-compares the compacted output.
+    // Status update (#1410 / #1387): the #1387 fixture commissioning DID land the
+    // `test_compaction_tombstone_ttl/ttl_expired_live-*` Cassandra reference, and the
+    // authoritative byte-oracle for the expired-TTL scenario now lives in
+    // `issue_1387_tombstone_ttl_compaction_byte_parity::ttl_expired_live_compaction_byte_for_byte`.
+    // #1410 fixed the localDeletionTime baseline (lengths now match), but that byte
+    // test is BLOCKED on #1538: byte parity needs an EXPIRING `WriteWithTtl` cell with
+    // an authoritative pinned `localExpirationTime`, which the current API cannot supply.
+    // This slot stays a fail-closed skip keyed on its OWN opt-in
+    // `CQLITE_TTL_ORACLE_FIXTURES` (a hand-curated byte-oracle #1387 did not commission
+    // under this name) so no CI gate false-passes; the real coverage is the #1387 byte
+    // test above once #1538 lands. Fail closed only in strict mode.
     let fixture_root = std::env::var("CQLITE_TTL_ORACLE_FIXTURES").ok();
     match fixture_root {
         Some(root) if Path::new(&root).exists() => {
