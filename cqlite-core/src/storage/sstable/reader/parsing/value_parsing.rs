@@ -9,6 +9,8 @@ use crate::{
 };
 
 use super::super::types::SSTableReader;
+use super::comparator_value_parsing::parse_value_with_comparator as decode_scalar_comparator;
+use super::custom_scalar::decode_custom_scalar;
 
 // ============================================================================
 // Standalone Pure Parsing Functions
@@ -477,10 +479,19 @@ impl SSTableReader {
                 let inner_value = self.parse_value_with_comparator(value_data, inner_comparator)?;
                 Ok(Value::Frozen(Box::new(inner_value)))
             }
-            _ => {
-                // For other types, preserve as blob for now
-                parse_blob_value(value_data)
-            }
+            // Scalar types with no self-recursion: delegate to the authoritative
+            // standalone decoder (issue #1627 — these previously fell through to a
+            // wrong-typed Value::Blob).
+            ComparatorType::Float32
+            | ComparatorType::Float
+            | ComparatorType::Timestamp
+            | ComparatorType::Varint
+            | ComparatorType::Decimal
+            | ComparatorType::Duration
+            | ComparatorType::Json => decode_scalar_comparator(value_data, &comparator),
+            // `time`/`inet` arrive as schema-derived Custom(name); genuinely-unknown
+            // custom types remain the only legitimate blob fallback.
+            ComparatorType::Custom(name) => decode_custom_scalar(name, value_data),
         }
     }
 
@@ -589,12 +600,18 @@ impl SSTableReader {
                 let inner_value = self.parse_value_with_comparator(value_data, inner_comparator)?;
                 Ok(Value::Frozen(Box::new(inner_value)))
             }
-            _ => {
-                // For other unsupported types (Custom, Counter, Timestamp, etc.),
-                // preserve as blob. These types are handled at the top-level
-                // by parse_value_with_schema_type but may appear in collections.
-                parse_blob_value(value_data)
-            }
+            // Scalar collection elements: delegate to the authoritative standalone
+            // decoder rather than blob-decoding them (issue #1627, same defect
+            // class as parse_value_with_schema_type).
+            ComparatorType::Float32
+            | ComparatorType::Float
+            | ComparatorType::Timestamp
+            | ComparatorType::Varint
+            | ComparatorType::Decimal
+            | ComparatorType::Duration
+            | ComparatorType::Json => decode_scalar_comparator(value_data, comparator),
+            // `time`/`inet` as schema-derived Custom(name); unknown custom → blob.
+            ComparatorType::Custom(name) => decode_custom_scalar(name, value_data),
         }
     }
 

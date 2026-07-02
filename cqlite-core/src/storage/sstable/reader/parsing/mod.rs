@@ -9,11 +9,14 @@
 
 // Sub-modules
 mod block_entries;
+mod custom_scalar;
 pub(crate) mod byte_comparable; // Needs to be accessible from row_cell_state_machine
 pub(crate) mod comparator_value_parsing; // Standalone comparator-based parsing for state machine
 mod key_parsing;
 mod v5_compressed_legacy;
 mod value_parsing;
+#[cfg(test)]
+mod value_parsing_schema_type_tests;
 
 // Re-export all parsing methods (they're implemented on SSTableReader)
 // No explicit re-exports needed since they're all impl blocks on SSTableReader
