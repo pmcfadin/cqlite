@@ -61,6 +61,58 @@ use crate::{Error, Result};
 /// memory. Any legitimate value stays far below this.
 pub(crate) const MAX_CRC_CHUNK_SIZE: u32 = 16 * 1024 * 1024;
 
+/// Lower bound accepted for the `CRC.db` chunk-size header (issue #1396).
+///
+/// Cassandra's uncompressed `ChecksummedRandomAccessReader` uses a fixed 64 KiB
+/// (`65536`) chunk. A hostile sidecar advertising a TINY `chunk_size` (e.g. `1`)
+/// implies `~data_len` CRC entries, so the derived "maximum plausible CRC.db
+/// length" in [`CrcDb::open`] balloons to `~4 * data_len` — a multi-GiB
+/// `tokio::fs::read` for a large Data.db, defeating the max-chunk guard. We floor
+/// at 4096: well below Cassandra's 64 KiB (so every real sidecar passes), yet far
+/// above any plausible real value, which caps the per-Data.db entry count and
+/// kills the tiny-chunk entry-count explosion. The accepted header range is
+/// therefore `MIN_CRC_CHUNK_SIZE ..= MAX_CRC_CHUNK_SIZE`.
+pub(crate) const MIN_CRC_CHUNK_SIZE: u32 = 4096;
+
+/// Absolute ceiling on the number of `CRC.db` bytes ever read into memory
+/// (issue #1396 Fix 2), independent of the header `chunk_size` and the declared
+/// Data.db length. Derivation: at Cassandra's 64 KiB chunk size, one 4-byte CRC
+/// covers 64 KiB of Data.db, so 64 MiB of CRC entries (`64 MiB / 4 = 16M`
+/// entries) describes a 1 TiB Data.db — larger than any uncompressed BIG SSTable
+/// we target. Capping the sidecar read at 64 MiB is thus generous for real data
+/// yet a hard bound: a `CRC.db` larger than this is rejected as typed corruption
+/// before its body is read, regardless of what its header or the Data.db size
+/// claim.
+pub(crate) const ABSOLUTE_CRC_DB_MAX: u64 = 64 * 1024 * 1024;
+
+/// Validate a raw `CRC.db` chunk-size header value, returning the accepted `u32`
+/// or a typed [`Error::Corruption`] naming the violated bound. Enforced
+/// identically at parse time and at open time so read-time verification uses the
+/// same bounds as open-time (issue #1396).
+fn validate_chunk_size(chunk_size_raw: i32) -> Result<u32> {
+    if chunk_size_raw <= 0 {
+        return Err(Error::corruption(format!(
+            "CRC.db chunk-size header is non-positive ({chunk_size_raw}); expected a positive block size (Cassandra default 65536)"
+        )));
+    }
+    let chunk_size = chunk_size_raw as u32;
+    if chunk_size < MIN_CRC_CHUNK_SIZE {
+        // Reject a tiny chunk size before it can inflate the per-Data.db entry
+        // count / derived sidecar-length bound (issue #1396: OOM guard).
+        return Err(Error::corruption(format!(
+            "CRC.db chunk-size header is {chunk_size} bytes — below the {MIN_CRC_CHUNK_SIZE}-byte minimum (Cassandra uses 65536); a chunk size this small implies an unbounded CRC entry count"
+        )));
+    }
+    if chunk_size > MAX_CRC_CHUNK_SIZE {
+        // Bound the header before any downstream `vec![0u8; chunk_size]`
+        // verification buffer is sized from it (issue #1396: OOM guard).
+        return Err(Error::corruption(format!(
+            "CRC.db chunk-size header is {chunk_size} bytes — exceeds the {MAX_CRC_CHUNK_SIZE}-byte maximum (Cassandra default 65536); refusing to allocate an unbounded verification buffer"
+        )));
+    }
+    Ok(chunk_size)
+}
+
 /// Parsed `CRC.db`: the chunk-size header plus one CRC32 per Data.db chunk.
 #[derive(Debug, Clone)]
 pub(crate) struct CrcDb {
@@ -84,19 +136,7 @@ impl CrcDb {
             )));
         }
         let chunk_size_raw = i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        if chunk_size_raw <= 0 {
-            return Err(Error::corruption(format!(
-                "CRC.db chunk-size header is non-positive ({chunk_size_raw}); expected a positive block size (Cassandra default 65536)"
-            )));
-        }
-        let chunk_size = chunk_size_raw as u32;
-        if chunk_size > MAX_CRC_CHUNK_SIZE {
-            // Bound the header before any downstream `vec![0u8; chunk_size]`
-            // verification buffer is sized from it (issue #1396: OOM guard).
-            return Err(Error::corruption(format!(
-                "CRC.db chunk-size header is {chunk_size} bytes — exceeds the {MAX_CRC_CHUNK_SIZE}-byte maximum (Cassandra default 65536); refusing to allocate an unbounded verification buffer"
-            )));
-        }
+        let chunk_size = validate_chunk_size(chunk_size_raw)?;
 
         let body = &bytes[4..];
         if body.len() % 4 != 0 {
@@ -140,15 +180,28 @@ impl CrcDb {
             ))
         })?;
         let chunk_size_raw = i32::from_be_bytes(header);
-        if chunk_size_raw <= 0 {
+        // Enforce the SAME chunk-size bounds as parse (min floor + max cap) so
+        // open-time and read-time verification agree (issue #1396). The min floor
+        // is what caps the derived `max_len` below — a tiny chunk size can no
+        // longer inflate the per-Data.db entry count.
+        let chunk_size = validate_chunk_size(chunk_size_raw)?;
+
+        let actual_len = tokio::fs::metadata(path)
+            .await
+            .map(|m| m.len())
+            .map_err(|e| {
+                Error::corruption(format!("cannot stat CRC.db at {}: {}", path.display(), e))
+            })?;
+
+        // Absolute ceiling FIRST — independent of the (attacker-controlled)
+        // header chunk_size and the declared Data.db length (issue #1396 Fix 2).
+        // Even a well-formed header + honest Data.db size cannot authorize an
+        // arbitrarily large sidecar read: 64 MiB of CRC entries already describes
+        // a 1 TiB Data.db at Cassandra's 64 KiB chunk size.
+        if actual_len > ABSOLUTE_CRC_DB_MAX {
             return Err(Error::corruption(format!(
-                "CRC.db chunk-size header is non-positive ({chunk_size_raw}); expected a positive block size (Cassandra default 65536)"
-            )));
-        }
-        let chunk_size = chunk_size_raw as u32;
-        if chunk_size > MAX_CRC_CHUNK_SIZE {
-            return Err(Error::corruption(format!(
-                "CRC.db chunk-size header is {chunk_size} bytes — exceeds the {MAX_CRC_CHUNK_SIZE}-byte maximum (Cassandra default 65536); refusing to read an oversized sidecar"
+                "CRC.db at {} is {actual_len} bytes — exceeds the absolute {ABSOLUTE_CRC_DB_MAX}-byte ceiling (enough CRC entries for a 1 TiB Data.db at a 64 KiB chunk size); refusing to read an oversized sidecar",
+                path.display()
             )));
         }
 
@@ -158,12 +211,6 @@ impl CrcDb {
         // saturating so an absurd `data_len`/`chunk_size` can never overflow.
         let n_chunks = data_len.div_ceil(chunk_size as u64);
         let max_len = 4u64.saturating_add(n_chunks.saturating_add(1).saturating_mul(4));
-        let actual_len = tokio::fs::metadata(path)
-            .await
-            .map(|m| m.len())
-            .map_err(|e| {
-                Error::corruption(format!("cannot stat CRC.db at {}: {}", path.display(), e))
-            })?;
         if actual_len > max_len {
             return Err(Error::corruption(format!(
                 "CRC.db at {} is {actual_len} bytes — exceeds the {max_len}-byte maximum implied by a {data_len}-byte Data.db (chunk_size={chunk_size}, {n_chunks} chunks + optional trailer); refusing to read an oversized sidecar",
@@ -335,6 +382,94 @@ mod tests {
         CrcDb::open(&ok_path, data_len)
             .await
             .expect("correctly-sized CRC.db must open");
+    }
+
+    /// Fix 1 (issue #1396): a TINY chunk-size header (the residual OOM vector —
+    /// e.g. `chunk_size = 1` makes the derived `max_len ≈ 4 * data_len`) is
+    /// rejected as typed corruption BEFORE any large allocation, at BOTH parse
+    /// and open, with the error naming the minimum-chunk-size bound.
+    #[tokio::test]
+    async fn tiny_chunk_size_is_rejected_before_large_alloc() {
+        // parse: chunk_size = 1 is below the floor.
+        let bytes = synth_crc_db(1, &[0xdead_beef]);
+        let err = CrcDb::parse(&bytes).expect_err("chunk_size=1 must be rejected");
+        assert!(
+            matches!(err, Error::Corruption(_)),
+            "typed corruption: {err}"
+        );
+        assert!(
+            err.to_string().contains("minimum"),
+            "message names the minimum-chunk-size bound: {err}"
+        );
+
+        // open: a header advertising chunk_size = 1 against a large declared
+        // Data.db length must be rejected right after the 4-byte header read —
+        // i.e. before `tokio::fs::read` buffers the (would-be multi-GiB) body.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let crc_path = dir.path().join("CRC.db");
+        tokio::fs::write(&crc_path, synth_crc_db(1, &[0, 1, 2]))
+            .await
+            .expect("write tiny-chunk crc.db");
+        // ~4 GiB declared Data.db: with the old chunk_size=1 the derived bound
+        // (~16 GiB) would have permitted an unbounded whole-file read.
+        let huge_data_len = 4u64 * 1024 * 1024 * 1024;
+        let err = CrcDb::open(&crc_path, huge_data_len)
+            .await
+            .expect_err("tiny chunk size must be rejected at open");
+        assert!(
+            matches!(err, Error::Corruption(_)),
+            "typed corruption: {err}"
+        );
+        assert!(
+            err.to_string().contains("minimum"),
+            "open error must name the min-chunk-size bound: {err}"
+        );
+
+        // The floor value itself (4096) is accepted at parse.
+        assert!(CrcDb::parse(&synth_crc_db(MIN_CRC_CHUNK_SIZE, &[])).is_ok());
+        assert!(matches!(
+            CrcDb::parse(&synth_crc_db(MIN_CRC_CHUNK_SIZE - 1, &[])),
+            Err(Error::Corruption(_))
+        ));
+    }
+
+    /// Fix 2 (issue #1396): a `CRC.db` whose on-disk length exceeds the ABSOLUTE
+    /// 64 MiB ceiling is rejected as typed corruption before its body is read,
+    /// independent of the (valid) header chunk_size and the declared Data.db size.
+    /// Uses a sparse `set_len` so the oversized length is reported by metadata
+    /// without allocating real disk blocks.
+    #[tokio::test]
+    async fn crc_db_over_absolute_ceiling_is_rejected_before_body_read() {
+        use tokio::io::AsyncWriteExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let crc_path = dir.path().join("CRC.db");
+        {
+            let mut f = tokio::fs::File::create(&crc_path).await.expect("create");
+            // Valid 64 KiB-chunk header so validate_chunk_size passes.
+            f.write_all(&65536i32.to_be_bytes())
+                .await
+                .expect("write header");
+            f.flush().await.expect("flush");
+            // Extend (sparsely) to just over the absolute ceiling.
+            f.set_len(ABSOLUTE_CRC_DB_MAX + 4)
+                .await
+                .expect("set_len over ceiling");
+        }
+        // A huge declared Data.db so the DERIVED max_len does not fire first —
+        // only the absolute ceiling should reject this.
+        let huge_data_len = 100u64 * 1024 * 1024 * 1024 * 1024;
+        let err = CrcDb::open(&crc_path, huge_data_len)
+            .await
+            .expect_err("over-ceiling CRC.db must be rejected");
+        assert!(
+            matches!(err, Error::Corruption(_)),
+            "typed corruption: {err}"
+        );
+        assert!(
+            err.to_string().contains("absolute"),
+            "error must name the absolute ceiling: {err}"
+        );
     }
 
     #[test]
