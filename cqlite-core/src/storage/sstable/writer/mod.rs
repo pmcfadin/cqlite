@@ -723,7 +723,18 @@ impl SSTableWriter {
                             self.stats.update_local_deletion_time(*ldt);
                         }
                     }
-                    crate::storage::write_engine::mutation::CellOperation::Write { .. } => {}
+                    // Issue #1728: a live, non-TTL `Write` cell carries Cassandra's
+                    // `Cell.NO_DELETION_TIME` (`Integer.MAX_VALUE`) as its
+                    // localDeletionTime. Cassandra's MetadataCollector folds that
+                    // sentinel into `maxLocalDeletionTime`, so any SSTable holding a
+                    // live non-TTL cell finalizes `maxLocalDeletionTime` == the live
+                    // sentinel — including a MIXED SSTable that also carries older
+                    // tombstones with a smaller real LDT. The dedicated chokepoint
+                    // raises the max ALONE (never poisoning minLocalDeletionTime or
+                    // the tombstone drop-time histogram, issue #851).
+                    crate::storage::write_engine::mutation::CellOperation::Write { .. } => {
+                        self.stats.note_live_local_deletion_time();
+                    }
                 }
             }
             // Track stats for partition tombstones
@@ -2064,6 +2075,71 @@ mod tests {
         assert_eq!(
             writer.stats.max_local_deletion_time, HIGHER_LDT,
             "max_local_deletion_time must reflect the higher per-cell Delete LDT"
+        );
+
+        let _info = writer.finish().await.unwrap();
+    }
+
+    /// Issue #1728: a MIXED SSTable (an older cell tombstone at a real, smaller
+    /// local-deletion-time PLUS a live non-TTL `Write` cell) must finalize
+    /// `max_local_deletion_time` at Cassandra's live `NO_DELETION_TIME` sentinel
+    /// (`i32::MAX`), NOT the tombstone LDT. Cassandra stamps every live non-TTL
+    /// cell with `Cell.NO_DELETION_TIME` and its MetadataCollector folds that into
+    /// `maxLocalDeletionTime`, so any SSTable containing a live cell reports the
+    /// sentinel there. The tombstone chokepoint invariants (issue #851) must
+    /// still hold: `min_local_deletion_time` and the tombstone drop-time histogram
+    /// describe the REAL tombstone only, never the live sentinel.
+    /// RED before the fix: the live `Write` arm was a no-op, so a mixed SSTable
+    /// kept `max_local_deletion_time` at the tombstone LDT and diverged from
+    /// Cassandra.
+    #[tokio::test]
+    async fn test_live_write_plus_tombstone_max_ldt_is_live_sentinel() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_two_regular_schema();
+        let mut writer = SSTableWriter::new(temp_dir.path().to_path_buf(), 1, &schema).unwrap();
+
+        // A real (non-sentinel) tombstone LDT, well below i32::MAX.
+        const TOMBSTONE_LDT: i32 = 1_500_000_000;
+        const ROW_TS_MICROS: i64 = 5_000_000;
+
+        let table_id = TableId::new("test_ks", "test_two_regular");
+        let pk = PartitionKey::single("id", Value::Integer(7));
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            None,
+            vec![
+                // An older cell tombstone at a real LDT.
+                CellOperation::Delete {
+                    column: "name".to_string(),
+                    local_deletion_time: Some(TOMBSTONE_LDT),
+                },
+                // A live, non-TTL cell in the SAME (mixed) SSTable.
+                CellOperation::Write {
+                    column: "age".to_string(),
+                    value: Value::Integer(42),
+                },
+            ],
+            ROW_TS_MICROS,
+            None,
+        );
+        let key = mutation.decorated_key(&schema).unwrap();
+        writer.write_partition(key, vec![mutation]).unwrap();
+
+        assert_eq!(
+            writer.stats.max_local_deletion_time,
+            i32::MAX,
+            "a live non-TTL cell must lift max_local_deletion_time to the NO_DELETION_TIME \
+             sentinel even alongside an older tombstone with a smaller real LDT"
+        );
+        assert_eq!(
+            writer.stats.min_local_deletion_time, TOMBSTONE_LDT,
+            "the live sentinel must not poison min_local_deletion_time (issue #851 chokepoint)"
+        );
+        assert_eq!(
+            writer.stats.tombstone_histogram.size(),
+            1,
+            "only the real tombstone enters the drop-time histogram, not the live cell"
         );
 
         let _info = writer.finish().await.unwrap();

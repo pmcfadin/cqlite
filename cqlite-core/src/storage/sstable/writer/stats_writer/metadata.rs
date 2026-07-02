@@ -263,6 +263,34 @@ impl StatisticsMetadata {
         self.tombstone_histogram.update(deletion_time);
     }
 
+    /// Fold a LIVE (non-TTL) cell's `NO_DELETION_TIME` sentinel into the
+    /// `maxLocalDeletionTime` aggregate ONLY.
+    ///
+    /// Cassandra stamps every live, non-expiring cell with
+    /// `Cell.NO_DELETION_TIME` (`Integer.MAX_VALUE`) as its `localDeletionTime`,
+    /// and `MetadataCollector.update(Cell)` folds that value into
+    /// `maxLocalDeletionTime`. So any SSTable that contains at least one live
+    /// non-TTL cell finalizes `maxLocalDeletionTime == Integer.MAX_VALUE`,
+    /// EVEN when the same SSTable also carries older tombstones with a smaller
+    /// real LDT (a mixed SSTable — e.g. after compaction). Without this fold a
+    /// mixed SSTable would keep `maxLocalDeletionTime` at the largest TOMBSTONE
+    /// LDT and diverge from Cassandra (issue #1728).
+    ///
+    /// Unlike [`Self::update_local_deletion_time`], the live sentinel must NOT
+    /// pull `minLocalDeletionTime` down nor enter the tombstone drop-time
+    /// histogram (those describe real tombstones only; issue #851). This method
+    /// therefore raises the max alone. A pure-live SSTable ends at
+    /// `max_local_deletion_time == i32::MAX`, which serialises to the same
+    /// `NO_DELETION_TIME` sentinel as the `== 0` "no deletions" case, so the
+    /// pure-live output byte-parity is unchanged.
+    pub fn note_live_local_deletion_time(&mut self) {
+        // `i32::MAX` is the largest possible local-deletion-time, so folding it
+        // into the running max is simply an assignment (a real tombstone LDT is
+        // always strictly smaller). Written directly to avoid the no-op
+        // `.max(i32::MAX)` clippy::unnecessary_min_or_max lint.
+        self.max_local_deletion_time = i32::MAX;
+    }
+
     /// True when `timestamp` is a LIVE / `NO_DELETION` marker rather than a real
     /// deletion timestamp. CQLite writes `DeletionTime.LIVE` as `Long.MIN_VALUE`
     /// (see `data_writer.rs`); Cassandra's `NO_DELETION` / `NO_TIMESTAMP` sentinel
@@ -458,6 +486,68 @@ mod tests {
             1,
             "LIVE marker must not be counted as a tombstone in the histogram"
         );
+    }
+
+    /// Issue #1728: a live non-TTL `Write` cell folds `NO_DELETION_TIME`
+    /// (`i32::MAX`) into `max_local_deletion_time`, matching Cassandra's
+    /// MetadataCollector. In a MIXED SSTable (an older tombstone at a smaller
+    /// real LDT plus a live cell) `max_local_deletion_time` must be the live
+    /// sentinel, NOT the tombstone LDT — while `min_local_deletion_time` and the
+    /// tombstone drop-time histogram continue to describe the real tombstone
+    /// only (issue #851 chokepoint invariants preserved).
+    #[test]
+    fn test_note_live_local_deletion_time_mixed_sstable() {
+        let mut meta = StatisticsMetadata::new();
+        // An older tombstone at a real, smaller LDT.
+        meta.update_local_deletion_time(1_500_000_000);
+        // A live non-TTL cell in the same (mixed) SSTable.
+        meta.note_live_local_deletion_time();
+
+        assert_eq!(
+            meta.max_local_deletion_time,
+            i32::MAX,
+            "a live cell must lift max_local_deletion_time to the NO_DELETION_TIME sentinel"
+        );
+        assert_eq!(
+            meta.min_local_deletion_time, 1_500_000_000,
+            "the live sentinel must not poison min_local_deletion_time"
+        );
+        assert_eq!(
+            meta.tombstone_histogram.size(),
+            1,
+            "the live cell must not be counted as a tombstone in the drop-time histogram"
+        );
+
+        // The sentinel survives finalize (only i32::MIN normalizes to 0), so the
+        // STATS component serialises the live NO_DELETION_TIME sentinel.
+        meta.finalize();
+        assert_eq!(meta.max_local_deletion_time, i32::MAX);
+    }
+
+    /// Issue #1728: a pure-live SSTable (only live `Write` cells, no tombstone)
+    /// ends with `max_local_deletion_time == i32::MAX`, which serialises to the
+    /// same `NO_DELETION_TIME` sentinel as the untouched `== 0` "no deletions"
+    /// case — so pure-live output byte-parity is unchanged.
+    #[test]
+    fn test_note_live_local_deletion_time_pure_live() {
+        let mut meta = StatisticsMetadata::new();
+        meta.note_live_local_deletion_time();
+
+        assert_eq!(meta.max_local_deletion_time, i32::MAX);
+        assert_eq!(
+            meta.min_local_deletion_time,
+            i32::MAX,
+            "no tombstone recorded: min stays at its unset sentinel"
+        );
+        assert!(
+            meta.tombstone_histogram.is_empty(),
+            "a live cell must not create a tombstone histogram bin"
+        );
+
+        meta.finalize();
+        // min unset -> normalized to 0; max holds the live sentinel.
+        assert_eq!(meta.min_local_deletion_time, 0);
+        assert_eq!(meta.max_local_deletion_time, i32::MAX);
     }
 
     /// With only LIVE markers, stats remain at sentinels and `finalize()`
