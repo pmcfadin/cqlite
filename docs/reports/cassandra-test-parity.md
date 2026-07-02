@@ -11,8 +11,8 @@ Sources: [`docs/cassandra_test_index.md`](../../docs/cassandra_test_index.md) ·
 | Status | Scenarios |
 |---|---|
 | `mirrored` | 233 |
-| `partial` | 9 |
-| `planned` | 49 |
+| `partial` | 13 |
+| `planned` | 45 |
 | `out_of_scope` | 31 |
 | **total** | **322** |
 
@@ -635,7 +635,7 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 
 Scenario counts above can overstate distinct proof: one backing test may exercise many scenario ids. The dedup view below counts unique test targets so the program is not read as more independent tests than exist (issue #1228).
 
-- Distinct backing tests: **67** across **258** scenarios that name a test.
+- Distinct backing tests: **68** across **262** scenarios that name a test.
 
 ### Tests backing more than one scenario
 
@@ -677,6 +677,7 @@ Scenario counts above can overstate distinct proof: one backing test may exercis
 | `scripts/tests/test_parity_failure_issue.py` | 5 |
 | `cqlite-core/tests/issue_1006_null_empty_boundary_parity.rs` | 4 |
 | `cqlite-core/tests/issue_1021_repaired_metadata_compaction_parity.rs` | 4 |
+| `cqlite-core/tests/issue_1387_tombstone_ttl_compaction_byte_parity.rs` | 4 |
 | `cqlite-core/tests/issue_990_data_db_row_framing_parity.rs` | 4 |
 | `cqlite-core/tests/issue_992_range_boundary_grammar.rs` | 4 |
 | `cqlite-core/tests/issue_1190_write_load_byte_parity.rs` | 3 |
@@ -699,13 +700,13 @@ Scenario counts above can overstate distinct proof: one backing test may exercis
 - `cass.compaction.CompactionColumnTest.cell_merge_lww` (planned): No dedicated fixture mirrors this specific per-column LWW merge case. → _Commission a fixture for per-column LWW merge and assert per-case goldens._
 - `cass.compaction.CompactionControllerTest.purgeable_timestamp_boundary` (planned): No dedicated fixture mirrors the CompactionController purgeable-timestamp boundary cases. → _Commission fixtures spanning the purgeable-timestamp boundary and assert per-case goldens._
 - `cass.compaction.CompactionDeleteAndPurgePKTest.partition_delete_purge` (planned): No dedicated fixture mirrors this partition-delete-then-purge case. → _Commission a partition-delete + gc-purge fixture and assert per-case goldens._
-- `cass.compaction.CompactionDeleteAndPurgeRowTest.row_delete_purge` (planned): No dedicated fixture mirrors this row-delete-then-purge case. → _Commission a row-delete + gc-purge fixture and assert per-case goldens._
+- `cass.compaction.CompactionDeleteAndPurgeRowTest.row_delete_purge` (partial): Byte-for-byte parity blocked on #1410 (compute_baseline_min localDeletionTime baseline corruption when a live-only input contributes its min_deletion_time=0 sentinel to the merge). → _Fix #1410, un-#[ignore] shadow_row_delete_compaction_byte_for_byte, upgrade this entry to byte_for_byte with strict: true._
 - `cass.compaction.CompactionDeletePKTest.partition_delete_preserved` (planned): No dedicated fixture mirrors this partition-delete-preservation case. → _Commission a fixture asserting partition deletions survive compaction and add goldens._
-- `cass.compaction.CompactionDeleteRowRangeTest.range_tombstone_merge` (planned): No dedicated fixture mirrors this overlapping range-tombstone merge case. → _Commission overlapping range-tombstone fixtures and assert per-case goldens._
+- `cass.compaction.CompactionDeleteRowRangeTest.range_tombstone_merge` (partial): Byte-for-byte overlapping range-tombstone compaction parity blocked on #1410. → _Fix #1410, un-#[ignore] rt_cross_gen_compaction_byte_for_byte, upgrade to byte_for_byte._
 - `cass.compaction.CompactionDeleteRowTest.row_deletion_marker_preserved` (planned): No dedicated fixture mirrors this row-deletion-marker-preservation case. → _Commission a row-deletion fixture and assert markers survive compaction._
 - `cass.compaction.CompactionOverlappingSSTableTest.partial_space_constrained_merge` (planned): No dedicated fixture mirrors the disk-space-constrained partial-compaction case. → _Commission overlapping-SSTable fixtures under a space constraint and assert live-row preservation._
 - `cass.compaction.CompactionsCQLTest.negative_ldts_suspect_table` (planned): No dedicated fixture mirrors the negative-LDTS suspect-table cases. → _Commission fixtures with negative local-deletion-time metadata and assert detection/goldens._
-- `cass.compaction.ForceCompactionTest.major_compaction_tombstone_purge` (planned): No dedicated fixture mirrors the forced/major-compaction purge case. → _Commission a major-compaction fixture and assert tombstone/TTL purge goldens._
+- `cass.compaction.ForceCompactionTest.major_compaction_tombstone_purge` (partial): Empty-output purge contract only; a fully-purged compaction has no bytes to diff. → _Keep the semantic purge contract; byte-for-byte surviving-tombstone parity is covered by the other three #1387 scenarios (blocked on #1410)._
 - `cass.compaction.LeveledCompactionStrategyTest.non_overlapping_levels` (planned): CQLite does not yet run a leveled compaction strategy; merge output parity for LCS-produced inputs is unmirrored. → _Implement/mirror leveled-strategy merge ordering or assert read parity over LCS-produced fixtures._
 - `cass.compaction.LeveledGenerationsTest.level_generation_merge_order` (planned): CQLite does not yet model leveled generations; merge-order parity is unmirrored. → _Mirror leveled-generation merge ordering or assert read parity over generation-tagged fixtures._
 - `cass.compaction.LongLeveledCompactionStrategyTest.concurrent_level_merge_safety` (planned): CQLite does not yet run concurrent leveled compaction; overlapping-range merge safety is unmirrored. → _Mirror concurrent leveled-compaction merge safety or assert read parity over the produced fixtures._
@@ -716,7 +717,7 @@ Scenario counts above can overstate distinct proof: one backing test may exercis
 - `cass.compaction.ShardedCompactionWriterTest.shard_boundary_row_preservation` (planned): No dedicated fixture mirrors sharded-compaction-writer shard-boundary preservation. → _Commission sharded-writer fixtures and assert no partition is orphaned across shard boundaries._
 - `cass.compaction.ShardedMultiWriterTest.flush_sharding_row_count` (planned): No dedicated fixture mirrors flush-triggered sharded multi-writer row counts. → _Commission flush-sharding fixtures and assert each partition yields the expected row count._
 - `cass.compaction.SingleSSTableLCSTaskTest.single_table_uplevel_metadata_readable` (planned): CQLite does not run LCS uplevel tasks; the single-table uplevel metadata path is unmirrored. → _Mirror single-SSTable LCS uplevel metadata validation or assert metadata read parity._
-- `cass.compaction.TimeWindowCompactionStrategyTest.ttl_window_expiry_purge` (planned): CQLite does not yet run a time-window compaction strategy; window-expiry purge parity is unmirrored. → _Mirror TWCS window-expiry purge semantics or assert read parity over TWCS-produced fixtures._
+- `cass.compaction.TimeWindowCompactionStrategyTest.ttl_window_expiry_purge` (partial): Byte-for-byte TTL-expiry compaction parity blocked on #1410. → _Fix #1410, un-#[ignore] ttl_expired_live_compaction_byte_for_byte, upgrade to byte_for_byte._
 - `cass.compaction.UnifiedCompactionDensitiesTest.sstable_density_distribution` (planned): CQLite does not implement UCS density distribution; output sizing parity is unmirrored. → _Mirror UCS density distribution or assert read parity over the produced SSTables._
 - `cass.compaction.UnifiedCompactionStrategyTest.gc_grace_purge_boundary` (planned): CQLite does not yet run the unified compaction strategy; gc_grace purge-boundary parity is unmirrored. → _Mirror UCS gc_grace purge boundary or assert read parity over UCS-produced fixtures._
 - `cass.compaction.harness_byte_tier_artifacts` (planned): No gated byte-for-byte comparison; the tier reports diffs + artifacts but does not fail the build yet. → _Promote to a hard gate (drop continue-on-error) once compaction output is byte-stable across the scenario matrix._
@@ -878,9 +879,9 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.compaction.CompactionColumnTest.cell_merge_lww` | manual_debug | — |
 | `cass.compaction.CompactionControllerTest.purgeable_timestamp_boundary` | manual_debug | — |
 | `cass.compaction.CompactionDeleteAndPurgePKTest.partition_delete_purge` | manual_debug | — |
-| `cass.compaction.CompactionDeleteAndPurgeRowTest.row_delete_purge` | manual_debug | — |
+| `cass.compaction.CompactionDeleteAndPurgeRowTest.row_delete_purge` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.compaction.CompactionDeletePKTest.partition_delete_preserved` | manual_debug | — |
-| `cass.compaction.CompactionDeleteRowRangeTest.range_tombstone_merge` | manual_debug | — |
+| `cass.compaction.CompactionDeleteRowRangeTest.range_tombstone_merge` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.compaction.CompactionDeleteRowTest.row_deletion_marker_preserved` | manual_debug | — |
 | `cass.compaction.CompactionIteratorTest.differential_compaction_loop` | required_parity | .github/workflows/compaction-parity.yml |
 | `cass.compaction.CompactionIteratorTest.live_partition_merge` | required_parity | .github/workflows/live-cell-compaction-parity.yml |
@@ -890,7 +891,7 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.compaction.CompactionsBytemanTest.fault_injected_compaction` | manual_debug | — |
 | `cass.compaction.CompactionsCQLTest.negative_ldts_suspect_table` | manual_debug | — |
 | `cass.compaction.EarlyOpenCompactionTest.early_open_intermediate_readers` | manual_debug | — |
-| `cass.compaction.ForceCompactionTest.major_compaction_tombstone_purge` | manual_debug | — |
+| `cass.compaction.ForceCompactionTest.major_compaction_tombstone_purge` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.compaction.GcCompactionTest.static_and_complex_columns_survive_gc` | required_parity | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.compaction.LeveledCompactionStrategyTest.non_overlapping_levels` | manual_debug | — |
 | `cass.compaction.LeveledGenerationsTest.level_generation_merge_order` | manual_debug | — |
@@ -903,7 +904,7 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.compaction.ShardedCompactionWriterTest.shard_boundary_row_preservation` | manual_debug | — |
 | `cass.compaction.ShardedMultiWriterTest.flush_sharding_row_count` | manual_debug | — |
 | `cass.compaction.SingleSSTableLCSTaskTest.single_table_uplevel_metadata_readable` | manual_debug | — |
-| `cass.compaction.TimeWindowCompactionStrategyTest.ttl_window_expiry_purge` | manual_debug | — |
+| `cass.compaction.TimeWindowCompactionStrategyTest.ttl_window_expiry_purge` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.compaction.UnifiedCompactionDensitiesTest.sstable_density_distribution` | manual_debug | — |
 | `cass.compaction.UnifiedCompactionStrategyTest.gc_grace_purge_boundary` | manual_debug | — |
 | `cass.compaction.harness_byte_tier_artifacts` | nightly_docker | .github/workflows/nightly-docker-parity.yml |
@@ -1205,9 +1206,9 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.compaction.CompactionColumnTest.cell_merge_lww` | nb, oa, big | — |
 | `cass.compaction.CompactionControllerTest.purgeable_timestamp_boundary` | nb, oa, big | — |
 | `cass.compaction.CompactionDeleteAndPurgePKTest.partition_delete_purge` | nb, oa, big | — |
-| `cass.compaction.CompactionDeleteAndPurgeRowTest.row_delete_purge` | nb, oa, big | — |
+| `cass.compaction.CompactionDeleteAndPurgeRowTest.row_delete_purge` | nb, oa | test-data/datasets/sstables/test_compaction_tombstone_ttl/shadow_row_delete-2b929be075a811f1a11c2f8df72ff67b/nb-3-big-Data.db.jsonl<br>_fail:_ artifact.nightly_docker.byte_diff |
 | `cass.compaction.CompactionDeletePKTest.partition_delete_preserved` | nb, oa, big | — |
-| `cass.compaction.CompactionDeleteRowRangeTest.range_tombstone_merge` | nb, oa, big | — |
+| `cass.compaction.CompactionDeleteRowRangeTest.range_tombstone_merge` | nb, oa | test-data/datasets/sstables/test_compaction_tombstone_ttl/rt_cross_gen-2bd3757075a811f1a11c2f8df72ff67b/nb-3-big-Data.db.jsonl<br>_fail:_ artifact.nightly_docker.byte_diff |
 | `cass.compaction.CompactionDeleteRowTest.row_deletion_marker_preserved` | nb, oa, big | — |
 | `cass.compaction.CompactionIteratorTest.differential_compaction_loop` | nb | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
 | `cass.compaction.CompactionIteratorTest.live_partition_merge` | nb | test-data/datasets/sstables/test_compactionparity/live_no_clustering-e08194b073a611f1b17b3da6654e7580/nb-3-big-Data.db.jsonl |
@@ -1217,7 +1218,7 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.compaction.CompactionsBytemanTest.fault_injected_compaction` | — | — |
 | `cass.compaction.CompactionsCQLTest.negative_ldts_suspect_table` | nb, oa, big | — |
 | `cass.compaction.EarlyOpenCompactionTest.early_open_intermediate_readers` | — | — |
-| `cass.compaction.ForceCompactionTest.major_compaction_tombstone_purge` | nb, oa, big | — |
+| `cass.compaction.ForceCompactionTest.major_compaction_tombstone_purge` | nb, oa | — |
 | `cass.compaction.GcCompactionTest.static_and_complex_columns_survive_gc` | nb | test-data/datasets/sstables/test_collections |
 | `cass.compaction.LeveledCompactionStrategyTest.non_overlapping_levels` | nb, oa, big | — |
 | `cass.compaction.LeveledGenerationsTest.level_generation_merge_order` | nb, oa, big | — |
@@ -1230,7 +1231,7 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.compaction.ShardedCompactionWriterTest.shard_boundary_row_preservation` | nb, oa, big | — |
 | `cass.compaction.ShardedMultiWriterTest.flush_sharding_row_count` | nb, oa, big | — |
 | `cass.compaction.SingleSSTableLCSTaskTest.single_table_uplevel_metadata_readable` | nb, oa, big | — |
-| `cass.compaction.TimeWindowCompactionStrategyTest.ttl_window_expiry_purge` | nb, oa, big | — |
+| `cass.compaction.TimeWindowCompactionStrategyTest.ttl_window_expiry_purge` | nb, oa | test-data/datasets/sstables/test_compaction_tombstone_ttl/ttl_expired_live-2bb2a70075a811f1a11c2f8df72ff67b/nb-3-big-Data.db.jsonl<br>_fail:_ artifact.nightly_docker.byte_diff |
 | `cass.compaction.UnifiedCompactionDensitiesTest.sstable_density_distribution` | nb, oa, big | — |
 | `cass.compaction.UnifiedCompactionStrategyTest.gc_grace_purge_boundary` | nb, oa, big | — |
 | `cass.compaction.harness_byte_tier_artifacts` | nb | compaction-parity/build/parity-artifacts-byteParity/<scenario>/cassandra-output/<br>_fail:_ artifact.nightly_docker.live_logs |
