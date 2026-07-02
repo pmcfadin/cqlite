@@ -1115,6 +1115,13 @@ fn purge_resumes_row_tombstone_when_bound_above() {
         "the row tombstone MUST be purged once the overlap bound rises above its mfda; \
          got {partial:?}"
     );
+    // The row tombstone (10s) shadowed A's older in-set row (`v1`/`w`@5s) at merge
+    // time (shadow-before-purge); purging the now-redundant marker must NOT
+    // resurrect that covered in-set data.
+    assert!(
+        partial.v_live.is_none(),
+        "purging the row tombstone must NOT resurrect A's covered in-set `v1`@5s; got {partial:?}"
+    );
 }
 
 /// Safe-purge, COMPLEX-deletion marker: with C newer the partial merge PURGES the
@@ -1136,5 +1143,12 @@ fn purge_resumes_complex_deletion_when_bound_above() {
         !partial.tags_complex_deletion,
         "the complex-deletion marker MUST be purged once the overlap bound rises above its \
          mfda; got {partial:?}"
+    );
+    // The marker (10s) shadowed A's older in-set element (`tags={7}`@5s) at merge
+    // time; purging the now-redundant marker must NOT resurrect that element.
+    assert!(
+        !partial.tags_live_element,
+        "purging the complex-deletion marker must NOT resurrect A's covered in-set element \
+         `tags={{7}}`@5s; got {partial:?}"
     );
 }
