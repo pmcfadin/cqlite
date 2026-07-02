@@ -55,12 +55,12 @@
 - [x] `bash scripts/agent-gate.sh` (with `CQLITE_DATASETS_ROOT` → datasets) → PASS; paste
       the AGENT-GATE SUMMARY block verbatim.
 - [x] Run clippy `RUSTFLAGS="-D warnings"` workspace + `--all-targets`; zero warnings.
-- [ ] spec-auditor (**C**) anchored to
+- [x] spec-auditor (**C**) anchored to
       `openspec/changes/uncompressed-crc-verify/specs/**` → PASS (every requirement
       satisfied with a public-surface test as evidence).
-- [ ] roborev `/roborev-review-branch --base origin/main --agent codex --wait` → clean.
+- [x] roborev `/roborev-review-branch --base origin/main --agent codex --wait` → clean.
 
 ## 7. Finalize
-- [ ] Merge on green (gate PASS + C PASS + roborev clean); squash + delete branch.
-- [ ] `openspec archive uncompressed-crc-verify`; remove worktree/branch; close #1396 with
+- [x] Merge on green (gate PASS + C PASS + roborev clean); squash + delete branch.
+- [x] `openspec archive uncompressed-crc-verify`; remove worktree/branch; close #1396 with
       a comment linking epic #1380.
