@@ -8,7 +8,8 @@
 //!
 //! Wire formats mirror the V5CompressedLegacy decoder (`raw_value.rs`):
 //! * `time` — 8-byte big-endian `i64` nanoseconds-since-midnight → [`Value::Time`].
-//! * `inet` — raw address bytes (4 for IPv4, 16 for IPv6) → [`Value::Inet`].
+//! * `inet` — raw address bytes, 4 for IPv4 or 16 for IPv6 (any other length is
+//!   rejected as corruption) → [`Value::Inet`].
 //!
 //! Any genuinely-unknown custom type is preserved verbatim as [`Value::Blob`] —
 //! the only legitimate blob fallback.
@@ -35,7 +36,16 @@ pub(super) fn decode_custom_scalar(name: &str, value_data: &[u8]) -> Result<Valu
                 Err(Error::corruption("Invalid time value length"))
             }
         }
-        "inet" => Ok(Value::Inet(value_data.to_vec())),
+        "inet" => {
+            // CQL `inet` is valid only as a 4-byte IPv4 or 16-byte IPv6 address
+            // (Cassandra `InetAddressType`); reject any other length as corruption
+            // rather than surfacing a malformed address (mirrors the `time` arm).
+            if value_data.len() == 4 || value_data.len() == 16 {
+                Ok(Value::Inet(value_data.to_vec()))
+            } else {
+                Err(Error::corruption("Invalid inet value length"))
+            }
+        }
         // Genuinely-unknown custom type: preserve raw bytes verbatim.
         _ => Ok(Value::Blob(value_data.to_vec())),
     }
@@ -70,6 +80,14 @@ mod tests {
             decode_custom_scalar("inet", &v6).unwrap(),
             Value::Inet(v6.clone())
         );
+    }
+
+    #[test]
+    fn inet_wrong_length_errors() {
+        // Neither 4 (IPv4) nor 16 (IPv6) bytes: must be rejected as corruption.
+        assert!(decode_custom_scalar("inet", &[0u8; 5]).is_err());
+        assert!(decode_custom_scalar("inet", &[]).is_err());
+        assert!(decode_custom_scalar("inet", &[0u8; 15]).is_err());
     }
 
     #[test]

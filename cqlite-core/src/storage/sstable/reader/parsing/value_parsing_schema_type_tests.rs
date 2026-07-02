@@ -212,3 +212,164 @@ async fn collection_scalar_elements_decode_typed_not_blob() {
         "list<double> elements must decode to Value::Float, not Value::Blob"
     );
 }
+
+/// Always-run coverage of the core scalar-decode fix (issue #1627, roborev
+/// finding 2).
+///
+/// The fixture-driven tests above drive the production block-path methods
+/// (`parse_value_with_schema_type` / the sibling `parse_value_with_comparator`)
+/// end-to-end, but they only run when the real Cassandra dataset is present —
+/// so default/CI runs without the corpus never exercise the fix. Constructing an
+/// `SSTableReader` `self` without a real SSTable is impractical (the struct owns
+/// a live file/mmap source, header, parser, platform, and version gates, all
+/// produced only by `SSTableReader::open`), so these tests instead drive, with
+/// no binary fixture, the exact two-step decode the block-path methods perform:
+///
+/// 1. `ComparatorType::from_data_type(<schema type string>)` — the first line of
+///    `parse_value_with_schema_type` — mapping the schema-derived type to a
+///    concrete (non-blob) `ComparatorType` variant, and
+/// 2. the authoritative decoders those methods delegate every scalar arm to:
+///    the free [`parse_value_with_comparator`] in `comparator_value_parsing`
+///    (for Float32/Float/Timestamp/Varint/Decimal/Duration/Json) and
+///    [`decode_custom_scalar`] (for the schema-derived `Custom("time")` /
+///    `Custom("inet")`).
+///
+/// Together these assert the block path resolves each affected type to a typed
+/// `Value` variant, NOT `Value::Blob` — the exact regression the `_ =>
+/// parse_blob_value` catch-all caused before the fix.
+mod always_run {
+    use super::super::comparator_value_parsing::parse_value_with_comparator;
+    use super::super::custom_scalar::decode_custom_scalar;
+    use crate::types::{ComparatorType, Value};
+
+    /// Each schema type string the block path resolves must map to the concrete
+    /// (typed, non-blob) `ComparatorType` variant whose match arm delegates to a
+    /// typed decoder. This guards the dispatch wiring: if any of these regressed
+    /// to `Blob`/an unexpected variant, the block path would blob-decode again.
+    #[test]
+    fn schema_type_strings_map_to_typed_comparators() {
+        let cases: &[(&str, ComparatorType)] = &[
+            ("float", ComparatorType::Float32),
+            ("double", ComparatorType::Float),
+            ("timestamp", ComparatorType::Timestamp),
+            ("varint", ComparatorType::Varint),
+            ("decimal", ComparatorType::Decimal),
+            ("duration", ComparatorType::Duration),
+            ("time", ComparatorType::Custom("time".to_string())),
+            ("inet", ComparatorType::Custom("inet".to_string())),
+            (
+                "list<double>",
+                ComparatorType::List(Box::new(ComparatorType::Float)),
+            ),
+        ];
+        for (type_str, expected) in cases {
+            let resolved = ComparatorType::from_data_type(type_str)
+                .unwrap_or_else(|e| panic!("from_data_type({type_str}) failed: {e}"));
+            assert_eq!(
+                &resolved, expected,
+                "schema type '{type_str}' must resolve to {expected:?} so the block path routes it to a typed decoder"
+            );
+        }
+    }
+
+    /// The authoritative decoders the block-path scalar arms delegate to must
+    /// return typed `Value` variants (never `Value::Blob`). These assertions
+    /// fail on the pre-fix `_ => parse_blob_value` behaviour and pass now.
+    #[test]
+    fn delegated_scalar_decoders_return_typed_not_blob() {
+        // Float32: 4-byte big-endian IEEE-754.
+        assert_eq!(
+            parse_value_with_comparator(&3.5f32.to_be_bytes(), &ComparatorType::Float32).unwrap(),
+            Value::Float32(3.5),
+        );
+
+        // Float (double): 8-byte big-endian IEEE-754.
+        assert_eq!(
+            parse_value_with_comparator(&6.25f64.to_be_bytes(), &ComparatorType::Float).unwrap(),
+            Value::Float(6.25),
+        );
+
+        // Timestamp: 8-byte big-endian millis.
+        let ts: i64 = 1_700_000_000_123;
+        assert_eq!(
+            parse_value_with_comparator(&ts.to_be_bytes(), &ComparatorType::Timestamp).unwrap(),
+            Value::Timestamp(ts),
+        );
+
+        // Varint: raw big-endian two's-complement bytes preserved verbatim.
+        let varint_bytes = vec![0x01, 0x00];
+        assert_eq!(
+            parse_value_with_comparator(&varint_bytes, &ComparatorType::Varint).unwrap(),
+            Value::Varint(varint_bytes.clone()),
+        );
+
+        // Decimal: 4-byte scale + unscaled bytes.
+        let mut dec = Vec::new();
+        dec.extend_from_slice(&2i32.to_be_bytes());
+        dec.extend_from_slice(&[0x30, 0x39]); // unscaled = 12345
+        assert_eq!(
+            parse_value_with_comparator(&dec, &ComparatorType::Decimal).unwrap(),
+            Value::Decimal {
+                scale: 2,
+                unscaled: vec![0x30, 0x39],
+            },
+        );
+
+        // Duration: three signed (zigzag) VInts months/days/nanos; all-zero.
+        assert_eq!(
+            parse_value_with_comparator(&[0x00, 0x00, 0x00], &ComparatorType::Duration).unwrap(),
+            Value::Duration {
+                months: 0,
+                days: 0,
+                nanos: 0,
+            },
+        );
+
+        // Json: UTF-8 JSON text parsed to a serde_json::Value.
+        assert_eq!(
+            parse_value_with_comparator(b"123", &ComparatorType::Json).unwrap(),
+            Value::Json(serde_json::json!(123)),
+        );
+
+        // time: 8-byte big-endian nanoseconds-since-midnight (Custom("time")).
+        let t: i64 = 4_500_000_000_000;
+        assert_eq!(
+            decode_custom_scalar("time", &t.to_be_bytes()).unwrap(),
+            Value::Time(t),
+        );
+
+        // inet: 4-byte IPv4 / 16-byte IPv6 raw address bytes (Custom("inet")).
+        assert_eq!(
+            decode_custom_scalar("inet", &[10u8, 0, 0, 1]).unwrap(),
+            Value::Inet(vec![10, 0, 0, 1]),
+        );
+        assert_eq!(
+            decode_custom_scalar("inet", &[0u8; 16]).unwrap(),
+            Value::Inet(vec![0u8; 16]),
+        );
+    }
+
+    /// The sibling collection-element path (`parse_value_with_comparator`) must
+    /// decode scalar elements to their typed variants. `list<double>` routes
+    /// each element through the same delegated decoder that previously
+    /// blob-decoded `double`.
+    #[test]
+    fn collection_scalar_elements_decode_typed_not_blob() {
+        use crate::parser::vint::encode_vint;
+
+        // list<double> [1.5, 2.5]: VInt count, then per element VInt length + f64.
+        let mut data = Vec::new();
+        data.extend_from_slice(&encode_vint(2));
+        for v in [1.5f64, 2.5f64] {
+            data.extend_from_slice(&encode_vint(8));
+            data.extend_from_slice(&v.to_be_bytes());
+        }
+
+        let comparator = ComparatorType::List(Box::new(ComparatorType::Float));
+        assert_eq!(
+            parse_value_with_comparator(&data, &comparator).unwrap(),
+            Value::List(vec![Value::Float(1.5), Value::Float(2.5)]),
+            "list<double> elements must decode to Value::Float, not Value::Blob"
+        );
+    }
+}
