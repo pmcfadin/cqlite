@@ -50,9 +50,9 @@
       chunk; no file-sized allocations) — perf gate within the agreed budget.
 
 ## 6. Validate + review (gate → C → roborev)
-- [ ] `bash scripts/agent-gate.sh` (with `CQLITE_DATASETS_ROOT` → datasets) → PASS; paste
+- [x] `bash scripts/agent-gate.sh` (with `CQLITE_DATASETS_ROOT` → datasets) → PASS; paste
       the AGENT-GATE SUMMARY block verbatim.
-- [ ] Run clippy `RUSTFLAGS="-D warnings"` workspace + `--all-targets`; zero warnings.
+- [x] Run clippy `RUSTFLAGS="-D warnings"` workspace + `--all-targets`; zero warnings.
 - [ ] spec-auditor (**C**) anchored to
       `openspec/changes/uncompressed-crc-verify/specs/**` → PASS (every requirement
       satisfied with a public-surface test as evidence).
