@@ -13,6 +13,23 @@
 # success stays `smoke`; canonical JSONL checks stay `canonical_semantic`; only
 # byte/offset/checksum/component-file diffs against a Cassandra reference are
 # `byte_for_byte`.
+#
+# File-kind convention for `cassandra.files` (issue #1408). Entries mix kinds;
+# the kind is carried by a documented naming convention (no separate field) and
+# the linter enforces it:
+#   * test   — basename ends in `Test.java` (a real Apache Cassandra test). MUST
+#              resolve to a detailed entry in docs/cassandra_test_index.md; the
+#              linter fails otherwise (a `*Test.java` that names no real test is
+#              a referential-hygiene bug — fix the name, do not invent an index
+#              entry).
+#   * source — a production `.java` NOT ending in `Test.java` (e.g.
+#              UnfilteredSerializer.java, Descriptor.java, BigTableWriter.java,
+#              BloomFilterSerializer.java, DeletionTime.java, DroppedColumn.java).
+#              Names the on-disk-format-defining source; not index-checked.
+#   * harness — CQLTester.java (test base class); not index-checked.
+#   * anchor — a category-level index anchor containing `#` (e.g. `#compaction`);
+#              not index-checked.
+#   * none   — the literal `n/a` placeholder.
 
 manifest_version: 1
 
@@ -4292,7 +4309,7 @@ scenarios:
       category: bloom-filter
       relevance: high
       files:
-        - BloomFilterSerializerTest.java
+        - BloomFilterSerializer.java
     cqlite:
       coverage:
         suite: sstable_parity_filter_db_bloom
@@ -4340,7 +4357,7 @@ scenarios:
       category: bloom-filter
       relevance: med
       files:
-        - BloomFilterSerializerTest.java
+        - BloomFilterSerializer.java
     cqlite:
       coverage:
         suite: sstable_parity_filter_db_bloom
@@ -6789,7 +6806,7 @@ scenarios:
       relevance: high
       files:
         - CQLSSTableWriterTest.java
-        - BigTableWriterTest.java
+        - BigTableWriter.java
     cqlite:
       coverage:
         suite: sstable_writer_cassandra_fixture_parity
@@ -7607,7 +7624,7 @@ scenarios:
       relevance: high
       files:
         - PartitionTest.java
-        - DeletionTest.java
+        - DeletionTime.java
     cqlite:
       coverage:
         suite: sstable_parity_delta_scan
@@ -7652,7 +7669,7 @@ scenarios:
       relevance: high
       files:
         - RowTest.java
-        - DeletionTest.java
+        - DeletionTime.java
     cqlite:
       coverage:
         suite: sstable_parity_delta_scan
@@ -7697,7 +7714,7 @@ scenarios:
       relevance: high
       files:
         - CellTest.java
-        - DeletionTest.java
+        - DeletionTime.java
     cqlite:
       coverage:
         suite: sstable_parity_delta_scan
@@ -8766,7 +8783,7 @@ scenarios:
       category: serialization
       relevance: high
       files:
-        - DroppedColumnTest.java
+        - DroppedColumn.java
         - SerializationHeaderTest.java
     cqlite:
       coverage:
@@ -8815,7 +8832,7 @@ scenarios:
       category: serialization
       relevance: high
       files:
-        - DroppedColumnTest.java
+        - DroppedColumn.java
         - ColumnIndexTest.java
     cqlite:
       coverage:
@@ -8912,7 +8929,7 @@ scenarios:
       relevance: high
       files:
         - SerializationHeaderTest.java
-        - DroppedColumnTest.java
+        - DroppedColumn.java
     cqlite:
       coverage:
         suite: schema_parity_serialization_header

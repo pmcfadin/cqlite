@@ -49,6 +49,27 @@ only reads the manifest, the repository tree, and the assessment report.
 Required: `id`, `title`, `status`, `capability`, `priority`, `risk`,
 `cassandra`, `cqlite`, `fixtures`, `evidence`, `ci`, `scope`.
 
+### `cassandra.files` file-kind convention
+
+`cassandra.files` mixes reference kinds. There is **no** separate `kind` field —
+the kind is carried by a **naming convention** and enforced by the linter
+(issue #1408):
+
+| Kind | How it is recognized | Index-checked? |
+|---|---|---|
+| `test` | basename ends in `Test.java` (a real Apache Cassandra test) | **Yes** — must resolve to a detailed entry in `docs/cassandra_test_index.md`. |
+| `source` | a production `.java` not ending in `Test.java` (e.g. `UnfilteredSerializer.java`, `Descriptor.java`, `BigTableWriter.java`, `BloomFilterSerializer.java`, `DeletionTime.java`, `DroppedColumn.java`) | No. |
+| `harness` | `CQLTester.java` (test base class) | No. |
+| `anchor` | contains `#` — a category-level index anchor (e.g. `#compaction`) | No. |
+| `none` | the literal `n/a` placeholder | No. |
+
+The linter (`cassandra-parity lint`) fails when a `*Test.java` reference does not
+resolve to an index entry. A `*Test.java` that names no real Cassandra test is a
+referential-hygiene bug: point it at the real production source (dropping the
+spurious `Test` suffix) rather than inventing an index entry. Scenario/evidence
+**counts** are not maintained here — they are generated into
+`docs/reports/cassandra-test-parity.md` by the `report` subcommand.
+
 ### Scenario IDs
 
 Stable dotted identifiers: `cass.<capability_group>.<scenario_slug>`, e.g.

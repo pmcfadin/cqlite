@@ -15,9 +15,13 @@
 
 - Cassandra source tree: [`apache/cassandra`](https://github.com/apache/cassandra),
   ref `cassandra-5.0.2` (git SHA `f278f6774fc76465c182041e081982105c3e7dbb`).
-- Test index: [`docs/cassandra_test_index.md`](../cassandra_test_index.md) — 403
-  Cassandra test files (~3,578 `@Test` methods), of which **115 are
+- Test index: [`docs/cassandra_test_index.md`](../cassandra_test_index.md) — 407
+  Cassandra test files (~3,604 `@Test` methods), of which **118 are
   high-relevance** for SSTable data correctness and data-loss prevention.
+- Scenario and evidence **counts** are not maintained by hand here; they are
+  generated from the manifest into
+  [`docs/reports/cassandra-test-parity.md`](cassandra-test-parity.md) by the
+  `cassandra-parity report` subcommand.
 
 CQLite is a single-node SSTable **reader / writer / compactor**. It does not run
 as a Cassandra node, so a large fraction of the Cassandra test corpus exercises
