@@ -630,7 +630,10 @@ impl WriteAheadLog {
                 Error::Storage(format!("Failed to trim torn WAL tail at {:?}: {}", path, e))
             })?;
             file.sync_all().map_err(|e| {
-                Error::Storage(format!("Failed to sync WAL after trim at {:?}: {}", path, e))
+                Error::Storage(format!(
+                    "Failed to sync WAL after trim at {:?}: {}",
+                    path, e
+                ))
             })?;
             if let Some(parent) = path.parent() {
                 sync_directory(parent)?;
@@ -1856,7 +1859,11 @@ mod tests {
         // Fresh reopen + replay must recover exactly [A, C].
         let wal = WriteAheadLog::open_existing(&path).unwrap();
         let mutations = wal.replay().unwrap();
-        assert_eq!(mutations.len(), 2, "must recover A and C (C must be present)");
+        assert_eq!(
+            mutations.len(),
+            2,
+            "must recover A and C (C must be present)"
+        );
 
         let names: Vec<&str> = mutations
             .iter()
@@ -1898,7 +1905,11 @@ mod tests {
 
         let wal = WriteAheadLog::open_existing(&path).unwrap();
         let mutations = wal.replay().unwrap();
-        assert_eq!(mutations.len(), 2, "must recover A and C after torn-header trim");
+        assert_eq!(
+            mutations.len(),
+            2,
+            "must recover A and C after torn-header trim"
+        );
     }
 
     /// Criterion 4: clean log unaffected. open_existing on a clean log preserves
