@@ -27,6 +27,13 @@ pub struct MaintenanceReport {
     pub bytes_written: u64,
     /// Whether there is pending compaction work
     pub pending_compaction: bool,
+    /// SSTables DROPPED WHOLE by the fully-expired fast path in the merge that
+    /// completed this step (issue #1388), distinct from the merged inputs: each was
+    /// proven fully expired by authoritative `Statistics.db` metadata and
+    /// overlap-safe, so it was excluded from the K-way merger (never read/decoded)
+    /// and its components were reclaimed after the merged output published. Empty
+    /// when nothing was dropped. Paths are input Data.db paths.
+    pub dropped_whole: Vec<PathBuf>,
 }
 
 /// Active merge state for incremental compaction (M5.2, Issue #384)
@@ -65,6 +72,13 @@ pub(crate) struct ActiveMerge {
     /// mutations so the writer still emits the static-row prelude (static-column
     /// presence is read from the input headers, not the current schema only).
     pub(crate) effective_schema: TableSchema,
+    /// SSTables DROPPED WHOLE for this compaction (issue #1388): proven fully
+    /// expired by authoritative `Statistics.db` metadata and overlap-safe, EXCLUDED
+    /// from `input_paths` (never read into the merger). Reclaimed in
+    /// `finalize_merge_async` AFTER the merged output publishes, via the same
+    /// component-delete path as the merged inputs, and surfaced in the
+    /// `MaintenanceReport`. Empty when nothing was dropped.
+    pub(crate) dropped_whole: Vec<PathBuf>,
 }
 
 impl WriteEngine {
@@ -215,6 +229,7 @@ impl WriteEngine {
             rows_merged: 0,
             bytes_written: 0,
             pending_compaction: false,
+            dropped_whole: Vec::new(),
         };
 
         // If no merge policy is set, no maintenance work to do
@@ -277,19 +292,25 @@ impl WriteEngine {
                 // full-compaction fast path. `candidates` is already scoped to
                 // this table's directory (see above), so the non-included set is
                 // exactly this table's outside SSTables.
+                // The non-included (outside) overlapping set for this table. Empty
+                // for a full compaction (`purge_safe == true`). Used both for the
+                // #935 overlap-purge bound below AND for the #1388 fully-expired
+                // drop-set overlap gate (see `start_merge`).
+                let non_included: Vec<PathBuf> = candidates
+                    .iter()
+                    .filter(|p| !selected_set.contains(*p))
+                    .cloned()
+                    .collect();
                 let max_purgeable_timestamp = if purge_safe {
                     None
                 } else {
-                    let non_included: Vec<PathBuf> = candidates
-                        .iter()
-                        .filter(|p| !selected_set.contains(*p))
-                        .cloned()
-                        .collect();
                     merge::compute_max_purgeable_timestamp(&non_included)
                 };
 
-                // Start a new merge
-                self.start_merge(selected, purge_safe, max_purgeable_timestamp)?;
+                // Start a new merge. `non_included` is threaded through so
+                // `start_merge` can compute the fully-expired drop-set (issue #1388)
+                // with the correct overlap gate.
+                self.start_merge(selected, purge_safe, max_purgeable_timestamp, non_included)?;
             } else {
                 // No work selected by policy
                 report.time_spent = start.elapsed();
@@ -668,6 +689,7 @@ mod tests {
             rows_merged: 1000,
             bytes_written: 1024 * 1024,
             pending_compaction: true,
+            dropped_whole: Vec::new(),
         };
 
         assert_eq!(report.time_spent.as_millis(), 250);
