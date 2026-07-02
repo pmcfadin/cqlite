@@ -347,6 +347,13 @@ mod always_run {
             decode_custom_scalar("inet", &[0u8; 16]).unwrap(),
             Value::Inet(vec![0u8; 16]),
         );
+
+        // json: schema type "json" resolves to Custom("json"), so the block-path
+        // Custom dispatch must route it to the typed JSON decoder, not a blob.
+        assert_eq!(
+            decode_custom_scalar("json", br#"{"a":1}"#).unwrap(),
+            Value::Json(serde_json::json!({"a": 1})),
+        );
     }
 
     /// The sibling collection-element path (`parse_value_with_comparator`) must
