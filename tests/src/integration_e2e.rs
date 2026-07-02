@@ -1530,6 +1530,9 @@ async fn test_sstable_round_trip_validation() -> Result<(), Box<dyn std::error::
                     .map(|(_, v)| v)
                     .expect("single-cell row must yield its cell value")
             }
+            cqlite_core::ScanRow::RawRow(bytes) => {
+                panic!("expected a decoded live ScanRow::Row for key {key:?}, got a raw undecoded RawRow ({} bytes)", bytes.len())
+            }
             cqlite_core::ScanRow::Marker(v) => {
                 panic!("expected live ScanRow::Row for key {key:?}, got Marker({v:?})")
             }

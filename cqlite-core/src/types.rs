@@ -108,8 +108,22 @@ pub type RowCells = Vec<(Arc<str>, Value)>;
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScanRow {
     /// A live row: its interned cells, ordered exactly as emitted (emit-time
-    /// alphabetical by column name).
+    /// alphabetical by column name). These cells are ALREADY DECODED — a
+    /// consumer surfaces them as-is (never re-decoding a cell value).
     Row(RowCells),
+    /// A RAW, UNDECODED whole-row value carried with explicit provenance
+    /// (issue #1334). Emitted only by the fallback producers — the `data_access`
+    /// offset-read placeholder and the legacy `parse_block_entries*` fallback —
+    /// which pre-#1334 returned a bare `Value::Blob` of a row's raw value bytes.
+    ///
+    /// This is DELIBERATELY distinct from [`ScanRow::Row`]: it tells a consumer,
+    /// by provenance (not by inspecting cell name/shape), that the bytes still
+    /// need schema-decoding. A schema-aware consumer schema-decodes these bytes
+    /// into the table's columns; a no-schema consumer surfaces them as the exact
+    /// pre-#1334 shape (a single `"data"` [`Value::Blob`] column). An already
+    /// decoded row — even one whose only non-key column is a blob column named
+    /// `"data"` — is a [`ScanRow::Row`] and is NEVER treated as raw.
+    RawRow(Vec<u8>),
     /// A non-row scan marker carried on the same channel — a row tombstone
     /// (`Value::Tombstone`), an absent/null row (`Value::Null`), or a synthetic
     /// compaction carrier value. Suppressed from user-visible output but
@@ -118,10 +132,18 @@ pub enum ScanRow {
 }
 
 impl ScanRow {
-    /// Interned cells of a live row, or `None` for a marker (tombstone/null).
+    /// Cells surfaced to a no-schema consumer: a live row's interned cells, the
+    /// single synthetic `"data"` blob for a raw fallback row, or `None` for a
+    /// marker (tombstone/null).
+    ///
+    /// A [`ScanRow::RawRow`] surfaces as one `("data", Value::Blob(bytes))` cell —
+    /// the exact pre-#1334 bare-`Value::Blob` shape a no-schema consumer produced.
     pub fn into_cells(self) -> Option<RowCells> {
         match self {
             ScanRow::Row(cells) => Some(cells),
+            ScanRow::RawRow(bytes) => {
+                Some(vec![(std::sync::Arc::from("data"), Value::Blob(bytes))])
+            }
             ScanRow::Marker(_) => None,
         }
     }
@@ -131,61 +153,56 @@ impl ScanRow {
         matches!(self, ScanRow::Marker(_))
     }
 
-    /// Number of cells in a live row, or the marker value's byte length.
+    /// Number of cells in a live row, or the byte length of a raw/marker value.
     ///
     /// Inspection convenience: a live [`ScanRow::Row`] reports its cell count; a
+    /// [`ScanRow::RawRow`] reports its undecoded byte length; a
     /// [`ScanRow::Marker`] delegates to the wrapped value's [`Value::len`].
     pub fn len(&self) -> usize {
         match self {
             ScanRow::Row(cells) => cells.len(),
+            ScanRow::RawRow(bytes) => bytes.len(),
             ScanRow::Marker(v) => v.len(),
         }
     }
 
-    /// True when a live row has no cells, or the marker value is empty/null.
+    /// True when a live row has no cells, a raw row has no bytes, or the marker
+    /// value is empty/null.
     pub fn is_empty(&self) -> bool {
         match self {
             ScanRow::Row(cells) => cells.is_empty(),
+            ScanRow::RawRow(bytes) => bytes.is_empty(),
             ScanRow::Marker(v) => v.is_empty(),
         }
     }
 
-    /// Byte view of a marker's wrapped value (e.g. a raw `Value::Blob` from an
-    /// offset-read placeholder); `None` for a live row.
+    /// Byte view of a raw fallback row's undecoded bytes, or a marker's wrapped
+    /// value bytes; `None` for a decoded live row.
     pub fn as_bytes(&self) -> Option<&[u8]> {
         match self {
+            ScanRow::RawRow(bytes) => Some(bytes),
             ScanRow::Marker(v) => v.as_bytes(),
             ScanRow::Row(_) => None,
         }
     }
 
-    /// THE single classifier that maps a decoded value onto the scan → query row
-    /// carrier (issue #1334). Every fallback producer routes through this so a
-    /// live value can never be mis-wrapped as a suppressed marker.
+    /// Classifier that maps a single ALREADY-DECODED named cell onto the
+    /// scan → query row carrier (issue #1334). Used by the block-emit producers
+    /// for genuine static/clustering cells so a live value can never be
+    /// mis-wrapped as a suppressed marker.
     ///
     /// A genuinely absent cell ([`Value::Null`]) or a tombstone
     /// ([`Value::Tombstone`]) stays a suppressible [`ScanRow::Marker`] —
     /// `build_row_from_scan`/`into_cells()` drop those from user-visible output.
-    /// ANY successfully-decoded LIVE value becomes a live single-cell
+    /// ANY other (decoded, live) value becomes a live single-cell
     /// [`ScanRow::Row`] under `column_name` (interned `Arc<str>`) so it surfaces
-    /// in SELECT/export/schema-discovery under ALL feature combinations
-    /// (including `legacy-heuristics`, which decodes legacy non-empty values into
-    /// a live [`Value::Blob`]).
+    /// in SELECT/export/schema-discovery. This is for DECODED cells only; a raw
+    /// undecoded whole-row value uses [`ScanRow::RawRow`] instead.
     pub fn classify_cell(column_name: &str, value: Value) -> ScanRow {
         match value {
             Value::Null | Value::Tombstone(_) => ScanRow::Marker(value),
             _ => ScanRow::Row(vec![(std::sync::Arc::from(column_name), value)]),
         }
-    }
-
-    /// Classify a fallback value that has NO column-name context: the schema-less
-    /// / `legacy-heuristics` blob fallback in `parse_block_entries*` and the
-    /// offset-read placeholder in `data_access`. A live value surfaces under the
-    /// synthetic `"data"` column — the exact single-column live-row shape the
-    /// pre-#1334 query layer produced for a bare [`Value`] — so a live
-    /// [`Value::Blob`] can never silently disappear behind a marker (issue #1334).
-    pub fn from_fallback_value(value: Value) -> ScanRow {
-        Self::classify_cell("data", value)
     }
 }
 

@@ -297,10 +297,10 @@ impl SSTableReader {
             })?;
             offset = data.len() - new_offset.len();
 
-            // Handle different value encodings in Cassandra 5.0
-            let value = if value_len == 0 {
-                // Empty value
-                Value::Null
+            // Handle different value encodings in Cassandra 5.0.
+            let scan_row = if value_len == 0 {
+                // Empty value → suppressible null marker.
+                ScanRow::Marker(Value::Null)
             } else if value_len > 16777216 {
                 // 16MB limit
                 return Err(Error::corruption(format!(
@@ -316,17 +316,19 @@ impl SSTableReader {
                 )));
             } else {
                 let value_data = &data[offset..offset + value_len];
-                self.parse_column_value_enhanced(value_data, &table_id, &key, schema)?
+                // Enforce the modern-format contract: V5 without schema must NOT
+                // fall back to a raw blob (`parse_column_value_enhanced` errors and
+                // we propagate). This legacy path carries the WHOLE row's raw value
+                // bytes; hand them downstream with explicit RAW provenance
+                // (issue #1334) so a schema-aware consumer schema-decodes them
+                // (pre-#1334 point-lookup behavior) and a no-schema consumer
+                // surfaces a single "data" blob — no downstream shape-guessing.
+                self.parse_column_value_enhanced(value_data, &table_id, &key, schema)?;
+                ScanRow::RawRow(value_data.to_vec())
             };
             offset += value_len;
 
-            // Route the fallback value through the crate-wide classifier
-            // (issue #1334): an empty value (`Value::Null`) or tombstone stays a
-            // suppressible marker, but a LIVE value must surface as a `ScanRow::Row`.
-            // With `legacy-heuristics` enabled, `parse_column_value_enhanced` decodes
-            // a non-empty legacy value into a live `Value::Blob`, which MUST NOT be
-            // swallowed by a marker (it surfaced as a synthetic "data" row pre-#1334).
-            entries.push((table_id, key, ScanRow::from_fallback_value(value)));
+            entries.push((table_id, key, scan_row));
         }
 
         Ok(entries)
@@ -645,10 +647,10 @@ impl SSTableReader {
             })?;
             offset = data.len() - new_offset.len();
 
-            // Handle different value encodings
-            let value = if value_len == 0 {
-                // Empty value
-                Value::Null
+            // Handle different value encodings.
+            let scan_row = if value_len == 0 {
+                // Empty value → suppressible null marker.
+                ScanRow::Marker(Value::Null)
             } else if value_len > 16777216 {
                 // 16MB limit
                 return Err(Error::corruption(format!(
@@ -664,17 +666,17 @@ impl SSTableReader {
                 )));
             } else {
                 let value_data = &data[offset..offset + value_len];
-                self.parse_column_value_enhanced(value_data, &table_id, &key, schema)?
+                // Enforce the modern-format contract (V5 without schema errors and
+                // we propagate). This legacy path carries the WHOLE row's raw value
+                // bytes; hand them downstream with explicit RAW provenance
+                // (issue #1334) so a schema-aware consumer schema-decodes them and a
+                // no-schema consumer surfaces a single "data" blob — no shape guess.
+                self.parse_column_value_enhanced(value_data, &table_id, &key, schema)?;
+                ScanRow::RawRow(value_data.to_vec())
             };
             offset += value_len;
 
-            // Route the legacy fallback value through the crate-wide classifier
-            // (issue #1334): a null/tombstone stays a suppressible marker, but a
-            // LIVE value surfaces as a `ScanRow::Row`. Under `legacy-heuristics`,
-            // `parse_column_value_enhanced` decodes a non-empty legacy value into a
-            // live `Value::Blob` here — wrapping it as `Marker` would silently drop
-            // data that surfaced as a synthetic "data" row pre-#1334.
-            entries.push((table_id, key, ScanRow::from_fallback_value(value)));
+            entries.push((table_id, key, scan_row));
         }
 
         Ok(entries)
@@ -1104,66 +1106,37 @@ mod tests {
                 assert_eq!(&*cells[0].0, "name", "interned real column name");
                 assert_eq!(cells[0].1, Value::Text("bob".to_string()));
             }
+            ScanRow::RawRow(_) => {
+                panic!("classify_cell never yields a RawRow; a decoded value must be a live Row")
+            }
             ScanRow::Marker(_) => panic!("a real value must be a live Row, not a marker"),
         }
     }
 
-    /// Issue #1334 / roborev round 4: the fallback push sites must surface a LIVE
-    /// value even under `--all-features`. With `legacy-heuristics` enabled, the
-    /// schema-less legacy fallback (`parse_column_value_enhanced`) decodes a
-    /// non-empty value into a live `Value::Blob`. Routing it through
-    /// `ScanRow::from_fallback_value` MUST yield a `ScanRow::Row` that surfaces the
-    /// blob via the public `build_row_from_scan` — pre-fix these sites wrapped it as
-    /// `ScanRow::Marker`, which `into_cells()` suppresses, so the legacy blob
-    /// silently disappeared from SELECT/export. This drives the REAL legacy decode
-    /// path (forcing the legacy version arm) and would fail (build_row_from_scan →
-    /// None → panic on `expect`) under marker-suppression.
-    #[cfg(feature = "legacy-heuristics")]
-    #[tokio::test]
-    async fn legacy_fallback_live_blob_surfaces_via_build_row_from_scan() {
-        use crate::parser::header::CassandraVersion;
-
-        let mut reader = match create_test_reader("test_basic", "simple_table").await {
-            Some(r) => r,
-            None => {
-                eprintln!("Skipping test: CQLITE_DATASETS_ROOT not set or test data unavailable");
-                return;
-            }
-        };
-
-        // Force the non-modern arm of `parse_column_value_enhanced` so that, with
-        // legacy-heuristics, a non-empty value decodes to a live `Value::Blob`
-        // (modern nb/da versions error out instead — see the modern-format arm).
-        reader.header.cassandra_version = CassandraVersion::Legacy;
-
-        let table_id = TableId::new("ks_tbl".to_string());
+    /// Issue #1334: the legacy `parse_block_entries*` fallback push sites carry a
+    /// row's RAW value bytes with explicit `ScanRow::RawRow` provenance (never a
+    /// suppressible marker). A no-schema consumer surfaces those bytes as the
+    /// `"data"` column via the public `build_row_from_scan` — the exact pre-#1334
+    /// bare-`Value::Blob` behavior — so the legacy blob can never silently
+    /// disappear from SELECT/export.
+    #[test]
+    fn raw_fallback_surfaces_via_build_row_from_scan() {
         let key = RowKey::new(b"pk".to_vec());
         let raw = vec![0xde, 0xad, 0xbe, 0xef];
 
-        // Real legacy fallback decode — the exact production value the two
-        // `parse_block_entries*` fallback push sites hand to `from_fallback_value`.
-        let value = reader
-            .parse_column_value_enhanced(&raw, &table_id, &key, None)
-            .expect("legacy-heuristics blob fallback must decode a non-empty value");
-        assert_eq!(
-            value,
-            Value::Blob(raw.clone()),
-            "legacy-heuristics fallback yields a LIVE blob, not null/tombstone"
-        );
-
-        // Route through the SAME classifier the fallback push sites now use.
-        let scan_row = ScanRow::from_fallback_value(value);
+        // The exact carrier the two `parse_block_entries*` fallback sites now emit.
+        let scan_row = ScanRow::RawRow(raw.clone());
         assert!(
-            matches!(scan_row, ScanRow::Row(_)),
-            "a live legacy blob must be a ScanRow::Row, never a suppressed Marker"
+            matches!(scan_row, ScanRow::RawRow(_)),
+            "the raw fallback must carry explicit RawRow provenance, never a Marker"
         );
 
         let row = crate::query::build_row_from_scan(key, scan_row, &[], None)
-            .expect("a live legacy fallback value must NOT be suppressed by into_cells()");
+            .expect("a raw fallback row must NOT be suppressed by into_cells()");
         assert_eq!(
             row.values.get("data"),
             Some(&Value::Blob(raw)),
-            "the live legacy blob must surface as the \"data\" column in SELECT/export"
+            "the raw fallback bytes must surface as the \"data\" column in SELECT/export"
         );
     }
 

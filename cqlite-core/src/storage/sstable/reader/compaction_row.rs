@@ -101,6 +101,20 @@ impl CompactionRow {
                     clustering: Vec::new(),
                 }
             }
+            // A raw undecoded fallback row collapses to a single `value` cell
+            // carrying the raw bytes as a blob — the exact pre-#1334 shape a bare
+            // `Value::Blob` produced in this legacy collapsed-value fallback.
+            ScanRow::RawRow(bytes) => CompactionRowData::Live {
+                simple: vec![SimpleCell {
+                    column: "value".to_string(),
+                    value: Value::Blob(bytes),
+                    timestamp: row_timestamp,
+                    ttl: None,
+                    local_deletion_time: None,
+                }],
+                complex: Vec::new(),
+                row_deletion: None,
+            },
             // Any other marker (null row, cell tombstone, …) collapses to a single
             // `value` cell, exactly as the pre-#1334 fallback did.
             ScanRow::Marker(other) => CompactionRowData::Live {

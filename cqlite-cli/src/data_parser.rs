@@ -407,6 +407,14 @@ impl RealDataParser {
                     columns.insert(name.to_string(), Self::core_value_to_parsed(v));
                 }
             }
+            // Issue #1334: a raw undecoded fallback row (no schema decode here)
+            // surfaces its bytes as a single "data" blob column so it is not lost.
+            ScanRow::RawRow(bytes) => {
+                columns.insert(
+                    "data".to_string(),
+                    Self::core_value_to_parsed(&Value::Blob(bytes.clone())),
+                );
+            }
             ScanRow::Marker(_) => {
                 // Row tombstone / null row: surface the regular columns as NULL.
                 for column in &self.schema.columns {

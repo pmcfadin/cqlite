@@ -744,14 +744,23 @@ impl QueryExecutor {
         use std::sync::Arc;
         let mut values: HashMap<Arc<str>, Value> = HashMap::new();
 
-        // Storage path carries rows as the single `ScanRow::Row` carrier keyed by
-        // the interned `Arc<str>` column-name handle (issue #1334); move the handle
-        // straight in (no per-cell `String` re-allocation of the name). Markers
-        // (row tombstone / null) carry no columns.
-        if let ScanRow::Row(cells) = data {
-            for (name, cell_value) in cells {
-                values.insert(name, cell_value);
+        // Storage path carries rows via the `ScanRow` carrier (issue #1334).
+        // * `Row` — decoded cells keyed by the interned `Arc<str>` column-name
+        //   handle; move the handle straight in (no `String` re-allocation).
+        // * `RawRow` — a raw undecoded fallback with no schema here; surface the
+        //   bytes as a single "data" blob, the exact pre-#1334 `other =>
+        //   insert("data", ..)` shape.
+        // * `Marker` (row tombstone / null) carries no columns.
+        match data {
+            ScanRow::Row(cells) => {
+                for (name, cell_value) in cells {
+                    values.insert(name, cell_value);
+                }
             }
+            ScanRow::RawRow(bytes) => {
+                values.insert(Arc::from("data"), Value::Blob(bytes));
+            }
+            ScanRow::Marker(_) => {}
         }
 
         // If no values were extracted, surface the row key for visibility.
@@ -1099,25 +1108,23 @@ mod tests {
 
     /// Issue #1334 / roborev H1: the offset-read placeholder
     /// (`data_access::read_value_at_offset`) surfaces its raw bytes to
-    /// SELECT/export through `get()` → `storage_data_to_query_row` as a live
-    /// single-column row keyed `"data"` — exactly the behaviour a bare
-    /// `Value::Blob` had pre-#1334. This pins that a live `ScanRow::Row` carrying
-    /// that blob keeps surfacing the value, while the equivalent
-    /// `ScanRow::Marker` is SUPPRESSED (drops the blob to an id-only fallback).
-    /// The producer emitting a `Marker` here (the regression) would silently lose
-    /// data that previously reached the query result.
+    /// SELECT/export through `get()` → `storage_data_to_query_row` as a single
+    /// column keyed `"data"` — exactly the behaviour a bare `Value::Blob` had
+    /// pre-#1334. The producer now emits explicit `ScanRow::RawRow` provenance;
+    /// this pins that a `RawRow` keeps surfacing the value under `"data"`, while
+    /// the equivalent `ScanRow::Marker` is SUPPRESSED (drops the blob to an
+    /// id-only fallback) — the regression a `Marker` here would cause.
     #[tokio::test]
     async fn offset_read_row_surfaces_data_marker_is_suppressed() {
-        use std::sync::Arc;
         let (_tmp, executor, _) = make_executor().await;
         let key = RowKey::new(vec![7]);
         let raw = vec![0xde, 0xad, 0xbe, 0xef];
 
-        // Live row (the fixed producer output): the raw blob surfaces as "data".
-        let live = ScanRow::Row(vec![(Arc::from("data"), Value::Blob(raw.clone()))]);
+        // The fixed producer output: the raw fallback surfaces its bytes as "data".
+        let live = ScanRow::RawRow(raw.clone());
         let row = executor
             .storage_data_to_query_row(live, &key)
-            .expect("live offset-read row must convert");
+            .expect("raw offset-read row must convert");
         assert_eq!(
             row.values.get("data"),
             Some(&Value::Blob(raw.clone())),

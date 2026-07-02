@@ -529,6 +529,9 @@ mod tests {
                     }
                 }
             }
+            ScanRow::RawRow(_) => {
+                panic!("❌ V5CompressedLegacy parser returned a raw undecoded RawRow (should return a decoded row with cells!)");
+            }
             ScanRow::Marker(Value::Null) => {
                 panic!("❌ V5CompressedLegacy parser returned Null value (should return row with cells!)");
             }

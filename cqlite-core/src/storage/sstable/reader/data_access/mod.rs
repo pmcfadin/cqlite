@@ -37,7 +37,7 @@ pub(in crate::storage::sstable::reader) use model::table_ids_match;
 use super::source::ScanCursor;
 use super::SSTableReader;
 use crate::parser::DataFormat;
-use crate::types::{CellWriteMetadata, ScanRow, TableId, Value};
+use crate::types::{CellWriteMetadata, ScanRow, TableId};
 use crate::{Error, Result, RowKey};
 use log::{debug, warn};
 use std::io::SeekFrom;
@@ -403,16 +403,14 @@ impl SSTableReader {
             buffer
         };
 
-        // TODO: Parse value using schema-driven type information (issue #1334).
-        // For now, preserve raw data until schema is available. Pre-#1334 this
-        // offset-read placeholder returned a bare `Value::Blob`, which the query
-        // layer surfaced as a synthetic single-column *live* row keyed "data"
-        // (the `other => insert("data", ..)` arm in
-        // `executor::storage_data_to_query_row`). Route it through the crate-wide
-        // classifier so the raw blob keeps surfacing as a live "data" cell; a
-        // `ScanRow::Marker` here would be SUPPRESSED downstream and silently drop
-        // a value that previously reached SELECT/export (issue #1334).
-        let row = ScanRow::from_fallback_value(Value::Blob(data.to_vec()));
+        // Preserve raw data until schema is available. Pre-#1334 this offset-read
+        // placeholder returned a bare `Value::Blob` of the row's raw value bytes,
+        // which `SchemaAwareReader` then schema-decoded and the no-schema query
+        // layer surfaced as a synthetic single-column "data" row. Carry that RAW
+        // provenance explicitly (issue #1334): a schema-aware consumer decodes the
+        // bytes; a no-schema consumer surfaces a single "data" blob — with no
+        // downstream guessing from the value's shape.
+        let row = ScanRow::RawRow(data.to_vec());
 
         // Extract write time from value (placeholder - would need to be parsed from SSTable)
         let _write_time = std::time::SystemTime::now()

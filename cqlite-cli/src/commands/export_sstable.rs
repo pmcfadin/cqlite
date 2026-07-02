@@ -392,10 +392,19 @@ fn convert_entry_to_query_row(
     // carries every regular column as a decoded `(name, value)` cell; a marker
     // (row tombstone / null row) contributes no cells (the null-fill below covers
     // the schema columns).
-    if let ScanRow::Row(cells) = value {
-        for (name, v) in cells {
-            values.insert(name.to_string(), v.clone());
+    match value {
+        ScanRow::Row(cells) => {
+            for (name, v) in cells {
+                values.insert(name.to_string(), v.clone());
+            }
         }
+        // A raw undecoded fallback row surfaces its bytes as a single "data" blob
+        // so it is never silently dropped from the export.
+        ScanRow::RawRow(bytes) => {
+            values.insert("data".to_string(), Value::Blob(bytes.clone()));
+        }
+        // A marker (row tombstone / null row) contributes no cells.
+        ScanRow::Marker(_) => {}
     }
 
     // Ensure all schema columns have entries (use Null for missing)

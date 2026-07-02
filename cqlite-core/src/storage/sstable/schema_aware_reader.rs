@@ -390,18 +390,19 @@ impl SchemaAwareReader {
 
     /// Disassemble a scanned row into its column values.
     ///
-    /// Issue #1334: the reader delivers a fully decoded [`ScanRow`]. Two live-row
-    /// shapes reach here and MUST behave exactly as they did pre-#1334:
-    /// * Genuine multi-column live rows (V5 scan decoder) carry ALREADY-decoded
-    ///   named cells; they pass through verbatim, except partition/clustering-key
+    /// Issue #1334: the reader delivers a [`ScanRow`] carrying EXPLICIT provenance,
+    /// so this consumer decides by provenance — never by inspecting a cell's
+    /// name/shape:
+    /// * [`ScanRow::Row`] — genuine ALREADY-decoded named cells (e.g. the V5 scan
+    ///   decoder). They pass through verbatim, except partition/clustering-key
     ///   cells the decoder injects but `scan` returns separately are skipped so
-    ///   keys are never duplicated as regular column values.
-    /// * A synthetic single-cell `[("data", Value::Blob(bytes))]` row from the
-    ///   point-lookup / offset-read placeholder wraps a whole row's raw bytes as
-    ///   one blob; pre-#1334 this API decoded those bytes into the table's columns
-    ///   via the [`SchemaParser`] — that decode is restored here.
-    ///
-    /// A [`ScanRow::Marker`] (tombstone / null / suppressed carrier) yields `{}`.
+    ///   keys are never duplicated. A row whose only non-key column is a blob
+    ///   column named `"data"` is a legitimate decoded row and passes through
+    ///   UNCHANGED — it is NOT reinterpreted as encoded row bytes.
+    /// * [`ScanRow::RawRow`] — a whole row's RAW, undecoded value bytes from the
+    ///   point-lookup / offset-read / legacy fallback. Schema-decode them into the
+    ///   table's columns via the [`SchemaParser`], exactly as pre-#1334.
+    /// * [`ScanRow::Marker`] (tombstone / null / suppressed carrier) yields `{}`.
     pub fn parse_row_value(&self, raw_value: &ScanRow) -> Result<HashMap<String, Value>> {
         Self::disassemble_row(&self.context, &self.schema_parser, raw_value)
     }
@@ -413,18 +414,15 @@ impl SchemaAwareReader {
     ) -> Result<HashMap<String, Value>> {
         let cells = match raw_value {
             ScanRow::Row(cells) => cells,
+            // Raw, undecoded whole-row bytes: schema-decode into the table's
+            // columns (the restored pre-#1334 point-lookup decode path). This is
+            // driven by PROVENANCE, not by matching a `("data", Blob)` shape.
+            ScanRow::RawRow(bytes) => {
+                return Self::decode_raw_row_bytes(context, schema_parser, bytes)
+            }
             // A marker carries no user-visible columns.
             ScanRow::Marker(_) => return Ok(HashMap::new()),
         };
-
-        // Synthetic offset-read / point-lookup shape: a lone "data" blob carrying
-        // a whole row's raw bytes. Schema-decode it into the table's columns,
-        // exactly as the pre-#1334 point lookup did.
-        if let [(name, Value::Blob(bytes))] = cells.as_slice() {
-            if name.as_ref() == "data" {
-                return Self::decode_raw_row_bytes(context, schema_parser, bytes);
-            }
-        }
 
         // Already-decoded named cells: copy them, skipping partition/clustering
         // key columns (which `scan` returns separately) to avoid duplicating keys.
@@ -699,7 +697,11 @@ mod tests {
     /// Build the (context, parser) pair `disassemble_row` needs, without opening
     /// a real SSTable file (the row-disassembly logic depends only on these two).
     fn build_context_and_parser() -> (ParsingContext, SchemaParser) {
-        let schema = create_test_schema();
+        build_context_and_parser_for(create_test_schema())
+    }
+
+    /// Build the (context, parser) pair for an explicit schema.
+    fn build_context_and_parser_for(schema: TableSchema) -> (ParsingContext, SchemaParser) {
         // Build the context directly from the schema (create_parsing_context
         // ignores the registry) so the test needs no async registry/platform.
         let context = ParsingContext {
@@ -723,26 +725,56 @@ mod tests {
         out
     }
 
-    // Finding 1 (roborev round 6): a synthetic single-cell `("data", Blob)` row
-    // from the point-lookup / offset-read path must be SCHEMA-DECODED into the
-    // table's columns, not returned as a raw "data" blob. Pre-fix this returned
-    // `{"data": Blob(..)}` and this assertion failed.
+    /// Issue #1334 (roborev): provenance, not shape, decides decode-vs-passthrough.
+    ///
+    /// A `ScanRow::RawRow(bytes)` fallback IS schema-decoded into the table's
+    /// columns. A legitimate already-decoded `ScanRow::Row` whose only non-key
+    /// column is a BLOB column named `data` passes through UNCHANGED — its blob
+    /// bytes are NOT reinterpreted as an encoded row. Under the previous
+    /// `("data", Blob)` shape heuristic the second assertion FAILED (the legit
+    /// blob was wrongly re-decoded).
     #[test]
-    fn test_synthetic_data_blob_is_schema_decoded() {
-        let (context, parser) = build_context_and_parser();
-
-        // Whole-row raw bytes: a single non-key column ("data": text).
+    fn raw_row_is_decoded_but_decoded_data_blob_passes_through() {
+        // (a) The raw fallback: undecoded whole-row bytes IS schema-decoded.
+        let (context, parser) = build_context_and_parser(); // `data` is text here
         let raw_bytes = text_cell_bytes("hello");
-        let row = ScanRow::Row(vec![(Arc::from("data"), Value::Blob(raw_bytes))]);
-
-        let cols = SchemaAwareReader::disassemble_row(&context, &parser, &row).expect("decode");
-
-        // Decoded into the schema column, NOT surfaced as a raw blob.
-        assert_eq!(cols.get("data"), Some(&Value::Text("hello".to_string())));
-        assert!(
-            !matches!(cols.get("data"), Some(Value::Blob(_))),
-            "synthetic 'data' blob must be schema-decoded, not passed through as a blob"
+        let raw_row = ScanRow::RawRow(raw_bytes);
+        let cols =
+            SchemaAwareReader::disassemble_row(&context, &parser, &raw_row).expect("decode raw");
+        assert_eq!(
+            cols.get("data"),
+            Some(&Value::Text("hello".to_string())),
+            "a RawRow fallback must be schema-decoded into the table's columns"
         );
+
+        // (b) A legit already-decoded row for a table whose only non-key column is
+        // a BLOB column named `data`. The scan returns keys separately, so the row
+        // carrier holds exactly ONE cell: `[("data", Blob(payload))]` — the exact
+        // single-element shape the deleted `if let [(name, Blob(bytes))]` heuristic
+        // keyed on. The blob VALUE must pass through UNCHANGED, never reinterpreted
+        // as encoded row bytes.
+        let mut blob_schema = create_test_schema();
+        for col in blob_schema.columns.iter_mut() {
+            if col.name == "data" {
+                col.data_type = "blob".to_string();
+            }
+        }
+        let (blob_ctx, blob_parser) = build_context_and_parser_for(blob_schema);
+
+        // Length-prefixed bytes: if wrongly re-decoded as a blob column,
+        // `parse_blob` strips the 4-byte prefix and yields the 5-byte "hello",
+        // NOT these 9 bytes — so a mismatch here proves the heuristic re-decoded.
+        let payload = text_cell_bytes("hello"); // [0,0,0,5,'h','e','l','l','o']
+        let decoded_row = ScanRow::Row(vec![(Arc::from("data"), Value::Blob(payload.clone()))]);
+        let cols = SchemaAwareReader::disassemble_row(&blob_ctx, &blob_parser, &decoded_row)
+            .expect("passthrough");
+        assert_eq!(
+            cols.get("data"),
+            Some(&Value::Blob(payload)),
+            "a legit decoded `data` blob column must pass through UNCHANGED, not be re-decoded \
+             (this assertion FAILS under the deleted (data,Blob) shape heuristic)"
+        );
+        assert_eq!(cols.len(), 1, "only the non-key column should remain");
     }
 
     // Finding 2 (roborev round 6): the V5 decoder injects partition/clustering

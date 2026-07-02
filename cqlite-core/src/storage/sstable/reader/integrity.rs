@@ -124,7 +124,8 @@ impl SSTableReader {
         // live row are preserved for callers to inspect.) Only a marker carries a
         // `Value` whose tombstone/TTL semantics this filter evaluates.
         let value = match row {
-            ScanRow::Row(_) => return true,
+            // A live row (decoded or raw undecoded fallback) is always kept.
+            ScanRow::Row(_) | ScanRow::RawRow(_) => return true,
             ScanRow::Marker(v) => v,
         };
         // Use the fast tombstone check for performance
@@ -248,6 +249,8 @@ impl SSTableReader {
         // suppressed.
         match row {
             ScanRow::Row(cells) => Ok(!cells.is_empty()),
+            // A raw undecoded fallback row carries live bytes → included.
+            ScanRow::RawRow(bytes) => Ok(!bytes.is_empty()),
             ScanRow::Marker(_) => Ok(false),
         }
     }

@@ -649,6 +649,13 @@ impl SSTableDataManager {
                     .into_iter()
                     .map(|(name, val)| (name.to_string(), val))
                     .collect(),
+                // Issue #1334: a raw undecoded fallback row (no schema here)
+                // surfaces its bytes as a single "value" blob column — the exact
+                // pre-#1334 shape a bare `Value::Blob` produced via this manager's
+                // fallback arm.
+                ScanRow::RawRow(bytes) => {
+                    HashMap::from([("value".to_string(), Value::Blob(bytes))])
+                }
                 // Markers (row tombstone / null row) carry no columns.
                 ScanRow::Marker(marker) => {
                     log::debug!(
