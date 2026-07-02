@@ -40,8 +40,9 @@ text/JSON/exit-code output contract, which is pinned by the #1236 verify capabil
 - **AND** a clean SSTable exits 0 while a corrupt one exits non-zero as before
 
 ### Requirement: The dead Degraded branch is removed
-The unreachable `IntegrityStatus::Degraded` path (driven by `checksum_mismatches`, which was never incremented)
-SHALL NOT remain as dead, misleading code. The consolidated projection SHALL produce only reachable statuses.
+The consolidated integrity projection SHALL produce only reachable status values and SHALL NOT retain the
+unreachable `IntegrityStatus::Degraded` path (driven by `checksum_mismatches`, a counter that was never
+incremented).
 
 #### Scenario: Integrity status is always a reachable value
 - **WHEN** `perform_integrity_check` returns any status
