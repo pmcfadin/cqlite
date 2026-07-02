@@ -196,6 +196,79 @@ async fn iterate_all_partitions_over_bit_flipped_uncompressed_fixture_fails_fast
     }
 }
 
+/// R2 (roborev Fix 1, chunk-0 soundness) — a byte flipped inside **chunk 0** of a
+/// real uncompressed fixture is caught by the plain `SSTableReader::scan` path,
+/// naming chunk 0. The clean `uncompressed_table` source is copied to a temp dir,
+/// one Data.db byte inside chunk 0 (`[0, 65536)`) is flipped while its
+/// Cassandra-written `CRC.db` is kept intact, so chunk 0's stored CRC no longer
+/// matches. This proves the first chunk is verified end-to-end (it was previously
+/// skipped when a read began after `actual_header_size`), never silently returned.
+/// Skip-clean when the clean source is absent.
+#[tokio::test]
+async fn plain_scan_over_chunk0_flipped_uncompressed_fixture_fails_fast() {
+    let Some(clean) = clean_source_data_db() else {
+        assert!(
+            !require_fixtures(),
+            "CQLITE_REQUIRE_FIXTURES=1 but the clean uncompressed_table source is absent"
+        );
+        eprintln!("SKIP: clean uncompressed_table source absent.");
+        return;
+    };
+    let src_dir = clean.parent().expect("dir");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut data_name: Option<String> = None;
+    for entry in std::fs::read_dir(src_dir).expect("read src").flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy().to_string();
+        if name_str.ends_with(".db.jsonl") {
+            continue; // drop bulky sidecar
+        }
+        std::fs::copy(entry.path(), tmp.path().join(&name_str)).expect("copy component");
+        if name_str.ends_with("-Data.db") {
+            data_name = Some(name_str);
+        }
+    }
+    let data = tmp
+        .path()
+        .join(data_name.expect("fixture must ship a Data.db"));
+
+    // Flip one byte inside chunk 0 ([0, 65536)) but well past the parsed header
+    // buffer (4096) so open() still succeeds; the mismatch surfaces on scan.
+    let mut bytes = std::fs::read(&data).expect("read Data.db");
+    assert!(
+        bytes.len() > 40_000,
+        "uncompressed_table Data.db should span multiple 64 KiB chunks"
+    );
+    let flip_at = 40_000usize; // inside chunk 0
+    bytes[flip_at] ^= 0xFF;
+    std::fs::write(&data, &bytes).expect("write chunk-0-flipped Data.db");
+
+    let reader = open_reader(&data).await;
+    let table_id = TableId::new(TABLE.to_string());
+    match reader.scan(&table_id, None, None, None, None).await {
+        Ok(rows) => panic!(
+            "read-path regression: scan over a chunk-0-flipped uncompressed Data.db returned Ok \
+             with {} rows; the first chunk must be verified (typed corruption naming chunk 0).",
+            rows.len()
+        ),
+        Err(err) => {
+            assert!(
+                matches!(err, Error::Corruption(_)),
+                "chunk-0 mismatch must be Error::Corruption, got: {err}"
+            );
+            let msg = err.to_string();
+            assert!(
+                msg.contains("chunk 0"),
+                "error must name chunk 0 (proving the first chunk is no longer skipped): {msg}"
+            );
+            assert!(
+                msg.to_uppercase().contains("CRC"),
+                "error should identify the CRC mismatch: {msg}"
+            );
+        }
+    }
+}
+
 /// R2 (roborev Fix 2) — the integrity check (`perform_integrity_check`) over the
 /// corrupt uncompressed fixture reports corruption rather than Healthy. Before
 /// the fix, a non-recoverable `read_next_block` error (the uncompressed CRC

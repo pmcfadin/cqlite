@@ -512,8 +512,23 @@ impl SSTableReader {
             ));
         }
         let file_size = self.stats.file_size;
+        // Fix 3 (issue #1396): a corrupt on-disk offset/size can overflow
+        // `offset + size` (debug panic / wrapped range that misattributes CRC
+        // chunks) or point past EOF. Use checked arithmetic and reject a range
+        // that overflows or exceeds the Data.db length as typed corruption
+        // BEFORE deriving any chunk index. `size >= 1` here (0 handled above),
+        // so `end > offset` and `end - 1` never underflows.
+        let end = offset
+            .checked_add(size as u64)
+            .filter(|end| *end <= file_size)
+            .ok_or_else(|| {
+                Error::corruption(format!(
+                    "uncompressed read range [0x{offset:x}, +{size}) overflows or exceeds the \
+                     Data.db length {file_size}; refusing to verify a corrupt offset"
+                ))
+            })?;
         let first = offset / cs;
-        let last = (offset + size as u64 - 1) / cs;
+        let last = (end - 1) / cs;
         for chunk in first..=last {
             // Skip chunks already verified for this reader.
             {

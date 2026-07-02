@@ -804,31 +804,44 @@ async fn read_uncompressed_data_block(
     // never returns the corrupt bytes / wrong values / a silent empty result. The
     // compressed path is unaffected (it uses its own inline per-chunk CRC).
     if let Some(crc) = crc_reader {
-        verify_uncompressed_chunks(crc, &data, current_pos, file_size)?;
+        verify_uncompressed_chunks(file, crc, &data, current_pos, file_size).await?;
     }
 
     Ok(Some(data))
 }
 
-/// Verify each fully-covered `chunk_size`-aligned block of a just-read
-/// uncompressed Data.db range `[start_offset, start_offset + data.len())` against
-/// the authoritative `CRC.db` (issue #1396).
+/// Verify EVERY `CRC.db` chunk that overlaps a just-read uncompressed Data.db
+/// range `[start_offset, start_offset + data.len())` against the authoritative
+/// `CRC.db` (issue #1396).
 ///
 /// Verification is done on `chunk_size` boundaries independent of the read-piece
-/// size (`UNCOMPRESSED_READ_PIECE_BYTES` and `CRC_CHUNK_SIZE` may differ). Only a
-/// chunk whose FULL byte range (`[c*cs, min((c+1)*cs, file_size))`) lies inside
-/// the returned buffer is verified — a chunk only partially present in this read
-/// is left to the read that completes it (the sequential scan paths read on chunk
-/// boundaries, so every chunk is eventually fully covered exactly once).
+/// size (`UNCOMPRESSED_READ_PIECE_BYTES` and `CRC_CHUNK_SIZE` may differ). A
+/// `CRC.db` chunk covers the WHOLE Data.db byte range `[c*cs, min((c+1)*cs,
+/// file_size))` indexed from Data.db offset 0. Because sequential reads begin at
+/// `actual_header_size` (NOT necessarily a chunk boundary), the FIRST overlapping
+/// chunk can start before `start_offset`: its prefix bytes (the header region)
+/// are not in the returned buffer. A previous version verified only chunks
+/// *fully contained* in the buffer and therefore SKIPPED that first chunk,
+/// returning corruption in its data bytes UNVERIFIED (soundness bug, Fix 1).
+///
+/// To close that gap this now verifies every overlapping chunk regardless of the
+/// start offset: for each chunk it assembles the full `[lo, hi)` block from the
+/// resident `data` (the overlapping middle) plus any missing prefix `[lo,
+/// start_offset)` or suffix `[end, hi)` READ from `file`, then checks the CRC32
+/// over the complete chunk. In the common sequential case only the first chunk's
+/// header prefix is ever read from disk; the file position is restored to `end`
+/// afterwards so the caller's subsequent piecewise reads continue unaffected.
 ///
 /// The final short chunk is verified once its end reaches `file_size`. A chunk
 /// whose CRC entry is missing from a truncated `CRC.db` is a typed error (via
 /// [`CrcDb::crc_for_chunk`]); the harmless trailing compaction empty-final-chunk
 /// entry (issue #1222) maps beyond `file_size` and is never queried.
 ///
-/// Memory: reads only from the already-resident data buffer and the tiny CRC
-/// sidecar — no new Data.db-file-sized allocation (issue #1396 memory budget).
-fn verify_uncompressed_chunks(
+/// Memory: at most one `chunk_size` block is materialised at a time (bounded by
+/// `MAX_CRC_CHUNK_SIZE`) — no new Data.db-file-sized allocation (issue #1396
+/// memory budget).
+async fn verify_uncompressed_chunks(
+    file: &Arc<Mutex<BlockSource>>,
     crc: &CrcDb,
     data: &[u8],
     start_offset: u64,
@@ -840,35 +853,107 @@ fn verify_uncompressed_chunks(
             "CRC.db chunk size is zero; cannot verify uncompressed chunks",
         ));
     }
-    let end = start_offset + data.len() as u64;
-    let mut chunk = start_offset / cs;
-    loop {
-        let lo = chunk * cs;
-        if lo >= end {
-            break;
-        }
-        // True Data.db byte range of this chunk (final chunk is short).
-        let hi = ((chunk + 1) * cs).min(file_size);
-        // Verify only when the WHOLE chunk is present in this returned buffer.
-        if lo >= start_offset && hi <= end && hi > lo {
-            let rel_lo = (lo - start_offset) as usize;
-            let rel_hi = (hi - start_offset) as usize;
-            let computed = crc32fast::hash(&data[rel_lo..rel_hi]);
-            let expected = crc.crc_for_chunk(chunk as usize)?;
-            if computed != expected {
-                return Err(Error::corruption(format!(
-                    "uncompressed CRC32 mismatch for chunk {} at Data.db offset 0x{:x} \
-                     ({} bytes): expected=0x{:08x}, computed=0x{:08x} (CRC.db)",
-                    chunk,
-                    lo,
-                    hi - lo,
-                    expected,
-                    computed
-                )));
-            }
-        }
-        chunk += 1;
+    if data.is_empty() {
+        return Ok(());
     }
+    // `data.len()` is bounded by the read-piece cap; `start_offset` is a real
+    // file position — overflow is implausible, but saturate to stay panic-free.
+    let end = start_offset.saturating_add(data.len() as u64);
+    let first = start_offset / cs;
+    // `end > start_offset` (data non-empty), so `end - 1` never underflows.
+    let last = (end - 1) / cs;
+
+    let mut did_seek = false;
+    for chunk in first..=last {
+        let lo = chunk.saturating_mul(cs);
+        // True Data.db byte range of this chunk (final chunk is short).
+        let hi = ((chunk + 1).saturating_mul(cs)).min(file_size);
+        if hi <= lo {
+            break; // chunk begins at/after EOF; nothing real to verify
+        }
+
+        // Assemble the WHOLE chunk [lo, hi): the part inside [start_offset, end)
+        // comes from the resident `data`; any missing prefix/suffix is read from
+        // the file so this chunk is fully verified regardless of where the read
+        // began (Fix 1: the first chunk was previously skipped).
+        let mut whole = Vec::with_capacity((hi - lo) as usize);
+        let pre_hi = start_offset.min(hi);
+        if lo < pre_hi {
+            read_range_into(file, lo, pre_hi, &mut whole).await?;
+            did_seek = true;
+        }
+        let mid_lo = lo.max(start_offset);
+        let mid_hi = hi.min(end);
+        if mid_lo < mid_hi {
+            whole.extend_from_slice(
+                &data[(mid_lo - start_offset) as usize..(mid_hi - start_offset) as usize],
+            );
+        }
+        let suf_lo = end.max(lo);
+        if suf_lo < hi {
+            read_range_into(file, suf_lo, hi, &mut whole).await?;
+            did_seek = true;
+        }
+        debug_assert_eq!(whole.len() as u64, hi - lo);
+
+        let computed = crc32fast::hash(&whole);
+        let expected = crc.crc_for_chunk(chunk as usize)?;
+        if computed != expected {
+            return Err(Error::corruption(format!(
+                "uncompressed CRC32 mismatch for chunk {} at Data.db offset 0x{:x} \
+                 ({} bytes): expected=0x{:08x}, computed=0x{:08x} (CRC.db)",
+                chunk,
+                lo,
+                hi - lo,
+                expected,
+                computed
+            )));
+        }
+    }
+
+    // Restore the file position to `end` (where the caller's main read left it)
+    // if any completing read moved it, so sequential piecewise reads continue.
+    if did_seek {
+        let mut guard = file.lock().await;
+        guard
+            .seek(std::io::SeekFrom::Start(end))
+            .await
+            .map_err(|e| {
+                Error::Io(std::io::Error::other(format!(
+                    "failed to restore Data.db position after CRC verification: {e}"
+                )))
+            })?;
+    }
+    Ok(())
+}
+
+/// Read the Data.db byte range `[lo, hi)` from `file` and append it to `out`.
+///
+/// Used by [`verify_uncompressed_chunks`] to complete a CRC chunk whose prefix
+/// (header region) or suffix is not present in the just-read buffer. The
+/// allocation is bounded by one `chunk_size` block (`MAX_CRC_CHUNK_SIZE`).
+async fn read_range_into(
+    file: &Arc<Mutex<BlockSource>>,
+    lo: u64,
+    hi: u64,
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    let mut buf = vec![0u8; (hi - lo) as usize];
+    let mut guard = file.lock().await;
+    guard
+        .seek(std::io::SeekFrom::Start(lo))
+        .await
+        .map_err(|e| {
+            Error::Io(std::io::Error::other(format!(
+                "failed to seek Data.db to 0x{lo:x} for CRC chunk completion: {e}"
+            )))
+        })?;
+    guard.read_exact(&mut buf).await.map_err(|e| {
+        Error::corruption(format!(
+            "failed to read Data.db bytes [0x{lo:x}, 0x{hi:x}) for CRC verification: {e}"
+        ))
+    })?;
+    out.extend_from_slice(&buf);
     Ok(())
 }
 
@@ -1130,8 +1215,18 @@ mod tests {
         v
     }
 
-    #[test]
-    fn verify_uncompressed_chunks_clean_multichunk_passes() {
+    /// Build an `Arc<Mutex<BlockSource>>` over `bytes` for the verifier tests.
+    /// The returned `TempDir` MUST be held for the source's lifetime.
+    async fn blocksource_from(bytes: &[u8]) -> (TempDir, Arc<Mutex<BlockSource>>) {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("data.bin");
+        tokio::fs::write(&path, bytes).await.expect("write data");
+        let file = tokio::fs::File::open(&path).await.expect("open data");
+        (dir, Arc::new(Mutex::new(BlockSource::buffered(file))))
+    }
+
+    #[tokio::test]
+    async fn verify_uncompressed_chunks_clean_multichunk_passes() {
         let cs = 8u32; // tiny chunk size for the test
         let data: Vec<u8> = (0..20u8).collect(); // 20 bytes -> chunks [0,8),[8,16),[16,20)
         let crcs = [
@@ -1140,12 +1235,15 @@ mod tests {
             crc32fast::hash(&data[16..20]),
         ];
         let crc = CrcDb::parse(&synth_crc_db(cs, &crcs)).expect("parse");
+        let (_dir, file) = blocksource_from(&data).await;
         // Whole-file contiguous read starting at offset 0.
-        verify_uncompressed_chunks(&crc, &data, 0, data.len() as u64).expect("clean data verifies");
+        verify_uncompressed_chunks(&file, &crc, &data, 0, data.len() as u64)
+            .await
+            .expect("clean data verifies");
     }
 
-    #[test]
-    fn verify_uncompressed_chunks_flip_in_later_chunk_attributed_to_that_chunk() {
+    #[tokio::test]
+    async fn verify_uncompressed_chunks_flip_in_later_chunk_attributed_to_that_chunk() {
         let cs = 8u32;
         let mut data: Vec<u8> = (0..20u8).collect();
         let crcs = [
@@ -1156,7 +1254,9 @@ mod tests {
         let crc = CrcDb::parse(&synth_crc_db(cs, &crcs)).expect("parse");
         // Flip a byte inside chunk 1 ([8,16)).
         data[10] ^= 0xFF;
-        let err = verify_uncompressed_chunks(&crc, &data, 0, data.len() as u64)
+        let (_dir, file) = blocksource_from(&data).await;
+        let err = verify_uncompressed_chunks(&file, &crc, &data, 0, data.len() as u64)
+            .await
             .expect_err("corrupt chunk must error");
         let msg = err.to_string();
         assert!(
@@ -1171,15 +1271,76 @@ mod tests {
         );
     }
 
-    #[test]
-    fn verify_uncompressed_chunks_truncated_crc_db_is_typed_error() {
+    #[tokio::test]
+    async fn verify_uncompressed_chunks_truncated_crc_db_is_typed_error() {
         let cs = 8u32;
         let data: Vec<u8> = (0..20u8).collect(); // needs 3 CRC entries
                                                  // Only provide 1 entry -> chunk 1/2 have no CRC -> truncation error.
         let crc = CrcDb::parse(&synth_crc_db(cs, &[crc32fast::hash(&data[0..8])])).expect("parse");
-        let err = verify_uncompressed_chunks(&crc, &data, 0, data.len() as u64)
+        let (_dir, file) = blocksource_from(&data).await;
+        let err = verify_uncompressed_chunks(&file, &crc, &data, 0, data.len() as u64)
+            .await
             .expect_err("truncated CRC.db must error");
         assert!(matches!(err, Error::Corruption(_)), "typed: {err}");
+    }
+
+    /// Fix 1 (issue #1396, SOUNDNESS): a sequential uncompressed read that begins
+    /// after `actual_header_size` (a non-chunk-boundary offset) must STILL fully
+    /// verify CHUNK 0 — the chunk that spans the header region. A byte corrupted
+    /// in chunk 0's header prefix `[0, start_offset)` — the bytes that are NOT in
+    /// the returned buffer and were previously skipped — must be caught as typed
+    /// corruption naming chunk 0. This drives the actual reader wiring
+    /// (`read_uncompressed_data_block` with the file pre-seeked to the header
+    /// offset), not the verify helper in isolation.
+    #[tokio::test]
+    async fn header_offset_read_still_verifies_chunk_0_prefix() {
+        let cs = 8u32; // tiny chunks: [0,8),[8,16),[16,20)
+        let clean: Vec<u8> = (0..20u8).collect();
+        let crcs = [
+            crc32fast::hash(&clean[0..8]),
+            crc32fast::hash(&clean[8..16]),
+            crc32fast::hash(&clean[16..20]),
+        ];
+        let crc = CrcDb::parse(&synth_crc_db(cs, &crcs)).expect("parse");
+        let config = SSTableReaderConfig::default();
+        let header_size = 3u64; // simulate actual_header_size: read starts mid-chunk-0
+
+        // 1) Clean: a read starting at the header offset verifies chunk 0 (its
+        //    prefix [0,3) is read from disk) and every later chunk, returning
+        //    [3,20) byte-identical.
+        let (dir, file) = blocksource_from(&clean).await;
+        {
+            let mut g = file.lock().await;
+            g.seek(std::io::SeekFrom::Start(header_size)).await.unwrap();
+        }
+        let piece = read_uncompressed_data_block(&file, &config, false, Some(&crc))
+            .await
+            .expect("clean header-offset read verifies")
+            .expect("non-empty section");
+        assert_eq!(piece, clean[3..], "returned bytes are the post-header data");
+        drop(dir);
+
+        // 2) Corrupt a byte in chunk 0's HEADER PREFIX [0,3) — a byte the read
+        //    buffer never contains. The OLD verifier skipped chunk 0 entirely for
+        //    a header-offset read, so this flip was returned UNVERIFIED. It must
+        //    now be caught as typed corruption naming chunk 0 (offset 0x0).
+        let mut corrupt = clean.clone();
+        corrupt[1] ^= 0xFF; // inside [0, header_size)
+        let (dir, file) = blocksource_from(&corrupt).await;
+        {
+            let mut g = file.lock().await;
+            g.seek(std::io::SeekFrom::Start(header_size)).await.unwrap();
+        }
+        let err = read_uncompressed_data_block(&file, &config, false, Some(&crc))
+            .await
+            .expect_err("corruption in chunk 0's header prefix must be caught, not returned");
+        let msg = err.to_string();
+        assert!(matches!(err, Error::Corruption(_)), "typed: {msg}");
+        assert!(
+            msg.contains("chunk 0"),
+            "must name chunk 0 (proving it is no longer skipped): {msg}"
+        );
+        drop(dir);
     }
 
     #[tokio::test]

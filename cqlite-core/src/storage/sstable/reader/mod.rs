@@ -537,7 +537,7 @@ impl SSTableReader {
         // (issue #1396). Only for uncompressed tables (compression_info None);
         // compressed tables carry inline per-chunk CRCs instead.
         let crc_reader = if compression_info.is_none() {
-            Self::load_crc_reader(path, &header).await?
+            Self::load_crc_reader(path, &header, file_size).await?
         } else {
             None
         };
@@ -926,6 +926,7 @@ impl SSTableReader {
     async fn load_crc_reader(
         path: &Path,
         header: &SSTableHeader,
+        data_len: u64,
     ) -> Result<Option<Arc<crc::CrcDb>>> {
         // BTI (`da`) never ships a CRC.db; nothing to load.
         if matches!(header.cassandra_version, CassandraVersion::V5_0Bti) {
@@ -950,7 +951,7 @@ impl SSTableReader {
             return Ok(None);
         }
 
-        let crc = crc::CrcDb::open(&crc_path).await.map_err(|e| {
+        let crc = crc::CrcDb::open(&crc_path, data_len).await.map_err(|e| {
             Error::corruption(format!(
                 "Failed to parse CRC.db at {}: {}",
                 crc_path.display(),

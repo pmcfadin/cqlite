@@ -113,8 +113,65 @@ impl CrcDb {
         Ok(Self { chunk_size, crcs })
     }
 
-    /// Read and parse a `CRC.db` from disk.
-    pub(crate) async fn open(path: &Path) -> Result<Self> {
+    /// Read and parse a `CRC.db` from disk, bounded by the Data.db size.
+    ///
+    /// `data_len` is the length in bytes of the associated `Data.db`. Before
+    /// reading the sidecar body into memory this reads only the 4-byte
+    /// chunk-size header, derives the MAXIMUM plausible `CRC.db` length for a
+    /// `data_len`-byte Data.db, and rejects an oversized sidecar as typed
+    /// [`Error::Corruption`] (issue #1396 Fix 2). This closes an unbounded-alloc
+    /// vector at open: a malformed / hostile `CRC.db` far larger than the
+    /// Data.db can possibly imply would otherwise force `tokio::fs::read` to
+    /// buffer the whole (arbitrarily large) file before any size sanity check.
+    pub(crate) async fn open(path: &Path, data_len: u64) -> Result<Self> {
+        use tokio::io::AsyncReadExt;
+
+        // Read ONLY the 4-byte chunk-size header first (bounded) so a hostile
+        // sidecar cannot drive an unbounded whole-file read here.
+        let mut file = tokio::fs::File::open(path).await.map_err(|e| {
+            Error::corruption(format!("cannot open CRC.db at {}: {}", path.display(), e))
+        })?;
+        let mut header = [0u8; 4];
+        file.read_exact(&mut header).await.map_err(|e| {
+            Error::corruption(format!(
+                "CRC.db at {} is too short for the 4-byte chunk-size header: {}",
+                path.display(),
+                e
+            ))
+        })?;
+        let chunk_size_raw = i32::from_be_bytes(header);
+        if chunk_size_raw <= 0 {
+            return Err(Error::corruption(format!(
+                "CRC.db chunk-size header is non-positive ({chunk_size_raw}); expected a positive block size (Cassandra default 65536)"
+            )));
+        }
+        let chunk_size = chunk_size_raw as u32;
+        if chunk_size > MAX_CRC_CHUNK_SIZE {
+            return Err(Error::corruption(format!(
+                "CRC.db chunk-size header is {chunk_size} bytes — exceeds the {MAX_CRC_CHUNK_SIZE}-byte maximum (Cassandra default 65536); refusing to read an oversized sidecar"
+            )));
+        }
+
+        // Maximum plausible CRC.db length for a `data_len`-byte Data.db: the
+        // 4-byte header + one 4-byte CRC per chunk + at most ONE trailing
+        // compaction empty-final-chunk entry (issue #1222). All arithmetic is
+        // saturating so an absurd `data_len`/`chunk_size` can never overflow.
+        let n_chunks = data_len.div_ceil(chunk_size as u64);
+        let max_len = 4u64.saturating_add(n_chunks.saturating_add(1).saturating_mul(4));
+        let actual_len = tokio::fs::metadata(path)
+            .await
+            .map(|m| m.len())
+            .map_err(|e| {
+                Error::corruption(format!("cannot stat CRC.db at {}: {}", path.display(), e))
+            })?;
+        if actual_len > max_len {
+            return Err(Error::corruption(format!(
+                "CRC.db at {} is {actual_len} bytes — exceeds the {max_len}-byte maximum implied by a {data_len}-byte Data.db (chunk_size={chunk_size}, {n_chunks} chunks + optional trailer); refusing to read an oversized sidecar",
+                path.display()
+            )));
+        }
+
+        // Size-validated: read the whole (now bounded) sidecar and parse.
         let bytes = tokio::fs::read(path).await.map_err(|e| {
             Error::corruption(format!("cannot read CRC.db at {}: {}", path.display(), e))
         })?;
@@ -236,6 +293,50 @@ mod tests {
         ));
     }
 
+    /// Fix 2 (issue #1396): `CrcDb::open` must reject a `CRC.db` far larger than
+    /// the Data.db size implies BEFORE reading its body into memory — otherwise a
+    /// malformed / hostile sidecar forces an unbounded allocation at open. Here a
+    /// well-formed-header CRC.db carrying vastly more per-chunk entries than a
+    /// tiny Data.db can have is rejected as typed corruption naming the maximum.
+    #[tokio::test]
+    async fn oversized_crc_db_vs_data_len_is_typed_error_before_body_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data = dir.path().join("Data.db");
+        // A tiny Data.db: one short chunk at 64 KiB chunk size → at most 1 real
+        // CRC entry (+ optional trailer) → max CRC.db length 12 bytes.
+        tokio::fs::write(&data, b"tiny").await.expect("write data");
+        let data_len = 4u64;
+
+        // Craft a CRC.db with a valid 64 KiB header but 10_000 bogus CRC entries
+        // (~40 KB) — far beyond the 12-byte maximum a 4-byte Data.db implies.
+        let bogus: Vec<u32> = (0..10_000u32).collect();
+        let crc_path = dir.path().join("CRC.db");
+        tokio::fs::write(&crc_path, synth_crc_db(65536, &bogus))
+            .await
+            .expect("write oversized crc.db");
+
+        let err = CrcDb::open(&crc_path, data_len)
+            .await
+            .expect_err("oversized CRC.db must be rejected");
+        assert!(
+            matches!(err, Error::Corruption(_)),
+            "typed corruption: {err}"
+        );
+        assert!(
+            err.to_string().contains("maximum") && err.to_string().contains("exceeds"),
+            "error must name the derived maximum bound: {err}"
+        );
+
+        // A correctly-sized CRC.db for the same Data.db still opens fine.
+        let ok_path = dir.path().join("CRC-ok.db");
+        tokio::fs::write(&ok_path, synth_crc_db(65536, &[0xdead_beef]))
+            .await
+            .expect("write ok crc.db");
+        CrcDb::open(&ok_path, data_len)
+            .await
+            .expect("correctly-sized CRC.db must open");
+    }
+
     #[test]
     fn partial_trailing_crc_is_typed_error() {
         // header + 1 full CRC + 2 stray bytes.
@@ -268,7 +369,9 @@ mod tests {
             .await
             .expect("write crc.db");
 
-        let crc = CrcDb::open(&crc_path).await.expect("open crc.db");
+        let crc = CrcDb::open(&crc_path, len as u64)
+            .await
+            .expect("open crc.db");
         assert_eq!(crc.chunk_size() as usize, CRC_CHUNK_SIZE);
         assert_eq!(crc.chunk_count(), 3, "2.5 chunks -> 3 CRC entries");
 
@@ -342,7 +445,12 @@ mod tests {
             return;
         };
 
-        let crc = CrcDb::open(&crc_path).await.expect("parse real CRC.db");
+        let data_len = std::fs::metadata(&data_path)
+            .map(|m| m.len())
+            .expect("stat Data.db");
+        let crc = CrcDb::open(&crc_path, data_len)
+            .await
+            .expect("parse real CRC.db");
         assert_eq!(
             crc.chunk_size(),
             65536,
@@ -374,14 +482,15 @@ mod tests {
     async fn compaction_trailer_is_extra_harmless_entry() {
         let dir = tempfile::tempdir().expect("tempdir");
         let data = dir.path().join("Data.db");
-        tokio::fs::write(&data, b"one short chunk")
-            .await
-            .expect("write");
+        let payload: &[u8] = b"one short chunk";
+        tokio::fs::write(&data, payload).await.expect("write");
         let crc_path = dir.path().join("CRC.db");
         write_crc_db(&data, crc_path.clone(), CrcTrailer::EmptyFinalChunk)
             .await
             .expect("write");
-        let crc = CrcDb::open(&crc_path).await.expect("open");
+        let crc = CrcDb::open(&crc_path, payload.len() as u64)
+            .await
+            .expect("open");
         // 1 real chunk + 1 trailing empty-final-chunk 0.
         assert_eq!(crc.chunk_count(), 2);
         assert_eq!(crc.crc_for_chunk(1).unwrap(), 0);

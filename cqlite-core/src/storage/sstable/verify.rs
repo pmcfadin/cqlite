@@ -1288,7 +1288,13 @@ async fn check_uncompressed_crc_db(
         return;
     }
 
-    let crc = match CrcDb::open(&crc_path).await {
+    // Data.db length bounds the maximum plausible CRC.db size (issue #1396
+    // Fix 2): `CrcDb::open` rejects an oversized sidecar before reading its body.
+    let data_len = tokio::fs::metadata(&components.data_path)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let crc = match CrcDb::open(&crc_path, data_len).await {
         Ok(c) => c,
         Err(e) => {
             findings.push(VerifyFinding::new(
