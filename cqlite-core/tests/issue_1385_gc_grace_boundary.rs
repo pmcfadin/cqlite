@@ -150,20 +150,32 @@ fn write_live_name(id: i32, ck: i32, name: &str, ts: i64) -> Mutation {
     )
 }
 
-/// A row with a ROW TOMBSTONE (coexisting with a live `score` cell) whose
-/// `localDeletionTime` is stamped at explicit `ldt_secs` and whose
-/// `markedForDeleteAt` is `del_ts` (microseconds). `with_row_tombstone` decouples
-/// the deletion from the row's liveness timestamp so the row keeps its live
-/// `score` cell while carrying the row deletion — matching the row-deletion purge
-/// site (a real, non-zero, surfaced `row_del_ldt`).
-fn write_row_tombstone_with_live(
-    id: i32,
-    ck: i32,
-    score: i32,
-    row_ts: i64,
-    del_ts: i64,
-    ldt_secs: i32,
-) -> Mutation {
+/// A ROW TOMBSTONE via `CellOperation::DeleteRow` at `ts` (microseconds), whose
+/// `localDeletionTime` is stamped at explicit `ldt_secs`.
+///
+/// A `DeleteRow` op (unlike the decoupled `Mutation::row_tombstone` field, which
+/// is broken on the direct-flush stats path — issue #1721) IS folded into the
+/// writer's `min_local_deletion_time` stats, so it flushes cleanly, and it reads
+/// back as a `RowData::Tombstone { deletion_time, local_deletion_time }`. That
+/// LDT flows into `row_del_ldt` (`fold_row_deletions`, reconcile.rs:170) and hits
+/// the SAME strict-`<` row-deletion purge site (reconcile.rs:507) that the
+/// decoupled field would — so this exercises the row-tombstone boundary exactly.
+fn write_row_delete(id: i32, ck: i32, ts: i64, ldt_secs: i32) -> Mutation {
+    Mutation::new(
+        TableId::new("gc_ks", "items"),
+        PartitionKey::single("id", Value::Integer(id)),
+        Some(ClusteringKey::single("ck", Value::Integer(ck))),
+        vec![CellOperation::DeleteRow],
+        ts,
+        None,
+    )
+    .with_local_deletion_time(ldt_secs)
+}
+
+/// A plain live row carrying a `score` cell (a survivor at a distinct clustering
+/// key so a purged row tombstone at another `ck` still leaves the partition
+/// non-empty and gives a positive "row not lost" signal).
+fn write_live_score(id: i32, ck: i32, score: i32, ts: i64) -> Mutation {
     Mutation::new(
         TableId::new("gc_ks", "items"),
         PartitionKey::single("id", Value::Integer(id)),
@@ -172,10 +184,9 @@ fn write_row_tombstone_with_live(
             column: "score".to_string(),
             value: Value::Integer(score),
         }],
-        row_ts,
+        ts,
         None,
     )
-    .with_row_tombstone(del_ts, ldt_secs)
 }
 
 /// A row with a `tags` COMPLEX-DELETION MARKER stamped at explicit `ldt_secs`
@@ -509,17 +520,16 @@ fn cell_tombstone_boundary_purged_one_second_below() {
 // Criterion 2 — row tombstone: boundary emitted, one-below omitted
 // ===========================================================================
 
-// NOTE (issue #1721): a direct `WriteEngine` flush of a decoupled row tombstone
-// (`Mutation::with_row_tombstone`) whose LDT is below the incremental
-// `min_local_deletion_time` baseline HARD-ERRORS at flush time — the writer's
-// per-partition stats loop folds `Delete`/`DeleteRow`/`ComplexDeletion`/
-// `partition_tombstone`/`range_tombstones` LDTs but NOT the `row_tombstone`
-// field, so the below-baseline guard (rows.rs:954) rejects the row. This is a
-// real writer stats bug (distinct from the #1410 baseline class), not a test
-// error, so per the test-authoring rule these two boundary tests are ignored
-// pending #1721 rather than fixed inline. Un-ignore when #1721 lands.
+// These tests use a `CellOperation::DeleteRow` op (whose LDT IS folded into the
+// writer's `min_local_deletion_time` stats and reads back as a
+// `RowData::Tombstone`) rather than the decoupled `Mutation::row_tombstone`
+// field. Both feed the SAME `row_del_ldt` and the SAME strict-`<` row-deletion
+// purge site (reconcile.rs:507), so this exercises the row-tombstone boundary
+// exactly. (The decoupled `row_tombstone` field itself is separately broken on
+// the direct-flush stats path — issue #1721 — and is not needed here.) A live
+// `score` row at a DISTINCT clustering key is a survivor proving the partition
+// is not lost when the tombstoned row at ck=0 is purged.
 #[test]
-#[ignore = "blocked on #1721 (row_tombstone LDT dropped from flush stats)"]
 fn row_tombstone_boundary_retained_at_gc_before() {
     let temp = TempDir::new().unwrap();
     let in_dir = temp.path().join("in");
@@ -528,19 +538,16 @@ fn row_tombstone_boundary_retained_at_gc_before() {
     let schema = make_schema();
 
     let stamped_ldt: i32 = 1_600_000_000;
-    // Row deletion at markedForDeleteAt = 100 micros, LDT stamped explicitly.
+    // Row deletion of (id=1, ck=0) at markedForDeleteAt = 100 micros; a live
+    // survivor row at ck=1.
     flush_batch(
         &in_dir,
         &wal_dir,
         &schema,
-        vec![write_row_tombstone_with_live(
-            1,
-            0,
-            7,
-            500,
-            100,
-            stamped_ldt,
-        )],
+        vec![
+            write_row_delete(1, 0, 100, stamped_ldt),
+            write_live_score(1, 1, 7, 500),
+        ],
     );
     let inputs = discover_inputs(&in_dir);
     let ldt = row_tombstone_ldt(&inputs, &schema);
@@ -552,15 +559,14 @@ fn row_tombstone_boundary_retained_at_gc_before() {
         has_row_tombstone(&out),
         "row tombstone at ldt == gcBefore must be RETAINED (emitted), entries: {out:?}"
     );
-    // The row's coexisting live `score` (issue #932 decoupled deletion) survives.
+    // The survivor row at ck=1 proves the partition was not lost.
     assert!(
         has_live_score(&out),
-        "the row's coexisting live `score` cell must survive"
+        "the live `score` survivor row (ck=1) must survive"
     );
 }
 
 #[test]
-#[ignore = "blocked on #1721 (row_tombstone LDT dropped from flush stats)"]
 fn row_tombstone_boundary_purged_one_second_below() {
     let temp = TempDir::new().unwrap();
     let in_dir = temp.path().join("in");
@@ -573,14 +579,10 @@ fn row_tombstone_boundary_purged_one_second_below() {
         &in_dir,
         &wal_dir,
         &schema,
-        vec![write_row_tombstone_with_live(
-            1,
-            0,
-            7,
-            500,
-            100,
-            stamped_ldt,
-        )],
+        vec![
+            write_row_delete(1, 0, 100, stamped_ldt),
+            write_live_score(1, 1, 7, 500),
+        ],
     );
     let inputs = discover_inputs(&in_dir);
     let ldt = row_tombstone_ldt(&inputs, &schema);
@@ -593,9 +595,10 @@ fn row_tombstone_boundary_purged_one_second_below() {
         "row tombstone one second below gcBefore must be PURGED (omitted == \
          PurgeCounts.row_tombstones == 1), entries: {out:?}"
     );
+    // The survivor row at ck=1 keeps the partition present after the purge.
     assert!(
         has_live_score(&out),
-        "purging the row deletion must leave the coexisting live `score` cell present"
+        "purging the row deletion must leave the live `score` survivor row present"
     );
 }
 
@@ -693,29 +696,42 @@ fn complex_deletion_boundary_purged_one_second_below() {
 #[test]
 fn shadow_before_purge_at_boundary() {
     let temp = TempDir::new().unwrap();
-    let in_dir = temp.path().join("in");
-    let wal_dir = temp.path().join("wal");
+    let old_dir = temp.path().join("old"); // input SSTable A: the covered cell
+    let new_dir = temp.path().join("new"); // input SSTable B: the tombstone
     let out_dir = temp.path().join("out");
     let schema = make_schema();
 
-    // Two contributors to the SAME (id=1, ck=0) row's `name` column:
-    //   * an OLDER live `name` cell at write ts = 50 (covered), and
-    //   * a NEWER `name` cell tombstone at write ts = 100 (shadows the older cell)
-    //     stamped at an explicit LDT; a live `score` keeps the row present.
+    // Two contributors to the SAME (id=1, ck=0) row's `name` column, flushed into
+    // SEPARATE input SSTables so the COMPACTION MERGE path (not a single flush
+    // writer) must reconcile them — the resurrectable older cell genuinely lives
+    // in an input the compaction reads:
+    //   * input A: an OLDER live `name` cell at write ts = 50 (covered), and
+    //   * input B: a NEWER `name` cell tombstone at write ts = 100 (shadows it)
+    //     stamped at an explicit LDT, alongside a live `score` cell.
     // The tombstone's write ts (100) > the covered cell's (50) so it shadows;
     // full compaction → the #935 overlap gate is +inf so the purge is allowed.
+    // If compaction ever purged BEFORE shadowing, the older "covered" cell would
+    // resurrect in the output — which this test catches.
     let stamped_ldt: i32 = 1_600_000_000;
     flush_batch(
-        &in_dir,
-        &wal_dir,
+        &old_dir,
+        &temp.path().join("wal-old"),
         &schema,
-        vec![
-            write_live_name(1, 0, "covered", 50),
-            write_name_cell_tombstone(1, 0, 7, 100, stamped_ldt),
-        ],
+        vec![write_live_name(1, 0, "covered", 50)],
     );
-    let inputs = discover_inputs(&in_dir);
-    let ldt = cell_tombstone_ldt(&inputs, &schema);
+    flush_batch(
+        &new_dir,
+        &temp.path().join("wal-new"),
+        &schema,
+        vec![write_name_cell_tombstone(1, 0, 7, 100, stamped_ldt)],
+    );
+
+    // Compact BOTH inputs together. Read the tombstone's authoritative on-disk
+    // LDT from the SSTable that actually holds it.
+    let mut inputs = discover_inputs(&old_dir);
+    inputs.extend(discover_inputs(&new_dir));
+    assert_eq!(inputs.len(), 2, "expected two separate input SSTables");
+    let ldt = cell_tombstone_ldt(&discover_inputs(&new_dir), &schema);
     let now_secs = ldt + 10_000_000;
     let gc_before = ldt + 1; // ldt == gcBefore - 1 → tombstone is purgeable
 
