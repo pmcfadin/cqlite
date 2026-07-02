@@ -14,7 +14,7 @@ use crate::{
     platform::Platform,
     schema::{TableSchema, UdtRegistry},
     types::TableId,
-    RowKey, ScanRow,
+    Config, RowKey, ScanRow,
 };
 
 use super::super::{
@@ -66,8 +66,6 @@ pub struct IntegrityCheckResult {
     pub total_blocks_checked: usize,
     /// List of corrupted block numbers
     pub corrupted_blocks: Vec<usize>,
-    /// Number of checksum mismatches
-    pub checksum_mismatches: usize,
     /// Number of unreadable blocks
     pub unreadable_blocks: usize,
     /// Total entries found
@@ -235,6 +233,13 @@ pub struct SSTableReader {
     pub(crate) block_cache: HashMap<u64, CachedBlock>,
     /// Reader configuration
     pub(crate) config: SSTableReaderConfig,
+    /// The full [`Config`] this reader was opened with.
+    ///
+    /// Retained so `perform_integrity_check` can delegate to the authoritative
+    /// verifier `verify::verify_sstable` — the single source of truth for SSTable
+    /// integrity (issue #1283) — using the SAME configuration the reader itself
+    /// was opened under, rather than re-deriving or defaulting it.
+    pub(crate) open_config: Config,
     /// Platform abstraction
     pub(crate) platform: Arc<Platform>,
     /// Statistics

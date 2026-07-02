@@ -353,6 +353,10 @@ impl SSTableReader {
 
     /// Open implementation; see [`open`](Self::open) for the instrumented wrapper.
     async fn open_inner(path: &Path, config: &Config, platform: Arc<Platform>) -> Result<Self> {
+        // Retain the open-time Config before any local `config` shadowing so
+        // `perform_integrity_check` can delegate to `verify::verify_sstable`
+        // (single source of truth, issue #1283) under the same config.
+        let open_config = config.clone();
         // #1249 (spec R1): reject below-floor versions BEFORE any file I/O.
         // Gates derive solely from the filename, so this is the earliest point
         // that can enforce the na+ floor — a pre-`na` (BIG) or non-`da` (BTI)
@@ -680,6 +684,7 @@ impl SSTableReader {
             block_meta_cache: HashMap::new(),
             block_cache: HashMap::new(),
             config: reader_config,
+            open_config,
             platform,
             stats,
             cache_hits: AtomicU64::new(0),
