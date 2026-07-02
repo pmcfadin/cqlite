@@ -61,6 +61,8 @@ mod compaction;
 mod maintenance;
 #[cfg(feature = "write-support")]
 mod stats;
+#[cfg(feature = "write-support")]
+mod sweep;
 #[cfg(all(test, feature = "write-support"))]
 mod test_support;
 
@@ -423,12 +425,7 @@ impl WriteEngine {
         //
         // Both sweeps are best-effort: individual failures are logged as warnings but
         // do not abort engine startup.
-        Self::sweep_orphaned_compaction_tmp(&config.data_dir);
-        Self::sweep_orphaned_partial_sstables(
-            &config.data_dir,
-            &config.schema.keyspace,
-            &config.schema.table,
-        );
+        Self::sweep_startup_orphans(&config);
 
         // Initialize WAL
         let wal_path = config.wal_dir.join(WriteAheadLog::WAL_FILENAME);
