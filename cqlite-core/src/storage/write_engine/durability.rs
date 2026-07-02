@@ -11,10 +11,22 @@
 //! missing even though the file contents were flushed — leaving the data in
 //! neither a reachable SSTable nor the (already truncated) WAL.
 //!
-//! This module closes that gap: it fsyncs the SSTable's parent directory
-//! *after* the component files are synced and *before* the WAL is truncated,
-//! and it makes the truncate-failure path explicit (leave the WAL intact as a
-//! durable replay marker) rather than silently swallowing the error.
+//! This module closes that gap: on every WAL-truncating flush it fsyncs the
+//! **full ancestor chain** from the SSTable's leaf directory up to (and
+//! including) the configured data root, deepest-first, *after* the component
+//! files are synced and *before* the WAL is truncated. It also makes the
+//! truncate-failure path explicit (leave the WAL intact as a durable replay
+//! marker) rather than silently swallowing the error.
+//!
+//! Syncing the whole leaf→data-root chain unconditionally — rather than only
+//! the directories a *given* flush attempt happened to create — closes a
+//! retry/partial-failure hazard (issue #1392): if an earlier attempt created
+//! `data_dir/ks/table` but crashed before its full directory-sync chain
+//! completed, the retry sees those dirs already present, so a
+//! "sync-only-what-I-created" barrier would sync just the leaf and truncate the
+//! WAL while the keyspace/table dirents were still not durable. Directory fsync
+//! is cheap and idempotent, so re-syncing an already-durable dir is harmless
+//! and removes the hazard entirely.
 //!
 //! The [`DurabilityBarrier`] trait is a test seam: production uses
 //! [`RealDurabilityBarrier`], while tests inject fakes that record the ordering
@@ -111,43 +123,25 @@ fn sync_directory(_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Like [`std::fs::create_dir_all`], but records which directories it actually
-/// created (issue #1392).
+/// Like [`std::fs::create_dir_all`], but maps failures to [`Error::Storage`]
+/// and treats a raced/pre-existing directory as success (issue #1392).
 ///
-/// On the FIRST flush for a keyspace/table, `create_dir_all` materializes the
-/// keyspace and table ancestor directories as well as the leaf SSTable
-/// directory. Fsyncing only the leaf persists the *component* dirents but NOT
-/// the leaf directory's own entry in its parent (nor the parent's entry in ITS
-/// parent) — a crash after the WAL is truncated could then lose the entire
-/// newly created SSTable directory tree. To close that gap the caller must
-/// fsync every directory whose contents changed; this helper returns the set of
-/// newly created directories (shallowest first, mirroring the top-down creation
-/// order) so the caller knows which ancestors need syncing.
-///
-/// The returned vector contains only directories this call created; already
-/// existing directories are not included (their dirents were already durable).
-pub(crate) fn create_dir_all_recording(path: &Path) -> Result<Vec<PathBuf>> {
-    let mut created = Vec::new();
-    create_dir_all_inner(path, &mut created)?;
-    Ok(created)
-}
-
-fn create_dir_all_inner(path: &Path, created: &mut Vec<PathBuf>) -> Result<()> {
+/// Directory *creation* no longer needs to record which ancestors it
+/// materialized: the flush durability barrier fsyncs the entire leaf→data-root
+/// chain unconditionally (see [`dirs_to_sync`]), so there is nothing to track.
+pub(crate) fn create_dir_all(path: &Path) -> Result<()> {
     if path.as_os_str().is_empty() {
         return Ok(());
     }
     match std::fs::create_dir(path) {
-        Ok(()) => {
-            created.push(path.to_path_buf());
-            Ok(())
-        }
+        Ok(()) => Ok(()),
         // Raced/pre-existing: another actor already made it, or it existed.
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
-        // Parent missing: create ancestors first (recording them), then retry.
+        // Parent missing: create ancestors first, then retry.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             match path.parent() {
                 Some(parent) if !parent.as_os_str().is_empty() => {
-                    create_dir_all_inner(parent, created)?;
+                    create_dir_all(parent)?;
                 }
                 _ => {
                     return Err(Error::Storage(format!(
@@ -157,10 +151,7 @@ fn create_dir_all_inner(path: &Path, created: &mut Vec<PathBuf>) -> Result<()> {
                 }
             }
             match std::fs::create_dir(path) {
-                Ok(()) => {
-                    created.push(path.to_path_buf());
-                    Ok(())
-                }
+                Ok(()) => Ok(()),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
                 Err(e) => Err(Error::Storage(format!(
                     "Failed to create directory {}: {e}",
@@ -175,52 +166,69 @@ fn create_dir_all_inner(path: &Path, created: &mut Vec<PathBuf>) -> Result<()> {
     }
 }
 
-/// Compute the ordered, de-duplicated list of directories to fsync so that
-/// every dirent created during a flush is persisted before the WAL is
-/// truncated (issue #1392).
+/// Compute the ordered list of directories to fsync so that every dirent along
+/// the newly written SSTable's path is persisted before the WAL is truncated
+/// (issue #1392).
 ///
-/// The set is:
-/// * the leaf SSTable directory (its new component dirents live here), plus
-/// * the *parent* of every newly created directory (so that directory's own
-///   entry in its parent is persisted).
+/// Walks from the leaf SSTable directory up to (and including) `data_root`,
+/// deepest-first. This is the whole ancestor chain that could hold a
+/// not-yet-durable dirent for the SSTable — the leaf (its component dirents),
+/// the table directory (the leaf's own entry), the keyspace directory (the
+/// table's entry), and the data root (the keyspace's entry).
+///
+/// Syncing the FULL chain on every flush — regardless of which dirs this
+/// particular attempt created — is deliberate (issue #1392): a retry after a
+/// partially completed earlier attempt sees the ancestors already present, so a
+/// "sync-only-what-I-created" barrier would skip them and truncate the WAL
+/// while they were still not durable. Directory fsync is idempotent, so
+/// re-syncing an already-durable dir is harmless.
 ///
 /// The result is ordered deepest-first so each child directory is synced before
 /// its parent — matching the POSIX convention that a parent's fsync only needs
-/// to follow the creation (and here the sync) of the child it references.
-fn dirs_to_sync(leaf: &Path, created_dirs: &[PathBuf]) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = vec![leaf.to_path_buf()];
-    for created in created_dirs {
-        if let Some(parent) = created.parent() {
-            let parent = parent.to_path_buf();
-            if !parent.as_os_str().is_empty() && !dirs.contains(&parent) {
-                dirs.push(parent);
+/// to follow the creation (and here the sync) of the child it references. The
+/// walk never ascends above `data_root`: it stops as soon as it reaches it, and
+/// defensively stops if `leaf` is not under `data_root` at all.
+fn dirs_to_sync(leaf: &Path, data_root: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut cur = leaf;
+    loop {
+        dirs.push(cur.to_path_buf());
+        if cur == data_root {
+            break;
+        }
+        match cur.parent() {
+            // Only ascend while we stay within the configured data root; never
+            // fsync directories above it.
+            Some(parent) if !parent.as_os_str().is_empty() && parent.starts_with(data_root) => {
+                cur = parent;
             }
+            _ => break,
         }
     }
-    // Deepest first: a directory's own entry lives in its parent, so we persist
-    // children before parents.
-    dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
     dirs
 }
 
 /// Complete the durability handoff at the end of a flush.
 ///
-/// `data_path` is the SSTable's Data.db path; its parent directory is fsynced
-/// (falling back to `data_dir` if `data_path` has no parent). Ordering is
+/// `data_path` is the SSTable's Data.db path; its parent directory is the leaf
+/// SSTable directory (falling back to `data_dir` if `data_path` has no parent).
+/// `data_dir` is the write engine's configured data root. Ordering is
 /// load-bearing (issue #1392):
 ///
-/// 1. fsync the SSTable's directory **and every newly created ancestor
-///    directory** so all new directory entries are durable.
+/// 1. fsync the **full ancestor chain** from the leaf SSTable directory up to
+///    (and including) `data_dir`, deepest-first, so every directory entry along
+///    the new SSTable's path is durable.
 /// 2. Only then truncate the WAL — the WAL copy of the data is discarded here.
 ///
-/// `created_dirs` is the set of directories that `create_dir_all` actually
-/// created for this flush (see [`create_dir_all_recording`]). On the first
-/// flush into a brand-new keyspace/table path this includes the keyspace and
-/// table directories; fsyncing only the leaf would persist the component
-/// dirents but leave the leaf's (and keyspace's) own entry in its parent
-/// unsynced, so a crash after the WAL truncate could lose the entire new
-/// SSTable directory. We therefore fsync the leaf plus the parent of every
-/// newly created directory, deepest-first, before truncating the WAL.
+/// The full chain is synced on EVERY flush, not just the directories this
+/// attempt created (see [`dirs_to_sync`]). Fsyncing only the leaf — or only the
+/// dirs a given attempt created — would persist the component dirents but could
+/// leave the leaf's (or keyspace's) own entry in its parent unsynced, so a
+/// crash after the WAL truncate could lose the entire new SSTable directory.
+/// This is especially dangerous on a RETRY after a partially completed earlier
+/// attempt: the ancestors already exist, so a "created this attempt" list would
+/// be empty and only the leaf would be synced. Directory fsync is cheap and
+/// idempotent, so re-syncing already-durable ancestors is harmless.
 ///
 /// If any directory fsync fails, the error is propagated and the WAL is
 /// **not** truncated, so recovery can still replay from the WAL.
@@ -252,16 +260,17 @@ pub(crate) fn finalize_flush_durability(
     barrier: &dyn DurabilityBarrier,
     data_path: &Path,
     data_dir: &Path,
-    created_dirs: &[PathBuf],
     wal: &mut WriteAheadLog,
 ) -> Result<FlushDurabilityOutcome> {
     // Step 1: persist the new SSTable's dirents BEFORE dropping the WAL copy.
     // (The component *contents* were already fsynced inside `writer.finish()`.)
-    // This fsyncs the leaf SSTable directory AND the parent of every ancestor
-    // directory created during this flush, deepest-first, so the whole newly
-    // created directory tree is durable — not just the leaf (issue #1392).
+    // This fsyncs the FULL ancestor chain from the leaf SSTable directory up to
+    // (and including) the data root, deepest-first, so every directory entry
+    // along the SSTable's path is durable — not just the leaf, and regardless
+    // of whether an earlier flush attempt already created some ancestors
+    // (issue #1392).
     let sstable_dir = data_path.parent().unwrap_or(data_dir);
-    for dir in dirs_to_sync(sstable_dir, created_dirs) {
+    for dir in dirs_to_sync(sstable_dir, data_dir) {
         barrier.sync_dir(&dir)?;
     }
 
@@ -393,7 +402,6 @@ mod tests {
             &barrier,
             &dir.path().join("nb-1-big-Data.db"),
             dir.path(),
-            &[],
             &mut wal,
         )
         .unwrap();
@@ -423,7 +431,6 @@ mod tests {
             &barrier,
             &dir.path().join("nb-1-big-Data.db"),
             dir.path(),
-            &[],
             &mut wal,
         )
         .unwrap_err();
@@ -460,7 +467,6 @@ mod tests {
             &barrier,
             &dir.path().join("nb-1-big-Data.db"),
             dir.path(),
-            &[],
             &mut wal,
         )
         .expect("truncate fault must not fail the flush");
@@ -505,7 +511,6 @@ mod tests {
             &barrier,
             &dir.path().join("nb-1-big-Data.db"),
             dir.path(),
-            &[],
             &mut wal,
         )
         .expect("a post-mutation truncate failure is COMMITTED, not a hard error");
@@ -548,7 +553,6 @@ mod tests {
             &RealDurabilityBarrier,
             &dir.path().join("nb-1-big-Data.db"),
             dir.path(),
-            &[],
             &mut wal,
         )
         .unwrap();
@@ -556,10 +560,9 @@ mod tests {
     }
 
     // Issue #1392 (FINDING 1): on the FIRST flush into a brand-new
-    // keyspace/table path, `create_dir_all` materializes the keyspace and table
-    // ancestor directories. The barrier must fsync the leaf AND every newly
-    // created ancestor's parent — deepest first — BEFORE the WAL truncate, so a
-    // crash cannot lose the freshly created directory tree.
+    // keyspace/table path, the barrier must fsync the leaf AND every ancestor up
+    // to the data root — deepest first — BEFORE the WAL truncate, so a crash
+    // cannot lose the freshly created directory tree.
     #[test]
     fn first_flush_fsyncs_new_ancestor_dirs_before_truncate() {
         let root = TempDir::new().unwrap();
@@ -573,12 +576,9 @@ mod tests {
         let ks_dir = data_dir.join("test_ks");
         let leaf_dir = ks_dir.join("test_table");
         let data_path = leaf_dir.join("nb-1-big-Data.db");
-        // Mirror what `create_dir_all_recording` would report on a first flush:
-        // shallowest-first, keyspace then table.
-        let created_dirs = vec![ks_dir.clone(), leaf_dir.clone()];
 
         let barrier = RecordingBarrier::new();
-        finalize_flush_durability(&barrier, &data_path, data_dir, &created_dirs, &mut wal).unwrap();
+        finalize_flush_durability(&barrier, &data_path, data_dir, &mut wal).unwrap();
 
         // Expected: fsync the leaf (its component dirents), then the keyspace dir
         // (persists the leaf's own entry), then the data_dir (persists the
@@ -591,48 +591,95 @@ mod tests {
                 FsOp::SyncDir(data_dir.to_path_buf()),
                 FsOp::WalTruncate,
             ],
-            "every newly created ancestor dir must be fsynced (deepest first) \
-             before the WAL truncate"
+            "every ancestor dir up to the data root must be fsynced (deepest \
+             first) before the WAL truncate"
         );
         assert_eq!(wal.replay().unwrap().mutations.len(), 0);
     }
 
-    // Issue #1392 (FINDING 1): `create_dir_all_recording` reports exactly the
-    // directories it created (shallowest first) and nothing that already existed.
+    // Issue #1392 (roborev r6): the whole class of retry/partial-failure loss.
+    // An earlier flush attempt already created data_dir/ks/table (so a
+    // "sync-only-what-I-created" barrier would have an EMPTY created set), then
+    // crashed before completing its directory-sync chain. On the RETRY the
+    // barrier must STILL fsync the full leaf→data-root chain (leaf, table dir,
+    // keyspace dir, data root) before truncating the WAL — proving the fix syncs
+    // the whole chain unconditionally rather than only newly created dirs.
     #[test]
-    fn create_dir_all_recording_reports_only_new_dirs() {
+    fn retry_with_preexisting_dirs_still_fsyncs_full_chain_before_truncate() {
+        let root = TempDir::new().unwrap();
+        let data_dir = root.path();
+        let mut wal = WriteAheadLog::create(data_dir).unwrap();
+        wal.append(&test_mutation(1, "Alice")).unwrap();
+        wal.sync().unwrap();
+
+        // Pre-create the whole tree, exactly as a failed earlier attempt would
+        // leave it. `create_dir_all` no longer tracks anything, so there is no
+        // "created this attempt" set to fall back on.
+        let ks_dir = data_dir.join("test_ks");
+        let leaf_dir = ks_dir.join("test_table");
+        create_dir_all(&leaf_dir).unwrap();
+        assert!(leaf_dir.exists());
+        let data_path = leaf_dir.join("nb-1-big-Data.db");
+
+        let barrier = RecordingBarrier::new();
+        finalize_flush_durability(&barrier, &data_path, data_dir, &mut wal).unwrap();
+
+        // The full chain is synced deepest-first even though nothing was created
+        // this attempt — and only THEN is the WAL truncated.
+        assert_eq!(
+            barrier.ops.into_inner(),
+            vec![
+                FsOp::SyncDir(leaf_dir),
+                FsOp::SyncDir(ks_dir),
+                FsOp::SyncDir(data_dir.to_path_buf()),
+                FsOp::WalTruncate,
+            ],
+            "a retry over pre-existing dirs must still fsync the full leaf→\
+             data-root chain (not just the leaf) before the WAL truncate"
+        );
+        assert_eq!(wal.replay().unwrap().mutations.len(), 0);
+    }
+
+    // Issue #1392: `create_dir_all` materializes the full tree and is idempotent
+    // (re-creating an existing tree succeeds).
+    #[test]
+    fn create_dir_all_is_idempotent() {
         let root = TempDir::new().unwrap();
         let ks = root.path().join("ks");
         let tbl = ks.join("tbl");
 
-        // First creation records both new ancestors, shallowest first.
-        let created = create_dir_all_recording(&tbl).unwrap();
-        assert_eq!(created, vec![ks.clone(), tbl.clone()]);
-
-        // Re-creating an existing tree records nothing.
-        let created_again = create_dir_all_recording(&tbl).unwrap();
-        assert!(
-            created_again.is_empty(),
-            "existing directories must not be reported as newly created"
-        );
-
-        // A new leaf under an existing parent records only the leaf.
+        create_dir_all(&tbl).unwrap();
+        assert!(tbl.is_dir());
+        // Re-creating an existing tree is a no-op success.
+        create_dir_all(&tbl).unwrap();
+        // A new leaf under an existing parent also succeeds.
         let tbl2 = ks.join("tbl2");
-        let created_leaf = create_dir_all_recording(&tbl2).unwrap();
-        assert_eq!(created_leaf, vec![tbl2]);
+        create_dir_all(&tbl2).unwrap();
+        assert!(tbl2.is_dir());
     }
 
-    // Issue #1392 (FINDING 1): `dirs_to_sync` yields the leaf plus each newly
-    // created dir's parent, de-duplicated and ordered deepest-first.
+    // Issue #1392: `dirs_to_sync` walks the full leaf→data-root chain, ordered
+    // deepest-first, and never ascends above the data root.
     #[test]
-    fn dirs_to_sync_is_deepest_first_and_deduped() {
+    fn dirs_to_sync_is_full_chain_deepest_first() {
         let root = TempDir::new().unwrap();
         let data_dir = root.path().to_path_buf();
         let ks = data_dir.join("ks");
         let leaf = ks.join("tbl");
-        let created = vec![ks.clone(), leaf.clone()];
 
-        let dirs = dirs_to_sync(&leaf, &created);
-        assert_eq!(dirs, vec![leaf, ks, data_dir]);
+        let dirs = dirs_to_sync(&leaf, &data_dir);
+        assert_eq!(dirs, vec![leaf, ks, data_dir.clone()]);
+
+        // The leaf being the data root itself yields just the root.
+        assert_eq!(dirs_to_sync(&data_dir, &data_dir), vec![data_dir.clone()]);
+
+        // Defensive: a leaf not under the data root does not ascend above it.
+        let stray = TempDir::new().unwrap();
+        let stray_leaf = stray.path().join("elsewhere");
+        assert_eq!(
+            dirs_to_sync(&stray_leaf, &data_dir),
+            vec![stray_leaf],
+            "must not fsync directories outside the configured data root"
+        );
     }
 }

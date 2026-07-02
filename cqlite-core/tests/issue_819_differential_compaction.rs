@@ -1024,7 +1024,6 @@ fn ref_sstable_info(data_path: &Path) -> cqlite_core::storage::sstable::writer::
         crc_path: opt("CRC.db"),
         partition_count: 0,
         data_size,
-        created_dirs: Vec::new(),
     }
 }
 

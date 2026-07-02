@@ -956,7 +956,6 @@ impl WriteEngine {
             &durability::RealDurabilityBarrier,
             &info.data_path,
             &self.config.data_dir,
-            &info.created_dirs,
             &mut self.wal,
         )?;
 

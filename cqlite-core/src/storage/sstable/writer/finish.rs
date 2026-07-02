@@ -47,35 +47,13 @@ impl SSTableWriter {
         // `finish_streaming()` can move `self.data_writer` out below.
         let sstable_dir = self.sstable_dir.clone();
         let sstable_dir = sstable_dir.as_path();
-        // Record which ancestor directories are newly created so the flush
-        // durability barrier can fsync them (and their parents) before the WAL
-        // is truncated (issue #1392). On a first flush this includes the
-        // keyspace/table directories; fsyncing only the leaf would leave those
-        // ancestors' own dirents unsynced and a crash could lose the whole tree.
-        //
-        // For a NON-EMPTY flush the streaming writers' `ensure_sink` already
-        // created this tree during `write_partition` (before `finish` runs), so
-        // THIS call reports an empty list — the newly created ancestors were
-        // recorded on the writers instead and are folded in below. For an EMPTY
-        // flush no partition was written, so `ensure_sink` never ran and this
-        // call is the point of creation. Both sources are merged (and
-        // de-duplicated) so `SSTableInfo::created_dirs` always reflects every
-        // ancestor this flush created, regardless of which path created it.
-        let mut created_dirs =
-            crate::storage::write_engine::durability::create_dir_all_recording(sstable_dir)?;
-        // Fold in the ancestor dirs the streaming Data.db / Index.db writers
-        // recorded when they lazily opened their sinks. Captured now, before the
-        // by-value `finish_streaming` calls below consume the writers.
-        for dir in self.data_writer.created_dirs() {
-            if !created_dirs.contains(dir) {
-                created_dirs.push(dir.clone());
-            }
-        }
-        for dir in self.index_writer.created_dirs() {
-            if !created_dirs.contains(dir) {
-                created_dirs.push(dir.clone());
-            }
-        }
+        // Ensure the keyspace/table directory tree exists (an empty flush never
+        // opened a streaming sink, so this may be the point of creation). The
+        // flush durability barrier later fsyncs the full leaf→data-root ancestor
+        // chain unconditionally before truncating the WAL, so directory
+        // *creation* no longer needs to record which ancestors it made (issue
+        // #1392).
+        crate::storage::write_engine::durability::create_dir_all(sstable_dir)?;
 
         // Finalize statistics metadata (normalize sentinel values)
         self.stats.finalize();
@@ -289,7 +267,6 @@ impl SSTableWriter {
             crc_path,
             partition_count: self.partition_count,
             data_size,
-            created_dirs,
         })
     }
 

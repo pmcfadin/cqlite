@@ -185,13 +185,6 @@ pub struct IndexWriter {
     position: u64,
     /// Entry count (for validation)
     entry_count: usize,
-    /// Ancestor directories this writer newly created when it lazily opened its
-    /// sink (issue #1392). Recorded here — the first `add_partition` may open the
-    /// Index.db sink before the Data.db sink, so this is one of the earliest
-    /// points the keyspace/table tree is materialized on a non-empty BIG flush.
-    /// `SSTableWriter::finish` folds it into `SSTableInfo::created_dirs` so the
-    /// flush durability barrier fsyncs the new ancestors before WAL truncate.
-    created_dirs: Vec<PathBuf>,
 }
 
 /// Information about a written index entry
@@ -227,7 +220,6 @@ impl IndexWriter {
             counting: false,
             position: 0,
             entry_count: 0,
-            created_dirs: Vec::new(),
         }
     }
 
@@ -264,7 +256,6 @@ impl IndexWriter {
             counting: true,
             position: 0,
             entry_count: 0,
-            created_dirs: Vec::new(),
         }
     }
 
@@ -284,7 +275,6 @@ impl IndexWriter {
             counting: false,
             position: 0,
             entry_count: 0,
-            created_dirs: Vec::new(),
         }
     }
 
@@ -297,15 +287,11 @@ impl IndexWriter {
         }
         if let Some(path) = self.index_path.clone() {
             if let Some(parent) = path.parent() {
-                // Record the newly created ancestor directories so the flush
-                // durability barrier fsyncs them before WAL truncate (issue
-                // #1392). `add_partition` can open this sink before the Data.db
-                // sink on a non-empty BIG flush, so recording only in
-                // `SSTableWriter::finish` (after the dirs already exist) would
-                // miss them and leave the ancestor dirents unsynced.
-                let created =
-                    crate::storage::write_engine::durability::create_dir_all_recording(parent)?;
-                self.created_dirs.extend(created);
+                // Create the keyspace/table tree. The flush durability barrier
+                // fsyncs the full leaf→data-root chain unconditionally before
+                // the WAL truncate, so this creation need not track which
+                // ancestors it made (issue #1392).
+                crate::storage::write_engine::durability::create_dir_all(parent)?;
             }
             let file = std::fs::File::create(&path)?;
             self.sink = Some(std::io::BufWriter::with_capacity(
@@ -539,17 +525,6 @@ impl IndexWriter {
     /// ```
     pub fn entry_count(&self) -> usize {
         self.entry_count
-    }
-
-    /// Ancestor directories this writer newly created when lazily opening its
-    /// Index.db sink (issue #1392).
-    ///
-    /// `SSTableWriter::finish` collects this (before consuming the writer via
-    /// `finish_streaming`) and folds it into `SSTableInfo::created_dirs` so the
-    /// flush durability barrier fsyncs every newly created ancestor before the
-    /// WAL is truncated.
-    pub(crate) fn created_dirs(&self) -> &[PathBuf] {
-        &self.created_dirs
     }
 
     /// Number of bytes currently held in the per-entry scratch buffer.

@@ -184,15 +184,6 @@ pub struct DataWriter {
     position: u64,
     /// Encoding baselines used for delta encoding.
     stats: EncodingStatsBaselines,
-    /// Ancestor directories this writer newly created when it lazily opened its
-    /// sink (issue #1392). `ensure_sink` runs during the first `write_partition`,
-    /// i.e. BEFORE `SSTableWriter::finish`, so it is the FIRST point the
-    /// keyspace/table directory tree can be materialized on a non-empty flush.
-    /// Recording it here (rather than only re-deriving it in `finish`, where the
-    /// dirs already exist and would be reported as empty) lets the flush
-    /// durability barrier fsync every newly created ancestor before the WAL is
-    /// truncated. Empty in in-memory mode and once the sink already exists.
-    created_dirs: Vec<PathBuf>,
 }
 
 mod cells;
@@ -265,7 +256,6 @@ impl DataWriter {
             data_path: None,
             position: 0,
             stats: EncodingStatsBaselines::from(&stats),
-            created_dirs: Vec::new(),
         }
     }
 
@@ -286,7 +276,6 @@ impl DataWriter {
             data_path: Some(data_path),
             position: 0,
             stats: EncodingStatsBaselines::from(&stats),
-            created_dirs: Vec::new(),
         }
     }
 
@@ -299,15 +288,11 @@ impl DataWriter {
         }
         if let Some(path) = self.data_path.clone() {
             if let Some(parent) = path.parent() {
-                // Record which ancestor directories this creation materializes so
-                // the flush durability barrier can fsync them before the WAL is
-                // truncated (issue #1392). This is the FIRST point a non-empty
-                // flush creates the keyspace/table tree — recording only in
-                // `SSTableWriter::finish` would report an empty list (the dirs
-                // already exist by then) and leave the ancestor dirents unsynced.
-                let created =
-                    crate::storage::write_engine::durability::create_dir_all_recording(parent)?;
-                self.created_dirs.extend(created);
+                // Create the keyspace/table tree. The flush durability barrier
+                // fsyncs the full leaf→data-root chain unconditionally before
+                // the WAL truncate, so this creation need not track which
+                // ancestors it made (issue #1392).
+                crate::storage::write_engine::durability::create_dir_all(parent)?;
             }
             let file = std::fs::File::create(&path)?;
             // Use a large BufWriter so a partition's bytes coalesce into a few
@@ -409,18 +394,6 @@ impl DataWriter {
     /// in both streaming and in-memory modes.
     pub fn position(&self) -> u64 {
         self.position + self.buffer.len() as u64
-    }
-
-    /// Ancestor directories this writer newly created when lazily opening its
-    /// sink (issue #1392).
-    ///
-    /// `SSTableWriter::finish` collects this (before consuming the writer via
-    /// `finish_streaming`) and folds it into `SSTableInfo::created_dirs` so the
-    /// flush durability barrier fsyncs every newly created ancestor before the
-    /// WAL is truncated — including on a non-empty first flush, where the dirs
-    /// were created here during `write_partition` rather than in `finish`.
-    pub(crate) fn created_dirs(&self) -> &[PathBuf] {
-        &self.created_dirs
     }
 
     /// Length of the per-partition scratch buffer.
