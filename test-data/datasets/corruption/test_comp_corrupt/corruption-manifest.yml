@@ -117,6 +117,31 @@ fixtures:
     verdict_byte_stable: yes
     fixture_dir_sha256: "e1ada712cc727b709f6216c9f085ffbc3cc59546d189a702342fc50ba84c5eb1"
     verdict_captured_for_dir_sha256: "e1ada712cc727b709f6216c9f085ffbc3cc59546d189a702342fc50ba84c5eb1"
+  - name: filter_db_bit_flip
+    manifest_key: cass.corruption.filter_db.bit_flip_big
+    status: active
+    component: nb-1-big-Filter.db
+    clean_source_table: "lz4_table"
+    clean_source_path: "datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Filter.db"
+    corrupted_path: "corruption/test_comp_corrupt/filter_db_bit_flip/nb-1-big-Filter.db"
+    mutation_type: bitflip
+    byte_offset: 8
+    original_bytes_hex: "10"
+    mutated_bytes_hex: "00"
+    original_sha256: "04d5b7c0b2c33c08d85bb833f61d521e30416d8009091881ea8a7ff05a0b202b"
+    corrupted_sha256: "5bad4443c287d42f9ccfcec1a151669549b4cf41bc4dc52e0bdb2fcf57dd2941"
+    original_size_bytes: 16
+    corrupted_size_bytes: 16
+    expected_failing_component: Filter.db
+    expected_error_class: FilterFalseNegative
+    rationale: "Bit-array bit flip (byte 8, the first bitset byte past the valid 8-byte header): a SET bit is cleared 1->0 so a present partition key hashes to an unset bit -> Bloom-filter FALSE NEGATIVE (might_contain==false). The BIG point-lookup path then returns Ok(None) for a live partition (silent data invisibility); full scans and BTI lookups are unaffected. Filter.db has no checksum so the flip is not caught on load. CQLite adds a verify --mode full FilterFalseNegative detection Cassandra lacks."
+    cassandra_verdict: clean
+    verdict_parity: divergent
+    verdict_note: "Cassandra 5.0.2 sstableverify -e verifies CLEAN (captured: 'Verify of BigTableReader:big(...nb-1-big-Data.db) succeeded. All 1 rows read successfully'): the standalone verifier does NOT read/validate Filter.db bit-array contents (Cassandra only rebuilds a filter it cannot deserialize; a parseable-but-wrong filter passes), so a flipped bit-array bit does NOT trip its verify. CQLite is intentionally STRICTER: verify --mode full re-probes every present Index.db key against the decoded filter and reports FilterFalseNegative. Recorded divergence + a detection tool Cassandra lacks; the read-side exposure (silent false negative on BIG point lookups) is Cassandra-equivalent (issue #1398)."
+    verdict_captured_for_sha256: "5bad4443c287d42f9ccfcec1a151669549b4cf41bc4dc52e0bdb2fcf57dd2941"
+    verdict_byte_stable: yes
+    fixture_dir_sha256: "88b3312ab3bf1455107b524b3341f42fc049b7114238bfaa7bf8411e4e910c98"
+    verdict_captured_for_dir_sha256: "88b3312ab3bf1455107b524b3341f42fc049b7114238bfaa7bf8411e4e910c98"
   - name: bti_partitions_footer_flip
     manifest_key: cass.corruption.bti_partitions_footer_bit_flip
     status: active
