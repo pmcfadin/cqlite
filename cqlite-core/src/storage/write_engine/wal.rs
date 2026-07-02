@@ -41,6 +41,13 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+/// Maximum plausible WAL entry payload length (16 MiB).
+///
+/// A declared length larger than this signals a torn/garbage tail rather than a
+/// real entry. Used both when scanning for the last valid boundary on open and
+/// as the replay-time sanity bound.
+const MAX_ENTRY_LENGTH: u32 = 16 * 1024 * 1024;
+
 /// Sync directory metadata to ensure file entries are persisted
 ///
 /// On POSIX systems this is critical for crash safety - without syncing the
@@ -596,6 +603,14 @@ impl WriteAheadLog {
     ///
     /// Returns an error if the file doesn't exist or cannot be opened.
     pub fn open_existing(path: &Path) -> Result<Self> {
+        // Determine the authoritative end-of-log boundary BEFORE opening for
+        // append. A crash can leave a partial (torn) entry at the tail; if it is
+        // retained, every subsequent append lands AFTER the garbage and is
+        // silently unrecoverable on the next replay (issue #1390). The boundary
+        // is derived from the length-prefixed + CRC32 framing (authoritative,
+        // not a byte-pattern guess), matching the no-heuristics mandate.
+        let valid_end = Self::scan_last_valid_offset(path)?;
+
         let file = OpenOptions::new()
             .read(true)
             .append(true)
@@ -608,12 +623,103 @@ impl WriteAheadLog {
 
         let current_size = metadata.len();
 
+        if valid_end < current_size {
+            // Physically trim the torn tail so future appends resume exactly at
+            // the last CRC-valid boundary.
+            file.set_len(valid_end).map_err(|e| {
+                Error::Storage(format!("Failed to trim torn WAL tail at {:?}: {}", path, e))
+            })?;
+            file.sync_all().map_err(|e| {
+                Error::Storage(format!("Failed to sync WAL after trim at {:?}: {}", path, e))
+            })?;
+            if let Some(parent) = path.parent() {
+                sync_directory(parent)?;
+            }
+            log::warn!(
+                "WAL {:?} had a torn tail: trimmed {} byte(s) ({} -> {})",
+                path,
+                current_size - valid_end,
+                current_size,
+                valid_end
+            );
+        }
+
         Ok(Self {
             file: BufWriter::with_capacity(Self::DEFAULT_BUFFER_SIZE, file),
             path: path.to_path_buf(),
             buffer_size: Self::DEFAULT_BUFFER_SIZE,
-            current_size,
+            current_size: valid_end,
         })
+    }
+
+    /// Scan the WAL and return the byte offset at the end of the last CRC-valid
+    /// entry — the boundary at which future appends must resume.
+    ///
+    /// Reads entries sequentially using the same length-prefixed + CRC32 framing
+    /// as [`replay`](Self::replay). Scanning stops (the valid prefix ends) at the
+    /// first entry that is:
+    /// - missing/short in its 8-byte header (torn header),
+    /// - declaring an implausible length (> [`MAX_ENTRY_LENGTH`], garbage tail),
+    /// - short in its payload (torn body), or
+    /// - CRC-invalid (corrupt framing — offsets past it cannot be trusted).
+    ///
+    /// The returned offset is therefore the end of a contiguous run of fully
+    /// written, CRC-valid entries. Bytes beyond it are a partial/corrupt tail
+    /// left by an interrupted append and must not be retained ahead of new
+    /// appends.
+    fn scan_last_valid_offset(path: &Path) -> Result<u64> {
+        let mut file = File::open(path)
+            .map_err(|e| Error::Storage(format!("Failed to open WAL for scan: {}", e)))?;
+
+        let mut offset = 0u64;
+
+        loop {
+            // Read entry header: [length][crc32].
+            let mut header = [0u8; 8];
+            match file.read_exact(&mut header) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => {
+                    return Err(Error::Storage(format!(
+                        "Failed to scan WAL header at offset {}: {}",
+                        offset, e
+                    )));
+                }
+            }
+
+            let entry_length = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+            let expected_crc = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+
+            // Implausible length => torn/garbage tail.
+            if entry_length > MAX_ENTRY_LENGTH {
+                break;
+            }
+
+            // Read the declared payload; a short read means a torn body.
+            let mut payload = vec![0u8; entry_length as usize];
+            match file.read_exact(&mut payload) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => {
+                    return Err(Error::Storage(format!(
+                        "Failed to scan WAL payload at offset {}: {}",
+                        offset, e
+                    )));
+                }
+            }
+
+            // Verify CRC: a mismatch means the framing (including the length we
+            // just trusted) is unreliable, so the valid prefix ends here.
+            let mut hasher = Hasher::new();
+            hasher.update(&payload);
+            if hasher.finalize() != expected_crc {
+                break;
+            }
+
+            offset += 8 + entry_length as u64;
+        }
+
+        Ok(offset)
     }
 
     /// Append a mutation to the WAL
@@ -744,7 +850,7 @@ impl WriteAheadLog {
             let expected_crc = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
 
             // Sanity check: entry length should be reasonable (<16MB)
-            if entry_length > 16 * 1024 * 1024 {
+            if entry_length > MAX_ENTRY_LENGTH {
                 log::warn!(
                     "WAL entry at offset {} has unreasonable length {} - stopping replay",
                     offset,
@@ -1665,6 +1771,163 @@ mod tests {
         let nonexistent = temp_dir.path().join("nonexistent");
         let result = WriteAheadLog::create(&nonexistent);
         assert!(result.is_err());
+    }
+
+    // ---- Issue #1390: torn-tail trim on open_existing -------------------
+    //
+    // `open_existing` must scan the log and position/truncate to the end of the
+    // last CRC-valid entry so that a partial (torn) tail left by a crash is not
+    // retained AHEAD of future appends. Otherwise every post-reopen append lands
+    // after the garbage and is silently unrecoverable on the next replay.
+
+    /// Append A then B (both synced), return (path, end_of_A_offset, total_size).
+    fn write_two_entries(temp_dir: &TempDir) -> (PathBuf, u64, u64) {
+        let mut wal = WriteAheadLog::create(temp_dir.path()).unwrap();
+
+        wal.append(&create_test_mutation(1, "Alice")).unwrap();
+        wal.sync().unwrap();
+        let end_of_a = wal.size();
+
+        wal.append(&create_test_mutation(2, "Bob")).unwrap();
+        wal.sync().unwrap();
+        let total = wal.size();
+
+        let path = wal.path().to_path_buf();
+        drop(wal);
+        (path, end_of_a, total)
+    }
+
+    /// Criterion 1: torn-tail trim on open. A valid + B truncated mid-payload;
+    /// open_existing must truncate the file back to the end of A (the last
+    /// CRC-valid boundary), leaving no torn bytes ahead of future appends.
+    #[test]
+    fn test_wal_open_existing_trims_torn_body() {
+        let temp_dir = TempDir::new().unwrap();
+        let (path, end_of_a, total) = write_two_entries(&temp_dir);
+
+        // Cut B mid-payload: keep its 8-byte header + 2 payload bytes.
+        let torn_len = end_of_a + 10;
+        assert!(
+            torn_len < total,
+            "test setup: B must be longer than 2 payload bytes"
+        );
+        let file = OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(torn_len).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        let wal = WriteAheadLog::open_existing(&path).unwrap();
+
+        // The torn tail must be physically trimmed to the end of A.
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            end_of_a,
+            "open_existing must truncate the torn tail to the last CRC-valid boundary"
+        );
+        assert_eq!(wal.size(), end_of_a);
+
+        let mutations = wal.replay().unwrap();
+        assert_eq!(mutations.len(), 1, "only A survives the trim");
+    }
+
+    /// Criterion 2: post-reopen writes recoverable. Continuing criterion 1 —
+    /// append C after reopen, then replay must yield exactly [A, C] with C
+    /// PRESENT. This is the assertion that fails before the fix (C lands after
+    /// the retained torn bytes and is lost on the next replay).
+    #[test]
+    fn test_wal_post_reopen_write_is_recoverable() {
+        let temp_dir = TempDir::new().unwrap();
+        let (path, end_of_a, total) = write_two_entries(&temp_dir);
+
+        let torn_len = end_of_a + 10;
+        assert!(torn_len < total);
+        let file = OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(torn_len).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        // Reopen (must trim the torn B), append C, sync, drop.
+        {
+            let mut wal = WriteAheadLog::open_existing(&path).unwrap();
+            wal.append(&create_test_mutation(3, "Carol")).unwrap();
+            wal.sync().unwrap();
+        }
+
+        // Fresh reopen + replay must recover exactly [A, C].
+        let wal = WriteAheadLog::open_existing(&path).unwrap();
+        let mutations = wal.replay().unwrap();
+        assert_eq!(mutations.len(), 2, "must recover A and C (C must be present)");
+
+        let names: Vec<&str> = mutations
+            .iter()
+            .map(|m| match &m.operations[0] {
+                CellOperation::Write {
+                    value: Value::Text(name),
+                    ..
+                } => name.as_str(),
+                other => panic!("expected Write op, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(names, vec!["Alice", "Carol"]);
+    }
+
+    /// Criterion 3: torn-header variant. Tail cut mid-header (< 8 bytes) — same
+    /// expected outcomes: trim to the end of A and remain appendable.
+    #[test]
+    fn test_wal_open_existing_trims_torn_header() {
+        let temp_dir = TempDir::new().unwrap();
+        let (path, end_of_a, _total) = write_two_entries(&temp_dir);
+
+        // Cut mid-header: keep A + only 3 bytes of B's 8-byte header.
+        let torn_len = end_of_a + 3;
+        let file = OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(torn_len).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        {
+            let mut wal = WriteAheadLog::open_existing(&path).unwrap();
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().len(),
+                end_of_a,
+                "torn header must be trimmed to the last CRC-valid boundary"
+            );
+            wal.append(&create_test_mutation(3, "Carol")).unwrap();
+            wal.sync().unwrap();
+        }
+
+        let wal = WriteAheadLog::open_existing(&path).unwrap();
+        let mutations = wal.replay().unwrap();
+        assert_eq!(mutations.len(), 2, "must recover A and C after torn-header trim");
+    }
+
+    /// Criterion 4: clean log unaffected. open_existing on a clean log preserves
+    /// all entries and appends normally (regression guard for the trim logic).
+    #[test]
+    fn test_wal_open_existing_clean_log_unaffected() {
+        let temp_dir = TempDir::new().unwrap();
+        let (path, _end_of_a, total) = write_two_entries(&temp_dir);
+
+        {
+            let wal = WriteAheadLog::open_existing(&path).unwrap();
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().len(),
+                total,
+                "a clean log must not be truncated"
+            );
+            assert_eq!(wal.size(), total);
+            let mutations = wal.replay().unwrap();
+            assert_eq!(mutations.len(), 2, "clean log preserves all entries");
+        }
+
+        // Appending after a clean reopen must extend the log normally.
+        {
+            let mut wal = WriteAheadLog::open_existing(&path).unwrap();
+            wal.append(&create_test_mutation(3, "Carol")).unwrap();
+            wal.sync().unwrap();
+        }
+        let wal = WriteAheadLog::open_existing(&path).unwrap();
+        assert_eq!(wal.replay().unwrap().len(), 3);
     }
 
     #[test]
