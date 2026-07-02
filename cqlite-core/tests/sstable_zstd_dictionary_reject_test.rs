@@ -307,21 +307,36 @@ fn zstd_dictionary_sstable_rejected_via_reader_fixture() {
                              decompression class (see #1414); got: {e}"
                         );
                         let msg = e.to_string().to_ascii_lowercase();
+                        // Must name the zstd/dictionary decompression path
+                        // (chunk_decompressor.rs:461) …
                         assert!(
                             msg.contains("zstd") || msg.contains("dictionary"),
                             "scan rejection message must name the zstd/dictionary \
                              decompression path (chunk_decompressor.rs:461); got: {e}"
                         );
+                        // … and must NOT be an inline-CRC / chunk-checksum failure:
+                        // the compressed-byte CRC is valid; the dictionary, not
+                        // corruption, is why the frame cannot be decoded. Excluding
+                        // these terms stops a CRC/digest mismatch from satisfying the
+                        // oracle by coincidence.
+                        assert!(
+                            !msg.contains("crc")
+                                && !msg.contains("checksum")
+                                && !msg.contains("digest"),
+                            "scan rejection must be the dict-decompression failure, not a \
+                             CRC/checksum/digest mismatch; got: {e}"
+                        );
                     }
                 }
             }
             Err(e) => {
-                // Rejecting at open() is also acceptable, as long as it is not
-                // misclassified as data corruption.
-                assert!(
-                    !matches!(e, Error::Corruption(_)),
-                    "reader rejection of a dictionary SSTable must not be Corruption; got: {e}"
-                );
+                // Opening a dictionary-compressed SSTable is EXPECTED to succeed:
+                // metadata parsing never decompresses chunk bytes and
+                // `ZstdCompressor` is a known compressor name. The fail-closed
+                // property lives on the decompressing read path, so an open() error
+                // is NOT the intended dict-rejection path — it means the fixture
+                // shape changed. Fail loudly rather than accept it as "rejection".
+                panic!("unexpected open failure for current fixture shape: {e}");
             }
         }
     });
@@ -391,12 +406,29 @@ fn zstd_dictionary_verify_reports_unsupported_not_checksum_fixture() {
         // behavior until #1414 upgrades it.
         assert!(
             report.findings.iter().any(|f| {
-                f.class == VerifyErrorClass::ChunkDecompressionError
-                    && (f.component == "Data.db" || f.component == "CompressionInfo.db")
+                if f.class != VerifyErrorClass::ChunkDecompressionError {
+                    return false;
+                }
+                if f.component != "Data.db" && f.component != "CompressionInfo.db" {
+                    return false;
+                }
+                let detail = f.detail.to_ascii_lowercase();
+                // Must name the decompression path …
+                let names_decompression = detail.contains("zstd")
+                    || detail.contains("dictionary")
+                    || detail.contains("decompress");
+                // … and must NOT be an inline-CRC / chunk-checksum finding: the
+                // compressed-byte CRC is valid, so a CRC-flavored decompression
+                // finding must not be allowed to satisfy this oracle.
+                let is_crc = detail.contains("crc")
+                    || detail.contains("checksum")
+                    || detail.contains("digest");
+                names_decompression && !is_crc
             }),
             "verify must report the dictionary rejection as a ChunkDecompressionError on \
-             Data.db/CompressionInfo.db (the decompression-error class, see #1414), not only \
-             unrelated setup/metadata findings: {:?}",
+             Data.db/CompressionInfo.db whose detail names the zstd/dictionary/decompress path \
+             (see #1414) — not a CRC/checksum/digest finding and not only unrelated \
+             setup/metadata findings: {:?}",
             report.findings
         );
     });
