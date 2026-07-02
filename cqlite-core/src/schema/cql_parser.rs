@@ -1521,8 +1521,7 @@ mod tests {
         );
 
         let bad_str = "frozen<".repeat(depth + 1) + "int" + &">".repeat(depth + 1);
-        let err = cql_type_to_type_id(&bad_str)
-            .expect_err("one level past the bound must error");
+        let err = cql_type_to_type_id(&bad_str).expect_err("one level past the bound must error");
         let msg = err.to_string();
         assert!(
             msg.contains("nesting") || msg.contains("deep"),
