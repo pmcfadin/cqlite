@@ -133,6 +133,17 @@ fn data_files(dir: &Path) -> Vec<PathBuf> {
     v
 }
 
+/// Same as [`data_files`] but ordered NEWEST-to-OLDEST (generation descending) —
+/// the input ordering `compact_sstables` expects (run index 0 = newest, which
+/// wins equal-timestamp tie-breaks). Passing compaction inputs in this order
+/// keeps the idempotence tests honest about tie-break behaviour; feeding
+/// ascending order would mask equal-timestamp tie-break regressions.
+fn data_files_newest_first(dir: &Path) -> Vec<PathBuf> {
+    let mut v = data_files(dir);
+    v.reverse();
+    v
+}
+
 /// Extract a column value from a scan row (`Value::Map` of `(Text(col), value)`).
 fn col<'a>(row: &'a Value, name: &str) -> Option<&'a Value> {
     match row {
@@ -387,7 +398,8 @@ fn ac2_compaction_of_double_replay_matches_single_copy_bytewise() {
         &dup_snapshot,
         mutations.len(),
     );
-    let dup_inputs = data_files(&sstable_dir(&dup_data));
+    // Newest-to-oldest: the run ordering `compact_sstables` expects.
+    let dup_inputs = data_files_newest_first(&sstable_dir(&dup_data));
     assert_eq!(
         dup_inputs.len(),
         2,
@@ -409,7 +421,7 @@ fn ac2_compaction_of_double_replay_matches_single_copy_bytewise() {
             .expect("ref sstable");
         drop(engine);
     }
-    let ref_inputs = data_files(&sstable_dir(&ref_data));
+    let ref_inputs = data_files_newest_first(&sstable_dir(&ref_data));
     assert_eq!(ref_inputs.len(), 1, "reference must be a single generation");
 
     // Compact BOTH through the identical one-shot path (full compaction,
@@ -542,7 +554,8 @@ fn ac3_replayed_tombstone_shadows_exactly_what_it_shadowed() {
     );
 
     // Compact all three generations; the tombstone must still shadow exactly PK2.
-    let inputs = data_files(&tbl_dir);
+    // Newest-to-oldest: the run ordering `compact_sstables` expects.
+    let inputs = data_files_newest_first(&tbl_dir);
     let out = TempDir::new().unwrap();
     let report = rt
         .block_on(compact_sstables(
