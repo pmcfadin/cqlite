@@ -24,8 +24,29 @@ use std::io::{Read, Seek, SeekFrom};
 
 use super::partitions::{parse_bti_node_for_traversal, read_node_payload, BtiPartitionLocation};
 
-/// Maximum DFS stack depth, mirroring [`crate::storage::sstable::bti::MAX_TRIE_DEPTH`].
-const DFS_MAX_DEPTH: usize = 128;
+/// Maximum accumulated key-path bytes along a single root→node path.
+///
+/// A BTI trie key path is a byte-comparable key (partition token prefix or
+/// clustering separator); Cassandra limits each partition/clustering key
+/// component to `u16::MAX` bytes (64 KiB − 1), so a reconstructed path longer
+/// than this is corruption — NOT a legitimate long key.  This replaces the old
+/// `DFS_MAX_DEPTH = 128` byte cap (issue #1629 defect 1), which spuriously
+/// rejected any legitimate key path longer than 128 bytes.
+const MAX_KEY_PATH_BYTES: usize = u16::MAX as usize;
+
+/// Maximum DFS **node** depth (stack depth), counted in NODES / transitions
+/// taken — NOT in accumulated key bytes.
+///
+/// In the BTI on-disk format every trie transition encodes exactly one key byte
+/// (there is no multi-byte "chain" node — see `node_decode`), so a leaf's node
+/// depth equals its key-path length + 1.  This cap must therefore be at least
+/// [`MAX_KEY_PATH_BYTES`] + 1, or it would re-introduce the very false positive
+/// this fix removes (issue #1629): the historical
+/// [`crate::storage::sstable::bti::MAX_TRIE_DEPTH`] value of 128 conflated node
+/// depth with key bytes and rejected legitimate long keys.  It is kept as a
+/// distinct, explicitly node-counted guard (defense in depth) alongside the
+/// key-byte and total-work bounds.
+const DFS_MAX_NODE_DEPTH: usize = MAX_KEY_PATH_BYTES + 1;
 
 /// Read the root offset from the 8-byte big-endian footer of a BTI file and
 /// load the entire trie (everything before the footer) into memory.
@@ -117,9 +138,21 @@ fn ordered_children(node: &BtiNode) -> Vec<(u8, usize)> {
 /// `decode_payload` and pushing `(reconstructed_key, decoded_payload)` onto the
 /// result Vec in byte-comparable order.
 ///
-/// The traversal is iterative (explicit stack), depth-capped at
-/// [`DFS_MAX_DEPTH`], and bounds-checks every offset — corrupt or cyclic tries
-/// produce an error rather than an infinite loop or panic.
+/// The traversal is iterative (explicit stack), bounds-checks every offset, and
+/// enforces three independent limits so corrupt or cyclic tries produce an error
+/// rather than an infinite loop, unbounded memory, or a panic:
+///
+/// 1. **Node depth** ([`DFS_MAX_NODE_DEPTH`]) — the number of nodes/transitions
+///    on the current root→node path (stack depth), counted in NODES, not bytes.
+/// 2. **Accumulated key bytes** ([`MAX_KEY_PATH_BYTES`]) — the length of the
+///    reconstructed key path; longer than a Cassandra key component (64 KiB − 1)
+///    is corruption.  (Because BTI encodes one key byte per transition, this and
+///    the node-depth cap are numerically coupled, but both are checked so each
+///    corruption mode has a precise, distinct error.)
+/// 3. **Total work** — a running `nodes_visited` counter.  Every distinct node
+///    occupies at least one trie byte, so `nodes_visited > trie_data.len()`
+///    proves reconvergence/cycling and terminates adversarial tries whose paths
+///    stay individually short but whose total node visits blow up.
 pub(crate) fn dfs_collect_in_order<T, F>(
     trie_data: &[u8],
     root_offset: usize,
@@ -130,15 +163,32 @@ where
 {
     let mut results: Vec<(Vec<u8>, T)> = Vec::new();
 
-    // Stack frame: (node_offset, accumulated_key_bytes).
-    // We use an explicit stack and push children in *reverse* order so the
-    // smallest transition byte is processed first (LIFO).
-    let mut stack: Vec<(usize, Vec<u8>)> = vec![(root_offset, Vec::new())];
+    // Stack frame: (node_offset, node_depth, accumulated_key_bytes).
+    // `node_depth` counts NODES on the path (root = 1), independent of the key
+    // byte length.  We use an explicit stack and push children in *reverse*
+    // order so the smallest transition byte is processed first (LIFO).
+    let mut stack: Vec<(usize, usize, Vec<u8>)> = vec![(root_offset, 1, Vec::new())];
 
-    while let Some((node_offset, key_bytes)) = stack.pop() {
-        if key_bytes.len() > DFS_MAX_DEPTH {
+    // Total nodes popped across ALL paths — the cycle / reconvergence guard.
+    let mut nodes_visited: usize = 0;
+
+    while let Some((node_offset, node_depth, key_bytes)) = stack.pop() {
+        nodes_visited = nodes_visited.saturating_add(1);
+        if nodes_visited > trie_data.len() {
             return Err(Error::Parse(format!(
-                "BTI DFS exceeded max depth {DFS_MAX_DEPTH} (corrupt or cyclic trie)"
+                "BTI DFS exceeded total work bound ({nodes_visited} nodes visited > \
+                 trie size {}; corrupt or cyclic trie)",
+                trie_data.len()
+            )));
+        }
+        if node_depth > DFS_MAX_NODE_DEPTH {
+            return Err(Error::Parse(format!(
+                "BTI DFS exceeded max node depth {DFS_MAX_NODE_DEPTH} (corrupt or cyclic trie)"
+            )));
+        }
+        if key_bytes.len() > MAX_KEY_PATH_BYTES {
+            return Err(Error::Parse(format!(
+                "BTI DFS key path exceeded max {MAX_KEY_PATH_BYTES} bytes (corrupt trie)"
             )));
         }
         if node_offset >= trie_data.len() {
@@ -158,10 +208,11 @@ where
         //    stack is LIFO, push them in DESCENDING order.
         let node = parse_bti_node_for_traversal(trie_data, node_offset)?;
         let children = ordered_children(&node);
+        let child_depth = node_depth.saturating_add(1);
         for &(transition_byte, child_offset) in children.iter().rev() {
             let mut child_key = key_bytes.clone();
             child_key.push(transition_byte);
-            stack.push((child_offset, child_key));
+            stack.push((child_offset, child_depth, child_key));
         }
     }
 
@@ -336,6 +387,120 @@ mod tests {
                 (vec![0xAA], BtiPartitionLocation::DataOffset(0)),
                 (vec![0xBB], BtiPartitionLocation::DataOffset(64)),
             ]
+        );
+    }
+
+    // ----- issue #1629: node-depth vs key-bytes vs total-work bounds -----
+
+    /// Build a `Partitions.db`-style trie that is a single-transition **chain**
+    /// of `n_links` `SingleNoPayload4` nodes descending to a `PayloadOnly`
+    /// partition leaf at offset 0.  Returns `(trie_bytes, root_offset)`.
+    ///
+    /// Because every BTI transition encodes exactly one key byte, the leaf's
+    /// reconstructed key path is `n_links` bytes long and the root→leaf node
+    /// depth is `n_links + 1`.  `partition_leaf(hash, -1)` yields
+    /// `DataOffset(0)` at the leaf.
+    fn partition_chain_to_leaf(n_links: usize) -> (Vec<u8>, usize) {
+        let mut trie = Vec::new();
+        trie.extend_from_slice(&partition_leaf(0x11, -1)); // leaf at offset 0 (3 bytes)
+        let mut child_off = 0usize;
+        for i in 0..n_links {
+            let node_off = trie.len();
+            let delta = node_off - child_off;
+            assert!(
+                delta <= 0x0F,
+                "chain link delta {delta} does not fit a SingleNoPayload4 nibble"
+            );
+            // SingleNoPayload4 (ordinal 1): [0x10|delta] [transition]; no payload.
+            trie.push(0x10 | (delta as u8 & 0x0F));
+            trie.push((i % 255) as u8 + 1); // transition byte (nonzero, varies)
+            child_off = node_off;
+        }
+        let root = trie.len() - 2; // last chain node
+        (trie, root)
+    }
+
+    /// Issue #1629 defect 1 (HEADLINE REGRESSION): a legitimate partition/clustering
+    /// key path longer than the old 128 cap (here ~200 bytes) must decode WITHOUT
+    /// error.  On pre-fix code this returns `Err("... exceeded max depth 128 ...")`
+    /// because the cap was applied to `key_bytes.len()` (accumulated key bytes),
+    /// not the trie node depth.
+    #[test]
+    fn dfs_long_partition_key_over_128_bytes_decodes() {
+        let (trie, root) = partition_chain_to_leaf(200);
+        let entries =
+            dfs_collect_partition_entries(&trie, root).expect("a ~200-byte key path must decode");
+        assert_eq!(entries.len(), 1, "the single leaf must be emitted");
+        assert_eq!(
+            entries[0].0.len(),
+            200,
+            "reconstructed key path is 200 bytes (one per transition)"
+        );
+        assert_eq!(entries[0].1, BtiPartitionLocation::DataOffset(0));
+    }
+
+    /// Issue #1629: a chain just past the OLD 128 cap (129 key bytes) must decode —
+    /// locks the regression right at the former false-positive boundary.
+    #[test]
+    fn dfs_chain_just_over_old_128_cap_decodes() {
+        let (trie, root) = partition_chain_to_leaf(129);
+        let entries = dfs_collect_partition_entries(&trie, root)
+            .expect("a 129-byte key path must decode (old cap was 128)");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0.len(), 129);
+    }
+
+    /// Issue #1629 defect 2: an adversarial *reconverging* trie whose node visits
+    /// grow super-linearly (each internal node has two transitions pointing at the
+    /// SAME child) must terminate via the total-work bound rather than hang.  Every
+    /// individual path stays short (so the key-bytes cap never fires), but
+    /// `nodes_visited` blows past `trie_data.len()` almost immediately.
+    #[test]
+    fn dfs_reconverging_trie_hits_work_bound_no_hang() {
+        // 30 levels ⇒ ~2^30 node visits without a work bound (would hang).
+        let mut trie = Vec::new();
+        trie.extend_from_slice(&partition_leaf(0x11, -1)); // N0 leaf at offset 0
+        let mut child_off = 0usize;
+        let levels = 30;
+        for _ in 0..levels {
+            let node_off = trie.len();
+            let delta = (node_off - child_off) as u8; // stays <= 255
+                                                      // Sparse8 with two transitions, BOTH pointing at the same child.
+            trie.push(0x50); // Sparse8, no payload
+            trie.push(0x02); // count = 2
+            trie.push(0x01); // transition a
+            trie.push(0x02); // transition b
+            trie.push(delta); // child a
+            trie.push(delta); // child b
+            child_off = node_off;
+        }
+        let root = trie.len() - 6;
+
+        let err = dfs_collect_partition_entries(&trie, root)
+            .expect_err("a reconverging trie must error, not hang");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("total work bound"),
+            "expected the total-work-bound error, got: {msg}"
+        );
+    }
+
+    /// Issue #1629: the node-depth cap still fires on a chain deeper than the cap.
+    /// In the BTI format node depth equals key-path length + 1, so the cap sits at
+    /// `u16::MAX + 1` nodes (see `DFS_MAX_NODE_DEPTH`); a chain past it errors with
+    /// the node-depth message (distinct from both the work-bound and the leaf
+    /// out-of-bounds errors).
+    #[test]
+    fn dfs_node_depth_cap_rejects_overlong_chain() {
+        // One node deeper than the cap: key path = DFS_MAX_NODE_DEPTH bytes,
+        // node depth = DFS_MAX_NODE_DEPTH + 1 (root..leaf) > the cap.
+        let (trie, root) = partition_chain_to_leaf(DFS_MAX_NODE_DEPTH);
+        let err = dfs_collect_partition_entries(&trie, root)
+            .expect_err("a chain past the node-depth cap must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("node depth"),
+            "expected the node-depth error, got: {msg}"
         );
     }
 
