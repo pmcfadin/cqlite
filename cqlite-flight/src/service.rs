@@ -65,6 +65,9 @@ impl From<ProducerError> for Status {
             {
                 Status::not_found(msg)
             }
+            // A canonicalization escape (issue #1430) is treated as a missing
+            // resource so the server never confirms a path outside the data dir.
+            ProducerError::UnsafePath { .. } => Status::not_found(msg),
             ProducerError::Discovery { .. }
             | ProducerError::Merge(_)
             | ProducerError::Convert(_)
@@ -374,7 +377,7 @@ impl CqliteFlightService {
             &ticket.keyspace,
             &ticket.table,
             ticket.snapshot.as_deref(),
-        );
+        )?;
 
         // The merge drains SSTables into memory and is CPU-bound — run it off the
         // async runtime so it cannot stall the gRPC reactor. A missing table
@@ -427,12 +430,22 @@ impl CqliteFlightService {
 
         let req = TableStatsRequest::from_bytes(&action.body)
             .map_err(|e| Status::invalid_argument(format!("invalid table_stats request: {e}")))?;
+        // Validate the path-bearing fields (issue #1430): a `table_stats` body is
+        // the same class of attacker-controlled input as a Flight ticket.
+        crate::pathsafe::validate_identifier("keyspace", &req.keyspace)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        crate::pathsafe::validate_identifier("table", &req.table)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        if let Some(snapshot) = &req.snapshot {
+            crate::pathsafe::validate_snapshot(snapshot)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        }
         let dir = DirSource::resolve(
             &self.data_dir,
             &req.keyspace,
             &req.table,
             req.snapshot.as_deref(),
-        )
+        )?
         .into_dir();
 
         // `gather_table_stats` is synchronous blocking fs I/O (read_dir + read of
@@ -589,6 +602,65 @@ mod tests {
             Err(e) => e,
         };
         assert_eq!(err.code(), tonic::Code::NotFound, "got: {err:?}");
+    }
+
+    // ---- Issue #1430: end-to-end path-traversal rejection (wiring evidence) ----
+
+    #[test]
+    fn do_get_rejects_absolute_snapshot_traversal() {
+        // A legit data dir that a valid `do_get` would serve from.
+        let schema = simple_schema();
+        let (_temp, data_dir, _dir) =
+            build_sstables(&schema, vec![vec![write_row(1, "x", 1, 100)]]);
+
+        // A "secret" directory OUTSIDE data_dir holding a Data.db an attacker
+        // wants to disclose.
+        let secret = tempfile::TempDir::new().unwrap();
+        std::fs::write(secret.path().join("nb-1-big-Data.db"), b"top secret").unwrap();
+
+        let svc = CqliteFlightService::new(data_dir, 1024);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // snapshot = absolute path to the secret dir. Without the guard,
+        // `Path::join` with an absolute component would escape data_dir entirely.
+        let mut t = ticket(KS, TBL);
+        t.snapshot = Some(secret.path().to_string_lossy().into_owned());
+
+        let result = rt.block_on(async {
+            let bytes = t.to_bytes().unwrap();
+            svc.do_get(Request::new(Ticket::new(bytes))).await
+        });
+        let err = match result {
+            Ok(_) => panic!("path-traversal ticket must be rejected, not served"),
+            Err(e) => e,
+        };
+        // Parse-time charset validation rejects the absolute snapshot path.
+        assert_eq!(
+            err.code(),
+            tonic::Code::InvalidArgument,
+            "absolute snapshot must be rejected as invalid argument, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn do_get_rejects_parent_traversal_keyspace() {
+        let schema = simple_schema();
+        let (_temp, data_dir, _dir) =
+            build_sstables(&schema, vec![vec![write_row(1, "x", 1, 100)]]);
+        let svc = CqliteFlightService::new(data_dir, 1024);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // keyspace with `../` must be rejected before any filesystem access.
+        let t = ticket("../secret", TBL);
+        let result = rt.block_on(async {
+            let bytes = t.to_bytes().unwrap();
+            svc.do_get(Request::new(Ticket::new(bytes))).await
+        });
+        let err = match result {
+            Ok(_) => panic!("`../` keyspace must be rejected"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code(), tonic::Code::InvalidArgument, "got: {err:?}");
     }
 
     #[test]

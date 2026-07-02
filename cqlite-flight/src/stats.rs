@@ -225,6 +225,20 @@ pub fn gather_table_stats(dir: &Path) -> Result<TableStatsResponse, StatsError> 
     let data_paths = collect_data_paths(entries, &mut response);
 
     for data_path in data_paths {
+        // Per-file containment (issue #1430): the enumerated Data.db must resolve
+        // to a target INSIDE `dir`. A symlinked Data.db inside an otherwise-valid
+        // dir can point outside `data_dir`; treat an escaping entry exactly like a
+        // missing/undecodable Statistics.db (taint completeness) and never read it.
+        if let Err(reason) = crate::pathsafe::assert_within("sstable", dir, &data_path) {
+            response.complete = false;
+            response.skipped_sstables = response.skipped_sstables.saturating_add(1);
+            tracing::debug!(
+                path = %data_path.display(),
+                %reason,
+                "table_stats: Data.db resolves outside the data directory (marking incomplete)"
+            );
+            continue;
+        }
         // Derive the sibling Statistics.db (same generation prefix). The lookup
         // itself can fail (no recognisable Data.db suffix) — that taints too.
         let stats_path = match sibling_statistics_path(&data_path) {
@@ -239,6 +253,19 @@ pub fn gather_table_stats(dir: &Path) -> Result<TableStatsResponse, StatsError> 
                 continue;
             }
         };
+        // The derived Statistics.db must ALSO resolve inside `dir` (a symlinked
+        // sibling can escape even when the Data.db does not). Fail-closed the same
+        // way and never read a file whose resolved target leaves the directory.
+        if let Err(reason) = crate::pathsafe::assert_within("sstable", dir, &stats_path) {
+            response.complete = false;
+            response.skipped_sstables = response.skipped_sstables.saturating_add(1);
+            tracing::debug!(
+                path = %stats_path.display(),
+                %reason,
+                "table_stats: Statistics.db resolves outside the data directory (marking incomplete)"
+            );
+            continue;
+        }
         match read_one_sstable_counts(&stats_path) {
             Ok(counts) => fold_counts(&mut response, &stats_path, counts),
             Err(e) => {
@@ -467,7 +494,9 @@ mod tests {
             ],
         );
         // Resolve the SSTable dir exactly as the service does, then gather.
-        let dir = DirSource::resolve(&data_dir, KS, TBL, None).into_dir();
+        let dir = DirSource::resolve(&data_dir, KS, TBL, None)
+            .expect("resolve")
+            .into_dir();
 
         let stats = gather_table_stats(&dir).expect("gather");
 
@@ -558,7 +587,9 @@ mod tests {
             &schema,
             vec![vec![write_row(1, "a", 1, 100), write_row(2, "b", 2, 100)]],
         );
-        let dir = DirSource::resolve(&data_dir, KS, TBL, None).into_dir();
+        let dir = DirSource::resolve(&data_dir, KS, TBL, None)
+            .expect("resolve")
+            .into_dir();
 
         let stats = gather_table_stats(&dir).expect("gather");
 
@@ -770,6 +801,115 @@ mod tests {
         assert_eq!(stats.live_rows, 2000, "sensor_data has 2000 rows (wide)");
         assert!(stats.complete, "real fixture decoded fully → complete");
         assert_eq!(stats.skipped_sstables, 0);
+    }
+
+    /// Build one real, fully-decodable SSTable and return `(temp, dir, data, stats)`
+    /// where `data`/`stats` are its `*-Data.db`/`*-Statistics.db` paths. Used by the
+    /// #1430 symlink-escape tests so the OUTSIDE target is a VALID statistics file
+    /// that WOULD contribute counts if it were (wrongly) read — the fail-before /
+    /// pass-after signal. `temp` keeps the backing dir alive.
+    #[cfg(unix)]
+    fn build_one_valid_sstable() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let schema = simple_schema();
+        let (temp, data_dir, _table) =
+            build_sstables(&schema, vec![vec![write_row(1, "a", 1, 100)]]);
+        let dir = DirSource::resolve(&data_dir, KS, TBL, None)
+            .expect("resolve")
+            .into_dir();
+        let data = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with("-Data.db"))
+            })
+            .expect("a Data.db was produced");
+        let stats = sibling_statistics_path(&data).expect("sibling stats path");
+        assert!(stats.exists(), "the SSTable produced a Statistics.db");
+        (temp, data, stats)
+    }
+
+    /// Issue #1430 (roborev per-file follow-up): a SYMLINKED `*-Statistics.db`
+    /// inside an otherwise-valid dir can resolve OUTSIDE the data directory. The
+    /// SSTable must be SKIPPED (taint completeness) and its outside target must NOT
+    /// be read/contribute counts. The outside file is a REAL decodable Statistics.db
+    /// so that, before the fix, it WOULD be read and contribute — proving the guard.
+    #[test]
+    #[cfg(unix)]
+    fn gather_skips_sstable_with_statistics_escaping_the_dir() {
+        use std::os::unix::fs::symlink;
+        // A valid SSTable whose Statistics.db we relocate outside the served dir.
+        let (_src_temp, _src_data, valid_stats) = build_one_valid_sstable();
+
+        let dir_tmp = tempfile::TempDir::new().unwrap();
+        let outside_tmp = tempfile::TempDir::new().unwrap();
+        let dir = dir_tmp.path();
+
+        // A real Data.db enumerates the SSTable...
+        std::fs::write(dir.join("nb-1-big-Data.db"), b"data").unwrap();
+        // ...but its sibling Statistics.db is a SYMLINK to a VALID, decodable stats
+        // file OUTSIDE the tree. Before the fix this decodes and contributes counts;
+        // the guard must skip it unread.
+        let outside_stats = outside_tmp.path().join("secret-Statistics.db");
+        std::fs::copy(&valid_stats, &outside_stats).unwrap();
+        symlink(&outside_stats, dir.join("nb-1-big-Statistics.db")).unwrap();
+
+        let stats = gather_table_stats(dir).expect("gather");
+
+        assert!(
+            !stats.complete,
+            "an SSTable whose Statistics.db escapes the dir must mark the response incomplete"
+        );
+        assert_eq!(
+            stats.skipped_sstables, 1,
+            "the escaping SSTable is counted as skipped"
+        );
+        assert_eq!(
+            stats.sstable_count, 0,
+            "the escaping SSTable did not contribute (was not read)"
+        );
+        assert_eq!(
+            stats.live_rows, 0,
+            "the outside stats file's counts must not leak in"
+        );
+    }
+
+    /// Companion: a SYMLINKED `*-Data.db` that itself resolves outside the dir is
+    /// skipped at enumeration time and its (valid, in-dir) sibling is never read.
+    /// The in-dir sibling is a REAL decodable stats file, so before the fix the
+    /// SSTable would be enumerated and its sibling would contribute counts.
+    #[test]
+    #[cfg(unix)]
+    fn gather_skips_sstable_with_data_db_escaping_the_dir() {
+        use std::os::unix::fs::symlink;
+        let (_src_temp, _src_data, valid_stats) = build_one_valid_sstable();
+
+        let dir_tmp = tempfile::TempDir::new().unwrap();
+        let outside_tmp = tempfile::TempDir::new().unwrap();
+        let dir = dir_tmp.path();
+
+        // A Data.db that is a symlink to a file OUTSIDE the tree.
+        let outside_data = outside_tmp.path().join("secret-Data.db");
+        std::fs::write(&outside_data, b"data").unwrap();
+        symlink(&outside_data, dir.join("nb-1-big-Data.db")).unwrap();
+        // A VALID in-dir sibling Statistics.db that must NOT rescue the escaping
+        // Data.db: the SSTable is skipped before the sibling is ever considered.
+        std::fs::copy(&valid_stats, dir.join("nb-1-big-Statistics.db")).unwrap();
+
+        let stats = gather_table_stats(dir).expect("gather");
+
+        assert!(
+            !stats.complete,
+            "an SSTable whose Data.db escapes the dir must mark the response incomplete"
+        );
+        assert_eq!(stats.skipped_sstables, 1, "the escaping SSTable is skipped");
+        assert_eq!(
+            stats.sstable_count, 0,
+            "it did not contribute (the valid sibling was never read)"
+        );
+        assert_eq!(stats.live_rows, 0);
     }
 
     #[test]

@@ -11,6 +11,7 @@
 pub mod agg;
 pub mod filter;
 pub mod obs;
+pub mod pathsafe;
 pub mod producer;
 pub mod service;
 pub mod stats;
