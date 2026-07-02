@@ -193,14 +193,6 @@ impl JSONWriter {
                     JsonValue::String(engine.encode(bytes))
                 }
             }
-            // Transient row carrier (issue #1334): render as a name→value object.
-            Value::Row(cells) => {
-                let mut obj = Map::new();
-                for (name, v) in cells {
-                    obj.insert(name.to_string(), Self::value_to_json(v));
-                }
-                JsonValue::Object(obj)
-            }
         }
     }
 }

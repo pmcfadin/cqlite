@@ -378,47 +378,23 @@ fn parse_cql_type_string(type_str: &str) -> cqlite_core::types::DataType {
 #[cfg(feature = "state_machine")]
 fn convert_entry_to_query_row(
     row_key: &cqlite_core::RowKey,
-    value: &cqlite_core::Value,
+    value: &cqlite_core::types::ScanRow,
     schema: &TableSchema,
 ) -> cqlite_core::query::QueryRow {
     use cqlite_core::query::{QueryRow, RowMetadata};
+    use cqlite_core::types::ScanRow;
     use cqlite_core::Value;
     use std::collections::HashMap;
 
     let mut values: HashMap<String, Value> = HashMap::new();
 
-    // Extract values from the Value (the scan carries rows as `Value::Row`,
-    // issue #1334; older paths may still carry `Value::Map`).
-    match value {
-        Value::Row(cells) => {
-            for (name, v) in cells {
-                values.insert(name.to_string(), v.clone());
-            }
-        }
-        Value::Map(pairs) => {
-            // Each pair is (key_value, column_value)
-            for (k, v) in pairs {
-                if let Value::Text(col_name) = k {
-                    values.insert(col_name.clone(), v.clone());
-                }
-            }
-        }
-        Value::Blob(data) => {
-            // For raw blob data, assign to first regular column if available
-            if let Some(first_col) = schema.columns.first() {
-                values.insert(first_col.name.clone(), Value::Blob(data.clone()));
-            }
-        }
-        Value::Text(s) => {
-            if let Some(first_col) = schema.columns.first() {
-                values.insert(first_col.name.clone(), Value::Text(s.clone()));
-            }
-        }
-        other => {
-            // For other value types, assign to first column
-            if let Some(first_col) = schema.columns.first() {
-                values.insert(first_col.name.clone(), other.clone());
-            }
+    // Issue #1334: the scan delivers the single `ScanRow` row carrier. A live row
+    // carries every regular column as a decoded `(name, value)` cell; a marker
+    // (row tombstone / null row) contributes no cells (the null-fill below covers
+    // the schema columns).
+    if let ScanRow::Row(cells) = value {
+        for (name, v) in cells {
+            values.insert(name.to_string(), v.clone());
         }
     }
 

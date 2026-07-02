@@ -113,8 +113,12 @@ pub async fn validate_sstable(
                                     let mut parsing_errors = 0;
                                     for entry in entries.iter() {
                                         let key = entry.key.clone();
-                                        let value =
-                                            cqlite_core::Value::Text(format!("{:?}", entry.key));
+                                        // Issue #1334: parse_entry consumes the
+                                        // `ScanRow` carrier; this mock path has no
+                                        // decoded row, so wrap as a marker.
+                                        let value = cqlite_core::types::ScanRow::Marker(
+                                            cqlite_core::Value::Text(format!("{:?}", entry.key)),
+                                        );
 
                                         if parser.parse_entry(&key, &value).is_err() {
                                             parsing_errors += 1;

@@ -94,10 +94,14 @@ pub async fn read_sstable(
                     break;
                 }
 
-                // Create mock key and value from bulletproof entry for compatibility
+                // Create mock key and value from bulletproof entry for compatibility.
+                // Issue #1334: parse_entry consumes the `ScanRow` carrier; this mock
+                // path has no decoded row, so wrap the synthetic value as a marker.
                 let key = entry.key.clone();
-                let value =
-                    cqlite_core::Value::Text(format!("{:?}|{}", entry.key, entry.format_info));
+                let value = cqlite_core::types::ScanRow::Marker(cqlite_core::Value::Text(format!(
+                    "{:?}|{}",
+                    entry.key, entry.format_info
+                )));
 
                 match parser.parse_entry(&key, &value) {
                     Ok(parsed_row) => {

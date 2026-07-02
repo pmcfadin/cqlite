@@ -9,7 +9,7 @@ use cqlite_core::{
     query::{QueryRow, RowMetadata},
     schema::{TableSchema, Column},
     storage::sstable::bulletproof_reader::SSTableEntry,
-    types::{Value, RowKey},
+    types::{RowKey, ScanRow, Value},
     Error,
 };
 use serde_json;
@@ -191,16 +191,16 @@ impl RealDataParser {
     }
 
     /// Parse raw SSTable entry into human-readable row
-    pub fn parse_entry(&self, key: &RowKey, value: &Value) -> Result<ParsedRow> {
+    pub fn parse_entry(&self, key: &RowKey, value: &ScanRow) -> Result<ParsedRow> {
         let mut columns = HashMap::new();
-        
+
         // Parse the key components (partition key + clustering key)
         if let Err(e) = self.parse_key_components(&key, &mut columns) {
             eprintln!("Warning: Failed to parse key components: {}", e);
         }
 
         // Parse the value components (regular columns)
-        if let Err(e) = self.parse_value_components(&value, &mut columns) {
+        if let Err(e) = self.parse_value_components(value, &mut columns) {
             eprintln!("Warning: Failed to parse value components: {}", e);
         }
 
@@ -388,72 +388,70 @@ impl RealDataParser {
         Ok(())
     }
 
-    /// Parse value components (regular columns)
-    fn parse_value_components(&self, value: &Value, columns: &mut HashMap<String, ParsedValue>) -> Result<()> {
-        // For now, we'll do a simplified value parsing
-        // In a real implementation, you'd need to properly deserialize based on Cassandra's serialization format
-        
+    /// Parse value components (regular columns).
+    ///
+    /// Issue #1334: the scan delivers a fully decoded [`ScanRow`]. A live
+    /// `ScanRow::Row` already carries every regular column as a decoded
+    /// `(name, value)` cell, so each cell is converted to a [`ParsedValue`] and
+    /// inserted by its real name — replacing the previous degenerate mapping that
+    /// debug-formatted the whole row into the first schema column. A marker (row
+    /// tombstone / null row) contributes no regular columns.
+    fn parse_value_components(
+        &self,
+        value: &ScanRow,
+        columns: &mut HashMap<String, ParsedValue>,
+    ) -> Result<()> {
         match value {
-            Value::Blob(data) => {
-                // Try to parse as different data types based on length and content
-                let parsed = self.parse_binary_data(data);
-                
-                // If we have regular columns in schema, try to assign values
-                for (i, column) in self.schema.columns.iter().enumerate() {
-                    if !columns.contains_key(&column.name) {
-                        let col_value = if i == 0 && data.len() > 0 {
-                            parsed.clone()
-                        } else {
-                            ParsedValue::Null
-                        };
-                        columns.insert(column.name.clone(), col_value);
-                    }
+            ScanRow::Row(cells) => {
+                for (name, v) in cells {
+                    columns.insert(name.to_string(), Self::core_value_to_parsed(v));
                 }
             }
-            Value::Text(s) => {
-                // If it's already a string, use it directly
-                if let Some(first_col) = self.schema.columns.first() {
-                    columns.insert(first_col.name.clone(), ParsedValue::Text(s.clone()));
-                }
-            }
-            Value::Integer(i) => {
-                if let Some(first_col) = self.schema.columns.first() {
-                    columns.insert(first_col.name.clone(), ParsedValue::Integer((*i).into()));
-                }
-            }
-            Value::BigInt(i) => {
-                if let Some(first_col) = self.schema.columns.first() {
-                    columns.insert(first_col.name.clone(), ParsedValue::Integer(*i));
-                }
-            }
-            Value::Float(f) => {
-                if let Some(first_col) = self.schema.columns.first() {
-                    columns.insert(first_col.name.clone(), ParsedValue::Float(*f));
-                }
-            }
-            Value::Boolean(b) => {
-                if let Some(first_col) = self.schema.columns.first() {
-                    columns.insert(first_col.name.clone(), ParsedValue::Boolean(*b));
-                }
-            }
-            Value::Null => {
-                // Add NULL values for all columns
+            ScanRow::Marker(_) => {
+                // Row tombstone / null row: surface the regular columns as NULL.
                 for column in &self.schema.columns {
-                    if !columns.contains_key(&column.name) {
-                        columns.insert(column.name.clone(), ParsedValue::Null);
-                    }
-                }
-            }
-            // Handle other Value variants that might exist
-            _ => {
-                // For any other variants, try to convert to string representation
-                if let Some(first_col) = self.schema.columns.first() {
-                    columns.insert(first_col.name.clone(), ParsedValue::Text(format!("{:?}", value)));
+                    columns
+                        .entry(column.name.clone())
+                        .or_insert(ParsedValue::Null);
                 }
             }
         }
 
         Ok(())
+    }
+
+    /// Convert an already-decoded core [`Value`] into the CLI's display-oriented
+    /// [`ParsedValue`] (issue #1334). Structured collections map to their
+    /// `ParsedValue` counterparts; anything without a dedicated variant falls back
+    /// to the value's `Display` rendering.
+    fn core_value_to_parsed(value: &Value) -> ParsedValue {
+        match value {
+            Value::Null | Value::Tombstone(_) => ParsedValue::Null,
+            Value::Boolean(b) => ParsedValue::Boolean(*b),
+            Value::Integer(i) => ParsedValue::Integer((*i).into()),
+            Value::TinyInt(i) => ParsedValue::Integer((*i).into()),
+            Value::SmallInt(i) => ParsedValue::Integer((*i).into()),
+            Value::BigInt(i) | Value::Counter(i) => ParsedValue::Integer(*i),
+            Value::Float(f) => ParsedValue::Float(*f),
+            Value::Float32(f) => ParsedValue::Float(*f as f64),
+            Value::Text(s) => ParsedValue::Text(s.clone()),
+            Value::Blob(b) => ParsedValue::Blob(hex::encode(b)),
+            Value::Uuid(_) => ParsedValue::Uuid(format!("{}", value)),
+            Value::List(items) | Value::Set(items) | Value::Tuple(items) => {
+                ParsedValue::Collection(items.iter().map(Self::core_value_to_parsed).collect())
+            }
+            Value::Map(pairs) => {
+                let mut map = HashMap::new();
+                for (k, v) in pairs {
+                    map.insert(k.to_string(), Self::core_value_to_parsed(v));
+                }
+                ParsedValue::Map(map)
+            }
+            Value::Frozen(inner) => Self::core_value_to_parsed(inner),
+            // Timestamp/Date/Time/Decimal/Duration/Varint/Inet/Json/Udt: use the
+            // value's canonical Display rendering.
+            other => ParsedValue::Text(format!("{}", other)),
+        }
     }
 
     /// Parse key data based on data type
@@ -668,10 +666,13 @@ impl ParsedRow {
     /// This enables SSTable export to use the StreamingParquetWriter which
     /// expects QueryRow format.
     pub fn to_query_row(&self) -> QueryRow {
+        // Issue #1334: `QueryRow.values` is keyed by the interned `Arc<str>`
+        // column-name handle; convert each `String` key rather than assigning a
+        // `String`-keyed map.
         let values = self
             .columns
             .iter()
-            .map(|(k, v)| (k.clone(), Value::from(v)))
+            .map(|(k, v)| (std::sync::Arc::from(k.as_str()), Value::from(v)))
             .collect();
 
         QueryRow {

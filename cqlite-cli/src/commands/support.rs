@@ -45,7 +45,7 @@ impl RealDataParser {
     pub fn parse_entry(
         &self,
         _key: &cqlite_core::RowKey,
-        _value: &cqlite_core::Value,
+        _value: &cqlite_core::types::ScanRow,
     ) -> Result<ParsedRow> {
         Ok(ParsedRow {
             data: std::collections::HashMap::new(),
