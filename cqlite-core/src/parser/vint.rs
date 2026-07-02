@@ -794,13 +794,73 @@ pub fn encode_vuint(value: u64) -> Vec<u8> {
     }
 }
 
+/// Test-only differential audit of length/count decodes (Issue #1623).
+///
+/// Every `parse_vint_length` call records whether the OLD signed (ZigZag)
+/// decode of the same bytes would have AGREED with the NEW unsigned decode.
+/// The verdict is intrinsic to the input bytes (not to the caller), so the
+/// counts remain correct even if unrelated tests decode concurrently. The
+/// corpus-differential test resets these around a full 33-table scan to report
+/// the real blast radius of the ZigZag mis-read.
+#[cfg(test)]
+pub(crate) mod length_decode_audit {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    pub(crate) static AGREE: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static DISAGREE: AtomicU64 = AtomicU64::new(0);
+    static ENABLED: AtomicBool = AtomicBool::new(false);
+
+    /// Reset counters and arm recording for the current audit window.
+    pub(crate) fn arm() {
+        AGREE.store(0, Ordering::SeqCst);
+        DISAGREE.store(0, Ordering::SeqCst);
+        ENABLED.store(true, Ordering::SeqCst);
+    }
+
+    /// Disarm recording; returns `(agree, disagree)`.
+    pub(crate) fn disarm() -> (u64, u64) {
+        ENABLED.store(false, Ordering::SeqCst);
+        (AGREE.load(Ordering::SeqCst), DISAGREE.load(Ordering::SeqCst))
+    }
+
+    /// Compare the legacy signed decode against the unsigned decode of the same
+    /// bytes and tally the verdict. Only records while armed.
+    pub(crate) fn record(input: &[u8]) {
+        if !ENABLED.load(Ordering::Relaxed) {
+            return;
+        }
+        // Legacy behaviour: signed ZigZag decode, rejecting negatives, as a usize.
+        let signed = super::parse_vint(input)
+            .ok()
+            .and_then(|(_, v)| if v >= 0 { Some(v as u64) } else { None });
+        // Fixed behaviour: unsigned decode.
+        let unsigned = super::parse_vuint(input).ok().map(|(_, v)| v);
+        match (signed, unsigned) {
+            (Some(s), Some(u)) if s == u => {
+                AGREE.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {
+                DISAGREE.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
 /// Parse a VInt and convert to usize for length fields
+///
+/// NOTE (Issue #1623): as of commit 1 (verification) this still routes through
+/// the signed ZigZag decoder `parse_vint` — the bug under test. Commit 2 flips
+/// it to the unsigned decoder `parse_vuint`. The `length_decode_audit::record`
+/// hook lets the corpus-differential test measure the blast radius either way.
 ///
 /// # Safety
 /// This function enforces a maximum length of 1GB (MAX_VINT_LENGTH) to prevent:
 /// - Overflow on 32-bit platforms where usize is 4 bytes
 /// - Memory exhaustion attacks via malicious input claiming huge lengths
 pub fn parse_vint_length(input: &[u8]) -> IResult<&[u8], usize> {
+    #[cfg(test)]
+    length_decode_audit::record(input);
+
     let (remaining, value) = parse_vint(input)?;
     if value < 0 {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -809,6 +869,37 @@ pub fn parse_vint_length(input: &[u8]) -> IResult<&[u8], usize> {
         )));
     }
     // Safety: Prevent overflow on usize conversion and allocation attacks
+    if value > MAX_VINT_LENGTH {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TooLarge,
+        )));
+    }
+    Ok((remaining, value as usize))
+}
+
+/// Parse a SIGNED (ZigZag) VInt length field written by CQLite's own
+/// serializers.
+///
+/// # CQLite-internal: encoder is ZigZag
+///
+/// A handful of CQLite-internal, self-consistent round-trips write length
+/// prefixes with the ZigZag encoder `parser::vint::encode_vint`
+/// (`serialize_sstable_header` and friends in `parser/header.rs`). Reading
+/// those back requires the SAME ZigZag decode — flipping them to unsigned would
+/// corrupt the round-trip. This helper preserves the historical signed decode
+/// while keeping the identical safety caps as [`parse_vint_length`].
+///
+/// Do NOT use this for Cassandra-produced bytes — those are unsigned; use
+/// [`parse_vint_length`].
+pub fn parse_vint_length_signed(input: &[u8]) -> IResult<&[u8], usize> {
+    let (remaining, value) = parse_vint(input)?;
+    if value < 0 {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
     if value > MAX_VINT_LENGTH {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
@@ -1003,9 +1094,60 @@ mod tests {
 
     #[test]
     fn test_vint_length() {
-        let bytes = encode_vint(42);
+        // Issue #1623: length fields are UNSIGNED. Encode with the unsigned
+        // encoder so the byte pattern matches what Cassandra writes.
+        let bytes = encode_vuint(42);
         let (_, length) = parse_vint_length(&bytes).unwrap();
         assert_eq!(length, 42);
+    }
+
+    /// Issue #1623 ACCEPTANCE TEST: a raw unsigned byte `0x05` is length 5.
+    ///
+    /// This MUST FAIL on `main` (commit 1) where `parse_vint_length` routes
+    /// through the signed ZigZag decoder: `0x05` ZigZag-decodes to -3, which is
+    /// rejected as a negative length. Commit 2 (the fix) routes through the
+    /// unsigned decoder and makes this pass.
+    #[test]
+    fn test_parse_vint_length_unsigned_single_byte_ac() {
+        assert_eq!(parse_vint_length(&[0x05]).unwrap().1, 5);
+    }
+
+    /// Issue #1623: additional unsigned single-byte checks. `0x04` is length 4
+    /// (the signed decoder silently returns 2), `0x7F` is the single-byte max.
+    #[test]
+    fn test_parse_vint_length_unsigned_bit_patterns() {
+        assert_eq!(parse_vint_length(&[0x04]).unwrap().1, 4);
+        assert_eq!(parse_vint_length(&[0x7F]).unwrap().1, 127);
+        assert_eq!(parse_vint_length(&[0x00]).unwrap().1, 0);
+        // Two-byte unsigned: 0x80 0x80 == 128
+        assert_eq!(parse_vint_length(&[0x80, 0x80]).unwrap().1, 128);
+    }
+
+    /// Issue #1623: unsigned length round-trip via the unsigned encoder for a
+    /// spread of values, including odd values whose ZigZag pattern would be
+    /// mis-read by the signed decoder.
+    #[test]
+    fn test_parse_vint_length_unsigned_roundtrip() {
+        for value in [0u64, 1, 2, 3, 4, 5, 63, 64, 127, 128, 255, 256, 16383, 16384, 100_000] {
+            let bytes = encode_vuint(value);
+            let (_, decoded) = parse_vint_length(&bytes)
+                .unwrap_or_else(|_| panic!("unsigned length decode failed for {value}"));
+            assert_eq!(decoded as u64, value, "roundtrip failed for {value}");
+        }
+    }
+
+    /// Issue #1623: the signed helper preserves the CQLite-internal ZigZag
+    /// round-trip used by `serialize_sstable_header` (`encode_vint`).
+    #[test]
+    fn test_parse_vint_length_signed_zigzag_roundtrip() {
+        for value in [0i64, 1, 5, 13, 42, 63, 64, 127, 1000] {
+            let bytes = encode_vint(value); // ZigZag encoder
+            let (_, decoded) = parse_vint_length_signed(&bytes)
+                .unwrap_or_else(|_| panic!("signed length decode failed for {value}"));
+            assert_eq!(decoded as i64, value, "signed roundtrip failed for {value}");
+        }
+        // Negative ZigZag values are rejected as lengths.
+        assert!(parse_vint_length_signed(&encode_vint(-10)).is_err());
     }
 
     #[test]
