@@ -2582,7 +2582,7 @@ scenarios:
       relevance: high
       files:
         - MetadataSerializerTest.java
-        - VerifyTest.java
+        - test/unit/org/apache/cassandra/io/sstable/VerifyTest.java
     cqlite:
       coverage:
         suite: sstable_parity_statistics_db
@@ -4388,7 +4388,7 @@ scenarios:
       relevance: high
       files:
         - BloomFilterTest.java
-        - VerifyTest.java
+        - test/unit/org/apache/cassandra/io/sstable/VerifyTest.java
     cqlite:
       coverage:
         suite: sstable_parity_filter_db_bloom
@@ -11549,7 +11549,7 @@ scenarios:
       files:
         - SSTableCorruptionDetectionTest.java
         - CorruptedSSTablesCompactionsTest.java
-        - VerifyTest.java
+        - test/unit/org/apache/cassandra/io/sstable/VerifyTest.java
         - ScrubTest.java
     cqlite:
       coverage:
@@ -11599,7 +11599,7 @@ scenarios:
       files:
         - SSTableCorruptionDetectionTest.java
         - CorruptedSSTablesCompactionsTest.java
-        - VerifyTest.java
+        - test/unit/org/apache/cassandra/io/sstable/VerifyTest.java
         - ScrubTest.java
     cqlite:
       coverage:
@@ -11646,7 +11646,7 @@ scenarios:
       relevance: high
       files:
         - SSTableCorruptionDetectionTest.java
-        - VerifyTest.java
+        - test/unit/org/apache/cassandra/io/sstable/VerifyTest.java
         - ScrubTest.java
         - StandaloneVerifierOnSSTablesTest.java
     cqlite:
@@ -11695,7 +11695,7 @@ scenarios:
       files:
         - CorruptPrimaryIndexTest.java
         - SSTableCorruptionDetectionTest.java
-        - VerifyTest.java
+        - test/unit/org/apache/cassandra/io/sstable/VerifyTest.java
         - ScrubTest.java
     cqlite:
       coverage:
@@ -11741,7 +11741,7 @@ scenarios:
       category: corruption-recovery
       relevance: high
       files:
-        - VerifyTest.java
+        - test/unit/org/apache/cassandra/io/sstable/VerifyTest.java
         - BloomFilterTest.java
     cqlite:
       coverage:
@@ -11795,7 +11795,7 @@ scenarios:
       files:
         - CorruptPrimaryIndexTest.java
         - SSTableCorruptionDetectionTest.java
-        - VerifyTest.java
+        - test/unit/org/apache/cassandra/io/sstable/VerifyTest.java
         - ScrubTest.java
     cqlite:
       coverage:
@@ -11853,7 +11853,7 @@ scenarios:
       files:
         - CorruptPrimaryIndexTest.java
         - SSTableCorruptionDetectionTest.java
-        - VerifyTest.java
+        - test/unit/org/apache/cassandra/io/sstable/VerifyTest.java
         - ScrubTest.java
     cqlite:
       coverage:
@@ -11909,7 +11909,7 @@ scenarios:
       relevance: high
       files:
         - SSTableCorruptionDetectionTest.java
-        - VerifyTest.java
+        - test/unit/org/apache/cassandra/io/sstable/VerifyTest.java
         - ScrubTest.java
         - StandaloneVerifierOnSSTablesTest.java
     cqlite:
@@ -11957,7 +11957,7 @@ scenarios:
       relevance: high
       files:
         - SSTableCorruptionDetectionTest.java
-        - VerifyTest.java
+        - test/unit/org/apache/cassandra/io/sstable/VerifyTest.java
         - ScrubTest.java
         - StandaloneVerifierOnSSTablesTest.java
     cqlite:
@@ -12005,7 +12005,7 @@ scenarios:
       relevance: high
       files:
         - SSTableCorruptionDetectionTest.java
-        - VerifyTest.java
+        - test/unit/org/apache/cassandra/io/sstable/VerifyTest.java
         - ScrubTest.java
         - StandaloneVerifierOnSSTablesTest.java
     cqlite:
@@ -12053,7 +12053,7 @@ scenarios:
       relevance: high
       files:
         - SSTableCorruptionDetectionTest.java
-        - VerifyTest.java
+        - test/unit/org/apache/cassandra/io/sstable/VerifyTest.java
         - ScrubTest.java
         - StandaloneVerifierOnSSTablesTest.java
         - ChecksummedRandomAccessReaderTest.java
@@ -12104,7 +12104,7 @@ scenarios:
       category: scrub-verify
       relevance: high
       files:
-        - VerifyTest.java
+        - test/unit/org/apache/cassandra/io/sstable/VerifyTest.java
         - StandaloneVerifierOnSSTablesTest.java
         - ScrubTest.java
         - SSTableCorruptionDetectionTest.java
@@ -12153,7 +12153,7 @@ scenarios:
       category: scrub-verify
       relevance: high
       files:
-        - VerifyTest.java
+        - test/unit/org/apache/cassandra/io/sstable/VerifyTest.java
         - StandaloneVerifierOnSSTablesTest.java
         - ScrubTest.java
         - SSTableCorruptionDetectionTest.java
@@ -12200,7 +12200,7 @@ scenarios:
       category: scrub-verify
       relevance: high
       files:
-        - VerifyTest.java
+        - test/unit/org/apache/cassandra/io/sstable/VerifyTest.java
         - StandaloneVerifierOnSSTablesTest.java
         - ScrubTest.java
     cqlite:
@@ -12248,7 +12248,7 @@ scenarios:
       category: scrub-verify
       relevance: high
       files:
-        - VerifyTest.java
+        - test/unit/org/apache/cassandra/io/sstable/VerifyTest.java
         - StandaloneVerifierOnSSTablesTest.java
         - ChecksummedRandomAccessReaderTest.java
         - SSTableCorruptionDetectionTest.java
@@ -12296,7 +12296,7 @@ scenarios:
       category: scrub-verify
       relevance: high
       files:
-        - VerifyTest.java
+        - test/unit/org/apache/cassandra/io/sstable/VerifyTest.java
         - ChecksummedRandomAccessReaderTest.java
         - SSTableCorruptionDetectionTest.java
         - ScrubTest.java
@@ -12345,7 +12345,7 @@ scenarios:
       category: scrub-verify
       relevance: high
       files:
-        - VerifyTest.java
+        - test/unit/org/apache/cassandra/io/sstable/VerifyTest.java
         - SSTableCorruptionDetectionTest.java
         - ScrubTest.java
     cqlite:
@@ -12393,7 +12393,7 @@ scenarios:
       category: scrub-verify
       relevance: high
       files:
-        - VerifyTest.java
+        - test/unit/org/apache/cassandra/io/sstable/VerifyTest.java
         - ScrubTest.java
         - SSTableCorruptionDetectionTest.java
     cqlite:
@@ -12439,7 +12439,7 @@ scenarios:
       category: scrub-verify
       relevance: high
       files:
-        - VerifyTest.java
+        - test/unit/org/apache/cassandra/io/sstable/VerifyTest.java
         - ScrubTest.java
         - SSTableCorruptionDetectionTest.java
         - StandaloneVerifierOnSSTablesTest.java
@@ -14973,9 +14973,11 @@ scenarios:
       category: sstable-format
       relevance: high
       files:
-        # Path-precise (#1199): the high-relevance file is the Big-format twin; a
-        # bare basename also matches the Med-relevance format/bti/ twin.
+        # Path-precise (#1199/#1407): both twins are referenced by full path — the
+        # High-relevance Big-format twin and the Med-relevance format/bti/ twin,
+        # which validates the same version/supported-features matrix for BTI.
         - test/unit/org/apache/cassandra/io/sstable/format/big/VersionSupportedFeaturesTest.java
+        - test/unit/org/apache/cassandra/io/sstable/format/bti/VersionSupportedFeaturesTest.java
     cqlite:
       coverage:
         suite: sstable_parity_component_manifest
@@ -15901,6 +15903,560 @@ scenarios:
       related_in_scope_scenarios:
         - cass.tombstone_ttl.gc_grace.partition_row_cell
         - cass.tombstone_ttl.skipped_sstable.partition_delete_shadows_older_rows
+
+  - id: cass.compaction.SizeTieredCompactionStrategyTest.bucket_selection
+    title: STCS size-bucket grouping and candidate selection
+    status: mirrored
+    capability: compaction_merge
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: compaction
+      relevance: med
+      files:
+      - test/unit/org/apache/cassandra/db/compaction/SizeTieredCompactionStrategyTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+        - cqlite-core/src/storage/write_engine/merge_policy.rs
+        - cqlite-core/tests/stcs_bucket_selection_parity.rs
+        notes: CQLite ships STCS (STCSPolicy). Its size-bucketing (bucket_low/bucket_high/min_sstable_size)
+          and min_threshold/max_threshold candidate selection are asserted against Cassandra's documented
+          SizeTieredCompactionStrategy rules via the stcs_bucket_selection_vectors fixture.
+    fixtures:
+      references:
+      - test-data/parity/stcs_bucket_selection_vectors.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts:
+      - jsonl
+      cassandra_version: 5.0.2
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version:
+      - nb
+      - oa
+      - da
+      fixture_generation_command: Test vectors derived from Apache Cassandra 5.0.2 SizeTieredCompactionStrategy
+        (getBuckets + mostInterestingBucket selection); each line of test-data/parity/stcs_bucket_selection_vectors.jsonl
+        cites the documented rule in its cassandra_rule field.
+      comparison_command: cargo test -p cqlite-core --features write-support --test stcs_bucket_selection_parity
+      reference_paths:
+      - test-data/parity/stcs_bucket_selection_vectors.jsonl
+      normalization: Compared on the SET of selected SSTable sizes (order-independent) STCS picks for the
+        next compaction under the Cassandra-default policy (min_threshold=4, max_threshold=32, bucket_low=0.5,
+        bucket_high=1.5, min_sstable_size=50MB); file identity and on-disk layout ignored.
+      known_limitations: Algorithm-level candidate-selection parity against documented STCS rules, not a
+        Data.db byte comparison and not a live-Cassandra bucketing capture.
+    ci:
+      tier: fast_pr
+    scope: {}
+  - id: cass.compaction.CompactionDiskSpaceTest.disk_space_constrained_merge
+    title: Disk-space-constrained compaction guardrail
+    status: planned
+    capability: compaction_merge
+    priority: P2
+    risk: p2_coverage
+    cassandra:
+      category: compaction
+      relevance: med
+      files:
+      - test/distributed/org/apache/cassandra/distributed/test/CompactionDiskSpaceTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+        notes: Cassandra fails compaction fast when free space is below the estimated remaining write bytes.
+          CQLite's compactor does not yet implement a pre-write disk-space budgeting guardrail.
+    fixtures:
+      datasets:
+      - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts:
+      - logs
+      cassandra_version: 5.0.2
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version:
+      - nb
+      known_limitations: No fixture or CQLite guardrail mirrors disk-space-constrained compaction; CQLite
+        does not estimate remaining write bytes or fail fast before an out-of-disk write.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: CQLite has no disk-space budgeting guardrail; a merge that would exhaust free space is not detected
+        before writing partial output.
+      next_step: Under the compaction fixture family (#1387), commission a space-constrained scenario and
+        add a pre-write disk-space estimate/guardrail to the compactor.
+      target_issue: 1387
+      target_suite: compaction_parity_tombstone_ttl
+  - id: cass.tombstone_ttl.SSTableExpiredBlockersTest.fully_expired_drop_blockers
+    title: Fully-expired SSTable drop-blocker detection
+    status: planned
+    capability: tombstone_ttl
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: tombstone-ttl
+      relevance: med
+      files:
+      - test/unit/org/apache/cassandra/tools/SSTableExpiredBlockersTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+        notes: The sstableexpiredblockers tool reports which overlapping SSTables block a fully-expired
+          SSTable from being dropped (CompactionController.getFullyExpiredSSTables). CQLite does not yet
+          implement fully-expired-SSTable drop or its overlap-based blocker detection.
+    fixtures:
+      datasets:
+      - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts:
+      - logs
+      cassandra_version: 5.0.2
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version:
+      - nb
+      known_limitations: CQLite honors gc_grace and tombstone shadowing on read/compaction but does not
+        drop fully-expired SSTables or compute the overlapping-SSTable blocker set.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: Fully-expired-SSTable drop (and the overlapping-SSTable blocker check that gates it) is not implemented;
+        expired data is filtered on read but not dropped.
+      next_step: 'Implement fully-expired-SSTable drop + blocker detection under #1388 and mirror the expired-blocker
+        semantics.'
+      target_issue: 1388
+      target_suite: compaction_parity_tombstone_ttl
+  - id: cass.sstable_format.UpgradeSSTablesTest.upgrade_rewrite_out_of_scope
+    title: nodetool upgradesstables / recompress rewrite
+    status: out_of_scope
+    capability: sstable_format
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: sstable-format
+      relevance: med
+      files:
+      - test/distributed/org/apache/cassandra/distributed/test/UpgradeSSTablesTest.java
+    cqlite:
+      coverage:
+        notes: upgradesstables/recompress_sstables rewrites SSTables to the current format version or a
+          new compression codec, coordinating with concurrent compaction/cleanup. CQLite is a reader/writer/compactor
+          of Cassandra 5.0 SSTables; it does not perform node-side upgrade rewrites or nodetool operation
+          scheduling.
+    fixtures:
+      datasets:
+      - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts:
+      - logs
+      cassandra_version: 5.0.2
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: not_sstable_reader_writer_compactor
+      rationale: SSTable upgrade/recompression is a node/nodetool rewrite operation with its own operation-priority
+        scheduling against compaction/cleanup. CQLite never runs upgradesstables.
+      cqlite_boundary: CQLite reads Cassandra 5.0 nb/oa/da SSTables whether freshly written or produced
+        by an upgrade rewrite, and its version floor rejects pre-na formats; it does not perform the upgrade
+        rewrite or schedule it against other operations.
+      safe_claim: CQLite reads and compacts SSTables that upgradesstables produced (nb/oa/da); it does not
+        reproduce the upgrade/recompress rewrite itself.
+      related_in_scope_scenarios:
+      - cass.sstable_format.descriptor_component_resolution
+      - cass.sstable_format.VersionSupportedFeaturesTest.version_feature_matrix
+  - id: cass.compaction.node_compaction_orchestration_out_of_scope
+    title: Node-side compaction scheduling / strategy managers (LCS/UCS)
+    status: out_of_scope
+    capability: compaction_merge
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: compaction
+      relevance: med
+      files:
+      - test/unit/org/apache/cassandra/db/compaction/AbstractCompactionStrategyTest.java
+      - test/unit/org/apache/cassandra/db/compaction/ActiveCompactionsTest.java
+      - test/unit/org/apache/cassandra/db/compaction/CancelCompactionsTest.java
+      - test/unit/org/apache/cassandra/db/compaction/CompactionStrategyManagerTest.java
+      - test/unit/org/apache/cassandra/db/compaction/CompactionStrategyManagerPendingRepairTest.java
+      - test/unit/org/apache/cassandra/db/compaction/OneCompactionTest.java
+      - test/unit/org/apache/cassandra/db/compaction/ShardManagerTest.java
+      - test/unit/org/apache/cassandra/db/compaction/simple/SimpleCompactionTest.java
+      - test/unit/org/apache/cassandra/db/compaction/unified/BackgroundCompactionTrackingTest.java
+      - test/unit/org/apache/cassandra/db/compaction/unified/ControllerTest.java
+      - test/distributed/org/apache/cassandra/distributed/test/LeveledCompactionTaskTest.java
+      - test/distributed/org/apache/cassandra/distributed/test/ring/BootstrapCompactionTest.java
+      - test/long/org/apache/cassandra/db/compaction/LongLeveledCompactionStrategyCQLTest.java
+    cqlite:
+      coverage:
+        notes: These exercise the node's CompactionManager scheduler, strategy managers (LCS/UCS/pending-repair),
+          the unified-compaction controller and shard manager, background-compaction tracking, in-flight
+          cancellation, and bootstrap-driven compaction. CQLite runs STCS merges on explicit invocation
+          and does not schedule, track, cancel, or manage compaction strategies.
+    fixtures:
+      datasets:
+      - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts:
+      - logs
+      cassandra_version: 5.0.2
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: not_sstable_reader_writer_compactor
+      rationale: Compaction scheduling, strategy-manager selection (LCS/UCS), background tracking, cancellation,
+        sharding, and bootstrap-triggered compaction are node lifecycle behaviors. CQLite ships only explicit
+        STCS-based merges over on-disk SSTables.
+      cqlite_boundary: CQLite selects and merges SSTables via STCS when invoked; it does not run the node
+        CompactionManager, strategy managers, controllers, background tracking, cancellation, or bootstrap-driven
+        compaction.
+      safe_claim: CQLite compacts base-table SSTables with STCS on explicit invocation, producing output
+        equal to Cassandra's per the compaction_merge scenarios; it does not reproduce the node's compaction
+        scheduler or strategy managers.
+      related_in_scope_scenarios:
+      - cass.compaction.SizeTieredCompactionStrategyTest.bucket_selection
+      - cass.compaction.CompactionAwareWriterTest.row_count_and_order_preservation
+  - id: cass.compaction.accord_journal_compaction_out_of_scope
+    title: Accord transactional journal compaction
+    status: out_of_scope
+    capability: compaction_merge
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: compaction
+      relevance: med
+      files:
+      - test/distributed/org/apache/cassandra/service/accord/AccordJournalCompactionTest.java
+      - test/unit/org/apache/cassandra/db/compaction/CompactionAccordIteratorsTest.java
+    cqlite:
+      coverage:
+        notes: Accord is Cassandra's distributed-transaction subsystem; these compact/iterate the Accord
+          journal. CQLite reads/compacts base-table SSTables and has no Accord journal.
+    fixtures:
+      datasets:
+      - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts:
+      - logs
+      cassandra_version: 5.0.2
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: distributed_consensus
+      rationale: Accord journal compaction and Accord-aware compaction iterators belong to the distributed-transaction
+        (consensus) subsystem, not the on-disk SSTable format CQLite reads.
+      cqlite_boundary: CQLite does not implement Accord, its journal, or Accord-aware compaction iterators;
+        it compacts ordinary base-table SSTables.
+      safe_claim: CQLite reads and compacts Cassandra 5.0 base-table SSTables; it does not reproduce Accord
+        journal compaction.
+      related_in_scope_scenarios:
+      - cass.compaction.CompactionAwareWriterTest.row_count_and_order_preservation
+      - cass.compaction.SizeTieredCompactionStrategyTest.bucket_selection
+  - id: cass.compaction.secondary_structure_and_guardrail_compaction_out_of_scope
+    title: Compaction of 2i/MV + write guardrails + only-purge-repaired GC
+    status: out_of_scope
+    capability: compaction_merge
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: compaction
+      relevance: med
+      files:
+      - test/distributed/org/apache/cassandra/distributed/test/SecondaryIndexCompactionTest.java
+      - test/unit/org/apache/cassandra/index/sai/functional/CompactionTest.java
+      - test/unit/org/apache/cassandra/cql3/ViewCompactionTest.java
+      - test/distributed/org/apache/cassandra/distributed/test/guardrails/GuardrailCollectionSizeOnSSTableWriteTest.java
+      - test/unit/org/apache/cassandra/db/compaction/CompactionGarbageCollectOnlyPurgeRepairedTest.java
+    cqlite:
+      coverage:
+        notes: Secondary-index (SAI/2i) and materialized-view rebuild during compaction, the write-time
+          collection-size guardrail, and the only_purge_repaired_tombstones GC option are node features
+          layered on top of base-table compaction. CQLite compacts base-table SSTables and honors repaired
+          metadata but does not rebuild 2i/MV, enforce write guardrails, or implement the only-purge-repaired
+          option.
+    fixtures:
+      datasets:
+      - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts:
+      - logs
+      cassandra_version: 5.0.2
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: not_sstable_reader_writer_compactor
+      rationale: Rebuilding secondary indexes / materialized views during compaction, enforcing write-time
+        guardrails, and the only-purge-repaired GC option are node-managed behaviors beyond base-table SSTable
+        compaction.
+      cqlite_boundary: CQLite compacts base-table SSTables and reads/honors repaired metadata (repairedAt/pendingRepair);
+        it does not rebuild SAI/2i or MV SSTables, enforce collection-size write guardrails, or implement
+        only_purge_repaired_tombstones.
+      safe_claim: CQLite reads and compacts base-table SSTables honoring their repaired metadata; it does
+        not reproduce 2i/MV rebuild, write guardrails, or the only-purge-repaired GC option.
+      related_in_scope_scenarios:
+      - cass.compaction.CompactionAwareWriterTest.row_count_and_order_preservation
+      - cass.tombstone_ttl.RepairedDataTombstonesTest.repair_metadata_gates_purge
+  - id: cass.compaction.sai_segment_flush_out_of_scope
+    title: SAI on-disk index segment flushing (fault injection)
+    status: out_of_scope
+    capability: compaction_merge
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: compaction
+      relevance: med
+      files:
+      - test/unit/org/apache/cassandra/index/sai/metrics/FinalSegmentFlushingFailureTest.java
+      - test/unit/org/apache/cassandra/index/sai/metrics/TinySegmentFlushingFailureTest.java
+    cqlite:
+      coverage:
+        notes: These inject failures into SAI (Storage-Attached Index) on-disk segment build/flush and assert
+          metric/recovery behavior. CQLite reads base-table SSTables and does not build or flush SAI index
+          segments.
+    fixtures:
+      datasets:
+      - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts:
+      - logs
+      cassandra_version: 5.0.2
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: sai_sasi_query
+      rationale: SAI index segment build/flush and its failure handling are secondary-index write internals,
+        not base-table SSTable compaction.
+      cqlite_boundary: CQLite reads base-table SSTable components; it does not build, flush, or recover
+        SAI index segments.
+      safe_claim: CQLite reads Cassandra 5.0 base-table SSTables; it does not reproduce SAI segment flushing
+        or its failure handling.
+      related_in_scope_scenarios:
+      - cass.compaction.CompactionAwareWriterTest.row_count_and_order_preservation
+  - id: cass.compression.zstd_dictionary_feature_out_of_scope
+    title: Zstd compression-dictionary training / cache / CLI
+    status: out_of_scope
+    capability: compression_checksum
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: compression
+      relevance: med
+      files:
+      - test/distributed/org/apache/cassandra/distributed/test/CompressorProviderTest.java
+      - test/unit/org/apache/cassandra/db/compression/CompressionDictionaryCacheTest.java
+      - test/unit/org/apache/cassandra/db/compression/CompressionDictionaryDataObjectTest.java
+      - test/unit/org/apache/cassandra/db/compression/CompressionDictionaryIntegrationTest.java
+      - test/unit/org/apache/cassandra/db/compression/CompressionDictionaryOrphanedTest.java
+      - test/unit/org/apache/cassandra/db/compression/CompressionDictionaryTrainingConfigTest.java
+      - test/unit/org/apache/cassandra/db/compression/CompressionDictionaryTrainingFrequencyTest.java
+      - test/unit/org/apache/cassandra/db/compression/SSTableChunkSamplerTest.java
+      - test/unit/org/apache/cassandra/schema/SystemDistributedKeyspaceCompressionDictionaryTest.java
+      - test/unit/org/apache/cassandra/tools/nodetool/ExportImportListCompressionDictionaryTest.java
+      - test/unit/org/apache/cassandra/tools/nodetool/TrainCompressionDictionaryTest.java
+    cqlite:
+      coverage:
+        notes: The zstd compression-dictionary feature (dictionary training, provider, cache, chunk sampling,
+          orphan cleanup, system-distributed storage, and nodetool train/export/import/list) is a node-side
+          capability. CQLite does not train, cache, or apply zstd compression dictionaries.
+    fixtures:
+      datasets:
+      - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts:
+      - logs
+      cassandra_version: 5.0.2
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: unsupported_compression_dictionary
+      rationale: Zstd dictionary training/caching/sampling and its nodetool + system-table plumbing are
+        a node compression feature CQLite does not support (see the existing zstd_dictionary out_of_scope
+        scenarios).
+      cqlite_boundary: CQLite decompresses non-dictionary zstd/lz4/snappy/deflate chunks Cassandra wrote;
+        it does not train, cache, or apply zstd compression dictionaries.
+      safe_claim: CQLite reads Cassandra 5.0 compressed SSTables using the standard codecs; it does not
+        reproduce the zstd dictionary training/cache/CLI feature.
+      related_in_scope_scenarios:
+      - cass.zstd_dictionary.dictionary_serialization
+      - cass.compression_checksum.chunk_offsets_and_crc
+  - id: cass.compression.codec_impl_and_cql_ddl_out_of_scope
+    title: Zstd codec implementation + CQL compression DDL
+    status: out_of_scope
+    capability: compression_checksum
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: compression
+      relevance: med
+      files:
+      - test/unit/org/apache/cassandra/io/compress/ZstdCompressorTest.java
+      - test/unit/org/apache/cassandra/io/compress/CQLCompressionTest.java
+    cqlite:
+      coverage:
+        notes: ZstdCompressorTest exercises Cassandra's Java Zstd codec implementation; CQLCompressionTest
+          exercises applying CQL ALTER ... WITH compression DDL. CQLite consumes the resulting compressed
+          chunks and CompressionInfo.db parameters but does not implement the Java codec or apply compression
+          DDL.
+    fixtures:
+      datasets:
+      - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts:
+      - logs
+      cassandra_version: 5.0.2
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: not_sstable_reader_writer_compactor
+      rationale: The Java compressor codec implementation and CQL compression-parameter DDL are node/library
+        concerns; CQLite reads the on-disk compressed chunks and their metadata rather than re-testing the
+        codec or DDL.
+      cqlite_boundary: CQLite decompresses zstd/lz4/snappy/deflate chunks and reads CompressionInfo.db params
+        for any codec Cassandra wrote; it does not test the Java codec impl or apply CQL compression DDL.
+      safe_claim: CQLite reads compressed SSTables produced with any supported codec and their compression
+        parameters; it does not reproduce the Java codec implementation or CQL compression DDL.
+      related_in_scope_scenarios:
+      - cass.compression_checksum.chunk_offsets_and_crc
+      - cass.compression_checksum.checksum_trailer_detection
+  - id: cass.sstable_io.reader_construction_out_of_scope
+    title: Cassandra-internal SSTableReader / BTI loading builder
+    status: out_of_scope
+    capability: sstable_format
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: sstable-io
+      relevance: med
+      files:
+      - test/unit/org/apache/cassandra/io/sstable/format/SSTableReaderDataReaderTest.java
+      - test/unit/org/apache/cassandra/io/sstable/format/bti/LoadingBuilderTest.java
+    cqlite:
+      coverage:
+        notes: These validate Cassandra's own SSTableReader/DataReader construction and the BTI on-open
+          loading builder (channel proxies, ref-counting, node caches). CQLite implements its own reader
+          over the same Data.db/BTI bytes and validates decoded output via canonical JSONL.
+    fixtures:
+      datasets:
+      - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts:
+      - logs
+      cassandra_version: 5.0.2
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: not_sstable_reader_writer_compactor
+      rationale: Cassandra's internal reader-construction and loading-builder plumbing (ref-counting, channel
+        proxies, in-node caches) are implementation internals of the Java reader, not the on-disk format
+        CQLite parses.
+      cqlite_boundary: CQLite parses the same Data.db and BTI components with its own reader and asserts
+        decoded output against canonical JSONL; it does not reproduce Cassandra's SSTableReader construction
+        or BTI loading builder.
+      safe_claim: CQLite reads the same Data.db/BTI bytes Cassandra's reader loads and validates the decoded
+        rows; it does not reproduce the Java reader-construction plumbing.
+      related_in_scope_scenarios:
+      - cass.data_db_decode.row_cell_flags_and_vint
+      - cass.bti_big_version_matrix.bti_da_write_read
+  - id: cass.tombstone_ttl.tombstone_warnings_and_guardrails_out_of_scope
+    title: Tombstone-count warnings + partition-tombstone guardrails
+    status: out_of_scope
+    capability: tombstone_ttl
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: tombstone-ttl
+      relevance: med
+      files:
+      - test/distributed/org/apache/cassandra/distributed/test/TombstoneWarningTest.java
+      - test/distributed/org/apache/cassandra/distributed/test/thresholds/TombstoneCountWarningTest.java
+      - test/distributed/org/apache/cassandra/distributed/test/guardrails/GuardrailPartitionTombstonesTest.java
+      - test/unit/org/apache/cassandra/db/guardrails/GuardrailPartitionTombstonesTest.java
+    cqlite:
+      coverage:
+        notes: Tombstone-count warning/failure thresholds and partition-tombstone guardrails are query-time
+          node safety limits (client warnings, TombstoneOverwhelmingException). CQLite filters and applies
+          tombstones during reads/compaction but does not enforce warn/fail thresholds.
+    fixtures:
+      datasets:
+      - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts:
+      - logs
+      cassandra_version: 5.0.2
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: not_sstable_reader_writer_compactor
+      rationale: Query-time tombstone warning/failure thresholds and partition-tombstone guardrails are
+        node configuration safety limits, not the on-disk tombstone encoding CQLite decodes.
+      cqlite_boundary: CQLite decodes and applies tombstones (shadowing, gc_grace expiry) on read/compaction;
+        it does not enforce tombstone-count warning/failure thresholds or partition-tombstone guardrails.
+      safe_claim: CQLite correctly reads and applies tombstones from SSTables; it does not implement query-time
+        tombstone warning/guardrail thresholds.
+      related_in_scope_scenarios:
+      - cass.data_db_decode.tombstone.partition_deletion_time
+      - cass.tombstone_ttl.RepairedDataTombstonesTest.repair_metadata_gates_purge
+  - id: cass.tombstone_ttl.streaming_tombstone_histogram_builder_out_of_scope
+    title: Streaming tombstone drop-time histogram builder
+    status: out_of_scope
+    capability: tombstone_ttl
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: tombstone-ttl
+      relevance: med
+      files:
+      - test/unit/org/apache/cassandra/utils/streamhist/StreamingTombstoneHistogramBuilderTest.java
+    cqlite:
+      coverage:
+        notes: The streaming tombstone histogram is built at flush time and serialized into Statistics.db
+          (deletion-time distribution for GC heuristics). CQLite reads this histogram from Statistics.db;
+          it does not build the streaming histogram.
+    fixtures:
+      datasets:
+      - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts:
+      - logs
+      cassandra_version: 5.0.2
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: not_sstable_reader_writer_compactor
+      rationale: Building the streaming tombstone drop-time histogram is a write/flush-side memtable concern;
+        CQLite consumes the serialized histogram in Statistics.db rather than constructing it.
+      cqlite_boundary: CQLite reads the tombstone drop-time histogram (EstimatedTombstoneDropTime) from
+        Statistics.db; it does not build the streaming histogram at flush time.
+      safe_claim: CQLite reads the serialized tombstone histogram Cassandra wrote into Statistics.db; it
+        does not reproduce the streaming histogram builder.
+      related_in_scope_scenarios:
+      - cass.statistics_metadata.serialization_header
+      - cass.statistics_db.core_metadata_checksums
 
 # ==============================================================================
 # Public/release-facing parity claims (issue #1023).

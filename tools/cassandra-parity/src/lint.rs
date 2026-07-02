@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use crate::model::{non_empty, Manifest, Scenario};
-use crate::{enums, workflow_check};
+use crate::{coverage, enums, workflow_check};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
@@ -72,7 +72,58 @@ pub fn lint(m: &Manifest, repo_root: Option<&Path>) -> Vec<Finding> {
 
     lint_claims(m, &mut out);
 
+    // Ambiguous bare-basename references (issue #1407). When we can read the
+    // Cassandra test index, a `cassandra.files` entry given as a bare basename
+    // (no path separator) is rejected when that basename maps to MORE THAN ONE
+    // source path in the index — a bare name cannot say which twin it means, and
+    // basename-only matching would silently classify the wrong file (the #1199
+    // soundness bug, now enforced fail-closed at authoring time). Such references
+    // must be qualified with their full `test/...` source path.
+    if let Some(root) = repo_root {
+        if let Ok(index_text) = std::fs::read_to_string(root.join(&m.cassandra_source.index)) {
+            lint_ambiguous_basenames(m, &index_text, &mut out);
+        }
+    }
+
     out
+}
+
+/// Reject bare-basename `cassandra.files` references that are ambiguous in the
+/// Cassandra test index — i.e. the basename appears at more than one source path
+/// (issue #1407). A path-qualified reference (containing a `/`) is always allowed;
+/// an unambiguous bare basename (exactly one index path) is allowed for brevity.
+fn lint_ambiguous_basenames(m: &Manifest, index_text: &str, out: &mut Vec<Finding>) {
+    let corpus = coverage::parse_index(index_text);
+    for s in &m.scenarios {
+        for f in &s.cassandra.files {
+            let trimmed = f.trim();
+            // Path-qualified references are unambiguous by construction.
+            if trimmed.contains('/') || trimmed.contains('\\') {
+                continue;
+            }
+            let base = coverage::normalized_basename(trimmed);
+            if let Some(paths) = corpus.basename_paths.get(base) {
+                if paths.len() > 1 {
+                    let mut sorted: Vec<&String> = paths.iter().collect();
+                    sorted.sort();
+                    let joined = sorted
+                        .iter()
+                        .map(|p| p.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    out.push(Finding::error(
+                        &s.id,
+                        "cassandra.files",
+                        format!(
+                            "ambiguous bare basename '{base}': the index lists {} source paths \
+                             for it ({joined}); qualify the reference with its full source path",
+                            paths.len()
+                        ),
+                    ));
+                }
+            }
+        }
+    }
 }
 
 /// Split a failure-artifact descriptor `artifact.<tier>.<kind>` into `(tier, kind)`.
