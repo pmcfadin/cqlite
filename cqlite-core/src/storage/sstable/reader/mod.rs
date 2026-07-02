@@ -579,7 +579,7 @@ impl SSTableReader {
             .await;
         let statistics_reader = Self::load_statistics_reader(path, &platform)
             .instrument(tracing::debug_span!("sstable.reader.open.load_statistics"))
-            .await;
+            .await?;
 
         // Extract SerializationHeader columns from Statistics.db (Issue #163)
         // This enables schema extraction for V5CompressedLegacy format
