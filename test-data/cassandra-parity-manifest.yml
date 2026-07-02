@@ -12829,6 +12829,18 @@ scenarios:
     cqlite:
       coverage:
         suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_zstd_dictionary_reject_test.rs
+        notes: >-
+          Boundary-enforcement evidence for issue #1399: CQLite fails closed
+          on zstd dictionary-compressed input rather than decoding it. The
+          always-run characterization test drives a real trained-dictionary
+          zstd frame through the shipped ChunkDecompressor and proves it is
+          rejected (never decoded to the original bytes); two fixture-gated
+          reader/verify oracle tests assert the same over a commissioned
+          Cassandra dictionary SSTable (fixture: #1413). Upgrading the generic
+          rejection to a typed dictionary-naming error / dedicated verify
+          class is tracked by #1414.
     fixtures: {}
     evidence:
       type: out_of_scope
@@ -12870,6 +12882,18 @@ scenarios:
     cqlite:
       coverage:
         suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_zstd_dictionary_reject_test.rs
+        notes: >-
+          Boundary-enforcement evidence for issue #1399: CQLite fails closed
+          on zstd dictionary-compressed input rather than decoding it. The
+          always-run characterization test drives a real trained-dictionary
+          zstd frame through the shipped ChunkDecompressor and proves it is
+          rejected (never decoded to the original bytes); two fixture-gated
+          reader/verify oracle tests assert the same over a commissioned
+          Cassandra dictionary SSTable (fixture: #1413). Upgrading the generic
+          rejection to a typed dictionary-naming error / dedicated verify
+          class is tracked by #1414.
     fixtures: {}
     evidence:
       type: out_of_scope
@@ -12908,6 +12932,18 @@ scenarios:
     cqlite:
       coverage:
         suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_zstd_dictionary_reject_test.rs
+        notes: >-
+          Boundary-enforcement evidence for issue #1399: CQLite fails closed
+          on zstd dictionary-compressed input rather than decoding it. The
+          always-run characterization test drives a real trained-dictionary
+          zstd frame through the shipped ChunkDecompressor and proves it is
+          rejected (never decoded to the original bytes); two fixture-gated
+          reader/verify oracle tests assert the same over a commissioned
+          Cassandra dictionary SSTable (fixture: #1413). Upgrading the generic
+          rejection to a typed dictionary-naming error / dedicated verify
+          class is tracked by #1414.
     fixtures: {}
     evidence:
       type: out_of_scope
@@ -12945,6 +12981,18 @@ scenarios:
     cqlite:
       coverage:
         suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_zstd_dictionary_reject_test.rs
+        notes: >-
+          Boundary-enforcement evidence for issue #1399: CQLite fails closed
+          on zstd dictionary-compressed input rather than decoding it. The
+          always-run characterization test drives a real trained-dictionary
+          zstd frame through the shipped ChunkDecompressor and proves it is
+          rejected (never decoded to the original bytes); two fixture-gated
+          reader/verify oracle tests assert the same over a commissioned
+          Cassandra dictionary SSTable (fixture: #1413). Upgrading the generic
+          rejection to a typed dictionary-naming error / dedicated verify
+          class is tracked by #1414.
     fixtures: {}
     evidence:
       type: out_of_scope
@@ -12982,6 +13030,18 @@ scenarios:
     cqlite:
       coverage:
         suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_zstd_dictionary_reject_test.rs
+        notes: >-
+          Boundary-enforcement evidence for issue #1399: CQLite fails closed
+          on zstd dictionary-compressed input rather than decoding it. The
+          always-run characterization test drives a real trained-dictionary
+          zstd frame through the shipped ChunkDecompressor and proves it is
+          rejected (never decoded to the original bytes); two fixture-gated
+          reader/verify oracle tests assert the same over a commissioned
+          Cassandra dictionary SSTable (fixture: #1413). Upgrading the generic
+          rejection to a typed dictionary-naming error / dedicated verify
+          class is tracked by #1414.
     fixtures: {}
     evidence:
       type: out_of_scope
@@ -13023,6 +13083,18 @@ scenarios:
     cqlite:
       coverage:
         suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_zstd_dictionary_reject_test.rs
+        notes: >-
+          Boundary-enforcement evidence for issue #1399: CQLite fails closed
+          on zstd dictionary-compressed input rather than decoding it. The
+          always-run characterization test drives a real trained-dictionary
+          zstd frame through the shipped ChunkDecompressor and proves it is
+          rejected (never decoded to the original bytes); two fixture-gated
+          reader/verify oracle tests assert the same over a commissioned
+          Cassandra dictionary SSTable (fixture: #1413). Upgrading the generic
+          rejection to a typed dictionary-naming error / dedicated verify
+          class is tracked by #1414.
     fixtures: {}
     evidence:
       type: out_of_scope
