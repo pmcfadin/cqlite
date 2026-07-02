@@ -30,6 +30,18 @@
 //! proves CQLite rejects the frame (never decodes it to the original bytes) and
 //! characterizes the CURRENT error, whose class is a KNOWN LIMITATION tracked in
 //! the production-hardening issue referenced below.
+//!
+//! ## Feature gate
+//!
+//! Every test in this file drives the production `ChunkDecompressor` / reader
+//! zstd decompress path, which returns `Error::InvalidFormat("Zstd support not
+//! compiled in")` when cqlite-core is built WITHOUT its optional `zstd` feature.
+//! Under such a build the positive-control decode (and the fail-closed
+//! assertions) would be meaningless, so the whole module is gated on the `zstd`
+//! feature — it compiles out entirely in a no-zstd build. The unconditional
+//! `zstd` dev-dependency (dictionary training) is orthogonal to the runtime
+//! `zstd` feature the decompressor is gated on.
+#![cfg(feature = "zstd")]
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -353,6 +365,86 @@ fn zstd_dictionary_sstable_rejected_via_reader_fixture() {
                 // is NOT the intended dict-rejection path — it means the fixture
                 // shape changed. Fail loudly rather than accept it as "rejection".
                 panic!("unexpected open failure for current fixture shape: {e}");
+            }
+        }
+    });
+}
+
+#[test]
+fn zstd_dictionary_reader_fails_closed_current_behavior() {
+    // CHARACTERIZATION of TODAY's reader behavior (the ACTIVE reader oracle the
+    // manifest points at). Distinct from the sibling
+    // `zstd_dictionary_sstable_rejected_via_reader_fixture`, which is `#[ignore]`
+    // and encodes the #1414 TARGET (a typed `InvalidFormat` rejection that names
+    // the zstd/dictionary path and excludes CRC/checksum). This test asserts only
+    // the SAFETY PROPERTY that must hold NOW: opening the commissioned
+    // dictionary-compressed SSTable and driving a full scan must FAIL CLOSED —
+    // never returning rows — while accepting EITHER `Error::Corruption` OR
+    // `Error::InvalidFormat`, because the current full-scan stitch path wraps a
+    // zstd-dictionary decode failure as `Corruption`. It deliberately does NOT
+    // require the typed variant, so it stays green until #1414 flips the class;
+    // when #1414 lands, the ignored sibling proves the upgrade and this test keeps
+    // guarding against a regression back to returning rows.
+    //
+    // Fixture-gated identically to the other reader oracle: SKIPs cleanly without
+    // the commissioned fixture, hard-FAILs under either strict flag
+    // (`require_fixtures()` -> `require_fixtures_strict()`), and requires the FULL
+    // component set before exercising the decompressing read path.
+    let data_db = datasets_root().join(format!("{DICT_FIXTURE_REL}-Data.db"));
+    if !data_db.exists() {
+        let msg = format!(
+            "zstd-dictionary fixture absent: {} (commission via \
+             test-data/scripts/generate-zstd-dictionary-fixture.md; tracked by the \
+             fixture-commission issue linked from #1399)",
+            data_db.display()
+        );
+        assert!(!require_fixtures(), "CQLITE_REQUIRE_FIXTURES=1 but {msg}");
+        eprintln!("SKIP: {msg}");
+        return;
+    }
+
+    // Reject a partial fixture up front so this oracle cannot pass on an unrelated
+    // missing-component / open / metadata error instead of the dict-decode path.
+    assert_full_fixture_present();
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    rt.block_on(async {
+        use cqlite_core::storage::sstable::reader::SSTableReader;
+        use cqlite_core::{Config, Platform};
+        use std::sync::Arc;
+
+        let config = Config::default();
+        let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+        // Opening MUST succeed: metadata parsing (header, Statistics.db,
+        // CompressionInfo.db) never decompresses chunk bytes and `ZstdCompressor`
+        // is a known compressor name. The fail-closed property lives on the
+        // DECOMPRESSING read path, so an open() error means the fixture shape
+        // changed — fail loudly rather than accept it as "rejection".
+        let reader = SSTableReader::open(&data_db, &config, platform)
+            .await
+            .expect("open of a dictionary-compressed SSTable must succeed (metadata only)");
+
+        // Drive the real reader decompress path: a full scan reads + decompresses
+        // every Data.db chunk. This MUST fail closed.
+        match reader.iterate_all_partitions().await {
+            Ok(rows) => panic!(
+                "FAIL-CLOSED VIOLATION: full scan of a dictionary-compressed SSTable \
+                 returned {} row(s) instead of rejecting — the decompression path must \
+                 fail closed (see #1399 AC#2)",
+                rows.len()
+            ),
+            Err(e) => {
+                // CURRENT behavior: accept EITHER Corruption OR InvalidFormat. The
+                // stitch path wraps dict-decode failures as Corruption today; #1414
+                // will upgrade this to a typed InvalidFormat/UnsupportedFormat
+                // rejection (asserted by the ignored sibling test). We intentionally
+                // do NOT require the typed variant here — only that the reader
+                // hard-errors and returns no rows.
+                assert!(
+                    matches!(e, Error::Corruption(_) | Error::InvalidFormat(_)),
+                    "scan of a dictionary SSTable must fail closed as Corruption or \
+                     InvalidFormat (current behavior; #1414 tracks the typed upgrade); got: {e}"
+                );
             }
         }
     });
