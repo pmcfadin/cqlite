@@ -129,7 +129,8 @@ impl SSTableManager {
         path: &Path,
     ) -> Result<Arc<reader::SSTableReader>> {
         #[cfg_attr(not(feature = "state_machine"), allow(unused_mut))]
-        let mut reader = reader::SSTableReader::open(path, &self.config, self.platform.clone()).await?;
+        let mut reader =
+            reader::SSTableReader::open(path, &self.config, self.platform.clone()).await?;
 
         #[cfg(feature = "state_machine")]
         {
@@ -222,7 +223,12 @@ impl SSTableManager {
             readers
                 .values()
                 .map(|r| canon(&r.file_path))
-                .chain(table_readers.values().flatten().map(|r| canon(&r.file_path)))
+                .chain(
+                    table_readers
+                        .values()
+                        .flatten()
+                        .map(|r| canon(&r.file_path)),
+                )
                 .collect()
         };
 
@@ -234,8 +240,12 @@ impl SSTableManager {
 
         // 4. Open every added generation OUTSIDE the write guard. Fail-closed:
         //    the first open error aborts the whole refresh, mutating nothing.
-        let mut opened: Vec<(PathBuf, SSTableId, Option<String>, Arc<reader::SSTableReader>)> =
-            Vec::with_capacity(added_paths.len());
+        let mut opened: Vec<(
+            PathBuf,
+            SSTableId,
+            Option<String>,
+            Arc<reader::SSTableReader>,
+        )> = Vec::with_capacity(added_paths.len());
         for path in &added_paths {
             let Some(filename) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
@@ -254,7 +264,12 @@ impl SSTableManager {
         let before_canon: HashSet<PathBuf> = readers
             .values()
             .map(|r| canon(&r.file_path))
-            .chain(table_readers.values().flatten().map(|r| canon(&r.file_path)))
+            .chain(
+                table_readers
+                    .values()
+                    .flatten()
+                    .map(|r| canon(&r.file_path)),
+            )
             .collect();
 
         readers.retain(|_id, r| discovered_canon.contains(&canon(&r.file_path)));
@@ -266,7 +281,12 @@ impl SSTableManager {
         let after_removal_canon: HashSet<PathBuf> = readers
             .values()
             .map(|r| canon(&r.file_path))
-            .chain(table_readers.values().flatten().map(|r| canon(&r.file_path)))
+            .chain(
+                table_readers
+                    .values()
+                    .flatten()
+                    .map(|r| canon(&r.file_path)),
+            )
             .collect();
         let readers_removed = before_canon.difference(&after_removal_canon).count();
 
@@ -356,7 +376,14 @@ mod tests {
             value: Value::Text(format!("v{}", id)),
         }];
         engine
-            .write_async(Mutation::new(table_id, pk, None, ops, 1_000 + id as i64, None))
+            .write_async(Mutation::new(
+                table_id,
+                pk,
+                None,
+                ops,
+                1_000 + id as i64,
+                None,
+            ))
             .await
             .expect("write");
         engine.flush().await.expect("flush");
@@ -377,7 +404,14 @@ mod tests {
                 value: Value::Text(format!("v{}", id)),
             }];
             engine
-                .write_async(Mutation::new(table_id, pk, None, ops, 1_000 + id as i64, None))
+                .write_async(Mutation::new(
+                    table_id,
+                    pk,
+                    None,
+                    ops,
+                    1_000 + id as i64,
+                    None,
+                ))
                 .await
                 .expect("write");
             engine.flush().await.expect("flush");
@@ -401,7 +435,9 @@ mod tests {
         assert!(copied > 0, "copied generation {} components", gen);
     }
 
-    fn scan_partition_ids(rows: &[(crate::RowKey, crate::ScanRow)]) -> std::collections::BTreeSet<i32> {
+    fn scan_partition_ids(
+        rows: &[(crate::RowKey, crate::ScanRow)],
+    ) -> std::collections::BTreeSet<i32> {
         rows.iter()
             .map(|(key, _)| {
                 let b = key.as_bytes();
@@ -460,7 +496,11 @@ mod tests {
             let table_readers = manager.table_readers.read().await;
             table_readers.values().flatten().map(Arc::clone).collect()
         };
-        assert_eq!(held_snapshot.len(), 1, "in-flight scan holds one gen-1 reader");
+        assert_eq!(
+            held_snapshot.len(),
+            1,
+            "in-flight scan holds one gen-1 reader"
+        );
 
         // Add gen-2 and refresh while that snapshot is "in flight".
         copy_generation(&src_table_dir, &live_table_dir, 2);

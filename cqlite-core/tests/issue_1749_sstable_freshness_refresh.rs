@@ -135,7 +135,11 @@ fn delete_generation(table_dir: &Path, gen: u32) -> usize {
             removed += 1;
         }
     }
-    assert!(removed > 0, "expected to remove generation {} components", gen);
+    assert!(
+        removed > 0,
+        "expected to remove generation {} components",
+        gen
+    );
     removed
 }
 
@@ -261,7 +265,10 @@ async fn corrupt_new_generation_rejects_whole_refresh() {
     std::fs::write(&stats, b"\x00\x01\x02corrupt-not-a-statistics-db\xff\xff")
         .expect("corrupt statistics");
 
-    let err = db.refresh().await.expect_err("refresh must fail-closed on corrupt generation");
+    let err = db
+        .refresh()
+        .await
+        .expect_err("refresh must fail-closed on corrupt generation");
     // Typed error (no panic); any Error variant is acceptable — assert it Displays.
     let _ = err.to_string();
 
@@ -294,7 +301,11 @@ async fn unchanged_directory_is_zero_delta_noop() {
     assert_eq!(report.readers_added, 0, "no-op: nothing added");
     assert_eq!(report.readers_removed, 0, "no-op: nothing removed");
 
-    assert_eq!(select_all_ids(&db).await, before, "result unchanged by no-op");
+    assert_eq!(
+        select_all_ids(&db).await,
+        before,
+        "result unchanged by no-op"
+    );
 }
 
 // The "In-flight scan unaffected by concurrent refresh" spec scenario is covered

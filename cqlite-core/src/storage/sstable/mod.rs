@@ -428,7 +428,10 @@ impl SSTableManager {
                                         key,
                                         path.display()
                                     );
-                                    table_readers.entry(key).or_insert_with(Vec::new).push(reader_arc);
+                                    table_readers
+                                        .entry(key)
+                                        .or_insert_with(Vec::new)
+                                        .push(reader_arc);
                                 } else {
                                     log::warn!(
                                         "SSTableManager could not extract table name from path: {}",
