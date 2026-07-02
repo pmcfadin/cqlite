@@ -791,6 +791,69 @@ async fn gc_purge_grace0_major_compaction_purges_to_empty() {
 // Fixture-integrity guard for the #[ignore]-until-#1410 byte-parity references
 // ════════════════════════════════════════════════════════════════════════════
 
+/// Collect EVERY distinct `local_delete_time` (as epoch seconds) that appears in a
+/// golden JSONL — whether under a row/cell `deletion_info` or a range-marker
+/// (`start`/`end`) `deletion_info`. Used by the fixture-integrity guard to prove the
+/// JSONL sidecar the ignored byte-parity tests read from is present, valid JSON, and
+/// actually carries the LDT metadata those tests pin against. A malformed line or an
+/// unparseable ISO LDT PANICS (fail-closed), matching `ldt_secs_from_golden`.
+fn golden_ldts(ref_dir: &Path, table: &str) -> Vec<i32> {
+    let data = single_data_db(ref_dir)
+        .unwrap_or_else(|| panic!("{table}: no compacted Data.db in a present fixture"));
+    let jsonl = ref_dir.join(format!("{}Data.db.jsonl", descriptor_prefix(&data)));
+    let text = std::fs::read_to_string(&jsonl)
+        .unwrap_or_else(|e| panic!("{table}: golden JSONL {jsonl:?} unreadable: {e}"));
+    let mut ldts: Vec<i32> = Vec::new();
+    let push_iso = |iso: &str, ldts: &mut Vec<i32>| {
+        let secs = iso_to_epoch_secs(iso).unwrap_or_else(|| {
+            panic!("{table}: golden local_delete_time '{iso}' not parseable as ISO-8601 seconds")
+        });
+        if !ldts.contains(&secs) {
+            ldts.push(secs);
+        }
+    };
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let jv: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("{table}: golden JSONL not valid JSON ({jsonl:?}): {e}"));
+        let Some(rows) = jv.get("rows").and_then(|r| r.as_array()) else {
+            continue;
+        };
+        for row in rows {
+            // Row/cell deletion_info (shadow_row_delete, ttl_expired_live).
+            if let Some(iso) = row
+                .get("deletion_info")
+                .and_then(|d| d.get("local_delete_time"))
+                .and_then(|v| v.as_str())
+            {
+                push_iso(iso, &mut ldts);
+            }
+            if let Some(cells) = row.get("cells").and_then(|c| c.as_array()) {
+                for cell in cells {
+                    if let Some(iso) = cell
+                        .get("deletion_info")
+                        .and_then(|d| d.get("local_delete_time"))
+                        .and_then(|v| v.as_str())
+                    {
+                        push_iso(iso, &mut ldts);
+                    }
+                }
+            }
+            // Range-marker deletion_info (rt_cross_gen).
+            for side in ["start", "end"] {
+                if let Some(iso) = row
+                    .get(side)
+                    .and_then(|s| s.get("deletion_info"))
+                    .and_then(|d| d.get("local_delete_time"))
+                    .and_then(|v| v.as_str())
+                {
+                    push_iso(iso, &mut ldts);
+                }
+            }
+        }
+    }
+    ldts
+}
+
 /// The three byte-parity scenarios are `#[ignore = "blocked on #1410"]`, so a
 /// default `cargo test` (including the nightly Docker strict lane) never executes
 /// their `reference_dir()` presence/consistency guards. Without this NON-ignored
@@ -798,11 +861,18 @@ async fn gc_purge_grace0_major_compaction_purges_to_empty() {
 /// `rt_cross_gen` reference would silently pass the "strict" lane (roborev finding).
 ///
 /// This test does NOT compare CQLite compaction output (that is what the ignored
-/// byte-parity tests do once #1410 lands) — it only asserts the committed golden
-/// fixtures exist and are internally consistent: exactly one `{table}-*` dir with a
-/// non-empty `Data.db` whose CRC32 matches the committed `Digest.crc32`. Under
-/// `CQLITE_REQUIRE_FIXTURES=1` a missing reference is a PANIC (via `reference_dir`),
-/// so the strict lane fail-closes on fixture regressions.
+/// byte-parity tests do once #1410 lands) — it asserts the committed golden fixtures
+/// exist and are internally consistent:
+///   * exactly one `{table}-*` dir with a non-empty `Data.db` whose CRC32 matches the
+///     committed `Digest.crc32`;
+///   * the `Data.db.jsonl` sidecar (which the ignored byte-parity tests read for
+///     `local_delete_time`) is present, valid JSON, and carries the number of DISTINCT
+///     tombstone LDTs each byte-parity test pins against (two for `rt_cross_gen`, at
+///     least one for the row/cell scenarios) — so a missing, empty, stale, or malformed
+///     JSONL cannot silently pass the strict lane while the byte-parity tests stay
+///     ignored (roborev finding).
+/// Under `CQLITE_REQUIRE_FIXTURES=1` a missing reference is a PANIC (via
+/// `reference_dir`), so the strict lane fail-closes on any fixture regression.
 #[tokio::test]
 async fn byte_parity_reference_fixtures_present_and_consistent() {
     let strict = require_fixtures_strict();
@@ -813,7 +883,12 @@ async fn byte_parity_reference_fixtures_present_and_consistent() {
         eprintln!("[issue_1387] CQLITE_DATASETS_ROOT unset; skipping fixture-integrity guard");
         return;
     }
-    for t in ["shadow_row_delete", "ttl_expired_live", "rt_cross_gen"] {
+    // (table, minimum number of DISTINCT tombstone LDTs the byte-parity test pins).
+    for (t, min_distinct_ldts) in [
+        ("shadow_row_delete", 1usize),
+        ("ttl_expired_live", 1usize),
+        ("rt_cross_gen", 2usize),
+    ] {
         let Some(ref_dir) = reference_dir(t) else {
             // reference_dir() already PANICs on present-but-incomplete; a plain
             // None means the dir is absent. Strict mode must fail-close.
@@ -824,6 +899,15 @@ async fn byte_parity_reference_fixtures_present_and_consistent() {
             continue;
         };
         assert_digest_consistent_with_data(t, &ref_dir);
-        eprintln!("[issue_1387] {KEYSPACE}.{t}: fixture-integrity guard PASS ({ref_dir:?})");
+        let ldts = golden_ldts(&ref_dir, t);
+        assert!(
+            ldts.len() >= min_distinct_ldts,
+            "{t}: golden JSONL must carry >= {min_distinct_ldts} distinct tombstone \
+             local_delete_time value(s) for the byte-parity test, got {ldts:?}"
+        );
+        eprintln!(
+            "[issue_1387] {KEYSPACE}.{t}: fixture-integrity guard PASS \
+             (Data.db+Digest consistent, JSONL LDTs={ldts:?})"
+        );
     }
 }
