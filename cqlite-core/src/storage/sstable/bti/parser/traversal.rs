@@ -191,8 +191,9 @@ where
         else {
             // `DfsOp::Pop`: this node's whole subtree is done — backtrack its
             // transition byte.  Every `Enter` that pushed a byte scheduled exactly
-            // one `Pop`, so this stays balanced.
-            path.pop();
+            // one `Pop`, so this always removes exactly the byte this frame pushed
+            // (the discarded `Option` is always `Some`); ignore it explicitly.
+            let _ = path.pop();
             continue;
         };
 
