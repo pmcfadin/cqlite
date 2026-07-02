@@ -18,6 +18,12 @@
 #   2. bindings/python/pyproject.toml         ([tool.maturin] must not re-pin --release)
 #   3. bindings/node/package.json             ("build" script)
 #   4. .github/workflows/node-release.yml     (must not drive an abort build)
+#   5. Cargo.toml                             ([profile.release-unwind] must set panic = "unwind")
+#
+# Check 5 closes the loophole where the build commands correctly select
+# `--profile release-unwind` but the profile itself is deleted or flipped to
+# `panic = "abort"` — which would silently strip the panic firewall from the
+# shipped bindings while every build-command check still passed.
 #
 # Run standalone:   bash scripts/tests/test_binding_unwind_profile.sh
 # Or via the gate:  scripts/agent-gate.sh runs it as the `binding-unwind-profile`
@@ -45,6 +51,7 @@ check_definitions() {
   local pyproject="$root/bindings/python/pyproject.toml"
   local pkg="$root/bindings/node/package.json"
   local node_wf="$root/.github/workflows/node-release.yml"
+  local cargo_toml="$root/Cargo.toml"
 
   # --- 1. Python wheel workflow -------------------------------------------
   if [ ! -f "$py_wf" ]; then
@@ -122,6 +129,36 @@ check_definitions() {
     fi
   fi
 
+  # --- 5. Workspace Cargo.toml [profile.release-unwind] -------------------
+  # The build commands above select `--profile release-unwind`; that profile
+  # is only a firewall if it actually exists and pins `panic = "unwind"`.
+  # Fail CLOSED: a missing Cargo.toml, an absent section, an unset panic, or
+  # any panic value other than "unwind" (e.g. "abort") is a violation.
+  if [ ! -f "$cargo_toml" ]; then
+    echo "FAIL - Cargo.toml missing (fail-closed): $cargo_toml"
+    fails=$((fails + 1))
+  elif ! grep -qE '^\[profile\.release-unwind\]' "$cargo_toml"; then
+    echo "FAIL - Cargo.toml has no [profile.release-unwind] section (fail-closed)"
+    fails=$((fails + 1))
+  else
+    # Extract the [profile.release-unwind] table (until the next table header).
+    local profile_section
+    profile_section=$(awk '
+      /^\[profile\.release-unwind\]/ { in_sec = 1; next }
+      /^\[/                          { in_sec = 0 }
+      in_sec                         { print }
+    ' "$cargo_toml")
+    local panic_line
+    panic_line=$(printf '%s\n' "$profile_section" | grep -E '^[[:space:]]*panic[[:space:]]*=')
+    if [ -z "$panic_line" ]; then
+      echo "FAIL - [profile.release-unwind] does not set panic (fail-closed; must be \"unwind\")"
+      fails=$((fails + 1))
+    elif ! printf '%s\n' "$panic_line" | grep -qE '^[[:space:]]*panic[[:space:]]*=[[:space:]]*"unwind"[[:space:]]*$'; then
+      echo "FAIL - [profile.release-unwind] panic is not \"unwind\" (abort/other strips the FFI firewall)"
+      fails=$((fails + 1))
+    fi
+  fi
+
   return "$fails"
 }
 
@@ -159,6 +196,17 @@ EOF
   cat >"$d/.github/workflows/node-release.yml" <<'EOF'
       - name: Build native module
         run: npm run build
+EOF
+  cat >"$d/Cargo.toml" <<'EOF'
+[profile.release]
+panic = "abort"
+
+[profile.release-unwind]
+inherits = "release"
+panic = "unwind"
+
+[profile.bench]
+debug = true
 EOF
 }
 
@@ -211,6 +259,53 @@ EOF
     sok "empty tree fails closed"
   fi
 
+  # (e) Profile pinned panic = "unwind" -> guard PASSES.
+  #     (The compliant fixture already ships this Cargo.toml; assert explicitly.)
+  local prof_ok="$tmp/prof_ok"
+  write_compliant_fixture "$prof_ok"
+  if check_definitions "$prof_ok" >/dev/null; then
+    sok "Cargo.toml [profile.release-unwind] panic=unwind passes"
+  else
+    sbad "Cargo.toml panic=unwind should pass but did not"
+    check_definitions "$prof_ok"
+  fi
+
+  # (f) Profile flipped to panic = "abort" -> guard FAILS closed.
+  local prof_abort="$tmp/prof_abort"
+  write_compliant_fixture "$prof_abort"
+  cat >"$prof_abort/Cargo.toml" <<'EOF'
+[profile.release]
+panic = "abort"
+
+[profile.release-unwind]
+inherits = "release"
+panic = "abort"
+
+[profile.bench]
+debug = true
+EOF
+  if check_definitions "$prof_abort" >/dev/null; then
+    sbad "[profile.release-unwind] panic=abort should FAIL but passed"
+  else
+    sok "[profile.release-unwind] panic=abort fails closed"
+  fi
+
+  # (g) Profile section deleted entirely -> guard FAILS closed.
+  local prof_missing="$tmp/prof_missing"
+  write_compliant_fixture "$prof_missing"
+  cat >"$prof_missing/Cargo.toml" <<'EOF'
+[profile.release]
+panic = "abort"
+
+[profile.bench]
+debug = true
+EOF
+  if check_definitions "$prof_missing" >/dev/null; then
+    sbad "missing [profile.release-unwind] section should FAIL but passed"
+  else
+    sok "missing [profile.release-unwind] section fails closed"
+  fi
+
   # Best-effort cleanup; the guard is offline so nothing else touches this dir.
   rm -rf "$tmp"
 
@@ -233,7 +328,7 @@ main() {
   findings=$(check_definitions "$REPO_ROOT")
   local real_fails=$?
   if [ "$real_fails" -eq 0 ]; then
-    echo "ok   - all four binding build definitions select '${UNWIND_FLAG}' (no --release)"
+    echo "ok   - all binding build definitions select '${UNWIND_FLAG}' (no --release) and Cargo.toml [profile.release-unwind] pins panic = \"unwind\""
   else
     printf '%s\n' "$findings"
     echo "FAIL - $real_fails binding build definition(s) would ship an abort-compiled artifact"
