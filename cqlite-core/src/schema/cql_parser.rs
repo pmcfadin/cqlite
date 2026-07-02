@@ -58,17 +58,41 @@ fn qualified_table_name(input: &str) -> IResult<&str, (Option<String>, String)> 
     }
 }
 
+/// Maximum allowed CQL type nesting depth for the nom schema parser. Mirrors
+/// [`crate::parser::complex_types::ComplexTypeParser`] (`max_depth = 32`) and the
+/// [`crate::schema::CqlType`] string parser guard.
+///
+/// Without this bound, a hostile or malformed schema with pathological nesting
+/// (e.g. `frozen<` × 50_000) recurses in `parse_type_inner` until the thread
+/// stack overflows and, under `panic = "abort"`, aborts the whole process
+/// instead of returning an error (issue #1690). The guard is
+/// `depth > MAX_TYPE_NESTING_DEPTH`, where `depth` is 0 for the outermost type
+/// and increments once per nesting level, so a leaf reached at exactly depth 32
+/// (i.e. 32 levels of nesting) is the last allowed depth; a 33rd level returns a
+/// nom failure (surfaced as `Err`).
+const MAX_TYPE_NESTING_DEPTH: usize = 32;
+
 /// Parse CQL data type
 fn cql_type(input: &str) -> IResult<&str, String> {
-    // Handle complex types like list<text>, map<text, bigint>, frozen<set<uuid>>
-    fn parse_type_inner(input: &str) -> IResult<&str, String> {
+    // Handle complex types like list<text>, map<text, bigint>, frozen<set<uuid>>.
+    // `depth` bounds recursion so pathological nesting cannot overflow the stack.
+    fn parse_type_inner(input: &str, depth: usize) -> IResult<&str, String> {
+        if depth > MAX_TYPE_NESTING_DEPTH {
+            // Unrecoverable failure so the enclosing `alt` short-circuits instead
+            // of backtracking; surfaces to the caller as `Err` (never a panic).
+            return Err(nom::Err::Failure(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::TooLarge,
+            )));
+        }
+
         let (input, base) = alt((
             // Collection types
             map(
                 tuple((
                     alt((keyword("list"), keyword("set"))),
                     char('<'),
-                    parse_type_inner,
+                    |i| parse_type_inner(i, depth + 1),
                     char('>'),
                 )),
                 |(collection, _, inner, _)| format!("{}<{}>", collection, inner),
@@ -78,10 +102,10 @@ fn cql_type(input: &str) -> IResult<&str, String> {
                 tuple((
                     keyword("map"),
                     char('<'),
-                    parse_type_inner,
+                    |i| parse_type_inner(i, depth + 1),
                     char(','),
                     ws,
-                    parse_type_inner,
+                    |i| parse_type_inner(i, depth + 1),
                     char('>'),
                 )),
                 |(_, _, key_type, _, _, value_type, _)| {
@@ -93,14 +117,21 @@ fn cql_type(input: &str) -> IResult<&str, String> {
                 tuple((
                     keyword("tuple"),
                     char('<'),
-                    separated_list1(tuple((ws, char(','), ws)), parse_type_inner),
+                    separated_list1(tuple((ws, char(','), ws)), |i| {
+                        parse_type_inner(i, depth + 1)
+                    }),
                     char('>'),
                 )),
                 |(_, _, types, _)| format!("tuple<{}>", types.join(", ")),
             ),
             // Frozen type
             map(
-                tuple((keyword("frozen"), char('<'), parse_type_inner, char('>'))),
+                tuple((
+                    keyword("frozen"),
+                    char('<'),
+                    |i| parse_type_inner(i, depth + 1),
+                    char('>'),
+                )),
                 |(_, _, inner, _)| format!("frozen<{}>", inner),
             ),
             // Simple types and UDTs
@@ -111,7 +142,7 @@ fn cql_type(input: &str) -> IResult<&str, String> {
     }
 
     let (input, _) = ws(input)?;
-    let (input, type_name) = parse_type_inner(input)?;
+    let (input, type_name) = parse_type_inner(input, 0)?;
     let (input, _) = ws(input)?;
 
     Ok((input, type_name))
@@ -1410,6 +1441,42 @@ mod tests {
             .find(|c| c.name == "person_info")
             .unwrap();
         assert_eq!(person.data_type, "tuple<text, int, boolean>");
+    }
+
+    /// Issue #1690 (P0 safety): the nom `cql_type` parser must NOT stack-overflow
+    /// on pathologically nested type strings (which under `panic = "abort"` abort
+    /// the whole process). Recursion is bounded at [`MAX_TYPE_NESTING_DEPTH`], so
+    /// deep input returns `Err` long before the stack is exhausted.
+    #[test]
+    fn test_cql_type_adversarial_deep_nesting_returns_err_not_abort() {
+        let s = "frozen<".repeat(50_000) + "int" + &">".repeat(50_000);
+        assert!(
+            cql_type(&s).is_err(),
+            "pathological nesting must return Err, not abort"
+        );
+    }
+
+    /// The depth bound is exact and behavior-preserving: a leaf reached at depth
+    /// == [`MAX_TYPE_NESTING_DEPTH`] (i.e. that many `frozen<...>` levels) is the
+    /// last allowed depth and reconstructs to the identical type string it did
+    /// before the guard existed; one level deeper returns `Err`.
+    #[test]
+    fn test_cql_type_nesting_depth_boundary_is_exact() {
+        let depth = MAX_TYPE_NESTING_DEPTH; // 32 — the last allowed nesting level.
+
+        // At the bound: must parse and round-trip to the exact same string.
+        let ok_str = "frozen<".repeat(depth) + "int" + &">".repeat(depth);
+        let (rest, parsed) =
+            cql_type(&ok_str).expect("nesting at the depth bound must still parse");
+        assert!(rest.trim().is_empty(), "entire input must be consumed");
+        assert_eq!(parsed, ok_str, "type string must be preserved unchanged");
+
+        // One past the bound: must error (nom failure surfaced as Err), not abort.
+        let bad_str = "frozen<".repeat(depth + 1) + "int" + &">".repeat(depth + 1);
+        assert!(
+            cql_type(&bad_str).is_err(),
+            "one level past the bound must return Err"
+        );
     }
 
     #[test]

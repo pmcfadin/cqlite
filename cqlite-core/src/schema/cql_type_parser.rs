@@ -7,6 +7,18 @@
 use super::CqlType;
 use crate::error::{Error, Result};
 
+/// Maximum allowed CQL type nesting depth. Mirrors
+/// [`crate::parser::complex_types::ComplexTypeParser`] (`max_depth = 32`).
+///
+/// Without this bound, a hostile or malformed schema with pathological nesting
+/// (e.g. `frozen<` × 50_000) recurses until the thread stack overflows and,
+/// under `panic = "abort"`, aborts the whole process instead of returning an
+/// error (issue #1690). The guard is `depth > MAX_NESTING_DEPTH`, where `depth`
+/// is 0 for the outermost type and increments once per nesting level. A leaf
+/// reached at exactly depth 32 (i.e. 32 levels of collection/frozen nesting) is
+/// therefore the last allowed depth; a 33rd level returns `Err`.
+const MAX_NESTING_DEPTH: usize = 32;
+
 impl CqlType {
     fn split_top_level_types(type_str: &str) -> Result<Vec<&str>> {
         let mut parts = Vec::new();
@@ -46,6 +58,20 @@ impl CqlType {
 
     /// Parse CQL type string into structured type
     pub fn parse(type_str: &str) -> Result<Self> {
+        Self::parse_with_depth(type_str, 0)
+    }
+
+    /// Recursive body of [`CqlType::parse`], threading the current nesting
+    /// `depth` so recursion is bounded at [`MAX_NESTING_DEPTH`] (issue #1690).
+    /// `depth` is 0 at the top level and increments by one for each nested type.
+    fn parse_with_depth(type_str: &str, depth: usize) -> Result<Self> {
+        if depth > MAX_NESTING_DEPTH {
+            return Err(Error::schema(format!(
+                "type nesting too deep (max {})",
+                MAX_NESTING_DEPTH
+            )));
+        }
+
         let type_str = type_str.trim();
 
         // CQL type keywords are case-insensitive (`SET<TEXT>` == `set<text>`),
@@ -62,20 +88,29 @@ impl CqlType {
         // Handle frozen types
         if let Some(inner) = strip_prefix_ci(type_str, "frozen<") {
             if let Some(inner) = inner.strip_suffix('>') {
-                return Ok(CqlType::Frozen(Box::new(Self::parse(inner)?)));
+                return Ok(CqlType::Frozen(Box::new(Self::parse_with_depth(
+                    inner,
+                    depth + 1,
+                )?)));
             }
         }
 
         // Handle collection types
         if let Some(inner) = strip_prefix_ci(type_str, "list<") {
             if let Some(inner) = inner.strip_suffix('>') {
-                return Ok(CqlType::List(Box::new(Self::parse(inner)?)));
+                return Ok(CqlType::List(Box::new(Self::parse_with_depth(
+                    inner,
+                    depth + 1,
+                )?)));
             }
         }
 
         if let Some(inner) = strip_prefix_ci(type_str, "set<") {
             if let Some(inner) = inner.strip_suffix('>') {
-                return Ok(CqlType::Set(Box::new(Self::parse(inner)?)));
+                return Ok(CqlType::Set(Box::new(Self::parse_with_depth(
+                    inner,
+                    depth + 1,
+                )?)));
             }
         }
 
@@ -86,8 +121,8 @@ impl CqlType {
                     return Err(Error::schema(format!("Invalid map type: {}", type_str)));
                 }
                 return Ok(CqlType::Map(
-                    Box::new(Self::parse(parts[0].trim())?),
-                    Box::new(Self::parse(parts[1].trim())?),
+                    Box::new(Self::parse_with_depth(parts[0].trim(), depth + 1)?),
+                    Box::new(Self::parse_with_depth(parts[1].trim(), depth + 1)?),
                 ));
             }
         }
@@ -98,7 +133,7 @@ impl CqlType {
                 let parts = Self::split_top_level_types(inner)?;
                 let mut types = Vec::new();
                 for part in parts {
-                    types.push(Self::parse(part.trim())?);
+                    types.push(Self::parse_with_depth(part.trim(), depth + 1)?);
                 }
                 return Ok(CqlType::Tuple(types));
             }
@@ -276,6 +311,50 @@ mod tests {
         assert_eq!(
             CqlType::parse("MyType").unwrap(),
             CqlType::Custom("udt:MyType".to_string())
+        );
+    }
+
+    /// Issue #1690 (P0 safety): a hostile/malformed schema with pathological
+    /// nesting must NOT stack-overflow (which under `panic = "abort"` aborts the
+    /// whole process). It must return `Err` instead. The recursion is bounded at
+    /// [`MAX_NESTING_DEPTH`], so this errors long before the stack is exhausted.
+    #[test]
+    fn test_adversarial_deep_nesting_returns_err_not_abort() {
+        let s = "frozen<".repeat(50_000) + "int" + &">".repeat(50_000);
+        assert!(
+            CqlType::parse(&s).is_err(),
+            "pathological nesting must return Err, not abort"
+        );
+    }
+
+    /// The depth bound is exact: a leaf reached at depth == [`MAX_NESTING_DEPTH`]
+    /// (i.e. `MAX_NESTING_DEPTH` levels of `frozen<...>` around a leaf) is the
+    /// last allowed depth and must still parse to the identical `CqlType` it did
+    /// before the guard existed; one level deeper must error.
+    #[test]
+    fn test_nesting_depth_boundary_is_exact() {
+        // 32 levels of frozen nesting: last allowed. Must parse and produce the
+        // unchanged nested structure (Frozen x32 around Int).
+        let depth = MAX_NESTING_DEPTH; // 32 — the last allowed nesting level.
+        let ok_str = "frozen<".repeat(depth) + "int" + &">".repeat(depth);
+        let mut parsed =
+            CqlType::parse(&ok_str).expect("nesting at the depth bound must still parse");
+
+        let mut frozen_levels = 0usize;
+        while let CqlType::Frozen(inner) = parsed {
+            parsed = *inner;
+            frozen_levels += 1;
+        }
+        assert_eq!(frozen_levels, depth, "all frozen levels must be preserved");
+        assert_eq!(parsed, CqlType::Int, "the leaf type must be unchanged");
+
+        // 33 levels: one past the bound. Must error with a clear message.
+        let bad_str = "frozen<".repeat(depth + 1) + "int" + &">".repeat(depth + 1);
+        let err = CqlType::parse(&bad_str).expect_err("one level past the bound must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("nesting") || msg.contains("deep"),
+            "error message must mention nesting/depth, got: {msg}"
         );
     }
 }
