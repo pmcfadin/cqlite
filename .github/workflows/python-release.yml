@@ -93,7 +93,9 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist
+          # release-unwind: inherits release but panic = "unwind" so the PyO3
+          # catch_unwind firewall is active in the shipped wheel (issue #1440).
+          args: --profile release-unwind --out dist
           working-directory: bindings/python
           manylinux: ${{ matrix.manylinux || 'auto' }}
 

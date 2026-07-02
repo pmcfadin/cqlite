@@ -159,6 +159,14 @@ lto = true
 panic = "abort"
 strip = true
 
+# Binding cdylibs (Python wheel, Node npm prebuild) ship with this profile so the
+# PyO3 / napi-rs catch_unwind->exception firewall at the FFI boundary is active
+# (issue #1440). Inherits release (lto, codegen-units, strip) and flips only the
+# panic strategy to unwind. CLI/core keep [profile.release] (panic = "abort").
+[profile.release-unwind]
+inherits = "release"
+panic = "unwind"
+
 [profile.bench]
 debug = true
 # bench inherits from release, which sets `strip = true` — that would discard
