@@ -390,18 +390,86 @@ impl SchemaAwareReader {
 
     /// Disassemble a scanned row into its column values.
     ///
-    /// Issue #1334: the reader now delivers a fully decoded [`ScanRow`] whose
-    /// live variant already carries the row's `(column_name, value)` cells with
-    /// interned names — so this simply moves those cells into a `String`-keyed
-    /// map (no re-parsing from raw bytes). A marker (row tombstone / null row)
-    /// carries no columns and yields an empty map.
+    /// Issue #1334: the reader delivers a fully decoded [`ScanRow`]. Two live-row
+    /// shapes reach here and MUST behave exactly as they did pre-#1334:
+    /// * Genuine multi-column live rows (V5 scan decoder) carry ALREADY-decoded
+    ///   named cells; they pass through verbatim, except partition/clustering-key
+    ///   cells the decoder injects but `scan` returns separately are skipped so
+    ///   keys are never duplicated as regular column values.
+    /// * A synthetic single-cell `[("data", Value::Blob(bytes))]` row from the
+    ///   point-lookup / offset-read placeholder wraps a whole row's raw bytes as
+    ///   one blob; pre-#1334 this API decoded those bytes into the table's columns
+    ///   via the [`SchemaParser`] — that decode is restored here.
+    ///
+    /// A [`ScanRow::Marker`] (tombstone / null / suppressed carrier) yields `{}`.
     pub fn parse_row_value(&self, raw_value: &ScanRow) -> Result<HashMap<String, Value>> {
-        let mut column_values = HashMap::new();
-        if let ScanRow::Row(cells) = raw_value {
-            for (name, value) in cells {
-                column_values.insert(name.to_string(), value.clone());
+        Self::disassemble_row(&self.context, &self.schema_parser, raw_value)
+    }
+
+    fn disassemble_row(
+        context: &ParsingContext,
+        schema_parser: &SchemaParser,
+        raw_value: &ScanRow,
+    ) -> Result<HashMap<String, Value>> {
+        let cells = match raw_value {
+            ScanRow::Row(cells) => cells,
+            // A marker carries no user-visible columns.
+            ScanRow::Marker(_) => return Ok(HashMap::new()),
+        };
+
+        // Synthetic offset-read / point-lookup shape: a lone "data" blob carrying
+        // a whole row's raw bytes. Schema-decode it into the table's columns,
+        // exactly as the pre-#1334 point lookup did.
+        if let [(name, Value::Blob(bytes))] = cells.as_slice() {
+            if name.as_ref() == "data" {
+                return Self::decode_raw_row_bytes(context, schema_parser, bytes);
             }
         }
+
+        // Already-decoded named cells: copy them, skipping partition/clustering
+        // key columns (which `scan` returns separately) to avoid duplicating keys.
+        let mut column_values = HashMap::new();
+        for (name, value) in cells {
+            if context.schema.is_partition_key(name) || context.schema.is_clustering_key(name) {
+                continue;
+            }
+            column_values.insert(name.to_string(), value.clone());
+        }
+        Ok(column_values)
+    }
+
+    /// Decode a whole row's raw value bytes into schema columns (pre-#1334 path).
+    ///
+    /// Iterates the table's columns in schema order, skipping key columns (parsed
+    /// separately), and decodes each non-key column from the raw byte stream with
+    /// exact consumed-byte tracking, stopping when the bytes are exhausted.
+    fn decode_raw_row_bytes(
+        context: &ParsingContext,
+        schema_parser: &SchemaParser,
+        value_bytes: &[u8],
+    ) -> Result<HashMap<String, Value>> {
+        let mut column_values = HashMap::new();
+        let mut offset = 0;
+
+        for column in &context.schema.columns {
+            // Skip key columns as they're parsed separately.
+            if context.schema.is_partition_key(&column.name)
+                || context.schema.is_clustering_key(&column.name)
+            {
+                continue;
+            }
+
+            if offset >= value_bytes.len() {
+                break; // No more data
+            }
+
+            let (column_value, consumed) =
+                schema_parser.parse_column_value(&column.name, &value_bytes[offset..])?;
+
+            offset += consumed;
+            column_values.insert(column.name.clone(), column_value);
+        }
+
         Ok(column_values)
     }
 
@@ -626,6 +694,94 @@ mod tests {
         schema.partition_keys.clear(); // Remove partition keys
 
         assert!(SchemaAwareReader::validate_schema_completeness(&schema).is_err());
+    }
+
+    /// Build the (context, parser) pair `disassemble_row` needs, without opening
+    /// a real SSTable file (the row-disassembly logic depends only on these two).
+    fn build_context_and_parser() -> (ParsingContext, SchemaParser) {
+        let schema = create_test_schema();
+        // Build the context directly from the schema (create_parsing_context
+        // ignores the registry) so the test needs no async registry/platform.
+        let context = ParsingContext {
+            partition_comparators: schema
+                .get_partition_key_comparators()
+                .expect("partition comparators"),
+            clustering_comparators: schema
+                .get_clustering_key_comparators()
+                .expect("clustering comparators"),
+            column_comparators: schema.get_all_comparators().expect("column comparators"),
+            schema,
+        };
+        let parser = SchemaParser::new(context.clone()).expect("schema parser");
+        (context, parser)
+    }
+
+    /// Length-prefixed (4-byte BE) text as it appears in a row's raw value bytes.
+    fn text_cell_bytes(s: &str) -> Vec<u8> {
+        let mut out = (s.len() as i32).to_be_bytes().to_vec();
+        out.extend_from_slice(s.as_bytes());
+        out
+    }
+
+    // Finding 1 (roborev round 6): a synthetic single-cell `("data", Blob)` row
+    // from the point-lookup / offset-read path must be SCHEMA-DECODED into the
+    // table's columns, not returned as a raw "data" blob. Pre-fix this returned
+    // `{"data": Blob(..)}` and this assertion failed.
+    #[test]
+    fn test_synthetic_data_blob_is_schema_decoded() {
+        let (context, parser) = build_context_and_parser();
+
+        // Whole-row raw bytes: a single non-key column ("data": text).
+        let raw_bytes = text_cell_bytes("hello");
+        let row = ScanRow::Row(vec![(Arc::from("data"), Value::Blob(raw_bytes))]);
+
+        let cols = SchemaAwareReader::disassemble_row(&context, &parser, &row).expect("decode");
+
+        // Decoded into the schema column, NOT surfaced as a raw blob.
+        assert_eq!(cols.get("data"), Some(&Value::Text("hello".to_string())));
+        assert!(
+            !matches!(cols.get("data"), Some(Value::Blob(_))),
+            "synthetic 'data' blob must be schema-decoded, not passed through as a blob"
+        );
+    }
+
+    // Finding 2 (roborev round 6): the V5 decoder injects partition/clustering
+    // key cells into the carrier, but `scan` returns keys separately. Those key
+    // columns must be skipped so they are not duplicated as regular column
+    // values. Pre-fix `id`/`timestamp` leaked into the column map.
+    #[test]
+    fn test_clustering_and_partition_keys_not_duplicated() {
+        let (context, parser) = build_context_and_parser();
+
+        // Genuine already-decoded multi-column row including the pk (`id`) and
+        // ck (`timestamp`) cells the V5 decoder injects.
+        let row = ScanRow::Row(vec![
+            (Arc::from("id"), Value::Uuid([7u8; 16])),
+            (Arc::from("timestamp"), Value::BigInt(123)),
+            (Arc::from("data"), Value::Text("payload".to_string())),
+        ]);
+
+        let cols = SchemaAwareReader::disassemble_row(&context, &parser, &row).expect("decode");
+
+        assert!(
+            !cols.contains_key("id"),
+            "partition key must not be duplicated"
+        );
+        assert!(
+            !cols.contains_key("timestamp"),
+            "clustering key must not be duplicated"
+        );
+        assert_eq!(cols.get("data"), Some(&Value::Text("payload".to_string())));
+        assert_eq!(cols.len(), 1, "only the non-key column should remain");
+    }
+
+    // A marker (row tombstone / null / suppressed carrier) yields no columns.
+    #[test]
+    fn test_marker_yields_empty_map() {
+        let (context, parser) = build_context_and_parser();
+        let row = ScanRow::Marker(Value::Null);
+        let cols = SchemaAwareReader::disassemble_row(&context, &parser, &row).expect("decode");
+        assert!(cols.is_empty());
     }
 
     #[test]
