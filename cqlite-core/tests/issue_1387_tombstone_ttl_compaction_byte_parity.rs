@@ -696,10 +696,9 @@ async fn rt_cross_gen_compaction_byte_for_byte() {
                             .and_then(|d| d.get("local_delete_time"))
                             .and_then(|v| v.as_str())
                         {
-                            if let Some(secs) = iso_to_epoch_secs(iso) {
-                                if !ldts.contains(&secs) {
-                                    ldts.push(secs);
-                                }
+                            if let Some(secs) = iso_to_epoch_secs(iso).filter(|s| !ldts.contains(s))
+                            {
+                                ldts.push(secs);
                             }
                         }
                     }
