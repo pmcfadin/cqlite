@@ -48,6 +48,80 @@ use std::path::{Path, PathBuf};
 /// as the replay-time sanity bound.
 const MAX_ENTRY_LENGTH: u32 = 16 * 1024 * 1024;
 
+/// Outcome of a WAL crash-recovery replay (issue #1391).
+///
+/// Replaying a WAL is not always lossless: a crash can leave a torn tail, and
+/// on-disk bit-rot can corrupt an entry in the MIDDLE of the log. The previous
+/// `replay()` returned a bare `Ok(Vec<Mutation>)` in every case, so a corrupt
+/// recovery was indistinguishable from a clean one — and the next flush then
+/// truncated the WAL, making the loss permanent and invisible.
+///
+/// This report makes lossiness explicit. Callers MUST consult
+/// [`is_clean`](Self::is_clean) before treating the recovery as complete;
+/// [`WriteEngine`](super::WriteEngine) preserves the raw WAL segment aside and
+/// surfaces the report rather than silently truncating over corruption.
+///
+/// # Recovery posture (fail-fast, then report)
+///
+/// The WAL framing has no sync markers, so once an entry's CRC does not verify
+/// (or its declared length is implausible) the byte offset of the *next* entry
+/// cannot be recovered authoritatively — trusting the corrupt length is exactly
+/// the misalignment bug that decoded arbitrary garbage. Replay therefore matches
+/// Cassandra's `CommitLogReplayer` default: it recovers the valid *prefix*, then
+/// **stops at the first unrecoverable corruption** ([`stopped_early`]) rather
+/// than guessing a resync point. The only exception is a CRC-*valid* entry whose
+/// payload fails to deserialize: the CRC guarantees the entry boundary, so that
+/// single entry is skipped (counted in [`corrupt_entries`]) and replay continues
+/// — an authoritative, non-heuristic resync.
+///
+/// [`stopped_early`]: Self::stopped_early
+/// [`corrupt_entries`]: Self::corrupt_entries
+#[derive(Debug, Clone, Default)]
+pub struct RecoveryReport {
+    /// Mutations recovered, in log order. On corruption this is the valid
+    /// prefix that precedes the first unrecoverable entry.
+    pub mutations: Vec<Mutation>,
+    /// Number of entries that could not be recovered (CRC mismatch, implausible
+    /// length, or CRC-valid-but-undecodable payload).
+    pub corrupt_entries: usize,
+    /// True when replay stopped before end-of-file because it hit corruption it
+    /// could not authoritatively resync past. Any entries after the stop point
+    /// are NOT in [`mutations`](Self::mutations) and are covered by
+    /// [`bytes_skipped`](Self::bytes_skipped).
+    pub stopped_early: bool,
+    /// Number of trailing bytes that were present on disk but not recovered
+    /// (the corrupt entry plus everything after it when `stopped_early`).
+    pub bytes_skipped: u64,
+}
+
+impl RecoveryReport {
+    /// A recovery is clean iff no entry was corrupt and replay reached EOF
+    /// without stopping early. A torn tail (an incomplete final append that was
+    /// never acknowledged) is NOT corruption and keeps a report clean.
+    pub fn is_clean(&self) -> bool {
+        self.corrupt_entries == 0 && !self.stopped_early
+    }
+}
+
+/// Why a sequential WAL scan stopped advancing (issue #1390 + #1391).
+///
+/// Distinguishing a torn tail from mid-stream corruption is the crux of safe
+/// recovery: a torn tail is an interrupted final append (safe to trim), whereas
+/// a CRC mismatch / implausible length on a fully-present entry is *unexpected
+/// corruption* whose successors must NOT be silently trimmed away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WalStop {
+    /// Reached end-of-file exactly on an entry boundary — a fully clean log.
+    CleanEof,
+    /// The trailing entry was short (header or payload cut off): an interrupted
+    /// append that was never acknowledged. Safe to trim.
+    TornTail,
+    /// A fully-present entry failed CRC or declared an implausible length. The
+    /// framing past this point is untrustworthy; successors must be preserved,
+    /// not silently discarded.
+    Corruption,
+}
+
 /// Sync directory metadata to ensure file entries are persisted
 ///
 /// On POSIX systems this is critical for crash safety - without syncing the
@@ -609,7 +683,7 @@ impl WriteAheadLog {
         // silently unrecoverable on the next replay (issue #1390). The boundary
         // is derived from the length-prefixed + CRC32 framing (authoritative,
         // not a byte-pattern guess), matching the no-heuristics mandate.
-        let valid_end = Self::scan_last_valid_offset(path)?;
+        let (valid_end, stop) = Self::scan_valid_prefix(path)?;
 
         let file = OpenOptions::new()
             .read(true)
@@ -621,11 +695,16 @@ impl WriteAheadLog {
             .metadata()
             .map_err(|e| Error::Storage(format!("Failed to read WAL metadata: {}", e)))?;
 
-        let current_size = metadata.len();
+        let file_len = metadata.len();
 
-        if valid_end < current_size {
-            // Physically trim the torn tail so future appends resume exactly at
-            // the last CRC-valid boundary.
+        // Only a TORN TAIL (an interrupted, never-acknowledged final append) may
+        // be trimmed — that is #1390's guarantee that future appends resume at
+        // the last valid boundary. A CRC mismatch / implausible length on a
+        // fully-present entry (`Corruption`) may have VALID successors, so
+        // silently `set_len`-ing them away would be the very data loss #1391
+        // guards against. We leave a corrupt log physically intact; `replay()`
+        // surfaces the loss and `WriteEngine` preserves the raw segment aside.
+        let current_size = if stop == WalStop::TornTail && valid_end < file_len {
             file.set_len(valid_end).map_err(|e| {
                 Error::Storage(format!("Failed to trim torn WAL tail at {:?}: {}", path, e))
             })?;
@@ -641,63 +720,72 @@ impl WriteAheadLog {
             log::warn!(
                 "WAL {:?} had a torn tail: trimmed {} byte(s) ({} -> {})",
                 path,
-                current_size - valid_end,
-                current_size,
+                file_len - valid_end,
+                file_len,
                 valid_end
             );
-        }
+            valid_end
+        } else {
+            if stop == WalStop::Corruption {
+                // Do not paper over corruption: appends resume after the intact
+                // (corrupt) bytes and replay/WriteEngine surface the loss.
+                log::error!(
+                    "WAL {:?} has corruption at offset {} ({} valid prefix byte(s) of {}); \
+                     leaving the segment intact for recovery",
+                    path,
+                    valid_end,
+                    valid_end,
+                    file_len
+                );
+            }
+            file_len
+        };
 
         Ok(Self {
             file: BufWriter::with_capacity(Self::DEFAULT_BUFFER_SIZE, file),
             path: path.to_path_buf(),
             buffer_size: Self::DEFAULT_BUFFER_SIZE,
-            current_size: valid_end,
+            current_size,
         })
     }
 
-    /// Scan the WAL and return the byte offset at the end of the last
-    /// structurally-COMPLETE entry — the boundary past which only a torn
-    /// (partially written) tail remains and at which future appends must resume.
+    /// Scan the WAL and return the byte offset at the end of the last CRC-valid
+    /// entry — the boundary at which future appends must resume.
     ///
     /// Reads entries sequentially using the same length-prefixed + CRC32 framing
-    /// as [`replay`](Self::replay). This trims ONLY a torn tail, i.e. it stops
-    /// (the recoverable prefix ends) at the first record that is
-    /// structurally-INCOMPLETE at the physical tail:
+    /// as [`replay`](Self::replay). Scanning stops (the valid prefix ends) at the
+    /// first entry that is:
     /// - missing/short in its 8-byte header (torn header),
-    /// - declaring an implausible length (> [`MAX_ENTRY_LENGTH`]): the framing is
-    ///   garbage and cannot be trusted to locate the next entry, or
-    /// - short in its payload (fewer bytes than the declared length remain — a
-    ///   torn body).
-    ///
-    /// Crucially, a structurally-COMPLETE entry (full declared payload present)
-    /// advances the prefix REGARDLESS of CRC validity. A complete-but-CRC-corrupt
-    /// entry that still has further entries after it is NOT a torn tail (issue
-    /// #1390 is scoped to torn tails only); truncating at it would permanently
-    /// lose the acknowledged entries that follow. [`replay`](Self::replay)
-    /// already skips a CRC-corrupt entry and continues past it, so leaving such
-    /// an entry in place is correct. (Surfacing that mid-stream loss to callers
-    /// is issue #1391, out of scope here.)
+    /// - declaring an implausible length (> [`MAX_ENTRY_LENGTH`], garbage tail),
+    /// - short in its payload (torn body), or
+    /// - CRC-invalid (corrupt framing — offsets past it cannot be trusted).
     ///
     /// The returned offset is therefore the end of a contiguous run of fully
-    /// written entries. Only the bytes beyond it — a partial record left by an
-    /// interrupted append — are trimmed ahead of new appends.
-    fn scan_last_valid_offset(path: &Path) -> Result<u64> {
+    /// written, CRC-valid entries. Bytes beyond it are a partial/corrupt tail
+    /// left by an interrupted append and must not be retained ahead of new
+    /// appends.
+    fn scan_valid_prefix(path: &Path) -> Result<(u64, WalStop)> {
         let mut file = File::open(path)
             .map_err(|e| Error::Storage(format!("Failed to open WAL for scan: {}", e)))?;
-        let file_len = file
-            .metadata()
-            .map_err(|e| Error::Storage(format!("Failed to read WAL metadata for scan: {}", e)))?
-            .len();
 
         let mut offset = 0u64;
 
         loop {
-            // Read entry header: [length][crc32]. A short/absent header means the
-            // tail was cut mid-header — the recoverable prefix ends here.
+            // Read entry header: [length][crc32].
             let mut header = [0u8; 8];
             match file.read_exact(&mut header) {
                 Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                // Clean boundary vs a header cut short: a full-length read that
+                // hit EOF immediately (0 bytes) is a clean end-of-log; a partial
+                // header is a torn tail.
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    let stop = if offset == 0 || Self::at_clean_eof(&mut file, offset)? {
+                        WalStop::CleanEof
+                    } else {
+                        WalStop::TornTail
+                    };
+                    return Ok((offset, stop));
+                }
                 Err(e) => {
                     return Err(Error::Storage(format!(
                         "Failed to scan WAL header at offset {}: {}",
@@ -707,42 +795,52 @@ impl WriteAheadLog {
             }
 
             let entry_length = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+            let expected_crc = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
 
-            // An implausible declared length means the framing at this point is
-            // garbage (a torn/partial header write). We cannot trust it to locate
-            // the next entry, so the recoverable prefix ends here.
+            // Implausible length on a fully-present header => corruption, not a
+            // torn tail: the framing is untrustworthy and any successors must be
+            // preserved rather than discarded.
             if entry_length > MAX_ENTRY_LENGTH {
-                break;
+                return Ok((offset, WalStop::Corruption));
             }
 
-            // A payload shorter than the declared length is a torn body: the tail
-            // was cut mid-entry. (Header read above already advanced the cursor by
-            // 8, so `offset + 8` is the payload start.)
-            let payload_end = offset
-                .saturating_add(8)
-                .saturating_add(u64::from(entry_length));
-            if payload_end > file_len {
-                break;
-            }
-
-            // Skip the payload WITHOUT inspecting its CRC. A structurally-complete
-            // entry advances the recoverable prefix regardless of CRC validity: a
-            // complete-but-CRC-corrupt entry with further entries after it is not a
-            // torn tail, and `replay` skips it and continues. Only a
-            // structurally-incomplete record at the physical tail (handled by the
-            // breaks above) ends the prefix.
-            file.seek(SeekFrom::Current(i64::from(entry_length)))
-                .map_err(|e| {
-                    Error::Storage(format!(
-                        "Failed to advance past WAL payload at offset {}: {}",
+            // Read the declared payload; a short read means a torn body (the
+            // final append was interrupted).
+            let mut payload = vec![0u8; entry_length as usize];
+            match file.read_exact(&mut payload) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    return Ok((offset, WalStop::TornTail));
+                }
+                Err(e) => {
+                    return Err(Error::Storage(format!(
+                        "Failed to scan WAL payload at offset {}: {}",
                         offset, e
-                    ))
-                })?;
+                    )));
+                }
+            }
 
-            offset = payload_end;
+            // Verify CRC. A mismatch on a fully-present entry means the framing
+            // (including the length we just trusted) is unreliable, so this is
+            // corruption — offsets past it cannot be resynced authoritatively.
+            let mut hasher = Hasher::new();
+            hasher.update(&payload);
+            if hasher.finalize() != expected_crc {
+                return Ok((offset, WalStop::Corruption));
+            }
+
+            offset += 8 + entry_length as u64;
         }
+    }
 
-        Ok(offset)
+    /// Distinguish a clean end-of-log from a torn header after a short header
+    /// read: seek to `offset` and check that exactly zero bytes remain.
+    fn at_clean_eof(file: &mut File, offset: u64) -> Result<bool> {
+        let len = file
+            .metadata()
+            .map_err(|e| Error::Storage(format!("Failed to read WAL metadata during scan: {}", e)))?
+            .len();
+        Ok(len == offset)
     }
 
     /// Append a mutation to the WAL
@@ -832,24 +930,43 @@ impl WriteAheadLog {
     /// Reads the WAL from the beginning and deserializes all valid entries.
     /// This is used during crash recovery to rebuild the memtable.
     ///
-    /// ## Corruption Handling
+    /// ## Corruption Handling (issue #1391)
     ///
-    /// - **Corrupted entries** (CRC mismatch): Logged as warnings, skipped
-    /// - **Truncated entries** (incomplete write): Stops replay, returns valid entries
-    /// - **Valid entries**: Deserialized and returned in order
+    /// Recovery is fail-fast-then-report — see [`RecoveryReport`] for the full
+    /// rationale. In summary:
+    ///
+    /// - **CRC mismatch / implausible length** on a fully-present entry: the
+    ///   framing past this point cannot be resynced authoritatively (no sync
+    ///   markers), so replay STOPS ([`RecoveryReport::stopped_early`]) and
+    ///   records the loss. It does NOT advance by the untrusted length (that was
+    ///   the misalignment bug that decoded garbage).
+    /// - **CRC-valid but undecodable payload**: the entry boundary is
+    ///   trustworthy, so this single entry is skipped
+    ///   ([`RecoveryReport::corrupt_entries`]) and replay continues.
+    /// - **Torn tail** (short header/payload at EOF): an interrupted final
+    ///   append that was never acknowledged — replay stops cleanly (not counted
+    ///   as corruption).
+    /// - **Valid entries**: deserialized and returned in order.
     ///
     /// # Returns
     ///
-    /// A vector of all valid mutations read from the WAL.
+    /// A [`RecoveryReport`]. Callers MUST check [`RecoveryReport::is_clean`]
+    /// before treating recovery as complete; a non-clean report signals data
+    /// loss that must be surfaced, not silently truncated over.
     ///
     /// # Errors
     ///
-    /// Returns an error if the WAL file cannot be opened or read.
-    pub fn replay(&self) -> Result<Vec<Mutation>> {
+    /// Returns an error if the WAL file cannot be opened or read (an I/O fault
+    /// distinct from in-band corruption, which is reported, not errored).
+    pub fn replay(&self) -> Result<RecoveryReport> {
         let mut file = File::open(&self.path)
             .map_err(|e| Error::Storage(format!("Failed to open WAL for replay: {}", e)))?;
+        let total_len = file
+            .metadata()
+            .map_err(|e| Error::Storage(format!("Failed to read WAL metadata for replay: {}", e)))?
+            .len();
 
-        let mut mutations = Vec::new();
+        let mut report = RecoveryReport::default();
         let mut offset = 0u64;
 
         loop {
@@ -858,7 +975,8 @@ impl WriteAheadLog {
             match file.read_exact(&mut header) {
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    // End of file or truncated header - stop replay
+                    // Clean EOF or a torn (never-acknowledged) final append -
+                    // stop replay without flagging corruption.
                     break;
                 }
                 Err(e) => {
@@ -872,13 +990,20 @@ impl WriteAheadLog {
             let entry_length = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
             let expected_crc = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
 
-            // Sanity check: entry length should be reasonable (<16MB)
+            // Implausible length: cannot trust the framing to find the next
+            // entry, so fail fast and report rather than skipping by a bogus
+            // length into arbitrary bytes.
             if entry_length > MAX_ENTRY_LENGTH {
-                log::warn!(
-                    "WAL entry at offset {} has unreasonable length {} - stopping replay",
+                log::error!(
+                    "WAL entry at offset {} declares implausible length {} (> {}) - stopping \
+                     replay; {} trailing byte(s) not recovered",
                     offset,
-                    entry_length
+                    entry_length,
+                    MAX_ENTRY_LENGTH,
+                    total_len.saturating_sub(offset)
                 );
+                report.corrupt_entries += 1;
+                report.stopped_early = true;
                 break;
             }
 
@@ -887,12 +1012,8 @@ impl WriteAheadLog {
             match file.read_exact(&mut mutation_bytes) {
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    // Truncated entry - stop replay
-                    log::warn!(
-                        "WAL entry at offset {} is truncated (expected {} bytes) - stopping replay",
-                        offset,
-                        entry_length
-                    );
+                    // Torn payload at the tail - interrupted final append, not
+                    // corruption. Stop cleanly.
                     break;
                 }
                 Err(e) => {
@@ -909,34 +1030,46 @@ impl WriteAheadLog {
             let actual_crc = hasher.finalize();
 
             if actual_crc != expected_crc {
-                log::warn!(
-                    "WAL entry at offset {} has CRC mismatch (expected 0x{:08x}, got 0x{:08x}) - skipping",
+                // CRC mismatch on a fully-present entry: the length we just
+                // trusted is unreliable, so the offset of the next entry is
+                // unknown. Fail fast and report; do NOT advance-and-continue.
+                log::error!(
+                    "WAL entry at offset {} has CRC mismatch (expected 0x{:08x}, got 0x{:08x}) - \
+                     stopping replay; {} trailing byte(s) not recovered",
                     offset,
                     expected_crc,
-                    actual_crc
+                    actual_crc,
+                    total_len.saturating_sub(offset)
                 );
-                offset += 8 + entry_length as u64;
-                continue;
+                report.corrupt_entries += 1;
+                report.stopped_early = true;
+                break;
             }
 
-            // Deserialize mutation (tolerating legacy pre-#764 records).
+            // CRC valid => the entry boundary is authoritative. Deserialize
+            // (tolerating legacy pre-#764 records). A decode failure here is a
+            // format skew our compat layers do not cover; because the boundary
+            // is trustworthy we skip just this entry and continue.
             match decode_mutation(&mutation_bytes) {
                 Ok(mutation) => {
-                    mutations.push(mutation);
+                    report.mutations.push(mutation);
                 }
                 Err(e) => {
-                    log::warn!(
-                        "WAL entry at offset {} failed to deserialize: {} - skipping",
+                    log::error!(
+                        "WAL entry at offset {} passed CRC but failed to deserialize: {} - \
+                         skipping this entry and continuing",
                         offset,
                         e
                     );
+                    report.corrupt_entries += 1;
                 }
             }
 
             offset += 8 + entry_length as u64;
         }
 
-        Ok(mutations)
+        report.bytes_skipped = total_len.saturating_sub(offset);
+        Ok(report)
     }
 
     /// Truncate the WAL (clear all entries)
@@ -1098,7 +1231,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal = WriteAheadLog::create(temp_dir.path()).unwrap();
 
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 0);
     }
 
@@ -1111,7 +1244,7 @@ mod tests {
         wal.append(&mutation).unwrap();
         wal.sync().unwrap();
 
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 1);
         assert_eq!(mutations[0].table.keyspace, "test_ks");
         assert_eq!(mutations[0].table.table, "test_table");
@@ -1128,7 +1261,7 @@ mod tests {
         }
         wal.sync().unwrap();
 
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 10);
 
         for (i, mutation) in mutations.iter().enumerate() {
@@ -1161,7 +1294,7 @@ mod tests {
         wal.truncate().unwrap();
         assert_eq!(wal.size(), 0);
 
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 0);
     }
 
@@ -1184,10 +1317,17 @@ mod tests {
         file.sync_all().unwrap();
         drop(file);
 
-        // Replay should skip the corrupted entry
+        // The corrupt (fully-present) entry must be reported, not silently
+        // dropped: no mutation is recovered, and the report is not clean.
         let wal = WriteAheadLog::open_existing(&wal_path).unwrap();
-        let mutations = wal.replay().unwrap();
-        assert_eq!(mutations.len(), 0);
+        let report = wal.replay().unwrap();
+        assert_eq!(report.mutations.len(), 0);
+        assert!(
+            !report.is_clean(),
+            "CRC corruption must surface as non-clean"
+        );
+        assert_eq!(report.corrupt_entries, 1);
+        assert!(report.stopped_early);
     }
 
     #[test]
@@ -1210,7 +1350,7 @@ mod tests {
 
         // Replay should stop at truncated entry
         let wal = WriteAheadLog::open_existing(&wal_path).unwrap();
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 0);
     }
 
@@ -1278,7 +1418,7 @@ mod tests {
         wal.sync().unwrap();
 
         // Replay should get both entries
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 2);
     }
 
@@ -1299,7 +1439,7 @@ mod tests {
         wal.append(&mutation).unwrap();
         wal.sync().unwrap();
 
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 1);
         assert!(mutations[0].clustering_key.is_some());
     }
@@ -1320,7 +1460,7 @@ mod tests {
         wal.append(&mutation).unwrap();
         wal.sync().unwrap();
 
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 1);
         assert_eq!(mutations[0].ttl_seconds, Some(3600));
     }
@@ -1341,7 +1481,7 @@ mod tests {
         wal.append(&mutation).unwrap();
         wal.sync().unwrap();
 
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 1);
         assert!(matches!(
             &mutations[0].operations[0],
@@ -1362,7 +1502,7 @@ mod tests {
         wal.append(&mutation).unwrap();
         wal.sync().unwrap();
 
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 1);
         assert!(matches!(
             &mutations[0].operations[0],
@@ -1386,7 +1526,7 @@ mod tests {
         wal.append(&mutation).unwrap();
         wal.sync().unwrap();
 
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 1);
         assert_eq!(
             mutations[0].local_deletion_time,
@@ -1407,7 +1547,7 @@ mod tests {
         wal.append(&mutation).unwrap();
         wal.sync().unwrap();
 
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 1);
         assert_eq!(mutations[0].local_deletion_time, None);
     }
@@ -1556,7 +1696,7 @@ mod tests {
         wal.append(&mutation).unwrap();
         wal.sync().unwrap();
 
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 1);
         match &mutations[0].operations[0] {
             CellOperation::Delete {
@@ -1849,7 +1989,7 @@ mod tests {
         );
         assert_eq!(wal.size(), end_of_a);
 
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 1, "only A survives the trim");
     }
 
@@ -1878,7 +2018,7 @@ mod tests {
 
         // Fresh reopen + replay must recover exactly [A, C].
         let wal = WriteAheadLog::open_existing(&path).unwrap();
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(
             mutations.len(),
             2,
@@ -1924,7 +2064,7 @@ mod tests {
         }
 
         let wal = WriteAheadLog::open_existing(&path).unwrap();
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(
             mutations.len(),
             2,
@@ -1947,7 +2087,7 @@ mod tests {
                 "a clean log must not be truncated"
             );
             assert_eq!(wal.size(), total);
-            let mutations = wal.replay().unwrap();
+            let mutations = wal.replay().unwrap().mutations;
             assert_eq!(mutations.len(), 2, "clean log preserves all entries");
         }
 
@@ -1958,7 +2098,7 @@ mod tests {
             wal.sync().unwrap();
         }
         let wal = WriteAheadLog::open_existing(&path).unwrap();
-        assert_eq!(wal.replay().unwrap().len(), 3);
+        assert_eq!(wal.replay().unwrap().mutations.len(), 3);
     }
 
     /// Regression (#1390 roborev finding): a COMPLETE but CRC-corrupt entry in

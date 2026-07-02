@@ -53,7 +53,7 @@ pub use mutation::{
     PartitionTombstone, RangeTombstone, TableId,
 };
 #[cfg(feature = "write-support")]
-pub use wal::WriteAheadLog;
+pub use wal::{RecoveryReport, WriteAheadLog};
 
 #[cfg(feature = "write-support")]
 mod compaction;
@@ -290,6 +290,13 @@ pub struct WriteEngine {
     wal: WriteAheadLog,
     /// In-memory write buffer
     memtable: Memtable,
+    /// Summary of the WAL crash-recovery replay performed in `new()` (issue
+    /// #1391). Its `mutations` are drained into the memtable, leaving only the
+    /// lossiness metadata (`corrupt_entries`, `stopped_early`, `bytes_skipped`).
+    /// Exposed via [`WriteEngine::wal_recovery`] so a caller can detect that a
+    /// recovery was lossy BEFORE the next flush truncates the WAL. A non-clean
+    /// recovery also preserves the raw WAL segment aside (see `new()`).
+    wal_recovery: RecoveryReport,
     /// SSTable generation counter (increments on each flush)
     generation: u64,
     /// Whether the engine has been closed (atomic for thread safety)
@@ -437,9 +444,30 @@ impl WriteEngine {
             WriteAheadLog::create(&config.wal_dir)?
         };
 
-        // Replay WAL into memtable
+        // Replay WAL into memtable. The report distinguishes a clean recovery
+        // from a lossy one (issue #1391); a bare Vec cannot.
         let mut memtable = Memtable::new();
-        let mutations = wal.replay()?;
+        let mut wal_recovery = wal.replay()?;
+        let mutations = std::mem::take(&mut wal_recovery.mutations);
+
+        if !wal_recovery.is_clean() {
+            // Preserve the raw WAL segment aside BEFORE anything (a later flush)
+            // can truncate it, so the corruption evidence survives for manual
+            // recovery. The report is also retained on the engine and exposed
+            // via `wal_recovery()` so a caller sees the loss pre-truncate.
+            let preserved = Self::preserve_corrupt_wal(&wal_path)?;
+            log::error!(
+                "WAL recovery at {:?} was LOSSY: recovered {} mutation(s), {} corrupt entry \
+                 (entries), stopped_early={}, {} byte(s) not recovered. Raw segment preserved at \
+                 {:?}. Investigate before relying on this data.",
+                wal_path,
+                mutations.len(),
+                wal_recovery.corrupt_entries,
+                wal_recovery.stopped_early,
+                wal_recovery.bytes_skipped,
+                preserved,
+            );
+        }
 
         if !mutations.is_empty() {
             log::info!("Replaying {} mutations from WAL", mutations.len());
@@ -466,6 +494,7 @@ impl WriteEngine {
             config,
             wal,
             memtable,
+            wal_recovery,
             generation,
             closed: AtomicBool::new(false),
             active_merge: None,
@@ -475,6 +504,47 @@ impl WriteEngine {
             l0_count: 0,
             dir_lock,
         })
+    }
+
+    /// Summary of the WAL crash-recovery replay performed when this engine was
+    /// opened (issue #1391).
+    ///
+    /// The `mutations` field has been drained into the memtable, so only the
+    /// lossiness metadata remains. Use [`RecoveryReport::is_clean`] to detect a
+    /// lossy recovery. A non-clean report means the raw WAL segment was
+    /// preserved aside (as `commitlog.wal.corrupt.<nanos>`) so a subsequent
+    /// flush cannot destroy the evidence.
+    pub fn wal_recovery(&self) -> &RecoveryReport {
+        &self.wal_recovery
+    }
+
+    /// Copy the raw WAL file aside before any truncation can destroy it, so a
+    /// lossy recovery leaves forensic evidence (issue #1391). Returns the path
+    /// of the preserved copy.
+    ///
+    /// The copy is a sibling `commitlog.wal.corrupt.<unix_nanos>`; the original
+    /// is left untouched (a later flush truncates it, but the aside copy — and
+    /// the retained [`RecoveryReport`] — survive).
+    fn preserve_corrupt_wal(wal_path: &Path) -> Result<PathBuf> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let file_name = wal_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| WriteAheadLog::WAL_FILENAME.to_string());
+        let preserved = match wal_path.parent() {
+            Some(parent) => parent.join(format!("{}.corrupt.{}", file_name, nanos)),
+            None => PathBuf::from(format!("{}.corrupt.{}", file_name, nanos)),
+        };
+        std::fs::copy(wal_path, &preserved).map_err(|e| {
+            Error::Storage(format!(
+                "Failed to preserve corrupt WAL {:?} aside to {:?}: {}",
+                wal_path, preserved, e
+            ))
+        })?;
+        Ok(preserved)
     }
 
     /// Write a mutation to the write engine
@@ -1389,6 +1459,140 @@ mod tests {
                 "both A and C must survive the second recovery (C must not be lost)"
             );
         }
+    }
+
+    // ---- Issue #1391: engine-level flush guard over a lossy WAL replay ----
+    //
+    // A lossy WAL recovery must be surfaced to the caller (via the retained
+    // RecoveryReport) AND its raw segment preserved aside BEFORE the next flush
+    // truncates the WAL. Otherwise the loss becomes permanent and invisible.
+
+    /// Build a 3-entry (A, B, C) WAL in `wal_dir` and return the byte offset at
+    /// the end of entry A (so B's payload, which starts at `end_a + 8`, can be
+    /// corrupted). All entries are fsync'd.
+    fn seed_wal_abc(wal_dir: &Path) -> u64 {
+        std::fs::create_dir_all(wal_dir).unwrap();
+        let mut wal = WriteAheadLog::create(wal_dir).unwrap();
+        wal.append(&create_test_mutation(1, "A", 1_000_000))
+            .unwrap();
+        wal.sync().unwrap();
+        let end_a = wal.size();
+        wal.append(&create_test_mutation(2, "B", 2_000_000))
+            .unwrap();
+        wal.sync().unwrap();
+        wal.append(&create_test_mutation(3, "C", 3_000_000))
+            .unwrap();
+        wal.sync().unwrap();
+        drop(wal);
+        end_a
+    }
+
+    fn count_corrupt_aside(wal_dir: &Path) -> usize {
+        std::fs::read_dir(wal_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .contains("commitlog.wal.corrupt.")
+            })
+            .count()
+    }
+
+    /// Criterion 5: a lossy WAL must not be silently truncated by the first
+    /// flush. Opening the engine over an A,B(corrupt),C WAL must expose a
+    /// non-clean RecoveryReport and preserve the raw segment aside; a subsequent
+    /// flush must NOT destroy that evidence.
+    #[tokio::test]
+    async fn test_write_engine_lossy_wal_preserved_before_flush_truncate() {
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+
+        let end_a = seed_wal_abc(&config.wal_dir);
+
+        // Bit-flip the first payload byte of B (just past its 8-byte header).
+        let wal_file = config.wal_dir.join(WriteAheadLog::WAL_FILENAME);
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&wal_file)
+                .unwrap();
+            f.seek(SeekFrom::Start(end_a + 8)).unwrap();
+            let mut byte = [0u8; 1];
+            f.read_exact(&mut byte).unwrap();
+            f.seek(SeekFrom::Start(end_a + 8)).unwrap();
+            f.write_all(&[byte[0] ^ 0x01]).unwrap();
+            f.sync_all().unwrap();
+        }
+
+        // Open the engine: recovery must surface as lossy and preserve evidence.
+        let mut engine = WriteEngine::new(config.clone()).unwrap();
+        assert!(
+            !engine.wal_recovery().is_clean(),
+            "engine must expose a non-clean RecoveryReport for a lossy WAL"
+        );
+        assert_eq!(engine.wal_recovery().corrupt_entries, 1);
+        assert!(engine.wal_recovery().stopped_early);
+        assert_eq!(
+            engine.memtable_row_count(),
+            1,
+            "only the valid prefix [A] is recovered"
+        );
+        assert_eq!(
+            count_corrupt_aside(&config.wal_dir),
+            1,
+            "the raw corrupt WAL segment must be preserved aside BEFORE any flush"
+        );
+
+        // Flush: this truncates the live WAL, but the preserved evidence must
+        // survive so the loss is not destroyed.
+        engine.flush().await.unwrap();
+        assert_eq!(
+            count_corrupt_aside(&config.wal_dir),
+            1,
+            "flush must NOT destroy the preserved corrupt WAL segment"
+        );
+    }
+
+    /// Regression guard: a CLEAN recovery is unchanged — no aside file, and the
+    /// flush truncates the WAL normally.
+    #[tokio::test]
+    async fn test_write_engine_clean_wal_recovery_truncates_normally() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+
+        seed_wal_abc(&config.wal_dir);
+
+        let mut engine = WriteEngine::new(config.clone()).unwrap();
+        assert!(engine.wal_recovery().is_clean());
+        assert_eq!(engine.memtable_row_count(), 3, "A, B, C all recovered");
+        assert_eq!(
+            count_corrupt_aside(&config.wal_dir),
+            0,
+            "a clean recovery must not preserve any aside segment"
+        );
+
+        engine.flush().await.unwrap();
+        let wal_file = config.wal_dir.join(WriteAheadLog::WAL_FILENAME);
+        assert_eq!(
+            std::fs::metadata(&wal_file).unwrap().len(),
+            0,
+            "clean recovery: the WAL is truncated normally after flush"
+        );
+        assert_eq!(count_corrupt_aside(&config.wal_dir), 0);
     }
 
     #[test]
