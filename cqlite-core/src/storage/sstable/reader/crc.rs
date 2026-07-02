@@ -49,6 +49,18 @@ use std::path::Path;
 
 use crate::{Error, Result};
 
+/// Upper bound accepted for the `CRC.db` chunk-size header (issue #1396).
+///
+/// Cassandra writes uncompressed BIG SSTables with a 64 KiB (`65536`) chunk and
+/// there is no realistic reason for an uncompressed CRC chunk to be larger. A
+/// malformed / hostile sidecar could advertise an arbitrary positive `i32`
+/// (up to ~2 GiB) which downstream verification turns into a `vec![0u8; n]`
+/// scratch allocation — an OOM / DoS vector. We cap at 16 MiB: generously above
+/// any plausible real chunk length yet a bounded allocation, so an absurd
+/// header is rejected as typed corruption at parse time rather than exhausting
+/// memory. Any legitimate value stays far below this.
+pub(crate) const MAX_CRC_CHUNK_SIZE: u32 = 16 * 1024 * 1024;
+
 /// Parsed `CRC.db`: the chunk-size header plus one CRC32 per Data.db chunk.
 #[derive(Debug, Clone)]
 pub(crate) struct CrcDb {
@@ -78,6 +90,13 @@ impl CrcDb {
             )));
         }
         let chunk_size = chunk_size_raw as u32;
+        if chunk_size > MAX_CRC_CHUNK_SIZE {
+            // Bound the header before any downstream `vec![0u8; chunk_size]`
+            // verification buffer is sized from it (issue #1396: OOM guard).
+            return Err(Error::corruption(format!(
+                "CRC.db chunk-size header is {chunk_size} bytes — exceeds the {MAX_CRC_CHUNK_SIZE}-byte maximum (Cassandra default 65536); refusing to allocate an unbounded verification buffer"
+            )));
+        }
 
         let body = &bytes[4..];
         if body.len() % 4 != 0 {
@@ -191,6 +210,30 @@ mod tests {
         // Negative (high bit set) chunk-size header.
         let neg = [0x80u8, 0, 0, 0];
         assert!(matches!(CrcDb::parse(&neg), Err(Error::Corruption(_))));
+    }
+
+    #[test]
+    fn absurd_chunk_size_is_typed_error_not_oom() {
+        // A sidecar advertising a chunk size far above MAX_CRC_CHUNK_SIZE (here
+        // near i32::MAX) must be rejected as typed corruption at parse time —
+        // BEFORE any `vec![0u8; chunk_size]` verification buffer is sized from
+        // it — rather than attempting a multi-gigabyte allocation (issue #1396).
+        let bytes = synth_crc_db(i32::MAX as u32, &[]);
+        let err = CrcDb::parse(&bytes).expect_err("absurd chunk size must error");
+        assert!(
+            matches!(err, Error::Corruption(_)),
+            "typed corruption: {err}"
+        );
+        assert!(
+            err.to_string().contains("maximum"),
+            "message names the maximum bound: {err}"
+        );
+        // Exactly at the cap parses; one byte over is rejected.
+        assert!(CrcDb::parse(&synth_crc_db(MAX_CRC_CHUNK_SIZE, &[])).is_ok());
+        assert!(matches!(
+            CrcDb::parse(&synth_crc_db(MAX_CRC_CHUNK_SIZE + 1, &[])),
+            Err(Error::Corruption(_))
+        ));
     }
 
     #[test]

@@ -1317,6 +1317,10 @@ async fn check_uncompressed_crc_db(
     // to the stored value (bounded memory, O(chunk_size)).
     let mut chunk_index = 0usize;
     let mut offset: u64 = 0;
+    // `chunk_size` is bounded by `MAX_CRC_CHUNK_SIZE` at parse time
+    // (`CrcDb::parse`, issue #1396) — a malformed sidecar advertising an absurd
+    // size was already rejected above as typed corruption, so this scratch
+    // allocation can never scale to an OOM.
     let mut buf = vec![0u8; chunk_size];
     loop {
         let mut filled = 0usize;

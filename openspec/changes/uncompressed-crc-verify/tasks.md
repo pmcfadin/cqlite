@@ -39,7 +39,9 @@
       Cassandra-written `test_basic/uncompressed_table`; single deterministic byte flip).
 - [x] Add the manifest entry (mutation offset, original/mutated bytes, SHA-256 bindings,
       `verdict_captured_for_dir_sha256`) with the captured Cassandra 5.0.2 `sstableverify`
-      verdict as oracle; record the absent-`CRC.db` pinned behavior scenario.
+      verdict as oracle; record the absent-`CRC.db` pinned behavior scenario in the
+      manifest's `design_notes` (key `crc_db_absent`: warn-and-proceed / read unverified,
+      owner-approved) so R5 cannot drift silently (issue #1396).
 - [x] Parity test: CQLite verify verdict matches the captured Cassandra verdict for this
       class; fixture is SHA-bound and fails closed when absent.
 

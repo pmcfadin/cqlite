@@ -16,6 +16,23 @@ cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
 cassandra_verify_tool: "sstableverify --extended --force"
 clean_keyspace: test_comp
 corrupt_keyspace: test_comp_corrupt
+
+# Design decisions recorded here so they cannot drift silently (they are pinned
+# by tests, but the manifest is the durable, reviewable record). Not corrupted
+# fixtures — no *.db binaries.
+design_notes:
+  - key: crc_db_absent
+    issue: 1396
+    decision: warn_and_proceed
+    scope: "uncompressed BIG SSTable (no CompressionInfo.db) with CRC.db ABSENT"
+    behavior: >
+      When an uncompressed BIG SSTable ships without a CRC.db sidecar, CQLite
+      emits a one-time warning and proceeds to read the Data.db UNVERIFIED
+      (there is no authoritative per-chunk checksum to check against). This is
+      by design and owner-approved: the alternative — refusing to read — would
+      break otherwise-valid data. Read-time CRC verification (issue #1396) is
+      therefore best-effort: enforced when a CRC.db is present, skipped (with a
+      warning) when it is absent. Pinned by the absent-CRC.db unit test.
 fixtures:
   - name: data_db_bit_flip
     manifest_key: cass.corruption.data_db.bit_flip

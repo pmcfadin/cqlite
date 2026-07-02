@@ -669,7 +669,10 @@ async fn read_large_block_streaming(
 ///   one [`UNCOMPRESSED_READ_PIECE_BYTES`] piece per call, advancing the file's
 ///   stream position so successive calls walk the section. Only the sliding-
 ///   window stitchers (which reassemble across pieces and handle `NeedMore`) use
-///   this, keeping their working set bounded regardless of file size.
+///   this, keeping their working set bounded regardless of file size. When a
+///   `crc_reader` is present the piece is instead sized to end on a CRC-chunk
+///   boundary (see below) so every full CRC chunk is verified exactly once; that
+///   can enlarge the piece by at most one (bounded) CRC chunk.
 ///
 /// In BOTH modes the *read itself* streams through a capped scratch buffer
 /// (`config.read_buffer_size`) rather than allocating and zeroing a second
@@ -740,7 +743,29 @@ async fn read_uncompressed_data_block(
     // WHOLE remaining section so the block is a complete, self-contained parse
     // unit and no partition/row is truncated at a piece boundary.
     let to_read = if piecewise {
-        remaining.min(UNCOMPRESSED_READ_PIECE_BYTES)
+        match crc_reader {
+            // With a CRC.db present (issue #1396) the piece MUST end on a CRC-chunk
+            // boundary (or EOF) so every full CRC chunk lands entirely inside
+            // exactly one returned piece and is verified before its bytes are
+            // emitted. A fixed 64 KiB piece would straddle any chunk larger than
+            // 64 KiB, and `verify_uncompressed_chunks` only checks chunks FULLY
+            // contained in the buffer — so such a chunk would be silently skipped
+            // and corruption returned unverified. We read at least one full chunk
+            // (or the ~64 KiB target, whichever is larger) and round the piece end
+            // UP to the next chunk boundary; successive pieces then start
+            // chunk-aligned. Alignment enlarges the piece by at most one CRC chunk,
+            // which `MAX_CRC_CHUNK_SIZE` (Fix 2) bounds, keeping memory bounded.
+            Some(crc) => {
+                let cs = crc.chunk_size() as u64; // > 0 and bounded (CrcDb::parse validates)
+                let want = (UNCOMPRESSED_READ_PIECE_BYTES as u64).max(cs);
+                let target_end = current_pos.saturating_add(want);
+                let aligned_end = target_end.div_ceil(cs).saturating_mul(cs).min(file_size);
+                // aligned_end > current_pos (want >= one chunk), capped at file_size,
+                // so this never exceeds `remaining` and is always >= 1.
+                (aligned_end - current_pos) as usize
+            }
+            None => remaining.min(UNCOMPRESSED_READ_PIECE_BYTES),
+        }
     } else {
         remaining
     };
@@ -1359,6 +1384,85 @@ mod tests {
         assert!(
             pieces >= 4,
             "expected the section to be split into multiple bounded pieces, got {pieces}"
+        );
+    }
+
+    /// Issue #1396 (soundness / verification-bypass): the PIECEWISE
+    /// `read_uncompressed_data_block` must, when a `CRC.db` is present, size each
+    /// returned piece so every full CRC chunk lands entirely inside exactly one
+    /// piece — even when the CRC chunk size EXCEEDS the 64 KiB read-piece target.
+    /// Otherwise a chunk larger than 64 KiB straddles two fixed pieces and
+    /// `verify_uncompressed_chunks` (which only checks chunks fully contained in a
+    /// single buffer) NEVER verifies it, silently returning corrupt bytes. Here a
+    /// synthetic 128 KiB-chunk `CRC.db` (paired with a synthetic Data.db) drives
+    /// the piecewise scan surface directly: a clean scan passes, and a single
+    /// flipped byte in a >64 KiB chunk is caught as typed corruption naming that
+    /// chunk. (A real Cassandra CRC.db always uses 64 KiB, so a >64 KiB fixture
+    /// must be synthetic; the assertion is on the actual reader wiring, not the
+    /// verify helper in isolation.)
+    #[tokio::test]
+    async fn piecewise_uncompressed_read_verifies_chunks_larger_than_piece_size() {
+        let cs: usize = 128 * 1024; // 2x UNCOMPRESSED_READ_PIECE_BYTES -> every chunk spans >1 piece
+        assert!(cs > UNCOMPRESSED_READ_PIECE_BYTES);
+        // 2.5 chunks: two full + a short final chunk.
+        let size = cs * 2 + cs / 2;
+        let clean: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        let crcs = [
+            crc32fast::hash(&clean[0..cs]),
+            crc32fast::hash(&clean[cs..2 * cs]),
+            crc32fast::hash(&clean[2 * cs..size]),
+        ];
+        let crc = CrcDb::parse(&synth_crc_db(cs as u32, &crcs)).expect("parse synthetic CRC.db");
+
+        let config = SSTableReaderConfig::default();
+        let temp_dir = TempDir::new().expect("create temp dir");
+
+        // 1) Clean data verifies across all pieces and reassembles byte-identical.
+        let clean_path = temp_dir.path().join("issue_1396_clean.bin");
+        tokio::fs::write(&clean_path, &clean).await.unwrap();
+        let file = tokio::fs::File::open(&clean_path).await.unwrap();
+        let file = Arc::new(Mutex::new(BlockSource::buffered(file)));
+        let mut assembled = Vec::new();
+        while let Some(piece) = read_uncompressed_data_block(&file, &config, true, Some(&crc))
+            .await
+            .expect("clean piecewise read verifies")
+        {
+            // Every full chunk in this piece must have been verified, so a piece
+            // must be a whole number of chunks (except a final short tail at EOF).
+            assembled.extend_from_slice(&piece);
+        }
+        assert_eq!(
+            assembled, clean,
+            "clean data must reassemble byte-identical"
+        );
+
+        // 2) Flip one byte inside chunk 2 (a >64 KiB chunk). The CRC entries are
+        //    the ORIGINAL values, so the piece covering chunk 2 must fail.
+        let mut corrupt = clean.clone();
+        corrupt[2 * cs + 5] ^= 0xFF;
+        let corrupt_path = temp_dir.path().join("issue_1396_corrupt.bin");
+        tokio::fs::write(&corrupt_path, &corrupt).await.unwrap();
+        let file = tokio::fs::File::open(&corrupt_path).await.unwrap();
+        let file = Arc::new(Mutex::new(BlockSource::buffered(file)));
+        let mut caught: Option<Error> = None;
+        loop {
+            match read_uncompressed_data_block(&file, &config, true, Some(&crc)).await {
+                Ok(Some(_)) => continue,
+                Ok(None) => break,
+                Err(e) => {
+                    caught = Some(e);
+                    break;
+                }
+            }
+        }
+        let err = caught.expect("flipped byte in a >64 KiB chunk must be caught, not returned");
+        assert!(
+            matches!(err, Error::Corruption(_)),
+            "typed corruption: {err}"
+        );
+        assert!(
+            err.to_string().contains("chunk 2"),
+            "must name the corrupt chunk 2: {err}"
         );
     }
 
