@@ -1050,3 +1050,91 @@ fn production_partial_purge_resumes_when_safe() {
         "C's newer live `v2` (ts=20s > delete@10s) must surface across {{output, C}}; got {all:?}"
     );
 }
+
+/// PRODUCTION PATH — complex-deletion zombie prevention through the real
+/// background partial compaction (roborev #1384): proves the production writer
+/// persists a RETAINED `CellOperation::ComplexDeletion` marker (a separate writer
+/// path from the direct-merger test) and that no live `tags` element resurfaces.
+#[test]
+fn production_partial_complex_deletion_no_zombie() {
+    let sch = schema_collection();
+    let res = run_production_partial(
+        &sch,
+        vec![live_tag_element(7, TS_LIVE)],
+        vec![complex_deletion_tags()],
+        vec![live_tag_element(7, TS_LIVE)],
+    );
+    // (i) The compaction OUTPUT ALONE must have RETAINED the complex-deletion
+    // marker (overlap gate blocked the purge AND the writer persisted it).
+    let out = observe(res.output.clone(), &sch, None, None, false, None);
+    assert!(
+        out.tags_complex_deletion,
+        "production partial: the complex-deletion marker MUST be RETAINED in the compaction \
+         output alone; got {out:?}"
+    );
+    // (ii) The full set {output, C} keeps C's live element shadowed — no zombie.
+    let all = observe(res.all, &sch, None, None, false, None);
+    assert!(
+        !all.tags_live_element,
+        "ZOMBIE (production partial): a live `tags` element resurfaced across {{output, C}}; \
+         got {all:?}"
+    );
+    assert!(
+        all.tags_complex_deletion,
+        "the retained complex-deletion marker must still shadow C's live element; got {all:?}"
+    );
+}
+
+// ===========================================================================
+// SAFE-PURGE completeness for the row + complex gate sites (roborev #1384 Low).
+//
+// The zombie-prevention tests cover RETENTION when the overlap gate blocks. These
+// cover the OTHER side for the row-tombstone and complex-deletion gate sites: when
+// the overlap bound rises STRICTLY ABOVE the tombstone/marker mfda (C newer at
+// `TS_LIVE_NEWER`), BOTH gates pass and the marker IS purged — so a regression
+// where those two sites never purge under a safe bound is caught.
+// ===========================================================================
+
+/// Safe-purge, ROW tombstone: with C newer (`overlap_bound = 20s > mfda 10s`) the
+/// partial merge PURGES the row tombstone (absent from the output).
+#[test]
+fn purge_resumes_row_tombstone_when_bound_above() {
+    let s = Scenario::build(
+        schema_scalar(),
+        vec![live_v("v1", TS_LIVE)],
+        vec![row_tomb()],
+        vec![live_v("v2", TS_LIVE_NEWER)],
+    );
+    let bound = s.overlap_bound();
+    assert_eq!(bound, TS_LIVE_NEWER, "overlap bound == C's newer min ts");
+    assert!(TS_TOMB < bound, "row-delete mfda strictly below the bound");
+
+    let partial = s.observe_partial();
+    assert!(
+        !partial.row_tombstone,
+        "the row tombstone MUST be purged once the overlap bound rises above its mfda; \
+         got {partial:?}"
+    );
+}
+
+/// Safe-purge, COMPLEX-deletion marker: with C newer the partial merge PURGES the
+/// marker (absent from the output).
+#[test]
+fn purge_resumes_complex_deletion_when_bound_above() {
+    let s = Scenario::build(
+        schema_collection(),
+        vec![live_tag_element(7, TS_LIVE)],
+        vec![complex_deletion_tags()],
+        vec![live_tag_element(9, TS_LIVE_NEWER)],
+    );
+    let bound = s.overlap_bound();
+    assert_eq!(bound, TS_LIVE_NEWER, "overlap bound == C's newer min ts");
+    assert!(TS_TOMB < bound, "marker mfda strictly below the bound");
+
+    let partial = s.observe_partial();
+    assert!(
+        !partial.tags_complex_deletion,
+        "the complex-deletion marker MUST be purged once the overlap bound rises above its \
+         mfda; got {partial:?}"
+    );
+}
