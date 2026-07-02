@@ -18,14 +18,8 @@ use nom::{bytes::complete::take, number::complete::be_u32, IResult};
 /// Cassandra serializes: writeUnsignedVInt(value - EPOCH)
 /// Cassandra deserializes: readUnsignedVInt() + EPOCH
 const TIMESTAMP_EPOCH: i64 = 1_442_880_000_000_000; // Sept 22, 2015 00:00:00 UTC in microseconds
-/// `EncodingStats.DELETION_TIME_EPOCH` (Cassandra `EncodingStats.java:74`), the
-/// "no local deletion time" sentinel used both as the NO_STATS default and as the
-/// identity element in `EncodingStats.mergeWith` / `EncodingStats.merge`: an input
-/// whose `minLocalDeletionTime == DELETION_TIME_EPOCH` (a live-only SSTable) is
-/// EXCLUDED from the merged min. Exposed for `compute_baseline_min` so the
-/// compaction baseline seeds identically to Cassandra (issue #1410).
-pub(crate) const DELETION_TIME_EPOCH: i64 = 1_442_880_000; // Sept 22, 2015 00:00:00 UTC in seconds
-                                                           // TTL epoch is 0 in Cassandra, but kept for consistency with the delta-encoding pattern
+const DELETION_TIME_EPOCH: i64 = 1_442_880_000; // Sept 22, 2015 00:00:00 UTC in seconds
+                                                // TTL epoch is 0 in Cassandra, but kept for consistency with the delta-encoding pattern
 const TTL_EPOCH: i64 = 0;
 
 /// Parse minimal EncodingStats section from nb-format Statistics.db
