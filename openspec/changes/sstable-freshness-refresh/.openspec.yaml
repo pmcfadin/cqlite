@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-07-02
+goal: "Deliberate snapshot/refresh/torn-read posture across library, CLI, and
+  Flight read surfaces (issue #1749)"
