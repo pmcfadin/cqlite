@@ -144,7 +144,7 @@ sha2 = "0.10"
 # rejection characterization test (issue #1399). Dev-only: proves CQLite's
 # decompression path rejects (never garbles) genuinely dictionary-compressed
 # zstd frames. `zdict_builder` (default) provides the trained-dictionary API.
-zstd = "0.13"
+zstd = { version = "0.13", features = ["zdict_builder"] }
 # Inline-CRC32 framing for the hand-built Cassandra chunk image in that same
 # test (integration tests don't inherit the library's normal dependencies).
 crc32fast = { workspace = true }

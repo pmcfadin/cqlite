@@ -221,18 +221,49 @@ fn zstd_dictionary_sstable_rejected_via_reader_fixture() {
 
         let config = Config::default();
         let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+        // Opening may LEGITIMATELY succeed: metadata parsing (header, Statistics.db,
+        // CompressionInfo.db) never decompresses chunk bytes, and `ZstdCompressor`
+        // is a known compressor name. The fail-closed property lives on the
+        // DECOMPRESSING READ path — so if open() succeeds we MUST drive a full scan
+        // (which reads + decompresses every Data.db chunk) and assert THAT rejects.
         match SSTableReader::open(&data_db, &config, platform).await {
-            Ok(_reader) => {
-                // Opening may succeed (metadata parses; ZstdCompressor is a known
-                // name). A full scan MUST then fail closed. If a future fixture
-                // makes this reachable, upgrade this to drive a scan and assert
-                // the typed rejection per #1399 AC#2 / #1414.
-                panic!(
-                    "unexpected: reader opened a dictionary-compressed SSTable without \
-                     rejection — scan-path fail-closed assertion needed (see #1399/#1414)"
-                );
+            Ok(reader) => {
+                // Drive a decompression path: a full scan reads and decompresses
+                // every Data.db chunk. This MUST fail closed — never return rows,
+                // never surface plaintext.
+                match reader.iterate_all_partitions().await {
+                    Ok(rows) => panic!(
+                        "FAIL-CLOSED VIOLATION: full scan of a dictionary-compressed \
+                         SSTable returned {} row(s) instead of rejecting — the \
+                         decompression path must fail closed (see #1399 AC#2 / #1414)",
+                        rows.len()
+                    ),
+                    Err(e) => {
+                        // Must be a typed format rejection, never data Corruption
+                        // and never a panic/partial decode. #1414 tracks upgrading
+                        // the message/class to name the dictionary feature; today it
+                        // fails closed as an InvalidFormat/UnsupportedFormat-class
+                        // error surfaced from the zstd decompression path.
+                        assert!(
+                            !matches!(e, Error::Corruption(_)),
+                            "scan rejection of a dictionary SSTable must not be \
+                             misclassified as Corruption; got: {e}"
+                        );
+                        assert!(
+                            matches!(
+                                e,
+                                Error::InvalidFormat(_)
+                                    | Error::UnsupportedFormat(_)
+                                    | Error::UnsupportedVersion { .. }
+                            ),
+                            "scan rejection must be a typed format error; got: {e}"
+                        );
+                    }
+                }
             }
             Err(e) => {
+                // Rejecting at open() is also acceptable, as long as it is not
+                // misclassified as data corruption.
                 assert!(
                     !matches!(e, Error::Corruption(_)),
                     "reader rejection of a dictionary SSTable must not be Corruption; got: {e}"
