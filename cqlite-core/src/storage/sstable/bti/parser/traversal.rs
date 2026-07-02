@@ -134,7 +134,7 @@ fn ordered_children(node: &BtiNode) -> Vec<(u8, usize)> {
 ///    trie_data.len()` proves reconvergence/cycling and terminates adversarial
 ///    tries whose paths stay individually short but whose total node visits blow
 ///    up.  This is the airtight cycle guard.
-/// 2. **Per-path key-path length** — `key_bytes.len() > trie_data.len()` is a
+/// 2. **Per-path key-path length** — `path.len() > trie_data.len()` is a
 ///    structurally impossible reconstructed path on an acyclic trie.
 /// 3. **Node depth** — the number of nodes on the current root→node path (stack
 ///    depth, root = 1).  A legal leaf's depth is at most `trie_data.len() + 1`
@@ -151,18 +151,61 @@ pub(crate) fn dfs_collect_in_order<T, F>(
 where
     F: FnMut(&[u8], usize) -> BtiResult<Option<T>>,
 {
+    // Op-based iterative DFS.  A SINGLE mutable `path` accumulates the transition
+    // bytes from the root down to the current node: `Enter` pushes a node's
+    // transition byte (and schedules the matching `Pop`), `Pop` backtracks it.  We
+    // clone `path` ONLY when emitting a payload (inherent to the owned return type,
+    // O(result size)), NEVER per child edge — this avoids the O(depth^2) prefix
+    // copying that a per-edge `key_bytes.clone()` incurs on long key paths (a
+    // 70 000-byte legal chain would otherwise copy ~2.45 GB; issue #1629 roborev).
+    enum DfsOp {
+        Enter {
+            node_offset: usize,
+            // The transition byte from the parent to this node (root = `None`).
+            transition: Option<u8>,
+            // Number of NODES on the root→this-node path (root = 1).
+            depth: usize,
+        },
+        // Backtrack: remove the transition byte pushed by the matching `Enter`.
+        Pop,
+    }
+
     let mut results: Vec<(Vec<u8>, T)> = Vec::new();
+    // The single reusable root→current-node transition-byte path.
+    let mut path: Vec<u8> = Vec::new();
+    let mut stack: Vec<DfsOp> = vec![DfsOp::Enter {
+        node_offset: root_offset,
+        transition: None,
+        depth: 1,
+    }];
 
-    // Stack frame: (node_offset, node_depth, accumulated_key_bytes).
-    // `node_depth` counts NODES on the path (root = 1), independent of the key
-    // byte length.  We use an explicit stack and push children in *reverse*
-    // order so the smallest transition byte is processed first (LIFO).
-    let mut stack: Vec<(usize, usize, Vec<u8>)> = vec![(root_offset, 1, Vec::new())];
-
-    // Total nodes popped across ALL paths — the cycle / reconvergence guard.
+    // Total nodes entered across ALL paths — the cycle / reconvergence guard.
     let mut nodes_visited: usize = 0;
 
-    while let Some((node_offset, node_depth, key_bytes)) = stack.pop() {
+    while let Some(op) = stack.pop() {
+        let DfsOp::Enter {
+            node_offset,
+            transition,
+            depth: node_depth,
+        } = op
+        else {
+            // `DfsOp::Pop`: this node's whole subtree is done — backtrack its
+            // transition byte.  Every `Enter` that pushed a byte scheduled exactly
+            // one `Pop`, so this stays balanced.
+            path.pop();
+            continue;
+        };
+
+        // Extend the shared path with this node's transition byte and schedule its
+        // removal AFTER the entire subtree is processed.  The `Pop` is pushed
+        // BEFORE this node's children so, LIFO, it runs once every child subtree
+        // has been fully walked.  The root (transition `None`) contributes no byte
+        // and therefore needs no `Pop`.
+        if let Some(b) = transition {
+            path.push(b);
+            stack.push(DfsOp::Pop);
+        }
+
         nodes_visited = nodes_visited.saturating_add(1);
         if nodes_visited > trie_data.len() {
             return Err(Error::Parse(format!(
@@ -171,7 +214,7 @@ where
                 trie_data.len()
             )));
         }
-        if key_bytes.len() > trie_data.len() {
+        if path.len() > trie_data.len() {
             return Err(Error::Parse(format!(
                 "BTI DFS key path exceeds trie size {} (corrupt or cyclic trie)",
                 trie_data.len()
@@ -192,20 +235,25 @@ where
         }
 
         // 1) Emit this node's own payload (if any) BEFORE descending — the key
-        //    terminating here sorts before any continuation.
+        //    terminating here sorts before any continuation.  Clone `path` ONLY
+        //    here (inherent to the owned result type), never per child edge.
         if let Some(payload) = decode_payload(trie_data, node_offset)? {
-            results.push((key_bytes.clone(), payload));
+            results.push((path.clone(), payload));
         }
 
         // 2) Descend children in ASCENDING transition-byte order.  Because the
-        //    stack is LIFO, push them in DESCENDING order.
+        //    stack is LIFO, push their `Enter` ops in DESCENDING order.  The `Pop`
+        //    scheduled above already sits below these ops, so it fires after the
+        //    entire subtree and backtracks this node's transition byte.
         let node = parse_bti_node_for_traversal(trie_data, node_offset)?;
         let children = ordered_children(&node);
         let child_depth = node_depth.saturating_add(1);
         for &(transition_byte, child_offset) in children.iter().rev() {
-            let mut child_key = key_bytes.clone();
-            child_key.push(transition_byte);
-            stack.push((child_offset, child_depth, child_key));
+            stack.push(DfsOp::Enter {
+                node_offset: child_offset,
+                transition: Some(transition_byte),
+                depth: child_depth,
+            });
         }
     }
 
