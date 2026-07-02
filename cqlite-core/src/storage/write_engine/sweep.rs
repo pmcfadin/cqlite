@@ -18,7 +18,7 @@
 //! non-fatal failure, so a failure never aborts startup yet is still surfaced
 //! (and asserted in tests) rather than swallowed into a log line.
 
-use super::WriteEngine;
+use super::{WriteEngine, WriteEngineConfig};
 use std::path::{Path, PathBuf};
 
 /// Outcome of a single startup orphan sweep.
@@ -54,16 +54,23 @@ impl WriteEngine {
     /// Called once from [`WriteEngine::open`](super::WriteEngine) before WAL
     /// replay. Never returns an error: an un-removable orphan is logged and left
     /// for a later sweep, it does not abort startup (issue #1393 AC #3).
-    pub(crate) fn sweep_startup_orphans(data_dir: &Path, keyspace: &str, table: &str) {
+    pub(crate) fn sweep_startup_orphans(config: &WriteEngineConfig) {
+        let data_dir = &config.data_dir;
         let tmp = Self::sweep_orphaned_compaction_tmp(data_dir);
-        let partial = Self::sweep_orphaned_partial_sstables(data_dir, keyspace, table);
+        let partial = Self::sweep_orphaned_partial_sstables(
+            data_dir,
+            &config.schema.keyspace,
+            &config.schema.table,
+        );
         for outcome in [&tmp, &partial] {
-            for failure in &outcome.failures {
-                log::warn!(
-                    "startup orphan sweep left an un-removable orphan (non-fatal, \
-                     will retry next startup): {}",
-                    failure
-                );
+            if outcome.had_failures() {
+                for failure in &outcome.failures {
+                    log::warn!(
+                        "startup orphan sweep left an un-removable orphan (non-fatal, \
+                         will retry next startup): {}",
+                        failure
+                    );
+                }
             }
         }
     }
