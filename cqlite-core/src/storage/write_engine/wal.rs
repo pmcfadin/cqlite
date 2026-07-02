@@ -1221,6 +1221,10 @@ impl WriteAheadLog {
     /// This is used after a successful flush to memtable/SSTable, removing
     /// old entries that are no longer needed for recovery.
     ///
+    /// On success this also lifts any pending corrupt-tail guard (issue #1391):
+    /// an emptied WAL has no corrupt tail, so subsequent `append()` calls must
+    /// not be rejected by the stale fail-closed guard.
+    ///
     /// # Errors
     ///
     /// Returns an error if the truncate operation fails.
@@ -1249,6 +1253,18 @@ impl WriteAheadLog {
             .map_err(|e| Error::Storage(format!("Failed to seek after truncate: {}", e)))?;
 
         self.current_size = 0;
+
+        // Clear any pending corrupt-tail guard (issue #1391, roborev r4). If this
+        // WAL was opened over a mid-stream corrupt tail, `open_existing` recorded
+        // the valid-prefix boundary in `pending_valid_prefix` and `append()` stays
+        // fail-closed until it is lifted. `truncate()` has just cleared the file to
+        // zero length and fsync'd + sought to the start, so the corrupt tail is
+        // gone from the LIVE log — leaving the guard set would wrongly reject ALL
+        // future appends against a now-empty WAL (deadlocked appends). The guard is
+        // lifted only HERE, after the flush/set_len/fsync/seek steps have all
+        // succeeded; any earlier failure returns via `?` with the guard still set,
+        // so the on-disk state and the fail-closed guard remain consistent.
+        self.pending_valid_prefix = None;
 
         Ok(())
     }
@@ -2502,6 +2518,77 @@ mod tests {
             vec!["Alice", "Carol"],
             "replay must yield exactly [A, C]"
         );
+    }
+
+    /// Issue #1391 (roborev r4): discarding a pending corrupt tail via `truncate()`
+    /// must lift the fail-closed append guard. `truncate()` clears the file to zero
+    /// length; an empty WAL has no corrupt tail, so `pending_valid_prefix` must not
+    /// remain set — otherwise every subsequent `append()` is rejected forever
+    /// (deadlocked appends) even though the live log is empty. Red-before: the guard
+    /// stayed set after truncate and the append errored. Green-after: the guard is
+    /// cleared and the append succeeds and replays.
+    #[test]
+    fn test_wal_truncate_clears_pending_corrupt_tail_guard() {
+        let temp_dir = TempDir::new().unwrap();
+        let (path, end_of_a, total) = write_two_entries(&temp_dir);
+
+        // Corrupt B's payload in place so `open_existing` records a pending corrupt
+        // tail (valid prefix ends at A) rather than trimming a torn tail.
+        let b_first_payload = end_of_a + 8;
+        assert!(
+            b_first_payload < total,
+            "test setup: B must have at least one payload byte"
+        );
+        {
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes[b_first_payload as usize] ^= 0xFF;
+            std::fs::write(&path, &bytes).unwrap();
+        }
+
+        let mut wal = WriteAheadLog::open_existing(&path).unwrap();
+        assert!(
+            wal.has_pending_corrupt_tail(),
+            "mid-stream corruption must leave a pending valid prefix"
+        );
+
+        // Discard the corrupt tail wholesale via truncate() (as a direct WAL user
+        // choosing to drop the log rather than reset-to-prefix).
+        wal.truncate().unwrap();
+
+        // After truncate the live WAL is empty, so the fail-closed guard MUST be
+        // lifted (red-before: guard stayed set here).
+        assert!(
+            !wal.has_pending_corrupt_tail(),
+            "truncate() must clear the pending corrupt-tail guard on an emptied WAL"
+        );
+        assert_eq!(wal.size(), 0, "truncate() must reset current_size to zero");
+
+        // A subsequent append must succeed (red-before: rejected by the stale guard)
+        // and land at offset 0 in the emptied log.
+        wal.append(&create_test_mutation(3, "Carol")).unwrap();
+        wal.sync().unwrap();
+        drop(wal);
+
+        // Fresh reopen + replay must recover EXACTLY [C]: the truncate dropped both
+        // A and the corrupt B, and C landed at the start of the emptied log.
+        let wal = WriteAheadLog::open_existing(&path).unwrap();
+        let report = wal.replay().unwrap();
+        assert!(
+            report.is_clean(),
+            "recovery must be clean after truncate + post-truncate append"
+        );
+        let names: Vec<&str> = report
+            .mutations
+            .iter()
+            .map(|m| match &m.operations[0] {
+                CellOperation::Write {
+                    value: Value::Text(name),
+                    ..
+                } => name.as_str(),
+                other => panic!("expected Write op, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(names, vec!["Carol"], "replay must yield exactly [C]");
     }
 
     /// Finding 1 (roborev r3): the write path's accepted max entry size MUST equal
