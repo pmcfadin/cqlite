@@ -77,13 +77,17 @@ pub struct IntegrityCheckResult {
 }
 
 /// Integrity status levels
+///
+/// Only two states are reachable: the integrity check delegates to the
+/// authoritative verifier `verify::verify_sstable` (issue #1283), which reports
+/// either zero findings (`Healthy`) or one-or-more findings (`Corrupted`). The
+/// former `Degraded` state was driven by a `checksum_mismatches` counter that was
+/// never incremented — it was unreachable dead code and has been removed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IntegrityStatus {
-    /// File is healthy
+    /// File is healthy (the verifier reported no findings)
     Healthy,
-    /// File has minor issues but is readable
-    Degraded,
-    /// File has corruption and may be unreadable
+    /// File has corruption (the verifier reported at least one finding)
     Corrupted,
 }
 
