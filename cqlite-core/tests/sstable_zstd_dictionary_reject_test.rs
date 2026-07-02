@@ -63,6 +63,47 @@ fn require_fixtures() -> bool {
     )
 }
 
+/// The full component set a commissioned `nb`/BIG zstd(+dictionary) fixture MUST
+/// carry — matches `test-data/scripts/generate-zstd-dictionary-fixture.md` and
+/// the stock `test_comp/zstd_table` generation on disk. Sidecars (`.db.jsonl`,
+/// `.db.txt` goldens) are intentionally excluded.
+const REQUIRED_FIXTURE_COMPONENTS: &[&str] = &[
+    "Data.db",
+    "CompressionInfo.db",
+    "Statistics.db",
+    "Index.db",
+    "Summary.db",
+    "Filter.db",
+    "Digest.crc32",
+    "TOC.txt",
+];
+
+/// Hard-fail (panic) when the commissioned fixture is present but INCOMPLETE, so
+/// a partial fixture can never silently pass a gated oracle on an unrelated
+/// missing-component / open / metadata error. Call this only AFTER the Data.db
+/// presence gate (which SKIPs a clean checkout and hard-fails under
+/// `CQLITE_REQUIRE_FIXTURES=1`) has established the fixture exists.
+fn assert_full_fixture_present() {
+    let missing: Vec<&str> = REQUIRED_FIXTURE_COMPONENTS
+        .iter()
+        .copied()
+        .filter(|c| {
+            !datasets_root()
+                .join(format!("{DICT_FIXTURE_REL}-{c}"))
+                .exists()
+        })
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "commissioned zstd-dictionary fixture is INCOMPLETE — missing component(s) {:?} \
+         (expected the full set {:?} under {}); a partial fixture must not silently pass a \
+         gated oracle",
+        missing,
+        REQUIRED_FIXTURE_COMPONENTS,
+        datasets_root().join(DICT_FIXTURE_REL).display()
+    );
+}
+
 /// Build a Cassandra-style single-chunk `Data.db` byte image: the compressed
 /// payload followed by its 4-byte big-endian inline CRC32 (the exact framing
 /// `CompressedSequentialWriter` writes and `ChunkDecompressor` reads).
@@ -210,6 +251,11 @@ fn zstd_dictionary_sstable_rejected_via_reader_fixture() {
         return;
     }
 
+    // A partial fixture (Data.db present but other components missing) must not
+    // let this oracle pass on an unrelated open/metadata error instead of
+    // exercising dict decompression — require the FULL commissioned set up front.
+    assert_full_fixture_present();
+
     // Present: the reader must reject (never return rows). We assert the
     // fail-closed safety property here; the exact typed class is tracked as a
     // KNOWN LIMITATION under issue #1414 (see the unit characterization above).
@@ -239,24 +285,32 @@ fn zstd_dictionary_sstable_rejected_via_reader_fixture() {
                         rows.len()
                     ),
                     Err(e) => {
-                        // Must be a typed format rejection, never data Corruption
-                        // and never a panic/partial decode. #1414 tracks upgrading
-                        // the message/class to name the dictionary feature; today it
-                        // fails closed as an InvalidFormat/UnsupportedFormat-class
-                        // error surfaced from the zstd decompression path.
+                        // Must be the SPECIFIC zstd-dictionary decompression
+                        // rejection — never data Corruption, never a panic/partial
+                        // decode, and never an unrelated open/metadata error.
+                        //
+                        // KNOWN LIMITATION: see #1414. The target end state is a
+                        // clean `Error::UnsupportedFormat` explicitly naming zstd
+                        // dictionary compression. Today CQLite fails closed on a
+                        // real trained-dict frame as `Error::InvalidFormat` whose
+                        // message names the zstd decompression path
+                        // (chunk_decompressor.rs:461); this assertion tracks that
+                        // CURRENT behavior until #1414 upgrades the class.
                         assert!(
                             !matches!(e, Error::Corruption(_)),
                             "scan rejection of a dictionary SSTable must not be \
                              misclassified as Corruption; got: {e}"
                         );
                         assert!(
-                            matches!(
-                                e,
-                                Error::InvalidFormat(_)
-                                    | Error::UnsupportedFormat(_)
-                                    | Error::UnsupportedVersion { .. }
-                            ),
-                            "scan rejection must be a typed format error; got: {e}"
+                            matches!(e, Error::InvalidFormat(_)),
+                            "scan rejection must be the InvalidFormat zstd-dictionary \
+                             decompression class (see #1414); got: {e}"
+                        );
+                        let msg = e.to_string().to_ascii_lowercase();
+                        assert!(
+                            msg.contains("zstd") || msg.contains("dictionary"),
+                            "scan rejection message must name the zstd/dictionary \
+                             decompression path (chunk_decompressor.rs:461); got: {e}"
                         );
                     }
                 }
@@ -295,6 +349,11 @@ fn zstd_dictionary_verify_reports_unsupported_not_checksum_fixture() {
         return;
     }
 
+    // Require the FULL commissioned component set so the verify report cannot
+    // pass on an unrelated missing-component / metadata finding instead of the
+    // decompression-path rejection this oracle exists to prove.
+    assert_full_fixture_present();
+
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     rt.block_on(async {
         use cqlite_core::storage::sstable::verify::{verify_sstable, VerifyErrorClass, VerifyMode};
@@ -320,8 +379,25 @@ fn zstd_dictionary_verify_reports_unsupported_not_checksum_fixture() {
             "dictionary rejection must not be reported as a Digest/checksum mismatch: {:?}",
             report.findings
         );
-        // KNOWN LIMITATION: see #1414. Today this surfaces as
-        // `ChunkDecompressionError` (shared with truncation/bit-flip); #1414 tracks
-        // a dedicated unsupported-compression-feature verify class.
+        // Must report the SPECIFIC decompression-path rejection on the data
+        // component — not ONLY unrelated setup/metadata findings. The verify
+        // FULL row scan decompresses every Data.db chunk; the dict frame fails
+        // there and `classify_scan_error` maps the "Zstd decompression failed"
+        // message onto `VerifyErrorClass::ChunkDecompressionError` on `Data.db`.
+        //
+        // KNOWN LIMITATION: see #1414. `ChunkDecompressionError` is shared with
+        // truncation/bit-flip; the target end state is an explicit
+        // unsupported-compression verify class. This assertion tracks the CURRENT
+        // behavior until #1414 upgrades it.
+        assert!(
+            report.findings.iter().any(|f| {
+                f.class == VerifyErrorClass::ChunkDecompressionError
+                    && (f.component == "Data.db" || f.component == "CompressionInfo.db")
+            }),
+            "verify must report the dictionary rejection as a ChunkDecompressionError on \
+             Data.db/CompressionInfo.db (the decompression-error class, see #1414), not only \
+             unrelated setup/metadata findings: {:?}",
+            report.findings
+        );
     });
 }
