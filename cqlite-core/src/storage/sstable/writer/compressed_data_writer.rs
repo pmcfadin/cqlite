@@ -21,6 +21,16 @@
 //! 4. Track chunk offsets for CompressionInfo.db
 //! 5. On finish(), flush remaining buffer
 //!
+//! # Claim boundary — BUILT-BUT-UNWIRED (issue #1406, posture b)
+//!
+//! This writer is NOT wired into CQLite's production write surface (flush +
+//! compaction via `SSTableWriter` emit uncompressed SSTables only). It exists to
+//! let read-path fixtures synthesize compressed SSTables for exercising the
+//! decompressing reader. Any attempt to emit a compressed SSTable as a real,
+//! parity-claimed artifact is fail-closed by
+//! [`super::compression_info_writer::CompressionInfoWriter::guard_unsupported_production_write`].
+//! See that module's docs and issue #1406.
+//!
 //! References:
 //! - Parser: `cqlite-core/src/storage/sstable/reader/compression.rs`
 //! - Format docs: `docs/sstables-definitive-guide/chapters/09-compression.md`
