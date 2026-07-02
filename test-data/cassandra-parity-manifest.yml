@@ -5466,18 +5466,34 @@ scenarios:
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
+      fixture_generation_command: >-
+        cd compaction-parity && bash scripts/bootstrap-cassandra.sh && gradle --no-daemon byteParity
+        # RUN-GENERATED: builds pinned cassandra-5.0.2 and emits the reference SSTable components
+        # into build/parity-artifacts-byteParity/<scenario>/cassandra-output/ (NOT committed to git)
       comparison_command: >-
         cd compaction-parity && gradle --no-daemon byteParity  # per-component cmp, no allowlist
       reference_paths:
+        # RUN-GENERATED placeholder (not committed): materialized only by fixture_generation_command
+        # above, inside a nightly/workflow_dispatch harness run. Empty on a fresh checkout.
         - compaction-parity/build/parity-artifacts-byteParity/<scenario>/cassandra-output/
       failure_artifacts:
         - artifact.nightly_docker.live_logs
       known_limitations: >-
-        The byte tier is implemented and runs in CI, but is non-blocking
-        (continue-on-error) and has no committed reference fixtures — the
-        reference output is regenerated in CI from the pinned Cassandra build, so
-        this scenario is `planned` (target named, not yet a gated claim). Promote
-        to a hard gate once compaction output is byte-stable.
+        CADENCE — the real Cassandra-vs-CQLite byte comparison for this claim runs
+        NIGHTLY-ONLY (schedule + workflow_dispatch via compaction-parity.yml /
+        nightly-docker-parity.yml `gradle byteParity`); it is NOT PR-gated, so a
+        byte_for_byte claim here must not be read as per-PR enforced. PR VISIBILITY
+        is provided by a Rust re-compaction byte-parity PROXY (issue #1405): the
+        `compaction-byte-parity` component of scripts/agent-gate.sh plus the
+        live-cell-compaction-parity.yml / tombstone-ttl-parity.yml PR lanes run
+        issue_1017/1019/1020/1240 (a committed-golden SUBSET, not the full Java
+        differential harness) — see docs/development/parity-ci-tiers.md
+        (PR-visibility proxy for the compaction byte tier). The byte tier is
+        implemented and runs in CI but is non-blocking (continue-on-error) and has
+        NO committed reference fixtures — the reference output is RUN-GENERATED in
+        CI from the pinned Cassandra build (see fixture_generation_command), so this
+        scenario is `planned` (target named, not yet a gated claim). Promote to a
+        hard gate once compaction output is byte-stable.
     ci:
       tier: nightly_docker
       workflow: .github/workflows/nightly-docker-parity.yml
@@ -5633,17 +5649,32 @@ scenarios:
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
+      fixture_generation_command: >-
+        cd compaction-parity && bash scripts/bootstrap-cassandra.sh && gradle --no-daemon byteParity
+        # RUN-GENERATED: builds pinned cassandra-5.0.2 and emits reference components +
+        # byte-diff/checksum artifacts into build/parity-artifacts-byteParity/ (NOT committed)
       comparison_command: >-
         cd compaction-parity && gradle --no-daemon byteParity
       reference_paths:
+        # RUN-GENERATED placeholder (not committed): materialized only by fixture_generation_command
+        # above, inside a nightly/workflow_dispatch harness run. Empty on a fresh checkout.
         - compaction-parity/build/parity-artifacts-byteParity/<scenario>/cassandra-output/
       failure_artifacts:
         - artifact.nightly_docker.live_logs
       known_limitations: >-
-        Byte tier is implemented and runs non-blocking in CI with full failure
-        artifacts, but has no committed reference fixtures (reference output is
-        regenerated in CI) and the writer is not yet byte-identical — hence
-        `planned`, not a gated byte-for-byte claim.
+        CADENCE — this harness byte-tier MECHANISM asserts (per-component cmp,
+        artifact preservation) run NIGHTLY-ONLY (schedule + workflow_dispatch via
+        compaction-parity.yml / nightly-docker-parity.yml `gradle byteParity`);
+        NOT PR-gated. PR VISIBILITY of the underlying byte claim is provided by the
+        Rust re-compaction byte-parity PROXY (issue #1405): the
+        `compaction-byte-parity` agent-gate component + live-cell-compaction-parity.yml
+        / tombstone-ttl-parity.yml PR lanes (issue_1017/1019/1020/1240, a
+        committed-golden SUBSET, not this Java harness) — see
+        docs/development/parity-ci-tiers.md (PR-visibility proxy for the compaction
+        byte tier). Byte tier is implemented and runs non-blocking in CI with full
+        failure artifacts, but has NO committed reference fixtures (reference output
+        is RUN-GENERATED in CI, see fixture_generation_command) and the writer is not
+        yet byte-identical — hence `planned`, not a gated byte-for-byte claim.
     ci:
       tier: nightly_docker
       workflow: .github/workflows/nightly-docker-parity.yml
