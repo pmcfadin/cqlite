@@ -119,16 +119,15 @@ async fn corpus_differential_unsigned_length_decode() {
     }
 
     let tables = collect_tables(&sstables);
-    if tables.is_empty() {
-        // Present-but-empty is a failure regardless of require_fixtures: a
-        // clean checkout ships JSONL only, but if the sstables/ tree exists it
-        // must contain Data.db binaries.
-        panic!(
-            "corpus present at {} but no Data.db files found — fetch datasets \
-             (bash test-data/scripts/fetch-datasets.sh)",
-            sstables.display()
-        );
-    }
+    // Present-but-empty is a failure regardless of require_fixtures: a
+    // clean checkout ships JSONL only, but if the sstables/ tree exists it
+    // must contain Data.db binaries.
+    assert!(
+        !tables.is_empty(),
+        "corpus present at {} but no Data.db files found — fetch datasets \
+         (bash test-data/scripts/fetch-datasets.sh)",
+        sstables.display()
+    );
 
     let config = Config::default();
     let platform = Arc::new(
