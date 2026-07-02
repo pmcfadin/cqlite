@@ -7,7 +7,7 @@
 
 ## 1. Metadata-only fully-expired detection
 
-- [ ] 1.1 Add `fn is_fully_expired(stats: &TimestampStatistics, gc_before_secs: i64) -> bool` (or a
+- [x] 1.1 Add `fn is_fully_expired(stats: &TimestampStatistics, gc_before_secs: i64) -> bool` (or a
       per-path variant reading `Statistics.db` via `stats_path_for` + `parse_statistics_with_fallback`)
       to the merge module. Predicate: `max_deletion_time < gc_before_secs`. Surface:
       `cqlite_core::storage::write_engine::merge` public/pub(crate) fn + a unit test that passes for an
@@ -16,7 +16,7 @@
 
 ## 2. Overlap-safety gate + drop-set computation
 
-- [ ] 2.1 Add `fn fully_expired_sstables(input_paths, outside_paths, gc_before_secs: Option<i64>) ->
+- [x] 2.1 Add `fn fully_expired_sstables(input_paths, outside_paths, gc_before_secs: Option<i64>) ->
       Vec<PathBuf>` composing 1.1 with the overlap bound. Reuse `compute_max_purgeable_timestamp` for the
       outside `min_timestamp` bound; drop a candidate iff fully expired AND
       `candidate.max_timestamp < outside_bound` (with `+inf` for an empty outside set / full compaction,
@@ -26,7 +26,7 @@
 
 ## 3. Wire drop-set into the WriteEngine background path
 
-- [ ] 3.1 In `maintenance_step_inner` compute the drop-set from `selected` (inputs) + `non_included`
+- [x] 3.1 In `maintenance_step_inner` compute the drop-set from `selected` (inputs) + `non_included`
       (outside) + `gc_before_secs`, subtract it from `selected` before `start_merge`, and thread the
       dropped paths into `start_merge` so finalize deletes them after publish. Surface:
       `WriteEngine::maintenance_step` (via `start_merge`) + an integration test asserting a fully-expired
@@ -34,7 +34,7 @@
 
 ## 4. Wire drop-set into the CLI one-shot path (gated per OQ-1)
 
-- [ ] 4.1 Per OQ-1 resolution: in `compact_sstables_with_registry`, when `purge_safe == true` (`--major`),
+- [x] 4.1 Per OQ-1 resolution: in `compact_sstables_with_registry`, when `purge_safe == true` (`--major`),
       compute the drop-set with an empty outside set, subtract it from `input_paths` before building the
       `KWayMerger`, and delete the dropped files after `writer.finish()`. No drop when `purge_safe`
       is false. Surface: `merge::compact_sstables_with_registry` + `cqlite compact --major` integration
@@ -42,29 +42,29 @@
 
 ## 5. Report/stats surface for the drop decision
 
-- [ ] 5.1 Add `dropped_whole: Vec<PathBuf>` (and count) to `MergeStats` / `CompactReport` and populate it
+- [x] 5.1 Add `dropped_whole: Vec<PathBuf>` (and count) to `MergeStats` / `CompactReport` and populate it
       from the drop-set on both surfaces. Surface: `CompactReport.stats.dropped_whole` +
       `CompactResult` (CLI) fields + tests asserting the plan decision (acceptance-criterion 1's
       "assert via plan/stats, not just output") and an empty set when nothing is dropped.
 
 ## 6. Read-parity + regression tests
 
-- [ ] 6.1 Add an integration test: build live + fully-expired SSTables, run the query before and after a
+- [x] 6.1 Add an integration test: build live + fully-expired SSTables, run the query before and after a
       drop-whole compaction, assert identical result sets per partition/generation (acceptance-criterion
       3), and assert the drop-whole result equals a merged-purge result. Surface: query engine over the
       compaction output.
-- [ ] 6.2 Add an overlap-safety regression test: a fully-expired SSTable that shadows data in an EXCLUDED
+- [x] 6.2 Add an overlap-safety regression test: a fully-expired SSTable that shadows data in an EXCLUDED
       overlapping SSTable is NOT dropped and the shadowed data stays shadowed on read (acceptance-criterion
       2). Surface: `WriteEngine::maintenance_step` + query engine.
 
 ## 7. Documentation
 
-- [ ] 7.1 Add a short note to `docs/sstables-definitive-guide/chapters/15-compaction-strategies.md` that
+- [x] 7.1 Add a short note to `docs/sstables-definitive-guide/chapters/15-compaction-strategies.md` that
       fully-expired SSTables are dropped whole (metadata-only detection + overlap gate). No doctrine change.
 
 ## 8. Gate + audit + review (pipeline)
 
-- [ ] 8.1 Run `scripts/agent-gate.sh` (fmt, clippy `-D warnings`, core/integration/write-support/CLI
+- [x] 8.1 Run `scripts/agent-gate.sh` (fmt, clippy `-D warnings`, core/integration/write-support/CLI
       tests, minimal build, smoke) and paste the SUMMARY block. Run with `CQLITE_DATASETS_ROOT` pointed
       at the main repo's `test-data/datasets` (worktrees have no Data.db binaries).
 - [ ] 8.2 Spec-auditor (C) review anchored to `openspec/changes/fully-expired-sstable-drop/specs/**`:
