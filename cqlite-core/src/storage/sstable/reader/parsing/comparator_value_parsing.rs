@@ -224,9 +224,15 @@ pub fn parse_value_with_comparator(
             let inner_value = parse_value_with_comparator(value_data, inner_comparator)?;
             Ok(Value::Frozen(Box::new(inner_value)))
         }
-        ComparatorType::Custom(_) => {
-            // Custom types are stored as blobs
-            Ok(Value::Blob(value_data.to_vec()))
+        ComparatorType::Custom(name) => {
+            // Schema-derived custom scalars (`time`/`inet`/`json`) decode to their
+            // typed `Value` via the shared decoder; genuinely-unknown custom types
+            // fall back to `Value::Blob` inside `decode_custom_scalar`. Dispatch is
+            // on the schema-derived name string (no-heuristics mandate, issue #28).
+            // This is reached for schema-derived custom scalars used as collection
+            // elements (e.g. `list<time>`, `set<inet>`, `map<text,json>`) on the
+            // block-path `RowCellStateMachine`, which uses this standalone parser.
+            super::custom_scalar::decode_custom_scalar(name, value_data)
         }
     }
 }
@@ -669,5 +675,116 @@ mod tests {
         } else {
             panic!("Expected List value");
         }
+    }
+
+    /// Encode a non-frozen collection element (VInt length prefix + body) using
+    /// the same length encoding `parse_list_value`/`parse_map_value` expect.
+    fn push_element(buf: &mut Vec<u8>, body: &[u8]) {
+        encode_signed(body.len() as i64, buf);
+        buf.extend_from_slice(body);
+    }
+
+    // Issue #1627 / roborev job 2738: the standalone `parse_value_with_comparator`
+    // is the parser the block-path `RowCellStateMachine` uses. Its
+    // `Custom(name)` arm must route schema-derived custom scalars through
+    // `decode_custom_scalar` so collection elements decode to their typed
+    // `Value` instead of `Value::Blob`. These tests drive the standalone parser
+    // with collection-of-custom-scalar comparators and would fail under the old
+    // `Custom(_) => Value::Blob` behavior.
+
+    #[test]
+    fn test_parse_list_of_time_custom_scalars() {
+        let t0: i64 = 0;
+        let t1: i64 = 4_500_000_000_000;
+        let mut data = Vec::new();
+        encode_signed(2, &mut data); // element count
+        push_element(&mut data, &t0.to_be_bytes());
+        push_element(&mut data, &t1.to_be_bytes());
+
+        let comparator =
+            ComparatorType::List(Box::new(ComparatorType::Custom("time".to_string())));
+        let result = parse_value_with_comparator(&data, &comparator).unwrap();
+
+        assert_eq!(result, Value::List(vec![Value::Time(t0), Value::Time(t1)]));
+    }
+
+    #[test]
+    fn test_parse_list_of_inet_custom_scalars() {
+        let v4 = vec![10u8, 0, 0, 1];
+        let v6 = vec![0u8; 16];
+        let mut data = Vec::new();
+        encode_signed(2, &mut data); // element count
+        push_element(&mut data, &v4);
+        push_element(&mut data, &v6);
+
+        let comparator =
+            ComparatorType::List(Box::new(ComparatorType::Custom("inet".to_string())));
+        let result = parse_value_with_comparator(&data, &comparator).unwrap();
+
+        assert_eq!(
+            result,
+            Value::List(vec![Value::Inet(v4), Value::Inet(v6)])
+        );
+    }
+
+    #[test]
+    fn test_parse_map_text_to_json_custom_scalars() {
+        // map<text, json>: keys are text, values are schema-derived Custom("json").
+        let key = b"k";
+        let json_body = br#"[1,2,3]"#;
+        let mut data = Vec::new();
+        encode_signed(1, &mut data); // entry count
+        push_element(&mut data, key);
+        push_element(&mut data, json_body);
+
+        let comparator = ComparatorType::Map(
+            Box::new(ComparatorType::Text),
+            Box::new(ComparatorType::Custom("json".to_string())),
+        );
+        let result = parse_value_with_comparator(&data, &comparator).unwrap();
+
+        assert_eq!(
+            result,
+            Value::Map(vec![(
+                Value::Text("k".to_string()),
+                Value::Json(serde_json::json!([1, 2, 3])),
+            )])
+        );
+    }
+
+    #[test]
+    fn test_parse_set_of_inet_custom_scalars() {
+        let v4a = vec![192u8, 168, 0, 1];
+        let v4b = vec![10u8, 0, 0, 2];
+        let mut data = Vec::new();
+        encode_signed(2, &mut data); // element count
+        push_element(&mut data, &v4a);
+        push_element(&mut data, &v4b);
+
+        let comparator =
+            ComparatorType::Set(Box::new(ComparatorType::Custom("inet".to_string())));
+        let result = parse_value_with_comparator(&data, &comparator).unwrap();
+
+        assert_eq!(
+            result,
+            Value::Set(vec![Value::Inet(v4a), Value::Inet(v4b)])
+        );
+    }
+
+    #[test]
+    fn test_parse_list_of_unknown_custom_stays_blob() {
+        // A genuinely-unknown custom marshaller name must still fall back to Blob
+        // (the only legitimate blob fallback), even as a collection element.
+        let body = vec![1u8, 2, 3];
+        let mut data = Vec::new();
+        encode_signed(1, &mut data);
+        push_element(&mut data, &body);
+
+        let comparator = ComparatorType::List(Box::new(ComparatorType::Custom(
+            "some_udt_marshaller".to_string(),
+        )));
+        let result = parse_value_with_comparator(&data, &comparator).unwrap();
+
+        assert_eq!(result, Value::List(vec![Value::Blob(body)]));
     }
 }
