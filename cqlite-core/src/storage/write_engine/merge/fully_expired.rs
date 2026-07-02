@@ -181,6 +181,43 @@ pub fn fully_expired_sstables(
         .collect()
 }
 
+/// Split `input_paths` into `(merge_inputs, dropped_whole)` given a `drop_set`
+/// (a subset of `input_paths`, e.g. from [`fully_expired_sstables`]).
+///
+/// `merge_inputs` is `input_paths` minus the drop-set — the SSTables the K-way
+/// merger will actually read. `dropped_whole` is the SSTables to exclude and
+/// reclaim after publish.
+///
+/// Degenerate all-dropped guard: the merger requires at least one input, so when
+/// the drop-set is EVERY input (a major compaction of an only-expired input set),
+/// one dropped SSTable is retained in `merge_inputs` (its rows purge to empty
+/// through the normal merge path) and removed from `dropped_whole`. Correctness is
+/// preserved and no read cost is paid for the remaining dropped SSTables.
+///
+/// Shared by both compaction surfaces so the exclusion + all-dropped guard live in
+/// one place (issue #1388).
+pub(crate) fn split_merge_and_dropped(
+    input_paths: &[PathBuf],
+    drop_set: Vec<PathBuf>,
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let dropped_lookup: std::collections::HashSet<&PathBuf> = drop_set.iter().collect();
+    let mut merge_inputs: Vec<PathBuf> = input_paths
+        .iter()
+        .filter(|p| !dropped_lookup.contains(*p))
+        .cloned()
+        .collect();
+    if !merge_inputs.is_empty() {
+        return (merge_inputs, drop_set);
+    }
+    // Everything was dropped: retain one for the merger; the rest stay dropped.
+    // `pop` removes the retained SSTable from the drop-set in one step.
+    let mut dropped_whole = drop_set;
+    if let Some(retained) = dropped_whole.pop() {
+        merge_inputs.push(retained);
+    }
+    (merge_inputs, dropped_whole)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

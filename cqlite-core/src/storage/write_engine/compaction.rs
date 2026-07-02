@@ -90,30 +90,9 @@ impl WriteEngine {
         // list below (never read/decoded — the perf win) and reclaimed after the
         // merged output publishes.
         let drop_set = merge::fully_expired_sstables(&input_paths, &outside_paths, gc_before_secs);
-        let dropped_lookup: std::collections::HashSet<&PathBuf> = drop_set.iter().collect();
-        let mut input_paths: Vec<PathBuf> = input_paths
-            .iter()
-            .filter(|p| !dropped_lookup.contains(*p))
-            .cloned()
-            .collect();
-        // Guard the degenerate all-dropped case: the merger requires at least one
-        // input, so retain the last dropped SSTable in the merge (its rows purge to
-        // empty through the normal path) rather than failing; the rest are still
-        // dropped whole. Correctness is preserved and no read cost is paid for the
-        // remaining dropped SSTables.
-        let dropped_whole: Vec<PathBuf> = if input_paths.is_empty() {
-            let mut all = drop_set.clone();
-            let retained = all.pop();
-            if let Some(r) = retained.clone() {
-                input_paths.push(r);
-            }
-            drop_set
-                .into_iter()
-                .filter(|p| Some(p) != retained.as_ref())
-                .collect()
-        } else {
-            drop_set
-        };
+        // Subtract the drop-set from the merger inputs (with the all-dropped guard);
+        // shared with the CLI one-shot path.
+        let (input_paths, dropped_whole) = merge::split_merge_and_dropped(&input_paths, drop_set);
 
         // Measure total bytes read (sum of Data.db file sizes as an approximation)
         let bytes_read: u64 = input_paths

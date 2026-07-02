@@ -83,6 +83,8 @@ pub use model::{CellData, ComplexDeletion, MergeEntry, MergeStats, MergeStep, Ro
 mod fully_expired;
 #[cfg(feature = "write-support")]
 pub use fully_expired::fully_expired_sstables;
+#[cfg(feature = "write-support")]
+pub(crate) use fully_expired::split_merge_and_dropped;
 
 /// Repair-state classification + mixed-state rejection for compaction
 /// (issue #1021). Reads each input's persisted repair state from `Statistics.db`
@@ -1789,38 +1791,13 @@ pub async fn compact_sstables_with_registry(
     // matching the tombstone-purge conservatism). The drop-set is subtracted from
     // the merger's input list BEFORE building the merger, so dropped SSTables are
     // never read/decoded (the perf win); their components are deleted only after
-    // the output publishes.
-    let dropped_whole: Vec<PathBuf> = if purge_safe {
+    // the output publishes. `split_merge_and_dropped` handles the all-dropped guard.
+    let drop_set: Vec<PathBuf> = if purge_safe {
         fully_expired_sstables(&input_paths, &[], gc_before_secs)
     } else {
         Vec::new()
     };
-    // Subtract the drop-set from the merger inputs. Guard the degenerate all-dropped
-    // case (a major compaction of an all-expired input set): the merger requires at
-    // least one input, so retain the last dropped SSTable in the merge (its rows
-    // purge to empty through the normal path) rather than crashing — the output is
-    // still correct and the remaining fully-expired SSTables are still dropped whole.
-    let dropped_set: std::collections::HashSet<&PathBuf> = dropped_whole.iter().collect();
-    let mut merge_inputs: Vec<PathBuf> = input_paths
-        .iter()
-        .filter(|p| !dropped_set.contains(*p))
-        .cloned()
-        .collect();
-    let dropped_whole: Vec<PathBuf> = if merge_inputs.is_empty() {
-        // Everything was fully expired: keep one input for the merger, drop the rest.
-        let mut kept = input_paths.clone();
-        let retained = kept.pop();
-        if let Some(ref r) = retained {
-            merge_inputs.push(r.clone());
-        }
-        // The drop-set is every input except the one retained for the merger.
-        dropped_whole
-            .into_iter()
-            .filter(|p| Some(p) != retained.as_ref())
-            .collect()
-    } else {
-        dropped_whole
-    };
+    let (merge_inputs, dropped_whole) = split_merge_and_dropped(&input_paths, drop_set);
     // From here on, decode/merge only the (drop-filtered) `merge_inputs`. The
     // dropped SSTables are reclaimed after the output publishes.
     let input_paths = merge_inputs;
