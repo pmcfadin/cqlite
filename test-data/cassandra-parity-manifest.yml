@@ -485,14 +485,17 @@ scenarios:
           (`fixture_static_columns_marker_byte_parity`) walks the real Snappy
           static_columns_table nb Data.db for the SAME static-row marker byte
           assertions (HAS_EXTENDED_FLAGS + IS_STATIC + prev_size=0 + omitted
-          clustering prefix). A LOCAL-ONLY fixture lane
-          (`fixture_static_only_partition_marker_byte_parity`) additionally walks
-          the truly static-ONLY partition (PK=99) of test_deltas/static_with_rows
-          when that (non-pinned) binary is present, SKIPPING in CI where it is
-          absent.
+          clustering prefix). A COMMITTED reference fixture lane
+          (`fixture_static_only_partition_marker_byte_parity`, issue #1400)
+          additionally walks the truly static-ONLY partition (PK=99) of
+          test_deltas/static_with_rows byte-for-byte; its tiny nb binaries + golden
+          are force-added into git, so this lane runs FAIL-CLOSED in every CI run
+          (a missing binary errors rather than skips).
     fixtures:
       references:
         - test-data/datasets/sstables/test_basic/static_columns_table-6b0425d0a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/static_with_rows-29a4cf80701f11f1b5d1d98b0640ec05/nb-1-big-Data.db
+        - test-data/datasets/sstables/test_deltas/static_with_rows-29a4cf80701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -518,14 +521,14 @@ scenarios:
         value and the static structure are compared against the sstabledump
         golden. These are asserted separately. The pinned fixture is decompressed
         first (FAIL CLOSED on a missing pinned fixture); the truly static-ONLY
-        partition shape is covered deterministically (always) plus the local-only
-        static_with_rows lane (skip-on-presence).
+        partition shape is covered deterministically (always) plus the committed
+        static_with_rows lane (fail-closed, issue #1400).
       known_limitations: >-
         The pinned static_columns_table has no static-ONLY partition, so the
         static-ONLY shape (a partition with a static_block and NO clustering rows)
-        is proven by the DETERMINISTIC writer lane (always runs) and the LOCAL-ONLY
-        test_deltas/static_with_rows lane (skip-on-presence; not in the CI
-        dataset). Per-static-cell value encoding across all CQL types is covered by
+        is proven by the DETERMINISTIC writer lane (always runs) and the COMMITTED
+        test_deltas/static_with_rows lane (fail-closed, issue #1400; its tiny nb
+        binaries are force-added into git). Per-static-cell value encoding across all CQL types is covered by
         the cql_types suites, whole-file identity by
         sstable_writer_cassandra_fixture_parity. This entry covers static-row BYTE
         parity, distinct from query/scan semantic parity.
@@ -555,23 +558,26 @@ scenarios:
           A partition that carries BOTH a static prelude AND regular clustering
           rows serializes the IS_STATIC static row first (no clustering prefix,
           prev_size=0) followed by regular rows whose clustering prefix carries
-          the clustering value(s). The PINNED fixture lane
-          (`fixture_static_with_clustering_rows_byte_parity`) walks
+          the clustering value(s). The COMMITTED fixture lane
+          (`fixture_static_with_clustering_rows_byte_parity`, issue #1400) walks
           test_tomb/static_with_tombstones (int32 PK + int32 clustering) partition
           key 1 byte-for-byte: the static row marker, then the first clustered
           row's PRESENT clustering header and its 4-byte int `ck=1` value (ASC) at
-          absolute offsets. `fixture_static_with_clustering_rows_jsonl_parity`
+          absolute offsets — its Data.db + CompressionInfo.db are force-added into
+          git (golden already tracked), so this lane runs FAIL-CLOSED in CI.
+          `fixture_static_with_clustering_rows_jsonl_parity`
           cross-checks the static cell value + the coexistence of static_block and
           clustering rows + the ck=1/row_1 pair against the sstabledump golden.
           `fixture_static_columns_marker_byte_parity` additionally walks the
           pinned static_columns_table static→clustered transition (UUID PK +
-          TIMESTAMP clustering), and a LOCAL-ONLY lane
-          (`fixture_local_static_with_rows_jsonl_parity`, skip-on-presence) covers
-          a dense ck 1..=4 ASC sequence. A deterministic counterpart
+          TIMESTAMP clustering), and a COMMITTED lane
+          (`fixture_local_static_with_rows_jsonl_parity`, fail-closed, issue #1400)
+          covers a dense ck 1..=4 ASC sequence. A deterministic counterpart
           (`regular_clustered_row_is_not_static_and_carries_clustering_prefix`)
           contrasts the non-static row layout via the public writer.
     fixtures:
       references:
+        - test-data/datasets/sstables/test_tomb/static_with_tombstones-4cdb9780702011f1b8f419c9a388d558/nb-1-big-Data.db
         - test-data/datasets/sstables/test_tomb/static_with_tombstones-4cdb9780702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
@@ -587,6 +593,7 @@ scenarios:
         --features write-support --test issue_991_static_clustering_parity
         static_with_clustering fixture_static_columns regular_clustered
       reference_paths:
+        - test-data/datasets/sstables/test_tomb/static_with_tombstones-4cdb9780702011f1b8f419c9a388d558/nb-1-big-Data.db
         - test-data/datasets/sstables/test_tomb/static_with_tombstones-4cdb9780702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - artifact.required_parity.byte_diff

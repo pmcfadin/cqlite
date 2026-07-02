@@ -189,32 +189,23 @@ fn regular_clustered_row_is_not_static_and_carries_clustering_prefix() {
 /// row: HAS_EXTENDED_FLAGS + IS_STATIC, and that it omits the clustering prefix
 /// (prev_size hard-coded to 0, body closes on END_OF_PARTITION).
 ///
-/// `static_with_rows` is a LOCAL-ONLY fixture (its binary is not in the pinned
-/// CI dataset), so this test SKIPS when the binary is absent — the static-only
-/// shape is also covered by the deterministic
-/// `static_only_row_sets_is_static_and_omits_clustering_prefix` test, which runs
-/// everywhere. When the binary IS present this asserts real Cassandra bytes.
+/// `static_with_rows` is a COMMITTED reference fixture (issue #1400 force-added
+/// its tiny Cassandra 5.0.2 `nb` binaries + golden into git), so this test is
+/// FAIL-CLOSED: a missing binary/golden is an error, never a silent skip — a
+/// future dataset regression that drops the fixture fails here rather than
+/// degrading to the writer-self-encode lane. The static-only shape is also
+/// covered by the deterministic
+/// `static_only_row_sets_is_static_and_omits_clustering_prefix` test.
 #[test]
 fn fixture_static_only_partition_marker_byte_parity() {
-    let Some(raw) = decompress_local_only_fixture(STATIC_WITH_ROWS_DIR) else {
-        eprintln!(
-            "SKIP fixture_static_only_partition_marker_byte_parity: local-only fixture \
-             {STATIC_WITH_ROWS_DIR}/nb-1-big-Data.db absent (covered deterministically)"
-        );
-        return;
-    };
+    let raw = decompress_fixture(STATIC_WITH_ROWS_DIR);
+    // Guards against a 0-comparison green: every byte assertion below bumps this,
+    // and we require it to be non-zero at the end (issue #1400, criterion 3).
+    let mut comparisons = 0usize;
     // Derive which PK is at file offset 0 from the golden (Cassandra orders by
     // murmur3 token, not key value), so a dataset regen that reshuffles partition
     // order produces a clear ordering signal rather than a confusing byte mismatch.
-    let Some(jsonl) =
-        read_jsonl_lines_opt(&format!("{STATIC_WITH_ROWS_DIR}/nb-1-big-Data.db.jsonl"))
-    else {
-        eprintln!(
-            "SKIP fixture_static_only_partition_marker_byte_parity: local-only golden absent \
-             (cannot derive first-partition PK)"
-        );
-        return;
-    };
+    let jsonl = read_jsonl_lines(&format!("{STATIC_WITH_ROWS_DIR}/nb-1-big-Data.db.jsonl"));
     let expected_first_pk = golden_first_partition_int_key(&jsonl[0]);
 
     // First partition header: [u16 key_len=4][i32 key][i32 LDT][i64 mfda].
@@ -228,6 +219,7 @@ fn fixture_static_only_partition_marker_byte_parity() {
          the pinned dataset was regenerated with a different murmur3 order — regenerate \
          the goldens alongside the binaries"
     );
+    comparisons += 1;
     let row_pos = STATIC_FIXTURE_HEADER;
 
     // First (and only) unfiltered of the static-only partition is the static row.
@@ -249,6 +241,7 @@ fn fixture_static_only_partition_marker_byte_parity() {
         EXTENDED_IS_STATIC,
         "static-only partition extended-flags byte (IS_STATIC exactly)",
     );
+    comparisons += 1;
 
     // A static row OMITS the clustering prefix: row_size follows the extended
     // flags directly. Real Cassandra (and our writer, issue #821) hard-codes the
@@ -279,20 +272,21 @@ fn fixture_static_only_partition_marker_byte_parity() {
          got 0x{:02X} (a leaked clustering prefix would shift this)",
         raw[body_end]
     );
+    comparisons += 1;
+    assert!(
+        comparisons > 0,
+        "fixture_static_only_partition_marker_byte_parity made 0 byte comparisons \
+         (fixture present but no assertion ran — 0-comparison green, issue #1400)"
+    );
 }
 
 /// JSONL parity (criterion 5, semantic family): the SAME static-only partition's
 /// decoded static cell matches the sstabledump golden value and the partition is
-/// static-ONLY (no clustering `"type":"row"` entries). Skips when the local-only
-/// golden is absent (same rationale as the byte-parity lane).
+/// static-ONLY (no clustering `"type":"row"` entries). FAIL-CLOSED: the golden is
+/// a committed reference (issue #1400), so a missing/empty golden is an error.
 #[test]
 fn fixture_static_only_partition_jsonl_parity() {
-    let Some(jsonl) =
-        read_jsonl_lines_opt(&format!("{STATIC_WITH_ROWS_DIR}/nb-1-big-Data.db.jsonl"))
-    else {
-        eprintln!("SKIP fixture_static_only_partition_jsonl_parity: local-only golden absent");
-        return;
-    };
+    let jsonl = read_jsonl_lines(&format!("{STATIC_WITH_ROWS_DIR}/nb-1-big-Data.db.jsonl"));
     let first = &jsonl[0];
     // Golden: partition key 99 carries exactly one static_block and NO rows.
     assert!(
@@ -330,18 +324,14 @@ fn fixture_static_only_partition_jsonl_parity() {
 /// declared order.
 #[test]
 fn fixture_static_with_clustering_rows_byte_parity() {
-    // #1208: the test_tomb/static_with_tombstones binary is NOT in the pinned
-    // CI bundle (refs-only), so read it skip-on-presence — the same fixture is
-    // read this way by sibling #1015. Present-but-empty still fails (the
-    // raw.len() > 8 assert in decompress_with_info), and the canonical static +
-    // clustering shape is also covered by deterministic writer tests.
-    let Some(raw) = decompress_local_only_fixture(STATIC_TOMB_DIR) else {
-        eprintln!(
-            "SKIP fixture_static_with_clustering_rows_byte_parity: local-only fixture \
-             {STATIC_TOMB_DIR}/nb-1-big-Data.db absent (not in pinned bundle; covered deterministically)"
-        );
-        return;
-    };
+    // #1400: the test_tomb/static_with_tombstones nb binaries (Data.db +
+    // CompressionInfo.db) are now COMMITTED reference fixtures (its golden was
+    // already tracked), so this lane is FAIL-CLOSED — a missing binary is an
+    // error, never a silent skip. The canonical static + clustering shape is also
+    // covered by deterministic writer tests.
+    let raw = decompress_fixture(STATIC_TOMB_DIR);
+    // Guards against a 0-comparison green (issue #1400, criterion 3).
+    let mut comparisons = 0usize;
 
     // Derive which PK is at file offset 0 from the golden (token order, not key
     // value), so a dataset regen that reshuffles partition order is reported as a
@@ -389,6 +379,7 @@ fn fixture_static_with_clustering_rows_byte_parity() {
          prelude is omitted from the prev-size chain) — and there is NO clustering \
          prefix between the extended flags and row_size",
     );
+    comparisons += 1;
     // The static row body ends; the next unfiltered (first clustered row) begins.
     let next_pos = s_prev_size.start + s_row_size.value as usize;
 
@@ -420,6 +411,12 @@ fn fixture_static_with_clustering_rows_byte_parity() {
         "PK=1 first clustered row clustering value (ck) must be 1 in ASC order, \
          4-byte big-endian at offset {ck_off}"
     );
+    comparisons += 1;
+    assert!(
+        comparisons > 0,
+        "fixture_static_with_clustering_rows_byte_parity made 0 byte comparisons \
+         (fixture present but no assertion ran — 0-comparison green, issue #1400)"
+    );
 }
 
 /// JSONL parity: PK=1 carries a static_block ('surviving_static') AND a
@@ -445,17 +442,12 @@ fn fixture_static_with_clustering_rows_jsonl_parity() {
     );
 }
 
-/// JSONL parity for the LOCAL-ONLY static_with_rows fixture (the cleanest
-/// static-only + dense static+clustering generation). Skips when its golden is
-/// absent — its shape is covered by the pinned lanes above.
+/// JSONL parity for the static_with_rows fixture (the cleanest static-only +
+/// dense static+clustering generation). FAIL-CLOSED: its golden is a committed
+/// reference (issue #1400), so a missing/empty golden is an error, not a skip.
 #[test]
 fn fixture_local_static_with_rows_jsonl_parity() {
-    let Some(jsonl) =
-        read_jsonl_lines_opt(&format!("{STATIC_WITH_ROWS_DIR}/nb-1-big-Data.db.jsonl"))
-    else {
-        eprintln!("SKIP fixture_local_static_with_rows_jsonl_parity: local-only golden absent");
-        return;
-    };
+    let jsonl = read_jsonl_lines(&format!("{STATIC_WITH_ROWS_DIR}/nb-1-big-Data.db.jsonl"));
     let p1 = jsonl
         .iter()
         .find(|l| l.contains("\"key\":[\"1\"]"))
@@ -1028,18 +1020,12 @@ fn null_vs_empty_clustering_value_byte_distinction() {
 
 #[test]
 fn fixture_static_row_flag_byte_well_formed() {
-    // #1208: the test_tomb/static_with_tombstones binary is NOT in the pinned
-    // CI bundle (refs-only), so read it skip-on-presence — the same fixture is
-    // read this way by sibling #1015. Present-but-empty still fails (the
+    // #1400: the test_tomb/static_with_tombstones nb binaries are now COMMITTED
+    // reference fixtures, so this anchor lane is FAIL-CLOSED — a missing binary is
+    // an error, never a silent skip. Present-but-empty still fails (the
     // raw.len() > 8 assert in decompress_with_info), and the static row-flag
     // mask is also anchored by deterministic writer tests.
-    let Some(raw) = decompress_local_only_fixture(STATIC_TOMB_DIR) else {
-        eprintln!(
-            "SKIP fixture_static_row_flag_byte_well_formed: local-only fixture \
-             {STATIC_TOMB_DIR}/nb-1-big-Data.db absent (not in pinned bundle; covered deterministically)"
-        );
-        return;
-    };
+    let raw = decompress_fixture(STATIC_TOMB_DIR);
 
     // Cassandra UnfilteredSerializer leading-byte sentinels that a LIVE STATIC
     // ROW must NOT carry: 0x01 is the END_OF_PARTITION marker (Unfiltered.Kind),
