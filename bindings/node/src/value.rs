@@ -457,20 +457,23 @@ pub fn row_to_object(
     values: &std::collections::HashMap<String, Value>,
 ) -> Result<JsObject> {
     let mut obj = env.create_object()?;
-    let mut emitted = 0usize;
+    // Emit every selected column, in authoritative SELECT order. A column absent
+    // from this row's values (a sparse row) is emitted as `null` so that
+    // `Object.keys(row)` always equals `columns.map(c => c.name)` and positional
+    // access stays stable (#1446 roborev).
     for (col_name, js_key) in keys {
-        if let Some(value) = values.get(col_name) {
-            let js_value = value_to_napi(env, value)?;
-            obj.set_property(*js_key, js_value)?;
-            emitted += 1;
-        }
+        let js_value = match values.get(col_name) {
+            Some(value) => value_to_napi(env, value)?,
+            None => env.get_null()?.into_unknown(),
+        };
+        obj.set_property(*js_key, js_value)?;
     }
     // Never drop cells (#1446 roborev): if the result carried values that the
     // authoritative column list does not cover — e.g. a streaming `SELECT *`
     // whose schema lookup failed leaves `metadata.columns` empty while rows are
     // still yielded — emit the remainder in a deterministic (name-sorted) order
     // rather than returning `{}` or falling back to nondeterministic hash order.
-    if emitted < values.len() {
+    if values.len() > keys.len() {
         let known: std::collections::HashSet<&str> =
             keys.iter().map(|(name, _)| name.as_str()).collect();
         let mut extra: Vec<&String> = values

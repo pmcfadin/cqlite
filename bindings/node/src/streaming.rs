@@ -200,6 +200,12 @@ impl napi::Task for NextTask {
 
         match output {
             NextResult::Value(values) => {
+                // Streaming yields one row per `next()` AsyncTask, and napi value
+                // handles are scoped to this `resolve` callback's `Env`, so the
+                // key handles cannot be cached across rows the way the batch
+                // `executeNative` path does — interning here is necessarily once
+                // per yielded row. The streaming win from #1446 is SELECT-order
+                // output (from `self.column_names`), not per-result interning.
                 let col_keys = intern_column_keys(&env, &self.column_names)?;
                 let row_obj = row_to_object(&env, &col_keys, &values)?;
                 result.set_named_property("value", row_obj)?;
