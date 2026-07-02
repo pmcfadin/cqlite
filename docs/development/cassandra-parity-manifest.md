@@ -120,6 +120,23 @@ Other evidence fields: `strict`, `artifacts` (`bytes`, `offsets`, `checksums`,
 - `smoke` requires `known_limitations` stating parse/load success is not byte
   parity; it cannot satisfy a P0 `p0_data_loss` scenario without `scope.gap`.
 - `partial` requires `known_limitations` plus `scope.gap`/`scope.next_step`.
+- `partial` is orphaned-debt-guarded (issue #1401): it **requires
+  `scope.target_issue`** and that `scope.next_step` cites the same `#<number>`.
+  A `partial` scenario is a promise of unfinished parity work; parking it on a
+  tracking issue that later closes leaves the debt with no home (before #1401,
+  48 of 52 partials were parked on CLOSED epics). This is a two-tier check:
+  - **Offline (PR gate):** `cassandra-parity lint` fail-closes when a `partial`
+    scenario has no `scope.target_issue` or its `next_step` omits the `#<number>`.
+    Run on every relevant PR by the `parity-manifest` job.
+  - **Network (nightly, SKIP-aware):** `scripts/tests/check-parity-partial-open-issues.sh`
+    (the `partial-open-issue-check` job) verifies each `target_issue` is still
+    OPEN on GitHub. It SKIPs (loudly, never a silent pass) without an
+    authenticated `gh`, so it can never flake a scheduled run.
+
+  When a tracker closes, re-park its partials onto an OPEN successor: update both
+  `scope.target_issue` and the `#<number>` in `scope.next_step`. Note the YAML
+  gotcha — a `#` after whitespace in a *plain* inline scalar starts a comment, so
+  quote a `next_step` that ends in `... #<number>.` (block `>-` scalars are fine).
 - `out_of_scope` must not define a `comparison_command`.
 
 ### `ci`

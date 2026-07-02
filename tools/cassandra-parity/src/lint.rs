@@ -584,6 +584,42 @@ fn lint_scenario(s: &Scenario, repo_root: Option<&Path>, out: &mut Vec<Finding>)
                     "partial evidence requires known_limitations",
                 ));
             }
+            // Issue #1401 (fail-closed orphaned-debt guard): a `partial` scenario is
+            // a promise of unfinished parity work, so it MUST be parked on a tracking
+            // issue that is still OPEN — otherwise the debt can sit forever with no
+            // home (48/52 partials were parked on CLOSED epics before this rule).
+            // Offline (PR-gate) half: `scope.target_issue` is REQUIRED and its number
+            // must be echoed in `scope.next_step`, so the machine field and the
+            // human-readable pointer agree. The open-state half (is #N actually open
+            // on GitHub?) is a network step run nightly and is SKIP-aware — see
+            // scripts/tests/check-parity-partial-open-issues.sh and
+            // docs/development/cassandra-parity-manifest.md.
+            match s.scope.target_issue {
+                None => out.push(Finding::error(
+                    id,
+                    "scope.target_issue",
+                    "partial evidence requires scope.target_issue pointing at an OPEN \
+                     tracking issue (see docs/development/cassandra-parity-manifest.md)",
+                )),
+                Some(n) => {
+                    let cites = s
+                        .scope
+                        .next_step
+                        .as_deref()
+                        .map(|ns| next_step_cites_issue(ns, n))
+                        .unwrap_or(false);
+                    if !cites {
+                        out.push(Finding::error(
+                            id,
+                            "scope.next_step",
+                            format!(
+                                "partial scenario next_step must cite its target_issue #{n} \
+                                 so the tracked-debt pointer and scope.target_issue agree"
+                            ),
+                        ));
+                    }
+                }
+            }
         }
         _ => {}
     }
@@ -704,6 +740,34 @@ fn valid_claim_id(id: &str) -> bool {
         }
         None => false,
     }
+}
+
+/// Whether `next_step` cites issue `#n` as a WHOLE token (issue #1401). A plain
+/// `contains("#{n}")` would false-match a prefix — `#150` inside `#1507` — so we
+/// scan every `#<digits>` run and require an exact numeric equality. Dependency-free
+/// (no `regex`), matching the [`valid_id`] style.
+fn next_step_cites_issue(next_step: &str, n: u64) -> bool {
+    let bytes = next_step.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'#' {
+            let start = i + 1;
+            let mut j = start;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > start {
+                // A full `#<digits>` token; compare the parsed value, not a substring.
+                if next_step[start..j].parse::<u64>().ok() == Some(n) {
+                    return true;
+                }
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    false
 }
 
 fn valid_id(id: &str) -> bool {
