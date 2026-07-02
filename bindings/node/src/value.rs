@@ -468,18 +468,21 @@ pub fn row_to_object(
         };
         obj.set_property(*js_key, js_value)?;
     }
-    // Never drop cells (#1446 roborev): if the result carried values that the
-    // authoritative column list does not cover — e.g. a streaming `SELECT *`
-    // whose schema lookup failed leaves `metadata.columns` empty while rows are
-    // still yielded — emit the remainder in a deterministic (name-sorted) order
-    // rather than returning `{}` or falling back to nondeterministic hash order.
-    if values.len() > keys.len() {
-        let known: std::collections::HashSet<&str> =
-            keys.iter().map(|(name, _)| name.as_str()).collect();
-        let mut extra: Vec<&String> = values
-            .keys()
-            .filter(|name| !known.contains(name.as_str()))
-            .collect();
+    // Never drop cells (#1446 roborev): emit any values the authoritative column
+    // list does not cover — e.g. a streaming `SELECT *` whose schema lookup
+    // failed leaves `metadata.columns` empty while rows are still yielded — in a
+    // deterministic (name-sorted) order rather than returning `{}` or falling
+    // back to nondeterministic hash order. Extras are detected by membership,
+    // not a length comparison, so a sparse row that also carries an unmapped
+    // value (fewer present selected columns than metadata entries, plus one
+    // extra) is still emitted in full.
+    let known: std::collections::HashSet<&str> =
+        keys.iter().map(|(name, _)| name.as_str()).collect();
+    let mut extra: Vec<&String> = values
+        .keys()
+        .filter(|name| !known.contains(name.as_str()))
+        .collect();
+    if !extra.is_empty() {
         extra.sort();
         for name in extra {
             if let Some(value) = values.get(name) {
