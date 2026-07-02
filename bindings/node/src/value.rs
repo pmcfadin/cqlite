@@ -457,10 +457,32 @@ pub fn row_to_object(
     values: &std::collections::HashMap<String, Value>,
 ) -> Result<JsObject> {
     let mut obj = env.create_object()?;
+    let mut emitted = 0usize;
     for (col_name, js_key) in keys {
         if let Some(value) = values.get(col_name) {
             let js_value = value_to_napi(env, value)?;
             obj.set_property(*js_key, js_value)?;
+            emitted += 1;
+        }
+    }
+    // Never drop cells (#1446 roborev): if the result carried values that the
+    // authoritative column list does not cover — e.g. a streaming `SELECT *`
+    // whose schema lookup failed leaves `metadata.columns` empty while rows are
+    // still yielded — emit the remainder in a deterministic (name-sorted) order
+    // rather than returning `{}` or falling back to nondeterministic hash order.
+    if emitted < values.len() {
+        let known: std::collections::HashSet<&str> =
+            keys.iter().map(|(name, _)| name.as_str()).collect();
+        let mut extra: Vec<&String> = values
+            .keys()
+            .filter(|name| !known.contains(name.as_str()))
+            .collect();
+        extra.sort();
+        for name in extra {
+            if let Some(value) = values.get(name) {
+                let js_value = value_to_napi(env, value)?;
+                obj.set_named_property(name, js_value)?;
+            }
         }
     }
     Ok(obj)
