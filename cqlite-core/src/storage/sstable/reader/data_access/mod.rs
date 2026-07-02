@@ -408,15 +408,11 @@ impl SSTableReader {
         // offset-read placeholder returned a bare `Value::Blob`, which the query
         // layer surfaced as a synthetic single-column *live* row keyed "data"
         // (the `other => insert("data", ..)` arm in
-        // `executor::storage_data_to_query_row`). That raw blob reached
-        // SELECT/export as real data, so it must keep doing so: emit it as a live
-        // `ScanRow::Row` with the same "data" column. A `ScanRow::Marker` here
-        // would be SUPPRESSED (or reduced to an id-only row) downstream and would
-        // silently drop a value that previously surfaced.
-        let row = ScanRow::Row(vec![(
-            std::sync::Arc::from("data"),
-            Value::Blob(data.to_vec()),
-        )]);
+        // `executor::storage_data_to_query_row`). Route it through the crate-wide
+        // classifier so the raw blob keeps surfacing as a live "data" cell; a
+        // `ScanRow::Marker` here would be SUPPRESSED downstream and silently drop
+        // a value that previously reached SELECT/export (issue #1334).
+        let row = ScanRow::from_fallback_value(Value::Blob(data.to_vec()));
 
         // Extract write time from value (placeholder - would need to be parsed from SSTable)
         let _write_time = std::time::SystemTime::now()

@@ -158,6 +158,35 @@ impl ScanRow {
             ScanRow::Row(_) => None,
         }
     }
+
+    /// THE single classifier that maps a decoded value onto the scan → query row
+    /// carrier (issue #1334). Every fallback producer routes through this so a
+    /// live value can never be mis-wrapped as a suppressed marker.
+    ///
+    /// A genuinely absent cell ([`Value::Null`]) or a tombstone
+    /// ([`Value::Tombstone`]) stays a suppressible [`ScanRow::Marker`] —
+    /// `build_row_from_scan`/`into_cells()` drop those from user-visible output.
+    /// ANY successfully-decoded LIVE value becomes a live single-cell
+    /// [`ScanRow::Row`] under `column_name` (interned `Arc<str>`) so it surfaces
+    /// in SELECT/export/schema-discovery under ALL feature combinations
+    /// (including `legacy-heuristics`, which decodes legacy non-empty values into
+    /// a live [`Value::Blob`]).
+    pub fn classify_cell(column_name: &str, value: Value) -> ScanRow {
+        match value {
+            Value::Null | Value::Tombstone(_) => ScanRow::Marker(value),
+            _ => ScanRow::Row(vec![(std::sync::Arc::from(column_name), value)]),
+        }
+    }
+
+    /// Classify a fallback value that has NO column-name context: the schema-less
+    /// / `legacy-heuristics` blob fallback in `parse_block_entries*` and the
+    /// offset-read placeholder in `data_access`. A live value surfaces under the
+    /// synthetic `"data"` column — the exact single-column live-row shape the
+    /// pre-#1334 query layer produced for a bare [`Value`] — so a live
+    /// [`Value::Blob`] can never silently disappear behind a marker (issue #1334).
+    pub fn from_fallback_value(value: Value) -> ScanRow {
+        Self::classify_cell("data", value)
+    }
 }
 
 /// User Defined Type value with structured field access
