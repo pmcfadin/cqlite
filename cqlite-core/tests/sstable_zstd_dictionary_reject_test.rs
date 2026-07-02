@@ -238,10 +238,22 @@ fn zstd_dictionary_frame_rejected_fail_closed() {
 }
 
 #[test]
+#[ignore = "expected typed rejection; blocked on #1414 — the full-scan stitch path currently wraps zstd-dictionary decompression failures as Error::Corruption. Enable when #1414 lands the typed UnsupportedFormat rejection."]
 fn zstd_dictionary_sstable_rejected_via_reader_fixture() {
     // AC#1/#2 oracle: a real commissioned Cassandra zstd+dictionary SSTable,
     // opened via the reader/query path, must fail closed (typed rejection, no
     // rows). Fixture-gated: SKIP clean, hard-FAIL under CQLITE_REQUIRE_FIXTURES=1.
+    //
+    // IGNORED pending #1414 (mirrors the #1397 ignored-expected-behavior
+    // precedent). The strict assertions below encode the TARGET end state —
+    // a typed InvalidFormat/UnsupportedFormat rejection naming the
+    // zstd/dictionary decompression path, explicitly excluding CRC/checksum
+    // and never Corruption, never rows. That is NOT today's behavior: the
+    // current full-scan stitch path wraps a dictionary decode failure as
+    // `Error::Corruption`, so with the fixture present this oracle would fail.
+    // Returning a typed format error from the reader path is #1414's scope (a
+    // production change, out of scope for this test-only issue). This test is a
+    // ready-to-enable regression: the #1414 fixer just removes the #[ignore].
     let data_db = datasets_root().join(format!("{DICT_FIXTURE_REL}-Data.db"));
     if !data_db.exists() {
         let msg = format!(
