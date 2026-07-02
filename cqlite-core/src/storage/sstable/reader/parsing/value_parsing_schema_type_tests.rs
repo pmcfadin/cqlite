@@ -99,7 +99,9 @@ async fn scalar_types_decode_typed_not_blob() {
     // float (Float32): 4-byte big-endian IEEE-754.
     let bytes = 3.5f32.to_be_bytes();
     assert_eq!(
-        reader.parse_value_with_schema_type(&bytes, "float").unwrap(),
+        reader
+            .parse_value_with_schema_type(&bytes, "float")
+            .unwrap(),
         Value::Float32(3.5),
         "CQL float must decode to Value::Float32, not Value::Blob"
     );
@@ -107,7 +109,9 @@ async fn scalar_types_decode_typed_not_blob() {
     // double (Float): 8-byte big-endian IEEE-754.
     let bytes = 6.25f64.to_be_bytes();
     assert_eq!(
-        reader.parse_value_with_schema_type(&bytes, "double").unwrap(),
+        reader
+            .parse_value_with_schema_type(&bytes, "double")
+            .unwrap(),
         Value::Float(6.25),
         "CQL double must decode to Value::Float, not Value::Blob"
     );
@@ -137,7 +141,9 @@ async fn scalar_types_decode_typed_not_blob() {
     dec.extend_from_slice(&2i32.to_be_bytes());
     dec.extend_from_slice(&[0x30, 0x39]); // unscaled = 12345
     assert_eq!(
-        reader.parse_value_with_schema_type(&dec, "decimal").unwrap(),
+        reader
+            .parse_value_with_schema_type(&dec, "decimal")
+            .unwrap(),
         Value::Decimal {
             scale: 2,
             unscaled: vec![0x30, 0x39],
