@@ -58,6 +58,8 @@ pub use wal::{RecoveryReport, WriteAheadLog};
 #[cfg(feature = "write-support")]
 mod compaction;
 #[cfg(feature = "write-support")]
+pub(crate) mod durability;
+#[cfg(feature = "write-support")]
 mod maintenance;
 #[cfg(feature = "write-support")]
 mod stats;
@@ -942,16 +944,29 @@ impl WriteEngine {
             info.data_size
         );
 
-        // Truncate WAL (data now persisted to SSTable)
-        // If truncate fails, log warning but don't fail - data is already in SSTable
-        if let Err(e) = self.wal.truncate() {
-            log::warn!(
-                "Failed to truncate WAL after successful SSTable flush: {}. \
-                Data is safe in SSTable, but WAL cleanup failed.",
-                e
-            );
-            // Don't return error - SSTable write succeeded, which is the important part
-        }
+        // Durability handoff (issue #1392): fsync the SSTable's parent directory
+        // BEFORE truncating the WAL. See `durability::finalize_flush_durability`.
+        //
+        // A `?`-propagated error here (e.g. a directory fsync failure) happens
+        // BEFORE the WAL is truncated, so the WAL is still intact and replayable:
+        // returning early WITHOUT advancing the generation is correct, because a
+        // retry re-flushes to the same generation and the untouched WAL still
+        // recovers the data on a crash mid-retry.
+        let durability_outcome = durability::finalize_flush_durability(
+            &durability::RealDurabilityBarrier,
+            &info.data_path,
+            &self.config.data_dir,
+            &info.created_dirs,
+            &mut self.wal,
+        )?;
+
+        // The SSTable is now durably published. Commit flush state — clear the
+        // memtable and advance the generation — for BOTH outcomes, including
+        // `WalTruncateFailedAfterCommit`. In that case the WAL has already been
+        // zeroed, so the published SSTable is the ONLY durable copy of these
+        // mutations; committing state guarantees a retry writes a NEW generation
+        // and never lets `File::create` overwrite the sole durable copy (which
+        // would lose the data on a crash mid-retry). See issue #1392.
 
         // Clear memtable
         self.memtable.clear();
@@ -979,7 +994,15 @@ impl WriteEngine {
         }
         self.record_memtable_gauges();
 
-        Ok(Some(info))
+        // Surface a post-mutation WAL-truncate failure AFTER state has been
+        // committed above (issue #1392). The data is durable in the published
+        // SSTable and the generation has advanced, so a retry cannot overwrite
+        // it; the error informs the caller that the WAL is no longer a valid
+        // replay marker.
+        match durability_outcome {
+            durability::FlushDurabilityOutcome::Durable => Ok(Some(info)),
+            durability::FlushDurabilityOutcome::WalTruncateFailedAfterCommit(err) => Err(err),
+        }
     }
 
     /// Close the write engine
@@ -2475,6 +2498,125 @@ mod tests {
             engine2.is_ok(),
             "WriteEngine must acquire lock after the previous engine was dropped: {:?}",
             engine2.err()
+        );
+    }
+
+    // Issue #1392 (roborev r4): when the WAL truncate fails AFTER `set_len(0)`
+    // has already zeroed the WAL, the just-published SSTable is the ONLY durable
+    // copy of the flushed mutations. The flush must therefore treat the SSTable
+    // handoff as COMMITTED for state purposes — clear the memtable and advance
+    // the generation BEFORE surfacing the error — so that a retry writes a NEW
+    // generation instead of `File::create`-overwriting the published SSTable
+    // (which would lose the data on a crash mid-retry).
+    //
+    // This drives the real `RealDurabilityBarrier` path via the WAL's test-only
+    // post-`set_len(0)` sync fault, then proves: (1) the flush surfaces the
+    // error, (2) state is committed (memtable cleared, generation advanced),
+    // (3) the published gen-1 SSTable survives byte-for-byte, (4) a subsequent
+    // flush writes a NEW generation, and (5) a full read returns each mutation
+    // exactly once — crash-safe, no loss, no duplication.
+    #[tokio::test]
+    async fn post_mutation_truncate_failure_commits_and_retry_writes_new_generation() {
+        use crate::platform::Platform;
+        use crate::storage::sstable::SSTableManager;
+        use crate::Config;
+        use std::sync::Arc;
+
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let data_dir = temp_dir.path().join("data");
+        let config = WriteEngineConfig::new(
+            data_dir.clone(),
+            temp_dir.path().join("wal"),
+            schema.clone(),
+        );
+        let mut engine = WriteEngine::new(config).unwrap();
+
+        // Write the first mutation, then arm a post-set_len(0) WAL-truncate fault
+        // so the flush finalize hits the `AfterMutation` path.
+        engine
+            .write(create_test_mutation(1, "Alice", 1_000_000))
+            .unwrap();
+        let gen_before = engine.generation();
+        engine.wal.set_fail_sync_after_truncate(true);
+
+        let err = engine
+            .flush()
+            .await
+            .expect_err("a post-mutation WAL-truncate failure must surface as an error");
+        assert!(
+            matches!(err, Error::Storage(_)),
+            "post-mutation truncate failure must surface as a storage error, got {err:?}"
+        );
+
+        // State is COMMITTED despite the error: the memtable is cleared and the
+        // generation has advanced, so a retry cannot reuse the published gen.
+        assert_eq!(
+            engine.memtable_row_count(),
+            0,
+            "memtable must be cleared once the SSTable is durably published"
+        );
+        assert_eq!(
+            engine.generation(),
+            gen_before + 1,
+            "generation must advance so a retry writes a NEW generation"
+        );
+
+        // The published gen-1 SSTable exists on disk. Snapshot its bytes to prove
+        // a later flush does NOT overwrite it.
+        let sstable_dir = data_dir.join("test_ks").join("test_table");
+        let gen1_data = sstable_dir.join("nb-1-big-Data.db");
+        assert!(
+            gen1_data.exists(),
+            "the published gen-1 Data.db must exist on disk after the faulted flush"
+        );
+        let gen1_bytes = std::fs::read(&gen1_data).unwrap();
+
+        // Disarm the fault and flush a SECOND mutation: it must write a NEW
+        // generation and leave the first SSTable byte-for-byte intact.
+        engine.wal.set_fail_sync_after_truncate(false);
+        engine
+            .write(create_test_mutation(2, "Bob", 2_000_000))
+            .unwrap();
+        engine
+            .flush()
+            .await
+            .expect("second flush must succeed")
+            .expect("second flush must produce an SSTable");
+
+        let gen2_data = sstable_dir.join("nb-2-big-Data.db");
+        assert!(
+            gen2_data.exists(),
+            "the retry must write a NEW generation (nb-2), not overwrite nb-1"
+        );
+        assert_eq!(
+            std::fs::read(&gen1_data).unwrap(),
+            gen1_bytes,
+            "the retry must NOT overwrite the published gen-1 SSTable"
+        );
+
+        // Full read across both generations: each mutation appears exactly once.
+        let cqlite_config = Config::default();
+        let platform = Arc::new(Platform::new(&cqlite_config).await.unwrap());
+        let manager = SSTableManager::new(
+            &data_dir,
+            &cqlite_config,
+            platform,
+            #[cfg(feature = "state_machine")]
+            None,
+        )
+        .await
+        .expect("SSTableManager must load both published generations");
+
+        let table_id = crate::types::TableId::from("test_ks.test_table");
+        let rows = manager
+            .scan(&table_id, None, None, None, Some(&schema))
+            .await
+            .expect("scan across both generations must succeed");
+        assert_eq!(
+            rows.len(),
+            2,
+            "both mutations must be readable exactly once (no loss, no duplication)"
         );
     }
 }

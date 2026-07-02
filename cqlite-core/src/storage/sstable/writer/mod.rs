@@ -193,6 +193,16 @@ pub struct SSTableInfo {
     pub partition_count: usize,
     /// Total size of Data.db file in bytes
     pub data_size: u64,
+    /// Directories that `finish()` newly created for this SSTable, shallowest
+    /// first (issue #1392).
+    ///
+    /// On the first flush into a brand-new keyspace/table path this includes
+    /// the keyspace and table directories in addition to the leaf. The flush
+    /// durability barrier fsyncs each of these ancestors' parents (deepest
+    /// first) before truncating the WAL so a crash cannot lose the newly
+    /// created directory tree. Empty on subsequent flushes where the directory
+    /// tree already existed.
+    pub created_dirs: Vec<PathBuf>,
 }
 
 /// SSTable writer coordinator
@@ -1451,6 +1461,84 @@ mod tests {
             .to_str()
             .unwrap()
             .contains("nb-1-big-Data.db"));
+    }
+
+    /// Issue #1392 (roborev r3): a NON-EMPTY first flush into a brand-new
+    /// keyspace/table path must report the newly created ancestor directories in
+    /// `SSTableInfo::created_dirs`, so the flush durability barrier can fsync them
+    /// (deepest-first) BEFORE truncating the WAL.
+    ///
+    /// This is the case that was silently broken: for a non-empty flush the
+    /// streaming `DataWriter`/`IndexWriter` create the keyspace/table tree in
+    /// `ensure_sink` during `write_partition` — BEFORE `finish` runs — so the
+    /// old finish-time `create_dir_all_recording` returned an EMPTY list and only
+    /// the leaf was fsynced, leaving the ancestor dirents unsynced (crash-loss
+    /// gap). RED before the fix (`created_dirs` empty → assertion fails); GREEN
+    /// after (the writers record at their first create point and finish folds it
+    /// in). The end-to-end handoff through `finalize_flush_durability` then
+    /// fsyncs those dirs and truncates the WAL.
+    #[tokio::test]
+    async fn nonempty_first_flush_records_and_fsyncs_ancestor_dirs_before_wal_truncate() {
+        use crate::storage::write_engine::durability::{
+            finalize_flush_durability, RealDurabilityBarrier,
+        };
+        use crate::storage::write_engine::wal::WriteAheadLog;
+
+        let root = TempDir::new().unwrap();
+        let data_dir = root.path();
+        let schema = create_test_schema();
+
+        // Brand-new nested SSTable dir: data_dir/test_ks/test_table (neither the
+        // keyspace nor the table directory exists yet). A non-empty flush creates
+        // this whole tree via the streaming writers' `ensure_sink`.
+        let ks_dir = data_dir.join("test_ks");
+        let leaf_dir = ks_dir.join("test_table");
+        assert!(!ks_dir.exists() && !leaf_dir.exists());
+
+        // A real WAL at the data_dir root, with an entry that must survive until
+        // the SSTable's dirents are durable.
+        let mut wal = WriteAheadLog::create(data_dir).unwrap();
+        let mutation = create_test_mutation("test_ks", "test_table", 1, "Alice", 1_000_000);
+        wal.append(&mutation).unwrap();
+        wal.sync().unwrap();
+
+        let mut writer = SSTableWriter::new(leaf_dir.clone(), 1, &schema).unwrap();
+        let key = mutation.decorated_key(&schema).unwrap();
+        writer.write_partition(key, vec![mutation]).unwrap();
+        let info = writer.finish().await.unwrap();
+
+        // The non-empty flush is what created these ancestors — they MUST be
+        // recorded (this list was silently empty before the fix).
+        assert!(info.data_size > 0, "flush must be non-empty");
+        assert!(
+            info.created_dirs.contains(&ks_dir),
+            "keyspace dir must be recorded as newly created: {:?}",
+            info.created_dirs
+        );
+        assert!(
+            info.created_dirs.contains(&leaf_dir),
+            "table (leaf) dir must be recorded as newly created: {:?}",
+            info.created_dirs
+        );
+
+        // End-to-end handoff: fsync the leaf + every new ancestor (deepest-first)
+        // then truncate the WAL. With the ancestors recorded, data_dir itself is
+        // reached (as the parent of ks_dir) and synced before the WAL is dropped.
+        finalize_flush_durability(
+            &RealDurabilityBarrier,
+            &info.data_path,
+            data_dir,
+            &info.created_dirs,
+            &mut wal,
+        )
+        .unwrap();
+
+        // The WAL truncate ran only after the dir fsyncs succeeded.
+        assert_eq!(
+            wal.replay().unwrap().mutations.len(),
+            0,
+            "WAL must be truncated after the ancestor dirs are fsynced"
+        );
     }
 
     /// Issue #852: a table with `bloom_filter_fp_chance = 1.0` disables the

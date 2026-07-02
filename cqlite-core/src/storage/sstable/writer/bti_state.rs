@@ -202,10 +202,14 @@ impl SSTableWriter {
         // Partitions.db must be non-empty here (pending is non-empty).
         let part_path = cpath("Partitions.db");
         tokio::fs::write(&part_path, partitions_bytes).await?;
+        // fsync Partitions.db contents (issue #1392): tokio::fs::write does not
+        // fsync, so the bytes would only reach the page cache.
+        Self::fsync_component(&part_path).await?;
 
         // Rows.db is ALWAYS emitted for BTI (possibly 0 bytes).
         let rows_path = cpath("Rows.db");
         tokio::fs::write(&rows_path, rows_bytes).await?;
+        Self::fsync_component(&rows_path).await?;
 
         Ok((Some(part_path), Some(rows_path)))
     }
