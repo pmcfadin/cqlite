@@ -282,6 +282,24 @@ describe('Row property order matches SELECT order (Issue #1446)', () => {
     }
   });
 
+  test('executeNative: every selected column is present on every row (null-filled, never undefined)', async () => {
+    // Locks the null-fill branch: a selected column absent from a row's values
+    // must still appear as a key (emitted as null), so row shape is stable and
+    // Object.keys never diverges from the projection. Missing cells are null,
+    // never undefined/omitted.
+    const cols = ['id', 'name', 'age', 'salary', 'active'];
+    const result = await db.executeNative(
+      `SELECT ${cols.join(', ')} FROM test_basic.simple_table LIMIT 10`
+    );
+    expect(result.rowCount).toBeGreaterThan(0);
+    for (const row of result.rows) {
+      expect(Object.keys(row)).toEqual(cols);
+      for (const k of cols) {
+        expect(row[k]).not.toBeUndefined(); // present as a value or explicit null
+      }
+    }
+  });
+
   test('executeStreaming: Object.keys(row) matches SELECT column order', async () => {
     const stream = db.executeStreaming(
       'SELECT name, id, age FROM test_basic.simple_table LIMIT 5'

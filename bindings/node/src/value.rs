@@ -431,18 +431,31 @@ fn udt_to_object(env: &Env, udt: &cqlite_core::UdtValue) -> Result<JsUnknown> {
     Ok(obj.into_unknown())
 }
 
-/// Intern the SELECT-order column names into reusable JS key handles.
+/// Reusable, once-per-result column-key structure for row construction.
 ///
-/// Issue #1446: build each column-name `JsString` **once per result set** so a
-/// wide-table scan does not re-intern `O(rows × columns)` identical strings at
-/// the FFI boundary. The returned pairs are `(lookup_name, js_key)`, kept in
-/// authoritative SELECT order; `row_to_object` consumes a borrow of this slice
-/// for every row. `JsString` is a `Copy` handle valid for the enclosing scope.
-pub fn intern_column_keys(env: &Env, names: &[String]) -> Result<Vec<(String, JsString)>> {
-    names
+/// Issue #1446: both the interned `JsString` handles and the membership set are
+/// built a single time per result set (they depend only on the column list,
+/// which is constant across every row) so a wide-table scan pays neither the
+/// `O(rows × columns)` string re-interning nor a per-row `HashSet` rebuild.
+pub struct ColumnKeys {
+    /// `(lookup_name, pre-interned JS key)` in authoritative SELECT order.
+    /// `JsString` is a `Copy` handle valid for the enclosing `Env` scope.
+    ordered: Vec<(String, JsString)>,
+    /// Membership set of the ordered names, for O(1) "is this value covered by
+    /// the authoritative column list?" checks in [`row_to_object`].
+    known: std::collections::HashSet<String>,
+}
+
+/// Intern the SELECT-order column names into a reusable [`ColumnKeys`].
+///
+/// Called once per result set; the returned structure is borrowed for every row.
+pub fn intern_column_keys(env: &Env, names: &[String]) -> Result<ColumnKeys> {
+    let ordered = names
         .iter()
         .map(|name| Ok((name.clone(), env.create_string(name)?)))
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    let known = names.iter().cloned().collect();
+    Ok(ColumnKeys { ordered, known })
 }
 
 /// Convert row values to a JavaScript object in authoritative SELECT order.
@@ -450,10 +463,10 @@ pub fn intern_column_keys(env: &Env, names: &[String]) -> Result<Vec<(String, Js
 /// Issue #1446: property insertion order equals `columns` order (V8 preserves
 /// string-key insertion order), so `Object.keys(row)` matches
 /// `columns.map(c => c.name)` — not `HashMap` hash order. `keys` are the
-/// pre-interned handles from [`intern_column_keys`], reused across every row.
+/// once-per-result handles from [`intern_column_keys`], reused across every row.
 pub fn row_to_object(
     env: &Env,
-    keys: &[(String, JsString)],
+    keys: &ColumnKeys,
     values: &std::collections::HashMap<String, Value>,
 ) -> Result<JsObject> {
     let mut obj = env.create_object()?;
@@ -461,7 +474,7 @@ pub fn row_to_object(
     // from this row's values (a sparse row) is emitted as `null` so that
     // `Object.keys(row)` always equals `columns.map(c => c.name)` and positional
     // access stays stable (#1446 roborev).
-    for (col_name, js_key) in keys {
+    for (col_name, js_key) in &keys.ordered {
         let js_value = match values.get(col_name) {
             Some(value) => value_to_napi(env, value)?,
             None => env.get_null()?.into_unknown(),
@@ -472,15 +485,12 @@ pub fn row_to_object(
     // list does not cover — e.g. a streaming `SELECT *` whose schema lookup
     // failed leaves `metadata.columns` empty while rows are still yielded — in a
     // deterministic (name-sorted) order rather than returning `{}` or falling
-    // back to nondeterministic hash order. Extras are detected by membership,
-    // not a length comparison, so a sparse row that also carries an unmapped
-    // value (fewer present selected columns than metadata entries, plus one
-    // extra) is still emitted in full.
-    let known: std::collections::HashSet<&str> =
-        keys.iter().map(|(name, _)| name.as_str()).collect();
+    // back to nondeterministic hash order. Extras are detected by membership
+    // against the precomputed `known` set (built once per result), so the common
+    // path where metadata covers every cell allocates no set and does no sort.
     let mut extra: Vec<&String> = values
         .keys()
-        .filter(|name| !known.contains(name.as_str()))
+        .filter(|name| !keys.known.contains(name.as_str()))
         .collect();
     if !extra.is_empty() {
         extra.sort();
