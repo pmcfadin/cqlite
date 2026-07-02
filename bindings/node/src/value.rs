@@ -470,24 +470,28 @@ pub fn row_to_object(
     values: &std::collections::HashMap<String, Value>,
 ) -> Result<JsObject> {
     let mut obj = env.create_object()?;
-    // Emit every selected column, in authoritative SELECT order. A column absent
-    // from this row's values (a sparse row) is emitted as `null` so that
-    // `Object.keys(row)` always equals `columns.map(c => c.name)` and positional
-    // access stays stable (#1446 roborev).
+    // Emit the selected columns that are present in this row's values, in
+    // authoritative SELECT order (#1446). For the normal case where metadata
+    // names match the value keys, this is every column, so `Object.keys(row)`
+    // equals `columns.map(c => c.name)`. A metadata column with no matching value
+    // is skipped (not null-filled): for aggregate queries core's metadata uses a
+    // fallback name like `col_0` while the value is keyed by the expression name
+    // like `Count(*)`, and null-filling would emit a phantom `col_0: null`
+    // alongside the real cell.
     for (col_name, js_key) in &keys.ordered {
-        let js_value = match values.get(col_name) {
-            Some(value) => value_to_napi(env, value)?,
-            None => env.get_null()?.into_unknown(),
-        };
-        obj.set_property(*js_key, js_value)?;
+        if let Some(value) = values.get(col_name) {
+            let js_value = value_to_napi(env, value)?;
+            obj.set_property(*js_key, js_value)?;
+        }
     }
     // Never drop cells (#1446 roborev): emit any values the authoritative column
-    // list does not cover — e.g. a streaming `SELECT *` whose schema lookup
-    // failed leaves `metadata.columns` empty while rows are still yielded — in a
-    // deterministic (name-sorted) order rather than returning `{}` or falling
-    // back to nondeterministic hash order. Extras are detected by membership
-    // against the precomputed `known` set (built once per result), so the common
-    // path where metadata covers every cell allocates no set and does no sort.
+    // list does not cover — an aggregate value keyed differently from its
+    // metadata name, or a streaming `SELECT *` whose schema lookup failed leaves
+    // `metadata.columns` empty while rows are still yielded — in a deterministic
+    // (name-sorted) order rather than dropping them or using nondeterministic
+    // hash order. Extras are detected by membership against the precomputed
+    // `known` set (built once per result), so the common path where metadata
+    // covers every cell allocates no set and does no sort.
     let mut extra: Vec<&String> = values
         .keys()
         .filter(|name| !keys.known.contains(name.as_str()))

@@ -282,11 +282,9 @@ describe('Row property order matches SELECT order (Issue #1446)', () => {
     }
   });
 
-  test('executeNative: every selected column is present on every row (null-filled, never undefined)', async () => {
-    // Locks the null-fill branch: a selected column absent from a row's values
-    // must still appear as a key (emitted as null), so row shape is stable and
-    // Object.keys never diverges from the projection. Missing cells are null,
-    // never undefined/omitted.
+  test('executeNative: every selected column is present on every row (never undefined)', async () => {
+    // For normal projections core populates every selected column, so the row
+    // shape is stable: Object.keys equals the projection and no cell is omitted.
     const cols = ['id', 'name', 'age', 'salary', 'active'];
     const result = await db.executeNative(
       `SELECT ${cols.join(', ')} FROM test_basic.simple_table LIMIT 10`
@@ -295,8 +293,28 @@ describe('Row property order matches SELECT order (Issue #1446)', () => {
     for (const row of result.rows) {
       expect(Object.keys(row)).toEqual(cols);
       for (const k of cols) {
-        expect(row[k]).not.toBeUndefined(); // present as a value or explicit null
+        expect(row[k]).not.toBeUndefined();
       }
+    }
+  });
+
+  test('executeNative: aggregate projection emits no phantom metadata column', async () => {
+    // Regression (#1446 roborev job 2736): aggregate result metadata uses a
+    // fallback name (col_0) while the row value is keyed by the expression name
+    // (Count(*)). A metadata column absent from values must be skipped, not
+    // null-filled — otherwise the row gains a phantom `col_0: null`.
+    const result = await db.executeNative(
+      'SELECT COUNT(*) FROM test_basic.simple_table'
+    );
+    expect(result.rowCount).toBe(1);
+    const row = result.rows[0];
+    const keys = Object.keys(row);
+    // The real aggregate cell is present with a non-null value...
+    expect(keys.length).toBe(1);
+    expect(row[keys[0]]).not.toBeNull();
+    // ...and no phantom null-filled metadata column leaks through.
+    for (const [k, v] of Object.entries(row)) {
+      expect(v === null).toBe(false);
     }
   });
 
