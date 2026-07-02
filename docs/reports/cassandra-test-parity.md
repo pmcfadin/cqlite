@@ -764,9 +764,9 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 ### `commitlog_replay`
 
 - `cass.commitlog.CommitLogStressTest.replay_round_trip` — Commitlog stress replay round-trip
-  - Safe wording: CQLite reads any SSTable produced after a commitlog-driven flush; it does not implement commit-log replay.
+  - Safe wording: CQLite reads any SSTable produced after a commitlog-driven flush and claims no commit-log-replay parity; its own WAL replay is validated by native tests (#1390/#1391/#1394).
 - `cass.commitlog_replay.recovery_out_of_scope` — Commitlog and replay compatibility (out of scope)
-  - Safe wording: CQLite reads SSTables that Cassandra has already flushed; it does not replay or validate commitlogs.
+  - Safe wording: CQLite reads already-flushed Cassandra SSTables and claims no commitlog/recovery parity; its own WAL crash-replay correctness is validated by native tests (#1390/#1391/#1394).
 
 ### `distributed_consensus`
 
@@ -785,16 +785,16 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 ### `memtable_internals`
 
 - `cass.memtable_flush.MemtableNegativeReleasedCQLReproTest.memtable_memory_accounting` — Memtable negative-released memory accounting repro
-  - Safe wording: CQLite reads any SSTable produced by a flush; it does not model the node's memtable memory accounting.
+  - Safe wording: CQLite reads any SSTable produced by a flush and claims no memtable memory-accounting parity; its own memtable accounting invariants are tracked for native coverage in #1404.
 - `cass.memtable_flush.NonSplittablePartitionerTrieMemtableFlushSetTest.trie_memtable_flushset` — Non-splittable-partitioner trie-memtable FlushSet metadata
-  - Safe wording: CQLite reads any SSTable the trie memtable flushed; it does not implement the trie-memtable internals.
+  - Safe wording: CQLite reads any SSTable the trie memtable flushed and claims no trie-memtable parity; its own memtable token-order invariant is tracked for native coverage in #1404.
 - `cass.memtable_flush.SplittablePartitionerTrieMemtableFlushSetTest.trie_memtable_flushset_split` — Splittable-partitioner trie-memtable FlushSet enumeration
-  - Safe wording: CQLite reads any SSTable the trie memtable flushed; it does not implement the trie-memtable internals.
+  - Safe wording: CQLite reads any SSTable the trie memtable flushed and claims no trie-memtable parity; its own memtable token-order invariant is tracked for native coverage in #1404.
 
 ### `node_lifecycle`
 
 - `cass.compaction.EarlyOpenCompactionTest.early_open_intermediate_readers` — Early-open compaction intermediate readers
-  - Safe wording: CQLite reads any completed SSTable a compaction produced; it does not implement early-open intermediate reader exposure.
+  - Safe wording: CQLite reads any completed SSTable a compaction produced and claims no early-open parity; its own crash-mid-compaction orphan cleanup is tracked for native coverage in #1393.
 
 ### `nodetool_jmx_metrics`
 

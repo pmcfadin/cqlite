@@ -154,6 +154,15 @@ Other evidence fields: `strict`, `artifacts` (`bytes`, `offsets`, `checksums`,
 `scope.related_in_scope_scenarios`. High-relevance Cassandra files may only be
 marked out of scope with an explicit `scope.cqlite_boundary`.
 
+**"Out of parity scope, but a CQLite-native surface" (issue #1403):**
+`out_of_scope` means only "not a Cassandra byte/semantic parity target." When the
+Cassandra behavior has a **functional analogue in CQLite's own code** (e.g. its
+WAL, its memtable, its crash-mid-compaction cleanup), the boundary text MUST name
+that native analogue and link its OPEN native (non-parity) coverage tracker — in
+the prose fields and in `scope.next_step`. Never claim "CQLite does not implement
+X" when a functional analogue exists. See the per-category audit-sweep table in
+[`docs/reports/cassandra-test-parity-assessment.md`](../reports/cassandra-test-parity-assessment.md#per-category-audit-sweep-issue-1403-ac3).
+
 | Category | Definition |
 |---|---|
 | `commitlog_replay` | Commitlog segment writing and replay/recovery. CQLite reads already-flushed SSTables only. |

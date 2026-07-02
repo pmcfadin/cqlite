@@ -7384,14 +7384,26 @@ scenarios:
     scope:
       out_of_scope_category: commitlog_replay
       rationale: >-
-        CQLite does not implement a commitlog or node recovery; it reads and
-        writes already-flushed SSTables. Out of scope does not mean unimportant.
+        Out of PARITY scope: CQLite claims no byte/semantic parity with
+        Cassandra's commitlog segment format or node-recovery pipeline. This does
+        NOT mean CQLite has no durability log — its native write-ahead log
+        (write_engine/wal.rs) with replay-after-crash semantics is the functional
+        analogue and a real CQLite surface with its own (non-parity) native test
+        obligations.
       cqlite_boundary: >-
-        CQLite operates on SSTable component files only. Commitlog segments and
-        replay/recovery are node runtime behavior CQLite never executes.
+        CQLite neither reads Cassandra commitlog segments nor claims node-recovery
+        parity. CQLite's native analogue is the WAL at write_engine/wal.rs
+        (replay-after-crash on startup), where the CommitLogTest bug class was
+        confirmed by the 2026-07-01 audit. Native (non-parity) WAL crash-replay
+        coverage is tracked in #1390, #1391, and #1394 — not by any
+        Cassandra-parity scenario.
       safe_claim: >-
-        CQLite reads SSTables that Cassandra has already flushed; it does not
-        replay or validate commitlogs.
+        CQLite reads already-flushed Cassandra SSTables and claims no
+        commitlog/recovery parity; its own WAL crash-replay correctness is
+        validated by native tests (#1390/#1391/#1394).
+      next_step: >-
+        Native (non-parity) WAL crash-replay coverage tracked in #1390, #1391,
+        #1394; remains out of Cassandra-parity scope.
       related_in_scope_scenarios:
         - cass.schema_evolution.serialization_header_column_order
 
@@ -15295,7 +15307,7 @@ scenarios:
     cqlite:
       coverage:
         notes: >-
-          CQLite reads and writes SSTable components; it does not write or replay the commit log.
+          CQLite claims no parity with Cassandra's commit log; its native analogue is the write-ahead log (write_engine/wal.rs), tracked for non-parity coverage in #1390/#1391/#1394.
     fixtures:
       datasets:
         - test-data/datasets/sstables
@@ -15309,11 +15321,23 @@ scenarios:
     scope:
       out_of_scope_category: commitlog_replay
       rationale: >-
-        This test writes mutations to the commit log, restarts, replays all segments, and verifies a round-trip hash. Commit-log replay is a node durability/recovery behavior outside CQLite's SSTable read/write/compact scope.
+        Out of PARITY scope: this test writes mutations to Cassandra's commit
+        log, restarts, replays all segments, and verifies a round-trip hash.
+        CQLite claims no parity with the commitlog segment format or replay
+        pipeline. Its functional analogue is the native write-ahead log
+        (write_engine/wal.rs), which carries the same crash-replay obligation.
       cqlite_boundary: >-
-        CQLite reads and writes SSTable components; it does not write or replay the commit log.
+        CQLite does not write or replay Cassandra commit-log segments and claims
+        no parity with them. Its native analogue is the WAL at
+        write_engine/wal.rs; native (non-parity) crash-replay round-trip coverage
+        is tracked in #1390, #1391, and #1394.
       safe_claim: >-
-        CQLite reads any SSTable produced after a commitlog-driven flush; it does not implement commit-log replay.
+        CQLite reads any SSTable produced after a commitlog-driven flush and
+        claims no commit-log-replay parity; its own WAL replay is validated by
+        native tests (#1390/#1391/#1394).
+      next_step: >-
+        Native (non-parity) WAL crash-replay coverage tracked in #1390, #1391,
+        #1394; remains out of Cassandra-parity scope.
       related_in_scope_scenarios:
         - cass.write_load_path.cassandra_sstable_writer_fixtures
 
@@ -15554,7 +15578,7 @@ scenarios:
     cqlite:
       coverage:
         notes: >-
-          CQLite reads completed SSTables; it does not expose partially written compaction outputs as early-open intermediate readers.
+          CQLite reads only completed SSTables and does not expose early-open readers; its functional lifecycle analogue is crash-mid-compaction orphan cleanup (write_engine/maintenance.rs), tracked for non-parity coverage in #1393.
     fixtures:
       datasets:
         - test-data/datasets/sstables
@@ -15568,11 +15592,26 @@ scenarios:
     scope:
       out_of_scope_category: node_lifecycle
       rationale: >-
-        Early-open exposes a partially written compaction output as a live reader before the compaction completes. This is a node-runtime read-availability optimization (SSTable lifecycle), not an on-disk format behavior.
+        Out of PARITY scope: early-open exposes a partially written compaction
+        output as a live reader before the compaction completes — a node-runtime
+        read-availability optimization CQLite claims no parity with. CQLite's
+        functional analogue in this SSTable-lifecycle space is its
+        crash-mid-compaction cleanup: the startup orphan sweeps
+        (sweep_orphaned_compaction_tmp / sweep_orphaned_partial_sstables in
+        write_engine/maintenance.rs).
       cqlite_boundary: >-
-        CQLite reads completed SSTables; it does not expose partially written compaction outputs as early-open intermediate readers.
+        CQLite reads only completed SSTables and does not expose early-open
+        intermediate readers. Its native analogue for partial-compaction
+        lifecycle is the startup orphan sweep of *-tmp / partial SSTables
+        (write_engine/maintenance.rs); native (non-parity) coverage of those
+        sweeps is tracked in #1393.
       safe_claim: >-
-        CQLite reads any completed SSTable a compaction produced; it does not implement early-open intermediate reader exposure.
+        CQLite reads any completed SSTable a compaction produced and claims no
+        early-open parity; its own crash-mid-compaction orphan cleanup is tracked
+        for native coverage in #1393.
+      next_step: >-
+        Native (non-parity) orphan-sweep coverage tracked in #1393; remains out
+        of Cassandra-parity scope.
       related_in_scope_scenarios:
         - cass.compaction_merge.byte_for_byte_output
         - cass.compaction_merge.tombstone_ttl_shadowing
@@ -15665,7 +15704,7 @@ scenarios:
     cqlite:
       coverage:
         notes: >-
-          CQLite does not maintain a node memtable or its memory pool; it reads/writes on-disk SSTable components.
+          CQLite claims no parity with Cassandra's memtable memory pool, but it DOES maintain a memtable (write_engine/memtable.rs) with estimate-based accounting; native (non-parity) accounting-drift coverage is tracked in #1404.
     fixtures:
       datasets:
         - test-data/datasets/sstables
@@ -15679,11 +15718,25 @@ scenarios:
     scope:
       out_of_scope_category: memtable_internals
       rationale: >-
-        This test reproduces a memtable memory-accounting assertion (negative released bytes) during flush. It targets the node's in-memory memtable allocator, not the on-disk SSTable the flush produces.
+        Out of PARITY scope: this test reproduces a memtable memory-accounting
+        assertion (negative released bytes) in Cassandra's in-memory allocator,
+        which CQLite claims no parity with. It is FALSE, however, that CQLite has
+        no memtable — write_engine/memtable.rs maintains a token-ordered BTreeMap
+        with conservative size-estimate accounting (estimate_mutation_size), the
+        functional analogue.
       cqlite_boundary: >-
-        CQLite does not maintain a node memtable or its memory pool; it reads/writes on-disk SSTable components.
+        CQLite does not model Cassandra's memtable memory pool and claims no
+        parity with it, but it DOES maintain a native memtable at
+        write_engine/memtable.rs whose estimate-based accounting is a real CQLite
+        surface; native (non-parity) memtable accounting-drift coverage is tracked
+        in #1404.
       safe_claim: >-
-        CQLite reads any SSTable produced by a flush; it does not model the node's memtable memory accounting.
+        CQLite reads any SSTable produced by a flush and claims no memtable
+        memory-accounting parity; its own memtable accounting invariants are
+        tracked for native coverage in #1404.
+      next_step: >-
+        Native (non-parity) memtable accounting-drift coverage tracked in #1404;
+        remains out of Cassandra-parity scope.
       related_in_scope_scenarios:
         - cass.write_load_path.cassandra_sstable_writer_fixtures
 
@@ -15701,7 +15754,7 @@ scenarios:
     cqlite:
       coverage:
         notes: >-
-          CQLite reads/writes on-disk SSTable components; it does not implement the trie-memtable FlushSet enumeration.
+          CQLite claims no parity with Cassandra's trie-memtable FlushSet enumeration, but its native memtable (write_engine/memtable.rs) has a token-ordered iteration that Data.db ordering depends on; native (non-parity) coverage is tracked in #1404.
     fixtures:
       datasets:
         - test-data/datasets/sstables
@@ -15715,11 +15768,25 @@ scenarios:
     scope:
       out_of_scope_category: memtable_internals
       rationale: >-
-        This test validates the trie-memtable getFlushSet() partition enumeration/metadata for a non-splittable partitioner. It targets the in-memory trie-memtable structure, not the resulting on-disk SSTable.
+        Out of PARITY scope: this test validates Cassandra's trie-memtable
+        getFlushSet() partition enumeration for a non-splittable partitioner — an
+        in-memory structure CQLite does not reimplement and claims no parity with.
+        CQLite's functional analogue is write_engine/memtable.rs, whose
+        token-ordered iteration (iter()) determines flushed Data.db partition
+        ordering.
       cqlite_boundary: >-
-        CQLite reads/writes on-disk SSTable components; it does not implement the trie-memtable FlushSet enumeration.
+        CQLite does not implement Cassandra's trie-memtable FlushSet enumeration
+        and claims no parity with it. Its native analogue is the token-ordered
+        BTreeMap iteration in write_engine/memtable.rs, on which Data.db ordering
+        depends; native (non-parity) token-order invariant coverage is tracked in
+        #1404.
       safe_claim: >-
-        CQLite reads any SSTable the trie memtable flushed; it does not implement the trie-memtable internals.
+        CQLite reads any SSTable the trie memtable flushed and claims no
+        trie-memtable parity; its own memtable token-order invariant is tracked
+        for native coverage in #1404.
+      next_step: >-
+        Native (non-parity) memtable token-order coverage tracked in #1404;
+        remains out of Cassandra-parity scope.
       related_in_scope_scenarios:
         - cass.write_load_path.cassandra_sstable_writer_fixtures
 
@@ -15737,7 +15804,7 @@ scenarios:
     cqlite:
       coverage:
         notes: >-
-          CQLite reads/writes on-disk SSTable components; it does not implement the trie-memtable FlushSet enumeration.
+          CQLite claims no parity with Cassandra's trie-memtable FlushSet enumeration, but its native memtable (write_engine/memtable.rs) has a token-ordered iteration that Data.db ordering depends on; native (non-parity) coverage is tracked in #1404.
     fixtures:
       datasets:
         - test-data/datasets/sstables
@@ -15751,11 +15818,25 @@ scenarios:
     scope:
       out_of_scope_category: memtable_internals
       rationale: >-
-        This test validates complete partition enumeration from the splittable-partitioner trie-memtable getFlushSet(). It targets the in-memory memtable structure, not the on-disk SSTable produced.
+        Out of PARITY scope: this test validates complete partition enumeration
+        from Cassandra's splittable-partitioner trie-memtable getFlushSet() — an
+        in-memory structure CQLite does not reimplement and claims no parity with.
+        CQLite's functional analogue is write_engine/memtable.rs, whose
+        token-ordered iteration (iter()) determines flushed Data.db partition
+        ordering.
       cqlite_boundary: >-
-        CQLite reads/writes on-disk SSTable components; it does not implement the trie-memtable FlushSet enumeration.
+        CQLite does not implement Cassandra's trie-memtable FlushSet enumeration
+        and claims no parity with it. Its native analogue is the token-ordered
+        BTreeMap iteration in write_engine/memtable.rs, on which Data.db ordering
+        depends; native (non-parity) token-order invariant coverage is tracked in
+        #1404.
       safe_claim: >-
-        CQLite reads any SSTable the trie memtable flushed; it does not implement the trie-memtable internals.
+        CQLite reads any SSTable the trie memtable flushed and claims no
+        trie-memtable parity; its own memtable token-order invariant is tracked
+        for native coverage in #1404.
+      next_step: >-
+        Native (non-parity) memtable token-order coverage tracked in #1404;
+        remains out of Cassandra-parity scope.
       related_in_scope_scenarios:
         - cass.write_load_path.cassandra_sstable_writer_fixtures
 
