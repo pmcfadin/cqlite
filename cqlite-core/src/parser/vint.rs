@@ -866,28 +866,32 @@ pub(crate) mod length_decode_audit {
 ///
 /// ## Call-site verdicts
 ///
-/// | Site (producer)                                              | Verdict          |
-/// |--------------------------------------------------------------|------------------|
-/// | Data.db rows/cells/collections: `row_cell_state_machine`,    | flip-to-unsigned |
-/// |   `reader/parsing/{key_parsing,block_entries,value_parsing,  |   (Cassandra;    |
-/// |   comparator_value_parsing}`, `types/{collections,primitives,|   CQLite's own   |
-/// |   udt}`, `optimized_complex_types`                            |   writer also    |
-/// |                                                              |   uses           |
-/// |                                                              |   `encode_unsigned`) |
-/// | Statistics.db: `parser/statistics.rs` (superseded on the     | flip-to-unsigned |
-/// |   prod path by `enhanced_statistics_parser`, format-unsigned) |                  |
-/// | Header-spec field parser: `storage/.../header_spec.rs`        | flip-to-unsigned |
-/// |   `VBytes`/`Array`/`Map` — Cassandra structural length/count  |   (read-only     |
-/// |   (`writeUnsignedVInt`); read-only header spec, no CQLite     |    Cassandra     |
-/// |   ZigZag writer to pair with                                  |    spec parser)  |
-/// | Header round-trip: `parser/header.rs` standard body —         | KEEP-SIGNED →    |
-/// |   `serialize_sstable_header` writes lengths with `encode_vint`|   uses           |
-/// |   (ZigZag); a CQLite-internal format, short-circuited for     |   `parse_vint_length_signed` |
-/// |   real V5 data via `parse_cassandra5_simplified_header`       |                  |
-/// | Range-tombstone bounds: `types/tombstones.rs` range_start/    | KEEP-SIGNED →    |
-/// |   range_end lengths — paired writer `serialize_cql_value`     |   uses           |
-/// |   (`types/mod.rs`) encodes with ZigZag `encode_vint`; a       |   `parse_vint_length_signed` |
-/// |   self-consistent CQLite-internal round-trip                  |                  |
+/// FLIP-TO-UNSIGNED — bytes written by Cassandra, or read-only parsers that
+/// model a Cassandra on-disk structure (`writeUnsignedVInt`). These call
+/// [`parse_vint_length`]:
+/// - Data.db rows/cells: `storage/sstable/row_cell_state_machine` and
+///   `reader/parsing/{key_parsing,block_entries,value_parsing,comparator_value_parsing}`.
+/// - Cassandra v5 collection element counts/lengths: the `parse_*_v5_format`
+///   paths in `parser/types/collections.rs` (a mixed file — its legacy paths
+///   are KEEP-SIGNED, see below).
+/// - Header-spec structural length/count fields: `storage/.../header_spec.rs`
+///   `VBytes`/`Array`/`Map` (read-only Cassandra header spec; no CQLite ZigZag
+///   writer to pair with).
+///
+/// KEEP-SIGNED — CQLite-internal round-trips whose paired writer emits ZigZag
+/// `encode_vint`; flipping one side would corrupt the pair. These call
+/// [`parse_vint_length_signed`]:
+/// - Legacy/schema/registry collection counts in `parser/types/collections.rs`,
+///   plus `parser/types/{primitives,udt}` and `parser/optimized_complex_types`
+///   (all paired with `serialize_cql_value` in `parser/types/mod.rs`).
+/// - `parser/statistics.rs` (self-encoded round-trip; the production Statistics.db
+///   read path is `enhanced_statistics_parser`, not these functions).
+/// - `parser/header.rs` standard body (paired with `serialize_sstable_header`
+///   `encode_vint`; real V5 data is short-circuited via
+///   `parse_cassandra5_simplified_header`).
+/// - Range-tombstone `range_start`/`range_end` bounds in
+///   `parser/types/tombstones.rs` (paired with `serialize_cql_value`
+///   `encode_vint`).
 ///
 /// # Safety
 /// Enforces a maximum length of 1GB ([`MAX_VINT_LENGTH`]) to prevent:
