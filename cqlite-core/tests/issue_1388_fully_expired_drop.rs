@@ -415,6 +415,78 @@ fn non_major_one_shot_does_not_drop() {
     assert_eq!(report.stats.input_files, 2);
 }
 
+/// Roborev F1 (former data-loss) regression: a MIXED SSTable — an old row
+/// tombstone whose `localDeletionTime` is below `gcBefore` PLUS a LIVE non-TTL
+/// cell in the SAME SSTable — must NOT be classified fully expired and must NOT
+/// be dropped by a major `compact_sstables`. Since #1728 the writer stamps live
+/// cells with `NO_DELETION_TIME`, so the finalized `max_local_deletion_time`
+/// (authoritative `Statistics.db`) is the `i32::MAX` live sentinel (parses back as
+/// `i64::MAX`), never `< gcBefore`. Dropping such an SSTable whole would lose the
+/// live cell (the former data-loss bug); it must instead be MERGED so the live
+/// row survives.
+#[test]
+fn mixed_tombstone_and_live_sstable_not_dropped() {
+    let temp = TempDir::new().unwrap();
+    let mixed_dir = temp.path().join("mixed");
+    let wal = temp.path().join("wal");
+    let out_dir = temp.path().join("out");
+    let schema = make_schema();
+
+    // ONE SSTable holding BOTH an expired row tombstone (tiny LDT < GC_BEFORE)
+    // AND a live non-TTL write (NO_DELETION_TIME). The mix lifts the SSTable's
+    // authoritative max_local_deletion_time to the live sentinel (#1728).
+    flush_batch(
+        &mixed_dir,
+        &wal.join("m"),
+        &schema,
+        vec![
+            delete_row(1, 0, TOMB_LDT, 100),
+            write_live_row(2, 0, "keep-me", 5_000_000),
+        ],
+    );
+    let mixed = discover_inputs(&mixed_dir);
+    assert_eq!(mixed.len(), 1, "one mixed input SSTable");
+    let mixed_path = mixed[0].clone();
+
+    // Metadata classifier: the mixed SSTable is NOT fully expired (its authoritative
+    // max_local_deletion_time is the live sentinel), so it is NOT in the drop-set —
+    // even for a major compaction (empty outside set).
+    let drop_set = fully_expired_sstables(&[mixed_path.clone()], &[], Some(GC_BEFORE));
+    assert!(
+        drop_set.is_empty(),
+        "a mixed tombstone+live SSTable must never be classified fully expired (#1728 F1)"
+    );
+
+    // Public surface: a major compaction must NOT drop it whole (would lose the
+    // live cell); it is merged and the live row survives.
+    let report = rt()
+        .block_on(compact_sstables(
+            vec![mixed_path.clone()],
+            &out_dir,
+            &schema,
+            1,
+            Some(GC_BEFORE),
+            Some(NOW_SECS),
+            true,
+        ))
+        .expect("compaction succeeds");
+    assert!(
+        report.stats.dropped_whole.is_empty(),
+        "compact_sstables must not drop a mixed tombstone+live SSTable whole (F1 data-loss)"
+    );
+    assert!(
+        mixed_path.exists(),
+        "the mixed SSTable was merged (retained until publish), not dropped whole"
+    );
+    // The live cell survives the merge; the tombstoned row is purged.
+    let values = read_name_values(&discover_inputs(&out_dir), &schema, true);
+    assert_eq!(
+        values,
+        vec!["keep-me".to_string()],
+        "the live cell in the mixed SSTable must survive (not lost to a whole drop)"
+    );
+}
+
 // ===========================================================================
 // R3 (WriteEngine background path) + R4 (MaintenanceReport)
 // ===========================================================================

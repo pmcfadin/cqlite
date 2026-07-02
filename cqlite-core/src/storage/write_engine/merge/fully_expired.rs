@@ -42,6 +42,20 @@ pub(super) fn is_fully_expired(stats: &TimestampStatistics, gc_before_secs: i64)
     stats.max_deletion_time < gc_before_secs
 }
 
+/// The authoritative newest write timestamp of an SSTable, or `None` when it is
+/// UNAVAILABLE (#1729 fail-closed `i64::MIN` sentinel).
+///
+/// Mirrors [`crate::storage::sstable::statistics_reader::StatisticsReader::max_timestamp`]:
+/// a drop/GC gate must never treat an unknown newest write as `i64::MIN` (which
+/// would compare below any overlap bound and wrongly permit a drop). Returning
+/// `None` here forces the overlap gate to FAIL CLOSED (retain the candidate).
+fn authoritative_max_timestamp(stats: &TimestampStatistics) -> Option<i64> {
+    match stats.max_timestamp {
+        i64::MIN => None,
+        v => Some(v),
+    }
+}
+
 /// Read a candidate SSTable's `TimestampStatistics` from its sibling
 /// `Statistics.db`. Returns `None` when the file is absent or fails to parse — the
 /// conservative signal that its expiry/timestamp facts are UNKNOWN, so the
@@ -86,18 +100,28 @@ fn read_timestamp_stats(data_path: &Path) -> Option<TimestampStatistics> {
 /// `Statistics.db` metadata only (no cell scan):
 ///
 /// 1. **Fully expired** — `max_deletion_time < gc_before_secs` (see
-///    [`is_fully_expired`]).
-/// 2. **Overlap-safe** — its `max_timestamp` is STRICTLY LESS THAN the minimum
-///    write timestamp across every overlapping SSTable that is NOT itself
-///    fully-expired: both the OUTSIDE overlapping SSTables (`outside_paths`) AND
-///    the NON-EXPIRED inputs of THIS compaction. If the candidate's newest write
-///    predates all of them, nothing it holds (tombstone or data) can shadow live
-///    data that would otherwise survive, so dropping it can never resurrect data.
-///    Mirrors Cassandra `CompactionController.getFullyExpiredSSTables`, which folds
-///    the min write timestamp of the non-fully-expired *compacting* SSTables into
-///    the same overlap bound as the non-compacting overlapping ones. The
+///    [`is_fully_expired`]). Since #1728 the writer stamps live cells with the
+///    `NO_DELETION_TIME` sentinel, so a MIXED SSTable (an old tombstone below
+///    `gcBefore` PLUS any live non-TTL cell) finalizes `max_deletion_time` as the
+///    `i32::MAX` live sentinel (parsed back as `i64::MAX`), which is never
+///    `< gc_before_secs`. Such a mixed SSTable is therefore correctly NOT
+///    fully-expired — closing the former data-loss gap (roborev F1) with the now
+///    authoritative `max_local_deletion_time`.
+/// 2. **Overlap-safe** — its authoritative `max_timestamp` is STRICTLY LESS THAN
+///    the minimum write timestamp across every overlapping SSTable that is NOT
+///    itself fully-expired: both the OUTSIDE overlapping SSTables (`outside_paths`)
+///    AND the NON-EXPIRED inputs of THIS compaction. If the candidate's newest
+///    write predates all of them, nothing it holds (tombstone or data) can shadow
+///    live data that would otherwise survive, so dropping it can never resurrect
+///    data. Mirrors Cassandra `CompactionController.getFullyExpiredSSTables`, which
+///    folds the min write timestamp of the non-fully-expired *compacting* SSTables
+///    into the same overlap bound as the non-compacting overlapping ones. The
 ///    non-compacting bound reuses [`compute_max_purgeable_timestamp`] (the coarse
 ///    global-`min_timestamp` #935 gate; OQ-2 → (A), key-range precision deferred).
+///    Since #1729 the candidate's `max_timestamp` may be the `i64::MIN` UNAVAILABLE
+///    sentinel; a candidate whose newest write is unknown CANNOT be proven to
+///    predate the overlap bound, so it FAILS CLOSED (is retained, never dropped) —
+///    closing the former resurrection gap (roborev F2).
 ///
 /// A non-expired INPUT is included in the bound because dropping a fully-expired
 /// SSTable whose tombstone shadows an OLDER live cell in a *co-compacting* input
@@ -144,13 +168,36 @@ pub fn fully_expired_sstables(
     // Outside overlap bound (non-compacting overlapping SSTables). An empty outside
     // set contributes +inf; a non-empty set with an UNKNOWN bound (an outside
     // Statistics.db unreadable) ⇒ cannot prove safety ⇒ drop nothing.
-    let mut overlap_bound: i64 = if outside_paths.is_empty() {
-        i64::MAX
+    let outside_bound: Option<i64> = if outside_paths.is_empty() {
+        Some(i64::MAX)
     } else {
         match compute_max_purgeable_timestamp(outside_paths) {
-            Some(bound) => bound,
+            Some(bound) => Some(bound),
             None => return Vec::new(),
         }
+    };
+
+    classify_drop_set(&input_stats, outside_bound, gc_before)
+}
+
+/// Pure drop-set classifier over already-read stats (no I/O), shared by
+/// [`fully_expired_sstables`] and its regression tests.
+///
+/// `outside_bound` is the overlap bound from the OUTSIDE (non-compacting) SSTables:
+/// `Some(i64::MAX)` for an empty outside set (+inf), `Some(b)` for a known bound,
+/// and callers must have already returned an empty drop-set for an UNKNOWN outside
+/// bound before calling this. It is here typed `Option` only so a caller can pass a
+/// resolved bound; a `None` here fails closed (empty drop-set).
+///
+/// Returns the subset of paths (in order) that may be dropped whole. See
+/// [`fully_expired_sstables`] for the full contract.
+fn classify_drop_set(
+    input_stats: &[(&PathBuf, Option<TimestampStatistics>)],
+    outside_bound: Option<i64>,
+    gc_before: i64,
+) -> Vec<PathBuf> {
+    let Some(mut overlap_bound) = outside_bound else {
+        return Vec::new();
     };
 
     // Fold in the min write timestamp of every NON-EXPIRED input of THIS
@@ -158,7 +205,7 @@ pub fn fully_expired_sstables(
     // bound (its own data is past gcBefore and purged anyway). An input whose
     // stats could not be read is NON-expired with an UNKNOWN min_timestamp, which
     // we cannot fold safely ⇒ disable the drop-set.
-    for (_, stats) in &input_stats {
+    for (_, stats) in input_stats {
         match stats {
             Some(s) if is_fully_expired(s, gc_before) => {}
             Some(s) => overlap_bound = overlap_bound.min(s.min_timestamp),
@@ -167,13 +214,16 @@ pub fn fully_expired_sstables(
     }
 
     input_stats
-        .into_iter()
+        .iter()
         .filter_map(|(path, stats)| {
-            let stats = stats?;
+            let stats = stats.as_ref()?;
             // Fully expired AND provably shadows nothing that would otherwise
             // survive (its newest write predates every non-expired overlap).
-            if is_fully_expired(&stats, gc_before) && stats.max_timestamp < overlap_bound {
-                Some(path.clone())
+            // #1729: an UNAVAILABLE max_timestamp (i64::MIN sentinel) cannot be
+            // proven to predate the bound ⇒ fail closed (retain, never drop).
+            let candidate_max_ts = authoritative_max_timestamp(stats)?;
+            if is_fully_expired(stats, gc_before) && candidate_max_ts < overlap_bound {
+                Some((*path).clone())
             } else {
                 None
             }
@@ -402,6 +452,78 @@ mod tests {
         assert!(
             dropped.is_empty(),
             "an expired input whose tombstone shadows a co-input's older live data must not be dropped"
+        );
+    }
+
+    /// Roborev F2 (former resurrection) regression: the overlap gate compares the
+    /// candidate's TRUE NEWEST write (`max_timestamp`, #1729-authoritative), not its
+    /// `min_timestamp`. A candidate whose `min_timestamp < overlap_bound <
+    /// max_timestamp` (an old tombstone min but a NEWER tombstone max) is RETAINED —
+    /// its newest write does NOT predate the outside data, so dropping it could
+    /// resurrect data. A gate that mistakenly used `min_timestamp` would drop it.
+    #[test]
+    fn overlap_gate_uses_max_timestamp_not_min_retains_when_max_above_bound() {
+        let tmp = TempDir::new().expect("temp dir");
+        // Candidate: fully expired (LDT 500 < 1_000), min write ts 1_000 (OLD),
+        // max write ts 8_000 (NEW — a later tombstone/write in the same SSTable).
+        let cand = write_expiry_stats(tmp.path(), 1, 500, 8_000, 1_000);
+        // Outside min write ts = 5_000 ⇒ overlap_bound = 5_000. The candidate's
+        // min (1_000) is BELOW the bound, but its max (8_000) is ABOVE it.
+        let outside = write_expiry_stats(tmp.path(), 2, i32::MAX, 20_000, 5_000);
+        let dropped = fully_expired_sstables(&[cand], &[outside], Some(1_000));
+        assert!(
+            dropped.is_empty(),
+            "min<bound<max must RETAIN: the gate compares the true newest write \
+             (max_timestamp), so a candidate whose newest write postdates the bound \
+             is not droppable (F2 resurrection guard)"
+        );
+    }
+
+    /// Roborev F2 fail-closed: since #1729 a candidate's `max_timestamp` may be the
+    /// `i64::MIN` UNAVAILABLE sentinel. An unknown newest write cannot be proven to
+    /// predate the overlap bound, so the candidate is RETAINED (never dropped) even
+    /// though it is fully expired and its (unavailable) sentinel would compare below
+    /// any real bound. Exercised through the pure classifier so the in-memory
+    /// sentinel is honest (the on-disk StatisticsWriter finalize normalizes
+    /// `i64::MIN → 0`, so it cannot round-trip the sentinel).
+    #[test]
+    fn overlap_gate_fails_closed_on_unavailable_max_timestamp() {
+        let cand: PathBuf = PathBuf::from("nb-1-big-Data.db");
+        // Fully expired (LDT 500 < 1_000) but max_timestamp is the #1729 unavailable
+        // sentinel (i64::MIN). A naive `sentinel < bound` comparison would wrongly
+        // permit a drop; the authoritative accessor forces a retain.
+        let stats = ts_stats(500, i64::MIN);
+        let input_stats = [(&cand, Some(stats))];
+        // Concrete, above-sentinel outside bound (5_000).
+        let dropped = classify_drop_set(&input_stats, Some(5_000), 1_000);
+        assert!(
+            dropped.is_empty(),
+            "an UNAVAILABLE (i64::MIN) max_timestamp must fail closed: retain, never drop (#1729 F2)"
+        );
+
+        // Control: the SAME candidate with a real, below-bound max_timestamp IS
+        // droppable, proving it is the sentinel (not some other field) that retains.
+        let live_max = ts_stats(500, 4_000);
+        let input_stats_live = [(&cand, Some(live_max))];
+        assert_eq!(
+            classify_drop_set(&input_stats_live, Some(5_000), 1_000),
+            vec![cand.clone()],
+            "a concrete below-bound max_timestamp on the same candidate is droppable"
+        );
+    }
+
+    /// The [`authoritative_max_timestamp`] accessor mirrors #1729: `None` for the
+    /// `i64::MIN` sentinel, `Some(v)` otherwise (incl. concrete negatives).
+    #[test]
+    fn authoritative_max_timestamp_maps_sentinel_to_none() {
+        assert_eq!(authoritative_max_timestamp(&ts_stats(0, i64::MIN)), None);
+        assert_eq!(
+            authoritative_max_timestamp(&ts_stats(0, 8_000)),
+            Some(8_000)
+        );
+        assert_eq!(
+            authoritative_max_timestamp(&ts_stats(0, i64::MIN + 1)),
+            Some(i64::MIN + 1)
         );
     }
 

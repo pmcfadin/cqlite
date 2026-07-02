@@ -44,9 +44,16 @@ cell's `createdAt + ttl`):
   (`sstable.getSSTableMetadata().maxLocalDeletionTime < gcBefore`).
 - The sentinel `NO_DELETION_TIME` / `Cell.NO_DELETION_TIME` (i32::MAX, "live, never expires") must be
   treated as NOT expired: any SSTable holding live non-TTL data has `max_deletion_time == i32::MAX`
-  (LIVE sentinel), which is never `< gcBefore`, so it is correctly ineligible. The detection reads the
-  raw metadata value and applies `value < gcBefore` with no other special-casing — the LIVE sentinel
-  falls out of the comparison naturally.
+  (LIVE sentinel, parsed back as `i64::MAX`), which is never `< gcBefore`, so it is correctly ineligible.
+  The detection reads the raw metadata value and applies `value < gcBefore` with no other special-casing
+  — the LIVE sentinel falls out of the comparison naturally.
+- **This metadata is now AUTHORITATIVE (prerequisites merged).** Issue #1728 makes the writer stamp
+  `NO_DELETION_TIME` on live cells, so a MIXED SSTable (an old tombstone whose localDeletionTime is below
+  `gcBefore` PLUS any live non-TTL cell) finalizes `max_local_deletion_time` as the `i32::MAX` live
+  sentinel — never `< gcBefore` — and is correctly NOT classified fully expired. This closes the former
+  data-loss gap (roborev High F1): before #1728 a mixed SSTable could under-report its
+  `max_local_deletion_time` and be wrongly dropped whole, losing its live cell. The classifier relies
+  directly on this now-authoritative value; no workaround is needed.
 - **No cell scan.** The decision is a single integer comparison against one metadata field. This is the
   no-heuristics-compliant path (issue #28) and is the whole point of the optimization: we must NOT read
   the SSTable's rows to decide to drop it (that would defeat the perf win and reintroduce a scan).
@@ -76,6 +83,15 @@ candidate is safe to drop iff its own **`max_timestamp` is strictly less than th
 - This reuses the identical `min_timestamp` metadata and the identical conservatism as the existing #935
   tombstone-purge gate, so the two decisions stay consistent (a compaction that may not purge a tombstone
   also may not silently drop the SSTable that holds it).
+- **The candidate `max_timestamp` is now AUTHORITATIVE (prerequisite merged).** Issue #1729 makes
+  `StatisticsReader::max_timestamp()` decode the true maxTimestamp from `Statistics.db`, returning `None`
+  (fail-closed) via the `i64::MIN` sentinel when it is unavailable. The overlap gate compares that
+  authoritative newest write against the bound and **fails closed** on `None`: a candidate whose newest
+  write is unknown cannot be proven to predate the outside data, so it is RETAINED (never dropped). This
+  closes the former resurrection gap (roborev High F2): before #1729 an unavailable max could compare as a
+  low placeholder and wrongly permit a drop, resurrecting shadowed data. The gate compares the true NEWEST
+  write (`max_timestamp`), never `min_timestamp`, so a candidate with `min_timestamp < bound <
+  max_timestamp` is correctly retained.
 
 ## Chosen approach: metadata-only drop-set computed at the plan step
 

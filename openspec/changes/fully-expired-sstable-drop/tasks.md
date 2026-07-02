@@ -20,9 +20,11 @@
       Vec<PathBuf>` composing 1.1 with the overlap bound. Reuse `compute_max_purgeable_timestamp` for the
       outside `min_timestamp` bound; drop a candidate iff fully expired AND
       `candidate.max_timestamp < outside_bound` (with `+inf` for an empty outside set / full compaction,
-      and NO drop when `gc_before_secs == None` or the bound is UNKNOWN in a partial compaction). Surface:
-      `merge::fully_expired_sstables` + unit tests covering: shadowing-retained, older-than-outside-dropped,
-      major-empty-outside-dropped, unknown-bound-retained, invalid-gcBefore-retained.
+      and NO drop when `gc_before_secs == None` or the bound is UNKNOWN in a partial compaction). Uses the
+      authoritative #1729 `max_timestamp` and fails closed (retains) when it is unavailable (`i64::MIN`
+      sentinel). Surface: `merge::fully_expired_sstables` + unit tests covering: shadowing-retained,
+      older-than-outside-dropped, major-empty-outside-dropped, unknown-bound-retained,
+      invalid-gcBefore-retained, min<bound<max-retained, unavailable-max-fails-closed.
 
 ## 3. Wire drop-set into the WriteEngine background path
 
@@ -56,6 +58,15 @@
 - [x] 6.2 Add an overlap-safety regression test: a fully-expired SSTable that shadows data in an EXCLUDED
       overlapping SSTable is NOT dropped and the shadowed data stays shadowed on read (acceptance-criterion
       2). Surface: `WriteEngine::maintenance_step` + query engine.
+- [x] 6.3 Roborev High F1/F2 regression tests (prerequisites #1728/#1729 merged make the metadata
+      authoritative). F1 (data-loss): a MIXED SSTable (old tombstone LDT < gcBefore + a live non-TTL cell)
+      is NOT classified fully expired and is NOT dropped by `compact_sstables` — the live cell survives
+      (`mixed_tombstone_and_live_sstable_not_dropped`). F2 (resurrection): the overlap gate compares the
+      authoritative `max_timestamp` — a candidate with `min_timestamp < bound < max_timestamp` is RETAINED
+      (`overlap_gate_uses_max_timestamp_not_min_retains_when_max_above_bound`), and an UNAVAILABLE
+      (`i64::MIN`) max_timestamp fails closed / retains
+      (`overlap_gate_fails_closed_on_unavailable_max_timestamp`). Surface: `compact_sstables` + the
+      metadata classifier.
 
 ## 7. Documentation
 
