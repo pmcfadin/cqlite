@@ -791,8 +791,15 @@ impl WriteAheadLog {
     ///
     /// Returns an error if the buffer flush, `set_len`, or fsync fails.
     pub fn reset_to_valid_prefix(&mut self) -> Result<Option<u64>> {
-        let valid_end = match self.pending_valid_prefix.take() {
-            Some(end) => end,
+        // Peek the pending value WITHOUT clearing it (issue #1391, roborev r3): if
+        // any step below (flush / set_len / fsync / directory sync) fails, the
+        // corrupt tail is still (partly) on disk and the guard MUST stay set so
+        // `append()` remains fail-closed. Clearing here — as `.take()` did — left
+        // the WAL appendable after the corrupt tail again on any mid-reset error,
+        // reintroducing the acknowledged-write-loss window. The guard is cleared
+        // only after ALL steps succeed (see the end of this function).
+        let valid_end = match self.pending_valid_prefix.as_ref() {
+            Some(end) => *end,
             None => return Ok(None),
         };
 
@@ -810,8 +817,10 @@ impl WriteAheadLog {
             .len();
 
         if valid_end >= file_len {
-            // Nothing beyond the valid prefix to trim (e.g. already reset).
+            // Nothing beyond the valid prefix to trim (e.g. already reset). This is
+            // a benign success, so it is safe to lift the guard.
             self.current_size = file_len;
+            self.pending_valid_prefix = None;
             return Ok(None);
         }
 
@@ -841,6 +850,8 @@ impl WriteAheadLog {
         );
 
         self.current_size = valid_end;
+        // All steps succeeded — only now is it safe to lift the fail-closed guard.
+        self.pending_valid_prefix = None;
         Ok(Some(valid_end))
     }
 
@@ -985,6 +996,22 @@ impl WriteAheadLog {
         // Serialize mutation using bincode
         let mutation_bytes = bincode::serialize(mutation)
             .map_err(|e| Error::Storage(format!("Failed to serialize mutation: {}", e)))?;
+
+        // Fail-closed size ceiling (issue #1391, roborev r3). `replay()` /
+        // `scan_valid_prefix` classify any entry whose declared length exceeds
+        // `MAX_ENTRY_LENGTH` as corruption and STOP. If `append()` accepted a
+        // larger entry, a >16 MiB write could be fsync-acknowledged here and then
+        // silently dropped as "corrupt" on the next recovery — acknowledged-write
+        // loss. The write path's accepted max MUST equal the replay/scan limit, so
+        // reject BEFORE writing anything. The comparison is done in `u64` so a
+        // multi-GiB length cannot truncate through the `as u32` cast below into a
+        // small, wrongly-accepted value.
+        if mutation_bytes.len() as u64 > MAX_ENTRY_LENGTH as u64 {
+            return Err(Error::Storage(format!(
+                "WAL entry exceeds MAX_ENTRY_LENGTH (16 MiB): {} bytes",
+                mutation_bytes.len()
+            )));
+        }
 
         let entry_length = mutation_bytes.len() as u32;
 
@@ -2475,6 +2502,129 @@ mod tests {
             vec!["Alice", "Carol"],
             "replay must yield exactly [A, C]"
         );
+    }
+
+    /// Finding 1 (roborev r3): the write path's accepted max entry size MUST equal
+    /// the replay/scan limit. An entry whose serialized length exceeds
+    /// `MAX_ENTRY_LENGTH` must be rejected BEFORE it is written (never
+    /// fsync-acknowledged), otherwise `replay()` would classify it as corruption
+    /// and drop it — silent acknowledged-write loss. A just-under-limit entry must
+    /// still succeed and replay intact.
+    #[test]
+    fn test_wal_append_rejects_oversize_entry_matching_replay_limit() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut wal = WriteAheadLog::create(temp_dir.path()).unwrap();
+        let path = wal.path().to_path_buf();
+
+        // Over-limit: serialized length > MAX_ENTRY_LENGTH (the payload alone
+        // already exceeds the ceiling). Must be rejected and NOT acknowledged.
+        let over = "x".repeat(MAX_ENTRY_LENGTH as usize + 1);
+        let err = wal
+            .append(&create_test_mutation(1, &over))
+            .expect_err("over-limit append must be rejected, not acknowledged");
+        match err {
+            Error::Storage(msg) => assert!(
+                msg.contains("MAX_ENTRY_LENGTH"),
+                "error must cite the size ceiling, got: {msg}"
+            ),
+            other => panic!("expected Error::Storage, got {other:?}"),
+        }
+        assert_eq!(
+            wal.size(),
+            0,
+            "a rejected append must not write or grow the WAL"
+        );
+
+        // Just-under-limit: payload sized so the whole entry stays below the
+        // ceiling; it must be accepted and survive a fresh reopen + replay.
+        let under = "y".repeat(MAX_ENTRY_LENGTH as usize - 8192);
+        wal.append(&create_test_mutation(2, &under)).unwrap();
+        wal.sync().unwrap();
+        drop(wal);
+
+        let wal = WriteAheadLog::open_existing(&path).unwrap();
+        let report = wal.replay().unwrap();
+        assert!(
+            report.is_clean(),
+            "just-under-limit entry must replay cleanly"
+        );
+        assert_eq!(report.mutations.len(), 1, "exactly the accepted entry");
+        match &report.mutations[0].operations[0] {
+            CellOperation::Write {
+                value: Value::Text(name),
+                ..
+            } => assert_eq!(name.len(), under.len(), "recovered payload must match"),
+            other => panic!("expected Write op, got {other:?}"),
+        }
+    }
+
+    /// Finding 2 (roborev r3): if any step of the reset sequence fails, the
+    /// fail-closed guard must remain set so `append()` keeps rejecting writes.
+    /// Injects a failure by removing the containing directory after the WAL fd is
+    /// open: `flush`/`set_len`/`sync_all` still act on the open inode, but the
+    /// final `sync_directory(parent)` opens the now-missing dir and errors. The
+    /// old `.take()` cleared the guard up front, so an error left the WAL wrongly
+    /// appendable; the guard must now survive the failure.
+    #[cfg(unix)]
+    #[test]
+    fn test_wal_reset_failure_keeps_guard_set() {
+        let temp_dir = TempDir::new().unwrap();
+        let subdir = temp_dir.path().join("wal_sub");
+        std::fs::create_dir(&subdir).unwrap();
+
+        // Write A + B inside the removable subdir, then corrupt B's payload in
+        // place to produce a mid-stream corrupt tail (valid prefix ends at A).
+        let (path, end_of_a, total) = {
+            let mut wal = WriteAheadLog::create(&subdir).unwrap();
+            wal.append(&create_test_mutation(1, "Alice")).unwrap();
+            wal.sync().unwrap();
+            let end_of_a = wal.size();
+            wal.append(&create_test_mutation(2, "Bob")).unwrap();
+            wal.sync().unwrap();
+            let total = wal.size();
+            let path = wal.path().to_path_buf();
+            (path, end_of_a, total)
+        };
+        let b_first_payload = end_of_a + 8;
+        assert!(
+            b_first_payload < total,
+            "test setup: B must have a payload byte"
+        );
+        {
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes[b_first_payload as usize] ^= 0xFF;
+            std::fs::write(&path, &bytes).unwrap();
+        }
+
+        let mut wal = WriteAheadLog::open_existing(&path).unwrap();
+        assert!(
+            wal.has_pending_corrupt_tail(),
+            "mid-stream corruption must record a pending valid prefix"
+        );
+
+        // Inject the reset-sequence failure: remove the dir the WAL lives in.
+        std::fs::remove_dir_all(&subdir).unwrap();
+
+        let err = wal
+            .reset_to_valid_prefix()
+            .expect_err("reset must propagate the directory-sync failure");
+        assert!(matches!(err, Error::Storage(_)), "expected Error::Storage");
+        assert!(
+            wal.has_pending_corrupt_tail(),
+            "the guard MUST remain set when the reset sequence fails partway"
+        );
+
+        // With the guard still set, append stays fail-closed.
+        let append_err = wal
+            .append(&create_test_mutation(3, "Carol"))
+            .expect_err("append must remain rejected after a failed reset");
+        match append_err {
+            Error::Storage(msg) => assert!(
+                msg.contains("reset_to_valid_prefix"),
+                "error must still direct the caller to reset first, got: {msg}"
+            ),
+            other => panic!("expected Error::Storage, got {other:?}"),
+        }
     }
 
     #[test]
