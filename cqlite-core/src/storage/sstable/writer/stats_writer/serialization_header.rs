@@ -82,23 +82,9 @@ impl StatisticsWriter {
         // `writeUnsignedVInt32` requires, and it also handles a far-future LDT stored as
         // a negative i32 bit pattern identically (the bit pattern IS the signed int the
         // reader expects). This mirrors the DataWriter per-row deletion deltas.
-        // "No local deletion time" is Cassandra's `EncodingStats` NO_STATS default /
-        // merge identity: its `minLocalDeletionTime` is `DELETION_TIME_EPOCH` (not `0`),
-        // so the serialized delta is `0` (EncodingStats.java:74,78,97,113-115). #1410:
-        // emit that SAME `DELETION_TIME_EPOCH` sentinel when this SSTable carries NO
-        // tombstone, so a live-only SSTable's EncodingStats is UNAMBIGUOUS versus a
-        // genuine tombstone whose real `localDeletionTime` happens to be a tiny value
-        // (e.g. `0`). Authoritative "has a tombstone" signal: the tombstone drop-time
-        // histogram, populated by `update_local_deletion_time` for EVERY real tombstone
-        // LDT (including `0`) but never for a LIVE marker (no-heuristics #28 — never
-        // inferred from the LDT value). Previously this emitted a bare `0` for the
-        // no-deletions case (finalize maps the unset `i32::MAX` min to `0`), which
-        // `compute_baseline_min` could not tell apart from a real LDT-`0` tombstone and
-        // so corrupted the compaction LDT baseline (#1410).
-        let has_tombstone = !metadata.tombstone_histogram.is_empty();
-        let min_ldt = if !has_tombstone {
-            // No deletions: Cassandra's DELETION_TIME_EPOCH sentinel (delta 0).
-            DELETION_TIME_EPOCH
+        let min_ldt = if metadata.min_local_deletion_time == i32::MAX {
+            // No deletions: use Integer.MAX_VALUE as baseline (DeletionTime.LIVE)
+            i32::MAX
         } else {
             metadata.min_local_deletion_time
         };
@@ -553,12 +539,7 @@ mod tests {
         // the decoded u64, reinterpreted as i64, fits a signed i32).
         let decode_delta = |min_ldt: i32| -> u64 {
             let mut meta = StatisticsMetadata::new();
-            // Drive through the authentic tombstone path so the drop-time histogram is
-            // populated: #1410 emits the DELETION_TIME_EPOCH no-deletion sentinel (delta
-            // 0) only when the SSTable has NO tombstone, so a REAL tombstone LDT under
-            // test must record a tombstone here (otherwise we would be probing the
-            // no-deletion path, not the sign-extension of a real delta).
-            meta.update_local_deletion_time(min_ldt);
+            meta.min_local_deletion_time = min_ldt;
             let writer = StatisticsWriter::new(PathBuf::from("test.db"));
             let bytes = writer
                 .build_serialization_header_component(None, &meta)

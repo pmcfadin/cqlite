@@ -1191,28 +1191,41 @@ pub fn compute_baseline_min(input_paths: &[PathBuf]) -> (i64, i32, i32) {
                 // as an i64 above i32::MAX and is a valid negative-i32 delta baseline
                 // (the exact value the DataWriter delta-encodes against), NOT bad data.
                 //
-                // EXCLUDE any input whose `minLocalDeletionTime` is a "no local deletion
-                // time" sentinel from the merged LDT-min, matching
-                // `EncodingStats.mergeWith` / `EncodingStats.merge`
+                // EXCLUDE any input that carries NO tombstone from the merged LDT-min,
+                // matching `EncodingStats.mergeWith` / `EncodingStats.merge`
                 // (EncodingStats.java:113-115, 146): a live-only input must NEVER lower
                 // the merged min, or a real tombstone LDT is delta-encoded against a
                 // too-low baseline and Data.db diverges (#1410: observed cass=99 vs
-                // ours=103, first diff at offset 24). The two authoritative no-deletion
-                // sentinels are:
-                //   * `DELETION_TIME_EPOCH` — Cassandra NO_STATS default / merge identity
-                //     (EncodingStats.java:74,78,97). A live-only SSTable — Cassandra's OR
-                //     CQLite's — serializes its EncodingStats `minLocalDeletionTime` as
-                //     this: #1410 makes CQLite's writer emit `DELETION_TIME_EPOCH` (not a
-                //     bare `0`) for the no-deletions case (stats_writer serialization
-                //     header + STATS component), so it is now UNAMBIGUOUS versus a genuine
-                //     tombstone whose real LDT happens to be a small value (e.g. `0`,
-                //     which stays included).
-                //   * `i32::MAX` bits — `DeletionTime.LIVE` / `Cell.NO_DELETION_TIME`.
-                // A genuine tombstone LDT (including `0`) is INCLUDED so the baseline
-                // covers every LDT the merger re-emits (no below-baseline write error).
+                // ours=103, first diff at offset 24, where the row-tombstone LDT delta is
+                // emitted). This does NOT touch the writer's on-disk format (a header
+                // sentinel change would desync the DataWriter's own LIVE-marker baseline,
+                // corrupting live complex-column deletion headers — roborev #1410
+                // Finding 1); the decision is made HERE, in the compaction baseline seeder.
+                //
+                // Two distinct on-disk representations mean "this SSTable has no local
+                // deletion time" — and CQLite's own writer serializes a live-only SSTable
+                // as a bare `0` (StatisticsMetadata::finalize maps the unset `i32::MAX`
+                // min to 0), which is INDISTINGUISHABLE from a genuine tombstone whose
+                // real LDT is 0 (an old row tombstone with a sub-second write timestamp)
+                // by the `min_deletion_time` VALUE alone. So we use an AUTHORITATIVE
+                // "has a tombstone" signal, NOT a heuristic on the value (#28): the
+                // STATS `estimatedTombstoneDropTime` histogram
+                // (`sstable_stats.tombstone_drop_times`), which CQLite's writer populates
+                // (via `update_local_deletion_time`) and Cassandra writes for EVERY real
+                // tombstone LDT — empty iff the SSTable carries no tombstone.
+                //   * Empty histogram (no tombstone) → no-deletion input → EXCLUDE, regardless
+                //     of whether `min_deletion_time` decoded as `0`, `DELETION_TIME_EPOCH`
+                //     (Cassandra's live-only sentinel) or the `i32::MAX` LIVE marker.
+                //   * Non-empty histogram → a genuine tombstone (INCLUDING a real LDT `0`)
+                //     → INCLUDE, so the baseline covers every LDT the merger re-emits.
+                // Defensively also exclude the explicit `DELETION_TIME_EPOCH` / `i32::MAX`
+                // sentinels even if a histogram were somehow present — they can never be a
+                // real tombstone LDT.
                 let ldt_bits = ts_stats.min_deletion_time as u32 as i32;
-                let is_no_deletion_sentinel = ts_stats.min_deletion_time
-                    == crate::parser::enhanced_statistics_parser::DELETION_TIME_EPOCH
+                let has_tombstone = !sstable_stats.tombstone_drop_times.is_empty();
+                let is_no_deletion_sentinel = !has_tombstone
+                    || ts_stats.min_deletion_time
+                        == crate::parser::enhanced_statistics_parser::DELETION_TIME_EPOCH
                     || ldt_bits == i32::MAX;
                 if !is_no_deletion_sentinel {
                     baseline_min_ldt = baseline_min_ldt.min(ldt_bits);
