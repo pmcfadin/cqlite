@@ -1183,52 +1183,30 @@ pub fn compute_baseline_min(input_paths: &[PathBuf]) -> (i64, i32, i32) {
             Ok((_, sstable_stats)) => {
                 let ts_stats = &sstable_stats.timestamp_stats;
                 baseline_min_ts = baseline_min_ts.min(ts_stats.min_timestamp);
-                // Local-deletion-time baseline seeding (#853/#886 branch-review,
-                // Finding 2; sentinel exclusion corrected in #1410).
+                // Local-deletion-time baseline seeding (#853/#886 Finding 2; sentinel
+                // exclusion corrected in #1410). The parser reconstructs
+                // `min_deletion_time` as `readUnsignedVInt32() + DELETION_TIME_EPOCH`
+                // (EncodingStats.java:289). We normalize to the 32-bit signed bit
+                // pattern (`as u32 as i32`) — a far-future LDT in [2^31, 2^32) surfaces
+                // as an i64 above i32::MAX and is a valid negative-i32 delta baseline
+                // (the exact value the DataWriter delta-encodes against), NOT bad data.
                 //
-                // The parser reconstructs `min_deletion_time` as
-                // `readUnsignedVInt32() + DELETION_TIME_EPOCH` (EncodingStats.java:289),
-                // so a far-future LDT in [2^31, 2^32) surfaces here as an i64 ABOVE
-                // i32::MAX (e.g. 2^31+5). These are legitimate after the deletion-marker
-                // fixes (#853 / range tombstones): they are negative i32 BIT PATTERNS,
-                // not "bad" values, and Cassandra's `EncodingStats.merge` mins over the
-                // signed int. Normalize as UNSIGNED 32-bit and reinterpret the bits as
-                // i32 so the seeded baseline matches the final Statistics.db baseline
-                // (DataWriter encodes per-row deltas as
-                // `local_deletion_time.wrapping_sub(min) as u32`). Casting the raw i64
-                // straight to i32 would also work for the bits, but the explicit
-                // `as u32 as i32` documents the 32-bit unsigned normalization.
-                //
-                // EXCLUDE any input whose `minLocalDeletionTime` is a
-                // "no local deletion time" sentinel from the merged LDT-min baseline —
-                // exactly what Cassandra's `EncodingStats.mergeWith` /
-                // `EncodingStats.merge` do (EncodingStats.java:113-115, 146): an input
-                // that carries no tombstone must NEVER lower the merged min, or every
-                // real tombstone LDT gets delta-encoded against a wrong (too-low)
-                // baseline and Data.db diverges (#1410, observed cass=99 vs ours=103,
-                // first diff at offset 24 where the row-tombstone LDT delta is emitted).
-                //
-                // The sentinel has THREE authoritative on-disk representations, all
-                // meaning "this SSTable has no local deletion time" — none of which is a
-                // real tombstone LDT (a Cassandra localDeletionTime is wall-clock seconds
-                // since the Unix epoch, always a large positive value, never 0 / EPOCH /
-                // MAX):
-                //   * `DELETION_TIME_EPOCH` — Cassandra's NO_STATS default and merge
-                //     identity (EncodingStats.java:74,78,97); a live-only Cassandra
-                //     SSTable reconstructs to exactly this.
-                //   * `i32::MAX` bit pattern — `DeletionTime.LIVE` / `Cell.NO_DELETION_TIME`.
-                //   * `0` — how CQLite's OWN writer records "no deletions" once
-                //     `StatisticsMetadata::finalize()` maps the unset `i32::MAX` min to 0
-                //     (stats_writer/metadata.rs), so a live-only CQLite input SSTable
-                //     reconstructs here as 0. This is the case #1410 actually hit: the
-                //     old code deliberately INCLUDED 0 and it dragged the baseline to 0.
-                //
-                // Comparison is on the raw parsed i64 for the `0` / `DELETION_TIME_EPOCH`
-                // sentinels (the authoritative values the parser reconstructs — no-
-                // heuristics #28) and on the 32-bit bit pattern for the `i32::MAX` LIVE
-                // marker. A genuine far-future LDT in [2^31, 2^32) surfaces as an i64
-                // above i32::MAX and is preserved as its negative-i32 bit pattern, which
-                // is exactly what the DataWriter delta-encodes against.
+                // EXCLUDE any input whose `minLocalDeletionTime` is a "no local deletion
+                // time" sentinel, matching `EncodingStats.mergeWith` / `EncodingStats.merge`
+                // (EncodingStats.java:113-115, 146): a live-only input must NEVER lower
+                // the merged min, or a real tombstone LDT is delta-encoded against a
+                // too-low baseline and Data.db diverges (#1410: observed cass=99 vs
+                // ours=103, first diff at offset 24). The sentinel has THREE authoritative
+                // on-disk forms — none a real LDT (LDTs are large wall-clock seconds):
+                //   * `DELETION_TIME_EPOCH` — Cassandra NO_STATS default / merge identity
+                //     (EncodingStats.java:74,78,97); a live-only Cassandra SSTable is this.
+                //   * `i32::MAX` bits — `DeletionTime.LIVE` / `Cell.NO_DELETION_TIME`.
+                //   * `0` — CQLite's own "no deletions" form once `finalize()` maps the
+                //     unset `i32::MAX` min to 0 (stats_writer/metadata.rs); the live-only
+                //     CQLite input reconstructs as 0. This is the case #1410 actually hit.
+                // Compared on the raw i64 for `0`/`DELETION_TIME_EPOCH` (the authoritative
+                // reconstructed values, no-heuristics #28) and on the 32-bit bit pattern
+                // for the `i32::MAX` LIVE marker.
                 let ldt_bits = ts_stats.min_deletion_time as u32 as i32;
                 let is_no_deletion_sentinel = ts_stats.min_deletion_time == 0
                     || ts_stats.min_deletion_time
