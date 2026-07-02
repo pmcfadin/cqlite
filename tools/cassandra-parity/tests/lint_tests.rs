@@ -265,6 +265,99 @@ fn out_of_scope_missing_required_fields_is_rejected() {
     );
 }
 
+// ----------------------------------------------------------------------------
+// Boundary-field correctness for out_of_scope EVIDENCE (issue #1402, epic #1381).
+// The field requirements above key on `status`; these guard the status/evidence
+// mismatch where `evidence.type: out_of_scope` carries a null boundary category
+// while `status` is something else (e.g. planned) — the exact mis-encoding fixed
+// by #1402.
+// ----------------------------------------------------------------------------
+
+/// A scenario whose `evidence.type` is out_of_scope but whose `status` is not,
+/// with a NULL out_of_scope_category. Before #1402 this slipped past every rule
+/// (the status match only enforces the category when status == out_of_scope).
+const MISMATCHED_OOS_NULL_CATEGORY: &str = r#"  - id: cass.compression_info.example_mismatch
+    title: Mismatched out_of_scope evidence with null category
+    status: planned
+    capability: compression_checksum
+    priority: P2
+    risk: p2_coverage
+    cassandra:
+      category: compression
+      relevance: med
+      files: [CompressionMetadataTest.java]
+    cqlite:
+      coverage:
+        suite: sstable_parity_compression_info_chunks
+        tests: [cqlite-core/tests/foo.rs]
+    fixtures: {}
+    evidence:
+      type: out_of_scope
+      known_limitations: no real fixture in corpus
+    ci:
+      tier: manual_debug
+    scope:
+      target_suite: sstable_parity_compression_info_chunks
+      gap: no real fixture
+"#;
+
+#[test]
+fn out_of_scope_evidence_with_null_category_is_rejected() {
+    let errs = errors(&wrap(MISMATCHED_OOS_NULL_CATEGORY));
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("scope.out_of_scope_category")),
+        "a status/evidence-mismatched out_of_scope with a null category must fail; got: {errs:#?}"
+    );
+}
+
+#[test]
+fn out_of_scope_evidence_high_relevance_without_boundary_is_rejected() {
+    // Category present but relevance high and no cqlite_boundary: only the
+    // boundary rule should fire, isolating the high-relevance requirement.
+    let scenario = MISMATCHED_OOS_NULL_CATEGORY
+        .replace("relevance: med", "relevance: high")
+        .replace(
+            "      target_suite: sstable_parity_compression_info_chunks",
+            "      out_of_scope_category: unsupported_compression_dictionary\n\
+             \x20     target_suite: sstable_parity_compression_info_chunks",
+        );
+    let errs = errors(&wrap(&scenario));
+    assert!(
+        errs.iter().any(|e| e.contains("scope.cqlite_boundary")),
+        "high-relevance out_of_scope evidence without a cqlite_boundary must fail; got: {errs:#?}"
+    );
+    assert!(
+        !errs
+            .iter()
+            .any(|e| e.contains("scope.out_of_scope_category")),
+        "category is present, so it must not be reported missing; got: {errs:#?}"
+    );
+}
+
+#[test]
+fn well_formed_out_of_scope_evidence_on_non_oos_status_passes_boundary_rule() {
+    // status: planned + evidence.type: out_of_scope with BOTH a boundary category
+    // and (for high relevance) a cqlite_boundary must not trip the boundary-field
+    // rule — no false positives on well-formed entries.
+    let scenario = MISMATCHED_OOS_NULL_CATEGORY
+        .replace("relevance: med", "relevance: high")
+        .replace(
+            "      target_suite: sstable_parity_compression_info_chunks",
+            "      out_of_scope_category: unsupported_compression_dictionary\n\
+             \x20     cqlite_boundary: CQLite decodes the codec but no fixture exists to byte-compare.\n\
+             \x20     target_suite: sstable_parity_compression_info_chunks",
+        );
+    let errs = errors(&wrap(&scenario));
+    assert!(
+        !errs
+            .iter()
+            .any(|e| e.contains("scope.out_of_scope_category")
+                || e.contains("scope.cqlite_boundary")),
+        "well-formed out_of_scope evidence must not trip the boundary-field rule; got: {errs:#?}"
+    );
+}
+
 #[test]
 fn byte_for_byte_without_evidence_is_rejected() {
     let scenario = VALID_SCENARIO
@@ -546,6 +639,94 @@ fn partial_without_gap_and_next_step_is_rejected() {
     );
 }
 
+/// A `partial`-evidence scenario with a full scope (gap + next_step) but NO
+/// `scope.target_issue` must be rejected (issue #1401): an untracked partial is
+/// orphaned debt with no open home. Note `next_step` cites an issue in prose but
+/// `target_issue` is absent — the machine field is what the fail-closed rule needs.
+const PARTIAL_UNTRACKED_SCENARIO: &str = r#"  - id: cass.tombstone_ttl.example_partial
+    title: Example partial scenario
+    status: partial
+    capability: tombstone_ttl
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files: [ExampleTest.java]
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests: []
+    fixtures: {}
+    evidence:
+      type: partial
+      known_limitations: no dedicated fixture yet
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: bash regen.sh
+    ci:
+      tier: manual_debug
+    scope:
+      gap: no dedicated fixture yet
+      next_step: "Commission a fixture (see #1387)."
+"#;
+
+#[test]
+fn partial_without_target_issue_is_rejected() {
+    let errs = errors(&wrap(PARTIAL_UNTRACKED_SCENARIO));
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("scope.target_issue") && e.contains("OPEN")),
+        "a partial scenario with no scope.target_issue must be rejected, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn partial_with_target_issue_but_next_step_missing_ref_is_rejected() {
+    // target_issue present, but next_step does not echo #<target_issue>.
+    let scenario = PARTIAL_UNTRACKED_SCENARIO.replace(
+        "      next_step: \"Commission a fixture (see #1387).\"\n",
+        "      next_step: Commission a fixture.\n      target_issue: 1387\n",
+    );
+    let errs = errors(&wrap(&scenario));
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("scope.next_step") && e.contains("#1387")),
+        "next_step that omits the target_issue #ref must be rejected, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn partial_next_step_ref_must_be_whole_token_not_prefix() {
+    // target_issue: 150, but next_step cites #1507 — a naive `contains("#150")`
+    // would false-match the #1507 prefix. The whole-token check must reject this.
+    let scenario = PARTIAL_UNTRACKED_SCENARIO.replace(
+        "      next_step: \"Commission a fixture (see #1387).\"\n",
+        "      next_step: \"Commission a fixture (see #1507).\"\n      target_issue: 150\n",
+    );
+    let errs = errors(&wrap(&scenario));
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("scope.next_step") && e.contains("#150")),
+        "a #1507 citation must NOT satisfy target_issue 150, got: {errs:#?}"
+    );
+}
+
+#[test]
+fn partial_parked_on_open_issue_passes() {
+    // target_issue present AND echoed in next_step: the fail-closed rule is satisfied.
+    let scenario = PARTIAL_UNTRACKED_SCENARIO.replace(
+        "      next_step: \"Commission a fixture (see #1387).\"\n",
+        "      next_step: \"Commission a fixture (see #1387).\"\n      target_issue: 1387\n",
+    );
+    let errs = errors(&wrap(&scenario));
+    assert!(
+        errs.is_empty(),
+        "a partial parked on an open issue + citing it must pass, got: {errs:#?}"
+    );
+}
+
 #[test]
 fn missing_local_reference_path_is_rejected_when_checked() {
     // With repo_root set, a non-existent reference path must be flagged.
@@ -586,6 +767,52 @@ fn real_manifest_lints_clean() {
         .map(|f| format!("[{}] {}: {}", f.id, f.field, f.message))
         .collect();
     assert!(errs.is_empty(), "real manifest has lint errors: {errs:#?}");
+}
+
+/// Issue #1408: a `kind: test` reference (basename ending in `Test.java`) that
+/// does not resolve to a detailed entry in the real checked-in index is a lint
+/// error; a production-source reference (no `Test` suffix) is exempt.
+#[test]
+fn test_kind_reference_absent_from_index_is_rejected() {
+    let root = repo_root();
+    let text = std::fs::read_to_string(root.join("test-data/cassandra-parity-manifest.yml"))
+        .expect("real manifest exists");
+    // Inject a phantom test-kind reference into the first scenario's files.
+    let phantom = text.replacen(
+        "        - DescriptorTest.java",
+        "        - DescriptorTest.java\n        - NoSuchPhantom1408Test.java",
+        1,
+    );
+    assert_ne!(phantom, text, "expected to inject a phantom reference");
+    let m = Manifest::from_yaml(&phantom).expect("manifest parses");
+    let errs: Vec<String> = lint(&m, Some(&root))
+        .into_iter()
+        .filter(|f| f.level == Level::Error)
+        .map(|f| format!("[{}] {}: {}", f.id, f.field, f.message))
+        .collect();
+    assert!(
+        errs.iter().any(|e| e.contains("NoSuchPhantom1408Test.java")
+            && e.contains("cassandra.files")
+            && e.contains("does not resolve")),
+        "expected a kind:test index-resolution error, got: {errs:#?}"
+    );
+
+    // The same reference as a production SOURCE (no `Test` suffix) is exempt.
+    let src = text.replacen(
+        "        - DescriptorTest.java",
+        "        - DescriptorTest.java\n        - NoSuchPhantom1408.java",
+        1,
+    );
+    let ms = Manifest::from_yaml(&src).expect("manifest parses");
+    let src_errs: Vec<String> = lint(&ms, Some(&root))
+        .into_iter()
+        .filter(|f| f.level == Level::Error && f.message.contains("NoSuchPhantom1408"))
+        .map(|f| f.message)
+        .collect();
+    assert!(
+        src_errs.is_empty(),
+        "a production-source reference must be exempt from the index-resolution rule: {src_errs:#?}"
+    );
 }
 
 #[test]
@@ -1153,4 +1380,87 @@ fn coverage_finds_high_relevance_files() {
         "all {} high-relevance files must be classified, only {} are",
         cov.high_total, cov.high_classified
     );
+}
+
+/// A scenario referencing a Cassandra file by `files: [<value>]`. The reference
+/// is otherwise valid `out_of_scope` (no path-existence checks on cassandra.files).
+fn oos_scenario_with_file(id_slug: &str, file_ref: &str) -> String {
+    format!(
+        r#"  - id: cass.sstable_format.{id_slug}
+    title: t
+    status: out_of_scope
+    capability: sstable_format
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: sstable-format
+      relevance: med
+      files:
+        - {file_ref}
+    cqlite:
+      coverage:
+        notes: n
+    evidence:
+      type: out_of_scope
+      artifacts: [logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: not_sstable_reader_writer_compactor
+      rationale: r
+      cqlite_boundary: b
+      safe_claim: s
+      related_in_scope_scenarios: [cass.sstable_format.descriptor_component_resolution]
+"#
+    )
+}
+
+const AMBIGUOUS_INDEX: &str = "\
+#### 🔴 High · `DupTest.java`
+- **Path:** `test/unit/org/apache/cassandra/io/sstable/DupTest.java`
+#### 🟡 Med · `DupTest.java`
+- **Path:** `test/unit/org/apache/cassandra/tools/DupTest.java`
+#### 🟡 Med · `SoloTest.java`
+- **Path:** `test/unit/org/apache/cassandra/db/SoloTest.java`
+";
+
+/// Issue #1407: a bare basename that maps to >1 index source path is rejected;
+/// a path-qualified reference and an unambiguous bare basename are accepted.
+#[test]
+fn ambiguous_bare_basename_is_rejected_when_index_present() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    std::fs::write(root.join("docs/cassandra_test_index.md"), AMBIGUOUS_INDEX).unwrap();
+
+    let scenarios = format!(
+        "{}{}{}",
+        oos_scenario_with_file("bare_ambiguous", "DupTest.java"),
+        oos_scenario_with_file(
+            "path_qualified",
+            "test/unit/org/apache/cassandra/io/sstable/DupTest.java"
+        ),
+        oos_scenario_with_file("bare_unambiguous", "SoloTest.java"),
+    );
+    let m = Manifest::from_yaml(&wrap(&scenarios)).unwrap();
+    let findings = lint(&m, Some(root));
+    let ambig: Vec<_> = findings
+        .iter()
+        .filter(|f| f.level == Level::Error && f.message.contains("ambiguous bare basename"))
+        .collect();
+
+    assert_eq!(
+        ambig.len(),
+        1,
+        "exactly one ambiguous-basename error expected, got: {ambig:#?}"
+    );
+    assert_eq!(ambig[0].id, "cass.sstable_format.bare_ambiguous");
+    assert!(ambig[0].message.contains("DupTest.java"));
+    // The path-qualified and unambiguous-bare scenarios must NOT be flagged.
+    assert!(!ambig
+        .iter()
+        .any(|f| f.id == "cass.sstable_format.path_qualified"
+            || f.id == "cass.sstable_format.bare_unambiguous"));
 }

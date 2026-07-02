@@ -174,6 +174,44 @@ P0 data-loss path without a recorded gap is a contract violation.
   `required_parity` scenario whose fixtures need a live Cassandra to regenerate
   is *attached* to the nightly so its goldens stay fresh.
 
+#### PR-visibility proxy for the compaction byte tier (issue #1405)
+
+The compaction byte-tier scenarios
+`cass.compaction.SSTableRewriterTest.output_component_integrity` and
+`cass.compaction.harness_byte_tier_artifacts` are `nightly_docker`: their real
+Cassandra-vs-CQLite byte comparison only runs under `gradle byteParity`
+(`compaction-parity.yml` / `nightly-docker-parity.yml`) on the nightly schedule
+and on `workflow_dispatch`. A PR that breaks compaction byte parity would
+otherwise merge green and be caught only by the next nightly. To give PRs
+*visibility* (not a heavyweight new required lane), a **PR proxy** runs a
+Rust-side re-compaction byte-parity subset:
+
+- **What runs.** The `compaction-byte-parity` component of
+  [`scripts/agent-gate.sh`](../../scripts/agent-gate.sh) executes the committed
+  Rust byte-parity tests (`issue_1017` live-cell, `issue_1020` frozen-UDT,
+  `issue_1240` nested frozen-collection-UDT — under `CQLITE_REQUIRE_FIXTURES=1`,
+  fail-closed on committed goldens; plus `issue_1019` static/dropped-column,
+  skip-aware over its fetched-only `test_tomb` fixtures). CQLite re-produces the
+  same inputs, runs its own compaction, and diffs the output components
+  byte-for-byte against committed Cassandra 5.0.2 compacted references. The same
+  tests also run on PRs via
+  [`live-cell-compaction-parity.yml`](../../.github/workflows/live-cell-compaction-parity.yml)
+  and [`tombstone-ttl-parity.yml`](../../.github/workflows/tombstone-ttl-parity.yml).
+- **What the PR proxy PROMISES.** For the committed live-cell / frozen-UDT /
+  nested-UDT scenarios, CQLite's compaction output is byte-identical to the
+  committed Cassandra golden on the diffed component set
+  (Data.db/Index.db/Summary.db/Digest.crc32/CRC.db). A regression there fails
+  the PR gate before merge.
+- **What it does NOT promise (why the nightly tier remains authoritative).** The
+  PR proxy is a *subset over committed goldens*, not the Java differential
+  harness. It does not rebuild Cassandra from source, does not exercise the full
+  scenario matrix, does not diff every component (Statistics.db/Filter.db are
+  present-not-diffed), and cannot catch drift induced by a transitive change
+  outside the covered write/merge/serializer paths. The `nightly_docker`
+  `gradle byteParity` run over a live Cassandra build is the authoritative
+  byte-tier backstop; the two manifest scenarios stay `nightly_docker` and
+  record this PR-proxy relationship in their `evidence` notes.
+
 ### `exhaustive_regeneration`
 
 - **Purpose.** The full, expensive regeneration of the entire fixture corpus

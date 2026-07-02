@@ -50,6 +50,7 @@ SKIP_KEYSPACES: dict[str, str] = {
     "test_compactionparity": "compaction byte-parity fixtures (differential-compaction harness)",
     "test_compactionparityudt": "compaction-parity UDT fixtures (compaction harness; may be local-only)",
     "test_signed_coll": "signed set/map element-order byte-parity fixtures (dedicated Rust parity test issue_1295_*)",
+    "test_compaction_tombstone_ttl": "tombstone/TTL compaction byte-parity fixtures (dedicated Rust parity test issue_1387_*)",
 }
 
 # In-scope keyspaces that are discovered + listed but not executed through the

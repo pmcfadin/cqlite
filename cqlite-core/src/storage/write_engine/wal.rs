@@ -41,6 +41,110 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+/// Maximum plausible WAL entry payload length (16 MiB).
+///
+/// A declared length larger than this signals a torn/garbage tail rather than a
+/// real entry. Used both when scanning for the last valid boundary on open and
+/// as the replay-time sanity bound.
+const MAX_ENTRY_LENGTH: u32 = 16 * 1024 * 1024;
+
+/// Outcome of a WAL crash-recovery replay (issue #1391).
+///
+/// Replaying a WAL is not always lossless: a crash can leave a torn tail, and
+/// on-disk bit-rot can corrupt an entry in the MIDDLE of the log. The previous
+/// `replay()` returned a bare `Ok(Vec<Mutation>)` in every case, so a corrupt
+/// recovery was indistinguishable from a clean one — and the next flush then
+/// truncated the WAL, making the loss permanent and invisible.
+///
+/// This report makes lossiness explicit. Callers MUST consult
+/// [`is_clean`](Self::is_clean) before treating the recovery as complete;
+/// [`WriteEngine`](super::WriteEngine) preserves the raw WAL segment aside and
+/// surfaces the report rather than silently truncating over corruption.
+///
+/// # Recovery posture (fail-fast, then report)
+///
+/// The WAL framing has no sync markers, so once an entry's CRC does not verify
+/// (or its declared length is implausible) the byte offset of the *next* entry
+/// cannot be recovered authoritatively — trusting the corrupt length is exactly
+/// the misalignment bug that decoded arbitrary garbage. Replay therefore matches
+/// Cassandra's `CommitLogReplayer` default: it recovers the valid *prefix*, then
+/// **stops at the first unrecoverable corruption** ([`stopped_early`]) rather
+/// than guessing a resync point. The only exception is a CRC-*valid* entry whose
+/// payload fails to deserialize: the CRC guarantees the entry boundary, so that
+/// single entry is skipped (counted in [`corrupt_entries`]) and replay continues
+/// — an authoritative, non-heuristic resync.
+///
+/// [`stopped_early`]: Self::stopped_early
+/// [`corrupt_entries`]: Self::corrupt_entries
+#[derive(Debug, Clone, Default)]
+pub struct RecoveryReport {
+    /// Mutations recovered, in log order. On corruption this is the valid
+    /// prefix that precedes the first unrecoverable entry.
+    pub mutations: Vec<Mutation>,
+    /// Number of entries that could not be recovered (CRC mismatch, implausible
+    /// length, or CRC-valid-but-undecodable payload).
+    pub corrupt_entries: usize,
+    /// True when replay stopped before end-of-file because it hit corruption it
+    /// could not authoritatively resync past. Any entries after the stop point
+    /// are NOT in [`mutations`](Self::mutations) and are covered by
+    /// [`bytes_skipped`](Self::bytes_skipped).
+    pub stopped_early: bool,
+    /// Number of trailing bytes that were present on disk but not recovered
+    /// (the corrupt entry plus everything after it when `stopped_early`).
+    pub bytes_skipped: u64,
+}
+
+impl RecoveryReport {
+    /// A recovery is clean iff no entry was corrupt and replay reached EOF
+    /// without stopping early. A torn HEADER (an incomplete final append that
+    /// never finished its 8-byte header, so there is provably no complete entry
+    /// to lose) is NOT corruption and keeps a report clean; a complete-header
+    /// entry that cannot be satisfied is corruption and makes a report lossy
+    /// (issue #1391 r5).
+    pub fn is_clean(&self) -> bool {
+        self.corrupt_entries == 0 && !self.stopped_early
+    }
+}
+
+/// Why a sequential WAL scan stopped advancing (issue #1390 + #1391).
+///
+/// Distinguishing a torn tail from mid-stream corruption is the crux of safe
+/// recovery: a torn tail is an interrupted final append (safe to trim), whereas
+/// a CRC mismatch / implausible length / unsatisfiable length on a *complete-
+/// header* entry is *unexpected corruption* whose successors must NOT be
+/// silently trimmed away.
+///
+/// # The torn-tail boundary is the header, not the payload (issue #1391, r5)
+///
+/// A torn tail is trimmable-as-clean ONLY when the trailing entry's 8-byte
+/// header is itself incomplete (< 8 bytes at EOF): there is provably no complete
+/// entry to lose. Once a COMPLETE header is present, an entry that cannot be
+/// satisfied (short payload at EOF, bad CRC, or an implausible length) is
+/// [`Corruption`](Self::Corruption): using only the allowed no-heuristics facts
+/// (header completeness, declared-length vs remaining-bytes, physical-tail
+/// position) an interrupted final write is INDISTINGUISHABLE from a bit-flipped
+/// length whose declared size overshoots EOF and swallows valid, acknowledged
+/// successors. Trusting it to be "just a torn tail" is exactly the silent lossy
+/// trim #1391 eliminates, so a complete-header entry that is dropped is always
+/// preserved + surfaced as lossy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WalStop {
+    /// Reached end-of-file exactly on an entry boundary — a fully clean log.
+    CleanEof,
+    /// The trailing entry's 8-byte HEADER was cut short (< 8 bytes at EOF): an
+    /// interrupted append that never even finished its header, so there is
+    /// provably no complete entry to lose. This is the only structurally-
+    /// incomplete tail that may be trimmed-as-clean (issue #1391, r5).
+    TornTail,
+    /// A COMPLETE-header entry could not be trusted: it failed CRC, declared an
+    /// implausible length (> [`MAX_ENTRY_LENGTH`]), or declared a length that
+    /// cannot be satisfied by the remaining bytes (short payload at EOF). The
+    /// framing past this point is untrustworthy and the dropped entry may be a
+    /// bit-flipped record swallowing valid successors, so it must be preserved,
+    /// not silently discarded.
+    Corruption,
+}
+
 /// Sync directory metadata to ensure file entries are persisted
 ///
 /// On POSIX systems this is critical for crash safety - without syncing the
@@ -51,7 +155,7 @@ use std::path::{Path, PathBuf};
 /// when `sync_all` is called on the file itself, so an explicit directory
 /// sync is unnecessary on Windows and we skip it.
 #[cfg(unix)]
-fn sync_directory(dir: &Path) -> Result<()> {
+pub(crate) fn sync_directory(dir: &Path) -> Result<()> {
     let dir_file = File::open(dir)
         .map_err(|e| Error::Storage(format!("Failed to open directory for sync: {}", e)))?;
 
@@ -63,7 +167,7 @@ fn sync_directory(dir: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn sync_directory(_dir: &Path) -> Result<()> {
+pub(crate) fn sync_directory(_dir: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -518,6 +622,15 @@ pub struct WriteAheadLog {
     buffer_size: usize,
     /// Current size of the WAL file (in bytes)
     current_size: u64,
+    /// Byte offset of the last CRC-valid prefix when `open_existing` detected
+    /// mid-stream corruption (issue #1391). The corrupt tail is intentionally
+    /// left on disk so the caller can preserve it aside as forensic evidence
+    /// FIRST; once that is done the caller invokes
+    /// [`reset_to_valid_prefix`](Self::reset_to_valid_prefix) so post-recovery
+    /// appends land at a replayable position instead of after the corrupt bytes
+    /// (where a synced write would be lost on the next replay). `None` for a
+    /// freshly created WAL, a clean reopen, or a torn tail (already trimmed).
+    pending_valid_prefix: Option<u64>,
 }
 
 impl WriteAheadLog {
@@ -576,6 +689,7 @@ impl WriteAheadLog {
             path,
             buffer_size,
             current_size: 0,
+            pending_valid_prefix: None,
         })
     }
 
@@ -596,6 +710,14 @@ impl WriteAheadLog {
     ///
     /// Returns an error if the file doesn't exist or cannot be opened.
     pub fn open_existing(path: &Path) -> Result<Self> {
+        // Determine the authoritative end-of-log boundary BEFORE opening for
+        // append. A crash can leave a partial (torn) entry at the tail; if it is
+        // retained, every subsequent append lands AFTER the garbage and is
+        // silently unrecoverable on the next replay (issue #1390). The boundary
+        // is derived from the length-prefixed + CRC32 framing (authoritative,
+        // not a byte-pattern guess), matching the no-heuristics mandate.
+        let (valid_end, stop) = Self::scan_valid_prefix(path)?;
+
         let file = OpenOptions::new()
             .read(true)
             .append(true)
@@ -606,14 +728,276 @@ impl WriteAheadLog {
             .metadata()
             .map_err(|e| Error::Storage(format!("Failed to read WAL metadata: {}", e)))?;
 
-        let current_size = metadata.len();
+        let file_len = metadata.len();
+
+        // Only a TORN TAIL — now strictly a torn HEADER (< 8 bytes at EOF), the
+        // sole structurally-incomplete tail with provably no complete entry to
+        // lose (issue #1391 r5) — may be trimmed HERE; that is #1390's guarantee
+        // that future appends resume at the last valid boundary. Any COMPLETE-
+        // header entry that cannot be trusted (`Corruption`: bad CRC, implausible
+        // length, or a declared length that overshoots EOF) may be a bit-flipped
+        // record swallowing VALID successors, so silently `set_len`-ing it away at
+        // open time would discard evidence before it can be preserved. We
+        // therefore leave a corrupt log
+        // physically intact so `replay()` surfaces the loss and `WriteEngine`
+        // can copy the raw segment aside; the caller then invokes
+        // `reset_to_valid_prefix` (issue #1391) to trim the LIVE log back to the
+        // valid prefix BEFORE accepting writes, so a post-recovery synced append
+        // lands at a replayable position rather than after the corrupt bytes.
+        let mut pending_valid_prefix = None;
+        let current_size = if stop == WalStop::TornTail && valid_end < file_len {
+            file.set_len(valid_end).map_err(|e| {
+                Error::Storage(format!("Failed to trim torn WAL tail at {:?}: {}", path, e))
+            })?;
+            file.sync_all().map_err(|e| {
+                Error::Storage(format!(
+                    "Failed to sync WAL after trim at {:?}: {}",
+                    path, e
+                ))
+            })?;
+            if let Some(parent) = path.parent() {
+                sync_directory(parent)?;
+            }
+            log::warn!(
+                "WAL {:?} had a torn tail: trimmed {} byte(s) ({} -> {})",
+                path,
+                file_len - valid_end,
+                file_len,
+                valid_end
+            );
+            valid_end
+        } else {
+            if stop == WalStop::Corruption && valid_end < file_len {
+                // Do not paper over corruption HERE: leave the corrupt segment on
+                // disk so the caller can preserve it aside first, and record the
+                // valid-prefix boundary so `reset_to_valid_prefix` can trim the
+                // live log once the evidence is safe.
+                log::error!(
+                    "WAL {:?} has corruption at offset {} ({} valid prefix byte(s) of {}); \
+                     leaving the segment intact for evidence preservation before reset",
+                    path,
+                    valid_end,
+                    valid_end,
+                    file_len
+                );
+                pending_valid_prefix = Some(valid_end);
+            }
+            file_len
+        };
 
         Ok(Self {
             file: BufWriter::with_capacity(Self::DEFAULT_BUFFER_SIZE, file),
             path: path.to_path_buf(),
             buffer_size: Self::DEFAULT_BUFFER_SIZE,
             current_size,
+            pending_valid_prefix,
         })
+    }
+
+    /// True if `open_existing` found mid-stream corruption whose valid prefix has
+    /// not yet been reset (issue #1391). While this holds, the LIVE WAL still
+    /// carries the corrupt tail and appends would land after it (lost on the next
+    /// replay) — the caller must preserve the segment aside and then call
+    /// [`reset_to_valid_prefix`](Self::reset_to_valid_prefix) before any write.
+    pub fn has_pending_corrupt_tail(&self) -> bool {
+        self.pending_valid_prefix.is_some()
+    }
+
+    /// After a lossy (`Corruption`) recovery, trim the LIVE WAL back to its last
+    /// CRC-valid prefix so post-recovery appends resume at a replayable position
+    /// (issue #1391). This is a no-op unless `open_existing` recorded a pending
+    /// corrupt tail; the caller MUST first preserve the raw segment aside (the
+    /// trim is destructive to the on-disk corrupt bytes, though the aside copy
+    /// and the retained `RecoveryReport` survive).
+    ///
+    /// Returns the new (valid-prefix) length when a trim occurred, or `None` when
+    /// there was nothing pending.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the buffer flush, `set_len`, or fsync fails.
+    pub fn reset_to_valid_prefix(&mut self) -> Result<Option<u64>> {
+        // Peek the pending value WITHOUT clearing it (issue #1391, roborev r3): if
+        // any step below (flush / set_len / fsync / directory sync) fails, the
+        // corrupt tail is still (partly) on disk and the guard MUST stay set so
+        // `append()` remains fail-closed. Clearing here — as `.take()` did — left
+        // the WAL appendable after the corrupt tail again on any mid-reset error,
+        // reintroducing the acknowledged-write-loss window. The guard is cleared
+        // only after ALL steps succeed (see the end of this function).
+        let valid_end = match self.pending_valid_prefix.as_ref() {
+            Some(end) => *end,
+            None => return Ok(None),
+        };
+
+        // Flush any buffered bytes first (there should be none — nothing has been
+        // appended since open — but do not rely on that).
+        self.file
+            .flush()
+            .map_err(|e| Error::Storage(format!("Failed to flush WAL before reset: {}", e)))?;
+
+        let file_len = self
+            .file
+            .get_ref()
+            .metadata()
+            .map_err(|e| Error::Storage(format!("Failed to read WAL metadata for reset: {}", e)))?
+            .len();
+
+        if valid_end >= file_len {
+            // Nothing beyond the valid prefix to trim (e.g. already reset). This is
+            // a benign success, so it is safe to lift the guard.
+            self.current_size = file_len;
+            self.pending_valid_prefix = None;
+            return Ok(None);
+        }
+
+        self.file.get_mut().set_len(valid_end).map_err(|e| {
+            Error::Storage(format!(
+                "Failed to reset WAL to valid prefix at {:?}: {}",
+                self.path, e
+            ))
+        })?;
+        self.file.get_ref().sync_all().map_err(|e| {
+            Error::Storage(format!(
+                "Failed to sync WAL after reset at {:?}: {}",
+                self.path, e
+            ))
+        })?;
+        if let Some(parent) = self.path.parent() {
+            sync_directory(parent)?;
+        }
+
+        log::warn!(
+            "WAL {:?} reset to last valid prefix after lossy recovery: {} -> {} \
+             ({} corrupt byte(s) dropped from the LIVE log; evidence preserved aside)",
+            self.path,
+            file_len,
+            valid_end,
+            file_len - valid_end
+        );
+
+        self.current_size = valid_end;
+        // All steps succeeded — only now is it safe to lift the fail-closed guard.
+        self.pending_valid_prefix = None;
+        Ok(Some(valid_end))
+    }
+
+    /// Scan the WAL and return the byte offset at the end of the last CRC-valid
+    /// entry — the boundary at which future appends must resume.
+    ///
+    /// Reads entries sequentially using the same length-prefixed + CRC32 framing
+    /// as [`replay`](Self::replay). Scanning stops (the valid prefix ends) at the
+    /// first entry that is:
+    /// - missing/short in its 8-byte header ([`WalStop::TornTail`] — a torn
+    ///   header is the only structurally-incomplete tail that may be trimmed as
+    ///   clean),
+    /// - declaring an implausible length (> [`MAX_ENTRY_LENGTH`], garbage tail —
+    ///   [`WalStop::Corruption`]),
+    /// - complete in its header but short in its payload at EOF
+    ///   ([`WalStop::Corruption`] — a complete-header entry whose declared length
+    ///   cannot be satisfied is indistinguishable from a length bit-flip that
+    ///   overshoots EOF, so it is preserved, not trimmed; issue #1391 r5), or
+    /// - CRC-invalid ([`WalStop::Corruption`] — corrupt framing, offsets past it
+    ///   cannot be trusted).
+    ///
+    /// The returned offset is therefore the end of a contiguous run of fully
+    /// written, CRC-valid entries. Bytes beyond it are either a torn HEADER left
+    /// by an interrupted append (trimmed as clean) or a corrupt/unsatisfiable
+    /// complete-header entry (preserved for evidence, reset separately).
+    fn scan_valid_prefix(path: &Path) -> Result<(u64, WalStop)> {
+        let mut file = File::open(path)
+            .map_err(|e| Error::Storage(format!("Failed to open WAL for scan: {}", e)))?;
+
+        let mut offset = 0u64;
+
+        loop {
+            // Read entry header: [length][crc32].
+            let mut header = [0u8; 8];
+            match file.read_exact(&mut header) {
+                Ok(_) => {}
+                // Clean boundary vs a header cut short: a full-length read that
+                // hit EOF exactly on the entry boundary (`file len == offset`) is
+                // a clean end-of-log; any surplus bytes are a torn header. This
+                // holds at `offset == 0` too: a WAL that is JUST a 1-7 byte torn
+                // first header (nothing valid before it) is a torn tail to be
+                // trimmed, NOT a clean EOF — an `offset == 0` short-circuit here
+                // would leave those garbage bytes in place and every later append
+                // would land after them, unrecoverable on the next replay
+                // (issue #1391).
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    let stop = if Self::at_clean_eof(&mut file, offset)? {
+                        WalStop::CleanEof
+                    } else {
+                        WalStop::TornTail
+                    };
+                    return Ok((offset, stop));
+                }
+                Err(e) => {
+                    return Err(Error::Storage(format!(
+                        "Failed to scan WAL header at offset {}: {}",
+                        offset, e
+                    )));
+                }
+            }
+
+            let entry_length = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+            let expected_crc = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+
+            // Implausible length on a fully-present header => corruption, not a
+            // torn tail: the framing is untrustworthy and any successors must be
+            // preserved rather than discarded.
+            if entry_length > MAX_ENTRY_LENGTH {
+                return Ok((offset, WalStop::Corruption));
+            }
+
+            // Read the declared payload. A short read (EOF before `entry_length`
+            // bytes) on a COMPLETE 8-byte header is CORRUPTION, not a torn tail
+            // (issue #1391, roborev r5). Using only the allowed no-heuristics
+            // facts (header completeness, declared-length vs remaining-bytes,
+            // physical-tail position) an interrupted final write of THIS entry is
+            // indistinguishable from a bit-flipped length on a fully-written entry
+            // whose declared size overshoots EOF and swallows valid successors —
+            // both are "complete header, declared length > remaining bytes, at the
+            // physical tail". Guessing which would be a byte-pattern heuristic. So
+            // we treat it as corruption: leave the tail intact for evidence and let
+            // the caller preserve + report it, rather than silently trimming an
+            // acknowledged successor away as a clean torn tail. Only a torn HEADER
+            // (< 8 bytes, handled above) is a structurally-incomplete tail that may
+            // be trimmed-as-clean.
+            let mut payload = vec![0u8; entry_length as usize];
+            match file.read_exact(&mut payload) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    return Ok((offset, WalStop::Corruption));
+                }
+                Err(e) => {
+                    return Err(Error::Storage(format!(
+                        "Failed to scan WAL payload at offset {}: {}",
+                        offset, e
+                    )));
+                }
+            }
+
+            // Verify CRC. A mismatch on a fully-present entry means the framing
+            // (including the length we just trusted) is unreliable, so this is
+            // corruption — offsets past it cannot be resynced authoritatively.
+            let mut hasher = Hasher::new();
+            hasher.update(&payload);
+            if hasher.finalize() != expected_crc {
+                return Ok((offset, WalStop::Corruption));
+            }
+
+            offset += 8 + entry_length as u64;
+        }
+    }
+
+    /// Distinguish a clean end-of-log from a torn header after a short header
+    /// read: seek to `offset` and check that exactly zero bytes remain.
+    fn at_clean_eof(file: &mut File, offset: u64) -> Result<bool> {
+        let len = file
+            .metadata()
+            .map_err(|e| Error::Storage(format!("Failed to read WAL metadata during scan: {}", e)))?
+            .len();
+        Ok(len == offset)
     }
 
     /// Append a mutation to the WAL
@@ -638,9 +1022,41 @@ impl WriteAheadLog {
     /// Returns an error if serialization fails or the write fails.
     #[tracing::instrument(name = "wal.append", skip(self, mutation))]
     pub fn append(&mut self, mutation: &Mutation) -> Result<()> {
+        // Refuse to append while a mid-stream corrupt tail is still on disk
+        // (issue #1391). `open_existing` deliberately leaves the corrupt segment
+        // intact for evidence preservation and records the valid-prefix boundary
+        // in `pending_valid_prefix`. If a direct public-API consumer appended now
+        // (without the `WriteEngine::new` reset), the new entry would land AFTER
+        // the corrupt tail — exactly where the next `replay()` stops — so the
+        // acknowledged write would be silently lost. The caller must preserve the
+        // segment aside and call `reset_to_valid_prefix()` first (which clears
+        // this flag). `WriteEngine::new` already does this before any write.
+        if self.pending_valid_prefix.is_some() {
+            return Err(Error::Storage(
+                "WAL has an unreset corrupt tail; reset_to_valid_prefix required before appending"
+                    .to_string(),
+            ));
+        }
+
         // Serialize mutation using bincode
         let mutation_bytes = bincode::serialize(mutation)
             .map_err(|e| Error::Storage(format!("Failed to serialize mutation: {}", e)))?;
+
+        // Fail-closed size ceiling (issue #1391, roborev r3). `replay()` /
+        // `scan_valid_prefix` classify any entry whose declared length exceeds
+        // `MAX_ENTRY_LENGTH` as corruption and STOP. If `append()` accepted a
+        // larger entry, a >16 MiB write could be fsync-acknowledged here and then
+        // silently dropped as "corrupt" on the next recovery — acknowledged-write
+        // loss. The write path's accepted max MUST equal the replay/scan limit, so
+        // reject BEFORE writing anything. The comparison is done in `u64` so a
+        // multi-GiB length cannot truncate through the `as u32` cast below into a
+        // small, wrongly-accepted value.
+        if mutation_bytes.len() as u64 > MAX_ENTRY_LENGTH as u64 {
+            return Err(Error::Storage(format!(
+                "WAL entry exceeds MAX_ENTRY_LENGTH (16 MiB): {} bytes",
+                mutation_bytes.len()
+            )));
+        }
 
         let entry_length = mutation_bytes.len() as u32;
 
@@ -703,24 +1119,48 @@ impl WriteAheadLog {
     /// Reads the WAL from the beginning and deserializes all valid entries.
     /// This is used during crash recovery to rebuild the memtable.
     ///
-    /// ## Corruption Handling
+    /// ## Corruption Handling (issue #1391)
     ///
-    /// - **Corrupted entries** (CRC mismatch): Logged as warnings, skipped
-    /// - **Truncated entries** (incomplete write): Stops replay, returns valid entries
-    /// - **Valid entries**: Deserialized and returned in order
+    /// Recovery is fail-fast-then-report — see [`RecoveryReport`] for the full
+    /// rationale. In summary:
+    ///
+    /// - **CRC mismatch / implausible length** on a fully-present entry: the
+    ///   framing past this point cannot be resynced authoritatively (no sync
+    ///   markers), so replay STOPS ([`RecoveryReport::stopped_early`]) and
+    ///   records the loss. It does NOT advance by the untrusted length (that was
+    ///   the misalignment bug that decoded garbage).
+    /// - **CRC-valid but undecodable payload**: the entry boundary is
+    ///   trustworthy, so this single entry is skipped
+    ///   ([`RecoveryReport::corrupt_entries`]) and replay continues.
+    /// - **Complete header + short payload at EOF**: a complete-header entry
+    ///   whose declared length cannot be satisfied is CORRUPTION (issue #1391
+    ///   r5), not a clean torn tail — it is indistinguishable from a length
+    ///   bit-flip that overshoots EOF and swallows valid successors. Replay stops
+    ///   early and records the loss ([`RecoveryReport::stopped_early`]).
+    /// - **Torn header** (short 8-byte header at EOF): an interrupted final
+    ///   append that never finished its header — there is provably no complete
+    ///   entry to lose, so replay stops cleanly (not counted as corruption).
+    /// - **Valid entries**: deserialized and returned in order.
     ///
     /// # Returns
     ///
-    /// A vector of all valid mutations read from the WAL.
+    /// A [`RecoveryReport`]. Callers MUST check [`RecoveryReport::is_clean`]
+    /// before treating recovery as complete; a non-clean report signals data
+    /// loss that must be surfaced, not silently truncated over.
     ///
     /// # Errors
     ///
-    /// Returns an error if the WAL file cannot be opened or read.
-    pub fn replay(&self) -> Result<Vec<Mutation>> {
+    /// Returns an error if the WAL file cannot be opened or read (an I/O fault
+    /// distinct from in-band corruption, which is reported, not errored).
+    pub fn replay(&self) -> Result<RecoveryReport> {
         let mut file = File::open(&self.path)
             .map_err(|e| Error::Storage(format!("Failed to open WAL for replay: {}", e)))?;
+        let total_len = file
+            .metadata()
+            .map_err(|e| Error::Storage(format!("Failed to read WAL metadata for replay: {}", e)))?
+            .len();
 
-        let mut mutations = Vec::new();
+        let mut report = RecoveryReport::default();
         let mut offset = 0u64;
 
         loop {
@@ -729,7 +1169,8 @@ impl WriteAheadLog {
             match file.read_exact(&mut header) {
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    // End of file or truncated header - stop replay
+                    // Clean EOF or a torn (never-acknowledged) final append -
+                    // stop replay without flagging corruption.
                     break;
                 }
                 Err(e) => {
@@ -743,13 +1184,20 @@ impl WriteAheadLog {
             let entry_length = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
             let expected_crc = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
 
-            // Sanity check: entry length should be reasonable (<16MB)
-            if entry_length > 16 * 1024 * 1024 {
-                log::warn!(
-                    "WAL entry at offset {} has unreasonable length {} - stopping replay",
+            // Implausible length: cannot trust the framing to find the next
+            // entry, so fail fast and report rather than skipping by a bogus
+            // length into arbitrary bytes.
+            if entry_length > MAX_ENTRY_LENGTH {
+                log::error!(
+                    "WAL entry at offset {} declares implausible length {} (> {}) - stopping \
+                     replay; {} trailing byte(s) not recovered",
                     offset,
-                    entry_length
+                    entry_length,
+                    MAX_ENTRY_LENGTH,
+                    total_len.saturating_sub(offset)
                 );
+                report.corrupt_entries += 1;
+                report.stopped_early = true;
                 break;
             }
 
@@ -758,12 +1206,28 @@ impl WriteAheadLog {
             match file.read_exact(&mut mutation_bytes) {
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    // Truncated entry - stop replay
-                    log::warn!(
-                        "WAL entry at offset {} is truncated (expected {} bytes) - stopping replay",
+                    // Short payload on a COMPLETE 8-byte header is CORRUPTION, not
+                    // a clean torn tail (issue #1391, roborev r5). A bit-flipped
+                    // length that overshoots EOF is structurally indistinguishable
+                    // from an interrupted final write here (both: complete header,
+                    // declared length > remaining bytes, at the physical tail), and
+                    // distinguishing them would be a byte-pattern heuristic. If the
+                    // length was corrupted, the swallowed bytes may hold VALID
+                    // acknowledged successors; breaking silently reported that loss
+                    // as clean. Report it (stop early) so `is_clean()` is false and
+                    // the caller preserves the tail aside. Only a torn HEADER
+                    // (< 8 bytes, the header read above) is a clean torn tail.
+                    log::error!(
+                        "WAL entry at offset {} has a complete header declaring length {} but \
+                         only {} payload byte(s) remain to EOF - stopping replay; {} trailing \
+                         byte(s) not recovered (corruption, not a clean torn tail)",
                         offset,
-                        entry_length
+                        entry_length,
+                        total_len.saturating_sub(offset + 8),
+                        total_len.saturating_sub(offset)
                     );
+                    report.corrupt_entries += 1;
+                    report.stopped_early = true;
                     break;
                 }
                 Err(e) => {
@@ -780,40 +1244,56 @@ impl WriteAheadLog {
             let actual_crc = hasher.finalize();
 
             if actual_crc != expected_crc {
-                log::warn!(
-                    "WAL entry at offset {} has CRC mismatch (expected 0x{:08x}, got 0x{:08x}) - skipping",
+                // CRC mismatch on a fully-present entry: the length we just
+                // trusted is unreliable, so the offset of the next entry is
+                // unknown. Fail fast and report; do NOT advance-and-continue.
+                log::error!(
+                    "WAL entry at offset {} has CRC mismatch (expected 0x{:08x}, got 0x{:08x}) - \
+                     stopping replay; {} trailing byte(s) not recovered",
                     offset,
                     expected_crc,
-                    actual_crc
+                    actual_crc,
+                    total_len.saturating_sub(offset)
                 );
-                offset += 8 + entry_length as u64;
-                continue;
+                report.corrupt_entries += 1;
+                report.stopped_early = true;
+                break;
             }
 
-            // Deserialize mutation (tolerating legacy pre-#764 records).
+            // CRC valid => the entry boundary is authoritative. Deserialize
+            // (tolerating legacy pre-#764 records). A decode failure here is a
+            // format skew our compat layers do not cover; because the boundary
+            // is trustworthy we skip just this entry and continue.
             match decode_mutation(&mutation_bytes) {
                 Ok(mutation) => {
-                    mutations.push(mutation);
+                    report.mutations.push(mutation);
                 }
                 Err(e) => {
-                    log::warn!(
-                        "WAL entry at offset {} failed to deserialize: {} - skipping",
+                    log::error!(
+                        "WAL entry at offset {} passed CRC but failed to deserialize: {} - \
+                         skipping this entry and continuing",
                         offset,
                         e
                     );
+                    report.corrupt_entries += 1;
                 }
             }
 
             offset += 8 + entry_length as u64;
         }
 
-        Ok(mutations)
+        report.bytes_skipped = total_len.saturating_sub(offset);
+        Ok(report)
     }
 
     /// Truncate the WAL (clear all entries)
     ///
     /// This is used after a successful flush to memtable/SSTable, removing
     /// old entries that are no longer needed for recovery.
+    ///
+    /// On success this also lifts any pending corrupt-tail guard (issue #1391):
+    /// an emptied WAL has no corrupt tail, so subsequent `append()` calls must
+    /// not be rejected by the stale fail-closed guard.
     ///
     /// # Errors
     ///
@@ -843,6 +1323,18 @@ impl WriteAheadLog {
             .map_err(|e| Error::Storage(format!("Failed to seek after truncate: {}", e)))?;
 
         self.current_size = 0;
+
+        // Clear any pending corrupt-tail guard (issue #1391, roborev r4). If this
+        // WAL was opened over a mid-stream corrupt tail, `open_existing` recorded
+        // the valid-prefix boundary in `pending_valid_prefix` and `append()` stays
+        // fail-closed until it is lifted. `truncate()` has just cleared the file to
+        // zero length and fsync'd + sought to the start, so the corrupt tail is
+        // gone from the LIVE log — leaving the guard set would wrongly reject ALL
+        // future appends against a now-empty WAL (deadlocked appends). The guard is
+        // lifted only HERE, after the flush/set_len/fsync/seek steps have all
+        // succeeded; any earlier failure returns via `?` with the guard still set,
+        // so the on-disk state and the fail-closed guard remain consistent.
+        self.pending_valid_prefix = None;
 
         Ok(())
     }
@@ -969,7 +1461,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let wal = WriteAheadLog::create(temp_dir.path()).unwrap();
 
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 0);
     }
 
@@ -982,7 +1474,7 @@ mod tests {
         wal.append(&mutation).unwrap();
         wal.sync().unwrap();
 
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 1);
         assert_eq!(mutations[0].table.keyspace, "test_ks");
         assert_eq!(mutations[0].table.table, "test_table");
@@ -999,7 +1491,7 @@ mod tests {
         }
         wal.sync().unwrap();
 
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 10);
 
         for (i, mutation) in mutations.iter().enumerate() {
@@ -1032,7 +1524,7 @@ mod tests {
         wal.truncate().unwrap();
         assert_eq!(wal.size(), 0);
 
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 0);
     }
 
@@ -1055,10 +1547,17 @@ mod tests {
         file.sync_all().unwrap();
         drop(file);
 
-        // Replay should skip the corrupted entry
+        // The corrupt (fully-present) entry must be reported, not silently
+        // dropped: no mutation is recovered, and the report is not clean.
         let wal = WriteAheadLog::open_existing(&wal_path).unwrap();
-        let mutations = wal.replay().unwrap();
-        assert_eq!(mutations.len(), 0);
+        let report = wal.replay().unwrap();
+        assert_eq!(report.mutations.len(), 0);
+        assert!(
+            !report.is_clean(),
+            "CRC corruption must surface as non-clean"
+        );
+        assert_eq!(report.corrupt_entries, 1);
+        assert!(report.stopped_early);
     }
 
     #[test]
@@ -1081,7 +1580,7 @@ mod tests {
 
         // Replay should stop at truncated entry
         let wal = WriteAheadLog::open_existing(&wal_path).unwrap();
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 0);
     }
 
@@ -1149,7 +1648,7 @@ mod tests {
         wal.sync().unwrap();
 
         // Replay should get both entries
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 2);
     }
 
@@ -1170,7 +1669,7 @@ mod tests {
         wal.append(&mutation).unwrap();
         wal.sync().unwrap();
 
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 1);
         assert!(mutations[0].clustering_key.is_some());
     }
@@ -1191,7 +1690,7 @@ mod tests {
         wal.append(&mutation).unwrap();
         wal.sync().unwrap();
 
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 1);
         assert_eq!(mutations[0].ttl_seconds, Some(3600));
     }
@@ -1212,7 +1711,7 @@ mod tests {
         wal.append(&mutation).unwrap();
         wal.sync().unwrap();
 
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 1);
         assert!(matches!(
             &mutations[0].operations[0],
@@ -1233,7 +1732,7 @@ mod tests {
         wal.append(&mutation).unwrap();
         wal.sync().unwrap();
 
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 1);
         assert!(matches!(
             &mutations[0].operations[0],
@@ -1257,7 +1756,7 @@ mod tests {
         wal.append(&mutation).unwrap();
         wal.sync().unwrap();
 
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 1);
         assert_eq!(
             mutations[0].local_deletion_time,
@@ -1278,7 +1777,7 @@ mod tests {
         wal.append(&mutation).unwrap();
         wal.sync().unwrap();
 
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 1);
         assert_eq!(mutations[0].local_deletion_time, None);
     }
@@ -1427,7 +1926,7 @@ mod tests {
         wal.append(&mutation).unwrap();
         wal.sync().unwrap();
 
-        let mutations = wal.replay().unwrap();
+        let mutations = wal.replay().unwrap().mutations;
         assert_eq!(mutations.len(), 1);
         match &mutations[0].operations[0] {
             CellOperation::Delete {
@@ -1665,6 +2164,759 @@ mod tests {
         let nonexistent = temp_dir.path().join("nonexistent");
         let result = WriteAheadLog::create(&nonexistent);
         assert!(result.is_err());
+    }
+
+    // ---- Issue #1390: torn-tail trim on open_existing -------------------
+    //
+    // `open_existing` must scan the log and position/truncate to the end of the
+    // last CRC-valid entry so that a partial (torn) tail left by a crash is not
+    // retained AHEAD of future appends. Otherwise every post-reopen append lands
+    // after the garbage and is silently unrecoverable on the next replay.
+
+    /// Append A then B (both synced), return (path, end_of_A_offset, total_size).
+    fn write_two_entries(temp_dir: &TempDir) -> (PathBuf, u64, u64) {
+        let mut wal = WriteAheadLog::create(temp_dir.path()).unwrap();
+
+        wal.append(&create_test_mutation(1, "Alice")).unwrap();
+        wal.sync().unwrap();
+        let end_of_a = wal.size();
+
+        wal.append(&create_test_mutation(2, "Bob")).unwrap();
+        wal.sync().unwrap();
+        let total = wal.size();
+
+        let path = wal.path().to_path_buf();
+        drop(wal);
+        (path, end_of_a, total)
+    }
+
+    /// Criterion 1 (updated for issue #1391 r5): a COMPLETE-header entry with a
+    /// short payload is NOT a clean torn tail. A valid A + B with a complete
+    /// 8-byte header but a truncated payload is structurally indistinguishable
+    /// from a length bit-flip that overshoots EOF (both: complete header,
+    /// declared length > remaining bytes, at the physical tail), so open_existing
+    /// must PRESERVE it (leave the bytes on disk, record a pending valid prefix)
+    /// rather than silently trimming it back to A and reporting clean. Only a
+    /// torn HEADER (< 8 bytes, see the torn-header criterion) is trimmed as clean.
+    #[test]
+    fn test_wal_open_existing_preserves_complete_header_short_payload() {
+        let temp_dir = TempDir::new().unwrap();
+        let (path, end_of_a, total) = write_two_entries(&temp_dir);
+
+        // Cut B mid-payload: keep its 8-byte header + 2 payload bytes.
+        let torn_len = end_of_a + 10;
+        assert!(
+            torn_len < total,
+            "test setup: B must be longer than 2 payload bytes"
+        );
+        let file = OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(torn_len).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        let wal = WriteAheadLog::open_existing(&path).unwrap();
+
+        // The complete-header short-payload entry must be PRESERVED, not trimmed:
+        // the file keeps its bytes and a pending valid prefix is recorded.
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            torn_len,
+            "a complete-header short-payload entry must be preserved on disk, not trimmed"
+        );
+        assert!(
+            wal.has_pending_corrupt_tail(),
+            "a complete-header short-payload entry must record a pending valid prefix"
+        );
+
+        // Replay recovers only A and reports the loss (not clean).
+        let report = wal.replay().unwrap();
+        assert_eq!(report.mutations.len(), 1, "only A is recovered");
+        assert!(
+            !report.is_clean(),
+            "the dropped complete-header entry is lossy"
+        );
+        assert!(report.stopped_early);
+    }
+
+    /// Criterion 2: post-reopen writes recoverable. Continuing criterion 1 —
+    /// after reopen the complete-header short-payload B is preserved pending, so
+    /// (issue #1391 r5) the caller must reset to the valid prefix before
+    /// appending C; replay must then yield exactly [A, C] with C PRESENT. This is
+    /// the guarantee that C lands at a replayable position, not after retained
+    /// torn bytes where it would be lost on the next replay.
+    #[test]
+    fn test_wal_post_reopen_write_is_recoverable() {
+        let temp_dir = TempDir::new().unwrap();
+        let (path, end_of_a, total) = write_two_entries(&temp_dir);
+
+        let torn_len = end_of_a + 10;
+        assert!(torn_len < total);
+        let file = OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(torn_len).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        // Reopen: B (complete header, short payload) is preserved pending. Reset
+        // to the valid prefix (end of A) so the append lands at a replayable
+        // position, then append C, sync, drop.
+        {
+            let mut wal = WriteAheadLog::open_existing(&path).unwrap();
+            let reset_to = wal.reset_to_valid_prefix().unwrap();
+            assert_eq!(reset_to, Some(end_of_a), "reset trims back to the end of A");
+            wal.append(&create_test_mutation(3, "Carol")).unwrap();
+            wal.sync().unwrap();
+        }
+
+        // Fresh reopen + replay must recover exactly [A, C].
+        let wal = WriteAheadLog::open_existing(&path).unwrap();
+        let mutations = wal.replay().unwrap().mutations;
+        assert_eq!(
+            mutations.len(),
+            2,
+            "must recover A and C (C must be present)"
+        );
+
+        let names: Vec<&str> = mutations
+            .iter()
+            .map(|m| match &m.operations[0] {
+                CellOperation::Write {
+                    value: Value::Text(name),
+                    ..
+                } => name.as_str(),
+                other => panic!("expected Write op, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(names, vec!["Alice", "Carol"]);
+    }
+
+    /// Criterion 3: torn-header variant. Tail cut mid-header (< 8 bytes) — same
+    /// expected outcomes: trim to the end of A and remain appendable.
+    #[test]
+    fn test_wal_open_existing_trims_torn_header() {
+        let temp_dir = TempDir::new().unwrap();
+        let (path, end_of_a, _total) = write_two_entries(&temp_dir);
+
+        // Cut mid-header: keep A + only 3 bytes of B's 8-byte header.
+        let torn_len = end_of_a + 3;
+        let file = OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(torn_len).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        {
+            let mut wal = WriteAheadLog::open_existing(&path).unwrap();
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().len(),
+                end_of_a,
+                "torn header must be trimmed to the last CRC-valid boundary"
+            );
+            wal.append(&create_test_mutation(3, "Carol")).unwrap();
+            wal.sync().unwrap();
+        }
+
+        let wal = WriteAheadLog::open_existing(&path).unwrap();
+        let mutations = wal.replay().unwrap().mutations;
+        assert_eq!(
+            mutations.len(),
+            2,
+            "must recover A and C after torn-header trim"
+        );
+    }
+
+    /// Criterion 4: clean log unaffected. open_existing on a clean log preserves
+    /// all entries and appends normally (regression guard for the trim logic).
+    #[test]
+    fn test_wal_open_existing_clean_log_unaffected() {
+        let temp_dir = TempDir::new().unwrap();
+        let (path, _end_of_a, total) = write_two_entries(&temp_dir);
+
+        {
+            let wal = WriteAheadLog::open_existing(&path).unwrap();
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().len(),
+                total,
+                "a clean log must not be truncated"
+            );
+            assert_eq!(wal.size(), total);
+            let mutations = wal.replay().unwrap().mutations;
+            assert_eq!(mutations.len(), 2, "clean log preserves all entries");
+        }
+
+        // Appending after a clean reopen must extend the log normally.
+        {
+            let mut wal = WriteAheadLog::open_existing(&path).unwrap();
+            wal.append(&create_test_mutation(3, "Carol")).unwrap();
+            wal.sync().unwrap();
+        }
+        let wal = WriteAheadLog::open_existing(&path).unwrap();
+        assert_eq!(wal.replay().unwrap().mutations.len(), 3);
+    }
+
+    /// Regression (#1390 roborev finding, superseded by #1391): a COMPLETE but
+    /// CRC-corrupt entry in the MIDDLE of the log is NOT a torn tail, so
+    /// `open_existing` must NOT truncate at it — the acknowledged bytes after it
+    /// must survive on disk. #1390 originally recovered them by skipping the
+    /// corrupt entry by its (untrusted) declared length and continuing; #1391
+    /// SUPERSEDES that with fail-fast-then-report: because the length field is not
+    /// CRC-protected, trusting it to locate the next entry is a heuristic, so
+    /// replay STOPS at the corruption, reports it (never silent), and the segment
+    /// (including any successors) is PRESERVED on disk for evidence rather than
+    /// recovered.
+    ///
+    /// WAL = [valid A][complete CRC-corrupt B][valid C]: the file length is
+    /// preserved through C (no truncation), `open_existing` leaves the corrupt
+    /// tail pending (not trimmed), and `replay` surfaces the valid prefix [A] plus
+    /// a non-clean, stopped-early report. Before #1390, `scan_last_valid_offset`
+    /// stopped at B's CRC mismatch and `open_existing` truncated back to the end
+    /// of A, permanently and SILENTLY discarding the acknowledged C.
+    #[test]
+    fn test_wal_open_existing_preserves_entries_after_midstream_crc_corruption() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // [A][B][C], all synced. Capture the end-of-A offset (start of B's frame)
+        // and the total size.
+        let (path, end_of_a, total) = {
+            let mut wal = WriteAheadLog::create(temp_dir.path()).unwrap();
+            wal.append(&create_test_mutation(1, "Alice")).unwrap();
+            wal.sync().unwrap();
+            let end_of_a = wal.size();
+            wal.append(&create_test_mutation(2, "Bob")).unwrap();
+            wal.sync().unwrap();
+            wal.append(&create_test_mutation(3, "Carol")).unwrap();
+            wal.sync().unwrap();
+            let total = wal.size();
+            let path = wal.path().to_path_buf();
+            drop(wal);
+            (path, end_of_a, total)
+        };
+
+        // Corrupt B's CRC (the 4 bytes at end_of_a+4) with a guaranteed-different
+        // value via a bit flip. B stays structurally complete (header + full
+        // payload intact); only its checksum is wrong.
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.seek(SeekFrom::Start(end_of_a + 4)).unwrap();
+        let mut crc = [0u8; 4];
+        file.read_exact(&mut crc).unwrap();
+        crc[0] ^= 0xFF;
+        file.seek(SeekFrom::Start(end_of_a + 4)).unwrap();
+        file.write_all(&crc).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        // open_existing must NOT truncate: B is complete and has bytes (C) after
+        // it, so it is not a torn tail. Under #1391 the corrupt tail is left
+        // pending (preserved for evidence), not silently trimmed.
+        let wal = WriteAheadLog::open_existing(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            total,
+            "a mid-stream CRC-corrupt (but structurally complete) entry must NOT be trimmed"
+        );
+        assert_eq!(wal.size(), total);
+        assert!(
+            wal.has_pending_corrupt_tail(),
+            "mid-stream corruption must be recorded as a pending corrupt tail, not trimmed away"
+        );
+
+        // replay surfaces the valid prefix [A] and REPORTS the mid-stream
+        // corruption (never silent): it stops at B rather than trusting B's
+        // uncovered length to skip to C. C is preserved on disk (see file-length
+        // assertion above) and surfaced via the non-clean report, not lost.
+        let report = wal.replay().unwrap();
+        assert!(
+            !report.is_clean(),
+            "mid-stream CRC corruption must be reported, not silently swallowed"
+        );
+        assert!(
+            report.stopped_early,
+            "replay must stop at the untrusted mid-stream corruption"
+        );
+        assert_eq!(report.corrupt_entries, 1, "B must be reported corrupt");
+        let names: Vec<&str> = report
+            .mutations
+            .iter()
+            .map(|m| match &m.operations[0] {
+                CellOperation::Write {
+                    value: Value::Text(name),
+                    ..
+                } => name.as_str(),
+                other => panic!("expected Write op, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Alice"],
+            "replay recovers the valid prefix [A] and reports the rest as lossy (never silent)"
+        );
+    }
+
+    /// Issue #1391 (Finding A): a WAL that is JUST a torn FIRST header — 1..=7
+    /// garbage bytes at offset 0 with no valid entry before them — must be
+    /// classified as a torn tail and trimmed to 0 on open, exactly like a torn
+    /// header after a valid entry. The prior `offset == 0` short-circuit
+    /// misclassified it as a clean EOF, so the garbage was left in place and
+    /// every later acknowledged append landed after it (unrecoverable on the
+    /// next replay). Verify: trim to 0, append C, replay yields exactly [C].
+    #[test]
+    fn test_wal_open_existing_trims_torn_first_header() {
+        for garbage_len in 1..8usize {
+            let temp_dir = TempDir::new().unwrap();
+            let path = temp_dir.path().join(WriteAheadLog::WAL_FILENAME);
+
+            // Write ONLY a partial (torn) 8-byte header — nothing valid precedes it.
+            std::fs::write(&path, vec![0xABu8; garbage_len]).unwrap();
+
+            // Reopen: the torn first header must be trimmed back to offset 0.
+            {
+                let mut wal = WriteAheadLog::open_existing(&path).unwrap();
+                assert_eq!(
+                    std::fs::metadata(&path).unwrap().len(),
+                    0,
+                    "torn first header ({garbage_len} byte(s)) must be trimmed to 0, not kept"
+                );
+                assert_eq!(wal.size(), 0);
+                assert!(
+                    !wal.has_pending_corrupt_tail(),
+                    "a torn tail is trimmed in open, not left pending"
+                );
+
+                // Append C after the trim, synced.
+                wal.append(&create_test_mutation(3, "Carol")).unwrap();
+                wal.sync().unwrap();
+            }
+
+            // Fresh reopen + replay must recover EXACTLY [C]: the append landed at
+            // offset 0, not after the garbage.
+            let wal = WriteAheadLog::open_existing(&path).unwrap();
+            let report = wal.replay().unwrap();
+            assert!(
+                report.is_clean(),
+                "recovery must be clean after trimming the torn first header \
+                 (garbage_len={garbage_len})"
+            );
+            let names: Vec<&str> = report
+                .mutations
+                .iter()
+                .map(|m| match &m.operations[0] {
+                    CellOperation::Write {
+                        value: Value::Text(name),
+                        ..
+                    } => name.as_str(),
+                    other => panic!("expected Write op, got {other:?}"),
+                })
+                .collect();
+            assert_eq!(
+                names,
+                vec!["Carol"],
+                "replay must yield exactly [C] (garbage_len={garbage_len})"
+            );
+        }
+    }
+
+    /// Issue #1391 (roborev r2, Finding 2): a WAL opened with a mid-stream
+    /// corrupt tail (`pending_valid_prefix` set) must REFUSE `append()` until the
+    /// caller resets to the valid prefix. A direct public-WAL-API consumer that
+    /// does not go through `WriteEngine::new` (which resets first) would otherwise
+    /// append AFTER the corrupt entry — where the next `replay()` stops — silently
+    /// losing the acknowledged write. Verify: append errors while pending; after
+    /// `reset_to_valid_prefix()` the append succeeds and replays as [A, C].
+    #[test]
+    fn test_wal_append_rejected_until_reset_after_midstream_corruption() {
+        let temp_dir = TempDir::new().unwrap();
+        let (path, end_of_a, total) = write_two_entries(&temp_dir);
+
+        // Corrupt B's payload IN PLACE (flip its first payload byte) without
+        // changing any length — a fully-present entry with a bad CRC, which
+        // `scan_valid_prefix` classifies as `Corruption` (not a torn tail). The
+        // valid prefix ends at A, so `open_existing` records a pending corrupt
+        // tail rather than trimming it away.
+        let b_first_payload = end_of_a + 8;
+        assert!(
+            b_first_payload < total,
+            "test setup: B must have at least one payload byte"
+        );
+        {
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes[b_first_payload as usize] ^= 0xFF;
+            std::fs::write(&path, &bytes).unwrap();
+        }
+
+        // Open: the corrupt segment is left intact (evidence) and the valid
+        // prefix (end of A) is recorded as pending.
+        let mut wal = WriteAheadLog::open_existing(&path).unwrap();
+        assert!(
+            wal.has_pending_corrupt_tail(),
+            "mid-stream corruption must leave a pending valid prefix, not silently trim"
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            total,
+            "the corrupt segment must remain on disk for evidence preservation"
+        );
+
+        // Finding 2: appending BEFORE reset must fail-closed (otherwise the write
+        // lands after the corrupt tail and is lost on the next replay).
+        let err = wal
+            .append(&create_test_mutation(3, "Carol"))
+            .expect_err("append must be rejected while a corrupt tail is unreset");
+        match err {
+            Error::Storage(msg) => assert!(
+                msg.contains("reset_to_valid_prefix"),
+                "error must direct the caller to reset first, got: {msg}"
+            ),
+            other => panic!("expected Error::Storage, got {other:?}"),
+        }
+
+        // Reset to the valid prefix (clears the pending flag) and confirm the
+        // corrupt tail is gone from the LIVE log.
+        let reset_to = wal.reset_to_valid_prefix().unwrap();
+        assert_eq!(reset_to, Some(end_of_a), "reset trims back to the end of A");
+        assert!(
+            !wal.has_pending_corrupt_tail(),
+            "reset_to_valid_prefix must clear the pending flag"
+        );
+
+        // After reset, append succeeds and lands at the valid boundary.
+        wal.append(&create_test_mutation(3, "Carol")).unwrap();
+        wal.sync().unwrap();
+        drop(wal);
+
+        // Fresh reopen + replay must recover EXACTLY [A, C]: C landed at end_of_a,
+        // not after the (now removed) corrupt B.
+        let wal = WriteAheadLog::open_existing(&path).unwrap();
+        let report = wal.replay().unwrap();
+        assert!(
+            report.is_clean(),
+            "recovery must be clean after reset + post-recovery append"
+        );
+        let names: Vec<&str> = report
+            .mutations
+            .iter()
+            .map(|m| match &m.operations[0] {
+                CellOperation::Write {
+                    value: Value::Text(name),
+                    ..
+                } => name.as_str(),
+                other => panic!("expected Write op, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Alice", "Carol"],
+            "replay must yield exactly [A, C]"
+        );
+    }
+
+    /// Issue #1391 (roborev r4): discarding a pending corrupt tail via `truncate()`
+    /// must lift the fail-closed append guard. `truncate()` clears the file to zero
+    /// length; an empty WAL has no corrupt tail, so `pending_valid_prefix` must not
+    /// remain set — otherwise every subsequent `append()` is rejected forever
+    /// (deadlocked appends) even though the live log is empty. Red-before: the guard
+    /// stayed set after truncate and the append errored. Green-after: the guard is
+    /// cleared and the append succeeds and replays.
+    #[test]
+    fn test_wal_truncate_clears_pending_corrupt_tail_guard() {
+        let temp_dir = TempDir::new().unwrap();
+        let (path, end_of_a, total) = write_two_entries(&temp_dir);
+
+        // Corrupt B's payload in place so `open_existing` records a pending corrupt
+        // tail (valid prefix ends at A) rather than trimming a torn tail.
+        let b_first_payload = end_of_a + 8;
+        assert!(
+            b_first_payload < total,
+            "test setup: B must have at least one payload byte"
+        );
+        {
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes[b_first_payload as usize] ^= 0xFF;
+            std::fs::write(&path, &bytes).unwrap();
+        }
+
+        let mut wal = WriteAheadLog::open_existing(&path).unwrap();
+        assert!(
+            wal.has_pending_corrupt_tail(),
+            "mid-stream corruption must leave a pending valid prefix"
+        );
+
+        // Discard the corrupt tail wholesale via truncate() (as a direct WAL user
+        // choosing to drop the log rather than reset-to-prefix).
+        wal.truncate().unwrap();
+
+        // After truncate the live WAL is empty, so the fail-closed guard MUST be
+        // lifted (red-before: guard stayed set here).
+        assert!(
+            !wal.has_pending_corrupt_tail(),
+            "truncate() must clear the pending corrupt-tail guard on an emptied WAL"
+        );
+        assert_eq!(wal.size(), 0, "truncate() must reset current_size to zero");
+
+        // A subsequent append must succeed (red-before: rejected by the stale guard)
+        // and land at offset 0 in the emptied log.
+        wal.append(&create_test_mutation(3, "Carol")).unwrap();
+        wal.sync().unwrap();
+        drop(wal);
+
+        // Fresh reopen + replay must recover EXACTLY [C]: the truncate dropped both
+        // A and the corrupt B, and C landed at the start of the emptied log.
+        let wal = WriteAheadLog::open_existing(&path).unwrap();
+        let report = wal.replay().unwrap();
+        assert!(
+            report.is_clean(),
+            "recovery must be clean after truncate + post-truncate append"
+        );
+        let names: Vec<&str> = report
+            .mutations
+            .iter()
+            .map(|m| match &m.operations[0] {
+                CellOperation::Write {
+                    value: Value::Text(name),
+                    ..
+                } => name.as_str(),
+                other => panic!("expected Write op, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(names, vec!["Carol"], "replay must yield exactly [C]");
+    }
+
+    /// Finding 1 (roborev r3): the write path's accepted max entry size MUST equal
+    /// the replay/scan limit. An entry whose serialized length exceeds
+    /// `MAX_ENTRY_LENGTH` must be rejected BEFORE it is written (never
+    /// fsync-acknowledged), otherwise `replay()` would classify it as corruption
+    /// and drop it — silent acknowledged-write loss. A just-under-limit entry must
+    /// still succeed and replay intact.
+    #[test]
+    fn test_wal_append_rejects_oversize_entry_matching_replay_limit() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut wal = WriteAheadLog::create(temp_dir.path()).unwrap();
+        let path = wal.path().to_path_buf();
+
+        // Over-limit: serialized length > MAX_ENTRY_LENGTH (the payload alone
+        // already exceeds the ceiling). Must be rejected and NOT acknowledged.
+        let over = "x".repeat(MAX_ENTRY_LENGTH as usize + 1);
+        let err = wal
+            .append(&create_test_mutation(1, &over))
+            .expect_err("over-limit append must be rejected, not acknowledged");
+        match err {
+            Error::Storage(msg) => assert!(
+                msg.contains("MAX_ENTRY_LENGTH"),
+                "error must cite the size ceiling, got: {msg}"
+            ),
+            other => panic!("expected Error::Storage, got {other:?}"),
+        }
+        assert_eq!(
+            wal.size(),
+            0,
+            "a rejected append must not write or grow the WAL"
+        );
+
+        // Just-under-limit: payload sized so the whole entry stays below the
+        // ceiling; it must be accepted and survive a fresh reopen + replay.
+        let under = "y".repeat(MAX_ENTRY_LENGTH as usize - 8192);
+        wal.append(&create_test_mutation(2, &under)).unwrap();
+        wal.sync().unwrap();
+        drop(wal);
+
+        let wal = WriteAheadLog::open_existing(&path).unwrap();
+        let report = wal.replay().unwrap();
+        assert!(
+            report.is_clean(),
+            "just-under-limit entry must replay cleanly"
+        );
+        assert_eq!(report.mutations.len(), 1, "exactly the accepted entry");
+        match &report.mutations[0].operations[0] {
+            CellOperation::Write {
+                value: Value::Text(name),
+                ..
+            } => assert_eq!(name.len(), under.len(), "recovered payload must match"),
+            other => panic!("expected Write op, got {other:?}"),
+        }
+    }
+
+    /// Finding 2 (roborev r3): if any step of the reset sequence fails, the
+    /// fail-closed guard must remain set so `append()` keeps rejecting writes.
+    /// Injects a failure by removing the containing directory after the WAL fd is
+    /// open: `flush`/`set_len`/`sync_all` still act on the open inode, but the
+    /// final `sync_directory(parent)` opens the now-missing dir and errors. The
+    /// old `.take()` cleared the guard up front, so an error left the WAL wrongly
+    /// appendable; the guard must now survive the failure.
+    #[cfg(unix)]
+    #[test]
+    fn test_wal_reset_failure_keeps_guard_set() {
+        let temp_dir = TempDir::new().unwrap();
+        let subdir = temp_dir.path().join("wal_sub");
+        std::fs::create_dir(&subdir).unwrap();
+
+        // Write A + B inside the removable subdir, then corrupt B's payload in
+        // place to produce a mid-stream corrupt tail (valid prefix ends at A).
+        let (path, end_of_a, total) = {
+            let mut wal = WriteAheadLog::create(&subdir).unwrap();
+            wal.append(&create_test_mutation(1, "Alice")).unwrap();
+            wal.sync().unwrap();
+            let end_of_a = wal.size();
+            wal.append(&create_test_mutation(2, "Bob")).unwrap();
+            wal.sync().unwrap();
+            let total = wal.size();
+            let path = wal.path().to_path_buf();
+            (path, end_of_a, total)
+        };
+        let b_first_payload = end_of_a + 8;
+        assert!(
+            b_first_payload < total,
+            "test setup: B must have a payload byte"
+        );
+        {
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes[b_first_payload as usize] ^= 0xFF;
+            std::fs::write(&path, &bytes).unwrap();
+        }
+
+        let mut wal = WriteAheadLog::open_existing(&path).unwrap();
+        assert!(
+            wal.has_pending_corrupt_tail(),
+            "mid-stream corruption must record a pending valid prefix"
+        );
+
+        // Inject the reset-sequence failure: remove the dir the WAL lives in.
+        std::fs::remove_dir_all(&subdir).unwrap();
+
+        let err = wal
+            .reset_to_valid_prefix()
+            .expect_err("reset must propagate the directory-sync failure");
+        assert!(matches!(err, Error::Storage(_)), "expected Error::Storage");
+        assert!(
+            wal.has_pending_corrupt_tail(),
+            "the guard MUST remain set when the reset sequence fails partway"
+        );
+
+        // With the guard still set, append stays fail-closed.
+        let append_err = wal
+            .append(&create_test_mutation(3, "Carol"))
+            .expect_err("append must remain rejected after a failed reset");
+        match append_err {
+            Error::Storage(msg) => assert!(
+                msg.contains("reset_to_valid_prefix"),
+                "error must still direct the caller to reset first, got: {msg}"
+            ),
+            other => panic!("expected Error::Storage, got {other:?}"),
+        }
+    }
+
+    /// Append A, B, C (all synced); return (path, end_of_A, end_of_B, total).
+    fn write_three_entries(temp_dir: &TempDir) -> (PathBuf, u64, u64, u64) {
+        let mut wal = WriteAheadLog::create(temp_dir.path()).unwrap();
+
+        wal.append(&create_test_mutation(1, "Alice")).unwrap();
+        wal.sync().unwrap();
+        let end_of_a = wal.size();
+
+        wal.append(&create_test_mutation(2, "Bob")).unwrap();
+        wal.sync().unwrap();
+        let end_of_b = wal.size();
+
+        wal.append(&create_test_mutation(3, "Carol")).unwrap();
+        wal.sync().unwrap();
+        let total = wal.size();
+
+        let path = wal.path().to_path_buf();
+        drop(wal);
+        (path, end_of_a, end_of_b, total)
+    }
+
+    /// Issue #1391 (roborev r5, HIGH): a COMPLETE 8-byte header whose declared
+    /// length is `<= MAX_ENTRY_LENGTH` but LARGER than the bytes remaining to EOF
+    /// must be classified as CORRUPTION, not a torn tail. For an A,B,C log where
+    /// B's length field is bit-flipped to a plausible-but-too-large value that
+    /// runs past EOF, the OLD classifier read B's payload, hit EOF, called it a
+    /// `TornTail`, trimmed the live WAL back to A, and reported a CLEAN recovery —
+    /// silently discarding B AND C (an acknowledged, durable entry). That is the
+    /// exact "silent lossy recovery reported as clean" #1391 exists to eliminate.
+    ///
+    /// A complete-header entry that cannot be satisfied by the remaining bytes is
+    /// structurally INDISTINGUISHABLE from an interrupted final write using only
+    /// the allowed no-heuristics facts (header completeness, declared-length vs
+    /// remaining-bytes, physical-tail position); guessing which it is would be a
+    /// byte-pattern heuristic. The safe, consistent rule therefore preserves the
+    /// tail + reports it lossy rather than silent-trimming as clean.
+    ///
+    /// Verify: NOT reported clean; the B/C tail is preserved on disk (not trimmed)
+    /// for the caller to copy aside; the report is lossy (`stopped_early`, a
+    /// corrupt entry, `bytes_skipped > 0`); only A is recovered. Red-before: the
+    /// OLD `TornTail` path trimmed to A + reported clean, so `is_clean()` was true
+    /// and the file was truncated to `end_of_A`.
+    #[test]
+    fn test_wal_midstream_length_past_eof_is_lossy_not_clean() {
+        let temp_dir = TempDir::new().unwrap();
+        let (path, end_of_a, _end_of_b, total) = write_three_entries(&temp_dir);
+
+        // Remaining payload bytes after B's 8-byte header, all the way to EOF:
+        // B's real payload + C's full framing. Bit-flip B's length UP to a value
+        // that overshoots EOF (> remaining) yet stays within MAX_ENTRY_LENGTH, so
+        // the payload read hits EOF (the misclassified-as-torn path) rather than
+        // the oversize-length path.
+        let remaining_after_b_header = total - (end_of_a + 8);
+        let bogus_len = remaining_after_b_header + 4096;
+        assert!(
+            bogus_len <= MAX_ENTRY_LENGTH as u64,
+            "test setup: bogus length must stay within MAX_ENTRY_LENGTH so it \
+             exercises the past-EOF path, not the oversize path"
+        );
+        assert!(
+            bogus_len > remaining_after_b_header,
+            "test setup: bogus length must overshoot EOF"
+        );
+        {
+            let mut bytes = std::fs::read(&path).unwrap();
+            let len_field = (end_of_a as usize)..(end_of_a as usize + 4);
+            bytes[len_field].copy_from_slice(&(bogus_len as u32).to_le_bytes());
+            std::fs::write(&path, &bytes).unwrap();
+        }
+
+        // Open: the corrupt segment (B + C) must be left INTACT on disk (evidence
+        // preservation) with the valid prefix (end of A) recorded as pending, not
+        // silently trimmed away.
+        let wal = WriteAheadLog::open_existing(&path).unwrap();
+        assert!(
+            wal.has_pending_corrupt_tail(),
+            "a complete-header entry with an unsatisfiable length must be preserved \
+             pending (not silently trimmed as a torn tail)"
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            total,
+            "the B/C tail must remain on disk for evidence preservation"
+        );
+
+        // Replay must NOT be clean: A recovered, B/C dropped and surfaced.
+        let report = wal.replay().unwrap();
+        assert!(
+            !report.is_clean(),
+            "a length-past-EOF middle entry must NOT report a clean recovery"
+        );
+        assert!(
+            report.stopped_early,
+            "replay must stop at the corrupt frame"
+        );
+        assert_eq!(report.corrupt_entries, 1, "the mis-sized entry is corrupt");
+        assert!(
+            report.bytes_skipped > 0,
+            "the discarded B/C tail must be counted as skipped, not lost silently"
+        );
+        assert_eq!(
+            report.mutations.len(),
+            1,
+            "only the valid prefix A survives"
+        );
+        match &report.mutations[0].operations[0] {
+            CellOperation::Write {
+                value: Value::Text(name),
+                ..
+            } => assert_eq!(name, "Alice", "the sole recovered entry must be A"),
+            other => panic!("expected Write op, got {other:?}"),
+        }
     }
 
     #[test]

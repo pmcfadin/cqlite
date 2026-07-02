@@ -402,6 +402,31 @@ impl SSTableWriter {
         )
     }
 
+    /// Configure compression for the SSTable this writer emits.
+    ///
+    /// FAIL-CLOSED GUARD (issue #1406, posture b — "guard now, wire compression
+    /// later"). CQLite's production write surface emits **uncompressed** SSTables
+    /// only: there is no wired path from flush or compaction to the
+    /// `CompressedDataWriter` / `CompressionInfoWriter` building blocks, and no
+    /// Cassandra-side byte-parity coverage exists for a CQLite-emitted
+    /// CompressionInfo.db. Rather than silently drop a compression request (and
+    /// emit an uncompressed SSTable that falsely claims otherwise) or emit an
+    /// unvalidated CompressionInfo.db, this constructor errors for every real
+    /// compression algorithm via
+    /// [`CompressionInfoWriter::guard_unsupported_production_write`].
+    /// [`CompressionAlgorithm::None`] is accepted and maps to the normal
+    /// uncompressed writer. Wiring real compression (posture a) is tracked in
+    /// issue #1406.
+    pub fn with_compression(
+        output_dir: PathBuf,
+        generation: u64,
+        schema: &TableSchema,
+        algorithm: CompressionAlgorithm,
+    ) -> Result<Self> {
+        CompressionInfoWriter::guard_unsupported_production_write(algorithm)?;
+        Self::with_expected_partitions(output_dir, generation, schema, 128)
+    }
+
     /// Create a new SSTable writer selecting the on-disk index `format` and an
     /// optional [`UdtRegistry`] for bare-UDT resolution (issue #766 + #929).
     pub fn with_format_and_registry(

@@ -53,7 +53,7 @@ pub use mutation::{
     PartitionTombstone, RangeTombstone, TableId,
 };
 #[cfg(feature = "write-support")]
-pub use wal::WriteAheadLog;
+pub use wal::{RecoveryReport, WriteAheadLog};
 
 #[cfg(feature = "write-support")]
 mod compaction;
@@ -61,6 +61,8 @@ mod compaction;
 mod maintenance;
 #[cfg(feature = "write-support")]
 mod stats;
+#[cfg(feature = "write-support")]
+mod sweep;
 #[cfg(all(test, feature = "write-support"))]
 mod test_support;
 
@@ -288,6 +290,13 @@ pub struct WriteEngine {
     wal: WriteAheadLog,
     /// In-memory write buffer
     memtable: Memtable,
+    /// Summary of the WAL crash-recovery replay performed in `new()` (issue
+    /// #1391). Its `mutations` are drained into the memtable, leaving only the
+    /// lossiness metadata (`corrupt_entries`, `stopped_early`, `bytes_skipped`).
+    /// Exposed via [`WriteEngine::wal_recovery`] so a caller can detect that a
+    /// recovery was lossy BEFORE the next flush truncates the WAL. A non-clean
+    /// recovery also preserves the raw WAL segment aside (see `new()`).
+    wal_recovery: RecoveryReport,
     /// SSTable generation counter (increments on each flush)
     generation: u64,
     /// Whether the engine has been closed (atomic for thread safety)
@@ -423,16 +432,11 @@ impl WriteEngine {
         //
         // Both sweeps are best-effort: individual failures are logged as warnings but
         // do not abort engine startup.
-        Self::sweep_orphaned_compaction_tmp(&config.data_dir);
-        Self::sweep_orphaned_partial_sstables(
-            &config.data_dir,
-            &config.schema.keyspace,
-            &config.schema.table,
-        );
+        Self::sweep_startup_orphans(&config);
 
         // Initialize WAL
         let wal_path = config.wal_dir.join(WriteAheadLog::WAL_FILENAME);
-        let wal = if wal_path.exists() {
+        let mut wal = if wal_path.exists() {
             // Recover from existing WAL
             WriteAheadLog::open_existing(&wal_path)?
         } else {
@@ -440,9 +444,45 @@ impl WriteEngine {
             WriteAheadLog::create(&config.wal_dir)?
         };
 
-        // Replay WAL into memtable
+        // Replay WAL into memtable. The report distinguishes a clean recovery
+        // from a lossy one (issue #1391); a bare Vec cannot.
         let mut memtable = Memtable::new();
-        let mutations = wal.replay()?;
+        let mut wal_recovery = wal.replay()?;
+        let mutations = std::mem::take(&mut wal_recovery.mutations);
+
+        if !wal_recovery.is_clean() {
+            // Preserve the raw WAL segment aside BEFORE anything (a later flush,
+            // or the reset below) can truncate it, so the corruption evidence
+            // survives for manual recovery. The report is also retained on the
+            // engine and exposed via `wal_recovery()` so a caller sees the loss
+            // pre-truncate.
+            let preserved = Self::preserve_corrupt_wal(&wal_path)?;
+
+            // With the evidence safely aside, trim the LIVE WAL back to its last
+            // CRC-valid prefix (issue #1391). Otherwise the engine would remain
+            // writable with the corrupt tail still on disk, and the FIRST synced
+            // write after this lossy recovery would be appended AFTER the corrupt
+            // entry — where the next replay stops — so that acknowledged write
+            // would be silently lost. Resetting to the valid prefix makes
+            // post-recovery appends land at a replayable position. (A torn tail
+            // was already trimmed in `open_existing`, so this only fires for
+            // mid-stream corruption.)
+            let reset_to = wal.reset_to_valid_prefix()?;
+
+            log::error!(
+                "WAL recovery at {:?} was LOSSY: recovered {} mutation(s), {} corrupt entry \
+                 (entries), stopped_early={}, {} byte(s) not recovered. Raw segment preserved at \
+                 {:?}; live WAL reset to valid prefix ({:?}). Investigate before relying on this \
+                 data.",
+                wal_path,
+                mutations.len(),
+                wal_recovery.corrupt_entries,
+                wal_recovery.stopped_early,
+                wal_recovery.bytes_skipped,
+                preserved,
+                reset_to,
+            );
+        }
 
         if !mutations.is_empty() {
             log::info!("Replaying {} mutations from WAL", mutations.len());
@@ -469,6 +509,7 @@ impl WriteEngine {
             config,
             wal,
             memtable,
+            wal_recovery,
             generation,
             closed: AtomicBool::new(false),
             active_merge: None,
@@ -478,6 +519,72 @@ impl WriteEngine {
             l0_count: 0,
             dir_lock,
         })
+    }
+
+    /// Summary of the WAL crash-recovery replay performed when this engine was
+    /// opened (issue #1391).
+    ///
+    /// The `mutations` field has been drained into the memtable, so only the
+    /// lossiness metadata remains. Use [`RecoveryReport::is_clean`] to detect a
+    /// lossy recovery. A non-clean report means the raw WAL segment was
+    /// preserved aside (as `commitlog.wal.corrupt.<nanos>`) so a subsequent
+    /// flush cannot destroy the evidence.
+    pub fn wal_recovery(&self) -> &RecoveryReport {
+        &self.wal_recovery
+    }
+
+    /// Copy the raw WAL file aside before any truncation can destroy it, so a
+    /// lossy recovery leaves forensic evidence (issue #1391). Returns the path
+    /// of the preserved copy.
+    ///
+    /// The copy is a sibling `commitlog.wal.corrupt.<unix_nanos>`; the original
+    /// is left untouched (a later flush truncates it, but the aside copy — and
+    /// the retained [`RecoveryReport`] — survive).
+    fn preserve_corrupt_wal(wal_path: &Path) -> Result<PathBuf> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let file_name = wal_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| WriteAheadLog::WAL_FILENAME.to_string());
+        let preserved = match wal_path.parent() {
+            Some(parent) => parent.join(format!("{}.corrupt.{}", file_name, nanos)),
+            None => PathBuf::from(format!("{}.corrupt.{}", file_name, nanos)),
+        };
+        std::fs::copy(wal_path, &preserved).map_err(|e| {
+            Error::Storage(format!(
+                "Failed to preserve corrupt WAL {:?} aside to {:?}: {}",
+                wal_path, preserved, e
+            ))
+        })?;
+
+        // Make the forensic copy durable BEFORE the caller resets/truncates the
+        // live WAL (issue #1391). `std::fs::copy` does not fsync; without this a
+        // crash after the copy but before it reaches disk could leave the live
+        // WAL already trimmed while the preserved copy is missing/incomplete —
+        // destroying the very evidence we set aside. Order: copy → fsync copy →
+        // fsync parent dir → (caller) reset live WAL.
+        {
+            let copy_file = std::fs::File::open(&preserved).map_err(|e| {
+                Error::Storage(format!(
+                    "Failed to open preserved corrupt WAL {:?} for fsync: {}",
+                    preserved, e
+                ))
+            })?;
+            copy_file.sync_all().map_err(|e| {
+                Error::Storage(format!(
+                    "Failed to fsync preserved corrupt WAL {:?}: {}",
+                    preserved, e
+                ))
+            })?;
+        }
+        if let Some(parent) = preserved.parent() {
+            wal::sync_directory(parent)?;
+        }
+
+        Ok(preserved)
     }
 
     /// Write a mutation to the write engine
@@ -1324,6 +1431,307 @@ mod tests {
         // Should have recovered 5 mutations
         assert_eq!(engine.memtable_row_count(), 5);
         assert!(engine.memtable_size() > 0);
+    }
+
+    /// Issue #1390 criterion 5: engine-level crash simulation through the
+    /// WriteEngine (not just the WAL unit). Write A (fsync-acknowledged), crash
+    /// (drop without flush), inject a torn tail into the commitlog, recover in a
+    /// new engine, write C (fsync-acknowledged), crash again, then recover once
+    /// more and assert every acknowledged mutation is present exactly once.
+    ///
+    /// Before the fix, C lands AFTER the retained torn bytes and is silently
+    /// lost on the second recovery.
+    #[test]
+    fn test_write_engine_recovers_across_torn_tail_crash() {
+        use std::io::Write as _;
+
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+
+        // 1. Write A and "crash" (drop without flush). Default durability is
+        //    SyncEachWrite, so A is fsync'd to the WAL.
+        {
+            let mut engine = WriteEngine::new(config.clone()).unwrap();
+            engine
+                .write(create_test_mutation(1, "Alice", 1_000_000))
+                .unwrap();
+        }
+
+        // 2. Inject a torn tail: a complete 8-byte header declaring a 100-byte
+        //    payload, followed by only 10 payload bytes (interrupted append).
+        let wal_file = config.wal_dir.join(WriteAheadLog::WAL_FILENAME);
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&wal_file)
+                .unwrap();
+            f.write_all(&100u32.to_le_bytes()).unwrap();
+            f.write_all(&0u32.to_le_bytes()).unwrap();
+            f.write_all(&[0xAB; 10]).unwrap();
+            f.sync_all().unwrap();
+        }
+
+        // 3. Recover: the torn tail must be trimmed. Then write C and crash.
+        {
+            let mut engine = WriteEngine::new(config.clone()).unwrap();
+            assert_eq!(
+                engine.memtable_row_count(),
+                1,
+                "must recover A across the torn tail"
+            );
+            engine
+                .write(create_test_mutation(3, "Carol", 3_000_000))
+                .unwrap();
+        }
+
+        // 4. Recover again: both acknowledged mutations must be present exactly
+        //    once (2 distinct partition keys => 2 memtable rows).
+        {
+            let engine = WriteEngine::new(config).unwrap();
+            assert_eq!(
+                engine.memtable_row_count(),
+                2,
+                "both A and C must survive the second recovery (C must not be lost)"
+            );
+        }
+    }
+
+    // ---- Issue #1391: engine-level flush guard over a lossy WAL replay ----
+    //
+    // A lossy WAL recovery must be surfaced to the caller (via the retained
+    // RecoveryReport) AND its raw segment preserved aside BEFORE the next flush
+    // truncates the WAL. Otherwise the loss becomes permanent and invisible.
+
+    /// Build a 3-entry (A, B, C) WAL in `wal_dir` and return the byte offset at
+    /// the end of entry A (so B's payload, which starts at `end_a + 8`, can be
+    /// corrupted). All entries are fsync'd.
+    fn seed_wal_abc(wal_dir: &Path) -> u64 {
+        std::fs::create_dir_all(wal_dir).unwrap();
+        let mut wal = WriteAheadLog::create(wal_dir).unwrap();
+        wal.append(&create_test_mutation(1, "A", 1_000_000))
+            .unwrap();
+        wal.sync().unwrap();
+        let end_a = wal.size();
+        wal.append(&create_test_mutation(2, "B", 2_000_000))
+            .unwrap();
+        wal.sync().unwrap();
+        wal.append(&create_test_mutation(3, "C", 3_000_000))
+            .unwrap();
+        wal.sync().unwrap();
+        drop(wal);
+        end_a
+    }
+
+    fn count_corrupt_aside(wal_dir: &Path) -> usize {
+        std::fs::read_dir(wal_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .contains("commitlog.wal.corrupt.")
+            })
+            .count()
+    }
+
+    /// Criterion 5: a lossy WAL must not be silently truncated by the first
+    /// flush. Opening the engine over an A,B(corrupt),C WAL must expose a
+    /// non-clean RecoveryReport and preserve the raw segment aside; a subsequent
+    /// flush must NOT destroy that evidence.
+    #[tokio::test]
+    async fn test_write_engine_lossy_wal_preserved_before_flush_truncate() {
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+
+        let end_a = seed_wal_abc(&config.wal_dir);
+
+        // Bit-flip the first payload byte of B (just past its 8-byte header).
+        let wal_file = config.wal_dir.join(WriteAheadLog::WAL_FILENAME);
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&wal_file)
+                .unwrap();
+            f.seek(SeekFrom::Start(end_a + 8)).unwrap();
+            let mut byte = [0u8; 1];
+            f.read_exact(&mut byte).unwrap();
+            f.seek(SeekFrom::Start(end_a + 8)).unwrap();
+            f.write_all(&[byte[0] ^ 0x01]).unwrap();
+            f.sync_all().unwrap();
+        }
+
+        // Open the engine: recovery must surface as lossy and preserve evidence.
+        let mut engine = WriteEngine::new(config.clone()).unwrap();
+        assert!(
+            !engine.wal_recovery().is_clean(),
+            "engine must expose a non-clean RecoveryReport for a lossy WAL"
+        );
+        assert_eq!(engine.wal_recovery().corrupt_entries, 1);
+        assert!(engine.wal_recovery().stopped_early);
+        assert_eq!(
+            engine.memtable_row_count(),
+            1,
+            "only the valid prefix [A] is recovered"
+        );
+        assert_eq!(
+            count_corrupt_aside(&config.wal_dir),
+            1,
+            "the raw corrupt WAL segment must be preserved aside BEFORE any flush"
+        );
+
+        // Flush: this truncates the live WAL, but the preserved evidence must
+        // survive so the loss is not destroyed.
+        engine.flush().await.unwrap();
+        assert_eq!(
+            count_corrupt_aside(&config.wal_dir),
+            1,
+            "flush must NOT destroy the preserved corrupt WAL segment"
+        );
+    }
+
+    /// Regression guard: a CLEAN recovery is unchanged — no aside file, and the
+    /// flush truncates the WAL normally.
+    #[tokio::test]
+    async fn test_write_engine_clean_wal_recovery_truncates_normally() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+
+        seed_wal_abc(&config.wal_dir);
+
+        let mut engine = WriteEngine::new(config.clone()).unwrap();
+        assert!(engine.wal_recovery().is_clean());
+        assert_eq!(engine.memtable_row_count(), 3, "A, B, C all recovered");
+        assert_eq!(
+            count_corrupt_aside(&config.wal_dir),
+            0,
+            "a clean recovery must not preserve any aside segment"
+        );
+
+        engine.flush().await.unwrap();
+        let wal_file = config.wal_dir.join(WriteAheadLog::WAL_FILENAME);
+        assert_eq!(
+            std::fs::metadata(&wal_file).unwrap().len(),
+            0,
+            "clean recovery: the WAL is truncated normally after flush"
+        );
+        assert_eq!(count_corrupt_aside(&config.wal_dir), 0);
+    }
+
+    /// Issue #1391 (Finding B): recovery-write-crash. After a LOSSY recovery the
+    /// engine stays writable, so a synced write issued right after recovery MUST
+    /// survive the next replay. Before the fix the live WAL still carried the
+    /// corrupt tail, so the acknowledged write landed AFTER the corrupt entry —
+    /// where replay stops — and was silently lost. With the valid-prefix reset,
+    /// the write lands at a replayable position: reopening the live WAL and
+    /// replaying must yield the valid prefix PLUS the post-recovery write (never
+    /// a set missing it), while the corrupt evidence is still preserved aside.
+    #[tokio::test]
+    async fn test_write_engine_reset_to_valid_prefix_keeps_post_recovery_write() {
+        use crate::types::Value;
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+
+        // Seed A, B, C then bit-flip B's payload → mid-stream corruption.
+        let end_a = seed_wal_abc(&config.wal_dir);
+        let wal_file = config.wal_dir.join(WriteAheadLog::WAL_FILENAME);
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&wal_file)
+                .unwrap();
+            f.seek(SeekFrom::Start(end_a + 8)).unwrap();
+            let mut byte = [0u8; 1];
+            f.read_exact(&mut byte).unwrap();
+            f.seek(SeekFrom::Start(end_a + 8)).unwrap();
+            f.write_all(&[byte[0] ^ 0x01]).unwrap();
+            f.sync_all().unwrap();
+        }
+
+        // Open the engine (recovery is lossy → evidence preserved, live WAL reset
+        // to the valid prefix [A]), then issue a synced post-recovery write D.
+        {
+            let mut engine = WriteEngine::new(config.clone()).unwrap();
+            assert!(!engine.wal_recovery().is_clean());
+            assert_eq!(engine.memtable_row_count(), 1, "valid prefix [A] recovered");
+            assert_eq!(
+                count_corrupt_aside(&config.wal_dir),
+                1,
+                "corrupt segment must be preserved aside"
+            );
+            // Default durability is SyncEachWrite, so D is fsync'd to the WAL.
+            engine
+                .write(create_test_mutation(4, "D", 4_000_000))
+                .unwrap();
+            drop(engine);
+        }
+
+        // Reopen the LIVE WAL directly and replay: it must recover [A, D] — the
+        // acknowledged post-recovery write is present, NOT lost behind the old
+        // corrupt tail.
+        let wal = WriteAheadLog::open_existing(&wal_file).unwrap();
+        let report = wal.replay().unwrap();
+        assert!(
+            report.is_clean(),
+            "the reset live WAL is a clean [A, D] prefix"
+        );
+        let names: Vec<&str> = report
+            .mutations
+            .iter()
+            .map(|m| match &m.operations[0] {
+                CellOperation::Write {
+                    value: Value::Text(name),
+                    ..
+                } => name.as_str(),
+                other => panic!("expected Write op, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec!["A", "D"],
+            "replay must yield the valid prefix AND the post-recovery write D, \
+             never a set missing D (and never the corrupt B/C)"
+        );
+        assert!(
+            !names.contains(&"B"),
+            "the corrupt entry B must not resurface"
+        );
+        assert!(
+            !names.contains(&"C"),
+            "C (behind corruption) must not resurface"
+        );
+
+        // The forensic evidence must still be on disk.
+        assert_eq!(
+            count_corrupt_aside(&config.wal_dir),
+            1,
+            "the corrupt WAL evidence must remain preserved aside after the reset"
+        );
     }
 
     #[test]

@@ -147,9 +147,14 @@ async fn test_wal_truncated_mid_entry() -> cqlite_core::error::Result<()> {
 }
 
 /// Flip one byte of the CRC field of the second entry.
-/// Replay should skip entry #2 (CRC mismatch) but recover entries #1 and #3.
+/// Issue #1391: a CRC mismatch on a fully-present MIDDLE entry (#2) must be
+/// surfaced, not silently skipped. Because the framing has no sync markers, the
+/// offset of entry #3 cannot be resynced authoritatively once #2's length is
+/// untrustworthy, so replay fails fast: it recovers the valid prefix (#1),
+/// stops, and reports the loss (previously it silently advanced by the corrupt
+/// length and returned a clean-looking [#1, #3]).
 #[tokio::test]
-async fn test_wal_corrupted_crc_skips_entry() -> cqlite_core::error::Result<()> {
+async fn test_wal_corrupted_crc_stops_and_reports() -> cqlite_core::error::Result<()> {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_test_schema();
     let wal_path = temp_dir.path().join("wal").join("commitlog.wal");
@@ -192,19 +197,39 @@ async fn test_wal_corrupted_crc_skips_entry() -> cqlite_core::error::Result<()> 
             schema,
         );
         let engine = WriteEngine::new(config)?;
-        // Entry #2 skipped due to CRC mismatch; entries #1 and #3 recovered
+        // Fail-fast: only the valid prefix (entry #1) is recovered; entry #3 is
+        // NOT silently included, and the loss is surfaced (not a clean report).
         assert_eq!(
             engine.memtable_row_count(),
-            2,
-            "expected 2 recovered entries after CRC corruption of entry #2"
+            1,
+            "expected only the valid prefix (entry #1) after CRC corruption of entry #2"
         );
+        assert!(
+            !engine.wal_recovery().is_clean(),
+            "the lossy recovery must be surfaced, not silent"
+        );
+        assert!(engine.wal_recovery().stopped_early);
+        assert_eq!(engine.wal_recovery().corrupt_entries, 1);
+        // The raw corrupt WAL segment is preserved aside for forensic recovery.
+        let asides = std::fs::read_dir(temp_dir.path().join("wal"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .contains("commitlog.wal.corrupt.")
+            })
+            .count();
+        assert_eq!(asides, 1, "corrupt WAL segment must be preserved aside");
     }
 
     Ok(())
 }
 
-/// Flip one byte inside the mutation payload of entry #2.
-/// The CRC will not match, so the entry must be skipped.
+/// Issue #1391: flipping a byte inside entry #2's payload breaks its CRC.
+/// Replay must fail fast at #2 (recovering the valid prefix #1) and report the
+/// loss, rather than silently skipping #2 and advancing by its now-untrusted
+/// length.
 #[tokio::test]
 async fn test_wal_corrupted_mutation_bytes() -> cqlite_core::error::Result<()> {
     let temp_dir = TempDir::new().unwrap();
@@ -250,12 +275,15 @@ async fn test_wal_corrupted_mutation_bytes() -> cqlite_core::error::Result<()> {
             schema,
         );
         let engine = WriteEngine::new(config)?;
-        // CRC over mutated payload will mismatch — entry #2 skipped
+        // Fail-fast: CRC mismatch at #2 stops replay after the valid prefix #1.
         assert_eq!(
             engine.memtable_row_count(),
-            2,
-            "expected 2 recovered entries after payload corruption of entry #2"
+            1,
+            "expected only the valid prefix (entry #1) after payload corruption of entry #2"
         );
+        assert!(!engine.wal_recovery().is_clean());
+        assert!(engine.wal_recovery().stopped_early);
+        assert_eq!(engine.wal_recovery().corrupt_entries, 1);
     }
 
     Ok(())

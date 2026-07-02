@@ -55,6 +55,12 @@ on:
       - 'docs/development/parity-ci-tiers.md'
       - 'docs/development/parity-release-checklist.md'
       - 'docs/development/cassandra-parity-manifest.md'
+  # Nightly + on-demand: the orphaned-debt open-state check (#1401) needs the
+  # network + an authenticated gh, so it runs off the PR path (the offline linter
+  # already gates PRs). SKIP-aware, so it can never flake a scheduled run.
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch: {}
 
 env:
   CARGO_TERM_COLOR: always
@@ -127,6 +133,29 @@ jobs:
 
       - name: Unit + integration tests
         run: cargo test -p cassandra-parity
+
+  # Orphaned-debt open-state check (issue #1401). The OFFLINE linter (the
+  # `parity-manifest` job above) fail-closes when a `partial` scenario lacks a
+  # scope.target_issue or its next_step does not cite it. THIS job is the NETWORK
+  # half: it verifies each partial's target_issue is still OPEN on GitHub, so debt
+  # parked on a now-CLOSED tracker (exactly the #1401 failure) is caught. It runs
+  # nightly + on demand (never on the PR path) and is SKIP-aware, so it cannot flake
+  # a scheduled run. No untrusted `${{ github.* }}` value is interpolated into any
+  # `run:` shell — the manifest path is a constant.
+  partial-open-issue-check:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Verify every partial target_issue is OPEN (SKIP-aware)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/tests/check-parity-partial-open-issues.sh
 
   # Self-healing for the semantic merge race (issue #1338). The committed report
   # docs/reports/cassandra-test-parity.md is a DERIVED artifact rendered from the

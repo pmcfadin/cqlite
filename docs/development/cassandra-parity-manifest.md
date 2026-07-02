@@ -49,6 +49,27 @@ only reads the manifest, the repository tree, and the assessment report.
 Required: `id`, `title`, `status`, `capability`, `priority`, `risk`,
 `cassandra`, `cqlite`, `fixtures`, `evidence`, `ci`, `scope`.
 
+### `cassandra.files` file-kind convention
+
+`cassandra.files` mixes reference kinds. There is **no** separate `kind` field —
+the kind is carried by a **naming convention** and enforced by the linter
+(issue #1408):
+
+| Kind | How it is recognized | Index-checked? |
+|---|---|---|
+| `test` | basename ends in `Test.java` (a real Apache Cassandra test) | **Yes** — must resolve to a detailed entry in `docs/cassandra_test_index.md`. |
+| `source` | a production `.java` not ending in `Test.java` (e.g. `UnfilteredSerializer.java`, `Descriptor.java`, `BigTableWriter.java`, `BloomFilterSerializer.java`, `DeletionTime.java`, `DroppedColumn.java`) | No. |
+| `harness` | `CQLTester.java` (test base class) | No. |
+| `anchor` | contains `#` — a category-level index anchor (e.g. `#compaction`) | No. |
+| `none` | the literal `n/a` placeholder | No. |
+
+The linter (`cassandra-parity lint`) fails when a `*Test.java` reference does not
+resolve to an index entry. A `*Test.java` that names no real Cassandra test is a
+referential-hygiene bug: point it at the real production source (dropping the
+spurious `Test` suffix) rather than inventing an index entry. Scenario/evidence
+**counts** are not maintained here — they are generated into
+`docs/reports/cassandra-test-parity.md` by the `report` subcommand.
+
 ### Scenario IDs
 
 Stable dotted identifiers: `cass.<capability_group>.<scenario_slug>`, e.g.
@@ -120,6 +141,23 @@ Other evidence fields: `strict`, `artifacts` (`bytes`, `offsets`, `checksums`,
 - `smoke` requires `known_limitations` stating parse/load success is not byte
   parity; it cannot satisfy a P0 `p0_data_loss` scenario without `scope.gap`.
 - `partial` requires `known_limitations` plus `scope.gap`/`scope.next_step`.
+- `partial` is orphaned-debt-guarded (issue #1401): it **requires
+  `scope.target_issue`** and that `scope.next_step` cites the same `#<number>`.
+  A `partial` scenario is a promise of unfinished parity work; parking it on a
+  tracking issue that later closes leaves the debt with no home (before #1401,
+  48 of 52 partials were parked on CLOSED epics). This is a two-tier check:
+  - **Offline (PR gate):** `cassandra-parity lint` fail-closes when a `partial`
+    scenario has no `scope.target_issue` or its `next_step` omits the `#<number>`.
+    Run on every relevant PR by the `parity-manifest` job.
+  - **Network (nightly, SKIP-aware):** `scripts/tests/check-parity-partial-open-issues.sh`
+    (the `partial-open-issue-check` job) verifies each `target_issue` is still
+    OPEN on GitHub. It SKIPs (loudly, never a silent pass) without an
+    authenticated `gh`, so it can never flake a scheduled run.
+
+  When a tracker closes, re-park its partials onto an OPEN successor: update both
+  `scope.target_issue` and the `#<number>` in `scope.next_step`. Note the YAML
+  gotcha — a `#` after whitespace in a *plain* inline scalar starts a comment, so
+  quote a `next_step` that ends in `... #<number>.` (block `>-` scalars are fine).
 - `out_of_scope` must not define a `comparison_command`.
 
 ### `ci`
@@ -136,6 +174,15 @@ Other evidence fields: `strict`, `artifacts` (`bytes`, `offsets`, `checksums`,
 `scope.rationale`, `scope.cqlite_boundary`, `scope.safe_claim`, and
 `scope.related_in_scope_scenarios`. High-relevance Cassandra files may only be
 marked out of scope with an explicit `scope.cqlite_boundary`.
+
+**"Out of parity scope, but a CQLite-native surface" (issue #1403):**
+`out_of_scope` means only "not a Cassandra byte/semantic parity target." When the
+Cassandra behavior has a **functional analogue in CQLite's own code** (e.g. its
+WAL, its memtable, its crash-mid-compaction cleanup), the boundary text MUST name
+that native analogue and link its OPEN native (non-parity) coverage tracker — in
+the prose fields and in `scope.next_step`. Never claim "CQLite does not implement
+X" when a functional analogue exists. See the per-category audit-sweep table in
+[`docs/reports/cassandra-test-parity-assessment.md`](../reports/cassandra-test-parity-assessment.md#per-category-audit-sweep-issue-1403-ac3).
 
 | Category | Definition |
 |---|---|

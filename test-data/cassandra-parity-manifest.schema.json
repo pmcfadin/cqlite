@@ -113,6 +113,7 @@
             },
             "relevance": { "enum": ["high", "med", "low"] },
             "files": {
+              "description": "Cassandra source references. File-kind is carried by a naming convention (issue #1408), NOT a separate field, and enforced by the linter: a `*Test.java` basename is a TEST and must resolve to a docs/cassandra_test_index.md entry; a production `.java` not ending in `Test.java` is a SOURCE; `CQLTester.java` is the harness; an entry containing `#` is a category ANCHOR; `n/a` is a placeholder. See the manifest header and docs/development/cassandra-parity-manifest.md.",
               "type": "array",
               "minItems": 1,
               "items": { "type": "string" }

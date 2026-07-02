@@ -221,19 +221,6 @@ pub fn decompress_fixture(dir: &str) -> Vec<u8> {
     decompress_with_info(dir, &data)
 }
 
-/// Decompress a LOCAL-ONLY fixture's Data.db, returning `None` when the binary
-/// is absent. Per the local-only-fixtures doctrine: a fixture NOT in the pinned
-/// CI dataset is SKIPPED (not fail-closed) when its binary is missing, but a
-/// fixture that IS present must still parse (a present-but-empty body fails). The
-/// canonical static-row shapes this fixture covers are ALSO asserted by
-/// deterministic writer tests and the pinned-fixture lanes, so skipping in CI
-/// loses no coverage.
-pub fn decompress_local_only_fixture(dir: &str) -> Option<Vec<u8>> {
-    let path = datasets_root().join(format!("{dir}/nb-1-big-Data.db"));
-    let data = std::fs::read(&path).ok()?;
-    Some(decompress_with_info(dir, &data))
-}
-
 // ===========================================================================
 // Deterministic writer fixtures (mirrors issue #990's shared helpers)
 // ===========================================================================
@@ -379,16 +366,19 @@ pub fn write_one_partition(
 // Fixture path / header constants
 // ===========================================================================
 
-/// LOCAL-ONLY fixture (NOT in the pinned CI dataset): the cleanest static-only +
-/// dense static+clustering generation (PK 99 static-only; PK 1/2/3 static +
-/// clustering ck 1..=4 ASC). Tests against it SKIP when its binary is absent.
+/// COMMITTED reference fixture (issue #1400 force-added its tiny Cassandra 5.0.2
+/// `nb` binaries + golden into git): the cleanest static-only + dense
+/// static+clustering generation (PK 99 static-only; PK 1/2/3 static + clustering
+/// ck 1..=4 ASC). Tests against it are FAIL-CLOSED (a missing binary errors).
 pub const STATIC_WITH_ROWS_DIR: &str =
     "sstables/test_deltas/static_with_rows-29a4cf80701f11f1b5d1d98b0640ec05";
 
-/// PINNED fixture (in the CI dataset): int32 PK + int32 clustering, static_col +
-/// row_col, with PK=1 carrying a static_block then clustering rows (and later
-/// tombstones we do not walk here). Used for the static+clustering byte-parity
-/// and static-row flag-byte anchor lanes.
+/// COMMITTED reference fixture (issue #1400 force-added its Data.db +
+/// CompressionInfo.db into git; the golden was already tracked): int32 PK + int32
+/// clustering, static_col + row_col, with PK=1 carrying a static_block then
+/// clustering rows (and later tombstones we do not walk here). Used for the
+/// static+clustering byte-parity and static-row flag-byte anchor lanes,
+/// FAIL-CLOSED (a missing binary errors).
 pub const STATIC_TOMB_DIR: &str =
     "sstables/test_tomb/static_with_tombstones-4cdb9780702011f1b8f419c9a388d558";
 
@@ -462,20 +452,6 @@ pub fn golden_first_partition_int_key(golden_first_line: &str) -> i32 {
             &rest[..end]
         )
     })
-}
-
-/// Read a LOCAL-ONLY JSONL golden, returning `None` when the file is absent
-/// (skip-on-presence). A present-but-empty golden is still a failure.
-pub fn read_jsonl_lines_opt(rel: &str) -> Option<Vec<String>> {
-    let path = datasets_root().join(rel);
-    let text = std::fs::read_to_string(&path).ok()?;
-    let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
-    assert!(
-        !lines.is_empty(),
-        "JSONL golden {} is present but empty (failure)",
-        path.display()
-    );
-    Some(lines)
 }
 
 /// Convert `YYYY-MM-DDTHH:MM:SS[.ffffff]Z` to epoch microseconds (Howard

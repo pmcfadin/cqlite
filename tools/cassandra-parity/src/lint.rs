@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use crate::model::{non_empty, Manifest, Scenario};
-use crate::{enums, workflow_check};
+use crate::{coverage, enums, workflow_check};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
@@ -72,7 +72,94 @@ pub fn lint(m: &Manifest, repo_root: Option<&Path>) -> Vec<Finding> {
 
     lint_claims(m, &mut out);
 
+    // Ambiguous bare-basename references (issue #1407). When we can read the
+    // Cassandra test index, a `cassandra.files` entry given as a bare basename
+    // (no path separator) is rejected when that basename maps to MORE THAN ONE
+    // source path in the index — a bare name cannot say which twin it means, and
+    // basename-only matching would silently classify the wrong file (the #1199
+    // soundness bug, now enforced fail-closed at authoring time). Such references
+    // must be qualified with their full `test/...` source path.
+    if let Some(root) = repo_root {
+        if let Ok(index_text) = std::fs::read_to_string(root.join(&m.cassandra_source.index)) {
+            lint_ambiguous_basenames(m, &index_text, &mut out);
+        }
+        // File-kind resolution (issue #1408).
+        lint_test_index_resolution(m, root, &mut out);
+    }
+
     out
+}
+
+/// Reject bare-basename `cassandra.files` references that are ambiguous in the
+/// Cassandra test index — i.e. the basename appears at more than one source path
+/// (issue #1407). A path-qualified reference (containing a `/`) is always allowed;
+/// an unambiguous bare basename (exactly one index path) is allowed for brevity.
+fn lint_ambiguous_basenames(m: &Manifest, index_text: &str, out: &mut Vec<Finding>) {
+    let corpus = coverage::parse_index(index_text);
+    for s in &m.scenarios {
+        for f in &s.cassandra.files {
+            let trimmed = f.trim();
+            // Path-qualified references are unambiguous by construction.
+            if trimmed.contains('/') || trimmed.contains('\\') {
+                continue;
+            }
+            let base = coverage::normalized_basename(trimmed);
+            if let Some(paths) = corpus.basename_paths.get(base) {
+                if paths.len() > 1 {
+                    let mut sorted: Vec<&String> = paths.iter().collect();
+                    sorted.sort();
+                    let joined = sorted
+                        .iter()
+                        .map(|p| p.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    out.push(Finding::error(
+                        &s.id,
+                        "cassandra.files",
+                        format!(
+                            "ambiguous bare basename '{base}': the index lists {} source paths \
+                             for it ({joined}); qualify the reference with its full source path",
+                            paths.len()
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// Issue #1408: enforce the manifest file-kind naming convention — every
+/// *test-kind* `cassandra.files` reference (basename ending in `Test.java`) MUST
+/// resolve to a detailed entry in the Cassandra test index
+/// (`cassandra_source.index`). Production sources, the harness, category
+/// `#anchor` references, and the `n/a` placeholder are exempt by convention (see
+/// the manifest header and `docs/development/cassandra-parity-manifest.md`).
+///
+/// The index is read from `repo_root`; when it is absent (e.g. linting from a
+/// sub-tree without the docs) the check is skipped so the linter stays usable,
+/// mirroring the claim-scan graceful-skip contract.
+fn lint_test_index_resolution(m: &Manifest, repo_root: &Path, out: &mut Vec<Finding>) {
+    let Ok(index_text) = std::fs::read_to_string(repo_root.join(&m.cassandra_source.index)) else {
+        return;
+    };
+    let corpus = coverage::parse_index(&index_text);
+    for s in &m.scenarios {
+        for f in &s.cassandra.files {
+            if coverage::is_test_reference(f) && !coverage::test_reference_resolves(&corpus, f) {
+                out.push(Finding::error(
+                    &s.id,
+                    "cassandra.files",
+                    format!(
+                        "kind:test reference '{f}' does not resolve to a {} entry; catalog it in \
+                         the index, or — if it actually names a production source/harness/category \
+                         anchor — drop the 'Test' suffix / use the real name per the manifest \
+                         file-kind convention",
+                        m.cassandra_source.index
+                    ),
+                ));
+            }
+        }
+    }
 }
 
 /// Split a failure-artifact descriptor `artifact.<tier>.<kind>` into `(tier, kind)`.
@@ -576,6 +663,43 @@ fn lint_scenario(s: &Scenario, repo_root: Option<&Path>, out: &mut Vec<Finding>)
                 ));
             }
         }
+        "out_of_scope" => {
+            // Boundary-field correctness (issue #1402, epic #1381 parity audit).
+            // An `evidence.type: out_of_scope` claim asserts that a Cassandra
+            // behavior lies OUTSIDE CQLite's reader/writer/compactor boundary, so
+            // it MUST name the boundary category (and, for high-relevance 🔴
+            // behavior, describe the boundary) — irrespective of the scenario
+            // `status`. The field requirements above (in the status match's
+            // "out_of_scope" arm) only fire when `status == "out_of_scope"`; two
+            // scenarios (the compression_info deflate/zstd real_fixture_chunks
+            // entries) slipped through with `status: planned` + `evidence.type:
+            // out_of_scope` and a NULL out_of_scope_category — the only such
+            // manifest-wide entries. Enforcing this here, keyed on
+            // `evidence.type`, fail-closes that status/evidence mismatch so a
+            // null-category out_of_scope can never recur. Guard on status to avoid
+            // double-reporting the status arm's identical finding for the
+            // well-formed `status == "out_of_scope"` case.
+            if s.status != "out_of_scope" {
+                if !non_empty(&s.scope.out_of_scope_category) {
+                    out.push(Finding::error(
+                        id,
+                        "scope.out_of_scope_category",
+                        "out_of_scope evidence requires a non-null scope.out_of_scope_category \
+                         (boundary category), even when status is not out_of_scope",
+                    ));
+                }
+                // High-relevance (🔴) Cassandra behavior needs an explicit
+                // boundary statement so the out_of_scope claim stays auditable.
+                if s.cassandra.relevance == "high" && !non_empty(&s.scope.cqlite_boundary) {
+                    out.push(Finding::error(
+                        id,
+                        "scope.cqlite_boundary",
+                        "out_of_scope evidence for a high-relevance Cassandra file requires \
+                         scope.cqlite_boundary describing the reader/writer/compactor boundary",
+                    ));
+                }
+            }
+        }
         "partial" => {
             if !non_empty(&s.evidence.known_limitations) {
                 out.push(Finding::error(
@@ -583,6 +707,42 @@ fn lint_scenario(s: &Scenario, repo_root: Option<&Path>, out: &mut Vec<Finding>)
                     "evidence.known_limitations",
                     "partial evidence requires known_limitations",
                 ));
+            }
+            // Issue #1401 (fail-closed orphaned-debt guard): a `partial` scenario is
+            // a promise of unfinished parity work, so it MUST be parked on a tracking
+            // issue that is still OPEN — otherwise the debt can sit forever with no
+            // home (48/52 partials were parked on CLOSED epics before this rule).
+            // Offline (PR-gate) half: `scope.target_issue` is REQUIRED and its number
+            // must be echoed in `scope.next_step`, so the machine field and the
+            // human-readable pointer agree. The open-state half (is #N actually open
+            // on GitHub?) is a network step run nightly and is SKIP-aware — see
+            // scripts/tests/check-parity-partial-open-issues.sh and
+            // docs/development/cassandra-parity-manifest.md.
+            match s.scope.target_issue {
+                None => out.push(Finding::error(
+                    id,
+                    "scope.target_issue",
+                    "partial evidence requires scope.target_issue pointing at an OPEN \
+                     tracking issue (see docs/development/cassandra-parity-manifest.md)",
+                )),
+                Some(n) => {
+                    let cites = s
+                        .scope
+                        .next_step
+                        .as_deref()
+                        .map(|ns| next_step_cites_issue(ns, n))
+                        .unwrap_or(false);
+                    if !cites {
+                        out.push(Finding::error(
+                            id,
+                            "scope.next_step",
+                            format!(
+                                "partial scenario next_step must cite its target_issue #{n} \
+                                 so the tracked-debt pointer and scope.target_issue agree"
+                            ),
+                        ));
+                    }
+                }
             }
         }
         _ => {}
@@ -704,6 +864,34 @@ fn valid_claim_id(id: &str) -> bool {
         }
         None => false,
     }
+}
+
+/// Whether `next_step` cites issue `#n` as a WHOLE token (issue #1401). A plain
+/// `contains("#{n}")` would false-match a prefix — `#150` inside `#1507` — so we
+/// scan every `#<digits>` run and require an exact numeric equality. Dependency-free
+/// (no `regex`), matching the [`valid_id`] style.
+fn next_step_cites_issue(next_step: &str, n: u64) -> bool {
+    let bytes = next_step.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'#' {
+            let start = i + 1;
+            let mut j = start;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > start {
+                // A full `#<digits>` token; compare the parsed value, not a substring.
+                if next_step[start..j].parse::<u64>().ok() == Some(n) {
+                    return true;
+                }
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    false
 }
 
 fn valid_id(id: &str) -> bool {

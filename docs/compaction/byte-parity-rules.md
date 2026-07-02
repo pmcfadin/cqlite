@@ -37,16 +37,16 @@ test), **Gap** (not handled), **N/A** (out of scope, e.g. intentionally rejected
 |------|------------------|--------|----------|
 | Cells reconcile by `(column, cell_path)` on timestamp; the higher timestamp wins. | (baseline) | Partial — per-column only, no cell_path | #844 |
 | At equal timestamp, a **tombstone beats a live cell**. | (baseline) | Covered | merge.rs reconcile |
-| At equal timestamp, a **tombstone beats an expiring (TTL) cell** before any localDeletionTime compare. | `a62c749` | Gap — `ttl` never consulted | #848 |
+| At equal timestamp, a **tombstone beats an expiring (TTL) cell** before any localDeletionTime compare. | `a62c749` | **Covered** | #848 (PR #936) — `merge/reconcile.rs` consults `ttl` at equal ts before any LDT compare; test `issue_848_tombstone_beats_expiring_roundtrip.rs` |
 | Counter tombstones tied on `(timestamp, localDeletionTime)` are resolved by **raw value bytes** (greater wins). | `d1f0678d`, `6336451` | N/A — counters rejected | (limitation) |
 
 ## 2. Tombstones & deletions
 
 | Rule | Cassandra commit | Status | Tracking |
 |------|------------------|--------|----------|
-| Range tombstones (including **open-ended** and nested) shadow covered cells during compaction. | `996ae4dc` | Gap — not applied in merge | #846 |
+| Range tombstones (including **open-ended** and nested) shadow covered cells during compaction. | `996ae4dc` | **Covered** | #846 (PRs #913/#936, #933) — reader coalesces bound markers into ranges; `merge/mod.rs` emits `RangeMarker` as an outer shadow floor; test `issue_933_range_tombstone_compaction.rs` |
 | Row / partition / cell deletions shadow covered data during the merge. | (baseline) | Partial — row shadowing only | #846 |
-| **gcBefore / gc_grace purging**: tombstones (and data they cover) older than `gcBefore` are purged. | `8d47ebb2` | Gap — purge utility unwired | #845 |
+| **gcBefore / gc_grace purging**: tombstones (and data they cover) older than `gcBefore` are purged. | `8d47ebb2` | **Covered** | #845 (PRs #936/#948) — `merge/mod.rs` threads `gc_before_secs` + `purge_safe` (overlap-aware `max_purgeable_timestamp` for partial compactions, #935); tests `issue_921_purge_decision_consistency.rs` |
 | **Dropped-column** cells (timestamp ≤ column drop time) are filtered out. | `cb34ad47` | Gap | #847 |
 | A merged **complex (collection) deletion** is dropped unless it **strictly supersedes** the active deletion (equal timestamps do not). | `bd244649` | Gap — no complex-deletion entity | #844 |
 | Complex-column cells are **shadowed before** the merged complex deletion is purged (no resurrection). | `f66fa14f` | Gap | #844 |

@@ -15,9 +15,13 @@
 
 - Cassandra source tree: [`apache/cassandra`](https://github.com/apache/cassandra),
   ref `cassandra-5.0.2` (git SHA `f278f6774fc76465c182041e081982105c3e7dbb`).
-- Test index: [`docs/cassandra_test_index.md`](../cassandra_test_index.md) — 403
-  Cassandra test files (~3,578 `@Test` methods), of which **115 are
+- Test index: [`docs/cassandra_test_index.md`](../cassandra_test_index.md) — 407
+  Cassandra test files (~3,604 `@Test` methods), of which **118 are
   high-relevance** for SSTable data correctness and data-loss prevention.
+- Scenario and evidence **counts** are not maintained by hand here; they are
+  generated from the manifest into
+  [`docs/reports/cassandra-test-parity.md`](cassandra-test-parity.md) by the
+  `cassandra-parity report` subcommand.
 
 CQLite is a single-node SSTable **reader / writer / compactor**. It does not run
 as a Cassandra node, so a large fraction of the Cassandra test corpus exercises
@@ -162,6 +166,52 @@ node. Each has a fixed `scope.out_of_scope_category` (see
 
 High-relevance Cassandra files may only be marked out-of-scope with an explicit
 `scope.cqlite_boundary` explaining why CQLite does not implement that behavior.
+
+### Convention: "out of PARITY scope, but a CQLite-native surface" (issue #1403)
+
+`out_of_scope` means only that a scenario is **not a Cassandra byte/semantic
+parity target** — it does **not** license the false claim that CQLite has no such
+behavior at all. Some Cassandra node behaviors have a **functional analogue** in
+CQLite's own code (its WAL, its memtable, its crash-mid-compaction cleanup). For
+those, "CQLite does not implement X" is wrong and misleading.
+
+When a functional analogue exists, the `out_of_scope` boundary text MUST:
+
+1. State that CQLite makes **no Cassandra parity claim** for that behavior
+   (that is what keeps it out of parity scope), and
+2. **Name the CQLite-native analogue** (with its source path), and
+3. **Link the OPEN native (non-parity) coverage tracker issue** — in the prose
+   fields (`rationale` / `cqlite_boundary` / `safe_claim`) and, structurally, in
+   `scope.next_step`.
+
+The analogue's correctness is proven by **native tests tracked on those issues**,
+not by any Cassandra-parity scenario. Never write "CQLite does not maintain a
+memtable / does not have a commit log / does not implement X" when the code says
+otherwise.
+
+#### Per-category audit sweep (issue #1403, AC3)
+
+Every `out_of_scope` category was swept for a functional CQLite analogue. Verdict:
+
+| Category | Functional CQLite analogue? | Native tracker |
+|---|---|---|
+| `commitlog_replay` | **Yes** — write-ahead log (`write_engine/wal.rs`), replay-after-crash | #1390, #1391, #1394 |
+| `memtable_internals` | **Yes** — memtable (`write_engine/memtable.rs`), token-order iteration + estimate accounting | #1404 |
+| `node_lifecycle` (early-open) | **Yes** — crash-mid-compaction orphan sweeps (`write_engine/maintenance.rs`) | #1393 |
+| `repair_coordinator` | No — no peers, no Merkle exchange, no anti-compaction lifecycle | — (clean) |
+| `read_repair_coordinator` | No — no coordinator, no digest-mismatch resolution, no cross-replica path | — (clean) |
+| `streaming_protocol` | No — no node-to-node stream wire protocol or join/leave transitions | — (clean) |
+| `distributed_consensus` | No — no Paxos/Accord participants or consensus rounds | — (clean) |
+| `nodetool_jmx_metrics` | No — no JMX, live metrics registry, or operational control surface | — (clean) |
+| `sai_sasi_query` | No — CQLite reads base-table components only; no SAI/SASI index engine | — (clean) |
+| `java_tooling` | No — CQLite does not reimplement scrub/upgrader JVM tools | — (clean) |
+| `unsupported_compression_dictionary` | No — feature CQLite does not support | — (clean) |
+| `not_sstable_reader_writer_compactor` | No — by definition outside the reader/writer/compactor | — (clean) |
+
+The three "Yes" categories were re-scoped by #1403 (boundary text corrected, native
+trackers linked). The remaining nine categories were **audited clean**: their
+Cassandra behavior has no CQLite-native analogue, so "CQLite does not implement X"
+is accurate for them and no re-scope is required.
 
 ## P0 areas to classify
 

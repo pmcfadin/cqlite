@@ -151,7 +151,7 @@ if ! command -v cargo >/dev/null 2>&1 && [ -d "$HOME/.cargo/bin" ]; then
 fi
 export CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-$REPO_ROOT/test-data/datasets}"
 
-COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard integration-tests format-compat write-tests cli-tests python-bindings node-bindings delivery-telemetry parity-report tooling-tests minimal-build smoke)
+COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard integration-tests format-compat write-tests cli-tests compaction-byte-parity python-bindings node-bindings delivery-telemetry parity-report tooling-tests minimal-build smoke)
 ONLY=""
 SELFTEST=0
 case "${1:-}" in
@@ -516,6 +516,76 @@ run_delivery_telemetry() {
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
+# compaction-byte-parity: the PR-VISIBLE proxy for the nightly-only Java
+# differential byte tier (issue #1405). The two manifest scenarios
+# cass.compaction.SSTableRewriterTest.output_component_integrity and
+# cass.compaction.harness_byte_tier_artifacts prove Cassandra-vs-CQLite
+# byte identity only under `gradle byteParity` (compaction-parity.yml /
+# nightly-docker-parity.yml), which fires nightly + on workflow_dispatch — never
+# on a PR. A PR could break compaction byte parity and merge green.
+#
+# This component runs the Rust re-compaction byte-parity SUBSET as the local PR
+# proxy: CQLite re-produces the same inputs, runs its own compaction, and diffs
+# the output components (Data.db/Index.db/Summary.db/Digest.crc32/CRC.db)
+# byte-for-byte against committed Cassandra 5.0.2 compacted references. It does
+# NOT replace the nightly Java tier (which diffs the FULL component set over the
+# whole scenario matrix from a live Cassandra build) — see
+# docs/development/parity-ci-tiers.md for the PR-proxy vs nightly tier contract.
+#
+# Fixture policy (fail-closed where fixtures are committed, SKIP-aware otherwise):
+#   * Group A (issue_1017/1020/1240): references are COMMITTED to git under
+#     test_compactionparity/** + test_compactionparityudt/**, so they run under
+#     CQLITE_REQUIRE_FIXTURES=1 — an absent/present-but-incomplete committed
+#     golden is a hard FAIL, never a silent skip.
+#   * Group B (issue_1019): its test_tomb references are fetched-only (not
+#     committed), so it runs WITHOUT CQLITE_REQUIRE_FIXTURES — it enforces the
+#     byte/header diff when the fixtures are present and cleanly self-skips when
+#     they are not (e.g. a checkout that has not fetched test_tomb).
+# The whole component SKIPs (loud, never silent PASS) when CQLITE_DATASETS_ROOT
+# is unset or the committed test_compactionparity keyspace is absent (a minimal
+# checkout). NOT in DATASET_COMPONENTS: it is self-guarding, so it must not trip
+# the hard dataset preflight.
+run_compaction_byte_parity() {
+  local name=compaction-byte-parity
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local log="$LOG_DIR/$name.log"
+  local start end status
+  start=$(date +%s)
+  local committed_ks="${CQLITE_DATASETS_ROOT:-}/sstables/test_compactionparity"
+  if [ -z "${CQLITE_DATASETS_ROOT:-}" ] || [ ! -d "$committed_ks" ]; then
+    status=SKIP
+    echo ">>> [$name] SKIP (CQLITE_DATASETS_ROOT unset or committed test_compactionparity fixtures absent)"
+    NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("0s")
+    return 0
+  fi
+  echo ">>> [$name] Rust byte-parity PR proxy for the nightly Java byte tier (#1405)"
+  if CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" bash -c '
+      set -euo pipefail
+      # Group A — committed references, fail-closed (CQLITE_REQUIRE_FIXTURES=1).
+      env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT="'"$CQLITE_DATASETS_ROOT"'" \
+        cargo test -p cqlite-core --features write-support \
+          --test issue_1017_live_cell_compaction_byte_parity \
+          --test issue_1020_udt_frozen_compaction_byte_parity \
+          --test issue_1240_nested_frozen_collection_udt_parity
+      # Group B — fetched-only test_tomb references, skip-aware (no require-fixtures).
+      env CQLITE_DATASETS_ROOT="'"$CQLITE_DATASETS_ROOT"'" \
+        cargo test -p cqlite-core --features write-support \
+          --test issue_1019_static_dropped_collection_compaction_parity' >"$log" 2>&1; then
+    status=PASS
+  else
+    status=FAIL
+    OVERALL=FAIL
+    echo "--- [$name] FAILED; last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
 # parity-report: verify the committed derived parity report is not stale vs its
 # source manifest (issue #1338). Renders test-data/cassandra-parity-manifest.yml
 # with `cassandra-parity report --check`; PASS when the committed report matches a
@@ -858,6 +928,7 @@ run_component write-tests bash -c '
 run_component cli-tests bash -c '
   cargo test --package cqlite-cli --test unit_tests &&
   cargo test --package cqlite-cli --features write-support --test write_readback_content_tests'
+run_compaction_byte_parity
 run_python_bindings
 run_node_bindings
 run_delivery_telemetry

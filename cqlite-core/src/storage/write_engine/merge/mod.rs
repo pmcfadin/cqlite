@@ -1183,27 +1183,74 @@ pub fn compute_baseline_min(input_paths: &[PathBuf]) -> (i64, i32, i32) {
             Ok((_, sstable_stats)) => {
                 let ts_stats = &sstable_stats.timestamp_stats;
                 baseline_min_ts = baseline_min_ts.min(ts_stats.min_timestamp);
-                // Local-deletion-time baseline seeding (#853/#886 branch-review,
-                // Finding 2). The parser reconstructs LDT as
-                // `readUnsignedVInt32() + DELETION_TIME_EPOCH` (EncodingStats.java:289),
-                // so a far-future LDT in [2^31, 2^32) surfaces here as an i64 ABOVE
-                // i32::MAX (e.g. 2^31+5). These are legitimate after the deletion-marker
-                // fixes (#853 / range tombstones): they are negative i32 BIT PATTERNS,
-                // not "bad" values, and Cassandra's `EncodingStats.merge` mins over the
-                // signed int. Normalize as UNSIGNED 32-bit and reinterpret the bits as
-                // i32 so the seeded baseline matches the final Statistics.db baseline
-                // (DataWriter encodes per-row deltas as
-                // `local_deletion_time.wrapping_sub(min) as u32`). Casting the raw i64
-                // straight to i32 would also work for the bits, but the explicit
-                // `as u32 as i32` documents the 32-bit unsigned normalization.
+                // Local-deletion-time baseline seeding (#853/#886 Finding 2; sentinel
+                // exclusion corrected in #1410). The parser reconstructs
+                // `min_deletion_time` as `readUnsignedVInt32() + DELETION_TIME_EPOCH`
+                // (EncodingStats.java:289). We normalize to the 32-bit signed bit
+                // pattern (`as u32 as i32`) — a far-future LDT in [2^31, 2^32) surfaces
+                // as an i64 above i32::MAX and is a valid negative-i32 delta baseline
+                // (the exact value the DataWriter delta-encodes against), NOT bad data.
                 //
-                // 0 is the normalized "no tombstones" sentinel
-                // (StatisticsMetadata::finalize() maps i32::MAX→0); include it so the
-                // baseline stays safe for merger tombstones that also use
-                // local_deletion_time=0. SKIP only the live/no-deletion sentinel
-                // (i32::MAX, DeletionTime.LIVE), which must never lower the baseline.
+                // EXCLUDE any input that carries NO tombstone from the merged LDT-min,
+                // matching `EncodingStats.mergeWith` / `EncodingStats.merge`
+                // (EncodingStats.java:113-115, 146): a live-only input must NEVER lower
+                // the merged min, or a real tombstone LDT is delta-encoded against a
+                // too-low baseline and Data.db diverges (#1410: observed cass=99 vs
+                // ours=103, first diff at offset 24, where the row-tombstone LDT delta is
+                // emitted). This does NOT touch the writer's on-disk format (a header
+                // sentinel change would desync the DataWriter's own LIVE-marker baseline,
+                // corrupting live complex-column deletion headers — roborev #1410
+                // Finding 1); the decision is made HERE, in the compaction baseline seeder.
+                //
+                // Two distinct on-disk representations mean "this SSTable has no local
+                // deletion time" — and CQLite's own writer serializes a live-only SSTable
+                // as a bare `0` (StatisticsMetadata::finalize maps the unset `i32::MAX`
+                // min to 0), which is INDISTINGUISHABLE from a genuine tombstone whose
+                // real LDT is 0 (an old row tombstone with a sub-second write timestamp)
+                // by the `min_deletion_time` VALUE alone. So we use an AUTHORITATIVE
+                // "has a tombstone" signal, NOT a heuristic on the value (#28): the STATS
+                // `estimatedTombstoneDropTime` histogram, which CQLite's writer populates
+                // (via `update_local_deletion_time`) and Cassandra writes for EVERY real
+                // tombstone LDT — empty iff the SSTable carries no tombstone. We do NOT
+                // exclude by LDT value (roborev #1410 Finding 2): `DELETION_TIME_EPOCH`
+                // (2015-09-22) is a perfectly valid EXPLICIT tombstone `localDeletionTime`
+                // here, so excluding it by value would drop a real tombstone from the
+                // baseline and make the writer reject/mis-encode it. The LIVE marker
+                // (`i32::MAX` / `NO_DELETION_TIME`) never reaches the histogram
+                // (`update_local_deletion_time` filters it), so an empty histogram already
+                // covers every no-deletion representation (`0`, `DELETION_TIME_EPOCH`,
+                // `i32::MAX`).
+                //
+                // CONSERVATIVE on a decode failure (roborev #1410 Finding 3): we decode
+                // the histogram DIRECTLY here with `parse_stats_extras` and match on its
+                // `Result`, NOT `sstable_stats.tombstone_drop_times` — the latter is an
+                // EMPTY vec BOTH for a genuinely live-only SSTable AND for a best-effort
+                // extras PARSE FAILURE (corrupt / version-mismatched STATS extras), which
+                // must not be conflated. We only treat an input as no-tombstone when the
+                // extras decode SUCCEEDS with an empty histogram; on ANY decode error we
+                // INCLUDE its LDT (cannot prove live-only → never leave the baseline too
+                // high, so the merger's re-emitted tombstones stay >= baseline).
+                //   * `Ok` + empty histogram → no tombstone → EXCLUDE.
+                //   * `Ok` + non-empty histogram → genuine tombstone (incl. real LDT `0`
+                //     or `DELETION_TIME_EPOCH`) → INCLUDE.
+                //   * `Err` (unparseable extras) → cannot prove live-only → INCLUDE.
                 let ldt_bits = ts_stats.min_deletion_time as u32 as i32;
-                if ldt_bits != i32::MAX {
+                let has_tombstone =
+                    match crate::parser::repair_metadata::parse_stats_extras(&stats_bytes, None) {
+                        Ok(extras) => !extras.tombstone_drop_times.is_empty(),
+                        Err(e) => {
+                            // Unparseable extras: stay conservative and INCLUDE (do NOT skip
+                            // a possibly-real LDT baseline). `true` forces the `.min()` below.
+                            log::debug!(
+                                "STATS-extras decode failed for {:?} during baseline seeding; \
+                             conservatively including its LDT baseline: {:?}",
+                                stats_path,
+                                e
+                            );
+                            true
+                        }
+                    };
+                if has_tombstone {
                     baseline_min_ldt = baseline_min_ldt.min(ldt_bits);
                 }
                 if let Some(min_ttl) = ts_stats.min_ttl {
@@ -2306,6 +2353,10 @@ impl KWayMerger {
                 &self.schema.dropped_columns,
                 effective_gc_before,
                 max_purgeable_timestamp,
+                // #1382: TTL expiry uses the merger's pinned evaluation instant,
+                // the SAME `now` that drove `compute_gc_before` so expiry and
+                // gc-grace purging agree deterministically.
+                self.now_secs,
                 &mut purges,
             ) {
                 // Issue #933: shadow cells covered by a range tombstone. The merge
@@ -3173,6 +3224,10 @@ impl KWayMerger {
             dropped_columns,
             gc_before_secs,
             max_purgeable_timestamp,
+            // #1382: this test-only wrapper keeps the pre-#1382 default of NO
+            // TTL expiry (`now_secs = None` = strict no-op). Tests that exercise
+            // TTL expiry drive the real `compact_sstables` surface instead.
+            None,
             &mut sink,
         )
     }
@@ -3208,6 +3263,12 @@ impl KWayMerger {
         // compaction; `i64::MIN` when purging is disabled (`gc_before_secs` is then
         // `None`, so this is unused).
         max_purgeable_timestamp: i64,
+        // Pinned TTL-expiry evaluation instant (`now`, GC-clock seconds), threaded
+        // from the merger (#1382). A live expiring cell whose `localDeletionTime`
+        // is STRICTLY LESS THAN this is turned into a cell tombstone (Step 3b′)
+        // and then purged by the SAME gc/overlap gate as any other cell tombstone.
+        // `None` disables expiry (a strict no-op), preserving pre-#1382 behavior.
+        now_secs: Option<i64>,
         // Tombstone-purge tally accumulated at the true purge decision points
         // (issue #1037). Never read here; only incremented.
         purges: &mut PurgeCounts,
@@ -3233,6 +3294,11 @@ impl KWayMerger {
         state.shadow_by_row_deletion();
         // Step 3b: dropped-column filtering (captures the phantom-row guard).
         state.filter_dropped_columns(dropped_columns);
+        // Step 3b′ (#1382): TTL expiry — convert expired live cells to cell
+        // tombstones BEFORE the gc-grace purge so an expired-past-grace cell is
+        // dropped by Step 3c and an expired-within-grace cell is emitted as a
+        // tombstone (its live value never resurfaces).
+        state.expire_ttl_cells(now_secs);
         // Step 3c: gc_grace / overlap-aware tombstone purging (tallies #1037).
         state.purge_gc_grace(gc_before_secs, max_purgeable_timestamp, purges);
         // Step 4: phantom-row guard + emit the merged entry.
@@ -5089,8 +5155,11 @@ mod tests {
         );
 
         let mut meta = StatisticsMetadata::new();
-        meta.min_local_deletion_time = far_future_bits;
-        meta.max_local_deletion_time = far_future_bits;
+        // A REAL far-future tombstone: drive it through `update_local_deletion_time`
+        // (not a bare field assignment) so BOTH the min AND the tombstone histogram are
+        // populated — the authoritative "this SSTable has a tombstone" signal the
+        // EncodingStats no-deletion sentinel now keys on (#1410).
+        meta.update_local_deletion_time(far_future_bits);
         StatisticsWriter::new(stats_path)
             .write(&meta, None)
             .expect("write Statistics.db with far-future LDT");
@@ -5127,6 +5196,165 @@ mod tests {
             baseline_ldt,
             i32::MAX,
             "live/no-deletion sentinel must not lower the seeded baseline"
+        );
+    }
+
+    /// #1410: a LIVE-ONLY input (no tombstones recorded → EMPTY tombstone histogram)
+    /// must NOT drag the merged LDT baseline down. `compute_baseline_min` excludes it
+    /// via the authoritative `tombstone_drop_times` histogram (empty ⇒ no tombstone),
+    /// matching `EncodingStats.merge`, which treats a no-deletion input as the merge
+    /// identity. When a live-only input is mixed with a tombstone-carrying input (a
+    /// real wall-clock LDT), the seeded baseline must equal the TOMBSTONE's LDT.
+    /// Regressing this re-introduces the #1410 wrong-delta (raw LDT vs `LDT - minLDT`).
+    #[test]
+    fn compute_baseline_min_skips_no_deletion_sentinel_mixed_with_tombstone() {
+        use crate::storage::sstable::writer::{StatisticsMetadata, StatisticsWriter};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("temp dir");
+
+        // Live-only input: NO tombstones recorded (empty drop-time histogram).
+        let live_data = tmp.path().join("nb-1-big-Data.db");
+        std::fs::write(&live_data, b"").expect("touch live Data.db");
+        let live_meta = StatisticsMetadata::new(); // no update_local_deletion_time call
+        StatisticsWriter::new(tmp.path().join("nb-1-big-Statistics.db"))
+            .write(&live_meta, None)
+            .expect("write live-only Statistics.db");
+
+        // Tombstone-carrying input: a real wall-clock LDT, driven through the
+        // authentic `update_local_deletion_time` path (populates min AND histogram).
+        let tomb_ldt: i32 = 1_782_950_059; // 2026-07-01 (matches the #1387 fixture LDT).
+        let tomb_data = tmp.path().join("nb-2-big-Data.db");
+        std::fs::write(&tomb_data, b"").expect("touch tombstone Data.db");
+        let mut tomb_meta = StatisticsMetadata::new();
+        tomb_meta.update_local_deletion_time(tomb_ldt);
+        StatisticsWriter::new(tmp.path().join("nb-2-big-Statistics.db"))
+            .write(&tomb_meta, None)
+            .expect("write tombstone Statistics.db");
+
+        let (_ts, baseline_ldt, _ttl) = compute_baseline_min(&[live_data, tomb_data]);
+        assert_eq!(
+            baseline_ldt, tomb_ldt,
+            "the live-only input's no-deletion sentinel must not lower the baseline \
+             below the tombstone input's real LDT (#1410)"
+        );
+    }
+
+    /// #1410: an ALL-live compaction (every input a no-deletion sentinel) leaves the
+    /// LDT baseline at its `i32::MAX` "unseeded" value, so the writer falls back to its
+    /// own live-sentinel encoding rather than being dragged down.
+    #[test]
+    fn compute_baseline_min_all_live_stays_unseeded() {
+        use crate::storage::sstable::writer::{StatisticsMetadata, StatisticsWriter};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("temp dir");
+        let data_path = tmp.path().join("nb-1-big-Data.db");
+        std::fs::write(&data_path, b"").expect("touch Data.db");
+        let meta = StatisticsMetadata::new(); // no tombstones -> no-deletion sentinel
+        StatisticsWriter::new(tmp.path().join("nb-1-big-Statistics.db"))
+            .write(&meta, None)
+            .expect("write live-only Statistics.db");
+
+        let (_ts, baseline_ldt, _ttl) = compute_baseline_min(&[data_path]);
+        assert_eq!(
+            baseline_ldt,
+            i32::MAX,
+            "an all-live compaction must leave the LDT baseline unseeded"
+        );
+    }
+
+    /// #1410 regression guard: a GENUINE tombstone whose real `localDeletionTime` is a
+    /// tiny value (e.g. `0`, as an old row tombstone with a sub-second write timestamp
+    /// produces — the compaction_integration scenario) must be INCLUDED in the LDT
+    /// baseline, NOT mistaken for the no-deletion sentinel. Driving it through
+    /// `update_local_deletion_time` populates the tombstone histogram, so
+    /// `compute_baseline_min` sees a non-empty `tombstone_drop_times` and includes the
+    /// real `0`, taking the baseline to `0` — otherwise the writer would reject the
+    /// re-emitted below-baseline LDT.
+    #[test]
+    fn compute_baseline_min_includes_genuine_zero_ldt_tombstone() {
+        use crate::storage::sstable::writer::{StatisticsMetadata, StatisticsWriter};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("temp dir");
+        let data_path = tmp.path().join("nb-1-big-Data.db");
+        std::fs::write(&data_path, b"").expect("touch Data.db");
+        let mut meta = StatisticsMetadata::new();
+        meta.update_local_deletion_time(0); // real tombstone at LDT 0 (histogram set)
+        StatisticsWriter::new(tmp.path().join("nb-1-big-Statistics.db"))
+            .write(&meta, None)
+            .expect("write Statistics.db with a genuine LDT-0 tombstone");
+
+        let (_ts, baseline_ldt, _ttl) = compute_baseline_min(&[data_path]);
+        assert_eq!(
+            baseline_ldt, 0,
+            "a genuine LDT-0 tombstone must be included in the baseline, not excluded \
+             as the no-deletion sentinel (#1410)"
+        );
+    }
+
+    /// #1410 (roborev Finding 3): when the STATS-extras histogram decode FAILS
+    /// (corrupt / version-mismatched STATS component) `compute_baseline_min` must
+    /// stay CONSERVATIVE and INCLUDE the input's LDT baseline — it must NOT treat an
+    /// extras PARSE FAILURE like an empty histogram (which would skip a possibly-real
+    /// LDT baseline and make the writer reject a re-emitted below-baseline tombstone).
+    ///
+    /// Setup: write a valid tombstone-carrying `Statistics.db`, then corrupt the FIRST
+    /// 4 bytes of the STATS component (the `estimatedPartitionSize` histogram bucket
+    /// count) to a negative i32 so `parse_stats_extras` fails with `Corruption`, while
+    /// the SERIALIZATION_HEADER EncodingStats (reached via its own TOC offset, a LATER
+    /// component) still decodes. Assert the tombstone LDT is included regardless.
+    #[test]
+    fn compute_baseline_min_conservative_when_stats_extras_unparseable() {
+        use crate::storage::sstable::writer::{StatisticsMetadata, StatisticsWriter};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("temp dir");
+        let data_path = tmp.path().join("nb-1-big-Data.db");
+        std::fs::write(&data_path, b"").expect("touch Data.db");
+        let stats_path = tmp.path().join("nb-1-big-Statistics.db");
+
+        let tomb_ldt: i32 = 1_782_950_059; // a real wall-clock tombstone LDT.
+        let mut meta = StatisticsMetadata::new();
+        meta.update_local_deletion_time(tomb_ldt);
+        StatisticsWriter::new(stats_path.clone())
+            .write(&meta, None)
+            .expect("write tombstone Statistics.db");
+
+        // Locate the STATS component (MetadataType ordinal 2) offset from the TOC and
+        // corrupt its first field (estimatedPartitionSize histogram bucket count) to a
+        // negative i32 so parse_stats_extras fails, without touching the header offset.
+        let mut bytes = std::fs::read(&stats_path).expect("read stats");
+        let count = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        let mut stats_offset = None;
+        for i in 0..count {
+            let entry = 8 + i * 8; // after count(4)+CRC(4); each entry = type(4)+offset(4)
+            let ty = u32::from_be_bytes([
+                bytes[entry],
+                bytes[entry + 1],
+                bytes[entry + 2],
+                bytes[entry + 3],
+            ]);
+            if ty == 2 {
+                stats_offset = Some(u32::from_be_bytes([
+                    bytes[entry + 4],
+                    bytes[entry + 5],
+                    bytes[entry + 6],
+                    bytes[entry + 7],
+                ]) as usize);
+            }
+        }
+        let off = stats_offset.expect("STATS component (type 2) in TOC");
+        // Negative bucket count → skip_estimated_histogram returns Corruption.
+        bytes[off..off + 4].copy_from_slice(&(-1i32).to_be_bytes());
+        std::fs::write(&stats_path, &bytes).expect("rewrite corrupted stats");
+
+        let (_ts, baseline_ldt, _ttl) = compute_baseline_min(&[data_path]);
+        assert_eq!(
+            baseline_ldt, tomb_ldt,
+            "an unparseable STATS-extras section must be treated conservatively \
+             (INCLUDE the LDT baseline), not as an empty no-tombstone histogram (#1410)"
         );
     }
 

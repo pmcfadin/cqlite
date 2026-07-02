@@ -399,97 +399,6 @@ impl WriteEngine {
         Ok(report)
     }
 
-    /// Scan data directory for SSTable candidates (M5.2 helper)
-    /// Startup sweep (a): remove any `.compaction-tmp-*` directories left under
-    /// `data_dir` by a previous crash mid-rename.  Best-effort — individual
-    /// failures are logged but do not abort engine startup.
-    pub(crate) fn sweep_orphaned_compaction_tmp(data_dir: &Path) {
-        let read_dir = match std::fs::read_dir(data_dir) {
-            Ok(rd) => rd,
-            Err(e) => {
-                log::debug!(
-                    "sweep_orphaned_compaction_tmp: cannot read {:?}: {}",
-                    data_dir,
-                    e
-                );
-                return;
-            }
-        };
-
-        for entry in read_dir.flatten() {
-            let path = entry.path();
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if name_str.starts_with(".compaction-tmp-") && path.is_dir() {
-                log::warn!("removing orphaned compaction tmp directory: {:?}", path);
-                if let Err(e) = std::fs::remove_dir_all(&path) {
-                    log::warn!(
-                        "failed to remove orphaned compaction tmp directory {:?}: {}",
-                        path,
-                        e
-                    );
-                }
-            }
-        }
-    }
-
-    /// Startup sweep (b): remove any `nb-{gen}-big-Data.db` (and its siblings)
-    /// under `data_dir/keyspace/table/` that lack a matching `TOC.txt`.
-    /// Such files are left when a crash occurs after some component renames but
-    /// before `TOC.txt` is renamed (the publication barrier).  Best-effort.
-    pub(crate) fn sweep_orphaned_partial_sstables(data_dir: &Path, keyspace: &str, table: &str) {
-        let sstable_dir = data_dir.join(keyspace).join(table);
-
-        let read_dir = match std::fs::read_dir(&sstable_dir) {
-            Ok(rd) => rd,
-            Err(_) => {
-                // Directory doesn't exist yet — nothing to sweep.
-                return;
-            }
-        };
-
-        for entry in read_dir.flatten() {
-            let path = entry.path();
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-
-            // Look for Data.db files produced by the writer (nb-{gen}-big-Data.db)
-            if !name_str.starts_with("nb-")
-                || !name_str.ends_with("-big-Data.db")
-                || !path.is_file()
-            {
-                continue;
-            }
-
-            // Extract the base prefix (e.g. "nb-5-big") to find the TOC sibling
-            let base = match name_str.strip_suffix("-Data.db") {
-                Some(b) => b.to_owned(),
-                None => continue,
-            };
-
-            // Extract the generation number for the log message
-            let gen_str = base
-                .strip_prefix("nb-")
-                .and_then(|s| s.strip_suffix("-big"))
-                .unwrap_or(&base);
-
-            let toc_path = sstable_dir.join(format!("{}-TOC.txt", base));
-            if !toc_path.exists() {
-                log::warn!(
-                    "removing orphaned partial SSTable components for generation {}: missing TOC.txt",
-                    gen_str
-                );
-                if let Err(e) = Self::delete_sstable_files_static(&path) {
-                    log::warn!(
-                        "failed to remove orphaned partial SSTable for generation {}: {}",
-                        gen_str,
-                        e
-                    );
-                }
-            }
-        }
-    }
-
     #[tracing::instrument(name = "compaction.scan_candidates", skip(self))]
     fn scan_sstable_candidates(&self) -> Result<Vec<PathBuf>> {
         let mut candidates = Vec::new();
@@ -573,7 +482,7 @@ impl WriteEngine {
     /// by which time the reader's handle has been released. This is the
     /// "deferred delete" half of the policy; Unix removes the inode immediately
     /// while any mapping keeps the bytes alive until it is dropped.
-    fn delete_sstable_files_static(data_path: &Path) -> Result<()> {
+    pub(crate) fn delete_sstable_files_static(data_path: &Path) -> Result<()> {
         // Extract base path: nb-{gen}-big
         let filename = data_path
             .file_name()
@@ -1423,123 +1332,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_startup_sweep_removes_orphaned_compaction_tmp_dir() {
-        // Pre-seed a .compaction-tmp-99/ directory under data_dir.
-        // WriteEngine::new() must remove it during the startup sweep.
-        let temp_dir = TempDir::new().unwrap();
-        let data_dir = temp_dir.path().join("data");
-        std::fs::create_dir_all(&data_dir).unwrap();
-
-        let orphan_dir = data_dir.join(".compaction-tmp-99");
-        std::fs::create_dir_all(&orphan_dir).unwrap();
-        // Put a partial component file inside to make it non-trivially non-empty
-        std::fs::write(orphan_dir.join("partial.db"), b"partial content").unwrap();
-
-        assert!(
-            orphan_dir.exists(),
-            "Orphan dir should exist before engine creation"
-        );
-
-        let config = config_for(&temp_dir);
-        let _engine = WriteEngine::new(config).unwrap();
-
-        assert!(
-            !orphan_dir.exists(),
-            "Startup sweep must remove orphaned .compaction-tmp-99/ directory"
-        );
-    }
-
-    #[test]
-    fn test_startup_sweep_removes_orphaned_partial_sstable() {
-        // Pre-seed nb-99-big-Data.db (and friends) WITHOUT a TOC.txt in the
-        // keyspace/table subdirectory.  WriteEngine::new() must remove them.
-        let temp_dir = TempDir::new().unwrap();
-        let data_dir = temp_dir.path().join("data");
-        let sstable_dir = data_dir.join("test_ks").join("test_table");
-        std::fs::create_dir_all(&sstable_dir).unwrap();
-
-        // Create orphaned components (no TOC.txt)
-        let orphan_components = [
-            "nb-99-big-Data.db",
-            "nb-99-big-Index.db",
-            "nb-99-big-Statistics.db",
-        ];
-        for name in &orphan_components {
-            std::fs::write(sstable_dir.join(name), b"orphaned").unwrap();
-        }
-
-        // Also create a complete SSTable (has TOC.txt) — must NOT be touched
-        let complete_components = ["nb-1-big-Data.db", "nb-1-big-Index.db", "nb-1-big-TOC.txt"];
-        for name in &complete_components {
-            std::fs::write(sstable_dir.join(name), b"good").unwrap();
-        }
-
-        let config = config_for(&temp_dir);
-        let _engine = WriteEngine::new(config).unwrap();
-
-        // Orphaned components must be gone
-        for name in &orphan_components {
-            assert!(
-                !sstable_dir.join(name).exists(),
-                "Startup sweep must remove orphaned component {:?}",
-                name
-            );
-        }
-
-        // Complete SSTable must remain intact
-        for name in &complete_components {
-            assert!(
-                sstable_dir.join(name).exists(),
-                "Startup sweep must NOT remove complete SSTable component {:?}",
-                name
-            );
-        }
-    }
-
-    #[test]
-    fn test_startup_sweep_leaves_complete_sstable_intact() {
-        // A full SSTable set (Data.db + TOC.txt + others) must survive the sweep.
-        let temp_dir = TempDir::new().unwrap();
-        let data_dir = temp_dir.path().join("data");
-        let sstable_dir = data_dir.join("test_ks").join("test_table");
-        std::fs::create_dir_all(&sstable_dir).unwrap();
-
-        let all_components = [
-            "nb-3-big-Data.db",
-            "nb-3-big-Index.db",
-            "nb-3-big-Summary.db",
-            "nb-3-big-Statistics.db",
-            "nb-3-big-Filter.db",
-            "nb-3-big-Digest.crc32",
-            "nb-3-big-TOC.txt",
-        ];
-        for name in &all_components {
-            std::fs::write(sstable_dir.join(name), b"complete").unwrap();
-        }
-
-        let config = config_for(&temp_dir);
-        let _engine = WriteEngine::new(config).unwrap();
-
-        for name in &all_components {
-            assert!(
-                sstable_dir.join(name).exists(),
-                "Complete SSTable component {:?} must not be removed by startup sweep",
-                name
-            );
-        }
-    }
-
-    // ============================================================================
-    // Issue #474 review follow-up: NB-1 startup sweep tests
-    // ============================================================================
-
-    /// Helper: build a WriteEngineConfig pointing at a given data/wal dir pair.
-    fn config_for(temp_dir: &TempDir) -> WriteEngineConfig {
-        WriteEngineConfig::new(
-            temp_dir.path().join("data"),
-            temp_dir.path().join("wal"),
-            create_test_schema(),
-        )
-    }
+    // Startup orphan-sweep coverage lives in `write_engine::sweep` (issue #1393),
+    // which owns the sweep implementation and its thorough acceptance tests
+    // (true-orphan removal, never-delete-live-data, non-fatal surfaced failures,
+    // idempotence, and the crash-mid-compaction e2e).
 }
