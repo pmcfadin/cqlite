@@ -27,6 +27,23 @@
 //! References:
 //! - Parser: `cqlite-core/src/storage/sstable/compression_info.rs`
 //! - Cassandra source: `CompressionMetadata.java:375-392`
+//!
+//! # Claim boundary — BUILT-BUT-UNWIRED (issue #1406, posture b)
+//!
+//! CQLite's production write surface (flush + compaction via `SSTableWriter`)
+//! emits **uncompressed** SSTables only, and therefore never emits a
+//! CompressionInfo.db. This writer and its sibling `CompressedDataWriter` are
+//! wired ONLY into read-path fixtures: they let tests synthesize compressed
+//! SSTables so the *reader/decompressor* can be exercised. They are NOT wired
+//! into any production write path, and there is ZERO Cassandra-side byte-parity
+//! coverage for a CQLite-emitted CompressionInfo.db.
+//!
+//! To keep that boundary honest and fail-closed, any code that would emit a
+//! CompressionInfo.db as part of a real (claimed) SSTable must first pass
+//! [`CompressionInfoWriter::guard_unsupported_production_write`], which errors
+//! for every real compression algorithm rather than emitting a false/partial
+//! artifact or making an unearned parity claim. Wiring real compressed writes
+//! (posture a) is tracked in issue #1406.
 
 use crate::error::{Error, Result};
 use std::fs::File;
@@ -155,6 +172,37 @@ impl CompressionInfoWriter {
     /// Create a new CompressionInfo.db writer
     pub fn new(path: PathBuf) -> Self {
         Self { path }
+    }
+
+    /// Fail-closed guard for PRODUCTION CompressionInfo.db emission (issue #1406,
+    /// posture b — "guard now, wire compression later").
+    ///
+    /// CQLite does not have a wired compressed-write path: flush and compaction
+    /// emit uncompressed SSTables (no CompressionInfo.db), and no Cassandra-side
+    /// byte-parity coverage exists for a CQLite-emitted CompressionInfo.db. Any
+    /// code that intends to produce a CompressionInfo.db as part of a real,
+    /// parity-claimed SSTable MUST call this first so an unwired compression
+    /// request errors clearly instead of silently emitting an uncompressed
+    /// SSTable (a false claim) or a partial/unvalidated CompressionInfo.db.
+    ///
+    /// [`CompressionAlgorithm::None`] (uncompressed) is permitted; every real
+    /// compression algorithm returns [`Error::UnsupportedFormat`]. This is the
+    /// enforced claim boundary — see the module docs and issue #1406.
+    ///
+    /// Note: this does NOT restrict [`Self::build_to_vec`] / [`Self::write`],
+    /// which read-path fixtures legitimately use to synthesize compressed
+    /// SSTables for exercising the decompressing reader.
+    pub fn guard_unsupported_production_write(algorithm: CompressionAlgorithm) -> Result<()> {
+        match algorithm {
+            CompressionAlgorithm::None => Ok(()),
+            other => Err(Error::UnsupportedFormat(format!(
+                "compressed SSTable writing is not supported: CQLite emits \
+                 uncompressed SSTables only (requested {}). The CompressionInfo.db \
+                 write path is built but unwired and unvalidated against Cassandra \
+                 (see issue #1406).",
+                other.cassandra_name()
+            ))),
+        }
     }
 
     /// Write compression metadata to file in Cassandra's binary format.
@@ -431,6 +479,41 @@ mod tests {
         assert_eq!(info.data_length, 32000);
         assert_eq!(info.chunk_offsets, vec![0, 9876]);
         assert!(info.option_pairs.is_empty());
+    }
+
+    /// Issue #1406 (posture b): the production-emission guard fails closed for
+    /// every real compression algorithm and permits only the uncompressed case.
+    #[test]
+    fn test_guard_unsupported_production_write_fails_closed() {
+        // Uncompressed is the only permitted production write.
+        assert!(
+            CompressionInfoWriter::guard_unsupported_production_write(CompressionAlgorithm::None)
+                .is_ok(),
+            "uncompressed (None) production writes must be permitted"
+        );
+
+        for algo in [
+            CompressionAlgorithm::Lz4,
+            CompressionAlgorithm::Snappy,
+            CompressionAlgorithm::Deflate,
+            CompressionAlgorithm::Zstd,
+        ] {
+            let err = CompressionInfoWriter::guard_unsupported_production_write(algo)
+                .expect_err("real compression must be rejected by the fail-closed guard");
+            match err {
+                Error::UnsupportedFormat(msg) => {
+                    assert!(
+                        msg.contains(algo.cassandra_name()),
+                        "error must name the requested algorithm, got: {msg}"
+                    );
+                    assert!(
+                        msg.contains("1406"),
+                        "error must cite the claim-boundary issue, got: {msg}"
+                    );
+                }
+                other => panic!("expected UnsupportedFormat, got {other:?}"),
+            }
+        }
     }
 
     #[test]

@@ -380,6 +380,20 @@ enforced in code: `BigVersionGates::from_version` rejects `< na` and `BtiVersion
 rejects non-`da`, both with `Error::UnsupportedVersion`; `SSTableReader::open` propagates that
 error rather than falling back. Do not re-litigate pre-`na` "regressions."
 
+### Write surface: CQLite writes UNCOMPRESSED SSTables (claim boundary, issue #1406)
+The production write surface (flush + compaction via `SSTableWriter`) emits
+**uncompressed** SSTables only and never emits a `CompressionInfo.db`. The
+compressed-write building blocks (`CompressedDataWriter`, `CompressionInfoWriter`)
+are built but **UNWIRED** — they exist solely to synthesize compressed fixtures for
+the read/decompress path, and carry zero Cassandra-side byte-parity coverage for a
+CQLite-emitted `CompressionInfo.db`. This is fail-closed in code: any attempt to
+configure compressed production writing returns `Error::UnsupportedFormat`
+(`SSTableWriter::with_compression` / `CompressionInfoWriter::guard_unsupported_production_write`).
+Do NOT claim CQLite emits compressed SSTables (parity manifest records this as
+`claim.blocked.compressed_sstable_writes`; the safe wording is
+`claim.safe.uncompressed_sstable_writes`). Wiring compressed writes (posture a) is
+tracked in issue #1406.
+
 ### Code Quality
 - `RUSTFLAGS="-D warnings"` must pass
 - No `unwrap()`/`expect()` in library code

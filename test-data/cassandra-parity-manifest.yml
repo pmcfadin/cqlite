@@ -15706,6 +15706,36 @@ scenarios:
 #                   as a counter-example. Each names the safe wording to use.
 # ==============================================================================
 claims:
+  - id: claim.safe.uncompressed_sstable_writes
+    kind: safe
+    phrase: >-
+      CQLite writes uncompressed SSTables
+    rationale: >-
+      The production write surface (flush + compaction via SSTableWriter) emits
+      UNCOMPRESSED SSTables only and never emits a CompressionInfo.db. The
+      compressed-write building blocks (CompressedDataWriter,
+      CompressionInfoWriter) are built but UNWIRED — used only by read-path
+      fixtures — and any attempt to configure compressed production writing is
+      fail-closed (SSTableWriter::with_compression /
+      CompressionInfoWriter::guard_unsupported_production_write return
+      Error::UnsupportedFormat). This is the claim boundary from issue #1406,
+      posture (b): guard now, wire compression later. It scopes the write claim
+      to uncompressed output rather than implying byte-validated compressed
+      writing, for which zero Cassandra-side coverage exists.
+    evidence_scenarios:
+      - cass.write_load_path.cql_sstable_writer.finished_data_db_artifacts
+
+  - id: claim.blocked.compressed_sstable_writes
+    kind: blocked
+    phrase: CQLite writes compressed SSTables
+    rationale: >-
+      CQLite does not emit compressed SSTables from any production path. The
+      compressed-write modules are built but unwired and carry no Cassandra-side
+      byte-parity coverage for a CQLite-emitted CompressionInfo.db (issue #1406).
+      Claiming compressed writing overstates the write surface, which is
+      fail-closed for every real compression algorithm.
+    safe_alternative: claim.safe.uncompressed_sstable_writes
+
   - id: claim.safe.selected_fixture_validation
     kind: safe
     phrase: >-

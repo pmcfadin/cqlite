@@ -1524,9 +1524,15 @@ Public/release-facing parity claims are enforced by the claim-scan lint. Safe wo
 - **claim.safe.traceable_cassandra_parity_suite** — a traceable parity suite mapping CQLite tests to specific Cassandra scenarios
   - Why safe: The parity manifest maps each CQLite test/fixture to the Cassandra scenario it mirrors, so claims are traceable to named evidence. This is distinct from running Cassandra's own JVM test suite.
   - Backed by: `cass.compaction.CompactionIteratorTest.differential_compaction_loop`, `cass.data_db_decode.serialization_mirror.multi_clustering_column_order`
+- **claim.safe.uncompressed_sstable_writes** — CQLite writes uncompressed SSTables
+  - Why safe: The production write surface (flush + compaction via SSTableWriter) emits UNCOMPRESSED SSTables only and never emits a CompressionInfo.db. The compressed-write building blocks (CompressedDataWriter, CompressionInfoWriter) are built but UNWIRED — used only by read-path fixtures — and any attempt to configure compressed production writing is fail-closed (SSTableWriter::with_compression / CompressionInfoWriter::guard_unsupported_production_write return Error::UnsupportedFormat). This is the claim boundary from issue #1406, posture (b): guard now, wire compression later. It scopes the write claim to uncompressed output rather than implying byte-validated compressed writing, for which zero Cassandra-side coverage exists.
+  - Backed by: `cass.write_load_path.cql_sstable_writer.finished_data_db_artifacts`
 
 ### Blocked phrases (rejected unless explicitly scoped)
 
+- **claim.blocked.compressed_sstable_writes** — "CQLite writes compressed SSTables"
+  - Why blocked: CQLite does not emit compressed SSTables from any production path. The compressed-write modules are built but unwired and carry no Cassandra-side byte-parity coverage for a CQLite-emitted CompressionInfo.db (issue #1406). Claiming compressed writing overstates the write surface, which is fail-closed for every real compression algorithm.
+  - Use instead: `claim.safe.uncompressed_sstable_writes`
 - **claim.blocked.full_compaction_byte_parity** — "full compaction byte parity"
   - Why blocked: Byte-for-byte compaction parity is proven only for the scenarios that carry byte_for_byte evidence, not for all compaction inputs/strategies. "Full" generalizes byte parity beyond the manifest's evidence.
   - Use instead: `claim.safe.rust_byte_level_coverage`
