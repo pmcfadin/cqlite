@@ -41,7 +41,7 @@
 
 use crate::platform::Platform;
 use crate::storage::sstable::compression_info::CompressionInfo;
-use crate::storage::sstable::reader::SSTableReader;
+use crate::storage::sstable::reader::{extract_sstable_base_name, SSTableReader};
 use crate::storage::sstable::version_gate::{SsTableDescriptor, SsTableFormat};
 use crate::{Config, Error, Result};
 use std::collections::BTreeMap;
@@ -311,7 +311,60 @@ pub async fn verify_sstable(
     platform: Arc<Platform>,
 ) -> Result<VerifyReport> {
     let components = resolve_components(dir)?;
+    verify_components(dir, components, mode, config, platform).await
+}
 
+/// Verify the EXACT SSTable generation identified by `data_db_path`.
+///
+/// Additive companion to [`verify_sstable`] (issue #1283, roborev). `verify_sstable`
+/// resolves the *lexicographically-first* `*-Data.db` in a directory, which is the
+/// wrong generation when a directory holds several: an `SSTableReader` opened on
+/// generation N would otherwise report the integrity of whichever `Data.db` sorts
+/// first. This entry point verifies precisely the generation whose components share
+/// `data_db_path`'s base name (e.g. `nb-2-big`), so a caller that already knows its
+/// own `Data.db` (an open reader) gets a verdict for THAT generation.
+///
+/// `data_db_path` must be an existing `*-Data.db` file; its parent directory supplies
+/// the sibling components. Returns a [`VerifyReport`] with the same corruption-as-
+/// findings contract as [`verify_sstable`].
+pub async fn verify_sstable_generation(
+    data_db_path: &Path,
+    mode: VerifyMode,
+    config: &Config,
+    platform: Arc<Platform>,
+) -> Result<VerifyReport> {
+    let dir = generation_dir(data_db_path);
+    let components = resolve_components_for_data_path(dir, data_db_path)?;
+    verify_components(dir, components, mode, config, platform).await
+}
+
+/// Resolve the directory that holds `data_db_path`'s sibling components.
+///
+/// `Path::parent()` returns an EMPTY path (not `None`) for a relative,
+/// directory-less filename (e.g. `nb-1-big-Data.db` opened from the SSTable dir as
+/// cwd), so a naive scan would look in the empty path instead of the current
+/// directory and fail component resolution — even though `SSTableReader::open`
+/// found the file (its sibling lookup joins onto the empty parent, which resolves
+/// relative to cwd). Normalize a missing/empty parent to `.` so component
+/// resolution scans the current directory (issue #1283, roborev).
+fn generation_dir(data_db_path: &Path) -> &Path {
+    match data_db_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    }
+}
+
+/// Shared verification body: runs all checks over an already-resolved
+/// [`ComponentSet`]. Both [`verify_sstable`] (first-generation resolution) and
+/// [`verify_sstable_generation`] (exact-generation resolution) delegate here so the
+/// check pipeline is defined exactly once (issue #1283).
+async fn verify_components(
+    dir: &Path,
+    components: ComponentSet,
+    mode: VerifyMode,
+    config: &Config,
+    platform: Arc<Platform>,
+) -> Result<VerifyReport> {
     let mut findings: Vec<VerifyFinding> = Vec::new();
 
     // ---- Check 1: TOC.txt completeness + component presence ----------------
@@ -469,8 +522,9 @@ pub async fn verify_sstable(
     })
 }
 
-/// Locate the SSTable generation in `dir` and enumerate its on-disk components.
-fn resolve_components(dir: &Path) -> Result<ComponentSet> {
+/// Read all regular files in `dir`, returning `(all_files, data_files)` where
+/// `data_files` is the subset ending in `-Data.db`.
+fn read_dir_files(dir: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     let entries = std::fs::read_dir(dir).map_err(|e| {
         Error::invalid_path(format!("Cannot read SSTable dir {}: {}", dir.display(), e))
     })?;
@@ -489,6 +543,16 @@ fn resolve_components(dir: &Path) -> Result<ComponentSet> {
             }
         }
     }
+    Ok((all_files, data_files))
+}
+
+/// Locate the SSTable generation in `dir` and enumerate its on-disk components.
+///
+/// If `dir` contains several generations, the lexicographically-first `*-Data.db`
+/// is selected (documented behavior of [`verify_sstable`]). To verify a SPECIFIC
+/// generation, use [`resolve_components_for_data_path`] / [`verify_sstable_generation`].
+fn resolve_components(dir: &Path) -> Result<ComponentSet> {
+    let (all_files, mut data_files) = read_dir_files(dir)?;
 
     data_files.sort();
     let data_path = data_files.into_iter().next().ok_or_else(|| {
@@ -498,15 +562,52 @@ fn resolve_components(dir: &Path) -> Result<ComponentSet> {
         ))
     })?;
 
+    build_component_set(&all_files, data_path)
+}
+
+/// Enumerate the components for the EXACT generation identified by `data_path`
+/// within `dir`. Unlike [`resolve_components`], this does not pick the first-sorted
+/// generation; it uses precisely the caller-supplied `data_path` (issue #1283).
+fn resolve_components_for_data_path(dir: &Path, data_path: &Path) -> Result<ComponentSet> {
+    if !data_path.is_file() {
+        return Err(Error::not_found(format!(
+            "SSTable Data.db component not found at {}",
+            data_path.display()
+        )));
+    }
+    let (all_files, _data_files) = read_dir_files(dir)?;
+    build_component_set(&all_files, data_path.to_path_buf())
+}
+
+/// Build a [`ComponentSet`] for `data_path`, indexing the sibling components in
+/// `all_files` that share its base name.
+fn build_component_set(all_files: &[PathBuf], data_path: PathBuf) -> Result<ComponentSet> {
     let data_name = data_path
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| Error::invalid_path("Data.db filename is not valid UTF-8"))?;
-    // Strip the trailing "-Data.db" to get the base name (e.g. "nb-1-big").
+    // Derive the base name with the SAME tolerance as `SSTableReader::open`, which
+    // locates its sibling components via `extract_sstable_base_name` and still opens
+    // a file whose name it cannot map (it simply skips the siblings). A reader that
+    // opened successfully MUST get an `IntegrityCheckResult`, not an `Err`, so this
+    // never rejects on the "-Data.db" suffix (issue #1283, roborev):
+    //   1. standard names end in "-Data.db" -> strip it (e.g. "nb-1-big");
+    //   2. otherwise fall back to the reader's own base-name derivation (descriptor
+    //      parse, then the {prefix}-{gen}-{format} heuristic) so any non-standard
+    //      name the reader accepts resolves the same base here;
+    //   3. if even that cannot map the name, degrade to the filename minus its ".db"
+    //      extension so we still verify what we can (Data.db digest, chunk CRCs)
+    //      rather than erroring — matching reader-open tolerance.
     let base_name = data_name
         .strip_suffix("-Data.db")
-        .ok_or_else(|| Error::invalid_path("Data.db filename did not end with -Data.db"))?
-        .to_string();
+        .map(str::to_string)
+        .or_else(|| extract_sstable_base_name(&data_path))
+        .unwrap_or_else(|| {
+            data_name
+                .strip_suffix(".db")
+                .unwrap_or(data_name)
+                .to_string()
+        });
 
     // Detect format via the descriptor parser, which scans for the "big"/"bti"
     // segment correctly even when the SSTable id is a hyphenated UUID
@@ -2369,5 +2470,73 @@ mod tests {
             bti_partition_identity_mismatch(&leaves, &data).expect("undercount must be flagged");
         assert!(detail.contains("2 partition keys"));
         assert!(detail.contains("3 distinct partitions"));
+    }
+
+    // ---- Finding 1 (roborev round 2): tolerate reader filename shapes -------
+    //
+    // `SSTableReader::open` does not enforce a "-Data.db" suffix and still opens a
+    // file whose name it cannot map (it just skips siblings). A reader that opened
+    // MUST get an `IntegrityCheckResult` from `perform_integrity_check`, not an
+    // `Err`, so `build_component_set` (the resolution the integrity check ultimately
+    // drives) must never reject on the suffix.
+
+    #[test]
+    fn build_component_set_matches_reader_base_name_for_non_data_db_name() {
+        // A name that does NOT end in "-Data.db" but that the reader's own
+        // base-name derivation accepts must resolve to the SAME base name the
+        // reader uses for sibling lookup — never an Err (issue #1283, roborev).
+        let p = PathBuf::from("/dir/nb-7-big-Statistics.db");
+        let set = build_component_set(&[p.clone()], p.clone())
+            .expect("reader-accepted non-Data.db name must not error");
+        assert_eq!(
+            Some(set.base_name),
+            extract_sstable_base_name(&p),
+            "verify base name must match SSTableReader::open's base-name derivation"
+        );
+    }
+
+    #[test]
+    fn build_component_set_degrades_on_unmappable_name() {
+        // A name the reader can open but that neither ends in "-Data.db" nor maps
+        // via the reader's derivation degrades to the filename minus ".db" (verify
+        // what we can) rather than erroring.
+        let p = PathBuf::from("/dir/weird.db");
+        let set = build_component_set(&[], p.clone()).expect("must degrade, not error");
+        assert_eq!(set.base_name, "weird");
+        assert_eq!(set.data_path, p);
+    }
+
+    #[test]
+    fn build_component_set_standard_name_still_resolves_canonically() {
+        let p = PathBuf::from("/dir/nb-3-big-Data.db");
+        let set = build_component_set(&[p.clone()], p).expect("standard name resolves");
+        assert_eq!(set.base_name, "nb-3-big");
+    }
+
+    // ---- Finding 2 (roborev round 2): relative Data.db path, empty parent ---
+    //
+    // A relative, directory-less filename yields an EMPTY parent from
+    // `Path::parent()` (Some(""), not None). `generation_dir` must normalize that
+    // to "." so sibling components are scanned in the current directory — matching
+    // where `SSTableReader::open` found the file.
+
+    #[test]
+    fn generation_dir_normalizes_empty_parent_to_current_dir() {
+        // Relative bare filename opened from the SSTable dir as cwd: empty parent → ".".
+        assert_eq!(
+            generation_dir(Path::new("nb-1-big-Data.db")),
+            Path::new("."),
+            "a relative directory-less Data.db must resolve against the current directory"
+        );
+        // Absolute path keeps its real parent.
+        assert_eq!(
+            generation_dir(Path::new("/x/y/nb-1-big-Data.db")),
+            Path::new("/x/y")
+        );
+        // Relative path WITH a directory component keeps that directory.
+        assert_eq!(
+            generation_dir(Path::new("sub/nb-1-big-Data.db")),
+            Path::new("sub")
+        );
     }
 }

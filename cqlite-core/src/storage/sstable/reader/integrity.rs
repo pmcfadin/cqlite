@@ -3,13 +3,12 @@
 //! This module contains methods for checking SSTable integrity, monitoring health,
 //! and handling tombstone filtering.
 
+use super::super::verify::{self, VerifyMode};
 use super::{IntegrityCheckResult, IntegrityStatus, SSTableReader, SSTableReaderHealthMetrics};
 use crate::types::{ScanRow, Value};
 use crate::Result;
 
 use log::{debug, info};
-use std::io::SeekFrom;
-use tokio::io::AsyncSeekExt;
 
 #[cfg(feature = "tombstones")]
 use super::super::tombstone_merger::GenerationValue;
@@ -47,89 +46,70 @@ impl SSTableReader {
         })
     }
 
-    /// Perform integrity check on the SSTable file
+    /// Perform an integrity check on the SSTable.
+    ///
+    /// Issue #1283: this is a THIN PROJECTION over `verify::verify_sstable` — the
+    /// single source of truth for SSTable integrity — not an independent check
+    /// pipeline. The legacy implementation walked only `Data.db` blocks, so a
+    /// corrupt `Index.db` / `Digest.crc32` / `Summary.db` / `Filter.db` or
+    /// out-of-order keys (all of which the verifier FAILs) read back `Healthy`
+    /// here — a divergent verdict. We now run the authoritative verifier in
+    /// `Full` mode over the reader's EXACT generation (`self.file_path`, not merely
+    /// its parent directory — roborev #1283) and map its `VerifyReport` onto the
+    /// legacy `IntegrityCheckResult` shape the (test-only) consumers expect.
     pub async fn perform_integrity_check(&self) -> Result<IntegrityCheckResult> {
         debug!("Starting integrity check for {:?}", self.file_path);
 
-        let mut result = IntegrityCheckResult {
+        // Delegate to the authoritative engine, verifying the EXACT generation this
+        // reader is opened on (issue #1283, roborev). The directory may hold several
+        // generations; `verify_sstable` resolves the lexicographically-first
+        // `*-Data.db`, which would report the wrong SSTable's integrity here.
+        // `verify_sstable_generation` verifies precisely `self.file_path`'s
+        // generation. We use the SAME Config/Platform the reader was opened with.
+        // Data corruption is reported as findings inside an Ok(report); only
+        // environmental problems return Err.
+        let report = verify::verify_sstable_generation(
+            &self.file_path,
+            VerifyMode::Full,
+            &self.open_config,
+            self.platform.clone(),
+        )
+        .await?;
+
+        // Project VerifyReport -> IntegrityCheckResult.
+        //  - any finding  => Corrupted; none => Healthy (no Degraded — issue #1283).
+        //  - rows_scanned => total_entries.
+        //  - findings' rendered strings => parsing_errors.
+        //  - per-block indices (corrupted_blocks/unreadable_blocks/total_blocks_checked)
+        //    are not produced by the verifier and no production consumer reads them,
+        //    so they stay best-effort empty/zero.
+        let parsing_errors: Vec<String> = report.findings.iter().map(|f| f.to_string()).collect();
+        let overall_status = if report.findings.is_empty() {
+            IntegrityStatus::Healthy
+        } else {
+            IntegrityStatus::Corrupted
+        };
+
+        // `checksum_mismatches` is a deprecated, always-0 compatibility field
+        // (issue #1283): the projection never populates it. The narrow allow keeps
+        // clippy `-D warnings` clean while the dead computation stays removed.
+        #[allow(deprecated)]
+        let result = IntegrityCheckResult {
             file_path: self.file_path.clone(),
             total_blocks_checked: 0,
             corrupted_blocks: Vec::new(),
             checksum_mismatches: 0,
             unreadable_blocks: 0,
-            total_entries: 0,
-            parsing_errors: Vec::new(),
-            overall_status: IntegrityStatus::Healthy,
+            total_entries: report.rows_scanned.unwrap_or(0),
+            parsing_errors,
+            overall_status,
         };
 
-        // Read through a private per-scan cursor (issue #815) so the integrity
-        // check never mutates the shared point-read cursor and can run alongside
-        // concurrent reads.
-        let cursor = self.new_scan_cursor().await?;
-        let header_size = self.calculate_header_size();
-        {
-            let mut file_guard = cursor.file.lock().await;
-            file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
-        }
-
-        // Check each block. Match on `read_next_block` explicitly rather than
-        // `.ok().flatten()` (issue #1396/#1283): a non-recoverable read error —
-        // e.g. an uncompressed `CRC.db` chunk mismatch now surfaced by the read
-        // path — must be RECORDED as corruption, not silently swallowed into a
-        // clean end-of-stream that leaves the file reported Healthy.
-        loop {
-            let block_data = match self.read_next_block(&cursor).await {
-                Ok(Some(block)) => block,
-                Ok(None) => break, // clean end of the data section
-                Err(e) => {
-                    // The next block could not be read/verified: the file is
-                    // corrupt from here on. Record it and stop — subsequent
-                    // reads would fail the same way.
-                    let block_no = result.total_blocks_checked + 1;
-                    result.unreadable_blocks += 1;
-                    result
-                        .parsing_errors
-                        .push(format!("Block {}: {}", block_no, e));
-                    result.corrupted_blocks.push(block_no);
-                    break;
-                }
-            };
-            result.total_blocks_checked += 1;
-
-            // Try to parse block entries
-            match self.parse_block_entries(&block_data, None) {
-                Ok(entries) => {
-                    result.total_entries += entries.len();
-                }
-                Err(e) => {
-                    result
-                        .parsing_errors
-                        .push(format!("Block {}: {}", result.total_blocks_checked, e));
-                    result.corrupted_blocks.push(result.total_blocks_checked);
-                }
-            }
-
-            // Yield control periodically
-            if result.total_blocks_checked % 100 == 0 {
-                tokio::task::yield_now().await;
-            }
-        }
-
-        // Determine overall status
-        result.overall_status =
-            if !result.corrupted_blocks.is_empty() || !result.parsing_errors.is_empty() {
-                IntegrityStatus::Corrupted
-            } else if result.checksum_mismatches > 0 {
-                IntegrityStatus::Degraded
-            } else {
-                IntegrityStatus::Healthy
-            };
-
         info!(
-            "Integrity check completed for {:?}: {:?}, {} blocks checked, {} entries",
+            "Integrity check completed for {:?}: {:?}, {} findings, {} rows scanned",
             self.file_path,
             result.overall_status,
-            result.total_blocks_checked,
+            result.parsing_errors.len(),
             result.total_entries
         );
 

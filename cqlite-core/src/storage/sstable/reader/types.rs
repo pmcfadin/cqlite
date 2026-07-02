@@ -14,7 +14,7 @@ use crate::{
     platform::Platform,
     schema::{TableSchema, UdtRegistry},
     types::TableId,
-    RowKey, ScanRow,
+    Config, RowKey, ScanRow,
 };
 
 use super::super::{
@@ -66,7 +66,17 @@ pub struct IntegrityCheckResult {
     pub total_blocks_checked: usize,
     /// List of corrupted block numbers
     pub corrupted_blocks: Vec<usize>,
-    /// Number of checksum mismatches
+    /// Number of checksum mismatches.
+    ///
+    /// Deprecated (issue #1283): the consolidated integrity check projects over the
+    /// authoritative verifier `verify::verify_sstable`, which does not surface a
+    /// per-block checksum-mismatch count. This field is retained for API
+    /// compatibility but is ALWAYS `0`; the dead computation that once populated it
+    /// has been removed. Inspect `parsing_errors` / `overall_status` instead.
+    #[deprecated(
+        since = "0.12.0",
+        note = "consolidated integrity check never populates this; it is always 0 (#1283) — use parsing_errors/overall_status"
+    )]
     pub checksum_mismatches: usize,
     /// Number of unreadable blocks
     pub unreadable_blocks: usize,
@@ -79,13 +89,29 @@ pub struct IntegrityCheckResult {
 }
 
 /// Integrity status levels
+///
+/// Only two states are PRODUCED: the integrity check delegates to the authoritative
+/// verifier `verify::verify_sstable` (issue #1283), which reports either zero
+/// findings (`Healthy`) or one-or-more findings (`Corrupted`). The former `Degraded`
+/// state was driven by a `checksum_mismatches` counter that was never incremented —
+/// it was unreachable dead code. `Degraded` is retained as a deprecated variant for
+/// API compatibility but is NEVER returned by `perform_integrity_check`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IntegrityStatus {
-    /// File is healthy
+    /// File is healthy (the verifier reported no findings)
     Healthy,
-    /// File has minor issues but is readable
+    /// File has minor issues but is readable.
+    ///
+    /// Deprecated (issue #1283): the consolidated integrity check never produces
+    /// this status — it projects `verify::verify_sstable` findings onto exactly
+    /// `Healthy` (no findings) or `Corrupted` (≥1 finding). Retained for API
+    /// compatibility only.
+    #[deprecated(
+        since = "0.12.0",
+        note = "consolidated integrity check never produces Degraded; only Healthy|Corrupted (#1283)"
+    )]
     Degraded,
-    /// File has corruption and may be unreadable
+    /// File has corruption (the verifier reported at least one finding)
     Corrupted,
 }
 
@@ -235,6 +261,13 @@ pub struct SSTableReader {
     pub(crate) block_cache: HashMap<u64, CachedBlock>,
     /// Reader configuration
     pub(crate) config: SSTableReaderConfig,
+    /// The full [`Config`] this reader was opened with.
+    ///
+    /// Retained so `perform_integrity_check` can delegate to the authoritative
+    /// verifier `verify::verify_sstable` — the single source of truth for SSTable
+    /// integrity (issue #1283) — using the SAME configuration the reader itself
+    /// was opened under, rather than re-deriving or defaulting it.
+    pub(crate) open_config: Config,
     /// Platform abstraction
     pub(crate) platform: Arc<Platform>,
     /// Statistics
