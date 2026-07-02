@@ -362,6 +362,151 @@ mod tests {
         engine.flush().await.expect("flush");
     }
 
+    /// Build a source dir holding two generations (`nb-1` = partition 1, `nb-2` =
+    /// partition 2), returning the `.../ks_ptr/users` table directory.
+    async fn build_two_generations(root: &Path) -> PathBuf {
+        let data_dir = root.join("data");
+        let wal_dir = root.join("wal");
+        let config = WriteEngineConfig::new(data_dir.clone(), wal_dir, users_schema());
+        let mut engine = WriteEngine::new(config).expect("write engine");
+        for id in [1_i32, 2_i32] {
+            let table_id = TableId::new("ks_ptr", "users");
+            let pk = PartitionKey::single("id", Value::Integer(id));
+            let ops = vec![CellOperation::Write {
+                column: "value".to_string(),
+                value: Value::Text(format!("v{}", id)),
+            }];
+            engine
+                .write_async(Mutation::new(table_id, pk, None, ops, 1_000 + id as i64, None))
+                .await
+                .expect("write");
+            engine.flush().await.expect("flush");
+        }
+        data_dir.join("ks_ptr").join("users")
+    }
+
+    fn copy_generation(src_table_dir: &Path, dst_table_dir: &Path, gen: u32) {
+        std::fs::create_dir_all(dst_table_dir).expect("mkdir dst");
+        let prefix = format!("nb-{}-big-", gen);
+        let mut copied = 0;
+        for entry in std::fs::read_dir(src_table_dir).expect("read src") {
+            let entry = entry.expect("entry");
+            let name = entry.file_name();
+            let name = name.to_str().expect("utf8");
+            if name.starts_with(&prefix) {
+                std::fs::copy(entry.path(), dst_table_dir.join(name)).expect("copy");
+                copied += 1;
+            }
+        }
+        assert!(copied > 0, "copied generation {} components", gen);
+    }
+
+    fn scan_partition_ids(rows: &[(crate::RowKey, crate::ScanRow)]) -> std::collections::BTreeSet<i32> {
+        rows.iter()
+            .map(|(key, _)| {
+                let b = key.as_bytes();
+                assert_eq!(b.len(), 4, "int pk is 4 bytes");
+                i32::from_be_bytes([b[0], b[1], b[2], b[3]])
+            })
+            .collect()
+    }
+
+    /// Spec scenario "In-flight scan unaffected by concurrent refresh".
+    ///
+    /// A scan resolves its reader list once (under the read guard) and holds
+    /// `Arc` clones; a scan's output is therefore a pure function of the reader
+    /// set it captured. This test pins the isolation invariant deterministically
+    /// (no timing): it captures the exact `Arc` reader set an in-flight scan
+    /// would hold on the pre-refresh directory, adds a generation and refreshes,
+    /// and asserts (a) the captured set is byte-for-byte unchanged by the refresh
+    /// — so a scan bound to it still yields the pre-refresh content {1} — and
+    /// (b) a scan started AFTER the refresh sees the post-refresh content {1, 2}.
+    #[tokio::test]
+    async fn in_flight_scan_unaffected_by_concurrent_refresh() {
+        let src = TempDir::new().expect("tmp src");
+        let src_table_dir = build_two_generations(src.path()).await;
+
+        let live = TempDir::new().expect("tmp live");
+        let live_table_dir = live.path().join("ks_ptr").join("users");
+        copy_generation(&src_table_dir, &live_table_dir, 1);
+
+        let config = Config::default();
+        let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+        let manager = SSTableManager::new(
+            live.path(),
+            &config,
+            platform,
+            #[cfg(feature = "state_machine")]
+            None,
+        )
+        .await
+        .expect("manager");
+
+        let schema = users_schema();
+        let table_id = crate::types::TableId::new("ks_ptr.users");
+
+        // Pre-refresh scan content is {1}; capture the exact Arc reader set an
+        // in-flight scan would hold (the read-guard snapshot the scan clones).
+        let pre_rows = manager
+            .scan(&table_id, None, None, None, Some(&schema))
+            .await
+            .expect("pre scan");
+        assert_eq!(
+            scan_partition_ids(&pre_rows),
+            std::collections::BTreeSet::from([1]),
+            "pre-refresh scan content is gen-1 only"
+        );
+        let held_snapshot: Vec<Arc<reader::SSTableReader>> = {
+            let table_readers = manager.table_readers.read().await;
+            table_readers.values().flatten().map(Arc::clone).collect()
+        };
+        assert_eq!(held_snapshot.len(), 1, "in-flight scan holds one gen-1 reader");
+
+        // Add gen-2 and refresh while that snapshot is "in flight".
+        copy_generation(&src_table_dir, &live_table_dir, 2);
+        let report = manager.refresh_tables().await.expect("refresh");
+        assert_eq!(report.readers_added, 1, "gen-2 added");
+
+        // (a) The captured in-flight reader set is unchanged by the refresh: the
+        //     same single gen-1 Arc (pointer identity), and NOT the gen-2 reader.
+        //     A scan bound to this unchanged set is therefore still exactly {1}.
+        let post_snapshot: Vec<Arc<reader::SSTableReader>> = {
+            let table_readers = manager.table_readers.read().await;
+            table_readers.values().flatten().map(Arc::clone).collect()
+        };
+        assert_eq!(post_snapshot.len(), 2, "manager now holds both generations");
+        assert_eq!(
+            held_snapshot.len(),
+            1,
+            "the in-flight snapshot is untouched by refresh"
+        );
+        assert!(
+            post_snapshot
+                .iter()
+                .any(|r| Arc::ptr_eq(r, &held_snapshot[0])),
+            "the pre-refresh gen-1 reader Arc survives the refresh unchanged"
+        );
+        let gen2_reader = post_snapshot
+            .iter()
+            .find(|r| !Arc::ptr_eq(r, &held_snapshot[0]))
+            .expect("gen-2 reader present post-refresh");
+        assert!(
+            !Arc::ptr_eq(gen2_reader, &held_snapshot[0]),
+            "the added gen-2 reader is NOT part of the in-flight snapshot (isolation)"
+        );
+
+        // (b) A scan started AFTER the refresh sees the post-refresh set {1, 2}.
+        let post_rows = manager
+            .scan(&table_id, None, None, None, Some(&schema))
+            .await
+            .expect("post scan");
+        assert_eq!(
+            scan_partition_ids(&post_rows),
+            std::collections::BTreeSet::from([1, 2]),
+            "post-refresh scan sees the new generation"
+        );
+    }
+
     /// Spec scenario "Unchanged directory is a cheap no-op": a refresh over an
     /// unchanged directory reports a zero delta AND keeps the exact same reader
     /// `Arc` objects (pointer identity — warm state preserved).
