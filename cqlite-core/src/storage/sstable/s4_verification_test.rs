@@ -340,9 +340,11 @@ mod s4_verification {
         // delta_minTimestamp = 1 → encode_vuint(1) = [0x01]
         meta.min_timestamp = TIMESTAMP_EPOCH + 1;
         meta.max_timestamp = TIMESTAMP_EPOCH + 1;
-        // delta_minLocalDeletionTime = 2 → encode_vuint(2) = [0x02]
-        meta.min_local_deletion_time = DELETION_TIME_EPOCH + 2;
-        meta.max_local_deletion_time = DELETION_TIME_EPOCH + 2;
+        // delta_minLocalDeletionTime = 2 → encode_vuint(2) = [0x02]. Drive through the
+        // authentic tombstone path so the drop-time histogram is populated: #1410 emits
+        // the DELETION_TIME_EPOCH no-deletion sentinel (delta 0) when there is NO
+        // tombstone, so a real LDT under test must record one here.
+        meta.update_local_deletion_time(DELETION_TIME_EPOCH + 2);
         // delta_minTTL = 3 → encode_vuint(3) = [0x03]
         meta.min_ttl = 3;
         meta.max_ttl = 10;
