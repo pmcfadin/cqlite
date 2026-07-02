@@ -161,3 +161,15 @@ captured for the common major-compaction case. Flagged as a fork because it trad
 (perf) for simplicity/safety, and the owner may want (B) for parity fidelity. **(A) can never resurrect
 data** — it only declines to drop in cases Cassandra would drop, so it is safe to ship (A) and file (B)
 as a follow-up if the owner wants tighter parity.
+
+## Resolved decisions (owner, 2026-07-02)
+
+- **OQ-1 → (A).** The CLI one-shot `compact` drops whole SSTables **ONLY under `--major`**. With `--major`
+  the outside set is empty by the operator's contract ⇒ overlap bound is `+inf` ⇒ every fully-expired
+  candidate is provably safe to drop (identical to how `--major` already unlocks tombstone purging).
+  Non-major CLI compaction NEVER drops whole (conservative default, matching current purge conservatism).
+- **OQ-2 → (A).** This change uses the **coarse #935 global-min-timestamp overlap gate** — the existing
+  `compute_max_purgeable_timestamp` bound (every other SSTable for the table treated as overlapping, global
+  `EncodingStats.minTimestamp`). It does NOT add key-range-aware overlap. Key-range precision (OQ-2 option
+  B) is deferred to a follow-up issue if the owner later wants tighter parity; it is out of scope here.
+  (A) is strictly conservative and can never resurrect data.
