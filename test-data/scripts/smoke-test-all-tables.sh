@@ -78,7 +78,7 @@ KEYSPACES=()
 # test-data/corpus-coverage-policy.md.
 SKIP_KEYSPACE_NAMES=(
     "test_writeparity" "test_compactionparity" "test_compactionparityudt"
-    "test_signed_coll"
+    "test_signed_coll" "test_compaction_tombstone_ttl"
 )
 SKIP_KEYSPACE_REASONS=(
     "write byte-parity fixtures (dedicated Rust parity tests)"

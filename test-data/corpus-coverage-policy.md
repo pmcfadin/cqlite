@@ -81,6 +81,7 @@ and local dev `.git` is always present.
 | `test_compactionparity` | parity-fixture | STCS compaction byte-parity fixtures validated by the differential-compaction harness, not the read-parity corpus. |
 | `test_compactionparityudt` | parity-fixture | Compaction-parity UDT fixtures (compaction harness only; may be local-only). |
 | `test_signed_coll` | parity-fixture | signed set/map element-order byte-parity fixtures (dedicated Rust parity test issue_1295_*). |
+| `test_compaction_tombstone_ttl` | parity-fixture | tombstone/TTL compaction byte-parity fixtures validated by dedicated Rust parity test `issue_1387_tombstone_ttl_compaction_byte_parity.rs`, not the read-parity corpus. |
 
 `system*` keyspaces are matched by the `system` **prefix** in every harness
 (`is_system_keyspace` in `smoke-test-all-tables.sh` and `corpus.py`,
