@@ -190,12 +190,29 @@ impl StatisticsReader {
         self.statistics.row_stats.live_rows
     }
 
-    /// Get timestamp range in microseconds
+    /// Get timestamp range in microseconds as `(min, max)`.
+    ///
+    /// Note (#1729): the returned `max` may be the `i64::MIN` "unavailable"
+    /// sentinel when the enhanced (nb) parser could not authoritatively decode
+    /// `maxTimestamp` from STATS. Callers that need a guaranteed-real maximum
+    /// should use [`Self::max_timestamp`], which returns `None` for that case.
     pub fn timestamp_range(&self) -> (i64, i64) {
         (
             self.statistics.timestamp_stats.min_timestamp,
             self.statistics.timestamp_stats.max_timestamp,
         )
+    }
+
+    /// Get the authoritative SSTable `maxTimestamp` (microseconds), or `None`
+    /// when it is not available (#1729 fail-closed sentinel `i64::MIN`).
+    ///
+    /// Consumers that must not proceed without a real maximum (e.g. a
+    /// compaction drop/GC gate, #1388) should gate on this returning `Some`.
+    pub fn max_timestamp(&self) -> Option<i64> {
+        match self.statistics.timestamp_stats.max_timestamp {
+            i64::MIN => None,
+            v => Some(v),
+        }
     }
 
     /// Get compression information
@@ -342,6 +359,10 @@ impl StatisticsReader {
             );
 
             report.push_str("## Timestamp Range\n");
+            // #1729: `max_timestamp()` returns None for the `i64::MIN`
+            // "unavailable" sentinel — render it honestly rather than printing a
+            // bogus epoch derived from i64::MIN.
+            let max_available = self.max_timestamp().is_some();
             if let (Some(min), Some(max)) = (min_time, max_time) {
                 report.push_str(&format!(
                     "- From: {}\n",
@@ -353,10 +374,14 @@ impl StatisticsReader {
                     "- Min timestamp: {}\n",
                     self.statistics.timestamp_stats.min_timestamp
                 ));
-                report.push_str(&format!(
-                    "- Max timestamp: {}\n",
-                    self.statistics.timestamp_stats.max_timestamp
-                ));
+                if max_available {
+                    report.push_str(&format!(
+                        "- Max timestamp: {}\n",
+                        self.statistics.timestamp_stats.max_timestamp
+                    ));
+                } else {
+                    report.push_str("- Max timestamp: unavailable\n");
+                }
             }
 
             if self.has_ttl_data() {
@@ -712,6 +737,64 @@ mod tests {
         }
     }
 
+    /// #1729 end-to-end: opening a REAL nb `Statistics.db` must decode the
+    /// authoritative `maxTimestamp` from STATS field 4 (via the enhanced-parser
+    /// post-pass), NOT leave the old `max == min` placeholder or the `i64::MIN`
+    /// "unavailable" sentinel. Skips when the dataset binaries are absent.
+    #[tokio::test]
+    async fn test_open_real_nb_decodes_authoritative_max_timestamp() {
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        let Ok(root) = std::env::var("CQLITE_DATASETS_ROOT") else {
+            eprintln!("CQLITE_DATASETS_ROOT not set, skipping");
+            return;
+        };
+        let path = PathBuf::from(root).join(
+            "sstables/test_timeseries/sensor_data-6c698230a25111f0a3fef1a551383fb9/\
+             nb-1-big-Statistics.db",
+        );
+        if !path.exists() {
+            eprintln!("dataset Statistics.db absent, skipping: {path:?}");
+            return;
+        }
+
+        let config = crate::Config::default();
+        let platform = Arc::new(
+            crate::Platform::new(&config)
+                .await
+                .expect("create platform"),
+        );
+        let reader = super::StatisticsReader::open(&path, platform)
+            .await
+            .expect("open real nb Statistics.db");
+
+        let (min, max) = reader.timestamp_range();
+        // A real time-series SSTable records write timestamps, so the
+        // authoritative max must be available (fail-closed None only when
+        // truly absent) and must be a real max >= min — never the i64::MIN
+        // sentinel.
+        let decoded_max = reader.max_timestamp();
+        assert!(
+            decoded_max.is_some(),
+            "a real time-series nb SSTable must expose an authoritative maxTimestamp"
+        );
+        let decoded_max = decoded_max.unwrap_or(i64::MIN);
+        assert_ne!(
+            decoded_max,
+            i64::MIN,
+            "max_timestamp must not be the unavailable sentinel for real data"
+        );
+        assert!(
+            decoded_max >= min,
+            "authoritative max ({decoded_max}) must be >= min ({min})"
+        );
+        assert_eq!(
+            max, decoded_max,
+            "timestamp_range max must match the authoritative decode"
+        );
+    }
+
     /// Minimal in-memory statistics for report-rendering tests. `total_rows`,
     /// `live_rows`, and `avg_rows_per_partition` are the #1325 sentinel-carrying
     /// fields the caller sets per-scenario; everything else is a benign default.
@@ -843,6 +926,63 @@ mod tests {
         assert!(
             compact.contains("Rows: 1000"),
             "compact summary must render the real total_rows: {compact}"
+        );
+    }
+
+    /// Build `stats_with` and override the timestamp range (#1729).
+    #[cfg(test)]
+    fn stats_with_timestamps(
+        min_timestamp: i64,
+        max_timestamp: i64,
+    ) -> crate::parser::statistics::SSTableStatistics {
+        let mut s = stats_with(1, 1, 1.0);
+        s.timestamp_stats.min_timestamp = min_timestamp;
+        s.timestamp_stats.max_timestamp = max_timestamp;
+        s
+    }
+
+    /// #1729: when the authoritative maxTimestamp is present it must be exposed
+    /// as `Some(max)` — and it is the TRUE max (min < X < max), not the min.
+    #[tokio::test]
+    async fn test_max_timestamp_authoritative_is_some_and_true_max() {
+        let min = 1_000_000i64;
+        let max = 5_000_000i64;
+        let reader =
+            super::StatisticsReader::from_statistics_for_test(stats_with_timestamps(min, max))
+                .await;
+        assert_eq!(reader.max_timestamp(), Some(max));
+        assert_ne!(
+            reader.max_timestamp(),
+            Some(min),
+            "max_timestamp must be the true max, never the min placeholder"
+        );
+        // The range accessor still returns both endpoints.
+        assert_eq!(reader.timestamp_range(), (min, max));
+    }
+
+    /// #1729 fail-closed: the `i64::MIN` sentinel (Cassandra's "no max recorded"
+    /// / enhanced-parser "unavailable") surfaces as `None`, and the report
+    /// renders "unavailable" rather than a bogus epoch derived from i64::MIN.
+    #[tokio::test]
+    async fn test_max_timestamp_sentinel_is_none_and_report_unavailable() {
+        let min = 1_000_000i64;
+        let reader =
+            super::StatisticsReader::from_statistics_for_test(stats_with_timestamps(min, i64::MIN))
+                .await;
+        assert_eq!(
+            reader.max_timestamp(),
+            None,
+            "the i64::MIN unavailable sentinel must surface as None (fail-closed)"
+        );
+
+        let report = reader.generate_report(false);
+        assert!(
+            report.contains("Max timestamp: unavailable"),
+            "report must render an unavailable max honestly, not a bogus epoch:\n{report}"
+        );
+        assert!(
+            !report.contains("-9223372036854775808"),
+            "report must NOT leak the raw i64::MIN sentinel:\n{report}"
         );
     }
 

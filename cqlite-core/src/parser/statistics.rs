@@ -790,8 +790,19 @@ impl StatisticsAnalyzer {
     }
 
     fn calculate_timestamp_range_days(stats: &SSTableStatistics) -> f64 {
-        let range_micros =
-            stats.timestamp_stats.max_timestamp - stats.timestamp_stats.min_timestamp;
+        // Fail-closed (#1729): the enhanced parser marks an unavailable
+        // authoritative maxTimestamp with the `i64::MIN` sentinel. When the max
+        // is unavailable — or is somehow below the min — we cannot compute a
+        // real range, so report 0.0 rather than an underflowing/garbage span.
+        let max = stats.timestamp_stats.max_timestamp;
+        let min = stats.timestamp_stats.min_timestamp;
+        if max == i64::MIN || max < min {
+            return 0.0;
+        }
+        // `max >= min` here, so the difference is non-negative and cannot
+        // overflow i64 for realistic timestamps; use a checked subtraction to
+        // stay defensive against pathological inputs.
+        let range_micros = max.saturating_sub(min);
         range_micros as f64 / (1_000_000.0 * 60.0 * 60.0 * 24.0)
     }
 }

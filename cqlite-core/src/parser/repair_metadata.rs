@@ -946,15 +946,29 @@ pub struct StatsExtras {
     /// when the histogram carries no bins (the common case for SSTables with no
     /// tombstones).
     pub tombstone_drop_times: Vec<(i64, u64)>,
+    /// Authoritative SSTable `maxTimestamp` (write timestamp, microseconds)
+    /// decoded from STATS field 4 (issue #1729). `None` when the SSTable
+    /// carries no live timestamp — Cassandra's `MetadataCollector` seeds the
+    /// tracker with `Long.MIN_VALUE`, so an on-disk value of [`i64::MIN`] is the
+    /// "no timestamps recorded" sentinel and is surfaced fail-closed as `None`
+    /// (consumers that require a real max — e.g. the #1388 drop gate — must NOT
+    /// proceed as if a max were known). Any other value is the true maximum.
+    ///
+    /// This intentionally replaces the historical `max_timestamp = min_timestamp`
+    /// placeholder in [`crate::parser::enhanced_statistics_parser`], which
+    /// silently reported the MIN write timestamp as the max.
+    pub max_timestamp: Option<i64>,
 }
 
 impl Default for StatsExtras {
     /// The default reported when no STATS component is locatable: "no
-    /// tombstones" max-LDT ([`NO_DELETION_TIME`]) and an empty histogram.
+    /// tombstones" max-LDT ([`NO_DELETION_TIME`]), an empty histogram, and no
+    /// authoritative `maxTimestamp` (fail-closed `None`).
     fn default() -> Self {
         StatsExtras {
             max_local_deletion_time: NO_DELETION_TIME,
             tombstone_drop_times: Vec::new(),
+            max_timestamp: None,
         }
     }
 }
@@ -1004,8 +1018,13 @@ pub fn parse_stats_extras(input: &[u8], gates: Option<&VersionGates>) -> Result<
     // 3. commitLogUpperBound: i64 segmentId + i32 position.
     c.skip(8 + 4)?;
 
-    // 4. minTimestamp, maxTimestamp.
-    c.skip(8 + 8)?;
+    // 4. minTimestamp, maxTimestamp (both i64 BE microseconds). Read (rather
+    //    than skip) maxTimestamp: it is the authoritative SSTable max write
+    //    timestamp (issue #1729). Both encodings (nb / oa / da) lay these out
+    //    identically here, so no version gating is needed for this field.
+    c.skip(8)?; // minTimestamp
+    let raw_max_timestamp = c.read_i64()?;
+    let max_timestamp = decode_max_timestamp(raw_max_timestamp);
 
     // 5. min/maxLocalDeletionTime. Width is 4 bytes each in both encodings; the
     //    signedness/sentinel differs by version (handled below).
@@ -1025,6 +1044,7 @@ pub fn parse_stats_extras(input: &[u8], gates: Option<&VersionGates>) -> Result<
     Ok(StatsExtras {
         max_local_deletion_time,
         tombstone_drop_times,
+        max_timestamp,
     })
 }
 
@@ -1037,6 +1057,26 @@ pub fn parse_stats_extras(input: &[u8], gates: Option<&VersionGates>) -> Result<
 /// The version sentinel maps to [`NO_DELETION_TIME`] (`i64::MAX`); any real
 /// deletion time (always `< 2^31` seconds-since-epoch) is returned as its
 /// integer value.
+/// Cassandra's `MetadataCollector` seeds its timestamp `MinMaxLongTracker` with
+/// `Long.MIN_VALUE` for the max; an SSTable that recorded no live write
+/// timestamp serializes that sentinel verbatim to STATS field 4. We treat it as
+/// "no authoritative maxTimestamp" rather than a real (nonsensical) maximum.
+const NO_MAX_TIMESTAMP_SENTINEL: i64 = i64::MIN;
+
+/// Normalize a raw STATS `maxTimestamp` (i64 BE microseconds) into an
+/// authoritative value, or `None` when the SSTable recorded no write timestamp.
+///
+/// The `Long.MIN_VALUE` sentinel maps to `None` (fail-closed: consumers that
+/// require a real max must not proceed as if one were known). Every other value
+/// — including a valid large or negative real timestamp — is returned verbatim.
+fn decode_max_timestamp(raw: i64) -> Option<i64> {
+    if raw == NO_MAX_TIMESTAMP_SENTINEL {
+        None
+    } else {
+        Some(raw)
+    }
+}
+
 fn decode_max_local_deletion_time(raw: u32, modern: bool) -> i64 {
     if modern {
         if raw == u32::MAX {
@@ -1165,6 +1205,19 @@ mod tests {
     /// are written using the legacy (16-byte: `f64 point + i64 value`) or
     /// modern (12-byte: `i64 point + i32 value`) layout per `modern`.
     fn synthetic_statistics_extras(modern: bool, raw_max_ldt: u32, bins: &[(i64, u64)]) -> Vec<u8> {
+        // Default fixture: minTimestamp=100, maxTimestamp=200.
+        synthetic_statistics_extras_ts(modern, raw_max_ldt, bins, 100, 200)
+    }
+
+    /// Same as [`synthetic_statistics_extras`] but with explicit min/max write
+    /// timestamps (STATS field 4), for exercising `decode_max_timestamp` (#1729).
+    fn synthetic_statistics_extras_ts(
+        modern: bool,
+        raw_max_ldt: u32,
+        bins: &[(i64, u64)],
+        min_timestamp: i64,
+        max_timestamp: i64,
+    ) -> Vec<u8> {
         let mut stats = Vec::new();
         // estimatedPartitionSize + estimatedCellPerPartitionCount (empty).
         stats.extend_from_slice(&0i32.to_be_bytes());
@@ -1173,8 +1226,8 @@ mod tests {
         stats.extend_from_slice(&(-1i64).to_be_bytes());
         stats.extend_from_slice(&0i32.to_be_bytes());
         // minTimestamp, maxTimestamp.
-        stats.extend_from_slice(&100i64.to_be_bytes());
-        stats.extend_from_slice(&200i64.to_be_bytes());
+        stats.extend_from_slice(&min_timestamp.to_be_bytes());
+        stats.extend_from_slice(&max_timestamp.to_be_bytes());
         // minLocalDeletionTime (any), maxLocalDeletionTime (verbatim raw u32).
         stats.extend_from_slice(&0u32.to_be_bytes());
         stats.extend_from_slice(&raw_max_ldt.to_be_bytes());
@@ -1445,6 +1498,45 @@ mod tests {
         let extras = parse_stats_extras(&bytes, Some(&nb_gates())).expect("decode");
         assert_eq!(extras.max_local_deletion_time, 1_700_000_000);
         assert!(extras.tombstone_drop_times.is_empty());
+        // Default fixture: maxTimestamp=200 (NOT the min=100 placeholder). #1729.
+        assert_eq!(extras.max_timestamp, Some(200));
+    }
+
+    #[test]
+    fn stats_extras_decodes_authoritative_max_timestamp_not_min() {
+        // Acceptance criterion #3: min < X < max, parsed max must equal the
+        // true max (not the min placeholder the enhanced parser used to emit).
+        let min_ts = 1_000_000i64;
+        let max_ts = 5_000_000i64;
+        let bytes = synthetic_statistics_extras_ts(false, i32::MAX as u32, &[], min_ts, max_ts);
+        let extras = parse_stats_extras(&bytes, Some(&nb_gates())).expect("decode");
+        assert_eq!(
+            extras.max_timestamp,
+            Some(max_ts),
+            "parsed max_timestamp must be the true max, not the min"
+        );
+        assert_ne!(
+            extras.max_timestamp,
+            Some(min_ts),
+            "max_timestamp must NOT equal the min placeholder"
+        );
+    }
+
+    #[test]
+    fn stats_extras_max_timestamp_long_min_sentinel_is_none() {
+        // Fail-closed (#1729): Cassandra seeds the max tracker with
+        // Long.MIN_VALUE; an SSTable with no recorded write timestamp
+        // serializes that sentinel → surfaced as None, never a bogus max.
+        let bytes = synthetic_statistics_extras_ts(false, i32::MAX as u32, &[], i64::MAX, i64::MIN);
+        let extras = parse_stats_extras(&bytes, Some(&nb_gates())).expect("decode");
+        assert_eq!(extras.max_timestamp, None);
+    }
+
+    #[test]
+    fn stats_extras_default_max_timestamp_is_none() {
+        // No STATS component → fail-closed None (no authoritative max).
+        let extras = StatsExtras::default();
+        assert_eq!(extras.max_timestamp, None);
     }
 
     #[test]
