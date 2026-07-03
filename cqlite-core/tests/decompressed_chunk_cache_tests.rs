@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use cqlite_core::storage::cache::DecompressedChunkCache;
 use cqlite_core::storage::sstable::reader::SSTableReader;
-use cqlite_core::types::{RowKey, TableId};
+use cqlite_core::types::TableId;
 use cqlite_core::{Config, Platform};
 
 fn require_fixtures() -> bool {
@@ -172,7 +172,7 @@ async fn bti_point_read_repeat_is_cached() {
     let Some((k, _)) = rows.first() else {
         panic!("test_da.simple_table present but scan returned 0 rows");
     };
-    let key = RowKey::from(k.clone());
+    let key = k.clone();
 
     // Cold point read: BTI target chunk decompressed + cached.
     let (h0, m0) = (reader.chunk_cache().hit_count(), reader.chunk_cache().miss_count());
