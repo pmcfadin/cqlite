@@ -93,6 +93,7 @@ env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
 | `fixtures_smoke` | added (#537) | Smoke/acceptance bench proving the fixture loaders are deterministic (seeded RNG + stable scan row count). Read/write portions activate under `cli-helpers` / `write-support`. |
 | `read` | added (#538), point-read reworked (#1562) | Read suite (needs `--features cli-helpers`): `get_partition_big`, `get_partition_bti`, `clustering_slice`, `full_scan`, `type_heavy` over the fixtures via the public query API. `get_partition_*` are **real** partition-targeted point reads (`WHERE id = <unquoted-uuid>`, #949/#956), asserted at setup to report a targeted `AccessPath` (not the old `SELECT * … LIMIT 1` scan proxy). `_bti` skip-registers when the optional `test_da` corpus is absent. |
 | `write` | added (#539, #574) | Write suite (needs `--features write-support`): `ingest_wal_on`, `ingest_wal_off`, and `flush` — see below. |
+| `compaction` | added (#1646) | Compaction / k-way-merge suite (needs `--features write-support`): `narrow`, `wide`, `tombstone_heavy` — full multi-generation STCS compaction over flushed L0 SSTables — see below. |
 | `observability_overhead` | added (#1043) | Zero-overhead-when-disabled gate: `read_scan` (needs `cli-helpers`) and `write_merge` (needs `write-support`). The SAME bench source runs under the default build vs `--features observability` with export disabled; the two arms are compared by `scripts/ci/observability_overhead.sh` — see below. |
 | `concurrent_scan` | added (#917), **gated** (#1564) | Aggregate throughput of N ∈ {1,2,4,8} concurrent `get_all_entries()` scans against one shared `Arc<SSTableReader>`, for the buffered and mmap backends (needs `--features cli-helpers`). Gated via a **concurrency scaling floor** (not absolute time) — see below. |
 | `read_while_write` | added (#1143), **gated** (#1564) | Reader-side scan latency with ~6 full-scan readers running concurrently with ~2 sustained-ingest writers (needs `--features cli-helpers,write-support`). Gated on the Criterion **median** (strict, 25% threshold); the p99 tail is printed to stderr for local diagnosis and owned by the A2 tail-latency harness (#1563). |
@@ -135,6 +136,20 @@ in-memory-OTLP correctness/sampling tests.
 | `write/ingest_wal_on` | **Advisory** — reported, never fails CI | Identical 256-row ingest with `Durability::SyncEachWrite` (default): every row calls `wal.append()` + `wal.sync()` (fsync). I/O-dominated; fsync latency on shared CI runners makes this too noisy for strict gating, but it documents durability cost. |
 | `write/flush` | **Strictly gated** — strict pass/fail | Pre-filled memtable flushed once per iteration. Throughput reported in MB/s. |
 
+### `compaction` bench breakdown (Issue #1646, Epic O finding O1)
+
+Each iteration flushes `min_threshold` (4) L0 SSTables in the **untimed** setup,
+installs an `STCSPolicy` explicitly via `set_merge_policy` (so O1 measures
+compaction regardless of whether the default-on STCS wiring, N1, has landed),
+then drives `WriteEngine::maintenance_step` to completion in the **timed**
+routine. Throughput is reported as compacted rows/second (`Throughput::Elements`).
+
+| Bench name | Gate policy | What it measures |
+|------------|-------------|------------------|
+| `compaction/narrow` | **Strictly gated** — strict pass/fail | Many small single-row partitions (`UUID` PK, no clustering) across the L0 SSTables. The CPU-bound merge-core probe; stable enough for strict regression detection. |
+| `compaction/wide` | **Advisory** — reported, never fails CI | A few fat partitions, each SSTable contributing a disjoint clustering slice so the merged partition is the union of all of them. Memory/data-shaped by design — **O2's dhat budget is its guard, not this wall clock** — so it is advisory. |
+| `compaction/tombstone_heavy` | **Strictly gated** — strict pass/fail | Live rows shadowed by row/range/cell tombstones in a later generation, exercising the reconcile + range-shadowing path. CPU-bound; strictly gated. |
+
 ## Performance regression gate (Issues #540, #572)
 
 CI runs the `read` + `write` benches on **both the PR and `main`, on the same
@@ -163,8 +178,8 @@ The gate distinguishes two classes of benches (configured via `perf-gate.json`):
 
 | Class | Behavior | When to use |
 |-------|----------|-------------|
-| **Strict** | Non-zero exit if delta > `threshold_pct`. Blocks merging. | CPU-bound, stable timings: `read/*`, `write/ingest_wal_off`, `write/flush`. |
-| **Advisory** | Delta reported in CI output, but **never causes a non-zero exit**, regardless of size. | I/O-dominated by fsync: `write/ingest_wal_on`. Variance on shared runners exceeds any useful threshold. |
+| **Strict** | Non-zero exit if delta > `threshold_pct`. Blocks merging. | CPU-bound, stable timings: `read/*`, `write/ingest_wal_off`, `write/flush`, `compaction/narrow`, `compaction/tombstone_heavy`. |
+| **Advisory** | Delta reported in CI output, but **never causes a non-zero exit**, regardless of size. | I/O-dominated by fsync (`write/ingest_wal_on`) or memory/data-shaped (`compaction/wide`, whose dhat budget is owned by O2, not this wall clock). Variance on shared runners exceeds any useful threshold. |
 
 To mark a bench advisory, add its ID to the `advisory_benches` list in
 `perf-gate.json`. The per-bench `threshold_pct` for advisory benches still
