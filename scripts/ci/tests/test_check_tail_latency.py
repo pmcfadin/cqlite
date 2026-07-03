@@ -117,6 +117,17 @@ class TestMissingRatioFailsClosedWhenEnforcing:
         rc = _run(tmp_path, harness, _gate(advisory=True))
         assert rc == 0, "advisory gate skips a missing ratio (reported, not failing)"
 
+    def test_enforcing_nan_ratio_exits_nonzero(self, tmp_path):
+        # A NaN ratio makes `value > threshold` false — it must NOT be reported ok.
+        # JSON has no NaN literal, so write it via the Python encoder's default.
+        h = tmp_path / "harness.json"
+        obj = _harness()
+        obj["p99_mixed_over_scan_free"] = float("nan")
+        h.write_text(json.dumps(obj))  # emits NaN (json.load reads it back as nan)
+        g = _write(tmp_path, "gate.json", _gate(advisory=False))
+        rc = main(["check_tail_latency.py", str(h), g])
+        assert rc != 0, "enforcing gate must fail on a non-finite (NaN) ratio"
+
 
 class TestWithinThresholdPasses:
     def test_within_threshold_advisory_exits_zero(self, tmp_path):

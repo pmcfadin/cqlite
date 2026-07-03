@@ -31,6 +31,7 @@ Example:
 """
 
 import json
+import math
 import sys
 
 # Ratios the gate knows about (top-level keys in the harness JSON).
@@ -64,21 +65,32 @@ def main(argv):
     print("-" * len(header))
 
     breaches = []
-    # A ratio the gate has a `max` for but that is absent from the harness JSON.
-    # In enforcing mode this is a fail-closed error (stale/malformed harness output
-    # must NOT bypass the gate); in advisory mode it is a reported SKIP.
+    # A ratio the gate has a `max` for but that is absent OR non-finite/malformed in
+    # the harness JSON. In enforcing mode this is a fail-closed error (stale/malformed
+    # harness output — including NaN, which makes `value > threshold` false — must NOT
+    # bypass the gate); in advisory mode it is a reported SKIP.
     missing_required = []
+
+    def _finite_number(v):
+        # Reject None, bool (a subclass of int), and non-finite floats (NaN/inf).
+        return (
+            isinstance(v, (int, float))
+            and not isinstance(v, bool)
+            and math.isfinite(float(v))
+        )
+
     for key in RATIO_KEYS:
         value = harness.get(key)
         cfg = ratios_cfg.get(key)
         has_threshold = cfg is not None and cfg.get("max") is not None
 
-        if value is None:
+        if not _finite_number(value):
+            reason = "absent from harness JSON" if value is None else f"malformed ({value!r})"
             if enforcing and has_threshold:
                 missing_required.append(key)
-                print(f"{key:<{col}} {'-':>12} {float(cfg['max']):>12.3f}  MISSING (required)")
+                print(f"{key:<{col}} {str(value):>12.12} {float(cfg['max']):>12.3f}  INVALID (required)")
             else:
-                print(f"{key:<{col}} {'-':>12} {'-':>12}  SKIP (absent from harness JSON)")
+                print(f"{key:<{col}} {'-':>12} {'-':>12}  SKIP ({reason})")
             continue
         if not has_threshold:
             print(f"{key:<{col}} {float(value):>12.3f} {'-':>12}  SKIP (no threshold)")
@@ -99,8 +111,8 @@ def main(argv):
     # output silently pass the gate.
     if missing_required:
         print(
-            f"❌ {len(missing_required)} required tail ratio(s) missing from harness JSON "
-            f"(enforcing): {', '.join(missing_required)}"
+            f"❌ {len(missing_required)} required tail ratio(s) missing or malformed in harness "
+            f"JSON (enforcing): {', '.join(missing_required)}"
         )
         print("   Regenerate the harness JSON (cargo bench --bench tail_latency) before gating.")
         return 1

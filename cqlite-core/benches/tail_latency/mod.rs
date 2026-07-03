@@ -422,12 +422,19 @@ pub fn run(fx: crate::fixtures::ReadFixture) -> Option<HarnessReport> {
     });
 
     // Wait (bounded) until the background scan has actually begun, so the measured
-    // point reads run under live contention. Never hang: fall through after the
-    // timeout (the post-join `scans > 0` assertion still guards a wedged scan).
+    // point reads run under live contention. A timeout is a HARNESS FAILURE, not a
+    // free pass: measuring the "mixed" stream without a live scan would mostly
+    // record the scan-free path and could still satisfy `scans > 0` from one late
+    // scan (roborev). Stop + join the thread and panic rather than mis-measure.
     let wait_start = std::time::Instant::now();
     while !scan_started.load(Ordering::Relaxed) {
         if wait_start.elapsed() > std::time::Duration::from_secs(30) {
-            break;
+            stop.store(true, Ordering::Relaxed);
+            let _ = scan_handle.join();
+            panic!(
+                "tail_latency: background scan did not begin within 30s — cannot measure \
+                 the point-read stream under live contention (mixed load would be invalid)"
+            );
         }
         std::thread::yield_now();
     }
