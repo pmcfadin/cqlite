@@ -3,20 +3,17 @@
 use crate::{Config, Result};
 
 pub mod fs;
-pub mod threading;
-pub mod time;
 
-/// Platform abstraction layer
+/// Opt-in filesystem seam for cross-platform compatibility.
+///
+/// NOTE: This is an opt-in `fs` seam only; most code paths use `std`/`tokio`
+/// fs directly — this is NOT an enforced I/O boundary. The `Platform` handle is
+/// threaded through many call sites, but only [`Platform::fs`] is ever read.
+/// Full removal of that threading is a possible later refactor (out of scope).
 #[derive(Debug)]
 pub struct Platform {
     /// File system abstraction
     fs: fs::FileSystem,
-
-    /// Time utilities
-    time: time::TimeProvider,
-
-    /// Threading utilities
-    threading: threading::ThreadingProvider,
 
     /// Configuration
     config: Config,
@@ -27,8 +24,6 @@ impl Platform {
     pub async fn new(config: &Config) -> Result<Self> {
         Ok(Self {
             fs: fs::FileSystem::new().await?,
-            time: time::TimeProvider::new(),
-            threading: threading::ThreadingProvider::new(),
             config: config.clone(),
         })
     }
@@ -36,16 +31,6 @@ impl Platform {
     /// Get file system abstraction
     pub fn fs(&self) -> &fs::FileSystem {
         &self.fs
-    }
-
-    /// Get time provider
-    pub fn time(&self) -> &time::TimeProvider {
-        &self.time
-    }
-
-    /// Get threading provider
-    pub fn threading(&self) -> &threading::ThreadingProvider {
-        &self.threading
     }
 
     /// Get configuration
@@ -95,58 +80,5 @@ mod tests {
         // Remove file
         fs.remove_file(&test_file).await.unwrap();
         assert!(!fs.exists(&test_file).await.unwrap());
-    }
-
-    #[test]
-    fn test_time_provider() {
-        let time = time::TimeProvider::new();
-
-        let now_micros = time.now_micros();
-        let now_millis = time.now_millis();
-        let now_secs = time.now_secs();
-
-        assert!(now_micros > 0);
-        assert!(now_millis > 0);
-        assert!(now_secs > 0);
-
-        // Check relationships with tolerance for timing differences
-        // Allow for small variations due to multiple system calls
-        let micros_to_millis = now_micros / 1000;
-        let millis_to_secs = now_millis / 1000;
-
-        // Allow small tolerance for timing variations between system calls
-        let tolerance_ms: u64 = 5;
-        let tolerance_sec: u64 = 1;
-
-        assert!(
-            micros_to_millis >= now_millis.saturating_sub(tolerance_ms),
-            "micros_to_millis ({}) should be within {}ms of now_millis ({})",
-            micros_to_millis,
-            tolerance_ms,
-            now_millis
-        );
-        assert!(
-            millis_to_secs >= now_secs.saturating_sub(tolerance_sec),
-            "millis_to_secs ({}) should be within {}s of now_secs ({})",
-            millis_to_secs,
-            tolerance_sec,
-            now_secs
-        );
-    }
-
-    #[tokio::test]
-    async fn test_threading_provider() {
-        let threading = threading::ThreadingProvider::new();
-
-        let result = threading.execute_cpu_task(|| 42).await.unwrap();
-
-        assert_eq!(result, 42);
-
-        let result = threading
-            .execute_io_task(|| "hello".to_string())
-            .await
-            .unwrap();
-
-        assert_eq!(result, "hello");
     }
 }
