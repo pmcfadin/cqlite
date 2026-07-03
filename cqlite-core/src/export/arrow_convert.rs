@@ -1475,7 +1475,9 @@ fn build_string_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, A
             None => Ok(None),
             Some(Value::Null) => Ok(None),
             Some(Value::Text(s)) => Ok(Some(s.clone())),
-            Some(Value::Json(j)) => Ok(Some(j.to_string())),
+            // `Json` is only a valid string source on the opaque fallback;
+            // an authoritative text column must fail closed on it.
+            Some(Value::Json(j)) if !strict_text => Ok(Some(j.to_string())),
             Some(other) if strict_text => Err(ArrowConvertError::InvalidValue(format!(
                 "column '{}': expected Text value, got {:?}",
                 col.name, other
@@ -2101,6 +2103,15 @@ mod tests {
             let rows = vec![row_one("s", Value::Integer(1))];
             assert!(is_invalid_value(rows_to_record_batch(&columns, &rows)));
         }
+    }
+
+    /// (9c) Authoritative text column: a `Value::Json` must FAIL CLOSED (the JSON
+    /// stringification is only valid on the opaque fallback).
+    #[test]
+    fn authoritative_text_column_rejects_json() {
+        let columns = vec![col("s", DataType::Text, Some(CqlType::Text))];
+        let rows = vec![row_one("s", Value::Json(serde_json::json!({"a": 1})))];
+        assert!(is_invalid_value(rows_to_record_batch(&columns, &rows)));
     }
 
     /// (9b) Authoritative text column happy path + nulls: a correct `Value::Text`
