@@ -23,6 +23,8 @@ from cqlite._cqlite import (
     Row,
     ColumnInfo,
     StreamingIterator,
+    # Exact temporal types (issue #1450)
+    Duration,
     # Prepared statements
     PreparedStatement,
     # Statistics
@@ -57,6 +59,8 @@ __all__ = [
     "Row",
     "ColumnInfo",
     "StreamingIterator",
+    # Exact temporal types (issue #1450)
+    "Duration",
     # Prepared statements
     "PreparedStatement",
     # Statistics

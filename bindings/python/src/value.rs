@@ -14,7 +14,8 @@ use cqlite_core::Value;
 /// Handles all CQL types with proper Python type mapping:
 /// - Primitives: Null→None, Boolean→bool, Integer→int, Float→float, Text→str
 /// - Binary: Blob→bytes, Uuid→str (formatted), Inet→str (IP format)
-/// - Temporal: Timestamp→datetime, Date→date, Time→time, Duration→timedelta
+/// - Temporal: Timestamp→datetime, Date→date, Time→int (nanoseconds since
+///   midnight, lossless), Duration→[`Duration`] (exact months/days/nanos)
 /// - Collections: List→list, Set→frozenset, Map→dict, Tuple→tuple
 /// - Complex: Udt→dict, Varint→int, Decimal→decimal.Decimal
 /// - Special: Tombstone→None, Frozen→unwrap
@@ -33,7 +34,7 @@ pub fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
         Value::Blob(b) => Ok(PyBytes::new(py, b).into_any().unbind()),
         Value::Timestamp(ts) => timestamp_to_datetime(py, *ts),
         Value::Date(d) => date_to_pydate(py, *d),
-        Value::Time(t) => time_to_pytime(py, *t),
+        Value::Time(t) => Ok(t.into_pyobject(py)?.into_any().unbind()),
         Value::Uuid(u) => uuid_to_py(py, u),
         Value::Varint(v) => varint_to_pyint(py, v),
         Value::Decimal { scale, unscaled } => decimal_to_pydecimal(py, *scale, unscaled),
@@ -41,7 +42,15 @@ pub fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
             months,
             days,
             nanos,
-        } => duration_to_timedelta(py, *months, *days, *nanos),
+        } => Ok(Py::new(
+            py,
+            Duration {
+                months: *months,
+                days: *days,
+                nanos: *nanos,
+            },
+        )?
+        .into_any()),
         Value::Json(j) => json_to_py(py, j),
         Value::List(l) => list_to_py(py, l),
         Value::Set(s) => set_to_py(py, s),
@@ -183,22 +192,55 @@ fn date_to_pydate(py: Python<'_>, days: i32) -> PyResult<PyObject> {
     Ok(result.into_pyobject(py)?.into_any().unbind())
 }
 
-/// Convert nanoseconds since midnight to datetime.time.
-fn time_to_pytime(py: Python<'_>, nanos: i64) -> PyResult<PyObject> {
-    let datetime = py.import("datetime")?;
-    let time_class = datetime.getattr("time")?;
+/// Exact CQL `duration` value.
+///
+/// A CQL `duration` has three independent components — `months`, `days`, and
+/// `nanos` — that cannot be collapsed into a single scalar without loss (a
+/// month is not a fixed number of days, and a day is not a fixed number of
+/// nanoseconds). This type preserves all three exactly, mirroring the Node
+/// binding's `{ months, days, nanos }` object.
+///
+/// Before v0.13 the Python binding returned a `datetime.timedelta`, which
+/// approximated months as 30 days and truncated nanoseconds to microseconds
+/// (the M4 §5.2 lossy mapping). That approximation has been removed.
+#[pyclass(module = "cqlite", frozen, eq, hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct Duration {
+    /// Whole months (may be negative).
+    #[pyo3(get)]
+    pub months: i32,
+    /// Whole days (may be negative).
+    #[pyo3(get)]
+    pub days: i32,
+    /// Sub-day component in nanoseconds (may be negative).
+    #[pyo3(get)]
+    pub nanos: i64,
+}
 
-    // Convert nanoseconds to hours, minutes, seconds, microseconds
-    let total_micros = nanos / 1000;
-    let total_seconds = total_micros / 1_000_000;
-    let micros = (total_micros % 1_000_000) as i32;
-    let total_minutes = total_seconds / 60;
-    let seconds = (total_seconds % 60) as i32;
-    let hours = (total_minutes / 60) as i32;
-    let minutes = (total_minutes % 60) as i32;
+#[pymethods]
+impl Duration {
+    /// Construct a `Duration` from its exact components.
+    #[new]
+    fn new(months: i32, days: i32, nanos: i64) -> Self {
+        Duration {
+            months,
+            days,
+            nanos,
+        }
+    }
 
-    let time = time_class.call1((hours, minutes, seconds, micros))?;
-    Ok(time.into_pyobject(py)?.into_any().unbind())
+    fn __repr__(&self) -> String {
+        format!(
+            "Duration(months={}, days={}, nanos={})",
+            self.months, self.days, self.nanos
+        )
+    }
+}
+
+/// Register value-conversion types (the exact [`Duration`] class) on the module.
+pub fn register_value(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<Duration>()?;
+    Ok(())
 }
 
 /// Convert UUID bytes to Python uuid.UUID object.
@@ -305,48 +347,6 @@ fn decimal_to_pydecimal(py: Python<'_>, scale: i32, unscaled: &[u8]) -> PyResult
             .into_any()
             .unbind())
     }
-}
-
-/// Convert duration to datetime.timedelta.
-///
-/// IMPORTANT: Precision limitations:
-/// - Months are approximated as 30 days (1 month = 30 days)
-///   Example: 2 months, 5 days → 65 days
-/// - Nanoseconds are truncated to microseconds (Python timedelta precision)
-///   Example: 1,234,567,890 ns → 1,234,567 μs (890 ns lost)
-///
-/// This approximation is documented in M4 spec section 5.2.
-fn duration_to_timedelta(py: Python<'_>, months: i32, days: i32, nanos: i64) -> PyResult<PyObject> {
-    let datetime = py.import("datetime")?;
-    let timedelta = datetime.getattr("timedelta")?;
-
-    // Convert months to days (approximation: 1 month = 30 days)
-    // Use checked arithmetic to prevent overflow on extreme values
-    let total_days = (months as i64)
-        .checked_mul(30)
-        .and_then(|m| m.checked_add(days as i64))
-        .ok_or_else(|| {
-            pyo3::exceptions::PyOverflowError::new_err(
-                "Duration value too large to convert to timedelta",
-            )
-        })?;
-
-    // Convert nanoseconds to microseconds (truncate sub-microsecond precision)
-    // nanos = total nanoseconds in the duration
-    // 1 microsecond = 1000 nanoseconds
-    let total_micros = nanos.checked_div(1000).ok_or_else(|| {
-        pyo3::exceptions::PyOverflowError::new_err("Duration nanoseconds value invalid")
-    })?;
-
-    // timedelta(days=X, microseconds=Y)
-    // Note: timedelta normalizes large microseconds to seconds/days automatically
-    // Example: timedelta(days=0, microseconds=86400000000) → timedelta(days=1)
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("days", total_days)?;
-    kwargs.set_item("microseconds", total_micros)?;
-
-    let result = timedelta.call((), Some(&kwargs))?;
-    Ok(result.into_pyobject(py)?.into_any().unbind())
 }
 
 /// Convert serde_json::Value to Python object.

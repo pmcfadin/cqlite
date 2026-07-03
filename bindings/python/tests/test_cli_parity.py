@@ -12,17 +12,20 @@ Key Differences Handled:
     - Python `bytes` → CLI `"0xhex"`
     - Python `datetime` → CLI `"YYYY-MM-DD HH:MM:SS.fff+0000"`
     - Python `date` → CLI `"YYYY-MM-DD"`
-    - Python `time` → CLI `"HH:MM:SS.nnnnnnnnn"`
+    - Python `time` → `int` nanoseconds (issue #1450); the CLI's
+      `"HH:MM:SS.nnnnnnnnn"` string is parsed back to nanoseconds so both
+      sides compare on the exact nanosecond value (no fake-zero padding)
     - Python `UUID` → CLI `"uuid-string"`
-    - Python `timedelta` → CLI `"XmoYdZns"` (lossy: months approximated as 30d)
+    - Python `cqlite.Duration` → CLI `"XmoYdZns"` (exact months/days/nanos, #1450)
     - Python `IPv4Address`/`IPv6Address` → CLI `"ip-string"`
     - Python `frozenset` → CLI JSON array
     - Python `dict` (for maps) → CLI array of `{"key": k, "value": v}`
 """
 
 import json
+import re
 import subprocess
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from ipaddress import IPv4Address, IPv6Address
 from pathlib import Path
@@ -34,6 +37,20 @@ import pytest
 import cqlite
 
 from conftest import DATASETS, SCHEMAS, PROJECT_ROOT
+
+
+# CLI renders CQL `time` as "HH:MM:SS.nnnnnnnnn" (9-digit nanoseconds). The
+# Python binding returns exact `int` nanoseconds since midnight (issue #1450),
+# so we parse the CLI string back to nanoseconds for an exact comparison rather
+# than padding the Python value with fake zeros.
+_CLI_TIME_RE = re.compile(r"^(\d{2}):(\d{2}):(\d{2})\.(\d{9})$")
+
+
+def _cli_time_to_nanos(value: str) -> int:
+    """Convert a CLI `HH:MM:SS.nnnnnnnnn` time string to nanoseconds since midnight."""
+    match = _CLI_TIME_RE.match(value)
+    hours, minutes, seconds, nanos = (int(g) for g in match.groups())
+    return (hours * 3600 + minutes * 60 + seconds) * 1_000_000_000 + nanos
 
 
 # =============================================================================
@@ -87,24 +104,21 @@ def normalize_python_value(value: Any, is_row_level: bool = True) -> Any:
         # CLI format: "YYYY-MM-DD"
         return value.strftime("%Y-%m-%d")
 
-    if isinstance(value, time):
-        # CLI format: "HH:MM:SS.nnnnnnnnn" (nanosecond precision)
-        # Python time only has microsecond precision, pad with zeros
-        return f"{value.hour:02d}:{value.minute:02d}:{value.second:02d}.{value.microsecond:06d}000"
+    # CQL `time` now decodes to exact `int` nanoseconds (issue #1450); it is
+    # handled by the int/float branch above and compared against the CLI time
+    # string parsed to nanoseconds in `normalize_cli_value`.
 
-    if isinstance(value, timedelta):
-        # CLI format: "XmoYdZns"
-        # Note: timedelta doesn't preserve months, so we lose that precision
-        # Convert to days and nanoseconds
-        total_days = value.days
-        total_nanos = (
-            value.seconds * 1_000_000_000 + value.microseconds * 1_000
-        )
+    if isinstance(value, cqlite.Duration):
+        # CLI format: "XmoYdZns" — matches cqlite ValueFormatter::format_duration.
+        # The exact months/days/nanos components are preserved (no 30-day
+        # collapse, no nanosecond truncation).
         parts = []
-        if total_days != 0:
-            parts.append(f"{total_days}d")
-        if total_nanos != 0:
-            parts.append(f"{total_nanos}ns")
+        if value.months != 0:
+            parts.append(f"{value.months}mo")
+        if value.days != 0:
+            parts.append(f"{value.days}d")
+        if value.nanos != 0:
+            parts.append(f"{value.nanos}ns")
         return "".join(parts) if parts else "0ns"
 
     if isinstance(value, Decimal):
@@ -184,6 +198,10 @@ def normalize_cli_value(value: Any) -> Any:
         return value
 
     if isinstance(value, str):
+        # CQL `time` renders as "HH:MM:SS.nnnnnnnnn"; parse to exact nanoseconds
+        # to match the Python binding's `int` nanoseconds (issue #1450).
+        if _CLI_TIME_RE.match(value):
+            return _cli_time_to_nanos(value)
         return value
 
     if isinstance(value, list):

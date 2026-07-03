@@ -622,6 +622,46 @@ class ColumnInfo:
 
     def __repr__(self) -> str: ...
 
+class Duration:
+    """Exact CQL ``duration`` value (issue #1450).
+
+    A CQL ``duration`` has three independent components that cannot be collapsed
+    into a single scalar without loss (a month is not a fixed number of days, and
+    a day is not a fixed number of nanoseconds). All three are preserved exactly,
+    mirroring the Node binding's ``{ months, days, nanos }`` object.
+
+    Breaking change (v0.13): a ``duration`` column previously decoded to a
+    ``datetime.timedelta`` that approximated months as 30 days and truncated
+    nanoseconds to microseconds (the M4 §5.2 lossy mapping). It now decodes to
+    this exact type. CQL ``time`` columns, likewise, now decode to an ``int``
+    (nanoseconds since midnight) instead of a microsecond-capped ``datetime.time``.
+
+    Attributes:
+        months: Whole months (may be negative).
+        days: Whole days (may be negative).
+        nanos: Sub-day component in nanoseconds (may be negative).
+    """
+
+    def __init__(self, months: int, days: int, nanos: int) -> None: ...
+    @property
+    def months(self) -> int:
+        """Whole months (may be negative)."""
+        ...
+
+    @property
+    def days(self) -> int:
+        """Whole days (may be negative)."""
+        ...
+
+    @property
+    def nanos(self) -> int:
+        """Sub-day component in nanoseconds (may be negative)."""
+        ...
+
+    def __eq__(self, other: object) -> bool: ...
+    def __hash__(self) -> int: ...
+    def __repr__(self) -> str: ...
+
 class StreamingIterator:
     """Memory-efficient iterator for large result sets.
 

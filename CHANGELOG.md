@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING (Python bindings):** CQL `duration` and `time` now decode to exact,
+  lossless Python types, matching the Node binding (#1450). The previous mapping
+  (M4 §5.2) was lossy and disagreed with Node, the CLI, and Cassandra:
+  - `time` → `int` (nanoseconds since midnight), was `datetime.time` (which
+    truncated sub-microsecond nanoseconds).
+  - `duration` → `cqlite.Duration(months, days, nanos)`, was `datetime.timedelta`
+    (which approximated months as 30 days and truncated nanoseconds to
+    microseconds).
+
+  Migration for code that relied on the old types:
+  ```python
+  # OLD: t was a datetime.time; d was a datetime.timedelta
+  # NEW: t is an int (nanoseconds); d is a cqlite.Duration
+  import datetime
+  t_ns = row["work_time"]                       # e.g. 3723123456789
+  t = datetime.time(                            # reconstruct a datetime.time (µs, lossy)
+      t_ns // 3_600_000_000_000,
+      (t_ns // 60_000_000_000) % 60,
+      (t_ns // 1_000_000_000) % 60,
+      (t_ns // 1000) % 1_000_000,
+  )
+  d = row["duration_val"]                        # cqlite.Duration
+  d.months, d.days, d.nanos                      # exact components
+  ```
+
 ### Removed
 
 - **BREAKING (CLI):** dropped YAML as a query output format. `--out yaml` and

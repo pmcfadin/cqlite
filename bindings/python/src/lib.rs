@@ -27,6 +27,7 @@ pub use refresh::RefreshReport;
 pub use result::{ColumnInfo, QueryResult, QueryResultIter, Row, StreamingIterator};
 pub use runtime::{block_on, try_get_runtime};
 pub use stats::DatabaseStats;
+pub use value::Duration;
 pub use write::{MaintenanceReport, WriteStats};
 
 /// CQLite version string.
@@ -78,6 +79,9 @@ fn _cqlite(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Register result types (QueryResult, Row, ColumnInfo)
     result::register_result(m)?;
+
+    // Register value-conversion types (exact `Duration`)
+    value::register_value(m)?;
 
     // Register prepared statement types
     prepared::register_prepared(m)?;
