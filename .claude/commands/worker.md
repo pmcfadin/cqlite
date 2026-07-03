@@ -107,7 +107,16 @@ diff and breaks 1:1:1:1. Instead:
   it — never `checkout`/`reset` the root to "fix" it.
 - **Finalize cleans up YOUR worktree only** (`git worktree remove`), then deletes the origin lock branch.
   Never `git checkout main` / `git reset` the shared root checkout as part of cleanup.
-- The gate is the only run that counts — paste its summary block. **But `agent-gate.sh`
+- **Tiered gate (issue #1821): iterate on `--lite`, run the FULL gate ONCE before merge.** On each fix
+  round use `scripts/agent-gate.sh --lite` (fmt + file-size + workspace clippy + blast-radius-scoped tests,
+  ~1-5 min) — the fast iteration loop, NOT the gate of record; its `==== AGENT-GATE LITE SUMMARY ====`
+  block must never be pasted as the full SUMMARY. Do a conditional internal `rust-reviewer` review-first
+  pass before the first full gate for diffs that change a `pub` item, touch >1 call site of a changed
+  symbol, or add a new surface (skip for mechanical diffs). Loop: `implement → lite (each round) →
+  conditional review-first → lite → FULL gate ONCE → roborev → CI → merge`. **`--lite` NEVER replaces the
+  full gate.**
+- The full gate is the only run that counts — run `scripts/agent-gate.sh` (no flag) exactly once before
+  merge and paste its `==== AGENT-GATE SUMMARY ====` block. **But `agent-gate.sh`
   PASS ≠ CI green** (L2, flow-meta #1310): the local gate does NOT run every CI lane —
   it uses pre-existing datasets and a subset of test targets. When a change touches a
   **regenerate path, a fixture parser, or a fail-closed CI guard**, reproduce the

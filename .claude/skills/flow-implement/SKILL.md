@@ -57,13 +57,23 @@ OpenSpec change `<slug>` (design-driven only).
    ```
 3. **Test data.** Worktrees lack the gitignored `Data.db` binaries — run the gate and tests with
    `CQLITE_DATASETS_ROOT` pointed at the MAIN repo's `test-data/datasets` (or `fetch-datasets.sh`).
-4. **Implement (TDD) — via subagents, NOT inline.** You orchestrate; you do not read source, write code,
-   or run the gate in your own context (that's what fills it up). Spawn `sstable-developer` (explicit
-   `model: opus` — pinned models are inaccessible) to implement test-first in the worktree AND run
-   `scripts/agent-gate.sh`, returning only a short summary + the AGENT-GATE SUMMARY block. For
-   parallelizable subtasks spawn several; sequence dependents. Use `test-validator` for gate/failure
-   triage and `Explore` for code search — keep raw file contents out of your context.
-5. **Gate (correctness).** Run `scripts/agent-gate.sh` in the worktree; it must be PASS. Paste the
+4. **Implement (TDD) — via subagents, NOT inline; iterate on the LITE gate (issue #1821).** You
+   orchestrate; you do not read source, write code, or run the gate in your own context (that's what fills
+   it up). Spawn `sstable-developer` (explicit `model: opus` — pinned models are inaccessible) to implement
+   test-first in the worktree. On EACH fix round the implementer runs `scripts/agent-gate.sh --lite` (fmt +
+   file-size + workspace clippy + blast-radius-scoped tests, ~1-5 min — NOT the gate of record; it emits a
+   distinct `==== AGENT-GATE LITE SUMMARY ====` block that must never be pasted as the full SUMMARY),
+   returning only a short summary + that lite block. For parallelizable subtasks spawn several; sequence
+   dependents. Use `test-validator` for gate/failure triage and `Explore` for code search — keep raw file
+   contents out of your context.
+   - **Conditional review-first**: before the FIRST full gate, do an internal `rust-reviewer` pass when the
+     diff changes a `pub` item, touches >1 call site of a changed symbol, or adds a new surface — this
+     catches findings before a 12-25 min full-gate cycle is spent. Skip it for mechanical/localized diffs.
+5. **Gate (correctness) — the FULL gate ONCE before merge.** After the lite loop converges (and the
+   conditional review-first pass, if applicable), run the FULL `scripts/agent-gate.sh` in the worktree
+   EXACTLY ONCE; it must be PASS. **`--lite` NEVER replaces this** — the full `==== AGENT-GATE SUMMARY ====`
+   block is the only run that counts. Loop shape: `implement → lite (each round) → conditional review-first
+   → lite → FULL gate ONCE → roborev → CI → merge`. Paste the
    AGENT-GATE SUMMARY block. A known-flaky lane (e.g. `test_flush_throughput`, py3.9) that passes on
    re-run is not a failure — note it.
    - **Gate PASS ≠ CI green** (L2, flow-meta #1310). The local gate does NOT run every CI lane (it uses
