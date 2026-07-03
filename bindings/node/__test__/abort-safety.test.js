@@ -40,8 +40,15 @@
  * therefore be RED under the debug gate, so it is intentionally omitted and
  * reported as a follow-up rather than run as a known-red test.
  *
- * These tests actually run and assert (never silently skip) when the dataset
- * is present; a missing/empty source Data.db throws loudly per issue #1437.
+ * DATASET GATING (never false-green): when the source Data.db is present these
+ * tests actually run and assert. A BROKEN source (present but empty), or a
+ * genuinely absent source under strict fixture mode
+ * (CQLITE_REQUIRE_FIXTURES / CQLITE_PARITY_REQUIRE_DATASETS), is a HARD FAILURE
+ * asserted loudly in beforeAll. A genuinely absent source in non-strict local
+ * dev registers as a real Jest SKIP (via test.skip) — NOT an early `return`
+ * from the test body, which Jest would score as a PASS and false-green the
+ * whole abort-safety harness. This mirrors the Python side
+ * (test_abort_safety.py::_require_source_or_skip -> pytest.skip / pytest.fail).
  */
 'use strict';
 
@@ -119,21 +126,38 @@ const METHOD = {
 });
 `;
 
-function requireSource() {
+/**
+ * True when strict fixture mode is requested (mirrors the Python
+ * `_require_fixtures_strict` helper and the Rust `require_fixtures_strict`):
+ * either CQLITE_REQUIRE_FIXTURES or CQLITE_PARITY_REQUIRE_DATASETS set to a
+ * truthy value flips a missing dataset from a Jest SKIP to a HARD FAILURE, so
+ * a dropped table or a path regression reds CI rather than false-greening.
+ * @returns {boolean}
+ */
+function requireFixturesStrict() {
+  const truthy = (v) => v === '1' || v === 'true';
+  return truthy(process.env.CQLITE_REQUIRE_FIXTURES) || truthy(process.env.CQLITE_PARITY_REQUIRE_DATASETS);
+}
+
+/**
+ * Classify the source SSTable at collection time (never false-green):
+ *   - { status: 'ok' }     : a present, non-empty source Data.db -> run.
+ *   - { status: 'broken' } : present but empty -> HARD FAIL (loud in beforeAll).
+ *   - { status: 'absent' } : no source dir    -> Jest SKIP, or HARD FAIL under
+ *                            strict fixture mode.
+ * @returns {{status: 'ok'|'broken'|'absent', reason?: string}}
+ */
+function classifySource() {
   const sstables = global.testPaths.SSTABLES_DIR;
   const src = sourceTableDir(sstables);
   if (src === null) {
-    // Dataset genuinely absent: honor the suite-wide availability guard.
-    if (!global.DATASETS_AVAILABLE) {
-      return false;
-    }
-    throw new Error(`No test_basic.simple_table SSTable under ${sstables} (issue #1437)`);
+    return { status: 'absent', reason: `No test_basic.simple_table SSTable under ${sstables} (issue #1437)` };
   }
   const data = path.join(src, 'nb-1-big-Data.db');
   if (fs.statSync(data).size === 0) {
-    throw new Error(`Source ${data} present but empty (issue #1437)`);
+    return { status: 'broken', reason: `Source ${data} present but empty (issue #1437)` };
   }
-  return true;
+  return { status: 'ok' };
 }
 
 /**
@@ -182,21 +206,35 @@ function runAndAssertSurvives(mode, entry, exposeUncompressed) {
   }
 }
 
-describe('Abort safety: corrupt SSTable must not kill the host (issue #1437)', () => {
-  let haveSource = false;
+// Decide gating ONCE, at collection time, so absence becomes a real Jest SKIP
+// rather than an early `return` (which Jest scores as a PASS). A broken source,
+// or an absent source under strict fixture mode, is a HARD FAILURE asserted in
+// beforeAll; a genuinely absent source in non-strict dev uses `test.skip`.
+const SOURCE = classifySource();
+const STRICT = requireFixturesStrict();
+const HARD_FAIL = SOURCE.status === 'broken' || (SOURCE.status === 'absent' && STRICT);
+const CAN_RUN = SOURCE.status === 'ok';
+// Use a real `test.skip` (Jest reports SKIPPED) only for a genuine, non-strict
+// absence. When we must run OR must hard-fail, register a real `test` so the
+// beforeAll guard executes and can throw loudly.
+const testOrSkip = CAN_RUN || HARD_FAIL ? test : test.skip;
 
+describe('Abort safety: corrupt SSTable must not kill the host (issue #1437)', () => {
   beforeAll(() => {
-    haveSource = requireSource();
+    // Fail closed on a hard misconfiguration; never silently continue.
+    if (HARD_FAIL) {
+      const hint = SOURCE.status === 'absent'
+        ? ' (strict fixture mode: CQLITE_REQUIRE_FIXTURES/CQLITE_PARITY_REQUIRE_DATASETS set; ' +
+          'fetch with bash test-data/scripts/fetch-datasets.sh)'
+        : '';
+      throw new Error(`${SOURCE.reason}${hint}`);
+    }
   });
 
   describe('compressed Data.db (exact issue recipe; survives in debug + release)', () => {
     for (const mode of MODES) {
       for (const entry of ['executeNative', 'streaming', 'parquet']) {
-        test(`survives ${mode} via ${entry}`, () => {
-          if (!haveSource) {
-            console.warn(`SKIP ${mode}/${entry}: datasets not available`);
-            return;
-          }
+        testOrSkip(`survives ${mode} via ${entry}`, () => {
           runAndAssertSurvives(mode, entry, false);
         });
       }
