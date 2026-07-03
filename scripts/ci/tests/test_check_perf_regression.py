@@ -53,6 +53,9 @@ _CRIT_WAL_OFF_REGRESSION = os.path.join(_FIXTURES, "criterion_wal_off_regression
 # (degree_ratio · median(n1)/median(n4)) evaluated on the PR baseline alone.
 _CRIT_SCALING_PASS = os.path.join(_FIXTURES, "scaling_floor_pass")
 _CRIT_SCALING_FAIL = os.path.join(_FIXTURES, "scaling_floor_fail")
+# Missing-required-data tree: buffered n4 absent (required floor → MISSING DATA →
+# fail), mmap present + healthy. Required-floor data is never legitimately absent in
+# CI, so a missing median is a gate failure, not a silent skip (issue #1564).
 _CRIT_SCALING_SKIP = os.path.join(_FIXTURES, "scaling_floor_skip")
 
 
@@ -193,17 +196,71 @@ class TestScalingFloor:
         captured = capsys.readouterr()
         assert "concurrent_scan/buffered/n4" in captured.out
 
-    def test_missing_n4_skips_without_failing(self, capsys):
-        """A scaling entry with a missing n4 median is SKIP, not a failure.
+    def test_missing_required_data_fails(self, capsys):
+        """Missing data for a required scaling floor FAILS the gate (issue #1564).
 
-        The buffered n4 median is absent here (buffered floor → SKIP) while the
-        mmap floor is present and healthy, so the gate still exits 0.
+        A scaling floor is intra-run: its data is always present on any run that
+        benches the target, so a missing median means a typo'd id / omitted
+        `--bench` / no-data bench — which must red, not silently disable the gate.
+        Here the buffered n4 median is absent (required buffered floor → MISSING
+        DATA → fail) while the mmap floor is present and healthy.
         """
         exit_code = _run(_CRIT_SCALING_SKIP)
-        assert exit_code == 0, (
-            "Expected zero exit when a scaling entry's n4 data is missing (SKIP), "
-            f"but got exit code {exit_code}."
+        assert exit_code != 0, (
+            "Expected non-zero exit when a required scaling floor's data is "
+            f"missing (must not silently skip), but got exit code {exit_code}."
         )
         captured = capsys.readouterr()
         assert "concurrent_scan/buffered/n4" in captured.out
-        assert "SKIP" in captured.out
+        assert "MISSING DATA" in captured.out
+
+    def test_optional_floor_skips_when_absent(self, tmp_path, capsys):
+        """A scaling floor marked ``optional: true`` SKIPs (exit 0) when absent.
+
+        Uses a custom gate config: one present required floor (evaluated ok, so
+        the "nothing evaluated" guard does not fire) plus one optional floor whose
+        data is missing (→ SKIP, not a failure).
+        """
+        import json
+
+        # Present, healthy required floor: scaling = 4 * 2.4M / 3.2M = 3.0.
+        crit = tmp_path / "criterion"
+        for name, ns in (("n1", 2_400_000.0), ("n4", 3_200_000.0)):
+            d = crit / "concurrent_scan" / "buffered" / name / "pr"
+            d.mkdir(parents=True)
+            (d / "estimates.json").write_text(
+                json.dumps({"median": {"point_estimate": ns}})
+            )
+
+        cfg = {
+            "default_threshold_pct": 10,
+            "advisory_benches": [],
+            "benches": [],
+            "scaling_floors": [
+                {
+                    "id": "concurrent_scan/buffered/n4",
+                    "baseline_id": "concurrent_scan/buffered/n1",
+                    "degree_ratio": 4,
+                    "min_scaling": 1.8,
+                },
+                {
+                    "id": "concurrent_scan/absent/n4",
+                    "baseline_id": "concurrent_scan/absent/n1",
+                    "degree_ratio": 4,
+                    "min_scaling": 1.8,
+                    "optional": True,
+                },
+            ],
+        }
+        cfg_path = tmp_path / "gate.json"
+        cfg_path.write_text(json.dumps(cfg))
+
+        exit_code = main(
+            ["check_perf_regression.py", str(crit), "pr", "base", str(cfg_path)]
+        )
+        captured = capsys.readouterr()
+        assert exit_code == 0, (
+            "Expected zero exit: the required floor passes and the optional floor "
+            f"skips, but got exit code {exit_code}.\n{captured.out}"
+        )
+        assert "SKIP (optional" in captured.out

@@ -36,7 +36,9 @@
 //! `cqlite-core/benches/perf-gate.json` with a wide 25% threshold (contention
 //! bench). The *correctness* floors (every scan returns the same non-zero row
 //! count; writers actually ingested) still guard against a broken scan or a
-//! wedged writer.
+//! wedged writer. A writer-readiness barrier holds the readers' timed scans until
+//! every writer is actively ingesting, so the gated median always reflects latency
+//! under live write contention rather than an uncontended window.
 //!
 //! Gated on `cli-helpers` + `write-support` (the read fixture loader needs the
 //! former, the `WriteEngine` the latter). Under default features the bench
@@ -69,7 +71,7 @@ const SCANS_PER_READER: usize = 8;
 #[cfg(all(feature = "cli-helpers", feature = "write-support"))]
 fn bench_read_while_write(c: &mut Criterion) {
     use criterion::black_box;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -118,6 +120,13 @@ fn bench_read_while_write(c: &mut Criterion) {
                     // them once the readers finish so a slow writer cannot
                     // pin the iteration open.
                     let stop = Arc::new(AtomicBool::new(false));
+                    // Readiness barrier: each writer bumps this after its first
+                    // ingest; the driver waits for all WRITERS before starting the
+                    // readers' timed scans, so the measured window genuinely
+                    // overlaps sustained write load (issue #1564 roborev — a
+                    // no-overlap iteration would measure an artificially fast,
+                    // uncontended median and could mask a regression).
+                    let ready = Arc::new(AtomicUsize::new(0));
 
                     // Spawn sustained-ingest writers, each on its own engine
                     // + temp dir (WAL off → pure CPU/memtable allocation, the
@@ -125,6 +134,7 @@ fn bench_read_while_write(c: &mut Criterion) {
                     let mut writer_handles = Vec::with_capacity(WRITERS);
                     for _ in 0..WRITERS {
                         let stop = Arc::clone(&stop);
+                        let ready = Arc::clone(&ready);
                         writer_handles.push(tokio::task::spawn_blocking(move || {
                             use rand::Rng;
                             let tmp = tempfile::TempDir::new()
@@ -134,14 +144,13 @@ fn bench_read_while_write(c: &mut Criterion) {
                             let mut rng = fixtures::seeded_rng();
                             let mut written = 0u64;
                             // Do-while: ingest at least once before honoring
-                            // `stop`, so a writer scheduled only after the
-                            // readers finished (and set stop=true) still ingests
-                            // once. This guarantees total_written >= WRITERS,
-                            // removing the zero-ingest scheduling race that
-                            // panicked the correctness floor below. Measurement
-                            // semantics are unchanged: in the common case the
-                            // writer still sustain-ingests for the whole reader
-                            // window.
+                            // `stop`, then signal readiness. This guarantees
+                            // total_written >= WRITERS (removing the zero-ingest
+                            // race that panicked the correctness floor) and lets
+                            // the driver barrier below start reader timing only
+                            // once every writer is actively ingesting. Measurement
+                            // semantics are unchanged: the writer sustain-ingests
+                            // for the whole reader window.
                             loop {
                                 let id = uuid::Uuid::from_u128(rng.gen());
                                 let age: i32 = rng.gen_range(0..100);
@@ -152,12 +161,29 @@ fn bench_read_while_write(c: &mut Criterion) {
                                 );
                                 engine.execute(&stmt).expect("read_while_write ingest");
                                 written += 1;
+                                if written == 1 {
+                                    ready.fetch_add(1, Ordering::Relaxed);
+                                }
                                 if stop.load(Ordering::Relaxed) {
                                     break;
                                 }
                             }
                             written
                         }));
+                    }
+
+                    // Barrier: wait until every writer has performed its first
+                    // ingest before starting the readers, so their timed scans
+                    // overlap live write pressure. Each writer's guaranteed first
+                    // ingest makes this terminate; bounded so a wedged writer
+                    // surfaces as a panic rather than a hang.
+                    let barrier_deadline = Instant::now() + Duration::from_secs(30);
+                    while ready.load(Ordering::Relaxed) < WRITERS {
+                        assert!(
+                            Instant::now() < barrier_deadline,
+                            "read_while_write: writers did not start within 30s — wedged writer path"
+                        );
+                        tokio::time::sleep(Duration::from_micros(100)).await;
                     }
 
                     // Spawn the readers; each loops `SCANS_PER_READER` full

@@ -204,14 +204,22 @@ speed cancels — this is exactly the property absolute-time gating lacks.
 The **floor is `1.8`**: below observed healthy (≈2.98/3.19) with ~40% headroom for
 CI-runner variance (fewer cores, shared scheduler; ubuntu-latest is ~4 vCPU),
 while still failing decisively against the ≈1.0 serialization signature. `n2`/`n8`
-are still measured for the local scaling curve but are not floored. A scaling
-entry whose `n1` or `n4` median is absent is reported `SKIP` and never fails.
+are still measured for the local scaling curve but are not floored. Because a
+scaling floor is **intra-run** (its data is always present on any run that benches
+`concurrent_scan`), a configured floor whose `n1`/`n4` median is **missing** is a
+gate **failure** (`MISSING DATA`), not a silent `SKIP` — so a typo'd id, an omitted
+`--bench`, or a no-data bench cannot quietly disable the gate. A floor may opt into
+skip-on-absent with `"optional": true` (for a genuinely optional fixture, like the
+`test_da` BTI corpus convention).
 
 `read_while_write` is gated as a standard **strict median** entry
 (`read_while_write/readers6_writers2`, 25% threshold) — the reader-side aggregate
 latency under write load, which is machine-readable and stable (tracks p50 ≈ 5 ms).
-Its p99 tail is not gated here (it is stderr-only and runner-noisy); the tail is
-owned by the A2 tail-latency harness (#1563).
+The bench uses a writer-readiness barrier so the readers' timed scans begin only
+once every writer is actively ingesting, guaranteeing the median reflects latency
+under live write contention (not an uncontended window). Its p99 tail is not gated
+here (it is stderr-only and runner-noisy); the tail is owned by the A2 tail-latency
+harness (#1563).
 
 ### Path-ignore behavior (Issue #572)
 

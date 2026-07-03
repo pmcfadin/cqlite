@@ -144,9 +144,21 @@ def main(argv):
     # (e.g. a reintroduced shared Mutex) collapses median(id)→≈degree_ratio*
     # median(baseline_id), driving scaling→≈1.0. A `scaling` below `min_scaling`
     # fails the gate. Legacy configs without `scaling_floors` are unaffected.
+    #
+    # Missing data for a configured floor is a FAILURE, not a SKIP (issue #1564
+    # roborev): the whole point of a scaling gate is to catch regressions, so a
+    # typo'd id, an omitted `--bench`, or a bench that produced no data must NOT
+    # silently disable the gate. Unlike the pr-vs-main median benches (which
+    # legitimately SKIP a bench absent from `main`), a scaling floor is intra-run,
+    # so its data is always present on any run that benches the target. An entry
+    # may opt into skip-on-absent with `"optional": true` (for a genuinely
+    # optional fixture, mirroring the read/get_partition_bti convention).
     # -----------------------------------------------------------------------
     scaling_floors = cfg.get("scaling_floors", [])
     scaling_evaluated = 0
+    # Reason text for each scaling-floor failure, keyed by bench id (the failures
+    # list carries only (id, None) for scaling entries).
+    scaling_fail_reason = {}
     if scaling_floors:
         print(
             f"Concurrency scaling floors (evaluated on '{new_baseline}' baseline):\n"
@@ -173,10 +185,24 @@ def main(argv):
                 missing.append(baseline_id)
             if m_scaled is None:
                 missing.append(bench_id)
-            print(
-                f"{bench_id:<{col_w}} {'-':>16} {'-':>16} {'-':>9}  "
-                f"{min_scaling:>7g}  SKIP (no data in '{new_baseline}': {', '.join(missing)})"
-            )
+            missing_txt = ", ".join(missing)
+            if entry.get("optional", False):
+                # Genuinely optional fixture — skip without failing.
+                print(
+                    f"{bench_id:<{col_w}} {'-':>16} {'-':>16} {'-':>9}  "
+                    f"{min_scaling:>7g}  SKIP (optional, no data in '{new_baseline}': {missing_txt})"
+                )
+            else:
+                # Required floor with no data — fail loudly rather than silently
+                # disabling the gate.
+                print(
+                    f"{bench_id:<{col_w}} {'-':>16} {'-':>16} {'-':>9}  "
+                    f"{min_scaling:>7g}  MISSING DATA (required; '{new_baseline}': {missing_txt})"
+                )
+                failures.append((bench_id, None))
+                scaling_fail_reason[bench_id] = (
+                    f"required scaling data missing in '{new_baseline}': {missing_txt}"
+                )
             continue
 
         scaling_evaluated += 1
@@ -184,6 +210,7 @@ def main(argv):
         if scaling < min_scaling:
             status = f"REGRESSION (scaling < {min_scaling:g})"
             failures.append((bench_id, None))
+            scaling_fail_reason[bench_id] = f"below scaling floor: {min_scaling:g}"
         else:
             status = "ok"
         print(
@@ -210,13 +237,10 @@ def main(argv):
         print(f"❌ {len(failures)} bench(es) regressed past their threshold:")
         for bench, ratio in failures:
             if ratio is None:
-                # Scaling-floor failure (ratio is not a pr-vs-main delta).
-                sf_entry = next(
-                    (s for s in scaling_floors if s.get("id") == bench), {}
-                )
-                floor = sf_entry.get("min_scaling")
-                floor_txt = f"scaling floor: {float(floor):g}" if floor is not None else "scaling floor"
-                print(f"   - {bench}: below scaling floor  ({floor_txt})")
+                # Scaling-floor failure (ratio is not a pr-vs-main delta): either
+                # below the floor or required data missing.
+                reason = scaling_fail_reason.get(bench, "scaling floor")
+                print(f"   - {bench}: {reason}")
             else:
                 bc_entry = next((b for b in bench_configs if b["id"] == bench), {})
                 tpct = bc_entry.get("threshold_pct", default_threshold_pct)
