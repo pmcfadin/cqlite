@@ -62,37 +62,59 @@ from corrupt_fixture import MODES, make_corrupt_fixture, source_table_dir
 ENTRY_POINTS = ("execute", "streaming", "parquet")
 
 # The child driver. Runs one entry point against a corrupt fixture and prints a
-# terminal sentinel. ``import cqlite`` sits OUTSIDE the try so a broken build
-# (ImportError) crashes non-zero and surfaces as a setup failure, never a false
-# green. A hard abort prints no terminal sentinel and exits with a signal.
+# terminal sentinel. Setup -- ``import cqlite``, ``cqlite.open``, and the
+# entry-method lookup -- sits OUTSIDE the success ``try``: a broken build
+# (ImportError), missing schema, failed ``open``, or a renamed/absent API method
+# crashes non-zero and surfaces as a setup failure, never a false-green
+# ``RAISED_*``. Only an EXPECTED native error thrown FROM the entry-point call
+# (``cqlite.CqliteError`` or a PyO3 ``PanicException`` under panic=unwind) is
+# accepted as a terminal ``RAISED_*``; any other exception re-raises and aborts
+# non-zero. The driver emits ``OPENED`` then ``CALLING <entry>`` before any
+# terminal sentinel so the parent can prove corrupt input was driven through the
+# entry point. A hard abort prints no terminal sentinel and exits with a signal.
 _DRIVER = r"""
 import sys, os, tempfile
 import cqlite
 
 root, schema, entry = sys.argv[1], sys.argv[2], sys.argv[3]
 QUERY = "SELECT * FROM test_basic.simple_table"
-try:
-    db = cqlite.open(root, schema=schema)
-    print("OPENED", flush=True)
+
+# entry name -> underlying Database method that must exist on the instance.
+METHODS = {"execute": "execute", "streaming": "execute_streaming", "parquet": "export_parquet"}
+
+# --- setup: NOT catchable as success ---
+db = cqlite.open(root, schema=schema)
+print("OPENED", flush=True)
+
+method_name = METHODS.get(entry)
+if method_name is None or not callable(getattr(db, method_name, None)):
+    print("BADENTRY %s" % entry, flush=True)
+    raise SystemExit(3)
+
+
+def _call():
     if entry == "execute":
-        n = sum(1 for _ in db.execute(QUERY))
-        print("RETURNED rows=%d" % n, flush=True)
-    elif entry == "streaming":
-        n = sum(1 for _ in db.execute_streaming(QUERY))
-        print("RETURNED rows=%d" % n, flush=True)
-    elif entry == "parquet":
-        out = os.path.join(tempfile.mkdtemp(), "out.parquet")
-        rows = db.export_parquet(QUERY, out)
-        print("RETURNED rows=%d" % rows, flush=True)
-    else:
-        print("BADENTRY %s" % entry, flush=True)
-        raise SystemExit(3)
+        return sum(1 for _ in db.execute(QUERY))
+    if entry == "streaming":
+        return sum(1 for _ in db.execute_streaming(QUERY))
+    out = os.path.join(tempfile.mkdtemp(), "out.parquet")
+    return db.export_parquet(QUERY, out)
+
+
+print("CALLING %s" % entry, flush=True)
+# --- ONLY the entry-point call is catchable as success ---
+try:
+    n = _call()
+    print("RETURNED rows=%d" % n, flush=True)
 except cqlite.CqliteError as exc:
     print("RAISED_CQLITE %s" % type(exc).__name__, flush=True)
-except SystemExit:
-    raise
-except BaseException as exc:  # includes PyO3 PanicException under panic=unwind
-    print("RAISED_OTHER %s" % type(exc).__name__, flush=True)
+except BaseException as exc:
+    # Accept ONLY a PyO3 PanicException (the panic=unwind containment path).
+    # Any other unexpected exception must NOT read as a passing terminal state.
+    if type(exc).__name__ == "PanicException":
+        print("RAISED_OTHER %s" % type(exc).__name__, flush=True)
+    else:
+        raise
 """
 
 
@@ -108,6 +130,33 @@ def _require_source_or_skip():
     data = src / "nb-1-big-Data.db"
     if data.stat().st_size == 0:
         pytest.fail(f"Source {data} present but empty (issue #1437)", pytrace=False)
+
+
+def _assert_drove_entry_point(result, entry, ctx):
+    """Prove corrupt input was driven THROUGH the entry point.
+
+    The driver must have emitted ``OPENED`` then ``CALLING <entry>`` before any
+    terminal sentinel. This defeats a false-green where a setup/open/lookup
+    failure would otherwise surface as a passing ``RAISED_*``.
+    """
+    lines = result.stdout.splitlines()
+    assert "OPENED" in lines, f"driver never opened the DB (setup failed?)\n{ctx}"
+    calling = "CALLING %s" % entry
+    assert calling in lines, f"driver never reached the {entry} entry point\n{ctx}"
+    opened_idx = lines.index("OPENED")
+    calling_idx = lines.index(calling)
+    assert calling_idx > opened_idx, f"CALLING before OPENED\n{ctx}"
+    terminal = ("RETURNED", "RAISED_CQLITE", "RAISED_OTHER")
+    term_idx = next(
+        (i for i, ln in enumerate(lines) if any(ln.startswith(t) for t in terminal)),
+        None,
+    )
+    assert term_idx is not None, (
+        f"no terminal sentinel on stdout (possible abort/hang)\n{ctx}"
+    )
+    assert term_idx > calling_idx, (
+        f"terminal sentinel appeared before the entry-point call\n{ctx}"
+    )
 
 
 def _run_driver(mode, entry, *, expose_uncompressed):
@@ -142,13 +191,11 @@ def test_compressed_corrupt_sstable_survives(mode, entry):
     # Liveness: an abort exits with a signal (negative rc) or non-zero code.
     assert result.returncode == 0, f"child process did not survive corrupt input\n{ctx}"
     # And it reached a catchable terminal state rather than hanging or aborting
-    # silently. RAISED_OTHER (e.g. a PanicException under panic=unwind) still
-    # proves the boundary contained the panic and the process lived on — which
-    # is exactly the guarantee #1440 extends to release builds.
-    terminal = ("RETURNED", "RAISED_CQLITE", "RAISED_OTHER")
-    assert any(tok in result.stdout for tok in terminal), (
-        f"no terminal sentinel on stdout (possible abort/hang)\n{ctx}"
-    )
+    # silently -- AFTER actually driving corrupt input through the entry point.
+    # RAISED_OTHER (e.g. a PanicException under panic=unwind) still proves the
+    # boundary contained the panic and the process lived on — which is exactly
+    # the guarantee #1440 extends to release builds.
+    _assert_drove_entry_point(result, entry, ctx)
 
 
 # The uncompressed flavor reaches the raw-parser panic. parquet is excluded
@@ -178,7 +225,4 @@ def test_uncompressed_corrupt_sstable_panic_is_contained(mode, entry):
         "release; #1440 fixes it). If this failed under a DEBUG build the "
         f"boundary regressed.\n{ctx}"
     )
-    terminal = ("RETURNED", "RAISED_CQLITE", "RAISED_OTHER")
-    assert any(tok in result.stdout for tok in terminal), (
-        f"no terminal sentinel on stdout (possible abort/hang)\n{ctx}"
-    )
+    _assert_drove_entry_point(result, entry, ctx)

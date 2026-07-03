@@ -54,39 +54,69 @@ const { MODES, sourceTableDir, makeCorruptFixture } = require('./corrupt-fixture
 
 const MODULE_PATH = path.resolve(__dirname, '..', 'lib', 'index.js');
 
-// Child driver. `require` sits OUTSIDE the try so a broken build crashes
-// non-zero (surfacing as a setup failure, not a false green). A hard abort
-// prints no terminal sentinel and exits with a signal.
+// Child driver. Setup (`require`, `Database.open`, and the entry-method lookup)
+// sits OUTSIDE the success `try`: a broken build, missing schema, failed
+// `open`, or a renamed/absent entry method is a HARD error (non-zero exit via
+// the outer `.catch`), never a false-green `RAISED`. Only a native/typed error
+// thrown FROM the entry-point call itself is caught as `RAISED`. The driver
+// emits `OPENED` then `CALLING <entry>` before any terminal sentinel so the
+// parent can prove corrupt input was actually driven through the entry point.
+// A hard abort prints no terminal sentinel and exits with a signal.
 const DRIVER = `
 const [root, schema, entry] = process.argv.slice(1);
 const { Database } = require(${JSON.stringify(MODULE_PATH)});
 const QUERY = 'SELECT * FROM test_basic.simple_table';
+
+// entry name -> underlying Database method that must exist on the instance.
+const METHOD = {
+  executeNative: 'executeNative',
+  streaming: 'executeStreaming',
+  parquet: 'exportParquet',
+};
+
 (async () => {
-  try {
-    const db = await Database.open(root, { schema });
-    console.log('OPENED');
+  // --- setup: NOT catchable as success ---
+  const db = await Database.open(root, { schema });
+  console.log('OPENED');
+
+  const methodName = METHOD[entry];
+  if (methodName === undefined || typeof db[methodName] !== 'function') {
+    console.log('BADENTRY ' + entry);
+    process.exit(3);
+  }
+
+  const call = async () => {
     if (entry === 'executeNative') {
       const r = await db.executeNative(QUERY);
-      console.log('RETURNED rows=' + r.rowCount);
+      return 'rows=' + r.rowCount;
     } else if (entry === 'streaming') {
       let n = 0;
       for await (const _ of db.executeStreaming(QUERY)) { n++; }
-      console.log('RETURNED rows=' + n);
-    } else if (entry === 'parquet') {
+      return 'rows=' + n;
+    } else {
       const fs = require('fs'); const os = require('os'); const path = require('path');
       const out = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cq-pq-')), 'out.parquet');
       const rows = await db.exportParquet(QUERY, out);
-      console.log('RETURNED rows=' + rows);
-    } else {
-      console.log('BADENTRY ' + entry);
-      process.exit(3);
+      return 'rows=' + rows;
     }
-    await db.close();
+  };
+
+  console.log('CALLING ' + entry);
+  // --- ONLY the entry-point call is catchable as success ---
+  try {
+    const detail = await call();
+    console.log('RETURNED ' + detail);
   } catch (e) {
     const name = (e && e.constructor && e.constructor.name) || 'Error';
     console.log('RAISED ' + name);
   }
-})();
+
+  try { await db.close(); } catch (_) { /* best-effort */ }
+})().catch((e) => {
+  // Setup/lookup failure -> hard error (non-zero exit), NOT a passing RAISED.
+  console.error('SETUP_FAILED ' + ((e && e.stack) || e));
+  process.exit(4);
+});
 `;
 
 function requireSource() {
@@ -133,9 +163,20 @@ function runAndAssertSurvives(mode, entry, exposeUncompressed) {
           `stdout=${JSON.stringify(out)}\nstderr=${JSON.stringify(errOut)}`
       );
     }
+    // Prove the driver actually drove corrupt input THROUGH the entry point:
+    // it must have opened the DB and announced the call before any terminal
+    // sentinel. This defeats a false-green where a setup/open/lookup failure
+    // would otherwise surface as a passing RAISED.
+    const lines = stdout.split(/\r?\n/);
+    const openedIdx = lines.indexOf('OPENED');
+    const callingIdx = lines.indexOf('CALLING ' + entry);
+    const terminalIdx = lines.findIndex((l) => /^(RETURNED|RAISED)\b/.test(l));
+    expect(openedIdx).toBeGreaterThanOrEqual(0);
+    expect(callingIdx).toBeGreaterThan(openedIdx);
     // RAISED (incl. a napi-converted panic under panic=unwind) or RETURNED both
-    // prove the boundary held and the process lived on.
-    expect(stdout).toMatch(/RETURNED|RAISED/);
+    // prove the boundary held and the process lived on -- but only when reached
+    // AFTER CALLING (i.e. from the entry-point call itself).
+    expect(terminalIdx).toBeGreaterThan(callingIdx);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
