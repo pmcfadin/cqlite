@@ -22,10 +22,12 @@
 //!
 //! ## Strategy
 //!
-//! A single long-lived bridge runtime is built lazily on first use and reused
-//! for every subsequent call (Issue #1670) — previously a fresh
+//! A single long-lived bridge runtime is built lazily on first *successful* use
+//! and reused for every subsequent call (Issue #1670) — previously a fresh
 //! `Runtime::new()` was constructed and torn down on *every* flush/maintenance
-//! step. The cached runtime is a **multi-thread** runtime (worker threads =
+//! step. A transient build failure is NOT cached: the error is returned to the
+//! caller and the next call retries, so one bad build never disables the bridge
+//! for the process lifetime. The cached runtime is a **multi-thread** runtime (worker threads =
 //! CPU count) with all drivers (I/O, time, blocking pool) enabled — the same
 //! flavor `Runtime::new()` built before #1670. This is deliberate: concurrent
 //! flush/compaction each bridge through `block_on_async`, and a single shared
@@ -62,35 +64,54 @@ use crate::error::{Error, Result};
 #[cfg(feature = "write-support")]
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "write-support")]
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 #[cfg(feature = "write-support")]
 use tokio::runtime::Runtime;
 
-/// Process-wide cached bridge runtime. Built once on first use and reused for
-/// the life of the process (Issue #1670). Tests that create and drop many
-/// `WriteEngine`s reuse this single runtime — a process-global runtime that
+/// Process-wide cached bridge runtime. Built once on first *successful* use and
+/// reused for the life of the process (Issue #1670). Tests that create and drop
+/// many `WriteEngine`s reuse this single runtime — a process-global runtime that
 /// outlives every engine is intentional and harmless.
 ///
-/// Stored as `Result<Runtime, String>` because `OnceLock::get_or_init` cannot
-/// return a fallible value on stable Rust and `get_or_try_init` is unstable; on
-/// a build failure the (rare) error message is cloned into an [`Error::Storage`]
-/// on every call, preserving the original error text.
+/// The cell holds ONLY a successfully-built [`Runtime`] (not a
+/// `Result<Runtime, _>`). A transient build failure (e.g. thread-spawn/resource
+/// exhaustion in [`tokio::runtime::Builder::build`]) returns an error to the
+/// caller WITHOUT populating this cell, so the next call retries — a failed
+/// build never poisons the cache for the process lifetime. Builds are serialized
+/// by [`BRIDGE_BUILD_LOCK`] with a double-check so a successful build still
+/// happens at most once even under a concurrent first-access race.
 #[cfg(feature = "write-support")]
-static BRIDGE_RUNTIME: OnceLock<std::result::Result<Runtime, String>> = OnceLock::new();
+static BRIDGE_RUNTIME: OnceLock<Runtime> = OnceLock::new();
+
+/// Serializes bridge-runtime construction so that (a) at most one build is
+/// in-flight at a time and (b) a successful build populates [`BRIDGE_RUNTIME`]
+/// exactly once even when multiple threads miss the fast path simultaneously.
+/// A single lock acquisition per bridge call is negligible next to the ~290µs a
+/// per-call `Runtime::new()` cost before #1670.
+#[cfg(feature = "write-support")]
+static BRIDGE_BUILD_LOCK: Mutex<()> = Mutex::new(());
 
 /// Number of times the cached bridge runtime has actually been constructed.
 ///
-/// Incremented exactly inside the [`BRIDGE_RUNTIME`] initializer, so it counts
-/// real `Runtime` builds — not `block_on_async` calls. With the cache it is
-/// `<= 1` for the life of the process; before Issue #1670 (a `Runtime::new()`
-/// per call) it grew by one on every `block_on_async` invocation.
+/// Incremented immediately before each real `Runtime` build (under the build
+/// lock), so it counts actual build *attempts* — not `block_on_async` calls.
+/// With the cache it is `<= 1` for the life of the process once a build
+/// succeeds; before Issue #1670 (a `Runtime::new()` per call) it grew by one on
+/// every `block_on_async` invocation. A retried build after a transient failure
+/// increments it again — the intended, observable retry behavior.
 #[cfg(feature = "write-support")]
 static RUNTIME_BUILD_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Return the cached bridge runtime, building it on first use.
+///
+/// A failed build returns `Err` WITHOUT caching anything, so the next call
+/// retries (no permanent poison — the regression fixed for Issue #1670). Builds
+/// are serialized by [`BRIDGE_BUILD_LOCK`] with a re-check under the lock, so a
+/// successful build happens at most once even if many threads miss the fast
+/// path at the same instant.
 #[cfg(feature = "write-support")]
 fn bridge_runtime() -> Result<&'static Runtime> {
-    let built = BRIDGE_RUNTIME.get_or_init(|| {
+    get_or_build_once(&BRIDGE_RUNTIME, &BRIDGE_BUILD_LOCK, || {
         RUNTIME_BUILD_COUNT.fetch_add(1, Ordering::Relaxed);
         // Multi-thread flavor (worker threads = CPU count), matching main's
         // `Runtime::new()` semantics so concurrent `block_on_async` calls and
@@ -99,12 +120,53 @@ fn bridge_runtime() -> Result<&'static Runtime> {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
-            .map_err(|e| format!("Failed to create tokio runtime: {}", e))
-    });
-    match built {
-        Ok(rt) => Ok(rt),
-        Err(msg) => Err(Error::Storage(msg.clone())),
+            .map_err(|e| Error::Storage(format!("Failed to create tokio runtime: {}", e)))
+    })
+}
+
+/// Return the value cached in `cell`, building it via `build` on the first miss.
+///
+/// The store-only-on-success cache contract (Issue #1670 robustness fix):
+/// - Fast path returns the cached value with no locking once populated.
+/// - On a miss, `lock` serializes construction and a re-check avoids a double
+///   build under a concurrent first-access race, so a successful build happens
+///   **at most once**.
+/// - If `build` returns `Err`, the error is propagated and `cell` stays EMPTY,
+///   so a later call retries — a transient failure never permanently poisons
+///   the cache.
+#[cfg(feature = "write-support")]
+fn get_or_build_once<T, F>(
+    cell: &'static OnceLock<T>,
+    lock: &Mutex<()>,
+    build: F,
+) -> Result<&'static T>
+where
+    F: FnOnce() -> Result<T>,
+{
+    // Fast path: already built and cached.
+    if let Some(v) = cell.get() {
+        return Ok(v);
     }
+    // Slow path: serialize construction so at most one build runs at a time.
+    let _guard = lock
+        .lock()
+        .map_err(|_| Error::Storage("bridge runtime build lock poisoned".to_string()))?;
+    // Re-check under the lock: another thread may have built while we waited.
+    if let Some(v) = cell.get() {
+        return Ok(v);
+    }
+    // On `Err` we return here WITHOUT touching `cell`, so it stays empty and the
+    // next call retries the build (no permanent poison).
+    let v = build()?;
+    // Only reached on success. We hold the lock and re-checked emptiness above,
+    // so `set` succeeds; store then return the stored ref.
+    if cell.set(v).is_err() {
+        return Err(Error::Storage(
+            "bridge runtime unexpectedly already set".to_string(),
+        ));
+    }
+    cell.get()
+        .ok_or_else(|| Error::Storage("bridge runtime missing after successful set".to_string()))
 }
 
 /// Run an async future to completion from a synchronous context, safely whether
@@ -257,6 +319,49 @@ mod tests {
                 other => panic!("expected Err(Storage(..)), got {other:?}"),
             }
         });
+    }
+
+    /// Issue #1670 robustness: a FAILED build must NOT poison the cache — the
+    /// next call retries and can succeed. Exercised on the isolated
+    /// `get_or_build_once` helper (its own `OnceLock`/`Mutex`) so the property is
+    /// tested without brittle global state or a way to force a real tokio build
+    /// to fail. This is the regression roborev flagged: a permanently-cached
+    /// `Err` would disable the bridge for the whole process.
+    #[test]
+    fn failed_build_does_not_poison_cache_and_retries() {
+        use std::sync::atomic::AtomicU32;
+
+        static CELL: OnceLock<u32> = OnceLock::new();
+        static LOCK: Mutex<()> = Mutex::new(());
+        static ATTEMPTS: AtomicU32 = AtomicU32::new(0);
+
+        // First call: the builder fails. The cell must stay empty (not poisoned).
+        let first: Result<&'static u32> = get_or_build_once(&CELL, &LOCK, || {
+            ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+            Err(Error::Storage("transient build failure".to_string()))
+        });
+        assert!(first.is_err(), "first build should surface the error");
+        assert!(
+            CELL.get().is_none(),
+            "failed build must leave the cache empty (no poison)"
+        );
+
+        // Second call: the builder succeeds and the value is cached.
+        let second: Result<&'static u32> = get_or_build_once(&CELL, &LOCK, || {
+            ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+            Ok(42u32)
+        });
+        assert_eq!(*second.expect("retry after failure succeeds"), 42);
+        assert_eq!(CELL.get(), Some(&42), "successful build is cached");
+
+        // Third call: fast path, no further build attempts.
+        let third: Result<&'static u32> =
+            get_or_build_once(&CELL, &LOCK, || panic!("must not rebuild after success"));
+        assert_eq!(*third.expect("cached value returned"), 42);
+
+        // Exactly two build attempts: one failed, one succeeded — proving the
+        // retry happened and the success was not rebuilt.
+        assert_eq!(ATTEMPTS.load(Ordering::Relaxed), 2);
     }
 
     /// Issue #587 panic-safety, no-runtime path: a panic in the future unwinds
