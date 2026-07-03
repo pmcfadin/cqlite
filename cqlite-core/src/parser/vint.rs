@@ -144,39 +144,38 @@ fn parse_zigzag_vint(input: &[u8]) -> IResult<&[u8], i64> {
         let value = ((first_byte & 0x1F) as u64) << 16 | (input[1] as u64) << 8 | input[2] as u64;
         (3, value)
     } else if first_byte == 0xF0 {
-        // Extended format: 0xF0 followed by variable length bytes
-        if input.len() < 2 {
+        // Extended format: 0xF0 followed by EXACTLY 8 continuation bytes (9 total).
+        // Issue #1624: the lead byte must consume a fixed length, not swallow the
+        // entire remaining buffer (which made the consumed length framing-dependent).
+        if input.len() < 9 {
             return Err(nom::Err::Error(nom::error::Error::new(
                 input,
                 nom::error::ErrorKind::Eof,
             )));
         }
-        // Read the remaining bytes as a big-endian integer
+        // Read exactly input[1..9] as a big-endian u64.
         let mut value = 0u64;
-        let bytes_to_read = input.len() - 1; // Skip the 0xF0 marker
         #[allow(clippy::needless_range_loop)]
-        for i in 1..=bytes_to_read.min(8) {
-            // Max 8 bytes for u64
+        for i in 1..9 {
             value = (value << 8) | (input[i] as u64);
         }
-        (bytes_to_read + 1, value)
+        (9usize, value)
     } else if first_byte == 0xFF {
-        // Extended format: 0xFF followed by variable length bytes (similar to 0xF0)
-        if input.len() < 2 {
+        // Extended format: 0xFF followed by EXACTLY 8 continuation bytes (9 total).
+        // Issue #1624: same fixed-length framing as the 0xF0 arm.
+        if input.len() < 9 {
             return Err(nom::Err::Error(nom::error::Error::new(
                 input,
                 nom::error::ErrorKind::Eof,
             )));
         }
-        // Read the remaining bytes as a big-endian integer
+        // Read exactly input[1..9] as a big-endian u64.
         let mut value = 0u64;
-        let bytes_to_read = input.len() - 1; // Skip the 0xFF marker
         #[allow(clippy::needless_range_loop)]
-        for i in 1..=bytes_to_read.min(8) {
-            // Max 8 bytes for u64
+        for i in 1..9 {
             value = (value << 8) | (input[i] as u64);
         }
-        (bytes_to_read + 1, value)
+        (9usize, value)
     } else {
         // Not a valid ZigZag VInt, let caller try other formats
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -1226,8 +1225,12 @@ mod tests {
         assert!(parse_vint(&[0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]).is_ok());
 
         // Test valid extended formats - should succeed now with backward compatibility
+        // 0xF0 + 7 bytes (8 total) parses via parse_vint_fixed's 5-byte path.
         assert!(parse_vint(&[0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]).is_ok()); // F0 extended format
-        assert!(parse_vint(&[0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]).is_ok()); // Should work with ZigZag parsing
+                                                                                        // Issue #1624: 0xFF + 7 bytes (8 total) is a TRUNCATED 0xFF vint — it
+                                                                                        // declares 8 continuation bytes (9 total) but only 7 are present, so it
+                                                                                        // is now correctly rejected (was Ok under the buffer-swallowing bug).
+        assert!(parse_vint(&[0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]).is_err());
 
         // Test incomplete data - with backward compatibility, focus on truly invalid cases
         assert!(parse_vint(&[0x80, 0x00]).is_ok()); // Two-byte format with data
@@ -1238,6 +1241,59 @@ mod tests {
         let _corrupted_data = b"data"; // ASCII corruption
                                        // Note: corruption detection should catch these, but if not, we accept them
                                        // as the new format is more permissive for backward compatibility
+    }
+
+    /// Issue #1624: a bare multi-byte lead byte is a TRUNCATED vint and MUST
+    /// error, not decode to a framing-dependent value. Previously the
+    /// `vint_fixed` single-byte special case decoded `0xC0` as -64 and `0x80`
+    /// as 0, making the result depend on how the slice was framed.
+    #[test]
+    fn test_parse_vint_truncated_lead_byte_is_err_1624() {
+        // 0xC0 has leading_ones=2 → declares a 3-byte vint, 2 bytes missing.
+        assert!(
+            parse_vint(&[0xC0]).is_err(),
+            "bare 0xC0 is a truncated 3-byte vint, must be Err"
+        );
+        // 0x80 has leading_ones=1 → declares a 2-byte vint, 1 byte missing.
+        assert!(
+            parse_vint(&[0x80]).is_err(),
+            "bare 0x80 is a truncated 2-byte vint, must be Err"
+        );
+    }
+
+    /// Issue #1624: framing-agreement — a COMPLETE value decodes identically
+    /// with or without trailing junk, consuming exactly its encoded length. The
+    /// old `vint_fixed` special case made a bare `0x80` decode as 0 (framing
+    /// dependent); a complete `[0x80, 0x80]` must decode the same value whether
+    /// or not extra bytes follow.
+    #[test]
+    fn test_parse_vint_framing_agreement_1624() {
+        let (rem_a, val_a) = parse_vint(&[0x80, 0x80]).expect("complete 2-byte vint");
+        let (rem_b, val_b) =
+            parse_vint(&[0x80, 0x80, 0xAA, 0xBB]).expect("2-byte vint + trailing junk");
+        assert_eq!(val_a, val_b, "decoded value must not depend on framing");
+        assert!(rem_a.is_empty(), "first form consumes all bytes");
+        assert_eq!(rem_b, &[0xAA, 0xBB], "second form leaves exactly the junk");
+        // Truncation direction: bare 0x80 is now correctly an error.
+        assert!(parse_vint(&[0x80]).is_err());
+    }
+
+    /// Issue #1624: the `0xF0`/`0xFF` extended arms of `parse_zigzag_vint` must
+    /// consume EXACTLY 9 bytes (lead + 8 continuation), not swallow the whole
+    /// remaining buffer. Truncated input (< 9 bytes) must error.
+    #[test]
+    fn test_parse_zigzag_vint_extended_consumes_exactly_nine_1624() {
+        let (rem, _) = parse_zigzag_vint(&[0xF0, 1, 2, 3, 4, 5, 6, 7, 8, 0xAA, 0xBB])
+            .expect("0xF0 + 8 continuation bytes");
+        assert_eq!(rem, &[0xAA, 0xBB], "0xF0 arm must consume exactly 9 bytes");
+
+        let (rem, _) = parse_zigzag_vint(&[0xFF, 1, 2, 3, 4, 5, 6, 7, 8, 0xAA, 0xBB])
+            .expect("0xFF + 8 continuation bytes");
+        assert_eq!(rem, &[0xAA, 0xBB], "0xFF arm must consume exactly 9 bytes");
+
+        // Truncated: fewer than 9 bytes must error.
+        assert!(parse_zigzag_vint(&[0xF0, 1, 2, 3]).is_err());
+        assert!(parse_zigzag_vint(&[0xFF, 1, 2, 3]).is_err());
     }
 
     #[test]
@@ -1264,13 +1320,19 @@ mod tests {
 
     #[test]
     fn test_parse_vint_extended_formats() {
-        // 0xF0 prefix should fall back to ZigZag parsing and succeed
+        // 0xF0 with 5 bytes parses via parse_vint_fixed's standard 5-byte path
+        // (0xF0 has leading_ones=4 → 5-byte vint), so parse_vint succeeds.
         let bytes = [0xF0, 0x00, 0x00, 0x00, 0x10];
-        let _ = parse_vint(&bytes).expect("extended format parses");
+        let _ = parse_vint(&bytes).expect("0xF0 5-byte vint parses");
 
-        // 0xFF extended format should also succeed
+        // Issue #1624: 0xFF declares 8 continuation bytes (9 total). With only
+        // 4 continuation bytes present this is truncated: parse_vint_fixed errs
+        // (needs 9), and the 0xFF zigzag fallback arm now also requires 9 bytes.
         let bytes = [0xFF, 0x00, 0x00, 0x00, 0x05];
-        let _ = parse_vint(&bytes).expect("fallback parse");
+        assert!(
+            parse_vint(&bytes).is_err(),
+            "truncated 0xFF vint (5 bytes, needs 9) must be Err"
+        );
     }
 
     // Issue #264 / #1623: VInt overflow protection tests (unsigned lengths).
