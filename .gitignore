@@ -207,3 +207,7 @@ docs/sstable-guide-audit/
 
 # parity-report self-test probe (issue #1338): removed by trap, ignored as a safety net
 test-data/.tmp-parity-manifest-mutated.yml
+
+# tail-latency harness history ledger (issue #1563): generated run data,
+# machine/run-specific. Consolidates into Epic A5's unified history.jsonl.
+cqlite-core/benches/tail-latency-history.jsonl

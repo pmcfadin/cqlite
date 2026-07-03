@@ -222,6 +222,91 @@ bindings/python/.venv/bin/pytest scripts/ci/tests/test_check_perf_regression.py 
 The tests prove: (a) a CPU-bench regression above threshold exits non-zero;
 (b) a large `write/ingest_wal_on` swing exits zero (advisory reported only).
 
+## Tail-latency harness (Issue #1563)
+
+The perf-regression gate above compares Criterion **medians**. But the July 2026
+read-path audit (`docs/reports/read-path-performance-audit-2026-07-01.md` §Epic A)
+found the three biggest read-path defects — C2 cursor convoy, F1 reader-map FIFO
+stall, F3 blocking I/O on async workers — are all **tail** pathologies: they
+barely move the median but inflate p99/p999 under a mixed load (a background scan
+running while point reads arrive). A median gate is structurally blind to them.
+
+`benches/tail_latency.rs` is a `harness = false` custom-main bench (not Criterion,
+which reports only a median) whose measurement core lives in the shared
+`benches/tail_latency/mod.rs` module (also exercised by
+`cqlite-core/tests/tail_latency_harness.rs`). Over one shared `Database` on the
+BIG `test_basic.simple_table` fixture it:
+
+1. runs a fixed stream of real partition-targeted point reads
+   (`SELECT id, name … WHERE id = <uuid-literal>`, the #949/#956 path) with **no**
+   background scan — the *scan-free baseline*; then
+2. runs the identical stream while **one continuous background full-table scan**
+   (`SELECT *` looped on its own thread) hammers the same reader set — the
+   *mixed* load.
+
+Setup asserts the point read returns ≥1 row and reports a **targeted**
+`AccessPath` (`PartitionLookup`) or panics — the same honesty guard as the `read`
+benches. Sample counts are fixed consts (`WARMUP` + `MEASURED_N`), never
+wall-clock-bounded.
+
+### Running
+
+```bash
+env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
+  cargo bench -p cqlite-core --features cli-helpers --bench tail_latency
+```
+
+Under default features (no `cli-helpers`) it prints a note and exits 0 without
+measuring. When the fixture binary is absent it skips (no measurement).
+
+### JSON output
+
+It prints a machine-readable report to stdout:
+
+```json
+{
+  "mixed":     { "p50": <ns>, "p99": <ns>, "p999": <ns> },
+  "scan_free": { "p50": <ns>, "p99": <ns>, "p999": <ns> },
+  "p99_over_p50": <mixed.p99 / mixed.p50>,
+  "p99_mixed_over_scan_free": <mixed.p99 / scan_free.p99>
+}
+```
+
+`p99_over_p50` is the tail spread within the mixed load; `p99_mixed_over_scan_free`
+is the convoy inflation — the headline number the C2/F1/F3 fixes must drive down.
+All gate thresholds are these intra-run **ratios**, never wall-clock absolutes, so
+shared-runner noise cannot flap the gate.
+
+### History ledger
+
+Each run appends one JSON record (`{ts, commit, mixed, scan_free, ratios}`) to
+`benches/tail-latency-history.jsonl`. This is generated run data (machine/run
+specific), so it is **gitignored**, not committed. It is documented to consolidate
+into the Epic A5 unified `history.jsonl` when A5 lands.
+
+### Advisory-first tail gate
+
+`benches/tail-latency-gate.json` holds per-ratio `max` thresholds plus an
+`advisory` flag; `scripts/ci/check_tail_latency.py <harness_json> <gate_json>`
+reports each ratio against its threshold:
+
+- **Advisory** (`advisory: true`, the default): breaches are reported with an
+  advisory status but the checker **always exits 0**. This records today's convoy
+  so the C2/F1/F3 fixes can be shown red-then-green without redding the gate now.
+- **Enforcing** (`advisory: false`, or pass `--enforce`): any ratio over its `max`
+  exits non-zero.
+
+**Flip to enforcing:** once C2/F1/F3 land and `p99_mixed_over_scan_free` drops,
+tighten the `max` values in `tail-latency-gate.json` to the new floor and set
+`advisory: false` (or pass `--enforce` in CI).
+
+The checker logic is proven by `scripts/ci/tests/test_check_tail_latency.py`
+(advisory breach → exit 0; enforce breach → exit 1; within-threshold → exit 0):
+
+```bash
+bindings/python/.venv/bin/pytest scripts/ci/tests/test_check_tail_latency.py -v
+```
+
 ## Audit (Issue #536)
 
 The three benches wired here dated to Aug 2025 (pre-format-maturity). Issue #536

@@ -230,6 +230,29 @@ pub fn open_read_db(fx: &ReadFixture) -> ReadDb {
     ReadDb { db, _tmp: tmp }
 }
 
+#[cfg(feature = "cli-helpers")]
+impl ReadDb {
+    /// Consume this fixture handle into a shareable `Arc<Database>`, **persisting
+    /// (leaking) the backing temp dir** so the copied SSTable files outlive the
+    /// handle.
+    ///
+    /// Why leak: the `Database` keeps live mmap/file handles into the temp copy,
+    /// and a full-table scan opens its OWN file handle per scan (issue #815), so
+    /// reaping the dir while queries run breaks reads (`ENOENT` on the next scan).
+    /// The tail-latency harness (issue #1563) shares one `Arc<Database>` across a
+    /// background-scan thread and a foreground point-read stream, so it needs the
+    /// DB — not a `ReadDb` wrapper — and the files must stay put for the run.
+    ///
+    /// Bench/test processes are short-lived, so the leaked temp copy (a few MB) is
+    /// reclaimed by the OS temp sweeper. Do not use this in long-running code.
+    pub fn into_shared_db(self) -> std::sync::Arc<cqlite_core::Database> {
+        // `keep()` returns the path and disables auto-delete: hand the copy to the
+        // OS for the process lifetime.
+        let _persisted = self._tmp.keep();
+        std::sync::Arc::new(self.db)
+    }
+}
+
 /// CQL for the write-bench target table — a single `CREATE TABLE` so the
 /// no-heuristics mandate (Issue #28) has an unambiguous write target. Mirrors
 /// `test_basic.simple_table` (UUID PK) used by the read fixtures.

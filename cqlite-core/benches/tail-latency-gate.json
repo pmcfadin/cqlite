@@ -1,0 +1,12 @@
+{
+  "_comment": "Tail-latency ratio gate policy (Issue #1563, Epic A / A2). ADVISORY-FIRST: while `advisory` is true, scripts/ci/check_tail_latency.py reports each ratio against its `max` but ALWAYS exits 0 (never fails CI) — it records the current convoy so the C2/F1/F3 tail fixes can be shown red-then-green. To ENFORCE: once those fixes land and p99_mixed_over_scan_free drops, tighten these `max` values to the new floor and set `advisory` to false (or pass --enforce in CI). Thresholds are intra-run RATIOS, never wall-clock absolutes, so shared-runner noise cannot flap the gate. Maxes are set a bit above the values measured on main (2026-07, local run): p99_over_p50 ≈ 1.33, p99_mixed_over_scan_free ≈ 1.28, with headroom for shared-runner tail noise. See cqlite-core/benches/README.md.",
+  "advisory": true,
+  "ratios": {
+    "p99_over_p50": {
+      "max": 6.0
+    },
+    "p99_mixed_over_scan_free": {
+      "max": 4.0
+    }
+  }
+}

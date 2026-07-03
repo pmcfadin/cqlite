@@ -196,6 +196,14 @@ harness = false
 name = "read_while_write"
 harness = false
 
+# Mixed-load tail-latency harness (issue #1563, Epic A / A2). `harness = false`
+# custom main: emits p50/p99/p999 + intra-run ratios (JSON), which Criterion's
+# median model cannot express. ADVISORY tail gate lives in
+# benches/tail-latency-gate.json + scripts/ci/check_tail_latency.py.
+[[bench]]
+name = "tail_latency"
+harness = false
+
 [features]
 # M2+ production defaults: Full query engine + write path enabled.
 # write-support is a pure first-party code-gating flag (no extra dependencies),
