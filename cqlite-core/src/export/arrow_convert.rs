@@ -1447,18 +1447,30 @@ fn build_float64_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, 
 }
 
 fn build_string_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
+    // When the schema carries an AUTHORITATIVE text type, fail closed on a
+    // wrong-variant value (mirroring the other scalar builders) rather than
+    // silently string-formatting it. For `cql_type = None` or opaque types
+    // (e.g. `Custom`) this stays the permissive Utf8 fallback: those columns
+    // have no authoritative type to validate against.
+    let strict_text = matches!(
+        col.cql_type.as_ref().map(unwrap_frozen_type),
+        Some(CqlType::Text | CqlType::Ascii | CqlType::Varchar)
+    );
     let values: Vec<Option<String>> = rows
         .iter()
-        .map(|row| {
-            row.values.get(col.name.as_str()).and_then(|v| match v {
-                Value::Null => None,
-                Value::Text(s) => Some(s.clone()),
-                Value::Json(j) => Some(j.to_string()),
-                // Use ValueFormatter for complex types
-                other => Some(ValueFormatter::format_value(other)),
-            })
+        .map(|row| match row.values.get(col.name.as_str()) {
+            None => Ok(None),
+            Some(Value::Null) => Ok(None),
+            Some(Value::Text(s)) => Ok(Some(s.clone())),
+            Some(Value::Json(j)) => Ok(Some(j.to_string())),
+            Some(other) if strict_text => Err(ArrowConvertError::InvalidValue(format!(
+                "column '{}': expected Text value, got {:?}",
+                col.name, other
+            ))),
+            // Opaque / untyped fallback: format complex types as strings.
+            Some(other) => Ok(Some(ValueFormatter::format_value(other))),
         })
-        .collect();
+        .collect::<Result<Vec<Option<String>>, ArrowConvertError>>()?;
     Ok(Arc::new(StringArray::from(values)))
 }
 
@@ -2064,5 +2076,37 @@ mod tests {
         let columns = vec![col("t", DataType::Text, Some(CqlType::Tuple(vec![])))];
         let rows = vec![row_one("t", Value::Text("nope".into()))];
         assert!(is_invalid_value(rows_to_record_batch(&columns, &rows)));
+    }
+
+    /// (9a) Authoritative text column: a non-`Text` value must FAIL CLOSED via
+    /// the strict typed builder, not be silently string-formatted by the flat
+    /// `build_string_array`.
+    #[test]
+    fn authoritative_text_column_type_mismatch_is_error() {
+        for cql in [CqlType::Text, CqlType::Ascii, CqlType::Varchar] {
+            let columns = vec![col("s", DataType::Text, Some(cql))];
+            let rows = vec![row_one("s", Value::Integer(1))];
+            assert!(is_invalid_value(rows_to_record_batch(&columns, &rows)));
+        }
+    }
+
+    /// (9b) Authoritative text column happy path + nulls: a correct `Value::Text`
+    /// converts cleanly and null/absent stay null.
+    #[test]
+    fn authoritative_text_column_builds_ok() {
+        let columns = vec![col("s", DataType::Text, Some(CqlType::Text))];
+        let rows = vec![
+            row_one("s", Value::Text("hi".into())),
+            row_one("s", Value::Null),
+            row_absent(),
+        ];
+        let batch = rows_to_record_batch(&columns, &rows).expect("well-typed text must build");
+        let arr = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("StringArray");
+        assert_eq!(arr.value(0), "hi");
+        assert_eq!(arr.null_count(), 2);
     }
 }
