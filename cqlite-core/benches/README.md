@@ -97,6 +97,8 @@ env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
 | `observability_overhead` | added (#1043) | Zero-overhead-when-disabled gate: `read_scan` (needs `cli-helpers`) and `write_merge` (needs `write-support`). The SAME bench source runs under the default build vs `--features observability` with export disabled; the two arms are compared by `scripts/ci/observability_overhead.sh` — see below. |
 | `concurrent_scan` | added (#917), **gated** (#1564) | Aggregate throughput of N ∈ {1,2,4,8} concurrent `get_all_entries()` scans against one shared `Arc<SSTableReader>`, for the buffered and mmap backends (needs `--features cli-helpers`). Gated via a **concurrency scaling floor** (not absolute time) — see below. |
 | `read_while_write` | added (#1143), **gated** (#1564) | Reader-side scan latency with ~6 full-scan readers running concurrently with ~2 sustained-ingest writers (needs `--features cli-helpers,write-support`). Gated on the Criterion **median** (strict, 25% threshold); the p99 tail is printed to stderr for local diagnosis and owned by the A2 tail-latency harness (#1563). |
+| `tail_latency` | added (#1563) | `harness = false` mixed-load tail harness (needs `--features cli-helpers`): p50/p99/p999 + intra-run ratios for point reads under a background scan — see below. Appends per-metric rows to the unified ledger. |
+| `open` | added (#1566) | `harness = false` cold-open + memory bench (needs `--features cli-helpers`): `open/cold_big` and `open/cold_bti` (fresh `SSTableReader::open` component-load cost; `_bti` skip-registers when `test_da` is absent) and `mem/open_n_readers` (per-reader RSS gauge). Skip-on-absent, panic-on-present-but-broken; appends its medians + the memory metric to the unified ledger — see below. |
 
 ### `observability_overhead` two-build comparison (Issue #1043)
 
@@ -344,12 +346,34 @@ is the convoy inflation — the headline number the C2/F1/F3 fixes must drive do
 All gate thresholds are these intra-run **ratios**, never wall-clock absolutes, so
 shared-runner noise cannot flap the gate.
 
-### History ledger
+### Unified history ledger (Issue #1566, Epic A / A5)
 
-Each run appends one JSON record (`{ts, commit, mixed, scan_free, ratios}`) to
-`benches/tail-latency-history.jsonl`. This is generated run data (machine/run
-specific), so it is **gitignored**, not committed. It is documented to consolidate
-into the Epic A5 unified `history.jsonl` when A5 lands.
+All harness benches persist their metrics to **one** append-only ledger,
+`target/profiling/history.jsonl`, written through the shared Rust module
+`benches/bench_ledger`. Every line is one JSON object **per metric** in the schema:
+
+```json
+{"ts": 1783103681, "commit": "<full-sha|unknown>", "bench": "tail_latency", "metric": "p99_over_p50", "value": 2.31, "unit": "ratio"}
+```
+
+- The `tail_latency` bench writes `mixed_p50/p99/p999` + `scan_free_p50/p99/p999`
+  (`ns`) and the two derived ratios (`ratio`), one line each.
+- The `open` bench writes `cold_big_median_ns` / `cold_bti_median_ns` (`ns`) and the
+  per-reader memory gauges `rss_after_n_readers_bytes` / `rss_per_reader_bytes`
+  (`bytes`).
+- `scripts/profile_report.py` writes each criterion bench's `median_ns` (`ns`) and
+  `peak_heap_bytes` (`bytes`) in the same schema.
+
+`./scripts/profile.sh report` reads the whole ledger back into a longitudinal
+per-metric table (latest value + delta vs the previous distinct commit). The ledger
+is generated run data (machine/run-specific): it lives under `target/` (gitignored)
+and is **never committed**; CI may upload it as an artifact. Override the path for a
+bench with the `CQLITE_BENCH_LEDGER` env var (else
+`<crate>/../target/profiling/history.jsonl`). Append is best-effort — a ledger write
+failure logs to stderr and never fails a measurement run.
+
+This replaced the A2 bespoke `benches/tail-latency-history.jsonl` (retired when A5
+landed). See `docs/profiling.md` for the full ledger contract.
 
 ### Advisory-first tail gate
 
