@@ -200,19 +200,24 @@ export interface ColumnInfo {
  */
 export interface QueryResult {
   /**
-   * Result rows as JSON-serializable objects.
+   * Result rows as legacy JSON-serialized objects (returned by `execute()`).
    *
-   * Values are JSON-serialized versions of CQL types:
-   * - BigInt/Counter: number (may lose precision for values > 2^53)
-   * - Blob: base64 string
-   * - Timestamp: ISO 8601 string
-   * - Set/Map: Array representations
-   * - Varint: Hex string `"0x{hex}"` (e.g., `"0x7f"` for 127)
-   * - Decimal: String `"decimal:{scale}:0x{hex}"` (e.g., `"decimal:2:0x7b"` for 1.23)
+   * ⚠️ These values are lossy legacy JSON encodings of CQL types — see the
+   * hazards on {@link Database.execute}:
+   * - **Blob → base64 `string`** (not a `Buffer`).
+   * - **Timestamp → ISO-8601 `string`** (not a `Date`).
+   * - **Varint → hex `string` `"0x{hex}"`** (e.g., `"0x7f"` for 127).
+   * - **Decimal → `string` `"decimal:{scale}:0x{hex}"`** (e.g., `"decimal:2:0x7b"`).
+   * - **Date/Time → `number`** (days-since-epoch / nanoseconds-since-midnight).
+   * - Set/Map → Array representations.
    *
-   * For native types with full precision, use `executeNative()`.
+   * (BigInt/Counter are currently returned as an exact `BigInt` on this napi
+   * build, but `execute()` is deprecated and unsupported regardless.)
    *
-   * @deprecated The execute() method uses legacy JSON encoding. Use executeNative() for proper type fidelity.
+   * For native types with full fidelity, use `executeNative()`.
+   *
+   * @deprecated The execute() method uses lossy legacy JSON encoding and is
+   *   removed in the next major. Use executeNative() for proper type fidelity.
    */
   rows: Record<string, unknown>[];
 
@@ -968,24 +973,45 @@ export declare class Database {
   static open(dataDir: string, options?: DatabaseOptions): Promise<Database>;
 
   /**
-   * Execute a CQL query and return results as JSON-serializable values.
+   * Execute a CQL query and return results as legacy JSON-serialized values.
    *
-   * Use this method when you need JSON-compatible output or don't need
-   * native JavaScript types. For native types with full precision,
-   * use `executeNative()` instead.
+   * **DEPRECATED — removed in the next major. Use {@link Database.executeNative} instead.**
    *
-   * ## Varint and Decimal Encoding
+   * ## ⚠️ Lossy legacy encodings and correctness hazards
    *
-   * This method uses hex-based encoding for arbitrary precision numbers:
-   * - **Varint**: `"0x{hex}"` - Two's complement big-endian hex encoding
-   *   - Example: 127 -> `"0x7f"`, -1 -> `"0xff"`, 256 -> `"0x0100"`
-   * - **Decimal**: `"decimal:{scale}:0x{hex}"` - Scale + hex-encoded unscaled value
-   *   - Example: 1.23 (scale=2, unscaled=123) -> `"decimal:2:0x7b"`
+   * `execute()` routes every value through a legacy JSON encoder. Several CQL
+   * types come back in a lossy or bespoke encoding that no caller can round-trip
+   * and that differs from the native type `executeNative()` returns:
+   *
+   * - **`blob` → base64 `string`** (not a `Buffer`).
+   * - **`timestamp` → ISO-8601 `string`** (not a `Date`).
+   * - **`varint` → `"0x{hex}"` string.** Two's-complement big-endian hex.
+   *   Example: 127 -> `"0x7f"`, -1 -> `"0xff"`, 256 -> `"0x0100"`.
+   * - **`decimal` → `"decimal:{scale}:0x{hex}"` string.** Example: 1.23
+   *   (scale=2, unscaled=123) -> `"decimal:2:0x7b"`.
+   * - **`date` → `number`** (days since epoch); **`time` → `number`**
+   *   (nanoseconds since midnight).
+   *
+   * It is also **slower** than `executeNative()`: it converts each value to JSON
+   * off the JS main thread, then converts that JSON to JS values on-loop — a
+   * double conversion `executeNative()` avoids.
+   *
+   * NOTE on precision: with this napi build (BigInt support), `bigint`/`counter`
+   * are currently returned as an exact JS `BigInt`, so a value above 2^53 is
+   * **not** presently rounded. Do not rely on this — the encoding is legacy and
+   * unsupported; `executeNative()` is the contract. (Older docs claimed a >2^53
+   * rounding loss; that is not observed on the current binding — issue #1457.)
+   *
+   * `executeNative()` returns native types with full fidelity (`BigInt`,
+   * `Buffer`, `Date`, `Set`, `Map`) and is the supported path.
    *
    * @param query - CQL SELECT statement to execute
    * @returns Promise resolving to QueryResult with rows and metadata
    * @throws {CqliteError} If the query fails
-   * @deprecated Since 0.4.0. Use `executeNative()` for proper type fidelity.
+   * @deprecated Since 0.4.0; removed in the next major. Use `executeNative()`
+   *   for proper type fidelity — `execute()` returns blob/decimal/varint/
+   *   timestamp/date/time in lossy legacy encodings and is slower. Calling it
+   *   emits a one-time `DeprecationWarning`.
    *
    * @example
    * ```typescript

@@ -166,7 +166,7 @@ const { Database } = require('@cqlite/node');
   const db = await Database.open('test-data/datasets/sstables', {
     schema: 'test-data/schemas/basic-types.cql'
   });
-  const result = await db.execute('SELECT * FROM test_basic.simple_table LIMIT 5');
+  const result = await db.executeNative('SELECT * FROM test_basic.simple_table LIMIT 5');
   console.log('Rows:', result.rowCount);
   for (const row of result.rows) {
     console.log(row.name);
@@ -344,7 +344,7 @@ bindings/node/
 
 **Status**: Phase 3 (Streaming) complete (Issue #305). Key APIs:
 - `Database.open(dataDir, options?)` — open with optional schema
-- `Database.execute(query)` — deprecated; use `executeNative()` for human-readable types
+- `Database.execute(query)` — **deprecated** (removed next major; emits a `DeprecationWarning`); lossy legacy JSON (blob→base64 string, timestamp→ISO string, varint/decimal→bespoke strings) and slower. Use `executeNative()`
 - `Database.executeNative(query)` — native JS types (BigInt, Date, Buffer, Set, Map)
 - `Database.executeStreaming(query, config?)` — async iteration for large result sets
 - `Database.getStats()` / `Database.close()`
