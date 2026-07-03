@@ -311,6 +311,27 @@ else
   echo "------- classify output -------"; printf '%s\n' "$classify_out"; echo "-------------------------------"
 fi
 
+# 7b. No metadata parser (issue #1821 roborev round 3): per-`--test`-target
+#     selection REQUIRES a Cargo-metadata parser (jq OR python3). When NEITHER is
+#     available the fallback must emit NO `--test` targets at all — otherwise it
+#     would run feature-gated targets (e.g. issue_1388_compact_major_drop, which
+#     needs write-support) feature-less and FAIL --lite spuriously in a minimal
+#     shell env. run_scoped_tests then scopes to package --lib only. We force the
+#     no-parser branch hermetically via AGENT_GATE_TEST_NO_METADATA_PARSER=1
+#     (no PATH surgery on jq/python3/cargo) and feed the SAME paths as test 7,
+#     including a feature-gated target and real direct targets.
+noparser_out=$(AGENT_GATE_TEST_NO_METADATA_PARSER=1 printf '%s\n' \
+  "cqlite-core/tests/compact_command.rs" \
+  "tests/cassandra5_header_tests.rs" \
+  "cqlite-cli/tests/issue_1388_compact_major_drop.rs" \
+  | AGENT_GATE_TEST_NO_METADATA_PARSER=1 bash "$GATE" --classify-test-targets 2>/dev/null)
+if [ -z "$noparser_out" ]; then
+  ok "no-parser: fallback emits NO --test targets (lib-only) when jq/python3 absent"
+else
+  bad "no-parser: fallback emitted --test targets without a metadata parser (should be lib-only)"
+  echo "------- classify output -------"; printf '%s\n' "$noparser_out"; echo "-------------------------------"
+fi
+
 # 8. Bash 3.2 compatibility (issue #1821): macOS ships Bash 3.2 as /bin/bash and
 #    the gate is invoked as plain `bash scripts/agent-gate.sh`. The --lite path
 #    must not use Bash-4-only features (associative arrays). Exercise the hook

@@ -193,14 +193,17 @@ export CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-$REPO_ROOT/test-data/datase
 # cqlite-cli/tests/common/mod.rs) that are NOT Cargo `--test` targets. Passing
 # such a stem as `--test <stem>` makes --lite FAIL on valid helper-only changes.
 # We therefore map a changed .rs file to a `--test` target ONLY via authoritative
-# Cargo metadata (each integration target's exact src_path + name — no path/name
-# heuristics). When neither jq nor python3 can parse metadata, we fall back to a
-# PRECISE path check restricted to the auto-discovery packages, where a direct
-# child `<pkg>/tests/<stem>.rs` (exactly one path segment after tests/) IS a real
-# auto-discovered target; nested files and the manually-declared integration
-# crates are never guessed at (they compile-check via --no-run / --lib instead).
-# These helpers use no Bash-4-only features (no associative arrays), so the whole
-# --lite path runs under macOS's default Bash 3.2.
+# Cargo metadata (each integration target's exact src_path + name + required-features
+# — no path/name heuristics). A metadata parser (jq OR python3) is a PREREQUISITE
+# for per-`--test`-target selection: without one we cannot learn a target's
+# required-features, and emitting a feature-gated target feature-less would make
+# --lite FAIL spuriously in a minimal shell env (roborev round-3 finding). So when
+# NEITHER jq nor python3 is available we emit NO `--test` targets at all — run_lite
+# scopes to the touched packages' `--lib` only (safe: --lib carries no per-target
+# required-features) and prints a note pointing at the full gate for integration
+# coverage. Hand-parsing Cargo.toml for required-features would just be another
+# heuristic, so we deliberately do not. These helpers use no Bash-4-only features
+# (no associative arrays), so the whole --lite path runs under macOS's Bash 3.2.
 
 # Emit "<abs_src_path>\t<pkg>\t<testname>\t<required-features>" for every Cargo
 # test target (required-features comma-joined, empty when none), or nothing if
@@ -209,6 +212,10 @@ export CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-$REPO_ROOT/test-data/datase
 # crate both own the top-level tests/*.rs files, and every owning package's
 # target must be runnable (issue #1821 roborev finding 1).
 _test_target_index() {
+  # Test hook (issue #1821 roborev round 3): force the no-metadata-parser path so
+  # the tooling self-test can assert the parser-absent behaviour hermetically,
+  # without PATH surgery on jq/python3/cargo.
+  [ "${AGENT_GATE_TEST_NO_METADATA_PARSER:-0}" = 1 ] && return 0
   local meta
   meta=$(cargo metadata --no-deps --format-version 1 2>/dev/null) || return 0
   [ -n "$meta" ] || return 0
@@ -236,40 +243,25 @@ for p in d["packages"]:
 # it (root `cqlite` + `cqlite-integration-tests` both own top-level tests/*.rs) —
 # all owners are emitted so none is silently dropped (issue #1821 finding 1).
 # Nested helper/module files are excluded. Deterministic; Bash 3.2-safe.
+#
+# Authoritative Cargo metadata (jq OR python3) is REQUIRED: without a parser we
+# cannot know a target's required-features, and emitting a feature-gated target
+# feature-less would make --lite FAIL spuriously (roborev round-3 finding). So
+# when metadata is unavailable this emits NOTHING — the caller (run_scoped_tests)
+# then scopes to package --lib only and says so, rather than guessing targets.
 classify_test_targets() {
-  local index f abs hits pkg base
+  local index f abs hits
   index=$(_test_target_index)
+  # No metadata parser (or metadata unavailable) -> emit no --test targets.
+  [ -n "$index" ] || return 0
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     case "$f" in *.rs) ;; *) continue ;; esac
-    if [ -n "$index" ]; then
-      abs="$REPO_ROOT/$f"
-      # ALL owning targets (no early exit), "<pkg>|<name>|<features>" per line.
-      hits=$(printf '%s\n' "$index" \
-        | awk -F'\t' -v p="$abs" '$1 == p { print $2 "|" $3 "|" $4 }')
-      [ -n "$hits" ] && printf '%s\n' "$hits"
-    else
-      # No JSON parser available: precise direct-child check restricted to the
-      # auto-discovery packages. `<pkg>/tests/<stem>.rs` with no further `/`.
-      # Required-features are unknown without metadata, so emit an empty field.
-      case "$f" in
-        cqlite-core/tests/*.rs)            pkg=cqlite-core;      base=${f#cqlite-core/tests/} ;;
-        cqlite-cli/tests/*.rs)             pkg=cqlite-cli;       base=${f#cqlite-cli/tests/} ;;
-        cqlite-flight/tests/*.rs)          pkg=cqlite-flight;    base=${f#cqlite-flight/tests/} ;;
-        tools/cassandra-parity/tests/*.rs) pkg=cassandra-parity; base=${f#tools/cassandra-parity/tests/} ;;
-        tests/*.rs)                        pkg=cqlite;           base=${f#tests/} ;;
-        *) continue ;;
-      esac
-      case "$base" in */*) continue ;; esac   # nested helper -> not a --test target
-      # Top-level tests/*.rs is owned by BOTH the root package and the
-      # cqlite-integration-tests crate; emit both so neither is dropped.
-      if [ "$pkg" = cqlite ]; then
-        printf 'cqlite|%s|\n' "${base%.rs}"
-        printf 'cqlite-integration-tests|%s|\n' "${base%.rs}"
-      else
-        printf '%s|%s|\n' "$pkg" "${base%.rs}"
-      fi
-    fi
+    abs="$REPO_ROOT/$f"
+    # ALL owning targets (no early exit), "<pkg>|<name>|<features>" per line.
+    hits=$(printf '%s\n' "$index" \
+      | awk -F'\t' -v p="$abs" '$1 == p { print $2 "|" $3 "|" $4 }')
+    [ -n "$hits" ] && printf '%s\n' "$hits"
   done
 }
 
@@ -1015,11 +1007,26 @@ run_scoped_tests() {
     printf '%s\n' "$pkgset" | grep -qxF "$pkg" || pkgset="${pkgset}${pkg}"$'\n'
   done <<<"$changed"
 
+  # Per-`--test` scoping REQUIRES an authoritative Cargo-metadata parser (jq or
+  # python3). Without one we cannot learn a target's required-features, and running
+  # a feature-gated target feature-less would FAIL --lite spuriously (roborev
+  # round-3 finding). So when NEITHER is present we scope to package --lib only
+  # (safe: --lib carries no per-target required-features) and say so; we emit NO
+  # --test targets at all. The AGENT_GATE_TEST_NO_METADATA_PARSER hook forces this
+  # branch for the tooling self-test.
+  local have_meta_parser=1
+  if [ "${AGENT_GATE_TEST_NO_METADATA_PARSER:-0}" = 1 ] || \
+     { ! command -v jq >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; }; then
+    have_meta_parser=0
+    echo ">>> [$name] no jq/python3 — scoping to package --lib only; run the full gate for integration-test coverage"
+  fi
+
   # Authoritative added/changed --test targets ("<pkg>|<testname>|<features>" per
   # line). Uses Cargo metadata so NESTED helper files (tests/<subdir>/*.rs) are
   # excluded rather than turned into a bogus `--test <stem>` that would fail --lite.
-  local newtests
-  newtests=$(printf '%s\n' "$changed" | classify_test_targets)
+  # Empty when no metadata parser is available (lib-only fallback, note above).
+  local newtests=""
+  [ "$have_meta_parser" -eq 1 ] && newtests=$(printf '%s\n' "$changed" | classify_test_targets)
 
   # Union the packages that OWN a changed --test target into the package set —
   # not just the path-prefix packages. Some owners (notably the workspace-root
