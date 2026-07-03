@@ -656,7 +656,6 @@ fn decode_mutation(bytes: &[u8]) -> std::result::Result<Mutation, bincode::Error
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug)]
 pub struct WriteAheadLog {
     /// Buffered writer for sequential appends
     file: BufWriter<File>,
@@ -700,6 +699,35 @@ pub struct WriteAheadLog {
     /// exercising the poison-on-partial-failure path (issue #1392, FINDING 1).
     #[cfg(test)]
     fail_seek_after_truncate: bool,
+}
+
+// Manual `Debug` (not derived) so the reusable `append_scratch` buffer — which
+// holds the last serialized mutation's raw row bytes — is never printed under
+// `{:?}`. Leaking those bytes would expose user data and could produce huge log
+// lines; we summarize the buffer by len/capacity only. All other fields keep
+// their usual `Debug` representation.
+impl std::fmt::Debug for WriteAheadLog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut dbg = f.debug_struct("WriteAheadLog");
+        dbg.field("file", &self.file)
+            .field("path", &self.path)
+            .field("buffer_size", &self.buffer_size)
+            .field("current_size", &self.current_size)
+            .field(
+                "append_scratch",
+                &format_args!(
+                    "<{} bytes, cap {}>",
+                    self.append_scratch.len(),
+                    self.append_scratch.capacity()
+                ),
+            )
+            .field("pending_valid_prefix", &self.pending_valid_prefix)
+            .field("poisoned", &self.poisoned);
+        #[cfg(test)]
+        dbg.field("fail_sync_after_truncate", &self.fail_sync_after_truncate)
+            .field("fail_seek_after_truncate", &self.fail_seek_after_truncate);
+        dbg.finish()
+    }
 }
 
 impl WriteAheadLog {
@@ -1141,9 +1169,14 @@ impl WriteAheadLog {
         // multi-GiB length cannot truncate through the `as u32` cast below into a
         // small, wrongly-accepted value.
         if self.append_scratch.len() as u64 > MAX_ENTRY_LENGTH as u64 {
+            let serialized_len = self.append_scratch.len();
+            // A single oversized (rejected) mutation must not permanently bloat the
+            // WAL instance's retained scratch capacity: release it before returning.
+            self.append_scratch.clear();
+            self.append_scratch.shrink_to_fit();
             return Err(Error::Storage(format!(
                 "WAL entry exceeds MAX_ENTRY_LENGTH (16 MiB): {} bytes",
-                self.append_scratch.len()
+                serialized_len
             )));
         }
 
