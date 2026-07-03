@@ -76,6 +76,16 @@ mod model;
 #[cfg(feature = "write-support")]
 pub use model::{CellData, ComplexDeletion, MergeEntry, MergeStats, MergeStep, RowData};
 
+/// Fully-expired SSTable drop classification (issue #1388): the metadata-only
+/// `fully_expired_sstables` drop-set used by both compaction surfaces to skip
+/// reading SSTables that are entirely past `gcBefore` and overlap-safe.
+#[cfg(feature = "write-support")]
+mod fully_expired;
+#[cfg(feature = "write-support")]
+pub use fully_expired::fully_expired_sstables;
+#[cfg(feature = "write-support")]
+pub(crate) use fully_expired::{reclaim_dropped_whole, split_merge_and_dropped};
+
 /// Repair-state classification + mixed-state rejection for compaction
 /// (issue #1021). Reads each input's persisted repair state from `Statistics.db`
 /// and either returns the shared state to preserve or rejects a mixed-state set.
@@ -1772,6 +1782,26 @@ pub async fn compact_sstables_with_registry(
         ));
     }
 
+    // Fully-expired SSTable drop (issue #1388, OQ-1 → (A)): the CLI one-shot has no
+    // knowledge of SSTables outside its explicit input list, so the drop is only
+    // overlap-safe when the operator asserts `--major` (`purge_safe == true`),
+    // which means the input set spans EVERY overlapping SSTable for the table ⇒
+    // empty outside set ⇒ +inf overlap bound ⇒ every fully-expired input is
+    // provably safe to drop. Without `--major` no drop occurs (conservative,
+    // matching the tombstone-purge conservatism). The drop-set is subtracted from
+    // the merger's input list BEFORE building the merger, so dropped SSTables are
+    // never read/decoded (the perf win); their components are deleted only after
+    // the output publishes. `split_merge_and_dropped` handles the all-dropped guard.
+    let drop_set: Vec<PathBuf> = if purge_safe {
+        fully_expired_sstables(&input_paths, &[], gc_before_secs)
+    } else {
+        Vec::new()
+    };
+    let (merge_inputs, dropped_whole) = split_merge_and_dropped(&input_paths, drop_set);
+    // From here on, decode/merge only the (drop-filtered) `merge_inputs`. The
+    // dropped SSTables are reclaimed after the output publishes.
+    let input_paths = merge_inputs;
+
     // #850: read static-row presence from the input SSTable headers. If a static
     // column is absent from the current schema but an input SSTable still declares
     // it (e.g. it was dropped from the catalog entirely, not retained via
@@ -1862,8 +1892,35 @@ pub async fn compact_sstables_with_registry(
     let (baseline_min_ts, baseline_min_ldt, baseline_min_ttl) = compute_baseline_min(&input_paths);
     writer.pre_seed_encoding_baselines(baseline_min_ts, baseline_min_ldt, baseline_min_ttl);
 
-    let stats = merger.merge(&mut writer)?;
+    let mut stats = merger.merge(&mut writer)?;
     let output = writer.finish().await?;
+
+    // Issue #1388: the merged output is now published. Reclaim the dropped-whole
+    // SSTables (never read into the merger) via the same component-delete path the
+    // WriteEngine background compaction uses for merged inputs. Deletion is
+    // best-effort: a failure leaves an invisible orphan (its TOC.txt is removed
+    // first) reclaimed on next startup, never a hard error — the output is correct.
+    //
+    // The one-shot CLI surface deletes NO merge inputs (the operator owns the input
+    // dir; the output lands in a separate `--output` dir), so `already_deleted` is
+    // EMPTY: in the degenerate all-expired case the SSTable the all-dropped guard
+    // retained as a merge input is ALSO in `dropped_whole` and IS reclaimed here
+    // (roborev #1388 Medium — closes the former "all-expired input left on disk").
+    fully_expired::reclaim_dropped_whole(&dropped_whole, &[], |dropped| {
+        if let Err(e) =
+            crate::storage::write_engine::WriteEngine::delete_sstable_files_static(dropped)
+        {
+            log::warn!(
+                "Failed to delete dropped-whole compaction input {:?}: {} \
+                 (output is valid; leftover is an invisible orphan)",
+                dropped,
+                e
+            );
+        }
+    });
+    // Record the drop decision in the report/stats (issue #1388, R4), distinct from
+    // the merged inputs so it is assertable from the plan, not just output absence.
+    stats.dropped_whole = dropped_whole;
 
     Ok(CompactReport { output, stats })
 }
@@ -2073,6 +2130,9 @@ impl KWayMerger {
             output_rows: 0,
             bytes_written: 0,
             elapsed: Duration::from_secs(0), // Will be updated at the end
+            // The merger only sees the (already drop-filtered) inputs; the caller
+            // that computed the drop-set records it (issue #1388).
+            dropped_whole: Vec::new(),
         };
 
         while let MergeStep::Partition { key, rows } = self.step()? {
@@ -3785,6 +3845,7 @@ mod tests {
             output_rows: 5000,
             bytes_written: 1024 * 1024,
             elapsed: Duration::from_secs(10),
+            dropped_whole: Vec::new(),
         };
 
         assert_eq!(stats.input_files, 5);

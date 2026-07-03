@@ -216,13 +216,31 @@ impl SSTableReader {
         }
     }
 
-    /// Load Statistics.db reader for min/max timestamps and metadata
+    /// Load Statistics.db reader for min/max timestamps and metadata.
+    ///
+    /// # Errors
+    ///
+    /// A *present but unparseable* Statistics.db is a HARD FAILURE (issue #1626):
+    /// proceeding with zero EncodingStats baselines and no SerializationHeader
+    /// columns would make every WRITETIME()/TTL/deletion-time from this SSTable
+    /// silently wrong (the "default-on-parse-failure" anti-pattern the
+    /// no-heuristics mandate forbids, issue #28). Corruption/UnsupportedVersion/IO
+    /// errors are propagated with the component file path named.
+    ///
+    /// Out of scope (returns `Ok(None)`, preserving prior behavior):
+    /// - a genuinely *missing* Statistics.db (`Error::NotFound`);
+    /// - a path from which the SSTable base name / parent dir cannot be derived.
     pub(super) async fn load_statistics_reader(
         path: &Path,
         platform: &Arc<Platform>,
-    ) -> Option<StatisticsReader> {
-        let base_name = extract_sstable_base_name(path)?;
-        let statistics_path = path.parent()?.join(format!("{}-Statistics.db", base_name));
+    ) -> Result<Option<StatisticsReader>> {
+        let Some(base_name) = extract_sstable_base_name(path) else {
+            return Ok(None);
+        };
+        let Some(parent) = path.parent() else {
+            return Ok(None);
+        };
+        let statistics_path = parent.join(format!("{}-Statistics.db", base_name));
 
         match StatisticsReader::open(&statistics_path, platform.clone()).await {
             Ok(reader) => {
@@ -230,16 +248,24 @@ impl SSTableReader {
                     "Loaded Statistics.db reader for {}",
                     statistics_path.display()
                 );
-                Some(reader)
+                Ok(Some(reader))
             }
-            Err(e) => {
-                log::warn!(
-                    "Failed to load Statistics.db from {}: {}. Timestamp delta decoding will use zero base values.",
-                    statistics_path.display(),
-                    e
-                );
-                None
-            }
+            // A missing Statistics.db keeps prior behavior: proceed without it.
+            Err(Error::NotFound(_)) => Ok(None),
+            // A genuine PARSE failure is data corruption: keep the `Corruption`
+            // kind but add the component path + underlying error for diagnosis.
+            Err(e @ Error::Corruption(_)) => Err(Error::corruption(format!(
+                "Failed to load Statistics.db from {}: {}",
+                statistics_path.display(),
+                e
+            ))),
+            // Any other failure of a PRESENT Statistics.db (IO read error, a
+            // below-floor `UnsupportedVersion`, ...) must still abort open()
+            // (issue #1626), but propagate the ORIGINAL error unchanged so its
+            // category/source is preserved rather than mislabeled as data
+            // corruption. `UnsupportedVersion` already names version + floor; an
+            // IO error keeps its `System` category.
+            Err(e) => Err(e),
         }
     }
 

@@ -62,6 +62,14 @@ pub enum ProducerError {
     /// The aggregation spec was invalid (bad column, Sum on non-numeric, …).
     #[error("invalid aggregation: {0}")]
     Aggregation(#[from] AggError),
+    /// The resolved SSTable directory escaped the data directory — e.g. via a
+    /// symlink inside the data dir (issue #1430). Charset validation already
+    /// blocks `../`/absolute fields; this is the canonicalization backstop.
+    #[error("unsafe path for {field}: escapes the data directory")]
+    UnsafePath {
+        /// Which ticket field produced the escaping path (`table`/`snapshot`).
+        field: &'static str,
+    },
 }
 
 /// Source of the SSTable `Data.db` files to merge for one table.
@@ -103,13 +111,30 @@ impl DirSource {
     /// `<table-dir>/snapshots/<name>/` hardlink set (Phase 3). When nothing
     /// matches, the exact (non-existent) path is returned so `data_paths`
     /// surfaces a clean `NotFound`.
-    pub fn resolve(data_dir: &Path, keyspace: &str, table: &str, snapshot: Option<&str>) -> Self {
+    ///
+    /// As defense in depth (issue #1430) the resolved directory is verified to
+    /// stay within `data_dir` after resolving symlinks; an escape yields
+    /// [`ProducerError::UnsafePath`]. Callers should still validate the ticket
+    /// fields with [`crate::pathsafe`] at parse time — that is the primary guard.
+    pub fn resolve(
+        data_dir: &Path,
+        keyspace: &str,
+        table: &str,
+        snapshot: Option<&str>,
+    ) -> Result<Self, ProducerError> {
         let table_dir = Self::table_base_dir(data_dir, keyspace, table);
         let dir = match snapshot {
             Some(name) if !name.is_empty() => table_dir.join("snapshots").join(name),
             _ => table_dir,
         };
-        Self::new(dir)
+        let field = if matches!(snapshot, Some(name) if !name.is_empty()) {
+            "snapshot"
+        } else {
+            "table"
+        };
+        crate::pathsafe::assert_within(field, data_dir, &dir)
+            .map_err(|_| ProducerError::UnsafePath { field })?;
+        Ok(Self::new(dir))
     }
 
     /// Resolve the on-disk directory for a table (live data dir, no snapshot).
@@ -151,6 +176,26 @@ impl SstableSource for DirSource {
                     .and_then(|n| n.to_str())
                     .is_some_and(|n| n.ends_with("-Data.db"))
             })
+            // Per-file containment (issue #1430): legit SSTable components live
+            // DIRECTLY in the resolved dir (Cassandra snapshots are hardlinks,
+            // which canonicalize under the dir). The directory-level guard in
+            // `resolve` only vets the enumeration dir; a SYMLINK inside an
+            // otherwise-valid dir can still resolve outside `data_dir`. Exclude
+            // (fail-closed) any entry whose canonicalized target escapes the dir
+            // so it is never opened/merged.
+            .filter(
+                |p| match crate::pathsafe::assert_within("sstable", &self.dir, p) {
+                    Ok(()) => true,
+                    Err(reason) => {
+                        tracing::debug!(
+                            path = %p.display(),
+                            %reason,
+                            "excluding SSTable whose resolved path escapes the data directory"
+                        );
+                        false
+                    }
+                },
+            )
             .collect();
         // Newest generation first. The merger reconciles by per-row timestamp;
         // generation order only breaks exact-timestamp ties, but a deterministic
@@ -1164,14 +1209,14 @@ mod tests {
     fn resolve_builds_snapshot_path() {
         let tmp = tempfile::TempDir::new().unwrap();
         std::fs::create_dir_all(tmp.path().join("ks").join("tbl")).unwrap();
-        let src = DirSource::resolve(tmp.path(), "ks", "tbl", Some("snap1"));
+        let src = DirSource::resolve(tmp.path(), "ks", "tbl", Some("snap1")).expect("resolve");
         assert!(
             src.dir.ends_with("ks/tbl/snapshots/snap1"),
             "got {:?}",
             src.dir
         );
         // Empty/None snapshot resolves to the live table dir.
-        let live = DirSource::resolve(tmp.path(), "ks", "tbl", None);
+        let live = DirSource::resolve(tmp.path(), "ks", "tbl", None).expect("resolve");
         assert!(live.dir.ends_with("ks/tbl"));
     }
 
@@ -1185,13 +1230,57 @@ mod tests {
         make_snapshot(&table_dir, "snap1");
 
         let producer = MergeProducer::new(schema, 1024).unwrap();
-        let src = DirSource::resolve(&data_dir, KS, TBL, Some("snap1"));
+        let src = DirSource::resolve(&data_dir, KS, TBL, Some("snap1")).expect("resolve");
         let batches = producer.produce(&src).unwrap();
         assert_eq!(
             total_rows(&batches),
             3,
             "reads the frozen snapshot SSTables"
         );
+    }
+
+    /// Issue #1430 (roborev per-file follow-up): `data_paths` enumerates files
+    /// DIRECTLY in the resolved dir, but a SYMLINK inside an otherwise-valid dir
+    /// can resolve OUTSIDE `data_dir`. Such an entry must be excluded (fail-closed)
+    /// and never returned for merging. A hardlink-style legit component (a real
+    /// file in the dir, which canonicalizes under the dir) must still be served.
+    #[test]
+    #[cfg(unix)]
+    fn data_paths_excludes_symlink_escaping_the_dir() {
+        use std::os::unix::fs::symlink;
+        let dir_tmp = tempfile::TempDir::new().unwrap();
+        let outside_tmp = tempfile::TempDir::new().unwrap();
+        let dir = dir_tmp.path();
+
+        // A legit Data.db living directly in the table dir.
+        let legit = dir.join("nb-1-big-Data.db");
+        std::fs::write(&legit, b"legit").unwrap();
+
+        // A secret file OUTSIDE the tree, reachable only via a symlink placed
+        // inside the (valid) table dir with a legit-looking Data.db name.
+        let secret = outside_tmp.path().join("secret-Data.db");
+        std::fs::write(&secret, b"secret").unwrap();
+        let escaping = dir.join("nb-99-big-Data.db");
+        symlink(&secret, &escaping).unwrap();
+
+        let paths = DirSource::new(dir).data_paths().unwrap();
+
+        // Only the legit component survives; the escaping symlink is excluded.
+        let canon_legit = legit.canonicalize().unwrap();
+        let canon_secret = secret.canonicalize().unwrap();
+        let canon_paths: Vec<PathBuf> = paths
+            .iter()
+            .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
+            .collect();
+        assert!(
+            canon_paths.contains(&canon_legit),
+            "legit component must be served, got {paths:?}"
+        );
+        assert!(
+            !canon_paths.contains(&canon_secret),
+            "symlink escaping the data dir must NOT be returned, got {paths:?}"
+        );
+        assert_eq!(paths.len(), 1, "only the legit component survives");
     }
 
     #[test]
