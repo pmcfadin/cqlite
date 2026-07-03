@@ -38,8 +38,7 @@
 #   format-compat      cargo test -p format-compatibility-tests (the 'oa' format crate;
 #                      issue #865 folded it into the workspace so fmt/clippy reach it)
 #   write-tests        cargo test -p cqlite-core --features write-support (lib + roundtrip + compaction)
-#   cli-tests          cargo test -p cqlite-cli --test unit_tests + (write-support:
-#                      write_readback_content_tests + graceful_shutdown_tests)
+#   cli-tests          cargo test -p cqlite-cli --test unit_tests + (write-support)
 #                      write_readback_content_tests (CQL write→read content parity, #1231)
 #   python-bindings    maturin develop + pytest bindings/python/tests in a throwaway
 #                      venv; SKIPs (never silently PASSes) if python3 is unavailable.
@@ -188,6 +187,59 @@ if [ "${CQLITE_DISABLE_SCCACHE:-0}" != 1 ] && command -v sccache >/dev/null 2>&1
   echo "agent-gate: sccache detected; using as RUSTC_WRAPPER with CARGO_INCREMENTAL=0 (#1822)"
 fi
 export CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-$REPO_ROOT/test-data/datasets}"
+
+# cargo-nextest auto-detect (issue #1737): the core-tests execution floor (the
+# gate's single dominant cost) runs under `cargo nextest run`, which parallelizes
+# across test binaries + cores (typically 2-4x vs serial `cargo test`).
+# Auto-detected like sccache: absent on PATH -> the gate falls back to plain
+# `cargo test` (identical test set, incl. doctests). Opt out with
+# CQLITE_DISABLE_NEXTEST=1. nextest does NOT run doctests, so the nextest path
+# additionally runs `cargo test --doc` so doctest coverage is never silently
+# dropped (same package/feature selection + same skip).
+NEXTEST=0
+if [ "${CQLITE_DISABLE_NEXTEST:-0}" != 1 ] && command -v cargo-nextest >/dev/null 2>&1; then
+  NEXTEST=1
+  echo "agent-gate: cargo-nextest detected ($(cargo nextest --version 2>/dev/null | head -1)); core-tests uses nextest + a cargo test --doc pass (#1737)"
+fi
+
+# Bounded component parallelism (issue #1737): independent gate components run
+# concurrently in a worker pool capped at AGENT_GATE_JOBS, collapsing wall-clock
+# toward the core-tests long pole WITHOUT oversubscribing the machine. Multiple
+# worktree gates can run at once (and aarch64 emulation raises OOM risk), so this
+# per-gate cap composes with the machine-wide bound of #1825. Default:
+# min(4, ncpu/2), floor 1. Set AGENT_GATE_JOBS=1 for the legacy strictly
+# sequential behavior. Concurrency is corruption-safe: cargo serializes builds on
+# the shared target dir via its own advisory lock, sccache dedups the recompiles,
+# datasets are read-only, and each component captures its own log + verdict to a
+# file (see record_result) so interleaved stdout can never corrupt the
+# deterministic end-of-run SUMMARY block.
+_ncpu=$( { command -v nproc >/dev/null 2>&1 && nproc; } || sysctl -n hw.ncpu 2>/dev/null || echo 4 )
+case "$_ncpu" in *[!0-9]*|'') _ncpu=4 ;; esac
+_default_jobs=$(( _ncpu / 2 ))
+[ "$_default_jobs" -gt 4 ] && _default_jobs=4
+[ "$_default_jobs" -lt 1 ] && _default_jobs=1
+AGENT_GATE_JOBS="${AGENT_GATE_JOBS:-$_default_jobs}"
+case "$AGENT_GATE_JOBS" in *[!0-9]*|'') AGENT_GATE_JOBS=1 ;; esac
+[ "$AGENT_GATE_JOBS" -lt 1 ] && AGENT_GATE_JOBS=1
+# The bounded pool relies on `wait -n` (bash 4.3+). On older bash (e.g. macOS's
+# stock /bin/bash 3.2) fall back to sequential execution rather than risk a
+# busy-poll race; correctness is identical, only wall-clock differs.
+if [ "$AGENT_GATE_JOBS" -gt 1 ] && \
+   ! { [ "${BASH_VERSINFO[0]:-0}" -gt 4 ] || \
+       { [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] && [ "${BASH_VERSINFO[1]:-0}" -ge 3 ]; }; }; then
+  echo "agent-gate: bash < 4.3 lacks 'wait -n'; components run sequentially (AGENT_GATE_JOBS=1)"
+  AGENT_GATE_JOBS=1
+fi
+
+# Static-golden mandate (coordinator directive for #1737): the local gate runs
+# against STATIC GOLDENS only. The live Docker/Cassandra sstabledump parity tests
+# (issue #911, the *_under_cassandra5_sstabledump cases) otherwise fire during
+# core-tests whenever a Docker daemon + a cassandra:5.0* image are present, adding
+# wall-clock and non-determinism (measured ~10s each on a warm image). We default
+# CQLITE_SKIP_DOCKER_TESTS=1 so run_core_tests filters them out; that coverage
+# still runs in the nightly/dispatch Docker CI lanes, and setting
+# CQLITE_SKIP_DOCKER_TESTS=0 restores them here (when Docker is available).
+export CQLITE_SKIP_DOCKER_TESTS="${CQLITE_SKIP_DOCKER_TESTS:-1}"
 
 COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity python-bindings node-bindings delivery-telemetry parity-report binding-unwind-profile tooling-tests minimal-build smoke)
 ONLY=""
@@ -406,6 +458,16 @@ if [ "$SELFTEST" -eq 1 ]; then
   exit 0
 fi
 
+# record_result <name> <status> <seconds>
+# Components may run concurrently in the bounded pool (issue #1737). A backgrounded
+# subshell CANNOT mutate the parent's NAMES/STATUSES/TIMES arrays or OVERALL, so
+# every component writes its own verdict to a per-component result file; the parent
+# reconstructs the summary arrays (in canonical COMPONENTS order) after the pool
+# drains. This keeps the SUMMARY block deterministic regardless of finish order.
+record_result() { # <name> <status> <seconds>
+  printf '%s %s\n' "$2" "$3" > "$LOG_DIR/$1.result"
+}
+
 run_component() { # run_component <name> <cmd...>
   local name="$1"; shift
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -419,13 +481,12 @@ run_component() { # run_component <name> <cmd...>
     status=PASS
   else
     status=FAIL
-    OVERALL=FAIL
     echo "--- [$name] FAILED; last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
   fi
   end=$(date +%s)
-  NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
+  record_result "$name" "$status" "$((end - start))"
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
@@ -445,7 +506,7 @@ run_python_bindings() {
   if ! command -v python3 >/dev/null 2>&1; then
     status=SKIP
     echo ">>> [$name] SKIP (no python3 on PATH)"
-    NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("0s")
+    record_result "$name" "$status" 0
     return 0
   fi
   # Persistent venv under target/ so repeat runs skip the maturin/pytest install.
@@ -463,13 +524,12 @@ run_python_bindings() {
     status=PASS
   else
     status=FAIL
-    OVERALL=FAIL
     echo "--- [$name] FAILED; last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
   fi
   end=$(date +%s)
-  NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
+  record_result "$name" "$status" "$((end - start))"
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
@@ -498,7 +558,7 @@ run_node_bindings() {
   if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
     status=SKIP
     echo ">>> [$name] SKIP (no node/npm on PATH)"
-    NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("0s")
+    record_result "$name" "$status" 0
     return 0
   fi
   echo ">>> [$name] npm ci + npm run build + jest write-readback-content (#1231)"
@@ -511,13 +571,12 @@ run_node_bindings() {
     status=PASS
   else
     status=FAIL
-    OVERALL=FAIL
     echo "--- [$name] FAILED; last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
   fi
   end=$(date +%s)
-  NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
+  record_result "$name" "$status" "$((end - start))"
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
@@ -536,7 +595,7 @@ run_delivery_telemetry() {
   if ! command -v python3 >/dev/null 2>&1; then
     status=SKIP
     echo ">>> [$name] SKIP (no python3 on PATH)"
-    NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("0s")
+    record_result "$name" "$status" 0
     return 0
   fi
   echo ">>> [$name] python3 scripts/tests/test_delivery_telemetry.py"
@@ -544,13 +603,12 @@ run_delivery_telemetry() {
     status=PASS
   else
     status=FAIL
-    OVERALL=FAIL
     echo "--- [$name] FAILED; last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
   fi
   end=$(date +%s)
-  NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
+  record_result "$name" "$status" "$((end - start))"
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
@@ -595,7 +653,7 @@ run_compaction_byte_parity() {
   if [ -z "${CQLITE_DATASETS_ROOT:-}" ] || [ ! -d "$committed_ks" ]; then
     status=SKIP
     echo ">>> [$name] SKIP (CQLITE_DATASETS_ROOT unset or committed test_compactionparity fixtures absent)"
-    NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("0s")
+    record_result "$name" "$status" 0
     return 0
   fi
   echo ">>> [$name] Rust byte-parity PR proxy for the nightly Java byte tier (#1405)"
@@ -614,13 +672,12 @@ run_compaction_byte_parity() {
     status=PASS
   else
     status=FAIL
-    OVERALL=FAIL
     echo "--- [$name] FAILED; last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
   fi
   end=$(date +%s)
-  NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
+  record_result "$name" "$status" "$((end - start))"
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
@@ -652,7 +709,7 @@ run_parity_report() {
   if [ ! -f "$manifest" ] || [ ! -d "$tool_dir" ]; then
     status=SKIP
     echo ">>> [$name] SKIP (cassandra-parity tool or manifest unavailable: manifest=$manifest tool=$tool_dir)"
-    NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("0s")
+    record_result "$name" "$status" 0
     return 0
   fi
   echo ">>> [$name] cargo run -q -p cassandra-parity -- report --check ($report)"
@@ -661,7 +718,6 @@ run_parity_report() {
     status=PASS
   else
     status=FAIL
-    OVERALL=FAIL
     # A nonzero --check exit is either a genuine render mismatch (the tool prints
     # "report: STALE — ...") or an invalid manifest (lint errors bail before any
     # render). Only the former is fixed by regenerating; mirror the CI heal job's
@@ -679,7 +735,7 @@ run_parity_report() {
     echo "--- end of $name output ---"
   fi
   end=$(date +%s)
-  NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
+  record_result "$name" "$status" "$((end - start))"
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
@@ -711,12 +767,11 @@ run_tooling_tests() {
   echo ">>> [$name] bash scripts/tests/test_generator_keyspace_scoping.sh"
   if ! bash "$REPO_ROOT/scripts/tests/test_generator_keyspace_scoping.sh" >>"$log" 2>&1; then
     status=FAIL
-    OVERALL=FAIL
     echo "--- [$name] FAILED (keyspace-scoping guard); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
-    NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
+    record_result "$name" "$status" "$((end - start))"
     echo ">>> [$name] $status ($((end - start))s)"
     return 0
   fi
@@ -726,12 +781,11 @@ run_tooling_tests() {
   echo ">>> [$name] bash scripts/tests/test_agent_gate_parity_report.sh"
   if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_parity_report.sh" >>"$log" 2>&1; then
     status=FAIL
-    OVERALL=FAIL
     echo "--- [$name] FAILED (parity-report self-test); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
-    NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
+    record_result "$name" "$status" "$((end - start))"
     echo ">>> [$name] $status ($((end - start))s)"
     return 0
   fi
@@ -739,7 +793,7 @@ run_tooling_tests() {
   if ! command -v python3 >/dev/null 2>&1; then
     status=SKIP
     echo ">>> [$name] SKIP (no python3 on PATH; selftest truncation reader needs it)"
-    NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("0s")
+    record_result "$name" "$status" 0
     return 0
   fi
   echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh"
@@ -748,13 +802,12 @@ run_tooling_tests() {
     status=PASS
   else
     status=FAIL
-    OVERALL=FAIL
     echo "--- [$name] FAILED; last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
   fi
   end=$(date +%s)
-  NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
+  record_result "$name" "$status" "$((end - start))"
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
@@ -830,7 +883,6 @@ run_file_size() {
       printf '      %s\n' "${grew[@]}"
     else
       status=FAIL
-      OVERALL=FAIL
       echo "--- [$name] FAIL: change makes over-threshold file(s) larger."
       echo "    Split per the campsite rule (epic #1116 source / #1135 tests), or, if a split"
       echo "    is genuinely out of scope, re-run with CQLITE_ALLOW_FILE_GROWTH=1 to acknowledge:"
@@ -839,7 +891,7 @@ run_file_size() {
   fi
 
   end=$(date +%s)
-  NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
+  record_result "$name" "$status" "$((end - start))"
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
@@ -924,40 +976,60 @@ fi
 PIN_FILE=".github/workflows/sstabledump-parity-gate.yml"
 PINS=$(grep -E 'DATASET_(TAG|ASSET|SHA256):' "$PIN_FILE" 2>/dev/null | sed 's/^ *//' | tr '\n' ' ' || echo "unavailable")
 
-run_component fmt cargo fmt --all --check
-run_component clippy env RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
-run_component core-tests cargo test --package cqlite-core --features cli-helpers -- \
-  --skip test_legacy_format_allows_blob_fallback_with_feature
-# Issue #1085: the row-collapse bug lived in the `tombstones`-feature scan path,
-# which the default gate run (cli-helpers) never compiles. Run the full-scan
-# regression test under `tombstones` so a re-introduction can't ship green.
-run_component tombstones-scan cargo test --package cqlite-core \
-  --features write-support,cli-helpers,tombstones \
-  --test issue_1085_tombstones_full_scan_parity
-# Issue #1143: the thread-identity guard proves the windowed scan's
-# decompress+parse runs OFF the async worker pool. Its probe is gated behind the
-# non-default `scan-offload-probe` feature (so the instrumentation never ships in
-# normal builds), and the test only compiles under that feature — so the default
-# core-tests run never executes it. Run it here with the feature on; a guard that
-# doesn't run in CI is not a guard.
-run_component scan-offload-guard cargo test --package cqlite-core \
-  --features cli-helpers,scan-offload-probe \
-  --test issue_1143_scan_offload_thread \
-  --test issue_1333_scan_scratch_reuse \
-  --test issue_1589_window_drain_bytes
-# Issue #1565 (Epic A/A4): dhat allocation/peak-heap regression net over the real
-# read path. Compiled only under `dhat-heap` (installs the dhat global allocator
-# in its own test binary), single-threaded because dhat::Profiler is a
-# process-global singleton. Pins today's measured full-scan total-bytes and
-# materializing peak-heap as Epic-E ratchet targets; dataset-dependent and fails
-# closed on empty (asserts >=1 row before reading dhat stats).
-run_component memory-budget cargo test --package cqlite-core \
-  --features cli-helpers,dhat-heap \
-  --test memory_budget -- --test-threads=1
-# Compile EVERY target in the package first (--no-run, whole package) so a
-# new/edited test file that doesn't compile can't hide behind the enumerated
-# run-list (issue #865); then execute the seven CI-enforced targets.
-run_component integration-tests bash -c '
+# ---- issue #1737: nextest core-tests + bounded parallel component pool ----
+# core-tests: the 67%-of-wall-clock execution floor. Under nextest it parallelizes
+# across test binaries + cores; a separate `cargo test --doc` pass preserves
+# doctest coverage nextest does not run. Falls back to plain `cargo test`.
+run_core_tests() {
+  # Always exclude the legacy blob-fallback test (needs the non-default feature).
+  # Under the static-golden mandate (CQLITE_SKIP_DOCKER_TESTS != 0, the gate
+  # default) ALSO exclude the live Docker parity tests by name substring; setting
+  # CQLITE_SKIP_DOCKER_TESTS=0 restores them. nextest excludes by filter DSL, the
+  # cargo fallback by libtest --skip (both keep the doctest pass so no coverage is
+  # dropped).
+  local nx_filter='not test(test_legacy_format_allows_blob_fallback_with_feature)'
+  local -a skip_args=(--skip test_legacy_format_allows_blob_fallback_with_feature)
+  if [ "${CQLITE_SKIP_DOCKER_TESTS:-1}" != 0 ]; then
+    nx_filter="$nx_filter and not test(under_cassandra5_sstabledump)"
+    skip_args+=(--skip under_cassandra5_sstabledump)
+  fi
+  if [ "$NEXTEST" -eq 1 ]; then
+    run_component core-tests bash -c '
+      cargo nextest run --package cqlite-core --features cli-helpers -E "$1" &&
+      cargo test --doc --package cqlite-core --features cli-helpers -- "${@:2}"' \
+      cqlite-agent-gate "$nx_filter" "${skip_args[@]}"
+  else
+    run_component core-tests cargo test --package cqlite-core --features cli-helpers -- "${skip_args[@]}"
+  fi
+}
+
+# _pool_selected <name>: honor the --only filter when building the launch list.
+_pool_selected() {
+  [ -z "$ONLY" ] && return 0
+  grep -qw "$1" <<<"${ONLY//,/ }"
+}
+
+# dispatch_component <name>: run exactly one gate component with the SAME command,
+# package, and feature selection as the historical sequential gate. Each branch
+# records its verdict to $LOG_DIR/<name>.result (see record_result), so it is safe
+# to run in a backgrounded subshell.
+dispatch_component() {
+  case "$1" in
+    fmt) run_component fmt cargo fmt --all --check ;;
+    clippy) run_component clippy env RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features ;;
+    core-tests) run_core_tests ;;
+    tombstones-scan) run_component tombstones-scan cargo test --package cqlite-core \
+      --features write-support,cli-helpers,tombstones \
+      --test issue_1085_tombstones_full_scan_parity ;;
+    scan-offload-guard) run_component scan-offload-guard cargo test --package cqlite-core \
+      --features cli-helpers,scan-offload-probe \
+      --test issue_1143_scan_offload_thread \
+      --test issue_1333_scan_scratch_reuse \
+      --test issue_1589_window_drain_bytes ;;
+    memory-budget) run_component memory-budget cargo test --package cqlite-core \
+      --features cli-helpers,dhat-heap \
+      --test memory_budget -- --test-threads=1 ;;
+    integration-tests) run_component integration-tests bash -c '
   cargo test --package cqlite-integration-tests --no-run &&
   cargo test --package cqlite-integration-tests \
     --test chunked_data_reader_direct_test \
@@ -966,42 +1038,106 @@ run_component integration-tests bash -c '
     --test golden_path_get_operations_tests \
     --test golden_path_partition_lookup_tests \
     --test golden_path_scan_operations_tests \
-    --test golden_path_summary_index_integration_tests'
-# format-compatibility-tests is now a workspace member (issue #865) so fmt/clippy
-# reach it; run its 'oa' format compliance tests here too.
-run_component format-compat cargo test --package format-compatibility-tests
-run_component write-tests bash -c '
+    --test golden_path_summary_index_integration_tests' ;;
+    format-compat) run_component format-compat cargo test --package format-compatibility-tests ;;
+    write-tests) run_component write-tests bash -c '
   cargo test --package cqlite-core --features write-support --lib &&
   cargo test --package cqlite-core --features write-support --test write_read_roundtrip &&
-  cargo test --package cqlite-core --features write-support --test compaction_integration'
-run_component cli-tests bash -c '
+  cargo test --package cqlite-core --features write-support --test compaction_integration' ;;
+    cli-tests) run_component cli-tests bash -c '
   cargo test --package cqlite-cli --test unit_tests &&
   cargo test --package cqlite-cli --features write-support --test write_readback_content_tests &&
-  cargo test --package cqlite-cli --features write-support --test graceful_shutdown_tests'
-run_compaction_byte_parity
-run_python_bindings
-run_node_bindings
-run_delivery_telemetry
-run_parity_report
-# binding-unwind-profile (#1440): fail-closed guard that the shipped Python wheel
-# and Node prebuild build definitions select `--profile release-unwind` (so the
-# PyO3/napi catch_unwind firewall is active) and never `--release` (abort). Pure
-# bash/grep/awk — offline, deterministic, no datasets; a hard FAIL on any
-# abort-built or missing/unparseable definition.
-run_component binding-unwind-profile bash "$REPO_ROOT/scripts/tests/test_binding_unwind_profile.sh"
-run_tooling_tests
-run_component minimal-build cargo build --package cqlite-core --no-default-features --features all-compression
-# Pin smoke to a binary built from THIS tree. Left to its own devices the
-# smoke script prefers any existing target/release/cqlite, however stale —
-# the first full gate run caught a May binary failing all test_oa tables
-# that current code reads fine.
-# Resolve the just-built CLI honoring CARGO_TARGET_DIR (issue #1247): when the
-# gate runs from a git worktree sharing a target dir via CARGO_TARGET_DIR, the
-# binary lands in "$CARGO_TARGET_DIR/debug", not "$PWD/target/debug". Fall back
-# to "$PWD/target" when CARGO_TARGET_DIR is unset.
-run_component smoke bash -c '
+  cargo test --package cqlite-cli --features write-support --test graceful_shutdown_tests' ;;
+    compaction-byte-parity) run_compaction_byte_parity ;;
+    python-bindings) run_python_bindings ;;
+    node-bindings) run_node_bindings ;;
+    delivery-telemetry) run_delivery_telemetry ;;
+    parity-report) run_parity_report ;;
+    binding-unwind-profile) run_component binding-unwind-profile bash "$REPO_ROOT/scripts/tests/test_binding_unwind_profile.sh" ;;
+    tooling-tests) run_tooling_tests ;;
+    minimal-build) run_component minimal-build cargo build --package cqlite-core --no-default-features --features all-compression ;;
+    smoke) run_component smoke bash -c '
   cargo build --package cqlite-cli --bin cqlite &&
-  CQLITE_CLI="${CARGO_TARGET_DIR:-$PWD/target}/debug/cqlite" bash test-data/scripts/smoke-test-all-tables.sh'
+  CQLITE_CLI="${CARGO_TARGET_DIR:-$PWD/target}/debug/cqlite" bash test-data/scripts/smoke-test-all-tables.sh' ;;
+    *) echo "dispatch_component: unknown component $1" >&2; return 2 ;;
+  esac
+}
+
+# is_side_component / run_side_component: python-bindings and node-bindings are the
+# biggest non-core costs and, being separate crates built with binding-specific
+# features, would repeatedly invalidate + rebuild cqlite-core in the SHARED target
+# dir if run concurrently with the main cargo lane (measured: python-bindings
+# ballooned 72s -> 576s under a naive shared-target pool). So they run in a SIDE
+# lane with their OWN CARGO_TARGET_DIR, which removes the cross-lane cargo
+# feature-thrash and build-lock contention (sccache still dedups the actual
+# compiles across target dirs). Nothing else spawns from these dirs.
+is_side_component() {
+  case "$1" in python-bindings|node-bindings) return 0 ;; *) return 1 ;; esac
+}
+run_side_component() {
+  local base="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
+  CARGO_TARGET_DIR="$base/agent-gate-side/$1" dispatch_component "$1"
+}
+
+# launch_components: two-lane bounded model (issue #1737). The MAIN lane runs every
+# selected non-side cargo component SERIALLY in canonical order (identical build
+# profile to the historical sequential gate -- no NEW cross-component thrash), with
+# nextest cutting the core-tests long pole. The SIDE lane runs the isolated-target
+# binding components concurrently with MAIN. Concurrent heavy processes are bounded
+# by AGENT_GATE_JOBS: MAIN takes one slot, the SIDE lane runs up to
+# (AGENT_GATE_JOBS - 1) of its components at once (this per-gate cap composes with
+# the machine-wide bound of #1825). AGENT_GATE_JOBS=1 (or bash < 4.3) collapses to
+# the historical strictly-sequential run. file-size already ran inline before the
+# dataset preflight and is skipped here.
+launch_components() {
+  local -a main_lane=() side_lane=()
+  local c
+  for c in "${COMPONENTS[@]}"; do
+    [ "$c" = file-size ] && continue
+    _pool_selected "$c" || continue
+    if is_side_component "$c"; then side_lane+=("$c"); else main_lane+=("$c"); fi
+  done
+
+  if [ "$AGENT_GATE_JOBS" -le 1 ] || [ "${#side_lane[@]}" -eq 0 ]; then
+    for c in "${main_lane[@]}"; do dispatch_component "$c"; done
+    for c in "${side_lane[@]}"; do run_side_component "$c"; done
+    return
+  fi
+
+  local side_jobs=$(( AGENT_GATE_JOBS - 1 )); [ "$side_jobs" -lt 1 ] && side_jobs=1
+  echo ">>> [pool] MAIN lane (serial, shared target): ${main_lane[*]}"
+  echo ">>> [pool] SIDE lane (isolated target, up to $side_jobs concurrent): ${side_lane[*]}"
+  # SIDE lane: a background sub-pool capped at side_jobs (each isolated target dir).
+  (
+    srun=0
+    for sc in "${side_lane[@]}"; do
+      run_side_component "$sc" &
+      srun=$(( srun + 1 ))
+      if [ "$srun" -ge "$side_jobs" ]; then wait -n 2>/dev/null || true; srun=$(( srun - 1 )); fi
+    done
+    wait
+  ) &
+  local side_pid=$!
+  # MAIN lane: serial, foreground (shared target dir, no intra-lane parallelism).
+  for c in "${main_lane[@]}"; do dispatch_component "$c"; done
+  wait "$side_pid"
+}
+
+launch_components
+
+# Reconstruct the summary arrays from per-component result files (issue #1737):
+# the bounded pool ran components in backgrounded subshells that cannot write the
+# parent's arrays, so each wrote its verdict to $LOG_DIR/<name>.result. Read them
+# back in canonical COMPONENTS order for a deterministic SUMMARY regardless of the
+# order components finished; a missing file means the component was not selected.
+for _c in "${COMPONENTS[@]}"; do
+  _rf="$LOG_DIR/$_c.result"
+  [ -f "$_rf" ] || continue
+  _st=""; _secs=""
+  read -r _st _secs < "$_rf" || true
+  NAMES+=("$_c"); STATUSES+=("$_st"); TIMES+=("${_secs}s")
+  [ "$_st" = FAIL ] && OVERALL=FAIL
+done
 
 declare -a SUMMARY_META=()
 SUMMARY_META+=("commit: $(git rev-parse --short HEAD) branch: $(git rev-parse --abbrev-ref HEAD) dirty: $(test -n "$(git status --porcelain)" && echo yes || echo no)")
