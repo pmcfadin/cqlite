@@ -617,6 +617,10 @@ impl SSTableReader {
             } else {
                 compressed_chunk
             };
+            // Issue #1589 red-measure: count bytes appended into the window so the
+            // byte-movement guard can compare against bytes memmoved.
+            #[cfg(feature = "scan-offload-probe")]
+            super::super::window_cursor::probe::note_bytes_appended(decompressed_chunk.len());
             window.extend_from_slice(&decompressed_chunk);
             chunk_count += 1;
 
@@ -696,6 +700,15 @@ impl SSTableReader {
             match step {
                 ParseStep::Emitted(consumed) => {
                     let take = if consumed == 0 { 1 } else { consumed };
+                    // Issue #1589 red-measure: the front-drain memmoves the entire
+                    // residual tail after every confirmed partition — Θ(P·W).
+                    #[cfg(feature = "scan-offload-probe")]
+                    {
+                        let capped = take.min(window.len());
+                        super::super::window_cursor::probe::note_bytes_memmoved(
+                            window.len() - capped,
+                        );
+                    }
                     window.drain(0..take.min(window.len()));
                     if local_break {
                         *broke = true;

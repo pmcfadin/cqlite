@@ -38,6 +38,13 @@ mod source;
 #[cfg(test)]
 mod tests;
 mod types;
+// Sliding-window byte cursor + its test-only byte-movement probe (issue #1589);
+// `pub` ONLY under the non-default `scan-offload-probe` feature so the guard test
+// reaches `window_cursor::probe`, else crate-private.
+#[cfg(not(feature = "scan-offload-probe"))]
+pub(crate) mod window_cursor;
+#[cfg(feature = "scan-offload-probe")]
+pub mod window_cursor;
 
 // Re-export public types
 pub use types::{
