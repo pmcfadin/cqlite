@@ -332,7 +332,7 @@ fn test_streaming_writer_byte_identical_to_in_memory() {
                 .unwrap(),
         );
     }
-    let data_size = stream_writer.finish_streaming().unwrap();
+    let data_size = stream_writer.finish_streaming().unwrap().data_size;
 
     // Offsets returned to the caller (fed to Index.db) must be identical.
     assert_eq!(
@@ -409,7 +409,7 @@ fn test_streaming_writer_bounds_memory_to_one_partition() {
         prev_flushed = flushed_after;
     }
 
-    let total = writer.finish_streaming().unwrap();
+    let total = writer.finish_streaming().unwrap().data_size;
     assert_eq!(
         total, prev_flushed,
         "total size must equal last flushed pos"
@@ -443,7 +443,7 @@ fn finish_streaming_persists_data_db_contents() {
             .write_partition(key, mutations, &schema, None, &[])
             .unwrap();
     }
-    let data_size = writer.finish_streaming().unwrap();
+    let data_size = writer.finish_streaming().unwrap().data_size;
 
     // The file length on disk equals the reported size (all bytes durable).
     let meta = std::fs::metadata(&data_path).unwrap();

@@ -65,6 +65,7 @@ pub(crate) use crate::storage::serialization::types::TypeSerializer;
 pub(crate) use crate::storage::serialization::vint::{
     encode_signed, encode_unsigned, unsigned_len,
 };
+pub(crate) use crate::storage::sstable::writer::crc_writer::StreamingCrc;
 pub(crate) use crate::storage::sstable::writer::index_writer::{
     PromotedIndexBlock, COLUMN_INDEX_SIZE_BYTES,
 };
@@ -182,6 +183,14 @@ pub struct DataWriter {
     data_path: Option<PathBuf>,
     /// Bytes already flushed to `sink`. Always 0 in in-memory mode.
     position: u64,
+    /// Incremental whole-file (`Digest.crc32`) + per-chunk (`CRC.db`) checksum
+    /// accumulator, fed every flushed byte in write order (issue #1663).
+    ///
+    /// Streaming mode only: [`flush_partition`](Self::flush_partition) feeds each
+    /// flushed scratch buffer through it, so [`finish_streaming`](Self::finish_streaming)
+    /// can return both checksums without re-reading the finished `Data.db`. Left
+    /// untouched (empty) in in-memory mode, which never calls `finish_streaming`.
+    crc: StreamingCrc,
     /// Encoding baselines used for delta encoding.
     stats: EncodingStatsBaselines,
 }
@@ -241,6 +250,22 @@ impl From<&StatisticsMetadata> for EncodingStatsBaselines {
     }
 }
 
+/// Result of finishing a streaming [`DataWriter`] (issue #1663).
+///
+/// Carries the total Data.db byte size and the checksums accumulated during the
+/// streaming write, so `SSTableWriter::finish` writes `Digest.crc32` and
+/// `CRC.db` without re-reading the finished `Data.db`.
+#[derive(Debug)]
+pub struct StreamFinish {
+    /// Total number of Data.db bytes written (the `data_size`).
+    pub data_size: u64,
+    /// Whole-file CRC32 over the raw Data.db bytes — the `Digest.crc32` value.
+    pub digest_crc32: u32,
+    /// One CRC32 per `CRC_CHUNK_SIZE` chunk of the raw Data.db bytes, in order —
+    /// the `CRC.db` chunk values (pass to `crc_writer::assemble_crc_bytes`).
+    pub chunk_crcs: Vec<u32>,
+}
+
 impl DataWriter {
     /// Create a new in-memory Data.db writer.
     ///
@@ -255,6 +280,7 @@ impl DataWriter {
             sink: None,
             data_path: None,
             position: 0,
+            crc: StreamingCrc::new(),
             stats: EncodingStatsBaselines::from(&stats),
         }
     }
@@ -275,6 +301,7 @@ impl DataWriter {
             sink: None,
             data_path: Some(data_path),
             position: 0,
+            crc: StreamingCrc::new(),
             stats: EncodingStatsBaselines::from(&stats),
         }
     }
@@ -318,6 +345,12 @@ impl DataWriter {
         if let Some(sink) = self.sink.as_mut() {
             sink.write_all(&self.buffer)?;
         }
+        // Feed the just-written bytes through the incremental checksum accumulator
+        // (issue #1663) so `finish_streaming` never re-reads the finished Data.db.
+        // Done here (after the sink write, before the clear) so every byte written
+        // to disk is checksummed exactly once, in write order — chunks straddle
+        // partition boundaries just as the re-read oracle chunks the raw file.
+        self.crc.update(&self.buffer);
         self.position += self.buffer.len() as u64;
         self.buffer.clear();
         Ok(())
@@ -358,12 +391,17 @@ impl DataWriter {
     }
 
     /// Finish a streaming writer: flush the sink to disk and return the total
-    /// number of Data.db bytes written (i.e. `data_size`).
+    /// byte size plus the checksums accumulated during the write (issue #1663).
     ///
     /// Any residual scratch (there is none in normal operation, since
     /// `write_partition` flushes per partition) is flushed first. Returns an
     /// error if the writer was created in in-memory mode.
-    pub fn finish_streaming(mut self) -> Result<u64> {
+    ///
+    /// The returned [`StreamFinish`] carries the whole-file `Digest.crc32` value
+    /// and the per-chunk `CRC.db` values that were accumulated as the data
+    /// streamed to disk, so `SSTableWriter::finish` computes neither by
+    /// re-reading the finished `Data.db`.
+    pub fn finish_streaming(mut self) -> Result<StreamFinish> {
         if self.data_path.is_none() {
             return Err(Error::InvalidInput(
                 "finish_streaming() called on an in-memory DataWriter".to_string(),
@@ -384,7 +422,15 @@ impl DataWriter {
                 .sync_all()
                 .map_err(|e| Error::Storage(format!("Failed to fsync Data.db contents: {e}")))?;
         }
-        Ok(self.position)
+        // Finalize the incremental checksums accumulated in `flush_partition`
+        // (issue #1663). `finalize` closes any trailing short chunk.
+        let data_size = self.position;
+        let (digest_crc32, chunk_crcs) = self.crc.finalize();
+        Ok(StreamFinish {
+            data_size,
+            digest_crc32,
+            chunk_crcs,
+        })
     }
 
     /// Get current file position (for Index.db offset tracking).
