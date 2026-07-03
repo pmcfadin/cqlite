@@ -40,7 +40,7 @@ use napi::{Env, JsObject};
 use napi_derive::napi;
 
 use crate::database::ColumnInfo;
-use crate::error::to_napi_error;
+use crate::error::{runtime_init_error, to_napi_error};
 use crate::value::{intern_column_keys, row_to_object};
 
 /// Streaming query result iterator.
@@ -164,7 +164,8 @@ impl napi::Task for NextTask {
 
         // Get next row from core iterator using the global runtime. The fetch is
         // `.instrument`-ed by the stream span (no guard across the runtime).
-        let next = crate::runtime::block_on(iter.next_async().instrument(self.span.clone()));
+        let next = crate::runtime::block_on(iter.next_async().instrument(self.span.clone()))
+            .map_err(runtime_init_error)?;
         match next {
             Some(Ok(row)) => {
                 // Materialise the interned `Arc<str>` name handles into `String`

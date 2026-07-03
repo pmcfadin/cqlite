@@ -13,7 +13,7 @@ use pyo3::types::{PyDict, PyList, PyString};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::error::to_py_err;
+use crate::error::{runtime_init_to_py_err, to_py_err};
 use crate::runtime::block_on;
 use crate::value::{key_error, value_to_py};
 
@@ -709,7 +709,7 @@ impl StreamingIterator {
             .lock()
             .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Iterator lock poisoned"))?;
 
-        let next_result = block_on(iter.next_async());
+        let next_result = block_on(iter.next_async()).map_err(runtime_init_to_py_err)?;
 
         match next_result {
             Some(Ok(row)) => {

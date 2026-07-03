@@ -19,11 +19,13 @@ mod write;
 
 pub use config::{config_from_py, StreamingConfig};
 pub use database::{open, Database};
-pub use error::{to_py_err, CqliteError, ParseError, QueryError, SchemaError};
+pub use error::{
+    runtime_init_to_py_err, to_py_err, CqliteError, ParseError, QueryError, SchemaError,
+};
 pub use prepared::PreparedStatement;
 pub use refresh::RefreshReport;
 pub use result::{ColumnInfo, QueryResult, QueryResultIter, Row, StreamingIterator};
-pub use runtime::{block_on, get_runtime};
+pub use runtime::{block_on, try_get_runtime};
 pub use stats::DatabaseStats;
 pub use write::{MaintenanceReport, WriteStats};
 

@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use napi_derive::napi;
 
-use crate::error::{simple_error, to_napi_error};
+use crate::error::{runtime_init_error, simple_error, to_napi_error};
 
 #[cfg(feature = "write-support")]
 use std::sync::Mutex;
@@ -478,6 +478,13 @@ impl Database {
         // off (issue #1040).
         crate::observability::init_once(options.as_ref().and_then(|o| o.otel.as_ref()));
 
+        // Eagerly build the shared tokio runtime so a resource-starved host
+        // (out of threads/FDs/memory) surfaces a catchable error AT open()
+        // rather than only later on the first executeNative/streaming next/flush
+        // block_on (issue #1438). On success the runtime is memoized and reused;
+        // this call is a cheap OnceLock fast-path on every subsequent open.
+        crate::runtime::try_get_runtime().map_err(runtime_init_error)?;
+
         // Per-handle default traceparent for this database's per-call spans.
         let traceparent = options
             .as_ref()
@@ -695,6 +702,13 @@ impl Database {
 
         #[cfg(not(feature = "write-support"))]
         let _ = (writable, write_dir); // suppress unused warning when feature off
+
+        // Eagerly build (and memoize) the shared async runtime so a resource-
+        // starved host surfaces the failure HERE at open() time as a catchable
+        // napi::Error, rather than deferring it to the first executeNative() /
+        // flushRun() / stream iteration that reaches `block_on` (issue #1438).
+        // Idempotent — later calls reuse the memoized runtime.
+        crate::runtime::try_get_runtime().map_err(runtime_init_error)?;
 
         Ok(Database {
             inner: Arc::new(db),
@@ -1159,7 +1173,9 @@ impl Database {
                 let mut engine = we_clone
                     .lock()
                     .map_err(|_| simple_error("Write engine lock poisoned"))?;
-                crate::runtime::block_on(engine.flush()).map_err(to_napi_error)
+                crate::runtime::block_on(engine.flush())
+                    .map_err(runtime_init_error)?
+                    .map_err(to_napi_error)
             })
             .await
             .map_err(|e| simple_error(format!("flush_run task panicked: {e}")))??;
@@ -1380,7 +1396,8 @@ impl napi::Task for ExecuteNativeTask {
                 })
             }
             .instrument(span),
-        )?;
+        )
+        .map_err(runtime_init_error)??;
 
         let row_count = result.rows.len() as u32;
         crate::observability::record_rows(&span_for_record, row_count as u64);

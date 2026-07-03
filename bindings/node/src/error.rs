@@ -160,6 +160,17 @@ pub fn to_napi_error(err: Error) -> napi::Error {
     napi::Error::new(napi::Status::GenericFailure, formatted_message)
 }
 
+/// Map a tokio runtime-initialization failure to a `napi::Error`.
+///
+/// The shared async runtime is built lazily (see `runtime::try_get_runtime`).
+/// If the host is out of threads/file descriptors/memory the build fails with an
+/// [`std::io::Error`]; surfacing it here as a `napi::Error` (via the same
+/// `Io` → System/`IO` mapping as any other I/O failure) lets `open()` reject/throw
+/// instead of the process aborting under `panic = "abort"` (issue #1438).
+pub fn runtime_init_error(err: std::io::Error) -> napi::Error {
+    to_napi_error(Error::Io(err))
+}
+
 /// Create a napi::Error with a simple message (no metadata).
 ///
 /// Use this for errors that don't originate from cqlite_core::Error,
@@ -355,6 +366,19 @@ mod tests {
         // Corruption has Data category, which maps to ParseError
         assert!(napi_err.reason.contains("data corrupted"));
         assert!(napi_err.reason.contains("code=PARSE"));
+    }
+
+    #[test]
+    fn test_runtime_init_error_maps_to_napi_error() {
+        // A runtime-init failure must surface as a catchable napi::Error
+        // (System/IO), never a process abort (issue #1438).
+        let io_err =
+            std::io::Error::other("cannot spawn worker threads: resource temporarily unavailable");
+        let napi_err = runtime_init_error(io_err);
+
+        assert!(napi_err.reason.contains("cannot spawn worker threads"));
+        assert!(napi_err.reason.contains("code=IO"));
+        assert!(napi_err.reason.contains("category=System"));
     }
 
     #[test]

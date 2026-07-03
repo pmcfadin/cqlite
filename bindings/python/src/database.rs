@@ -34,7 +34,7 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 use crate::config::{config_from_py, StreamingConfig};
-use crate::error::to_py_err;
+use crate::error::{runtime_init_to_py_err, to_py_err};
 use crate::prepared::PreparedStatement;
 use crate::result::{QueryResult, StreamingIterator};
 use crate::runtime::block_on;
@@ -153,11 +153,14 @@ impl Database {
                 .map_err(|_| PyRuntimeError::new_err("Write engine lock poisoned during close"))?;
             // close() flushes remaining data. MutexGuard is not Send, so we
             // cannot release the GIL here. The flush on close is typically fast.
-            block_on(engine.inner.close()).map_err(to_py_err)?;
+            block_on(engine.inner.close())
+                .map_err(runtime_init_to_py_err)?
+                .map_err(to_py_err)?;
         }
 
         // Shutdown the read-side storage engine
         py.allow_threads(|| block_on(self.inner.shutdown()))
+            .map_err(runtime_init_to_py_err)?
             .map_err(to_py_err)?;
 
         // Flush buffered telemetry (issue #1039) so a short-lived script that
@@ -279,6 +282,7 @@ impl Database {
         // Release GIL during async execution to allow other Python threads to run
         let core_result = py
             .allow_threads(|| block_on(db.execute(&query_owned)))
+            .map_err(runtime_init_to_py_err)?
             .map_err(to_py_err)?;
 
         let result = QueryResult::from_core(py, core_result)?;
@@ -349,6 +353,7 @@ impl Database {
         // Release GIL during async execution
         let core_iter = py
             .allow_threads(|| block_on(db.execute_streaming(&query_owned, core_config)))
+            .map_err(runtime_init_to_py_err)?
             .map_err(to_py_err)?;
 
         Ok(StreamingIterator::with_span(core_iter, span.clone()))
@@ -478,6 +483,10 @@ impl Database {
 
                 Ok(writer.rows_written())
             })
+            // Fold a runtime-init failure into the same PyErr channel as the
+            // export body so the caller sees a catchable exception (issue #1438).
+            .map_err(runtime_init_to_py_err)
+            .and_then(|inner| inner)
         });
 
         result
@@ -515,6 +524,7 @@ impl Database {
 
         let prepared = py
             .allow_threads(|| block_on(db.prepare(&query_owned)))
+            .map_err(runtime_init_to_py_err)?
             .map_err(to_py_err)?;
 
         Ok(PreparedStatement::new(prepared))
@@ -546,6 +556,7 @@ impl Database {
 
         let core_stats = py
             .allow_threads(|| block_on(db.stats()))
+            .map_err(runtime_init_to_py_err)?
             .map_err(to_py_err)?;
 
         DatabaseStats::from_core(py, core_stats)
@@ -849,10 +860,12 @@ pub fn open(
                 Ok::<_, cqlite_core::Error>((result.database, Some(registry)))
             })
         })
+        .map_err(runtime_init_to_py_err)?
         .map_err(to_py_err)?
     } else {
         let db = py
             .allow_threads(|| block_on(cqlite_core::Database::open(&path, core_config)))
+            .map_err(runtime_init_to_py_err)?
             .map_err(to_py_err)?;
         (db, None)
     };
@@ -892,6 +905,7 @@ pub fn open(
                     })
                 })
             })
+            .map_err(runtime_init_to_py_err)?
             .map_err(to_py_err)?;
 
         let engine_config = cqlite_core::storage::write_engine::WriteEngineConfig::new(

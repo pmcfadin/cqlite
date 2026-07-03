@@ -194,7 +194,9 @@ impl PyWriteEngine {
     /// Returns the Data.db path, or an empty string if the memtable was empty.
     pub fn flush(&mut self) -> cqlite_core::error::Result<String> {
         use crate::runtime::block_on;
-        let info = block_on(self.inner.flush())?;
+        // Outer `?` converts a runtime-init `io::Error` via `Error::Io` (#[from]);
+        // inner `?` propagates the flush error (issue #1438).
+        let info = block_on(self.inner.flush())??;
         Ok(info
             .map(|i| i.data_path.to_string_lossy().into_owned())
             .unwrap_or_default())
