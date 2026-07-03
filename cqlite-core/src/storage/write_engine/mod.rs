@@ -1435,12 +1435,25 @@ impl Drop for WriteEngine {
         // arguments (a single `usize`) allocate only when a warn-level logger is
         // actually enabled.
         if !self.memtable.is_empty() {
-            log::warn!(
-                "WriteEngine dropped without close(): {} row(s) in the memtable were NOT \
-                 flushed to an SSTable and remain only in the WAL (durability now relies on \
-                 WAL replay at next startup). Call `close().await` for a graceful shutdown.",
-                self.memtable.row_count()
-            );
+            // The recovery guidance depends on the durability mode: with WAL
+            // durability the rows survive in the WAL and replay on next open,
+            // but with `Durability::Disabled` the WAL was skipped entirely, so
+            // an ungraceful drop loses the un-flushed rows permanently.
+            match self.config.durability {
+                Durability::SyncEachWrite => log::warn!(
+                    "WriteEngine dropped without close(): {} row(s) in the memtable were NOT \
+                     flushed to an SSTable and remain only in the WAL (durability now relies on \
+                     WAL replay at next startup). Call `close().await` for a graceful shutdown.",
+                    self.memtable.row_count()
+                ),
+                Durability::Disabled => log::warn!(
+                    "WriteEngine dropped without close(): {} row(s) in the memtable were NOT \
+                     flushed to an SSTable and are LOST — durability is Disabled so these rows \
+                     were never written to the WAL and cannot be recovered (they existed in \
+                     memory only). Call `close().await` for a graceful shutdown.",
+                    self.memtable.row_count()
+                ),
+            }
         }
 
         // If close() was already called the lock was already released; a second
@@ -3323,6 +3336,59 @@ mod tests {
                 .iter()
                 .any(|m| m.contains("dropped") && m.contains("without close")),
             "expected an unflushed-drop warning, captured warnings: {warnings:?}"
+        );
+        // WAL-durable engine: the guidance must point at WAL recovery, NOT loss.
+        assert!(
+            warnings.iter().any(|m| m.contains("WAL replay")),
+            "WAL-durable drop warning must mention WAL replay recovery, captured: {warnings:?}"
+        );
+        assert!(
+            !warnings.iter().any(|m| m.contains("LOST")),
+            "WAL-durable drop warning must NOT claim data loss, captured: {warnings:?}"
+        );
+    }
+
+    /// Issue #1693 (roborev): with `Durability::Disabled` the WAL is skipped, so
+    /// an ungraceful drop loses the un-flushed rows. The warning must say the
+    /// rows are LOST rather than giving false "recoverable from the WAL" guidance.
+    #[test]
+    fn test_drop_without_close_warns_data_loss_when_durability_disabled() {
+        drop_warn_capture::start();
+
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        )
+        .with_durability(Durability::Disabled);
+        let mut engine = WriteEngine::new(config).unwrap();
+        engine
+            .write(create_test_mutation(1, "Alice", 1_000_000))
+            .unwrap();
+        assert!(
+            engine.memtable_row_count() > 0,
+            "precondition: memtable must be non-empty before drop"
+        );
+
+        drop(engine);
+
+        let warnings = drop_warn_capture::take_warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|m| m.contains("dropped") && m.contains("without close")),
+            "expected an unflushed-drop warning, captured warnings: {warnings:?}"
+        );
+        // No-WAL engine: the warning must signal data loss, NOT WAL recovery.
+        assert!(
+            warnings.iter().any(|m| m.contains("LOST")),
+            "Durability::Disabled drop warning must signal data loss, captured: {warnings:?}"
+        );
+        assert!(
+            !warnings.iter().any(|m| m.contains("WAL replay")),
+            "Durability::Disabled drop warning must NOT promise WAL recovery, captured: {warnings:?}"
         );
     }
 
