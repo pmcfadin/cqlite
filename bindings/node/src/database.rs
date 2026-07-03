@@ -179,6 +179,12 @@ pub struct DatabaseOptions {
     #[napi(js_name = "writeDir")]
     pub write_dir: Option<String>,
 
+    /// Enable automatic (STCS) size-tiered compaction for the write engine.
+    /// Default: true. Set false to disable compaction — `maintenanceStep`
+    /// then performs no merges (issue #1619).
+    #[napi(js_name = "autoCompaction")]
+    pub auto_compaction: Option<bool>,
+
     /// OpenTelemetry export options (epic #1031, issue #1040).
     ///
     /// When omitted, the `CQLITE_OTEL_*` environment variables are consulted;
@@ -481,6 +487,10 @@ impl Database {
                 config.memory.block_cache.enabled = enabled;
                 config.memory.row_cache.enabled = enabled;
                 config.memory.query_cache.enabled = enabled;
+            }
+
+            if let Some(ac) = opts.auto_compaction {
+                config.storage.compaction.auto_compaction = ac;
             }
 
             let writable = opts.writable.unwrap_or(false);

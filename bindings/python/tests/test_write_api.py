@@ -496,3 +496,112 @@ def test_total_written_accumulates_across_flushes(writable_db):
     assert stats_final.l0_count >= 2, (
         f"l0_count must be >= 2 after two flushes, got {stats_final.l0_count}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #1619 — auto_compaction off-switch via the public config surface
+# ---------------------------------------------------------------------------
+#
+# The config bridge (`config_from_dict`) deserializes into the FULL
+# `cqlite_core::Config`, which is not `#[serde(default)]`, so a partial dict
+# like ``{"storage": {"compaction": {"auto_compaction": False}}}`` is rejected.
+# The supported way to flip just this switch is to obtain a COMPLETE config
+# dict from a preset (``cqlite.performance_optimized()`` returns a full
+# round-tripped config dict), toggle
+# ``["storage"]["compaction"]["auto_compaction"]``, then pass it to
+# ``cqlite.open(config=...)``. These tests exercise that public path
+# end-to-end (open -> write -> flush x4 -> maintenance_step).
+
+
+def _full_config_dict(auto_compaction: bool) -> dict:
+    """Return a COMPLETE config dict with the compaction switch flipped.
+
+    Starts from the ``performance_optimized`` preset (a full config dict) so
+    the config bridge accepts it, then sets the one field under test.
+    """
+    cfg = cqlite.performance_optimized()
+    assert "storage" in cfg and "compaction" in cfg["storage"], (
+        "preset config dict must expose storage.compaction"
+    )
+    cfg["storage"]["compaction"]["auto_compaction"] = auto_compaction
+    return cfg
+
+
+def _open_flush_n_maintain(tmp_path, write_schema, config, n=4):
+    """Open writable with `config`, flush `n` distinct L0 SSTables, then run
+    one maintenance_step with a generous budget.
+
+    Returns ``(report, l0_flushes)`` where ``l0_flushes`` is the per-engine
+    flush counter (``write_stats.l0_count``). Note that ``l0_count`` is a
+    monotonic count of successful flushes — it is NOT decremented by a merge —
+    so merge evidence comes from the MaintenanceReport (``rows_merged`` /
+    ``completed_merges``), the authoritative STCS-ran signal.
+    """
+    data_dir = tmp_path / "data_dir"
+    data_dir.mkdir()
+    write_dir = tmp_path / "write_dir"
+
+    with cqlite.open(
+        str(data_dir),
+        schema=str(write_schema),
+        writable=True,
+        write_dir=str(write_dir),
+        config=config,
+    ) as db:
+        for i in range(n):
+            # Distinct partition key per flush -> one L0 SSTable each.
+            db.execute(
+                f"INSERT INTO write_test.items (id, name, value) "
+                f"VALUES ({1900 + i}, 'compact{i}', {i})"
+            )
+            db.flush_run()
+        l0_flushes = db.write_stats.l0_count
+        report = db.maintenance_step(budget_ms=60000)
+        return report, l0_flushes
+
+
+def test_compaction_off_switch_disables_merges(tmp_path, write_schema):
+    """A full config with auto_compaction=False makes maintenance_step a no-op.
+
+    Proves the off-switch is reachable through the public
+    ``open(config=...)`` surface (issue #1619).
+    """
+    config = _full_config_dict(auto_compaction=False)
+    report, l0_flushes = _open_flush_n_maintain(
+        tmp_path, write_schema, config, n=4
+    )
+    assert l0_flushes == 4, f"expected 4 flushed SSTables, got {l0_flushes}"
+    assert report.rows_merged == 0, "off-switch: no rows may be merged"
+    assert not report.pending_compaction, "off-switch: no pending compaction"
+    assert report.completed_merges == [], "off-switch: no merges completed"
+
+
+def test_compaction_default_config_enables_merges(tmp_path, write_schema):
+    """A full config with auto_compaction=True (default) merges >=4 SSTables.
+
+    Companion to the off-switch test: proves the default STCS policy is
+    genuinely active through the same public config surface.
+    """
+    config = _full_config_dict(auto_compaction=True)
+    report, l0_flushes = _open_flush_n_maintain(
+        tmp_path, write_schema, config, n=4
+    )
+    assert l0_flushes == 4, f"expected 4 flushed SSTables, got {l0_flushes}"
+    assert report.rows_merged > 0, "default STCS policy must merge rows"
+    assert len(report.completed_merges) > 0, "at least one merge must complete"
+
+
+def test_compaction_partial_config_dict_rejected(tmp_path, write_schema):
+    """A PARTIAL config dict is rejected (documents the full-config
+    requirement). This guards against the doc ever again implying partial
+    dicts work (issue #1619)."""
+    data_dir = tmp_path / "data_dir"
+    data_dir.mkdir()
+    with pytest.raises(ValueError):
+        cqlite.open(
+            str(data_dir),
+            schema=str(write_schema),
+            writable=True,
+            write_dir=str(tmp_path / "write_dir"),
+            config={"storage": {"compaction": {"auto_compaction": False}}},
+        )

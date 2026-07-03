@@ -702,3 +702,75 @@ describe('Write error paths (Issue #391)', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// auto_compaction off-switch (Issue #1619)
+// ---------------------------------------------------------------------------
+
+describe('autoCompaction off-switch (Issue #1619)', () => {
+  beforeAll(requireSchemaFile);
+
+  /**
+   * Open a writable DB with an explicit autoCompaction setting, insert `n`
+   * distinct rows flushing after each so that `n` separate L0 SSTables land on
+   * disk (>= STCS min_threshold = 4 triggers a merge), then run one
+   * maintenanceStep with a generous budget. Returns the report + l0 counts.
+   */
+  async function flushNAndMaintain(autoCompaction, n) {
+    const { dir, cleanup } = tmpWriteDir();
+    const opts = {
+      schema: SCHEMA_PATH,
+      writable: true,
+      writeDir: dir,
+    };
+    if (autoCompaction !== undefined) opts.autoCompaction = autoCompaction;
+    const db = await Database.open(dir, opts);
+    try {
+      for (let i = 0; i < n; i++) {
+        // Distinct partition key per flush → one L0 SSTable each.
+        const id = `550e8400-e29b-41d4-a716-4466554500${(80 + i)
+          .toString()
+          .padStart(2, '0')}`;
+        await db.execute(
+          `INSERT INTO test_basic.simple_table (id, name) VALUES (${id}, 'Row${i}')`
+        );
+        await db.flushRun();
+      }
+      // Note: writeStats.l0Count is a per-binding flush counter (incremented on
+      // every flushRun), NOT the live on-disk SSTable count — it is not
+      // decremented by a merge. Merge evidence therefore comes from the
+      // MaintenanceReport (rowsMerged / completedMerges), which is the
+      // authoritative signal for whether STCS ran.
+      const l0Flushes = db.writeStats.l0Count;
+      const report = await db.maintenanceStep({ budgetMs: 60000 });
+      return { report, l0Flushes };
+    } finally {
+      await db.close();
+      cleanup();
+    }
+  }
+
+  test('autoCompaction:false makes maintenanceStep a no-op with >=4 SSTables', async () => {
+    const { report, l0Flushes } = await flushNAndMaintain(false, 4);
+    expect(l0Flushes).toBe(4);
+    // Off-switch: no merge policy installed → nothing merges.
+    expect(report.rowsMerged).toBe(0);
+    expect(report.pendingCompaction).toBe(false);
+    expect(report.completedMerges.length).toBe(0);
+  });
+
+  test('default (autoCompaction omitted) merges with >=4 SSTables', async () => {
+    const { report, l0Flushes } = await flushNAndMaintain(undefined, 4);
+    expect(l0Flushes).toBe(4);
+    // Default STCS policy must merge rows and complete at least one merge.
+    expect(report.rowsMerged).toBeGreaterThan(0);
+    expect(report.completedMerges.length).toBeGreaterThan(0);
+  });
+
+  test('autoCompaction:true explicitly enables merges with >=4 SSTables', async () => {
+    const { report, l0Flushes } = await flushNAndMaintain(true, 4);
+    expect(l0Flushes).toBe(4);
+    expect(report.rowsMerged).toBeGreaterThan(0);
+    expect(report.completedMerges.length).toBeGreaterThan(0);
+  });
+});

@@ -376,6 +376,13 @@ export interface DatabaseOptions {
   writeDir?: string;
 
   /**
+   * Enable automatic (STCS) size-tiered compaction for the write engine.
+   * Default: true. Set false to disable compaction — `maintenanceStep`
+   * then performs no merges (issue #1619).
+   */
+  autoCompaction?: boolean;
+
+  /**
    * OpenTelemetry export options (epic #1031, issue #1040).
    *
    * When omitted, the `CQLITE_OTEL_*` environment variables are consulted.
