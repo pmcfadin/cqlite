@@ -181,6 +181,10 @@ name = "write"
 harness = false
 
 [[bench]]
+name = "compaction"
+harness = false
+
+[[bench]]
 name = "concurrent_scan"
 harness = false
 

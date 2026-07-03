@@ -17,6 +17,7 @@ Test matrix:
 """
 
 import importlib.util
+import json
 import os
 import sys
 import types
@@ -182,6 +183,37 @@ class TestAllWithinThresholdPasses:
         _run(_CRIT_ADVISORY_ONLY)
         captured = capsys.readouterr()
         assert "✅" in captured.out or "All" in captured.out
+
+
+class TestCompactionGateEntries:
+    """Issue #1646 (Epic O, O1): the compaction CPU shapes must be STRICTLY
+    gated in the real perf-gate.json (present, not advisory), and the
+    memory-shaped `compaction/wide` must be advisory. This assertion FAILS on
+    `main`, where no `compaction/*` id exists in perf-gate.json."""
+
+    @staticmethod
+    def _cfg():
+        with open(_GATE_JSON, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_strict_compaction_ids_present_and_not_advisory(self):
+        cfg = self._cfg()
+        ids = {b["id"] for b in cfg["benches"]}
+        advisory = set(cfg.get("advisory_benches", []))
+        for strict_id in ("compaction/narrow", "compaction/tombstone_heavy"):
+            assert strict_id in ids, (
+                f"{strict_id} must be a tracked bench in perf-gate.json"
+            )
+            assert strict_id not in advisory, (
+                f"{strict_id} is a CPU-bound shape and must be STRICT, not advisory"
+            )
+
+    def test_compaction_wide_is_advisory(self):
+        cfg = self._cfg()
+        assert "compaction/wide" in set(cfg.get("advisory_benches", [])), (
+            "compaction/wide is memory/data-shaped (O2 owns its dhat budget) and "
+            "must be advisory, not a strict wall-clock gate"
+        )
 
 
 class TestMissingDataSkipped:

@@ -207,6 +207,9 @@ async fn open_reader(data_path: &Path, schema: &TableSchema) -> SSTableReader {
     let mut reader = SSTableReader::open(data_path, &config, platform)
         .await
         .unwrap();
+    // Preserve the historical sync attach path for this fixture helper; the
+    // deprecation (issue #1692) is about the sync fallback cache, not this test.
+    #[allow(deprecated)]
     reader.set_schema_registry(Arc::new(RwLock::new(registry)));
     reader
 }

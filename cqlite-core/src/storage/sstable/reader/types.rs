@@ -297,6 +297,16 @@ pub struct SSTableReader {
     pub(crate) schema_registry: Option<Arc<crate::schema::SchemaRegistry>>,
     /// Table schema extracted from SSTable header
     pub(super) schema: Option<Arc<TableSchema>>,
+    /// Schema pre-resolved from the [`schema_registry`](Self::schema_registry) at
+    /// wiring time (async), cached for the SYNC schema-fallback tier of
+    /// `get_table_schema`. Issue #1692 (AG3): the sync parse path must never
+    /// `block_on` the async registry lock on a tokio worker thread, so the
+    /// registry lookup is resolved once, up front, into this field instead.
+    /// `Some` only when the header schema was absent AND the registry resolved a
+    /// schema for this table; otherwise `None` (the sync path then falls through
+    /// to header-column construction, exactly as before).
+    #[cfg(feature = "state_machine")]
+    pub(super) registry_schema: Option<Arc<TableSchema>>,
     /// UDT registry for UDT-aware parsing (cached for sync access)
     pub(crate) udt_registry: Option<UdtRegistry>,
     /// CompressionInfo metadata for chunked decompression (if compressed)
