@@ -67,6 +67,22 @@ const checks = [
     ],
   },
   {
+    name: 'storage-engine Mermaid diagrams use stacked layouts',
+    file: 'src/content/docs/proposals-research/storage-engine.mdx',
+    includes: [
+      'export const architectureMermaid = `flowchart TB',
+      'export const dataPathsMermaid = `flowchart TB',
+      'Cold ~~~ Fresh',
+      'Fresh ~~~ Research',
+    ],
+    excludes: [
+      'export const architectureMermaid = `flowchart LR',
+      '  subgraph Cold["Cold path"]\n    direction LR',
+      '  subgraph Fresh["Fresh tail path"]\n    direction LR',
+      '  subgraph Research["Research path"]\n    direction LR',
+    ],
+  },
+  {
     name: 'Mermaid diagram component renders and preserves source',
     file: 'src/components/MermaidDiagram.astro',
     includes: [
