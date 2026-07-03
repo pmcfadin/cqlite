@@ -553,20 +553,38 @@ impl SSTableReader {
         // `batch` before propagating any error it returns.
         let drained: Result<()> = (|| {
             while let Some(compressed_chunk) = raw_rx.blocking_recv() {
-                let decompressed_chunk = if compressed_chunk.len() >= ctx.max_compressed_length {
-                    compressed_chunk
+                // Shared decompressed-chunk cache (issue #1567). The I/O half feeds
+                // chunks from the data-section start (chunk 0) in order, so
+                // `chunk_count` is the ABSOLUTE chunk index — a stable cache key in
+                // the windowed-scan namespace. Incompressible raw-passthrough chunks
+                // (`len >= max_compressed_length`) skip the decompressor already, so
+                // there is nothing to memoize; they are NOT cached (documented D-choice,
+                // task 4.4). On a compressible chunk the cache is consulted before
+                // decompress: a hit skips the decompressor (and the counter).
+                if compressed_chunk.len() >= ctx.max_compressed_length {
+                    window.refill(&compressed_chunk);
                 } else if let Some(compression_reader) = &self.compression_reader {
-                    let compression = Compression::new(*compression_reader.algorithm())?;
-                    compression.decompress(&compressed_chunk).map_err(|e| {
-                        Error::corruption(format!(
-                            "drain_scan_window_blocking: Failed to decompress chunk {}: {}",
-                            chunk_count, e
-                        ))
-                    })?
+                    let key =
+                        self.chunk_cache_key(super::data_access::NS_WINDOWED_CHUNK, chunk_count as u64);
+                    let chunk: std::sync::Arc<[u8]> = match self.chunk_cache.get(&key) {
+                        Some(hit) => hit,
+                        None => {
+                            let compression = Compression::new(*compression_reader.algorithm())?;
+                            let d = compression.decompress(&compressed_chunk).map_err(|e| {
+                                Error::corruption(format!(
+                                    "drain_scan_window_blocking: Failed to decompress chunk {}: {}",
+                                    chunk_count, e
+                                ))
+                            })?;
+                            super::data_access::DECOMPRESS_CALLS
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            self.chunk_cache.insert(key, d)
+                        }
+                    };
+                    window.refill(&chunk);
                 } else {
-                    compressed_chunk
-                };
-                window.refill(&decompressed_chunk);
+                    window.refill(&compressed_chunk);
+                }
                 chunk_count += 1;
 
                 // Not the final chunk yet: drain confirmed partitions; NeedMore

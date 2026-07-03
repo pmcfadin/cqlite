@@ -27,6 +27,12 @@ mod big_promoted;
 // pub(crate) `big_reverse_partition_rows`, so it cannot live in `tests/`.
 #[cfg(all(test, not(feature = "tombstones")))]
 mod big_promoted_crc_tests;
+// In-crate proof that the BIG point-read chunk fetch (`get_cached_data`) consults
+// the shared decompressed-chunk cache (issue #1567). Needs `pub(crate)` reader
+// state (`actual_header_size`) to build a valid offset, so it cannot live in
+// `tests/`.
+#[cfg(test)]
+mod chunk_cache_wiring_tests;
 mod compaction;
 mod model;
 mod sequential;
@@ -38,6 +44,12 @@ pub use model::ClusteringSlice;
 // Re-export for the sibling `scan_stream_windowed` module, which references
 // `data_access::table_ids_match` (unchanged path).
 pub(in crate::storage::sstable::reader) use model::table_ids_match;
+
+// Re-export the decompress-work counter so the sibling `scan_stream_windowed`
+// module (outside `data_access`) can increment it on the windowed-scan miss path
+// (issue #1567). `model` is a private submodule, so the raw path is not reachable
+// from `reader::scan_stream_windowed`; this widens the path exactly enough.
+pub(in crate::storage::sstable::reader) use model::DECOMPRESS_CALLS;
 
 use super::source::ScanCursor;
 use super::SSTableReader;
@@ -517,19 +529,33 @@ impl SSTableReader {
         Ok(Some(row))
     }
 
-    /// Read block with caching support and hit/miss tracking
+    /// Read block with caching support and hit/miss tracking.
+    ///
+    /// Wired to the shared [`DecompressedChunkCache`] (issue #1567): the cache is
+    /// consulted BEFORE the file read, so a repeat read of a resident region is a
+    /// refcount-bump hit that touches the file zero times and re-decompresses
+    /// nothing. Keyed by the index-resolved `block_offset` in the BIG-point-read
+    /// namespace ([`NS_BIG_POINT`]), which is disjoint from the chunk-index
+    /// namespaces used by the windowed-scan and BTI sites. The returned buffer is
+    /// already CRC-verified: [`read_value_at_offset`](Self::read_value_at_offset)
+    /// runs `verify_uncompressed_range` before calling this, so a hit returns
+    /// bytes verified when they were first inserted.
+    ///
+    /// [`DecompressedChunkCache`]: crate::storage::cache::DecompressedChunkCache
     async fn get_cached_data(&self, block_offset: u64, size: u32) -> Result<Vec<u8>> {
         use crate::parser::header::CassandraVersion;
         use crate::storage::sstable::compression::Compression;
         use tokio::io::AsyncReadExt;
 
-        // Calculate block identifier based on offset and size
-        let _block_id = block_offset;
-
-        // For now, always read from disk and track as cache miss
+        let key = self.chunk_cache_key(NS_BIG_POINT, block_offset);
+        if let Some(hit) = self.chunk_cache.get(&key) {
+            self.record_cache_hit();
+            return Ok(hit.to_vec());
+        }
         self.record_cache_miss();
 
-        // Read from disk
+        // Read from disk (counted so a repeat read can prove zero underlying reads).
+        model::CHUNK_READ_CALLS.fetch_add(1, Ordering::Relaxed);
         let mut file = self.file.lock().await;
         file.seek(SeekFrom::Start(block_offset)).await?;
 
@@ -541,7 +567,10 @@ impl SSTableReader {
         let data = if let Some(compression_reader) = &self.compression_reader {
             let compression = Compression::new(*compression_reader.algorithm())?;
             match compression.decompress(&buffer) {
-                Ok(decompressed) => decompressed,
+                Ok(decompressed) => {
+                    model::DECOMPRESS_CALLS.fetch_add(1, Ordering::Relaxed);
+                    decompressed
+                }
                 Err(e) => {
                     // Handle decompression errors based on format
                     if self.header.cassandra_version != CassandraVersion::Legacy {
@@ -558,7 +587,10 @@ impl SSTableReader {
             buffer
         };
 
-        Ok(data)
+        // Insert into the shared cache (converts the Vec to Arc<[u8]> once) and
+        // return an owned copy (this site's callers consume a Vec).
+        let arc = self.chunk_cache.insert(key, data);
+        Ok(arc.to_vec())
     }
 
     /// Verify the `CRC.db` chunk(s) covering the uncompressed Data.db byte range
