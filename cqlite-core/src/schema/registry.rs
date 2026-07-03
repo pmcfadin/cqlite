@@ -330,17 +330,29 @@ impl SchemaRegistry {
 
         // Store in registry.
         //
-        // Versioning (which acquires the `version_history` write lock) is
-        // computed BEFORE acquiring the `schemas` write guard so that no
-        // `.await` happens while the guard is held — that combination was a
-        // latent lock-order/TOCTOU hazard on the cold registration path
-        // (issue #1710). The final insert under the write guard is atomic;
-        // the version-history entry is a separate, independent lock.
-        if self.config.enable_versioning && self.schemas.read().await.contains_key(&table_id) {
+        // The existence check and the insert MUST be a single write-locked
+        // critical section: two concurrent FIRST registrations of the same
+        // table must not both observe "absent". A check-then-act split (read
+        // lock to check, later write lock to insert) is a TOCTOU race — both
+        // callers would skip `create_schema_version`, then one insert would
+        // overwrite the other, silently dropping the second registration's
+        // update-ness (a lost version). Here we capture `existed` and insert
+        // atomically under one write guard.
+        //
+        // The guard is DROPPED before any `.await`: `create_schema_version`
+        // acquires the independent `version_history` lock and must never run
+        // while the `schemas` guard is held — that combination was the latent
+        // lock-order hazard on the cold registration path (issue #1710).
+        let existed = {
+            let mut schemas = self.schemas.write().await;
+            let existed = schemas.contains_key(&table_id);
+            schemas.insert(table_id.clone(), entry);
+            existed
+        }; // `schemas` write guard released here — no `.await` occurred under it.
+
+        if self.config.enable_versioning && existed {
             self.create_schema_version(&table_id, &schema).await?;
         }
-
-        self.schemas.write().await.insert(table_id, entry);
 
         Ok(())
     }
@@ -1627,6 +1639,68 @@ mod tests {
             1,
             "concurrent re-registration must leave exactly one entry"
         );
+    }
+
+    /// Issue #1710 (roborev follow-up): the existence-check and insert in
+    /// `register_schema` must be a SINGLE write-locked critical section.
+    /// Here N tasks concurrently register the SAME previously-absent table.
+    /// With an atomic check/insert, exactly ONE task observes "absent"
+    /// (creates no version) and the other N-1 observe "present" (each records
+    /// one version) — so version history holds exactly N-1 entries and there
+    /// is exactly one final schema entry. The pre-fix check-then-act shape
+    /// (read-lock check, later write-lock insert) let several tasks observe
+    /// "absent" at once, dropping version-creation calls (a lost update), so
+    /// history would hold FEWER than N-1 entries. A barrier releases all tasks
+    /// simultaneously and we repeat to make that concurrent-absent window real.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_first_registration_no_lost_version() {
+        const N: usize = 8;
+        for _ in 0..40 {
+            let mut cfg = SchemaRegistryConfig::default();
+            cfg.enable_versioning = true;
+            // Large cap so create_schema_version never trims history and the
+            // N-1 assertion measures every recorded version.
+            cfg.max_versions_per_schema = 10_000;
+            let registry = Arc::new(make_registry(cfg).await);
+            let barrier = Arc::new(tokio::sync::Barrier::new(N));
+
+            let mut handles = vec![];
+            for _ in 0..N {
+                let r = Arc::clone(&registry);
+                let b = Arc::clone(&barrier);
+                handles.push(tokio::spawn(async move {
+                    // Release all registrations at the same instant so the
+                    // "table absent" window is genuinely contended.
+                    b.wait().await;
+                    r.register_schema(simple_schema("users"), SchemaSource::Manual)
+                        .await
+                        .expect("concurrent register");
+                }));
+            }
+            for h in handles {
+                h.await.expect("task joins (no deadlock)");
+            }
+
+            // Exactly one final entry (idempotent upsert, no lost insert).
+            let all = registry.list_schemas(None).await.expect("list");
+            assert_eq!(
+                all.iter().filter(|s| s.table == "users").count(),
+                1,
+                "concurrent first registration must leave exactly one entry"
+            );
+
+            // Exactly one task saw "absent" (skips versioning); the other N-1
+            // each recorded a version. Fewer than N-1 => a lost update.
+            let history = registry
+                .get_schema_history("test_ks", "users")
+                .await
+                .expect("history");
+            assert_eq!(
+                history.len(),
+                N - 1,
+                "exactly one first-registration + (N-1) versioned updates: no lost update"
+            );
+        }
     }
 
     #[tokio::test]
