@@ -53,6 +53,20 @@ const checks = [
     ],
   },
   {
+    name: 'storage-engine data paths render Mermaid instead of static SVG',
+    file: 'src/content/docs/proposals-research/storage-engine.mdx',
+    includes: [
+      'const dataPathsMermaid = `',
+      'chart={dataPathsMermaid}',
+      'sourceLabel="Mermaid source for the data-path diagram"',
+    ],
+    excludes: [
+      "import dataPathsDiagram from '../../../assets/storage-engine-data-paths.svg';",
+      'src={dataPathsDiagram.src}',
+      'storage-engine-data-paths.svg',
+    ],
+  },
+  {
     name: 'Mermaid diagram component renders and preserves source',
     file: 'src/components/MermaidDiagram.astro',
     includes: [
@@ -70,6 +84,11 @@ const checks = [
   {
     name: 'static architecture SVG was removed',
     file: 'src/assets/storage-engine-architecture.svg',
+    absent: true,
+  },
+  {
+    name: 'static data-path SVG was removed',
+    file: 'src/assets/storage-engine-data-paths.svg',
     absent: true,
   },
   {
