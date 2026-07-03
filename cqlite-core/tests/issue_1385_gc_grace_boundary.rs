@@ -59,6 +59,7 @@ use std::path::{Path, PathBuf};
 
 use cqlite_core::parser::enhanced_statistics_parser::parse_statistics_with_fallback;
 use cqlite_core::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema};
+use cqlite_core::storage::sstable::writer::SSTableWriter;
 use cqlite_core::storage::write_engine::merge::{
     compact_sstables, CellData, ComplexDeletion, MergeEntry, MergeStep, RowData,
 };
@@ -724,6 +725,83 @@ fn decoupled_row_tombstone_below_baseline_flushes_and_folds_stats() {
         statistics_min_local_deletion_time(&in_dir),
         i64::from(del_ldt),
         "Statistics.db minLocalDeletionTime must reflect the row-tombstone ldt"
+    );
+}
+
+/// Companion regression for issue #1721 — the OTHER fold the fix added.
+///
+/// The #1721 fix folds a decoupled `Mutation::row_tombstone`'s `(deletion_time,
+/// ldt)` into `min_local_deletion_time` in TWO writer code paths:
+///   * fold B — the pre-seeded / two-pass baseline (`compute_mutations_baseline_stats`,
+///     used when `baselines_locked = true`), which the WriteEngine FLUSH path drives
+///     and which `decoupled_row_tombstone_below_baseline_flushes_and_folds_stats`
+///     above already covers (that flush pre-seeds baselines, so it exercises fold B);
+///   * fold A — the INCREMENTAL per-partition fold in `write_partition`, reached only
+///     when baselines are NOT pre-seeded (`baselines_locked = false`).
+///
+/// No production surface enters `write_partition` with `baselines_locked = false`
+/// (WriteEngine flush, `compact_sstables`, and background maintenance all pre-seed),
+/// so fold A is reachable ONLY through the public `SSTableWriter::write_partition`
+/// API when the caller does not pre-seed. This drives exactly that surface: a lone
+/// partition carrying a decoupled row tombstone whose `ldt` (and `deletion_time`)
+/// sit far below the `i32::MAX` incremental baseline, plus a live survivor cell.
+///
+/// Without fold A, `write_partition` leaves `min_local_deletion_time` at its
+/// `i32::MAX` default and the below-baseline guard in `data_writer/rows.rs` rejects
+/// the row with `InvalidInput("Row tombstone: local deletion time 1600000000 is less
+/// than min_local_deletion_time 2147483647")` (the `deletion_time` delta would also
+/// underflow `min_timestamp`). With it, the write and finalize succeed and the LDT
+/// is stamped verbatim into both the emitted row deletion and `Statistics.db`.
+#[test]
+fn decoupled_row_tombstone_below_incremental_baseline_folds_stats_unlocked() {
+    let temp = TempDir::new().unwrap();
+    let out_dir = temp.path().join("out");
+    let schema = make_schema();
+
+    // Same shape as the pre-seeded sibling: deletion DECOUPLED and OLDER than the
+    // survivor cell; its LDT is the binding minimum below the `i32::MAX` baseline.
+    let del_ts: i64 = 100;
+    let del_ldt: i32 = 1_600_000_000;
+    let row_ts: i64 = 500; // surviving `score` cell writetime (> del_ts)
+
+    let mutation = write_decoupled_row_tombstone_with_survivor(1, 0, del_ts, del_ldt, 7, row_ts);
+    let key = mutation.decorated_key(&schema).expect("decorated key");
+
+    // Direct `SSTableWriter` WITHOUT `pre_seed_encoding_baselines` → `baselines_locked
+    // == false` → the INCREMENTAL write_partition fold (fold A) is the only thing that
+    // can lower `min_local_deletion_time` to cover the tombstone. This `write_partition`
+    // returns the below-baseline `InvalidInput` if fold A is removed.
+    let mut writer = SSTableWriter::new(out_dir.clone(), 1, &schema).expect("writer");
+    writer
+        .write_partition(key, vec![mutation])
+        .expect("write_partition must fold the decoupled row-tombstone ldt (issue #1721 fold A)");
+    rt().block_on(writer.finish()).expect("finish");
+
+    // The row reads back as a live survivor carrying the coexisting row deletion
+    // stamped verbatim (localDeletionTime == del_ldt).
+    let inputs = discover_inputs(&out_dir);
+    assert!(!inputs.is_empty(), "expected an input SSTable after finish");
+    let entries = read_entries(&inputs, &schema);
+    let live = entries
+        .iter()
+        .find(|e| matches!(e.row_data, RowData::Live { .. }))
+        .unwrap_or_else(|| panic!("expected a live survivor row, entries: {entries:?}"));
+    assert_eq!(
+        live.row_deletion,
+        Some((del_ts, del_ldt)),
+        "the decoupled row deletion must be emitted verbatim (localDeletionTime == ldt)"
+    );
+    assert!(
+        has_live_score(&entries),
+        "the survivor `score` cell (newer than the deletion) must survive"
+    );
+
+    // Statistics.db minLocalDeletionTime must reflect the folded row-tombstone LDT.
+    assert_eq!(
+        statistics_min_local_deletion_time(&out_dir),
+        i64::from(del_ldt),
+        "Statistics.db minLocalDeletionTime must reflect the row-tombstone ldt on the \
+         non-preseeded (baselines_locked == false) write_partition path"
     );
 }
 
