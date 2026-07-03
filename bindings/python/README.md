@@ -164,8 +164,8 @@ CQL types are automatically converted to Python native types:
 | `blob` | `bytes` |
 | `timestamp` | `datetime.datetime` |
 | `date` | `datetime.date` |
-| `time` | `datetime.time` |
-| `duration` | `datetime.timedelta` |
+| `time` | `int` (nanoseconds since midnight, lossless) |
+| `duration` | `cqlite.Duration` (exact `months` / `days` / `nanos`) |
 | `uuid`, `timeuuid` | `uuid.UUID` |
 | `inet` | `ipaddress.IPv4Address` or `IPv6Address` |
 | `decimal` | `decimal.Decimal` |

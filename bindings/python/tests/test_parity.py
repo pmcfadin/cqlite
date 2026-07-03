@@ -23,7 +23,7 @@ from __future__ import annotations
 import functools
 import json
 import re
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime
 from decimal import Decimal
 from ipaddress import IPv4Address, IPv6Address
 from pathlib import Path
@@ -275,28 +275,44 @@ def normalize_jsonl_value(value: Any, cell_name: str = "") -> Any:
         if re.match(r"^\d{4}-\d{2}-\d{2}$", value):
             return date.fromisoformat(value)
 
-        # Detect time pattern with nanoseconds: "01:12:05.394017000"
+        # Detect time pattern with nanoseconds: "01:12:05.394017000".
+        # CQL `time` decodes to exact int nanoseconds since midnight (#1450),
+        # so parse the full nanosecond fraction (no microsecond truncation).
         time_match = re.match(r"^(\d{2}):(\d{2}):(\d{2})\.(\d+)$", value)
         if time_match:
             h, m, s, frac = time_match.groups()
-            # Truncate to microseconds
-            micros = int(frac[:6].ljust(6, "0"))
-            return time(int(h), int(m), int(s), micros)
+            nanos = int(frac[:9].ljust(9, "0"))
+            return (int(h) * 3600 + int(m) * 60 + int(s)) * 1_000_000_000 + nanos
 
-        # Detect simple time: "01:12:05"
-        if re.match(r"^\d{2}:\d{2}:\d{2}$", value):
-            return time.fromisoformat(value)
+        # Detect simple time: "01:12:05" -> exact int nanoseconds (#1450).
+        simple_time = re.match(r"^(\d{2}):(\d{2}):(\d{2})$", value)
+        if simple_time:
+            h, m, s = simple_time.groups()
+            return (int(h) * 3600 + int(m) * 60 + int(s)) * 1_000_000_000
 
-        # Duration pattern: "12h58m22s" or with months/days
-        duration_match = re.match(
-            r"^(?:(\d+)mo)?(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$",
-            value,
-        )
-        if duration_match and any(duration_match.groups()):
-            mo, d, h, m, s = [int(g) if g else 0 for g in duration_match.groups()]
-            # Convert months to days (approximation: 30 days/month)
-            total_days = mo * 30 + d
-            return timedelta(days=total_days, hours=h, minutes=m, seconds=s)
+        # Duration pattern: "12h58m22s", "1mo2d3h", "1s123ns", etc.
+        # CQL `duration` decodes to an exact cqlite.Duration (#1450). sstabledump
+        # renders Cassandra's stored (months, days, nanos) via the full grammar
+        # (y/mo/w/d/h/m/s/ms/us/ns); reconstruct the exact three components,
+        # inverting that rendering (no 30-day collapse, no truncation). The
+        # two-char units are matched before the single-char ones so `mo`/`ms`/`us`
+        # are not mis-read as `m`/`s`.
+        duration_tokens = re.findall(r"(\d+)(mo|ms|us|µs|ns|[ymwdhs])", value)
+        if duration_tokens and "".join(n + u for n, u in duration_tokens) == value:
+            units: dict[str, int] = {}
+            for num, unit in duration_tokens:
+                units[unit] = units.get(unit, 0) + int(num)
+            months = units.get("y", 0) * 12 + units.get("mo", 0)
+            days = units.get("w", 0) * 7 + units.get("d", 0)
+            nanos = (
+                units.get("h", 0) * 3_600_000_000_000
+                + units.get("m", 0) * 60_000_000_000
+                + units.get("s", 0) * 1_000_000_000
+                + units.get("ms", 0) * 1_000_000
+                + (units.get("us", 0) + units.get("µs", 0)) * 1_000
+                + units.get("ns", 0)
+            )
+            return cqlite.Duration(months, days, nanos)
 
         # Plain string
         return value
