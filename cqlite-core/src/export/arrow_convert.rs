@@ -1329,15 +1329,17 @@ pub(crate) fn rescale_decimal(scale: i32, unscaled: &[u8]) -> Result<i128, Arrow
 fn build_boolean_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<bool>> = rows
         .iter()
-        .map(|row| match row.values.get(col.name.as_str()) {
-            None => Ok(None),
-            Some(Value::Boolean(b)) => Ok(Some(*b)),
-            Some(Value::Null) => Ok(None),
-            Some(other) => Err(ArrowConvertError::InvalidValue(format!(
-                "column '{}': expected Boolean value, got {:?}",
-                col.name, other
-            ))),
-        })
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::Boolean(b)) => Ok(Some(*b)),
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected Boolean value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
         .collect::<Result<Vec<Option<bool>>, ArrowConvertError>>()?;
     Ok(Arc::new(BooleanArray::from(values)))
 }
@@ -1345,15 +1347,17 @@ fn build_boolean_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, 
 fn build_int8_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<i8>> = rows
         .iter()
-        .map(|row| match row.values.get(col.name.as_str()) {
-            None => Ok(None),
-            Some(Value::TinyInt(i)) => Ok(Some(*i)),
-            Some(Value::Null) => Ok(None),
-            Some(other) => Err(ArrowConvertError::InvalidValue(format!(
-                "column '{}': expected TinyInt value, got {:?}",
-                col.name, other
-            ))),
-        })
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::TinyInt(i)) => Ok(Some(*i)),
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected TinyInt value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
         .collect::<Result<Vec<Option<i8>>, ArrowConvertError>>()?;
     Ok(Arc::new(Int8Array::from(values)))
 }
@@ -1361,15 +1365,17 @@ fn build_int8_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Arr
 fn build_int16_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<i16>> = rows
         .iter()
-        .map(|row| match row.values.get(col.name.as_str()) {
-            None => Ok(None),
-            Some(Value::SmallInt(i)) => Ok(Some(*i)),
-            Some(Value::Null) => Ok(None),
-            Some(other) => Err(ArrowConvertError::InvalidValue(format!(
-                "column '{}': expected SmallInt value, got {:?}",
-                col.name, other
-            ))),
-        })
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::SmallInt(i)) => Ok(Some(*i)),
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected SmallInt value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
         .collect::<Result<Vec<Option<i16>>, ArrowConvertError>>()?;
     Ok(Arc::new(Int16Array::from(values)))
 }
@@ -1382,16 +1388,18 @@ fn build_int32_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Ar
     let allow_compat = col.cql_type.is_none();
     let values: Vec<Option<i32>> = rows
         .iter()
-        .map(|row| match row.values.get(col.name.as_str()) {
-            None => Ok(None),
-            Some(Value::Integer(i)) => Ok(Some(*i)),
-            Some(Value::Date(d)) if allow_compat => Ok(Some(*d)), // Date is stored as i32 days
-            Some(Value::Null) => Ok(None),
-            Some(other) => Err(ArrowConvertError::InvalidValue(format!(
-                "column '{}': expected Int value, got {:?}",
-                col.name, other
-            ))),
-        })
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::Integer(i)) => Ok(Some(*i)),
+                Some(Value::Date(d)) if allow_compat => Ok(Some(*d)), // Date is stored as i32 days
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected Int value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
         .collect::<Result<Vec<Option<i32>>, ArrowConvertError>>()?;
     Ok(Arc::new(Int32Array::from(values)))
 }
@@ -1407,17 +1415,19 @@ fn build_int64_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Ar
     let allow_compat = effective.is_none();
     let values: Vec<Option<i64>> = rows
         .iter()
-        .map(|row| match row.values.get(col.name.as_str()) {
-            None => Ok(None),
-            Some(Value::BigInt(i)) => Ok(Some(*i)),
-            Some(Value::Counter(c)) if allow_counter => Ok(Some(*c)),
-            Some(Value::Time(t)) if allow_compat => Ok(Some(*t)), // Time is stored as i64 nanos
-            Some(Value::Null) => Ok(None),
-            Some(other) => Err(ArrowConvertError::InvalidValue(format!(
-                "column '{}': expected BigInt value, got {:?}",
-                col.name, other
-            ))),
-        })
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::BigInt(i)) => Ok(Some(*i)),
+                Some(Value::Counter(c)) if allow_counter => Ok(Some(*c)),
+                Some(Value::Time(t)) if allow_compat => Ok(Some(*t)), // Time is stored as i64 nanos
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected BigInt value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
         .collect::<Result<Vec<Option<i64>>, ArrowConvertError>>()?;
     Ok(Arc::new(Int64Array::from(values)))
 }
@@ -1425,19 +1435,21 @@ fn build_int64_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Ar
 fn build_float32_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<f32>> = rows
         .iter()
-        .map(|row| match row.values.get(col.name.as_str()) {
-            None => Ok(None),
-            Some(Value::Float32(f)) => Ok(Some(*f)),
-            // A CQL `float` (32-bit) may be carried as the wider `Value::Float`
-            // (f64) by the decode path; narrow it back (lossless for genuine
-            // f32 values), mirroring build_float64_array which accepts both.
-            Some(Value::Float(f)) => Ok(Some(*f as f32)),
-            Some(Value::Null) => Ok(None),
-            Some(other) => Err(ArrowConvertError::InvalidValue(format!(
-                "column '{}': expected Float value, got {:?}",
-                col.name, other
-            ))),
-        })
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::Float32(f)) => Ok(Some(*f)),
+                // A CQL `float` (32-bit) may be carried as the wider `Value::Float`
+                // (f64) by the decode path; narrow it back (lossless for genuine
+                // f32 values), mirroring build_float64_array which accepts both.
+                Some(Value::Float(f)) => Ok(Some(*f as f32)),
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected Float value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
         .collect::<Result<Vec<Option<f32>>, ArrowConvertError>>()?;
     Ok(Arc::new(Float32Array::from(values)))
 }
@@ -1445,16 +1457,18 @@ fn build_float32_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, 
 fn build_float64_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<f64>> = rows
         .iter()
-        .map(|row| match row.values.get(col.name.as_str()) {
-            None => Ok(None),
-            Some(Value::Float(f)) => Ok(Some(*f)),
-            Some(Value::Float32(f)) => Ok(Some(*f as f64)),
-            Some(Value::Null) => Ok(None),
-            Some(other) => Err(ArrowConvertError::InvalidValue(format!(
-                "column '{}': expected Double value, got {:?}",
-                col.name, other
-            ))),
-        })
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::Float(f)) => Ok(Some(*f)),
+                Some(Value::Float32(f)) => Ok(Some(*f as f64)),
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected Double value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
         .collect::<Result<Vec<Option<f64>>, ArrowConvertError>>()?;
     Ok(Arc::new(Float64Array::from(values)))
 }
@@ -1471,20 +1485,22 @@ fn build_string_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, A
     );
     let values: Vec<Option<String>> = rows
         .iter()
-        .map(|row| match row.values.get(col.name.as_str()) {
-            None => Ok(None),
-            Some(Value::Null) => Ok(None),
-            Some(Value::Text(s)) => Ok(Some(s.clone())),
-            // `Json` is only a valid string source on the opaque fallback;
-            // an authoritative text column must fail closed on it.
-            Some(Value::Json(j)) if !strict_text => Ok(Some(j.to_string())),
-            Some(other) if strict_text => Err(ArrowConvertError::InvalidValue(format!(
-                "column '{}': expected Text value, got {:?}",
-                col.name, other
-            ))),
-            // Opaque / untyped fallback: format complex types as strings.
-            Some(other) => Ok(Some(ValueFormatter::format_value(other))),
-        })
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::Null) => Ok(None),
+                Some(Value::Text(s)) => Ok(Some(s.clone())),
+                // `Json` is only a valid string source on the opaque fallback;
+                // an authoritative text column must fail closed on it.
+                Some(Value::Json(j)) if !strict_text => Ok(Some(j.to_string())),
+                Some(other) if strict_text => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected Text value, got {:?}",
+                    col.name, other
+                ))),
+                // Opaque / untyped fallback: format complex types as strings.
+                Some(other) => Ok(Some(ValueFormatter::format_value(other))),
+            },
+        )
         .collect::<Result<Vec<Option<String>>, ArrowConvertError>>()?;
     Ok(Arc::new(StringArray::from(values)))
 }
@@ -1492,15 +1508,17 @@ fn build_string_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, A
 fn build_binary_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<&[u8]>> = rows
         .iter()
-        .map(|row| match row.values.get(col.name.as_str()) {
-            None => Ok(None),
-            Some(Value::Blob(b)) => Ok(Some(b.as_slice())),
-            Some(Value::Null) => Ok(None),
-            Some(other) => Err(ArrowConvertError::InvalidValue(format!(
-                "column '{}': expected Blob value, got {:?}",
-                col.name, other
-            ))),
-        })
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::Blob(b)) => Ok(Some(b.as_slice())),
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected Blob value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
         .collect::<Result<Vec<Option<&[u8]>>, ArrowConvertError>>()?;
     Ok(Arc::new(BinaryArray::from(values)))
 }
@@ -1511,15 +1529,17 @@ fn build_timestamp_array(
 ) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<i64>> = rows
         .iter()
-        .map(|row| match row.values.get(col.name.as_str()) {
-            None => Ok(None),
-            Some(Value::Timestamp(ts)) => Ok(Some(*ts)),
-            Some(Value::Null) => Ok(None),
-            Some(other) => Err(ArrowConvertError::InvalidValue(format!(
-                "column '{}': expected Timestamp value, got {:?}",
-                col.name, other
-            ))),
-        })
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::Timestamp(ts)) => Ok(Some(*ts)),
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected Timestamp value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
         .collect::<Result<Vec<Option<i64>>, ArrowConvertError>>()?;
     Ok(Arc::new(
         TimestampMillisecondArray::from(values).with_timezone("UTC"),
@@ -1529,15 +1549,17 @@ fn build_timestamp_array(
 fn build_uuid_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<[u8; 16]>> = rows
         .iter()
-        .map(|row| match row.values.get(col.name.as_str()) {
-            None => Ok(None),
-            Some(Value::Uuid(uuid)) => Ok(Some(*uuid)),
-            Some(Value::Null) => Ok(None),
-            Some(other) => Err(ArrowConvertError::InvalidValue(format!(
-                "column '{}': expected Uuid value, got {:?}",
-                col.name, other
-            ))),
-        })
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::Uuid(uuid)) => Ok(Some(*uuid)),
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected Uuid value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
         .collect::<Result<Vec<Option<[u8; 16]>>, ArrowConvertError>>()?;
 
     let mut builder = arrow::array::FixedSizeBinaryBuilder::new(16);
@@ -1558,15 +1580,17 @@ fn build_uuid_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Arr
 fn build_date32_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<i32>> = rows
         .iter()
-        .map(|row| match row.values.get(col.name.as_str()) {
-            None => Ok(None),
-            Some(Value::Date(days)) => Ok(Some(*days)),
-            Some(Value::Null) => Ok(None),
-            Some(other) => Err(ArrowConvertError::InvalidValue(format!(
-                "column '{}': expected Date value, got {:?}",
-                col.name, other
-            ))),
-        })
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::Date(days)) => Ok(Some(*days)),
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected Date value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
         .collect::<Result<Vec<Option<i32>>, ArrowConvertError>>()?;
     Ok(Arc::new(Date32Array::from(values)))
 }
@@ -1578,15 +1602,17 @@ fn build_time64_ns_array(
 ) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<i64>> = rows
         .iter()
-        .map(|row| match row.values.get(col.name.as_str()) {
-            None => Ok(None),
-            Some(Value::Time(nanos)) => Ok(Some(*nanos)),
-            Some(Value::Null) => Ok(None),
-            Some(other) => Err(ArrowConvertError::InvalidValue(format!(
-                "column '{}': expected Time value, got {:?}",
-                col.name, other
-            ))),
-        })
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::Time(nanos)) => Ok(Some(*nanos)),
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected Time value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
         .collect::<Result<Vec<Option<i64>>, ArrowConvertError>>()?;
     Ok(Arc::new(Time64NanosecondArray::from(values)))
 }
@@ -1601,7 +1627,7 @@ fn build_decimal128_array(
         .with_precision_and_scale(DECIMAL_MAX_PRECISION, DECIMAL_FIXED_SCALE as i8)?;
 
     for row in rows {
-        match row.values.get(col.name.as_str()) {
+        match unwrap_frozen_value(row.values.get(col.name.as_str())) {
             Some(Value::Decimal { scale, unscaled }) => {
                 let rescaled = rescale_decimal(*scale, unscaled).map_err(|e| {
                     ArrowConvertError::InvalidValue(format!("Column '{}': {e}", col.name))
@@ -1633,7 +1659,7 @@ fn build_varint_as_decimal128_array(
         .with_precision_and_scale(DECIMAL_MAX_PRECISION, 0)?;
 
     for row in rows {
-        match row.values.get(col.name.as_str()) {
+        match unwrap_frozen_value(row.values.get(col.name.as_str())) {
             Some(Value::Varint(bytes)) => {
                 if bytes.is_empty() {
                     builder.append_value(0);
@@ -1681,15 +1707,17 @@ fn build_duration_utf8_array(
 ) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<String>> = rows
         .iter()
-        .map(|row| match row.values.get(col.name.as_str()) {
-            None => Ok(None),
-            Some(v @ Value::Duration { .. }) => Ok(Some(ValueFormatter::format_value(v))),
-            Some(Value::Null) => Ok(None),
-            Some(other) => Err(ArrowConvertError::InvalidValue(format!(
-                "column '{}': expected Duration value, got {:?}",
-                col.name, other
-            ))),
-        })
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(v @ Value::Duration { .. }) => Ok(Some(ValueFormatter::format_value(v))),
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected Duration value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
         .collect::<Result<Vec<Option<String>>, ArrowConvertError>>()?;
     Ok(Arc::new(StringArray::from(values)))
 }
@@ -1701,7 +1729,7 @@ fn build_uuid_fixed_binary_array(
 ) -> Result<ArrayRef, ArrowConvertError> {
     let mut builder = arrow::array::FixedSizeBinaryBuilder::new(16);
     for row in rows {
-        match row.values.get(col.name.as_str()) {
+        match unwrap_frozen_value(row.values.get(col.name.as_str())) {
             Some(Value::Uuid(bytes)) => builder.append_value(bytes)?,
             Some(Value::Null) | None => builder.append_null(),
             Some(other) => {
@@ -1722,17 +1750,19 @@ fn build_inet_utf8_array(
 ) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<String>> = rows
         .iter()
-        .map(|row| match row.values.get(col.name.as_str()) {
-            None => Ok(None),
-            Some(Value::Inet(bytes)) => Ok(Some(ValueFormatter::format_value(&Value::Inet(
-                bytes.clone(),
-            )))),
-            Some(Value::Null) => Ok(None),
-            Some(other) => Err(ArrowConvertError::InvalidValue(format!(
-                "column '{}': expected Inet value, got {:?}",
-                col.name, other
-            ))),
-        })
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::Inet(bytes)) => Ok(Some(ValueFormatter::format_value(&Value::Inet(
+                    bytes.clone(),
+                )))),
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected Inet value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
         .collect::<Result<Vec<Option<String>>, ArrowConvertError>>()?;
     Ok(Arc::new(StringArray::from(values)))
 }
@@ -1744,7 +1774,7 @@ fn build_list_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Arr
     let mut null_bitmap: Vec<bool> = Vec::new();
 
     for row in rows {
-        match row.values.get(col.name.as_str()) {
+        match unwrap_frozen_value(row.values.get(col.name.as_str())) {
             Some(Value::List(items)) | Some(Value::Set(items)) => {
                 null_bitmap.push(true);
                 for item in items {
@@ -1786,7 +1816,7 @@ fn build_map_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Arro
     let mut null_bitmap: Vec<bool> = Vec::new();
 
     for row in rows {
-        match row.values.get(col.name.as_str()) {
+        match unwrap_frozen_value(row.values.get(col.name.as_str())) {
             Some(Value::Map(pairs)) => {
                 null_bitmap.push(true);
                 for (k, v) in pairs {
@@ -2112,6 +2142,43 @@ mod tests {
         let columns = vec![col("s", DataType::Text, Some(CqlType::Text))];
         let rows = vec![row_one("s", Value::Json(serde_json::json!({"a": 1})))];
         assert!(is_invalid_value(rows_to_record_batch(&columns, &rows)));
+    }
+
+    /// (9d) Frozen-wrapped valid values must NOT be rejected: `frozen<text>`
+    /// with `Value::Frozen(Value::Text(..))` builds, and a high-fidelity
+    /// `frozen<date>` with `Value::Frozen(Value::Date(..))` builds.
+    #[test]
+    fn frozen_wrapped_scalar_values_build_ok() {
+        // frozen<text> via the flat string builder.
+        let text_cols = vec![col(
+            "s",
+            DataType::Text,
+            Some(CqlType::Frozen(Box::new(CqlType::Text))),
+        )];
+        let text_rows = vec![row_one(
+            "s",
+            Value::Frozen(Box::new(Value::Text("hi".into()))),
+        )];
+        let batch =
+            rows_to_record_batch(&text_cols, &text_rows).expect("frozen<text> value must build");
+        let arr = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("StringArray");
+        assert_eq!(arr.value(0), "hi");
+
+        // frozen<date> via the high-fidelity date builder.
+        let date_cols = vec![col(
+            "d",
+            DataType::Integer,
+            Some(CqlType::Frozen(Box::new(CqlType::Date))),
+        )];
+        let date_rows = vec![row_one("d", Value::Frozen(Box::new(Value::Date(19_000))))];
+        let batch =
+            rows_to_record_batch(&date_cols, &date_rows).expect("frozen<date> value must build");
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(batch.column(0).null_count(), 0);
     }
 
     /// (9b) Authoritative text column happy path + nulls: a correct `Value::Text`
