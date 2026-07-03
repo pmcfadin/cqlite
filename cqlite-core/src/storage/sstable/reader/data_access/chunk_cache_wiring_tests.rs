@@ -94,7 +94,9 @@ async fn big_point_read_get_cached_data_is_wired() {
             !require_fixtures(),
             "CQLITE_REQUIRE_FIXTURES=1 but test_basic.uncompressed_table is absent"
         );
-        eprintln!("SKIP: test_basic.uncompressed_table absent — cannot prove get_cached_data wiring");
+        eprintln!(
+            "SKIP: test_basic.uncompressed_table absent — cannot prove get_cached_data wiring"
+        );
         return;
     };
 
@@ -113,17 +115,26 @@ async fn big_point_read_get_cached_data_is_wired() {
     assert!(size > 0);
 
     // Cold read: populates the cache (one miss, one underlying read).
-    let (h0, m0) = (reader.chunk_cache().hit_count(), reader.chunk_cache().miss_count());
+    let (h0, m0) = (
+        reader.chunk_cache().hit_count(),
+        reader.chunk_cache().miss_count(),
+    );
     SSTableReader::reset_chunk_read_calls();
     let cold = reader
         .read_value_at_offset(header, size)
         .await
         .expect("cold offset read");
     let cold_reads = SSTableReader::chunk_read_call_count();
-    let (h1, m1) = (reader.chunk_cache().hit_count(), reader.chunk_cache().miss_count());
+    let (h1, m1) = (
+        reader.chunk_cache().hit_count(),
+        reader.chunk_cache().miss_count(),
+    );
     assert_eq!(m1 - m0, 1, "cold read must be a cache MISS");
     assert_eq!(h1 - h0, 0, "cold read must not hit the cache");
-    assert!(cold_reads >= 1, "cold read must perform >=1 underlying read");
+    assert!(
+        cold_reads >= 1,
+        "cold read must perform >=1 underlying read"
+    );
 
     // Warm read: identical offset → cache hit, ZERO underlying reads, ZERO
     // decompress (uncompressed table), identical result.
@@ -135,12 +146,21 @@ async fn big_point_read_get_cached_data_is_wired() {
         .expect("warm offset read");
     let warm_reads = SSTableReader::chunk_read_call_count();
     let warm_decompress = SSTableReader::decompress_call_count();
-    let (h2, m2) = (reader.chunk_cache().hit_count(), reader.chunk_cache().miss_count());
+    let (h2, m2) = (
+        reader.chunk_cache().hit_count(),
+        reader.chunk_cache().miss_count(),
+    );
 
     assert_eq!(m2 - m1, 0, "warm read must NOT miss the cache");
     assert_eq!(h2 - h1, 1, "warm read must be a cache HIT");
-    assert_eq!(warm_reads, 0, "warm read must perform ZERO underlying reads");
-    assert_eq!(warm_decompress, 0, "warm read must perform ZERO decompressions");
+    assert_eq!(
+        warm_reads, 0,
+        "warm read must perform ZERO underlying reads"
+    );
+    assert_eq!(
+        warm_decompress, 0,
+        "warm read must perform ZERO decompressions"
+    );
     assert_eq!(
         format!("{cold:?}"),
         format!("{warm:?}"),

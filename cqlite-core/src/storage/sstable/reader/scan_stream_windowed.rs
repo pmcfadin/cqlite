@@ -564,8 +564,8 @@ impl SSTableReader {
                 if compressed_chunk.len() >= ctx.max_compressed_length {
                     window.refill(&compressed_chunk);
                 } else if let Some(compression_reader) = &self.compression_reader {
-                    let key =
-                        self.chunk_cache_key(super::data_access::NS_WINDOWED_CHUNK, chunk_count as u64);
+                    let key = self
+                        .chunk_cache_key(super::data_access::NS_WINDOWED_CHUNK, chunk_count as u64);
                     let chunk: std::sync::Arc<[u8]> = match self.chunk_cache.get(&key) {
                         Some(hit) => hit,
                         None => {

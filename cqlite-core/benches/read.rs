@@ -219,7 +219,11 @@ fn bench_get_partition_bti(c: &mut Criterion) {
 /// group, gate reports SKIP) when the optional `test_da` corpus is absent.
 #[cfg(feature = "cli-helpers")]
 fn bench_point_lookup_repeated(c: &mut Criterion) {
-    bench_get_partition(c, fixtures::ReadFixture::SIMPLE_BTI, "point_lookup_repeated");
+    bench_get_partition(
+        c,
+        fixtures::ReadFixture::SIMPLE_BTI,
+        "point_lookup_repeated",
+    );
 }
 
 /// Bench: bounded read of clustering-ordered rows from sensor_data.

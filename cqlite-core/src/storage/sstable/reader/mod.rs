@@ -321,9 +321,11 @@ impl SSTableReader {
         // decompressed-chunk cache sized from config (issue #1567). Production
         // reads route through `SSTableManager`, which calls `open_with_cache` with
         // its SHARED instance so all readers of a dataset share one cache.
-        let cache = Arc::new(crate::storage::cache::DecompressedChunkCache::with_budget_bytes(
-            config.memory.block_cache.max_size as usize,
-        ));
+        let cache = Arc::new(
+            crate::storage::cache::DecompressedChunkCache::with_budget_bytes(
+                config.memory.block_cache.max_size as usize,
+            ),
+        );
         Self::open_with_cache(path, config, platform, cache).await
     }
 

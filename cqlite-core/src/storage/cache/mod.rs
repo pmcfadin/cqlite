@@ -276,7 +276,10 @@ mod tests {
 
         assert!(cache.get(&a).is_some(), "A (recently used) must survive");
         assert!(cache.get(&c).is_some(), "C (just inserted) must survive");
-        assert!(cache.get(&b).is_none(), "B (least recently used) must be evicted");
+        assert!(
+            cache.get(&b).is_none(),
+            "B (least recently used) must be evicted"
+        );
         assert!(cache.resident_bytes() <= 200);
     }
 
@@ -297,7 +300,11 @@ mod tests {
             );
         }
         // At 100 bytes/entry and a 500-byte budget, at most 5 entries survive.
-        assert!(cache.len() <= 5, "entry count must stay bounded (got {})", cache.len());
+        assert!(
+            cache.len() <= 5,
+            "entry count must stay bounded (got {})",
+            cache.len()
+        );
     }
 
     /// A single entry larger than the budget is retained (never evict below one
@@ -307,7 +314,10 @@ mod tests {
         let cache = DecompressedChunkCache::with_budget_and_shards(100, 1);
         let k = ChunkKey::new(1, 0);
         cache.insert(k, chunk(0xEE, 4096));
-        assert!(cache.get(&k).is_some(), "oversized entry must remain resident");
+        assert!(
+            cache.get(&k).is_some(),
+            "oversized entry must remain resident"
+        );
         assert_eq!(cache.len(), 1);
     }
 
@@ -396,7 +406,11 @@ mod tests {
             cache.insert(ChunkKey::new(1, 1), chunk(0x66, 16));
             hit.is_some()
         }));
-        assert_eq!(res.ok(), Some(true), "cache must recover from a poisoned lock");
+        assert_eq!(
+            res.ok(),
+            Some(true),
+            "cache must recover from a poisoned lock"
+        );
     }
 
     #[test]

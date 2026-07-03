@@ -126,11 +126,17 @@ async fn windowed_scan_repeat_is_cached() {
     let tid = TableId::new("test_basic.simple_table");
 
     // Cold scan: decompresses every chunk, populating the cache.
-    let (h0, m0) = (reader.chunk_cache().hit_count(), reader.chunk_cache().miss_count());
+    let (h0, m0) = (
+        reader.chunk_cache().hit_count(),
+        reader.chunk_cache().miss_count(),
+    );
     SSTableReader::reset_decompress_calls();
     let cold_rows = scan_stream_count(&reader, &tid).await;
     let cold_decompress = SSTableReader::decompress_call_count();
-    let (h1, m1) = (reader.chunk_cache().hit_count(), reader.chunk_cache().miss_count());
+    let (h1, m1) = (
+        reader.chunk_cache().hit_count(),
+        reader.chunk_cache().miss_count(),
+    );
 
     assert!(cold_rows > 0, "fixture present but scan returned 0 rows");
     assert!(
@@ -144,10 +150,16 @@ async fn windowed_scan_repeat_is_cached() {
     SSTableReader::reset_decompress_calls();
     let warm_rows = scan_stream_count(&reader, &tid).await;
     let warm_decompress = SSTableReader::decompress_call_count();
-    let (h2, m2) = (reader.chunk_cache().hit_count(), reader.chunk_cache().miss_count());
+    let (h2, m2) = (
+        reader.chunk_cache().hit_count(),
+        reader.chunk_cache().miss_count(),
+    );
 
     assert_eq!(warm_rows, cold_rows, "cache MUST NOT change the row set");
-    assert_eq!(warm_decompress, 0, "warm scan must perform ZERO decompressions");
+    assert_eq!(
+        warm_decompress, 0,
+        "warm scan must perform ZERO decompressions"
+    );
     assert_eq!(m2 - m1, 0, "warm scan must not miss the cache");
     assert!(h2 - h1 > 0, "warm scan must hit the cache");
 }
@@ -175,11 +187,17 @@ async fn bti_point_read_repeat_is_cached() {
     let key = k.clone();
 
     // Cold point read: BTI target chunk decompressed + cached.
-    let (h0, m0) = (reader.chunk_cache().hit_count(), reader.chunk_cache().miss_count());
+    let (h0, m0) = (
+        reader.chunk_cache().hit_count(),
+        reader.chunk_cache().miss_count(),
+    );
     SSTableReader::reset_decompress_calls();
     let cold = reader.get(&tid, &key).await.expect("cold BTI point read");
     let cold_decompress = SSTableReader::decompress_call_count();
-    let (h1, m1) = (reader.chunk_cache().hit_count(), reader.chunk_cache().miss_count());
+    let (h1, m1) = (
+        reader.chunk_cache().hit_count(),
+        reader.chunk_cache().miss_count(),
+    );
 
     assert!(cold.is_some(), "cold BTI point read must find the key");
     assert!(
@@ -193,14 +211,20 @@ async fn bti_point_read_repeat_is_cached() {
     SSTableReader::reset_decompress_calls();
     let warm = reader.get(&tid, &key).await.expect("warm BTI point read");
     let warm_decompress = SSTableReader::decompress_call_count();
-    let (h2, m2) = (reader.chunk_cache().hit_count(), reader.chunk_cache().miss_count());
+    let (h2, m2) = (
+        reader.chunk_cache().hit_count(),
+        reader.chunk_cache().miss_count(),
+    );
 
     assert_eq!(
         format!("{cold:?}"),
         format!("{warm:?}"),
         "cache MUST NOT change the point-read result"
     );
-    assert_eq!(warm_decompress, 0, "warm BTI read must perform ZERO decompressions");
+    assert_eq!(
+        warm_decompress, 0,
+        "warm BTI read must perform ZERO decompressions"
+    );
     assert_eq!(m2 - m1, 0, "warm BTI read must not miss the cache");
     assert!(h2 - h1 > 0, "warm BTI read must hit the cache");
 }
@@ -217,7 +241,13 @@ async fn scan_larger_than_cache_stays_bounded() {
     let tid = TableId::new("test_basic.simple_table");
 
     // Learn the full decompressed footprint with a generous cache.
-    let big = Arc::new(open_with_cache(&data_db, Arc::new(DecompressedChunkCache::with_budget_bytes(256 * 1024 * 1024))).await);
+    let big = Arc::new(
+        open_with_cache(
+            &data_db,
+            Arc::new(DecompressedChunkCache::with_budget_bytes(256 * 1024 * 1024)),
+        )
+        .await,
+    );
     let full_rows = scan_stream_count(&big, &tid).await;
     let total_resident = big.chunk_cache().resident_bytes();
     assert!(full_rows > 0, "fixture present but scan returned 0 rows");
