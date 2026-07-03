@@ -904,14 +904,19 @@ pub(crate) fn build_typed_value_array(
         // ----------------------------------------------------------------
         CqlType::Tuple(element_types) => {
             if element_types.is_empty() {
-                // Degenerate case: no fields → Utf8 fallback.
+                // Degenerate case: no fields → Utf8 fallback. Still fail closed
+                // on a wrong top-level variant; only a Tuple (or null) is valid.
                 let arr: Vec<Option<String>> = values
                     .iter()
-                    .map(|opt| match opt {
-                        Some(Value::Null) | None => None,
-                        Some(v) => Some(ValueFormatter::format_value(v)),
+                    .map(|opt| match unwrap_frozen_value(*opt) {
+                        Some(Value::Null) | None => Ok(None),
+                        Some(v @ Value::Tuple(_)) => Ok(Some(ValueFormatter::format_value(v))),
+                        Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                            "expected Tuple value, got {:?}",
+                            other
+                        ))),
                     })
-                    .collect();
+                    .collect::<Result<Vec<Option<String>>, ArrowConvertError>>()?;
                 return Ok(Arc::new(StringArray::from(arr)));
             }
 
@@ -1007,14 +1012,20 @@ pub(crate) fn build_typed_value_array(
         // ----------------------------------------------------------------
         CqlType::Udt(_udt_name, udt_fields) => {
             if udt_fields.is_empty() {
-                // Degenerate case: no fields → Utf8 fallback.
+                // Degenerate case (incl. unresolved named UDTs, which carry an
+                // empty field list): Utf8 fallback. Still fail closed on a wrong
+                // top-level variant; only a Udt (or null) is valid.
                 let arr: Vec<Option<String>> = values
                     .iter()
-                    .map(|opt| match opt {
-                        Some(Value::Null) | None => None,
-                        Some(v) => Some(ValueFormatter::format_value(v)),
+                    .map(|opt| match unwrap_frozen_value(*opt) {
+                        Some(Value::Null) | None => Ok(None),
+                        Some(v @ Value::Udt(_)) => Ok(Some(ValueFormatter::format_value(v))),
+                        Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                            "expected Udt value, got {:?}",
+                            other
+                        ))),
                     })
-                    .collect();
+                    .collect::<Result<Vec<Option<String>>, ArrowConvertError>>()?;
                 return Ok(Arc::new(StringArray::from(arr)));
             }
 
@@ -2030,5 +2041,28 @@ mod tests {
         let batch = rows_to_record_batch(&columns, &rows).expect("null/absent UDT must build");
         assert_eq!(batch.num_rows(), 2);
         assert_eq!(batch.column(0).null_count(), 2);
+    }
+
+    /// (8c) UDT degenerate/empty-field arm (also how UNRESOLVED named UDTs are
+    /// represented): a non-`Udt` scalar must still FAIL CLOSED, not silently
+    /// serialize as UTF-8.
+    #[test]
+    fn empty_field_udt_expected_udt_got_scalar_is_error() {
+        let columns = vec![col(
+            "u",
+            DataType::Text,
+            Some(CqlType::Udt("unresolved".into(), vec![])),
+        )];
+        let rows = vec![row_one("u", Value::Integer(9))];
+        assert!(is_invalid_value(rows_to_record_batch(&columns, &rows)));
+    }
+
+    /// (7c) Tuple degenerate/empty-field arm: a non-`Tuple` scalar must still
+    /// FAIL CLOSED, not silently serialize as UTF-8.
+    #[test]
+    fn empty_field_tuple_expected_tuple_got_scalar_is_error() {
+        let columns = vec![col("t", DataType::Text, Some(CqlType::Tuple(vec![])))];
+        let rows = vec![row_one("t", Value::Text("nope".into()))];
+        assert!(is_invalid_value(rows_to_record_batch(&columns, &rows)));
     }
 }
