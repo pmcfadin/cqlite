@@ -156,6 +156,14 @@ crc32fast = { workspace = true }
 [target.'cfg(unix)'.dev-dependencies]
 pprof = { version = "0.14", features = ["flamegraph", "criterion"] }
 
+# Current-RSS sampling for the open/mem bench (benches/open.rs, Issue #1566 A5):
+# mach `task_info(MACH_TASK_BASIC_INFO).resident_size` is the live resident size
+# (getrusage.ru_maxrss is PEAK, not current — Finding 3). libc's mach_task_self is
+# deprecated in favor of mach2, so use mach2 for the non-deprecated task port.
+# macOS-only, dev-only: never ships in the library.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+mach2 = "0.4"
+
 [[bench]]
 name = "partition_lookup"
 harness = false

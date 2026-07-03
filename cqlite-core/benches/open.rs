@@ -110,9 +110,16 @@ fn open_reader_blocking(
     })
 }
 
-/// Sample the process RSS in bytes: `/proc/self/statm` (current RSS, Linux) or
-/// `getrusage` `ru_maxrss` (peak RSS in bytes, macOS). `None` elsewhere so the
-/// caller records nothing rather than a bogus value. Best-effort.
+/// Sample the process's CURRENT resident set size in bytes: `/proc/self/statm`
+/// (Linux) or the mach `task_info(MACH_TASK_BASIC_INFO).resident_size` (macOS).
+/// `None` elsewhere so the caller records nothing rather than a bogus value.
+/// Best-effort.
+///
+/// macOS note (Finding 3, roborev): `getrusage.ru_maxrss` is PEAK RSS, not current,
+/// so a per-reader delta computed from two peak samples can be 0/stale when an
+/// earlier peak already exceeded the post-open footprint. mach `task_info` with
+/// `MACH_TASK_BASIC_INFO` reports the live `resident_size`, so the delta honestly
+/// reflects the readers just opened.
 #[cfg(feature = "cli-helpers")]
 fn rss_bytes() -> Option<u64> {
     #[cfg(target_os = "linux")]
@@ -128,14 +135,27 @@ fn rss_bytes() -> Option<u64> {
     }
     #[cfg(target_os = "macos")]
     {
-        // SAFETY: getrusage writes a fully-initialized rusage into the zeroed struct.
-        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
-        let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
-        if rc != 0 {
+        // Current resident size via mach task_info(MACH_TASK_BASIC_INFO). Unlike
+        // getrusage.ru_maxrss (peak), resident_size is the live RSS. The task port
+        // comes from mach2 (libc's mach_task_self is deprecated); the info struct,
+        // flavor, count, and task_info entry point are the non-deprecated libc ones.
+        let mut info: libc::mach_task_basic_info = unsafe { std::mem::zeroed() };
+        let mut count: libc::mach_msg_type_number_t = libc::MACH_TASK_BASIC_INFO_COUNT;
+        // SAFETY: mach_task_self() returns this process's task port; task_info writes
+        // `count` integers into `info` (zeroed, correctly sized via
+        // MACH_TASK_BASIC_INFO_COUNT). We check the kern_return_t before reading it.
+        let rc = unsafe {
+            libc::task_info(
+                mach2::traps::mach_task_self(),
+                libc::MACH_TASK_BASIC_INFO,
+                &mut info as *mut _ as libc::task_info_t,
+                &mut count,
+            )
+        };
+        if rc != libc::KERN_SUCCESS {
             return None;
         }
-        // On macOS ru_maxrss is bytes (Linux would be KiB, handled above).
-        Some(usage.ru_maxrss.max(0) as u64)
+        Some(info.resident_size)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
