@@ -1455,6 +1455,12 @@ find "$CQLITE_DATASETS_ROOT/sstables" -name "*-Data.db" | wc -l
 # Must be > 0 (should be 33+ for the full corpus)
 ```
 
+## Fuzzing the parser (issue #1614)
+
+[Section titled “Fuzzing the parser (issue #1614)”](#fuzzing-the-parser-issue-1614)
+
+The parser decodes untrusted bytes, so a standing **cargo-fuzz / libFuzzer** harness at `fuzz/` proves it never panics/hangs/OOMs on arbitrary input (every input yields `Ok` or `Err`). The crate is its own workspace and is **excluded from the main workspace**, so the stable `scripts/agent-gate.sh` and every default `cargo` build are unaffected — fuzzing needs **nightly** Rust and is out of the stable gate. Five targets (`fuzz_vint`, `fuzz_value_decode`, `fuzz_block_emit`, `fuzz_bti`, `fuzz_schema_parse`) reach `cqlite-core` internals via the feature-gated `#[doc(hidden)] cqlite_core::fuzz_support` module (`--features fuzz`), which leaves the default public API unchanged. Run one target with `cd fuzz && cargo +nightly fuzz run fuzz_vint -- -max_total_time=45 -rss_limit_mb=2048 -timeout=25` (or all via `fuzz/smoke.sh`); `.github/workflows/fuzz.yml` runs a bounded PR smoke lane plus a nightly long-run, uploading any crash reproducer as an artifact. A crash is a **success** for the net — it is filed as its own bug issue with the reproducer, not silently patched.
+
 # Wiring Evidence
 
 > A feature is done when the intended public surface exercises it — not when a helper passes unit tests in isolation. How to name the public surface and prove the call chain reaches it. (Issues
