@@ -129,6 +129,19 @@ class TestMissingRatioFailsClosedWhenEnforcing:
         assert rc != 0, "enforcing gate must fail on a non-finite (NaN) ratio"
 
 
+class TestUnknownFlagRejected:
+    def test_typo_enforce_flag_is_rejected(self, tmp_path):
+        # `--enfore` must not be silently ignored (which would leave advisory mode
+        # and exit 0 on a breach). Expect a usage error (exit 2).
+        rc = _run(
+            tmp_path,
+            _harness(p99_mixed_over_scan_free=99.0),
+            _gate(advisory=True, cross_max=12.0),
+            "--enfore",
+        )
+        assert rc == 2, "unknown flag must be rejected with a usage error"
+
+
 class TestWithinThresholdPasses:
     def test_within_threshold_advisory_exits_zero(self, tmp_path):
         rc = _run(tmp_path, _harness(), _gate(advisory=True))

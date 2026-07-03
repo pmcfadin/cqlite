@@ -41,6 +41,13 @@ RATIO_KEYS = ("p99_over_p50", "p99_mixed_over_scan_free")
 def main(argv):
     positional = [a for a in argv[1:] if not a.startswith("--")]
     flags = {a for a in argv[1:] if a.startswith("--")}
+    # Reject unknown flags fail-closed: a typo like `--enfore` must NOT silently
+    # leave the checker in advisory mode and exit 0 on a breach (roborev).
+    unknown = flags - {"--enforce"}
+    if unknown:
+        print(f"error: unknown flag(s): {', '.join(sorted(unknown))}\n")
+        print(__doc__)
+        return 2
     if len(positional) != 2:
         print(__doc__)
         return 2

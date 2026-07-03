@@ -169,7 +169,12 @@ fn append_ledger_writes_one_json_line_with_required_keys() {
 #[cfg(feature = "cli-helpers")]
 const K: f64 = 12.0;
 
+// Serialize the two dataset-backed latency tests: cargo runs tests within one
+// binary on parallel threads, so an un-serialized mixed-load test would run its
+// background scan concurrently with the scan-free determinism test and perturb its
+// timings (roborev). `#[serial]` forces them to run one at a time.
 #[cfg(feature = "cli-helpers")]
+#[serial_test::serial]
 #[test]
 fn mixed_p99_bounded_by_k_times_baseline() {
     use fixtures::ReadFixture;
@@ -200,6 +205,7 @@ fn mixed_p99_bounded_by_k_times_baseline() {
 }
 
 #[cfg(feature = "cli-helpers")]
+#[serial_test::serial]
 #[test]
 fn scan_free_determinism_within_wide_tolerance() {
     use fixtures::ReadFixture;
