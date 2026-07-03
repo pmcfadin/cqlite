@@ -104,18 +104,29 @@ fn select_full_scan_alloc_budget() {
     );
 }
 
-/// allocations-per-row ceiling for a full `SELECT *` over the widest real fixture,
+/// Per-fixture allocations-per-row / per-cell ceilings for a full `SELECT *`,
 /// pinned at the current-main measured value plus variance slack (a ratchet Epic
 /// J/K children lower as the O(rows×cols) transient-string dispatch is fixed).
 ///
-/// MEASURED on `main` today (test_wide_rows.many_columns_table): total_blocks=2282,
-/// rows=50, cols=8 (populated columns in the first row) → allocs/row=45.6,
-/// allocs/cell=5.7. Ceiling = measured allocs/row + ~30% slack for
-/// allocator/toolchain/platform variance (block counts differ slightly by std/OS).
-const CEILING_ALLOCS_PER_ROW: f64 = 60.0;
-
-/// allocations-per-cell ceiling for the same full scan; measured 5.7 → +~35% slack.
-const CEILING_ALLOCS_PER_CELL: f64 = 8.0;
+/// Two fixtures are supported so the budget still runs when the optional wide
+/// fixture is absent, and each gets its OWN ceiling so neither ratchet is loosened
+/// by the other's very different shape (allocs/cell in particular scales inversely
+/// with column count):
+///
+/// - `many_columns_table` (preferred, wide): MEASURED total_blocks=2282, rows=50,
+///   cols=8 (populated columns in the first row) → allocs/row=45.6, allocs/cell=5.7.
+/// - `simple_table` (CI-guaranteed fallback): MEASURED total_blocks≈60337/scan,
+///   rows=999, cols=5 → allocs/row≈60.4, allocs/cell≈12.1.
+///
+/// Ceilings add ~25-35% slack for allocator/toolchain/platform variance (block
+/// counts differ slightly by std/OS). Returns `(per_row, per_cell)`.
+fn alloc_ceilings(fx: &fixtures::ReadFixture) -> (f64, f64) {
+    if fx.table == fixtures::ReadFixture::MANY_COLUMNS.table {
+        (60.0, 8.0) // measured 45.6 / 5.7
+    } else {
+        (78.0, 16.0) // SIMPLE fallback: measured 60.4 / 12.1
+    }
+}
 
 /// allocations-per-row and allocations-per-cell for a full-table `SELECT *` driven
 /// through the real public query path over the widest real fixture must stay within
@@ -139,6 +150,7 @@ fn select_full_scan_alloc_per_row_budget() {
         eprintln!("alloc_per_row_budget: no wide fixture present — skipping (skip-register)");
         return;
     };
+    let (ceiling_per_row, ceiling_per_cell) = alloc_ceilings(&fx);
     let sql = format!("SELECT * FROM {}", fx.qualified());
 
     // Open BEFORE the profiler so fixture-copy/ingest allocations are excluded and
@@ -184,19 +196,19 @@ fn select_full_scan_alloc_per_row_budget() {
     );
 
     assert!(
-        allocs_per_row <= CEILING_ALLOCS_PER_ROW,
+        allocs_per_row <= ceiling_per_row,
         "allocs/row {:.1} exceeded ceiling {:.1} (fixture {}, {} rows × {} cols)",
         allocs_per_row,
-        CEILING_ALLOCS_PER_ROW,
+        ceiling_per_row,
         fx.qualified(),
         rows,
         cols
     );
     assert!(
-        allocs_per_cell <= CEILING_ALLOCS_PER_CELL,
+        allocs_per_cell <= ceiling_per_cell,
         "allocs/cell {:.1} exceeded ceiling {:.1} (fixture {}, {} rows × {} cols)",
         allocs_per_cell,
-        CEILING_ALLOCS_PER_CELL,
+        ceiling_per_cell,
         fx.qualified(),
         rows,
         cols
