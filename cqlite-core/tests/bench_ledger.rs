@@ -104,6 +104,36 @@ fn append_metrics_writes_one_json_line_per_metric() {
     );
 }
 
+/// A bare relative filename (no directory component) must not fail the append: its
+/// `path.parent()` is `Some("")`, and `create_dir_all("")` errors — so the empty
+/// parent must be skipped (Finding 2). We chdir into a tempdir so the bare filename
+/// resolves there, then restore the CWD and env regardless of outcome.
+#[test]
+#[serial]
+fn append_metrics_ok_for_bare_relative_filename_empty_parent() {
+    let dir = tempfile::TempDir::new().expect("temp dir for ledger");
+    let prev_cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(dir.path()).expect("chdir into tempdir");
+
+    // Bare filename → PathBuf::parent() == Some(""), the create_dir_all("") case.
+    std::env::set_var("CQLITE_BENCH_LEDGER", "history.jsonl");
+    let result = bench_ledger::append_metrics("unit_bench", &[("p50", 100.0, "ns")]);
+    let file_exists = dir.path().join("history.jsonl").is_file();
+
+    // Restore process-global state before asserting so a failure cannot leak it.
+    std::env::remove_var("CQLITE_BENCH_LEDGER");
+    std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+
+    assert!(
+        result.is_ok(),
+        "bare-filename ledger path (empty parent) must append Ok, got {result:?}"
+    );
+    assert!(
+        file_exists,
+        "append to a bare-filename ledger path must create the file in the CWD"
+    );
+}
+
 /// Best-effort contract (spec R3 "a ledger write failure does not fail the bench"):
 /// when the ledger path is unwritable, `append_metrics` returns `Err` rather than
 /// panicking, so the bench `main` can log-and-continue instead of aborting the run.

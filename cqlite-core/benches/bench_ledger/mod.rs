@@ -113,7 +113,11 @@ fn now_secs() -> u64 {
 pub fn append_metrics(bench: &str, metrics: &[(&str, f64, &str)]) -> std::io::Result<()> {
     let path = ledger_path();
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        // A bare filename (e.g. `CQLITE_BENCH_LEDGER=history.jsonl`) yields an empty
+        // parent; `create_dir_all("")` errors, so only create a real parent dir.
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
     }
     let ts = now_secs();
     let commit = current_commit();
