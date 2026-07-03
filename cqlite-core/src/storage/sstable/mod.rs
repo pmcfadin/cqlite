@@ -69,7 +69,6 @@ use tokio::sync::RwLock;
 #[cfg(feature = "tombstones")]
 use self::tombstone_merger::{EntryMetadata, GenerationValue, TombstoneMerger};
 use crate::platform::Platform;
-#[cfg(not(feature = "tombstones"))]
 use crate::types::CellWriteMetadata;
 use crate::{types::TableId, Config, Result, RowKey, ScanRow};
 // `RowCells`/`Value` are only referenced by the write-support merge read path
@@ -1557,7 +1556,12 @@ impl SSTableManager {
     /// matching the per-reader scan order (range then limit). With `None`/`None`
     /// bounds the output is byte-for-byte the full reconciled set, unchanged from
     /// before. This stays definitionally in lockstep with the plain helper.
-    #[cfg(all(not(feature = "tombstones"), feature = "write-support"))]
+    ///
+    /// Available whenever `write-support` is on — the `tombstones` build reuses the
+    /// identical `KWayMerger` reconciliation so `WRITETIME(col)` / `TTL(col)` resolve
+    /// from the authoritative winning cell there too (Issue #1535). Nothing in this
+    /// body depends on the tombstones GC path; it only needs the merger.
+    #[cfg(feature = "write-support")]
     async fn merge_generations_for_read_with_metadata(
         &self,
         reader_list: &[Arc<reader::SSTableReader>],
@@ -1698,7 +1702,16 @@ impl SSTableManager {
     ///
     /// Falls back to the regular `scan` with empty metadata when the reader does not
     /// surface metadata (non-V5CompressedLegacy paths).
-    #[cfg(not(feature = "tombstones"))]
+    ///
+    /// Issue #1535: this is the single implementation for both the default /
+    /// `write-support` build and the `tombstones` build. The former `tombstones`
+    /// variant delegated to `scan` and returned empty metadata, so `WRITETIME(col)`
+    /// / `TTL(col)` wrongly resolved to null under `--features tombstones`. The
+    /// reader-level `scan_with_cell_metadata` surfaces the authoritative per-cell
+    /// timestamp/TTL regardless of feature flags, so the fix is simply to use it in
+    /// both builds. The cross-generation metadata merge stays gated on `write-support`
+    /// (it needs the `KWayMerger`); without it the per-reader concatenation still
+    /// surfaces each cell's real metadata rather than fabricating or dropping it.
     pub async fn scan_with_cell_metadata(
         &self,
         table_id: &TableId,
@@ -1776,33 +1789,6 @@ impl SSTableManager {
         } else {
             Ok(Vec::new())
         }
-    }
-
-    /// Tombstones-feature variant: delegates to regular `scan` and returns empty
-    /// metadata maps.  WRITETIME/TTL will still return null when tombstones are
-    /// enabled, but at least the code compiles and does not panic.
-    #[cfg(feature = "tombstones")]
-    pub async fn scan_with_cell_metadata(
-        &self,
-        table_id: &TableId,
-        start_key: Option<&RowKey>,
-        end_key: Option<&RowKey>,
-        limit: Option<usize>,
-        schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<
-        Vec<(
-            RowKey,
-            ScanRow,
-            HashMap<String, crate::types::CellWriteMetadata>,
-        )>,
-    > {
-        let base = self
-            .scan(table_id, start_key, end_key, limit, schema)
-            .await?;
-        Ok(base
-            .into_iter()
-            .map(|(k, v)| (k, v, HashMap::new()))
-            .collect())
     }
 
     /// Resolve the readers serving `table_id`, returning cloned `Arc` handles.
