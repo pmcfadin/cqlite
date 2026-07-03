@@ -138,8 +138,53 @@ exports that tail as real SSTable generations that CQLite can merge normally.</p
   SSTables --&gt;|snapshot read| CQLite
   Tail -. fresh tail read .-&gt; CQLite</code></pre> </details> <script type="module" src="/cqlite/_astro/MermaidDiagram.astro_astro_type_script_index_0_lang.VodJEtqs.js"></script> 
 <div class="sl-heading-wrapper level-h2"><h2 id="data-paths">Data paths</h2><a class="sl-anchor-link" href="#data-paths"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Data paths”</span></a></div>
-<figure><img src="/cqlite/_astro/storage-engine-data-paths.CHcPhpLR.svg" alt="Cold path, fresh tail path, and research path for the storage-engine proposal."/><figcaption><p>The proposal separates runtime data movement from how research is promoted
-into roadmap work.</p></figcaption></figure>
+<figure class="mermaid-figure astro-6vqylkyd"> <pre class="mermaid-fallback astro-6vqylkyd" data-mermaid-diagram>flowchart TB
+  subgraph Cold[&quot;Cold path&quot;]
+    direction LR
+    SSTables[&quot;Flushed SSTables&quot;] --&gt; ColdCQLite[&quot;CQLite reader&quot;]
+    ColdCQLite --&gt; Flight[&quot;Arrow Flight&quot;]
+    Flight --&gt; Trino[&quot;Trino&quot;]
+    ColdCQLite --&gt; Iceberg[&quot;Iceberg materializer&quot;]
+  end
+
+  subgraph Fresh[&quot;Fresh tail path&quot;]
+    direction LR
+    Write[&quot;Cassandra write&quot;] --&gt; Memtable[&quot;CqliteMemtable&quot;]
+    Memtable --&gt; TailGen[&quot;Tail gen-* SSTable&quot;]
+    TailGen --&gt; Merge[&quot;CQLite k-way LWW merge&quot;]
+    Merge --&gt; Query[&quot;Flight / Trino query&quot;]
+  end
+
+  subgraph Research[&quot;Research path&quot;]
+    direction LR
+    Notes[&quot;Raw research notes&quot;] --&gt; Synthesis[&quot;Synthesis report&quot;]
+    Synthesis --&gt; Proposal[&quot;Official proposal&quot;]
+    Proposal --&gt; Tasks[&quot;Implementation tasks&quot;]
+    Tasks --&gt; Roadmap[&quot;Roadmap&quot;]
+  end</pre> <figcaption class="astro-6vqylkyd">The proposal separates runtime data movement from how research is promoted into roadmap work.</figcaption> </figure> <details class="mermaid-source astro-6vqylkyd"> <summary class="astro-6vqylkyd">Mermaid source for the data-path diagram</summary> <pre class="astro-6vqylkyd"><code class="astro-6vqylkyd">flowchart TB
+  subgraph Cold[&quot;Cold path&quot;]
+    direction LR
+    SSTables[&quot;Flushed SSTables&quot;] --&gt; ColdCQLite[&quot;CQLite reader&quot;]
+    ColdCQLite --&gt; Flight[&quot;Arrow Flight&quot;]
+    Flight --&gt; Trino[&quot;Trino&quot;]
+    ColdCQLite --&gt; Iceberg[&quot;Iceberg materializer&quot;]
+  end
+
+  subgraph Fresh[&quot;Fresh tail path&quot;]
+    direction LR
+    Write[&quot;Cassandra write&quot;] --&gt; Memtable[&quot;CqliteMemtable&quot;]
+    Memtable --&gt; TailGen[&quot;Tail gen-* SSTable&quot;]
+    TailGen --&gt; Merge[&quot;CQLite k-way LWW merge&quot;]
+    Merge --&gt; Query[&quot;Flight / Trino query&quot;]
+  end
+
+  subgraph Research[&quot;Research path&quot;]
+    direction LR
+    Notes[&quot;Raw research notes&quot;] --&gt; Synthesis[&quot;Synthesis report&quot;]
+    Synthesis --&gt; Proposal[&quot;Official proposal&quot;]
+    Proposal --&gt; Tasks[&quot;Implementation tasks&quot;]
+    Tasks --&gt; Roadmap[&quot;Roadmap&quot;]
+  end</code></pre> </details>  
 <div class="sl-heading-wrapper level-h3"><h3 id="cold-path">Cold path</h3><a class="sl-anchor-link" href="#cold-path"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Cold path”</span></a></div>
 <p>Flushed SSTables are the stable, already-shipped read path. CQLite discovers the
 table’s live generations, reads Cassandra components directly, performs normal
