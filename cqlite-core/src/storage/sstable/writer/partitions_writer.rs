@@ -105,18 +105,25 @@ pub struct PartitionTrieEntry {
     hash_byte: u8,
     /// Where this partition's leaf payload points (`Data.db` or `Rows.db`).
     payload: PartitionPayload,
-    /// Raw on-disk partition-key bytes. Retained so `finish` can write the
-    /// Cassandra `PartitionIndex` first/last-key region (the lowest- and
-    /// highest-token keys after the trie-key sort). Bounded by the partition-key
-    /// size, not the partition data.
-    raw_key: Vec<u8>,
 }
 
 /// Builder that accumulates partition entries and serializes the BTI
 /// `Partitions.db` trie.
+///
+/// Only the two boundary raw partition keys (lowest- and highest-token, i.e.
+/// min/max trie key) are retained for the Cassandra `PartitionIndex`
+/// first/last-key region. Interior raw keys are never read, so they are not
+/// stored (issue #1678): retaining a full raw-key copy per partition wasted
+/// ~1.6 MB for 100k 16-byte keys and grew linearly with partition count.
 #[derive(Debug, Default)]
 pub struct PartitionsTrieWriter {
     entries: Vec<PartitionTrieEntry>,
+    /// `(min_trie_key, raw_key)` for the lowest-token partition seen so far.
+    /// Mirrors `entries.first()` after `finish` sorts by trie key.
+    first_raw: Option<([u8; 9], Vec<u8>)>,
+    /// `(max_trie_key, raw_key)` for the highest-token partition seen so far.
+    /// Mirrors `entries.last()` after `finish` sorts by trie key.
+    last_raw: Option<([u8; 9], Vec<u8>)>,
 }
 
 impl PartitionsTrieWriter {
@@ -124,6 +131,8 @@ impl PartitionsTrieWriter {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            first_raw: None,
+            last_raw: None,
         }
     }
 
@@ -135,6 +144,17 @@ impl PartitionsTrieWriter {
     /// Whether any partitions have been accumulated.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Total retained raw-key bytes for the boundary (first/last) keys only.
+    ///
+    /// Interior partition keys are not retained (issue #1678), so this is bounded
+    /// by two partition-key sizes regardless of partition count. Used by the
+    /// retention-budget test to prove no interior copies accumulate.
+    #[cfg(test)]
+    pub(crate) fn retained_raw_key_bytes(&self) -> usize {
+        self.first_raw.as_ref().map_or(0, |(_, k)| k.len())
+            + self.last_raw.as_ref().map_or(0, |(_, k)| k.len())
     }
 
     /// Record a partition: its raw on-disk key bytes and its `Data.db` offset.
@@ -158,11 +178,24 @@ impl PartitionsTrieWriter {
     pub fn add_partition_with_payload(&mut self, raw_key_bytes: &[u8], payload: PartitionPayload) {
         let key = encode_partition_key_for_bti_trie(raw_key_bytes);
         let hash_byte = filter_hash_byte(raw_key_bytes);
+
+        // Track only the boundary raw keys (min/max trie key). `finish` sorts by
+        // trie key before writing the first/last-key region, so the boundaries
+        // must correspond to the min/max trie key, NOT insertion order. Clone the
+        // raw bytes only when a new min or max is seen (issue #1678).
+        match &self.first_raw {
+            Some((min_key, _)) if key >= *min_key => {}
+            _ => self.first_raw = Some((key, raw_key_bytes.to_vec())),
+        }
+        match &self.last_raw {
+            Some((max_key, _)) if key <= *max_key => {}
+            _ => self.last_raw = Some((key, raw_key_bytes.to_vec())),
+        }
+
         self.entries.push(PartitionTrieEntry {
             key,
             hash_byte,
             payload,
-            raw_key: raw_key_bytes.to_vec(),
         });
     }
 
@@ -207,15 +240,13 @@ impl PartitionsTrieWriter {
         }
 
         // First/last decorated key (lowest/highest token after the trie-key sort).
-        // Bounded copies (partition-key sized); entries is non-empty here.
-        let first_key = entries
-            .first()
-            .map(|e| e.raw_key.clone())
-            .unwrap_or_default();
-        let last_key = entries
-            .last()
-            .map(|e| e.raw_key.clone())
-            .unwrap_or_default();
+        // These boundary raw keys were tracked incrementally by min/max trie key
+        // in `add_partition_with_payload`, so they are byte-identical to
+        // `entries.first()/last()` after the sort — without retaining an interior
+        // raw-key copy per partition (issue #1678). Bounded copies (partition-key
+        // sized); `entries` is non-empty here, so both boundaries are `Some`.
+        let first_key = self.first_raw.map(|(_, k)| k).unwrap_or_default();
+        let last_key = self.last_raw.map(|(_, k)| k).unwrap_or_default();
         let key_count = entries.len() as i64;
 
         // 1. Serialize the trie nodes; `root` is the absolute offset of the root
@@ -1208,6 +1239,63 @@ mod tests {
             (vec![0x22u8; 16], 0),
             (vec![0x33u8; 16], 125),
         ]);
+    }
+
+    /// Issue #1678: interior partition raw keys must NOT be retained. Only the two
+    /// boundary raw keys (min/max trie key) are kept for the first/last-key region.
+    /// On `main` (per-entry `raw_key`) the accessor reported `N × keylen`; here it
+    /// is bounded by first+last only.
+    #[test]
+    fn interior_raw_keys_are_not_retained() {
+        let mut w = PartitionsTrieWriter::new();
+        for i in 0u64..1000 {
+            let mut k = vec![0u8; 16];
+            k[0..8].copy_from_slice(&i.to_be_bytes());
+            w.add_partition(&k, i);
+        }
+        // Only the first and last (16 bytes each) may be retained.
+        assert!(
+            w.retained_raw_key_bytes() <= 32,
+            "retained {} raw-key bytes; expected <= 32 (first+last only)",
+            w.retained_raw_key_bytes()
+        );
+    }
+
+    /// Issue #1678: the boundary raw keys tracked incrementally by min/max trie
+    /// key must equal what `entries.first()/last()` would yield after the sort, so
+    /// `finish` emits an unchanged first/last-key region. Partitions are added in a
+    /// deliberately scrambled order (not token order) to prove first/last follow
+    /// the trie-key sort, not insertion order.
+    #[test]
+    fn boundary_raw_keys_match_sorted_first_last() {
+        let raws: Vec<Vec<u8>> = [0x33u8, 0x11, 0x88, 0x22, 0x55, 0x44]
+            .iter()
+            .map(|b| vec![*b; 16])
+            .collect();
+        let mut w = PartitionsTrieWriter::new();
+        for (i, r) in raws.iter().enumerate() {
+            w.add_partition(r, i as u64);
+        }
+
+        // Oracle: sort the same keys by trie key and take first/last raw bytes.
+        let mut sorted: Vec<(_, Vec<u8>)> = raws
+            .iter()
+            .map(|r| (encode_partition_key_for_bti_trie(r), r.clone()))
+            .collect();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
+        let expect_first = sorted.first().map(|(_, r)| r.clone()).unwrap();
+        let expect_last = sorted.last().map(|(_, r)| r.clone()).unwrap();
+
+        assert_eq!(
+            w.first_raw.as_ref().map(|(_, k)| k.clone()),
+            Some(expect_first),
+            "first boundary raw key must be the min-trie-key partition"
+        );
+        assert_eq!(
+            w.last_raw.as_ref().map(|(_, k)| k.clone()),
+            Some(expect_last),
+            "last boundary raw key must be the max-trie-key partition"
+        );
     }
 
     #[test]
