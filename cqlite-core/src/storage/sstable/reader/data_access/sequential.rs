@@ -359,23 +359,31 @@ impl SSTableReader {
                 file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
             }
 
+            // Issue #1411: separate the chunk-integrity stitch from the schema-aware
+            // parse so their failure classes are not conflated. `stitch_all_chunks`
+            // drives the authoritative per-chunk CRC32 check
+            // (`block_io::read_nb_format_chunk_data`) + decompression; a CRC mismatch,
+            // decompression failure, or corrupt offset is corruption and MUST surface
+            // (propagate via `?`, matching `scan`), never be masked as a missing key.
+            // Only the `parse_block` step below may soft-miss (schema unavailable /
+            // wrong table type) so the caller can try the next reader. Previously
+            // `stitch_and_parse_all_chunks` combined both under a blanket
+            // `Err(_) => Ok(None)` that swallowed CRC corruption on point lookups.
+            let stitched_buffer = self.stitch_all_chunks(&cursor).await?;
+
             // Pass the reader's own schema so that V5CompressedLegacy rows can be fully
             // parsed and their partition RowKeys emitted.  Without a schema, parse_row_v5
             // fails for all rows in a partition, causing no entries to be pushed and making
             // the key comparison always miss even when the key exists.
             let schema_opt = self.get_table_schema(None);
-            let all_entries = match self
-                .stitch_and_parse_all_chunks(&cursor, schema_opt.as_ref())
-                .await
+            let parser = self.build_v5_parser();
+            let all_entries = match parser.parse_block(&stitched_buffer, schema_opt.as_ref(), self)
             {
                 Ok(entries) => entries,
                 Err(e) => {
                     // Schema may not be available for this reader (e.g., wrong table type).
                     // Return None so the caller can try the next reader.
-                    log::debug!(
-                        "scan_for_key: stitch_and_parse_all_chunks failed (schema missing?): {}",
-                        e
-                    );
+                    log::debug!("scan_for_key: parse_block failed (schema missing?): {}", e);
                     return Ok(None);
                 }
             };
