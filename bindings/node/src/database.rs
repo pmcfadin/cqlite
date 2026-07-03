@@ -179,6 +179,12 @@ pub struct DatabaseOptions {
     #[napi(js_name = "writeDir")]
     pub write_dir: Option<String>,
 
+    /// Enable automatic (STCS) size-tiered compaction for the write engine.
+    /// Default: true. Set false to disable compaction — `maintenanceStep`
+    /// then performs no merges (issue #1619).
+    #[napi(js_name = "autoCompaction")]
+    pub auto_compaction: Option<bool>,
+
     /// OpenTelemetry export options (epic #1031, issue #1040).
     ///
     /// When omitted, the `CQLITE_OTEL_*` environment variables are consulted;
@@ -483,6 +489,10 @@ impl Database {
                 config.memory.query_cache.enabled = enabled;
             }
 
+            if let Some(ac) = opts.auto_compaction {
+                config.storage.compaction.auto_compaction = ac;
+            }
+
             let writable = opts.writable.unwrap_or(false);
             let write_dir = opts.write_dir.map(PathBuf::from);
 
@@ -495,6 +505,12 @@ impl Database {
         // write engine initializer can also read the same CQL file.
         #[cfg(feature = "write-support")]
         let schema_path_for_write: Option<PathBuf> = schema_path.clone();
+
+        // Capture the compaction settings before `core_config` is moved into
+        // ingestion / Database::open, so `Config.storage.compaction` is
+        // authoritative for the write path (issue #1619) rather than decorative.
+        #[cfg(feature = "write-support")]
+        let compaction_config = core_config.storage.compaction.clone();
 
         // Validate write options
         #[cfg(feature = "write-support")]
@@ -648,7 +664,8 @@ impl Database {
                 wd.join("data"),
                 wd.join("wal"),
                 schema,
-            );
+            )
+            .with_compaction_config(&compaction_config);
 
             let engine = cqlite_core::storage::write_engine::WriteEngine::new(config)
                 .map_err(to_napi_error)?;
