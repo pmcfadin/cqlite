@@ -17,10 +17,10 @@ mod key_parsing;
 // can reach `V5CompressedLegacyParser::parse_block_emit` for the block-emit fuzz
 // target. This widens crate-internal visibility only — the module and its
 // `parse_block_emit` remain unreachable from outside cqlite-core.
-pub(crate) mod v5_compressed_legacy;
-mod value_parsing;
 #[cfg(test)]
 mod schema_fallback_stall_tests;
+pub(crate) mod v5_compressed_legacy;
+mod value_parsing;
 #[cfg(test)]
 mod value_parsing_schema_type_tests;
 

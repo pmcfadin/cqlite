@@ -25,7 +25,7 @@ impl TypeInferenceEngine {
     pub(super) fn infer_column_type<'a>(
         &'a self,
         samples: &'a [Value],
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TypeInfo>> + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TypeInfo>> + Send + 'a>> {
         Box::pin(async move {
             if samples.is_empty() {
                 return Ok(TypeInfo {
