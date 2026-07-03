@@ -153,6 +153,24 @@ def _require_source_or_skip():
         pytest.fail(f"Source {data} present but empty (issue #1437)", pytrace=False)
 
 
+def _reached_entry_point_call(result, entry):
+    """Whether the child emitted ``OPENED`` then ``CALLING <entry>`` IN ORDER.
+
+    Uses the SAME ordering sentinels the survival path asserts, but WITHOUT
+    requiring a terminal sentinel (an abort prints none). Returns True only when
+    the child proved it opened the DB and then invoked the corrupt-input entry
+    point -- distinguishing a genuine post-call abort from a setup/open/lookup
+    failure that ALSO exits non-zero but never reaches the entry point.
+    """
+    lines = result.stdout.splitlines()
+    if "OPENED" not in lines:
+        return False
+    calling = "CALLING %s" % entry
+    if calling not in lines:
+        return False
+    return lines.index(calling) > lines.index("OPENED")
+
+
 def _assert_drove_entry_point(result, entry, ctx):
     """Prove corrupt input was driven THROUGH the entry point.
 
@@ -268,6 +286,20 @@ def test_uncompressed_corrupt_sstable_panic_is_contained(mode, entry):
     if _PANIC_ABORT:
         # release=abort, pre-#1440. Strict xfail scoped to the rc assertion only.
         if result.returncode != 0:
+            # A non-zero exit is the EXPECTED abort ONLY if it happened AFTER the
+            # child opened the DB and reached the entry-point call. A non-zero
+            # exit lacking the ``OPENED``/``CALLING <entry>`` ordering sentinels
+            # is a setup/import/open/API-lookup failure that never drove corrupt
+            # input through the boundary -- that must hard-FAIL, never masquerade
+            # as the expected abort (false-green on the release harness).
+            if not _reached_entry_point_call(result, entry):
+                pytest.fail(
+                    "child exited non-zero WITHOUT reaching the entry point "
+                    f"(missing OPENED/CALLING {entry}): a setup/open/lookup "
+                    "failure, not the expected post-call abort.\n"
+                    f"{ctx}",
+                    pytrace=False,
+                )
             pytest.xfail(
                 "corrupt uncompressed SSTable aborts the interpreter until "
                 f"#1440 lands panic=unwind (#1437)\n{ctx}"
