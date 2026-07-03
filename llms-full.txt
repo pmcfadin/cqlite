@@ -3437,7 +3437,7 @@ The remaining gap is Cassandra’s unflushed memtable tail. The proposed spike e
 
 [Section titled “Architecture diagram”](#architecture-diagram)
 
-![Cassandra OLTP Plane and OLAP Plane connected through an SSTable Foundation with optional fresh tail export.](/cqlite/_astro/storage-engine-architecture.B2C73QO4.svg)
+![Cassandra OLTP Plane and OLAP Plane connected through an SSTable Foundation with optional fresh tail export.](/cqlite/_astro/storage-engine-architecture.Cgj0JxoC.svg)
 
 Cassandra owns operational correctness. CQLite reads the shared SSTable foundation and serves analytical consumers.
 
@@ -3453,10 +3453,10 @@ flowchart TB
 
 
   subgraph OLAP["OLAP Plane"]
-    CQLite["CQLite SSTable reader"]
-    Flight["Arrow Flight"]
-    Trino["Trino"]
+    ReadApp["Application analytical reads"]
+    Query["Trino + Arrow Flight"]
     Iceberg["Iceberg materializer"]
+    CQLite["CQLite SSTable reader"]
   end
 
 
@@ -3472,9 +3472,9 @@ flowchart TB
   App --> CommitLog --> Lifecycle
   Lifecycle --> SSTables
   SSTables --> CQLite
-  CQLite --> Flight
-  Flight --> Trino
-  CQLite --> Iceberg
+  ReadApp --> Query
+  Query --> Iceberg
+  Iceberg --> CQLite
   CommitLog -. fresh tail export .-> Tail
 ```
 

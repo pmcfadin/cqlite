@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 620" role="img" aria-labelledby="title desc">
+  <title id="title">CQLite storage engine direction architecture</title>
+  <desc id="desc">Cassandra OLTP creates SSTables while OLAP applications query analytical services backed by CQLite SSTable reads.</desc>
+  <defs>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#2f6fed"/>
+    </marker>
+    <marker id="arrow-teal" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#168a72"/>
+    </marker>
+    <marker id="arrow-amber" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#bd7418"/>
+    </marker>
+  </defs>
+
+  <rect width="1180" height="620" rx="24" fill="#f8fafc"/>
+
+  <rect x="58" y="58" width="390" height="336" rx="18" fill="#ffffff" stroke="#ccd6e6" stroke-width="2"/>
+  <text x="84" y="98" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="700" fill="#162033">Cassandra OLTP Plane</text>
+  <text x="84" y="127" font-family="Inter, Arial, sans-serif" font-size="15" fill="#59677e">Apps use Cassandra for reads and writes.</text>
+
+  <rect x="92" y="166" width="322" height="52" rx="10" fill="#eef5ff" stroke="#c8d9fa"/>
+  <text x="116" y="198" font-family="Inter, Arial, sans-serif" font-size="17" font-weight="650" fill="#23304a">Application reads and writes</text>
+  <rect x="92" y="238" width="322" height="52" rx="10" fill="#eefaf7" stroke="#bfebe0"/>
+  <text x="116" y="270" font-family="Inter, Arial, sans-serif" font-size="17" font-weight="650" fill="#23304a">CommitLog + Memtable</text>
+  <rect x="92" y="310" width="322" height="52" rx="10" fill="#fff8ec" stroke="#f0d3a9"/>
+  <text x="116" y="342" font-family="Inter, Arial, sans-serif" font-size="17" font-weight="650" fill="#23304a">Flush, compaction, repair</text>
+
+  <rect x="732" y="58" width="390" height="336" rx="18" fill="#ffffff" stroke="#ccd6e6" stroke-width="2"/>
+  <text x="758" y="98" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="700" fill="#162033">OLAP Plane</text>
+  <text x="758" y="127" font-family="Inter, Arial, sans-serif" font-size="15" fill="#59677e">Apps query analytical services backed by SSTables.</text>
+
+  <rect x="766" y="154" width="322" height="44" rx="10" fill="#eef5ff" stroke="#c8d9fa"/>
+  <text x="790" y="181" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="650" fill="#23304a">Application analytical reads</text>
+  <rect x="766" y="214" width="322" height="44" rx="10" fill="#eefaf7" stroke="#bfebe0"/>
+  <text x="790" y="241" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="650" fill="#23304a">Trino + Arrow Flight</text>
+  <rect x="766" y="274" width="322" height="44" rx="10" fill="#fff8ec" stroke="#f0d3a9"/>
+  <text x="790" y="301" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="650" fill="#23304a">Iceberg materializer</text>
+  <rect x="766" y="334" width="322" height="44" rx="10" fill="#f6f1ff" stroke="#d6c7fa"/>
+  <text x="790" y="361" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="650" fill="#23304a">CQLite SSTable reader</text>
+
+  <rect x="118" y="454" width="944" height="108" rx="18" fill="#ffffff" stroke="#ccd6e6" stroke-width="2"/>
+  <text x="148" y="492" font-family="Inter, Arial, sans-serif" font-size="25" font-weight="750" fill="#162033">SSTable Foundation</text>
+  <text x="148" y="522" font-family="Inter, Arial, sans-serif" font-size="15" fill="#59677e">Shared Cassandra SSTable files.</text>
+
+  <g font-family="Inter, Arial, sans-serif" font-size="15" font-weight="700" fill="#2d3950">
+    <rect x="430" y="480" width="96" height="44" rx="9" fill="#f4f7fb" stroke="#d7e0ee"/>
+    <text x="454" y="507">Data.db</text>
+    <rect x="542" y="480" width="96" height="44" rx="9" fill="#f4f7fb" stroke="#d7e0ee"/>
+    <text x="564" y="507">Index.db</text>
+    <rect x="654" y="480" width="116" height="44" rx="9" fill="#f4f7fb" stroke="#d7e0ee"/>
+    <text x="678" y="507">Summary.db</text>
+    <rect x="786" y="480" width="130" height="44" rx="9" fill="#f4f7fb" stroke="#d7e0ee"/>
+    <text x="806" y="507">Statistics.db</text>
+    <rect x="932" y="480" width="92" height="44" rx="9" fill="#f4f7fb" stroke="#d7e0ee"/>
+    <text x="954" y="507">gen-*</text>
+  </g>
+
+  <path d="M253 362 C253 422 310 444 430 454" fill="none" stroke="#bd7418" stroke-width="4" marker-end="url(#arrow-amber)"/>
+  <text x="278" y="426" font-family="Inter, Arial, sans-serif" font-size="14" font-weight="700" fill="#8a5717">flush creates durable SSTables</text>
+
+  <path d="M590 454 C646 407 713 378 768 340" fill="none" stroke="#2f6fed" stroke-width="4" marker-end="url(#arrow-blue)"/>
+  <text x="606" y="410" font-family="Inter, Arial, sans-serif" font-size="14" font-weight="700" fill="#2459bf">snapshot read</text>
+
+  <path d="M414 264 C534 228 642 228 766 264" fill="none" stroke="#168a72" stroke-width="4" stroke-dasharray="10 8" marker-end="url(#arrow-teal)"/>
+  <text x="512" y="214" font-family="Inter, Arial, sans-serif" font-size="14" font-weight="700" fill="#126c5a">optional fresh tail export</text>
+</svg>
