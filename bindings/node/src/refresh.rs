@@ -44,10 +44,12 @@ pub struct RefreshReport {
 impl RefreshReport {
     /// Build the Node report from the core [`cqlite_core::RefreshReport`].
     fn from_core(report: cqlite_core::RefreshReport) -> Self {
+        // Saturating conversion (no-silent-data-loss posture): the counts are
+        // usize on the core side; clamp to u32::MAX rather than truncating.
         Self {
-            tables_scanned: report.tables_scanned as u32,
-            readers_added: report.readers_added as u32,
-            readers_removed: report.readers_removed as u32,
+            tables_scanned: u32::try_from(report.tables_scanned).unwrap_or(u32::MAX),
+            readers_added: u32::try_from(report.readers_added).unwrap_or(u32::MAX),
+            readers_removed: u32::try_from(report.readers_removed).unwrap_or(u32::MAX),
         }
     }
 }

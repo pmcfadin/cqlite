@@ -19,6 +19,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
+import pytest
+
 import cqlite
 
 KEYSPACE = "test_freshness"
@@ -206,3 +208,22 @@ def test_refresh_report_repr_and_to_dict():
                 "readers_added": 1,
                 "readers_removed": 0,
             }
+
+
+def test_refresh_on_closed_database_raises():
+    """``refresh()`` on a closed database raises the closed-database error
+    (mirrors the Node ``refresh() on a closed database rejects`` test)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        schema = _write_schema(root)
+        src_table_dir = _build_two_generations(root, schema)
+
+        live = root / "live"
+        live_table_dir = live / KEYSPACE / TABLE
+        _copy_generation(src_table_dir, live_table_dir, 1)
+
+        db = cqlite.open(live, schema=schema)
+        db.close()
+
+        with pytest.raises(RuntimeError, match="closed"):
+            db.refresh()

@@ -31,7 +31,7 @@
 //! a scan already in flight completes against the pre-refresh set and is never
 //! affected by a concurrent refresh.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -211,31 +211,56 @@ impl SSTableManager {
     pub async fn refresh_tables(&self) -> Result<RefreshReport> {
         // 1. Rediscover the current on-disk Data.db set (no readers opened yet).
         let discovered_paths = self.discover_data_file_paths().await?;
-        let discovered_canon: HashSet<PathBuf> =
-            discovered_paths.iter().map(|p| canon(p)).collect();
 
-        // 2. Snapshot the canonical paths currently held (short read guards).
-        //    Union both maps so no held generation is missed even under a
-        //    pre-existing SSTableId (filename) collision across keyspaces.
-        let held_canon: HashSet<PathBuf> = {
+        // Precompute a raw-path -> canonical-path cache for EVERY path this
+        // refresh will diff. Filesystem canonicalization happens ONLY here (and
+        // in step 4 for freshly opened readers), never inside the write-guarded
+        // critical section (step 5), which must perform zero syscalls. A
+        // reader's `file_path` is immutable and `canon` is a pure function of
+        // path + filesystem, so a cache built now stays valid for the whole
+        // call.
+        let mut canon_cache: HashMap<PathBuf, PathBuf> =
+            HashMap::with_capacity(discovered_paths.len());
+        for p in &discovered_paths {
+            canon_cache.entry(p.clone()).or_insert_with(|| canon(p));
+        }
+
+        // 2. Snapshot the canonical paths currently held (short read guards),
+        //    extending the cache with every held reader's file_path so the
+        //    guarded section can resolve them without syscalls. Union both maps
+        //    so no held generation is missed even under a pre-existing
+        //    SSTableId (filename) collision across keyspaces.
+        let mut held_canon: HashSet<PathBuf> = HashSet::new();
+        {
             let readers = self.readers.read().await;
             let table_readers = self.table_readers.read().await;
-            readers
-                .values()
-                .map(|r| canon(&r.file_path))
-                .chain(
-                    table_readers
-                        .values()
-                        .flatten()
-                        .map(|r| canon(&r.file_path)),
-                )
-                .collect()
+            for r in readers.values().chain(table_readers.values().flatten()) {
+                let c = canon_cache
+                    .entry(r.file_path.clone())
+                    .or_insert_with(|| canon(&r.file_path))
+                    .clone();
+                held_canon.insert(c);
+            }
+        }
+
+        // Cache-only canonicalization: reads the precomputed map, falling back
+        // to the raw path (NO syscall) for any path not seen during precompute
+        // — matching `canon`'s own fallback for an un-canonicalizable path.
+        let canon_of = |p: &Path| -> PathBuf {
+            canon_cache
+                .get(p)
+                .cloned()
+                .unwrap_or_else(|| p.to_path_buf())
         };
+
+        let discovered_canon: HashSet<PathBuf> =
+            discovered_paths.iter().map(|p| canon_of(p)).collect();
 
         // 3. Candidate additions = discovered paths not already held.
         let added_paths: Vec<PathBuf> = discovered_paths
-            .into_iter()
-            .filter(|p| !held_canon.contains(&canon(p)))
+            .iter()
+            .filter(|p| !held_canon.contains(&canon_of(p)))
+            .cloned()
             .collect();
 
         // 4. Open every added generation OUTSIDE the write guard. Fail-closed:
@@ -253,39 +278,41 @@ impl SSTableManager {
             let sstable_id = SSTableId::from_filename(filename);
             let reader_arc = self.open_reader_with_schema(path).await?;
             let key = self.table_key_for(path, &reader_arc);
-            opened.push((canon(path), sstable_id, key, reader_arc));
+            opened.push((canon_of(path), sstable_id, key, reader_arc));
         }
 
         // 5. Apply the diff under the write guards (short critical section).
         let mut readers = self.readers.write().await;
         let mut table_readers = self.table_readers.write().await;
 
-        // 5a. Removal: retain only readers still present on disk.
+        // 5a. Removal: retain only readers still present on disk. Every
+        //     canonical path below comes from the precomputed cache — the
+        //     guarded section performs zero filesystem syscalls.
         let before_canon: HashSet<PathBuf> = readers
             .values()
-            .map(|r| canon(&r.file_path))
+            .map(|r| canon_of(&r.file_path))
             .chain(
                 table_readers
                     .values()
                     .flatten()
-                    .map(|r| canon(&r.file_path)),
+                    .map(|r| canon_of(&r.file_path)),
             )
             .collect();
 
-        readers.retain(|_id, r| discovered_canon.contains(&canon(&r.file_path)));
+        readers.retain(|_id, r| discovered_canon.contains(&canon_of(&r.file_path)));
         for list in table_readers.values_mut() {
-            list.retain(|r| discovered_canon.contains(&canon(&r.file_path)));
+            list.retain(|r| discovered_canon.contains(&canon_of(&r.file_path)));
         }
         table_readers.retain(|_key, list| !list.is_empty());
 
         let after_removal_canon: HashSet<PathBuf> = readers
             .values()
-            .map(|r| canon(&r.file_path))
+            .map(|r| canon_of(&r.file_path))
             .chain(
                 table_readers
                     .values()
                     .flatten()
-                    .map(|r| canon(&r.file_path)),
+                    .map(|r| canon_of(&r.file_path)),
             )
             .collect();
         let readers_removed = before_canon.difference(&after_removal_canon).count();
@@ -299,7 +326,7 @@ impl SSTableManager {
             }
             // Guard against inserting the same freshly-opened path twice if the
             // discovery listed a duplicate (defensive; discovery does not).
-            if readers.values().any(|r| canon(&r.file_path) == cpath) {
+            if readers.values().any(|r| canon_of(&r.file_path) == cpath) {
                 continue;
             }
             readers.insert(sstable_id, Arc::clone(&reader_arc));
