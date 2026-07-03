@@ -3,6 +3,8 @@
 from cqlite._cqlite import (
     __version__,
     version,
+    # Test-support introspection (issue #1437)
+    _built_with_panic_abort,
     # Exception types
     CqliteError,
     SchemaError,
@@ -33,6 +35,8 @@ from cqlite._cqlite import (
 __all__ = [
     "__version__",
     "version",
+    # Test-support introspection (issue #1437)
+    "_built_with_panic_abort",
     # Exception types
     "CqliteError",
     "SchemaError",

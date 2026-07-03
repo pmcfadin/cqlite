@@ -50,6 +50,8 @@ import tempfile
 
 import pytest
 
+import cqlite
+
 from conftest import (
     SCHEMA_BASIC_TYPES,
     DATASETS,
@@ -60,6 +62,25 @@ from corrupt_fixture import MODES, make_corrupt_fixture, source_table_dir
 
 # Entry points exercised per fixture. Each name selects a branch in the driver.
 ENTRY_POINTS = ("execute", "streaming", "parquet")
+
+
+def _built_with_panic_abort() -> bool:
+    """Whether the loaded wheel was compiled with ``panic = "abort"``.
+
+    Delegates to the ``cqlite._built_with_panic_abort`` introspection helper
+    (issue #1437), which reports the ACTUAL compiled panic strategy via
+    ``cfg!(panic = "abort")``. Guarded so this file still collects against an
+    older wheel that predates the symbol: a missing symbol is treated as "not
+    abort", i.e. the survival cases below hard-assert (preserving the gate's
+    teeth) rather than silently xfailing.
+    """
+    probe = getattr(cqlite, "_built_with_panic_abort", None)
+    return bool(probe()) if callable(probe) else False
+
+
+# True only on a `panic = "abort"` wheel (release, pre-#1440). See the marker
+# rationale on the uncompressed test below.
+_PANIC_ABORT = _built_with_panic_abort()
 
 # The child driver. Runs one entry point against a corrupt fixture and prints a
 # terminal sentinel. Setup -- ``import cqlite``, ``cqlite.open``, and the
@@ -200,6 +221,28 @@ def test_compressed_corrupt_sstable_survives(mode, entry):
 
 # The uncompressed flavor reaches the raw-parser panic. parquet is excluded
 # because it hangs there (a separate non-panic bug); see the module docstring.
+#
+# CONDITIONAL STRICT XFAIL (issue #1437): the marker is keyed on the ACTUAL
+# compiled panic strategy of the loaded wheel.
+#   * condition False (debug/unwind, or a post-#1440 release=unwind wheel):
+#     marker inactive -> these cases hard-assert the interpreter SURVIVES
+#     (rc==0) and must PASS. This preserves the gate's teeth: a boundary
+#     regression under an unwind build is still a hard FAIL.
+#   * condition True (release=abort, pre-#1440): the corrupt uncompressed
+#     SSTable aborts the interpreter (SIGABRT, rc!=0). A `strict` xfail records
+#     that expected failure as green -- and would flip to a hard failure the
+#     moment the case unexpectedly starts surviving.
+# Once #1440 flips the release profile to `panic = "unwind"`,
+# `_built_with_panic_abort()` goes False on every wheel, the marker deactivates,
+# and these cases hard-assert again -- self-cleaning, no follow-up edit needed.
+@pytest.mark.xfail(
+    _PANIC_ABORT,
+    strict=True,
+    reason=(
+        "corrupt uncompressed SSTable aborts the interpreter until #1440 lands "
+        "panic=unwind (#1437)"
+    ),
+)
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("entry", ("execute", "streaming"))
 def test_uncompressed_corrupt_sstable_panic_is_contained(mode, entry):
