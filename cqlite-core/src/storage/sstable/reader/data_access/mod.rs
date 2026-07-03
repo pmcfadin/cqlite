@@ -80,6 +80,21 @@ impl SSTableReader {
         ChunkKey::new(self.chunk_cache_id ^ namespace, chunk_index)
     }
 
+    /// Build a [`ChunkKey`] for a size-dependent range read (the BIG point-read
+    /// path): the decompressed bytes depend on BOTH `offset` and `size`, so
+    /// `size` is carried as the key's `aux` discriminant. Keying by `offset`
+    /// alone would alias two reads at the same offset with different sizes and
+    /// return the first-cached range (roborev #1567).
+    #[inline]
+    pub(crate) fn chunk_cache_key_ranged(
+        &self,
+        namespace: u64,
+        offset: u64,
+        size: u32,
+    ) -> ChunkKey {
+        ChunkKey::with_aux(self.chunk_cache_id ^ namespace, offset, size as u64)
+    }
+
     /// The shared decompressed-chunk cache this reader consults (issue #1567).
     ///
     /// Exposed so callers/tests can observe cache residency and per-instance
@@ -547,7 +562,7 @@ impl SSTableReader {
         use crate::storage::sstable::compression::Compression;
         use tokio::io::AsyncReadExt;
 
-        let key = self.chunk_cache_key(NS_BIG_POINT, block_offset);
+        let key = self.chunk_cache_key_ranged(NS_BIG_POINT, block_offset, size);
         if let Some(hit) = self.chunk_cache.get(&key) {
             self.record_cache_hit();
             return Ok(hit.to_vec());

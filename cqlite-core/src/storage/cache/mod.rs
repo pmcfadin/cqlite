@@ -61,15 +61,39 @@ pub struct ChunkKey {
     pub sstable: u64,
     /// Authoritative chunk index or index-resolved offset within `sstable`.
     pub chunk_index: u64,
+    /// Extra discriminant for a size-dependent range read. The chunk-index sites
+    /// (BTI, windowed scan) decompress a whole compression chunk whose bytes are
+    /// fully determined by `chunk_index`, so they use `aux = 0`. The BIG
+    /// point-read path (`get_cached_data`) reads an index-resolved
+    /// `(block_offset, size)` byte range whose decompressed content depends on
+    /// BOTH the offset AND the length: two reads at the same `block_offset` with
+    /// different `size` decompress different input and MUST NOT alias. `aux`
+    /// carries `size` for that path so the key is complete (roborev #1567), and
+    /// because `(u64 offset, u32 size)` cannot be packed into one `u64` without
+    /// loss, `aux` is a first-class key field, not folded into `chunk_index`.
+    pub aux: u64,
 }
 
 impl ChunkKey {
-    /// Construct a key from an sstable identity hash and a chunk discriminator.
+    /// Construct a key from an sstable identity hash and a chunk discriminator
+    /// (whole-chunk sites; `aux = 0`).
     #[inline]
     pub fn new(sstable: u64, chunk_index: u64) -> Self {
         Self {
             sstable,
             chunk_index,
+            aux: 0,
+        }
+    }
+
+    /// Construct a key with an extra discriminant (`aux`) for a size-dependent
+    /// range read (the BIG point-read path keys `aux = size`).
+    #[inline]
+    pub fn with_aux(sstable: u64, chunk_index: u64, aux: u64) -> Self {
+        Self {
+            sstable,
+            chunk_index,
+            aux,
         }
     }
 }
@@ -418,5 +442,42 @@ mod tests {
         let cache = DecompressedChunkCache::with_budget_and_shards(1 << 20, 10);
         assert_eq!(cache.shards.len(), 16);
         assert_eq!(cache.mask, 15);
+    }
+
+    /// roborev #1567: a size-dependent range read (BIG point-read path) keyed by
+    /// offset alone would return the first-cached range when the same offset is
+    /// later read with a different size. The `aux` discriminant (size) makes the
+    /// key complete, so a same-offset/different-size read MISSES rather than
+    /// aliasing to the wrong bytes.
+    #[test]
+    fn ranged_key_does_not_alias_same_offset_different_size() {
+        let cache = DecompressedChunkCache::with_budget_bytes(1 << 20);
+        let sstable = 0xABCD_u64;
+        let offset = 4096_u64;
+
+        // Cache a 16-byte range at `offset`.
+        let k16 = ChunkKey::with_aux(sstable, offset, 16);
+        let v16 = cache.insert(k16, chunk(0x11, 16));
+
+        // A read at the SAME offset but a DIFFERENT size must not hit `v16`.
+        let k32 = ChunkKey::with_aux(sstable, offset, 32);
+        assert!(
+            cache.get(&k32).is_none(),
+            "same offset with a different size must not alias the cached range"
+        );
+
+        // The original size still hits the original bytes (Arc identity).
+        let again = cache.get(&k16).expect("original ranged key still resident");
+        assert!(
+            Arc::ptr_eq(&v16, &again),
+            "same (offset,size) key returns the same buffer"
+        );
+
+        // aux == 0 (whole-chunk sites) is a distinct namespace from any sized read.
+        let k0 = ChunkKey::new(sstable, offset);
+        assert!(
+            cache.get(&k0).is_none(),
+            "whole-chunk key (aux=0) must not alias a sized range read"
+        );
     }
 }
