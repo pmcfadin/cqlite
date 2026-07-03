@@ -23,9 +23,32 @@
 //!    Data.db data section — the exact bytes the scan path parses — and, for each
 //!    authoritative decoded variable-length cell value (Text/Blob) of known
 //!    length `L`, locates the LITERAL on-disk `writeUnsignedVInt(L)` length
-//!    prefix that precedes the value bytes (confirmed byte-exact: the recovered
-//!    vint must occupy exactly the bytes ending where the value begins and
-//!    unsigned-decode to `L`).
+//!    prefix that precedes the value bytes.
+//!
+//!    ## Anchoring: the match must be a REAL cell length prefix (roborev job 2769)
+//!
+//!    A plain substring search for the value bytes could hit a COINCIDENTAL
+//!    occurrence of those bytes rather than the actual length-prefixed cell
+//!    region, so the confirmed evidence would not be anchored to a real cell
+//!    length field. The authoritative scan path (`SSTableReader::scan`) yields
+//!    decoded `ScanRow` values only — it does not surface the byte offset of each
+//!    cell value in the stitched buffer, and plumbing offsets through the whole
+//!    row/cell parse state machine would be invasive and fragile — so we cannot
+//!    anchor to a decoder-reported offset directly.
+//!
+//!    Instead we make each substring match UNAMBIGUOUS: the value byte sequence
+//!    must occur EXACTLY ONCE in the entire decompressed data section. Given
+//!    uniqueness, that single position IS provably the real on-disk location of
+//!    the cell value the authoritative decoder produced (there is no alternative
+//!    coincidental occurrence it could confuse it with). By the on-disk V5 cell
+//!    layout `writeUnsignedVInt(L)` immediately followed by the `L` value bytes,
+//!    the bytes immediately preceding that unique position ARE the real length
+//!    prefix. We additionally confirm byte-exact: the recovered vint must occupy
+//!    exactly the bytes ending where the value begins (whole-prefix consumption)
+//!    and unsigned-decode to `L`. Non-unique matches are skipped, so a confirmed
+//!    site is a genuine, provably-anchored on-disk length prefix. (Uniqueness
+//!    filtering may reduce the confirmed-site count below the `MAX_SITES` cap;
+//!    the non-vacuity assertion still guarantees the count stays well above 0.)
 //! 3. It then decodes those literal on-disk prefix bytes with BOTH decoders,
 //!    per-site, into LOCAL counters: the UNSIGNED decode (`parse_vint_length`)
 //!    must equal the authoritative length `L`, while a LOCAL differential tallies
@@ -135,10 +158,27 @@ fn find_from(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
         .map(|rel| from + rel)
 }
 
+/// Return the position of `needle` in `haystack` iff it occurs EXACTLY ONCE.
+///
+/// Uniqueness is what anchors a substring match to the real cell region: if the
+/// value bytes appear exactly once in the whole decompressed data section, that
+/// single position is provably the on-disk location of the cell value the
+/// authoritative decoder produced — there is no coincidental alternative
+/// occurrence to confuse it with (roborev job 2769). Returns `None` for 0 or
+/// >=2 occurrences (short-circuits on the second hit, so it is bounded).
+fn unique_occurrence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    let first = find_from(haystack, needle, 0)?;
+    // Any further occurrence (even overlapping) makes the match ambiguous.
+    if find_from(haystack, needle, first + 1).is_some() {
+        return None;
+    }
+    Some(first)
+}
+
 /// Minimum authoritative value length we accept as an extraction anchor. A
-/// 6+-byte value makes a coincidental byte-sequence match (a false length
-/// prefix) vanishingly unlikely, so a confirmed hit is a genuine on-disk
-/// `writeUnsignedVInt` length prefix.
+/// 6+-byte value both makes a coincidental byte-sequence match vanishingly
+/// unlikely and makes the required whole-buffer uniqueness (below) common, so a
+/// confirmed hit is a genuine on-disk `writeUnsignedVInt` length prefix.
 const MIN_ANCHOR_LEN: usize = 6;
 
 /// Cap on confirmed differential sites — enough to be decisive, bounded so the
@@ -150,6 +190,11 @@ const MAX_SITES: usize = 256;
 /// value length `L`. Pushes `(prefix_bytes, expected_len)` for each confirmed
 /// site. The differential tally is computed later from these confirmed sites
 /// using LOCAL counters, so this probing does not affect the tally.
+///
+/// Anchoring (roborev job 2769): a value is only used when its byte sequence
+/// occurs EXACTLY ONCE in `buffer`. That uniqueness pins the match to the real
+/// cell location, so the vint immediately preceding it is a genuine on-disk
+/// length prefix — not a coincidental byte match. Non-unique values are skipped.
 fn extract_length_prefixes(
     buffer: &[u8],
     rows: &[(crate::RowKey, ScanRow)],
@@ -175,29 +220,26 @@ fn extract_length_prefixes(
             if expected_len < MIN_ANCHOR_LEN {
                 continue;
             }
-            // The on-disk cell layout is `writeUnsignedVInt(L)` immediately
-            // followed by the `L` value bytes. Find each occurrence of the value
-            // bytes and recover the unique unsigned vint that ends exactly where
-            // they begin and decodes to `L`.
-            let mut search_from = 0usize;
-            while let Some(p) = find_from(buffer, vbytes, search_from) {
-                search_from = p + 1;
-                for k in 1..=9usize {
-                    if k > p {
-                        continue;
-                    }
-                    let prefix = &buffer[p - k..p];
-                    if let Ok((rem, decoded)) = parse_vint_length(prefix) {
-                        // Byte-exact: the vint occupies the whole `k`-byte prefix
-                        // (rem empty) AND decodes to the authoritative length.
-                        if rem.is_empty() && decoded == expected_len {
-                            out.push((prefix.to_vec(), expected_len));
-                            break;
-                        }
-                    }
+            // Require the value bytes to occur exactly once so the match is
+            // provably the real cell region (see `unique_occurrence`). The
+            // on-disk cell layout is `writeUnsignedVInt(L)` immediately followed
+            // by the `L` value bytes, so the unsigned vint ending exactly where
+            // this unique occurrence begins IS the real length prefix.
+            let Some(p) = unique_occurrence(buffer, vbytes) else {
+                continue;
+            };
+            for k in 1..=9usize {
+                if k > p {
+                    continue;
                 }
-                if out.len() >= MAX_SITES {
-                    return;
+                let prefix = &buffer[p - k..p];
+                if let Ok((rem, decoded)) = parse_vint_length(prefix) {
+                    // Byte-exact: the vint occupies the whole `k`-byte prefix
+                    // (rem empty) AND decodes to the authoritative length.
+                    if rem.is_empty() && decoded == expected_len {
+                        out.push((prefix.to_vec(), expected_len));
+                        break;
+                    }
                 }
             }
         }
