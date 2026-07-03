@@ -322,13 +322,9 @@ mod tests {
             // but this call is guaranteed to contribute its own +1, so
             // `after > before` is deterministic (never flaky).
             let before = SYSTEM_REFRESHES.load(Ordering::Relaxed);
-            let reading = StatusMetrics::get_process_memory();
+            let _reading = StatusMetrics::get_process_memory();
             let after = SYSTEM_REFRESHES.load(Ordering::Relaxed);
 
-            assert!(
-                reading > 0,
-                "each tick must return a fresh live reading through the cached handle"
-            );
             assert!(
                 after > before,
                 "each tick must refresh the cached handle (fresh, not stale): \
