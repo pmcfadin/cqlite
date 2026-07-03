@@ -667,6 +667,10 @@ pub struct WriteAheadLog {
     buffer_size: usize,
     /// Current size of the WAL file (in bytes)
     current_size: u64,
+    /// Reusable scratch buffer for serializing a mutation in `append`, so the
+    /// steady-state write path does not allocate a fresh `Vec` per call. Cleared
+    /// and refilled on every `append`; never shared across threads (`&mut self`).
+    append_scratch: Vec<u8>,
     /// Byte offset of the last CRC-valid prefix when `open_existing` detected
     /// mid-stream corruption (issue #1391). The corrupt tail is intentionally
     /// left on disk so the caller can preserve it aside as forensic evidence
@@ -754,6 +758,7 @@ impl WriteAheadLog {
             path,
             buffer_size,
             current_size: 0,
+            append_scratch: Vec::new(),
             pending_valid_prefix: None,
             poisoned: None,
             #[cfg(test)]
@@ -860,6 +865,7 @@ impl WriteAheadLog {
             path: path.to_path_buf(),
             buffer_size: Self::DEFAULT_BUFFER_SIZE,
             current_size,
+            append_scratch: Vec::new(),
             pending_valid_prefix,
             poisoned: None,
             #[cfg(test)]
@@ -1118,8 +1124,11 @@ impl WriteAheadLog {
             ));
         }
 
-        // Serialize mutation using bincode
-        let mutation_bytes = bincode::serialize(mutation)
+        // Serialize mutation using bincode into a reusable scratch buffer so the
+        // steady-state write path does not allocate a fresh `Vec` per call.
+        // `serialize_into` yields byte-identical output to `bincode::serialize`.
+        self.append_scratch.clear();
+        bincode::serialize_into(&mut self.append_scratch, mutation)
             .map_err(|e| Error::Storage(format!("Failed to serialize mutation: {}", e)))?;
 
         // Fail-closed size ceiling (issue #1391, roborev r3). `replay()` /
@@ -1131,18 +1140,18 @@ impl WriteAheadLog {
         // reject BEFORE writing anything. The comparison is done in `u64` so a
         // multi-GiB length cannot truncate through the `as u32` cast below into a
         // small, wrongly-accepted value.
-        if mutation_bytes.len() as u64 > MAX_ENTRY_LENGTH as u64 {
+        if self.append_scratch.len() as u64 > MAX_ENTRY_LENGTH as u64 {
             return Err(Error::Storage(format!(
                 "WAL entry exceeds MAX_ENTRY_LENGTH (16 MiB): {} bytes",
-                mutation_bytes.len()
+                self.append_scratch.len()
             )));
         }
 
-        let entry_length = mutation_bytes.len() as u32;
+        let entry_length = self.append_scratch.len() as u32;
 
         // Calculate CRC32 over the mutation bytes
         let mut hasher = Hasher::new();
-        hasher.update(&mutation_bytes);
+        hasher.update(&self.append_scratch);
         let crc32 = hasher.finalize();
 
         // Write entry: [length][crc32][mutation_bytes]
@@ -1155,7 +1164,7 @@ impl WriteAheadLog {
             .map_err(|e| Error::Storage(format!("Failed to write CRC32: {}", e)))?;
 
         self.file
-            .write_all(&mutation_bytes)
+            .write_all(&self.append_scratch)
             .map_err(|e| Error::Storage(format!("Failed to write mutation bytes: {}", e)))?;
 
         // Update size (8 bytes header + mutation bytes)
