@@ -420,12 +420,15 @@ pub(crate) fn build_typed_value_array(
                 .filter_map(|opt| {
                     let v = unwrap_frozen_value(*opt)?;
                     Some(match v {
-                        Value::Boolean(b) => Some(*b),
-                        Value::Null => None,
-                        _ => None,
+                        Value::Boolean(b) => Ok(Some(*b)),
+                        Value::Null => Ok(None),
+                        other => Err(ArrowConvertError::InvalidValue(format!(
+                            "expected Boolean value in element, got {:?}",
+                            other
+                        ))),
                     })
                 })
-                .collect();
+                .collect::<Result<Vec<Option<bool>>, ArrowConvertError>>()?;
             Ok(Arc::new(BooleanArray::from(arr)))
         }
         CqlType::TinyInt => {
@@ -434,12 +437,15 @@ pub(crate) fn build_typed_value_array(
                 .filter_map(|opt| {
                     let v = unwrap_frozen_value(*opt)?;
                     Some(match v {
-                        Value::TinyInt(i) => Some(*i),
-                        Value::Null => None,
-                        _ => None,
+                        Value::TinyInt(i) => Ok(Some(*i)),
+                        Value::Null => Ok(None),
+                        other => Err(ArrowConvertError::InvalidValue(format!(
+                            "expected TinyInt value in element, got {:?}",
+                            other
+                        ))),
                     })
                 })
-                .collect();
+                .collect::<Result<Vec<Option<i8>>, ArrowConvertError>>()?;
             Ok(Arc::new(Int8Array::from(arr)))
         }
         CqlType::SmallInt => {
@@ -448,12 +454,15 @@ pub(crate) fn build_typed_value_array(
                 .filter_map(|opt| {
                     let v = unwrap_frozen_value(*opt)?;
                     Some(match v {
-                        Value::SmallInt(i) => Some(*i),
-                        Value::Null => None,
-                        _ => None,
+                        Value::SmallInt(i) => Ok(Some(*i)),
+                        Value::Null => Ok(None),
+                        other => Err(ArrowConvertError::InvalidValue(format!(
+                            "expected SmallInt value in element, got {:?}",
+                            other
+                        ))),
                     })
                 })
-                .collect();
+                .collect::<Result<Vec<Option<i16>>, ArrowConvertError>>()?;
             Ok(Arc::new(Int16Array::from(arr)))
         }
         CqlType::Int => {
@@ -462,12 +471,15 @@ pub(crate) fn build_typed_value_array(
                 .filter_map(|opt| {
                     let v = unwrap_frozen_value(*opt)?;
                     Some(match v {
-                        Value::Integer(i) => Some(*i),
-                        Value::Null => None,
-                        _ => None,
+                        Value::Integer(i) => Ok(Some(*i)),
+                        Value::Null => Ok(None),
+                        other => Err(ArrowConvertError::InvalidValue(format!(
+                            "expected Int value in element, got {:?}",
+                            other
+                        ))),
                     })
                 })
-                .collect();
+                .collect::<Result<Vec<Option<i32>>, ArrowConvertError>>()?;
             Ok(Arc::new(Int32Array::from(arr)))
         }
         CqlType::BigInt => {
@@ -476,12 +488,15 @@ pub(crate) fn build_typed_value_array(
                 .filter_map(|opt| {
                     let v = unwrap_frozen_value(*opt)?;
                     Some(match v {
-                        Value::BigInt(i) => Some(*i),
-                        Value::Null => None,
-                        _ => None,
+                        Value::BigInt(i) => Ok(Some(*i)),
+                        Value::Null => Ok(None),
+                        other => Err(ArrowConvertError::InvalidValue(format!(
+                            "expected BigInt value in element, got {:?}",
+                            other
+                        ))),
                     })
                 })
-                .collect();
+                .collect::<Result<Vec<Option<i64>>, ArrowConvertError>>()?;
             Ok(Arc::new(Int64Array::from(arr)))
         }
         CqlType::Counter => {
@@ -490,13 +505,16 @@ pub(crate) fn build_typed_value_array(
                 .filter_map(|opt| {
                     let v = unwrap_frozen_value(*opt)?;
                     Some(match v {
-                        Value::Counter(c) => Some(*c),
-                        Value::BigInt(i) => Some(*i),
-                        Value::Null => None,
-                        _ => None,
+                        Value::Counter(c) => Ok(Some(*c)),
+                        Value::BigInt(i) => Ok(Some(*i)),
+                        Value::Null => Ok(None),
+                        other => Err(ArrowConvertError::InvalidValue(format!(
+                            "expected Counter value in element, got {:?}",
+                            other
+                        ))),
                     })
                 })
-                .collect();
+                .collect::<Result<Vec<Option<i64>>, ArrowConvertError>>()?;
             Ok(Arc::new(Int64Array::from(arr)))
         }
         CqlType::Float => {
@@ -505,12 +523,20 @@ pub(crate) fn build_typed_value_array(
                 .filter_map(|opt| {
                     let v = unwrap_frozen_value(*opt)?;
                     Some(match v {
-                        Value::Float32(f) => Some(*f),
-                        Value::Null => None,
-                        _ => None,
+                        Value::Float32(f) => Ok(Some(*f)),
+                        // A CQL `float` (32-bit) may be carried as the wider
+                        // `Value::Float` (f64) by the decode path; narrow it
+                        // back (lossless for genuine f32 values), mirroring the
+                        // Double arm which accepts both float variants.
+                        Value::Float(f) => Ok(Some(*f as f32)),
+                        Value::Null => Ok(None),
+                        other => Err(ArrowConvertError::InvalidValue(format!(
+                            "expected Float value in element, got {:?}",
+                            other
+                        ))),
                     })
                 })
-                .collect();
+                .collect::<Result<Vec<Option<f32>>, ArrowConvertError>>()?;
             Ok(Arc::new(Float32Array::from(arr)))
         }
         CqlType::Double => {
@@ -519,13 +545,16 @@ pub(crate) fn build_typed_value_array(
                 .filter_map(|opt| {
                     let v = unwrap_frozen_value(*opt)?;
                     Some(match v {
-                        Value::Float(f) => Some(*f),
-                        Value::Float32(f) => Some(*f as f64),
-                        Value::Null => None,
-                        _ => None,
+                        Value::Float(f) => Ok(Some(*f)),
+                        Value::Float32(f) => Ok(Some(*f as f64)),
+                        Value::Null => Ok(None),
+                        other => Err(ArrowConvertError::InvalidValue(format!(
+                            "expected Double value in element, got {:?}",
+                            other
+                        ))),
                     })
                 })
-                .collect();
+                .collect::<Result<Vec<Option<f64>>, ArrowConvertError>>()?;
             Ok(Arc::new(Float64Array::from(arr)))
         }
         CqlType::Text | CqlType::Ascii | CqlType::Varchar => {
@@ -534,12 +563,15 @@ pub(crate) fn build_typed_value_array(
                 .filter_map(|opt| {
                     let v = unwrap_frozen_value(*opt)?;
                     Some(match v {
-                        Value::Text(s) => Some(s.clone()),
-                        Value::Null => None,
-                        _ => None,
+                        Value::Text(s) => Ok(Some(s.clone())),
+                        Value::Null => Ok(None),
+                        other => Err(ArrowConvertError::InvalidValue(format!(
+                            "expected Text value in element, got {:?}",
+                            other
+                        ))),
                     })
                 })
-                .collect();
+                .collect::<Result<Vec<Option<String>>, ArrowConvertError>>()?;
             Ok(Arc::new(StringArray::from(arr)))
         }
         CqlType::Blob => {
@@ -548,12 +580,15 @@ pub(crate) fn build_typed_value_array(
                 .filter_map(|opt| {
                     let v = unwrap_frozen_value(*opt)?;
                     Some(match v {
-                        Value::Blob(b) => Some(b.clone()),
-                        Value::Null => None,
-                        _ => None,
+                        Value::Blob(b) => Ok(Some(b.clone())),
+                        Value::Null => Ok(None),
+                        other => Err(ArrowConvertError::InvalidValue(format!(
+                            "expected Blob value in element, got {:?}",
+                            other
+                        ))),
                     })
                 })
-                .collect();
+                .collect::<Result<Vec<Option<Vec<u8>>>, ArrowConvertError>>()?;
             let refs: Vec<Option<&[u8]>> = byte_slices.iter().map(|o| o.as_deref()).collect();
             Ok(Arc::new(BinaryArray::from(refs)))
         }
@@ -563,12 +598,15 @@ pub(crate) fn build_typed_value_array(
                 .filter_map(|opt| {
                     let v = unwrap_frozen_value(*opt)?;
                     Some(match v {
-                        Value::Timestamp(ts) => Some(*ts),
-                        Value::Null => None,
-                        _ => None,
+                        Value::Timestamp(ts) => Ok(Some(*ts)),
+                        Value::Null => Ok(None),
+                        other => Err(ArrowConvertError::InvalidValue(format!(
+                            "expected Timestamp value in element, got {:?}",
+                            other
+                        ))),
                     })
                 })
-                .collect();
+                .collect::<Result<Vec<Option<i64>>, ArrowConvertError>>()?;
             Ok(Arc::new(
                 TimestampMillisecondArray::from(arr).with_timezone("UTC"),
             ))
@@ -579,12 +617,15 @@ pub(crate) fn build_typed_value_array(
                 .filter_map(|opt| {
                     let v = unwrap_frozen_value(*opt)?;
                     Some(match v {
-                        Value::Date(d) => Some(*d),
-                        Value::Null => None,
-                        _ => None,
+                        Value::Date(d) => Ok(Some(*d)),
+                        Value::Null => Ok(None),
+                        other => Err(ArrowConvertError::InvalidValue(format!(
+                            "expected Date value in element, got {:?}",
+                            other
+                        ))),
                     })
                 })
-                .collect();
+                .collect::<Result<Vec<Option<i32>>, ArrowConvertError>>()?;
             Ok(Arc::new(Date32Array::from(arr)))
         }
         CqlType::Time => {
@@ -593,12 +634,15 @@ pub(crate) fn build_typed_value_array(
                 .filter_map(|opt| {
                     let v = unwrap_frozen_value(*opt)?;
                     Some(match v {
-                        Value::Time(t) => Some(*t),
-                        Value::Null => None,
-                        _ => None,
+                        Value::Time(t) => Ok(Some(*t)),
+                        Value::Null => Ok(None),
+                        other => Err(ArrowConvertError::InvalidValue(format!(
+                            "expected Time value in element, got {:?}",
+                            other
+                        ))),
                     })
                 })
-                .collect();
+                .collect::<Result<Vec<Option<i64>>, ArrowConvertError>>()?;
             Ok(Arc::new(Time64NanosecondArray::from(arr)))
         }
         CqlType::Decimal => {
@@ -667,12 +711,15 @@ pub(crate) fn build_typed_value_array(
                 .filter_map(|opt| {
                     let v = unwrap_frozen_value(*opt)?;
                     Some(match v {
-                        Value::Duration { .. } => Some(ValueFormatter::format_value(v)),
-                        Value::Null => None,
-                        _ => None,
+                        Value::Duration { .. } => Ok(Some(ValueFormatter::format_value(v))),
+                        Value::Null => Ok(None),
+                        other => Err(ArrowConvertError::InvalidValue(format!(
+                            "expected Duration value in element, got {:?}",
+                            other
+                        ))),
                     })
                 })
-                .collect();
+                .collect::<Result<Vec<Option<String>>, ArrowConvertError>>()?;
             Ok(Arc::new(StringArray::from(arr)))
         }
         CqlType::Uuid | CqlType::TimeUuid => {
@@ -698,14 +745,17 @@ pub(crate) fn build_typed_value_array(
                 .filter_map(|opt| {
                     let v = unwrap_frozen_value(*opt)?;
                     Some(match v {
-                        Value::Inet(bytes) => {
-                            Some(ValueFormatter::format_value(&Value::Inet(bytes.clone())))
-                        }
-                        Value::Null => None,
-                        _ => None,
+                        Value::Inet(bytes) => Ok(Some(ValueFormatter::format_value(&Value::Inet(
+                            bytes.clone(),
+                        )))),
+                        Value::Null => Ok(None),
+                        other => Err(ArrowConvertError::InvalidValue(format!(
+                            "expected Inet value in element, got {:?}",
+                            other
+                        ))),
                     })
                 })
-                .collect();
+                .collect::<Result<Vec<Option<String>>, ArrowConvertError>>()?;
             Ok(Arc::new(StringArray::from(arr)))
         }
         // ----------------------------------------------------------------
@@ -737,12 +787,10 @@ pub(crate) fn build_typed_value_array(
                         offsets.push(flat_elements.len() as i32);
                     }
                     Some(other) => {
-                        // Unexpected value type — serialize as empty list to
-                        // avoid hard failure (defensive; shouldn't happen with
-                        // correct schema).
-                        null_bitmap.push(false);
-                        offsets.push(flat_elements.len() as i32);
-                        let _ = other; // suppress unused warning
+                        return Err(ArrowConvertError::InvalidValue(format!(
+                            "expected List/Set value, got {:?}",
+                            other
+                        )));
                     }
                 }
             }
@@ -808,11 +856,10 @@ pub(crate) fn build_typed_value_array(
                         offsets.push(flat_keys.len() as i32);
                     }
                     Some(other) => {
-                        // Unexpected value type — treat as null map entry
-                        // (defensive; shouldn't happen with correct schema).
-                        null_bitmap.push(false);
-                        offsets.push(flat_keys.len() as i32);
-                        let _ = other;
+                        return Err(ArrowConvertError::InvalidValue(format!(
+                            "expected Map value, got {:?}",
+                            other
+                        )));
                     }
                 }
             }
@@ -857,14 +904,19 @@ pub(crate) fn build_typed_value_array(
         // ----------------------------------------------------------------
         CqlType::Tuple(element_types) => {
             if element_types.is_empty() {
-                // Degenerate case: no fields → Utf8 fallback.
+                // Degenerate case: no fields → Utf8 fallback. Still fail closed
+                // on a wrong top-level variant; only a Tuple (or null) is valid.
                 let arr: Vec<Option<String>> = values
                     .iter()
-                    .map(|opt| match opt {
-                        Some(Value::Null) | None => None,
-                        Some(v) => Some(ValueFormatter::format_value(v)),
+                    .map(|opt| match unwrap_frozen_value(*opt) {
+                        Some(Value::Null) | None => Ok(None),
+                        Some(v @ Value::Tuple(_)) => Ok(Some(ValueFormatter::format_value(v))),
+                        Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                            "expected Tuple value, got {:?}",
+                            other
+                        ))),
                     })
-                    .collect();
+                    .collect::<Result<Vec<Option<String>>, ArrowConvertError>>()?;
                 return Ok(Arc::new(StringArray::from(arr)));
             }
 
@@ -874,6 +926,21 @@ pub(crate) fn build_typed_value_array(
             // Unwrap Frozen at the value level before inspecting tuples.
             let unwrapped: Vec<Option<&Value>> =
                 values.iter().map(|opt| unwrap_frozen_value(*opt)).collect();
+
+            // Fail closed: a non-null top-level value that is not a Tuple is a
+            // type mismatch, not a null.  Mirror the scalar arms rather than
+            // silently coercing the whole struct row's children to null.
+            for v in unwrapped.iter() {
+                match v {
+                    Some(Value::Tuple(_)) | Some(Value::Null) | None => {}
+                    Some(other) => {
+                        return Err(ArrowConvertError::InvalidValue(format!(
+                            "expected Tuple value, got {:?}",
+                            other
+                        )));
+                    }
+                }
+            }
 
             // Build a null bitmap: true = row is non-null (valid struct).
             let null_bitmap: Vec<bool> = unwrapped
@@ -906,7 +973,8 @@ pub(crate) fn build_typed_value_array(
                                         .unwrap_or(&null_sentinel),
                                 )
                             }
-                            // Null row or wrong type → null sentinel.
+                            // Null/absent row → null sentinel (wrong variants
+                            // already failed closed above).
                             _ => Some(&null_sentinel),
                         }
                     })
@@ -944,14 +1012,20 @@ pub(crate) fn build_typed_value_array(
         // ----------------------------------------------------------------
         CqlType::Udt(_udt_name, udt_fields) => {
             if udt_fields.is_empty() {
-                // Degenerate case: no fields → Utf8 fallback.
+                // Degenerate case (incl. unresolved named UDTs, which carry an
+                // empty field list): Utf8 fallback. Still fail closed on a wrong
+                // top-level variant; only a Udt (or null) is valid.
                 let arr: Vec<Option<String>> = values
                     .iter()
-                    .map(|opt| match opt {
-                        Some(Value::Null) | None => None,
-                        Some(v) => Some(ValueFormatter::format_value(v)),
+                    .map(|opt| match unwrap_frozen_value(*opt) {
+                        Some(Value::Null) | None => Ok(None),
+                        Some(v @ Value::Udt(_)) => Ok(Some(ValueFormatter::format_value(v))),
+                        Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                            "expected Udt value, got {:?}",
+                            other
+                        ))),
                     })
-                    .collect();
+                    .collect::<Result<Vec<Option<String>>, ArrowConvertError>>()?;
                 return Ok(Arc::new(StringArray::from(arr)));
             }
 
@@ -960,6 +1034,21 @@ pub(crate) fn build_typed_value_array(
             // Unwrap Frozen at the value level before inspecting UDTs.
             let unwrapped: Vec<Option<&Value>> =
                 values.iter().map(|opt| unwrap_frozen_value(*opt)).collect();
+
+            // Fail closed: a non-null top-level value that is not a Udt is a
+            // type mismatch, not a null.  Mirror the scalar arms rather than
+            // silently coercing the whole struct row's children to null.
+            for v in unwrapped.iter() {
+                match v {
+                    Some(Value::Udt(_)) | Some(Value::Null) | None => {}
+                    Some(other) => {
+                        return Err(ArrowConvertError::InvalidValue(format!(
+                            "expected Udt value, got {:?}",
+                            other
+                        )));
+                    }
+                }
+            }
 
             // Build a null bitmap: true = row is non-null (valid struct).
             let null_bitmap: Vec<bool> = unwrapped
@@ -988,7 +1077,8 @@ pub(crate) fn build_typed_value_array(
                                     .unwrap_or(&null_sentinel),
                             )
                         }
-                        // Null row or wrong type → null sentinel.
+                        // Null/absent row → null sentinel (wrong variants
+                        // already failed closed above).
                         _ => Some(&null_sentinel),
                     })
                     .collect();
@@ -1239,132 +1329,197 @@ pub(crate) fn rescale_decimal(scale: i32, unscaled: &[u8]) -> Result<i128, Arrow
 fn build_boolean_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<bool>> = rows
         .iter()
-        .map(|row| {
-            row.values.get(col.name.as_str()).and_then(|v| match v {
-                Value::Boolean(b) => Some(*b),
-                Value::Null => None,
-                _ => None,
-            })
-        })
-        .collect();
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::Boolean(b)) => Ok(Some(*b)),
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected Boolean value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
+        .collect::<Result<Vec<Option<bool>>, ArrowConvertError>>()?;
     Ok(Arc::new(BooleanArray::from(values)))
 }
 
 fn build_int8_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<i8>> = rows
         .iter()
-        .map(|row| {
-            row.values.get(col.name.as_str()).and_then(|v| match v {
-                Value::TinyInt(i) => Some(*i),
-                Value::Null => None,
-                _ => None,
-            })
-        })
-        .collect();
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::TinyInt(i)) => Ok(Some(*i)),
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected TinyInt value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
+        .collect::<Result<Vec<Option<i8>>, ArrowConvertError>>()?;
     Ok(Arc::new(Int8Array::from(values)))
 }
 
 fn build_int16_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<i16>> = rows
         .iter()
-        .map(|row| {
-            row.values.get(col.name.as_str()).and_then(|v| match v {
-                Value::SmallInt(i) => Some(*i),
-                Value::Null => None,
-                _ => None,
-            })
-        })
-        .collect();
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::SmallInt(i)) => Ok(Some(*i)),
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected SmallInt value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
+        .collect::<Result<Vec<Option<i16>>, ArrowConvertError>>()?;
     Ok(Arc::new(Int16Array::from(values)))
 }
 
 fn build_int32_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
+    // The same-width `Date`→i32 acceptance is only valid on the OPAQUE path
+    // (`cql_type = None`): an authoritative `date` column routes to
+    // `build_date32_array`, so an authoritative `int` column carrying a `Date`
+    // is a genuine mismatch that must fail closed.
+    let allow_compat = col.cql_type.is_none();
     let values: Vec<Option<i32>> = rows
         .iter()
-        .map(|row| {
-            row.values.get(col.name.as_str()).and_then(|v| match v {
-                Value::Integer(i) => Some(*i),
-                Value::Date(d) => Some(*d), // Date is stored as i32 days
-                Value::Null => None,
-                _ => None,
-            })
-        })
-        .collect();
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::Integer(i)) => Ok(Some(*i)),
+                Some(Value::Date(d)) if allow_compat => Ok(Some(*d)), // Date is stored as i32 days
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected Int value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
+        .collect::<Result<Vec<Option<i32>>, ArrowConvertError>>()?;
     Ok(Arc::new(Int32Array::from(values)))
 }
 
 fn build_int64_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
+    // `build_int64_array` backs authoritative `bigint` and `counter` columns
+    // plus the opaque (`cql_type = None`) path. `Counter` is legitimate for a
+    // `counter` column; the same-width `Time`→i64 acceptance and cross-accepting
+    // `Counter` for a `bigint` column are only valid on the opaque path (an
+    // authoritative `time` column routes to `build_time64_ns_array`).
+    let effective = col.cql_type.as_ref().map(unwrap_frozen_type);
+    let allow_counter = matches!(effective, None | Some(CqlType::Counter));
+    let allow_compat = effective.is_none();
     let values: Vec<Option<i64>> = rows
         .iter()
-        .map(|row| {
-            row.values.get(col.name.as_str()).and_then(|v| match v {
-                Value::BigInt(i) => Some(*i),
-                Value::Counter(c) => Some(*c),
-                Value::Time(t) => Some(*t), // Time is stored as i64 nanos
-                Value::Null => None,
-                _ => None,
-            })
-        })
-        .collect();
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::BigInt(i)) => Ok(Some(*i)),
+                Some(Value::Counter(c)) if allow_counter => Ok(Some(*c)),
+                Some(Value::Time(t)) if allow_compat => Ok(Some(*t)), // Time is stored as i64 nanos
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected BigInt value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
+        .collect::<Result<Vec<Option<i64>>, ArrowConvertError>>()?;
     Ok(Arc::new(Int64Array::from(values)))
 }
 
 fn build_float32_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<f32>> = rows
         .iter()
-        .map(|row| {
-            row.values.get(col.name.as_str()).and_then(|v| match v {
-                Value::Float32(f) => Some(*f),
-                Value::Null => None,
-                _ => None,
-            })
-        })
-        .collect();
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::Float32(f)) => Ok(Some(*f)),
+                // A CQL `float` (32-bit) may be carried as the wider `Value::Float`
+                // (f64) by the decode path; narrow it back (lossless for genuine
+                // f32 values), mirroring build_float64_array which accepts both.
+                Some(Value::Float(f)) => Ok(Some(*f as f32)),
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected Float value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
+        .collect::<Result<Vec<Option<f32>>, ArrowConvertError>>()?;
     Ok(Arc::new(Float32Array::from(values)))
 }
 
 fn build_float64_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<f64>> = rows
         .iter()
-        .map(|row| {
-            row.values.get(col.name.as_str()).and_then(|v| match v {
-                Value::Float(f) => Some(*f),
-                Value::Float32(f) => Some(*f as f64),
-                Value::Null => None,
-                _ => None,
-            })
-        })
-        .collect();
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::Float(f)) => Ok(Some(*f)),
+                Some(Value::Float32(f)) => Ok(Some(*f as f64)),
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected Double value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
+        .collect::<Result<Vec<Option<f64>>, ArrowConvertError>>()?;
     Ok(Arc::new(Float64Array::from(values)))
 }
 
 fn build_string_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
+    // When the schema carries an AUTHORITATIVE text type, fail closed on a
+    // wrong-variant value (mirroring the other scalar builders) rather than
+    // silently string-formatting it. For `cql_type = None` or opaque types
+    // (e.g. `Custom`) this stays the permissive Utf8 fallback: those columns
+    // have no authoritative type to validate against.
+    let strict_text = matches!(
+        col.cql_type.as_ref().map(unwrap_frozen_type),
+        Some(CqlType::Text | CqlType::Ascii | CqlType::Varchar)
+    );
     let values: Vec<Option<String>> = rows
         .iter()
-        .map(|row| {
-            row.values.get(col.name.as_str()).and_then(|v| match v {
-                Value::Null => None,
-                Value::Text(s) => Some(s.clone()),
-                Value::Json(j) => Some(j.to_string()),
-                // Use ValueFormatter for complex types
-                other => Some(ValueFormatter::format_value(other)),
-            })
-        })
-        .collect();
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::Null) => Ok(None),
+                Some(Value::Text(s)) => Ok(Some(s.clone())),
+                // `Json` is only a valid string source on the opaque fallback;
+                // an authoritative text column must fail closed on it.
+                Some(Value::Json(j)) if !strict_text => Ok(Some(j.to_string())),
+                Some(other) if strict_text => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected Text value, got {:?}",
+                    col.name, other
+                ))),
+                // Opaque / untyped fallback: format complex types as strings.
+                Some(other) => Ok(Some(ValueFormatter::format_value(other))),
+            },
+        )
+        .collect::<Result<Vec<Option<String>>, ArrowConvertError>>()?;
     Ok(Arc::new(StringArray::from(values)))
 }
 
 fn build_binary_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<&[u8]>> = rows
         .iter()
-        .map(|row| {
-            row.values.get(col.name.as_str()).and_then(|v| match v {
-                Value::Blob(b) => Some(b.as_slice()),
-                Value::Null => None,
-                _ => None,
-            })
-        })
-        .collect();
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::Blob(b)) => Ok(Some(b.as_slice())),
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected Blob value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
+        .collect::<Result<Vec<Option<&[u8]>>, ArrowConvertError>>()?;
     Ok(Arc::new(BinaryArray::from(values)))
 }
 
@@ -1374,14 +1529,18 @@ fn build_timestamp_array(
 ) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<i64>> = rows
         .iter()
-        .map(|row| {
-            row.values.get(col.name.as_str()).and_then(|v| match v {
-                Value::Timestamp(ts) => Some(*ts),
-                Value::Null => None,
-                _ => None,
-            })
-        })
-        .collect();
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::Timestamp(ts)) => Ok(Some(*ts)),
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected Timestamp value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
+        .collect::<Result<Vec<Option<i64>>, ArrowConvertError>>()?;
     Ok(Arc::new(
         TimestampMillisecondArray::from(values).with_timezone("UTC"),
     ))
@@ -1390,14 +1549,18 @@ fn build_timestamp_array(
 fn build_uuid_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<[u8; 16]>> = rows
         .iter()
-        .map(|row| {
-            row.values.get(col.name.as_str()).and_then(|v| match v {
-                Value::Uuid(uuid) => Some(*uuid),
-                Value::Null => None,
-                _ => None,
-            })
-        })
-        .collect();
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::Uuid(uuid)) => Ok(Some(*uuid)),
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected Uuid value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
+        .collect::<Result<Vec<Option<[u8; 16]>>, ArrowConvertError>>()?;
 
     let mut builder = arrow::array::FixedSizeBinaryBuilder::new(16);
     for opt in values {
@@ -1417,14 +1580,18 @@ fn build_uuid_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Arr
 fn build_date32_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<i32>> = rows
         .iter()
-        .map(|row| {
-            row.values.get(col.name.as_str()).and_then(|v| match v {
-                Value::Date(days) => Some(*days),
-                Value::Null => None,
-                _ => None,
-            })
-        })
-        .collect();
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::Date(days)) => Ok(Some(*days)),
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected Date value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
+        .collect::<Result<Vec<Option<i32>>, ArrowConvertError>>()?;
     Ok(Arc::new(Date32Array::from(values)))
 }
 
@@ -1435,14 +1602,18 @@ fn build_time64_ns_array(
 ) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<i64>> = rows
         .iter()
-        .map(|row| {
-            row.values.get(col.name.as_str()).and_then(|v| match v {
-                Value::Time(nanos) => Some(*nanos),
-                Value::Null => None,
-                _ => None,
-            })
-        })
-        .collect();
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::Time(nanos)) => Ok(Some(*nanos)),
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected Time value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
+        .collect::<Result<Vec<Option<i64>>, ArrowConvertError>>()?;
     Ok(Arc::new(Time64NanosecondArray::from(values)))
 }
 
@@ -1456,7 +1627,7 @@ fn build_decimal128_array(
         .with_precision_and_scale(DECIMAL_MAX_PRECISION, DECIMAL_FIXED_SCALE as i8)?;
 
     for row in rows {
-        match row.values.get(col.name.as_str()) {
+        match unwrap_frozen_value(row.values.get(col.name.as_str())) {
             Some(Value::Decimal { scale, unscaled }) => {
                 let rescaled = rescale_decimal(*scale, unscaled).map_err(|e| {
                     ArrowConvertError::InvalidValue(format!("Column '{}': {e}", col.name))
@@ -1488,7 +1659,7 @@ fn build_varint_as_decimal128_array(
         .with_precision_and_scale(DECIMAL_MAX_PRECISION, 0)?;
 
     for row in rows {
-        match row.values.get(col.name.as_str()) {
+        match unwrap_frozen_value(row.values.get(col.name.as_str())) {
             Some(Value::Varint(bytes)) => {
                 if bytes.is_empty() {
                     builder.append_value(0);
@@ -1536,14 +1707,18 @@ fn build_duration_utf8_array(
 ) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<String>> = rows
         .iter()
-        .map(|row| {
-            row.values.get(col.name.as_str()).and_then(|v| match v {
-                Value::Duration { .. } => Some(ValueFormatter::format_value(v)),
-                Value::Null => None,
-                _ => None,
-            })
-        })
-        .collect();
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(v @ Value::Duration { .. }) => Ok(Some(ValueFormatter::format_value(v))),
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected Duration value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
+        .collect::<Result<Vec<Option<String>>, ArrowConvertError>>()?;
     Ok(Arc::new(StringArray::from(values)))
 }
 
@@ -1554,7 +1729,7 @@ fn build_uuid_fixed_binary_array(
 ) -> Result<ArrayRef, ArrowConvertError> {
     let mut builder = arrow::array::FixedSizeBinaryBuilder::new(16);
     for row in rows {
-        match row.values.get(col.name.as_str()) {
+        match unwrap_frozen_value(row.values.get(col.name.as_str())) {
             Some(Value::Uuid(bytes)) => builder.append_value(bytes)?,
             Some(Value::Null) | None => builder.append_null(),
             Some(other) => {
@@ -1575,16 +1750,20 @@ fn build_inet_utf8_array(
 ) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<String>> = rows
         .iter()
-        .map(|row| {
-            row.values.get(col.name.as_str()).and_then(|v| match v {
-                Value::Inet(bytes) => {
-                    Some(ValueFormatter::format_value(&Value::Inet(bytes.clone())))
-                }
-                Value::Null => None,
-                _ => None,
-            })
-        })
-        .collect();
+        .map(
+            |row| match unwrap_frozen_value(row.values.get(col.name.as_str())) {
+                None => Ok(None),
+                Some(Value::Inet(bytes)) => Ok(Some(ValueFormatter::format_value(&Value::Inet(
+                    bytes.clone(),
+                )))),
+                Some(Value::Null) => Ok(None),
+                Some(other) => Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected Inet value, got {:?}",
+                    col.name, other
+                ))),
+            },
+        )
+        .collect::<Result<Vec<Option<String>>, ArrowConvertError>>()?;
     Ok(Arc::new(StringArray::from(values)))
 }
 
@@ -1595,7 +1774,7 @@ fn build_list_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Arr
     let mut null_bitmap: Vec<bool> = Vec::new();
 
     for row in rows {
-        match row.values.get(col.name.as_str()) {
+        match unwrap_frozen_value(row.values.get(col.name.as_str())) {
             Some(Value::List(items)) | Some(Value::Set(items)) => {
                 null_bitmap.push(true);
                 for item in items {
@@ -1607,9 +1786,11 @@ fn build_list_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Arr
                 null_bitmap.push(false);
                 offsets.push(values.len() as i32);
             }
-            _ => {
-                null_bitmap.push(false);
-                offsets.push(values.len() as i32);
+            Some(other) => {
+                return Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected List/Set value, got {:?}",
+                    col.name, other
+                )));
             }
         }
     }
@@ -1635,7 +1816,7 @@ fn build_map_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Arro
     let mut null_bitmap: Vec<bool> = Vec::new();
 
     for row in rows {
-        match row.values.get(col.name.as_str()) {
+        match unwrap_frozen_value(row.values.get(col.name.as_str())) {
             Some(Value::Map(pairs)) => {
                 null_bitmap.push(true);
                 for (k, v) in pairs {
@@ -1648,9 +1829,11 @@ fn build_map_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Arro
                 null_bitmap.push(false);
                 offsets.push(keys.len() as i32);
             }
-            _ => {
-                null_bitmap.push(false);
-                offsets.push(keys.len() as i32);
+            Some(other) => {
+                return Err(ArrowConvertError::InvalidValue(format!(
+                    "column '{}': expected Map value, got {:?}",
+                    col.name, other
+                )));
             }
         }
     }
@@ -1681,4 +1864,398 @@ fn build_map_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Arro
         Some(null_buffer),
         false,
     )))
+}
+
+// =========================================================================
+// Tests — fail-closed Value→Arrow conversion (Issue #1485)
+// =========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::{ColumnInfo, QueryRow};
+    use crate::schema::CqlType;
+    use crate::types::{DataType, Value};
+    use crate::RowKey;
+    use arrow::array::{Array, Int32Array};
+
+    /// Build a `ColumnInfo` for a single test column.
+    fn col(name: &str, data_type: DataType, cql_type: Option<CqlType>) -> ColumnInfo {
+        ColumnInfo {
+            name: name.to_string(),
+            data_type,
+            nullable: true,
+            position: 0,
+            table_name: None,
+            cql_type,
+        }
+    }
+
+    /// Build a `QueryRow` from a single (column, value) pair.
+    fn row_one(name: &str, value: Value) -> QueryRow {
+        let mut values: HashMap<Arc<str>, Value> = HashMap::new();
+        values.insert(name.into(), value);
+        QueryRow {
+            values,
+            key: RowKey::new(Vec::new()),
+            metadata: Default::default(),
+            cell_metadata: None,
+        }
+    }
+
+    /// An empty row: the column is absent entirely.
+    fn row_absent() -> QueryRow {
+        QueryRow {
+            values: HashMap::new(),
+            key: RowKey::new(Vec::new()),
+            metadata: Default::default(),
+            cell_metadata: None,
+        }
+    }
+
+    fn is_invalid_value(res: Result<arrow::record_batch::RecordBatch, ArrowConvertError>) -> bool {
+        matches!(res, Err(ArrowConvertError::InvalidValue(_)))
+    }
+
+    /// (1) Typed high-fidelity scalar builder (`build_date32_array`): a
+    /// type-mismatched value must FAIL CLOSED rather than silently become NULL.
+    #[test]
+    fn typed_scalar_type_mismatch_is_error() {
+        let columns = vec![col("d", DataType::Timestamp, Some(CqlType::Date))];
+        let rows = vec![row_one("d", Value::Text("not-a-date".into()))];
+        assert!(is_invalid_value(rows_to_record_batch(&columns, &rows)));
+    }
+
+    /// (2) Flat `data_type` builder path (`build_int32_array`, `cql_type = None`):
+    /// a type-mismatched value must FAIL CLOSED.
+    #[test]
+    fn flat_builder_type_mismatch_is_error() {
+        let columns = vec![col("n", DataType::Integer, None)];
+        let rows = vec![row_one("n", Value::Text("nope".into()))];
+        assert!(is_invalid_value(rows_to_record_batch(&columns, &rows)));
+    }
+
+    /// (3a) Collection path (`build_typed_value_array` List arm): a scalar where
+    /// a list is expected must FAIL CLOSED.
+    #[test]
+    fn collection_expected_list_got_scalar_is_error() {
+        let columns = vec![col(
+            "l",
+            DataType::List,
+            Some(CqlType::List(Box::new(CqlType::Int))),
+        )];
+        let rows = vec![row_one("l", Value::Integer(5))];
+        assert!(is_invalid_value(rows_to_record_batch(&columns, &rows)));
+    }
+
+    /// (3b) Collection element dispatch (Pattern A scalar arm reached via list
+    /// recursion): a mistyped element inside a well-formed list must FAIL CLOSED.
+    #[test]
+    fn collection_mistyped_element_is_error() {
+        let columns = vec![col(
+            "l",
+            DataType::List,
+            Some(CqlType::List(Box::new(CqlType::Int))),
+        )];
+        let rows = vec![row_one(
+            "l",
+            Value::List(vec![Value::Integer(1), Value::Text("bad".into())]),
+        )];
+        assert!(is_invalid_value(rows_to_record_batch(&columns, &rows)));
+    }
+
+    /// (3c) Map path (`build_typed_value_array` Map arm): a scalar where a map is
+    /// expected must FAIL CLOSED.
+    #[test]
+    fn collection_expected_map_got_scalar_is_error() {
+        let columns = vec![col(
+            "m",
+            DataType::Map,
+            Some(CqlType::Map(
+                Box::new(CqlType::Text),
+                Box::new(CqlType::Int),
+            )),
+        )];
+        let rows = vec![row_one("m", Value::Integer(7))];
+        assert!(is_invalid_value(rows_to_record_batch(&columns, &rows)));
+    }
+
+    /// (4) Regression guard: `Value::Null` and an ABSENT column must STILL map to
+    /// proper Arrow nulls — never an error.
+    #[test]
+    fn null_and_absent_still_build_ok() {
+        let columns = vec![col("n", DataType::Integer, None)];
+        let rows = vec![row_one("n", Value::Null), row_absent()];
+        let batch = rows_to_record_batch(&columns, &rows).expect("null/absent must build");
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(batch.column(0).null_count(), 2);
+    }
+
+    /// (5) Happy path: a correctly-typed value converts cleanly.
+    #[test]
+    fn correctly_typed_value_builds_ok() {
+        let columns = vec![col("n", DataType::Integer, None)];
+        let rows = vec![row_one("n", Value::Integer(42))];
+        let batch = rows_to_record_batch(&columns, &rows).expect("well-typed value must build");
+        let arr = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .expect("Int32Array");
+        assert_eq!(arr.value(0), 42);
+        assert_eq!(arr.null_count(), 0);
+    }
+
+    /// (6) Regression: a CQL `float` (32-bit) column whose value is carried as
+    /// the wider `Value::Float` (f64) by the decode path must convert (narrowed
+    /// to f32), NOT be rejected as a type mismatch. Real data (e.g. a `height`
+    /// float column) surfaces `Value::Float`; the old silent `_ => None`
+    /// dropped it to NULL. Covers both the typed and flat float32 arms.
+    #[test]
+    fn float32_column_accepts_wide_float_value() {
+        // Flat path (cql_type = None -> build_float32_array).
+        let flat = vec![col("h", DataType::Float32, None)];
+        let rows = vec![row_one("h", Value::Float(1.84f32 as f64))];
+        let batch = rows_to_record_batch(&flat, &rows).expect("wide float must narrow, not error");
+        let arr = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .expect("Float32Array");
+        assert_eq!(arr.value(0), 1.84f32);
+        assert_eq!(arr.null_count(), 0);
+
+        // Typed high-fidelity path (CqlType::Float -> build_typed_value_array).
+        let typed = vec![col("h", DataType::Float32, Some(CqlType::Float))];
+        let rows = vec![row_one("h", Value::Float(1.84f32 as f64))];
+        let batch =
+            rows_to_record_batch(&typed, &rows).expect("wide float (typed) must narrow, not error");
+        let arr = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .expect("Float32Array");
+        assert_eq!(arr.value(0), 1.84f32);
+    }
+
+    /// (7a) Tuple arm: a non-`Tuple` top-level value in a tuple column must FAIL
+    /// CLOSED, not silently become a struct row of null children.
+    #[test]
+    fn tuple_expected_tuple_got_scalar_is_error() {
+        let columns = vec![col(
+            "t",
+            DataType::Text,
+            Some(CqlType::Tuple(vec![CqlType::Int, CqlType::Text])),
+        )];
+        let rows = vec![row_one("t", Value::Text("not-a-tuple".into()))];
+        assert!(is_invalid_value(rows_to_record_batch(&columns, &rows)));
+    }
+
+    /// (7b) Tuple arm regression: `Value::Null` and an ABSENT tuple column must
+    /// STILL build (as struct nulls), never error.
+    #[test]
+    fn tuple_null_and_absent_still_build_ok() {
+        let columns = vec![col(
+            "t",
+            DataType::Text,
+            Some(CqlType::Tuple(vec![CqlType::Int, CqlType::Text])),
+        )];
+        let rows = vec![row_one("t", Value::Null), row_absent()];
+        let batch = rows_to_record_batch(&columns, &rows).expect("null/absent tuple must build");
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(batch.column(0).null_count(), 2);
+    }
+
+    /// (8a) UDT arm: a non-`Udt` top-level value in a UDT column must FAIL
+    /// CLOSED, not silently become a struct row of null children.
+    #[test]
+    fn udt_expected_udt_got_scalar_is_error() {
+        let columns = vec![col(
+            "u",
+            DataType::Text,
+            Some(CqlType::Udt(
+                "my_type".into(),
+                vec![("a".into(), CqlType::Int), ("b".into(), CqlType::Text)],
+            )),
+        )];
+        let rows = vec![row_one("u", Value::Integer(9))];
+        assert!(is_invalid_value(rows_to_record_batch(&columns, &rows)));
+    }
+
+    /// (8b) UDT arm regression: `Value::Null` and an ABSENT UDT column must STILL
+    /// build (as struct nulls), never error.
+    #[test]
+    fn udt_null_and_absent_still_build_ok() {
+        let columns = vec![col(
+            "u",
+            DataType::Text,
+            Some(CqlType::Udt(
+                "my_type".into(),
+                vec![("a".into(), CqlType::Int), ("b".into(), CqlType::Text)],
+            )),
+        )];
+        let rows = vec![row_one("u", Value::Null), row_absent()];
+        let batch = rows_to_record_batch(&columns, &rows).expect("null/absent UDT must build");
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(batch.column(0).null_count(), 2);
+    }
+
+    /// (8c) UDT degenerate/empty-field arm (also how UNRESOLVED named UDTs are
+    /// represented): a non-`Udt` scalar must still FAIL CLOSED, not silently
+    /// serialize as UTF-8.
+    #[test]
+    fn empty_field_udt_expected_udt_got_scalar_is_error() {
+        let columns = vec![col(
+            "u",
+            DataType::Text,
+            Some(CqlType::Udt("unresolved".into(), vec![])),
+        )];
+        let rows = vec![row_one("u", Value::Integer(9))];
+        assert!(is_invalid_value(rows_to_record_batch(&columns, &rows)));
+    }
+
+    /// (7c) Tuple degenerate/empty-field arm: a non-`Tuple` scalar must still
+    /// FAIL CLOSED, not silently serialize as UTF-8.
+    #[test]
+    fn empty_field_tuple_expected_tuple_got_scalar_is_error() {
+        let columns = vec![col("t", DataType::Text, Some(CqlType::Tuple(vec![])))];
+        let rows = vec![row_one("t", Value::Text("nope".into()))];
+        assert!(is_invalid_value(rows_to_record_batch(&columns, &rows)));
+    }
+
+    /// (9a) Authoritative text column: a non-`Text` value must FAIL CLOSED via
+    /// the strict typed builder, not be silently string-formatted by the flat
+    /// `build_string_array`.
+    #[test]
+    fn authoritative_text_column_type_mismatch_is_error() {
+        for cql in [CqlType::Text, CqlType::Ascii, CqlType::Varchar] {
+            let columns = vec![col("s", DataType::Text, Some(cql))];
+            let rows = vec![row_one("s", Value::Integer(1))];
+            assert!(is_invalid_value(rows_to_record_batch(&columns, &rows)));
+        }
+    }
+
+    /// (9c) Authoritative text column: a `Value::Json` must FAIL CLOSED (the JSON
+    /// stringification is only valid on the opaque fallback).
+    #[test]
+    fn authoritative_text_column_rejects_json() {
+        let columns = vec![col("s", DataType::Text, Some(CqlType::Text))];
+        let rows = vec![row_one("s", Value::Json(serde_json::json!({"a": 1})))];
+        assert!(is_invalid_value(rows_to_record_batch(&columns, &rows)));
+    }
+
+    /// (9d) Frozen-wrapped valid values must NOT be rejected: `frozen<text>`
+    /// with `Value::Frozen(Value::Text(..))` builds, and a high-fidelity
+    /// `frozen<date>` with `Value::Frozen(Value::Date(..))` builds.
+    #[test]
+    fn frozen_wrapped_scalar_values_build_ok() {
+        // frozen<text> via the flat string builder.
+        let text_cols = vec![col(
+            "s",
+            DataType::Text,
+            Some(CqlType::Frozen(Box::new(CqlType::Text))),
+        )];
+        let text_rows = vec![row_one(
+            "s",
+            Value::Frozen(Box::new(Value::Text("hi".into()))),
+        )];
+        let batch =
+            rows_to_record_batch(&text_cols, &text_rows).expect("frozen<text> value must build");
+        let arr = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("StringArray");
+        assert_eq!(arr.value(0), "hi");
+
+        // frozen<date> via the high-fidelity date builder.
+        let date_cols = vec![col(
+            "d",
+            DataType::Integer,
+            Some(CqlType::Frozen(Box::new(CqlType::Date))),
+        )];
+        let date_rows = vec![row_one("d", Value::Frozen(Box::new(Value::Date(19_000))))];
+        let batch =
+            rows_to_record_batch(&date_cols, &date_rows).expect("frozen<date> value must build");
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(batch.column(0).null_count(), 0);
+    }
+
+    /// (9b) Authoritative text column happy path + nulls: a correct `Value::Text`
+    /// converts cleanly and null/absent stay null.
+    #[test]
+    fn authoritative_text_column_builds_ok() {
+        let columns = vec![col("s", DataType::Text, Some(CqlType::Text))];
+        let rows = vec![
+            row_one("s", Value::Text("hi".into())),
+            row_one("s", Value::Null),
+            row_absent(),
+        ];
+        let batch = rows_to_record_batch(&columns, &rows).expect("well-typed text must build");
+        let arr = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("StringArray");
+        assert_eq!(arr.value(0), "hi");
+        assert_eq!(arr.null_count(), 2);
+    }
+
+    /// (10a) Authoritative `int` column: a `Value::Date` (same-width i32) must
+    /// FAIL CLOSED — the `date`→i32 acceptance is only for the opaque path.
+    #[test]
+    fn authoritative_int_column_rejects_date() {
+        let columns = vec![col("n", DataType::Integer, Some(CqlType::Int))];
+        let rows = vec![row_one("n", Value::Date(19_000))];
+        assert!(is_invalid_value(rows_to_record_batch(&columns, &rows)));
+    }
+
+    /// (10b) Opaque (`cql_type = None`) int column: the `Date`→i32 same-width
+    /// acceptance is preserved (no authoritative type to validate against).
+    #[test]
+    fn opaque_int_column_accepts_date() {
+        let columns = vec![col("n", DataType::Integer, None)];
+        let rows = vec![row_one("n", Value::Date(19_000))];
+        let batch = rows_to_record_batch(&columns, &rows).expect("opaque int accepts Date");
+        let arr = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .expect("Int32Array");
+        assert_eq!(arr.value(0), 19_000);
+    }
+
+    /// (10c) Authoritative `bigint` / `counter` columns: a `Value::Time`
+    /// (same-width i64) must FAIL CLOSED; `Value::Counter` in a `bigint` column
+    /// must also FAIL CLOSED.
+    #[test]
+    fn authoritative_bigint_counter_reject_mismatch() {
+        let bigint_time = vec![col("b", DataType::BigInt, Some(CqlType::BigInt))];
+        assert!(is_invalid_value(rows_to_record_batch(
+            &bigint_time,
+            &[row_one("b", Value::Time(123))]
+        )));
+
+        let counter_time = vec![col("c", DataType::BigInt, Some(CqlType::Counter))];
+        assert!(is_invalid_value(rows_to_record_batch(
+            &counter_time,
+            &[row_one("c", Value::Time(123))]
+        )));
+
+        let bigint_counter = vec![col("b", DataType::BigInt, Some(CqlType::BigInt))];
+        assert!(is_invalid_value(rows_to_record_batch(
+            &bigint_counter,
+            &[row_one("b", Value::Counter(7))]
+        )));
+    }
+
+    /// (10d) Authoritative `counter` column happy path: `Value::Counter` builds.
+    #[test]
+    fn authoritative_counter_column_accepts_counter() {
+        let columns = vec![col("c", DataType::BigInt, Some(CqlType::Counter))];
+        let rows = vec![row_one("c", Value::Counter(42))];
+        let batch = rows_to_record_batch(&columns, &rows).expect("counter accepts Counter");
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(batch.column(0).null_count(), 0);
+    }
 }
