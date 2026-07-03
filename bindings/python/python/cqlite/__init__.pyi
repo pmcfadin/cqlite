@@ -269,6 +269,32 @@ class Database:
         """
         ...
 
+    def refresh(self) -> "RefreshReport":
+        """Re-discover the data directory and apply changes to the reader set.
+
+        A ``Database`` serves every query from the snapshot of on-disk SSTables
+        taken at ``open`` time. ``refresh()`` explicitly picks up files that
+        appeared or disappeared since then: newly present generations become
+        queryable, removed generations stop being queried, and unchanged
+        generations keep their warm reader state (they are not re-parsed).
+
+        The refresh is atomic and fail-closed: if any newly discovered
+        generation fails to open (e.g. a corrupt ``Statistics.db``) the call
+        raises and the previously held reader set is left fully unchanged. A
+        query already in flight is unaffected; queries started after this call
+        returns see the new set.
+
+        Returns:
+            A ``RefreshReport`` with ``tables_scanned``, ``readers_added``,
+            and ``readers_removed``.
+
+        Raises:
+            RuntimeError: If the database is closed.
+            CqliteError: If a newly discovered generation fails to open (the
+                held reader set is left unchanged).
+        """
+        ...
+
     def flush_run(self) -> str:
         """Flush the memtable to a new SSTable.
 
@@ -764,6 +790,47 @@ class MaintenanceReport:
 
         Keys: ``time_spent_ms``, ``rows_merged``, ``bytes_written``,
               ``completed_merges``, ``pending_compaction``.
+        """
+        ...
+
+    def __repr__(self) -> str: ...
+
+
+class RefreshReport:
+    """Result of a single ``Database.refresh()`` call (issue #1749).
+
+    Describes how an explicit directory refresh changed the held SSTable reader
+    set.
+
+    Attributes:
+        tables_scanned: Number of table directories re-discovered.
+        readers_added: Number of SSTable generations newly opened.
+        readers_removed: Number of SSTable generations dropped.
+
+    Example:
+        >>> report = db.refresh()
+        >>> print(f"+{report.readers_added}/-{report.readers_removed} readers")
+    """
+
+    @property
+    def tables_scanned(self) -> int:
+        """Number of table directories re-discovered."""
+        ...
+
+    @property
+    def readers_added(self) -> int:
+        """Number of SSTable generations newly opened."""
+        ...
+
+    @property
+    def readers_removed(self) -> int:
+        """Number of SSTable generations dropped."""
+        ...
+
+    def to_dict(self) -> dict[str, int]:
+        """Convert to a plain dictionary.
+
+        Keys: ``tables_scanned``, ``readers_added``, ``readers_removed``.
         """
         ...
 

@@ -28,6 +28,8 @@ from cqlite._cqlite import (
     # Write API (Issue #390)
     WriteStats,
     MaintenanceReport,
+    # Refresh (Issue #1749)
+    RefreshReport,
 )
 
 __all__ = [
@@ -58,4 +60,6 @@ __all__ = [
     # Write API (Issue #390)
     "WriteStats",
     "MaintenanceReport",
+    # Refresh (Issue #1749)
+    "RefreshReport",
 ]

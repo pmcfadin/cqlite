@@ -10,6 +10,7 @@ mod database;
 mod error;
 mod observability;
 mod prepared;
+mod refresh;
 mod result;
 mod runtime;
 mod stats;
@@ -20,6 +21,7 @@ pub use config::{config_from_py, StreamingConfig};
 pub use database::{open, Database};
 pub use error::{to_py_err, CqliteError, ParseError, QueryError, SchemaError};
 pub use prepared::PreparedStatement;
+pub use refresh::RefreshReport;
 pub use result::{ColumnInfo, QueryResult, QueryResultIter, Row, StreamingIterator};
 pub use runtime::{block_on, get_runtime};
 pub use stats::DatabaseStats;
@@ -55,6 +57,9 @@ fn _cqlite(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Register prepared statement types
     prepared::register_prepared(m)?;
+
+    // Register refresh report type (issue #1749)
+    refresh::register_refresh(m)?;
 
     // Register database stats types
     stats::register_stats(m)?;

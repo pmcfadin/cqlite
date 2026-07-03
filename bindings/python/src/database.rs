@@ -36,6 +36,7 @@ use pyo3::prelude::*;
 use crate::config::{config_from_py, StreamingConfig};
 use crate::error::to_py_err;
 use crate::prepared::PreparedStatement;
+use crate::refresh::RefreshReport;
 use crate::result::{QueryResult, StreamingIterator};
 use crate::runtime::block_on;
 use crate::stats::DatabaseStats;
@@ -549,6 +550,56 @@ impl Database {
             .map_err(to_py_err)?;
 
         DatabaseStats::from_core(py, core_stats)
+    }
+
+    /// Re-discover the data directory and apply changes to the held reader set.
+    ///
+    /// A `Database` takes a snapshot of the on-disk SSTables at `open` time and
+    /// serves every subsequent query from that snapshot. `refresh()` is the
+    /// explicit way to pick up files that appeared or disappeared since then:
+    /// it re-runs the same TOC/filename-component discovery `open` uses (no
+    /// content sniffing) and applies the diff — newly present generations
+    /// become queryable, removed generations stop being queried, and unchanged
+    /// generations keep their existing warm reader state (Index/Statistics/bloom
+    /// are not re-parsed).
+    ///
+    /// The refresh is atomic and fail-closed: if any newly discovered generation
+    /// fails to open (including a corrupt `Statistics.db`, per the #1626
+    /// posture), `refresh()` raises and leaves the previously held reader set
+    /// fully unchanged — no partial application. A query already in flight is
+    /// unaffected; queries started after `refresh()` returns see the new set.
+    ///
+    /// # Returns
+    ///
+    /// A `RefreshReport` with `tables_scanned`, `readers_added`, and
+    /// `readers_removed`.
+    ///
+    /// # Raises
+    ///
+    /// * `RuntimeError` – If the database is closed
+    /// * `CqliteError`  – If a newly discovered generation fails to open (the
+    ///                    held reader set is left unchanged)
+    ///
+    /// # Example
+    ///
+    /// ```python
+    /// # A new SSTable was copied into the data directory after open.
+    /// report = db.refresh()
+    /// print(f"added {report.readers_added}, removed {report.readers_removed}")
+    /// # Subsequent queries now see the new generation.
+    /// ```
+    pub fn refresh(&self, py: Python<'_>) -> PyResult<RefreshReport> {
+        self.ensure_open()?;
+
+        let db = self.inner();
+
+        // Release the GIL during the async re-discovery + reader swap so other
+        // Python threads keep running (same pattern as execute).
+        let core_report = py
+            .allow_threads(|| block_on(db.refresh()))
+            .map_err(to_py_err)?;
+
+        Ok(RefreshReport::from_core(core_report))
     }
 
     // -----------------------------------------------------------------------
