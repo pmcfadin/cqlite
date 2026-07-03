@@ -221,9 +221,16 @@ def main(argv):
     if scaling_floors:
         print()
 
-    if compared == 0 and scaling_evaluated == 0:
-        # Nothing could be compared or evaluated (e.g. baselines never produced)
-        # — surface loudly rather than passing silently.
+    # Median-bench protection is INDEPENDENT of the scaling floors (issue #1564
+    # roborev): if median benches are configured but none could be compared, that
+    # is missing baseline data and must fail — a passing scaling floor must not
+    # mask it.
+    if bench_configs and compared == 0:
+        print("❌ No median benches could be compared (baseline data missing).")
+        return 1
+    # Nothing configured at all, or a scaling-only config whose floors all skipped
+    # — surface loudly rather than passing silently.
+    if not bench_configs and scaling_evaluated == 0:
         print("❌ No tracked benches could be compared (no baseline data found).")
         return 1
 

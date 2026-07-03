@@ -60,18 +60,48 @@ _CRIT_SCALING_SKIP = os.path.join(_FIXTURES, "scaling_floor_skip")
 
 
 # ---------------------------------------------------------------------------
-# Helper
+# Helpers
+#
+# The real perf-gate.json now carries BOTH median `benches` and required
+# `scaling_floors`. Each test class exercises one concern in isolation by running
+# the real config with the other section stripped, so median fixtures need no
+# concurrent_scan data and scaling fixtures need no median data. A dedicated guard
+# test uses the FULL config to prove the two checks are independent.
 # ---------------------------------------------------------------------------
+import json  # noqa: E402
+import tempfile  # noqa: E402
+
+
+def _load_gate():
+    with open(_GATE_JSON) as fh:
+        return json.load(fh)
+
+
+def _run_with_config(criterion_dir, cfg, new_baseline="pr", base_baseline="base"):
+    fd, path = tempfile.mkstemp(suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(cfg, fh)
+        return main(
+            ["check_perf_regression.py", criterion_dir, new_baseline, base_baseline, path]
+        )
+    finally:
+        os.unlink(path)
+
+
 def _run(criterion_dir, new_baseline="pr", base_baseline="base"):
-    """Invoke main() with the real perf-gate.json and return the exit code."""
-    argv = [
-        "check_perf_regression.py",
-        criterion_dir,
-        new_baseline,
-        base_baseline,
-        _GATE_JSON,
-    ]
-    return main(argv)
+    """Median-bench view: real config with `scaling_floors` stripped."""
+    cfg = _load_gate()
+    cfg["scaling_floors"] = []
+    return _run_with_config(criterion_dir, cfg, new_baseline, base_baseline)
+
+
+def _run_scaling_only(criterion_dir, new_baseline="pr", base_baseline="base"):
+    """Scaling-floor view: real config with median `benches` stripped."""
+    cfg = _load_gate()
+    cfg["benches"] = []
+    cfg["advisory_benches"] = []
+    return _run_with_config(criterion_dir, cfg, new_baseline, base_baseline)
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +206,7 @@ class TestScalingFloor:
 
     def test_healthy_scaling_passes(self, capsys):
         """scaling ≈3.0 (buffered) / ≈3.2 (mmap) is above the floor → exit 0."""
-        exit_code = _run(_CRIT_SCALING_PASS)
+        exit_code = _run_scaling_only(_CRIT_SCALING_PASS)
         assert exit_code == 0, (
             "Expected zero exit when concurrent_scan scaling is healthy (≈3.0), "
             f"but got exit code {exit_code}."
@@ -184,7 +214,7 @@ class TestScalingFloor:
 
     def test_serialized_scaling_fails(self, capsys):
         """median(n4) ≈ 4·median(n1) → scaling ≈1.0 < 1.8 → non-zero exit."""
-        exit_code = _run(_CRIT_SCALING_FAIL)
+        exit_code = _run_scaling_only(_CRIT_SCALING_FAIL)
         assert exit_code != 0, (
             "Expected non-zero exit when concurrent_scan n4 median is ~4x the n1 "
             "median (re-serialized scan path, scaling ≈1.0), but got exit code 0."
@@ -192,9 +222,25 @@ class TestScalingFloor:
 
     def test_serialized_scaling_output_names_bench(self, capsys):
         """The failure output must name the floored scaling entry."""
-        _run(_CRIT_SCALING_FAIL)
+        _run_scaling_only(_CRIT_SCALING_FAIL)
         captured = capsys.readouterr()
         assert "concurrent_scan/buffered/n4" in captured.out
+
+    def test_passing_scaling_does_not_mask_missing_median(self, capsys):
+        """A passing scaling floor must NOT mask uncompared median benches.
+
+        Runs the FULL real config (median benches + scaling floors) against a
+        fixture that has only concurrent_scan data: the scaling floors pass, but
+        every configured median bench is uncompared → the gate must still fail
+        (issue #1564 roborev: the two checks are independent).
+        """
+        exit_code = main(
+            ["check_perf_regression.py", _CRIT_SCALING_PASS, "pr", "base", _GATE_JSON]
+        )
+        assert exit_code != 0, (
+            "Expected non-zero exit: median benches are configured but uncompared, "
+            "which a passing scaling floor must not mask."
+        )
 
     def test_missing_required_data_fails(self, capsys):
         """Missing data for a required scaling floor FAILS the gate (issue #1564).
