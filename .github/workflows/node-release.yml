@@ -88,6 +88,17 @@ jobs:
             npm run build
           fi
 
+      # Issue #1460: prove the release artifact we are about to ship can actually
+      # write. If `--features write-support` were ever dropped from the build,
+      # the fix makes DML fail closed, so this smoke reds instead of silently
+      # publishing a binary that no-ops INSERTs. Skipped only for the
+      # aarch64-linux CROSS build, which cannot be executed on the x86_64 host.
+      - name: Verify release artifact can write (write-smoke)
+        if: matrix.target != 'aarch64-unknown-linux-gnu'
+        working-directory: bindings/node
+        shell: bash
+        run: npx jest __test__/write-smoke.test.js --runInBand
+
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:

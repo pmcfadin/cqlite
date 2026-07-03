@@ -70,7 +70,13 @@ jobs:
 
       - name: Run smoke Jest subset
         working-directory: bindings/node
-        run: npx jest __test__/loader.test.js __test__/publish.test.js __test__/smoke.test.js --runInBand
+        # write-smoke.test.js (issue #1460) runs against the release-built
+        # (`npm run build` = --features write-support) `.node` artifact and
+        # asserts a DML INSERT is routed to the write engine and persists a
+        # non-empty *-Data.db. It reds if the write-support flag is ever dropped
+        # (the fix makes a stripped build fail closed on DML). Kept in the always
+        # -required smoke subset so it guards every PR, not just ci:bindings-full.
+        run: npx jest __test__/loader.test.js __test__/publish.test.js __test__/smoke.test.js __test__/write-smoke.test.js --runInBand
 
   build:
     name: Build (${{ matrix.target }})
