@@ -41,10 +41,10 @@ Retro weighted failure ranking:
 |---|---|---|---|
 | Reduce recurring `rework` (retro #1) | #1793 | push recurring finding classes left so they never trigger a fix→re-gate round | open |
 | Reduce recurring `roborev_findings` | #1736 | same family — pre-empt the recurring finding classes | open |
-| Tiered gate (`--lite`) + review-first | #1821 | fast inner-loop gate subset for iteration + full gate once pre-merge; conditional internal review before roborev | open |
+| Tiered gate (`--lite`) + review-first | #1821 | fast inner-loop gate subset for iteration + full gate once pre-merge; conditional internal review before roborev | 🔜 almost done (PR #1828) |
 | **Shared compiler cache (sccache)** | **#1822** | per-worktree `target/` + shared object cache to delete cross-worktree cold-compile duplication; rejected shared `CARGO_TARGET_DIR` (build-lock serializes parallel gates) | ✅ **DONE (PR #1833)** — 562s / 25.6% saved on fresh-worktree case, 100% hit rate |
 | Machine-wide gate concurrency cap | #1825 | bound simultaneous full-gate runs so higher session concurrency stays safe (also: concurrent gates skew wall-clock measurements) | open |
-| Gate perf: nextest + shared build cache | #1737 | ~15–20min sequential gate bottleneck; nextest + build cache (overlaps #1822) | open |
+| **Gate perf: nextest + parallel components** | **#1737** | **← designated NEXT lever.** Re-scoped post-#1822 to the 2 remaining levers: `cargo-nextest` for the core-tests floor (694s/67% of the gate — test *execution*, not compile) + capped parallelism of independent components. Target ≥40% off the 17.3-min warm baseline | 🔧 **in progress** (issue-1737 worktree; subagent implementing) |
 
 Three orthogonal families: **(1) cut the churn at the source** (#1793/#1736/#1821), **(2) delete
 duplicated compile work** (#1822/#1737), **(3) make higher concurrency safe** (#1825). Do all three;
@@ -69,3 +69,11 @@ they compound.
   Insight: incremental `target/` state still beats sccache for *repeated local edits* in one
   worktree — the two are complementary (sccache for fresh worktrees, incremental for local
   iteration). #1737 (nextest + build cache) now partially subsumed by this; flag for dedup.
+- **2026-07-03** — Post-sccache gate breakdown revealed the new floor: **core-tests is 67% of the
+  17.3-min warm gate (694s)** and it's test *execution*, not compile — sccache can't touch it. The
+  other 15 components combined are ~37s; the gate is still strictly sequential. **Re-scoped #1737**
+  (owner-directed) to the 2 remaining levers — `cargo-nextest` for core-tests (2–4× typical) +
+  capped parallelism of independent components (~32% alone, collapses to the core-tests long pole;
+  concurrency-capped per #1825). Moved out of #1737: build cache → #1822 (done), two-tier → #1821.
+  Claimed #1737 and dispatched a `test-validator` subagent to implement + measure (≥40% target off
+  the 1036s baseline).
