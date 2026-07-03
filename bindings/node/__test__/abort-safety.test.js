@@ -172,9 +172,16 @@ function runAndAssertSurvives(mode, entry, exposeUncompressed) {
     });
     let stdout = '';
     try {
+      // Child timeout is deliberately BELOW Jest's testTimeout (30s, see
+      // jest.config.js). execFileSync is synchronous and blocks the Jest
+      // worker, so a hung child must be killed by execFileSync's OWN timeout
+      // (surfacing here as a caught ETIMEDOUT -> rich "did not survive" failure)
+      // BEFORE Jest's worker timeout fires and kills the whole worker with a
+      // context-free error. Keeping it under 30s preserves meaningful abort/hang
+      // detection at the child boundary.
       stdout = execFileSync(process.execPath, ['-e', DRIVER, root, global.testPaths.SCHEMA_BASIC_TYPES, entry], {
         encoding: 'utf8',
-        timeout: 120000,
+        timeout: 20000,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (err) {

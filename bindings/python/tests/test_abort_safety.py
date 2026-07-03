@@ -222,27 +222,27 @@ def test_compressed_corrupt_sstable_survives(mode, entry):
 # The uncompressed flavor reaches the raw-parser panic. parquet is excluded
 # because it hangs there (a separate non-panic bug); see the module docstring.
 #
-# CONDITIONAL STRICT XFAIL (issue #1437): the marker is keyed on the ACTUAL
-# compiled panic strategy of the loaded wheel.
-#   * condition False (debug/unwind, or a post-#1440 release=unwind wheel):
-#     marker inactive -> these cases hard-assert the interpreter SURVIVES
-#     (rc==0) and must PASS. This preserves the gate's teeth: a boundary
-#     regression under an unwind build is still a hard FAIL.
-#   * condition True (release=abort, pre-#1440): the corrupt uncompressed
-#     SSTable aborts the interpreter (SIGABRT, rc!=0). A `strict` xfail records
-#     that expected failure as green -- and would flip to a hard failure the
-#     moment the case unexpectedly starts surviving.
+# CONDITIONAL STRICT XFAIL, applied IMPERATIVELY (issue #1437, roborev fix): the
+# expected-abort logic is keyed on the ACTUAL compiled panic strategy of the
+# loaded wheel and scoped to JUST the child-survival (rc==0) assertion -- it is
+# deliberately NOT a function-level ``@pytest.mark.xfail`` decorator. A decorator
+# marker masks EVERY exception in the test's setup AND call phase (verified:
+# both a fixture failure and a call-phase ``pytest.fail`` are swallowed as
+# XFAIL), which would let a fail-closed dataset gate (missing datasets under
+# ``CQLITE_REQUIRE_FIXTURES=1``) be silently recorded as an expected xfail
+# instead of the hard failure it must be. By running ``_require_source_or_skip``
+# first (unmasked) and only then branching on the compiled panic strategy, a
+# strict fixture failure stays a real error/skip while the rc-survival keeps
+# strict xfail semantics:
+#   * debug/unwind, or a post-#1440 release=unwind wheel (`_PANIC_ABORT` False):
+#     no xfail branch -> hard-assert the interpreter SURVIVES (rc==0) and PASS.
+#     Preserves the gate's teeth: a boundary regression under unwind is a FAIL.
+#   * release=abort, pre-#1440 (`_PANIC_ABORT` True): a dead child (rc!=0) is the
+#     expected abort -> ``pytest.xfail`` (green); an unexpectedly SURVIVING child
+#     (rc==0) is a hard FAIL, mirroring ``strict=True`` XPASS.
 # Once #1440 flips the release profile to `panic = "unwind"`,
-# `_built_with_panic_abort()` goes False on every wheel, the marker deactivates,
-# and these cases hard-assert again -- self-cleaning, no follow-up edit needed.
-@pytest.mark.xfail(
-    _PANIC_ABORT,
-    strict=True,
-    reason=(
-        "corrupt uncompressed SSTable aborts the interpreter until #1440 lands "
-        "panic=unwind (#1437)"
-    ),
-)
+# `_built_with_panic_abort()` goes False on every wheel, the abort branch never
+# fires, and these cases hard-assert again -- self-cleaning, no follow-up edit.
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("entry", ("execute", "streaming"))
 def test_uncompressed_corrupt_sstable_panic_is_contained(mode, entry):
@@ -252,20 +252,36 @@ def test_uncompressed_corrupt_sstable_panic_is_contained(mode, entry):
     debug/test profile (``panic=unwind``) PyO3 converts the core panic into a
     catchable ``PanicException`` and the child exits 0 -> PASS. Under an
     unmodified ``main`` RELEASE wheel (``panic=abort``) the same panic raises
-    SIGABRT, the child dies with a signal, ``returncode != 0`` -> this test
-    FAILS. That failure is the point (issue #1437 DoD): it proves the harness
-    exercises a real abort. Issue #1440 flips the release panic strategy so
-    this goes green on release too.
+    SIGABRT, the child dies with a signal, ``returncode != 0`` -> this case is
+    an expected (strict) xfail. That expected abort is the point (issue #1437
+    DoD): it proves the harness exercises a real abort. Issue #1440 flips the
+    release panic strategy so this goes green on release too.
     """
+    # Dataset/schema gating runs FIRST and UNMASKED: a strict fail-closed
+    # dataset failure here is a hard error, never swallowed as an expected xfail.
     _require_source_or_skip()
     result = _run_driver(mode, entry, expose_uncompressed=True)
     ctx = (
         f"mode={mode} entry={entry} rc={result.returncode}\n"
         f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
     )
+    if _PANIC_ABORT:
+        # release=abort, pre-#1440. Strict xfail scoped to the rc assertion only.
+        if result.returncode != 0:
+            pytest.xfail(
+                "corrupt uncompressed SSTable aborts the interpreter until "
+                f"#1440 lands panic=unwind (#1437)\n{ctx}"
+            )
+        # Child unexpectedly survived on an abort wheel -> strict XPASS = FAIL.
+        pytest.fail(
+            "child survived corrupt input on a panic=abort wheel: the abort "
+            "boundary unexpectedly held. Remove the abort xfail branch (#1440 "
+            f"may have landed early).\n{ctx}",
+            pytrace=False,
+        )
+    # unwind build: the boundary MUST contain the panic and the child MUST live.
     assert result.returncode == 0, (
-        "child process aborted on corrupt input (expected on unmodified `main` "
-        "release; #1440 fixes it). If this failed under a DEBUG build the "
-        f"boundary regressed.\n{ctx}"
+        "child process aborted on corrupt input under a DEBUG/unwind build -- "
+        f"the boundary regressed.\n{ctx}"
     )
     _assert_drove_entry_point(result, entry, ctx)
