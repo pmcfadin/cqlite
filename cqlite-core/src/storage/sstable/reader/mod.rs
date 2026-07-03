@@ -990,18 +990,54 @@ impl SSTableReader {
         Ok(Some(Arc::new(crc)))
     }
 
-    /// Set the schema registry for schema-driven operations
+    /// Set the schema registry for schema-driven operations.
+    ///
+    /// This is a SYNC method (`&mut self`, non-async), so it CANNOT await the
+    /// async registry to pre-resolve the sync schema-fallback cache
+    /// ([`registry_schema`](Self::registry_schema)) — doing so would require a
+    /// `block_on`, which #1692 (AG3) forbids on a tokio worker thread. It
+    /// therefore only stores the registry and INVALIDATES any previously
+    /// pre-resolved cache (the new registry may resolve a different schema).
+    ///
+    /// Direct callers that intend to trigger a SYNC parse (whose schema-fallback
+    /// tier reads `registry_schema`) must, from an async context, either call the
+    /// combined [`attach_schema_registry`](Self::attach_schema_registry) instead,
+    /// or call [`resolve_registry_schema`](Self::resolve_registry_schema) after
+    /// this. Otherwise the sync path deliberately falls through to
+    /// header-column construction (or `None`). The crate's own async wiring path
+    /// (`open_reader_with_schema`) already does this.
     #[cfg(feature = "state_machine")]
     pub fn set_schema_registry(
         &mut self,
         schema_registry: Arc<tokio::sync::RwLock<crate::schema::SchemaRegistry>>,
     ) {
         self.schema_registry = Some(schema_registry);
+        // Invalidate the sync fallback cache: a prior registry (if any) may have
+        // resolved a schema that no longer applies. It is re-populated only by an
+        // explicit `resolve_registry_schema()` / `attach_schema_registry()`.
+        self.registry_schema = None;
         log::debug!(
             "Schema registry set for {}.{} - enabling schema-driven digest computation",
             self.header.keyspace,
             self.header.table_name
         );
+    }
+
+    /// Attach a schema registry AND pre-resolve it into the sync fallback cache
+    /// (issue #1692). Async wiring convenience for DIRECT callers: it combines
+    /// [`set_schema_registry`](Self::set_schema_registry) with
+    /// [`resolve_registry_schema`](Self::resolve_registry_schema) so the sync
+    /// `get_table_schema` fallback tier is populated without any `block_on`.
+    ///
+    /// Prefer this over the bare sync `set_schema_registry` whenever you attach a
+    /// registry to a reader you will parse synchronously.
+    #[cfg(feature = "state_machine")]
+    pub async fn attach_schema_registry(
+        &mut self,
+        schema_registry: Arc<tokio::sync::RwLock<crate::schema::SchemaRegistry>>,
+    ) {
+        self.set_schema_registry(schema_registry);
+        self.resolve_registry_schema().await;
     }
 
     /// Set the schema registry for schema-driven operations (non-state_machine builds)
