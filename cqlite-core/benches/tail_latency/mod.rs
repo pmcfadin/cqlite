@@ -394,10 +394,11 @@ pub fn run(fx: crate::fixtures::ReadFixture) -> Option<HarnessReport> {
 
     // Mixed load: one continuous background full-table scan on its own thread.
     let stop = Arc::new(AtomicBool::new(false));
-    // Readiness signal: the scan thread sets this once it has begun executing a
-    // scan, so the measured point-read stream overlaps a *live* scan rather than
-    // racing thread startup (roborev finding — without this, "scans > 0" after
-    // join only proves a scan ran at some point, not during the measured window).
+    // Readiness signal: the scan thread sets this once it has *completed a full
+    // scan* (and is looping into the next), so the measured point-read stream
+    // overlaps a demonstrably-live scan rather than racing thread startup (roborev
+    // finding — without this, "scans > 0" after join only proves a scan ran at some
+    // point, not during the measured window).
     let scan_started = Arc::new(AtomicBool::new(false));
     let scan_db = Arc::clone(&db);
     let scan_stop = Arc::clone(&stop);
@@ -410,13 +411,18 @@ pub fn run(fx: crate::fixtures::ReadFixture) -> Option<HarnessReport> {
             .expect("tail_latency background-scan runtime");
         let mut scans: u64 = 0;
         while !scan_stop.load(Ordering::Relaxed) {
-            // Mark the scan live just before the first execute begins.
-            scan_started_w.store(true, Ordering::Relaxed);
             let res = rt
                 .block_on(scan_db.execute(&scan_sql))
                 .expect("tail_latency background scan");
             std::hint::black_box(res.rows.len());
             scans += 1;
+            // Signal readiness only AFTER a full scan has actually executed, and
+            // keep looping: this proves the scan path is live (one pass done, the
+            // next already starting) before the foreground measured stream is
+            // released, rather than merely proving the thread was scheduled
+            // (roborev — a pre-execute flag could fire while this thread is
+            // descheduled, leaving the "mixed" window mostly scan-free).
+            scan_started_w.store(true, Ordering::Relaxed);
         }
         scans
     });
@@ -432,8 +438,8 @@ pub fn run(fx: crate::fixtures::ReadFixture) -> Option<HarnessReport> {
             stop.store(true, Ordering::Relaxed);
             let _ = scan_handle.join();
             panic!(
-                "tail_latency: background scan did not begin within 30s — cannot measure \
-                 the point-read stream under live contention (mixed load would be invalid)"
+                "tail_latency: background scan did not complete a full pass within 30s — cannot \
+                 measure the point-read stream under live contention (mixed load would be invalid)"
             );
         }
         std::thread::yield_now();
