@@ -28,16 +28,16 @@
 - [x] 4.1 Built each binding cdylib both ways (`--release` vs `--profile release-unwind`); recorded
       byte size for each (see PR notes). macOS arm64: Node 9,197,504 -> 11,413,120 (+24.1%);
       Python 9,233,808 -> 11,433,040 (+23.8%).
-- [ ] 4.2 Run a representative scan micro-benchmark abort vs unwind — NOT measured in the impl
-      environment (maturin/napi runtimes unavailable offline; the freshly-built cdylibs are not
-      loadable as installed modules). Lead to capture the scan micro-benchmark for the PR body.
+- [x] 4.2 Scan micro-benchmark abort vs unwind captured in PR #1751 body: Node 10.71->10.76ms
+      (+0.46%, within jitter), Python 9.997->10.379ms (+3.8%, shown to be run-to-run noise). No
+      measurable steady-state scan overhead.
 
 ## 5. Quality gates (definition of done)
 - [x] 5.1 `scripts/agent-gate.sh` PASS — AGENT-GATE SUMMARY block pasted in the handoff.
 - [x] 5.2 `RUSTFLAGS="-D warnings"` clean (gate clippy PASS); no new `unwrap()`/`expect()` in library
       code (no library code changed — profile/config/guard only).
-- [ ] 5.3 Spec-auditor (C) PASS against `openspec/changes/panic-unwind-profile/specs/**` — run by lead.
-- [ ] 5.4 roborev clean (`--base origin/main --agent codex`) — run by lead.
+- [x] 5.3 Spec-auditor (C) PASS against `openspec/changes/panic-unwind-profile/specs/**` — all R1-R4 satisfied.
+- [x] 5.4 roborev clean (`--base origin/main --agent codex`) — converged, no issues found.
 - [x] 5.5 File-size ratchet respected (gate file-size PASS).
 
 ## Notes
