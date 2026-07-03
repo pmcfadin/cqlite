@@ -77,6 +77,22 @@ pub struct SchemaRegistry {
     validator: Arc<SchemaValidator>,
     /// Schema version history
     version_history: Arc<RwLock<HashMap<String, Vec<SchemaVersion>>>>,
+    /// Per-table update-serialization locks (issue #1710).
+    ///
+    /// Maps `table_id` -> an async mutex whose guard is held across the whole
+    /// `register_schema` sequence {decide `existed` -> upsert schema -> append
+    /// version-history} for that table. This serializes concurrent updates of
+    /// the SAME table so the `schemas` map and `version_history` can never
+    /// diverge (e.g. registry ends with task A's schema while history records
+    /// task B's as newest), WITHOUT holding the global `schemas` write lock
+    /// across the `create_schema_version(...).await`.
+    ///
+    /// Lock ordering (deadlock-free): the per-table lock is ALWAYS acquired
+    /// BEFORE the `schemas`/`version_history` locks; those inner locks are only
+    /// ever held briefly and never across an `.await`. The `std::sync::Mutex`
+    /// guarding this map itself is held only long enough to clone the per-table
+    /// `Arc` — never across an `.await`.
+    update_locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 /// Schema entry in the registry
@@ -270,7 +286,25 @@ impl SchemaRegistry {
             discovery_engine,
             validator,
             version_history: Arc::new(RwLock::new(HashMap::new())),
+            update_locks: std::sync::Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Fetch (creating if absent) the per-table update-serialization lock.
+    ///
+    /// The map's `std::sync::Mutex` is held only long enough to clone the
+    /// per-table `Arc<tokio::sync::Mutex<()>>` and is NEVER held across an
+    /// `.await`. On poisoning we recover the inner map rather than panic
+    /// (no `unwrap()`/`expect()` in library code).
+    fn table_update_lock(&self, table_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self
+            .update_locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks
+            .entry(table_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     /// Discover and register schema from SSTable files
@@ -307,6 +341,29 @@ impl SchemaRegistry {
     /// Register a schema from external source
     pub async fn register_schema(&self, schema: TableSchema, source: SchemaSource) -> Result<()> {
         let table_id = format!("{}.{}", schema.keyspace, schema.table);
+
+        // Serialize the WHOLE update for this table (issue #1710).
+        //
+        // The upsert of `schemas` and the append to `version_history` cannot be
+        // performed under one held lock: `create_schema_version` awaits the
+        // independent `version_history` lock, and holding the `schemas` write
+        // guard across that `.await` was the lock-order hazard fixed earlier.
+        // But if the upsert and the history-append are not serialized *together*
+        // per table, two concurrent updates of the SAME table with DIFFERENT
+        // schemas can interleave so the registry ends with one task's schema
+        // while history records the other's as newest (registry/history
+        // divergence).
+        //
+        // Fix: hold a per-table async mutex across the entire
+        // {decide existed -> upsert -> append version} sequence below. It is
+        // acquired FIRST — before any `schemas`/`version_history` lock — and
+        // those inner locks are still taken only briefly and never across an
+        // `.await`, so there is no lock-order cycle (no deadlock). Two
+        // concurrent `register_schema` calls for the same table thus run
+        // strictly one-after-another and stay consistent; calls for different
+        // tables still proceed in parallel.
+        let table_lock = self.table_update_lock(&table_id);
+        let _update_guard = table_lock.lock().await;
 
         // Validate schema if validation is enabled
         let validation_status = if self.config.enable_validation {
@@ -1699,6 +1756,86 @@ mod tests {
                 history.len(),
                 N - 1,
                 "exactly one first-registration + (N-1) versioned updates: no lost update"
+            );
+        }
+    }
+
+    /// A `simple_schema` plus one distinguishing regular column, so different
+    /// tasks can register genuinely DIFFERENT schemas for the same table.
+    fn schema_with_marker(table: &str, marker: &str) -> TableSchema {
+        let mut s = simple_schema(table);
+        s.columns.push(crate::schema::Column {
+            name: marker.to_string(),
+            data_type: "text".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        });
+        s
+    }
+
+    fn column_names(schema: &TableSchema) -> Vec<String> {
+        schema.columns.iter().map(|c| c.name.clone()).collect()
+    }
+
+    /// Issue #1710 (roborev Medium): registry and version-history must not
+    /// diverge under concurrent updates of the SAME table with DIFFERENT
+    /// schemas. Each task registers `users` with a distinct marker column, so
+    /// its schema is unique. With the per-table update lock, the whole
+    /// {upsert schema -> append version} sequence runs atomically per table, so
+    /// the final registry schema ALWAYS equals the newest `version_history`
+    /// entry. Without the lock, task A's upsert and task B's history-append can
+    /// interleave (registry=A, newest history=B) — divergence this test
+    /// detects. A barrier releases all tasks at once and we repeat many
+    /// iterations to make the interleaving window real; no deadlock either.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_distinct_schemas_registry_history_consistent() {
+        const N: usize = 16;
+        for _ in 0..2000 {
+            let mut cfg = SchemaRegistryConfig::default();
+            cfg.enable_versioning = true;
+            cfg.max_versions_per_schema = 10_000; // never trim; keep true newest
+            let registry = Arc::new(make_registry(cfg).await);
+
+            // Seed so every concurrent call takes the versioning (update) path.
+            registry
+                .register_schema(schema_with_marker("users", "seed"), SchemaSource::Manual)
+                .await
+                .expect("seed register");
+
+            let barrier = Arc::new(tokio::sync::Barrier::new(N));
+            let mut handles = vec![];
+            for i in 0..N {
+                let r = Arc::clone(&registry);
+                let b = Arc::clone(&barrier);
+                handles.push(tokio::spawn(async move {
+                    let marker = format!("c{i}");
+                    b.wait().await;
+                    r.register_schema(schema_with_marker("users", &marker), SchemaSource::Manual)
+                        .await
+                        .expect("concurrent register");
+                }));
+            }
+            for h in handles {
+                h.await.expect("task joins (no deadlock)");
+            }
+
+            // The registry's current schema must equal the newest recorded
+            // version — the two cannot have been left describing different
+            // updates.
+            let current = registry.get_schema("test_ks", "users").await.expect("get");
+            let history = registry
+                .get_schema_history("test_ks", "users")
+                .await
+                .expect("history");
+            let newest = history.last().expect("at least one version recorded");
+            assert_eq!(
+                column_names(&current),
+                column_names(&newest.schema),
+                "registry schema and newest version_history entry must agree \
+                 (registry={:?}, newest_version={:?})",
+                column_names(&current),
+                column_names(&newest.schema),
             );
         }
     }
