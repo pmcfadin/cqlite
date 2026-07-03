@@ -121,9 +121,18 @@ jobs:
           fi
           git checkout --force --detach origin/main
           git submodule update --init --recursive || true
+          # The `compaction` bench target may not exist on `main` yet (it is
+          # introduced by the PR that adds this bench). Include --bench compaction
+          # only when the target is present on the checked-out tree; otherwise
+          # cargo bench would fail before the comparison script runs. The compare
+          # script SKIPs any bench missing from the baseline, so a first-PR
+          # baseline with no compaction data stays green.
+          BENCH_TARGETS=(--bench read --bench write --bench concurrent_scan --bench read_while_write)
+          if [[ -f cqlite-core/benches/compaction.rs ]]; then
+            BENCH_TARGETS+=(--bench compaction)
+          fi
           cargo bench -p cqlite-core --features "$BENCH_FEATURES" \
-            --bench read --bench write --bench concurrent_scan --bench read_while_write --bench compaction \
-            -- --save-baseline base "${BENCH_ARGV[@]}"
+            "${BENCH_TARGETS[@]}" -- --save-baseline base "${BENCH_ARGV[@]}"
 
       - name: Restore PR ref (for the gate script + policy)
         run: git checkout --force --detach ${{ steps.refs.outputs.pr_ref }}
