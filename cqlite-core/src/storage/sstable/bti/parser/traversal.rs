@@ -116,8 +116,14 @@ fn ordered_children(node: &BtiNode) -> Vec<(u8, usize)> {
 /// result Vec in byte-comparable order.
 ///
 /// The traversal is iterative (explicit stack), bounds-checks every offset, and
-/// enforces three independent limits so corrupt or cyclic tries produce an error
-/// rather than an infinite loop, unbounded memory, or a panic.  **Every bound is
+/// enforces a **visited-offset guard** plus three independent limits so corrupt or
+/// cyclic tries produce an error rather than an infinite loop, unbounded memory, or
+/// a panic.  The visited-offset guard fires FIRST for cycles/reconvergence: a BTI
+/// trie is a TREE (each node written once, referenced by exactly one parent), so no
+/// offset is legitimately entered twice during a full DFS.  Rejecting the first
+/// re-entry bounds the PENDING OP STACK — a small cyclic/high-fan-out node cannot
+/// push `Enter` ops faster than the total-work counter climbs toward a large padded
+/// trie length (issue #1629 adversarial reconvergence).  **Every remaining bound is
 /// relative to the trie's own byte length (`trie_data.len()`), never a fixed
 /// constant.**  The reason: on an acyclic trie every node on a root→node path is
 /// distinct and occupies at least one trie byte, so any legitimately reconstructed
@@ -182,6 +188,18 @@ where
     // Total nodes entered across ALL paths — the cycle / reconvergence guard.
     let mut nodes_visited: usize = 0;
 
+    // Per-offset visited bitset (1 bit per trie byte) — the FIRST-re-entry guard.
+    // A BTI trie is structurally a TREE: every node is written once and referenced
+    // by exactly one parent, so during a full DFS no node offset is legitimately
+    // entered more than once.  Rejecting the first re-entry bounds the PENDING OP
+    // STACK: it stops a small cyclic/reconvergent node with high fan-out (e.g. a
+    // Dense node whose up-to-256 children all point back at itself or a shared
+    // descendant) from pushing `Enter` ops far faster than `nodes_visited` climbs
+    // toward a large padded `trie_data.len()` — which the total-work guard alone
+    // would let exhaust memory before firing (issue #1629 adversarial reconvergence).
+    // A bit-per-offset respects the <128 MB memory target (1/8th of a `Vec<bool>`).
+    let mut visited = vec![0u8; trie_data.len().div_ceil(8)];
+
     while let Some(op) = stack.pop() {
         let DfsOp::Enter {
             node_offset,
@@ -234,6 +252,20 @@ where
                 trie_data.len()
             )));
         }
+
+        // Visited-offset guard: reject the FIRST re-entry of any node offset.
+        // Fires BEFORE this node's children are decoded/scheduled, so a cycle or a
+        // DAG-style reconvergence cannot inflate the op stack (or `nodes_visited`)
+        // past a single extra visit.  Runs after the OOB check so `node_offset` is
+        // a valid index into the bitset.
+        let word = node_offset >> 3;
+        let bit = 1u8 << (node_offset & 7);
+        if visited[word] & bit != 0 {
+            return Err(Error::Parse(format!(
+                "BTI DFS revisited node offset {node_offset} (corrupt or cyclic trie)"
+            )));
+        }
+        visited[word] |= bit;
 
         // 1) Emit this node's own payload (if any) BEFORE descending — the key
         //    terminating here sorts before any continuation.  Clone `path` ONLY
@@ -522,10 +554,11 @@ mod tests {
     }
 
     /// Issue #1629 defect 2: an adversarial *reconverging* trie whose node visits
-    /// grow super-linearly (each internal node has two transitions pointing at the
-    /// SAME child) must terminate via the total-work bound rather than hang.  Every
-    /// individual path stays short (so the key-bytes cap never fires), but
-    /// `nodes_visited` blows past `trie_data.len()` almost immediately.
+    /// would grow super-linearly (each internal node has two transitions pointing at
+    /// the SAME child) must terminate rather than hang.  With the visited-offset
+    /// guard the SHARED child trips the revisit/cyclic error on its second entry
+    /// (before the total-work bound), so we assert the revisit message and, above
+    /// all, that it does NOT hang or explode.
     #[test]
     fn dfs_reconverging_trie_hits_work_bound_no_hang() {
         // 30 levels ⇒ ~2^30 node visits without a work bound (would hang).
@@ -551,8 +584,8 @@ mod tests {
             .expect_err("a reconverging trie must error, not hang");
         let msg = format!("{err}");
         assert!(
-            msg.contains("total work bound"),
-            "expected the total-work-bound error, got: {msg}"
+            msg.contains("revisited node offset") || msg.contains("total work bound"),
+            "expected the revisit/total-work error, got: {msg}"
         );
     }
 
@@ -575,10 +608,47 @@ mod tests {
             .expect_err("a cyclic (self-looping) trie must error, not hang");
         let msg = format!("{err}");
         assert!(
-            msg.contains("total work bound")
+            msg.contains("revisited node offset")
+                || msg.contains("total work bound")
                 || msg.contains("key path exceeds trie size")
                 || msg.contains("node depth"),
             "expected a trie-size-relative error, got: {msg}"
+        );
+    }
+
+    /// Issue #1629 (roborev): the total-work guard scales with the ENTIRE trie byte
+    /// length, so it does NOT bound the PENDING OP STACK.  A small high-fan-out node
+    /// that self-loops (or reconverges), sitting in a LARGELY PADDED trie, can push
+    /// `Enter` ops far faster than `nodes_visited` climbs toward `trie_data.len()` —
+    /// exhausting memory before the work bound fires.  The visited-offset guard must
+    /// reject the FIRST re-entry, so this returns Err (the revisit/cyclic message)
+    /// after visiting a handful of nodes, never exploding the op stack.
+    #[test]
+    fn dfs_padded_reconvergence_rejected_before_stack_blowup() {
+        // Sparse8 at offset 0 with 200 transitions, EVERY delta = 0 ⇒ every child
+        // resolves to offset 0 (self-loop).  Without the visited guard, each entry
+        // would push 200 more `Enter` ops while `nodes_visited` rose by only 1, so
+        // the op stack would balloon to ~200 × trie_len before the total-work bound
+        // tripped.
+        let fan_out: usize = 200;
+        let mut trie = vec![0x50u8, fan_out as u8]; // Sparse8, no payload
+        trie.extend((1..=fan_out).map(|b| b as u8)); // 200 distinct ascending transitions
+        trie.resize(trie.len() + fan_out, 0); // 200 deltas, all 0 → self-loop
+        let live_len = trie.len();
+        // Pad the trie MUCH larger than the live node so the old total-work bound
+        // (== trie_data.len()) would have allowed ~100k self-visits.
+        trie.resize(live_len + 100_000, 0);
+        assert!(
+            trie.len() > live_len * 100,
+            "padded trie must dwarf the live node so total-work alone would not save us"
+        );
+
+        let err = dfs_collect_partition_entries(&trie, 0)
+            .expect_err("a padded high-fan-out self-loop must error, not blow up the stack");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("revisited node offset"),
+            "the visited guard must fire first (before total work), got: {msg}"
         );
     }
 
