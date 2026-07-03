@@ -1,5 +1,7 @@
 //! Storage engine implementation for CQLite
 
+/// Shared, bytes-bounded, sharded decompressed-chunk cache (issue #1567).
+pub mod cache;
 pub mod sstable;
 
 // Canonical partition-key (de)serialization, shared by the read (query) path

@@ -647,22 +647,36 @@ impl SSTableReader {
             // If chunk-targeted, append the next chunk before each parse attempt
             // (the whole-section fallback already has all bytes in `window`).
             if chunk_targeted {
+                // Cache key: the ABSOLUTE chunk index about to be read. `read_next_block`
+                // reads `cursor.chunk_index` then increments it, so capture it first
+                // (issue #1567). Shared cache is consulted before decompress; a hit
+                // skips the decompressor (the compressed bytes were still read).
+                let this_chunk = cursor
+                    .chunk_index
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    as u64;
                 match self.read_next_block(&cursor).await? {
                     Some(compressed_chunk) => {
-                        let decompressed_chunk = if let Some(compression_reader) =
-                            &self.compression_reader
+                        let key = self.chunk_cache_key(super::NS_BTI_CHUNK, this_chunk);
+                        let decompressed_chunk: std::sync::Arc<[u8]> = if let Some(hit) =
+                            self.chunk_cache.get(&key)
                         {
+                            hit
+                        } else if let Some(compression_reader) = &self.compression_reader {
                             let compression = Compression::new(*compression_reader.algorithm())?;
-                            compression.decompress(&compressed_chunk).map_err(|e| {
+                            let d = compression.decompress(&compressed_chunk).map_err(|e| {
                                 Error::corruption(format!(
                                     "BTI point lookup: failed to decompress chunk: {}",
                                     e
                                 ))
-                            })?
+                            })?;
+                            super::model::DECOMPRESS_CALLS
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            self.chunk_cache.insert(key, d)
                         } else {
                             // No compression reader despite CompressionInfo:
                             // treat raw chunk bytes as the decompressed data.
-                            compressed_chunk
+                            self.chunk_cache.insert(key, compressed_chunk)
                         };
                         window.extend_from_slice(&decompressed_chunk);
                     }

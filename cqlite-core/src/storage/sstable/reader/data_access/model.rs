@@ -167,6 +167,37 @@ pub(super) fn physical_byte_bounds_for_slice(
 pub(crate) static SCAN_FOR_KEY_CALLS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+/// Process-global count of *actual* chunk decompressions performed by the three
+/// decompressed-chunk read sites wired to the [`DecompressedChunkCache`] (issue
+/// #1567): the BIG point read (`get_cached_data`), the BTI target-chunk read
+/// (`bti_decompress_and_parse_target`), and the windowed streaming scan
+/// (`drain_scan_window_blocking`). Incremented exactly once per real
+/// `Compression::decompress` call — i.e. ONLY on a cache miss, after the lookup
+/// fails. A repeated read that hits the cache leaves this unchanged, which is the
+/// TDD oracle for "the hit skipped decompression".
+///
+/// Mirrors [`SCAN_FOR_KEY_CALLS`]: a single `Relaxed` add, not `cfg(test)`-gated
+/// (integration tests compile the lib without the `test` cfg). Read/reset via
+/// [`SSTableReader::decompress_call_count`] / [`SSTableReader::reset_decompress_calls`].
+///
+/// [`DecompressedChunkCache`]: crate::storage::cache::DecompressedChunkCache
+/// [`SSTableReader::decompress_call_count`]: crate::storage::sstable::SSTableReader::decompress_call_count
+/// [`SSTableReader::reset_decompress_calls`]: crate::storage::sstable::SSTableReader::reset_decompress_calls
+pub(crate) static DECOMPRESS_CALLS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Process-global count of *actual* compressed-bytes reads from the backing byte
+/// source at the BIG point-read site (`get_cached_data`, issue #1567). Skipped on
+/// a cache hit (the cache is consulted before the file read there), so a repeated
+/// point read that hits the cache leaves this unchanged — the oracle for "zero
+/// underlying reads". Read/reset via [`SSTableReader::chunk_read_call_count`] /
+/// [`SSTableReader::reset_chunk_read_calls`].
+///
+/// [`SSTableReader::chunk_read_call_count`]: crate::storage::sstable::SSTableReader::chunk_read_call_count
+/// [`SSTableReader::reset_chunk_read_calls`]: crate::storage::sstable::SSTableReader::reset_chunk_read_calls
+pub(crate) static CHUNK_READ_CALLS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 /// Compare two table IDs, handling both qualified (keyspace.table) and unqualified (table) formats.
 ///
 /// This function allows flexible matching:
