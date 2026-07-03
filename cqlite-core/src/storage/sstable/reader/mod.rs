@@ -705,6 +705,8 @@ impl SSTableReader {
             statistics_reader,
             schema_registry: None, // Will be set by set_schema_registry() after construction
             schema,
+            #[cfg(feature = "state_machine")]
+            registry_schema: None, // Resolved by resolve_registry_schema() at wiring time (#1692)
             udt_registry: None, // Will be set when available for UDT-aware parsing
             compression_info: compression_info.map(Arc::new),
             crc_reader,
@@ -997,6 +999,67 @@ impl SSTableReader {
             self.header.keyspace,
             self.header.table_name
         );
+    }
+
+    /// Pre-resolve the registry schema into the sync cache (issue #1692, AG3).
+    ///
+    /// Call this once, from an async wiring point (e.g. `open_reader_with_schema`),
+    /// AFTER [`set_schema_registry`](Self::set_schema_registry). It resolves the
+    /// table schema from the async registry a single time — properly awaited — and
+    /// caches it in [`registry_schema`](crate::storage::sstable::reader::types), so
+    /// the SYNC schema-fallback tier of `get_table_schema` reads a plain field
+    /// instead of `block_on`-ing the async registry lock on a tokio worker thread.
+    ///
+    /// Cold path only: when the SSTable header already carried a schema
+    /// (`self.schema.is_some()`) the sync path short-circuits before the registry
+    /// tier, so no resolution is performed. A registry miss leaves the cache
+    /// `None`; the sync path then falls through to header-column construction,
+    /// exactly as the previous `block_on` path did on a miss.
+    #[cfg(feature = "state_machine")]
+    pub(crate) async fn resolve_registry_schema(&mut self) {
+        // Header schema present -> the registry tier is never reached; skip.
+        if self.schema.is_some() {
+            return;
+        }
+        let Some(registry_rwlock) = self.schema_registry.clone() else {
+            return;
+        };
+
+        // Keyspace/table from the SSTable path (authoritative), with the header
+        // names as the documented fallback — same resolution the old block_on
+        // path used.
+        let (keyspace, table_name) =
+            match parsing::extract_keyspace_table_from_path(&self.file_path) {
+                Ok(names) => names,
+                Err(e) => {
+                    log::debug!(
+                        "resolve_registry_schema: path parse failed for {}: {}. Using header names.",
+                        self.file_path.display(),
+                        e
+                    );
+                    (self.header.keyspace.clone(), self.header.table_name.clone())
+                }
+            };
+
+        let registry = registry_rwlock.read().await;
+        match registry.get_schema(&keyspace, &table_name).await {
+            Ok(schema) => {
+                log::debug!(
+                    "resolve_registry_schema: cached registry schema for {}.{}",
+                    keyspace,
+                    table_name
+                );
+                self.registry_schema = Some(Arc::new(schema));
+            }
+            Err(e) => {
+                log::debug!(
+                    "resolve_registry_schema: no registry schema for {}.{}: {}",
+                    keyspace,
+                    table_name,
+                    e
+                );
+            }
+        }
     }
 
     /// Set the schema registry for schema-driven operations (non-state_machine builds)

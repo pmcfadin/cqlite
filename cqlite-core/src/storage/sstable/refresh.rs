@@ -143,6 +143,12 @@ impl SSTableManager {
             if let Some(ref registry_rwlock) = *schema_reg_guard {
                 reader.set_schema_registry(Arc::clone(registry_rwlock));
 
+                // Pre-resolve the registry schema into the reader's sync cache here,
+                // in this async context (issue #1692, AG3). The sync schema-fallback
+                // tier of `get_table_schema` then reads a plain field instead of
+                // `block_on`-ing the async registry on a tokio worker thread.
+                reader.resolve_registry_schema().await;
+
                 // Also set the UDT registry for UDT-aware collection parsing (Issue #238).
                 let schema_registry = registry_rwlock.read().await;
                 let udt_registry_lock = schema_registry.get_udt_registry();

@@ -20,6 +20,8 @@ mod key_parsing;
 pub(crate) mod v5_compressed_legacy;
 mod value_parsing;
 #[cfg(test)]
+mod schema_fallback_stall_tests;
+#[cfg(test)]
 mod value_parsing_schema_type_tests;
 
 // Re-export all parsing methods (they're implemented on SSTableReader)
@@ -71,7 +73,9 @@ use super::{super::row_cell_state_machine::ParsedRow, types::SSTableReader};
 /// assert_eq!(keyspace, "test_basic");
 /// assert_eq!(table, "simple_table");
 /// ```
-fn extract_keyspace_table_from_path(path: &Path) -> Result<(String, String)> {
+pub(in crate::storage::sstable::reader) fn extract_keyspace_table_from_path(
+    path: &Path,
+) -> Result<(String, String)> {
     // Get parent directory containing table_name-uuid
     let table_dir = path
         .parent()
