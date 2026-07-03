@@ -328,17 +328,19 @@ impl SchemaRegistry {
             _associated_files: Vec::new(),
         };
 
-        // Store in registry
-        {
-            let mut schemas = self.schemas.write().await;
-
-            // Check if we need to create a new version
-            if self.config.enable_versioning && schemas.contains_key(&table_id) {
-                self.create_schema_version(&table_id, &schema).await?;
-            }
-
-            schemas.insert(table_id, entry);
+        // Store in registry.
+        //
+        // Versioning (which acquires the `version_history` write lock) is
+        // computed BEFORE acquiring the `schemas` write guard so that no
+        // `.await` happens while the guard is held — that combination was a
+        // latent lock-order/TOCTOU hazard on the cold registration path
+        // (issue #1710). The final insert under the write guard is atomic;
+        // the version-history entry is a separate, independent lock.
+        if self.config.enable_versioning && self.schemas.read().await.contains_key(&table_id) {
+            self.create_schema_version(&table_id, &schema).await?;
         }
+
+        self.schemas.write().await.insert(table_id, entry);
 
         Ok(())
     }
@@ -1583,6 +1585,48 @@ mod tests {
             .expect("fetch schema");
         assert_eq!(fetched.table, "users");
         assert_eq!(fetched.partition_keys.len(), 1);
+    }
+
+    /// Issue #1710: `register_schema` must not hold the `schemas` write guard
+    /// across the `create_schema_version(...).await` (that acquires the
+    /// `version_history` lock — a latent lock-order hazard). Verified by
+    /// structure (version computation is now hoisted before the `schemas`
+    /// write in `register_schema`) and behaviorally here: many concurrent
+    /// re-registrations of the same table (versioning ON, forcing the version
+    /// path every time) must complete without deadlock and leave exactly one
+    /// final entry (idempotent, no lost update).
+    #[tokio::test]
+    async fn test_concurrent_register_schema_idempotent_no_deadlock() {
+        let mut cfg = SchemaRegistryConfig::default();
+        cfg.enable_versioning = true; // force the create_schema_version path
+        let registry = Arc::new(make_registry(cfg).await);
+
+        // Seed once so every concurrent call takes the versioning branch.
+        registry
+            .register_schema(simple_schema("users"), SchemaSource::Manual)
+            .await
+            .expect("seed register");
+
+        let mut handles = vec![];
+        for _ in 0..16 {
+            let r = Arc::clone(&registry);
+            handles.push(tokio::spawn(async move {
+                r.register_schema(simple_schema("users"), SchemaSource::Manual)
+                    .await
+                    .expect("concurrent register");
+            }));
+        }
+        for h in handles {
+            h.await.expect("task joins (no deadlock)");
+        }
+
+        // Exactly one final entry for the table (idempotent upsert).
+        let all = registry.list_schemas(None).await.expect("list");
+        assert_eq!(
+            all.iter().filter(|s| s.table == "users").count(),
+            1,
+            "concurrent re-registration must leave exactly one entry"
+        );
     }
 
     #[tokio::test]
