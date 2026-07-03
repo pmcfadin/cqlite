@@ -13,7 +13,11 @@ pub(crate) mod byte_comparable; // Needs to be accessible from row_cell_state_ma
 pub(crate) mod comparator_value_parsing; // Standalone comparator-based parsing for state machine
 mod custom_scalar;
 mod key_parsing;
-mod v5_compressed_legacy;
+// `pub(crate)` (not `pub`) so the in-crate `fuzz_support` driver (issue #1614)
+// can reach `V5CompressedLegacyParser::parse_block_emit` for the block-emit fuzz
+// target. This widens crate-internal visibility only — the module and its
+// `parse_block_emit` remain unreachable from outside cqlite-core.
+pub(crate) mod v5_compressed_legacy;
 mod value_parsing;
 #[cfg(test)]
 mod value_parsing_schema_type_tests;

@@ -148,6 +148,16 @@ fn cql_type(input: &str) -> IResult<&str, String> {
     Ok((input, type_name))
 }
 
+/// Crate-internal fuzz shim (issue #1614) exposing the module-private nom
+/// [`cql_type`] parser so the in-crate `fuzz_support` block can drive it
+/// directly against arbitrary strings (proving the `MAX_TYPE_NESTING_DEPTH`
+/// guard returns `Err`, never a stack overflow). Not `pub` — reachable only
+/// within cqlite-core, so it widens no external surface.
+#[cfg(feature = "fuzz")]
+pub(crate) fn cql_type_fuzz(input: &str) -> IResult<&str, String> {
+    cql_type(input)
+}
+
 /// Parse column definition (with optional STATIC modifier and inline PRIMARY KEY)
 /// Returns (name, data_type, is_static)
 fn column_definition(input: &str) -> IResult<&str, (String, String, bool)> {

@@ -49,6 +49,14 @@ pub mod discovery;
 #[doc(hidden)]
 pub mod testing;
 
+// Fuzz-support surface (issue #1614). Only compiled under `--features fuzz`, and
+// `#[doc(hidden)]` even then, so the default public API and docs are unchanged.
+// Exposes thin `Result`-returning drivers over the internal decode entry points
+// for the external `fuzz/` cargo-fuzz crate. See `fuzz_support.rs`.
+#[cfg(feature = "fuzz")]
+#[doc(hidden)]
+pub mod fuzz_support;
+
 // NOTE: memory_safety_runner moved to tools/memory-safety-runner (Issue #245)
 // NOTE: memory_safety_tests disabled - MemTable removed in Issue #175
 

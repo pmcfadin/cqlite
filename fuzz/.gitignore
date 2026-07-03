@@ -1,0 +1,12 @@
+# cargo-fuzz build artifacts and generated corpus/crash outputs.
+# The committed SEED corpus lives under corpus/<target>/ and is force-added
+# (see below); everything else here is regenerated and must not be committed.
+/target
+/Cargo.lock
+/artifacts
+/coverage
+
+# libFuzzer grows corpus/<target>/ with mutated inputs at runtime. Ignore those
+# generated inputs but KEEP the committed seed files (force-added via `git add -f`).
+corpus/*/*
+!corpus/*/seed_*

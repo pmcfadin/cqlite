@@ -257,6 +257,14 @@ observability-testing = ["observability", "opentelemetry_sdk?/testing"]
 pest = []
 wasm = ["wasm-bindgen", "js-sys", "web-sys"]
 
+# Fuzz-support surface (issue #1614) — gates a single `#[doc(hidden)] pub mod
+# fuzz_support` exposing thin, `Result`-returning drivers over the internal
+# decode entry points so the external `fuzz/` cargo-fuzz crate can reach them
+# WITHOUT widening the default public API. Adds NO new dependencies; the module
+# does not exist unless this feature is enabled, so every default build / gate /
+# CI run is byte-identical without it. NOT in defaults.
+fuzz = []
+
 # Legacy heuristics support (backward compatibility for pre-5.0 formats)
 # NOT enabled in default CI configuration - opt-in only
 legacy-heuristics = []
