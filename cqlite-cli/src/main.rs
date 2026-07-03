@@ -1049,12 +1049,128 @@ async fn run_main() -> Result<()> {
             unreachable!("Commands::Verify is dispatched before database initialization")
         }
         None => {
+            // Issue #1693 (AG4): with `--writable` and no one-shot operation
+            // requested, drop into an interactive writable session that flushes
+            // (via `engine.close()`) on SIGINT / EOF instead of just printing
+            // help and dropping the engine unflushed.
+            #[cfg(feature = "write-support")]
+            if cli.execute.is_none()
+                && cli.file.is_none()
+                && cli.mutation.is_empty()
+                && cli.mutations_file.is_none()
+                && !cli.flush
+            {
+                if let Some(engine) = write_engine.as_mut() {
+                    return run_writable_interactive(engine).await;
+                }
+            }
             // Default to help message for now
             println!("CQLite CLI v{}", env!("CARGO_PKG_VERSION"));
             println!("Use --help for available commands");
             Ok(())
         }
     }
+}
+
+/// Issue #1693 (AG4): interactive writable session with graceful shutdown.
+///
+/// Reads CQL DML statements (INSERT/UPDATE/DELETE), one per line, from stdin and
+/// applies each to the write engine, printing `OK` on success. The loop races
+/// input against `SIGINT` (Ctrl-C): on the first Ctrl-C — or on stdin EOF
+/// (Ctrl-D) — it calls [`WriteEngine::close`], which flushes the memtable to a
+/// durable SSTable before returning. Without this, an interrupted writable
+/// session would drop the engine unflushed and leave the last rows recoverable
+/// only via WAL replay.
+///
+/// A SECOND Ctrl-C received *while the shutdown flush is in progress* aborts the
+/// flush and exits immediately (exit code 130); any not-yet-flushed rows then
+/// remain only in the WAL. This escape hatch keeps a stuck flush from wedging
+/// the process.
+#[cfg(feature = "write-support")]
+async fn run_writable_interactive(engine: &mut WriteEngine) -> Result<()> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    eprintln!(
+        "cqlite writable session: enter CQL DML (INSERT/UPDATE/DELETE), one per line. \
+         Ctrl-D or Ctrl-C flushes and exits; a second Ctrl-C during shutdown exits \
+         immediately (unflushed rows remain only in the WAL)."
+    );
+
+    let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    loop {
+        tokio::select! {
+            // `biased`: check for Ctrl-C before draining more input so a pending
+            // interrupt wins deterministically instead of racing the reader.
+            biased;
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("\nReceived Ctrl-C — flushing memtable before exit...");
+                return shutdown_flush_and_exit(engine).await;
+            }
+            next = lines.next_line() => {
+                match next {
+                    Ok(Some(line)) => {
+                        let stmt = line.trim();
+                        if stmt.is_empty() {
+                            continue;
+                        }
+                        match engine.execute(stmt) {
+                            Ok(()) => {
+                                // stdout is block-buffered when piped; flush so a
+                                // driving parent (or test) observes the ack promptly.
+                                println!("OK");
+                                let _ = std::io::Write::flush(&mut std::io::stdout());
+                            }
+                            Err(e) => eprintln!("Error: {e}"),
+                        }
+                    }
+                    // stdin EOF (Ctrl-D): flush + finalize for durability.
+                    Ok(None) => {
+                        engine
+                            .close()
+                            .await
+                            .map_err(|e| anyhow::anyhow!("graceful close failed: {e}"))?;
+                        return Ok(());
+                    }
+                    Err(e) => return Err(anyhow::anyhow!("stdin read error: {e}")),
+                }
+            }
+        }
+    }
+}
+
+/// Flush + finalize the engine on Ctrl-C, then terminate the process.
+///
+/// A SECOND Ctrl-C received while the flush is in progress wins the race and
+/// exits immediately (code 130) so a wedged flush cannot hang shutdown; any
+/// not-yet-flushed rows then remain only in the WAL (issue #1693).
+///
+/// This deliberately calls [`std::process::exit`] rather than returning: the
+/// interactive loop leaves an async-stdin read parked on Tokio's blocking pool,
+/// and returning would wedge runtime shutdown waiting for that blocking read to
+/// finish (it never will). Because `close()` has already run, no in-flight write
+/// state is lost by skipping destructors here.
+#[cfg(feature = "write-support")]
+async fn shutdown_flush_and_exit(engine: &mut WriteEngine) -> Result<()> {
+    let code = tokio::select! {
+        biased;
+        _ = tokio::signal::ctrl_c() => {
+            eprintln!(
+                "Second Ctrl-C — exiting immediately; unflushed rows remain only in the WAL."
+            );
+            130
+        }
+        res = engine.close() => {
+            match res {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("graceful close failed: {e}");
+                    1
+                }
+            }
+        }
+    };
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    std::process::exit(code);
 }
 
 /// Install the unified `tracing_subscriber` registry (Issue #1033, Epic #1031).

@@ -25,7 +25,9 @@ cqlite-core = { path = "../cqlite-core", version = "0.12.0" }
 clap = { workspace = true }
 
 # Async runtime
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "signal"] }
+# `io-std` + `io-util` back the async stdin loop in the interactive writable
+# session (issue #1693); `signal` backs its Ctrl-C graceful-shutdown handler.
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "signal", "io-std", "io-util"] }
 
 # Error handling
 thiserror = { workspace = true }
