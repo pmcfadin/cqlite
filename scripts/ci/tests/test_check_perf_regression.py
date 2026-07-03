@@ -251,7 +251,7 @@ class TestScalingFloor:
         Here the buffered n4 median is absent (required buffered floor → MISSING
         DATA → fail) while the mmap floor is present and healthy.
         """
-        exit_code = _run(_CRIT_SCALING_SKIP)
+        exit_code = _run_scaling_only(_CRIT_SCALING_SKIP)
         assert exit_code != 0, (
             "Expected non-zero exit when a required scaling floor's data is "
             f"missing (must not silently skip), but got exit code {exit_code}."
