@@ -16,14 +16,28 @@ import { Database } from '@cqlite/node';
 // Open a database with schema
 const db = await Database.open('path/to/sstables', { schema: 'schema.cql' });
 
-// Execute queries
-const result = await db.execute('SELECT * FROM keyspace.table LIMIT 10');
+// Execute queries (executeNative() returns native JS types with full precision)
+const result = await db.executeNative('SELECT * FROM keyspace.table LIMIT 10');
 for (const row of result.rows) {
   console.log(row.name);
 }
 
 await db.close();
 ```
+
+> **⚠️ Warning: `execute()` is deprecated and will be removed in the next major.**
+> Prefer `executeNative()`. `execute()` returns **lossy** legacy JSON encodings:
+> - `blob` → base64 **string** (not a `Buffer`)
+> - `timestamp` → ISO-8601 **string** (not a `Date`)
+> - `varint` → `"0x{hex}"` **string**
+> - `decimal` → `"decimal:{scale}:0x{hex}"` **string**
+> - `date`/`time` → **number** (days-since-epoch / nanoseconds-since-midnight)
+>
+> It is also slower (JSON off-loop, then JS on-loop — a double conversion).
+> Calling `execute()` emits a one-time `DeprecationWarning`. Use `executeNative()`
+> for native types (`BigInt`, `Buffer`, `Date`, `Set`, `Map`) with full fidelity.
+> (`bigint`/`counter` currently come back as an exact `BigInt` on this napi build,
+> so they are not presently rounded — but `execute()` is unsupported regardless.)
 
 ## Features
 
@@ -70,20 +84,23 @@ The `close()` method is idempotent - safe to call multiple times.
 ### Executing Queries
 
 ```typescript
-// Simple query - returns JSON-serializable values
-const result = await db.execute('SELECT * FROM keyspace.table');
+// Simple query - executeNative() returns native JS types with full precision
+const result = await db.executeNative('SELECT * FROM keyspace.table');
 for (const row of result.rows) {
   console.log(row);
 }
 
 // With LIMIT
-const limited = await db.execute('SELECT name, age FROM users LIMIT 100');
+const limited = await db.executeNative('SELECT name, age FROM users LIMIT 100');
 
 // Access query metadata
 console.log(`Rows returned: ${result.rowCount}`);
 console.log(`Execution time: ${result.executionTimeMs}ms`);
 console.log(`Columns: ${result.columns.map(c => c.name).join(', ')}`);
 ```
+
+> Prefer `executeNative()` over the deprecated `execute()` — see the warning at
+> the top of this README for the precision/encoding hazards of `execute()`.
 
 ### Native Types with executeNative()
 
@@ -109,7 +126,13 @@ for (const row of result.rows) {
 }
 ```
 
-### JSON Encoding (execute method)
+### JSON Encoding (deprecated `execute()` method)
+
+> **⚠️ Deprecated — removed in the next major.** `execute()` returns lossy legacy
+> JSON encodings and is slower than `executeNative()`. In particular blob comes
+> back as a base64 string, timestamp as an ISO-8601 string, and varint/decimal
+> as bespoke non-round-trippable strings. This section documents the encoding for
+> the few callers that still depend on it; new code should use `executeNative()`.
 
 The `execute()` method returns JSON-serializable values. For most types this works intuitively,
 but `varint` and `decimal` types use a hex-based encoding to preserve arbitrary precision:
@@ -132,15 +155,16 @@ console.log(native.rows[0].amount);
 - `varint`: `"0x{hex}"` - Two's complement big-endian hex encoding
 - `decimal`: `"decimal:{scale}:0x{hex}"` - Scale (decimal places) + hex-encoded unscaled value
 
-**Recommendation:** Use `executeNative()` for most applications. The `execute()` method is
-primarily for JSON serialization scenarios where you need raw, reversible encoding.
+**Recommendation:** Use `executeNative()`. The `execute()` method is deprecated
+(removed in the next major); its JSON encoding is lossy (blob/timestamp/varint/
+decimal come back as bespoke strings) and it is slower than `executeNative()`.
 
 ### Column Metadata
 
 Each query result includes column information:
 
 ```typescript
-const result = await db.execute('SELECT * FROM keyspace.table');
+const result = await db.executeNative('SELECT * FROM keyspace.table');
 
 for (const col of result.columns) {
   console.log(`${col.name}: ${col.dataType}`);
@@ -167,7 +191,7 @@ import { Database } from '@cqlite/node';
 
 try {
   const db = await Database.open('/path/to/data');
-  const result = await db.execute('SELECT * FROM keyspace.table');
+  const result = await db.executeNative('SELECT * FROM keyspace.table');
 } catch (e) {
   // Error code for programmatic handling
   console.log(`Code: ${e.code}`);        // 'IO', 'SCHEMA', 'QUERY', 'PARSE', etc.
@@ -240,11 +264,11 @@ const db = await Database.open('path/to/sstables', {
 });
 
 // Write rows via CQL INSERT, UPDATE, or DELETE
-await db.execute(
+await db.executeNative(
   "INSERT INTO test_basic.simple_table (id, name, age) " +
   "VALUES (22222222-2222-2222-2222-222222222222, 'Bob', 25)"
 );
-await db.execute(
+await db.executeNative(
   "UPDATE test_basic.simple_table SET age = 26 " +
   "WHERE id = 22222222-2222-2222-2222-222222222222"
 );
@@ -273,7 +297,8 @@ await db.close();
 
 | Method / Property | Description |
 |-------------------|-------------|
-| `db.execute(cql)` | Execute a CQL INSERT, UPDATE, or DELETE statement |
+| `db.executeNative(cql)` | Execute a CQL INSERT, UPDATE, or DELETE statement (recommended) |
+| `db.execute(cql)` | **Deprecated** (removed next major; emits a `DeprecationWarning`). Same DML behavior as `executeNative()`, but lossy for SELECT — use `executeNative()` |
 | `db.flushRun()` | Flush memtable to SSTable; returns the Data.db path or `""` if memtable was empty |
 | `db.maintenanceStep(options?)` | Run STCS compaction for up to `options.budgetMs` ms (default: 100); returns `MaintenanceReport` |
 | `db.writeStats` | Synchronous getter: `memtableSizeBytes`, `memtableRowCount`, `totalWrittenBytes`, `l0SstableCount` |

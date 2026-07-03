@@ -776,7 +776,16 @@ impl Database {
 
     /// Execute a CQL query or write statement and return results.
     ///
-    /// For SELECT queries, returns matching rows.
+    /// **DEPRECATED — removed in the next major. Use `executeNative()` instead.**
+    ///
+    /// For SELECT queries, returns matching rows as lossy legacy JSON encodings:
+    /// blob → base64 string, timestamp → ISO-8601 string, varint → `"0x{hex}"`,
+    /// decimal → `"decimal:{scale}:0x{hex}"`, date/time → number. It also
+    /// double-converts (JSON off-loop, then JS on-loop) so it is slower than
+    /// `executeNative()`. The JS wrapper (`lib/error-wrapper.js`) emits a
+    /// one-time `DeprecationWarning` on first call. (BigInt/Counter are
+    /// currently returned as an exact JS `BigInt` on this napi build.)
+    ///
     /// For INSERT/UPDATE/DELETE, executes the write and returns `rowsAffected`.
     /// For large result sets, consider using streaming via `executeStreaming()`.
     ///
@@ -785,12 +794,12 @@ impl Database {
     ///
     /// @example
     /// ```javascript
-    /// // Read
-    /// const result = await db.execute('SELECT * FROM users LIMIT 10');
+    /// // Read (recommended: executeNative() for native types with full precision)
+    /// const result = await db.executeNative('SELECT * FROM users LIMIT 10');
     /// console.log(`Got ${result.rowCount} rows in ${result.executionTimeMs}ms`);
     ///
     /// // Write (requires writable: true in open options)
-    /// const wr = await db.execute("INSERT INTO users (id, name) VALUES (uuid(), 'Alice')");
+    /// const wr = await db.executeNative("INSERT INTO users (id, name) VALUES (uuid(), 'Alice')");
     /// console.log(`Rows affected: ${wr.rowsAffected}`);
     /// ```
     #[napi]
@@ -1522,6 +1531,16 @@ impl napi::Task for ExecuteNativeTask {
 ///
 /// This provides basic type conversion for Phase 2.
 /// For native JavaScript types, use `executeNative()` instead.
+///
+/// ⚠️ Lossy legacy encoding — see `execute()` in `lib/index.d.ts` for the full
+/// hazard list. blob → base64 string; timestamp → ISO-8601 string; varint →
+/// `"0x{hex}"`; decimal → `"decimal:{scale}:0x{hex}"`; date/time → number.
+/// (BigInt/Counter serde numbers are converted by napi to an exact JS `BigInt`
+/// on this build, so they are not presently rounded.)
+///
+/// TODO(next-major): remove `execute()` + `value_to_json` (breaking change;
+/// deprecated since 0.4.0, callers must migrate to `executeNative()`). See
+/// issue #1457. Do NOT remove before the next major bump.
 #[deprecated(
     since = "0.4.0",
     note = "Use executeNative() for native JavaScript types"

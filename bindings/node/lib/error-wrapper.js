@@ -164,6 +164,41 @@ function createAsyncIterator(nativeStream) {
 }
 
 /**
+ * Emit a one-time deprecation warning for the legacy `execute()` method.
+ *
+ * `execute()` returns lossy legacy JSON encodings — blob comes back as a base64
+ * string (not a Buffer), timestamp as an ISO-8601 string (not a Date), and
+ * varint/decimal in bespoke `"0x…"` / `"decimal:…"` strings no caller can
+ * round-trip (see index.d.ts). It also double-converts (JSON off-loop, then JS
+ * on-loop) so it is slower than `executeNative()`. It is deprecated and will be
+ * removed in the next major; `executeNative()` returns native types with full
+ * fidelity. We emit via `process.emitWarning(..., 'DeprecationWarning')` guarded
+ * by a module-level flag so it fires at most once per process, matching Node's
+ * own deprecation convention (issue #1457).
+ *
+ * @private
+ */
+let executeDeprecationWarned = false;
+function warnExecuteDeprecated() {
+  if (executeDeprecationWarned) {
+    return;
+  }
+  executeDeprecationWarned = true;
+  process.emitWarning(
+    "Database.execute() is deprecated and will be removed in the next major. " +
+      "It returns lossy legacy JSON encodings: blob becomes a base64 string " +
+      "(not a Buffer), timestamp an ISO-8601 string (not a Date), and " +
+      "varint/decimal bespoke non-round-trippable strings; it is also slower " +
+      "(double conversion). Use executeNative() for native types with full " +
+      "fidelity (BigInt, Buffer, Date, Set, Map).",
+    {
+      type: "DeprecationWarning",
+      code: "CQLITE_DEP0001",
+    }
+  );
+}
+
+/**
  * Create a wrapped Database class with enhanced error handling.
  *
  * @param {Function} NativeDatabase - The native Database class
@@ -187,6 +222,7 @@ function createWrappedDatabase(NativeDatabase, wrapPreparedStatement) {
     }
 
     async execute(query) {
+      warnExecuteDeprecated();
       try {
         const result = await this._native.execute(query);
         // For SELECT: rowsAffected = rowCount (alias, Issue #348).
