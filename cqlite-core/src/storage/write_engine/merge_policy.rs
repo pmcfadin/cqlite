@@ -154,21 +154,37 @@ impl STCSPolicy {
             return Vec::new();
         }
 
-        // Sort by size (ascending)
+        // Sort by size (ascending), tie-breaking on path so equal-sized inputs
+        // are processed in a fully deterministic order (independent of the
+        // caller's candidate ordering).
         let mut sorted = sstables.to_vec();
-        sorted.sort_by_key(|s| s.data_size);
+        sorted.sort_by(|a, b| {
+            a.data_size
+                .cmp(&b.data_size)
+                .then_with(|| a.data_path.cmp(&b.data_path))
+        });
 
-        // Map of average size -> bucket
+        // Map of average size -> bucket. The HashMap is retained for O(1)
+        // average-key updates, but the fit-search below never iterates it
+        // directly: iteration order of `HashMap` is unspecified, which would
+        // make bucket membership nondeterministic across runs (issue #1666).
         let mut buckets: HashMap<u64, Vec<SSTableMetadata>> = HashMap::new();
 
         for sstable in sorted {
             let size = sstable.data_size;
 
-            // Look for a bucket containing similar-sized files
+            // Look for a bucket containing similar-sized files. We iterate the
+            // existing bucket average-sizes in ascending order (a deterministic
+            // total order over the unique u64 keys) so that the first-fit
+            // decision is reproducible and prefers the smallest matching tier,
+            // matching Cassandra's smallest-tier-first intent.
+            let mut avg_sizes: Vec<u64> = buckets.keys().copied().collect();
+            avg_sizes.sort_unstable();
+
             let mut found_bucket = false;
             let mut old_average = 0u64;
 
-            for (&avg_size, _bucket) in buckets.iter() {
+            for &avg_size in &avg_sizes {
                 // Check if this SSTable fits in the bucket:
                 // 1. Size is within [bucket_low, bucket_high] ratio of bucket average
                 // 2. OR both this SSTable and bucket average are below min_sstable_size
@@ -203,8 +219,32 @@ impl STCSPolicy {
             }
         }
 
-        // Convert to Vec of buckets
-        buckets.into_values().collect()
+        // Convert to a deterministically ordered Vec of buckets.
+        let mut result: Vec<Vec<SSTableMetadata>> = buckets.into_values().collect();
+
+        // Sort each bucket's members by (size, path) so that any downstream
+        // `take(max_threshold)` selects a stable subset.
+        for bucket in &mut result {
+            bucket.sort_by(|a, b| {
+                a.data_size
+                    .cmp(&b.data_size)
+                    .then_with(|| a.data_path.cmp(&b.data_path))
+            });
+        }
+
+        // Order buckets smallest-tier-first: representative size is the bucket's
+        // minimum member size (its first element after the sort above), with the
+        // corresponding path as a total tie-break. Empty buckets never occur, but
+        // are ordered last defensively without panicking.
+        result.sort_by(|a, b| {
+            let key = |b: &[SSTableMetadata]| match b.first() {
+                Some(s) => (s.data_size, Some(s.data_path.clone())),
+                None => (u64::MAX, None),
+            };
+            key(a).cmp(&key(b))
+        });
+
+        result
     }
 }
 
@@ -253,11 +293,15 @@ impl STCSPolicy {
             sstables.push(SSTableMetadata::new(path.clone(), metadata.len()));
         }
 
-        // Group into buckets
+        // Group into buckets. `group_into_buckets` returns buckets ordered
+        // smallest-tier-first with a total tie-break, and each bucket's members
+        // sorted by (size, path), so the selection below is fully deterministic
+        // (issue #1666).
         let buckets = self.group_into_buckets(&sstables);
 
-        // Find the first bucket with at least min_threshold SSTables
-        // (In real Cassandra, this would use hotness/read metrics to select best bucket)
+        // Pick the smallest eligible tier: the first bucket (smallest
+        // representative size) with at least min_threshold SSTables.
+        // (In real Cassandra, this would use hotness/read metrics to select best bucket.)
         for bucket in buckets {
             if bucket.len() >= self.min_threshold {
                 // Limit to max_threshold SSTables
@@ -529,6 +573,63 @@ mod tests {
 
         // Should have multiple buckets for different size ranges
         assert!(buckets.len() >= 2);
+    }
+
+    #[test]
+    fn test_stcs_selection_is_deterministic_smallest_tier() {
+        use std::collections::HashSet;
+
+        let policy = STCSPolicy::default();
+
+        // Two eligible tiers, each with min_threshold members:
+        //   - small tier: 4 x 100MB
+        //   - large tier: 4 x 500MB (500MB is outside [0.5,1.5]x of 100MB and
+        //     both are >= min_sstable_size, so they form a distinct bucket).
+        // The smaller tier must be selected on every run.
+        let (_temp, paths) = create_temp_sstables(&[500, 500, 500, 500, 100, 100, 100, 100]);
+
+        // Expected pick: the four 100MB paths (indices 4..8), returned sorted by
+        // (size, path). All are equal-sized, so the deterministic order is by path.
+        let mut expected: Vec<PathBuf> = paths[4..8].to_vec();
+        expected.sort();
+
+        // Run selection many times; on `main` (HashMap iteration order) the pick
+        // is order-dependent — either it varies or it picks the larger 500MB tier.
+        let picks: HashSet<Vec<PathBuf>> = (0..100)
+            .map(|_| policy.select_merge(&paths).expect("select_merge"))
+            .collect();
+
+        assert_eq!(
+            picks.len(),
+            1,
+            "STCS selection must be deterministic across runs, got {} distinct results",
+            picks.len()
+        );
+        let pick = picks.into_iter().next().expect("one pick");
+        assert_eq!(
+            pick, expected,
+            "STCS must deterministically select the smallest eligible tier (4x100MB)"
+        );
+
+        // The grouped buckets themselves must be returned smallest-tier-first.
+        let sstables: Vec<SSTableMetadata> = paths
+            .iter()
+            .map(|p| {
+                let len = std::fs::metadata(p).expect("stat").len();
+                SSTableMetadata::new(p.clone(), len)
+            })
+            .collect();
+        let buckets = policy.group_into_buckets(&sstables);
+        let reps: Vec<u64> = buckets
+            .iter()
+            .map(|b| b.iter().map(|s| s.data_size).min().unwrap_or(u64::MAX))
+            .collect();
+        let mut sorted_reps = reps.clone();
+        sorted_reps.sort_unstable();
+        assert_eq!(
+            reps, sorted_reps,
+            "group_into_buckets must return buckets in ascending representative size order"
+        );
     }
 
     #[test]
