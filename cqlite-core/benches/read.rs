@@ -203,6 +203,25 @@ fn bench_get_partition_bti(c: &mut Criterion) {
     bench_get_partition(c, fixtures::ReadFixture::SIMPLE_BTI, "get_partition_bti");
 }
 
+/// Bench: a REPEATED identical point read served from the shared
+/// decompressed-chunk cache (issue #1567, Epic B/B1). Produces the Criterion id
+/// `read/point_lookup_repeated`.
+///
+/// Criterion warms up before measuring, so every timed iteration reads the same
+/// key through the same long-lived `Database` — the target chunk is decompressed
+/// exactly ONCE (the warm-up cold read) and served from the cache thereafter
+/// (`Arc::clone`, no re-read, no re-decompress). This measures the steady-state
+/// *cached* point-read latency, the metric the cache is built to reduce; the
+/// integration suite proves the zero-work property directly (decompress delta 0).
+///
+/// Uses the BTI (`da`) fixture because its point-read path
+/// (`bti_decompress_and_parse_target`) is a wired cache site; skip-registers (no
+/// group, gate reports SKIP) when the optional `test_da` corpus is absent.
+#[cfg(feature = "cli-helpers")]
+fn bench_point_lookup_repeated(c: &mut Criterion) {
+    bench_get_partition(c, fixtures::ReadFixture::SIMPLE_BTI, "point_lookup_repeated");
+}
+
 /// Bench: bounded read of clustering-ordered rows from sensor_data.
 ///
 /// sensor_data has `PRIMARY KEY (sensor_id, timestamp)` with `CLUSTERING ORDER BY
@@ -382,6 +401,7 @@ criterion_group!(
     config = profiling::configure();
     targets = bench_get_partition_big,
               bench_get_partition_bti,
+              bench_point_lookup_repeated,
               bench_clustering_slice,
               bench_full_scan,
               bench_type_heavy,

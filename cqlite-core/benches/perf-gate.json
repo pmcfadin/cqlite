@@ -15,6 +15,11 @@
       "threshold_pct": 10
     },
     {
+      "id": "read/point_lookup_repeated",
+      "threshold_pct": 10,
+      "_note": "issue #1567 — steady-state cached repeat point read (shared decompressed-chunk cache); skip-registers when the optional test_da BTI corpus is absent"
+    },
+    {
       "id": "read/clustering_slice",
       "threshold_pct": 10
     },
