@@ -11,10 +11,36 @@ use super::model::{
     sort_by_token_order, sort_by_token_order_with_meta, table_ids_match, SCAN_FOR_KEY_CALLS,
 };
 use crate::types::{CellWriteMetadata, ScanRow, TableId};
-use crate::{Result, RowKey};
+use crate::{Error, Result, RowKey};
 use std::io::SeekFrom;
 use tokio::io::AsyncSeekExt;
 use tokio::sync::mpsc;
+
+/// Classify a `parse_block` failure on the compressed (`V5CompressedLegacy`)
+/// point-lookup path (`scan_for_key`) as a soft-miss vs. a fatal error.
+///
+/// Issue #1411: the scan path ([`SSTableReader::stitch_and_parse_all_chunks`])
+/// propagates every `parse_block` error via `?`. The point-lookup path mirrors
+/// that so `get()` and `scan()` agree on which failures are fatal — with ONE
+/// deliberate exception, the case the original blanket `Err(_) => Ok(None)`
+/// existed to protect: this reader has no schema for the table, so it cannot
+/// serve the key and the caller must fall through to the next SSTable reader.
+///
+/// Returns `true` (soft-miss → `Ok(None)`) ONLY when both hold:
+/// - `schema_present == false` — the reader supplied no schema, and
+/// - the parser reported [`Error::Schema`] — which `V5CompressedLegacy`'s
+///   `parse_block` raises ("requires schema for <ks>.<table>") *before* it
+///   inspects any bytes when no schema is available.
+///
+/// Every other failure is non-recoverable and must propagate: real data
+/// corruption / malformed blocks (`Corruption`, `InvalidFormat`, `Parse`, I/O,
+/// etc.), and — critically — a deep schema/type-resolution `Error::Schema`
+/// raised when a schema IS present (a UDT/type that cannot be resolved is a real
+/// error, not a missing key). Requiring `!schema_present` prevents that class
+/// from ever being masked as "not found".
+fn is_parse_soft_miss(schema_present: bool, err: &Error) -> bool {
+    !schema_present && matches!(err, Error::Schema(_))
+}
 
 impl SSTableReader {
     /// Scan a range of keys
@@ -359,25 +385,45 @@ impl SSTableReader {
                 file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
             }
 
+            // Issue #1411: separate the chunk-integrity stitch from the schema-aware
+            // parse so their failure classes are not conflated. `stitch_all_chunks`
+            // drives the authoritative per-chunk CRC32 check
+            // (`block_io::read_nb_format_chunk_data`) + decompression; a CRC mismatch,
+            // decompression failure, or corrupt offset is corruption and MUST surface
+            // (propagate via `?`, matching `scan`), never be masked as a missing key.
+            // Only the `parse_block` step below may soft-miss (schema unavailable /
+            // wrong table type) so the caller can try the next reader. Previously
+            // `stitch_and_parse_all_chunks` combined both under a blanket
+            // `Err(_) => Ok(None)` that swallowed CRC corruption on point lookups.
+            let stitched_buffer = self.stitch_all_chunks(&cursor).await?;
+
             // Pass the reader's own schema so that V5CompressedLegacy rows can be fully
             // parsed and their partition RowKeys emitted.  Without a schema, parse_row_v5
             // fails for all rows in a partition, causing no entries to be pushed and making
             // the key comparison always miss even when the key exists.
             let schema_opt = self.get_table_schema(None);
-            let all_entries = match self
-                .stitch_and_parse_all_chunks(&cursor, schema_opt.as_ref())
-                .await
+            let parser = self.build_v5_parser();
+            let all_entries = match parser.parse_block(&stitched_buffer, schema_opt.as_ref(), self)
             {
                 Ok(entries) => entries,
-                Err(e) => {
-                    // Schema may not be available for this reader (e.g., wrong table type).
-                    // Return None so the caller can try the next reader.
+                // Issue #1411 (roborev): the scan path (`stitch_and_parse_all_chunks`)
+                // propagates EVERY `parse_block` error via `?`. Mirror that here so
+                // `get()` and `scan()` agree on which errors are fatal. The ONLY
+                // legitimate soft-miss — the case the original blanket
+                // `Err(_) => Ok(None)` existed to protect — is classified by
+                // `is_parse_soft_miss`: this reader has no schema for the table, so it
+                // cannot serve the key and the caller must try the next SSTable reader.
+                // Every other failure (real corruption / malformed block, or a deep
+                // schema/type-resolution error when a schema IS present) MUST surface.
+                Err(e) if is_parse_soft_miss(schema_opt.is_some(), &e) => {
                     log::debug!(
-                        "scan_for_key: stitch_and_parse_all_chunks failed (schema missing?): {}",
+                        "scan_for_key: no schema for this reader ({}); soft-miss so the caller tries the next reader: {}",
+                        table_id,
                         e
                     );
                     return Ok(None);
                 }
+                Err(e) => return Err(e),
             };
 
             // NOTE: The SSTableIndex is built from 16-byte Murmur3 *digests*, not raw keys,
@@ -714,6 +760,57 @@ impl SSTableReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // =========================================================================
+    // Issue #1411: point-lookup parse-error classification (unit level)
+    //
+    // Proves `scan_for_key`'s parse-error handling matches the scan path
+    // (`stitch_and_parse_all_chunks`, which propagates EVERY `parse_block` error):
+    // only "this reader has no schema for the table" soft-misses to Ok(None) so a
+    // multi-reader `get()` can try the next reader; real corruption / malformed
+    // blocks (and a deep schema error when a schema IS present) stay fatal.
+    // =========================================================================
+
+    #[test]
+    fn soft_miss_only_when_schema_absent_and_schema_error() {
+        // The one legitimate soft-miss: no schema for this reader → the parser
+        // reports Error::Schema before touching bytes → caller tries next reader.
+        assert!(is_parse_soft_miss(
+            false,
+            &Error::schema("V5CompressedLegacy format requires schema for ks.tbl")
+        ));
+    }
+
+    #[test]
+    fn schema_error_with_schema_present_is_fatal() {
+        // A schema IS present but a deep type/UDT resolution failed → real error,
+        // NOT a missing key. Must propagate (matches the scan path).
+        assert!(!is_parse_soft_miss(
+            true,
+            &Error::schema("Not a UserType: frozen<...>")
+        ));
+    }
+
+    #[test]
+    fn corruption_classes_are_always_fatal() {
+        // Real data corruption / malformed block classes MUST propagate in BOTH
+        // schema-present and schema-absent modes — never masked as "not found".
+        // These are exactly the classes the scan path surfaces via `?`.
+        for schema_present in [true, false] {
+            assert!(!is_parse_soft_miss(
+                schema_present,
+                &Error::corruption("chunk 0 CRC mismatch at offset 0x0")
+            ));
+            assert!(!is_parse_soft_miss(
+                schema_present,
+                &Error::invalid_format("malformed row header in chunk 0 at offset 0x0")
+            ));
+            assert!(!is_parse_soft_miss(
+                schema_present,
+                &Error::Parse("bad VInt".to_string())
+            ));
+        }
+    }
 
     // =========================================================================
     // Integration tests with real SSTable data

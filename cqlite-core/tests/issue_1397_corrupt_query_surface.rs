@@ -53,6 +53,13 @@ use std::sync::Arc;
 /// Relative path of the corrupt COMPRESSED Data.db under the datasets root.
 const CORRUPT_DATA_DB: &str = "corruption/test_comp_corrupt/data_db_bit_flip/nb-1-big-Data.db";
 
+/// Relative path of the CLEAN source Data.db the corrupt fixture was derived from
+/// (`test_comp/lz4_table`). Used to prove the #1411 fix keeps a healthy point
+/// lookup returning `Ok(Some(_))` — so the corrupt-fixture `Err` is genuinely the
+/// corruption surfacing, not a lookup that fails for every input.
+const CLEAN_DATA_DB: &str =
+    "sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db";
+
 /// Fully-qualified table the corrupt fixture was derived from.
 const TABLE: &str = "test_comp.lz4_table";
 
@@ -219,15 +226,17 @@ async fn streaming_scan_terminates_with_error_not_silent_truncation() {
 /// EXPECTED behavior (issue #1397): a typed, non-recoverable corruption error naming
 /// the corrupt chunk index + offset — NOT `Ok(None)` and NOT garbage.
 ///
-/// This test asserts that correct behavior. It is `#[ignore]`d today because the
-/// point-lookup path (`get` → bloom(present) → `read_value_at_offset`/`get_cached_data`)
-/// reads raw bytes at an offset and LZ4-decodes them WITHOUT the inline per-chunk CRC
-/// check, so a bit-flipped chunk currently reads as "not found" (`Ok(None)`) instead
-/// of surfacing corruption. Fixing that bypass is tracked as #1411; un-ignore this
-/// test when #1411 lands. The identical `get([0,0,0,1])` returns `Ok(Some(_))` on the
-/// CLEAN fixture, so the divergence is a read-path defect, not a wrong key.
+/// Fixed by issue #1411. The point lookup for `lz4_table` (a compressed `nb` table)
+/// falls through the digest-index miss (issue #517) into `scan_for_key`, whose
+/// chunk-stitching branch used to swallow EVERY `Err` from
+/// `stitch_and_parse_all_chunks` as `Ok(None)` — including the authoritative
+/// per-chunk CRC32 mismatch raised by `block_io::read_nb_format_chunk_data`. #1411
+/// split the integrity stitch (`stitch_all_chunks`, whose errors now propagate) from
+/// the schema-aware parse (which alone may soft-miss), so the corruption surfaces as
+/// the SAME typed error the full-scan/stream paths return. The identical
+/// `get([0,0,0,1])` returns `Ok(Some(_))` on the CLEAN fixture, so the divergence was
+/// a read-path defect, not a wrong key.
 #[tokio::test]
-#[ignore = "expected behavior; blocked on #1411 (point-lookup bypasses inline chunk-CRC check). Un-ignore when #1411 lands."]
 async fn point_lookup_into_corrupt_chunk_should_error_see_1411() {
     let Some(path) = corrupt_data_db_or_gate() else {
         return;
@@ -248,6 +257,43 @@ async fn point_lookup_into_corrupt_chunk_should_error_see_1411() {
             "point lookup over the corrupt chunk returned Ok(Some({v:?})) — garbage \
              from a bit-flipped chunk; it must return a typed corruption error."
         ),
+    }
+}
+
+/// Issue #1411 CLEAN-fixture control — the SAME point lookup (`get([0,0,0,1])`) on
+/// the healthy source SSTable returns `Ok(Some(_))`. This proves the corrupt-fixture
+/// `Err` above is the CRC corruption surfacing, not a lookup that misses for every
+/// input (which would make the corrupt-fixture assertion vacuous). Skip-clean when
+/// the clean binary is absent; `CQLITE_REQUIRE_FIXTURES=1` makes absence a hard fail;
+/// a present fixture that returns `Ok(None)`/`Err` fails unconditionally.
+#[tokio::test]
+async fn point_lookup_on_clean_chunk_returns_some_1411() {
+    let path = datasets_root().map(|r| r.join(CLEAN_DATA_DB));
+    let path = match path {
+        Some(p) if p.is_file() => p,
+        _ => {
+            assert!(
+                !require_fixtures(),
+                "CQLITE_REQUIRE_FIXTURES=1 but the clean source fixture is absent: {CLEAN_DATA_DB}. \
+                 Fetch the corpus (test-data/scripts/fetch-datasets.sh)."
+            );
+            eprintln!("SKIP: clean source fixture absent ({CLEAN_DATA_DB}); set CQLITE_REQUIRE_FIXTURES=1 to enforce.");
+            return;
+        }
+    };
+    let reader = open_reader(&path).await;
+    let table_id = TableId::new(TABLE.to_string());
+    let key = RowKey::new(PK1_KEY_BYTES.to_vec());
+
+    match reader.get(&table_id, &key).await {
+        Ok(Some(_)) => {}
+        Ok(None) => panic!(
+            "point lookup for pk=1 on the CLEAN {TABLE} fixture returned Ok(None); the \
+             partition must be found (else the corrupt-fixture assertion is vacuous)."
+        ),
+        Err(e) => {
+            panic!("point lookup for pk=1 on the CLEAN {TABLE} fixture must succeed, got Err: {e}")
+        }
     }
 }
 
