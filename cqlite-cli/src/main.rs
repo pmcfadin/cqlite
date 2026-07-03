@@ -476,6 +476,15 @@ async fn run_main() -> Result<()> {
             write_dir.join("wal"),
             schema.clone(),
         );
+        // Issue #1693: allow a low flush threshold via env so an interactive
+        // writable session's mid-session auto-flush is observable in tests
+        // WITHOUT writing the 64MB default threshold worth of data over stdin.
+        // Production leaves this unset and keeps the 64MB default.
+        if let Ok(raw) = std::env::var("CQLITE_MEMTABLE_FLUSH_THRESHOLD") {
+            if let Ok(bytes) = raw.trim().parse::<usize>() {
+                config = config.with_flush_threshold(bytes);
+            }
+        }
         // #929: supply a UDT registry built from the schema file's CREATE TYPE
         // statements so a bare-name non-frozen UDT column flushes as complex
         // per-field cells instead of the single-cell fallback (roborev #1029).
@@ -1113,8 +1122,16 @@ async fn run_writable_interactive(engine: &mut WriteEngine) -> Result<()> {
                         if stmt.is_empty() {
                             continue;
                         }
-                        match engine.execute(stmt) {
-                            Ok(()) => {
+                        // Use the async, threshold-flushing path (NOT the sync
+                        // `execute`, which intentionally skips auto-flush in an
+                        // async context). Otherwise a long interactive session
+                        // grows the memtable past the flush threshold up to the
+                        // hard limit, after which writes fail until exit — see
+                        // roborev finding, issue #1693. `execute_flushing` awaits a
+                        // real async flush (no block_on) so mid-session data lands
+                        // durably in Data.db.
+                        match engine.execute_flushing(stmt).await {
+                            Ok(_) => {
                                 // stdout is block-buffered when piped; flush so a
                                 // driving parent (or test) observes the ack promptly.
                                 println!("OK");

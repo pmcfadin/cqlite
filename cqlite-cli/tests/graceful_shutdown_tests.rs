@@ -205,3 +205,130 @@ fn sigint_in_writable_session_flushes_before_exit() {
         "durable row has wrong name: {grace}"
     );
 }
+
+/// Count Data.db SSTable components under a write engine's data directory.
+fn count_data_db(data_dir: &Path) -> usize {
+    fn walk(dir: &Path, acc: &mut usize) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, acc);
+            } else if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with("-Data.db"))
+            {
+                *acc += 1;
+            }
+        }
+    }
+    let mut n = 0;
+    walk(data_dir, &mut n);
+    n
+}
+
+/// Poll until `pred(count_data_db(..))` holds or `timeout` elapses.
+fn wait_for_sstable<F: Fn(usize) -> bool>(data_dir: &Path, pred: F, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if pred(count_data_db(data_dir)) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Issue #1693 (roborev): the interactive writable loop must use the async,
+/// threshold-flushing path (`execute_flushing`) rather than the sync `execute`
+/// (which intentionally skips auto-flush in an async context). Otherwise a long
+/// session grows the memtable past the flush threshold up to the hard limit and
+/// then FAILS every write until exit.
+///
+/// This drives a real interactive session with a tiny flush threshold (env
+/// override), writes several rows to cross it, and asserts a durable SSTable
+/// appears MID-SESSION — before any Ctrl-D/Ctrl-C — and that writes keep being
+/// accepted afterwards. On the pre-fix code (sync `execute`) no SSTable is
+/// produced until `close()`, so this test is RED before the fix.
+#[test]
+fn writable_session_auto_flushes_mid_session_across_threshold() {
+    let tmp = TempDir::new().unwrap();
+    let schema = write_schema(tmp.path());
+    let wd = tmp.path().join("wd");
+    let data_dir = wd.join("data");
+
+    let mut child = Command::new(cqlite_bin())
+        .args([
+            "--writable",
+            "--write-dir",
+            wd.to_str().unwrap(),
+            "--schema",
+            schema.to_str().unwrap(),
+        ])
+        // Tiny threshold so a handful of small rows crosses it and forces a
+        // mid-session flush without writing 64MB over stdin.
+        .env("CQLITE_MEMTABLE_FLUSH_THRESHOLD", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn cqlite interactive writable session");
+
+    let mut stdin = child.stdin.take().expect("child stdin");
+    let stdout_rx = spawn_line_reader(child.stdout.take().expect("child stdout"));
+
+    // Write several rows; each write should trigger an auto-flush because the
+    // threshold is effectively zero. Wait for each OK so the session is making
+    // progress (and not dead-ending at the hard limit).
+    for id in 0..5 {
+        writeln!(
+            stdin,
+            "INSERT INTO test_write.users (id, name, age, active) VALUES ({id}, 'row{id}', {id}, true);"
+        )
+        .expect("write INSERT to child stdin");
+        stdin.flush().expect("flush child stdin");
+        let ack = wait_for_line(&stdout_rx, |l| l.trim() == "OK", Duration::from_secs(60));
+        assert!(
+            ack.is_some(),
+            "write id={id} was not acknowledged — session dead-ended (no mid-session flush?)"
+        );
+    }
+
+    // A durable SSTable must exist BEFORE we close the session. On the sync
+    // `execute` path this stays 0 until close(); the flushing path produces one.
+    let flushed = wait_for_sstable(&data_dir, |n| n >= 1, Duration::from_secs(60));
+    assert!(
+        flushed,
+        "no Data.db SSTable appeared mid-session — interactive loop did not use the \
+         threshold-flushing path (issue #1693)"
+    );
+
+    // Cleanly end via EOF and confirm the process exits successfully.
+    drop(stdin);
+    let status = child
+        .wait_timeout(Duration::from_secs(60))
+        .expect("wait_timeout on child")
+        .unwrap_or_else(|| {
+            let _ = child.kill();
+            panic!("child did not exit on stdin EOF");
+        });
+    assert!(
+        status.success(),
+        "child exited uncleanly on EOF: {status:?}"
+    );
+
+    // All rows are durable on an independent read-only reopen.
+    let rows = select_rows(&data_dir, &schema, "SELECT * FROM test_write.users");
+    for id in 0..5 {
+        assert!(
+            rows.iter()
+                .any(|r| r.get("id").and_then(|v| v.as_i64()) == Some(id)),
+            "row id={id} not durable after mid-session flush; rows: {rows:?}"
+        );
+    }
+}
