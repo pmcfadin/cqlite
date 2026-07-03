@@ -18,7 +18,13 @@
 //! `dhat::Profiler` is a process-global singleton (two live profilers panic),
 //! so every test builds/drops its own profiler AND is `#[serial_test::serial]`;
 //! the gate additionally passes `--test-threads=1`.
-#![cfg(feature = "dhat-heap")]
+//!
+//! Requires BOTH `dhat-heap` (the global allocator + `HeapStats`) and
+//! `cli-helpers` (the `benches/fixtures/mod.rs` real-SSTable loader below uses
+//! `open_read_db`, which is itself `#[cfg(feature = "cli-helpers")]`). Gating on
+//! both means `--features dhat-heap` alone compiles an empty target instead of
+//! failing to build (roborev #1565); the gate always passes `cli-helpers,dhat-heap`.
+#![cfg(all(feature = "dhat-heap", feature = "cli-helpers"))]
 
 // The dhat allocator must be the global allocator to observe every allocation.
 // It is confined to this one test binary — default builds/tests never link it.
