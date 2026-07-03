@@ -320,6 +320,57 @@ fn bench_type_heavy(c: &mut Criterion) {
     group.finish();
 }
 
+/// Bench: partition-dense STREAMING full scan of simple_table (issue #1589).
+///
+/// `test_basic.simple_table` is UUID-keyed with no clustering column, so every row
+/// is its OWN partition (~999 one-row partitions) — the Θ(P·W) pathological shape
+/// the window-drain cursor targets. Unlike `full_scan` (which uses `db.execute`),
+/// this drives `execute_streaming`, the sliding-`WindowCursor` path where confirmed
+/// partitions used to be removed with a per-partition `window.drain(0..consumed)`
+/// (memmoving the whole residual tail each time). It is the sensitive read bench for
+/// a regression in the window-consume cost. `Throughput::Elements(row_count)` so the
+/// report shows rows/sec.
+#[cfg(feature = "cli-helpers")]
+fn bench_scan_partition_dense_stream(c: &mut Criterion) {
+    use cqlite_core::query::result::StreamingConfig;
+
+    let fx = fixtures::ReadFixture::SIMPLE;
+    let loaded = fixtures::open_read_db(&fx);
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let sql = format!("SELECT * FROM {}", fx.qualified());
+
+    // Drain one streaming scan to completion, returning the row count.
+    let drain = |sql: &str| -> usize {
+        rt.block_on(async {
+            let mut iter = loaded
+                .db
+                .execute_streaming(sql, StreamingConfig::default())
+                .await
+                .expect("execute_streaming");
+            let mut n = 0usize;
+            while let Some(row) = iter.next_async().await {
+                black_box(row.expect("streamed row"));
+                n += 1;
+            }
+            n
+        })
+    };
+
+    let row_count = drain(&sql) as u64;
+    assert!(
+        row_count > 0,
+        "partition-dense stream scan of {} returned zero rows — fixtures not fetched?",
+        fx.qualified()
+    );
+
+    let mut group = c.benchmark_group("read");
+    group.throughput(Throughput::Elements(row_count));
+    group.bench_function("scan_partition_dense_stream", |bch| {
+        bch.iter(|| black_box(drain(black_box(&sql))));
+    });
+    group.finish();
+}
+
 // ---------------------------------------------------------------------------
 // criterion_group! / criterion_main! — feature-gated so the bench compiles
 // under default features (no cli-helpers) with an empty but valid group.
@@ -333,7 +384,8 @@ criterion_group!(
               bench_get_partition_bti,
               bench_clustering_slice,
               bench_full_scan,
-              bench_type_heavy
+              bench_type_heavy,
+              bench_scan_partition_dense_stream
 );
 
 #[cfg(not(feature = "cli-helpers"))]
