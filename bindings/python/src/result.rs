@@ -176,14 +176,13 @@ impl QueryResult {
         // shares it by reference-count instead of re-cloning column-name
         // Strings per row.
         //
-        // Fallback (issue #1445): the legacy materialized executor wraps rows via
-        // `QueryResult::with_rows(..)` (e.g. point lookups in
-        // `cqlite-core::query::executor`), which leaves `metadata.columns` empty
-        // even though the rows carry values. Without this, every `Row` would be
-        // built with zero columns and drop all its values. When metadata columns
-        // are empty but rows exist, derive the shape from the first row's value
-        // keys (sorted, mirroring the SELECT executor's schema-less path) so the
-        // materialized output matches.
+        // Fallback (issue #1445): the legacy materialized executor wraps rows
+        // via `QueryResult::with_rows(..)` (e.g. point lookups in
+        // `cqlite-core::query::executor`), leaving `metadata.columns` empty even
+        // though rows carry values — without this every `Row` gets zero columns
+        // and drops all values. When empty but rows exist, derive the shape from
+        // the first row's value keys (sorted, mirroring the SELECT executor's
+        // schema-less path) so materialized output matches.
         let shape = if result.metadata.columns.is_empty() {
             match result.rows.first() {
                 Some(first_row) => build_row_shape_from_row_keys(py, first_row),
@@ -429,21 +428,52 @@ impl Row {
     /// lookup so the row is correct even if the core row's `HashMap` iteration
     /// order differs from column order. A column present in `shape` but absent
     /// from the row becomes Python `None`.
+    ///
+    /// Any row value whose key is **not** in `shape` is never dropped (issue
+    /// #1445): such keys are appended after the shaped columns in sorted order.
+    /// This preserves values where `metadata.columns` does not name every row
+    /// value — notably aggregates, keyed by alias (e.g. `Count(*)`) while
+    /// metadata carries a placeholder (`col_0`). When every row key is covered
+    /// (the common scan case) the shared shape is reused unchanged.
     pub(crate) fn from_core(
         py: Python<'_>,
         row: &cqlite_core::query::result::QueryRow,
         shape: RowShape,
     ) -> PyResult<Self> {
         let mut slots: Vec<Option<PyObject>> = (0..shape.keys.len()).map(|_| None).collect();
+        let mut uncovered: Vec<&str> = Vec::new();
         for (name, value) in &row.values {
-            if let Some(&pos) = shape.index.get(name.as_ref()) {
-                slots[pos] = Some(value_to_py(py, value)?);
+            match shape.index.get(name.as_ref()) {
+                Some(&pos) => slots[pos] = Some(value_to_py(py, value)?),
+                None => uncovered.push(name.as_ref()),
             }
         }
-        let values = slots
+
+        let mut values: Vec<PyObject> = slots
             .into_iter()
             .map(|v| v.unwrap_or_else(|| py.None()))
             .collect();
+
+        if uncovered.is_empty() {
+            // Fast path: every row value is covered by the shared shape.
+            return Ok(Self { shape, values });
+        }
+
+        // Slow path: extend the shape for THIS row so no value is dropped.
+        uncovered.sort_unstable();
+        let mut keys: Vec<Py<PyString>> = shape.keys.iter().map(|k| k.clone_ref(py)).collect();
+        let mut index: HashMap<String, usize> = (*shape.index).clone();
+        for name in uncovered {
+            if let Some(value) = row.values.get(name) {
+                index.insert(name.to_string(), keys.len());
+                keys.push(PyString::new(py, name).unbind());
+                values.push(value_to_py(py, value)?);
+            }
+        }
+        let shape = RowShape {
+            keys: keys.into(),
+            index: Arc::new(index),
+        };
         Ok(Self { shape, values })
     }
 }

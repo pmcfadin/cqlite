@@ -421,3 +421,29 @@ class TestSchemaLessStreamingSelectOrder:
             assert any(row[k] is not None for k in keys), (
                 "legacy materialized point lookup surfaced no values"
             )
+
+    def test_aggregate_value_not_dropped(self):
+        """COUNT(*) value must be surfaced, not dropped (issue #1445).
+
+        The aggregate row is keyed by its alias (e.g. ``Count(*)``) while
+        ``metadata.columns`` carries a positional placeholder (``col_0``). The
+        positional row rewrite must NOT drop values whose key is absent from the
+        metadata columns; before the fix, ``SELECT COUNT(*)`` returned only
+        ``{col_0: None}`` and lost the actual count.
+        """
+        skip_if_no_datasets()
+        skip_if_no_schema(SCHEMA_BASIC_TYPES)
+        with cqlite.open(DATASETS, schema=SCHEMA_BASIC_TYPES) as db:
+            baseline = db.execute("SELECT * FROM test_basic.simple_table")
+            expected_count = len(baseline)
+            assert expected_count > 0, "fixture present but returned 0 rows"
+
+            agg = db.execute("SELECT COUNT(*) FROM test_basic.simple_table")
+            assert len(agg) == 1
+            row = agg.rows[0]
+            d = row.to_dict()
+            # The actual count must appear as a value somewhere in the row and
+            # equal the number of rows in the table (no data loss).
+            assert expected_count in d.values(), (
+                f"COUNT(*) value {expected_count} was dropped from row {d}"
+            )
