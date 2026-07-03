@@ -1237,6 +1237,52 @@ impl WriteAheadLog {
     /// Returns an error if the WAL file cannot be opened or read (an I/O fault
     /// distinct from in-band corruption, which is reported, not errored).
     pub fn replay(&self) -> Result<RecoveryReport> {
+        // Thin wrapper over `replay_each` (issue #1661): collect the streamed
+        // mutations into the report's Vec so existing callers/tests are
+        // unchanged. `replay_each` itself never materialises the whole log.
+        let mut out = Vec::new();
+        let mut report = self.replay_each(|m| {
+            out.push(m);
+            Ok(())
+        })?;
+        report.mutations = out;
+        Ok(report)
+    }
+
+    /// Streaming form of [`replay`](Self::replay): invoke `f` once per recovered
+    /// mutation instead of accumulating a whole-log `Vec<Mutation>` (issue #1661).
+    ///
+    /// Control flow — decode/skip/stop/error semantics and the on-disk framing —
+    /// is byte-for-byte identical to [`replay`](Self::replay); this is a pure
+    /// memory refactor. The two differences are internal:
+    ///
+    /// 1. A single payload buffer is reused across entries (its capacity grows to
+    ///    the largest entry seen and is retained), so the peak read buffer is
+    ///    bounded by the largest single entry rather than allocated fresh per
+    ///    entry.
+    /// 2. Each successfully decoded mutation is passed to `f` rather than pushed
+    ///    onto a `Vec`, so the caller (e.g. crash recovery) can insert it into the
+    ///    memtable immediately and never hold the whole log resident.
+    ///
+    /// The returned [`RecoveryReport`] carries the same corruption metadata
+    /// ([`corrupt_entries`](RecoveryReport::corrupt_entries),
+    /// [`stopped_early`](RecoveryReport::stopped_early),
+    /// [`bytes_skipped`](RecoveryReport::bytes_skipped)) as `replay`, but its
+    /// [`mutations`](RecoveryReport::mutations) vec is left empty — the mutations
+    /// were streamed to `f`. Callers MUST still consult
+    /// [`RecoveryReport::is_clean`].
+    ///
+    /// If `f` returns an error, replay stops and the error propagates unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the WAL file cannot be opened or read (an I/O fault
+    /// distinct from in-band corruption, which is reported, not errored), or if
+    /// `f` returns an error for a recovered mutation.
+    pub fn replay_each<F>(&self, mut f: F) -> Result<RecoveryReport>
+    where
+        F: FnMut(Mutation) -> Result<()>,
+    {
         let mut file = File::open(&self.path)
             .map_err(|e| Error::Storage(format!("Failed to open WAL for replay: {}", e)))?;
         let total_len = file
@@ -1246,6 +1292,10 @@ impl WriteAheadLog {
 
         let mut report = RecoveryReport::default();
         let mut offset = 0u64;
+        // Reuse ONE payload buffer across entries (issue #1661): `resize` retains
+        // the allocation's capacity, so the peak read buffer is bounded by the
+        // largest single entry rather than a fresh `vec![0u8; len]` per entry.
+        let mut mutation_bytes: Vec<u8> = Vec::new();
 
         loop {
             // Read entry header: [length][crc32]
@@ -1285,8 +1335,10 @@ impl WriteAheadLog {
                 break;
             }
 
-            // Read mutation bytes
-            let mut mutation_bytes = vec![0u8; entry_length as usize];
+            // Read mutation bytes into the reused buffer (issue #1661). `resize`
+            // grows/shrinks the length to exactly `entry_length` (reusing the
+            // retained capacity); `read_exact` then overwrites all of it.
+            mutation_bytes.resize(entry_length as usize, 0);
             match file.read_exact(&mut mutation_bytes) {
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
@@ -1350,7 +1402,10 @@ impl WriteAheadLog {
             // is trustworthy we skip just this entry and continue.
             match decode_mutation(&mutation_bytes) {
                 Ok(mutation) => {
-                    report.mutations.push(mutation);
+                    // Stream the mutation to the caller instead of accumulating a
+                    // whole-log Vec (issue #1661). An `f` error propagates
+                    // unchanged.
+                    f(mutation)?;
                 }
                 Err(e) => {
                     log::error!(
@@ -3255,6 +3310,117 @@ mod tests {
             } => assert_eq!(name, "Alice", "the sole recovered entry must be A"),
             other => panic!("expected Write op, got {other:?}"),
         }
+    }
+
+    /// Issue #1661: `replay_each` must be semantically identical to `replay()` —
+    /// it must yield the SAME mutations in the SAME order and produce the SAME
+    /// corruption metadata for a mixed WAL (valid entries plus a CRC-corrupt
+    /// entry). This proves the streaming refactor changed only allocation
+    /// behavior, not decode/skip/stop semantics.
+    #[test]
+    fn test_replay_each_matches_replay_for_mixed_wal() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // [A][B][C], all synced. Capture the end-of-A offset (start of B's frame).
+        let (path, end_of_a) = {
+            let mut wal = WriteAheadLog::create(temp_dir.path()).unwrap();
+            wal.append(&create_test_mutation(1, "Alice")).unwrap();
+            wal.sync().unwrap();
+            let end_of_a = wal.size();
+            wal.append(&create_test_mutation(2, "Bob")).unwrap();
+            wal.sync().unwrap();
+            wal.append(&create_test_mutation(3, "Carol")).unwrap();
+            wal.sync().unwrap();
+            let path = wal.path().to_path_buf();
+            drop(wal);
+            (path, end_of_a)
+        };
+
+        // Corrupt B's CRC (4 bytes at end_of_a + 4) via a bit flip; B stays
+        // structurally complete so this exercises the CRC-mismatch stop path.
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.seek(SeekFrom::Start(end_of_a + 4)).unwrap();
+        let mut crc = [0u8; 4];
+        file.read_exact(&mut crc).unwrap();
+        crc[0] ^= 0xFF;
+        file.seek(SeekFrom::Start(end_of_a + 4)).unwrap();
+        file.write_all(&crc).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        let wal = WriteAheadLog::open_existing(&path).unwrap();
+
+        // Reference: the whole-log `replay()`.
+        let report = wal.replay().unwrap();
+
+        // Streaming: collect the callback-delivered mutations.
+        let mut streamed = Vec::new();
+        let stream_report = wal
+            .replay_each(|m| {
+                streamed.push(m);
+                Ok(())
+            })
+            .unwrap();
+
+        // Same mutations, same order (compare via bincode bytes — Mutation has no
+        // PartialEq).
+        let ser = |m: &Mutation| bincode::serialize(m).unwrap();
+        let expected: Vec<Vec<u8>> = report.mutations.iter().map(ser).collect();
+        let actual: Vec<Vec<u8>> = streamed.iter().map(ser).collect();
+        assert_eq!(
+            actual, expected,
+            "replay_each must yield the same mutations in the same order as replay()"
+        );
+        // Only the valid prefix A survives the mid-stream corruption.
+        assert_eq!(streamed.len(), 1, "only the valid prefix A is recovered");
+
+        // Same corruption metadata; `replay_each`'s report leaves mutations empty
+        // (they were streamed to the callback), while `replay()` populates them.
+        assert_eq!(stream_report.corrupt_entries, report.corrupt_entries);
+        assert_eq!(stream_report.stopped_early, report.stopped_early);
+        assert_eq!(stream_report.bytes_skipped, report.bytes_skipped);
+        assert!(
+            stream_report.stopped_early,
+            "must stop at the corrupt entry"
+        );
+        assert_eq!(stream_report.corrupt_entries, 1);
+        assert!(
+            stream_report.mutations.is_empty(),
+            "replay_each streams mutations to the callback, so its report Vec stays empty"
+        );
+    }
+
+    /// Issue #1661: a fully clean multi-entry WAL must stream every entry in
+    /// order and report clean, matching `replay()`.
+    #[test]
+    fn test_replay_each_clean_multi_entry() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut wal = WriteAheadLog::create(temp_dir.path()).unwrap();
+        wal.append(&create_test_mutation(1, "Alice")).unwrap();
+        wal.append(&create_test_mutation(2, "Bob")).unwrap();
+        wal.append(&create_test_mutation(3, "Carol")).unwrap();
+        wal.sync().unwrap();
+
+        let report = wal.replay().unwrap();
+        let mut streamed = Vec::new();
+        let stream_report = wal
+            .replay_each(|m| {
+                streamed.push(m);
+                Ok(())
+            })
+            .unwrap();
+
+        let ser = |m: &Mutation| bincode::serialize(m).unwrap();
+        let expected: Vec<Vec<u8>> = report.mutations.iter().map(ser).collect();
+        let actual: Vec<Vec<u8>> = streamed.iter().map(ser).collect();
+        assert_eq!(actual, expected);
+        assert_eq!(streamed.len(), 3);
+        assert!(stream_report.is_clean());
+        assert!(report.is_clean());
     }
 
     #[test]
