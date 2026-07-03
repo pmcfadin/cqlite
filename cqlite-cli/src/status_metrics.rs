@@ -7,7 +7,42 @@
 
 use cqlite_core::Database;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Test-only counter of how many times the shared `System` handle has been
+/// constructed. sysinfo's intended pattern is construct-once + narrow refresh
+/// per tick; this lets the TDD test assert exactly one construction across many
+/// status-refresh ticks (Issue #1719).
+#[cfg(test)]
+static SYSTEM_CONSTRUCTIONS: AtomicUsize = AtomicUsize::new(0);
+
+/// Test-only counter of how many times the cached `System` handle has been
+/// refreshed. sysinfo's intended pattern is construct-once + refresh-per-tick;
+/// this lets the TDD test deterministically assert that every tick performs a
+/// live refresh through the cached handle (i.e. the reading is never a stale
+/// cached value) without depending on RSS timing/monotonicity (Issue #1719).
+#[cfg(test)]
+static SYSTEM_REFRESHES: AtomicUsize = AtomicUsize::new(0);
+
+/// Shared, lazily-constructed `sysinfo::System` handle.
+///
+/// Constructed exactly once (on first status refresh) and reused for every
+/// subsequent 5-second tick. Each refresh performs the narrowest possible
+/// refresh for the current process only, keeping the reported memory value
+/// fresh without re-enumerating system state each tick (Issue #1719). A
+/// `Mutex` is sufficient at the 5s status cadence.
+fn shared_system() -> &'static Mutex<sysinfo::System> {
+    static SYSTEM: OnceLock<Mutex<sysinfo::System>> = OnceLock::new();
+    SYSTEM.get_or_init(|| {
+        #[cfg(test)]
+        SYSTEM_CONSTRUCTIONS.fetch_add(1, Ordering::Relaxed);
+        Mutex::new(sysinfo::System::new())
+    })
+}
 
 /// Default metrics refresh interval (5 seconds)
 pub const METRICS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
@@ -83,10 +118,7 @@ impl StatusMetrics {
     /// Uses sysinfo crate for cross-platform memory reading.
     /// Returns RSS (Resident Set Size) in bytes, or 0 if unavailable.
     fn get_process_memory() -> u64 {
-        use sysinfo::{ProcessRefreshKind, System};
-
-        // Create system instance and refresh current process
-        let mut system = System::new();
+        use sysinfo::ProcessRefreshKind;
 
         // Get current process ID
         let pid = match sysinfo::get_current_pid() {
@@ -94,7 +126,18 @@ impl StatusMetrics {
             Err(_) => return 0,
         };
 
+        // Reuse the shared System handle (constructed once) and refresh only
+        // this process's memory — the reading stays fresh per tick without
+        // re-enumerating all system state (Issue #1719).
+        let mut system = match shared_system().lock() {
+            Ok(guard) => guard,
+            Err(_) => return 0,
+        };
+
         system.refresh_process_specifics(pid, ProcessRefreshKind::new().with_memory());
+
+        #[cfg(test)]
+        SYSTEM_REFRESHES.fetch_add(1, Ordering::Relaxed);
 
         // Get memory usage in bytes (RSS)
         system
@@ -234,6 +277,69 @@ mod tests {
     fn test_check_health_nonexistent_path() {
         let health = StatusMetrics::check_health(Some(Path::new("/nonexistent/path/12345")));
         assert_eq!(health, HealthIndicator::Error);
+    }
+
+    /// Issue #1719 (red on main): the shared `System` handle must be
+    /// constructed exactly once across many status-refresh ticks, not once
+    /// per tick. On main `get_process_memory` did `System::new()` every call,
+    /// so this global total would be >= the number of calls and the assertion
+    /// would fail.
+    #[test]
+    fn test_system_constructed_once_across_ticks() {
+        // Simulate many 5s status-refresh ticks.
+        for _ in 0..8 {
+            let _ = StatusMetrics::get_process_memory();
+        }
+        // OnceLock guarantees the handle is initialized exactly once for the
+        // whole process, regardless of how many ticks (or other tests) call in.
+        assert_eq!(
+            SYSTEM_CONSTRUCTIONS.load(Ordering::Relaxed),
+            1,
+            "System must be constructed exactly once across refresh ticks, not per tick"
+        );
+    }
+
+    /// The cached handle must perform a live refresh on every tick so the
+    /// reading is never a stale cached value. We prove this deterministically
+    /// by observing the refresh counter around each individual tick: every
+    /// call to `get_process_memory` drives at least one refresh through the
+    /// cached handle (`after > before`), so the reported memory is re-read live
+    /// each tick rather than served from a stale cached value.
+    ///
+    /// This tests the intent ("handle cached once, refreshed every tick")
+    /// with zero dependence on RSS timing/monotonicity — that RSS class is
+    /// non-deterministic in a parallel test process (Issue #1719, #1774). The
+    /// per-tick `after > before` invariant also holds under concurrent tests
+    /// incrementing the same global counter (this call always adds its own +1),
+    /// so it is not flaky.
+    #[test]
+    fn test_memory_reading_stays_fresh_across_ticks() {
+        const TICKS: usize = 5;
+
+        for _ in 0..TICKS {
+            // A single tick must drive at least one refresh through the cached
+            // handle. Concurrent tests may also increment this global counter,
+            // but this call is guaranteed to contribute its own +1, so
+            // `after > before` is deterministic (never flaky).
+            let before = SYSTEM_REFRESHES.load(Ordering::Relaxed);
+            let _reading = StatusMetrics::get_process_memory();
+            let after = SYSTEM_REFRESHES.load(Ordering::Relaxed);
+
+            assert!(
+                after > before,
+                "each tick must refresh the cached handle (fresh, not stale): \
+                 before={before} after={after}"
+            );
+        }
+
+        // The freshness must come from refreshing the *cached* handle, not from
+        // reconstructing it: the handle is constructed exactly once regardless
+        // of how many ticks (or concurrent tests) call in.
+        assert_eq!(
+            SYSTEM_CONSTRUCTIONS.load(Ordering::Relaxed),
+            1,
+            "refresh-per-tick must reuse the single cached handle, not reconstruct it"
+        );
     }
 
     #[test]
