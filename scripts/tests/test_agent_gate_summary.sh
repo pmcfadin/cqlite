@@ -399,6 +399,20 @@ else
   echo "------- classify output -------"; printf '%s\n' "$noparser_out"; echo "-------------------------------"
 fi
 
+# 7c. No metadata parser RUNS the core lib tests (issue #1821 roborev): the
+#     lib-only fallback must ACTUALLY RUN cqlite-core's tests, not compile-check
+#     them. The old code consulted pkg_has_lib (empty index -> 0) and degraded to
+#     `--no-run`. Assert the fallback command includes `--lib` and does NOT include
+#     `--no-run`. Force the no-parser branch hermetically via the existing hook.
+noparser_cmd=$(AGENT_GATE_TEST_NO_METADATA_PARSER=1 bash "$GATE" --scoped-test-cmd-noparser 2>/dev/null)
+if printf '%s\n' "$noparser_cmd" | grep -qF -- '--lib' \
+   && ! printf '%s\n' "$noparser_cmd" | grep -qF -- '--no-run'; then
+  ok "no-parser: fallback RUNS cqlite-core --lib tests (has --lib, no --no-run)"
+else
+  bad "no-parser: fallback command does not run lib tests (want --lib, not --no-run)"
+  echo "------- scoped cmd -------"; printf '%s\n' "$noparser_cmd"; echo "--------------------------"
+fi
+
 # 8. Bash 3.2 compatibility (issue #1821): macOS ships Bash 3.2 as /bin/bash and
 #    the gate is invoked as plain `bash scripts/agent-gate.sh`. The --lite path
 #    must not use Bash-4-only features (associative arrays). Exercise the hook

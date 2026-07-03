@@ -322,6 +322,16 @@ _owners_from_index() {
 # longest-prefix ownership. Empty when no metadata parser is available.
 classify_package_owners() { _owners_from_index "$(_package_index)"; }
 
+# Single source of truth for the no-parser fallback's scoped-test command (issue
+# #1821 roborev): when NEITHER jq nor python3 is present we cannot derive package
+# ownership from Cargo metadata, so we scope to `cqlite-core --lib`. Crucially this
+# RUNS the core lib tests (no `--no-run`) — a compile-only check would give false
+# confidence that tests passed. cli-helpers matches the full gate's core-tests.
+# Both run_scoped_tests and the --scoped-test-cmd-noparser self-test hook use this.
+_scoped_test_cmd_noparser() {
+  echo "test -p cqlite-core --lib --features cli-helpers"
+}
+
 COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity python-bindings node-bindings delivery-telemetry parity-report binding-unwind-profile tooling-tests minimal-build smoke)
 # --lite (issue #1821) runs ONLY this fast subset: file-size ratchet, fmt,
 # FULL-workspace clippy (cross-crate API breaks are the cheap-insurance class),
@@ -346,6 +356,10 @@ case "${1:-}" in
   # Hidden self-test hook (issue #1821): map stdin paths -> "<pkg>|<has_lib>"
   # via metadata-derived longest-prefix package ownership. No side effects.
   --classify-package-owners) classify_package_owners; exit 0 ;;
+  # Hidden self-test hook (issue #1821 roborev): print the no-parser fallback's
+  # scoped-test command so the self-test can assert it RUNS tests (--lib, never
+  # --no-run). No side effects; does not invoke cargo.
+  --scoped-test-cmd-noparser) echo "cargo $(_scoped_test_cmd_noparser)"; exit 0 ;;
   --only) ONLY="${2:?--only needs a comma-separated component list}" ;;
   --emit-summary-selftest) SELFTEST=1 ;;
   "") ;;
@@ -1062,6 +1076,30 @@ run_scoped_tests() {
      { ! command -v jq >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; }; then
     have_meta_parser=0
     echo ">>> [$name] no jq/python3 — scoping to cqlite-core --lib only; run the full gate for integration-test coverage"
+  fi
+
+  # No-parser fallback (issue #1821 roborev): without a metadata parser we do NOT
+  # consult pkg_has_lib (it can't know without metadata and would degrade to a
+  # compile-only --no-run). Run an explicit, unconditional cqlite-core --lib test
+  # that ACTUALLY RUNS the core lib tests, then finish this component and return —
+  # the metadata-derived per-package selection below is skipped entirely.
+  if [ "$have_meta_parser" -eq 0 ]; then
+    local -a args=()
+    read -r -a args <<<"$(_scoped_test_cmd_noparser)"
+    echo ">>> [$name] cargo ${args[*]}"
+    if ! cargo "${args[@]}" >>"$log" 2>&1; then
+      status=FAIL
+      OVERALL=FAIL
+    fi
+    if [ "$status" = FAIL ]; then
+      echo "--- [$name] FAILED; last 60 lines of $log ---"
+      tail -60 "$log"
+      echo "--- end of $name output ---"
+    fi
+    end=$(date +%s)
+    NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
+    echo ">>> [$name] $status ($((end - start))s)"
+    return
   fi
 
   # Metadata-derived package ownership (issue #1821): the single authoritative
