@@ -172,6 +172,20 @@ REPO_ROOT="$PWD"
 if ! command -v cargo >/dev/null 2>&1 && [ -d "$HOME/.cargo/bin" ]; then
   export PATH="$HOME/.cargo/bin:$PATH"
 fi
+
+# sccache auto-detect (issue #1822): if sccache is available, use it as the
+# rustc wrapper for incremental compilation cache. Each worktree keeps its own
+# target/ dir (no lock contention); the shared object cache deduplicates
+# compilation across worktrees. Disabled via CQLITE_DISABLE_SCCACHE=1.
+# Cache location: $SCCACHE_DIR (default ~/.cache/sccache on Linux,
+# ~/Library/Caches/Mozilla.sccache on macOS). Cache size limit:
+# $SCCACHE_CACHE_SIZE (default 10 GiB; raise for multi-user builds).
+# Measurement (issue #1822): 25.6% speedup on fresh worktrees with warm cache.
+if [ "${CQLITE_DISABLE_SCCACHE:-0}" != 1 ] && command -v sccache >/dev/null 2>&1; then
+  export RUSTC_WRAPPER=sccache
+  export CARGO_INCREMENTAL=0
+  echo "agent-gate: sccache detected; using as RUSTC_WRAPPER with CARGO_INCREMENTAL=0 (#1822)"
+fi
 export CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-$REPO_ROOT/test-data/datasets}"
 
 COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity python-bindings node-bindings delivery-telemetry parity-report binding-unwind-profile tooling-tests minimal-build smoke)

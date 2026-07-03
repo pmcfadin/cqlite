@@ -88,6 +88,57 @@ cat /tmp/gate-summary.txt   # complete SUMMARY, even if gate.log truncated
 # Fast self-test of the emission/recovery path:
 bash scripts/tests/test_agent_gate_summary.sh
 
+### Shared Compiler Cache (sccache)
+
+The gate uses **sccache** (Mozilla's shared compiler cache) to eliminate duplicated compilation across worktrees. Each worktree is **independent** (owns its `target/` dir, no lock contention), but reuses cached compilation artifacts from any prior worktree, giving **25.6% wall-clock speedup on fresh-worktree scenarios** (measured in issue #1822).
+
+**Setup** (one-time per machine):
+```bash
+# macOS:
+brew install sccache
+
+# Linux:
+cargo install sccache
+
+# Or download a release binary: https://github.com/mozilla/sccache/releases
+```
+
+**Configuration** (optional; auto-detects on first use):
+The gate auto-enables sccache if it's on `$PATH`. To customize:
+```bash
+# Set cache location (default: ~/.cache/sccache on Linux, ~/Library/Caches/Mozilla.sccache on macOS)
+export SCCACHE_DIR=/custom/cache/path
+
+# Set size limit (default 10 GiB; raise for multi-worktree teams)
+export SCCACHE_CACHE_SIZE=50G
+
+# Disable sccache for a single gate run (if needed for diagnostics)
+CQLITE_DISABLE_SCCACHE=1 bash scripts/agent-gate.sh
+
+# Disable sccache permanently (not recommended)
+export CQLITE_DISABLE_SCCACHE=1
+```
+
+**Rationale: sccache vs shared `CARGO_TARGET_DIR`** (issue #1822):
+- **sccache (chosen):** Each worktree has its own `target/` dir (parallel gates do not contend for the build lock); the shared object cache deduplicates `rustc` invocations. Empirically: 7 concurrent worktree gates run in parallel, all benefiting from the cache.
+- **Shared `CARGO_TARGET_DIR` (rejected):** `cargo` takes an exclusive build lock on the shared target dir, so concurrent gates serialize (throughput bottleneck), thrashing the cache with different feature sets (each gate component uses different flags / features).
+
+**Cache management**:
+```bash
+# View cache stats (shows hit rate, size, cache location)
+sccache --show-stats
+
+# Zero stats for measurement
+sccache --zero-stats
+
+# Stop the background server (if needed for diagnostics)
+sccache --stop-server
+
+# Start the server explicitly (normally auto-starts)
+sccache --start-server
+```
+
+
 # Build
 cargo build
 
