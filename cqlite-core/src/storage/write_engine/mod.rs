@@ -547,9 +547,24 @@ impl WriteEngine {
 
         // Replay WAL into memtable. The report distinguishes a clean recovery
         // from a lossy one (issue #1391); a bare Vec cannot.
+        //
+        // Stream each recovered mutation straight into the memtable via
+        // `replay_each` (issue #1661) instead of materialising a whole-log
+        // `Vec<Mutation>` and then copying it in: peak memory is bounded by the
+        // memtable itself, not ~2× it. `recovered` is an authoritative count of
+        // mutations actually recovered (used only for the lossy-recovery log,
+        // preserving its prior `mutations.len()` meaning); the completion log
+        // counts from the memtable. The report still carries all corruption
+        // metadata — mutations stream via the closure, so its `mutations` vec
+        // stays empty.
         let mut memtable = Memtable::new();
-        let mut wal_recovery = wal.replay()?;
-        let mutations = std::mem::take(&mut wal_recovery.mutations);
+        let mut recovered = 0usize;
+        let wal_recovery = wal.replay_each(|mutation| {
+            let decorated_key = mutation.decorated_key(&config.schema)?;
+            memtable.insert_with_key(decorated_key, mutation)?;
+            recovered += 1;
+            Ok(())
+        })?;
 
         if !wal_recovery.is_clean() {
             // Preserve the raw WAL segment aside BEFORE anything (a later flush,
@@ -576,7 +591,7 @@ impl WriteEngine {
                  {:?}; live WAL reset to valid prefix ({:?}). Investigate before relying on this \
                  data.",
                 wal_path,
-                mutations.len(),
+                recovered,
                 wal_recovery.corrupt_entries,
                 wal_recovery.stopped_early,
                 wal_recovery.bytes_skipped,
@@ -585,19 +600,10 @@ impl WriteEngine {
             );
         }
 
-        if !mutations.is_empty() {
-            log::info!("Replaying {} mutations from WAL", mutations.len());
-
-            for mutation in mutations {
-                // Compute decorated key
-                let decorated_key = mutation.decorated_key(&config.schema)?;
-
-                // Insert into memtable
-                memtable.insert_with_key(decorated_key, mutation)?;
-            }
-
+        if recovered > 0 {
             log::info!(
-                "WAL replay complete: {} rows in memtable, {} bytes",
+                "WAL replay complete: replayed {} mutation(s); {} rows in memtable, {} bytes",
+                recovered,
                 memtable.row_count(),
                 memtable.size_bytes()
             );
