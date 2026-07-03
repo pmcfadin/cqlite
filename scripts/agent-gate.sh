@@ -187,6 +187,73 @@ if ! command -v cargo >/dev/null 2>&1 && [ -d "$HOME/.cargo/bin" ]; then
 fi
 export CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-$REPO_ROOT/test-data/datasets}"
 
+# --- Authoritative Cargo integration-test target mapping (issue #1821) --------
+# roborev finding: a Bash `case` glob such as `*/tests/*.rs` also matches NESTED
+# helper/module files (e.g. cqlite-core/tests/write_read_roundtrip/data_multi.rs,
+# cqlite-cli/tests/common/mod.rs) that are NOT Cargo `--test` targets. Passing
+# such a stem as `--test <stem>` makes --lite FAIL on valid helper-only changes.
+# We therefore map a changed .rs file to a `--test` target ONLY via authoritative
+# Cargo metadata (each integration target's exact src_path + name — no path/name
+# heuristics). When neither jq nor python3 can parse metadata, we fall back to a
+# PRECISE path check restricted to the auto-discovery packages, where a direct
+# child `<pkg>/tests/<stem>.rs` (exactly one path segment after tests/) IS a real
+# auto-discovered target; nested files and the manually-declared integration
+# crates are never guessed at (they compile-check via --no-run / --lib instead).
+# These helpers use no Bash-4-only features (no associative arrays), so the whole
+# --lite path runs under macOS's default Bash 3.2.
+
+# Emit "<abs_src_path>\t<pkg>\t<testname>" for every Cargo test target, or nothing
+# if metadata cannot be produced/parsed.
+_test_target_index() {
+  local meta
+  meta=$(cargo metadata --no-deps --format-version 1 2>/dev/null) || return 0
+  [ -n "$meta" ] || return 0
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s' "$meta" | jq -r \
+      '.packages[] | .name as $p | .targets[]
+       | select(.kind[] == "test") | "\(.src_path)\t\($p)\t\(.name)"'
+  elif command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$meta" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+for p in d["packages"]:
+    for t in p["targets"]:
+        if "test" in t.get("kind", []):
+            print("%s\t%s\t%s" % (t["src_path"], p["name"], t["name"]))
+'
+  fi
+}
+
+# Read changed repo-relative paths on stdin; print "<pkg>|<testname>" for each
+# that is an ACTUAL Cargo integration-test target. Nested helper/module files are
+# excluded. Deterministic; Bash 3.2-safe.
+classify_test_targets() {
+  local index f abs hit pkg base
+  index=$(_test_target_index)
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$f" in *.rs) ;; *) continue ;; esac
+    if [ -n "$index" ]; then
+      abs="$REPO_ROOT/$f"
+      hit=$(printf '%s\n' "$index" \
+        | awk -F'\t' -v p="$abs" '$1 == p { print $2 "|" $3; exit }')
+      [ -n "$hit" ] && printf '%s\n' "$hit"
+    else
+      # No JSON parser available: precise direct-child check for the four
+      # auto-discovery packages only. `<pkg>/tests/<stem>.rs` with no further `/`.
+      case "$f" in
+        cqlite-core/tests/*.rs)            pkg=cqlite-core;      base=${f#cqlite-core/tests/} ;;
+        cqlite-cli/tests/*.rs)             pkg=cqlite-cli;       base=${f#cqlite-cli/tests/} ;;
+        cqlite-flight/tests/*.rs)          pkg=cqlite-flight;    base=${f#cqlite-flight/tests/} ;;
+        tools/cassandra-parity/tests/*.rs) pkg=cassandra-parity; base=${f#tools/cassandra-parity/tests/} ;;
+        *) continue ;;
+      esac
+      case "$base" in */*) continue ;; esac   # nested helper -> not a --test target
+      printf '%s|%s\n' "$pkg" "${base%.rs}"
+    fi
+  done
+}
+
 COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity python-bindings node-bindings delivery-telemetry parity-report binding-unwind-profile tooling-tests minimal-build smoke)
 # --lite (issue #1821) runs ONLY this fast subset: file-size ratchet, fmt,
 # FULL-workspace clippy (cross-crate API breaks are the cheap-insurance class),
@@ -205,6 +272,9 @@ case "${1:-}" in
   # running any component.
   --lite) LITE=1; [ "${2:-}" = --emit-summary-selftest ] && SELFTEST=1 ;;
   --lite-list) printf '%s\n' "${LITE_COMPONENTS[@]}"; exit 0 ;;
+  # Hidden self-test hook (issue #1821): map stdin paths -> "<pkg>|<testname>"
+  # for actual Cargo test targets (nested helpers excluded). No side effects.
+  --classify-test-targets) classify_test_targets; exit 0 ;;
   --only) ONLY="${2:?--only needs a comma-separated component list}" ;;
   --emit-summary-selftest) SELFTEST=1 ;;
   "") ;;
@@ -910,9 +980,8 @@ run_scoped_tests() {
   fi
 
   # path -> package. Order matters: tests/format-compatibility before tests/*.
-  declare -A pkgset=()
-  declare -A newtests=()   # key "<pkg>|<teststem>" for added/changed --test targets
-  local f pkg stem
+  # Bash 3.2-safe: a newline-delimited set (grep -qxF dedup), no associative array.
+  local pkgset="" f pkg
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     case "$f" in
@@ -924,14 +993,14 @@ run_scoped_tests() {
       tests/*)                      pkg=cqlite-integration-tests ;;
       *) continue ;;   # bindings, scripts, docs, .claude, root -> no rust lib pkg
     esac
-    pkgset["$pkg"]=1
-    case "$f" in
-      */tests/*.rs|tests/*.rs)
-        stem=$(basename "$f" .rs)
-        newtests["$pkg|$stem"]=1
-        ;;
-    esac
+    printf '%s\n' "$pkgset" | grep -qxF "$pkg" || pkgset="${pkgset}${pkg}"$'\n'
   done <<<"$changed"
+
+  # Authoritative added/changed --test targets ("<pkg>|<testname>" per line).
+  # Uses Cargo metadata so NESTED helper files (tests/<subdir>/*.rs) are excluded
+  # rather than turned into a bogus `--test <stem>` that would fail --lite.
+  local newtests
+  newtests=$(printf '%s\n' "$changed" | classify_test_targets)
 
   # package -> manifest dir (to detect a src/lib.rs target).
   pkg_dir() {
@@ -946,7 +1015,8 @@ run_scoped_tests() {
     esac
   }
 
-  local -a pkgs=("${!pkgset[@]}")
+  local -a pkgs=()
+  while IFS= read -r pkg; do [ -n "$pkg" ] && pkgs+=("$pkg"); done <<<"$pkgset"
   local scoped_note
   if [ "${#pkgs[@]}" -eq 0 ]; then
     pkgs=(cqlite-core)
@@ -965,10 +1035,13 @@ run_scoped_tests() {
     [ -n "$dir" ] && [ -f "$dir/src/lib.rs" ] && haslib=1
     [ "$haslib" -eq 1 ] && args+=(--lib)
     local -a stems=()
-    for key in "${!newtests[@]}"; do
+    while IFS= read -r key; do
+      [ -n "$key" ] || continue
       case "$key" in "$p|"*) stems+=(--test "${key#*|}") ;; esac
-    done
-    args+=("${stems[@]}")
+    done <<<"$newtests"
+    # Bash 3.2 under `set -u` treats "${stems[@]}" of an EMPTY array as unbound,
+    # so only expand it when non-empty (count expansion is always safe).
+    [ "${#stems[@]}" -gt 0 ] && args+=("${stems[@]}")
     # A test-only crate with no changed --test target has nothing runnable to
     # scope to; compile-check it (--no-run) rather than run its whole (slow) suite.
     if [ "$haslib" -eq 0 ] && [ "${#stems[@]}" -eq 0 ]; then

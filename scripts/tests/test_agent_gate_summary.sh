@@ -262,6 +262,49 @@ else
   ok "lite-selftest: block does not contain the full-gate SUMMARY marker line"
 fi
 
+# 7. scoped-test target classification (issue #1821): a changed file is treated
+#    as a Cargo `--test` target ONLY if it is an actual integration-test target.
+#    NESTED helper/module files under tests/<subdir>/ must NOT be picked (a Bash
+#    `case` glob like `*/tests/*.rs` matches `/`, so it wrongly matched them and
+#    made --lite FAIL on valid helper-only changes). The gate exposes the mapping
+#    via the hidden `--classify-test-targets` hook (stdin paths -> "<pkg>|<name>").
+classify_out=$(printf '%s\n' \
+  "cqlite-core/tests/write_read_roundtrip/data_multi.rs" \
+  "cqlite-cli/tests/common/mod.rs" \
+  "cqlite-core/src/storage/sstable/reader.rs" \
+  "cqlite-core/tests/compact_command.rs" \
+  | bash "$GATE" --classify-test-targets 2>/dev/null)
+# Nested helper + module files must be EXCLUDED.
+if printf '%s\n' "$classify_out" | grep -qE '\|(data_multi|mod)$'; then
+  bad "classify: nested helper (write_read_roundtrip/data_multi.rs or common/mod.rs) wrongly picked as a --test target"
+  echo "------- classify output -------"; printf '%s\n' "$classify_out"; echo "-------------------------------"
+else
+  ok "classify: nested helper/module files NOT treated as --test targets"
+fi
+# A real direct integration-test target must still be picked, mapped to its pkg.
+if printf '%s\n' "$classify_out" | grep -qxF "cqlite-core|compact_command"; then
+  ok "classify: real integration-test target (compact_command) picked with correct package"
+else
+  bad "classify: real integration-test target compact_command was NOT picked"
+  echo "------- classify output -------"; printf '%s\n' "$classify_out"; echo "-------------------------------"
+fi
+
+# 8. Bash 3.2 compatibility (issue #1821): macOS ships Bash 3.2 as /bin/bash and
+#    the gate is invoked as plain `bash scripts/agent-gate.sh`. The --lite path
+#    must not use Bash-4-only features (associative arrays). Exercise the hook
+#    under /bin/bash when it is the 3.x default so the test is meaningful there.
+if [ -x /bin/bash ]; then
+  bin_bash_major=$(/bin/bash -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null)
+  if /bin/bash "$GATE" --lite-list >/dev/null 2>&1 \
+     && printf '%s\n' "cqlite-core/tests/compact_command.rs" \
+        | /bin/bash "$GATE" --classify-test-targets 2>/dev/null \
+        | grep -qxF "cqlite-core|compact_command"; then
+    ok "bash-compat: --lite classification path runs under /bin/bash (major ${bin_bash_major:-?})"
+  else
+    bad "bash-compat: --lite classification path failed under /bin/bash (major ${bin_bash_major:-?})"
+  fi
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]
