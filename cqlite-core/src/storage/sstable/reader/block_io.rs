@@ -181,14 +181,12 @@ async fn read_next_block_impl(
     if cassandra_version.is_nb_format() || is_bti {
         log::debug!("block_io::read_next_block_impl: Using NB/BTI format chunk reader");
 
-        // Get file size for chunk size calculation
+        // File size for chunk-size calculation. The SSTable is immutable, so this
+        // reads the cached length instead of re-deriving it with a seek(End)/back
+        // probe on every chunk (issue #1586).
         let file_size = {
             let mut file_guard = file.lock().await;
-            let current = file_guard.stream_position().await?;
-            file_guard.seek(std::io::SeekFrom::End(0)).await?;
-            let size = file_guard.stream_position().await?;
-            file_guard.seek(std::io::SeekFrom::Start(current)).await?;
-            size
+            file_guard.len().await?
         };
 
         // Read chunk with CRC validation
@@ -692,33 +690,14 @@ async fn read_uncompressed_data_block(
             )))
         })?;
 
-        // Get file size
-        file_guard
-            .seek(std::io::SeekFrom::End(0))
-            .await
-            .map_err(|e| {
-                Error::Io(std::io::Error::other(format!(
-                    "Failed to seek to end: {}",
-                    e
-                )))
-            })?;
-        let size = file_guard.stream_position().await.map_err(|e| {
+        // File size from the cached immutable length — no seek(End)/back probe on
+        // every piece read (issue #1586).
+        let size = file_guard.len().await.map_err(|e| {
             Error::Io(std::io::Error::other(format!(
                 "Failed to get file size: {}",
                 e
             )))
         })?;
-
-        // Seek back to current position
-        file_guard
-            .seek(std::io::SeekFrom::Start(current))
-            .await
-            .map_err(|e| {
-                Error::Io(std::io::Error::other(format!(
-                    "Failed to seek back to position: {}",
-                    e
-                )))
-            })?;
 
         (current, size)
     };

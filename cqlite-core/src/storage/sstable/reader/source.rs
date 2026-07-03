@@ -40,8 +40,13 @@ use crate::Result;
 ///
 /// See the module documentation for the trade-offs between the two backends.
 pub(crate) enum BlockSource {
-    /// Buffered file I/O through the OS page cache.
-    Buffered(BufReader<File>),
+    /// Buffered file I/O through the OS page cache. `len` caches the immutable
+    /// file length so the block-I/O layer never re-probes it with `seek(End)`
+    /// per chunk (issue #1586).
+    Buffered {
+        reader: BufReader<File>,
+        len: Option<u64>,
+    },
     /// Memory-mapped file view served directly from the page cache.
     Mapped(MmapCursor),
     /// Direct I/O (`O_DIRECT` / `F_NOCACHE`) that bypasses the page cache.
@@ -50,9 +55,43 @@ pub(crate) enum BlockSource {
 }
 
 impl BlockSource {
-    /// Create a buffered (non-mmap) source from an open tokio file.
+    /// Create a buffered (non-mmap) source with the length resolved lazily on the
+    /// first [`Self::len`] call. Test-only: production paths know the length at
+    /// open and use [`Self::buffered_sized`] (issue #1586).
+    #[cfg(test)]
     pub(crate) fn buffered(file: File) -> Self {
-        BlockSource::Buffered(BufReader::new(file))
+        BlockSource::Buffered {
+            reader: BufReader::new(file),
+            len: None,
+        }
+    }
+
+    /// Create a buffered source with its (immutable) file length already known,
+    /// so the block-I/O layer never issues a size probe at all (issue #1586).
+    pub(crate) fn buffered_sized(file: File, len: u64) -> Self {
+        BlockSource::Buffered {
+            reader: BufReader::new(file),
+            len: Some(len),
+        }
+    }
+
+    /// The total byte length of the backing file. Resident for mmap/direct; for a
+    /// buffered source it is cached (derived once via `metadata`, SSTables being
+    /// immutable) rather than re-probed with `seek(End)` per chunk (issue #1586).
+    pub(crate) async fn len(&mut self) -> io::Result<u64> {
+        match self {
+            BlockSource::Buffered { reader, len } => match *len {
+                Some(l) => Ok(l),
+                None => {
+                    let l = reader.get_ref().metadata().await?.len();
+                    *len = Some(l);
+                    Ok(l)
+                }
+            },
+            BlockSource::Mapped(c) => Ok(c.mmap.len() as u64),
+            #[cfg(unix)]
+            BlockSource::Direct(c) => Ok(c.len),
+        }
     }
 
     /// Create a memory-mapped source from a previously mapped file.
@@ -90,7 +129,10 @@ impl BlockSource {
 pub(crate) enum ScanSource {
     /// Reopen the file for each scan, giving it its own OS file handle and seek
     /// position. The per-handle cost is a small buffered reader.
-    Buffered,
+    Buffered {
+        /// Immutable file length captured at reader open (issue #1586).
+        file_len: u64,
+    },
     /// Share the underlying read-only memory map; each scan gets its own cursor
     /// position over the same mapped bytes (just an `Arc` clone, no new mapping).
     Mapped(Arc<Mmap>),
@@ -100,6 +142,9 @@ pub(crate) enum ScanSource {
     Direct {
         /// Read-ahead window (bytes) for each scan's [`DirectCursor`].
         window: usize,
+        /// Immutable file length captured at reader open (issue #1586), used by
+        /// the buffered fallback when direct I/O is refused.
+        file_len: u64,
     },
 }
 
@@ -107,10 +152,12 @@ impl ScanSource {
     /// Mint a fresh, independent [`BlockSource`] for one scan.
     pub(crate) async fn open(&self, path: &Path) -> Result<BlockSource> {
         Ok(match self {
-            ScanSource::Buffered => BlockSource::buffered(File::open(path).await?),
+            ScanSource::Buffered { file_len } => {
+                BlockSource::buffered_sized(File::open(path).await?, *file_len)
+            }
             ScanSource::Mapped(mmap) => BlockSource::mapped(mmap.clone()),
             #[cfg(unix)]
-            ScanSource::Direct { window } => {
+            ScanSource::Direct { window, file_len } => {
                 // Reopen with O_DIRECT for this scan. If the platform/filesystem
                 // refuses direct I/O, degrade to buffered rather than failing the
                 // scan (mirrors the open()-time fallback).
@@ -122,7 +169,7 @@ impl ScanSource {
                             path.display(),
                             e
                         );
-                        BlockSource::buffered(File::open(path).await?)
+                        BlockSource::buffered_sized(File::open(path).await?, *file_len)
                     }
                 }
             }
@@ -159,7 +206,7 @@ impl AsyncRead for BlockSource {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         match self.get_mut() {
-            BlockSource::Buffered(r) => Pin::new(r).poll_read(cx, buf),
+            BlockSource::Buffered { reader, .. } => Pin::new(reader).poll_read(cx, buf),
             BlockSource::Mapped(c) => Pin::new(c).poll_read(cx, buf),
             #[cfg(unix)]
             BlockSource::Direct(c) => Pin::new(c).poll_read(cx, buf),
@@ -170,7 +217,7 @@ impl AsyncRead for BlockSource {
 impl AsyncSeek for BlockSource {
     fn start_seek(self: Pin<&mut Self>, position: SeekFrom) -> io::Result<()> {
         match self.get_mut() {
-            BlockSource::Buffered(r) => Pin::new(r).start_seek(position),
+            BlockSource::Buffered { reader, .. } => Pin::new(reader).start_seek(position),
             BlockSource::Mapped(c) => Pin::new(c).start_seek(position),
             #[cfg(unix)]
             BlockSource::Direct(c) => Pin::new(c).start_seek(position),
@@ -179,7 +226,7 @@ impl AsyncSeek for BlockSource {
 
     fn poll_complete(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<u64>> {
         match self.get_mut() {
-            BlockSource::Buffered(r) => Pin::new(r).poll_complete(cx),
+            BlockSource::Buffered { reader, .. } => Pin::new(reader).poll_complete(cx),
             BlockSource::Mapped(c) => Pin::new(c).poll_complete(cx),
             #[cfg(unix)]
             BlockSource::Direct(c) => Pin::new(c).poll_complete(cx),

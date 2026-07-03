@@ -736,10 +736,15 @@ impl SSTableReader {
 
     /// Open a buffered point-read source and its per-scan factory. Shared by the
     /// buffered backend and as the graceful fallback for mmap/direct.
-    async fn open_buffered_sources(path: &Path) -> Result<(BlockSource, ScanSource)> {
+    async fn open_buffered_sources(
+        path: &Path,
+        file_size: u64,
+    ) -> Result<(BlockSource, ScanSource)> {
         Ok((
-            BlockSource::buffered(File::open(path).await?),
-            ScanSource::Buffered,
+            BlockSource::buffered_sized(File::open(path).await?, file_size),
+            ScanSource::Buffered {
+                file_len: file_size,
+            },
         ))
     }
 
@@ -767,7 +772,7 @@ impl SSTableReader {
             prefetch_bytes
         };
         match mode {
-            DiskAccessMode::Buffered => Self::open_buffered_sources(path).await,
+            DiskAccessMode::Buffered => Self::open_buffered_sources(path, file_size).await,
             DiskAccessMode::Mmap => match Self::map_file(path) {
                 Ok(mmap) => {
                     log::debug!(
@@ -797,7 +802,7 @@ impl SSTableReader {
                         path.display(),
                         e
                     );
-                    Self::open_buffered_sources(path).await
+                    Self::open_buffered_sources(path, file_size).await
                 }
             },
             DiskAccessMode::Direct => {
@@ -815,6 +820,7 @@ impl SSTableReader {
                                 BlockSource::direct(cursor),
                                 ScanSource::Direct {
                                     window: direct_window,
+                                    file_len: file_size,
                                 },
                             ))
                         }
@@ -824,7 +830,7 @@ impl SSTableReader {
                                 path.display(),
                                 e
                             );
-                            Self::open_buffered_sources(path).await
+                            Self::open_buffered_sources(path, file_size).await
                         }
                     }
                 }
@@ -835,11 +841,11 @@ impl SSTableReader {
                         "Direct I/O is unavailable on this platform; using buffered I/O for {}",
                         path.display()
                     );
-                    Self::open_buffered_sources(path).await
+                    Self::open_buffered_sources(path, file_size).await
                 }
             }
             // `resolve_disk_access_mode` never yields `Auto`; handle defensively.
-            DiskAccessMode::Auto => Self::open_buffered_sources(path).await,
+            DiskAccessMode::Auto => Self::open_buffered_sources(path, file_size).await,
         }
     }
 
