@@ -2,7 +2,8 @@
   "_comment": "Performance regression gate policy (Issue #572). The CI workflow .github/workflows/perf-regression.yml runs these benches on both the PR and main on the SAME runner and fails if any STRICT bench's Criterion median regresses by more than its threshold_pct. ADVISORY benches are always reported but never cause a non-zero exit, regardless of delta — they exist to document cost, not to block merges. To adjust, edit bench entries here; see cqlite-core/benches/README.md.",
   "default_threshold_pct": 10,
   "advisory_benches": [
-    "write/ingest_wal_on"
+    "write/ingest_wal_on",
+    "compaction/wide"
   ],
   "benches": [
     {
@@ -42,6 +43,19 @@
       "id": "read_while_write/readers6_writers2",
       "threshold_pct": 25,
       "_note": "reader-side median under concurrent write load; wide threshold (contention bench); p99 tail owned by A2 tail-latency harness #1563"
+    },
+    {
+      "id": "compaction/narrow",
+      "threshold_pct": 10
+    },
+    {
+      "id": "compaction/wide",
+      "threshold_pct": 10,
+      "_note": "advisory — memory/data-shaped fat-partition merge; O2's dhat budget is its guard, not this wall clock"
+    },
+    {
+      "id": "compaction/tombstone_heavy",
+      "threshold_pct": 10
     }
   ],
   "scaling_floors": [
