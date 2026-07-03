@@ -140,7 +140,16 @@ jobs:
           if [[ -f cqlite-core/benches/decode_bench.rs ]]; then
             BENCH_TARGETS+=(--bench decode)
           fi
-          cargo bench -p cqlite-core --features "$BENCH_FEATURES" \
+          # `bench-internals` (issue #1615) is defined by the PR but may not exist
+          # on `main` yet. Passing it to `cargo bench` on a checkout that does not
+          # define it fails feature resolution BEFORE the guarded --bench decode is
+          # skipped, so build a base-specific feature list that appends it only when
+          # the checked-out Cargo.toml declares it (mirrors the target guards above).
+          BASE_FEATURES="cli-helpers,write-support"
+          if grep -q '^bench-internals' cqlite-core/Cargo.toml; then
+            BASE_FEATURES="$BASE_FEATURES,bench-internals"
+          fi
+          cargo bench -p cqlite-core --features "$BASE_FEATURES" \
             "${BENCH_TARGETS[@]}" -- --save-baseline base "${BENCH_ARGV[@]}"
 
       - name: Restore PR ref (for the gate script + policy)
