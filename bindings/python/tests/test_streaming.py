@@ -10,9 +10,136 @@ Tests verify:
 5. Memory usage stays bounded
 """
 
+import sys
+import threading
+import time
+
 import pytest
 
 import cqlite
+
+from conftest import (
+    DATASETS,
+    SCHEMA_WIDE_ROWS,
+    require_test_data,
+)
+
+
+class TestStreamingGilRelease:
+    """Issue #1441: streaming __next__ must release the GIL during its blocking
+    buffer refill so other Python threads make progress."""
+
+    def test_streaming_next_releases_gil(self):
+        """A concurrent Python thread makes progress ONLY while the streaming
+        iterator's ``__next__`` has the GIL released.
+
+        Design (why this discriminates the bug):
+
+        * Python's periodic thread switch is disabled for the test window via
+          ``sys.setswitchinterval(1000)``. With voluntary preemption off, the
+          *only* way the busy-spin thread (B) can run while the streaming thread
+          (A) is executing is if A **explicitly releases the GIL**. B still
+          yields cooperatively (``time.sleep(0)`` always drops the GIL), so A is
+          never starved.
+        * Thread A iterates a wide table with ``buffer_size=1`` so every row is a
+          separate blocking channel refill (``block_on(next_async())``).
+        * On unmodified ``main``, ``__next__`` holds the GIL across that
+          ``block_on``, so B is frozen for the whole iteration → its counter
+          barely moves past its pre-iteration baseline.
+        * With the fix, each refill runs inside ``py.allow_threads(...)``; B runs
+          during every refill and its counter advances far past the floor.
+
+        The assertion measures B's progress *delta* strictly between A's first
+        and last row so B's small pre-start head start does not leak in.
+        """
+        # Fail loudly (not skip) under strict fixture mode (issue #1230).
+        require_test_data(SCHEMA_WIDE_ROWS)
+
+        # No-GIL (free-threaded) builds have no GIL to release; the concurrency
+        # claim under test is GIL-specific.
+        if not getattr(sys, "_is_gil_enabled", lambda: True)():
+            pytest.skip("free-threaded build: no GIL to release")
+
+        counter = {"n": 0}
+        rows = {"n": 0, "error": None}
+        baseline = {"n": None}
+        stop = threading.Event()
+        a_started = threading.Event()
+        a_done = threading.Event()
+
+        def spin():
+            # Cooperative busy loop. sleep(0) always releases the GIL, so A is
+            # never blocked by B; but with the switch interval raised, B only
+            # gets scheduled when SOME thread hands off the GIL.
+            while not stop.is_set():
+                counter["n"] += 1
+                time.sleep(0)
+
+        def iterate():
+            try:
+                with cqlite.open(DATASETS, schema=SCHEMA_WIDE_ROWS) as database:
+                    # wide_partition_table is the largest wide-row fixture.
+                    # buffer_size=1 forces one blocking refill per row.
+                    config = cqlite.StreamingConfig(buffer_size=1)
+                    n = 0
+                    for _row in database.execute_streaming(
+                        "SELECT * FROM test_wide_rows.wide_partition_table",
+                        config=config,
+                    ):
+                        if n == 0:
+                            # Snapshot B's counter at the first row, then signal:
+                            # everything after this is attributable to GIL state
+                            # during refills, not to B's pre-start head start.
+                            baseline["n"] = counter["n"]
+                            a_started.set()
+                        n += 1
+                    rows["n"] = n
+            except Exception as exc:  # noqa: BLE001 - surfaced in main thread
+                rows["error"] = exc
+            finally:
+                a_started.set()
+                a_done.set()
+
+        old_interval = sys.getswitchinterval()
+        sys.setswitchinterval(1000)  # effectively disable periodic preemption
+        b = threading.Thread(target=spin, daemon=True)
+        a = threading.Thread(target=iterate, daemon=True)
+        try:
+            b.start()
+            a.start()
+            a.join(timeout=30)
+            after = counter["n"]
+        finally:
+            sys.setswitchinterval(old_interval)
+            stop.set()
+
+        b.join(timeout=5)
+
+        assert a_done.is_set(), "streaming iteration did not finish in time"
+        assert rows["error"] is None, f"streaming thread failed: {rows['error']}"
+        # Guard against a trivially-green run: A must have done real multi-refill
+        # blocking work for the concurrency claim to mean anything. A dropped or
+        # unfetched fixture would otherwise let B spin freely and pass vacuously.
+        assert rows["n"] > 1, (
+            f"streaming thread yielded {rows['n']} rows; need a multi-row wide "
+            "fixture for a meaningful GIL-release assertion"
+        )
+        assert baseline["n"] is not None, "did not capture B baseline at first row"
+
+        # Progress B made strictly DURING A's blocking refills.
+        during = after - baseline["n"]
+
+        # Floor: generous vs CI flake, but far above the ~0 progress a
+        # GIL-starved B makes on unmodified main (where B is frozen across every
+        # refill). Empirically the fixed build advances B into the many
+        # thousands during the ~100-row iteration; unmodified main leaves it near
+        # zero.
+        floor = 500
+        assert during > floor, (
+            f"concurrent thread advanced only {during} increments during "
+            f"streaming (floor {floor}); GIL appears held across refill "
+            f"(baseline={baseline['n']}, after={after})"
+        )
 
 
 class TestStreamingImports:
