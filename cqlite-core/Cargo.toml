@@ -208,6 +208,15 @@ harness = false
 name = "tail_latency"
 harness = false
 
+# Cold-open + per-reader-memory bench (issue #1566, Epic A / A5). `harness = false`
+# criterion target: `open/cold_big`, `open/cold_bti` (skip-register when absent),
+# and `mem/open_n_readers` (records the per-reader RSS gauge the ledger can express
+# but criterion cannot). Appends its measured medians + memory metric to the unified
+# target/profiling/history.jsonl via the shared bench_ledger module.
+[[bench]]
+name = "open"
+harness = false
+
 [features]
 # M2+ production defaults: Full query engine + write path enabled.
 # write-support is a pure first-party code-gating flag (no extra dependencies),
