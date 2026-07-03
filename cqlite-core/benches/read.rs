@@ -1,37 +1,55 @@
 //! Read micro-benchmarks for cqlite-core (Issue #538, Epic #541 Phase 1).
 //!
-//! Four benches measure the public query API over real Cassandra 5.0 SSTables:
+//! The benches measure the public query API over real Cassandra 5.0 SSTables:
 //!
-//! - `read/point_lookup`    — minimal single-row read (`SELECT * … LIMIT 1`)
-//! - `read/clustering_slice` — bounded read of clustering-ordered rows (`LIMIT N`)
-//! - `read/full_scan`       — `SELECT *` streaming all rows of simple_table
-//! - `read/type_heavy`      — `SELECT *` over collection_table to isolate decode cost
+//! - `read/get_partition_big` — real partition-targeted point read (BIG/`nb`)
+//! - `read/get_partition_bti` — real partition-targeted point read (BTI/`da`)
+//! - `read/clustering_slice`  — bounded read of clustering-ordered rows (`LIMIT N`)
+//! - `read/full_scan`         — `SELECT *` streaming all rows of simple_table
+//! - `read/type_heavy`        — `SELECT *` over collection_table to isolate decode cost
 //!
-//! # Why LIMIT-based proxies instead of keyed `WHERE` lookups (issue #548)
+//! # Real point reads: `get_partition` (issue #1562)
 //!
-//! The query engine's `value_to_row_key` only handles Integer/Text/Float/Boolean;
-//! `Value::Uuid` falls through, so `WHERE id = '<uuid-literal>'` returns 0 rows for
-//! a UUID partition key (and the scan-filter path compares `Value::Text` against the
-//! stored `Value::Uuid`, which never matches). Almost every fixture table is
-//! UUID-keyed, and the one non-UUID single-key table ships empty, so a true keyed
-//! point lookup is not currently expressible through the public API. This is tracked
-//! in #548.
+//! The old `read/point_lookup` bench ran `SELECT * … LIMIT 1` — a full scan
+//! truncated to one row. That is a scan, not a point read, so it could not detect
+//! a regression on the partition-targeted point path (bloom/BTI prune →
+//! single-candidate seek → chunk decode). Since #956 a UUID partition key is
+//! addressable via an unquoted-UUID literal (`WHERE id = <8-4-4-4-12>`), which
+//! engages the #949 fast path, so a true keyed point read is now expressible
+//! through the public API.
 //!
-//! Until #548 lands, `point_lookup` and `clustering_slice` use deterministic
-//! `LIMIT`-bounded reads as honest proxies: `point_lookup` measures the
-//! per-query + first-row decode latency (`LIMIT 1`), and `clustering_slice` measures
-//! a bounded read over the clustering-ordered partition front (`LIMIT N`). Both
-//! exercise the real open → seek → decode path and are distinct from `full_scan`.
-//! When #548 is fixed, switch these two to keyed `WHERE` lookups for a sharper signal.
+//! `bench_get_partition` drives that real path: it learns a present `id` from a
+//! one-shot scan, formats the unquoted-UUID literal, and benches
+//! `SELECT id, name FROM <ks.tbl> WHERE id = <lit>`. Two guards at setup make the
+//! measurement honest — it panics rather than silently benching the wrong thing:
+//!
+//!  1. `rows.len() >= 1` — never measure a 0-row query.
+//!  2. `access_path.is_targeted()` — the query MUST report a partition-targeted
+//!     `AccessPath` (`PartitionLookup`), proving #949/#956 are wired. If it comes
+//!     back a full-scan variant, the setup panics with an actionable message.
+//!
+//! Query shape note: the projection (`SELECT id, name`, not `SELECT *`) is
+//! deliberate. `QueryEngine::execute` routes a `SELECT` through the legacy
+//! full-scan executor when `cql.contains("WHERE id =") && whitespace_tokens <= 8`
+//! (a "simple id lookup"); `SELECT * FROM <ks.tbl> WHERE id = <lit>` is exactly 8
+//! tokens and would fall into that legacy path (reporting `access_path = None`).
+//! Projecting two columns is a faithful fully-constrained point read that routes
+//! through the modern `SelectExecutor` and reports the real access path.
+//!
+//! `get_partition_big` uses the always-present canonical `test_basic.simple_table`
+//! (`nb`); `get_partition_bti` uses the optional `test_da.simple_table` (`da`) and
+//! **skip-registers** (creates no group, so the gate reports SKIP) when that
+//! corpus is absent.
 //!
 //! All benches are gated on `cli-helpers` (required for `open_read_db`). Under
 //! default features the bench compiles to an empty criterion group so the binary
 //! is still valid.
 //!
-//! Determinism: these benches issue fixed SQL with fixed `LIMIT` constants over a
-//! fixed fixture, so the result set is byte-for-byte identical across runs and
-//! machines without needing randomness. (A bench that does randomized key
-//! selection should draw from `fixtures::seeded_rng()` for the same guarantee.)
+//! Determinism: the point-read benches pick the *first* row's key from a fixed
+//! fixture scan (stable ordering) and issue fixed SQL; `clustering_slice` uses a
+//! fixed `LIMIT`. The result set is identical across runs and machines without
+//! randomness. (A bench that does randomized key selection should draw from
+//! `fixtures::seeded_rng()` for the same guarantee.)
 
 #[cfg(feature = "cli-helpers")]
 use criterion::{black_box, Throughput};
@@ -47,40 +65,142 @@ mod profiling;
 // cli-helpers benches
 // ---------------------------------------------------------------------------
 
-/// Bench: cost of returning one row from simple_table.
-///
-/// Uses `LIMIT 1` rather than `WHERE id = '<uuid>'` because the query engine
-/// cannot currently resolve UUID partition-key equality to a RowKey (#548; see
-/// module doc). Reports `Throughput::Elements(1)`.
+/// Format a 16-byte UUID as the canonical 8-4-4-4-12 unquoted-UUID literal the
+/// SELECT parser accepts (issue #956). Mirrors the helper in
+/// `tests/issue_956_uuid_literal_partition_lookup_parity.rs`.
 #[cfg(feature = "cli-helpers")]
-fn bench_point_lookup(c: &mut Criterion) {
-    let fx = fixtures::ReadFixture::SIMPLE;
+fn uuid_to_literal(bytes: &[u8; 16]) -> String {
+    let h = |range: std::ops::Range<usize>| -> String {
+        bytes[range].iter().map(|b| format!("{b:02x}")).collect()
+    };
+    format!(
+        "{}-{}-{}-{}-{}",
+        h(0..4),
+        h(4..6),
+        h(6..8),
+        h(8..10),
+        h(10..16)
+    )
+}
+
+/// Shared driver for the real partition-targeted point-read benches.
+///
+/// Learns a present `id` from a one-shot scan, formats the unquoted-UUID literal,
+/// and benches `SELECT id, name FROM <qualified> WHERE id = <lit>` — the real
+/// #949/#956 partition-targeted path (see module doc). Two setup guards keep the
+/// measurement honest (panic rather than silently mis-measure):
+///   1. the point read returns ≥1 row, and
+///   2. it reports a *targeted* `AccessPath` (not a full-scan fallback).
+///
+/// If the fixture's corpus is absent, returns early WITHOUT creating a group, so
+/// the perf gate reports SKIP for that bench rather than failing.
+#[cfg(feature = "cli-helpers")]
+fn bench_get_partition(c: &mut Criterion, fx: fixtures::ReadFixture, bench_name: &str) {
+    use cqlite_core::Value;
+
+    if !fixtures::fixture_present(&fx) {
+        // Optional fixture (e.g. the BTI test_da corpus) not present in this
+        // checkout — skip-register: no group, no measurement, gate reports SKIP.
+        eprintln!(
+            "read/{bench_name}: fixture {} not present — skipping (skip-register)",
+            fx.qualified()
+        );
+        return;
+    }
+
     let loaded = fixtures::open_read_db(&fx);
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
-    let sql = format!("SELECT * FROM {} LIMIT 1", fx.qualified());
+    // Learn a present partition key from a one-shot scan.
+    let scan = rt
+        .block_on(
+            loaded
+                .db
+                .execute(&format!("SELECT id FROM {}", fx.qualified())),
+        )
+        .expect("get_partition setup scan");
+    let first = scan.rows.first().unwrap_or_else(|| {
+        panic!(
+            "get_partition: scan of {} returned zero rows — fixtures not fetched?",
+            fx.qualified()
+        )
+    });
+    let id = match first.values.get("id") {
+        Some(Value::Uuid(b)) => *b,
+        other => panic!(
+            "get_partition: first row `id` did not decode as Value::Uuid (got {other:?}) for {}",
+            fx.qualified()
+        ),
+    };
+    let literal = uuid_to_literal(&id);
 
-    // Assert at setup: we must get ≥1 row.
+    // Projected (>8 tokens) so it routes through the modern SelectExecutor and
+    // engages the #949 fast path (see module doc on the legacy simple-id-lookup
+    // routing quirk).
+    let sql = format!(
+        "SELECT id, name FROM {} WHERE id = {}",
+        fx.qualified(),
+        literal
+    );
+
+    // Guard 1: never silently measure a 0-row query.
     let setup = rt
         .block_on(loaded.db.execute(&sql))
-        .expect("point_lookup setup query");
+        .expect("get_partition setup point read");
     assert!(
         !setup.rows.is_empty(),
-        "point_lookup: LIMIT 1 on {} returned zero rows — fixtures not fetched?",
+        "get_partition: point read on {} returned zero rows for a known-present key — \
+         #949/#956 regressed?",
+        fx.qualified()
+    );
+
+    // Guard 2: the point read MUST take a partition-targeted path. If it fell back
+    // to a full scan (or the legacy no-access-path route), fail loudly — otherwise
+    // the bench would be a scan proxy again.
+    let targeted = setup
+        .metadata
+        .access_path
+        .as_ref()
+        .map(|p| p.is_targeted())
+        .unwrap_or(false);
+    assert!(
+        targeted,
+        "get_partition: point read fell back to full scan (access_path = {:?}) on {} — \
+         #956/#949 regressed, or the query routed to the legacy executor",
+        setup.metadata.access_path,
         fx.qualified()
     );
 
     let mut group = c.benchmark_group("read");
     group.throughput(Throughput::Elements(1));
-    group.bench_function("point_lookup", |bch| {
+    group.bench_function(bench_name, |bch| {
         bch.iter(|| {
             let res = rt
                 .block_on(loaded.db.execute(black_box(&sql)))
-                .expect("point lookup");
+                .expect("get_partition point read");
             black_box(res.rows.len())
         });
     });
     group.finish();
+}
+
+/// Bench: real partition-targeted point read over the BIG (`nb`) fixture.
+///
+/// `test_basic.simple_table` is the always-present canonical fixture. Produces
+/// the Criterion id `read/get_partition_big`.
+#[cfg(feature = "cli-helpers")]
+fn bench_get_partition_big(c: &mut Criterion) {
+    bench_get_partition(c, fixtures::ReadFixture::SIMPLE, "get_partition_big");
+}
+
+/// Bench: real partition-targeted point read over the BTI (`da`) fixture.
+///
+/// `test_da.simple_table` is optional (absent in some checkouts); when missing
+/// the bench skip-registers (no measurement). Produces the Criterion id
+/// `read/get_partition_bti`.
+#[cfg(feature = "cli-helpers")]
+fn bench_get_partition_bti(c: &mut Criterion) {
+    bench_get_partition(c, fixtures::ReadFixture::SIMPLE_BTI, "get_partition_bti");
 }
 
 /// Bench: bounded read of clustering-ordered rows from sensor_data.
@@ -209,7 +329,8 @@ fn bench_type_heavy(c: &mut Criterion) {
 criterion_group!(
     name = benches;
     config = profiling::configure();
-    targets = bench_point_lookup,
+    targets = bench_get_partition_big,
+              bench_get_partition_bti,
               bench_clustering_slice,
               bench_full_scan,
               bench_type_heavy

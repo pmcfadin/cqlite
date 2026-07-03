@@ -63,10 +63,12 @@ and provides:
   SSTables (hash-independent), honoring `CQLITE_DATASETS_ROOT`.
 - `seeded_rng()` + `BENCH_SEED` — a fixed-seed RNG so any "random" key/partition
   selection is identical on every run and machine.
-- `ReadFixture` descriptors (`SIMPLE`, `CLUSTERING`, `TYPE_HEAVY`) and
-  `open_read_db()` — open a queryable `Database` over one fixture table,
+- `ReadFixture` descriptors (`SIMPLE`, `SIMPLE_BTI`, `CLUSTERING`, `TYPE_HEAVY`)
+  and `open_read_db()` — open a queryable `Database` over one fixture table,
   **isolated in a temp dir** so a bench run never mutates the shared corpus
-  (requires `--features cli-helpers`).
+  (requires `--features cli-helpers`). `SIMPLE_BTI` is optional (the `test_da`
+  corpus is absent in some checkouts); guard with `fixture_present()` and
+  skip-register when missing.
 - `open_write_engine()` — build a `WriteEngine` against a temp dir (requires
   `--features write-support`).
 
@@ -89,7 +91,7 @@ env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
 | `partition_lookup` | kept | Index.db partition-key lookup (`IndexReader::lookup_partition`) — cold/warm cache, throughput, access-pattern distribution. The latency-sensitive read path. |
 | `m1_performance` | kept | M1 baseline targets: partition-lookup latency plus multi-SSTable read throughput (MB/s). |
 | `fixtures_smoke` | added (#537) | Smoke/acceptance bench proving the fixture loaders are deterministic (seeded RNG + stable scan row count). Read/write portions activate under `cli-helpers` / `write-support`. |
-| `read` | added (#538) | Read suite (needs `--features cli-helpers`): `point_lookup`, `clustering_slice`, `full_scan`, `type_heavy` over the fixtures via the public query API. |
+| `read` | added (#538), point-read reworked (#1562) | Read suite (needs `--features cli-helpers`): `get_partition_big`, `get_partition_bti`, `clustering_slice`, `full_scan`, `type_heavy` over the fixtures via the public query API. `get_partition_*` are **real** partition-targeted point reads (`WHERE id = <unquoted-uuid>`, #949/#956), asserted at setup to report a targeted `AccessPath` (not the old `SELECT * … LIMIT 1` scan proxy). `_bti` skip-registers when the optional `test_da` corpus is absent. |
 | `write` | added (#539, #574) | Write suite (needs `--features write-support`): `ingest_wal_on`, `ingest_wal_off`, and `flush` — see below. |
 | `observability_overhead` | added (#1043) | Zero-overhead-when-disabled gate: `read_scan` (needs `cli-helpers`) and `write_merge` (needs `write-support`). The SAME bench source runs under the default build vs `--features observability` with export disabled; the two arms are compared by `scripts/ci/observability_overhead.sh` — see below. |
 
