@@ -52,6 +52,15 @@
 #                      (two manifest-changing PRs), which no per-PR/local check can
 #                      see; that path self-heals via the push-to-main job in
 #                      .github/workflows/cassandra-parity.yml (issue #1338).
+#   binding-unwind-profile
+#                      fail-closed guard (#1440): the shipped Python wheel and
+#                      Node prebuild build definitions must select
+#                      `--profile release-unwind` (PyO3/napi catch_unwind firewall
+#                      active) and never `--release` (abort). Reads the four build
+#                      definitions (python-release.yml, pyproject.toml [tool.maturin],
+#                      package.json build script, node-release.yml); hard-FAILs on
+#                      any abort-built or missing/unparseable definition. Pure
+#                      bash/grep/awk — offline, deterministic, no datasets/network.
 #   tooling-tests      shell-tooling regression tests (fast, no datasets/network):
 #                      scripts/tests/test_agent_gate_summary.sh — proves the
 #                      SUMMARY block survives non-foreground capture (#1175). It
@@ -151,7 +160,7 @@ if ! command -v cargo >/dev/null 2>&1 && [ -d "$HOME/.cargo/bin" ]; then
 fi
 export CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-$REPO_ROOT/test-data/datasets}"
 
-COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard integration-tests format-compat write-tests cli-tests compaction-byte-parity python-bindings node-bindings delivery-telemetry parity-report tooling-tests minimal-build smoke)
+COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard integration-tests format-compat write-tests cli-tests compaction-byte-parity python-bindings node-bindings delivery-telemetry parity-report binding-unwind-profile tooling-tests minimal-build smoke)
 ONLY=""
 SELFTEST=0
 case "${1:-}" in
@@ -933,6 +942,12 @@ run_python_bindings
 run_node_bindings
 run_delivery_telemetry
 run_parity_report
+# binding-unwind-profile (#1440): fail-closed guard that the shipped Python wheel
+# and Node prebuild build definitions select `--profile release-unwind` (so the
+# PyO3/napi catch_unwind firewall is active) and never `--release` (abort). Pure
+# bash/grep/awk — offline, deterministic, no datasets; a hard FAIL on any
+# abort-built or missing/unparseable definition.
+run_component binding-unwind-profile bash "$REPO_ROOT/scripts/tests/test_binding_unwind_profile.sh"
 run_tooling_tests
 run_component minimal-build cargo build --package cqlite-core --no-default-features --features all-compression
 # Pin smoke to a binary built from THIS tree. Left to its own devices the

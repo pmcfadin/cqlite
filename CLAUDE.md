@@ -121,8 +121,8 @@ cargo run --package cqlite-cli -- \
   --out json
 
 # Python bindings build and test
-cd bindings/python && maturin develop  # Development build
-cd bindings/python && maturin build --release  # Release wheel
+cd bindings/python && maturin develop --profile dev  # Development build (debug; overrides the release-unwind firewall pin for a fast dev loop)
+cd bindings/python && maturin build --profile release-unwind  # Release wheel (panic-unwind firewall, issue #1440 — NOT --release, which is panic=abort)
 
 # Run Python tests - fast tests only (default, Issue #331)
 env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets pytest bindings/python/tests -v
@@ -503,7 +503,7 @@ rustup update
 **Python import errors**: Verify Python 3.9+ and rebuild bindings:
 ```bash
 python3 --version  # Must be 3.9+
-cd bindings/python && maturin develop
+cd bindings/python && maturin develop --profile dev
 ```
 
 **Python tests skip or fail**: Ensure test data is available:
