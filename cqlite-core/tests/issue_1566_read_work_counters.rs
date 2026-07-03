@@ -257,6 +257,62 @@ async fn bti_point_read_increments_trie_walks() {
     );
 }
 
+/// Scenario: a real read-path operation increments the seek counter. `SEEK_CALLS`
+/// is wired across every production read-path seek site (the `block_io` compressed
+/// chunk-read seek plus the `data_access` BTI/BIG point-lookup + scan seeks), so a
+/// real scan and a real point read through the public `Database` API on the BIG
+/// multi-chunk fixture must each bump it (consumer E4). This is the wiring evidence
+/// the finding requires: without instrumenting the `data_access` seeks the counter
+/// could stay 0 while real seeks happen, making the E4 guard unreliable.
+#[tokio::test]
+#[serial]
+async fn read_path_increments_seek_calls() {
+    if !fixture_data_present("test_basic", "simple_table") {
+        eprintln!("Skipping (A5 wiring): test_basic/simple_table Data.db not present");
+        return;
+    }
+    let Some(db) = setup("test_basic", "basic-types.cql").await else {
+        eprintln!("Skipping (A5 wiring): could not ingest test_basic");
+        return;
+    };
+
+    // Reset, then a full scan (which reads the compressed chunks through the
+    // production seek sites) must record at least one seek.
+    rwc::reset();
+    assert_eq!(rwc::seek_calls(), 0, "reset must zero SEEK_CALLS");
+    let scan = db
+        .execute("SELECT id FROM test_basic.simple_table")
+        .await
+        .expect("scan of test_basic.simple_table");
+    assert!(
+        !scan.rows.is_empty(),
+        "present fixture must return rows (0 rows = read regression, not a skip)"
+    );
+    assert!(
+        rwc::seek_calls() >= 1,
+        "A5: a real scan must record at least one production read-path seek; got {}",
+        rwc::seek_calls()
+    );
+
+    // A targeted point read also traverses a production seek site.
+    let Some(point_sql) = learn_point_sql(&db, "test_basic.simple_table").await else {
+        panic!("A5: could not learn a present UUID key from test_basic.simple_table");
+    };
+    rwc::reset();
+    assert_eq!(rwc::seek_calls(), 0, "reset must zero SEEK_CALLS");
+    let res = db.execute(&point_sql).await.expect("point read");
+    assert!(
+        !res.rows.is_empty(),
+        "A5: point read on a known-present key returned zero rows — #949/#956 regressed?"
+    );
+    assert!(
+        rwc::seek_calls() >= 1,
+        "A5: a real point read must record at least one production read-path seek; \
+         got {}",
+        rwc::seek_calls()
+    );
+}
+
 /// Scenario: counters reset between operations — each reads zero immediately after
 /// `reset` and reflects only the subsequent work. A pure-API check that does not
 /// require a fixture.

@@ -49,10 +49,14 @@
 //!   compression-chunk decompress (`Compressor::decompress`). Consumers **B1**
 //!   (chunk cache — a cache hit must skip the decompress) and **E3** (copy-chain —
 //!   count the decompress invocations a read triggers).
-//! - [`record_seek`] / [`seek_calls`] — **`SEEK_CALLS`**: one per block-read seek in
-//!   the chunk read path (`reader/block_io.rs`). Consumer **E4** (drop redundant
-//!   seeks): a sequential chunk walk must not re-seek to the position it is already
-//!   at.
+//! - [`record_seek`] / [`seek_calls`] — **`SEEK_CALLS`**: one per production
+//!   read-path seek. Wired across every read-path seek site: the compressed
+//!   chunk-read seek in `reader/block_io.rs` and the point-lookup / single-partition
+//!   / whole-section / scan seeks in the `reader/data_access` modules
+//!   (`bti.rs` BTI target-chunk + fallback + scan, `big_promoted.rs` BIG
+//!   reverse-block target-chunk + last-partition seek-to-end). Consumer **E4** (drop
+//!   redundant seeks): a sequential chunk walk must not re-seek to the position it is
+//!   already at.
 //! - [`record_file_open`] / [`file_opens`] — **`FILE_OPENS`**: one per `open(2)` that
 //!   mints a reader `BlockSource` file descriptor (`reader/source.rs` scan opens +
 //!   the reader's cold-open sites). Consumer **C2** (pread / kill the per-lookup
@@ -170,9 +174,11 @@ pub fn record_decompress() {
     COUNTERS.record_decompress();
 }
 
-/// Record one block-read seek in the chunk read path (`SEEK_CALLS`; consumer E4).
+/// Record one production read-path seek (`SEEK_CALLS`; consumer E4).
 ///
-/// Called unconditionally at the chunk-read seek (`reader/block_io.rs`); the body
+/// Called unconditionally at every production read-path seek site
+/// (`reader/block_io.rs` chunk-read seek plus the `reader/data_access` BTI/BIG
+/// point-lookup, single-partition, whole-section, and scan seeks); the body
 /// compiles to a no-op in a release build (design.md Decision 1).
 #[inline(always)]
 pub fn record_seek() {
