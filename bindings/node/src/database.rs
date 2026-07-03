@@ -827,7 +827,10 @@ impl Database {
                     // in the runtime-present binding topology; the plain sync
                     // `execute()` skips it and would grow the memtable to the hard
                     // limit. Returns the number of mutations applied.
+                    // Outer `?` folds a runtime-init `io::Error` into napi; inner
+                    // `?` propagates the core error (issue #1438).
                     let n = crate::runtime::block_on(engine.execute_flushing(&query))
+                        .map_err(runtime_init_error)?
                         .map_err(to_napi_error)?;
                     Ok::<(u32, u64), napi::Error>((start.elapsed().as_millis() as u32, n))
                 })

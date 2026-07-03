@@ -192,7 +192,9 @@ impl PyWriteEngine {
     /// threshold is crossed.
     pub fn execute(&mut self, statement: &str) -> cqlite_core::error::Result<u64> {
         use crate::runtime::block_on;
-        block_on(self.inner.execute_flushing(statement))
+        // Outer `?` converts a runtime-init `io::Error` via `Error::Io` (#[from]);
+        // inner `?` propagates the core error (issue #1438).
+        Ok(block_on(self.inner.execute_flushing(statement))??)
     }
 
     /// Flush the memtable to a new SSTable generation.
