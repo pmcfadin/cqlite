@@ -52,6 +52,10 @@ export default defineConfig({
           autogenerate: { directory: 'user-docs' },
         },
         {
+          label: 'Proposals and Research',
+          autogenerate: { directory: 'proposals-research' },
+        },
+        {
           label: 'Releases',
           autogenerate: { directory: 'releases' },
         },

@@ -7,6 +7,7 @@
     "sync-format-guide": "node scripts/sync-format-guide.mjs",
     "predev": "node scripts/sync-format-guide.mjs",
     "prebuild": "node scripts/sync-format-guide.mjs",
+    "validate-proposals-research": "node scripts/validate-proposals-research.mjs",
     "dev": "astro dev",
     "start": "astro dev",
     "build": "astro build",
