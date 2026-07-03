@@ -265,6 +265,63 @@ classify_test_targets() {
   done
 }
 
+# Emit "<abs_manifest_dir>\t<pkg>\t<has_lib>" for EVERY workspace package, or
+# nothing when metadata cannot be produced/parsed. `has_lib` is 1 when the
+# package has a library target that `cargo test --lib` can run (a target whose
+# kind includes "lib" or "rlib"; a cdylib-only binding crate is 0). This is the
+# single authoritative source of package ownership — it covers ALL members
+# (core, cli, flight, parity, integration-tests, format-compat, tools/*,
+# bindings/*, examples, the workspace-root `cqlite`), so no member can fall
+# through a hand-maintained list (issue #1821 recurring roborev finding).
+_package_index() {
+  # Test hook: force the no-metadata-parser path hermetically (issue #1821).
+  [ "${AGENT_GATE_TEST_NO_METADATA_PARSER:-0}" = 1 ] && return 0
+  local meta
+  meta=$(cargo metadata --no-deps --format-version 1 2>/dev/null) || return 0
+  [ -n "$meta" ] || return 0
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s' "$meta" | jq -r \
+      '.packages[]
+       | (.manifest_path | sub("/[^/]+$"; "")) as $dir
+       | (if any(.targets[]; (.kind[] == "lib") or (.kind[] == "rlib")) then 1 else 0 end) as $lib
+       | "\($dir)\t\(.name)\t\($lib)"'
+  elif command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$meta" | python3 -c '
+import json, os, sys
+d = json.load(sys.stdin)
+for p in d["packages"]:
+    dr = os.path.dirname(p["manifest_path"])
+    lib = 1 if any(("lib" in t["kind"]) or ("rlib" in t["kind"]) for t in p["targets"]) else 0
+    print("%s\t%s\t%d" % (dr, p["name"], lib))
+'
+  fi
+}
+
+# Given the package index (as $1) and changed repo-relative paths on stdin, print
+# "<pkg>|<has_lib>" for the workspace package that OWNS each path: the package
+# whose manifest directory is the LONGEST prefix of the path. The workspace-root
+# package (manifest dir == repo root) is EXCLUDED as a path owner — its directory
+# is a prefix of everything, so treating it as an owner would make it a degenerate
+# catch-all for docs/scripts/config changes; it still enters the package set via
+# test-target ownership when a top-level tests/*.rs it owns changes. Deterministic;
+# one owner per path; Bash 3.2-safe (no associative arrays).
+_owners_from_index() {
+  local index=$1 f abs
+  [ -n "$index" ] || return 0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    abs="$REPO_ROOT/$f"
+    printf '%s\n' "$index" | awk -F'\t' -v path="$abs" -v root="$REPO_ROOT" '
+      $1 == root { next }
+      { if (substr(path, 1, length($1) + 1) == $1 "/" && length($1) > bl) { bl = length($1); best = $2 "|" $3 } }
+      END { if (best != "") print best }'
+  done
+}
+
+# Self-test / debug hook: map stdin paths -> "<pkg>|<has_lib>" via metadata-derived
+# longest-prefix ownership. Empty when no metadata parser is available.
+classify_package_owners() { _owners_from_index "$(_package_index)"; }
+
 COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity python-bindings node-bindings delivery-telemetry parity-report binding-unwind-profile tooling-tests minimal-build smoke)
 # --lite (issue #1821) runs ONLY this fast subset: file-size ratchet, fmt,
 # FULL-workspace clippy (cross-crate API breaks are the cheap-insurance class),
@@ -286,6 +343,9 @@ case "${1:-}" in
   # Hidden self-test hook (issue #1821): map stdin paths -> "<pkg>|<testname>"
   # for actual Cargo test targets (nested helpers excluded). No side effects.
   --classify-test-targets) classify_test_targets; exit 0 ;;
+  # Hidden self-test hook (issue #1821): map stdin paths -> "<pkg>|<has_lib>"
+  # via metadata-derived longest-prefix package ownership. No side effects.
+  --classify-package-owners) classify_package_owners; exit 0 ;;
   --only) ONLY="${2:?--only needs a comma-separated component list}" ;;
   --emit-summary-selftest) SELFTEST=1 ;;
   "") ;;
@@ -990,69 +1050,59 @@ run_scoped_tests() {
     changed=$(git diff --name-only HEAD 2>/dev/null)
   fi
 
-  # path -> package. Order matters: tests/format-compatibility before tests/*.
-  # Bash 3.2-safe: a newline-delimited set (grep -qxF dedup), no associative array.
-  local pkgset="" f pkg
-  while IFS= read -r f; do
-    [ -n "$f" ] || continue
-    case "$f" in
-      cqlite-core/*)                pkg=cqlite-core ;;
-      cqlite-cli/*)                 pkg=cqlite-cli ;;
-      cqlite-flight/*)              pkg=cqlite-flight ;;
-      tools/cassandra-parity/*)     pkg=cassandra-parity ;;
-      tests/format-compatibility/*) pkg=format-compatibility-tests ;;
-      tests/*)                      pkg=cqlite-integration-tests ;;
-      *) continue ;;   # bindings, scripts, docs, .claude, root -> no rust lib pkg
-    esac
-    printf '%s\n' "$pkgset" | grep -qxF "$pkg" || pkgset="${pkgset}${pkg}"$'\n'
-  done <<<"$changed"
-
-  # Per-`--test` scoping REQUIRES an authoritative Cargo-metadata parser (jq or
-  # python3). Without one we cannot learn a target's required-features, and running
-  # a feature-gated target feature-less would FAIL --lite spuriously (roborev
-  # round-3 finding). So when NEITHER is present we scope to package --lib only
-  # (safe: --lib carries no per-target required-features) and say so; we emit NO
-  # --test targets at all. The AGENT_GATE_TEST_NO_METADATA_PARSER hook forces this
-  # branch for the tooling self-test.
+  # Package ownership and per-`--test` scoping REQUIRE an authoritative
+  # Cargo-metadata parser (jq or python3). Without one we cannot map a path to its
+  # owning workspace member NOR learn a target's required-features (running a
+  # feature-gated target feature-less would FAIL --lite spuriously). So when
+  # NEITHER is present we scope to `cqlite-core --lib` ONLY and say so — we emit no
+  # per-package/per-target selection and reintroduce NO hardcoded path mapping. The
+  # AGENT_GATE_TEST_NO_METADATA_PARSER hook forces this branch for the self-test.
   local have_meta_parser=1
   if [ "${AGENT_GATE_TEST_NO_METADATA_PARSER:-0}" = 1 ] || \
      { ! command -v jq >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; }; then
     have_meta_parser=0
-    echo ">>> [$name] no jq/python3 — scoping to package --lib only; run the full gate for integration-test coverage"
+    echo ">>> [$name] no jq/python3 — scoping to cqlite-core --lib only; run the full gate for integration-test coverage"
   fi
 
-  # Authoritative added/changed --test targets ("<pkg>|<testname>|<features>" per
-  # line). Uses Cargo metadata so NESTED helper files (tests/<subdir>/*.rs) are
-  # excluded rather than turned into a bogus `--test <stem>` that would fail --lite.
-  # Empty when no metadata parser is available (lib-only fallback, note above).
-  local newtests=""
-  [ "$have_meta_parser" -eq 1 ] && newtests=$(printf '%s\n' "$changed" | classify_test_targets)
+  # Metadata-derived package ownership (issue #1821): the single authoritative
+  # source. `pkgindex` is "<manifest_dir>\t<pkg>\t<has_lib>" for every member;
+  # `owners` is the longest-prefix owning package of each changed path
+  # ("<pkg>|<has_lib>"); `newtests` is every changed --test target
+  # ("<pkg>|<testname>|<features>"). All empty in the no-parser fallback. This
+  # replaces the old hardcoded path-prefix `case` and `pkg_dir` maps, which kept
+  # missing real members (tools/*, bindings/*, examples, ...); every workspace
+  # member is now covered because ownership comes from `cargo metadata`.
+  local pkgindex="" owners="" newtests=""
+  if [ "$have_meta_parser" -eq 1 ]; then
+    pkgindex=$(_package_index)
+    owners=$(printf '%s\n' "$changed" | _owners_from_index "$pkgindex")
+    newtests=$(printf '%s\n' "$changed" | classify_test_targets)
+  fi
 
-  # Union the packages that OWN a changed --test target into the package set —
-  # not just the path-prefix packages. Some owners (notably the workspace-root
-  # `cqlite` package, which owns the top-level tests/*.rs targets) have no path
-  # prefix of their own and would otherwise be dropped (issue #1821 finding 1).
-  local tpkg
+  # has_lib lookup for ANY package name, straight from the metadata index (1 when
+  # the package has a lib/rlib target `cargo test --lib` can run, else 0).
+  pkg_has_lib() {
+    printf '%s\n' "$pkgindex" \
+      | awk -F'\t' -v p="$1" '$2 == p { print $3; f = 1; exit } END { if (!f) print 0 }'
+  }
+
+  # Bash 3.2-safe newline-delimited package set (grep -qxF dedup). Built from BOTH
+  # path owners AND the owners of every changed --test target — the latter covers
+  # members with no path prefix of their own (notably the workspace-root `cqlite`
+  # package, which owns the top-level tests/*.rs targets; issue #1821 finding 1).
+  local pkgset="" pkg key tpkg
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    pkg=${key%%|*}
+    [ -n "$pkg" ] || continue
+    printf '%s\n' "$pkgset" | grep -qxF "$pkg" || pkgset="${pkgset}${pkg}"$'\n'
+  done <<<"$owners"
   while IFS= read -r key; do
     [ -n "$key" ] || continue
     tpkg=${key%%|*}
     [ -n "$tpkg" ] || continue
     printf '%s\n' "$pkgset" | grep -qxF "$tpkg" || pkgset="${pkgset}${tpkg}"$'\n'
   done <<<"$newtests"
-
-  # package -> manifest dir (to detect a src/lib.rs target).
-  pkg_dir() {
-    case "$1" in
-      cqlite)                     echo "." ;;
-      cqlite-core)                echo "cqlite-core" ;;
-      cqlite-cli)                 echo "cqlite-cli" ;;
-      cqlite-flight)              echo "cqlite-flight" ;;
-      cassandra-parity)           echo "tools/cassandra-parity" ;;
-      cqlite-integration-tests)   echo "tests" ;;
-      format-compatibility-tests) echo "tests/format-compatibility" ;;
-      *) echo "" ;;
-    esac
-  }
 
   local -a pkgs=()
   while IFS= read -r pkg; do [ -n "$pkg" ] && pkgs+=("$pkg"); done <<<"$pkgset"
@@ -1077,15 +1127,16 @@ run_scoped_tests() {
     printf '%s' "$set"
   }
 
-  local p dir key rest tname feats
+  local p rest tname feats
   for p in "${pkgs[@]}"; do
-    dir=$(pkg_dir "$p")
     local -a args=(test -p "$p")
     local featset=""
     # cqlite-core lib tests need cli-helpers (matches the full gate's core-tests).
     [ "$p" = cqlite-core ] && featset=$(add_features "$featset" cli-helpers)
-    local haslib=0
-    [ -n "$dir" ] && [ -f "$dir/src/lib.rs" ] && haslib=1
+    # Lib presence comes from Cargo metadata (no src/lib.rs probing). A package
+    # with no lib target runs only its changed --test targets (issue #1821).
+    local haslib
+    haslib=$(pkg_has_lib "$p")
     [ "$haslib" -eq 1 ] && args+=(--lib)
     local -a stems=()
     # Collect every changed --test target this package owns AND union each

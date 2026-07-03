@@ -311,6 +311,73 @@ else
   echo "------- classify output -------"; printf '%s\n' "$classify_out"; echo "-------------------------------"
 fi
 
+# 7a. Metadata-derived PACKAGE ownership (issue #1821 roborev round 4): the old
+#     hardcoded path-prefix `case` + `pkg_dir` maps only listed a SUBSET of
+#     workspace members, so a change under an unlisted real member (tools/*,
+#     bindings/*, examples, ...) fell through and ran the WRONG (cqlite-core --lib)
+#     tests — a defect roborev re-found each round. Ownership now comes from
+#     `cargo metadata` (longest manifest-dir prefix), covering EVERY member. The
+#     mapping is exposed via the hidden `--classify-package-owners` hook
+#     (stdin paths -> "<pkg>|<has_lib>", one owner per path).
+owners_out=$(printf '%s\n' \
+  "tools/format-validator/src/lib.rs" \
+  "tools/sstabledump-validator/src/main.rs" \
+  "bindings/python/src/lib.rs" \
+  "bindings/node/src/database.rs" \
+  "examples/basic.rs" \
+  "cqlite-core/src/storage/sstable/reader.rs" \
+  "tests/format-compatibility/src/lib.rs" \
+  "docs/some-doc.md" \
+  | bash "$GATE" --classify-package-owners 2>/dev/null)
+# A currently-missed tools/* member must resolve to ITS package (has a lib -> 1).
+if printf '%s\n' "$owners_out" | grep -qxF "format-validator|1"; then
+  ok "owners: tools/format-validator resolves to its own package (was falling through)"
+else
+  bad "owners: tools/format-validator/src/lib.rs did NOT resolve to format-validator"
+  echo "------- owners output -------"; printf '%s\n' "$owners_out"; echo "-----------------------------"
+fi
+# A bindings/* member must resolve to its cdylib package (no lib target -> 0).
+if printf '%s\n' "$owners_out" | grep -qxF "cqlite-py|0" \
+   && printf '%s\n' "$owners_out" | grep -qxF "cqlite-node|0"; then
+  ok "owners: bindings/{python,node} resolve to cqlite-py|0 / cqlite-node|0 (cdylib, no --lib)"
+else
+  bad "owners: bindings/* did NOT resolve to their packages with has_lib=0"
+  echo "------- owners output -------"; printf '%s\n' "$owners_out"; echo "-----------------------------"
+fi
+# The examples crate must resolve to its own package (has a lib -> 1).
+if printf '%s\n' "$owners_out" | grep -qxF "cqlite-examples|1"; then
+  ok "owners: examples/ resolves to cqlite-examples (was falling through)"
+else
+  bad "owners: examples/basic.rs did NOT resolve to cqlite-examples"
+  echo "------- owners output -------"; printf '%s\n' "$owners_out"; echo "-----------------------------"
+fi
+# A nested member (tests/format-compatibility) must win over its parent tests/.
+if printf '%s\n' "$owners_out" | grep -qxF "format-compatibility-tests|0"; then
+  ok "owners: nested tests/format-compatibility wins longest-prefix over tests/"
+else
+  bad "owners: tests/format-compatibility did NOT resolve to format-compatibility-tests"
+  echo "------- owners output -------"; printf '%s\n' "$owners_out"; echo "-----------------------------"
+fi
+# The workspace-root `cqlite` package (manifest dir == repo root) is a degenerate
+# catch-all prefix and must NOT be a path owner — a docs-only change resolves to
+# NO package (falls through to the cqlite-core --lib default), not to root cqlite.
+if printf '%s\n' "$owners_out" | grep -q '^cqlite|'; then
+  bad "owners: repo-root 'cqlite' package wrongly claimed a path (degenerate catch-all)"
+  echo "------- owners output -------"; printf '%s\n' "$owners_out"; echo "-----------------------------"
+else
+  ok "owners: repo-root 'cqlite' package excluded as a path owner (docs change -> fallback)"
+fi
+# No metadata parser -> NO ownership resolution at all (lib-only fallback).
+noparser_owners=$(AGENT_GATE_TEST_NO_METADATA_PARSER=1 printf '%s\n' \
+  "tools/format-validator/src/lib.rs" \
+  | AGENT_GATE_TEST_NO_METADATA_PARSER=1 bash "$GATE" --classify-package-owners 2>/dev/null)
+if [ -z "$noparser_owners" ]; then
+  ok "owners: no-parser fallback emits NO ownership (scopes to cqlite-core --lib)"
+else
+  bad "owners: no-parser fallback emitted ownership without a metadata parser"
+  echo "------- owners output -------"; printf '%s\n' "$noparser_owners"; echo "-----------------------------"
+fi
+
 # 7b. No metadata parser (issue #1821 roborev round 3): per-`--test`-target
 #     selection REQUIRES a Cargo-metadata parser (jq OR python3). When NEITHER is
 #     available the fallback must emit NO `--test` targets at all — otherwise it
