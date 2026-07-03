@@ -404,7 +404,13 @@ pub fn run(fx: crate::fixtures::ReadFixture) -> Option<HarnessReport> {
     let scan_stop = Arc::clone(&stop);
     let scan_started_w = Arc::clone(&scan_started);
     let scan_sql = format!("SELECT * FROM {}", fx.qualified());
-    let scan_handle = std::thread::spawn(move || {
+    // The scan thread reports its completed-pass count over a channel rather than
+    // via `join()`, so BOTH waits below (readiness and shutdown) can be bounded: a
+    // scan wedged inside `db.execute` would make a blocking `join()` hang forever
+    // despite the timeouts (roborev). The `JoinHandle` is intentionally dropped
+    // (detached) — on a timeout the thread is reaped on process exit.
+    let (scan_tx, scan_rx) = std::sync::mpsc::channel::<u64>();
+    std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -424,21 +430,18 @@ pub fn run(fx: crate::fixtures::ReadFixture) -> Option<HarnessReport> {
             // descheduled, leaving the "mixed" window mostly scan-free).
             scan_started_w.store(true, Ordering::Relaxed);
         }
-        scans
+        let _ = scan_tx.send(scans);
     });
 
     // Wait (bounded) until the background scan has actually begun, so the measured
     // point reads run under live contention. A timeout is a HARNESS FAILURE, not a
     // free pass: measuring the "mixed" stream without a live scan would mostly
     // record the scan-free path and could still satisfy `scans > 0` from one late
-    // scan (roborev). Stop + join the thread and panic rather than mis-measure.
+    // scan (roborev). Signal stop best-effort and panic rather than mis-measure
+    // (no join — the detached thread is reaped on process exit).
     let wait_start = std::time::Instant::now();
     while !scan_started.load(Ordering::Relaxed) {
         if wait_start.elapsed() > std::time::Duration::from_secs(30) {
-            // Fail loud and PROMPTLY. Do NOT join here: if the scan is wedged
-            // inside `db.execute` it never observes `stop`, so `join()` would block
-            // indefinitely and defeat the bound (roborev). Signal stop best-effort
-            // and panic — the detached scan thread is reaped on process exit.
             stop.store(true, Ordering::Relaxed);
             panic!(
                 "tail_latency: background scan did not complete a full pass within 30s — cannot \
@@ -451,10 +454,17 @@ pub fn run(fx: crate::fixtures::ReadFixture) -> Option<HarnessReport> {
     let mixed_lat = run_point_read_stream(&db, &sql, MEASURED_N, WARMUP);
     let mixed = TailStats::from_latencies(&mixed_lat);
 
+    // Bounded shutdown: signal stop and wait for the scan thread's completed-pass
+    // count via the channel with a timeout. A blocking `join()` here would hang
+    // forever if the scan wedged inside `db.execute` after signalling readiness
+    // (roborev); `recv_timeout` bounds it and panics loudly instead.
     stop.store(true, Ordering::Relaxed);
-    let scans = scan_handle
-        .join()
-        .expect("tail_latency background-scan thread panicked");
+    let scans = match scan_rx.recv_timeout(std::time::Duration::from_secs(30)) {
+        Ok(n) => n,
+        Err(_) => panic!(
+            "tail_latency: background scan did not shut down within 30s of stop — wedged scan path?"
+        ),
+    };
     assert!(
         scans > 0,
         "tail_latency: background scan completed zero full passes — wedged scan path?"
