@@ -282,6 +282,22 @@ impl WriteEngineConfig {
 /// Orchestrates WAL, memtable, and SSTable flushing for write operations.
 /// This is the primary public API for all write operations in CQLite.
 ///
+/// ## Durability contract: you MUST call [`close`](WriteEngine::close)
+///
+/// **`Drop` is not a flush.** Rows written with [`write`](WriteEngine::write) /
+/// [`execute`](WriteEngine::execute) live in the in-memory memtable (and the
+/// WAL) until a flush turns them into an SSTable. Only
+/// [`close`](WriteEngine::close) (or an explicit flush) guarantees the memtable
+/// is persisted to a Data.db. Because Tokio has no async drop, `Drop` CANNOT
+/// flush — doing so would require a `block_on` inside `drop`, which is
+/// forbidden (issue #1693/AG3). An engine dropped with a non-empty memtable
+/// logs a `warn!` and leaves those rows recoverable only via WAL replay on the
+/// next startup.
+///
+/// Embedders (and every long-lived writer) MUST therefore call
+/// `engine.close().await` for a graceful shutdown — e.g. from a `SIGINT`
+/// handler — before the process exits.
+///
 /// ## Thread Safety
 ///
 /// WriteEngine follows a single-writer model. It is NOT thread-safe and
@@ -1263,6 +1279,11 @@ impl WriteEngine {
     /// syncs the WAL, then marks the engine as closed. After calling close(),
     /// the engine cannot be used for further writes.
     ///
+    /// **This is the durability boundary.** `Drop` does not (and cannot — no
+    /// async drop in Tokio) flush; callers MUST `close().await` before exit to
+    /// guarantee written rows reach an SSTable rather than relying on WAL replay
+    /// (issue #1693). See the type-level docs on [`WriteEngine`].
+    ///
     /// This method is idempotent - calling it multiple times is safe.
     ///
     /// # Returns
@@ -1406,6 +1427,22 @@ impl WriteEngine {
 #[cfg(feature = "write-support")]
 impl Drop for WriteEngine {
     fn drop(&mut self) {
+        // Issue #1693 (AG4): `Drop` is NOT a flush — there is no async drop in
+        // Tokio, and re-introducing a `block_on` here is the AG3 defect. So the
+        // best we can do on an ungraceful drop is make the silent data-loss mode
+        // visible: if the memtable still holds rows that `close()` never flushed,
+        // warn. The `is_empty()` guard is a cheap length check; the format
+        // arguments (a single `usize`) allocate only when a warn-level logger is
+        // actually enabled.
+        if !self.memtable.is_empty() {
+            log::warn!(
+                "WriteEngine dropped without close(): {} row(s) in the memtable were NOT \
+                 flushed to an SSTable and remain only in the WAL (durability now relies on \
+                 WAL replay at next startup). Call `close().await` for a graceful shutdown.",
+                self.memtable.row_count()
+            );
+        }
+
         // If close() was already called the lock was already released; a second
         // unlock is a no-op on most platforms (Linux returns ENOLCK which we
         // ignore here).  The important invariant is that the lock is always
