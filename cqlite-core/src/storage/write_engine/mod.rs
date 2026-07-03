@@ -2033,7 +2033,8 @@ mod tests {
             wal.append(&bad).unwrap();
             wal.sync().unwrap();
             let end_a = wal.size();
-            wal.append(&create_test_mutation(2, "B", 2_000_000)).unwrap();
+            wal.append(&create_test_mutation(2, "B", 2_000_000))
+                .unwrap();
             wal.sync().unwrap();
             end_a
         };
