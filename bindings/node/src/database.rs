@@ -185,6 +185,14 @@ pub struct DatabaseOptions {
     #[napi(js_name = "autoCompaction")]
     pub auto_compaction: Option<bool>,
 
+    /// Memtable flush threshold in bytes for the write engine (issue #1620).
+    /// When the in-memory memtable grows past this size, the binding write path
+    /// (`execute`) awaits a real async flush to a new SSTable generation.
+    /// Only meaningful when `writable` is true. Default: 64 MB (67108864 bytes).
+    /// JavaScript numbers safely represent up to 2^53 bytes.
+    #[napi(js_name = "flushThreshold")]
+    pub flush_threshold: Option<f64>,
+
     /// OpenTelemetry export options (epic #1031, issue #1040).
     ///
     /// When omitted, the `CQLITE_OTEL_*` environment variables are consulted;
@@ -378,12 +386,6 @@ pub struct Database {
     /// Wrapped in Arc so it can be shared with async tasks.
     #[cfg(feature = "write-support")]
     write_engine: Option<Arc<Mutex<cqlite_core::storage::write_engine::WriteEngine>>>,
-    /// Track total bytes written across all flushes (for writeStats.totalWritten).
-    #[cfg(feature = "write-support")]
-    total_written_bytes: Arc<Mutex<u64>>,
-    /// Track how many L0 SSTable files have been flushed.
-    #[cfg(feature = "write-support")]
-    l0_count: Arc<Mutex<u32>>,
 }
 
 impl Database {
@@ -492,7 +494,9 @@ impl Database {
             .filter(|t| !t.trim().is_empty());
 
         // Extract all options and build config
-        let (schema_path, core_config, writable, write_dir) = if let Some(opts) = options {
+        let (schema_path, core_config, writable, write_dir, flush_threshold) = if let Some(opts) =
+            options
+        {
             let mut config = cqlite_core::Config::default();
 
             if let Some(limit) = opts.memory_limit {
@@ -522,9 +526,54 @@ impl Database {
             let writable = opts.writable.unwrap_or(false);
             let write_dir = opts.write_dir.map(PathBuf::from);
 
-            (opts.schema.map(PathBuf::from), config, writable, write_dir)
+            // Validate the optional flush threshold (issue #1620). Bytes as an
+            // f64 (napi-idiomatic; matches `memoryLimit`). Must be finite, at
+            // least 1 byte, and no greater than the memtable hard limit;
+            // converted to `usize` at config-build time.
+            let flush_threshold = match opts.flush_threshold {
+                Some(v) => {
+                    if !v.is_finite() {
+                        return Err(napi::Error::from_reason(
+                            "flushThreshold must be a finite number",
+                        ));
+                    }
+                    if v < 1.0 {
+                        return Err(napi::Error::from_reason(
+                            "flushThreshold must be at least 1 byte",
+                        ));
+                    }
+                    // A threshold above the hard limit would never trigger an
+                    // auto-flush: the memtable hits the hard limit and rejects
+                    // writes first, dead-ending the binding write path
+                    // (roborev jobs 2885/2890, issue #1620). Gated on
+                    // `write-support`, matching every other `write_engine`
+                    // reference in this file — `WriteEngineConfig` is
+                    // `#[cfg(feature = "write-support")]` in core, and the
+                    // threshold is only meaningful when the write engine exists.
+                    #[cfg(feature = "write-support")]
+                    {
+                        let hard_limit =
+                            cqlite_core::storage::write_engine::WriteEngineConfig::DEFAULT_HARD_LIMIT;
+                        if v > hard_limit as f64 {
+                            return Err(napi::Error::from_reason(format!(
+                                "flushThreshold ({v} bytes) must not exceed the memtable hard limit ({hard_limit} bytes)"
+                            )));
+                        }
+                    }
+                    Some(v)
+                }
+                None => None,
+            };
+
+            (
+                opts.schema.map(PathBuf::from),
+                config,
+                writable,
+                write_dir,
+                flush_threshold,
+            )
         } else {
-            (None, cqlite_core::Config::default(), false, None)
+            (None, cqlite_core::Config::default(), false, None, None)
         };
 
         // Clone schema path before it is potentially consumed by db open, so the
@@ -686,12 +735,18 @@ impl Database {
                 ));
             };
 
-            let config = cqlite_core::storage::write_engine::WriteEngineConfig::new(
+            let mut config = cqlite_core::storage::write_engine::WriteEngineConfig::new(
                 wd.join("data"),
                 wd.join("wal"),
                 schema,
             )
             .with_compaction_config(&compaction_config);
+
+            // Apply the optional flush threshold (issue #1620); default is the
+            // engine's 64 MB when not provided.
+            if let Some(v) = flush_threshold {
+                config = config.with_flush_threshold(v as usize);
+            }
 
             let engine = cqlite_core::storage::write_engine::WriteEngine::new(config)
                 .map_err(to_napi_error)?;
@@ -701,7 +756,7 @@ impl Database {
         };
 
         #[cfg(not(feature = "write-support"))]
-        let _ = (writable, write_dir); // suppress unused warning when feature off
+        let _ = (writable, write_dir, flush_threshold); // suppress unused warning when feature off
 
         // Eagerly build (and memoize) the shared async runtime so a resource-
         // starved host surfaces the failure HERE at open() time as a catchable
@@ -716,10 +771,6 @@ impl Database {
             traceparent,
             #[cfg(feature = "write-support")]
             write_engine: write_engine_opt,
-            #[cfg(feature = "write-support")]
-            total_written_bytes: Arc::new(Mutex::new(0)),
-            #[cfg(feature = "write-support")]
-            l0_count: Arc::new(Mutex::new(0)),
         })
     }
 
@@ -766,13 +817,19 @@ impl Database {
                         .as_ref()
                         .expect("ensure_writable verified write_engine is Some"),
                 );
-                let elapsed_ms = tokio::task::spawn_blocking(move || {
+                let (elapsed_ms, applied) = tokio::task::spawn_blocking(move || {
                     let start = std::time::Instant::now();
                     let mut engine = we_clone
                         .lock()
                         .map_err(|_| simple_error("Write engine lock poisoned"))?;
-                    engine.execute(&query).map_err(to_napi_error)?;
-                    Ok::<u32, napi::Error>(start.elapsed().as_millis() as u32)
+                    // Drive the async-flushing write path to completion while the
+                    // engine Mutex is held (issue #1620). This restores auto-flush
+                    // in the runtime-present binding topology; the plain sync
+                    // `execute()` skips it and would grow the memtable to the hard
+                    // limit. Returns the number of mutations applied.
+                    let n = crate::runtime::block_on(engine.execute_flushing(&query))
+                        .map_err(to_napi_error)?;
+                    Ok::<(u32, u64), napi::Error>((start.elapsed().as_millis() as u32, n))
                 })
                 .await
                 .map_err(|e| simple_error(format!("execute DML task panicked: {e}")))??;
@@ -780,7 +837,7 @@ impl Database {
                 return Ok(QueryResult {
                     rows: vec![],
                     row_count: 0,
-                    rows_affected: 1,
+                    rows_affected: applied as u32,
                     execution_time_ms: elapsed_ms,
                     columns: vec![],
                 });
@@ -1166,8 +1223,6 @@ impl Database {
             // We hold the Mutex lock and block_on inside a spawn_blocking to avoid
             // blocking the napi async executor thread.
             let we_clone = Arc::clone(we);
-            let total_written_clone = Arc::clone(&self.total_written_bytes);
-            let l0_clone = Arc::clone(&self.l0_count);
 
             let result = tokio::task::spawn_blocking(move || {
                 let mut engine = we_clone
@@ -1180,17 +1235,11 @@ impl Database {
             .await
             .map_err(|e| simple_error(format!("flush_run task panicked: {e}")))??;
 
+            // Flush statistics (l0Count, totalWritten) are read straight from the
+            // engine's own counters in `writeStats` (issue #1620), so there are no
+            // Node-side counters to update here.
             match result {
-                Some(info) => {
-                    // Track flush statistics
-                    if let Ok(mut tw) = total_written_clone.lock() {
-                        *tw += info.data_size;
-                    }
-                    if let Ok(mut l0) = l0_clone.lock() {
-                        *l0 += 1;
-                    }
-                    Ok(info.data_path.to_string_lossy().into_owned())
-                }
+                Some(info) => Ok(info.data_path.to_string_lossy().into_owned()),
                 None => Ok(String::new()),
             }
         }
@@ -1303,15 +1352,17 @@ impl Database {
                 .lock()
                 .map_err(|_| simple_error("Write engine lock poisoned"))?;
 
-            let total_written = self.total_written_bytes.lock().map(|g| *g).unwrap_or(0);
-            let l0_count = self.l0_count.lock().map(|g| *g).unwrap_or(0);
-
+            // Read L0 count and cumulative flushed bytes from the engine's own
+            // authoritative counters (issue #1620). The engine increments these
+            // on EVERY flush — including the automatic flushes the `execute()`
+            // path now performs via `execute_flushing` — so the stats stay
+            // accurate for auto-flushes, not just explicit `flushRun()` calls.
             Ok(WriteStats {
                 memtable_size: engine.memtable_size() as f64,
                 memtable_rows: engine.memtable_row_count() as u32,
                 wal_size: engine.wal_size() as f64,
-                l0_count,
-                total_written: total_written as f64,
+                l0_count: engine.l0_count() as u32,
+                total_written: engine.total_flushed_bytes() as f64,
             })
         }
 
