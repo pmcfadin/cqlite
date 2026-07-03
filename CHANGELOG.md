@@ -33,6 +33,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   d = row["duration_val"]                        # cqlite.Duration
   d.months, d.days, d.nanos                      # exact components
   ```
+- **BREAKING (discovery-driven flows):** loading the schema for a table that was
+  never registered or discovered now returns an error instead of a fabricated
+  `uuid id` default schema. `SchemaManager::load_schema` previously invented a
+  hardcoded schema for unknown tables, so queries against an undefined table
+  returned fabricated-shape rows rather than failing — a no-heuristics violation.
+  Unknown tables now fail honestly with `Error::Schema("unknown table <name>;
+  no schema registered or discovered")`, mirroring the I3 hard-fail precedent
+  (#1626). Tables with real registered/discovered schemas (including all corpus
+  parity tables) are unaffected (#1710).
 
 ### Removed
 

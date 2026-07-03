@@ -873,47 +873,23 @@ impl SchemaManager {
             .cloned()
     }
 
-    /// Load schema for a table
+    /// Load schema for a table.
+    ///
+    /// Returns `Err(Error::Schema(..))` for an unknown table. CQLite never
+    /// fabricates a schema for a table nobody defined — doing so would return
+    /// fabricated-shape rows for undefined tables, violating the no-heuristics
+    /// mandate. This mirrors the I3 (#1626) hard-fail precedent (issue #1710).
+    ///
+    /// This is a pure read-lock lookup: no write happens on the unknown-table
+    /// path, so there is no read-drop-write TOCTOU here.
     pub async fn load_schema(&self, table_name: &str) -> Result<TableSchema> {
-        // Read lock first to check if schema exists
         let schemas = self.schemas.read().await;
-        if let Some(schema) = schemas.get(table_name) {
-            return Ok(schema.clone());
-        }
-        drop(schemas); // Explicit drop before write lock
-
-        // Create default schema
-        let schema = self.create_default_schema(table_name);
-
-        // Write lock to insert
-        self.schemas
-            .write()
-            .await
-            .insert(table_name.to_string(), schema.clone());
-        Ok(schema)
-    }
-
-    /// Create a default schema for unknown tables
-    fn create_default_schema(&self, table_name: &str) -> TableSchema {
-        TableSchema {
-            keyspace: "default".to_string(),
-            table: table_name.to_string(),
-            partition_keys: vec![KeyColumn {
-                name: "id".to_string(),
-                data_type: "uuid".to_string(),
-                position: 0,
-            }],
-            clustering_keys: vec![],
-            columns: vec![Column {
-                name: "id".to_string(),
-                data_type: "uuid".to_string(),
-                nullable: false,
-                default: None,
-                is_static: false,
-            }],
-            comments: HashMap::new(),
-            dropped_columns: HashMap::new(),
-        }
+        schemas.get(table_name).cloned().ok_or_else(|| {
+            Error::schema(format!(
+                "unknown table {}; no schema registered or discovered",
+                table_name
+            ))
+        })
     }
 
     /// Parse and register a schema from a CQL CREATE TABLE statement
@@ -1224,9 +1200,7 @@ mod tests {
             .expect("primitive/collection-only schema should validate");
     }
 
-    #[tokio::test]
-    async fn test_concurrent_schema_access() {
-        // Create a SchemaManager for testing concurrent access
+    async fn test_manager() -> Arc<SchemaManager> {
         let config = Config::default();
         let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1241,32 +1215,79 @@ mod tests {
             .await
             .unwrap(),
         );
-
-        let manager = Arc::new(
+        Arc::new(
             SchemaManager::new_with_storage(storage, &config)
                 .await
                 .unwrap(),
+        )
+    }
+
+    fn table_schema_named(table_name: &str) -> TableSchema {
+        let mut schema = udt_schema("text");
+        schema.table = table_name.to_string();
+        schema
+    }
+
+    /// Issue #1710: `load_schema` for a table nobody defined must return `Err`,
+    /// never a fabricated `uuid id` schema (no-heuristics mandate; I3 #1626
+    /// hard-fail precedent). RED on main, which fabricated a default schema.
+    #[tokio::test]
+    async fn test_load_schema_unknown_table_errs() {
+        let manager = test_manager().await;
+
+        let err = manager
+            .load_schema("never_defined_table")
+            .await
+            .expect_err("unknown table must error, not fabricate a schema");
+        assert!(matches!(err, Error::Schema(_)), "got {err:?}");
+        assert!(
+            err.to_string().contains("never_defined_table"),
+            "error must name the unknown table, got: {err}"
         );
 
-        // Spawn 10 concurrent tasks accessing 3 different tables
+        // And the failed lookup must NOT insert a fabricated entry.
+        assert!(
+            manager.schemas.read().await.is_empty(),
+            "unknown-table lookup must not mutate the registry"
+        );
+    }
+
+    /// Issue #1710: concurrent `load_schema` of a registered table returns the
+    /// real schema from every task, and never mutates the registry (the
+    /// unknown-table path no longer does a read-drop-write, so there is no
+    /// lost-update TOCTOU).
+    #[tokio::test]
+    async fn test_concurrent_schema_access() {
+        let manager = test_manager().await;
+
+        // Register 3 real schemas up front (authoritative metadata only).
+        for i in 0..3 {
+            let name = format!("table_{}", i);
+            manager
+                .schemas
+                .write()
+                .await
+                .insert(name.clone(), table_schema_named(&name));
+        }
+
+        // Spawn 10 concurrent tasks loading the 3 tables.
         let mut handles = vec![];
         for i in 0..10 {
             let m = Arc::clone(&manager);
             let handle = tokio::spawn(async move {
-                let table = format!("table_{}", i % 3); // 3 different tables, concurrent access
-                m.load_schema(&table).await.unwrap()
+                let table = format!("table_{}", i % 3);
+                let schema = m.load_schema(&table).await.expect("registered table loads");
+                assert_eq!(schema.table, table);
             });
             handles.push(handle);
         }
-
-        // Wait for all tasks to complete
         for handle in handles {
             handle.await.unwrap();
         }
 
-        // Verify schemas were created
+        // Registry is unchanged: exactly the 3 registered entries, no fabrication.
         let schemas = manager.schemas.read().await;
-        assert!(schemas.len() <= 3); // At most 3 unique tables
+        assert_eq!(schemas.len(), 3);
         assert!(schemas.contains_key("table_0"));
         assert!(schemas.contains_key("table_1"));
         assert!(schemas.contains_key("table_2"));
