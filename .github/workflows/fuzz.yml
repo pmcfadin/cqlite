@@ -22,7 +22,13 @@ on:
       - 'cqlite-core/src/parser/**'
       - 'cqlite-core/src/storage/sstable/**'
       - 'cqlite-core/src/schema/**'
+      - 'cqlite-core/src/types/**'
       - 'cqlite-core/src/fuzz_support.rs'
+      # Manifests: feature/dependency resolution for the fuzz surface (the crate
+      # depends on cqlite-core with `--features fuzz`).
+      - 'cqlite-core/Cargo.toml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - '.github/workflows/fuzz.yml'
   schedule:
     # Nightly long-run, 04:07 UTC (off-peak, between gate 03:37 and
