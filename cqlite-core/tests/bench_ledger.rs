@@ -103,3 +103,29 @@ fn append_metrics_writes_one_json_line_per_metric() {
         "one append_metrics call must stamp a single ts across its batch"
     );
 }
+
+/// Best-effort contract (spec R3 "a ledger write failure does not fail the bench"):
+/// when the ledger path is unwritable, `append_metrics` returns `Err` rather than
+/// panicking, so the bench `main` can log-and-continue instead of aborting the run.
+/// The path is made unwritable by rooting it under a regular FILE, so both
+/// `create_dir_all` of the parent and the open fail deterministically and portably
+/// (no reliance on filesystem permissions).
+#[test]
+#[serial]
+fn append_metrics_returns_err_on_unwritable_path_without_panicking() {
+    let dir = tempfile::TempDir::new().expect("temp dir for ledger");
+    // A regular file; using it as a *directory* component below is always invalid.
+    let blocker = dir.path().join("not-a-dir");
+    std::fs::write(&blocker, b"x").expect("create blocker file");
+    // Parent (`.../not-a-dir`) is a file → create_dir_all + open both fail.
+    let unwritable = blocker.join("history.jsonl");
+
+    std::env::set_var("CQLITE_BENCH_LEDGER", &unwritable);
+    let result = bench_ledger::append_metrics("unit_bench", &[("p50", 100.0, "ns")]);
+    std::env::remove_var("CQLITE_BENCH_LEDGER");
+
+    assert!(
+        result.is_err(),
+        "append to an unwritable ledger path must return Err (best-effort), not Ok or panic"
+    );
+}
