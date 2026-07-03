@@ -64,14 +64,23 @@ def main(argv):
     print("-" * len(header))
 
     breaches = []
+    # A ratio the gate has a `max` for but that is absent from the harness JSON.
+    # In enforcing mode this is a fail-closed error (stale/malformed harness output
+    # must NOT bypass the gate); in advisory mode it is a reported SKIP.
+    missing_required = []
     for key in RATIO_KEYS:
         value = harness.get(key)
         cfg = ratios_cfg.get(key)
+        has_threshold = cfg is not None and cfg.get("max") is not None
 
         if value is None:
-            print(f"{key:<{col}} {'-':>12} {'-':>12}  SKIP (absent from harness JSON)")
+            if enforcing and has_threshold:
+                missing_required.append(key)
+                print(f"{key:<{col}} {'-':>12} {float(cfg['max']):>12.3f}  MISSING (required)")
+            else:
+                print(f"{key:<{col}} {'-':>12} {'-':>12}  SKIP (absent from harness JSON)")
             continue
-        if cfg is None or cfg.get("max") is None:
+        if not has_threshold:
             print(f"{key:<{col}} {float(value):>12.3f} {'-':>12}  SKIP (no threshold)")
             continue
 
@@ -85,6 +94,17 @@ def main(argv):
         print(f"{key:<{col}} {value:>12.3f} {threshold:>12.3f}  {status}")
 
     print()
+    # Fail-closed: enforcing mode must not exit 0 when a required (thresholded)
+    # ratio is missing from the harness JSON — that would let stale/malformed
+    # output silently pass the gate.
+    if missing_required:
+        print(
+            f"❌ {len(missing_required)} required tail ratio(s) missing from harness JSON "
+            f"(enforcing): {', '.join(missing_required)}"
+        )
+        print("   Regenerate the harness JSON (cargo bench --bench tail_latency) before gating.")
+        return 1
+
     if breaches:
         if enforcing:
             print(f"❌ {len(breaches)} tail ratio(s) exceeded threshold:")

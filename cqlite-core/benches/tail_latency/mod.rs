@@ -394,8 +394,14 @@ pub fn run(fx: crate::fixtures::ReadFixture) -> Option<HarnessReport> {
 
     // Mixed load: one continuous background full-table scan on its own thread.
     let stop = Arc::new(AtomicBool::new(false));
+    // Readiness signal: the scan thread sets this once it has begun executing a
+    // scan, so the measured point-read stream overlaps a *live* scan rather than
+    // racing thread startup (roborev finding — without this, "scans > 0" after
+    // join only proves a scan ran at some point, not during the measured window).
+    let scan_started = Arc::new(AtomicBool::new(false));
     let scan_db = Arc::clone(&db);
     let scan_stop = Arc::clone(&stop);
+    let scan_started_w = Arc::clone(&scan_started);
     let scan_sql = format!("SELECT * FROM {}", fx.qualified());
     let scan_handle = std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -404,6 +410,8 @@ pub fn run(fx: crate::fixtures::ReadFixture) -> Option<HarnessReport> {
             .expect("tail_latency background-scan runtime");
         let mut scans: u64 = 0;
         while !scan_stop.load(Ordering::Relaxed) {
+            // Mark the scan live just before the first execute begins.
+            scan_started_w.store(true, Ordering::Relaxed);
             let res = rt
                 .block_on(scan_db.execute(&scan_sql))
                 .expect("tail_latency background scan");
@@ -412,6 +420,17 @@ pub fn run(fx: crate::fixtures::ReadFixture) -> Option<HarnessReport> {
         }
         scans
     });
+
+    // Wait (bounded) until the background scan has actually begun, so the measured
+    // point reads run under live contention. Never hang: fall through after the
+    // timeout (the post-join `scans > 0` assertion still guards a wedged scan).
+    let wait_start = std::time::Instant::now();
+    while !scan_started.load(Ordering::Relaxed) {
+        if wait_start.elapsed() > std::time::Duration::from_secs(30) {
+            break;
+        }
+        std::thread::yield_now();
+    }
 
     let mixed_lat = run_point_read_stream(&db, &sql, MEASURED_N, WARMUP);
     let mixed = TailStats::from_latencies(&mixed_lat);

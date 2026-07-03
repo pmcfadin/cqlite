@@ -101,6 +101,23 @@ class TestEnforcingBreachFails:
         assert rc != 0, "advisory:false on a breach must exit non-zero"
 
 
+class TestMissingRatioFailsClosedWhenEnforcing:
+    def test_enforcing_missing_required_ratio_exits_nonzero(self, tmp_path):
+        # A thresholded ratio absent from the harness JSON (stale/malformed output)
+        # must NOT silently pass the enforcing gate.
+        harness = _harness()
+        del harness["p99_mixed_over_scan_free"]
+        rc = _run(tmp_path, harness, _gate(advisory=False))
+        assert rc != 0, "enforcing gate must fail when a required ratio is missing"
+
+    def test_advisory_missing_ratio_still_exits_zero(self, tmp_path):
+        # Advisory mode reports a missing ratio as SKIP and still passes.
+        harness = _harness()
+        del harness["p99_mixed_over_scan_free"]
+        rc = _run(tmp_path, harness, _gate(advisory=True))
+        assert rc == 0, "advisory gate skips a missing ratio (reported, not failing)"
+
+
 class TestWithinThresholdPasses:
     def test_within_threshold_advisory_exits_zero(self, tmp_path):
         rc = _run(tmp_path, _harness(), _gate(advisory=True))
