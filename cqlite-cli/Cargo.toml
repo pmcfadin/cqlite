@@ -25,7 +25,9 @@ cqlite-core = { path = "../cqlite-core", version = "0.12.0" }
 clap = { workspace = true }
 
 # Async runtime
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "signal"] }
+# `io-std` + `io-util` back the async stdin loop in the interactive writable
+# session (issue #1693); `signal` backs its Ctrl-C graceful-shutdown handler.
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "signal", "io-std", "io-util"] }
 
 # Error handling
 thiserror = { workspace = true }
@@ -116,6 +118,8 @@ serial_test = "3.0"
 # Test infrastructure dependencies
 test-log = "0.2"
 wait-timeout = "0.2"
+# Send SIGINT to a spawned CLI child in the graceful-shutdown test (issue #1693).
+libc = { workspace = true }
 rustc_version = "0.4"
 
 # Enhanced testing framework dependencies

@@ -38,7 +38,8 @@
 #   format-compat      cargo test -p format-compatibility-tests (the 'oa' format crate;
 #                      issue #865 folded it into the workspace so fmt/clippy reach it)
 #   write-tests        cargo test -p cqlite-core --features write-support (lib + roundtrip + compaction)
-#   cli-tests          cargo test -p cqlite-cli --test unit_tests + (write-support)
+#   cli-tests          cargo test -p cqlite-cli --test unit_tests + (write-support:
+#                      write_readback_content_tests + graceful_shutdown_tests)
 #                      write_readback_content_tests (CQL write→read content parity, #1231)
 #   python-bindings    maturin develop + pytest bindings/python/tests in a throwaway
 #                      venv; SKIPs (never silently PASSes) if python3 is unavailable.
@@ -975,7 +976,8 @@ run_component write-tests bash -c '
   cargo test --package cqlite-core --features write-support --test compaction_integration'
 run_component cli-tests bash -c '
   cargo test --package cqlite-cli --test unit_tests &&
-  cargo test --package cqlite-cli --features write-support --test write_readback_content_tests'
+  cargo test --package cqlite-cli --features write-support --test write_readback_content_tests &&
+  cargo test --package cqlite-cli --features write-support --test graceful_shutdown_tests'
 run_compaction_byte_parity
 run_python_bindings
 run_node_bindings

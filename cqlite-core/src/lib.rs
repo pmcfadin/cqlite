@@ -562,6 +562,15 @@ impl Database {
     ///
     /// This method ensures all pending operations are completed and
     /// all resources are properly cleaned up.
+    ///
+    /// ## Durability contract
+    ///
+    /// Embedders MUST call `close().await` for a graceful shutdown. `Drop` is
+    /// NOT a flush — Tokio has no async drop, so dropping a handle cannot await
+    /// a flush and any un-flushed writer state is left to recovery (WAL replay)
+    /// rather than being persisted here. For the write path this maps onto
+    /// [`storage::write_engine::WriteEngine::close`], which is the actual
+    /// memtable-to-SSTable durability boundary (issue #1693).
     pub async fn close(self) -> Result<()> {
         // Stop background tasks
         self.storage.shutdown().await?;

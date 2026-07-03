@@ -282,6 +282,22 @@ impl WriteEngineConfig {
 /// Orchestrates WAL, memtable, and SSTable flushing for write operations.
 /// This is the primary public API for all write operations in CQLite.
 ///
+/// ## Durability contract: you MUST call [`close`](WriteEngine::close)
+///
+/// **`Drop` is not a flush.** Rows written with [`write`](WriteEngine::write) /
+/// [`execute`](WriteEngine::execute) live in the in-memory memtable (and the
+/// WAL) until a flush turns them into an SSTable. Only
+/// [`close`](WriteEngine::close) (or an explicit flush) guarantees the memtable
+/// is persisted to a Data.db. Because Tokio has no async drop, `Drop` CANNOT
+/// flush — doing so would require a `block_on` inside `drop`, which is
+/// forbidden (issue #1693/AG3). An engine dropped with a non-empty memtable
+/// logs a `warn!` and leaves those rows recoverable only via WAL replay on the
+/// next startup.
+///
+/// Embedders (and every long-lived writer) MUST therefore call
+/// `engine.close().await` for a graceful shutdown — e.g. from a `SIGINT`
+/// handler — before the process exits.
+///
 /// ## Thread Safety
 ///
 /// WriteEngine follows a single-writer model. It is NOT thread-safe and
@@ -1263,6 +1279,11 @@ impl WriteEngine {
     /// syncs the WAL, then marks the engine as closed. After calling close(),
     /// the engine cannot be used for further writes.
     ///
+    /// **This is the durability boundary.** `Drop` does not (and cannot — no
+    /// async drop in Tokio) flush; callers MUST `close().await` before exit to
+    /// guarantee written rows reach an SSTable rather than relying on WAL replay
+    /// (issue #1693). See the type-level docs on [`WriteEngine`].
+    ///
     /// This method is idempotent - calling it multiple times is safe.
     ///
     /// # Returns
@@ -1406,6 +1427,35 @@ impl WriteEngine {
 #[cfg(feature = "write-support")]
 impl Drop for WriteEngine {
     fn drop(&mut self) {
+        // Issue #1693 (AG4): `Drop` is NOT a flush — there is no async drop in
+        // Tokio, and re-introducing a `block_on` here is the AG3 defect. So the
+        // best we can do on an ungraceful drop is make the silent data-loss mode
+        // visible: if the memtable still holds rows that `close()` never flushed,
+        // warn. The `is_empty()` guard is a cheap length check; the format
+        // arguments (a single `usize`) allocate only when a warn-level logger is
+        // actually enabled.
+        if !self.memtable.is_empty() {
+            // The recovery guidance depends on the durability mode: with WAL
+            // durability the rows survive in the WAL and replay on next open,
+            // but with `Durability::Disabled` the WAL was skipped entirely, so
+            // an ungraceful drop loses the un-flushed rows permanently.
+            match self.config.durability {
+                Durability::SyncEachWrite => log::warn!(
+                    "WriteEngine dropped without close(): {} row(s) in the memtable were NOT \
+                     flushed to an SSTable and remain only in the WAL (durability now relies on \
+                     WAL replay at next startup). Call `close().await` for a graceful shutdown.",
+                    self.memtable.row_count()
+                ),
+                Durability::Disabled => log::warn!(
+                    "WriteEngine dropped without close(): {} row(s) in the memtable were NOT \
+                     flushed to an SSTable and are LOST — durability is Disabled so these rows \
+                     were never written to the WAL and cannot be recovered (they existed in \
+                     memory only). Call `close().await` for a graceful shutdown.",
+                    self.memtable.row_count()
+                ),
+            }
+        }
+
         // If close() was already called the lock was already released; a second
         // unlock is a no-op on most platforms (Linux returns ENOLCK which we
         // ignore here).  The important invariant is that the lock is always
@@ -3195,6 +3245,180 @@ mod tests {
             rows.len(),
             2,
             "both mutations must be readable exactly once (no loss, no duplication)"
+        );
+    }
+
+    /// Minimal thread-local log capturer for the Drop-warn tests (issue #1693).
+    ///
+    /// A `log` logger can only be installed process-wide once and is shared by
+    /// every test in this binary, so it records into a *thread-local* buffer.
+    /// cargo runs each test on its own thread, so a thread-local buffer isolates
+    /// concurrent tests from one another. No external crate is pulled in.
+    mod drop_warn_capture {
+        use log::{Level, LevelFilter, Log, Metadata, Record};
+        use std::cell::RefCell;
+        use std::sync::Once;
+
+        thread_local! {
+            static BUFFER: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+        }
+
+        struct ThreadLocalCapture;
+
+        impl Log for ThreadLocalCapture {
+            fn enabled(&self, _metadata: &Metadata) -> bool {
+                true
+            }
+
+            fn log(&self, record: &Record) {
+                if record.level() == Level::Warn {
+                    BUFFER.with(|b| {
+                        if let Some(buf) = b.borrow_mut().as_mut() {
+                            buf.push(record.args().to_string());
+                        }
+                    });
+                }
+            }
+
+            fn flush(&self) {}
+        }
+
+        static INSTALL: Once = Once::new();
+
+        /// Install the capturing logger process-wide (idempotent) and begin
+        /// capturing warnings on the current thread. If another logger was
+        /// already installed the buffer stays available on this thread but no
+        /// records arrive, which fails the assertions loudly rather than
+        /// silently passing.
+        pub(super) fn start() {
+            INSTALL.call_once(|| {
+                let _ = log::set_boxed_logger(Box::new(ThreadLocalCapture));
+                log::set_max_level(LevelFilter::Trace);
+            });
+            BUFFER.with(|b| *b.borrow_mut() = Some(Vec::new()));
+        }
+
+        /// Take the warnings captured on the current thread since `start()`.
+        pub(super) fn take_warnings() -> Vec<String> {
+            BUFFER.with(|b| b.borrow_mut().take().unwrap_or_default())
+        }
+    }
+
+    /// Issue #1693 (AG4): dropping a `WriteEngine` whose memtable still holds
+    /// un-flushed rows (i.e. `close()` was never called) must emit a `warn!` so
+    /// the silent data-loss mode is visible in logs.
+    #[test]
+    fn test_drop_without_close_warns_on_nonempty_memtable() {
+        drop_warn_capture::start();
+
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+        let mut engine = WriteEngine::new(config).unwrap();
+        engine
+            .write(create_test_mutation(1, "Alice", 1_000_000))
+            .unwrap();
+        assert!(
+            engine.memtable_row_count() > 0,
+            "precondition: memtable must be non-empty before drop"
+        );
+
+        // Drop WITHOUT close() — the durability-loss path.
+        drop(engine);
+
+        let warnings = drop_warn_capture::take_warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|m| m.contains("dropped") && m.contains("without close")),
+            "expected an unflushed-drop warning, captured warnings: {warnings:?}"
+        );
+        // WAL-durable engine: the guidance must point at WAL recovery, NOT loss.
+        assert!(
+            warnings.iter().any(|m| m.contains("WAL replay")),
+            "WAL-durable drop warning must mention WAL replay recovery, captured: {warnings:?}"
+        );
+        assert!(
+            !warnings.iter().any(|m| m.contains("LOST")),
+            "WAL-durable drop warning must NOT claim data loss, captured: {warnings:?}"
+        );
+    }
+
+    /// Issue #1693 (roborev): with `Durability::Disabled` the WAL is skipped, so
+    /// an ungraceful drop loses the un-flushed rows. The warning must say the
+    /// rows are LOST rather than giving false "recoverable from the WAL" guidance.
+    #[test]
+    fn test_drop_without_close_warns_data_loss_when_durability_disabled() {
+        drop_warn_capture::start();
+
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        )
+        .with_durability(Durability::Disabled);
+        let mut engine = WriteEngine::new(config).unwrap();
+        engine
+            .write(create_test_mutation(1, "Alice", 1_000_000))
+            .unwrap();
+        assert!(
+            engine.memtable_row_count() > 0,
+            "precondition: memtable must be non-empty before drop"
+        );
+
+        drop(engine);
+
+        let warnings = drop_warn_capture::take_warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|m| m.contains("dropped") && m.contains("without close")),
+            "expected an unflushed-drop warning, captured warnings: {warnings:?}"
+        );
+        // No-WAL engine: the warning must signal data loss, NOT WAL recovery.
+        assert!(
+            warnings.iter().any(|m| m.contains("LOST")),
+            "Durability::Disabled drop warning must signal data loss, captured: {warnings:?}"
+        );
+        assert!(
+            !warnings.iter().any(|m| m.contains("WAL replay")),
+            "Durability::Disabled drop warning must NOT promise WAL recovery, captured: {warnings:?}"
+        );
+    }
+
+    /// Control for issue #1693: after a graceful `close()` the memtable is empty,
+    /// so `Drop` must NOT emit the unflushed-drop warning.
+    #[tokio::test]
+    async fn test_drop_after_close_does_not_warn() {
+        drop_warn_capture::start();
+
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+        let mut engine = WriteEngine::new(config).unwrap();
+        engine
+            .write(create_test_mutation(1, "Alice", 1_000_000))
+            .unwrap();
+        engine.close().await.unwrap();
+
+        drop(engine);
+
+        let warnings = drop_warn_capture::take_warnings();
+        assert!(
+            !warnings
+                .iter()
+                .any(|m| m.contains("dropped") && m.contains("without close")),
+            "close() flushed the memtable; Drop must not warn, captured: {warnings:?}"
         );
     }
 }
