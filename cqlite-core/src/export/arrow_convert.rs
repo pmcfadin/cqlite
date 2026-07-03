@@ -1277,8 +1277,14 @@ pub(crate) fn convert_column_to_array(
 /// Rescale a CQL decimal value to the fixed column scale (`DECIMAL_FIXED_SCALE`).
 ///
 /// Returns the rescaled `i128` value, or an error if:
+/// - The input scale exceeds `DECIMAL_FIXED_SCALE` (would require truncation /
+///   silent precision loss — fail closed instead of divide-and-truncate).
 /// - The rescaled magnitude exceeds 38 decimal digits (overflow of `Decimal128`).
 /// - Checked multiplication overflows `i128` when scaling up.
+///
+/// Follow-up option (not implemented here per owner decision 2026-07-01): derive
+/// a per-column target scale from schema / `Statistics.db` metadata so that
+/// higher-scale decimals can be represented without loss instead of erroring.
 pub(crate) fn rescale_decimal(scale: i32, unscaled: &[u8]) -> Result<i128, ArrowConvertError> {
     use num_bigint::BigInt;
 
@@ -1286,23 +1292,30 @@ pub(crate) fn rescale_decimal(scale: i32, unscaled: &[u8]) -> Result<i128, Arrow
         return Ok(0i128);
     }
 
+    // Fail closed: a scale greater than the fixed target scale can only be
+    // reconciled by dividing (truncating toward zero), which silently drops
+    // precision from an authoritative export. Error instead — mirror the
+    // over-magnitude guard below rather than truncate.
+    if scale > DECIMAL_FIXED_SCALE {
+        return Err(ArrowConvertError::InvalidValue(format!(
+            "decimal scale {scale} exceeds the fixed export scale {DECIMAL_FIXED_SCALE}; \
+             refusing to truncate (would lose precision)"
+        )));
+    }
+
     // Decode big-endian two's-complement signed integer.
     let bigint = BigInt::from_signed_bytes_be(unscaled);
 
-    // Compute scale delta: positive means we must multiply (scale up),
-    // negative means we must divide (scale down / truncate).
+    // Compute scale delta: positive means we must multiply (scale up).
+    // A negative delta (scale > DECIMAL_FIXED_SCALE) is rejected above.
     let delta = DECIMAL_FIXED_SCALE - scale;
 
     let rescaled = if delta == 0 {
         bigint
-    } else if delta > 0 {
+    } else {
         // Scale up: multiply by 10^delta.
         let factor = BigInt::from(10i64).pow(delta as u32);
         bigint * factor
-    } else {
-        // Scale down: divide by 10^(-delta), truncating toward zero.
-        let factor = BigInt::from(10i64).pow((-delta) as u32);
-        bigint / factor
     };
 
     // Verify the result fits in Decimal128(38, …).
@@ -2004,6 +2017,54 @@ mod tests {
             .expect("Int32Array");
         assert_eq!(arr.value(0), 42);
         assert_eq!(arr.null_count(), 0);
+    }
+
+    /// (5b) Fail-closed (issue #1487): a `decimal` with scale > `DECIMAL_FIXED_SCALE`
+    /// (here scale 12) must return an error rather than silently truncating toward
+    /// zero. On the pre-fix code path this scaled down and succeeded lossily.
+    #[test]
+    fn decimal_scale_above_fixed_is_error() {
+        let columns = vec![col("d", DataType::Blob, Some(CqlType::Decimal))];
+        // 123456789012 with scale 12 == 0.123456789012 — 12 fractional digits.
+        let unscaled = num_bigint::BigInt::from(123_456_789_012i64).to_signed_bytes_be();
+        let rows = vec![row_one(
+            "d",
+            Value::Decimal {
+                scale: 12,
+                unscaled,
+            },
+        )];
+        assert!(is_invalid_value(rows_to_record_batch(&columns, &rows)));
+    }
+
+    /// (5c) Happy path (issue #1487): an in-range `decimal` (scale <= 9) still
+    /// converts exactly as before.
+    #[test]
+    fn decimal_scale_within_fixed_builds_ok() {
+        use arrow::array::Decimal128Array;
+        let columns = vec![col("d", DataType::Blob, Some(CqlType::Decimal))];
+        // 123456 with scale 3 == 123.456 — rescaled to scale 9 -> 123_456_000_000.
+        let unscaled = num_bigint::BigInt::from(123_456i64).to_signed_bytes_be();
+        let rows = vec![row_one("d", Value::Decimal { scale: 3, unscaled })];
+        let batch = rows_to_record_batch(&columns, &rows).expect("in-range decimal must build");
+        let arr = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Decimal128Array>()
+            .expect("Decimal128Array");
+        assert_eq!(arr.value(0), 123_456_000_000i128);
+        assert_eq!(arr.null_count(), 0);
+    }
+
+    /// (5d) Regression guard (issue #1487): a NULL / absent decimal stays NULL —
+    /// the fail-closed scale check must not disturb the null path.
+    #[test]
+    fn decimal_null_and_absent_still_null() {
+        let columns = vec![col("d", DataType::Blob, Some(CqlType::Decimal))];
+        let rows = vec![row_one("d", Value::Null), row_absent()];
+        let batch = rows_to_record_batch(&columns, &rows).expect("null/absent decimal must build");
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(batch.column(0).null_count(), 2);
     }
 
     /// (6) Regression: a CQL `float` (32-bit) column whose value is carried as
