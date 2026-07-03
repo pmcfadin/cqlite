@@ -256,14 +256,17 @@ impl CrcDb {
 
     /// Stored CRC32 for the chunk containing Data.db byte `offset`
     /// (`chunk_index = offset / chunk_size`).
-    #[cfg(test)]
+    // Only consumed by the write-support-gated test module below.
+    #[cfg(all(test, feature = "write-support"))]
     pub(crate) fn crc_for_offset(&self, offset: u64) -> Result<u32> {
         let chunk_index = (offset / self.chunk_size as u64) as usize;
         self.crc_for_chunk(chunk_index)
     }
 }
 
-#[cfg(test)]
+// This test module references `crate::storage::sstable::writer::crc_writer`, which
+// only exists under the `write-support` feature; gate the whole module accordingly.
+#[cfg(all(test, feature = "write-support"))]
 mod tests {
     use super::*;
     use crate::storage::sstable::writer::crc_writer::{write_crc_db, CrcTrailer, CRC_CHUNK_SIZE};
