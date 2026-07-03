@@ -3197,4 +3197,125 @@ mod tests {
             "both mutations must be readable exactly once (no loss, no duplication)"
         );
     }
+
+    /// Minimal thread-local log capturer for the Drop-warn tests (issue #1693).
+    ///
+    /// A `log` logger can only be installed process-wide once and is shared by
+    /// every test in this binary, so it records into a *thread-local* buffer.
+    /// cargo runs each test on its own thread, so a thread-local buffer isolates
+    /// concurrent tests from one another. No external crate is pulled in.
+    mod drop_warn_capture {
+        use log::{Level, LevelFilter, Log, Metadata, Record};
+        use std::cell::RefCell;
+        use std::sync::Once;
+
+        thread_local! {
+            static BUFFER: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+        }
+
+        struct ThreadLocalCapture;
+
+        impl Log for ThreadLocalCapture {
+            fn enabled(&self, _metadata: &Metadata) -> bool {
+                true
+            }
+
+            fn log(&self, record: &Record) {
+                if record.level() == Level::Warn {
+                    BUFFER.with(|b| {
+                        if let Some(buf) = b.borrow_mut().as_mut() {
+                            buf.push(record.args().to_string());
+                        }
+                    });
+                }
+            }
+
+            fn flush(&self) {}
+        }
+
+        static INSTALL: Once = Once::new();
+
+        /// Install the capturing logger process-wide (idempotent) and begin
+        /// capturing warnings on the current thread. If another logger was
+        /// already installed the buffer stays available on this thread but no
+        /// records arrive, which fails the assertions loudly rather than
+        /// silently passing.
+        pub(super) fn start() {
+            INSTALL.call_once(|| {
+                let _ = log::set_boxed_logger(Box::new(ThreadLocalCapture));
+                log::set_max_level(LevelFilter::Trace);
+            });
+            BUFFER.with(|b| *b.borrow_mut() = Some(Vec::new()));
+        }
+
+        /// Take the warnings captured on the current thread since `start()`.
+        pub(super) fn take_warnings() -> Vec<String> {
+            BUFFER.with(|b| b.borrow_mut().take().unwrap_or_default())
+        }
+    }
+
+    /// Issue #1693 (AG4): dropping a `WriteEngine` whose memtable still holds
+    /// un-flushed rows (i.e. `close()` was never called) must emit a `warn!` so
+    /// the silent data-loss mode is visible in logs.
+    #[test]
+    fn test_drop_without_close_warns_on_nonempty_memtable() {
+        drop_warn_capture::start();
+
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+        let mut engine = WriteEngine::new(config).unwrap();
+        engine
+            .write(create_test_mutation(1, "Alice", 1_000_000))
+            .unwrap();
+        assert!(
+            engine.memtable_row_count() > 0,
+            "precondition: memtable must be non-empty before drop"
+        );
+
+        // Drop WITHOUT close() — the durability-loss path.
+        drop(engine);
+
+        let warnings = drop_warn_capture::take_warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|m| m.contains("dropped") && m.contains("without close")),
+            "expected an unflushed-drop warning, captured warnings: {warnings:?}"
+        );
+    }
+
+    /// Control for issue #1693: after a graceful `close()` the memtable is empty,
+    /// so `Drop` must NOT emit the unflushed-drop warning.
+    #[tokio::test]
+    async fn test_drop_after_close_does_not_warn() {
+        drop_warn_capture::start();
+
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+        let mut engine = WriteEngine::new(config).unwrap();
+        engine
+            .write(create_test_mutation(1, "Alice", 1_000_000))
+            .unwrap();
+        engine.close().await.unwrap();
+
+        drop(engine);
+
+        let warnings = drop_warn_capture::take_warnings();
+        assert!(
+            !warnings
+                .iter()
+                .any(|m| m.contains("dropped") && m.contains("without close")),
+            "close() flushed the memtable; Drop must not warn, captured: {warnings:?}"
+        );
+    }
 }
