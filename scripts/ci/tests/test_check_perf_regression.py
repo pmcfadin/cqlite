@@ -48,6 +48,13 @@ _CRIT_CPU_REGRESSION = os.path.join(_FIXTURES, "cpu_regression")
 _CRIT_ADVISORY_ONLY = os.path.join(_FIXTURES, "criterion_advisory_only")
 _CRIT_WAL_OFF_REGRESSION = os.path.join(_FIXTURES, "criterion_wal_off_regression")
 
+# Concurrency scaling-floor scenarios (Issue #1564). These trees carry only the
+# `pr` baseline because the scaling floor is an *intra-run* ratio
+# (degree_ratio · median(n1)/median(n4)) evaluated on the PR baseline alone.
+_CRIT_SCALING_PASS = os.path.join(_FIXTURES, "scaling_floor_pass")
+_CRIT_SCALING_FAIL = os.path.join(_FIXTURES, "scaling_floor_fail")
+_CRIT_SCALING_SKIP = os.path.join(_FIXTURES, "scaling_floor_skip")
+
 
 # ---------------------------------------------------------------------------
 # Helper
@@ -153,3 +160,50 @@ class TestMissingDataSkipped:
         assert exit_code != 0, (
             "Expected non-zero exit when no baseline data exists (should surface loudly)."
         )
+
+
+class TestScalingFloor:
+    """Concurrency scaling floor (Issue #1564).
+
+    scaling = degree_ratio · median(n1) / median(n4), evaluated on the `pr`
+    baseline. Healthy parallel scans measure ≈3.0; a re-serialized read path
+    (shared Mutex) collapses median(n4)→≈4·median(n1) so scaling→≈1.0, below the
+    1.8 floor in perf-gate.json.
+    """
+
+    def test_healthy_scaling_passes(self, capsys):
+        """scaling ≈3.0 (buffered) / ≈3.2 (mmap) is above the floor → exit 0."""
+        exit_code = _run(_CRIT_SCALING_PASS)
+        assert exit_code == 0, (
+            "Expected zero exit when concurrent_scan scaling is healthy (≈3.0), "
+            f"but got exit code {exit_code}."
+        )
+
+    def test_serialized_scaling_fails(self, capsys):
+        """median(n4) ≈ 4·median(n1) → scaling ≈1.0 < 1.8 → non-zero exit."""
+        exit_code = _run(_CRIT_SCALING_FAIL)
+        assert exit_code != 0, (
+            "Expected non-zero exit when concurrent_scan n4 median is ~4x the n1 "
+            "median (re-serialized scan path, scaling ≈1.0), but got exit code 0."
+        )
+
+    def test_serialized_scaling_output_names_bench(self, capsys):
+        """The failure output must name the floored scaling entry."""
+        _run(_CRIT_SCALING_FAIL)
+        captured = capsys.readouterr()
+        assert "concurrent_scan/buffered/n4" in captured.out
+
+    def test_missing_n4_skips_without_failing(self, capsys):
+        """A scaling entry with a missing n4 median is SKIP, not a failure.
+
+        The buffered n4 median is absent here (buffered floor → SKIP) while the
+        mmap floor is present and healthy, so the gate still exits 0.
+        """
+        exit_code = _run(_CRIT_SCALING_SKIP)
+        assert exit_code == 0, (
+            "Expected zero exit when a scaling entry's n4 data is missing (SKIP), "
+            f"but got exit code {exit_code}."
+        )
+        captured = capsys.readouterr()
+        assert "concurrent_scan/buffered/n4" in captured.out
+        assert "SKIP" in captured.out

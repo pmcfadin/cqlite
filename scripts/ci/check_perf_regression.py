@@ -131,9 +131,72 @@ def main(argv):
 
     print()
 
-    if compared == 0:
-        # No bench could be compared (e.g. baselines never produced) — surface
-        # loudly rather than passing silently.
+    # -----------------------------------------------------------------------
+    # Concurrency scaling floors (Issue #1564)
+    #
+    # A machine-independent intra-run invariant, evaluated on the `new` (PR)
+    # baseline alone (both medians come from the same run on the same runner, so
+    # the machine's absolute speed cancels):
+    #
+    #     scaling = degree_ratio * median(baseline_id) / median(id)
+    #
+    # Healthy parallel scans measure ≈degree_ratio; a re-serialized read path
+    # (e.g. a reintroduced shared Mutex) collapses median(id)→≈degree_ratio*
+    # median(baseline_id), driving scaling→≈1.0. A `scaling` below `min_scaling`
+    # fails the gate. Legacy configs without `scaling_floors` are unaffected.
+    # -----------------------------------------------------------------------
+    scaling_floors = cfg.get("scaling_floors", [])
+    scaling_evaluated = 0
+    if scaling_floors:
+        print(
+            f"Concurrency scaling floors (evaluated on '{new_baseline}' baseline):\n"
+            f"  scaling = degree_ratio * median(baseline) / median(scaled); "
+            f"fails below floor.\n"
+        )
+        sh = (
+            f"{'scaling entry':<{col_w}} {'baseline (ns)':>16} {'scaled (ns)':>16} "
+            f"{'scaling':>9}  {'floor':>7}  status"
+        )
+        print(sh)
+        print("-" * len(sh))
+
+    for entry in scaling_floors:
+        bench_id = entry.get("id", "")
+        baseline_id = entry.get("baseline_id", "")
+        m_base = _median_ns(criterion_dir, baseline_id, new_baseline)
+        m_scaled = _median_ns(criterion_dir, bench_id, new_baseline)
+        min_scaling = float(entry.get("min_scaling", 0.0))
+
+        if m_base is None or m_scaled is None:
+            missing = []
+            if m_base is None:
+                missing.append(baseline_id)
+            if m_scaled is None:
+                missing.append(bench_id)
+            print(
+                f"{bench_id:<{col_w}} {'-':>16} {'-':>16} {'-':>9}  "
+                f"{min_scaling:>7g}  SKIP (no data in '{new_baseline}': {', '.join(missing)})"
+            )
+            continue
+
+        scaling_evaluated += 1
+        scaling = float(entry.get("degree_ratio", 1)) * m_base / m_scaled
+        if scaling < min_scaling:
+            status = f"REGRESSION (scaling < {min_scaling:g})"
+            failures.append((bench_id, None))
+        else:
+            status = "ok"
+        print(
+            f"{bench_id:<{col_w}} {m_base:>16.0f} {m_scaled:>16.0f} "
+            f"{scaling:>9.2f}  {min_scaling:>7g}  {status}"
+        )
+
+    if scaling_floors:
+        print()
+
+    if compared == 0 and scaling_evaluated == 0:
+        # Nothing could be compared or evaluated (e.g. baselines never produced)
+        # — surface loudly rather than passing silently.
         print("❌ No tracked benches could be compared (no baseline data found).")
         return 1
 
@@ -146,9 +209,18 @@ def main(argv):
     if failures:
         print(f"❌ {len(failures)} bench(es) regressed past their threshold:")
         for bench, ratio in failures:
-            bc_entry = next((b for b in bench_configs if b["id"] == bench), {})
-            tpct = bc_entry.get("threshold_pct", default_threshold_pct)
-            print(f"   - {bench}: {ratio * 100:+.1f}%  (threshold: {tpct:g}%)")
+            if ratio is None:
+                # Scaling-floor failure (ratio is not a pr-vs-main delta).
+                sf_entry = next(
+                    (s for s in scaling_floors if s.get("id") == bench), {}
+                )
+                floor = sf_entry.get("min_scaling")
+                floor_txt = f"scaling floor: {float(floor):g}" if floor is not None else "scaling floor"
+                print(f"   - {bench}: below scaling floor  ({floor_txt})")
+            else:
+                bc_entry = next((b for b in bench_configs if b["id"] == bench), {})
+                tpct = bc_entry.get("threshold_pct", default_threshold_pct)
+                print(f"   - {bench}: {ratio * 100:+.1f}%  (threshold: {tpct:g}%)")
         print(
             "\nIf this slowdown is expected/intended, justify it in the PR. To change "
             "the threshold or tracked set, edit cqlite-core/benches/perf-gate.json."

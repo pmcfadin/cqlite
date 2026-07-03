@@ -94,6 +94,8 @@ env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
 | `read` | added (#538), point-read reworked (#1562) | Read suite (needs `--features cli-helpers`): `get_partition_big`, `get_partition_bti`, `clustering_slice`, `full_scan`, `type_heavy` over the fixtures via the public query API. `get_partition_*` are **real** partition-targeted point reads (`WHERE id = <unquoted-uuid>`, #949/#956), asserted at setup to report a targeted `AccessPath` (not the old `SELECT * … LIMIT 1` scan proxy). `_bti` skip-registers when the optional `test_da` corpus is absent. |
 | `write` | added (#539, #574) | Write suite (needs `--features write-support`): `ingest_wal_on`, `ingest_wal_off`, and `flush` — see below. |
 | `observability_overhead` | added (#1043) | Zero-overhead-when-disabled gate: `read_scan` (needs `cli-helpers`) and `write_merge` (needs `write-support`). The SAME bench source runs under the default build vs `--features observability` with export disabled; the two arms are compared by `scripts/ci/observability_overhead.sh` — see below. |
+| `concurrent_scan` | added (#917), **gated** (#1564) | Aggregate throughput of N ∈ {1,2,4,8} concurrent `get_all_entries()` scans against one shared `Arc<SSTableReader>`, for the buffered and mmap backends (needs `--features cli-helpers`). Gated via a **concurrency scaling floor** (not absolute time) — see below. |
+| `read_while_write` | added (#1143), **gated** (#1564) | Reader-side scan latency with ~6 full-scan readers running concurrently with ~2 sustained-ingest writers (needs `--features cli-helpers,write-support`). Gated on the Criterion **median** (strict, 25% threshold); the p99 tail is printed to stderr for local diagnosis and owned by the A2 tail-latency harness (#1563). |
 
 ### `observability_overhead` two-build comparison (Issue #1043)
 
@@ -168,6 +170,48 @@ To mark a bench advisory, add its ID to the `advisory_benches` list in
 `perf-gate.json`. The per-bench `threshold_pct` for advisory benches still
 controls what is highlighted in the output (the "elevated delta" warning level);
 it never triggers a failure.
+
+### Concurrency scaling floor (Issue #1564)
+
+`concurrent_scan` is gated by a **machine-independent scaling floor**, not an
+absolute time, because its absolute curve is runner-noisy but its *intra-run
+ratio* is not. The gate policy carries this in a `scaling_floors` array in
+`perf-gate.json` (evaluated by `check_perf_regression.py` after the median loop):
+
+```jsonc
+"scaling_floors": [
+  { "id": "concurrent_scan/buffered/n4", "baseline_id": "concurrent_scan/buffered/n1",
+    "degree_ratio": 4, "min_scaling": 1.8 },
+  { "id": "concurrent_scan/mmap/n4",     "baseline_id": "concurrent_scan/mmap/n1",
+    "degree_ratio": 4, "min_scaling": 1.8 }
+]
+```
+
+Each entry checks, **on the PR (`pr`) baseline alone** (no `main` comparison):
+
+```
+scaling = degree_ratio · median(n1) / median(n4)
+```
+
+Both medians come from the same run on the same runner, so the machine's absolute
+speed cancels — this is exactly the property absolute-time gating lacks.
+
+- **Healthy parallel scans:** `median(n4) ≈ median(n1)` → `scaling ≈ 4`
+  (measured ≈ **2.98** buffered, ≈ **3.19** mmap).
+- **Re-serialized read path** (e.g. a reintroduced shared `Mutex`, exactly what
+  #815 removed): `median(n4) ≈ 4·median(n1)` → `scaling ≈ 1.0`.
+
+The **floor is `1.8`**: below observed healthy (≈2.98/3.19) with ~40% headroom for
+CI-runner variance (fewer cores, shared scheduler; ubuntu-latest is ~4 vCPU),
+while still failing decisively against the ≈1.0 serialization signature. `n2`/`n8`
+are still measured for the local scaling curve but are not floored. A scaling
+entry whose `n1` or `n4` median is absent is reported `SKIP` and never fails.
+
+`read_while_write` is gated as a standard **strict median** entry
+(`read_while_write/readers6_writers2`, 25% threshold) — the reader-side aggregate
+latency under write load, which is machine-readable and stable (tracks p50 ≈ 5 ms).
+Its p99 tail is not gated here (it is stderr-only and runner-noisy); the tail is
+owned by the A2 tail-latency harness (#1563).
 
 ### Path-ignore behavior (Issue #572)
 

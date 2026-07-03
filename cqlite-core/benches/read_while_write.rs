@@ -23,17 +23,20 @@
 //! bandwidth / scheduler — exactly the contention surface #1143 is about — and
 //! never on the same files.
 //!
-//! # Not a CI gate (by design)
+//! # CI gate: strict median (Issue #1564)
 //!
 //! Tail (p99) statistics over a fixed sample are runner-noisy: p99 is dominated by
 //! the worst few samples, which on a shared CI runner are scheduler/allocator
-//! outliers unrelated to the code under test. So, exactly like `concurrent_scan`,
-//! this bench is **advisory** — it is deliberately ABSENT from
-//! `cqlite-core/benches/perf-gate.json`, so it runs under `./scripts/profile.sh`
-//! and as a local regression guard but never fails the perf-regression CI. The
-//! only hard assertions here are *correctness* floors (every scan returns the
-//! same non-zero row count; writers actually ingested), which catch a broken scan
-//! or a wedged writer far more reliably than a timing threshold would.
+//! outliers unrelated to the code under test — so the p99 is NOT gated here (it is
+//! still printed to stderr for local diagnosis, and the reader-side tail is owned
+//! by the A2 tail-latency harness, #1563). What IS gated is the machine-readable
+//! Criterion **median** for `read_while_write/readers6_writers2` — the
+//! per-iteration aggregate reader latency under write load, which is stable
+//! (tracks p50 ≈ 5 ms). It is a **strict** entry in
+//! `cqlite-core/benches/perf-gate.json` with a wide 25% threshold (contention
+//! bench). The *correctness* floors (every scan returns the same non-zero row
+//! count; writers actually ingested) still guard against a broken scan or a
+//! wedged writer.
 //!
 //! Gated on `cli-helpers` + `write-support` (the read fixture loader needs the
 //! former, the `WriteEngine` the latter). Under default features the bench
@@ -130,7 +133,16 @@ fn bench_read_while_write(c: &mut Criterion) {
                                 fixtures::open_write_engine_wal_off(tmp.path(), usize::MAX);
                             let mut rng = fixtures::seeded_rng();
                             let mut written = 0u64;
-                            while !stop.load(Ordering::Relaxed) {
+                            // Do-while: ingest at least once before honoring
+                            // `stop`, so a writer scheduled only after the
+                            // readers finished (and set stop=true) still ingests
+                            // once. This guarantees total_written >= WRITERS,
+                            // removing the zero-ingest scheduling race that
+                            // panicked the correctness floor below. Measurement
+                            // semantics are unchanged: in the common case the
+                            // writer still sustain-ingests for the whole reader
+                            // window.
+                            loop {
                                 let id = uuid::Uuid::from_u128(rng.gen());
                                 let age: i32 = rng.gen_range(0..100);
                                 let stmt = format!(
@@ -140,6 +152,9 @@ fn bench_read_while_write(c: &mut Criterion) {
                                 );
                                 engine.execute(&stmt).expect("read_while_write ingest");
                                 written += 1;
+                                if stop.load(Ordering::Relaxed) {
+                                    break;
+                                }
                             }
                             written
                         }));

@@ -16,17 +16,20 @@
 //! scans. Reading the rows/sec criterion prints for `n1` vs `n2/n4/n8` gives the
 //! scaling curve directly (n4 rows/sec ÷ n1 rows/sec = 4-way scaling factor).
 //!
-//! # Not a CI gate (by design)
+//! # CI gate: concurrency scaling floor (Issue #1564)
 //!
-//! Concurrent-scan scaling is sublinear and IO/scheduler-bound, so the absolute
-//! curve is machine-dependent and noisy on shared runners. Per the issue and the
-//! project's flaky-perf-gate history, this bench is **documentation + a local
-//! regression guard**, not a hard timing assertion: it is intentionally absent
-//! from `cqlite-core/benches/perf-gate.json`, so it runs under
-//! `./scripts/profile.sh` but never fails the perf-regression CI. The only
-//! hard assertion here is a *correctness* floor — every scan must return the same
-//! non-zero row count — which catches an accidental re-serialization or a broken
-//! scan far more reliably than a timing threshold would.
+//! The *absolute* scan curve is IO/scheduler-bound and runner-noisy, so this
+//! bench is NOT gated on absolute time. Instead the perf gate enforces a
+//! **machine-independent scaling floor** in `cqlite-core/benches/perf-gate.json`
+//! (`scaling_floors`): for each backend it checks the *intra-run* ratio
+//! `scaling = degree_ratio · median(n1) / median(n4)` on the PR baseline alone
+//! (both medians come from the same run, so machine speed cancels). Healthy
+//! parallel scans measure ≈2.98 (buffered) / ≈3.19 (mmap); a re-serialized read
+//! path (e.g. a reintroduced shared `Mutex`, exactly what #815 removed) collapses
+//! `median(n4)→≈4·median(n1)` so scaling→≈1.0 and the gate reds against the
+//! `1.8` floor. `n2`/`n8` are still measured for the local scaling curve but are
+//! not floored. The correctness floor below (every scan returns the same non-zero
+//! row count) still guards against a broken scan.
 //!
 //! Gated on `cli-helpers` only to share the profiling-harness feature set used by
 //! the other read benches (`scripts/profile.sh`); the scan path itself is core.

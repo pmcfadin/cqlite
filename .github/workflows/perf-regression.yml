@@ -109,7 +109,8 @@ jobs:
             read -r -a BENCH_ARGV <<< "$BENCH_ARGS"
           fi
           cargo bench -p cqlite-core --features "$BENCH_FEATURES" \
-            --bench read --bench write -- --save-baseline pr "${BENCH_ARGV[@]}"
+            --bench read --bench write --bench concurrent_scan --bench read_while_write \
+            -- --save-baseline pr "${BENCH_ARGV[@]}"
 
       - name: Benchmark main → baseline 'base'
         run: |
@@ -121,7 +122,8 @@ jobs:
           git checkout --force --detach origin/main
           git submodule update --init --recursive || true
           cargo bench -p cqlite-core --features "$BENCH_FEATURES" \
-            --bench read --bench write -- --save-baseline base "${BENCH_ARGV[@]}"
+            --bench read --bench write --bench concurrent_scan --bench read_while_write \
+            -- --save-baseline base "${BENCH_ARGV[@]}"
 
       - name: Restore PR ref (for the gate script + policy)
         run: git checkout --force --detach ${{ steps.refs.outputs.pr_ref }}
