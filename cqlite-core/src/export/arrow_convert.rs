@@ -1375,12 +1375,17 @@ fn build_int16_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Ar
 }
 
 fn build_int32_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
+    // The same-width `Date`→i32 acceptance is only valid on the OPAQUE path
+    // (`cql_type = None`): an authoritative `date` column routes to
+    // `build_date32_array`, so an authoritative `int` column carrying a `Date`
+    // is a genuine mismatch that must fail closed.
+    let allow_compat = col.cql_type.is_none();
     let values: Vec<Option<i32>> = rows
         .iter()
         .map(|row| match row.values.get(col.name.as_str()) {
             None => Ok(None),
             Some(Value::Integer(i)) => Ok(Some(*i)),
-            Some(Value::Date(d)) => Ok(Some(*d)), // Date is stored as i32 days
+            Some(Value::Date(d)) if allow_compat => Ok(Some(*d)), // Date is stored as i32 days
             Some(Value::Null) => Ok(None),
             Some(other) => Err(ArrowConvertError::InvalidValue(format!(
                 "column '{}': expected Int value, got {:?}",
@@ -1392,13 +1397,21 @@ fn build_int32_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Ar
 }
 
 fn build_int64_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
+    // `build_int64_array` backs authoritative `bigint` and `counter` columns
+    // plus the opaque (`cql_type = None`) path. `Counter` is legitimate for a
+    // `counter` column; the same-width `Time`→i64 acceptance and cross-accepting
+    // `Counter` for a `bigint` column are only valid on the opaque path (an
+    // authoritative `time` column routes to `build_time64_ns_array`).
+    let effective = col.cql_type.as_ref().map(unwrap_frozen_type);
+    let allow_counter = matches!(effective, None | Some(CqlType::Counter));
+    let allow_compat = effective.is_none();
     let values: Vec<Option<i64>> = rows
         .iter()
         .map(|row| match row.values.get(col.name.as_str()) {
             None => Ok(None),
             Some(Value::BigInt(i)) => Ok(Some(*i)),
-            Some(Value::Counter(c)) => Ok(Some(*c)),
-            Some(Value::Time(t)) => Ok(Some(*t)), // Time is stored as i64 nanos
+            Some(Value::Counter(c)) if allow_counter => Ok(Some(*c)),
+            Some(Value::Time(t)) if allow_compat => Ok(Some(*t)), // Time is stored as i64 nanos
             Some(Value::Null) => Ok(None),
             Some(other) => Err(ArrowConvertError::InvalidValue(format!(
                 "column '{}': expected BigInt value, got {:?}",
@@ -2108,5 +2121,63 @@ mod tests {
             .expect("StringArray");
         assert_eq!(arr.value(0), "hi");
         assert_eq!(arr.null_count(), 2);
+    }
+
+    /// (10a) Authoritative `int` column: a `Value::Date` (same-width i32) must
+    /// FAIL CLOSED — the `date`→i32 acceptance is only for the opaque path.
+    #[test]
+    fn authoritative_int_column_rejects_date() {
+        let columns = vec![col("n", DataType::Integer, Some(CqlType::Int))];
+        let rows = vec![row_one("n", Value::Date(19_000))];
+        assert!(is_invalid_value(rows_to_record_batch(&columns, &rows)));
+    }
+
+    /// (10b) Opaque (`cql_type = None`) int column: the `Date`→i32 same-width
+    /// acceptance is preserved (no authoritative type to validate against).
+    #[test]
+    fn opaque_int_column_accepts_date() {
+        let columns = vec![col("n", DataType::Integer, None)];
+        let rows = vec![row_one("n", Value::Date(19_000))];
+        let batch = rows_to_record_batch(&columns, &rows).expect("opaque int accepts Date");
+        let arr = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .expect("Int32Array");
+        assert_eq!(arr.value(0), 19_000);
+    }
+
+    /// (10c) Authoritative `bigint` / `counter` columns: a `Value::Time`
+    /// (same-width i64) must FAIL CLOSED; `Value::Counter` in a `bigint` column
+    /// must also FAIL CLOSED.
+    #[test]
+    fn authoritative_bigint_counter_reject_mismatch() {
+        let bigint_time = vec![col("b", DataType::BigInt, Some(CqlType::BigInt))];
+        assert!(is_invalid_value(rows_to_record_batch(
+            &bigint_time,
+            &[row_one("b", Value::Time(123))]
+        )));
+
+        let counter_time = vec![col("c", DataType::BigInt, Some(CqlType::Counter))];
+        assert!(is_invalid_value(rows_to_record_batch(
+            &counter_time,
+            &[row_one("c", Value::Time(123))]
+        )));
+
+        let bigint_counter = vec![col("b", DataType::BigInt, Some(CqlType::BigInt))];
+        assert!(is_invalid_value(rows_to_record_batch(
+            &bigint_counter,
+            &[row_one("b", Value::Counter(7))]
+        )));
+    }
+
+    /// (10d) Authoritative `counter` column happy path: `Value::Counter` builds.
+    #[test]
+    fn authoritative_counter_column_accepts_counter() {
+        let columns = vec![col("c", DataType::BigInt, Some(CqlType::Counter))];
+        let rows = vec![row_one("c", Value::Counter(42))];
+        let batch = rows_to_record_batch(&columns, &rows).expect("counter accepts Counter");
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(batch.column(0).null_count(), 0);
     }
 }
