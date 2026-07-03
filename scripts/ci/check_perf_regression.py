@@ -131,9 +131,106 @@ def main(argv):
 
     print()
 
-    if compared == 0:
-        # No bench could be compared (e.g. baselines never produced) — surface
-        # loudly rather than passing silently.
+    # -----------------------------------------------------------------------
+    # Concurrency scaling floors (Issue #1564)
+    #
+    # A machine-independent intra-run invariant, evaluated on the `new` (PR)
+    # baseline alone (both medians come from the same run on the same runner, so
+    # the machine's absolute speed cancels):
+    #
+    #     scaling = degree_ratio * median(baseline_id) / median(id)
+    #
+    # Healthy parallel scans measure ≈degree_ratio; a re-serialized read path
+    # (e.g. a reintroduced shared Mutex) collapses median(id)→≈degree_ratio*
+    # median(baseline_id), driving scaling→≈1.0. A `scaling` below `min_scaling`
+    # fails the gate. Legacy configs without `scaling_floors` are unaffected.
+    #
+    # Missing data for a configured floor is a FAILURE, not a SKIP (issue #1564
+    # roborev): the whole point of a scaling gate is to catch regressions, so a
+    # typo'd id, an omitted `--bench`, or a bench that produced no data must NOT
+    # silently disable the gate. Unlike the pr-vs-main median benches (which
+    # legitimately SKIP a bench absent from `main`), a scaling floor is intra-run,
+    # so its data is always present on any run that benches the target. An entry
+    # may opt into skip-on-absent with `"optional": true` (for a genuinely
+    # optional fixture, mirroring the read/get_partition_bti convention).
+    # -----------------------------------------------------------------------
+    scaling_floors = cfg.get("scaling_floors", [])
+    scaling_evaluated = 0
+    # Reason text for each scaling-floor failure, keyed by bench id (the failures
+    # list carries only (id, None) for scaling entries).
+    scaling_fail_reason = {}
+    if scaling_floors:
+        print(
+            f"Concurrency scaling floors (evaluated on '{new_baseline}' baseline):\n"
+            f"  scaling = degree_ratio * median(baseline) / median(scaled); "
+            f"fails below floor.\n"
+        )
+        sh = (
+            f"{'scaling entry':<{col_w}} {'baseline (ns)':>16} {'scaled (ns)':>16} "
+            f"{'scaling':>9}  {'floor':>7}  status"
+        )
+        print(sh)
+        print("-" * len(sh))
+
+    for entry in scaling_floors:
+        bench_id = entry.get("id", "")
+        baseline_id = entry.get("baseline_id", "")
+        m_base = _median_ns(criterion_dir, baseline_id, new_baseline)
+        m_scaled = _median_ns(criterion_dir, bench_id, new_baseline)
+        min_scaling = float(entry.get("min_scaling", 0.0))
+
+        if m_base is None or m_scaled is None:
+            missing = []
+            if m_base is None:
+                missing.append(baseline_id)
+            if m_scaled is None:
+                missing.append(bench_id)
+            missing_txt = ", ".join(missing)
+            if entry.get("optional", False):
+                # Genuinely optional fixture — skip without failing.
+                print(
+                    f"{bench_id:<{col_w}} {'-':>16} {'-':>16} {'-':>9}  "
+                    f"{min_scaling:>7g}  SKIP (optional, no data in '{new_baseline}': {missing_txt})"
+                )
+            else:
+                # Required floor with no data — fail loudly rather than silently
+                # disabling the gate.
+                print(
+                    f"{bench_id:<{col_w}} {'-':>16} {'-':>16} {'-':>9}  "
+                    f"{min_scaling:>7g}  MISSING DATA (required; '{new_baseline}': {missing_txt})"
+                )
+                failures.append((bench_id, None))
+                scaling_fail_reason[bench_id] = (
+                    f"required scaling data missing in '{new_baseline}': {missing_txt}"
+                )
+            continue
+
+        scaling_evaluated += 1
+        scaling = float(entry.get("degree_ratio", 1)) * m_base / m_scaled
+        if scaling < min_scaling:
+            status = f"REGRESSION (scaling < {min_scaling:g})"
+            failures.append((bench_id, None))
+            scaling_fail_reason[bench_id] = f"below scaling floor: {min_scaling:g}"
+        else:
+            status = "ok"
+        print(
+            f"{bench_id:<{col_w}} {m_base:>16.0f} {m_scaled:>16.0f} "
+            f"{scaling:>9.2f}  {min_scaling:>7g}  {status}"
+        )
+
+    if scaling_floors:
+        print()
+
+    # Median-bench protection is INDEPENDENT of the scaling floors (issue #1564
+    # roborev): if median benches are configured but none could be compared, that
+    # is missing baseline data and must fail — a passing scaling floor must not
+    # mask it.
+    if bench_configs and compared == 0:
+        print("❌ No median benches could be compared (baseline data missing).")
+        return 1
+    # Nothing configured at all, or a scaling-only config whose floors all skipped
+    # — surface loudly rather than passing silently.
+    if not bench_configs and scaling_evaluated == 0:
         print("❌ No tracked benches could be compared (no baseline data found).")
         return 1
 
@@ -146,9 +243,15 @@ def main(argv):
     if failures:
         print(f"❌ {len(failures)} bench(es) regressed past their threshold:")
         for bench, ratio in failures:
-            bc_entry = next((b for b in bench_configs if b["id"] == bench), {})
-            tpct = bc_entry.get("threshold_pct", default_threshold_pct)
-            print(f"   - {bench}: {ratio * 100:+.1f}%  (threshold: {tpct:g}%)")
+            if ratio is None:
+                # Scaling-floor failure (ratio is not a pr-vs-main delta): either
+                # below the floor or required data missing.
+                reason = scaling_fail_reason.get(bench, "scaling floor")
+                print(f"   - {bench}: {reason}")
+            else:
+                bc_entry = next((b for b in bench_configs if b["id"] == bench), {})
+                tpct = bc_entry.get("threshold_pct", default_threshold_pct)
+                print(f"   - {bench}: {ratio * 100:+.1f}%  (threshold: {tpct:g}%)")
         print(
             "\nIf this slowdown is expected/intended, justify it in the PR. To change "
             "the threshold or tracked set, edit cqlite-core/benches/perf-gate.json."

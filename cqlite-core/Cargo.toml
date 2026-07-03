@@ -188,10 +188,10 @@ harness = false
 name = "observability_overhead"
 harness = false
 
-# Read-while-write tail-latency guard (issue #1143). ADVISORY: deliberately
-# absent from benches/perf-gate.json — p99 tail statistics are runner-noisy, so
-# this is a local regression guard run under scripts/profile.sh, never a CI gate
-# (mirrors `concurrent_scan`).
+# Read-while-write reader-latency-under-write-load guard (issue #1143). GATED
+# (issue #1564): a strict median entry in benches/perf-gate.json
+# (read_while_write/readers6_writers2, 25% threshold). The p99 tail stays
+# stderr-only / runner-noisy and is owned by the A2 tail-latency harness (#1563).
 [[bench]]
 name = "read_while_write"
 harness = false

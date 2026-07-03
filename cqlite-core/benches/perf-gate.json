@@ -37,6 +37,27 @@
     {
       "id": "write/flush",
       "threshold_pct": 10
+    },
+    {
+      "id": "read_while_write/readers6_writers2",
+      "threshold_pct": 25,
+      "_note": "reader-side median under concurrent write load; wide threshold (contention bench); p99 tail owned by A2 tail-latency harness #1563"
+    }
+  ],
+  "scaling_floors": [
+    {
+      "id": "concurrent_scan/buffered/n4",
+      "baseline_id": "concurrent_scan/buffered/n1",
+      "degree_ratio": 4,
+      "min_scaling": 1.8,
+      "_note": "throughput(n4)/throughput(n1)=degree_ratio*median(n1)/median(n4); healthy≈2.98, serialized≈1.0 → floor 1.8 leaves CI-runner headroom (issue #1564)"
+    },
+    {
+      "id": "concurrent_scan/mmap/n4",
+      "baseline_id": "concurrent_scan/mmap/n1",
+      "degree_ratio": 4,
+      "min_scaling": 1.8,
+      "_note": "throughput(n4)/throughput(n1)=degree_ratio*median(n1)/median(n4); healthy≈3.19, serialized≈1.0 → floor 1.8 leaves CI-runner headroom (issue #1564)"
     }
   ]
 }
