@@ -7,7 +7,34 @@
 
 use cqlite_core::Database;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Test-only counter of how many times the shared `System` handle has been
+/// constructed. sysinfo's intended pattern is construct-once + narrow refresh
+/// per tick; this lets the TDD test assert exactly one construction across many
+/// status-refresh ticks (Issue #1719).
+#[cfg(test)]
+static SYSTEM_CONSTRUCTIONS: AtomicUsize = AtomicUsize::new(0);
+
+/// Shared, lazily-constructed `sysinfo::System` handle.
+///
+/// Constructed exactly once (on first status refresh) and reused for every
+/// subsequent 5-second tick. Each refresh performs the narrowest possible
+/// refresh for the current process only, keeping the reported memory value
+/// fresh without re-enumerating system state each tick (Issue #1719). A
+/// `Mutex` is sufficient at the 5s status cadence.
+fn shared_system() -> &'static Mutex<sysinfo::System> {
+    static SYSTEM: OnceLock<Mutex<sysinfo::System>> = OnceLock::new();
+    SYSTEM.get_or_init(|| {
+        #[cfg(test)]
+        SYSTEM_CONSTRUCTIONS.fetch_add(1, Ordering::Relaxed);
+        Mutex::new(sysinfo::System::new())
+    })
+}
 
 /// Default metrics refresh interval (5 seconds)
 pub const METRICS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
@@ -83,14 +110,19 @@ impl StatusMetrics {
     /// Uses sysinfo crate for cross-platform memory reading.
     /// Returns RSS (Resident Set Size) in bytes, or 0 if unavailable.
     fn get_process_memory() -> u64 {
-        use sysinfo::{ProcessRefreshKind, System};
-
-        // Create system instance and refresh current process
-        let mut system = System::new();
+        use sysinfo::ProcessRefreshKind;
 
         // Get current process ID
         let pid = match sysinfo::get_current_pid() {
             Ok(pid) => pid,
+            Err(_) => return 0,
+        };
+
+        // Reuse the shared System handle (constructed once) and refresh only
+        // this process's memory — the reading stays fresh per tick without
+        // re-enumerating all system state (Issue #1719).
+        let mut system = match shared_system().lock() {
+            Ok(guard) => guard,
             Err(_) => return 0,
         };
 
@@ -234,6 +266,54 @@ mod tests {
     fn test_check_health_nonexistent_path() {
         let health = StatusMetrics::check_health(Some(Path::new("/nonexistent/path/12345")));
         assert_eq!(health, HealthIndicator::Error);
+    }
+
+    /// Issue #1719 (red on main): the shared `System` handle must be
+    /// constructed exactly once across many status-refresh ticks, not once
+    /// per tick. On main `get_process_memory` did `System::new()` every call,
+    /// so this global total would be >= the number of calls and the assertion
+    /// would fail.
+    #[test]
+    fn test_system_constructed_once_across_ticks() {
+        // Simulate many 5s status-refresh ticks.
+        for _ in 0..8 {
+            let _ = StatusMetrics::get_process_memory();
+        }
+        // OnceLock guarantees the handle is initialized exactly once for the
+        // whole process, regardless of how many ticks (or other tests) call in.
+        assert_eq!(
+            SYSTEM_CONSTRUCTIONS.load(Ordering::Relaxed),
+            1,
+            "System must be constructed exactly once across refresh ticks, not per tick"
+        );
+    }
+
+    /// The cached handle must still report a fresh reading each tick: after
+    /// allocating and touching a large buffer, the reported RSS must grow.
+    #[test]
+    fn test_memory_reading_stays_fresh_across_ticks() {
+        let before = StatusMetrics::get_process_memory();
+        assert!(before > 0, "process memory reading should be available");
+
+        // Allocate ~100 MiB and touch every page so it becomes resident.
+        let chunk = 100 * 1024 * 1024;
+        let mut buf: Vec<u8> = vec![0u8; chunk];
+        let page = 4096;
+        let mut i = 0;
+        while i < buf.len() {
+            buf[i] = (i % 251) as u8;
+            i += page;
+        }
+        // Read on the next tick using the same cached handle.
+        let after = StatusMetrics::get_process_memory();
+
+        // Prevent the allocation from being optimized away before the reading.
+        std::hint::black_box(&buf);
+
+        assert!(
+            after > before,
+            "reading must stay fresh per tick: before={before} after={after}"
+        );
     }
 
     #[test]
