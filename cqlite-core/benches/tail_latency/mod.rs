@@ -435,8 +435,11 @@ pub fn run(fx: crate::fixtures::ReadFixture) -> Option<HarnessReport> {
     let wait_start = std::time::Instant::now();
     while !scan_started.load(Ordering::Relaxed) {
         if wait_start.elapsed() > std::time::Duration::from_secs(30) {
+            // Fail loud and PROMPTLY. Do NOT join here: if the scan is wedged
+            // inside `db.execute` it never observes `stop`, so `join()` would block
+            // indefinitely and defeat the bound (roborev). Signal stop best-effort
+            // and panic — the detached scan thread is reaped on process exit.
             stop.store(true, Ordering::Relaxed);
-            let _ = scan_handle.join();
             panic!(
                 "tail_latency: background scan did not complete a full pass within 30s — cannot \
                  measure the point-read stream under live contention (mixed load would be invalid)"
