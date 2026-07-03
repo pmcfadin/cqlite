@@ -57,23 +57,29 @@ OpenSpec change `<slug>` (design-driven only).
    ```
 3. **Test data.** Worktrees lack the gitignored `Data.db` binaries — run the gate and tests with
    `CQLITE_DATASETS_ROOT` pointed at the MAIN repo's `test-data/datasets` (or `fetch-datasets.sh`).
-4. **Implement (TDD) — via subagents, NOT inline; iterate on the LITE gate (issue #1821).** You
-   orchestrate; you do not read source, write code, or run the gate in your own context (that's what fills
-   it up). Spawn `sstable-developer` (explicit `model: opus` — pinned models are inaccessible) to implement
-   test-first in the worktree. On EACH fix round the implementer runs `scripts/agent-gate.sh --lite` (fmt +
-   file-size + workspace clippy + blast-radius-scoped tests, ~1-5 min — NOT the gate of record; it emits a
-   distinct `==== AGENT-GATE LITE SUMMARY ====` block that must never be pasted as the full SUMMARY),
-   returning only a short summary + that lite block. For parallelizable subtasks spawn several; sequence
-   dependents. Use `test-validator` for gate/failure triage and `Explore` for code search — keep raw file
-   contents out of your context.
-   - **Conditional review-first**: before the FIRST full gate, do an internal `rust-reviewer` pass when the
-     diff changes a `pub` item, touches >1 call site of a changed symbol, or adds a new surface — this
-     catches findings before a 12-25 min full-gate cycle is spent. Skip it for mechanical/localized diffs.
-5. **Gate (correctness) — the FULL gate ONCE before merge.** After the lite loop converges (and the
-   conditional review-first pass, if applicable), run the FULL `scripts/agent-gate.sh` in the worktree
-   EXACTLY ONCE; it must be PASS. **`--lite` NEVER replaces this** — the full `==== AGENT-GATE SUMMARY ====`
-   block is the only run that counts. Loop shape: `implement → lite (each round) → conditional review-first
-   → lite → FULL gate ONCE → roborev → CI → merge`. Paste the
+4. **Implement (TDD) — via subagents, NOT inline; tiered-gate loop (issue #1821).** You orchestrate; you
+   do not read source, write code, or run the gate in your own context (that's what fills it up). Spawn
+   `sstable-developer` (explicit `model: opus` — pinned models are inaccessible) to implement test-first in
+   the worktree. For parallelizable subtasks spawn several; sequence dependents. Use `test-validator` for
+   gate/failure triage and `Explore` for code search — keep raw file contents out of your context. The
+   implementer runs the **fix-round loop below, in order**, and returns only a short summary + the LITE
+   block (NOT the full SUMMARY) each round:
+   1. Make the next test-first change.
+   2. **Run `scripts/agent-gate.sh --lite`** (fmt + file-size + FULL-workspace clippy + blast-radius-scoped
+      tests, ~1-5 min). It is the FAST ITERATION gate, NOT the gate of record; it emits a distinct
+      `==== AGENT-GATE LITE SUMMARY ====` block that must NEVER be pasted as the full SUMMARY.
+   3. If lite FAILs, fix and go to step 2. Repeat until lite is PASS and the change is complete.
+   Do NOT run the full `scripts/agent-gate.sh` during the fix-round loop — that is step 6.
+5. **Conditional internal review-first (issue #1821) — BEFORE the first full gate.** If the diff changes a
+   `pub` item, touches >1 call site of a changed symbol, or adds a new surface, run an internal
+   `rust-reviewer` pass (explicit `model: opus`) now and address its findings — this catches structural
+   findings before a 12-25 min full-gate cycle is spent. **Skip this step** for mechanical/localized diffs.
+   Re-run `scripts/agent-gate.sh --lite` after any review-driven change.
+6. **Gate (correctness) — run the FULL `scripts/agent-gate.sh` EXACTLY ONCE before merge.** After the
+   fix-round loop converges (and step 5, if applicable), run the FULL gate in the worktree; it must be
+   PASS. **`--lite` NEVER replaces this** — the full `==== AGENT-GATE SUMMARY ====` block is the ONLY run
+   that counts. Loop shape: `implement → lite (each round) → conditional review-first → lite → FULL gate
+   ONCE → roborev → CI → merge`. Paste the
    AGENT-GATE SUMMARY block. A known-flaky lane (e.g. `test_flush_throughput`, py3.9) that passes on
    re-run is not a failure — note it.
    - **Gate PASS ≠ CI green** (L2, flow-meta #1310). The local gate does NOT run every CI lane (it uses
@@ -87,13 +93,14 @@ OpenSpec change `<slug>` (design-driven only).
      (`Partitions.db`/`Rows.db`) and `Statistics.db` are not byte-reproducible across regen runs. Gate the
      **semantic verdict** (the parity test), keep the empty/missing-verdict authoring check fail-closed
      (validation playbook, L1). Per-component binding is tracked in #1294.
-6. **C — intent audit** (design-driven). Spawn `spec-auditor` (explicit model) anchored to
+7. **C — intent audit** (design-driven). Spawn `spec-auditor` (explicit model) anchored to
    `openspec/changes/<slug>/specs/**`. Verdict must be PASS — every requirement `satisfied` with a
    public-surface test as evidence. `unmet`/uncovered/unjustified-`partial` → route the fix back (loop).
-7. **Review.** roborev: `/roborev-review-branch --base origin/main` until clean (fix mechanical findings
+8. **Review.** roborev: `/roborev-review-branch --base origin/main` until clean (fix mechanical findings
    in the loop; escalate genuine decisions to the owner). Add `rust-reviewer` / `coverage-reviewer` /
-   `test-validator` as the change warrants.
-8. **Open the PR.** The claim branch is already on origin (pushed in step 2); this push sends the
+   `test-validator` as the change warrants. (If a roborev round drives a code change, re-run
+   `scripts/agent-gate.sh --lite` to iterate, then the FULL gate once more before merge.)
+9. **Open the PR.** The claim branch is already on origin (pushed in step 2); this push sends the
    implementation commits. Use a closing keyword (`Closes #<N>`) so merge auto-closes the issue:
    ```bash
    gh issue edit <N> --remove-label status:in-progress --add-label status:in-review
@@ -103,7 +110,7 @@ OpenSpec change `<slug>` (design-driven only).
    # run the flow-board detection snippet first (switches to the project-capable account), then
    # gh project item-edit ... Status=In Review when have_project=1; else the label above + loud ⚠️ warning.
    ```
-9. **Terminal state — arm merge-on-green, then STOP.** The worker's terminal state for an issue is
+10. **Terminal state — arm merge-on-green, then STOP.** The worker's terminal state for an issue is
    **PR-open + `agent-gate.sh` PASS + (design-driven) spec-auditor C PASS + roborev clean**. At that point
    you arm the merge-on-green mechanism and **end your turn** — there is no human merge click, and you do
    NOT poll the PR's own external CI. Steps:
