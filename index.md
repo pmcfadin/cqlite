@@ -69,6 +69,11 @@ Prefer a prebuilt download or need another platform? See the [installation guide
     href="/cqlite/user-docs/"
   />
   <LinkCard
+    title="Proposals and Research"
+    description="Official forward-looking proposals, design direction, and research-backed architecture notes."
+    href="/cqlite/proposals-research/"
+  />
+  <LinkCard
     title="SSTable Format Guide"
     description="22-chapter deep dive into the Cassandra 5.0 SSTable binary format."
     href="/cqlite/sstable-format/"
