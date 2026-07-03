@@ -656,7 +656,6 @@ fn decode_mutation(bytes: &[u8]) -> std::result::Result<Mutation, bincode::Error
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug)]
 pub struct WriteAheadLog {
     /// Buffered writer for sequential appends
     file: BufWriter<File>,
@@ -667,6 +666,10 @@ pub struct WriteAheadLog {
     buffer_size: usize,
     /// Current size of the WAL file (in bytes)
     current_size: u64,
+    /// Reusable scratch buffer for serializing a mutation in `append`, so the
+    /// steady-state write path does not allocate a fresh `Vec` per call. Cleared
+    /// and refilled on every `append`; never shared across threads (`&mut self`).
+    append_scratch: Vec<u8>,
     /// Byte offset of the last CRC-valid prefix when `open_existing` detected
     /// mid-stream corruption (issue #1391). The corrupt tail is intentionally
     /// left on disk so the caller can preserve it aside as forensic evidence
@@ -696,6 +699,35 @@ pub struct WriteAheadLog {
     /// exercising the poison-on-partial-failure path (issue #1392, FINDING 1).
     #[cfg(test)]
     fail_seek_after_truncate: bool,
+}
+
+// Manual `Debug` (not derived) so the reusable `append_scratch` buffer — which
+// holds the last serialized mutation's raw row bytes — is never printed under
+// `{:?}`. Leaking those bytes would expose user data and could produce huge log
+// lines; we summarize the buffer by len/capacity only. All other fields keep
+// their usual `Debug` representation.
+impl std::fmt::Debug for WriteAheadLog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut dbg = f.debug_struct("WriteAheadLog");
+        dbg.field("file", &self.file)
+            .field("path", &self.path)
+            .field("buffer_size", &self.buffer_size)
+            .field("current_size", &self.current_size)
+            .field(
+                "append_scratch",
+                &format_args!(
+                    "<{} bytes, cap {}>",
+                    self.append_scratch.len(),
+                    self.append_scratch.capacity()
+                ),
+            )
+            .field("pending_valid_prefix", &self.pending_valid_prefix)
+            .field("poisoned", &self.poisoned);
+        #[cfg(test)]
+        dbg.field("fail_sync_after_truncate", &self.fail_sync_after_truncate)
+            .field("fail_seek_after_truncate", &self.fail_seek_after_truncate);
+        dbg.finish()
+    }
 }
 
 impl WriteAheadLog {
@@ -754,6 +786,7 @@ impl WriteAheadLog {
             path,
             buffer_size,
             current_size: 0,
+            append_scratch: Vec::new(),
             pending_valid_prefix: None,
             poisoned: None,
             #[cfg(test)]
@@ -860,6 +893,7 @@ impl WriteAheadLog {
             path: path.to_path_buf(),
             buffer_size: Self::DEFAULT_BUFFER_SIZE,
             current_size,
+            append_scratch: Vec::new(),
             pending_valid_prefix,
             poisoned: None,
             #[cfg(test)]
@@ -1118,8 +1152,11 @@ impl WriteAheadLog {
             ));
         }
 
-        // Serialize mutation using bincode
-        let mutation_bytes = bincode::serialize(mutation)
+        // Serialize mutation using bincode into a reusable scratch buffer so the
+        // steady-state write path does not allocate a fresh `Vec` per call.
+        // `serialize_into` yields byte-identical output to `bincode::serialize`.
+        self.append_scratch.clear();
+        bincode::serialize_into(&mut self.append_scratch, mutation)
             .map_err(|e| Error::Storage(format!("Failed to serialize mutation: {}", e)))?;
 
         // Fail-closed size ceiling (issue #1391, roborev r3). `replay()` /
@@ -1131,18 +1168,23 @@ impl WriteAheadLog {
         // reject BEFORE writing anything. The comparison is done in `u64` so a
         // multi-GiB length cannot truncate through the `as u32` cast below into a
         // small, wrongly-accepted value.
-        if mutation_bytes.len() as u64 > MAX_ENTRY_LENGTH as u64 {
+        if self.append_scratch.len() as u64 > MAX_ENTRY_LENGTH as u64 {
+            let serialized_len = self.append_scratch.len();
+            // A single oversized (rejected) mutation must not permanently bloat the
+            // WAL instance's retained scratch capacity: release it before returning.
+            self.append_scratch.clear();
+            self.append_scratch.shrink_to_fit();
             return Err(Error::Storage(format!(
                 "WAL entry exceeds MAX_ENTRY_LENGTH (16 MiB): {} bytes",
-                mutation_bytes.len()
+                serialized_len
             )));
         }
 
-        let entry_length = mutation_bytes.len() as u32;
+        let entry_length = self.append_scratch.len() as u32;
 
         // Calculate CRC32 over the mutation bytes
         let mut hasher = Hasher::new();
-        hasher.update(&mutation_bytes);
+        hasher.update(&self.append_scratch);
         let crc32 = hasher.finalize();
 
         // Write entry: [length][crc32][mutation_bytes]
@@ -1155,7 +1197,7 @@ impl WriteAheadLog {
             .map_err(|e| Error::Storage(format!("Failed to write CRC32: {}", e)))?;
 
         self.file
-            .write_all(&mutation_bytes)
+            .write_all(&self.append_scratch)
             .map_err(|e| Error::Storage(format!("Failed to write mutation bytes: {}", e)))?;
 
         // Update size (8 bytes header + mutation bytes)

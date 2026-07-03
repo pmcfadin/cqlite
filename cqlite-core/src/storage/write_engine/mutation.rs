@@ -429,15 +429,13 @@ impl PartitionKey {
             )));
         }
 
-        let mut result = Vec::new();
-
-        // Single-component key: no length prefix
+        // Single-component key: no length prefix. Return the serialized value
+        // directly to avoid allocating (and copying into) an intermediate Vec.
         if self.columns.len() == 1 {
-            let value_bytes =
-                self.serialize_value(&self.columns[0].1, &schema.partition_keys[0])?;
-            result.extend_from_slice(&value_bytes);
-            return Ok(result);
+            return self.serialize_value(&self.columns[0].1, &schema.partition_keys[0]);
         }
+
+        let mut result = Vec::new();
 
         // Multi-component partition keys use a `0x00` end-of-component marker
         // after every component, including the last one.
