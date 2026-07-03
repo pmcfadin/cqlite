@@ -704,16 +704,24 @@ impl Database {
             .as_ref()
             .expect("require_writable() guarantees write_engine is Some");
 
-        let mut engine = engine_mutex
-            .lock()
-            .map_err(|_| PyRuntimeError::new_err("Write engine lock poisoned"))?;
-
         let query_owned = query.to_string();
         let t0 = Instant::now();
 
-        // MutexGuard is not Send so we cannot release the GIL here.
-        // execute() is a fast synchronous in-memory operation (WAL write + memtable insert).
-        let rows_affected = engine.execute(&query_owned).map_err(to_py_err)?;
+        // Release the GIL for the write (issue #1620). `execute()` now routes
+        // through `WriteEngine::execute_flushing`, which performs a REAL async
+        // SSTable flush (disk I/O) when the memtable crosses the flush threshold
+        // — so holding the GIL for its duration would block every other Python
+        // thread. The `MutexGuard` is created and dropped entirely inside the
+        // closure, so it never crosses the GIL boundary; the closure captures
+        // only `Send` values (`&Mutex<PyWriteEngine>` + `String`).
+        let rows_affected = py
+            .allow_threads(|| {
+                let mut engine = engine_mutex.lock().map_err(|_| {
+                    cqlite_core::error::Error::Storage("Write engine lock poisoned".to_string())
+                })?;
+                engine.execute(&query_owned)
+            })
+            .map_err(to_py_err)?;
 
         let elapsed_ms = t0.elapsed().as_millis() as u64;
 
@@ -779,7 +787,7 @@ impl Database {
 ///     pass
 /// ```
 #[pyfunction]
-#[pyo3(signature = (path, *, schema=None, config=None, writable=false, write_dir=None, otel_config=None, traceparent=None))]
+#[pyo3(signature = (path, *, schema=None, config=None, writable=false, write_dir=None, flush_threshold=None, otel_config=None, traceparent=None))]
 pub fn open(
     py: Python<'_>,
     path: PathBuf,
@@ -787,6 +795,7 @@ pub fn open(
     config: Option<&Bound<'_, PyAny>>,
     writable: bool,
     write_dir: Option<PathBuf>,
+    flush_threshold: Option<u64>,
     otel_config: Option<&Bound<'_, PyAny>>,
     traceparent: Option<String>,
 ) -> PyResult<Database> {
@@ -797,6 +806,27 @@ pub fn open(
     // simply yields no telemetry.
     let obs_cfg = crate::observability::config_from_py(py, otel_config)?;
     crate::observability::ensure_initialized(obs_cfg);
+
+    // Validate the optional flush threshold upfront (issue #1620), regardless of
+    // `writable`, so Python matches the Node binding's validation. A `0` threshold
+    // would make `should_flush(0)` true after every write (pathological
+    // flush-per-write); a threshold above the memtable hard limit would never
+    // trigger an auto-flush (the memtable hits the hard limit and rejects writes
+    // first, dead-ending the write path — roborev job 2885).
+    if let Some(v) = flush_threshold {
+        if v < 1 {
+            return Err(PyValueError::new_err(
+                "flush_threshold must be at least 1 byte",
+            ));
+        }
+        let hard_limit =
+            cqlite_core::storage::write_engine::WriteEngineConfig::DEFAULT_HARD_LIMIT as u64;
+        if v > hard_limit {
+            return Err(PyValueError::new_err(format!(
+                "flush_threshold ({v} bytes) must not exceed the memtable hard limit ({hard_limit} bytes)"
+            )));
+        }
+    }
 
     // Validate writable-mode requirements upfront before any I/O.
     if writable {
@@ -894,12 +924,18 @@ pub fn open(
             })
             .map_err(to_py_err)?;
 
-        let engine_config = cqlite_core::storage::write_engine::WriteEngineConfig::new(
+        let mut engine_config = cqlite_core::storage::write_engine::WriteEngineConfig::new(
             wd.join("data"),
             wd.join("wal"),
             table_schema,
         )
         .with_compaction_config(&compaction_config);
+
+        // Apply the optional flush threshold in bytes (issue #1620); the engine
+        // default (64 MB) is used when not provided.
+        if let Some(v) = flush_threshold {
+            engine_config = engine_config.with_flush_threshold(v as usize);
+        }
 
         let engine = cqlite_core::storage::write_engine::WriteEngine::new(engine_config)
             .map_err(to_py_err)?;
@@ -907,7 +943,12 @@ pub fn open(
         Some(Mutex::new(PyWriteEngine::new(engine)))
     } else {
         // Silence unused-variable warning
-        let _ = (write_dir, schema_registry_opt, compaction_config);
+        let _ = (
+            write_dir,
+            schema_registry_opt,
+            compaction_config,
+            flush_threshold,
+        );
         None
     };
 

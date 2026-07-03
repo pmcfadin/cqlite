@@ -383,6 +383,14 @@ export interface DatabaseOptions {
   autoCompaction?: boolean;
 
   /**
+   * Memtable flush threshold in bytes for the write engine (issue #1620).
+   * When the in-memory memtable grows past this size, the write path
+   * (`execute`) awaits a real async flush to a new SSTable generation.
+   * Only meaningful when `writable` is true. Default: 64 MB (67108864 bytes).
+   */
+  flushThreshold?: number;
+
+  /**
    * OpenTelemetry export options (epic #1031, issue #1040).
    *
    * When omitted, the `CQLITE_OTEL_*` environment variables are consulted.

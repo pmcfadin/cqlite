@@ -388,6 +388,7 @@ def open(
     config: Config | None = None,
     writable: bool = False,
     write_dir: str | Path | None = None,
+    flush_threshold: int | None = None,
     otel_config: dict[str, object] | None = None,
     traceparent: str | None = None,
 ) -> Database:
@@ -403,6 +404,11 @@ def open(
                   When ``True``, both ``schema`` and ``write_dir`` must be provided.
         write_dir: Directory for WAL files and flushed SSTables.
                    Required when ``writable=True``; created automatically.
+        flush_threshold: Memtable flush threshold in bytes for the write engine
+                   (issue #1620).  When the in-memory memtable grows past this
+                   size, ``execute`` awaits a real async flush to a new SSTable
+                   generation.  Only meaningful when ``writable=True``.
+                   Default: 64 MB (67108864 bytes).
 
                    **Caveat**: Only one ``Database`` instance should hold a given
                    ``write_dir`` at a time.  Concurrent instances sharing the same

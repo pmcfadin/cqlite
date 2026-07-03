@@ -76,6 +76,17 @@ impl WriteEngine {
     pub fn l0_count(&self) -> u64 {
         self.l0_count
     }
+
+    /// Return the cumulative bytes written to flushed L0 SSTables (Data.db plus
+    /// all sibling components) since the engine was opened (issue #1620).
+    ///
+    /// Incremented on every successful flush — including the automatic flushes
+    /// the binding write path now performs via `execute_flushing` — so binding
+    /// write stats stay accurate for automatic flushes, not only explicit
+    /// `flush()` calls. In-process counter; resets to zero on re-open.
+    pub fn total_flushed_bytes(&self) -> u64 {
+        self.total_flushed_bytes
+    }
 }
 
 #[cfg(all(test, feature = "write-support"))]

@@ -358,6 +358,13 @@ pub struct WriteEngine {
     /// also be used for persistence, but the counter is more robust and avoids
     /// scanning the filesystem on every stats query).
     l0_count: u64,
+    /// Cumulative bytes written to flushed L0 SSTables (Data.db + all sibling
+    /// components) since the engine was opened (issue #1620). Incremented once
+    /// per successful `flush_internal_async()` by the flushed SSTable's
+    /// `data_size`. In-process only; reset to zero on re-open. Read via
+    /// [`WriteEngine::total_flushed_bytes`] so binding stats stay accurate for
+    /// automatic flushes (not just explicit `flush()` calls).
+    total_flushed_bytes: u64,
     /// Advisory exclusive lock on `write_dir` (`.lock` file).
     ///
     /// Held for the lifetime of the `WriteEngine`; released on `close()` or
@@ -369,6 +376,17 @@ pub struct WriteEngine {
     /// the same `write_dir`, which would corrupt WAL files and SSTables
     /// (Issue #485).
     dir_lock: std::fs::File,
+    /// Whether the "memtable over flush threshold" warning has already been
+    /// emitted for the current threshold crossing (issue #1620).
+    ///
+    /// The sync `write()` path does NOT auto-flush when a Tokio runtime is
+    /// present, so once the memtable crosses the flush threshold it stays over
+    /// it until an explicit (or async) flush. Without this guard the
+    /// over-threshold `log::warn!` fired on EVERY subsequent write (log spam).
+    /// It is set to `true` the first time the warning is emitted and reset to
+    /// `false` on the next successful flush, so the warning fires at most once
+    /// per threshold crossing.
+    warned_over_threshold: bool,
 }
 
 /// Reject any mutation that contains a counter cell write.
@@ -617,7 +635,9 @@ impl WriteEngine {
             cumulative_stats: CompactionStats::default(),
             rows_written: 0,
             l0_count: 0,
+            total_flushed_bytes: 0,
             dir_lock,
+            warned_over_threshold: false,
         })
     }
 
@@ -717,6 +737,48 @@ impl WriteEngine {
     }
 
     fn write_inner(&mut self, mutation: Mutation) -> Result<()> {
+        // Insert into WAL + memtable, then handle sync-context auto-flush.
+        self.write_into_memtable(mutation)?;
+
+        // Check if memtable should be flushed (sync callers only). The binding
+        // write path runs inside a Tokio runtime and does NOT reach here — it
+        // uses `execute_flushing`, which owns its own real async flush and
+        // deliberately skips the "call flush() manually" warning below.
+        if self
+            .memtable
+            .should_flush(self.config.memtable_flush_threshold)
+        {
+            // Rate-limit the over-threshold warning (issue #1620). A sync caller
+            // that lives inside a runtime never auto-flushes below, so the
+            // memtable stays over threshold across many writes; without this
+            // guard the warning fired on EVERY such write. Emit it at most once
+            // per crossing; it is reset on the next flush.
+            if !self.warned_over_threshold {
+                log::warn!(
+                    "Memtable size {} exceeds threshold {} - call flush() manually in async context",
+                    self.memtable.size_bytes(),
+                    self.config.memtable_flush_threshold
+                );
+                self.warned_over_threshold = true;
+            }
+
+            // Try to flush synchronously only if we're not in an async context.
+            if tokio::runtime::Handle::try_current().is_err() {
+                log::info!("Triggering automatic flush");
+                self.flush_internal()?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Insert a mutation into the WAL + memtable WITHOUT any auto-flush handling.
+    ///
+    /// Shared by the sync [`write_inner`] path (which then performs the
+    /// sync-context warn + flush) and the async [`execute_flushing`] path (which
+    /// owns its own real async flush and must NOT emit the sync "call flush()
+    /// manually in async context" warning) (issue #1620, roborev job 2879).
+    fn write_into_memtable(&mut self, mutation: Mutation) -> Result<()> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(Error::InvalidInput(
                 "WriteEngine has been closed".to_string(),
@@ -751,24 +813,6 @@ impl WriteEngine {
         self.rows_written += 1;
         crate::observability::add_counter(crate::observability::catalog::WRITE_MUTATIONS, 1, &[]);
         self.record_memtable_gauges();
-
-        // 5. Check if memtable should be flushed (only in non-async context)
-        if self
-            .memtable
-            .should_flush(self.config.memtable_flush_threshold)
-        {
-            log::warn!(
-                "Memtable size {} exceeds threshold {} - call flush() manually in async context",
-                self.memtable.size_bytes(),
-                self.config.memtable_flush_threshold
-            );
-
-            // Try to flush synchronously only if we're not in an async context
-            if tokio::runtime::Handle::try_current().is_err() {
-                log::info!("Triggering automatic flush");
-                self.flush_internal()?;
-            }
-        }
 
         Ok(())
     }
@@ -899,31 +943,96 @@ impl WriteEngine {
     }
 
     fn execute_inner(&mut self, statement: &str) -> Result<()> {
+        // The public sync `execute` signature is unchanged: delegate to the
+        // counted implementation and discard the mutation count (issue #1620).
+        self.execute_inner_counted(statement).map(|_| ())
+    }
+
+    /// Parse + write a CQL statement into the memtable, returning the number of
+    /// mutations applied (N for a BATCH, else 1).
+    ///
+    /// This is the shared core of the sync `execute` path and the async
+    /// `execute_flushing` path (issue #1620). It is *unrecorded* (no
+    /// `record_result`); callers record at the public boundary.
+    fn execute_inner_counted(&mut self, statement: &str) -> Result<u64> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(Error::InvalidInput(
                 "WriteEngine has been closed".to_string(),
             ));
         }
 
-        let trimmed = statement.trim();
-
-        // BATCH statements produce multiple mutations.
-        //
         // Single-boundary error recording (issue #1036): call the *unrecorded*
         // `write_inner` here rather than the public `write`. `execute` already
         // wraps this method in `record_result`, so the escaping error is counted
         // exactly once at the public boundary instead of twice.
-        if trimmed.len() >= 5 && trimmed.as_bytes()[..5].eq_ignore_ascii_case(b"BEGIN") {
-            let mutations =
-                cql_to_mutation::convert_cql_to_mutations(trimmed, &self.config.schema)?;
-            for mutation in mutations {
-                self.write_inner(mutation)?;
-            }
-            Ok(())
-        } else {
-            let mutation = self.parse_cql_to_mutation(statement)?;
-            self.write_inner(mutation)
+        let mutations = self.parse_statement_to_mutations(statement)?;
+        let n = mutations.len() as u64;
+        for mutation in mutations {
+            self.write_inner(mutation)?;
         }
+        Ok(n)
+    }
+
+    /// Parse a CQL DML statement into its mutation(s). A `BEGIN BATCH` yields one
+    /// mutation per statement in the batch; any other DML yields exactly one.
+    ///
+    /// Shared by the sync `execute` path ([`execute_inner_counted`]) and the
+    /// async [`execute_flushing`] path so both agree on batch semantics
+    /// (issue #1620).
+    fn parse_statement_to_mutations(&self, statement: &str) -> Result<Vec<Mutation>> {
+        let trimmed = statement.trim();
+        if trimmed.len() >= 5 && trimmed.as_bytes()[..5].eq_ignore_ascii_case(b"BEGIN") {
+            cql_to_mutation::convert_cql_to_mutations(trimmed, &self.config.schema)
+        } else {
+            Ok(vec![self.parse_cql_to_mutation(statement)?])
+        }
+    }
+
+    /// Execute a DML statement and, if the memtable has crossed the flush
+    /// threshold, await a REAL async flush (issue #1620, DECIDED: write_async).
+    ///
+    /// This is the entry point for the Node/Python binding write path, which runs
+    /// inside a Tokio runtime where the sync auto-flush in `write()` is
+    /// intentionally skipped. It restores auto-flush there WITHOUT the surprise
+    /// inline-flush latency the plain sync `write()`/`execute()` path avoids.
+    /// Returns the number of mutations applied (N for BATCH, else 1).
+    #[tracing::instrument(name = "write.cql_execute_flushing", skip(self, statement))]
+    pub async fn execute_flushing(&mut self, statement: &str) -> Result<u64> {
+        // Single-boundary error recording (issue #1036): `execute_flushing` is
+        // the public Node/Python DML entry point, so — like `execute`,
+        // `write_async`, and `flush` — it records the escaping result exactly
+        // once here. The inner helper and everything it calls (`write_inner`,
+        // `flush_internal_async`) are *unrecorded* to avoid double counting.
+        crate::observability::record_result("write", self.execute_flushing_inner(statement).await)
+    }
+
+    async fn execute_flushing_inner(&mut self, statement: &str) -> Result<u64> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(Error::InvalidInput(
+                "WriteEngine has been closed".to_string(),
+            ));
+        }
+
+        // Parse first, then write each mutation and flush as soon as the memtable
+        // crosses the threshold. Checking after EVERY mutation (not just once at
+        // the end) means a large `BEGIN BATCH` cannot accumulate all the way to
+        // the hard limit before flushing and dead-ending (roborev job 2854,
+        // issue #1620).
+        let mutations = self.parse_statement_to_mutations(statement)?;
+        let n = mutations.len() as u64;
+        for mutation in mutations {
+            // Use the warn-free memtable insert: this path owns the real async
+            // flush below, so it must not emit the sync "call flush() manually"
+            // warning (roborev job 2879, issue #1620).
+            self.write_into_memtable(mutation)?;
+            if self
+                .memtable
+                .should_flush(self.config.memtable_flush_threshold)
+            {
+                self.flush_internal_async().await?;
+            }
+        }
+        Ok(n)
     }
 
     /// Force a flush of the memtable to SSTable
@@ -1068,8 +1177,17 @@ impl WriteEngine {
         // Clear memtable
         self.memtable.clear();
 
+        // Reset the over-threshold warn guard (issue #1620): the memtable is now
+        // empty, so the next threshold crossing is a fresh event that should warn
+        // again (at most once).
+        self.warned_over_threshold = false;
+
         // Increment the L0 SSTable counter (Issue #486).
         self.l0_count += 1;
+
+        // Accumulate cumulative flushed bytes (issue #1620) so binding write
+        // stats reflect automatic flushes, not only explicit `flush()` calls.
+        self.total_flushed_bytes = self.total_flushed_bytes.saturating_add(info.data_size);
 
         // Increment generation for next flush
         self.generation += 1;
@@ -2337,6 +2455,131 @@ mod tests {
         assert!(result.is_ok(), "Should accept writes after flush");
 
         assert_eq!(engine.memtable_row_count(), 1);
+    }
+
+    /// Issue #1620 (N2 — auto-flush cliff): the binding write path runs INSIDE a
+    /// Tokio runtime, where the sync `write()`/`execute()` auto-flush is
+    /// intentionally skipped (`Handle::try_current().is_err()` is false). On main
+    /// that meant the memtable grew unbounded until the hard limit, then every
+    /// write dead-ended. `execute_flushing` restores auto-flush via a REAL async
+    /// flush.
+    ///
+    /// Negative control: with the OLD sync `execute()` path in this same
+    /// runtime-present topology, no flush would ever fire, so `generation()`
+    /// would stay `1` and eventually a write would hit the hard limit. Here we
+    /// assert a real flush advanced the generation and no write dead-ended.
+    #[tokio::test]
+    async fn test_execute_flushing_auto_flushes_in_runtime() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        // Tiny flush threshold (4KB), default 256MB hard limit.
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        )
+        .with_flush_threshold(4096)
+        .with_durability(Durability::Disabled);
+
+        let mut engine = WriteEngine::new(config).unwrap();
+        assert_eq!(engine.generation(), 1);
+
+        // We are inside a runtime (this is #[tokio::test]) — the exact topology
+        // the bindings hit. Drive enough inserts to cross the tiny threshold
+        // many times.
+        for i in 0..2000 {
+            let stmt = format!(
+                "INSERT INTO test_ks.test_table (id, name) VALUES ({}, 'User{}')",
+                i, i
+            );
+            let n = engine
+                .execute_flushing(&stmt)
+                .await
+                .expect("execute_flushing must not dead-end at the hard limit");
+            assert_eq!(n, 1, "single INSERT applies exactly one mutation");
+        }
+
+        // A real async flush happened: generation advanced past 1.
+        assert!(
+            engine.generation() > 1,
+            "expected auto-flush to advance generation, got {} (would stay 1 on the old sync path in a runtime)",
+            engine.generation()
+        );
+    }
+
+    /// Issue #1620: the over-threshold `log::warn!` must fire at most once per
+    /// threshold crossing. With a runtime present the sync `write()` path does
+    /// NOT auto-flush, so the memtable stays over threshold across many writes;
+    /// the `warned_over_threshold` guard prevents re-warning until the next
+    /// flush resets it. This asserts the private flag directly (same module) so
+    /// it is deterministic without capturing log output.
+    #[tokio::test]
+    async fn test_over_threshold_warn_fires_at_most_once_per_crossing() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        // Tiny flush threshold so a couple of writes cross it; generous hard
+        // limit so the sync path keeps accepting writes over threshold.
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        )
+        .with_flush_threshold(256)
+        .with_hard_limit(64 * 1024)
+        .with_durability(Durability::Disabled);
+
+        let mut engine = WriteEngine::new(config).unwrap();
+        assert!(
+            !engine.warned_over_threshold,
+            "guard starts false before any crossing"
+        );
+
+        // Sync path inside a runtime: no auto-flush, so the memtable climbs and
+        // stays over threshold. First over-threshold write flips the guard.
+        let mut crossed = false;
+        for i in 0..500 {
+            engine
+                .write(create_test_mutation(
+                    i,
+                    &format!("User{}", i),
+                    1_000_000 + i as i64,
+                ))
+                .unwrap();
+            if engine.warned_over_threshold {
+                crossed = true;
+                break;
+            }
+        }
+        assert!(crossed, "memtable should have crossed the flush threshold");
+        assert!(
+            engine.warned_over_threshold,
+            "guard set after first crossing"
+        );
+
+        // Subsequent over-threshold writes must NOT re-arm/clear the guard.
+        for i in 500..600 {
+            engine
+                .write(create_test_mutation(
+                    i,
+                    &format!("User{}", i),
+                    1_000_000 + i as i64,
+                ))
+                .unwrap();
+            assert!(
+                engine.warned_over_threshold,
+                "guard must remain set across subsequent over-threshold writes"
+            );
+        }
+
+        // An explicit flush clears the memtable and resets the guard, so the
+        // next crossing warns again.
+        engine.flush().await.unwrap();
+        assert!(
+            !engine.warned_over_threshold,
+            "guard resets to false after a successful flush"
+        );
     }
 
     #[test]

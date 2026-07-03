@@ -184,9 +184,15 @@ impl PyWriteEngine {
     /// Execute a DML CQL statement (INSERT / UPDATE / DELETE / BEGIN BATCH).
     ///
     /// Returns the number of mutations applied (typically 1, or N for BATCH).
+    ///
+    /// Routes through the async-flushing write path (issue #1620): the Python
+    /// binding runs inside a Tokio runtime where the sync `execute()` auto-flush
+    /// is intentionally skipped, so it would otherwise grow the memtable to the
+    /// hard limit. `execute_flushing` awaits a real async flush once the flush
+    /// threshold is crossed.
     pub fn execute(&mut self, statement: &str) -> cqlite_core::error::Result<u64> {
-        self.inner.execute(statement)?;
-        Ok(1)
+        use crate::runtime::block_on;
+        block_on(self.inner.execute_flushing(statement))
     }
 
     /// Flush the memtable to a new SSTable generation.
