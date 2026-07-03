@@ -235,6 +235,33 @@ else
   ok "stale-early: old run-id no longer present"
 fi
 
+# 6. LITE summary emission (issue #1821): `--lite --emit-summary-selftest` must
+#    emit a DISTINCTLY-labeled block ("==== AGENT-GATE LITE SUMMARY ====" + a
+#    "MODE: lite" line) so a lite summary can NEVER be pasted as the full gate's
+#    SUMMARY, and the caller-known recovery file must still be complete for lite.
+LITE_START="==== AGENT-GATE LITE SUMMARY ===="
+LITE_END="==== END AGENT-GATE LITE SUMMARY ===="
+lite_file="$tmp/lite-summary.txt"
+AGENT_GATE_SUMMARY_FILE="$lite_file" \
+  bash "$GATE" --lite --emit-summary-selftest >"$tmp/lite.log" 2>&1
+lite_rc=$?
+assert_exit "lite-selftest" "$lite_rc" 0
+if grep -qF "$LITE_START" "$lite_file" && grep -qF "$LITE_END" "$lite_file" \
+   && grep -q "^MODE: lite" "$lite_file" && grep -q "^RESULT: " "$lite_file"; then
+  ok "lite-selftest: distinct LITE markers + MODE: lite present in caller-known file"
+else
+  bad "lite-selftest: missing LITE markers or MODE line (file: $lite_file)"
+  echo "------- captured -------"; cat "$lite_file"; echo "------------------------"
+fi
+# The lite block MUST NOT carry the full-gate markers (would be pasteable as the
+# full SUMMARY). The full START marker is a prefix of the LITE one, so match the
+# full marker only when it is NOT the LITE marker (i.e. its own line boundaries).
+if grep -qxF "$START_MARKER" "$lite_file"; then
+  bad "lite-selftest: block also contains the FULL '$START_MARKER' line (must not)"
+else
+  ok "lite-selftest: block does not contain the full-gate SUMMARY marker line"
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

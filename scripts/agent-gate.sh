@@ -107,7 +107,20 @@
 #
 # Usage:
 #   scripts/agent-gate.sh             # full gate (the only run that counts)
-#   scripts/agent-gate.sh --list      # list components without running
+#   scripts/agent-gate.sh --lite      # FAST ITERATION gate (issue #1821): runs
+#                                     # ONLY file-size + fmt + FULL-workspace clippy
+#                                     # (-D warnings) + BLAST-RADIUS-SCOPED tests
+#                                     # (the touched package's --lib + the diff's
+#                                     # new --test targets; NOT core-tests/write/
+#                                     # cli/bindings/parity/smoke). ~1-5 min vs
+#                                     # 12-25 min. It is NOT the gate of record and
+#                                     # emits a DISTINCT "==== AGENT-GATE LITE
+#                                     # SUMMARY ====" block (MODE: lite) so it can
+#                                     # never be pasted as the full SUMMARY. The
+#                                     # full gate MUST PASS once before merge. Its
+#                                     # recovery default is .agent-gate-lite-summary.txt.
+#   scripts/agent-gate.sh --list      # list full-gate components without running
+#   scripts/agent-gate.sh --lite-list # list the --lite components without running
 #   scripts/agent-gate.sh --only fmt,clippy   # debugging aid; output is
 #                                     # marked PARTIAL and never counts as the gate
 #   scripts/agent-gate.sh --emit-summary-selftest
@@ -175,15 +188,43 @@ fi
 export CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-$REPO_ROOT/test-data/datasets}"
 
 COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity python-bindings node-bindings delivery-telemetry parity-report binding-unwind-profile tooling-tests minimal-build smoke)
+# --lite (issue #1821) runs ONLY this fast subset: file-size ratchet, fmt,
+# FULL-workspace clippy (cross-crate API breaks are the cheap-insurance class),
+# and blast-radius-scoped tests (the touched package's --lib + the diff's new
+# test targets), NOT the full core-tests/write/cli/bindings/parity set. It is the
+# FAST ITERATION loop, NOT the gate of record — the full gate must PASS once
+# before merge. See run_lite() below.
+LITE_COMPONENTS=(file-size fmt clippy scoped-tests)
 ONLY=""
 SELFTEST=0
+LITE=0
 case "${1:-}" in
   --list) printf '%s\n' "${COMPONENTS[@]}"; exit 0 ;;
+  # --lite alone runs the fast gate; `--lite --emit-summary-selftest` drives the
+  # LITE summary block through the real emission path (for tooling-tests) without
+  # running any component.
+  --lite) LITE=1; [ "${2:-}" = --emit-summary-selftest ] && SELFTEST=1 ;;
+  --lite-list) printf '%s\n' "${LITE_COMPONENTS[@]}"; exit 0 ;;
   --only) ONLY="${2:?--only needs a comma-separated component list}" ;;
   --emit-summary-selftest) SELFTEST=1 ;;
   "") ;;
   *) echo "unknown argument: $1" >&2; exit 2 ;;
 esac
+
+# Summary-block markers + optional MODE line (issue #1821). The DEFAULT (full
+# gate) values are the historical literals, so a no-flag run's output is
+# byte-for-byte unchanged. --lite swaps in DISTINCT markers plus a MODE line so a
+# lite summary can NEVER be mistaken for — or pasted as — the full gate's SUMMARY
+# (which remains the only run that counts). Everything that writes/greps the block
+# uses these variables; for LITE=0 they equal the old literals exactly.
+SUMMARY_START_MARKER="==== AGENT-GATE SUMMARY ===="
+SUMMARY_END_MARKER="==== END AGENT-GATE SUMMARY ===="
+SUMMARY_MODE_LINE=""
+if [ "$LITE" -eq 1 ]; then
+  SUMMARY_START_MARKER="==== AGENT-GATE LITE SUMMARY ===="
+  SUMMARY_END_MARKER="==== END AGENT-GATE LITE SUMMARY ===="
+  SUMMARY_MODE_LINE="MODE: lite (FAST ITERATION — NOT the gate of record; full agent-gate.sh must PASS once before merge)"
+fi
 
 LOG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate.XXXXXX")
 # Per-run nonce (#1175 roborev finding 1): the LOG_DIR is a fresh per-run mktemp
@@ -199,7 +240,14 @@ RUN_ID="$LOG_DIR"
 # the same $REPO_ROOT. Concurrent same-checkout runs MUST each set a unique
 # AGENT_GATE_SUMMARY_FILE or they clobber each other's recovery artifact;
 # separate worktrees get distinct repo roots and are already isolated.
-SUMMARY_FILE="${AGENT_GATE_SUMMARY_FILE:-$REPO_ROOT/.agent-gate-summary.txt}"
+# The lite run uses a DISTINCT default recovery filename (issue #1821) so it can
+# never clobber the full gate's recovery artifact, and so `cat`-ing the default
+# after a lite run can never be misread as the full gate's result.
+if [ "$LITE" -eq 1 ]; then
+  SUMMARY_FILE="${AGENT_GATE_SUMMARY_FILE:-$REPO_ROOT/.agent-gate-lite-summary.txt}"
+else
+  SUMMARY_FILE="${AGENT_GATE_SUMMARY_FILE:-$REPO_ROOT/.agent-gate-summary.txt}"
+fi
 # Resolve a caller-provided RELATIVE AGENT_GATE_SUMMARY_FILE against the caller's
 # original CWD, not the repo root we cd'd into (#1175 roborev finding 1). Absolute
 # paths are used verbatim; the unset default above is already absolute.
@@ -229,10 +277,11 @@ SUMMARY_WRITE_FAILED=0
 # sentinel (unwritable path) we do not abort here; emit_summary's authoritative
 # write guard catches an unwritable path at the end and forces a FAIL.
 {
-  echo "==== AGENT-GATE SUMMARY ===="
+  echo "$SUMMARY_START_MARKER"
   echo "run-id: $RUN_ID"
+  [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
   echo "RESULT: INCOMPLETE (gate did not finish)"
-  echo "==== END AGENT-GATE SUMMARY ===="
+  echo "$SUMMARY_END_MARKER"
 } > "$SUMMARY_FILE" 2>/dev/null || true
 
 # emit_summary <result> [meta-line ...]
@@ -272,14 +321,15 @@ emit_summary() {
   write_err=$(
     {
       echo
-      echo "==== AGENT-GATE SUMMARY ===="
+      echo "$SUMMARY_START_MARKER"
       echo "run-id: $RUN_ID"
+      [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
       local line
       for line in "$@"; do echo "$line"; done
       echo "logs: $LOG_DIR"
       echo "summary-file: $SUMMARY_FILE"
       echo "RESULT: $result"
-      echo "==== END AGENT-GATE SUMMARY ===="
+      echo "$SUMMARY_END_MARKER"
     } > "$SUMMARY_FILE" 2>&1
     printf '\037rc=%d' "$?"
   ) || true
@@ -299,7 +349,7 @@ emit_summary() {
     reason="write failed (rc=$write_rc)${write_err:+: $write_err}"
   elif [ ! -s "$SUMMARY_FILE" ]; then
     reason="${write_err:-file missing or empty}"
-  elif ! grep -q '==== END AGENT-GATE SUMMARY ====' "$SUMMARY_FILE" 2>/dev/null; then
+  elif ! grep -qF "$SUMMARY_END_MARKER" "$SUMMARY_FILE" 2>/dev/null; then
     reason="incomplete write (end marker missing)${write_err:+: $write_err}"
   elif ! grep -qF "run-id: $RUN_ID" "$SUMMARY_FILE" 2>/dev/null; then
     reason="stale file (run-id of this run not found — write did not land)${write_err:+: $write_err}"
@@ -334,14 +384,15 @@ emit_summary() {
   else
     {
       echo
-      echo "==== AGENT-GATE SUMMARY ===="
+      echo "$SUMMARY_START_MARKER"
       echo "run-id: $RUN_ID"
+      [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
       local line
       for line in "$@"; do echo "$line"; done
       echo "logs: $LOG_DIR"
       echo "summary-file: $SUMMARY_FILE (WRITE FAILED — see stderr)"
       echo "RESULT: $emit_result"
-      echo "==== END AGENT-GATE SUMMARY ===="
+      echo "$SUMMARY_END_MARKER"
     } > "$LOG_SUMMARY_FILE" 2>/dev/null || true
   fi
 
@@ -356,14 +407,15 @@ emit_summary() {
   else
     {
       echo
-      echo "==== AGENT-GATE SUMMARY ===="
+      echo "$SUMMARY_START_MARKER"
       echo "run-id: $RUN_ID"
+      [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
       local line
       for line in "$@"; do echo "$line"; done
       echo "logs: $LOG_DIR"
       echo "summary-file: $SUMMARY_FILE (WRITE FAILED — see stderr)"
       echo "RESULT: $emit_result"
-      echo "==== END AGENT-GATE SUMMARY ===="
+      echo "$SUMMARY_END_MARKER"
     } 2>/dev/null || true
   fi
 }
@@ -827,6 +879,163 @@ run_file_size() {
   NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
   echo ">>> [$name] $status ($((end - start))s)"
 }
+
+# scoped-tests (issue #1821, --lite only): the blast-radius-scoped test component.
+# Map each changed path to its cargo package and run ONLY those packages' --lib
+# tests plus the diff's new/changed `--test` targets — NOT the full
+# core-tests/write/cli/bindings/parity set. Falls back to `cqlite-core --lib` and
+# says so when no rust workspace package is in the diff (docs/scripts/bindings-only
+# changes). Package detection uses the SAME base-ref resolution as file-size.
+run_scoped_tests() {
+  local name=scoped-tests
+  local log="$LOG_DIR/$name.log"
+  local start end status=PASS
+  start=$(date +%s)
+  : >"$log"
+
+  local base="" ref
+  for ref in origin/main main origin/master master; do
+    if git rev-parse --verify -q "$ref" >/dev/null 2>&1; then
+      base=$(git merge-base HEAD "$ref" 2>/dev/null) && [ -n "$base" ] && break
+    fi
+  done
+
+  local changed
+  if [ -n "$base" ]; then
+    changed=$(printf '%s\n%s\n' \
+      "$(git diff --name-only "$base"...HEAD 2>/dev/null)" \
+      "$(git diff --name-only HEAD 2>/dev/null)")
+  else
+    changed=$(git diff --name-only HEAD 2>/dev/null)
+  fi
+
+  # path -> package. Order matters: tests/format-compatibility before tests/*.
+  declare -A pkgset=()
+  declare -A newtests=()   # key "<pkg>|<teststem>" for added/changed --test targets
+  local f pkg stem
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$f" in
+      cqlite-core/*)                pkg=cqlite-core ;;
+      cqlite-cli/*)                 pkg=cqlite-cli ;;
+      cqlite-flight/*)              pkg=cqlite-flight ;;
+      tools/cassandra-parity/*)     pkg=cassandra-parity ;;
+      tests/format-compatibility/*) pkg=format-compatibility-tests ;;
+      tests/*)                      pkg=cqlite-integration-tests ;;
+      *) continue ;;   # bindings, scripts, docs, .claude, root -> no rust lib pkg
+    esac
+    pkgset["$pkg"]=1
+    case "$f" in
+      */tests/*.rs|tests/*.rs)
+        stem=$(basename "$f" .rs)
+        newtests["$pkg|$stem"]=1
+        ;;
+    esac
+  done <<<"$changed"
+
+  # package -> manifest dir (to detect a src/lib.rs target).
+  pkg_dir() {
+    case "$1" in
+      cqlite-core)                echo "cqlite-core" ;;
+      cqlite-cli)                 echo "cqlite-cli" ;;
+      cqlite-flight)              echo "cqlite-flight" ;;
+      cassandra-parity)           echo "tools/cassandra-parity" ;;
+      cqlite-integration-tests)   echo "tests" ;;
+      format-compatibility-tests) echo "tests/format-compatibility" ;;
+      *) echo "" ;;
+    esac
+  }
+
+  local -a pkgs=("${!pkgset[@]}")
+  local scoped_note
+  if [ "${#pkgs[@]}" -eq 0 ]; then
+    pkgs=(cqlite-core)
+    scoped_note="cqlite-core --lib (default; no rust workspace package in the diff)"
+  else
+    scoped_note="${pkgs[*]}"
+  fi
+  echo ">>> [$name] blast-radius packages: $scoped_note"
+
+  local p dir key
+  for p in "${pkgs[@]}"; do
+    dir=$(pkg_dir "$p")
+    local -a args=(test -p "$p")
+    [ "$p" = cqlite-core ] && args+=(--features cli-helpers)
+    local haslib=0
+    [ -n "$dir" ] && [ -f "$dir/src/lib.rs" ] && haslib=1
+    [ "$haslib" -eq 1 ] && args+=(--lib)
+    local -a stems=()
+    for key in "${!newtests[@]}"; do
+      case "$key" in "$p|"*) stems+=(--test "${key#*|}") ;; esac
+    done
+    args+=("${stems[@]}")
+    # A test-only crate with no changed --test target has nothing runnable to
+    # scope to; compile-check it (--no-run) rather than run its whole (slow) suite.
+    if [ "$haslib" -eq 0 ] && [ "${#stems[@]}" -eq 0 ]; then
+      args+=(--no-run)
+    fi
+    echo ">>> [$name] cargo ${args[*]}"
+    if ! cargo "${args[@]}" >>"$log" 2>&1; then
+      status=FAIL
+      OVERALL=FAIL
+    fi
+  done
+
+  if [ "$status" = FAIL ]; then
+    echo "--- [$name] FAILED; last 60 lines of $log ---"
+    tail -60 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
+# run_lite (issue #1821): the FAST ITERATION gate. Runs file-size + fmt +
+# FULL-workspace clippy + blast-radius-scoped tests, emits a DISTINCTLY-labeled
+# LITE summary, and EXITS — it never falls through to the full-gate flow below, so
+# the no-flag path is completely unchanged. It is NOT the gate of record.
+run_lite() {
+  echo
+  echo "==================================================================="
+  echo "  AGENT-GATE --lite  :  FAST ITERATION GATE — *NOT* THE GATE OF RECORD"
+  echo "  Runs: file-size + fmt + workspace clippy + blast-radius-scoped tests."
+  echo "  It SKIPS core-tests, write/cli, bindings, parity, smoke, etc."
+  echo "  Before merge you MUST run the full  scripts/agent-gate.sh  and it must"
+  echo "  PASS — its ==== AGENT-GATE SUMMARY ==== block is the ONLY run that counts."
+  echo "==================================================================="
+  echo
+
+  run_file_size
+  run_component fmt cargo fmt --all --check
+  run_component clippy env RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
+  run_scoped_tests
+
+  declare -a SUMMARY_META=()
+  SUMMARY_META+=("commit: $(git rev-parse --short HEAD) branch: $(git rev-parse --abbrev-ref HEAD) dirty: $(test -n "$(git status --porcelain)" && echo yes || echo no)")
+  SUMMARY_META+=("lite-scope: file-size fmt clippy scoped-tests (full gate NOT run — run it once before merge)")
+  local i
+  for i in "${!NAMES[@]}"; do
+    SUMMARY_META+=("$(printf '%-18s %s (%s)' "${NAMES[$i]}:" "${STATUSES[$i]}" "${TIMES[$i]}")")
+  done
+  emit_summary "$OVERALL" "${SUMMARY_META[@]}"
+
+  if [ "$SUMMARY_WRITE_FAILED" -ne 0 ]; then
+    echo "agent-gate: exiting non-zero because the summary file could not be written (#1175)" >&2
+    exit 1
+  fi
+  case "$OVERALL" in
+    PASS) exit 0 ;;
+    *) exit 1 ;;
+  esac
+}
+
+# --lite (issue #1821): run the fast subset and EXIT before the full-gate flow.
+# Kept fully separate from the full-gate execution below so the no-flag path is
+# byte-for-byte unchanged.
+if [ "$LITE" -eq 1 ]; then
+  run_lite
+fi
 
 # file-size runs first and needs no dataset, so it executes before the dataset
 # preflight (which exits early when data is missing).
