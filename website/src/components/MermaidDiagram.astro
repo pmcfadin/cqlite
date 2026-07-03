@@ -1,0 +1,134 @@
+---
+interface Props {
+  chart: string;
+  caption?: string;
+  sourceLabel?: string;
+}
+
+const {
+  chart,
+  caption,
+  sourceLabel = 'Mermaid source',
+} = Astro.props;
+---
+
+<figure class="mermaid-figure">
+  <pre class="mermaid-fallback" data-mermaid-diagram>{chart}</pre>
+  {caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<details class="mermaid-source">
+  <summary>{sourceLabel}</summary>
+  <pre><code>{chart}</code></pre>
+</details>
+
+<script>
+  import mermaid from 'mermaid';
+
+  mermaid.initialize({
+    startOnLoad: false,
+    securityLevel: 'strict',
+    theme: 'base',
+    flowchart: {
+      curve: 'basis',
+      htmlLabels: true,
+    },
+    themeVariables: {
+      fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif',
+      primaryColor: '#eef5ff',
+      primaryBorderColor: '#c8d9fa',
+      primaryTextColor: '#23304a',
+      lineColor: '#2f6fed',
+      clusterBkg: '#ffffff',
+      clusterBorder: '#ccd6e6',
+      edgeLabelBackground: '#f8fafc',
+    },
+  });
+
+  async function renderMermaidDiagrams() {
+    const diagrams = document.querySelectorAll('pre[data-mermaid-diagram]');
+
+    for (const [index, diagram] of diagrams.entries()) {
+      if (diagram.getAttribute('data-mermaid-rendered') === 'true') {
+        continue;
+      }
+
+      const source = diagram.textContent ?? '';
+      const id = `mermaid-${Date.now()}-${index}`;
+
+      try {
+        const { svg } = await mermaid.render(id, source);
+        const rendered = document.createElement('div');
+        rendered.className = 'mermaid-rendered';
+        rendered.innerHTML = svg;
+        diagram.setAttribute('data-mermaid-rendered', 'true');
+        diagram.replaceWith(rendered);
+      } catch (error) {
+        diagram.classList.add('mermaid-error');
+        console.error('Mermaid render failed', error);
+      }
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', renderMermaidDiagrams, { once: true });
+  } else {
+    renderMermaidDiagrams();
+  }
+
+  document.addEventListener('astro:page-load', renderMermaidDiagrams);
+</script>
+
+<style>
+  .mermaid-figure {
+    margin: 1.5rem 0;
+  }
+
+  .mermaid-fallback,
+  :global(.mermaid-rendered) {
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 0.5rem;
+    background: var(--sl-color-bg);
+    overflow-x: auto;
+    padding: 1rem;
+  }
+
+  .mermaid-fallback {
+    white-space: pre;
+  }
+
+  .mermaid-error {
+    border-color: var(--sl-color-red);
+  }
+
+  :global(.mermaid-rendered svg) {
+    display: block;
+    width: 100% !important;
+    max-width: 100% !important;
+    height: auto;
+    margin: 0 auto;
+  }
+
+  .mermaid-source {
+    margin: 1rem 0 2rem;
+  }
+
+  .mermaid-source pre {
+    overflow-x: auto;
+  }
+
+  @media (min-width: 72rem) {
+    .mermaid-figure {
+      width: min(1000px, calc(100vw - var(--sl-sidebar-width) - 4rem));
+      margin-left: 50%;
+      transform: translateX(-50%);
+    }
+  }
+
+  @media (max-width: 760px) {
+    :global(.mermaid-rendered svg) {
+      min-width: 640px;
+      max-width: none !important;
+    }
+  }
+</style>

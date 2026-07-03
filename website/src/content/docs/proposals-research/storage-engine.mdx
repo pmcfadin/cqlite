@@ -4,12 +4,35 @@ description: "CQLite's proposed storage-engine direction: an adjacent analytical
 sidebar:
   label: Storage Engine
   order: 1
+tableOfContents: false
 ---
 
 import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import MermaidDiagram from '../../../components/MermaidDiagram.astro';
 import storageEngineConcept from '../../../assets/storage-engine-parallel-planes.png';
-import architectureDiagram from '../../../assets/storage-engine-architecture.svg';
 import dataPathsDiagram from '../../../assets/storage-engine-data-paths.svg';
+
+export const architectureMermaid = `flowchart LR
+  subgraph OLTP["Cassandra OLTP Plane"]
+    direction TB
+    OApp["Application reads/writes"] --> OStore["CommitLog + Memtable"] --> Lifecycle["Flush, compaction, repair"]
+  end
+
+  subgraph Foundation["SSTable Foundation"]
+    direction TB
+    SSTables["Data.db / Index.db / Summary.db / Statistics.db"]
+    Tail["Optional fresh tail gen-*"]
+  end
+
+  subgraph OLAP["Trino / Iceberg OLAP Plane"]
+    direction TB
+    AApp["Application analytical reads"] --> Services["Trino / Arrow Flight / Iceberg materializer"] --> CQLite["CQLite SSTable reader"]
+  end
+
+  Lifecycle -->|flush creates durable SSTables| SSTables
+  OStore -. optional fresh tail export .-> Tail
+  SSTables -->|snapshot read| CQLite
+  Tail -. fresh tail read .-> CQLite`;
 
 # Storage Engine Direction
 
@@ -52,53 +75,11 @@ systems such as Arrow Flight, Trino, and Iceberg.
 
 ## Architecture diagram
 
-<figure>
-  <img
-    src={architectureDiagram.src}
-    alt="Cassandra OLTP Plane and OLAP Plane connected through an SSTable Foundation with optional fresh tail export."
-  />
-  <figcaption>
-    Cassandra owns operational correctness. CQLite reads the shared SSTable
-    foundation and serves analytical consumers.
-  </figcaption>
-</figure>
-
-<details>
-<summary>Mermaid source for the architecture diagram</summary>
-
-```mermaid
-flowchart TB
-  subgraph OLTP["Cassandra OLTP Plane"]
-    App["Application reads and writes"]
-    CommitLog["CommitLog + Memtable"]
-    Lifecycle["Flush, compaction, repair, streaming"]
-  end
-
-  subgraph OLAP["OLAP Plane"]
-    ReadApp["Application analytical reads"]
-    Query["Trino + Arrow Flight"]
-    Iceberg["Iceberg materializer"]
-    CQLite["CQLite SSTable reader"]
-  end
-
-  subgraph SSTables["SSTable Foundation"]
-    Data["Data.db"]
-    Index["Index.db"]
-    Summary["Summary.db"]
-    Stats["Statistics.db"]
-    Tail["Tail gen-*"]
-  end
-
-  App --> CommitLog --> Lifecycle
-  Lifecycle --> SSTables
-  SSTables --> CQLite
-  ReadApp --> Query
-  Query --> Iceberg
-  Iceberg --> CQLite
-  CommitLog -. fresh tail export .-> Tail
-```
-
-</details>
+<MermaidDiagram
+  chart={architectureMermaid}
+  caption="Cassandra owns OLTP reads, writes, and lifecycle. OLAP applications enter through Trino, Arrow Flight, or Iceberg, and CQLite reads the shared SSTable foundation."
+  sourceLabel="Mermaid source for the architecture diagram"
+/>
 
 ## Data paths
 
