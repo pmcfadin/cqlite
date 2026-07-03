@@ -499,6 +499,32 @@ mod tests {
         }
     }
 
+    /// Local unsigned-VInt encoder for tests (Cassandra `writeUnsignedVInt`, no
+    /// zigzag). Cassandra writes collection element/entry counts and per-element
+    /// length prefixes with the unsigned encoding, so fixtures for the
+    /// unsigned-aware parser (issue #1623) must use this, not `encode_signed`.
+    fn encode_unsigned(value: u64, buf: &mut Vec<u8>) {
+        let magnitude = (value | 1).leading_zeros();
+        let size = ((639 - magnitude * 9) >> 6) as usize;
+        if size == 1 {
+            buf.push(value as u8);
+        } else if size == 9 {
+            buf.push(0xFF);
+            buf.extend_from_slice(&value.to_be_bytes());
+        } else {
+            let extra_bytes = size - 1;
+            let mask: u8 = (0xFFu16 << (8 - extra_bytes)) as u8;
+            let first_byte_data_bits = 8 - extra_bytes - 1;
+            let data_shift = extra_bytes * 8;
+            let first_byte_data =
+                ((value >> data_shift) & ((1u64 << first_byte_data_bits) - 1)) as u8;
+            buf.push(mask | first_byte_data);
+            for i in (0..extra_bytes).rev() {
+                buf.push(((value >> (i * 8)) & 0xFF) as u8);
+            }
+        }
+    }
+
     #[test]
     fn test_parse_simple_int() {
         let data = vec![0x00, 0x00, 0x00, 0x2A]; // 42 in big-endian
@@ -653,16 +679,18 @@ mod tests {
     #[test]
     fn test_parse_list_of_ints() {
         // List with 2 elements: [1, 2]
-        // Format: element_count (VInt) + (element_length (VInt) + element_bytes)*
-        // Note: VInt uses zigzag encoding, so value 4 is encoded as 8 (0x08)
+        // Format: element_count (unsigned VInt) + (element_length (unsigned VInt)
+        // + element_bytes)*
+        // Issue #1623: Cassandra writes counts/lengths with writeUnsignedVInt, so
+        // small values are their own byte (count 2 = 0x02, length 4 = 0x04).
         let mut data = vec![
-            0x04, // count = 2 (zigzag_encode(2) = 4)
+            0x02, // count = 2 (unsigned VInt)
         ];
         // Element 1: length=4, value=0x00000001 (1 as big-endian i32)
-        data.push(0x08); // length (zigzag_encode(4) = 8)
+        data.push(0x04); // length = 4 (unsigned VInt)
         data.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]); // value
                                                            // Element 2: length=4, value=0x00000002 (2 as big-endian i32)
-        data.push(0x08); // length (zigzag_encode(4) = 8)
+        data.push(0x04); // length = 4 (unsigned VInt)
         data.extend_from_slice(&[0x00, 0x00, 0x00, 0x02]); // value
 
         let comparator = ComparatorType::List(Box::new(ComparatorType::Int));
@@ -680,7 +708,7 @@ mod tests {
     /// Encode a non-frozen collection element (VInt length prefix + body) using
     /// the same length encoding `parse_list_value`/`parse_map_value` expect.
     fn push_element(buf: &mut Vec<u8>, body: &[u8]) {
-        encode_signed(body.len() as i64, buf);
+        encode_unsigned(body.len() as u64, buf);
         buf.extend_from_slice(body);
     }
 
@@ -697,7 +725,7 @@ mod tests {
         let t0: i64 = 0;
         let t1: i64 = 4_500_000_000_000;
         let mut data = Vec::new();
-        encode_signed(2, &mut data); // element count
+        encode_unsigned(2, &mut data); // element count
         push_element(&mut data, &t0.to_be_bytes());
         push_element(&mut data, &t1.to_be_bytes());
 
@@ -712,7 +740,7 @@ mod tests {
         let v4 = vec![10u8, 0, 0, 1];
         let v6 = vec![0u8; 16];
         let mut data = Vec::new();
-        encode_signed(2, &mut data); // element count
+        encode_unsigned(2, &mut data); // element count
         push_element(&mut data, &v4);
         push_element(&mut data, &v6);
 
@@ -728,7 +756,7 @@ mod tests {
         let key = b"k";
         let json_body = br#"[1,2,3]"#;
         let mut data = Vec::new();
-        encode_signed(1, &mut data); // entry count
+        encode_unsigned(1, &mut data); // entry count
         push_element(&mut data, key);
         push_element(&mut data, json_body);
 
@@ -752,7 +780,7 @@ mod tests {
         let v4a = vec![192u8, 168, 0, 1];
         let v4b = vec![10u8, 0, 0, 2];
         let mut data = Vec::new();
-        encode_signed(2, &mut data); // element count
+        encode_unsigned(2, &mut data); // element count
         push_element(&mut data, &v4a);
         push_element(&mut data, &v4b);
 
@@ -768,7 +796,7 @@ mod tests {
         // (the only legitimate blob fallback), even as a collection element.
         let body = vec![1u8, 2, 3];
         let mut data = Vec::new();
-        encode_signed(1, &mut data);
+        encode_unsigned(1, &mut data); // element count
         push_element(&mut data, &body);
 
         let comparator = ComparatorType::List(Box::new(ComparatorType::Custom(

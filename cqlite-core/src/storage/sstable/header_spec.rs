@@ -579,6 +579,7 @@ fn parse_header_field<'a>(
             (remaining, HeaderFieldValue::Bytes(bytes.to_vec()))
         }
         HeaderFieldType::VBytes => {
+            // Cassandra structural length/count (writeUnsignedVInt); unsigned.
             let (remaining, len) = parse_vint_length(input)?;
             let (remaining, bytes) = take(len)(remaining)?;
             (remaining, HeaderFieldValue::Bytes(bytes.to_vec()))

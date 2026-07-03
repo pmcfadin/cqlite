@@ -794,13 +794,83 @@ pub fn encode_vuint(value: u64) -> Vec<u8> {
     }
 }
 
-/// Parse a VInt and convert to usize for length fields
+/// Parse an UNSIGNED VInt length/count field (Cassandra `writeUnsignedVInt`).
+///
+/// # Producer classification (Issue #1623)
+///
+/// Cassandra encodes length, count, and collection-element-count fields with
+/// `writeUnsignedVInt` — UNSIGNED, no ZigZag (see Appendix B, encodings cheat
+/// sheet). ZigZag is used ONLY for genuinely-signed deltas. This function
+/// therefore routes through [`parse_vuint`], NOT the signed [`parse_vint`].
+///
+/// The prior implementation routed through the signed ZigZag decoder, silently
+/// mis-reading any unsigned length whose bit pattern differs under ZigZag while
+/// consuming the same byte count (e.g. raw `0x05` is length 5, but ZigZag reads
+/// it as -3 → error; `0x04` is length 4 but ZigZag reads 2).
+///
+/// ## Call-site verdicts
+///
+/// FLIP-TO-UNSIGNED — bytes written by Cassandra, or read-only parsers that
+/// model a Cassandra on-disk structure (`writeUnsignedVInt`). These call
+/// [`parse_vint_length`]:
+/// - Data.db rows/cells: `storage/sstable/row_cell_state_machine` and
+///   `reader/parsing/{key_parsing,block_entries,value_parsing,comparator_value_parsing}`.
+/// - Cassandra v5 collection element counts/lengths: the `parse_*_v5_format`
+///   paths in `parser/types/collections.rs` (a mixed file — its legacy paths
+///   are KEEP-SIGNED, see below).
+/// - Header-spec structural length/count fields: `storage/.../header_spec.rs`
+///   `VBytes`/`Array`/`Map` (read-only Cassandra header spec; no CQLite ZigZag
+///   writer to pair with).
+///
+/// KEEP-SIGNED — CQLite-internal round-trips whose paired writer emits ZigZag
+/// `encode_vint`; flipping one side would corrupt the pair. These call
+/// [`parse_vint_length_signed`]:
+/// - Legacy/schema/registry collection counts in `parser/types/collections.rs`,
+///   plus `parser/types/{primitives,udt}` and `parser/optimized_complex_types`
+///   (all paired with `serialize_cql_value` in `parser/types/mod.rs`).
+/// - `parser/statistics.rs` (self-encoded round-trip; the production Statistics.db
+///   read path is `enhanced_statistics_parser`, not these functions).
+/// - `parser/header.rs` standard body (paired with `serialize_sstable_header`
+///   `encode_vint`; real V5 data is short-circuited via
+///   `parse_cassandra5_simplified_header`).
+/// - Range-tombstone `range_start`/`range_end` bounds in
+///   `parser/types/tombstones.rs` (paired with `serialize_cql_value`
+///   `encode_vint`).
 ///
 /// # Safety
-/// This function enforces a maximum length of 1GB (MAX_VINT_LENGTH) to prevent:
+/// Enforces a maximum length of 1GB ([`MAX_VINT_LENGTH`]) to prevent:
 /// - Overflow on 32-bit platforms where usize is 4 bytes
 /// - Memory exhaustion attacks via malicious input claiming huge lengths
 pub fn parse_vint_length(input: &[u8]) -> IResult<&[u8], usize> {
+    let (remaining, value) = parse_vuint(input)?;
+    // Safety: Prevent overflow on usize conversion and allocation attacks.
+    // `value` is u64; MAX_VINT_LENGTH (1GB) is far below usize::MAX on all
+    // supported platforms (>= 32-bit), so the cast below cannot truncate once
+    // the value is bounded.
+    if value > MAX_VINT_LENGTH as u64 {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TooLarge,
+        )));
+    }
+    Ok((remaining, value as usize))
+}
+
+/// Parse a SIGNED (ZigZag) VInt length field written by CQLite's own
+/// serializers.
+///
+/// # CQLite-internal: encoder is ZigZag
+///
+/// A handful of CQLite-internal, self-consistent round-trips write length
+/// prefixes with the ZigZag encoder `parser::vint::encode_vint`
+/// (`serialize_sstable_header` and friends in `parser/header.rs`). Reading
+/// those back requires the SAME ZigZag decode — flipping them to unsigned would
+/// corrupt the round-trip. This helper preserves the historical signed decode
+/// while keeping the identical safety caps as [`parse_vint_length`].
+///
+/// Do NOT use this for Cassandra-produced bytes — those are unsigned; use
+/// [`parse_vint_length`].
+pub fn parse_vint_length_signed(input: &[u8]) -> IResult<&[u8], usize> {
     let (remaining, value) = parse_vint(input)?;
     if value < 0 {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -808,7 +878,6 @@ pub fn parse_vint_length(input: &[u8]) -> IResult<&[u8], usize> {
             nom::error::ErrorKind::Verify,
         )));
     }
-    // Safety: Prevent overflow on usize conversion and allocation attacks
     if value > MAX_VINT_LENGTH {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
@@ -1003,9 +1072,62 @@ mod tests {
 
     #[test]
     fn test_vint_length() {
-        let bytes = encode_vint(42);
+        // Issue #1623: length fields are UNSIGNED. Encode with the unsigned
+        // encoder so the byte pattern matches what Cassandra writes.
+        let bytes = encode_vuint(42);
         let (_, length) = parse_vint_length(&bytes).unwrap();
         assert_eq!(length, 42);
+    }
+
+    /// Issue #1623 ACCEPTANCE TEST: a raw unsigned byte `0x05` is length 5.
+    ///
+    /// This MUST FAIL on `main` (commit 1) where `parse_vint_length` routes
+    /// through the signed ZigZag decoder: `0x05` ZigZag-decodes to -3, which is
+    /// rejected as a negative length. Commit 2 (the fix) routes through the
+    /// unsigned decoder and makes this pass.
+    #[test]
+    fn test_parse_vint_length_unsigned_single_byte_ac() {
+        assert_eq!(parse_vint_length(&[0x05]).unwrap().1, 5);
+    }
+
+    /// Issue #1623: additional unsigned single-byte checks. `0x04` is length 4
+    /// (the signed decoder silently returns 2), `0x7F` is the single-byte max.
+    #[test]
+    fn test_parse_vint_length_unsigned_bit_patterns() {
+        assert_eq!(parse_vint_length(&[0x04]).unwrap().1, 4);
+        assert_eq!(parse_vint_length(&[0x7F]).unwrap().1, 127);
+        assert_eq!(parse_vint_length(&[0x00]).unwrap().1, 0);
+        // Two-byte unsigned: 0x80 0x80 == 128
+        assert_eq!(parse_vint_length(&[0x80, 0x80]).unwrap().1, 128);
+    }
+
+    /// Issue #1623: unsigned length round-trip via the unsigned encoder for a
+    /// spread of values, including odd values whose ZigZag pattern would be
+    /// mis-read by the signed decoder.
+    #[test]
+    fn test_parse_vint_length_unsigned_roundtrip() {
+        for value in [
+            0u64, 1, 2, 3, 4, 5, 63, 64, 127, 128, 255, 256, 16383, 16384, 100_000,
+        ] {
+            let bytes = encode_vuint(value);
+            let (_, decoded) = parse_vint_length(&bytes)
+                .unwrap_or_else(|_| panic!("unsigned length decode failed for {value}"));
+            assert_eq!(decoded as u64, value, "roundtrip failed for {value}");
+        }
+    }
+
+    /// Issue #1623: the signed helper preserves the CQLite-internal ZigZag
+    /// round-trip used by `serialize_sstable_header` (`encode_vint`).
+    #[test]
+    fn test_parse_vint_length_signed_zigzag_roundtrip() {
+        for value in [0i64, 1, 5, 13, 42, 63, 64, 127, 1000] {
+            let bytes = encode_vint(value); // ZigZag encoder
+            let (_, decoded) = parse_vint_length_signed(&bytes)
+                .unwrap_or_else(|_| panic!("signed length decode failed for {value}"));
+            assert_eq!(decoded as i64, value, "signed roundtrip failed for {value}");
+        }
+        // Negative ZigZag values are rejected as lengths.
+        assert!(parse_vint_length_signed(&encode_vint(-10)).is_err());
     }
 
     #[test]
@@ -1094,9 +1216,11 @@ mod tests {
         // Test empty input
         assert!(parse_vint(&[]).is_err());
 
-        // Test negative length
-        let negative_bytes = encode_vint(-10);
-        assert!(parse_vint_length(&negative_bytes).is_err());
+        // Issue #1623: length fields are unsigned, so they cannot be negative.
+        // Negative-length rejection now lives on the signed helper.
+        assert!(parse_vint_length_signed(&encode_vint(-10)).is_err());
+        // An over-1GB unsigned length is rejected by the length cap.
+        assert!(parse_vint_length(&encode_vuint(2_000_000_000u64)).is_err());
 
         // Test valid max length encoding (0xFF indicates 8 extra bytes = 9 total bytes)
         assert!(parse_vint(&[0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]).is_ok());
@@ -1149,11 +1273,13 @@ mod tests {
         let _ = parse_vint(&bytes).expect("fallback parse");
     }
 
-    // Issue #264: VInt overflow protection tests
+    // Issue #264 / #1623: VInt overflow protection tests (unsigned lengths).
     #[test]
     fn test_vint_overflow_protection() {
+        let max = MAX_VINT_LENGTH as u64;
+
         // Test 1: Value exceeding 1GB limit should fail
-        let large_value = encode_vint(2_000_000_000i64); // 2GB - exceeds MAX_VINT_LENGTH
+        let large_value = encode_vuint(2_000_000_000u64); // 2GB - exceeds MAX_VINT_LENGTH
         let result = parse_vint_length(&large_value);
         assert!(
             result.is_err(),
@@ -1161,31 +1287,33 @@ mod tests {
         );
 
         // Test 2: Value just under limit should succeed
-        let safe_value = encode_vint(MAX_VINT_LENGTH - 1);
+        let safe_value = encode_vuint(max - 1);
         let result = parse_vint_length(&safe_value);
         assert!(result.is_ok(), "Should accept values < 1GB");
         let (_, length) = result.unwrap();
-        assert_eq!(length, (MAX_VINT_LENGTH - 1) as usize);
+        assert_eq!(length as u64, max - 1);
 
-        // Test 3: Exact limit should fail (> not >=)
-        let limit_value = encode_vint(MAX_VINT_LENGTH + 1);
-        let result = parse_vint_length(&limit_value);
-        assert!(result.is_err(), "Should reject values > MAX_VINT_LENGTH");
+        // Test 3: Exact limit should succeed, one over should fail (> not >=)
+        let at_limit = encode_vuint(max);
+        assert!(
+            parse_vint_length(&at_limit).is_ok(),
+            "Should accept exactly MAX_VINT_LENGTH"
+        );
+        let over_limit = encode_vuint(max + 1);
+        assert!(
+            parse_vint_length(&over_limit).is_err(),
+            "Should reject values > MAX_VINT_LENGTH"
+        );
 
-        // Test 4: Negative values should still be rejected
-        let negative_value = encode_vint(-1i64);
-        let result = parse_vint_length(&negative_value);
-        assert!(result.is_err(), "Should reject negative values");
-
-        // Test 5: Zero should be valid
-        let zero_value = encode_vint(0i64);
+        // Test 4: Zero should be valid
+        let zero_value = encode_vuint(0u64);
         let result = parse_vint_length(&zero_value);
         assert!(result.is_ok(), "Should accept zero");
         let (_, length) = result.unwrap();
         assert_eq!(length, 0);
 
-        // Test 6: Reasonable values (16MB - existing limit in block_entries)
-        let sixteen_mb = encode_vint(16 * 1024 * 1024i64);
+        // Test 5: Reasonable values (16MB - existing limit in block_entries)
+        let sixteen_mb = encode_vuint(16 * 1024 * 1024u64);
         let result = parse_vint_length(&sixteen_mb);
         assert!(result.is_ok(), "Should accept 16MB (common limit)");
     }

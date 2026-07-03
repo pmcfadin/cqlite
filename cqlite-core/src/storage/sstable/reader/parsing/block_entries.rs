@@ -719,7 +719,7 @@ impl SSTableReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::vint::encode_vint;
+    use crate::parser::vint::encode_vuint;
     use crate::storage::sstable::row_cell_state_machine::{
         ClusteringRow, PartitionKey, RowHeader, StaticRow,
     };
@@ -825,7 +825,7 @@ mod tests {
 
         // Create data with table_id_len = 257 (exceeds 256 byte limit)
         let mut data = Vec::new();
-        data.extend_from_slice(&encode_vint(257)); // table_id_len
+        data.extend_from_slice(&encode_vuint(257)); // table_id_len
         data.extend_from_slice(&vec![0x41; 257]); // 257 bytes of 'A'
 
         let result = reader.parse_block_entries_legacy(&data, None);
@@ -850,9 +850,9 @@ mod tests {
 
         // Create data with valid table_id but key_len = 65537
         let mut data = Vec::new();
-        data.extend_from_slice(&encode_vint(5)); // table_id_len
+        data.extend_from_slice(&encode_vuint(5)); // table_id_len
         data.extend_from_slice(b"test.table"); // Actually 10 bytes, but we only read 5
-        data.extend_from_slice(&encode_vint(65537)); // key_len exceeds limit
+        data.extend_from_slice(&encode_vuint(65537)); // key_len exceeds limit
 
         let result = reader.parse_block_entries_legacy(&data, None);
         assert!(result.is_err());
@@ -877,11 +877,11 @@ mod tests {
 
         // Create data with valid table_id, key, but value_len > 16MB
         let mut data = Vec::new();
-        data.extend_from_slice(&encode_vint(10)); // table_id_len
+        data.extend_from_slice(&encode_vuint(10)); // table_id_len
         data.extend_from_slice(b"test.table");
-        data.extend_from_slice(&encode_vint(4)); // key_len
+        data.extend_from_slice(&encode_vuint(4)); // key_len
         data.extend_from_slice(b"key1");
-        data.extend_from_slice(&encode_vint(16777217)); // value_len = 16MB + 1
+        data.extend_from_slice(&encode_vuint(16777217)); // value_len = 16MB + 1
 
         let result = reader.parse_block_entries_legacy(&data, None);
         assert!(result.is_err());
@@ -905,7 +905,7 @@ mod tests {
 
         // Create data with table_id_len = 10 but only 5 bytes provided
         let mut data = Vec::new();
-        data.extend_from_slice(&encode_vint(10)); // table_id_len
+        data.extend_from_slice(&encode_vuint(10)); // table_id_len
         data.extend_from_slice(b"short"); // Only 5 bytes
 
         let result = reader.parse_block_entries_legacy(&data, None);
@@ -931,11 +931,11 @@ mod tests {
 
         // Create data with value_len = 100 but only 10 bytes available
         let mut data = Vec::new();
-        data.extend_from_slice(&encode_vint(10)); // table_id_len
+        data.extend_from_slice(&encode_vuint(10)); // table_id_len
         data.extend_from_slice(b"test.table");
-        data.extend_from_slice(&encode_vint(4)); // key_len
+        data.extend_from_slice(&encode_vuint(4)); // key_len
         data.extend_from_slice(b"key1");
-        data.extend_from_slice(&encode_vint(100)); // value_len
+        data.extend_from_slice(&encode_vuint(100)); // value_len
         data.extend_from_slice(b"shortvalue"); // Only 10 bytes
 
         let result = reader.parse_block_entries_legacy(&data, None);
@@ -1299,11 +1299,11 @@ mod tests {
 
         // Create VInt-based legacy format data
         let mut data = Vec::new();
-        data.extend_from_slice(&encode_vint(10)); // table_id_len
+        data.extend_from_slice(&encode_vuint(10)); // table_id_len
         data.extend_from_slice(b"test.table");
-        data.extend_from_slice(&encode_vint(4)); // key_len
+        data.extend_from_slice(&encode_vuint(4)); // key_len
         data.extend_from_slice(b"key1");
-        data.extend_from_slice(&encode_vint(0)); // empty value
+        data.extend_from_slice(&encode_vuint(0)); // empty value
 
         // Use legacy parser directly to test VInt fallback
         let result = reader.parse_block_entries_legacy(&data, None);
@@ -1390,11 +1390,11 @@ mod tests {
 
         // Create data with non-UTF8 table_id
         let mut data = Vec::new();
-        data.extend_from_slice(&encode_vint(4)); // table_id_len
+        data.extend_from_slice(&encode_vuint(4)); // table_id_len
         data.extend_from_slice(&[0xFF, 0xFE, 0xFD, 0xFC]); // Invalid UTF-8
-        data.extend_from_slice(&encode_vint(4)); // key_len
+        data.extend_from_slice(&encode_vuint(4)); // key_len
         data.extend_from_slice(b"key1");
-        data.extend_from_slice(&encode_vint(0)); // empty value
+        data.extend_from_slice(&encode_vuint(0)); // empty value
 
         let result = reader.parse_block_entries_legacy(&data, None);
 
@@ -1433,10 +1433,10 @@ mod tests {
 
         // Create data with empty key (key_len = 0)
         let mut data = Vec::new();
-        data.extend_from_slice(&encode_vint(10)); // table_id_len
+        data.extend_from_slice(&encode_vuint(10)); // table_id_len
         data.extend_from_slice(b"test.table");
-        data.extend_from_slice(&encode_vint(0)); // key_len = 0 (empty key)
-        data.extend_from_slice(&encode_vint(0)); // empty value
+        data.extend_from_slice(&encode_vuint(0)); // key_len = 0 (empty key)
+        data.extend_from_slice(&encode_vuint(0)); // empty value
 
         let result = reader.parse_block_entries_legacy(&data, None);
 

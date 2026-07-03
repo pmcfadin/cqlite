@@ -3,7 +3,10 @@
 //! Handles user-defined types (embedded-schema and registry-driven), tuples,
 //! and frozen wrappers, including registry-aware decoding of nested UDTs.
 
-use super::super::vint::parse_vint_length;
+// Issue #1623: UDT/tuple schema + field lengths round-trip with CQLite's own
+// ZigZag serializer (serialize_cql_value), a self-consistent internal pair, so
+// these length/count reads use the signed helper (not unsigned parse_vint_length).
+use super::super::vint::parse_vint_length_signed;
 use super::collections::{
     parse_list_with_element_type, parse_map_with_types, parse_set_with_element_type,
 };
@@ -43,7 +46,7 @@ pub fn parse_udt_enhanced_with_registry<'a>(
         }
         Err(embedded_error) => {
             // Embedded parsing failed, try to extract type name and use registry-based parsing
-            if let Ok((after_type_name_len, type_name_length)) = parse_vint_length(input) {
+            if let Ok((after_type_name_len, type_name_length)) = parse_vint_length_signed(input) {
                 if let Ok((after_type_name, type_name_bytes)) =
                     take::<_, _, nom::error::Error<&[u8]>>(type_name_length)(after_type_name_len)
                 {
@@ -72,14 +75,14 @@ pub fn parse_udt_enhanced_with_registry<'a>(
 /// Parse UDT value with embedded schema information (for SSTable format)
 pub fn parse_udt(input: &[u8]) -> IResult<&[u8], Value> {
     // Parse UDT type name length and name
-    let (input, type_name_length) = parse_vint_length(input)?;
+    let (input, type_name_length) = parse_vint_length_signed(input)?;
     let (input, type_name_bytes) = take(type_name_length)(input)?;
     let type_name = String::from_utf8(type_name_bytes.to_vec()).map_err(|_| {
         nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
     })?;
 
     // Parse field count
-    let (input, field_count) = parse_vint_length(input)?;
+    let (input, field_count) = parse_vint_length_signed(input)?;
 
     // Parse field definitions (schema metadata)
     let mut field_defs = Vec::with_capacity(field_count);
@@ -87,7 +90,7 @@ pub fn parse_udt(input: &[u8]) -> IResult<&[u8], Value> {
 
     for _ in 0..field_count {
         // Parse field name
-        let (new_remaining, field_name_length) = parse_vint_length(remaining)?;
+        let (new_remaining, field_name_length) = parse_vint_length_signed(remaining)?;
         let (new_remaining, field_name_bytes) = take(field_name_length)(new_remaining)?;
         let field_name = String::from_utf8(field_name_bytes.to_vec()).map_err(|_| {
             nom::Err::Error(nom::error::Error::new(
@@ -253,12 +256,12 @@ fn try_find_udt_in_any_keyspace<'a>(
 /// Skip over embedded UDT schema to get to the field values
 fn skip_embedded_udt_schema(input: &[u8]) -> IResult<&[u8], ()> {
     // Parse field count
-    let (mut remaining, field_count) = parse_vint_length(input)?;
+    let (mut remaining, field_count) = parse_vint_length_signed(input)?;
 
     // Skip over field definitions (name + type for each field)
     for _ in 0..field_count {
         // Skip field name
-        let (new_remaining, field_name_length) = parse_vint_length(remaining)?;
+        let (new_remaining, field_name_length) = parse_vint_length_signed(remaining)?;
         let (new_remaining, _) = take(field_name_length)(new_remaining)?;
 
         // Skip field type
@@ -427,7 +430,7 @@ pub fn parse_frozen_udt_with_registry<'a>(
     }
 
     // Fallback: try to skip embedded schema and parse with registry definition
-    if let Ok((after_type_name_len, type_name_length)) = parse_vint_length(input) {
+    if let Ok((after_type_name_len, type_name_length)) = parse_vint_length_signed(input) {
         if let Ok((after_type_name, _type_name_bytes)) =
             take::<_, _, nom::error::Error<&[u8]>>(type_name_length)(after_type_name_len)
         {
@@ -449,7 +452,7 @@ pub fn parse_frozen_udt_with_registry<'a>(
 /// Parse tuple value according to Cassandra format specification
 pub fn parse_tuple(input: &[u8]) -> IResult<&[u8], Value> {
     // Parse field count
-    let (input, field_count) = parse_vint_length(input)?;
+    let (input, field_count) = parse_vint_length_signed(input)?;
 
     // Parse field type definitions
     let mut field_types = Vec::with_capacity(field_count);

@@ -4,7 +4,14 @@
 //! layout, registry-aware element decoding (for collections of UDTs), and the
 //! schema-driven decoders used by the no-heuristics read path.
 
-use super::super::vint::{parse_vint, parse_vint_length};
+// Issue #1623: `*_v5_format` parsers read RAW Cassandra collection cells whose
+// counts/lengths are unsigned (`parse_vint_length`). The legacy/schema/registry
+// parsers (`parse_list`, `parse_map`, `parse_list_with_element_type`,
+// `parse_map_with_types`, `parse_*_with_schema`) round-trip with CQLite's own
+// ZigZag serializer (`serialize_cql_value`) and use signed element lengths
+// (-1 = null via `parse_vint`); their COUNT reads therefore use the signed
+// helper to stay self-consistent.
+use super::super::vint::{parse_vint, parse_vint_length, parse_vint_length_signed};
 use super::udt::parse_cql_value_for_type_with_registry;
 use super::{
     create_empty_value_for_cql_type, parse_cql_value, parse_cql_value_raw,
@@ -35,7 +42,7 @@ pub fn parse_list_enhanced(input: &[u8]) -> IResult<&[u8], Value> {
 
 /// Legacy list parser for backward compatibility
 pub fn parse_list(input: &[u8]) -> IResult<&[u8], Value> {
-    let (input, count) = parse_vint_length(input)?;
+    let (input, count) = parse_vint_length_signed(input)?;
 
     // Validate count to prevent memory exhaustion attacks
     if count > MAX_COLLECTION_SIZE {
@@ -121,7 +128,7 @@ pub fn parse_map_enhanced(input: &[u8]) -> IResult<&[u8], Value> {
 
 /// Legacy map parser for backward compatibility
 pub fn parse_map(input: &[u8]) -> IResult<&[u8], Value> {
-    let (input, count) = parse_vint_length(input)?;
+    let (input, count) = parse_vint_length_signed(input)?;
 
     // Validate count to prevent memory exhaustion
     if count > MAX_COLLECTION_SIZE {
@@ -189,7 +196,7 @@ pub(super) fn parse_list_with_element_type<'a>(
     keyspace: &str,
     registry: &UdtRegistry,
 ) -> IResult<&'a [u8], Value> {
-    let (input, count) = parse_vint_length(input)?;
+    let (input, count) = parse_vint_length_signed(input)?;
 
     // Validate count to prevent memory exhaustion attacks
     if count > MAX_COLLECTION_SIZE {
@@ -269,7 +276,7 @@ pub(super) fn parse_map_with_types<'a>(
     keyspace: &str,
     registry: &UdtRegistry,
 ) -> IResult<&'a [u8], Value> {
-    let (input, count) = parse_vint_length(input)?;
+    let (input, count) = parse_vint_length_signed(input)?;
 
     // Validate count to prevent memory exhaustion
     if count > MAX_COLLECTION_SIZE {
@@ -511,7 +518,7 @@ pub fn parse_list_with_schema<'a>(
     input: &'a [u8],
     element_schema: &CqlType,
 ) -> IResult<&'a [u8], Value> {
-    let (input, count) = parse_vint_length(input)?;
+    let (input, count) = parse_vint_length_signed(input)?;
 
     // Validate count to prevent memory exhaustion
     if count > MAX_COLLECTION_SIZE {
@@ -577,7 +584,7 @@ pub fn parse_map_with_schema<'a>(
     key_schema: &CqlType,
     value_schema: &CqlType,
 ) -> IResult<&'a [u8], Value> {
-    let (input, count) = parse_vint_length(input)?;
+    let (input, count) = parse_vint_length_signed(input)?;
 
     // Validate count to prevent memory exhaustion
     if count > MAX_COLLECTION_SIZE {
@@ -664,14 +671,16 @@ mod tests {
     #[test]
     fn test_parse_list_v5_homogeneous() {
         let mut data = Vec::new();
-        data.extend(super::super::super::vint::encode_vint(2)); // two elements
+        // Issue #1623: parse_list_v5_format reads count AND element lengths via
+        // the unsigned parse_vint_length, so encode them unsigned.
+        data.extend(super::super::super::vint::encode_vuint(2)); // two elements
         data.push(0x00); // homogeneous collection
         data.push(CqlTypeId::Int as u8);
 
-        data.extend(super::super::super::vint::encode_vint(4));
+        data.extend(super::super::super::vint::encode_vuint(4));
         data.extend_from_slice(&1i32.to_be_bytes());
 
-        data.extend(super::super::super::vint::encode_vint(4));
+        data.extend(super::super::super::vint::encode_vuint(4));
         data.extend_from_slice(&2i32.to_be_bytes());
 
         let (_, value) = parse_list_v5_format(&data).expect("parse list");
@@ -684,17 +693,18 @@ mod tests {
     #[test]
     fn test_parse_list_v5_mixed_types() {
         let mut data = Vec::new();
-        data.extend(super::super::super::vint::encode_vint(2)); // two elements
+        // Issue #1623: parse_list_v5_format uses the unsigned parse_vint_length.
+        data.extend(super::super::super::vint::encode_vuint(2)); // two elements
         data.push(0x01); // mixed-type flag
 
         // First element: text "alpha"
         data.push(CqlTypeId::Varchar as u8);
-        data.extend(super::super::super::vint::encode_vint(5));
+        data.extend(super::super::super::vint::encode_vuint(5));
         data.extend_from_slice(b"alpha");
 
         // Second element: integer 7
         data.push(CqlTypeId::Int as u8);
-        data.extend(super::super::super::vint::encode_vint(4));
+        data.extend(super::super::super::vint::encode_vuint(4));
         data.extend_from_slice(&7i32.to_be_bytes());
 
         let (_, value) = parse_list_v5_format(&data).expect("parse list");

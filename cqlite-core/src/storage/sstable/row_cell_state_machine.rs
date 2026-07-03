@@ -1538,12 +1538,13 @@ mod tests {
         data.extend_from_slice(&42i64.to_be_bytes()); // Timestamp
 
         // Partition key: component count (1) + component length (1) + component ("k")
-        data.push(0x02); // 1 component (vint encoded: 1 -> 2 in zigzag)
-        data.push(0x02); // 1 byte length (vint encoded: 1 -> 2 in zigzag)
+        // Issue #1623: counts/lengths are UNSIGNED VInt, so 1 encodes as 0x01.
+        data.push(0x01); // 1 component (unsigned VInt)
+        data.push(0x01); // 1 byte length (unsigned VInt)
         data.push(b'k'); // Component data
 
         // Clustering row count: 0 (no clustering rows)
-        data.push(0x00); // 0 rows (vint encoded: 0 -> 0)
+        data.push(0x00); // 0 rows (unsigned VInt: 0 -> 0x00)
 
         let result = state_machine.process(&data);
         assert!(result.is_ok());

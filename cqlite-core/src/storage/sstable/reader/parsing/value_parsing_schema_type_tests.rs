@@ -19,7 +19,7 @@
 //! authoritatively-encoded bytes, asserting the correct typed `Value` variants
 //! instead of `Value::Blob`.
 
-use crate::parser::vint::encode_vint;
+use crate::parser::vint::encode_vuint;
 use crate::storage::sstable::reader::SSTableReader;
 use crate::types::Value;
 use crate::{Config, Platform};
@@ -197,9 +197,9 @@ async fn collection_scalar_elements_decode_typed_not_blob() {
     // list<double> with two elements [1.5, 2.5]. CollectionSerializer: VInt count,
     // then per element VInt length + big-endian f64.
     let mut data = Vec::new();
-    data.extend_from_slice(&encode_vint(2));
+    data.extend_from_slice(&encode_vuint(2));
     for v in [1.5f64, 2.5f64] {
-        data.extend_from_slice(&encode_vint(8));
+        data.extend_from_slice(&encode_vuint(8));
         data.extend_from_slice(&v.to_be_bytes());
     }
 
@@ -362,13 +362,13 @@ mod always_run {
     /// blob-decoded `double`.
     #[test]
     fn collection_scalar_elements_decode_typed_not_blob() {
-        use crate::parser::vint::encode_vint;
+        use crate::parser::vint::encode_vuint;
 
         // list<double> [1.5, 2.5]: VInt count, then per element VInt length + f64.
         let mut data = Vec::new();
-        data.extend_from_slice(&encode_vint(2));
+        data.extend_from_slice(&encode_vuint(2));
         for v in [1.5f64, 2.5f64] {
-            data.extend_from_slice(&encode_vint(8));
+            data.extend_from_slice(&encode_vuint(8));
             data.extend_from_slice(&v.to_be_bytes());
         }
 

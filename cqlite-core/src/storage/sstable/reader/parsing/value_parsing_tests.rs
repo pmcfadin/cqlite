@@ -1,5 +1,5 @@
 use super::*;
-use crate::parser::vint::encode_vint;
+use crate::parser::vint::encode_vuint;
 
 // ============================================================================
 // Primitive Type Tests
@@ -166,7 +166,7 @@ fn test_parse_date_negative() {
 #[test]
 fn test_parse_list_empty() {
     let mut data = Vec::new();
-    data.extend_from_slice(&encode_vint(0)); // 0 elements
+    data.extend_from_slice(&encode_vuint(0)); // 0 elements
 
     let result =
         parse_list_value_with(&data, &ComparatorType::Int, |d, _| parse_int_value(d)).unwrap();
@@ -181,8 +181,8 @@ fn test_parse_list_empty() {
 #[test]
 fn test_parse_list_single_int() {
     let mut data = Vec::new();
-    data.extend_from_slice(&encode_vint(1)); // 1 element
-    data.extend_from_slice(&encode_vint(4)); // element length
+    data.extend_from_slice(&encode_vuint(1)); // 1 element
+    data.extend_from_slice(&encode_vuint(4)); // element length
     data.extend_from_slice(&42i32.to_be_bytes());
 
     let result =
@@ -199,9 +199,9 @@ fn test_parse_list_single_int() {
 #[test]
 fn test_parse_list_multiple_ints() {
     let mut data = Vec::new();
-    data.extend_from_slice(&encode_vint(3)); // 3 elements
+    data.extend_from_slice(&encode_vuint(3)); // 3 elements
     for val in [1i32, 2, 3] {
-        data.extend_from_slice(&encode_vint(4)); // each int is 4 bytes
+        data.extend_from_slice(&encode_vuint(4)); // each int is 4 bytes
         data.extend_from_slice(&val.to_be_bytes());
     }
 
@@ -221,14 +221,14 @@ fn test_parse_list_multiple_ints() {
 #[test]
 fn test_parse_list_text_elements() {
     let mut data = Vec::new();
-    data.extend_from_slice(&encode_vint(2)); // 2 elements
+    data.extend_from_slice(&encode_vuint(2)); // 2 elements
 
     let str1 = "hello";
-    data.extend_from_slice(&encode_vint(str1.len() as i64));
+    data.extend_from_slice(&encode_vuint(str1.len() as u64));
     data.extend_from_slice(str1.as_bytes());
 
     let str2 = "world";
-    data.extend_from_slice(&encode_vint(str2.len() as i64));
+    data.extend_from_slice(&encode_vuint(str2.len() as u64));
     data.extend_from_slice(str2.as_bytes());
 
     let result =
@@ -246,9 +246,9 @@ fn test_parse_list_text_elements() {
 #[test]
 fn test_parse_set_int() {
     let mut data = Vec::new();
-    data.extend_from_slice(&encode_vint(2)); // 2 elements
+    data.extend_from_slice(&encode_vuint(2)); // 2 elements
     for val in [10i32, 20] {
-        data.extend_from_slice(&encode_vint(4));
+        data.extend_from_slice(&encode_vuint(4));
         data.extend_from_slice(&val.to_be_bytes());
     }
 
@@ -267,20 +267,20 @@ fn test_parse_set_int() {
 #[test]
 fn test_parse_map_text_int() {
     let mut data = Vec::new();
-    data.extend_from_slice(&encode_vint(2)); // 2 entries
+    data.extend_from_slice(&encode_vuint(2)); // 2 entries
 
     // Entry 1: "key1" -> 100
     let key1 = "key1";
-    data.extend_from_slice(&encode_vint(key1.len() as i64));
+    data.extend_from_slice(&encode_vuint(key1.len() as u64));
     data.extend_from_slice(key1.as_bytes());
-    data.extend_from_slice(&encode_vint(4));
+    data.extend_from_slice(&encode_vuint(4));
     data.extend_from_slice(&100i32.to_be_bytes());
 
     // Entry 2: "key2" -> 200
     let key2 = "key2";
-    data.extend_from_slice(&encode_vint(key2.len() as i64));
+    data.extend_from_slice(&encode_vuint(key2.len() as u64));
     data.extend_from_slice(key2.as_bytes());
-    data.extend_from_slice(&encode_vint(4));
+    data.extend_from_slice(&encode_vuint(4));
     data.extend_from_slice(&200i32.to_be_bytes());
 
     let result = parse_map_value_with(
@@ -309,7 +309,7 @@ fn test_parse_map_text_int() {
 #[test]
 fn test_parse_map_empty() {
     let mut data = Vec::new();
-    data.extend_from_slice(&encode_vint(0)); // 0 entries
+    data.extend_from_slice(&encode_vuint(0)); // 0 entries
 
     let result = parse_map_value_with(
         &data,
@@ -334,21 +334,21 @@ fn test_parse_map_empty() {
 fn test_parse_map_nested() {
     // Map<text, list<int>>
     let mut data = Vec::new();
-    data.extend_from_slice(&encode_vint(1)); // 1 entry
+    data.extend_from_slice(&encode_vuint(1)); // 1 entry
 
     // Key: "numbers"
     let key = "numbers";
-    data.extend_from_slice(&encode_vint(key.len() as i64));
+    data.extend_from_slice(&encode_vuint(key.len() as u64));
     data.extend_from_slice(key.as_bytes());
 
     // Value: list<int> with [1, 2, 3]
     let mut list_data = Vec::new();
-    list_data.extend_from_slice(&encode_vint(3)); // 3 elements
+    list_data.extend_from_slice(&encode_vuint(3)); // 3 elements
     for val in [1i32, 2, 3] {
-        list_data.extend_from_slice(&encode_vint(4));
+        list_data.extend_from_slice(&encode_vuint(4));
         list_data.extend_from_slice(&val.to_be_bytes());
     }
-    data.extend_from_slice(&encode_vint(list_data.len() as i64));
+    data.extend_from_slice(&encode_vuint(list_data.len() as u64));
     data.extend_from_slice(&list_data);
 
     let result = parse_map_value_with(
@@ -503,9 +503,9 @@ fn test_parse_udt_with_collection() {
 
     // Field "tags": list<text> = ["tag1", "tag2"]
     let mut list_data = Vec::new();
-    list_data.extend_from_slice(&encode_vint(2)); // 2 elements (VInt count per CollectionSerializer)
+    list_data.extend_from_slice(&encode_vuint(2)); // 2 elements (VInt count per CollectionSerializer)
     for tag in ["tag1", "tag2"] {
-        list_data.extend_from_slice(&encode_vint(tag.len() as i64)); // VInt element length
+        list_data.extend_from_slice(&encode_vuint(tag.len() as u64)); // VInt element length
         list_data.extend_from_slice(tag.as_bytes());
     }
     // UDT field length prefix = 4-byte BE i32
@@ -575,8 +575,8 @@ fn test_parse_uuid_wrong_length() {
 #[test]
 fn test_parse_list_truncated() {
     let mut data = Vec::new();
-    data.extend_from_slice(&encode_vint(2)); // Claims 2 elements
-    data.extend_from_slice(&encode_vint(4)); // First element length
+    data.extend_from_slice(&encode_vuint(2)); // Claims 2 elements
+    data.extend_from_slice(&encode_vuint(4)); // First element length
     data.extend_from_slice(&42i32.to_be_bytes());
     // Missing second element
 

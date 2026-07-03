@@ -2,7 +2,7 @@
 //!
 //! Decodes the legacy CQL binary tombstone encoding into `Value::Tombstone`.
 
-use super::super::vint::parse_vint_length;
+use super::super::vint::parse_vint_length_signed;
 use crate::types::{RowKey, TombstoneInfo, TombstoneType, Value};
 use nom::{
     bytes::complete::take,
@@ -43,9 +43,13 @@ pub fn parse_tombstone(input: &[u8]) -> IResult<&[u8], Value> {
     let (input, range_start, range_end) = if tombstone_type == TombstoneType::RangeTombstone {
         let (input, has_range) = be_u8(input)?;
         if has_range != 0 {
-            let (input, start_len) = parse_vint_length(input)?;
+            // CQLite-internal: encoder is ZigZag encode_vint (see types/mod.rs
+            // serialize_cql_value); intentionally signed.
+            let (input, start_len) = parse_vint_length_signed(input)?;
             let (input, start_data) = take(start_len)(input)?;
-            let (input, end_len) = parse_vint_length(input)?;
+            // CQLite-internal: encoder is ZigZag encode_vint (see types/mod.rs
+            // serialize_cql_value); intentionally signed.
+            let (input, end_len) = parse_vint_length_signed(input)?;
             let (input, end_data) = take(end_len)(input)?;
             (input, Some(start_data.to_vec()), Some(end_data.to_vec()))
         } else {
@@ -117,6 +121,49 @@ mod tests {
             deletion_time_bytes[7],
         ]);
         assert_eq!(deletion_time, 5000);
+    }
+
+    #[test]
+    fn test_range_tombstone_range_roundtrip_zigzag() {
+        // Issue #1623 regression: the range_start/range_end length prefixes are
+        // written by serialize_cql_value with the CQLite ZigZag encoder
+        // (encode_vint), so they MUST be read back with the signed decoder.
+        // A length of 1 encodes as ZigZag 0x02; decoding it as UNSIGNED would
+        // yield 2 and corrupt the round-trip (take too many bytes / mismatch).
+        use crate::types::{TombstoneInfo, TombstoneType};
+        let range_tombstone = Value::Tombstone(TombstoneInfo {
+            deletion_time: 4242,
+            tombstone_type: TombstoneType::RangeTombstone,
+            local_deletion_time: 0,
+            ttl: None,
+            // Byte length exactly 1 so ZigZag (0x02) vs unsigned (0x01) disagree.
+            range_start: Some(RowKey::new(vec![0xAB])),
+            range_end: Some(RowKey::new(vec![0xCD])),
+        });
+        let serialized = serialize_cql_value(&range_tombstone).unwrap();
+
+        let (remaining, parsed) = parse_tombstone(&serialized[1..]).unwrap(); // Skip type ID
+        assert!(
+            remaining.is_empty(),
+            "range tombstone should consume all bytes"
+        );
+        assert_eq!(
+            parsed, range_tombstone,
+            "range tombstone round-trip mismatch"
+        );
+
+        if let Value::Tombstone(info) = parsed {
+            assert_eq!(
+                info.range_start.map(|k| k.as_bytes().to_vec()),
+                Some(vec![0xAB])
+            );
+            assert_eq!(
+                info.range_end.map(|k| k.as_bytes().to_vec()),
+                Some(vec![0xCD])
+            );
+        } else {
+            panic!("expected Value::Tombstone");
+        }
     }
 
     #[test]

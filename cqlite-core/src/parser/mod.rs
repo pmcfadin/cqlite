@@ -142,6 +142,8 @@ pub mod types;
 pub mod udt_tests;
 pub mod vint;
 pub mod vint_fixed;
+#[cfg(test)]
+mod vint_length_corpus_audit_tests;
 
 // M3 Performance Optimization Modules
 pub mod optimized_complex_types;

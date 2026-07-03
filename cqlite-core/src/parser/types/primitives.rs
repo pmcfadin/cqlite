@@ -4,7 +4,14 @@
 //! uuid, timestamp/date/time, varint, decimal, duration, inet) as they appear
 //! in the Cassandra SSTable cell format.
 
-use super::super::vint::{parse_vint, parse_vint_length};
+// Issue #1623: text/blob/varint/inet length prefixes here are read back from
+// CQLite's own `serialize_cql_value` output, whose lengths are written with the
+// ZigZag encoder `encode_vint`. This is a self-consistent CQLite-internal pair,
+// so these length reads use `parse_vint_length_signed` (ZigZag), NOT the
+// unsigned `parse_vint_length` used for raw Cassandra structural fields. Real
+// Cassandra cell values are length-delimited by the cell header (decoded with
+// the unsigned reader in `storage/sstable/reader/parsing`) before reaching here.
+use super::super::vint::{parse_vint, parse_vint_length_signed};
 use crate::types::Value;
 use nom::{
     bytes::complete::take,
@@ -55,7 +62,7 @@ pub fn parse_double(input: &[u8]) -> IResult<&[u8], Value> {
 
 /// Parse text (length-prefixed UTF-8 string)
 pub fn parse_text(input: &[u8]) -> IResult<&[u8], Value> {
-    let (input, length) = parse_vint_length(input)?;
+    let (input, length) = parse_vint_length_signed(input)?;
     let (input, bytes) = take(length)(input)?;
     let text = String::from_utf8(bytes.to_vec()).map_err(|_| {
         nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
@@ -65,7 +72,7 @@ pub fn parse_text(input: &[u8]) -> IResult<&[u8], Value> {
 
 /// Parse blob (length-prefixed binary data)
 pub fn parse_blob(input: &[u8]) -> IResult<&[u8], Value> {
-    let (input, length) = parse_vint_length(input)?;
+    let (input, length) = parse_vint_length_signed(input)?;
     let (input, bytes) = take(length)(input)?;
     Ok((input, Value::Blob(bytes.to_vec())))
 }
@@ -102,7 +109,7 @@ pub fn parse_time(input: &[u8]) -> IResult<&[u8], Value> {
 
 /// Parse varint (variable-length integer)
 pub fn parse_varint(input: &[u8]) -> IResult<&[u8], Value> {
-    let (input, length) = parse_vint_length(input)?;
+    let (input, length) = parse_vint_length_signed(input)?;
     let (input, bytes) = take(length)(input)?;
     Ok((input, Value::Varint(bytes.to_vec())))
 }
@@ -153,7 +160,7 @@ pub fn parse_duration(input: &[u8]) -> IResult<&[u8], Value> {
 
 /// Parse inet address (4 or 16 bytes)
 pub fn parse_inet(input: &[u8]) -> IResult<&[u8], Value> {
-    let (input, length) = parse_vint_length(input)?;
+    let (input, length) = parse_vint_length_signed(input)?;
     let (input, bytes) = take(length)(input)?;
     Ok((input, Value::Inet(bytes.to_vec())))
 }
