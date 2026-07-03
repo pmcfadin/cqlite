@@ -20,7 +20,7 @@ import cqlite
 
 from conftest import (
     DATASETS,
-    SCHEMA_WIDE_ROWS,
+    SCHEMA_BASIC_TYPES,
     require_test_data,
 )
 
@@ -29,31 +29,56 @@ class TestStreamingGilRelease:
     """Issue #1441: streaming __next__ must release the GIL during its blocking
     buffer refill so other Python threads make progress."""
 
+    # The widest, most-scannable single-partition-ish fixture in the corpus
+    # (999 rows). Many rows keep the one-time per-stream setup GIL-release
+    # negligible next to the 999 per-row blocking refills, so the unmodified
+    # build reads ~0 for the metric below (GIL held the whole iteration).
+    _TABLE = "test_basic.simple_table"
+
+    # Per-attempt metric: the fraction of a single stream's wall-time during
+    # which the GIL was free for the concurrent spinner =
+    #     during / (rate_solo * dS)
+    # where ``rate_solo`` is the spinner's robustly-calibrated uncontended rate
+    # (max over sub-windows, so it is not underestimated when the spinner is
+    # briefly descheduled) and ``dS`` is the stream duration. It is a RATE
+    # RATIO, hence invariant to machine/CI load.
+    #
+    # A SINGLE attempt is noisy in both directions (the OS scheduler landing the
+    # spinner inside a given microsecond GIL-release window is luck; and the
+    # unmodified build has rare eval-breaker GIL releases at loop boundaries that
+    # occasionally spike one attempt). So neither max nor a single reading is
+    # robust. Instead we run ``_ATTEMPTS`` streams and COUNT how many clear a
+    # modest per-attempt bar ``_ATTEMPT_FLOOR`` — a bulk-distribution statistic.
+    # Measured (this machine, incl. under 4 saturating CPU hogs; warm cache):
+    #   * fixed build:     6-8 of 8 attempts clear 0.05
+    #   * unmodified main: 0-3 of 8 attempts clear 0.05 (spinner starved; only
+    #                       the odd eval-breaker release spikes an attempt)
+    # Requiring >= 5 sits between the two with margin on both sides.
+    _ATTEMPTS = 8
+    _ATTEMPT_FLOOR = 0.05
+    _MIN_ATTEMPTS_CLEARING = 5
+
     def test_streaming_next_releases_gil(self):
-        """A concurrent Python thread makes progress ONLY while the streaming
-        iterator's ``__next__`` has the GIL released.
+        """A concurrent Python thread runs during streaming iteration ONLY when
+        ``__next__`` releases the GIL.
 
-        Design (why this discriminates the bug):
+        Why this discriminates the bug (and is not flaky):
 
-        * Python's periodic thread switch is disabled for the test window via
+        * Python's periodic thread switch is disabled for the window via
           ``sys.setswitchinterval(1000)``. With voluntary preemption off, the
-          *only* way the busy-spin thread (B) can run while the streaming thread
-          (A) is executing is if A **explicitly releases the GIL**. B still
-          yields cooperatively (``time.sleep(0)`` always drops the GIL), so A is
-          never starved.
-        * Thread A iterates a wide table with ``buffer_size=1`` so every row is a
-          separate blocking channel refill (``block_on(next_async())``).
-        * On unmodified ``main``, ``__next__`` holds the GIL across that
-          ``block_on``, so B is frozen for the whole iteration → its counter
-          barely moves past its pre-iteration baseline.
-        * With the fix, each refill runs inside ``py.allow_threads(...)``; B runs
-          during every refill and its counter advances far past the floor.
-
-        The assertion measures B's progress *delta* strictly between A's first
-        and last row so B's small pre-start head start does not leak in.
+          busy-spin thread (B) can run only when some thread *explicitly* hands
+          off the GIL. B still yields cooperatively (``time.sleep(0)`` always
+          drops the GIL), so the streaming thread never starves.
+        * A single stream over ``simple_table`` (999 rows) with ``buffer_size=1``
+          makes every row a separate blocking channel refill
+          (``block_on(next_async())``); the one-time query setup is negligible
+          next to 999 refills, so on the unmodified build B is starved for the
+          whole iteration.
+        * Robustness comes from the count-of-attempts-clearing statistic (see
+          the class constants), not from a single fragile reading.
         """
         # Fail loudly (not skip) under strict fixture mode (issue #1230).
-        require_test_data(SCHEMA_WIDE_ROWS)
+        require_test_data(SCHEMA_BASIC_TYPES)
 
         # No-GIL (free-threaded) builds have no GIL to release; the concurrency
         # claim under test is GIL-specific.
@@ -61,84 +86,77 @@ class TestStreamingGilRelease:
             pytest.skip("free-threaded build: no GIL to release")
 
         counter = {"n": 0}
-        rows = {"n": 0, "error": None}
-        baseline = {"n": None}
         stop = threading.Event()
-        a_started = threading.Event()
-        a_done = threading.Event()
 
         def spin():
-            # Cooperative busy loop. sleep(0) always releases the GIL, so A is
-            # never blocked by B; but with the switch interval raised, B only
-            # gets scheduled when SOME thread hands off the GIL.
+            # Cooperative busy loop. sleep(0) always releases the GIL, so the
+            # streaming thread is never blocked by B; but with the switch
+            # interval raised, B only advances while some thread hands off the
+            # GIL — i.e. while ``__next__`` is inside ``py.allow_threads(...)``.
             while not stop.is_set():
                 counter["n"] += 1
                 time.sleep(0)
 
-        def iterate():
-            try:
-                with cqlite.open(DATASETS, schema=SCHEMA_WIDE_ROWS) as database:
-                    # wide_partition_table is the largest wide-row fixture.
-                    # buffer_size=1 forces one blocking refill per row.
-                    config = cqlite.StreamingConfig(buffer_size=1)
-                    n = 0
-                    for _row in database.execute_streaming(
-                        "SELECT * FROM test_wide_rows.wide_partition_table",
-                        config=config,
-                    ):
-                        if n == 0:
-                            # Snapshot B's counter at the first row, then signal:
-                            # everything after this is attributable to GIL state
-                            # during refills, not to B's pre-start head start.
-                            baseline["n"] = counter["n"]
-                            a_started.set()
-                        n += 1
-                    rows["n"] = n
-            except Exception as exc:  # noqa: BLE001 - surfaced in main thread
-                rows["error"] = exc
-            finally:
-                a_started.set()
-                a_done.set()
+        def stream_once(database):
+            config = cqlite.StreamingConfig(buffer_size=1)
+            c_start = counter["n"]
+            t_start = time.perf_counter()
+            rows = 0
+            for _row in database.execute_streaming(
+                f"SELECT * FROM {self._TABLE}", config=config
+            ):
+                rows += 1
+            dS = time.perf_counter() - t_start
+            during = counter["n"] - c_start
+            return during, dS, rows
 
         old_interval = sys.getswitchinterval()
-        sys.setswitchinterval(1000)  # effectively disable periodic preemption
+        sys.setswitchinterval(1000)  # disable periodic preemption for the window
         b = threading.Thread(target=spin, daemon=True)
-        a = threading.Thread(target=iterate, daemon=True)
+        b.start()
+        fracs = []
+        rows_seen = 0
         try:
-            b.start()
-            a.start()
-            a.join(timeout=30)
-            after = counter["n"]
+            time.sleep(0.05)  # let B warm up and get scheduled
+
+            # Robust uncontended rate: MAX over sub-windows so a brief deschedule
+            # during calibration cannot underestimate it (which would inflate the
+            # fractions below and risk a false pass on the buggy build).
+            rate_solo = 0.0
+            for _ in range(5):
+                c0 = counter["n"]
+                t0 = time.perf_counter()
+                time.sleep(0.03)
+                rate_solo = max(
+                    rate_solo, (counter["n"] - c0) / (time.perf_counter() - t0)
+                )
+            assert rate_solo > 0, "spinner made no progress during calibration"
+
+            with cqlite.open(DATASETS, schema=SCHEMA_BASIC_TYPES) as database:
+                for _ in range(self._ATTEMPTS):
+                    during, dS, rows = stream_once(database)
+                    rows_seen = rows
+                    fracs.append(during / (rate_solo * dS) if dS > 0 else 0.0)
         finally:
             sys.setswitchinterval(old_interval)
             stop.set()
-
         b.join(timeout=5)
 
-        assert a_done.is_set(), "streaming iteration did not finish in time"
-        assert rows["error"] is None, f"streaming thread failed: {rows['error']}"
-        # Guard against a trivially-green run: A must have done real multi-refill
-        # blocking work for the concurrency claim to mean anything. A dropped or
-        # unfetched fixture would otherwise let B spin freely and pass vacuously.
-        assert rows["n"] > 1, (
-            f"streaming thread yielded {rows['n']} rows; need a multi-row wide "
-            "fixture for a meaningful GIL-release assertion"
+        # Guard against a trivially-green run: the stream must actually have
+        # yielded the large fixture. A dropped/unfetched Data.db would otherwise
+        # make the assertion meaningless.
+        assert rows_seen >= 900, (
+            f"streaming yielded only {rows_seen} rows; need the ~999-row "
+            f"{self._TABLE} fixture for a meaningful GIL-release assertion"
         )
-        assert baseline["n"] is not None, "did not capture B baseline at first row"
+        assert len(fracs) == self._ATTEMPTS, "not all streaming attempts ran"
 
-        # Progress B made strictly DURING A's blocking refills.
-        during = after - baseline["n"]
-
-        # Floor: generous vs CI flake, but far above the ~0 progress a
-        # GIL-starved B makes on unmodified main (where B is frozen across every
-        # refill). Empirically the fixed build advances B into the many
-        # thousands during the ~100-row iteration; unmodified main leaves it near
-        # zero.
-        floor = 500
-        assert during > floor, (
-            f"concurrent thread advanced only {during} increments during "
-            f"streaming (floor {floor}); GIL appears held across refill "
-            f"(baseline={baseline['n']}, after={after})"
+        clearing = sum(1 for f in fracs if f > self._ATTEMPT_FLOOR)
+        assert clearing >= self._MIN_ATTEMPTS_CLEARING, (
+            f"only {clearing}/{self._ATTEMPTS} streaming attempts let the "
+            f"concurrent thread run past {self._ATTEMPT_FLOOR} of the window "
+            f"(need >= {self._MIN_ATTEMPTS_CLEARING}); GIL appears held across "
+            f"the blocking refill. fracs={[round(f, 3) for f in fracs]}"
         )
 
 
