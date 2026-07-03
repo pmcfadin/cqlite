@@ -68,16 +68,25 @@ files are gitignored) so the corpus is present in a clean checkout.
 - **AND** the seeds are real-derived, small component bytes / strings
 
 ### Requirement: CI runs a bounded PR smoke lane and a nightly long-run, without touching the stable gate
-A dedicated fuzz workflow SHALL run every target for a short, bounded time on pull requests (so a PR
-can never hang on fuzzing) and for a long budget on a nightly schedule. The workflow SHALL install
-nightly Rust + cargo-fuzz and pass `-rss_limit_mb` and `-timeout` on every run; a crash SHALL fail the
-job and upload the reproducer as an artifact. This workflow SHALL be separate from
-`scripts/agent-gate.sh` and the stable CI so the gate remains on stable Rust and unaffected.
+A dedicated fuzz workflow SHALL run every CI-runnable target for a short, bounded time on pull requests
+(so a PR can never hang on fuzzing) and for a long budget on a nightly schedule. The workflow SHALL
+install nightly Rust + cargo-fuzz and pass `-rss_limit_mb` and `-timeout` on every run; a crash SHALL
+fail the job and upload the reproducer as an artifact. This workflow SHALL be separate from
+`scripts/agent-gate.sh` and the stable CI so the gate remains on stable Rust and unaffected. A target
+whose driver requires a fetched dataset fixture to exercise the real path (e.g. `fuzz_block_emit`, which
+needs a real `SSTableReader`) SHALL NOT be run in CI as a silent no-op that reports false-green
+coverage; such a target MAY be excluded from the CI matrix (while remaining a standing target runnable
+via the local smoke script) until its fixture is wired, with the exclusion documented and tracked.
 
 #### Scenario: PR smoke is bounded and isolated
 - **WHEN** a pull request touches the fuzz crate or parser sources
-- **THEN** each target runs for a bounded `-max_total_time` with `-rss_limit_mb`/`-timeout` set
+- **THEN** every CI-runnable target runs for a bounded `-max_total_time` with `-rss_limit_mb`/`-timeout` set
 - **AND** the stable agent gate / CI jobs run unchanged on stable Rust
+
+#### Scenario: A dataset-gated target does not report false-green CI coverage
+- **WHEN** a target's driver would no-op in CI because a required dataset fixture is absent
+- **THEN** that target is excluded from the CI matrix (not run as a silent always-green no-op)
+- **AND** it remains a standing target runnable locally with datasets, with the exclusion documented and tracked (e.g. re-add after the fixture/blocking fix lands)
 
 #### Scenario: A crash found in CI is surfaced, not swallowed
 - **WHEN** a fuzz run (PR smoke or nightly) discovers a crashing input

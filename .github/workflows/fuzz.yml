@@ -53,10 +53,17 @@ jobs:
       fail-fast: false
       matrix:
         # STATIC, literal target list (never derived from untrusted input).
+        # `fuzz_block_emit` is intentionally EXCLUDED from CI: it requires a real
+        # SSTable fixture via `CQLITE_DATASETS_ROOT` (its driver no-ops without
+        # one), and once datasets are fetched it deterministically reproduces the
+        # decimal length add-overflow crash (#1795) — so it would be
+        # red-by-construction until that fix lands. Running it here without
+        # datasets would report false-green coverage. It remains a standing
+        # target exercised by `fuzz/smoke.sh` locally; re-add it to this matrix
+        # (with a dataset fetch) after #1795 is fixed.
         target:
           - fuzz_vint
           - fuzz_value_decode
-          - fuzz_block_emit
           - fuzz_bti
           - fuzz_schema_parse
     steps:
@@ -71,13 +78,6 @@ jobs:
 
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
-
-      # NOTE: this lane does not fetch test datasets, so `fuzz_block_emit` runs
-      # as a never-panic no-op here (its driver returns Err without a
-      # `CQLITE_DATASETS_ROOT` fixture). The full block-emit path is exercised by
-      # the local `fuzz/smoke.sh` with datasets present; wiring dataset-fetch into
-      # this lane is deferred (see the block-emit overflow finding filed off
-      # issue #1614).
 
       - name: Run bounded fuzz smoke
         # matrix.target is a trusted static literal, but pass it via a quoted env
@@ -109,10 +109,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # `fuzz_block_emit` excluded from CI — see the pr-smoke matrix comment
+        # (needs datasets + red-by-construction on #1795; re-add after the fix).
         target:
           - fuzz_vint
           - fuzz_value_decode
-          - fuzz_block_emit
           - fuzz_bti
           - fuzz_schema_parse
     steps:
@@ -127,13 +128,6 @@ jobs:
 
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
-
-      # NOTE: this lane does not fetch test datasets, so `fuzz_block_emit` runs
-      # as a never-panic no-op here (its driver returns Err without a
-      # `CQLITE_DATASETS_ROOT` fixture). The full block-emit path is exercised by
-      # the local `fuzz/smoke.sh` with datasets present; wiring dataset-fetch into
-      # this lane is deferred (see the block-emit overflow finding filed off
-      # issue #1614).
 
       - name: Run long fuzz budget
         env:
