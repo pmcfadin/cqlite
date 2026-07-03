@@ -28,8 +28,9 @@ mod integrity;
 mod key_digest;
 pub(crate) mod parsing; // Needs to be accessible from row_cell_state_machine
 mod partition_lookup;
+// sync-fallback registry-schema pre-resolution (issue #1692)
 #[cfg(feature = "state_machine")]
-mod registry_schema; // sync-fallback registry-schema pre-resolution (issue #1692)
+mod registry_schema;
 // Windowed streaming-scan driver (issue #1143); `pub` ONLY under non-default
 // `scan-offload-probe` so the #1143 guard reaches its probe, else private.
 #[cfg(not(feature = "scan-offload-probe"))]
