@@ -198,7 +198,11 @@ mod tests {
         let addresses: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
         // Exactly one build ran despite N concurrent first callers.
-        assert_eq!(BUILDS.load(Ordering::SeqCst), 1, "build must run exactly once");
+        assert_eq!(
+            BUILDS.load(Ordering::SeqCst),
+            1,
+            "build must run exactly once"
+        );
         // Every caller observed the same &'static value.
         assert!(
             addresses.windows(2).all(|w| w[0] == w[1]),
