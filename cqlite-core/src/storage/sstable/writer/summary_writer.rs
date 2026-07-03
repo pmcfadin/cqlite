@@ -201,8 +201,20 @@ impl SummaryWriter {
             self.first_key = Some(key_bytes.clone());
         }
 
-        // Track actual last key of the SSTable (updated for every partition)
-        self.last_key = Some(key_bytes.clone());
+        // Track the last key (updated per partition, but only the FINAL value is
+        // serialized in `finish`). A fresh clone per call allocates N buffers for N
+        // partitions and discards all but one (perf audit S6, issue #1683). The
+        // borrowed `&DecoratedKey` cannot be held across calls, so reuse the single
+        // existing buffer in place: `clear` keeps capacity, `extend_from_slice`
+        // refills — a constant number of allocations for N partitions instead of N.
+        // The final serialized bytes are byte-identical to the per-partition clone.
+        match &mut self.last_key {
+            Some(buf) => {
+                buf.clear();
+                buf.extend_from_slice(key_bytes);
+            }
+            None => self.last_key = Some(key_bytes.clone()),
+        }
 
         // Count every partition for size_at_full_sampling.
         self.total_partition_count = self.total_partition_count.saturating_add(1);
