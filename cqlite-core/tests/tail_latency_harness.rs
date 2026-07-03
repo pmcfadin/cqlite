@@ -85,6 +85,70 @@ fn report_ratios_and_json_shape() {
     }
 }
 
+#[test]
+fn append_ledger_writes_one_json_line_with_required_keys() {
+    // Exercises the persisted-ledger surface (spec R4) without a dataset: build a
+    // report, append it twice to a temp ledger, and assert each append is exactly
+    // one JSON-lines record carrying ts + commit + both stat blocks + ratios.
+    let report = harness::HarnessReport::new(
+        harness::TailStats {
+            p50: 100,
+            p99: 400,
+            p999: 800,
+        },
+        harness::TailStats {
+            p50: 90,
+            p99: 100,
+            p999: 150,
+        },
+    );
+
+    let dir = tempfile::TempDir::new().expect("temp dir for ledger");
+    let path = dir.path().join("tail-latency-history.jsonl");
+
+    // GIT_COMMIT override keeps the record deterministic (no reliance on a repo).
+    std::env::set_var("GIT_COMMIT", "deadbeefcafef00d");
+    harness::append_ledger(&path, &report).expect("append ledger record 1");
+    harness::append_ledger(&path, &report).expect("append ledger record 2");
+    std::env::remove_var("GIT_COMMIT");
+
+    let contents = std::fs::read_to_string(&path).expect("read ledger");
+    let lines: Vec<&str> = contents.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "expected 2 JSON-lines records, got: {contents}"
+    );
+
+    // Each line is a standalone JSON object with the required keys.
+    for line in &lines {
+        let v: serde_json::Value = serde_json::from_str(line).expect("record is valid JSON");
+        assert!(v.get("ts").and_then(|t| t.as_u64()).is_some(), "ts: {line}");
+        assert_eq!(
+            v.get("commit").and_then(|c| c.as_str()),
+            Some("deadbeefcafef00d"),
+            "commit: {line}"
+        );
+        for key in ["mixed", "scan_free"] {
+            let block = v
+                .get(key)
+                .unwrap_or_else(|| panic!("missing {key}: {line}"));
+            for stat in ["p50", "p99", "p999"] {
+                assert!(
+                    block.get(stat).and_then(|s| s.as_u64()).is_some(),
+                    "{key}.{stat}: {line}"
+                );
+            }
+        }
+        for ratio in ["p99_over_p50", "p99_mixed_over_scan_free"] {
+            assert!(
+                v.get(ratio).and_then(|r| r.as_f64()).is_some(),
+                "{ratio}: {line}"
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Dataset tests (require cli-helpers + the present BIG fixture)
 // ---------------------------------------------------------------------------
