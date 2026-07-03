@@ -12,10 +12,15 @@ artifacts that drive the recursive-improvement loop:
 
   outputs:
     target/profiling/report.json     machine-readable, for tooling/agents
-    target/profiling/report.md       human-readable ranked bottleneck table
-    target/profiling/history.jsonl   append-only ledger (one line per run, with
-                                     git revision) so improvement across
-                                     iterations is auditable
+    target/profiling/report.md       human-readable ranked bottleneck table +
+                                     a longitudinal per-metric history view
+    target/profiling/history.jsonl   the unified append-only ledger (Issue #1566,
+                                     Epic A / A5): one JSON object PER METRIC per
+                                     run, schema {ts, commit, bench, metric, value,
+                                     unit}. The A-series harness benches append to
+                                     this same file/schema via benches/bench_ledger,
+                                     so criterion medians, bench percentiles, and the
+                                     cold-open/memory gauges all live in one ledger.
 
 Usage:
     scripts/profile_report.py [--criterion-dir target/criterion]
@@ -48,6 +53,138 @@ def _git_rev():
         return out.stdout.strip()
     except Exception:
         return "unknown"
+
+
+def _git_commit():
+    """Full HEAD SHA for the ledger `commit` field, matching the Rust bench_ledger
+    writer (which uses `git rev-parse HEAD`) so the two sources group together."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        )
+        return out.stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+# Unified ledger schema (Issue #1566): one JSON object per line, one record per
+# metric. Shared with the Rust `benches/bench_ledger` module.
+LEDGER_FIELDS = ("ts", "commit", "bench", "metric", "value", "unit")
+
+
+def build_ledger_records(report):
+    """Flatten a report into unified per-metric ledger records: one `median_ns`
+    record per criterion bench and one `peak_heap_bytes` record when heap data
+    exists. All records in a run share the run's `ts` + `commit`."""
+    ts = int(
+        datetime.datetime.now(datetime.timezone.utc).timestamp()
+    )
+    commit = _git_commit()
+    records = []
+    for b in report["benches"]:
+        records.append(
+            {
+                "ts": ts,
+                "commit": commit,
+                "bench": b["id"],
+                "metric": "median_ns",
+                "value": round(b["median_ns"]),
+                "unit": "ns",
+            }
+        )
+    heap = report.get("heap")
+    if heap and heap.get("peak_bytes") is not None:
+        records.append(
+            {
+                "ts": ts,
+                "commit": commit,
+                "bench": "heap",
+                "metric": "peak_heap_bytes",
+                "value": heap["peak_bytes"],
+                "unit": "bytes",
+            }
+        )
+    return records
+
+
+def append_ledger(path, records):
+    """Append one JSON line per record to the unified ledger (best-effort: a write
+    failure is logged and does not abort the report)."""
+    try:
+        with open(path, "a") as fh:
+            for rec in records:
+                fh.write(json.dumps(rec) + "\n")
+    except OSError as e:
+        print(f"warning: could not append ledger {path}: {e}", file=sys.stderr)
+
+
+def read_ledger(path):
+    """Read the unified ledger back, returning the valid unified records (schema
+    {ts,commit,bench,metric,value,unit}). Malformed and legacy-schema lines (the
+    pre-A5 run-summary `{ts,rev,benches,...}` lines) are skipped, so a report over a
+    ledger that predates the migration still renders."""
+    records = []
+    try:
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                if all(k in obj for k in LEDGER_FIELDS):
+                    records.append(obj)
+    except OSError:
+        return []
+    return records
+
+
+def _latest_and_prev(group):
+    """Given a metric's records sorted ascending by ts, return (latest_record,
+    prev_record) where prev is the most recent record from a DIFFERENT commit than
+    the latest (or None). Grouping the delta by *distinct commit* (not by row) means
+    re-running the same commit does not show a spurious 0% delta against itself."""
+    if not group:
+        return None, None
+    latest = group[-1]
+    latest_commit = latest.get("commit")
+    for rec in reversed(group[:-1]):
+        if rec.get("commit") != latest_commit:
+            return latest, rec
+    return latest, None
+
+
+def summarize_history(records):
+    """Group ledger records by (bench, metric); for each, the latest value and the
+    delta vs the previous distinct commit. Returns a list of dicts sorted by id."""
+    groups = {}
+    for rec in records:
+        key = (rec["bench"], rec["metric"])
+        groups.setdefault(key, []).append(rec)
+    rows = []
+    for (bench, metric), recs in groups.items():
+        recs.sort(key=lambda r: r.get("ts", 0))
+        latest, prev = _latest_and_prev(recs)
+        row = {
+            "bench": bench,
+            "metric": metric,
+            "unit": latest.get("unit", ""),
+            "value": latest.get("value"),
+            "commit": latest.get("commit", "unknown"),
+            "prev_value": prev.get("value") if prev else None,
+        }
+        pv = row["prev_value"]
+        cv = row["value"]
+        if pv not in (None, 0) and isinstance(cv, (int, float)):
+            row["delta_pct"] = (cv / pv - 1.0) * 100.0
+        rows.append(row)
+    rows.sort(key=lambda r: (r["bench"], r["metric"]))
+    return rows
 
 
 def _throughput_elements(benchmark_json):
@@ -118,7 +255,50 @@ def fmt_ns(ns):
     return f"{ns:.0f} ns"
 
 
-def render_markdown(report):
+def _fmt_history_value(value, unit):
+    """Human-readable value for the history table, unit-aware."""
+    if not isinstance(value, (int, float)):
+        return "—"
+    if unit == "ns":
+        return fmt_ns(value)
+    if unit == "bytes":
+        return f"{value / 2**20:.1f} MiB"
+    if unit == "ratio":
+        return f"{value:.3f}"
+    return f"{value:g}"
+
+
+def render_history(history_rows):
+    """Render the longitudinal per-metric view: latest value + delta vs the previous
+    distinct commit (Issue #1566). Reads the whole unified ledger back."""
+    lines = [
+        "## History (latest value + delta vs previous commit)",
+        "",
+    ]
+    if not history_rows:
+        lines += [
+            "- no history yet — the unified ledger "
+            "(`target/profiling/history.jsonl`) is empty.",
+            "",
+        ]
+        return lines
+    lines += [
+        "| bench | metric | latest | Δ vs prev commit | unit | commit |",
+        "|-------|--------|--------|------------------|------|--------|",
+    ]
+    for r in history_rows:
+        delta = f"{r['delta_pct']:+.1f}%" if "delta_pct" in r else "—"
+        commit = (r.get("commit") or "unknown")[:12]
+        lines.append(
+            f"| {r['bench']} | {r['metric']} | "
+            f"{_fmt_history_value(r['value'], r['unit'])} | {delta} | "
+            f"{r['unit']} | `{commit}` |"
+        )
+    lines.append("")
+    return lines
+
+
+def render_markdown(report, history_rows=None):
     lines = [
         "# CQLite profiling report",
         "",
@@ -154,6 +334,9 @@ def render_markdown(report):
         ]
     else:
         lines.append("- no heap data — run `./scripts/profile.sh heap` first")
+
+    lines.append("")
+    lines += render_history(history_rows or [])
 
     lines += [
         "",
@@ -199,29 +382,28 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     json_path = os.path.join(args.out_dir, "report.json")
     md_path = os.path.join(args.out_dir, "report.md")
+    ledger_path = os.path.join(args.out_dir, "history.jsonl")
+
     with open(json_path, "w") as fh:
         json.dump(report, fh, indent=2)
-    with open(md_path, "w") as fh:
-        fh.write(render_markdown(report))
 
-    # Append-only ledger: one compact line per run so successive iterations of
-    # the improvement loop stay comparable even after baselines are overwritten.
-    history_line = {
-        "ts": report["generated_at"],
-        "rev": report["git_rev"],
-        "benches": {
-            b["id"]: round(b["median_ns"]) for b in benches
-        },
-        "peak_heap_bytes": heap.get("peak_bytes") if heap else None,
-    }
-    with open(os.path.join(args.out_dir, "history.jsonl"), "a") as fh:
-        fh.write(json.dumps(history_line) + "\n")
+    # Unified append-only ledger (Issue #1566): one JSON object PER METRIC in the
+    # {ts, commit, bench, metric, value, unit} schema, the same file+schema the
+    # A-series harness benches append to via benches/bench_ledger. Append first,
+    # then read the whole ledger back so the report's longitudinal view includes
+    # this run.
+    append_ledger(ledger_path, build_ledger_records(report))
+    history_rows = summarize_history(read_ledger(ledger_path))
+
+    md = render_markdown(report, history_rows)
+    with open(md_path, "w") as fh:
+        fh.write(md)
 
     print(f"wrote {json_path}")
     print(f"wrote {md_path}")
-    print(f"appended {os.path.join(args.out_dir, 'history.jsonl')}")
+    print(f"appended {ledger_path}")
     print()
-    print(render_markdown(report))
+    print(md)
     return 0
 
 
