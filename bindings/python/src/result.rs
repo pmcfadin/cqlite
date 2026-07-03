@@ -257,6 +257,35 @@ fn build_row_shape(py: Python<'_>, columns: &[cqlite_core::query::result::Column
     }
 }
 
+/// Build the shared row shape from a `QueryRow`'s value keys.
+///
+/// Used by the streaming path when `metadata.columns` is empty (schema-less
+/// `SELECT *`): core's `get_result_columns()` can return no columns even though
+/// the streamed rows carry values. Keys are sorted alphabetically to mirror the
+/// materialized/core ordering (see `select_executor::execute`, issue #129/#140,
+/// which populates `metadata.columns` from the first row's sorted `values`
+/// keys), so streaming output matches materialized output.
+fn build_row_shape_from_row_keys(
+    py: Python<'_>,
+    row: &cqlite_core::query::result::QueryRow,
+) -> RowShape {
+    let mut names: Vec<&str> = row.values.keys().map(|k| k.as_ref()).collect();
+    names.sort_unstable();
+    let keys: Arc<[Py<PyString>]> = names
+        .iter()
+        .map(|n| PyString::new(py, n).unbind())
+        .collect();
+    let index: HashMap<String, usize> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| ((*n).to_string(), i))
+        .collect();
+    RowShape {
+        keys,
+        index: Arc::new(index),
+    }
+}
+
 /// A single row from query results with dict-like access.
 ///
 /// Supports both dict-style indexing and method access:
@@ -562,10 +591,17 @@ impl StreamingIterator {
     /// Return the shared row shape for this stream, building it once from the
     /// iterator's `metadata.columns` (the authoritative SELECT order) and
     /// caching it for every subsequent row (issue #1445).
+    ///
+    /// When `metadata.columns` is empty — core's streaming `get_result_columns()`
+    /// returns no columns for schema-less `SELECT *` even though the streamed rows
+    /// carry values — the shape is instead built from `first_row`'s value keys
+    /// (sorted, matching the materialized path) so rows don't lose all their
+    /// values (issue #1445 streaming regression).
     fn row_shape(
         &self,
         py: Python<'_>,
         iter: &cqlite_core::query::result::QueryResultIterator,
+        first_row: &cqlite_core::query::result::QueryRow,
     ) -> PyResult<RowShape> {
         let mut slot = self
             .row_shape
@@ -574,7 +610,11 @@ impl StreamingIterator {
         if let Some(shape) = slot.as_ref() {
             return Ok(shape.clone());
         }
-        let shape = build_row_shape(py, &iter.metadata.columns);
+        let shape = if iter.metadata.columns.is_empty() {
+            build_row_shape_from_row_keys(py, first_row)
+        } else {
+            build_row_shape(py, &iter.metadata.columns)
+        };
         *slot = Some(shape.clone());
         Ok(shape)
     }
@@ -630,7 +670,7 @@ impl StreamingIterator {
                 // Convert core row to Python Row, sharing the per-stream ordered
                 // shape (built once) so column names are interned per stream, not
                 // per row, and columns stay in SELECT order (issue #1445).
-                let shape = self.row_shape(py, &iter)?;
+                let shape = self.row_shape(py, &iter, &row)?;
                 let py_row = Row::from_core(py, &row, shape)?;
                 Py::new(py, py_row)
             }

@@ -13,6 +13,8 @@ import pytest
 
 import cqlite
 
+from conftest import DATASETS, skip_if_no_datasets
+
 
 class TestExecuteImports:
     """Test that execute-related types are importable."""
@@ -313,3 +315,69 @@ class TestRowSelectOrder:
         with pytest.raises(KeyError):
             _ = row["definitely_not_a_column"]
         assert len(row) == len(result.columns)
+
+
+class TestSchemaLessStreamingSelectOrder:
+    """Schema-less streaming SELECT * must not drop values (issue #1445).
+
+    Regression: in the streaming path, core's ``get_result_columns()`` can
+    return an EMPTY column list for a schema-less ``SELECT *`` even though the
+    streamed rows carry values. The per-stream ``RowShape`` was built only from
+    those (empty) metadata columns, so every streamed row lost ALL its values
+    and every column lookup failed. The fix builds the shape from the first
+    row's value keys (sorted, mirroring the materialized/core path) when
+    metadata columns are empty.
+    """
+
+    def test_schemaless_streaming_rows_nonempty_and_ordered(self):
+        """Streamed schema-less rows expose columns/values in sorted order."""
+        skip_if_no_datasets()
+        # Open WITHOUT a schema so core has no authoritative column metadata.
+        with cqlite.open(DATASETS) as db:
+            rows = list(
+                db.execute_streaming(
+                    "SELECT * FROM test_basic.simple_table LIMIT 5"
+                )
+            )
+            assert rows, (
+                "fixture present but streaming returned 0 rows - "
+                "datasets unreadable/empty"
+            )
+            for row in rows:
+                keys = list(row.keys())
+                # The regression made every row expose ZERO columns.
+                assert keys, "schema-less streamed row lost all its columns"
+                # Materialized/core ordering for schema-less SELECT * is the
+                # first row's value keys sorted alphabetically (issue #129).
+                assert keys == sorted(keys), (
+                    "streamed columns must be in sorted (materialized) order"
+                )
+                # Every advertised column must be a working lookup with a value
+                # (at least one non-None, i.e. values were actually surfaced).
+                assert [k for k, _ in row.items()] == keys
+                assert list(row.to_dict().keys()) == keys
+                assert list(row.values()) == [row[k] for k in keys]
+                assert any(row[k] is not None for k in keys), (
+                    "schema-less streamed row surfaced no values"
+                )
+
+    def test_schemaless_streaming_matches_materialized(self):
+        """Streaming and materialized schema-less SELECT * agree column-wise."""
+        skip_if_no_datasets()
+        with cqlite.open(DATASETS) as db:
+            materialized = db.execute(
+                "SELECT * FROM test_basic.simple_table LIMIT 5"
+            )
+            assert len(materialized) > 0
+            mat_keys = list(materialized.rows[0].keys())
+
+        with cqlite.open(DATASETS) as db:
+            streamed = list(
+                db.execute_streaming(
+                    "SELECT * FROM test_basic.simple_table LIMIT 5"
+                )
+            )
+        assert streamed, "streaming returned 0 rows"
+        assert list(streamed[0].keys()) == mat_keys, (
+            "streaming column order must match materialized output"
+        )
