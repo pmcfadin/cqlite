@@ -559,10 +559,32 @@ impl WriteEngine {
         // stays empty.
         let mut memtable = Memtable::new();
         let mut recovered = 0usize;
+        // DEFER the first memtable-application error instead of aborting the scan
+        // (issue #1661, roborev). The pre-streaming flow scanned the ENTIRE WAL
+        // first (`replay()`), ran the lossy-recovery preserve/reset, and only THEN
+        // applied mutations — so a schema/key-conversion or insert failure on an
+        // earlier valid mutation could never prevent a LATER corrupt tail from
+        // being detected, preserved aside, and reset. If the streaming callback
+        // returned that error via `?`, replay would stop early and skip
+        // preserve/reset, silently changing the #1390/#1391 recovery semantics
+        // this refactor must preserve. So we record the FIRST apply error, stop
+        // applying (the engine will not be constructed), but keep scanning for the
+        // full RecoveryReport; the error is surfaced only after preserve/reset
+        // below. The streaming memory win is unaffected — no whole-log Vec.
+        let mut apply_error: Option<Error> = None;
         let wal_recovery = wal.replay_each(|mutation| {
-            let decorated_key = mutation.decorated_key(&config.schema)?;
-            memtable.insert_with_key(decorated_key, mutation)?;
-            recovered += 1;
+            if apply_error.is_some() {
+                // An earlier mutation already failed; keep scanning to reach any
+                // later corruption but skip further application.
+                return Ok(());
+            }
+            match mutation.decorated_key(&config.schema) {
+                Ok(decorated_key) => match memtable.insert_with_key(decorated_key, mutation) {
+                    Ok(()) => recovered += 1,
+                    Err(e) => apply_error = Some(e),
+                },
+                Err(e) => apply_error = Some(e),
+            }
             Ok(())
         })?;
 
@@ -598,6 +620,15 @@ impl WriteEngine {
                 preserved,
                 reset_to,
             );
+        }
+
+        // Surface any deferred memtable-application error now — AFTER the
+        // lossy-recovery preserve/reset above has run (issue #1661, roborev).
+        // This restores the pre-streaming ordering: on-disk WAL corruption is
+        // preserved aside and the live WAL is reset to its valid prefix before
+        // engine construction fails on the apply error.
+        if let Some(e) = apply_error {
+            return Err(e);
         }
 
         if recovered > 0 {
@@ -1954,6 +1985,95 @@ mod tests {
             count_corrupt_aside(&config.wal_dir),
             1,
             "flush must NOT destroy the preserved corrupt WAL segment"
+        );
+    }
+
+    /// Issue #1661 (roborev): a memtable-application error on an EARLIER valid
+    /// mutation MUST NOT abort the WAL scan before a LATER corrupt tail can be
+    /// detected, preserved aside, and reset. The streaming refactor applies each
+    /// mutation as it is scanned; if that apply error propagated immediately, the
+    /// #1390/#1391 lossy-recovery preserve/reset would be skipped — a forbidden
+    /// behavior change. Build a WAL of [A(applies-fail), B(corrupt)]: A is a
+    /// CRC-valid, decodable mutation whose partition key value (`Text`) cannot be
+    /// encoded against the `int` schema, so `decorated_key` fails at apply time;
+    /// B is bit-flipped so replay reports the recovery as lossy. `WriteEngine::new`
+    /// must return the deferred apply error, but ONLY after the corrupt segment was
+    /// preserved aside and the live WAL reset to its valid prefix [A].
+    #[test]
+    fn test_write_engine_apply_error_still_preserves_and_resets_corrupt_tail() {
+        use crate::storage::write_engine::mutation::{CellOperation, PartitionKey, TableId};
+        use crate::types::Value;
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema(); // partition key `id` is `int`
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+
+        // Seed A = a mutation whose partition key is Text (mismatches the int
+        // schema) so it serializes/CRCs/deserializes fine but fails at apply
+        // (`decorated_key`); then B = a valid mutation we will corrupt.
+        std::fs::create_dir_all(&config.wal_dir).unwrap();
+        let end_a = {
+            let mut wal = WriteAheadLog::create(&config.wal_dir).unwrap();
+            let bad = Mutation::new(
+                TableId::new("test_ks", "test_table"),
+                PartitionKey::single("id", Value::Text("not-an-int".to_string())),
+                None,
+                vec![CellOperation::Write {
+                    column: "name".to_string(),
+                    value: Value::Text("A".to_string()),
+                }],
+                1_000_000,
+                None,
+            );
+            wal.append(&bad).unwrap();
+            wal.sync().unwrap();
+            let end_a = wal.size();
+            wal.append(&create_test_mutation(2, "B", 2_000_000)).unwrap();
+            wal.sync().unwrap();
+            end_a
+        };
+
+        // Bit-flip B's first payload byte (just past its 8-byte header) → CRC
+        // mismatch → mid-stream corruption.
+        let wal_file = config.wal_dir.join(WriteAheadLog::WAL_FILENAME);
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&wal_file)
+                .unwrap();
+            f.seek(SeekFrom::Start(end_a + 8)).unwrap();
+            let mut byte = [0u8; 1];
+            f.read_exact(&mut byte).unwrap();
+            f.seek(SeekFrom::Start(end_a + 8)).unwrap();
+            f.write_all(&[byte[0] ^ 0x01]).unwrap();
+            f.sync_all().unwrap();
+        }
+
+        // Opening must FAIL on the deferred apply error...
+        let result = WriteEngine::new(config.clone());
+        assert!(
+            result.is_err(),
+            "engine open must surface the deferred memtable-application error"
+        );
+
+        // ...but ONLY after the lossy-recovery preserve/reset ran. Pre-fix, the
+        // apply error aborted the scan before B's corruption was seen, so neither
+        // of these held.
+        assert_eq!(
+            count_corrupt_aside(&config.wal_dir),
+            1,
+            "corrupt segment must be preserved aside even though an earlier apply failed"
+        );
+        assert_eq!(
+            std::fs::metadata(&wal_file).unwrap().len(),
+            end_a,
+            "live WAL must be reset to its valid prefix [A] before the apply error surfaces"
         );
     }
 
