@@ -3438,21 +3438,22 @@ The remaining gap is Cassandra’s unflushed memtable tail. The proposed spike e
 [Section titled “Architecture diagram”](#architecture-diagram)
 
 ```
-flowchart LR
+flowchart TB
   subgraph OLTP["Cassandra OLTP Plane"]
     direction TB
-    OApp["Application reads/writes"] --> OStore["CommitLog + Memtable"] --> Lifecycle["Flush, compaction, repair"]
+    OApp["Application reads/writes"] --> OStore["CommitLog +<br/>Memtable"] --> Lifecycle["Flush, compaction, repair"]
   end
 
   subgraph Foundation["SSTable Foundation"]
     direction TB
-    SSTables["Data.db / Index.db / Summary.db / Statistics.db"]
-    Tail["Optional fresh tail gen-*"]
+    SSTables["Data.db / Index.db<br/>Summary.db / Statistics.db"]
+    Tail["Optional fresh<br/>tail gen-*"]
+    SSTables ~~~ Tail
   end
 
   subgraph OLAP["Trino / Iceberg OLAP Plane"]
     direction TB
-    AApp["Application analytical reads"] --> Services["Trino / Arrow Flight / Iceberg materializer"] --> CQLite["CQLite SSTable reader"]
+    AApp["Application analytical reads"] --> Services["Trino / Arrow Flight<br/>Iceberg materializer"] --> CQLite["CQLite SSTable reader"]
   end
 
   Lifecycle -->|flush creates durable SSTables| SSTables
@@ -3466,21 +3467,22 @@ Cassandra owns OLTP reads, writes, and lifecycle. OLAP applications enter throug
 Mermaid source for the architecture diagram
 
 ```
-flowchart LR
+flowchart TB
   subgraph OLTP["Cassandra OLTP Plane"]
     direction TB
-    OApp["Application reads/writes"] --> OStore["CommitLog + Memtable"] --> Lifecycle["Flush, compaction, repair"]
+    OApp["Application reads/writes"] --> OStore["CommitLog +<br/>Memtable"] --> Lifecycle["Flush, compaction, repair"]
   end
 
   subgraph Foundation["SSTable Foundation"]
     direction TB
-    SSTables["Data.db / Index.db / Summary.db / Statistics.db"]
-    Tail["Optional fresh tail gen-*"]
+    SSTables["Data.db / Index.db<br/>Summary.db / Statistics.db"]
+    Tail["Optional fresh<br/>tail gen-*"]
+    SSTables ~~~ Tail
   end
 
   subgraph OLAP["Trino / Iceberg OLAP Plane"]
     direction TB
-    AApp["Application analytical reads"] --> Services["Trino / Arrow Flight / Iceberg materializer"] --> CQLite["CQLite SSTable reader"]
+    AApp["Application analytical reads"] --> Services["Trino / Arrow Flight<br/>Iceberg materializer"] --> CQLite["CQLite SSTable reader"]
   end
 
   Lifecycle -->|flush creates durable SSTables| SSTables
@@ -3496,28 +3498,31 @@ flowchart LR
 ```
 flowchart TB
   subgraph Cold["Cold path"]
-    direction LR
-    SSTables["Flushed SSTables"] --> ColdCQLite["CQLite reader"]
+    direction TB
+    SSTables["Flushed<br/>SSTables"] --> ColdCQLite["CQLite reader"]
     ColdCQLite --> Flight["Arrow Flight"]
     Flight --> Trino["Trino"]
-    ColdCQLite --> Iceberg["Iceberg materializer"]
+    ColdCQLite --> Iceberg["Iceberg<br/>materializer"]
   end
 
   subgraph Fresh["Fresh tail path"]
-    direction LR
+    direction TB
     Write["Cassandra write"] --> Memtable["CqliteMemtable"]
-    Memtable --> TailGen["Tail gen-* SSTable"]
-    TailGen --> Merge["CQLite k-way LWW merge"]
+    Memtable --> TailGen["Tail gen-*<br/>SSTable"]
+    TailGen --> Merge["CQLite k-way<br/>LWW merge"]
     Merge --> Query["Flight / Trino query"]
   end
 
   subgraph Research["Research path"]
-    direction LR
-    Notes["Raw research notes"] --> Synthesis["Synthesis report"]
+    direction TB
+    Notes["Raw research<br/>notes"] --> Synthesis["Synthesis report"]
     Synthesis --> Proposal["Official proposal"]
-    Proposal --> Tasks["Implementation tasks"]
+    Proposal --> Tasks["Implementation<br/>tasks"]
     Tasks --> Roadmap["Roadmap"]
   end
+
+  Cold ~~~ Fresh
+  Fresh ~~~ Research
 ```
 
 The proposal separates runtime data movement from how research is promoted into roadmap work.
@@ -3527,28 +3532,31 @@ Mermaid source for the data-path diagram
 ```
 flowchart TB
   subgraph Cold["Cold path"]
-    direction LR
-    SSTables["Flushed SSTables"] --> ColdCQLite["CQLite reader"]
+    direction TB
+    SSTables["Flushed<br/>SSTables"] --> ColdCQLite["CQLite reader"]
     ColdCQLite --> Flight["Arrow Flight"]
     Flight --> Trino["Trino"]
-    ColdCQLite --> Iceberg["Iceberg materializer"]
+    ColdCQLite --> Iceberg["Iceberg<br/>materializer"]
   end
 
   subgraph Fresh["Fresh tail path"]
-    direction LR
+    direction TB
     Write["Cassandra write"] --> Memtable["CqliteMemtable"]
-    Memtable --> TailGen["Tail gen-* SSTable"]
-    TailGen --> Merge["CQLite k-way LWW merge"]
+    Memtable --> TailGen["Tail gen-*<br/>SSTable"]
+    TailGen --> Merge["CQLite k-way<br/>LWW merge"]
     Merge --> Query["Flight / Trino query"]
   end
 
   subgraph Research["Research path"]
-    direction LR
-    Notes["Raw research notes"] --> Synthesis["Synthesis report"]
+    direction TB
+    Notes["Raw research<br/>notes"] --> Synthesis["Synthesis report"]
     Synthesis --> Proposal["Official proposal"]
-    Proposal --> Tasks["Implementation tasks"]
+    Proposal --> Tasks["Implementation<br/>tasks"]
     Tasks --> Roadmap["Roadmap"]
   end
+
+  Cold ~~~ Fresh
+  Fresh ~~~ Research
 ```
 
 ### Cold path

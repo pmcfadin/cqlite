@@ -96,41 +96,43 @@ cleanly swappable.</p></div> </article> <article class="card sl-flex astro-v5tid
 Trino, exports Parquet, and can materialize lakehouse tables.</p></div> </article> <article class="card sl-flex astro-v5tidmuc"> <p class="title sl-flex astro-v5tidmuc"> <svg aria-hidden="true" class="icon astro-v5tidmuc astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.333em;"></svg> <span class="astro-v5tidmuc">Close the freshness gap</span> </p> <div class="body astro-v5tidmuc"><p>The remaining gap is Cassandra’s unflushed memtable tail. The proposed spike
 exports that tail as real SSTable generations that CQLite can merge normally.</p></div> </article> </div> 
 <div class="sl-heading-wrapper level-h2"><h2 id="architecture-diagram">Architecture diagram</h2><a class="sl-anchor-link" href="#architecture-diagram"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Architecture diagram”</span></a></div>
-<figure class="mermaid-figure astro-6vqylkyd"> <pre class="mermaid-fallback astro-6vqylkyd" data-mermaid-diagram>flowchart LR
+<figure class="mermaid-figure astro-6vqylkyd"> <pre class="mermaid-fallback astro-6vqylkyd" data-mermaid-diagram>flowchart TB
   subgraph OLTP[&quot;Cassandra OLTP Plane&quot;]
     direction TB
-    OApp[&quot;Application reads/writes&quot;] --&gt; OStore[&quot;CommitLog + Memtable&quot;] --&gt; Lifecycle[&quot;Flush, compaction, repair&quot;]
+    OApp[&quot;Application reads/writes&quot;] --&gt; OStore[&quot;CommitLog +&lt;br/&gt;Memtable&quot;] --&gt; Lifecycle[&quot;Flush, compaction, repair&quot;]
   end
 
   subgraph Foundation[&quot;SSTable Foundation&quot;]
     direction TB
-    SSTables[&quot;Data.db / Index.db / Summary.db / Statistics.db&quot;]
-    Tail[&quot;Optional fresh tail gen-*&quot;]
+    SSTables[&quot;Data.db / Index.db&lt;br/&gt;Summary.db / Statistics.db&quot;]
+    Tail[&quot;Optional fresh&lt;br/&gt;tail gen-*&quot;]
+    SSTables ~~~ Tail
   end
 
   subgraph OLAP[&quot;Trino / Iceberg OLAP Plane&quot;]
     direction TB
-    AApp[&quot;Application analytical reads&quot;] --&gt; Services[&quot;Trino / Arrow Flight / Iceberg materializer&quot;] --&gt; CQLite[&quot;CQLite SSTable reader&quot;]
+    AApp[&quot;Application analytical reads&quot;] --&gt; Services[&quot;Trino / Arrow Flight&lt;br/&gt;Iceberg materializer&quot;] --&gt; CQLite[&quot;CQLite SSTable reader&quot;]
   end
 
   Lifecycle --&gt;|flush creates durable SSTables| SSTables
   OStore -. optional fresh tail export .-&gt; Tail
   SSTables --&gt;|snapshot read| CQLite
-  Tail -. fresh tail read .-&gt; CQLite</pre> <figcaption class="astro-6vqylkyd">Cassandra owns OLTP reads, writes, and lifecycle. OLAP applications enter through Trino, Arrow Flight, or Iceberg, and CQLite reads the shared SSTable foundation.</figcaption> </figure> <details class="mermaid-source astro-6vqylkyd"> <summary class="astro-6vqylkyd">Mermaid source for the architecture diagram</summary> <pre class="astro-6vqylkyd"><code class="astro-6vqylkyd">flowchart LR
+  Tail -. fresh tail read .-&gt; CQLite</pre> <figcaption class="astro-6vqylkyd">Cassandra owns OLTP reads, writes, and lifecycle. OLAP applications enter through Trino, Arrow Flight, or Iceberg, and CQLite reads the shared SSTable foundation.</figcaption> </figure> <details class="mermaid-source astro-6vqylkyd"> <summary class="astro-6vqylkyd">Mermaid source for the architecture diagram</summary> <pre class="astro-6vqylkyd"><code class="astro-6vqylkyd">flowchart TB
   subgraph OLTP[&quot;Cassandra OLTP Plane&quot;]
     direction TB
-    OApp[&quot;Application reads/writes&quot;] --&gt; OStore[&quot;CommitLog + Memtable&quot;] --&gt; Lifecycle[&quot;Flush, compaction, repair&quot;]
+    OApp[&quot;Application reads/writes&quot;] --&gt; OStore[&quot;CommitLog +&lt;br/&gt;Memtable&quot;] --&gt; Lifecycle[&quot;Flush, compaction, repair&quot;]
   end
 
   subgraph Foundation[&quot;SSTable Foundation&quot;]
     direction TB
-    SSTables[&quot;Data.db / Index.db / Summary.db / Statistics.db&quot;]
-    Tail[&quot;Optional fresh tail gen-*&quot;]
+    SSTables[&quot;Data.db / Index.db&lt;br/&gt;Summary.db / Statistics.db&quot;]
+    Tail[&quot;Optional fresh&lt;br/&gt;tail gen-*&quot;]
+    SSTables ~~~ Tail
   end
 
   subgraph OLAP[&quot;Trino / Iceberg OLAP Plane&quot;]
     direction TB
-    AApp[&quot;Application analytical reads&quot;] --&gt; Services[&quot;Trino / Arrow Flight / Iceberg materializer&quot;] --&gt; CQLite[&quot;CQLite SSTable reader&quot;]
+    AApp[&quot;Application analytical reads&quot;] --&gt; Services[&quot;Trino / Arrow Flight&lt;br/&gt;Iceberg materializer&quot;] --&gt; CQLite[&quot;CQLite SSTable reader&quot;]
   end
 
   Lifecycle --&gt;|flush creates durable SSTables| SSTables
@@ -140,51 +142,57 @@ exports that tail as real SSTable generations that CQLite can merge normally.</p
 <div class="sl-heading-wrapper level-h2"><h2 id="data-paths">Data paths</h2><a class="sl-anchor-link" href="#data-paths"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Data paths”</span></a></div>
 <figure class="mermaid-figure astro-6vqylkyd"> <pre class="mermaid-fallback astro-6vqylkyd" data-mermaid-diagram>flowchart TB
   subgraph Cold[&quot;Cold path&quot;]
-    direction LR
-    SSTables[&quot;Flushed SSTables&quot;] --&gt; ColdCQLite[&quot;CQLite reader&quot;]
+    direction TB
+    SSTables[&quot;Flushed&lt;br/&gt;SSTables&quot;] --&gt; ColdCQLite[&quot;CQLite reader&quot;]
     ColdCQLite --&gt; Flight[&quot;Arrow Flight&quot;]
     Flight --&gt; Trino[&quot;Trino&quot;]
-    ColdCQLite --&gt; Iceberg[&quot;Iceberg materializer&quot;]
+    ColdCQLite --&gt; Iceberg[&quot;Iceberg&lt;br/&gt;materializer&quot;]
   end
 
   subgraph Fresh[&quot;Fresh tail path&quot;]
-    direction LR
+    direction TB
     Write[&quot;Cassandra write&quot;] --&gt; Memtable[&quot;CqliteMemtable&quot;]
-    Memtable --&gt; TailGen[&quot;Tail gen-* SSTable&quot;]
-    TailGen --&gt; Merge[&quot;CQLite k-way LWW merge&quot;]
+    Memtable --&gt; TailGen[&quot;Tail gen-*&lt;br/&gt;SSTable&quot;]
+    TailGen --&gt; Merge[&quot;CQLite k-way&lt;br/&gt;LWW merge&quot;]
     Merge --&gt; Query[&quot;Flight / Trino query&quot;]
   end
 
   subgraph Research[&quot;Research path&quot;]
-    direction LR
-    Notes[&quot;Raw research notes&quot;] --&gt; Synthesis[&quot;Synthesis report&quot;]
+    direction TB
+    Notes[&quot;Raw research&lt;br/&gt;notes&quot;] --&gt; Synthesis[&quot;Synthesis report&quot;]
     Synthesis --&gt; Proposal[&quot;Official proposal&quot;]
-    Proposal --&gt; Tasks[&quot;Implementation tasks&quot;]
+    Proposal --&gt; Tasks[&quot;Implementation&lt;br/&gt;tasks&quot;]
     Tasks --&gt; Roadmap[&quot;Roadmap&quot;]
-  end</pre> <figcaption class="astro-6vqylkyd">The proposal separates runtime data movement from how research is promoted into roadmap work.</figcaption> </figure> <details class="mermaid-source astro-6vqylkyd"> <summary class="astro-6vqylkyd">Mermaid source for the data-path diagram</summary> <pre class="astro-6vqylkyd"><code class="astro-6vqylkyd">flowchart TB
+  end
+
+  Cold ~~~ Fresh
+  Fresh ~~~ Research</pre> <figcaption class="astro-6vqylkyd">The proposal separates runtime data movement from how research is promoted into roadmap work.</figcaption> </figure> <details class="mermaid-source astro-6vqylkyd"> <summary class="astro-6vqylkyd">Mermaid source for the data-path diagram</summary> <pre class="astro-6vqylkyd"><code class="astro-6vqylkyd">flowchart TB
   subgraph Cold[&quot;Cold path&quot;]
-    direction LR
-    SSTables[&quot;Flushed SSTables&quot;] --&gt; ColdCQLite[&quot;CQLite reader&quot;]
+    direction TB
+    SSTables[&quot;Flushed&lt;br/&gt;SSTables&quot;] --&gt; ColdCQLite[&quot;CQLite reader&quot;]
     ColdCQLite --&gt; Flight[&quot;Arrow Flight&quot;]
     Flight --&gt; Trino[&quot;Trino&quot;]
-    ColdCQLite --&gt; Iceberg[&quot;Iceberg materializer&quot;]
+    ColdCQLite --&gt; Iceberg[&quot;Iceberg&lt;br/&gt;materializer&quot;]
   end
 
   subgraph Fresh[&quot;Fresh tail path&quot;]
-    direction LR
+    direction TB
     Write[&quot;Cassandra write&quot;] --&gt; Memtable[&quot;CqliteMemtable&quot;]
-    Memtable --&gt; TailGen[&quot;Tail gen-* SSTable&quot;]
-    TailGen --&gt; Merge[&quot;CQLite k-way LWW merge&quot;]
+    Memtable --&gt; TailGen[&quot;Tail gen-*&lt;br/&gt;SSTable&quot;]
+    TailGen --&gt; Merge[&quot;CQLite k-way&lt;br/&gt;LWW merge&quot;]
     Merge --&gt; Query[&quot;Flight / Trino query&quot;]
   end
 
   subgraph Research[&quot;Research path&quot;]
-    direction LR
-    Notes[&quot;Raw research notes&quot;] --&gt; Synthesis[&quot;Synthesis report&quot;]
+    direction TB
+    Notes[&quot;Raw research&lt;br/&gt;notes&quot;] --&gt; Synthesis[&quot;Synthesis report&quot;]
     Synthesis --&gt; Proposal[&quot;Official proposal&quot;]
-    Proposal --&gt; Tasks[&quot;Implementation tasks&quot;]
+    Proposal --&gt; Tasks[&quot;Implementation&lt;br/&gt;tasks&quot;]
     Tasks --&gt; Roadmap[&quot;Roadmap&quot;]
-  end</code></pre> </details>  
+  end
+
+  Cold ~~~ Fresh
+  Fresh ~~~ Research</code></pre> </details>  
 <div class="sl-heading-wrapper level-h3"><h3 id="cold-path">Cold path</h3><a class="sl-anchor-link" href="#cold-path"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Cold path”</span></a></div>
 <p>Flushed SSTables are the stable, already-shipped read path. CQLite discovers the
 table’s live generations, reads Cassandra components directly, performs normal
