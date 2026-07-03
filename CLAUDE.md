@@ -421,6 +421,29 @@ scales directly with file size (a file must be read before it can be edited).
 - JSONL reference files for parity checking
 - See [sstabledump validation playbook](https://pmcfadin.github.io/cqlite/agents-developing/validation-playbook/)
 
+### Fuzzing (issue #1614)
+- The parser fuzz harness lives at `fuzz/` — a **cargo-fuzz / libFuzzer** crate
+  that is its own workspace and is **excluded from the main workspace**, so
+  `scripts/agent-gate.sh` and every default `cargo build`/`clippy`/`test` neither
+  compile nor depend on it. Fuzzing needs **nightly** Rust and is **out of the
+  stable gate**.
+- Five targets prove the parser never panics/hangs/OOMs on arbitrary bytes
+  (returns `Ok` or `Err`): `fuzz_vint`, `fuzz_value_decode`, `fuzz_block_emit`,
+  `fuzz_bti`, `fuzz_schema_parse`. They reach `cqlite-core` internals via the
+  feature-gated `#[doc(hidden)] cqlite_core::fuzz_support` module (build with
+  `--features fuzz`), which keeps the default public API unchanged.
+- Run one target (needs `rustup toolchain install nightly` + `cargo install cargo-fuzz`):
+  ```bash
+  cd fuzz && cargo +nightly fuzz run fuzz_vint -- -max_total_time=45 -rss_limit_mb=2048 -timeout=25
+  ```
+  Or all targets: `fuzz/smoke.sh`. `fuzz_block_emit` fully exercises the
+  block-emit path only when `CQLITE_DATASETS_ROOT` points at the test datasets
+  (a real `test_basic/simple_table` fixture); otherwise it no-ops.
+- CI: `.github/workflows/fuzz.yml` runs a bounded per-target PR smoke lane and a
+  nightly long-run (both nightly + cargo-fuzz, isolated from the stable gate). A
+  crash fails the job and uploads the reproducer artifact; crashes are filed as
+  their own bug issues (not silently patched here).
+
 ### Python E2E Test Architecture (Issue #323)
 
 **Primary E2E Tests** (`bindings/python/tests/`):
