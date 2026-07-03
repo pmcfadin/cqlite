@@ -22,6 +22,17 @@
 #                      --test issue_1589_window_drain_bytes (the scan/compaction
 #                      windows advance a cursor + compact once per refill instead
 #                      of front-draining per partition — issue #1589); same gate.
+#   memory-budget      cargo test -p cqlite-core --features cli-helpers,dhat-heap
+#                      --test memory_budget -- --test-threads=1 (issue #1565, Epic
+#                      A/A4). dhat allocation/peak-heap regression net over the real
+#                      read path: pins today's measured full-scan total-bytes
+#                      (~209 MB, ceiling 252 MB) and materializing peak-heap
+#                      (~4.9 MB, ceiling 6 MB, also asserted < 128 MiB) as Epic-E
+#                      ratchet targets. Requires the dhat-heap feature (installs the
+#                      dhat global allocator, confined to this one test binary) and
+#                      --test-threads=1 (dhat::Profiler is a process-global
+#                      singleton). Dataset-dependent: fails closed on empty (each
+#                      test asserts >=1 row before reading dhat stats).
 #   integration-tests  cargo test -p cqlite-integration-tests: compile ALL targets
 #                      (--no-run, whole package) then run the seven CI-enforced ones
 #   format-compat      cargo test -p format-compatibility-tests (the 'oa' format crate;
@@ -163,7 +174,7 @@ if ! command -v cargo >/dev/null 2>&1 && [ -d "$HOME/.cargo/bin" ]; then
 fi
 export CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-$REPO_ROOT/test-data/datasets}"
 
-COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard integration-tests format-compat write-tests cli-tests compaction-byte-parity python-bindings node-bindings delivery-telemetry parity-report binding-unwind-profile tooling-tests minimal-build smoke)
+COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity python-bindings node-bindings delivery-telemetry parity-report binding-unwind-profile tooling-tests minimal-build smoke)
 ONLY=""
 SELFTEST=0
 case "${1:-}" in
@@ -826,6 +837,7 @@ run_file_size
 # for a dataset-dependent component is the #646 hazard, so this set must stay
 # complete.
 #   needs datasets: core-tests, tombstones-scan, scan-offload-guard,
+#     memory-budget (dhat lane reads real Data.db and fails closed on empty),
 #     integration-tests, write-tests, smoke (read Data.db / golden fixtures), and
 #     python-bindings — the pytest suite resolves CQLITE_DATASETS_ROOT and calls
 #     skip_if_no_datasets() (bindings/python/tests/conftest.py), so with data
@@ -847,7 +859,7 @@ run_file_size
 #     assertions with hardcoded vectors — it reads no CQLITE_DATASETS_ROOT and no
 #     Data.db — so guarding it just made `--only format-compat` falsely fail the
 #     preflight when datasets are absent.
-DATASET_COMPONENTS="core-tests tombstones-scan scan-offload-guard integration-tests write-tests python-bindings smoke"
+DATASET_COMPONENTS="core-tests tombstones-scan scan-offload-guard memory-budget integration-tests write-tests python-bindings smoke"
 
 # selected_needs_datasets: true iff at least one SELECTED component reads datasets.
 # With no --only, every component runs, so it's always true. With --only, it's true
@@ -918,6 +930,15 @@ run_component scan-offload-guard cargo test --package cqlite-core \
   --test issue_1143_scan_offload_thread \
   --test issue_1333_scan_scratch_reuse \
   --test issue_1589_window_drain_bytes
+# Issue #1565 (Epic A/A4): dhat allocation/peak-heap regression net over the real
+# read path. Compiled only under `dhat-heap` (installs the dhat global allocator
+# in its own test binary), single-threaded because dhat::Profiler is a
+# process-global singleton. Pins today's measured full-scan total-bytes and
+# materializing peak-heap as Epic-E ratchet targets; dataset-dependent and fails
+# closed on empty (asserts >=1 row before reading dhat stats).
+run_component memory-budget cargo test --package cqlite-core \
+  --features cli-helpers,dhat-heap \
+  --test memory_budget -- --test-threads=1
 # Compile EVERY target in the package first (--no-run, whole package) so a
 # new/edited test file that doesn't compile can't hide behind the enumerated
 # run-list (issue #865); then execute the seven CI-enforced targets.
