@@ -68,7 +68,7 @@ mod schema_aware_reader_test;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 #[cfg(feature = "tombstones")]
 use self::tombstone_merger::{EntryMetadata, GenerationValue, TombstoneMerger};
@@ -240,6 +240,13 @@ pub struct SSTableManager {
     /// [`SSTableManager::refresh_tables`] re-runs the same discovery (issue #1749).
     discovery_source: refresh::DiscoverySource,
 
+    /// Serializes concurrent [`SSTableManager::refresh_tables`] calls end-to-end
+    /// (discovery through swap) so two refreshes cannot interleave — a stale
+    /// discovery set from one refresh can never remove a generation a concurrent
+    /// refresh just added (TOCTOU, issue #1749, Decision 4). Held ONLY across a
+    /// refresh; queries never take this lock (they use the `RwLock` read guards).
+    refresh_lock: Arc<Mutex<()>>,
+
     /// Schema registry for schema-aware operations (feature-gated)
     #[cfg(feature = "state_machine")]
     schema_registry: Arc<RwLock<Option<Arc<RwLock<crate::schema::SchemaRegistry>>>>>,
@@ -266,6 +273,7 @@ impl SSTableManager {
             platform,
             config: config.clone(),
             discovery_source: refresh::DiscoverySource::BasePath,
+            refresh_lock: Arc::new(Mutex::new(())),
             #[cfg(feature = "state_machine")]
             schema_registry: Arc::new(RwLock::new(schema_registry)),
         };
@@ -353,6 +361,7 @@ impl SSTableManager {
             platform: platform.clone(),
             config: config.clone(),
             discovery_source: refresh::DiscoverySource::TableDirs(table_dirs.clone()),
+            refresh_lock: Arc::new(Mutex::new(())),
             #[cfg(feature = "state_machine")]
             schema_registry: Arc::new(RwLock::new(schema_registry)),
         };

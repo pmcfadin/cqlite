@@ -577,7 +577,7 @@ export interface MaintenanceReport {
  * ```
  */
 export interface RefreshReport {
-  /** Number of table directories re-discovered during the refresh. */
+  /** Number of distinct logical tables present after the refresh. */
   tablesScanned: number;
 
   /** Number of SSTable generations newly opened and made queryable. */

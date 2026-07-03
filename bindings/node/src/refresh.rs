@@ -31,7 +31,7 @@ use crate::error::to_napi_error;
 /// ```
 #[napi(object)]
 pub struct RefreshReport {
-    /// Number of table directories re-discovered during the refresh.
+    /// Number of distinct logical tables present after the refresh.
     pub tables_scanned: u32,
 
     /// Number of SSTable generations newly opened and made queryable.

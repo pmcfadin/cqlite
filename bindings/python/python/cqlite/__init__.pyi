@@ -803,7 +803,7 @@ class RefreshReport:
     set.
 
     Attributes:
-        tables_scanned: Number of table directories re-discovered.
+        tables_scanned: Number of distinct logical tables present after the refresh.
         readers_added: Number of SSTable generations newly opened.
         readers_removed: Number of SSTable generations dropped.
 
@@ -814,7 +814,7 @@ class RefreshReport:
 
     @property
     def tables_scanned(self) -> int:
-        """Number of table directories re-discovered."""
+        """Number of distinct logical tables present after the refresh."""
         ...
 
     @property

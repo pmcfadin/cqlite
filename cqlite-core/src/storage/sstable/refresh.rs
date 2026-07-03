@@ -29,7 +29,12 @@
 //! Concurrency reuses the existing lock discipline (Decision 4): queries resolve
 //! their reader list once under the `RwLock` read guard and hold `Arc` clones, so
 //! a scan already in flight completes against the pre-refresh set and is never
-//! affected by a concurrent refresh.
+//! affected by a concurrent refresh. Two concurrent `refresh_tables` calls fully
+//! serialize on a dedicated refresh mutex held end-to-end (discovery through
+//! swap): the second cannot start until the first has applied its diff, so its
+//! discovery set already reflects the first's changes and it becomes a zero-delta
+//! no-op — a stale discovery set can never remove a generation a concurrent
+//! refresh just added. The refresh mutex is NEVER taken on a query path.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -209,6 +214,13 @@ impl SSTableManager {
     /// full contract (snapshot-at-open, explicit refresh, in-flight isolation,
     /// fail-closed atomicity).
     pub async fn refresh_tables(&self) -> Result<RefreshReport> {
+        // 0. Serialize the WHOLE refresh (discovery through swap) so two
+        //    concurrent refreshes cannot interleave: without this, a refresh with
+        //    a stale discovery set (step 1) could, at swap time (step 5), remove a
+        //    generation a concurrent refresh already added (TOCTOU, Decision 4).
+        //    Held only across the refresh; queries never take this lock.
+        let _refresh_guard = self.refresh_lock.lock().await;
+
         // 1. Rediscover the current on-disk Data.db set (no readers opened yet).
         let discovered_paths = self.discover_data_file_paths().await?;
 
@@ -615,6 +627,143 @@ mod tests {
         assert!(
             Arc::ptr_eq(&before[0], &after[0]),
             "no-op refresh must keep the SAME reader Arc (warm state preserved)"
+        );
+    }
+
+    /// Two SEQUENTIAL refreshes with a generation added between them must both
+    /// apply correctly: the first is a no-op over the unchanged directory, the
+    /// second picks up the newly-added generation. Deterministic (no timing).
+    #[tokio::test]
+    async fn sequential_refreshes_each_apply_correctly() {
+        let src = TempDir::new().expect("tmp src");
+        let src_table_dir = build_two_generations(src.path()).await;
+
+        let live = TempDir::new().expect("tmp live");
+        let live_table_dir = live.path().join("ks_ptr").join("users");
+        copy_generation(&src_table_dir, &live_table_dir, 1);
+
+        let config = Config::default();
+        let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+        let manager = SSTableManager::new(
+            live.path(),
+            &config,
+            platform,
+            #[cfg(feature = "state_machine")]
+            None,
+        )
+        .await
+        .expect("manager");
+
+        // First refresh over the unchanged directory: zero delta.
+        let first = manager.refresh_tables().await.expect("first refresh");
+        assert_eq!(first.readers_added, 0, "first refresh adds nothing");
+        assert_eq!(first.readers_removed, 0, "first refresh removes nothing");
+
+        // Add gen-2, then refresh again: the second refresh picks it up.
+        copy_generation(&src_table_dir, &live_table_dir, 2);
+        let second = manager.refresh_tables().await.expect("second refresh");
+        assert_eq!(second.readers_added, 1, "second refresh adds gen-2");
+        assert_eq!(second.readers_removed, 0, "second refresh removes nothing");
+
+        let held = {
+            let table_readers = manager.table_readers.read().await;
+            table_readers
+                .values()
+                .flatten()
+                .map(Arc::clone)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            held.len(),
+            2,
+            "both generations held after the two refreshes"
+        );
+    }
+
+    /// Regression for the TOCTOU race (issue #1749, Decision 4): N `refresh()`
+    /// calls launched concurrently after a generation is added must serialize on
+    /// the refresh mutex. The final reader set must equal the on-disk truth
+    /// ({gen-1, gen-2}), EXACTLY ONE refresh may report the addition (the rest are
+    /// zero-delta no-ops), and NO reader may vanish (a stale-discovery refresh must
+    /// not remove what a concurrent refresh just added). Deterministic: correctness
+    /// is asserted on the final state and the aggregate deltas, with no timing.
+    #[tokio::test]
+    async fn concurrent_refreshes_serialize_no_reader_vanishes() {
+        let src = TempDir::new().expect("tmp src");
+        let src_table_dir = build_two_generations(src.path()).await;
+
+        let live = TempDir::new().expect("tmp live");
+        let live_table_dir = live.path().join("ks_ptr").join("users");
+        copy_generation(&src_table_dir, &live_table_dir, 1);
+
+        let config = Config::default();
+        let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+        let manager = SSTableManager::new(
+            live.path(),
+            &config,
+            platform,
+            #[cfg(feature = "state_machine")]
+            None,
+        )
+        .await
+        .expect("manager");
+
+        // Add gen-2 on disk, then fire several refreshes concurrently.
+        copy_generation(&src_table_dir, &live_table_dir, 2);
+        let (r0, r1, r2, r3) = tokio::join!(
+            manager.refresh_tables(),
+            manager.refresh_tables(),
+            manager.refresh_tables(),
+            manager.refresh_tables(),
+        );
+        let reports = [
+            r0.expect("refresh 0"),
+            r1.expect("refresh 1"),
+            r2.expect("refresh 2"),
+            r3.expect("refresh 3"),
+        ];
+
+        // Exactly one refresh applied the +1 addition; the rest are no-ops. No
+        // refresh may report a removal (nothing left the directory).
+        let total_added: usize = reports.iter().map(|r| r.readers_added).sum();
+        let total_removed: usize = reports.iter().map(|r| r.readers_removed).sum();
+        assert_eq!(
+            total_added, 1,
+            "exactly one serialized refresh adds gen-2 (others are no-ops)"
+        );
+        assert_eq!(
+            total_removed, 0,
+            "no refresh may remove a reader a concurrent refresh just added"
+        );
+
+        // Final held set equals the on-disk truth: both generations, none vanished.
+        let held = {
+            let table_readers = manager.table_readers.read().await;
+            table_readers
+                .values()
+                .flatten()
+                .map(Arc::clone)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            held.len(),
+            2,
+            "final reader set equals on-disk truth ({{gen-1, gen-2}})"
+        );
+        let scanned = manager
+            .scan(
+                &crate::types::TableId::new("ks_ptr.users"),
+                None,
+                None,
+                None,
+                Some(&users_schema()),
+            )
+            .await
+            .expect("post scan");
+        assert_eq!(
+            scan_partition_ids(&scanned),
+            std::collections::BTreeSet::from([1, 2]),
+            "both partitions queryable after concurrent refreshes"
         );
     }
 }

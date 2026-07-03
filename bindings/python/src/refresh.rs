@@ -18,7 +18,7 @@ use crate::runtime::block_on;
 ///
 /// # Attributes
 ///
-/// * `tables_scanned`  – Number of table directories re-discovered.
+/// * `tables_scanned`  – Number of distinct logical tables present after the refresh.
 /// * `readers_added`   – Number of SSTable generations newly opened.
 /// * `readers_removed` – Number of SSTable generations dropped.
 ///
@@ -31,7 +31,7 @@ use crate::runtime::block_on;
 /// ```
 #[pyclass(module = "cqlite")]
 pub struct RefreshReport {
-    /// Number of table directories re-discovered during the refresh.
+    /// Number of distinct logical tables present after the refresh.
     #[pyo3(get)]
     pub tables_scanned: usize,
     /// Number of SSTable generations newly opened and made queryable.
