@@ -3437,45 +3437,56 @@ The remaining gap is Cassandra’s unflushed memtable tail. The proposed spike e
 
 [Section titled “Architecture diagram”](#architecture-diagram)
 
-![Cassandra OLTP Plane and OLAP Plane connected through an SSTable Foundation with optional fresh tail export.](/cqlite/_astro/storage-engine-architecture.Cgj0JxoC.svg)
+```
+flowchart LR
+  subgraph OLTP["Cassandra OLTP Plane"]
+    direction TB
+    OApp["Application reads/writes"] --> OStore["CommitLog + Memtable"] --> Lifecycle["Flush, compaction, repair"]
+  end
 
-Cassandra owns operational correctness. CQLite reads the shared SSTable foundation and serves analytical consumers.
+  subgraph Foundation["SSTable Foundation"]
+    direction TB
+    SSTables["Data.db / Index.db / Summary.db / Statistics.db"]
+    Tail["Optional fresh tail gen-*"]
+  end
+
+  subgraph OLAP["Trino / Iceberg OLAP Plane"]
+    direction TB
+    AApp["Application analytical reads"] --> Services["Trino / Arrow Flight / Iceberg materializer"] --> CQLite["CQLite SSTable reader"]
+  end
+
+  Lifecycle -->|flush creates durable SSTables| SSTables
+  OStore -. optional fresh tail export .-> Tail
+  SSTables -->|snapshot read| CQLite
+  Tail -. fresh tail read .-> CQLite
+```
+
+Cassandra owns OLTP reads, writes, and lifecycle. OLAP applications enter through Trino, Arrow Flight, or Iceberg, and CQLite reads the shared SSTable foundation.
 
 Mermaid source for the architecture diagram
 
-```mermaid
-flowchart TB
+```
+flowchart LR
   subgraph OLTP["Cassandra OLTP Plane"]
-    App["Application reads and writes"]
-    CommitLog["CommitLog + Memtable"]
-    Lifecycle["Flush, compaction, repair, streaming"]
+    direction TB
+    OApp["Application reads/writes"] --> OStore["CommitLog + Memtable"] --> Lifecycle["Flush, compaction, repair"]
   end
 
-
-  subgraph OLAP["OLAP Plane"]
-    ReadApp["Application analytical reads"]
-    Query["Trino + Arrow Flight"]
-    Iceberg["Iceberg materializer"]
-    CQLite["CQLite SSTable reader"]
+  subgraph Foundation["SSTable Foundation"]
+    direction TB
+    SSTables["Data.db / Index.db / Summary.db / Statistics.db"]
+    Tail["Optional fresh tail gen-*"]
   end
 
-
-  subgraph SSTables["SSTable Foundation"]
-    Data["Data.db"]
-    Index["Index.db"]
-    Summary["Summary.db"]
-    Stats["Statistics.db"]
-    Tail["Tail gen-*"]
+  subgraph OLAP["Trino / Iceberg OLAP Plane"]
+    direction TB
+    AApp["Application analytical reads"] --> Services["Trino / Arrow Flight / Iceberg materializer"] --> CQLite["CQLite SSTable reader"]
   end
 
-
-  App --> CommitLog --> Lifecycle
-  Lifecycle --> SSTables
-  SSTables --> CQLite
-  ReadApp --> Query
-  Query --> Iceberg
-  Iceberg --> CQLite
-  CommitLog -. fresh tail export .-> Tail
+  Lifecycle -->|flush creates durable SSTables| SSTables
+  OStore -. optional fresh tail export .-> Tail
+  SSTables -->|snapshot read| CQLite
+  Tail -. fresh tail read .-> CQLite
 ```
 
 ## Data paths
