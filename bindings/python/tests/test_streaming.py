@@ -35,28 +35,35 @@ class TestStreamingGilRelease:
     # build reads ~0 for the metric below (GIL held the whole iteration).
     _TABLE = "test_basic.simple_table"
 
-    # Per-attempt metric: the fraction of a single stream's wall-time during
-    # which the GIL was free for the concurrent spinner =
-    #     during / (rate_solo * dS)
-    # where ``rate_solo`` is the spinner's robustly-calibrated uncontended rate
-    # (max over sub-windows, so it is not underestimated when the spinner is
-    # briefly descheduled) and ``dS`` is the stream duration. It is a RATE
-    # RATIO, hence invariant to machine/CI load.
+    # Metric: the fraction of streaming wall-time during which the GIL was free
+    # for the concurrent spinner, AGGREGATED across all attempts =
+    #     sum(during) / (rate_solo * sum(dS))
+    # where ``during`` is the spinner's increment count over one stream,
+    # ``rate_solo`` is the spinner's robustly-calibrated uncontended rate (max
+    # over sub-windows, so it is not underestimated when the spinner is briefly
+    # descheduled), and ``dS`` is that stream's duration. It is a RATE RATIO,
+    # hence invariant to machine/CI load.
     #
     # A SINGLE attempt is noisy in both directions (the OS scheduler landing the
     # spinner inside a given microsecond GIL-release window is luck; and the
     # unmodified build has rare eval-breaker GIL releases at loop boundaries that
-    # occasionally spike one attempt). So neither max nor a single reading is
-    # robust. Instead we run ``_ATTEMPTS`` streams and COUNT how many clear a
-    # modest per-attempt bar ``_ATTEMPT_FLOOR`` — a bulk-distribution statistic.
-    # Measured (this machine, incl. under 4 saturating CPU hogs; warm cache):
-    #   * fixed build:     6-8 of 8 attempts clear 0.05
-    #   * unmodified main: 0-3 of 8 attempts clear 0.05 (spinner starved; only
-    #                       the odd eval-breaker release spikes an attempt)
-    # Requiring >= 5 sits between the two with margin on both sides.
-    _ATTEMPTS = 8
-    _ATTEMPT_FLOOR = 0.05
-    _MIN_ATTEMPTS_CLEARING = 5
+    # occasionally spike one attempt). Counting per-attempt clears is therefore
+    # fragile under load (the scheduler simply does not land the spinner in every
+    # narrow window). Instead we AGGREGATE the numerator and denominator over
+    # ``_ATTEMPTS`` streams and require the pooled fraction to clear a modest
+    # floor. Pooling smooths per-attempt scheduler noise: every fixed-build
+    # attempt contributes GIL-free time, while the buggy build's rare single-
+    # attempt spikes get diluted by the many near-zero attempts.
+    #
+    # Measured (this machine, under 4 saturating CPU hogs; warm cache):
+    #   * fixed build:     aggregate 0.30 - 0.60 (24 attempts; >= 0.18 even at 16)
+    #   * unmodified main: aggregate 0.0025 - 0.0098 (24 attempts; spinner starved
+    #                       the whole iteration; only rare eval-breaker releases)
+    # A floor of 0.05 sits ~5x above the buggy ceiling and well below the fixed
+    # floor — even a low-signal fixed run (~0.096 observed on a differently loaded
+    # machine) clears it with ~2x margin.
+    _ATTEMPTS = 24
+    _AGGREGATE_FLOOR = 0.05
 
     def test_streaming_next_releases_gil(self):
         """A concurrent Python thread runs during streaming iteration ONLY when
@@ -74,8 +81,10 @@ class TestStreamingGilRelease:
           (``block_on(next_async())``); the one-time query setup is negligible
           next to 999 refills, so on the unmodified build B is starved for the
           whole iteration.
-        * Robustness comes from the count-of-attempts-clearing statistic (see
-          the class constants), not from a single fragile reading.
+        * Robustness comes from AGGREGATING the GIL-free fraction across
+          ``_ATTEMPTS`` streams (pooled numerator / pooled denominator), not from
+          a single fragile reading or a per-attempt scheduler-lands-in-the-window
+          bucket count (see the class constants).
         """
         # Fail loudly (not skip) under strict fixture mode (issue #1230).
         require_test_data(SCHEMA_BASIC_TYPES)
@@ -110,11 +119,15 @@ class TestStreamingGilRelease:
             during = counter["n"] - c_start
             return during, dS, rows
 
+        # Accumulators for the pooled (aggregate) GIL-free fraction.
+        sum_during = 0
+        sum_dS = 0.0
+
         old_interval = sys.getswitchinterval()
         sys.setswitchinterval(1000)  # disable periodic preemption for the window
         b = threading.Thread(target=spin, daemon=True)
         b.start()
-        fracs = []
+        attempts_run = 0
         rows_seen = 0
         try:
             time.sleep(0.05)  # let B warm up and get scheduled
@@ -136,7 +149,9 @@ class TestStreamingGilRelease:
                 for _ in range(self._ATTEMPTS):
                     during, dS, rows = stream_once(database)
                     rows_seen = rows
-                    fracs.append(during / (rate_solo * dS) if dS > 0 else 0.0)
+                    sum_during += during
+                    sum_dS += dS
+                    attempts_run += 1
         finally:
             sys.setswitchinterval(old_interval)
             stop.set()
@@ -149,14 +164,17 @@ class TestStreamingGilRelease:
             f"streaming yielded only {rows_seen} rows; need the ~999-row "
             f"{self._TABLE} fixture for a meaningful GIL-release assertion"
         )
-        assert len(fracs) == self._ATTEMPTS, "not all streaming attempts ran"
+        assert attempts_run == self._ATTEMPTS, "not all streaming attempts ran"
 
-        clearing = sum(1 for f in fracs if f > self._ATTEMPT_FLOOR)
-        assert clearing >= self._MIN_ATTEMPTS_CLEARING, (
-            f"only {clearing}/{self._ATTEMPTS} streaming attempts let the "
-            f"concurrent thread run past {self._ATTEMPT_FLOOR} of the window "
-            f"(need >= {self._MIN_ATTEMPTS_CLEARING}); GIL appears held across "
-            f"the blocking refill. fracs={[round(f, 3) for f in fracs]}"
+        # Pooled GIL-free fraction across all attempts. rate_solo is a constant,
+        # so this equals sum(during) / (rate_solo * sum(dS)).
+        aggregate = sum_during / (rate_solo * sum_dS) if sum_dS > 0 else 0.0
+        assert aggregate > self._AGGREGATE_FLOOR, (
+            f"aggregate GIL-free fraction {aggregate:.4f} across "
+            f"{self._ATTEMPTS} streaming attempts did not clear "
+            f"{self._AGGREGATE_FLOOR}; the concurrent thread was starved, so the "
+            f"GIL appears held across the blocking refill "
+            f"(rate_solo={rate_solo:.0f}/s)"
         )
 
 
