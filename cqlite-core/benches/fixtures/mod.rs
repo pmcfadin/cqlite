@@ -102,11 +102,23 @@ pub fn table_dir(keyspace: &str, table: &str) -> PathBuf {
 pub fn fixture_present(fx: &ReadFixture) -> bool {
     let parent = sstables_root().join(fx.keyspace);
     let prefix = format!("{}-", fx.table);
-    std::fs::read_dir(&parent)
-        .ok()
+    // Locate the CFID-suffixed table directory …
+    let Some(dir) = std::fs::read_dir(&parent).ok().and_then(|rd| {
+        rd.filter_map(|e| e.ok())
+            .find(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+            .map(|e| e.path())
+    }) else {
+        return false;
+    };
+    // … and require at least one real SSTable data component. The corpus ships
+    // committed sidecars (`*-Data.db.jsonl`, `*.txt`) even when the binary
+    // `*-Data.db` is not fetched; matching the directory alone would let the
+    // optional bench proceed into `open_read_db` and panic (0 rows) instead of
+    // skip-registering (roborev, issue #1562). `-Data.db` excludes `-Data.db.jsonl`.
+    std::fs::read_dir(&dir)
         .map(|rd| {
             rd.filter_map(|e| e.ok())
-                .any(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+                .any(|e| e.file_name().to_string_lossy().ends_with("-Data.db"))
         })
         .unwrap_or(false)
 }
