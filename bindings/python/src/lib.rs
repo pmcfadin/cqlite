@@ -34,12 +34,34 @@ fn version() -> &'static str {
     VERSION
 }
 
+/// Test-support introspection: reports whether this extension was compiled with
+/// the `panic = "abort"` strategy.
+///
+/// This is read-only and derived at compile time from `cfg!(panic = "abort")`,
+/// so it reflects the ACTUAL compiled panic strategy of the loaded wheel (which
+/// differs between the debug/test profile, `panic = "unwind"`, and the release
+/// profile). The abort-safety harness (`tests/test_abort_safety.py`, issue
+/// #1437) keys a conditional strict xfail on this value: under `panic = "unwind"`
+/// PyO3 contains a core panic as a catchable exception and the survival cases
+/// hard-assert; under `panic = "abort"` the same panic is a process abort until
+/// issue #1440 flips the release profile to `panic = "unwind"`.
+///
+/// Not part of the stable public API; the leading underscore marks it as
+/// internal test support.
+#[pyfunction]
+fn _built_with_panic_abort() -> bool {
+    cfg!(panic = "abort")
+}
+
 /// Python module for CQLite.
 #[pymodule]
 fn _cqlite(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register version info
     m.add("__version__", VERSION)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
+
+    // Test-support introspection (issue #1437). See the fn doc comment.
+    m.add_function(wrap_pyfunction!(_built_with_panic_abort, m)?)?;
 
     // Register exception types
     error::register_exceptions(m)?;

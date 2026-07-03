@@ -16,6 +16,14 @@ def version() -> str:
     """Return the CQLite version string."""
     ...
 
+# Test-support introspection (issue #1437). Reports the ACTUAL compiled panic
+# strategy of the loaded wheel via ``cfg!(panic = "abort")``; used by the
+# abort-safety harness to key its conditional strict xfail. Not part of the
+# stable public API.
+def _built_with_panic_abort() -> bool:
+    """Whether this wheel was compiled with ``panic = "abort"``."""
+    ...
+
 # Exception hierarchy
 class CqliteError(Exception):
     """Base exception for all CQLite errors."""
