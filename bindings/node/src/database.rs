@@ -410,13 +410,32 @@ impl Database {
     }
 
     /// Determine whether a CQL statement is a write operation.
-    #[cfg(feature = "write-support")]
+    ///
+    /// Deliberately NOT feature-gated: the read-path entry points must be able to
+    /// detect DML even when the `write-support` feature is compiled out, so they
+    /// can fail closed (return an explicit error) instead of silently handing an
+    /// `INSERT`/`UPDATE`/`DELETE` to the read engine — which would return a
+    /// read-shaped, empty result and never persist the row (issue #1460).
     fn is_dml_statement(query: &str) -> bool {
         let upper = query.trim_start().to_uppercase();
         upper.starts_with("INSERT")
             || upper.starts_with("UPDATE")
             || upper.starts_with("DELETE")
             || upper.starts_with("BEGIN")
+    }
+
+    /// Error returned when a DML statement is issued against a binary that was
+    /// built WITHOUT the `write-support` feature. Failing closed here is the
+    /// whole point of issue #1460: without this guard the DML string falls
+    /// through to the read engine and silently no-ops (no write, no error).
+    #[cfg(not(feature = "write-support"))]
+    fn dml_unsupported_error() -> napi::Error {
+        simple_error(
+            "Write support is not compiled into this build of @cqlite/node. \
+             DML statements (INSERT/UPDATE/DELETE) cannot be executed and will \
+             NOT be silently ignored. Rebuild the native module with \
+             `--features write-support`.",
+        )
     }
 }
 
@@ -753,6 +772,13 @@ impl Database {
                 });
             }
 
+            // Fail closed: without the write-support feature, a DML statement must
+            // NOT fall through to the read engine (issue #1460).
+            #[cfg(not(feature = "write-support"))]
+            if Self::is_dml_statement(&query) {
+                return Err(Self::dml_unsupported_error());
+            }
+
             let core_result = self.inner.execute(&query).await.map_err(|e| {
                 // Boundary error: record once here (subsystem = "node"), not in
                 // nested helpers, to avoid double counting with core.
@@ -1065,6 +1091,13 @@ impl Database {
             self.ensure_writable()?;
         }
 
+        // Fail closed: without the write-support feature, a DML statement must
+        // NOT fall through to the read engine (issue #1460).
+        #[cfg(not(feature = "write-support"))]
+        if Self::is_dml_statement(&query) {
+            return Err(Self::dml_unsupported_error());
+        }
+
         Ok(napi::bindgen_prelude::AsyncTask::new(ExecuteNativeTask {
             inner: self.inner.clone(),
             query,
@@ -1323,6 +1356,15 @@ impl napi::Task for ExecuteNativeTask {
                     rows_affected: 1,
                 });
             }
+        }
+
+        // Fail closed: without the write-support feature, a DML statement must
+        // NOT fall through to the read engine (issue #1460). The public
+        // `execute_native` entry point already rejects this before creating the
+        // task; this is defense-in-depth so the task can never silently no-op.
+        #[cfg(not(feature = "write-support"))]
+        if Database::is_dml_statement(&self.query) {
+            return Err(Database::dml_unsupported_error());
         }
 
         // Use global runtime for async execution. The future is `.instrument`-ed
