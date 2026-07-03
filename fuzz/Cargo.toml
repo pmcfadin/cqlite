@@ -1,0 +1,69 @@
+# cargo-fuzz / libFuzzer crate for the CQLite parser safety net (issue #1614).
+#
+# This crate is INTENTIONALLY its own workspace (the empty `[workspace]` table
+# below) so it is never pulled into the main Cargo workspace: `cargo build`,
+# `cargo clippy`, and `scripts/agent-gate.sh` at the repo root neither compile
+# nor depend on it. It requires NIGHTLY Rust + `cargo install cargo-fuzz`.
+#
+# Run a single target (nightly):
+#   cd fuzz && cargo +nightly fuzz run fuzz_vint -- -max_total_time=45 \
+#       -rss_limit_mb=2048 -timeout=25
+[package]
+name = "cqlite-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# Reach the internal parser entry points through the feature-gated,
+# `#[doc(hidden)]` fuzz-support surface — NOT the default public API.
+cqlite-core = { path = "../cqlite-core", features = ["fuzz", "all-compression"] }
+
+[[bin]]
+name = "fuzz_vint"
+path = "fuzz_targets/fuzz_vint.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_value_decode"
+path = "fuzz_targets/fuzz_value_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_block_emit"
+path = "fuzz_targets/fuzz_block_emit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_bti"
+path = "fuzz_targets/fuzz_bti.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_schema_parse"
+path = "fuzz_targets/fuzz_schema_parse.rs"
+test = false
+doc = false
+bench = false
+
+# Own workspace root: keeps `fuzz/` out of the main workspace automatically
+# (belt-and-suspenders with the root Cargo.toml `[workspace] exclude`).
+[workspace]
+
+# Release-ish profile for the fuzz binaries: optimized but with debug info +
+# overflow checks so a crash reproduces with a useful stack.
+[profile.release]
+debug = 1
+overflow-checks = true

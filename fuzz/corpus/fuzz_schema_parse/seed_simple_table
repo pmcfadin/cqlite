@@ -1,0 +1,1 @@
+CREATE TABLE test_basic.simple_table (id UUID PRIMARY KEY, name TEXT, age INT, active BOOLEAN)

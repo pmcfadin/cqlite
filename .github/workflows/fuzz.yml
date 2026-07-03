@@ -1,0 +1,154 @@
+name: Parser fuzz (safety net)
+
+# Standing parser fuzz harness (issue #1614, epic #1601 finding H1).
+#
+# This workflow is ISOLATED from the stable agent gate / CI: it runs on NIGHTLY
+# Rust + cargo-fuzz (libFuzzer needs nightly). It never touches
+# `scripts/agent-gate.sh`, and the `fuzz/` crate is excluded from the main
+# workspace, so no stable build/clippy/test compiles it.
+#
+# Two jobs:
+#   - pr-smoke: bounded per-target run on PRs that touch the parser or the fuzz
+#     crate (so a PR can never hang on fuzzing).
+#   - nightly:  a long per-target budget on a schedule + manual dispatch.
+#
+# Both pass `-rss_limit_mb` and `-timeout` on every invocation (never-OOM /
+# never-hang enforcement) and upload any crash reproducer as an artifact.
+
+on:
+  pull_request:
+    paths:
+      - 'fuzz/**'
+      - 'cqlite-core/src/parser/**'
+      - 'cqlite-core/src/storage/sstable/**'
+      - 'cqlite-core/src/schema/**'
+      - 'cqlite-core/src/fuzz_support.rs'
+      - '.github/workflows/fuzz.yml'
+  schedule:
+    # Nightly long-run, 04:07 UTC (off-peak, between gate 03:37 and
+    # cql-type-parity 04:31).
+    - cron: '7 4 * * *'
+  workflow_dispatch:
+
+# Least-privilege: this workflow only reads repo code and uploads artifacts.
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Bounded per-target smoke on PRs. Each target is a separate matrix leg so a
+  # crash pinpoints the target and the legs run in parallel.
+  pr-smoke:
+    name: PR smoke (${{ matrix.target }})
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # STATIC, literal target list (never derived from untrusted input).
+        target:
+          - fuzz_vint
+          - fuzz_value_decode
+          - fuzz_block_emit
+          - fuzz_bti
+          - fuzz_schema_parse
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Rust (nightly)
+        uses: ./.github/actions/setup-rust-ci
+        with:
+          toolchain: nightly
+          cache-key: fuzz-nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      # NOTE: this lane does not fetch test datasets, so `fuzz_block_emit` runs
+      # as a never-panic no-op here (its driver returns Err without a
+      # `CQLITE_DATASETS_ROOT` fixture). The full block-emit path is exercised by
+      # the local `fuzz/smoke.sh` with datasets present; wiring dataset-fetch into
+      # this lane is deferred (see the block-emit overflow finding filed off
+      # issue #1614).
+
+      - name: Run bounded fuzz smoke
+        # matrix.target is a trusted static literal, but pass it via a quoted env
+        # var (never inline `${{ }}` in the shell) per the command-injection
+        # doctrine.
+        env:
+          TARGET: ${{ matrix.target }}
+        working-directory: fuzz
+        run: |
+          cargo +nightly fuzz run "$TARGET" -- \
+            -max_total_time=45 \
+            -rss_limit_mb=2048 \
+            -timeout=25
+
+      - name: Upload crash reproducer
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/**
+          if-no-files-found: ignore
+
+  # Long per-target run on a nightly schedule / manual dispatch.
+  nightly:
+    name: Nightly long-run (${{ matrix.target }})
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - fuzz_vint
+          - fuzz_value_decode
+          - fuzz_block_emit
+          - fuzz_bti
+          - fuzz_schema_parse
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Rust (nightly)
+        uses: ./.github/actions/setup-rust-ci
+        with:
+          toolchain: nightly
+          cache-key: fuzz-nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      # NOTE: this lane does not fetch test datasets, so `fuzz_block_emit` runs
+      # as a never-panic no-op here (its driver returns Err without a
+      # `CQLITE_DATASETS_ROOT` fixture). The full block-emit path is exercised by
+      # the local `fuzz/smoke.sh` with datasets present; wiring dataset-fetch into
+      # this lane is deferred (see the block-emit overflow finding filed off
+      # issue #1614).
+
+      - name: Run long fuzz budget
+        env:
+          TARGET: ${{ matrix.target }}
+        working-directory: fuzz
+        run: |
+          cargo +nightly fuzz run "$TARGET" -- \
+            -max_total_time=600 \
+            -rss_limit_mb=2048 \
+            -timeout=25
+
+      - name: Upload crash reproducer
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-nightly-${{ matrix.target }}
+          path: fuzz/artifacts/**
+          if-no-files-found: ignore

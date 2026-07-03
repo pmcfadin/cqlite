@@ -10,6 +10,13 @@ members = [
     "examples",
     "tools/*",
 ]
+# The cargo-fuzz crate (issue #1614) is its own workspace (`fuzz/Cargo.toml` has
+# an empty `[workspace]` table). Exclude it here too so no default `cargo
+# build`/`clippy`/test at the repo root — or `scripts/agent-gate.sh` — ever
+# compiles it; fuzzing requires nightly and is run only via its own workflow.
+exclude = [
+    "fuzz",
+]
 resolver = "2"
 
 [package]
