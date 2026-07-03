@@ -9,7 +9,7 @@ with the shape:
     {"median": {"point_estimate": <float_ns>}, ...}
 
 Test matrix:
-  A) CPU bench (read/point_lookup) regresses 20% → non-zero exit (FAIL gate)
+  A) CPU bench (read/get_partition_big) regresses 20% → non-zero exit (FAIL gate)
   B) Massive write/ingest_wal_on swing (50%) with all strict benches OK → zero
      exit (advisory reported, gate passes)
   C) write/ingest_wal_off regresses 20% (strict bench) → non-zero exit
@@ -69,13 +69,13 @@ def _run(criterion_dir, new_baseline="pr", base_baseline="base"):
 # ---------------------------------------------------------------------------
 
 class TestCpuRegressionFails:
-    """A CPU-bound bench (read/point_lookup) regressing > threshold → exit 1."""
+    """A CPU-bound bench (read/get_partition_big) regressing > threshold → exit 1."""
 
-    def test_read_point_lookup_20pct_regression_fails(self, capsys):
-        """20% regression on read/point_lookup must fail the gate (non-zero exit)."""
+    def test_read_get_partition_big_20pct_regression_fails(self, capsys):
+        """20% regression on read/get_partition_big must fail the gate (non-zero exit)."""
         exit_code = _run(_CRIT_CPU_REGRESSION)
         assert exit_code != 0, (
-            "Expected non-zero exit for a 20% regression in read/point_lookup "
+            "Expected non-zero exit for a 20% regression in read/get_partition_big "
             "(a strictly gated bench), but got exit code 0."
         )
 
@@ -83,7 +83,7 @@ class TestCpuRegressionFails:
         """The failure output must name the regressing bench."""
         _run(_CRIT_CPU_REGRESSION)
         captured = capsys.readouterr()
-        assert "read/point_lookup" in captured.out
+        assert "read/get_partition_big" in captured.out
 
 
 class TestAdvisoryWalOnNeverFails:

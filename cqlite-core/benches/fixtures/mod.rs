@@ -94,6 +94,35 @@ pub fn table_dir(keyspace: &str, table: &str) -> PathBuf {
     }
 }
 
+/// True if a fixture's on-disk SSTable directory is present under the datasets
+/// root. Unlike [`table_dir`] this never panics — it returns `false` when the
+/// keyspace dir or the `<table>-<hash>` directory is missing, so an *optional*
+/// fixture (e.g. the BTI `test_da` corpus, absent in some checkouts) can be
+/// skip-registered by a bench rather than aborting the run.
+pub fn fixture_present(fx: &ReadFixture) -> bool {
+    let parent = sstables_root().join(fx.keyspace);
+    let prefix = format!("{}-", fx.table);
+    // Locate the CFID-suffixed table directory …
+    let Some(dir) = std::fs::read_dir(&parent).ok().and_then(|rd| {
+        rd.filter_map(|e| e.ok())
+            .find(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+            .map(|e| e.path())
+    }) else {
+        return false;
+    };
+    // … and require at least one real SSTable data component. The corpus ships
+    // committed sidecars (`*-Data.db.jsonl`, `*.txt`) even when the binary
+    // `*-Data.db` is not fetched; matching the directory alone would let the
+    // optional bench proceed into `open_read_db` and panic (0 rows) instead of
+    // skip-registering (roborev, issue #1562). `-Data.db` excludes `-Data.db.jsonl`.
+    std::fs::read_dir(&dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .any(|e| e.file_name().to_string_lossy().ends_with("-Data.db"))
+        })
+        .unwrap_or(false)
+}
+
 /// A small, fixed read fixture: a keyspace/table in the vendored corpus plus the
 /// schema file that decodes it. Descriptors are `const` so benches reference a
 /// stable, named set rather than hard-coding paths.
@@ -114,6 +143,18 @@ impl ReadFixture {
         keyspace: "test_basic",
         table: "simple_table",
         schema_file: "basic-types.cql",
+    };
+
+    /// `test_da.simple_table` — the BTI (`da` format) analogue of [`Self::SIMPLE`]:
+    /// `UUID PRIMARY KEY`, no clustering. The `read/get_partition_bti` point-read
+    /// fixture. **Optional** — the `test_da` corpus is not present in every
+    /// checkout, so benches must guard on [`fixture_present`] and skip-register
+    /// when absent. Uses the BTI-specific `da-test.cql` schema (the table is
+    /// declared under the `test_da` keyspace there, not `test_basic`).
+    pub const SIMPLE_BTI: ReadFixture = ReadFixture {
+        keyspace: "test_da",
+        table: "simple_table",
+        schema_file: "da-test.cql",
     };
 
     /// `test_timeseries.sensor_data` — partition + clustering layout. The

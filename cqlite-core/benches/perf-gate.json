@@ -6,7 +6,11 @@
   ],
   "benches": [
     {
-      "id": "read/point_lookup",
+      "id": "read/get_partition_big",
+      "threshold_pct": 10
+    },
+    {
+      "id": "read/get_partition_bti",
       "threshold_pct": 10
     },
     {

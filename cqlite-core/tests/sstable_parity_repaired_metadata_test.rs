@@ -474,9 +474,11 @@ fn repaired_metadata_synthetic_repaired_state_roundtrip() {
 fn repaired_metadata_writer_roundtrip_preserves_unrepaired_state() {
     use cqlite_core::storage::sstable::writer::{StatisticsMetadata, StatisticsWriter};
 
-    let dir = std::env::temp_dir().join("cqlite-988-repaired-roundtrip");
-    std::fs::create_dir_all(&dir).expect("create temp dir");
-    let stats_path = dir.join("nb-1-big-Statistics.db");
+    // Unique per-invocation dir (held to end of test) — a fixed shared
+    // `env::temp_dir()` path races the file out from under the read when the
+    // full test suite runs binaries in parallel (pre-existing flake).
+    let dir = tempfile::TempDir::new().expect("create temp dir");
+    let stats_path = dir.path().join("nb-1-big-Statistics.db");
 
     let mut meta = StatisticsMetadata::new();
     meta.update_timestamp(1_000_000);
@@ -551,9 +553,11 @@ fn repaired_metadata_writer_roundtrip_preserves_unrepaired_state() {
 fn repaired_state_writer_roundtrip_preserves_repaired_pending_transient() {
     use cqlite_core::storage::sstable::writer::{StatisticsMetadata, StatisticsWriter};
 
-    let dir = std::env::temp_dir().join("cqlite-1021-repaired-preserve");
-    std::fs::create_dir_all(&dir).expect("create temp dir");
-    let stats_path = dir.join("nb-1-big-Statistics.db");
+    // Unique per-invocation dir (held to end of test) — see the sibling
+    // roundtrip test; a fixed shared `env::temp_dir()` path races under the
+    // parallel suite (pre-existing flake).
+    let dir = tempfile::TempDir::new().expect("create temp dir");
+    let stats_path = dir.path().join("nb-1-big-Statistics.db");
 
     let repaired_at: i64 = 1_700_000_000_000;
     let pending_uuid: [u8; 16] = [
