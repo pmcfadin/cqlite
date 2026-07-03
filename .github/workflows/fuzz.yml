@@ -22,6 +22,7 @@ on:
       - 'cqlite-core/src/parser/**'
       - 'cqlite-core/src/storage/sstable/**'
       - 'cqlite-core/src/schema/**'
+      - 'cqlite-core/src/types.rs'
       - 'cqlite-core/src/types/**'
       - 'cqlite-core/src/fuzz_support.rs'
       # Manifests: feature/dependency resolution for the fuzz surface (the crate
