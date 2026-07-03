@@ -922,6 +922,21 @@ pub(crate) fn build_typed_value_array(
             let unwrapped: Vec<Option<&Value>> =
                 values.iter().map(|opt| unwrap_frozen_value(*opt)).collect();
 
+            // Fail closed: a non-null top-level value that is not a Tuple is a
+            // type mismatch, not a null.  Mirror the scalar arms rather than
+            // silently coercing the whole struct row's children to null.
+            for v in unwrapped.iter() {
+                match v {
+                    Some(Value::Tuple(_)) | Some(Value::Null) | None => {}
+                    Some(other) => {
+                        return Err(ArrowConvertError::InvalidValue(format!(
+                            "expected Tuple value, got {:?}",
+                            other
+                        )));
+                    }
+                }
+            }
+
             // Build a null bitmap: true = row is non-null (valid struct).
             let null_bitmap: Vec<bool> = unwrapped
                 .iter()
@@ -953,7 +968,8 @@ pub(crate) fn build_typed_value_array(
                                         .unwrap_or(&null_sentinel),
                                 )
                             }
-                            // Null row or wrong type → null sentinel.
+                            // Null/absent row → null sentinel (wrong variants
+                            // already failed closed above).
                             _ => Some(&null_sentinel),
                         }
                     })
@@ -1008,6 +1024,21 @@ pub(crate) fn build_typed_value_array(
             let unwrapped: Vec<Option<&Value>> =
                 values.iter().map(|opt| unwrap_frozen_value(*opt)).collect();
 
+            // Fail closed: a non-null top-level value that is not a Udt is a
+            // type mismatch, not a null.  Mirror the scalar arms rather than
+            // silently coercing the whole struct row's children to null.
+            for v in unwrapped.iter() {
+                match v {
+                    Some(Value::Udt(_)) | Some(Value::Null) | None => {}
+                    Some(other) => {
+                        return Err(ArrowConvertError::InvalidValue(format!(
+                            "expected Udt value, got {:?}",
+                            other
+                        )));
+                    }
+                }
+            }
+
             // Build a null bitmap: true = row is non-null (valid struct).
             let null_bitmap: Vec<bool> = unwrapped
                 .iter()
@@ -1035,7 +1066,8 @@ pub(crate) fn build_typed_value_array(
                                     .unwrap_or(&null_sentinel),
                             )
                         }
-                        // Null row or wrong type → null sentinel.
+                        // Null/absent row → null sentinel (wrong variants
+                        // already failed closed above).
                         _ => Some(&null_sentinel),
                     })
                     .collect();
@@ -1936,5 +1968,67 @@ mod tests {
             .downcast_ref::<Float32Array>()
             .expect("Float32Array");
         assert_eq!(arr.value(0), 1.84f32);
+    }
+
+    /// (7a) Tuple arm: a non-`Tuple` top-level value in a tuple column must FAIL
+    /// CLOSED, not silently become a struct row of null children.
+    #[test]
+    fn tuple_expected_tuple_got_scalar_is_error() {
+        let columns = vec![col(
+            "t",
+            DataType::Text,
+            Some(CqlType::Tuple(vec![CqlType::Int, CqlType::Text])),
+        )];
+        let rows = vec![row_one("t", Value::Text("not-a-tuple".into()))];
+        assert!(is_invalid_value(rows_to_record_batch(&columns, &rows)));
+    }
+
+    /// (7b) Tuple arm regression: `Value::Null` and an ABSENT tuple column must
+    /// STILL build (as struct nulls), never error.
+    #[test]
+    fn tuple_null_and_absent_still_build_ok() {
+        let columns = vec![col(
+            "t",
+            DataType::Text,
+            Some(CqlType::Tuple(vec![CqlType::Int, CqlType::Text])),
+        )];
+        let rows = vec![row_one("t", Value::Null), row_absent()];
+        let batch = rows_to_record_batch(&columns, &rows).expect("null/absent tuple must build");
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(batch.column(0).null_count(), 2);
+    }
+
+    /// (8a) UDT arm: a non-`Udt` top-level value in a UDT column must FAIL
+    /// CLOSED, not silently become a struct row of null children.
+    #[test]
+    fn udt_expected_udt_got_scalar_is_error() {
+        let columns = vec![col(
+            "u",
+            DataType::Text,
+            Some(CqlType::Udt(
+                "my_type".into(),
+                vec![("a".into(), CqlType::Int), ("b".into(), CqlType::Text)],
+            )),
+        )];
+        let rows = vec![row_one("u", Value::Integer(9))];
+        assert!(is_invalid_value(rows_to_record_batch(&columns, &rows)));
+    }
+
+    /// (8b) UDT arm regression: `Value::Null` and an ABSENT UDT column must STILL
+    /// build (as struct nulls), never error.
+    #[test]
+    fn udt_null_and_absent_still_build_ok() {
+        let columns = vec![col(
+            "u",
+            DataType::Text,
+            Some(CqlType::Udt(
+                "my_type".into(),
+                vec![("a".into(), CqlType::Int), ("b".into(), CqlType::Text)],
+            )),
+        )];
+        let rows = vec![row_one("u", Value::Null), row_absent()];
+        let batch = rows_to_record_batch(&columns, &rows).expect("null/absent UDT must build");
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(batch.column(0).null_count(), 2);
     }
 }
