@@ -56,7 +56,11 @@ fn main() {
 fn main() {
     use std::path::PathBuf;
 
-    /// Memory budget from CLAUDE.md: <128 MiB for large files.
+    /// Memory budget from CLAUDE.md: <128 MiB for large files. Only referenced in
+    /// the `dhat-heap` summary block below, so gate it to that feature — otherwise a
+    /// non-`dhat-heap` build of this example (e.g. `--features cli-helpers` or
+    /// `work-counters`) trips `dead_code` under `-D warnings`.
+    #[cfg(feature = "dhat-heap")]
     const HEAP_BUDGET_BYTES: u64 = 128 * 1024 * 1024;
 
     let out_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/profiling");
