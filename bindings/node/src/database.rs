@@ -363,7 +363,7 @@ impl ParquetExportOptions {
 /// The write engine is protected by an Arc<Mutex> and only one write can proceed at a time.
 #[napi]
 pub struct Database {
-    inner: Arc<cqlite_core::Database>,
+    pub(crate) inner: Arc<cqlite_core::Database>,
     closed: AtomicBool,
     /// Default incoming W3C `traceparent` for this handle's per-call spans
     /// (issue #1040). `None` when not supplied or invalid.
@@ -382,7 +382,7 @@ pub struct Database {
 
 impl Database {
     /// Check if database is open, returning error if closed.
-    fn ensure_open(&self) -> napi::Result<()> {
+    pub(crate) fn ensure_open(&self) -> napi::Result<()> {
         if self.closed.load(Ordering::SeqCst) {
             Err(simple_error("Database is closed"))
         } else {
