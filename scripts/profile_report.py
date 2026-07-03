@@ -56,8 +56,14 @@ def _git_rev():
 
 
 def _git_commit():
-    """Full HEAD SHA for the ledger `commit` field, matching the Rust bench_ledger
-    writer (which uses `git rev-parse HEAD`) so the two sources group together."""
+    """Commit id for the ledger `commit` field, mirroring the Rust bench_ledger
+    writer's `current_commit()`: a non-empty `GIT_COMMIT` env override wins, else
+    `git rev-parse HEAD`, else "unknown". Honoring the same override keeps a CI run
+    that sets `GIT_COMMIT` from splitting one run's records across two `commit`
+    values (Finding 4, roborev)."""
+    env_commit = os.environ.get("GIT_COMMIT", "").strip()
+    if env_commit:
+        return env_commit
     try:
         out = subprocess.run(
             ["git", "rev-parse", "HEAD"],

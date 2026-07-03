@@ -142,6 +142,42 @@ class TestSummarizeHistory:
 
 
 # ---------------------------------------------------------------------------
+# Unit: commit resolver honors GIT_COMMIT (mirrors the Rust bench_ledger writer)
+# ---------------------------------------------------------------------------
+class TestCommitResolver:
+    def test_git_commit_env_override_wins(self, monkeypatch):
+        # A non-empty GIT_COMMIT wins over `git rev-parse HEAD` so a CI run that
+        # sets it does not split its records across two `commit` values.
+        monkeypatch.setenv("GIT_COMMIT", "envsha1234")
+        assert _mod._git_commit() == "envsha1234"
+
+    def test_git_commit_blank_env_falls_back_to_git(self, monkeypatch):
+        # A blank/whitespace override is ignored (matches the Rust `.trim()` guard);
+        # falls back to `git rev-parse HEAD` (stubbed) or "unknown".
+        monkeypatch.setenv("GIT_COMMIT", "   ")
+        monkeypatch.setattr(
+            _mod.subprocess, "run",
+            lambda *a, **k: type("R", (), {"stdout": "fallbackhead\n"})(),
+        )
+        assert _mod._git_commit() == "fallbackhead"
+
+    def test_ledger_commit_field_uses_git_commit_env(self, tmp_path, monkeypatch):
+        # End-to-end: the ledger `commit` field reflects GIT_COMMIT when set.
+        monkeypatch.setenv("GIT_COMMIT", "ledgerenvsha")
+        criterion_dir = str(tmp_path / "criterion")
+        out_dir = str(tmp_path / "profiling")
+        _write_estimate(criterion_dir, "read/x", 1000)
+        monkeypatch.setattr(
+            sys, "argv",
+            ["profile_report.py", "--criterion-dir", criterion_dir, "--out-dir", out_dir],
+        )
+        assert _mod.main() == 0
+        lines = _read_ledger_lines(os.path.join(out_dir, "history.jsonl"))
+        assert lines, "ledger must have records"
+        assert all(r["commit"] == "ledgerenvsha" for r in lines)
+
+
+# ---------------------------------------------------------------------------
 # End-to-end: main() writes the unified ledger and renders the history table
 # ---------------------------------------------------------------------------
 class TestMainEndToEnd:
