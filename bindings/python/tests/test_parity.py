@@ -290,18 +290,29 @@ def normalize_jsonl_value(value: Any, cell_name: str = "") -> Any:
             h, m, s = simple_time.groups()
             return (int(h) * 3600 + int(m) * 60 + int(s)) * 1_000_000_000
 
-        # Duration pattern: "12h58m22s" or with months/days.
-        # CQL `duration` decodes to an exact cqlite.Duration (#1450): months and
-        # days are kept independently (no 30-day collapse) and sub-day time is
-        # nanoseconds.
-        duration_match = re.match(
-            r"^(?:(\d+)mo)?(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$",
-            value,
-        )
-        if duration_match and any(duration_match.groups()):
-            mo, d, h, m, s = [int(g) if g else 0 for g in duration_match.groups()]
-            nanos = (h * 3600 + m * 60 + s) * 1_000_000_000
-            return cqlite.Duration(mo, d, nanos)
+        # Duration pattern: "12h58m22s", "1mo2d3h", "1s123ns", etc.
+        # CQL `duration` decodes to an exact cqlite.Duration (#1450). sstabledump
+        # renders Cassandra's stored (months, days, nanos) via the full grammar
+        # (y/mo/w/d/h/m/s/ms/us/ns); reconstruct the exact three components,
+        # inverting that rendering (no 30-day collapse, no truncation). The
+        # two-char units are matched before the single-char ones so `mo`/`ms`/`us`
+        # are not mis-read as `m`/`s`.
+        duration_tokens = re.findall(r"(\d+)(mo|ms|us|µs|ns|[ymwdhs])", value)
+        if duration_tokens and "".join(n + u for n, u in duration_tokens) == value:
+            units: dict[str, int] = {}
+            for num, unit in duration_tokens:
+                units[unit] = units.get(unit, 0) + int(num)
+            months = units.get("y", 0) * 12 + units.get("mo", 0)
+            days = units.get("w", 0) * 7 + units.get("d", 0)
+            nanos = (
+                units.get("h", 0) * 3_600_000_000_000
+                + units.get("m", 0) * 60_000_000_000
+                + units.get("s", 0) * 1_000_000_000
+                + units.get("ms", 0) * 1_000_000
+                + (units.get("us", 0) + units.get("µs", 0)) * 1_000
+                + units.get("ns", 0)
+            )
+            return cqlite.Duration(months, days, nanos)
 
         # Plain string
         return value
