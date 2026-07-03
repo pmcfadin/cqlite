@@ -522,9 +522,7 @@ impl SSTableReader {
         use crate::storage::sstable::compression::Compression;
 
         let parser = self.build_v5_parser();
-        // Sliding window with a FRONT CURSOR (issue #1589): confirmed partitions are
-        // consumed by advancing the cursor, and the reclaimed prefix is compacted
-        // once per refill — not memmoved per partition as the old front-drain did.
+        // Sliding front-cursor window (issue #1589): compacts once per refill.
         let mut window = WindowCursor::new();
         let mut broke = false;
         let mut chunk_count = 0usize;
@@ -568,8 +566,6 @@ impl SSTableReader {
                 } else {
                     compressed_chunk
                 };
-                // Refill the window: compact the already-consumed prefix ONCE
-                // (issue #1589), then append the freshly decompressed chunk.
                 window.refill(&decompressed_chunk);
                 chunk_count += 1;
 
@@ -759,10 +755,7 @@ impl SSTableReader {
             match step {
                 ParseStep::Emitted(consumed) => {
                     let take = if consumed == 0 { 1 } else { consumed };
-                    // Advance the cursor over the confirmed partition (issue #1589):
-                    // NO memmove here — the reclaimed prefix is compacted once at the
-                    // next refill. `consume` clamps to the remaining length, matching
-                    // the prior `drain(0..take.min(window.len()))`.
+                    // Advance the cursor (no memmove); `consume` clamps to remaining.
                     window.consume(take);
                     // Accumulate this partition's surviving entries in scan order,
                     // flushing a full batch as ONE channel item whenever it
