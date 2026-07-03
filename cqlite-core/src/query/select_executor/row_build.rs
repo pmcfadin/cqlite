@@ -104,7 +104,12 @@ pub fn build_row_from_scan(
     // fall through to a non-row fallback (issue #1334 / roborev H2).
     let cells = row.into_cells()?;
 
-    let mut row_values: HashMap<Arc<str>, Value> = HashMap::new();
+    // Issue #1584: pre-size the value map to the upper bound of inserts — the
+    // decoded cell count plus the reconstructed partition-key columns. This is a
+    // single sized allocation with no rehash growth (for `SELECT *` it is exact;
+    // for a narrower projection it slightly over-reserves, still one alloc).
+    let pk_hint = schema.map(|s| s.partition_keys.len()).unwrap_or(0);
+    let mut row_values: HashMap<Arc<str>, Value> = HashMap::with_capacity(cells.len() + pk_hint);
     let project = |name: &str| projection.is_empty() || projection.iter().any(|p| p == name);
 
     // Issue #1334: the decoder carries interned `Arc<str>` column-name handles in
@@ -241,6 +246,31 @@ mod tests {
             row.values.len(),
             2,
             "exactly the two real columns, no extras"
+        );
+    }
+
+    /// Issue #1584: the row value map is pre-sized to the decoded cell count so a
+    /// single sized allocation covers the row (no rehash growth). Pinned via a
+    /// narrow projection: 8 cells are decoded but only ONE survives projection —
+    /// the map's capacity must still reflect the 8-cell hint (`>= 8`). With the
+    /// pre-fix `HashMap::new()` the map is grown from empty to the single inserted
+    /// entry (capacity 3), which fails this lower bound.
+    #[test]
+    fn build_row_from_scan_presizes_value_map() {
+        let cells: Vec<(Arc<str>, Value)> = (0..8)
+            .map(|i| (Arc::from(format!("c{i}").as_str()), Value::Integer(i)))
+            .collect();
+        let key = RowKey::new(b"k".to_vec());
+
+        let row = build_row_from_scan(key, ScanRow::Row(cells), &["c0".to_string()], None)
+            .expect("a live row must build");
+
+        assert_eq!(row.values.len(), 1, "projection keeps exactly one column");
+        assert!(
+            row.values.capacity() >= 8,
+            "issue #1584: value map must be pre-sized to the decoded cell count \
+             (>= 8), not grown from empty to the projected size; got capacity {}",
+            row.values.capacity()
         );
     }
 
