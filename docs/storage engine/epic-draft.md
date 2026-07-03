@@ -19,14 +19,19 @@ complete history at lakehouse scale.
 - Delta-export already emits tombstone-faithful envelopes; the DuckDB
   reference-merge guide (#878) proves the remaining consumer burden and
   doubles as the parity oracle.
-- Statistics.db authoritativeness work (#1728/#1729 → #1388) is landing the
-  watermark foundation this epic requires.
+- Statistics.db authoritativeness work LANDED 2026-07-02 (#1728 via PR
+  #1732, #1729 via PR #1730; #1388 also closed) — the watermark foundation
+  this epic requires is in place.
 
 ## Child issues / changes (in order)
 
-1. **add-iceberg-materializer** — single-invocation materializer, filesystem
-   catalog, exactly-once commits, lineage-safe, reference-merge parity.
-   (OpenSpec change drafted; ready for flow-groom.)
+1. **add-iceberg-materializer** — single-invocation materializer, embedded
+   SQL catalog (SQLite), exactly-once commits, lineage-safe,
+   reference-merge parity. OQ1 verdict (2026-07-03): **HYBRID** — adopt
+   iceberg-rust 0.9.1 writers/types, build the delete-aware snapshot
+   commit layer ourselves (upstream has no delete-commit action; see
+   `iceberg-oq1-build-vs-adopt.md`). Effort M–L, not glue. (OpenSpec
+   change drafted; ready for flow-groom.)
 2. **add-materializer-daemon** — continuous data-directory watcher;
    generation lifecycle; backoff/retry; sidecar-deployable.
 3. **add-materializer-primary-range-dedup** — cluster mode: per-node
@@ -35,16 +40,22 @@ complete history at lakehouse scale.
 4. **add-materializer-repaired-gating** — consistency contract: only
    repaired SSTables materialize; snapshot watermark = repair horizon.
 5. **add-iceberg-rest-catalog** — REST catalog backend, auth, commit-conflict
-   handling.
+   handling. Candidate design (owner suggestion 2026-07-03): a
+   **Cassandra-backed catalog** — LWT compare-and-swap as the commit lock
+   behind a REST front; the cluster is already present in sidecar/cluster
+   mode and solves cross-node commit coordination that SQLite cannot.
 6. **add-iceberg-maintenance** — equality-delete compaction, snapshot
    rewrite/expiry, orphan-file cleanup.
 
 ## Dependencies
 
-- #1729 / #1728 (authoritative Statistics.db) — blocks child 1's watermark
-  requirement (fail-closed until landed).
+- #1729 / #1728 (authoritative Statistics.db) — LANDED 2026-07-02 (PRs
+  #1730 / #1732); fail-closed on placeholder stats stays as defense.
 - Epic #696 envelope schema — stable input contract.
-- OQ1 (iceberg-rust write maturity) — spike task inside child 1.
+- OQ1 (iceberg-rust write maturity) — ANSWERED 2026-07-03: HYBRID (adopt
+  0.9.1 + build the delete-commit layer); spike task replaced by a named
+  commit-layer build task in child 1. Evidence:
+  `iceberg-oq1-build-vs-adopt.md`.
 
 ## Exit criteria (epic)
 
@@ -55,10 +66,17 @@ complete history at lakehouse scale.
 - Demo: `SELECT` in DuckDB against the catalog, sub-second, zero pipeline
   code.
 
-## NEEDS YOU (product decisions before child 1 activates)
+## Product decisions — ALL DECIDED 2026-07-03 (owner)
 
-- OQ2: tables whose clustering columns can't be Iceberg identifier fields —
-  degrade to position deletes or fail closed?
-- OQ3: static-column materialization shape (denormalize vs companion table).
-- Catalog naming convention: `catalog.<keyspace>.<table>` vs configurable
-  namespace mapping.
+- OQ2: **fail closed with a named error** for PK columns whose types
+  Iceberg disallows as equality fields (float/double); position-delete
+  degradation is a possible follow-up child.
+- OQ3: **denormalize statics per row**; static-only partitions skipped
+  with a counted warning in child 1.
+- SD-arrow: **feature-isolated arrow 57 inside `export/iceberg/`** — no
+  workspace upgrade in this epic.
+- SD-catalog: **`iceberg-catalog-sql` on SQLite** for child 1;
+  Cassandra-backed catalog recorded as child-5 candidate; self-emitted
+  filesystem metadata as fallback.
+- Catalog naming (lead default): `catalog.<keyspace>.<table>` +
+  `--namespace` override flag; no configurable mapping in child 1.

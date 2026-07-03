@@ -29,7 +29,13 @@ Iceberg state must equal the reference merge.
 - New CLI subcommand `cqlite materialize` behind `--features iceberg`
   (single invocation, single table, one-or-more input generations →
   one Iceberg snapshot commit).
-- Catalog support: filesystem/Hadoop-style catalog only in this change.
+- Catalog support: embedded SQL catalog (`iceberg-catalog-sql`, SQLite
+  backend) only in this change; self-emitted filesystem metadata as
+  documented fallback. (Revised 2026-07-03: apache/iceberg-rust ships no
+  filesystem catalog — see design D5/D5a and
+  `iceberg-oq1-build-vs-adopt.md`. HYBRID verdict: we build the
+  delete-aware snapshot commit layer; arrow 57 isolated behind the
+  `iceberg` feature.)
 - Snapshot commits carry consumed-generation identities and an authoritative
   delta-horizon watermark in snapshot properties.
 
@@ -40,7 +46,7 @@ Iceberg state must equal the reference merge.
   `cqlite-cli` `materialize` subcommand, `Cargo.toml` (iceberg-rust + arrow
   deps behind the `iceberg` feature only — default dependency surface
   unchanged, matching the #558 precedent).
-- Parity manifest: adds `claim.safe.iceberg_materialize_filesystem_catalog`;
+- Parity manifest: adds `claim.safe.iceberg_materialize_embedded_catalog`;
   records `claim.blocked.iceberg_rest_catalog` and
   `claim.blocked.continuous_materialization` until follow-ups land.
 - Note on #1406: this change neither depends on nor alters the
@@ -50,14 +56,21 @@ Iceberg state must equal the reference merge.
 
 ## Dependencies
 
-- **Hard**: authoritative `maxTimestamp` decoding in Statistics.db (#1729)
-  and live-cell `maxLocalDeletionTime` fidelity (#1728) — the watermark
-  requirement fails closed without them (consistent with #1388's blockers).
+- **Hard (LANDED 2026-07-02)**: authoritative `maxTimestamp` decoding in
+  Statistics.db (#1729, PR #1730) and live-cell `maxLocalDeletionTime`
+  fidelity (#1728, PR #1732) — both closed. The watermark requirement's
+  fail-closed behavior on placeholder stats stays as defense against
+  legacy/malformed inputs.
 - **Hard**: Epic #696 delta-envelope schema (`__op`/`__ts`, `--envelope-prefix`).
 - **Soft**: Epic #673 Arrow type mapping (reused for Iceberg schema derivation).
 
 ## Out of scope (follow-up changes under the same epic)
 
+0. **Unflushed memtable tail exports** (CEP-11 plugin design,
+   `memtable-plugin-design.md`): the materializer consumes ONLY real
+   flushed/compacted SSTable generations from the data directory. Tail
+   state must reach the lakehouse via a normal flush, never via tail
+   exports. (Orthogonality confirmed 2026-07-03.)
 1. `add-materializer-daemon` — continuous sidecar-style watcher with
    generation-lineage tracking against the live data directory.
 2. `add-materializer-primary-range-dedup` — cluster mode: each node

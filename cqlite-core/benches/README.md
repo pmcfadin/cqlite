@@ -91,11 +91,14 @@ env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
 | `partition_lookup` | kept | Index.db partition-key lookup (`IndexReader::lookup_partition`) — cold/warm cache, throughput, access-pattern distribution. The latency-sensitive read path. |
 | `m1_performance` | kept | M1 baseline targets: partition-lookup latency plus multi-SSTable read throughput (MB/s). |
 | `fixtures_smoke` | added (#537) | Smoke/acceptance bench proving the fixture loaders are deterministic (seeded RNG + stable scan row count). Read/write portions activate under `cli-helpers` / `write-support`. |
-| `read` | added (#538), point-read reworked (#1562) | Read suite (needs `--features cli-helpers`): `get_partition_big`, `get_partition_bti`, `clustering_slice`, `full_scan`, `type_heavy` over the fixtures via the public query API. `get_partition_*` are **real** partition-targeted point reads (`WHERE id = <unquoted-uuid>`, #949/#956), asserted at setup to report a targeted `AccessPath` (not the old `SELECT * … LIMIT 1` scan proxy). `_bti` skip-registers when the optional `test_da` corpus is absent. |
+| `read` | added (#538), point-read reworked (#1562), chunk cache (#1567) | Read suite (needs `--features cli-helpers`): `get_partition_big`, `get_partition_bti`, `point_lookup_repeated`, `clustering_slice`, `full_scan`, `type_heavy` over the fixtures via the public query API. `get_partition_*` are **real** partition-targeted point reads (`WHERE id = <unquoted-uuid>`, #949/#956), asserted at setup to report a targeted `AccessPath` (not the old `SELECT * … LIMIT 1` scan proxy). `point_lookup_repeated` (#1567) measures the steady-state **cached** repeat point read — Criterion warms up, so the target chunk is decompressed once and served from the shared decompressed-chunk cache thereafter (`Arc::clone`, no re-read/re-decompress). `_bti` / `point_lookup_repeated` skip-register when the optional `test_da` corpus is absent. |
 | `write` | added (#539, #574) | Write suite (needs `--features write-support`): `ingest_wal_on`, `ingest_wal_off`, and `flush` — see below. |
+| `compaction` | added (#1646) | Compaction / k-way-merge suite (needs `--features write-support`): `narrow`, `wide`, `tombstone_heavy` — full multi-generation STCS compaction over flushed L0 SSTables — see below. |
 | `observability_overhead` | added (#1043) | Zero-overhead-when-disabled gate: `read_scan` (needs `cli-helpers`) and `write_merge` (needs `write-support`). The SAME bench source runs under the default build vs `--features observability` with export disabled; the two arms are compared by `scripts/ci/observability_overhead.sh` — see below. |
 | `concurrent_scan` | added (#917), **gated** (#1564) | Aggregate throughput of N ∈ {1,2,4,8} concurrent `get_all_entries()` scans against one shared `Arc<SSTableReader>`, for the buffered and mmap backends (needs `--features cli-helpers`). Gated via a **concurrency scaling floor** (not absolute time) — see below. |
 | `read_while_write` | added (#1143), **gated** (#1564) | Reader-side scan latency with ~6 full-scan readers running concurrently with ~2 sustained-ingest writers (needs `--features cli-helpers,write-support`). Gated on the Criterion **median** (strict, 25% threshold); the p99 tail is printed to stderr for local diagnosis and owned by the A2 tail-latency harness (#1563). |
+| `tail_latency` | added (#1563) | `harness = false` mixed-load tail harness (needs `--features cli-helpers`): p50/p99/p999 + intra-run ratios for point reads under a background scan — see below. Appends per-metric rows to the unified ledger. |
+| `open` | added (#1566) | `harness = false` cold-open + memory bench (needs `--features cli-helpers`): `open/cold_big` and `open/cold_bti` (fresh `SSTableReader::open` component-load cost; `_bti` skip-registers when `test_da` is absent) and `mem/open_n_readers` (per-reader RSS gauge). Skip-on-absent, panic-on-present-but-broken; appends its medians + the memory metric to the unified ledger — see below. |
 
 ### `observability_overhead` two-build comparison (Issue #1043)
 
@@ -135,6 +138,20 @@ in-memory-OTLP correctness/sampling tests.
 | `write/ingest_wal_on` | **Advisory** — reported, never fails CI | Identical 256-row ingest with `Durability::SyncEachWrite` (default): every row calls `wal.append()` + `wal.sync()` (fsync). I/O-dominated; fsync latency on shared CI runners makes this too noisy for strict gating, but it documents durability cost. |
 | `write/flush` | **Strictly gated** — strict pass/fail | Pre-filled memtable flushed once per iteration. Throughput reported in MB/s. |
 
+### `compaction` bench breakdown (Issue #1646, Epic O finding O1)
+
+Each iteration flushes `min_threshold` (4) L0 SSTables in the **untimed** setup,
+installs an `STCSPolicy` explicitly via `set_merge_policy` (so O1 measures
+compaction regardless of whether the default-on STCS wiring, N1, has landed),
+then drives `WriteEngine::maintenance_step` to completion in the **timed**
+routine. Throughput is reported as compacted rows/second (`Throughput::Elements`).
+
+| Bench name | Gate policy | What it measures |
+|------------|-------------|------------------|
+| `compaction/narrow` | **Strictly gated** — strict pass/fail | Many small single-row partitions (`UUID` PK, no clustering) across the L0 SSTables. The CPU-bound merge-core probe; stable enough for strict regression detection. |
+| `compaction/wide` | **Advisory** — reported, never fails CI | A few fat partitions, each SSTable contributing a disjoint clustering slice so the merged partition is the union of all of them. Memory/data-shaped by design — **O2's dhat budget is its guard, not this wall clock** — so it is advisory. |
+| `compaction/tombstone_heavy` | **Strictly gated** — strict pass/fail | Live rows shadowed by row/range/cell tombstones in a later generation, exercising the reconcile + range-shadowing path. CPU-bound; strictly gated. |
+
 ## Performance regression gate (Issues #540, #572)
 
 CI runs the `read` + `write` benches on **both the PR and `main`, on the same
@@ -163,8 +180,8 @@ The gate distinguishes two classes of benches (configured via `perf-gate.json`):
 
 | Class | Behavior | When to use |
 |-------|----------|-------------|
-| **Strict** | Non-zero exit if delta > `threshold_pct`. Blocks merging. | CPU-bound, stable timings: `read/*`, `write/ingest_wal_off`, `write/flush`. |
-| **Advisory** | Delta reported in CI output, but **never causes a non-zero exit**, regardless of size. | I/O-dominated by fsync: `write/ingest_wal_on`. Variance on shared runners exceeds any useful threshold. |
+| **Strict** | Non-zero exit if delta > `threshold_pct`. Blocks merging. | CPU-bound, stable timings: `read/*`, `write/ingest_wal_off`, `write/flush`, `compaction/narrow`, `compaction/tombstone_heavy`. |
+| **Advisory** | Delta reported in CI output, but **never causes a non-zero exit**, regardless of size. | I/O-dominated by fsync (`write/ingest_wal_on`) or memory/data-shaped (`compaction/wide`, whose dhat budget is owned by O2, not this wall clock). Variance on shared runners exceeds any useful threshold. |
 
 To mark a bench advisory, add its ID to the `advisory_benches` list in
 `perf-gate.json`. The per-bench `threshold_pct` for advisory benches still
@@ -329,12 +346,34 @@ is the convoy inflation — the headline number the C2/F1/F3 fixes must drive do
 All gate thresholds are these intra-run **ratios**, never wall-clock absolutes, so
 shared-runner noise cannot flap the gate.
 
-### History ledger
+### Unified history ledger (Issue #1566, Epic A / A5)
 
-Each run appends one JSON record (`{ts, commit, mixed, scan_free, ratios}`) to
-`benches/tail-latency-history.jsonl`. This is generated run data (machine/run
-specific), so it is **gitignored**, not committed. It is documented to consolidate
-into the Epic A5 unified `history.jsonl` when A5 lands.
+All harness benches persist their metrics to **one** append-only ledger,
+`target/profiling/history.jsonl`, written through the shared Rust module
+`benches/bench_ledger`. Every line is one JSON object **per metric** in the schema:
+
+```json
+{"ts": 1783103681, "commit": "<full-sha|unknown>", "bench": "tail_latency", "metric": "p99_over_p50", "value": 2.31, "unit": "ratio"}
+```
+
+- The `tail_latency` bench writes `mixed_p50/p99/p999` + `scan_free_p50/p99/p999`
+  (`ns`) and the two derived ratios (`ratio`), one line each.
+- The `open` bench writes `cold_big_median_ns` / `cold_bti_median_ns` (`ns`) and the
+  per-reader memory gauges `rss_after_n_readers_bytes` / `rss_per_reader_bytes`
+  (`bytes`).
+- `scripts/profile_report.py` writes each criterion bench's `median_ns` (`ns`) and
+  `peak_heap_bytes` (`bytes`) in the same schema.
+
+`./scripts/profile.sh report` reads the whole ledger back into a longitudinal
+per-metric table (latest value + delta vs the previous distinct commit). The ledger
+is generated run data (machine/run-specific): it lives under `target/` (gitignored)
+and is **never committed**; CI may upload it as an artifact. Override the path for a
+bench with the `CQLITE_BENCH_LEDGER` env var (else
+`<crate>/../target/profiling/history.jsonl`). Append is best-effort — a ledger write
+failure logs to stderr and never fails a measurement run.
+
+This replaced the A2 bespoke `benches/tail-latency-history.jsonl` (retired when A5
+landed). See `docs/profiling.md` for the full ledger contract.
 
 ### Advisory-first tail gate
 

@@ -56,13 +56,38 @@ a lineage record are treated as flush-origin; `--require-lineage` makes
 unknown lineage fail closed (spec req) for directories where Cassandra — not
 CQLite — performed compaction and lineage is genuinely unknowable.
 
-### D5. Catalog: filesystem first
+### D5. Catalog: embedded SQL catalog (SQLite) — REVISED 2026-07-03 per OQ1
 
-`iceberg-rust` filesystem catalog only. REST catalog (credentials, retries,
-multi-writer commit conflicts) is its own change. **Open question OQ1**
-covers iceberg-rust v2-delete write maturity; fallback is emitting the
-Iceberg metadata/manifests directly (we already own a Parquet writer), which
-is more code but zero new semantics.
+OQ1 research (`iceberg-oq1-build-vs-adopt.md`) found apache/iceberg-rust
+ships **no filesystem/Hadoop catalog** (pattern rejected upstream;
+`StaticTable` is read-only). Child 1 uses the ASF-official
+`iceberg-catalog-sql` crate on an embedded SQLite backend (`catalog.db`
+alongside the warehouse dir): commit-capable, persistent, readable by
+DuckDB/PyIceberg, works offline. Self-emitted filesystem metadata
+(metadata JSON + `version-hint.text`, atomic swap) is the documented
+no-dependency fallback. REST catalog stays its own change (child 5);
+owner note: evaluate a **Cassandra-backed catalog** (LWT compare-and-swap
+behind a REST front) as a candidate design for the shared cluster catalog
+in child 5 — decided out of scope for child 1 (offline/archived data dirs
+must materialize without a live cluster).
+
+### D5a. OQ1 verdict: HYBRID — adopt writers, build the commit layer
+
+iceberg-rust 0.9.1 ships `EqualityDeleteWriter`/`PositionDeleteFileWriter`
+and public manifest/metadata building blocks, but **no released or main
+transaction action can commit delete files into a snapshot** (upstream PRs
+#1882/#1987 both closed stale). Child 1 adopts the crate for types,
+writers, FileIO, and manifest encoding, and builds the delete-aware
+snapshot+commit layer in `commit.rs` (~scope of PR #1987; the same shape
+RisingWave runs in production). Delete when upstream lands `row_delta`.
+
+### D5b. Arrow isolation (SD-arrow, decided 2026-07-03)
+
+iceberg-rust 0.9.1 requires arrow 57; the workspace pins arrow 53. The
+`iceberg` feature pulls arrow 57 **isolated inside `export/iceberg/`** —
+batches built directly from CQLite `Value`s, no type-sharing with arrow-53
+code (two arrow majors already coexist in the lock via duckdb). No
+workspace upgrade in this epic.
 
 ### D6. Feature isolation
 
@@ -72,15 +97,23 @@ subcommand compiled out without the flag. Campsite rule: new module tree
 `export/iceberg/{mod.rs, fold.rs, deletes.rs, commit.rs, lineage.rs,
 schema.rs}` — no file grows past target.
 
-## Open questions (NEEDS YOU)
+## Open questions — ALL RESOLVED 2026-07-03 (owner decisions)
 
-- **OQ1**: iceberg-rust write-path maturity for v2 equality deletes at our
-  pin date — spike task 1.1 answers build-vs-adopt before implementation.
-- **OQ2**: identifier fields for tables where clustering columns include
-  types Iceberg disallows in identifier fields — degrade to
-  position deletes for those tables, or block with a named error?
-- **OQ3**: static columns — materialize as denormalized per-row values
-  (simple, redundant) or as a companion table (normalized, two commits)?
+- **OQ1** (RESOLVED): **HYBRID** — adopt iceberg-rust 0.9.1, build the
+  delete-aware commit layer (see D5a). Spike task 1.1 is dead; replaced by
+  a named commit-layer build task. Evidence:
+  `iceberg-oq1-build-vs-adopt.md` +
+  `cassandra-index/research-iceberg-oq1.md`.
+- **OQ2** (RESOLVED): **fail closed with a named error** (table, column,
+  type) when a primary-key column's type is disallowed as an Iceberg
+  equality field (float/double). Position-delete degradation is a possible
+  follow-up child if real corpora demand it.
+- **OQ3** (RESOLVED): **denormalize static columns per row** — one table,
+  zero consumer join knowledge. Static-only partitions (no clustering
+  rows) are skipped with a counted warning in child 1. Companion-table
+  shape rejected (reintroduces the consumer join this epic removes).
+- Catalog naming (lead default, reversible): `catalog.<keyspace>.<table>`
+  with a `--namespace` override flag; no configurable mapping in child 1.
 
 ## Non-goals restated
 

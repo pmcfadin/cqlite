@@ -317,6 +317,30 @@ impl SSTableReader {
     ///
     /// [`SSTABLES_OPEN`]: crate::observability::catalog::SSTABLES_OPEN
     pub async fn open(path: &Path, config: &Config, platform: Arc<Platform>) -> Result<Self> {
+        // Back-compat: existing callers and sibling crates get a FRESH per-reader
+        // decompressed-chunk cache sized from config (issue #1567). Production
+        // reads route through `SSTableManager`, which calls `open_with_cache` with
+        // its SHARED instance so all readers of a dataset share one cache.
+        let cache = Arc::new(
+            crate::storage::cache::DecompressedChunkCache::with_budget_bytes(
+                config.memory.block_cache.max_size as usize,
+            ),
+        );
+        Self::open_with_cache(path, config, platform, cache).await
+    }
+
+    /// Open an SSTable file for reading, sharing the provided
+    /// [`DecompressedChunkCache`](crate::storage::cache::DecompressedChunkCache).
+    ///
+    /// Identical to [`open`](Self::open) except the reader stores `cache` (an
+    /// `Arc` clone) instead of minting its own, so every reader a manager opens
+    /// for one dataset consults the same bytes-bounded chunk cache (issue #1567).
+    pub async fn open_with_cache(
+        path: &Path,
+        config: &Config,
+        platform: Arc<Platform>,
+        cache: Arc<crate::storage::cache::DecompressedChunkCache>,
+    ) -> Result<Self> {
         use crate::observability::{self as obs, catalog};
         use tracing::Instrument as _;
 
@@ -330,7 +354,7 @@ impl SSTableReader {
         // `.await`: entering a span guard and then awaiting can attach unrelated
         // async work scheduled on this task to the span. `Instrument` enters the
         // span only while this specific future is polled.
-        let result = Self::open_inner(path, config, platform)
+        let result = Self::open_inner(path, config, platform, cache)
             .instrument(span.clone())
             .await;
         match &result {
@@ -362,7 +386,12 @@ impl SSTableReader {
     }
 
     /// Open implementation; see [`open`](Self::open) for the instrumented wrapper.
-    async fn open_inner(path: &Path, config: &Config, platform: Arc<Platform>) -> Result<Self> {
+    async fn open_inner(
+        path: &Path,
+        config: &Config,
+        platform: Arc<Platform>,
+        chunk_cache: Arc<crate::storage::cache::DecompressedChunkCache>,
+    ) -> Result<Self> {
         // Retain the open-time Config before any local `config` shadowing so
         // `perform_integrity_check` can delegate to `verify::verify_sstable`
         // (single source of truth, issue #1283) under the same config.
@@ -682,6 +711,17 @@ impl SSTableReader {
         // Extract generation from filename or use default
         let generation = extract_generation_from_path(path);
 
+        // Stable per-reader cache identity (issue #1567): hash the immutable
+        // file path + generation. Authoritative reader identity, never byte
+        // content — combined with a per-site salt to form the cache key.
+        let chunk_cache_id = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            path.hash(&mut h);
+            generation.hash(&mut h);
+            h.finish()
+        };
+
         Ok(Self {
             file_path: path.to_path_buf(),
             file,
@@ -717,6 +757,8 @@ impl SSTableReader {
             version_gates,
             bti_partitions_db,
             bti_rows_db,
+            chunk_cache,
+            chunk_cache_id,
             bti_partition_offsets: std::sync::OnceLock::new(),
         })
     }
@@ -745,6 +787,10 @@ impl SSTableReader {
         path: &Path,
         file_size: u64,
     ) -> Result<(BlockSource, ScanSource)> {
+        // A5 read-work counter (FILE_OPENS; consumer C2): one per open(2) that mints
+        // a reader fd — here the buffered cold-open / graceful-fallback site. No-op
+        // in release (design.md Decision 1/2).
+        crate::storage::sstable::read_work_counters::record_file_open();
         Ok((
             BlockSource::buffered_sized(File::open(path).await?, file_size),
             ScanSource::Buffered {
@@ -870,6 +916,10 @@ impl SSTableReader {
     /// `io::Error`. This is why mmap is opt-in and gated on immutable local
     /// files; see [`Config`]'s `storage.use_mmap` for the full constraints.
     fn map_file(path: &Path) -> Result<memmap2::Mmap> {
+        // A5 read-work counter (FILE_OPENS; consumer C2): one per open(2) that mints
+        // a reader fd — here the mmap cold-open site. No-op in release (design.md
+        // Decision 1/2).
+        crate::storage::sstable::read_work_counters::record_file_open();
         let std_file = std::fs::File::open(path)?;
         // SAFETY: read-only mapping of a file assumed immutable for the
         // reader's lifetime; see the function-level note above.

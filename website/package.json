@@ -7,6 +7,7 @@
     "sync-format-guide": "node scripts/sync-format-guide.mjs",
     "predev": "node scripts/sync-format-guide.mjs",
     "prebuild": "node scripts/sync-format-guide.mjs",
+    "validate-proposals-research": "node scripts/validate-proposals-research.mjs",
     "dev": "astro dev",
     "start": "astro dev",
     "build": "astro build",
@@ -17,6 +18,7 @@
   "dependencies": {
     "@astrojs/starlight": "0.34.3",
     "astro": "5.18.2",
+    "mermaid": "11.16.0",
     "starlight-links-validator": "0.15.1",
     "starlight-llms-txt": "0.6.1"
   }

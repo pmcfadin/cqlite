@@ -27,6 +27,12 @@ mod big_promoted;
 // pub(crate) `big_reverse_partition_rows`, so it cannot live in `tests/`.
 #[cfg(all(test, not(feature = "tombstones")))]
 mod big_promoted_crc_tests;
+// In-crate proof that the BIG point-read chunk fetch (`get_cached_data`) consults
+// the shared decompressed-chunk cache (issue #1567). Needs `pub(crate)` reader
+// state (`actual_header_size`) to build a valid offset, so it cannot live in
+// `tests/`.
+#[cfg(test)]
+mod chunk_cache_wiring_tests;
 mod compaction;
 mod model;
 mod sequential;
@@ -39,16 +45,88 @@ pub use model::ClusteringSlice;
 // `data_access::table_ids_match` (unchanged path).
 pub(in crate::storage::sstable::reader) use model::table_ids_match;
 
+// Re-export the decompress-work counter so the sibling `scan_stream_windowed`
+// module (outside `data_access`) can increment it on the windowed-scan miss path
+// (issue #1567). `model` is a private submodule, so the raw path is not reachable
+// from `reader::scan_stream_windowed`; this widens the path exactly enough.
+pub(in crate::storage::sstable::reader) use model::DECOMPRESS_CALLS;
+
 use super::source::ScanCursor;
 use super::SSTableReader;
 use crate::parser::DataFormat;
+use crate::storage::cache::ChunkKey;
 use crate::types::{CellWriteMetadata, ScanRow, TableId};
 use crate::{Error, Result, RowKey};
 use log::{debug, warn};
 use std::io::SeekFrom;
+use std::sync::atomic::Ordering;
 use tokio::io::AsyncSeekExt;
 
+// Per-site cache key namespaces (design D4): fold a site discriminator into the
+// sstable-identity field of [`ChunkKey`] so numerically-overlapping keys from
+// different read sites (an index-resolved `block_offset` vs a small chunk index)
+// can never collide on the shared cache. The acceptance criterion is per-site
+// consultation + repeat-read hits, not that a physical chunk shares one key
+// across differently-granular sites, so distinct namespaces are correct.
+pub(super) const NS_BIG_POINT: u64 = 0;
+pub(super) const NS_BTI_CHUNK: u64 = 0x9E37_79B9_7F4A_7C15;
+pub(super) const NS_WINDOWED_CHUNK: u64 = 0xC2B2_AE3D_27D4_EB4F;
+
 impl SSTableReader {
+    /// Build a [`ChunkKey`] for `chunk_index` in the given per-site `namespace`,
+    /// bound to this reader's stable cache identity. See the `NS_*` salts.
+    #[inline]
+    pub(crate) fn chunk_cache_key(&self, namespace: u64, chunk_index: u64) -> ChunkKey {
+        ChunkKey::new(self.chunk_cache_id ^ namespace, chunk_index)
+    }
+
+    /// Build a [`ChunkKey`] for a size-dependent range read (the BIG point-read
+    /// path): the decompressed bytes depend on BOTH `offset` and `size`, so
+    /// `size` is carried as the key's `aux` discriminant. Keying by `offset`
+    /// alone would alias two reads at the same offset with different sizes and
+    /// return the first-cached range (roborev #1567).
+    #[inline]
+    pub(crate) fn chunk_cache_key_ranged(
+        &self,
+        namespace: u64,
+        offset: u64,
+        size: u32,
+    ) -> ChunkKey {
+        ChunkKey::with_aux(self.chunk_cache_id ^ namespace, offset, size as u64)
+    }
+
+    /// The shared decompressed-chunk cache this reader consults (issue #1567).
+    ///
+    /// Exposed so callers/tests can observe cache residency and per-instance
+    /// hit/miss counts (parallelism-immune, unlike the process-global
+    /// [`decompress_call_count`](Self::decompress_call_count)).
+    pub fn chunk_cache(&self) -> &std::sync::Arc<crate::storage::cache::DecompressedChunkCache> {
+        &self.chunk_cache
+    }
+
+    /// Process-global count of actual chunk decompressions at the wired read
+    /// sites (issue #1567). Tests reset around a cold/warm read pair and assert a
+    /// warm-read delta of 0 to prove the hit skipped decompression.
+    pub fn decompress_call_count() -> u64 {
+        model::DECOMPRESS_CALLS.load(Ordering::Relaxed)
+    }
+
+    /// Reset the decompress-work counter to zero (test/instrumentation harness).
+    pub fn reset_decompress_calls() {
+        model::DECOMPRESS_CALLS.store(0, Ordering::Relaxed);
+    }
+
+    /// Process-global count of compressed-bytes reads at the BIG point-read site
+    /// (issue #1567). A warm point read that hits the cache leaves this unchanged.
+    pub fn chunk_read_call_count() -> u64 {
+        model::CHUNK_READ_CALLS.load(Ordering::Relaxed)
+    }
+
+    /// Reset the chunk-read counter to zero (test/instrumentation harness).
+    pub fn reset_chunk_read_calls() {
+        model::CHUNK_READ_CALLS.store(0, Ordering::Relaxed);
+    }
+
     /// Return `true` when Data.db uses the V5CompressedLegacy NB chunked format and
     /// therefore requires all chunks to be stitched before parsing.
     ///
@@ -466,19 +544,33 @@ impl SSTableReader {
         Ok(Some(row))
     }
 
-    /// Read block with caching support and hit/miss tracking
+    /// Read block with caching support and hit/miss tracking.
+    ///
+    /// Wired to the shared [`DecompressedChunkCache`] (issue #1567): the cache is
+    /// consulted BEFORE the file read, so a repeat read of a resident region is a
+    /// refcount-bump hit that touches the file zero times and re-decompresses
+    /// nothing. Keyed by the index-resolved `block_offset` in the BIG-point-read
+    /// namespace ([`NS_BIG_POINT`]), which is disjoint from the chunk-index
+    /// namespaces used by the windowed-scan and BTI sites. The returned buffer is
+    /// already CRC-verified: [`read_value_at_offset`](Self::read_value_at_offset)
+    /// runs `verify_uncompressed_range` before calling this, so a hit returns
+    /// bytes verified when they were first inserted.
+    ///
+    /// [`DecompressedChunkCache`]: crate::storage::cache::DecompressedChunkCache
     async fn get_cached_data(&self, block_offset: u64, size: u32) -> Result<Vec<u8>> {
         use crate::parser::header::CassandraVersion;
         use crate::storage::sstable::compression::Compression;
         use tokio::io::AsyncReadExt;
 
-        // Calculate block identifier based on offset and size
-        let _block_id = block_offset;
-
-        // For now, always read from disk and track as cache miss
+        let key = self.chunk_cache_key_ranged(NS_BIG_POINT, block_offset, size);
+        if let Some(hit) = self.chunk_cache.get(&key) {
+            self.record_cache_hit();
+            return Ok(hit.to_vec());
+        }
         self.record_cache_miss();
 
-        // Read from disk
+        // Read from disk (counted so a repeat read can prove zero underlying reads).
+        model::CHUNK_READ_CALLS.fetch_add(1, Ordering::Relaxed);
         let mut file = self.file.lock().await;
         file.seek(SeekFrom::Start(block_offset)).await?;
 
@@ -490,7 +582,10 @@ impl SSTableReader {
         let data = if let Some(compression_reader) = &self.compression_reader {
             let compression = Compression::new(*compression_reader.algorithm())?;
             match compression.decompress(&buffer) {
-                Ok(decompressed) => decompressed,
+                Ok(decompressed) => {
+                    model::DECOMPRESS_CALLS.fetch_add(1, Ordering::Relaxed);
+                    decompressed
+                }
                 Err(e) => {
                     // Handle decompression errors based on format
                     if self.header.cassandra_version != CassandraVersion::Legacy {
@@ -507,7 +602,10 @@ impl SSTableReader {
             buffer
         };
 
-        Ok(data)
+        // Insert into the shared cache (converts the Vec to Arc<[u8]> once) and
+        // return an owned copy (this site's callers consume a Vec).
+        let arc = self.chunk_cache.insert(key, data);
+        Ok(arc.to_vec())
     }
 
     /// Verify the `CRC.db` chunk(s) covering the uncompressed Data.db byte range

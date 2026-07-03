@@ -1,33 +1,100 @@
-# Process Improvements Log
+# Delivery Process Improvements — throughput tracker
 
-A running, **measurable** log of changes to the CQLite delivery process. Each
-entry states what changed, the problem it targets, a falsifiable hypothesis, and
-exactly how we will measure whether it worked — so we can evaluate (and revert)
-changes with data instead of vibes.
+Living tracker for CQLite delivery-pipeline throughput work. Owner-facing: what we're
+changing, why (data), and current status. Source of truth for *failures* is the delivery
+telemetry ledger (`docs/reports/delivery-telemetry.jsonl`) + `scripts/delivery-telemetry.py retro`.
 
-The primary measurement source is the append-only delivery-telemetry ledger
-`docs/reports/delivery-telemetry.jsonl` (schema
-`docs/reports/delivery-telemetry.schema.json`), stamped once per completed issue
-by `flow-finalize` via `scripts/delivery-telemetry.py`.
+Last updated: 2026-07-03.
 
-## How to add an entry
+## Where the time actually goes (telemetry, n=91 issues)
 
-Append a new `## YYYY-MM-DD — <short title>` section at the TOP of the log
-(newest first) with these fields:
+| Phase | Median | Mean | Notes |
+|---|---|---|---|
+| created → PR | 19.6h | 87.7h | dominated by backlog wait, not active work |
+| PR → merge (review/gate/roborev tail) | **0.8h** | 2.3h | active pipeline is fast once claimed |
+| total cycle | 24.3h | 90.0h | |
 
-- **Change** — what concretely changed (scripts, doctrine, workflow).
-- **Problem it targets** — the observed pain, ideally with issue numbers.
-- **Hypothesis** — a falsifiable prediction ("X should go down / up").
-- **How to measure** — the exact ledger fields / query and the before/after
-  windows to compare. Name the baseline data point(s).
-- **Status / result** (optional, filled in later) — what the data showed once
-  enough post-change issues have landed; whether we keep, tune, or revert.
+Retro weighted failure ranking:
 
-Keep entries short. The point is that a future reader can re-run the measurement.
+| category | count | weight | score |
+|---|---|---|---|
+| rework | 220 | 4 | **880** |
+| roborev_findings | 430 | 2 | 860 |
+| gate_failures | 69 | 5 | 345 |
+| rebase_events | 107 | 2 | 214 |
+| claim_collisions | 0 | 3 | 0 |
 
----
+**Key reads:**
+- The pipeline tail is *fine*. The controllable cost is **iteration churn**: roborev findings
+  (4.7/issue, max 40) → rework (2.4/issue) → full gate re-runs (`gate_runs` 1.8/issue, max 9;
+  each run ~45–60 min wall-clock ≈ ~120 gate-hours total across the program).
+- Findings inflate the tail directly: 0 findings → 0.4h to merge; 4+ findings → 1.3h (3.3×).
+  Worst offenders are design-routed parity work (#1028: 22 findings/11 rework; #1027: 17/9).
+- **`claim_collisions = 0`** — the branch-lock claim protocol is working; no throughput lost to
+  duplicate work. Do not touch it.
+- **~330G of duplicated `target/` dirs** across 7 worktrees — every fresh worktree cold-compiles
+  the whole workspace before its first gate run. No shared compiler cache today.
 
-## 2026-07-03 — Tiered gate (`--lite`) + conditional review-first + full-gate-once-before-merge
+## The levers (in flight)
+
+| Lever | Issue | What | Status |
+|---|---|---|---|
+| Reduce recurring `rework` (retro #1) | #1793 | push recurring finding classes left so they never trigger a fix→re-gate round | open |
+| Reduce recurring `roborev_findings` | #1736 | same family — pre-empt the recurring finding classes | open |
+| Tiered gate (`--lite`) + review-first | #1821 | fast inner-loop gate subset for iteration + full gate once pre-merge; conditional internal review before roborev | 🔜 almost done (PR #1828) |
+| **Shared compiler cache (sccache)** | **#1822** | per-worktree `target/` + shared object cache to delete cross-worktree cold-compile duplication; rejected shared `CARGO_TARGET_DIR` (build-lock serializes parallel gates) | ✅ **DONE (PR #1833)** — 562s / 25.6% saved on fresh-worktree case, 100% hit rate |
+| Machine-wide gate concurrency cap | #1825 | bound simultaneous full-gate runs so higher session concurrency stays safe (also: concurrent gates skew wall-clock measurements) | open |
+| **Gate perf: nextest + parallel components** | **#1737** | **← designated NEXT lever.** Re-scoped post-#1822 to the 2 remaining levers: `cargo-nextest` for the core-tests floor (694s/67% of the gate — test *execution*, not compile) + capped parallelism of independent components. Target ≥40% off the 17.3-min warm baseline | 🔧 **in progress** (issue-1737 worktree; subagent implementing) |
+
+Three orthogonal families: **(1) cut the churn at the source** (#1793/#1736/#1821), **(2) delete
+duplicated compile work** (#1822/#1737), **(3) make higher concurrency safe** (#1825). Do all three;
+they compound.
+
+## Activity log
+
+- **2026-07-03** — Ran telemetry retro over 91 records; produced the time-suck analysis above.
+  Identified sccache (over shared `target/`) as a root-cost lever independent of gate tiering.
+- **2026-07-03** — Filed **#1822** (sccache spike, scoped, measure-first) and dispatched a
+  `test-validator` subagent to run the cold-vs-warm gate measurement in an isolated worktree; wire
+  into `agent-gate.sh` (auto-detect, graceful no-op) only if the measured delta justifies it.
+  Merge-on-green authorized by owner. Awaiting the cold/warm measurement table.
+- **2026-07-03** — **#1822 landed (PR #1833, `1547fea6`).** Spike measured 3 scenarios with
+  sccache 0.16.0: COLD (empty cache) 36.6 min / 10% hit → FRESH_WITH_CACHE (new worktree, warm
+  cache) **27.3 min / 100% hit** → WARM (incremental `target/`) 17.3 min. **562s (25.6%) saved on
+  the fresh-worktree case** — the cross-worktree scenario sccache targets. Compile-bound components
+  24–91% faster (format-compat 91%, smoke/minimal-build 76%, cli/write/integration 53–56%);
+  test-execution-bound (core-tests) <5%, as expected. **Decision: WIRED IN** — auto-detect in
+  `agent-gate.sh` (opt-out `CQLITE_DISABLE_SCCACHE=1`), `CARGO_INCREMENTAL=0`, `CARGO_TARGET_DIR`
+  rejected. Final gate with wiring: RESULT PASS (99.9% hit). roborev clean.
+  Insight: incremental `target/` state still beats sccache for *repeated local edits* in one
+  worktree — the two are complementary (sccache for fresh worktrees, incremental for local
+  iteration). #1737 (nextest + build cache) now partially subsumed by this; flag for dedup.
+- **2026-07-03** — Post-sccache gate breakdown revealed the new floor: **core-tests is 67% of the
+  17.3-min warm gate (694s)** and it's test *execution*, not compile — sccache can't touch it. The
+  other 15 components combined are ~37s; the gate is still strictly sequential. **Re-scoped #1737**
+  (owner-directed) to the 2 remaining levers — `cargo-nextest` for core-tests (2–4× typical) +
+  capped parallelism of independent components (~32% alone, collapses to the core-tests long pole;
+  concurrency-capped per #1825). Moved out of #1737: build cache → #1822 (done), two-tier → #1821.
+  Claimed #1737 and dispatched a `test-validator` subagent to implement + measure (≥40% target off
+  the 1036s baseline).
+
+## Change detail — measurable process changes
+
+Each entry below states what changed, the problem it targets, a falsifiable hypothesis, and
+exactly how we will measure whether it worked — so we can evaluate (and revert) changes with
+data instead of vibes. The primary measurement source is the append-only delivery-telemetry
+ledger `docs/reports/delivery-telemetry.jsonl` (schema
+`docs/reports/delivery-telemetry.schema.json`), stamped once per completed issue by
+`flow-finalize` via `scripts/delivery-telemetry.py`.
+
+**How to add an entry:** append a new `### YYYY-MM-DD — <short title>` subsection at the TOP
+of this section (newest first) with: **Change** (what concretely changed), **Problem it
+targets** (observed pain + issue numbers), **Hypothesis** (a falsifiable prediction),
+**How to measure** (exact ledger fields / query + before/after windows; name the baseline
+data point(s)), and optionally **Status / result** (filled in later once enough post-change
+issues have landed). Keep entries short so a future reader can re-run the measurement.
+
+### 2026-07-03 — Tiered gate (`--lite`) + conditional review-first + full-gate-once-before-merge
 
 - **Change** — Added `scripts/agent-gate.sh --lite`, a fast iteration gate that
   runs ONLY `file-size` + `fmt` + FULL-workspace `clippy` (`-D warnings`) +

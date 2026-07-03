@@ -210,6 +210,10 @@ docs/sstable-guide-audit/
 # parity-report self-test probe (issue #1338): removed by trap, ignored as a safety net
 test-data/.tmp-parity-manifest-mutated.yml
 
-# tail-latency harness history ledger (issue #1563): generated run data,
-# machine/run-specific. Consolidates into Epic A5's unified history.jsonl.
-cqlite-core/benches/tail-latency-history.jsonl
+# Unified perf history ledger (issue #1566, Epic A / A5): the A-series benches and
+# scripts/profile_report.py append per-metric run records to
+# target/profiling/history.jsonl. This is machine/run-specific generated run data —
+# it lives under /target (already ignored) so needs no rule of its own, and CI may
+# upload it as an artifact; we never commit it (a per-machine churning ledger would
+# be noise and a merge-race magnet). The A2 bespoke tail-latency ledger it replaced
+# was removed here when A5 landed.

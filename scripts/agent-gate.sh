@@ -38,7 +38,8 @@
 #   format-compat      cargo test -p format-compatibility-tests (the 'oa' format crate;
 #                      issue #865 folded it into the workspace so fmt/clippy reach it)
 #   write-tests        cargo test -p cqlite-core --features write-support (lib + roundtrip + compaction)
-#   cli-tests          cargo test -p cqlite-cli --test unit_tests + (write-support)
+#   cli-tests          cargo test -p cqlite-cli --test unit_tests + (write-support:
+#                      write_readback_content_tests + graceful_shutdown_tests)
 #                      write_readback_content_tests (CQL write→read content parity, #1231)
 #   python-bindings    maturin develop + pytest bindings/python/tests in a throwaway
 #                      venv; SKIPs (never silently PASSes) if python3 is unavailable.
@@ -184,6 +185,20 @@ REPO_ROOT="$PWD"
 # Agent sandboxes often run with a minimal PATH; pick up rustup's cargo.
 if ! command -v cargo >/dev/null 2>&1 && [ -d "$HOME/.cargo/bin" ]; then
   export PATH="$HOME/.cargo/bin:$PATH"
+fi
+
+# sccache auto-detect (issue #1822): if sccache is available, use it as the
+# rustc wrapper for incremental compilation cache. Each worktree keeps its own
+# target/ dir (no lock contention); the shared object cache deduplicates
+# compilation across worktrees. Disabled via CQLITE_DISABLE_SCCACHE=1.
+# Cache location: $SCCACHE_DIR (default ~/.cache/sccache on Linux,
+# ~/Library/Caches/Mozilla.sccache on macOS). Cache size limit:
+# $SCCACHE_CACHE_SIZE (default 10 GiB; raise for multi-user builds).
+# Measurement (issue #1822): 25.6% speedup on fresh worktrees with warm cache.
+if [ "${CQLITE_DISABLE_SCCACHE:-0}" != 1 ] && command -v sccache >/dev/null 2>&1; then
+  export RUSTC_WRAPPER=sccache
+  export CARGO_INCREMENTAL=0
+  echo "agent-gate: sccache detected; using as RUSTC_WRAPPER with CARGO_INCREMENTAL=0 (#1822)"
 fi
 export CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-$REPO_ROOT/test-data/datasets}"
 
@@ -1402,7 +1417,8 @@ run_component write-tests bash -c '
   cargo test --package cqlite-core --features write-support --test compaction_integration'
 run_component cli-tests bash -c '
   cargo test --package cqlite-cli --test unit_tests &&
-  cargo test --package cqlite-cli --features write-support --test write_readback_content_tests'
+  cargo test --package cqlite-cli --features write-support --test write_readback_content_tests &&
+  cargo test --package cqlite-cli --features write-support --test graceful_shutdown_tests'
 run_compaction_byte_parity
 run_python_bindings
 run_node_bindings

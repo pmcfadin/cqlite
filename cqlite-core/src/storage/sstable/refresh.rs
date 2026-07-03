@@ -134,8 +134,13 @@ impl SSTableManager {
         path: &Path,
     ) -> Result<Arc<reader::SSTableReader>> {
         #[cfg_attr(not(feature = "state_machine"), allow(unused_mut))]
-        let mut reader =
-            reader::SSTableReader::open(path, &self.config, self.platform.clone()).await?;
+        let mut reader = reader::SSTableReader::open_with_cache(
+            path,
+            &self.config,
+            self.platform.clone(),
+            self.chunk_cache.clone(),
+        )
+        .await?;
 
         #[cfg(feature = "state_machine")]
         {

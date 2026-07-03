@@ -183,12 +183,42 @@ so each round starts from the previous round's output instead of folklore.
 | `target/profiling/dhat-heap.json` | full allocation profile (open in the [dhat viewer](https://nnethercote.github.io/dh_view/dh_view.html)) |
 | `target/profiling/heap-summary.json` | peak heap + budget verdict, machine-readable |
 | `target/profiling/report.json` | ranked bench table with deltas — input for the *next* iteration (or an agent driving it) |
-| `target/profiling/report.md` | the same, human-readable |
-| `target/profiling/history.jsonl` | append-only ledger: one line per iteration with git rev, medians, peak heap |
+| `target/profiling/report.md` | the same, human-readable, plus a longitudinal per-metric History table |
+| `target/profiling/history.jsonl` | the **unified** append-only ledger — one JSON object **per metric** per run (see below) |
+
+#### The unified history ledger (Issue #1566, Epic A / A5)
+
+`target/profiling/history.jsonl` is the single perf ledger for the whole repo.
+Every record is one JSON object on its own line with the schema:
+
+```json
+{"ts": 1783103681, "commit": "<full-sha|unknown>", "bench": "read/full_scan", "metric": "median_ns", "value": 5000, "unit": "ns"}
+```
+
+One record **per metric**, so a single run emits many lines:
+
+- `scripts/profile_report.py` writes one `median_ns` (`ns`) record per criterion
+  bench and one `peak_heap_bytes` (`bytes`) record when dhat heap data exists;
+- the A-series harness benches append to the **same file and schema** through the
+  shared Rust module `cqlite-core/benches/bench_ledger` — the `tail_latency` bench
+  writes `mixed_p99` (`ns`), `p99_over_p50` (`ratio`), … and the `open` bench writes
+  `cold_big_median_ns` (`ns`), `rss_per_reader_bytes` (`bytes`), … — metrics
+  criterion's median-only model cannot express.
+
+`./scripts/profile.sh report` reads the whole ledger back and renders the **History
+(latest value + delta vs previous distinct commit)** table into `report.md`; the
+delta is computed against the most recent record from a *different* commit, so
+re-running the same commit never shows a spurious 0%.
+
+The ledger is **generated run data** (machine/run-specific): it lives under
+`target/` (already gitignored) and is **never committed** — a per-machine churning
+ledger would be noise and a merge-race magnet. CI may upload it as an artifact. Its
+path is overridable for benches via the `CQLITE_BENCH_LEDGER` env var (else
+`<crate>/../target/profiling/history.jsonl`).
 
 `history.jsonl` is what makes the loop *recursive* rather than one-shot: it
 survives baseline overwrites, so you can always answer "did the last five
-changes actually compound?" with `git rev` precision.
+changes actually compound?" with `commit` precision.
 
 ### Exit criteria for a round of optimization
 

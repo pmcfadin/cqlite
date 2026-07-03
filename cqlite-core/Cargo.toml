@@ -156,6 +156,14 @@ crc32fast = { workspace = true }
 [target.'cfg(unix)'.dev-dependencies]
 pprof = { version = "0.14", features = ["flamegraph", "criterion"] }
 
+# Current-RSS sampling for the open/mem bench (benches/open.rs, Issue #1566 A5):
+# mach `task_info(MACH_TASK_BASIC_INFO).resident_size` is the live resident size
+# (getrusage.ru_maxrss is PEAK, not current — Finding 3). libc's mach_task_self is
+# deprecated in favor of mach2, so use mach2 for the non-deprecated task port.
+# macOS-only, dev-only: never ships in the library.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+mach2 = "0.4"
+
 [[bench]]
 name = "partition_lookup"
 harness = false
@@ -181,6 +189,10 @@ name = "write"
 harness = false
 
 [[bench]]
+name = "compaction"
+harness = false
+
+[[bench]]
 name = "concurrent_scan"
 harness = false
 
@@ -202,6 +214,15 @@ harness = false
 # benches/tail-latency-gate.json + scripts/ci/check_tail_latency.py.
 [[bench]]
 name = "tail_latency"
+harness = false
+
+# Cold-open + per-reader-memory bench (issue #1566, Epic A / A5). `harness = false`
+# criterion target: `open/cold_big`, `open/cold_bti` (skip-register when absent),
+# and `mem/open_n_readers` (records the per-reader RSS gauge the ledger can express
+# but criterion cannot). Appends its measured medians + memory metric to the unified
+# target/profiling/history.jsonl via the shared bench_ledger module.
+[[bench]]
+name = "open"
 harness = false
 
 [features]
@@ -329,6 +350,16 @@ delta-scan = []
 # Dev/profiling only — never enable for production builds (allocation tracking
 # adds overhead). See docs/profiling.md.
 dhat-heap = []
+
+# Read-work counters (issue #1566, Epic A / A5). TEST/BENCH-ONLY, NOT in defaults:
+# enables the getters/`reset` and the counter bodies in
+# `storage::sstable::read_work_counters` so benches and integration tests can read
+# the trie-walk / decompress / seek / file-open gauges. The `record_*()` call sites
+# are unconditional but compile to no-ops without this feature (and without
+# `cfg(test)`), so a default/release build links no counter atomics and pays
+# nothing — verify with `cargo build -p cqlite-core` that no counter static is
+# referenced. Consumed by epics B–G's TDD work-guard tests.
+work-counters = []
 
 # Scan-offload thread-identity probe (issue #1143 regression guard). TEST-ONLY,
 # NOT in defaults: gates the `scan_stream_windowed::probe` module, the pub

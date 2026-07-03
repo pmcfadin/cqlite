@@ -113,9 +113,15 @@ impl SSTableReader {
         let _entered = span.enter();
 
         let Some(partitions_db) = &self.bti_partitions_db else {
-            // Not a BTI reader — no trie to consult.
+            // Not a BTI reader — no trie to consult (no descent, no count).
             return Ok(None);
         };
+
+        // A5 read-work counter (TRIE_WALKS; consumers C3/C4): one per real trie
+        // descent — counted only once we have a `Partitions.db` to descend, so a
+        // non-BTI reader that returned above never bumps it. No-op in release
+        // (design.md Decision 1/2).
+        crate::storage::sstable::read_work_counters::record_trie_walk();
 
         let lookup = lookup_raw_key_in_bti_partitions_db(
             &mut std::io::Cursor::new(partitions_db.as_slice()),

@@ -86,10 +86,12 @@ fn report_ratios_and_json_shape() {
 }
 
 #[test]
-fn append_ledger_writes_one_json_line_with_required_keys() {
-    // Exercises the persisted-ledger surface (spec R4) without a dataset: build a
-    // report, append it twice to a temp ledger, and assert each append is exactly
-    // one JSON-lines record carrying ts + commit + both stat blocks + ratios.
+fn ledger_metrics_flatten_to_unified_per_metric_rows() {
+    // After the A5 migration (Issue #1566) the harness no longer owns a bespoke
+    // ledger; it exposes `ledger_metrics()`, and the shared `bench_ledger` module
+    // (unit-tested separately) does the append. Assert the flattening surface: one
+    // row per percentile (`ns`) and per derived ratio (`ratio`), covering every
+    // stat and both ratios, so a future edit to the metric set is caught here.
     let report = harness::HarnessReport::new(
         harness::TailStats {
             p50: 100,
@@ -103,50 +105,40 @@ fn append_ledger_writes_one_json_line_with_required_keys() {
         },
     );
 
-    let dir = tempfile::TempDir::new().expect("temp dir for ledger");
-    let path = dir.path().join("tail-latency-history.jsonl");
+    let rows = report.ledger_metrics();
+    assert_eq!(rows.len(), 8, "6 percentiles + 2 ratios");
 
-    // GIT_COMMIT override keeps the record deterministic (no reliance on a repo).
-    std::env::set_var("GIT_COMMIT", "deadbeefcafef00d");
-    harness::append_ledger(&path, &report).expect("append ledger record 1");
-    harness::append_ledger(&path, &report).expect("append ledger record 2");
-    std::env::remove_var("GIT_COMMIT");
-
-    let contents = std::fs::read_to_string(&path).expect("read ledger");
-    let lines: Vec<&str> = contents.lines().filter(|l| !l.trim().is_empty()).collect();
-    assert_eq!(
-        lines.len(),
-        2,
-        "expected 2 JSON-lines records, got: {contents}"
-    );
-
-    // Each line is a standalone JSON object with the required keys.
-    for line in &lines {
-        let v: serde_json::Value = serde_json::from_str(line).expect("record is valid JSON");
-        assert!(v.get("ts").and_then(|t| t.as_u64()).is_some(), "ts: {line}");
-        assert_eq!(
-            v.get("commit").and_then(|c| c.as_str()),
-            Some("deadbeefcafef00d"),
-            "commit: {line}"
-        );
-        for key in ["mixed", "scan_free"] {
-            let block = v
-                .get(key)
-                .unwrap_or_else(|| panic!("missing {key}: {line}"));
-            for stat in ["p50", "p99", "p999"] {
-                assert!(
-                    block.get(stat).and_then(|s| s.as_u64()).is_some(),
-                    "{key}.{stat}: {line}"
-                );
-            }
-        }
-        for ratio in ["p99_over_p50", "p99_mixed_over_scan_free"] {
-            assert!(
-                v.get(ratio).and_then(|r| r.as_f64()).is_some(),
-                "{ratio}: {line}"
-            );
-        }
+    // Percentile rows carry `ns`; the two ratio rows carry `ratio`.
+    let ns_rows: Vec<&str> = rows
+        .iter()
+        .filter(|(_, _, unit)| *unit == "ns")
+        .map(|(m, _, _)| *m)
+        .collect();
+    assert_eq!(ns_rows.len(), 6, "6 percentile rows in ns: {ns_rows:?}");
+    for expected in [
+        "mixed_p50",
+        "mixed_p99",
+        "mixed_p999",
+        "scan_free_p50",
+        "scan_free_p99",
+        "scan_free_p999",
+    ] {
+        assert!(ns_rows.contains(&expected), "missing ns metric {expected}");
     }
+
+    // Ratio values match the derived report ratios.
+    let get = |name: &str| {
+        rows.iter()
+            .find(|(m, _, _)| *m == name)
+            .map(|(_, v, u)| (*v, *u))
+    };
+    assert_eq!(get("p99_over_p50"), Some((report.p99_over_p50, "ratio")));
+    assert_eq!(
+        get("p99_mixed_over_scan_free"),
+        Some((report.p99_mixed_over_scan_free, "ratio"))
+    );
+    // mixed_p99 value round-trips as f64 ns.
+    assert_eq!(get("mixed_p99"), Some((400.0, "ns")));
 }
 
 // ---------------------------------------------------------------------------
