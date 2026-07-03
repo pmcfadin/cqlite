@@ -42,13 +42,64 @@ pub(in crate::storage::sstable::reader) use model::table_ids_match;
 use super::source::ScanCursor;
 use super::SSTableReader;
 use crate::parser::DataFormat;
+use crate::storage::cache::ChunkKey;
 use crate::types::{CellWriteMetadata, ScanRow, TableId};
 use crate::{Error, Result, RowKey};
 use log::{debug, warn};
 use std::io::SeekFrom;
+use std::sync::atomic::Ordering;
 use tokio::io::AsyncSeekExt;
 
+// Per-site cache key namespaces (design D4): fold a site discriminator into the
+// sstable-identity field of [`ChunkKey`] so numerically-overlapping keys from
+// different read sites (an index-resolved `block_offset` vs a small chunk index)
+// can never collide on the shared cache. The acceptance criterion is per-site
+// consultation + repeat-read hits, not that a physical chunk shares one key
+// across differently-granular sites, so distinct namespaces are correct.
+pub(super) const NS_BIG_POINT: u64 = 0;
+pub(super) const NS_BTI_CHUNK: u64 = 0x9E37_79B9_7F4A_7C15;
+pub(super) const NS_WINDOWED_CHUNK: u64 = 0xC2B2_AE3D_27D4_EB4F;
+
 impl SSTableReader {
+    /// Build a [`ChunkKey`] for `chunk_index` in the given per-site `namespace`,
+    /// bound to this reader's stable cache identity. See the `NS_*` salts.
+    #[inline]
+    pub(crate) fn chunk_cache_key(&self, namespace: u64, chunk_index: u64) -> ChunkKey {
+        ChunkKey::new(self.chunk_cache_id ^ namespace, chunk_index)
+    }
+
+    /// The shared decompressed-chunk cache this reader consults (issue #1567).
+    ///
+    /// Exposed so callers/tests can observe cache residency and per-instance
+    /// hit/miss counts (parallelism-immune, unlike the process-global
+    /// [`decompress_call_count`](Self::decompress_call_count)).
+    pub fn chunk_cache(&self) -> &std::sync::Arc<crate::storage::cache::DecompressedChunkCache> {
+        &self.chunk_cache
+    }
+
+    /// Process-global count of actual chunk decompressions at the wired read
+    /// sites (issue #1567). Tests reset around a cold/warm read pair and assert a
+    /// warm-read delta of 0 to prove the hit skipped decompression.
+    pub fn decompress_call_count() -> u64 {
+        model::DECOMPRESS_CALLS.load(Ordering::Relaxed)
+    }
+
+    /// Reset the decompress-work counter to zero (test/instrumentation harness).
+    pub fn reset_decompress_calls() {
+        model::DECOMPRESS_CALLS.store(0, Ordering::Relaxed);
+    }
+
+    /// Process-global count of compressed-bytes reads at the BIG point-read site
+    /// (issue #1567). A warm point read that hits the cache leaves this unchanged.
+    pub fn chunk_read_call_count() -> u64 {
+        model::CHUNK_READ_CALLS.load(Ordering::Relaxed)
+    }
+
+    /// Reset the chunk-read counter to zero (test/instrumentation harness).
+    pub fn reset_chunk_read_calls() {
+        model::CHUNK_READ_CALLS.store(0, Ordering::Relaxed);
+    }
+
     /// Return `true` when Data.db uses the V5CompressedLegacy NB chunked format and
     /// therefore requires all chunks to be stitched before parsing.
     ///

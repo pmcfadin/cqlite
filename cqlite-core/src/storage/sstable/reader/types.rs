@@ -363,6 +363,22 @@ pub struct SSTableReader {
     ///
     /// [`resolve_rows_db_entry`]: crate::storage::sstable::bti::resolve_rows_db_entry
     pub(crate) bti_rows_db: Option<Arc<Vec<u8>>>,
+    /// Shared, bytes-bounded decompressed-chunk cache (issue #1567, Epic B/B1).
+    ///
+    /// Every reader opened for the same logical dataset via `SSTableManager`
+    /// shares ONE instance (cloned `Arc`), so a chunk decompressed by one read
+    /// path is reused by any other. Readers opened via the back-compat
+    /// [`SSTableReader::open`] get a fresh per-reader cache. Consulted by the
+    /// three wired read sites before reading+decompressing; a hit is an
+    /// `Arc::clone` (never a memcpy or a re-decompress).
+    pub(crate) chunk_cache: Arc<crate::storage::cache::DecompressedChunkCache>,
+    /// Stable per-reader cache identity: a hash of `file_path` + `generation`.
+    /// Combined with a per-site namespace salt to form [`ChunkKey::sstable`], so
+    /// two different SSTables never collide in the shared cache. Authoritative
+    /// (derived from immutable reader identity), never from byte content.
+    ///
+    /// [`ChunkKey::sstable`]: crate::storage::cache::ChunkKey::sstable
+    pub(crate) chunk_cache_id: u64,
     /// Lazily-computed, ascending-sorted list of every partition's UNCOMPRESSED
     /// `Data.db` start offset, enumerated authoritatively from the BTI
     /// `Partitions.db` trie (issue #953 / #951).

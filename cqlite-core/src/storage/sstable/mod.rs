@@ -250,6 +250,13 @@ pub struct SSTableManager {
     /// Schema registry for schema-aware operations (feature-gated)
     #[cfg(feature = "state_machine")]
     schema_registry: Arc<RwLock<Option<Arc<RwLock<crate::schema::SchemaRegistry>>>>>,
+
+    /// Shared, bytes-bounded decompressed-chunk cache (issue #1567, Epic B/B1),
+    /// sized once from `config.memory.block_cache.max_size`. Cloned into every
+    /// reader this manager opens (via `open_reader_with_schema` →
+    /// `SSTableReader::open_with_cache`) so all readers of one dataset — including
+    /// those added by a later `refresh_tables` — share one cache and one budget.
+    pub(crate) chunk_cache: Arc<crate::storage::cache::DecompressedChunkCache>,
 }
 
 impl SSTableManager {
@@ -276,6 +283,11 @@ impl SSTableManager {
             refresh_lock: Arc::new(Mutex::new(())),
             #[cfg(feature = "state_machine")]
             schema_registry: Arc::new(RwLock::new(schema_registry)),
+            chunk_cache: Arc::new(
+                crate::storage::cache::DecompressedChunkCache::with_budget_bytes(
+                    config.memory.block_cache.max_size as usize,
+                ),
+            ),
         };
 
         // Load existing SSTable files
@@ -364,6 +376,11 @@ impl SSTableManager {
             refresh_lock: Arc::new(Mutex::new(())),
             #[cfg(feature = "state_machine")]
             schema_registry: Arc::new(RwLock::new(schema_registry)),
+            chunk_cache: Arc::new(
+                crate::storage::cache::DecompressedChunkCache::with_budget_bytes(
+                    config.memory.block_cache.max_size as usize,
+                ),
+            ),
         };
 
         // Load SSTables from the provided table directories
