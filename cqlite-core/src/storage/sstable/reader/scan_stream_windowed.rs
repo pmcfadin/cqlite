@@ -125,6 +125,7 @@
 
 use super::data_access::table_ids_match;
 use super::source::ScanCursor;
+use super::window_cursor::WindowCursor;
 use super::SSTableReader;
 use crate::types::{ScanRow, TableId};
 use crate::{Error, Result, RowKey};
@@ -493,7 +494,7 @@ impl SSTableReader {
     /// Blocking parse half of the windowed streaming scan (issue #1143).
     ///
     /// Runs entirely on a `spawn_blocking` thread — NEVER on an async worker.
-    /// Owns the sliding `window: Vec<u8>`; for each raw chunk pulled from
+    /// Owns the sliding `window` (a [`WindowCursor`], issue #1589); for each raw chunk pulled from
     /// `raw_rx` it applies the incompressible-raw fallback or decompresses,
     /// appends to the window, and drains every confirmed partition via
     /// [`drain_scan_window`]. On a CLEAN `raw_rx` close (I/O EOF) it runs a final
@@ -521,7 +522,8 @@ impl SSTableReader {
         use crate::storage::sstable::compression::Compression;
 
         let parser = self.build_v5_parser();
-        let mut window: Vec<u8> = Vec::new();
+        // Sliding front-cursor window (issue #1589): compacts once per refill.
+        let mut window = WindowCursor::new();
         let mut broke = false;
         let mut chunk_count = 0usize;
         // Pending surviving rows not yet handed to the forwarder. Flushed as a
@@ -564,7 +566,7 @@ impl SSTableReader {
                 } else {
                     compressed_chunk
                 };
-                window.extend_from_slice(&decompressed_chunk);
+                window.refill(&decompressed_chunk);
                 chunk_count += 1;
 
                 // Not the final chunk yet: drain confirmed partitions; NeedMore
@@ -677,7 +679,7 @@ impl SSTableReader {
         &self,
         parser: &crate::storage::sstable::reader::parsing::V5CompressedLegacyParser,
         ctx: &WindowParseCtx,
-        window: &mut Vec<u8>,
+        window: &mut WindowCursor,
         at_final_chunk: bool,
         tx: &mpsc::Sender<Result<Vec<(RowKey, ScanRow)>>>,
         batch: &mut Vec<(RowKey, ScanRow)>,
@@ -753,7 +755,8 @@ impl SSTableReader {
             match step {
                 ParseStep::Emitted(consumed) => {
                     let take = if consumed == 0 { 1 } else { consumed };
-                    window.drain(0..take.min(window.len()));
+                    // Advance the cursor (no memmove); `consume` clamps to remaining.
+                    window.consume(take);
                     // Accumulate this partition's surviving entries in scan order,
                     // flushing a full batch as ONE channel item whenever it
                     // reaches `BATCH_EMIT_ROWS`. `blocking_send` carries the same

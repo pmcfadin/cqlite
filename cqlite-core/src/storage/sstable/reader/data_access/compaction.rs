@@ -7,6 +7,7 @@
 //! the k-way merger can apply tombstone-shadowing semantics (Issue #505).
 
 use super::super::source::ScanCursor;
+use super::super::window_cursor::WindowCursor;
 use super::super::SSTableReader;
 use crate::{Error, Result};
 use std::io::SeekFrom;
@@ -529,12 +530,14 @@ impl SSTableReader {
     ///
     /// ## Sliding-window driver
     ///
-    /// The V5CompressedLegacy chunk-stitching path keeps a `window: Vec<u8>` of
-    /// decompressed bytes. After appending each decompressed chunk it drains
-    /// confirmed partitions via `parse_one_partition_with_timestamps`,
-    /// `drain(0..consumed)`-ing the front of the window after every `Emitted`,
-    /// and stopping at `NeedMore` to await the next chunk (a partition can
-    /// straddle a chunk boundary). At EOF a final drain pass runs with
+    /// The V5CompressedLegacy chunk-stitching path keeps a sliding
+    /// [`WindowCursor`](super::super::window_cursor::WindowCursor) of decompressed
+    /// bytes. After refilling with each decompressed chunk it drains confirmed
+    /// partitions via `parse_one_partition_with_timestamps`, advancing the cursor
+    /// over the front after every `Emitted` (the reclaimed prefix is compacted once
+    /// per refill, not memmoved per partition — issue #1589), and stopping at
+    /// `NeedMore` to await the next chunk (a partition can straddle a chunk
+    /// boundary). At EOF a final drain pass runs with
     /// `at_final_chunk = true` so the trailing (possibly truncated) partition is
     /// terminal rather than requesting a refill that will never come.
     ///
@@ -577,7 +580,10 @@ impl SSTableReader {
         let owned_schema = schema.cloned().or_else(|| self.get_table_schema(None));
         let parser = self.build_v5_parser();
 
-        let mut window: Vec<u8> = Vec::new();
+        // Sliding window with a FRONT CURSOR (issue #1589): confirmed partitions are
+        // consumed by advancing the cursor, and the reclaimed prefix is compacted
+        // once per refill — not memmoved per partition as the old front-drain did.
+        let mut window = WindowCursor::new();
         let mut broke = false;
 
         use crate::storage::sstable::compression::Compression;
@@ -617,7 +623,9 @@ impl SSTableReader {
             } else {
                 compressed_chunk
             };
-            window.extend_from_slice(&decompressed_chunk);
+            // Refill the window: compact the already-consumed prefix ONCE
+            // (issue #1589), then append the freshly decompressed chunk.
+            window.refill(&decompressed_chunk);
             chunk_count += 1;
 
             // Not the final chunk yet: NeedMore means "await more bytes". Drain
@@ -666,7 +674,7 @@ impl SSTableReader {
         &self,
         parser: &crate::storage::sstable::reader::parsing::V5CompressedLegacyParser,
         schema: Option<&crate::schema::TableSchema>,
-        window: &mut Vec<u8>,
+        window: &mut WindowCursor,
         at_final_chunk: bool,
         emit: &mut F,
         broke: &mut bool,
@@ -696,7 +704,11 @@ impl SSTableReader {
             match step {
                 ParseStep::Emitted(consumed) => {
                     let take = if consumed == 0 { 1 } else { consumed };
-                    window.drain(0..take.min(window.len()));
+                    // Advance the cursor over the confirmed partition (issue #1589):
+                    // NO memmove here — the reclaimed prefix is compacted once at the
+                    // next refill. `consume` clamps to the remaining length, matching
+                    // the prior `drain(0..take.min(window.len()))`.
+                    window.consume(take);
                     if local_break {
                         *broke = true;
                         return Ok(());
