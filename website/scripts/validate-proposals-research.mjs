@@ -41,6 +41,30 @@ const checks = [
     file: 'src/assets/storage-engine-parallel-planes.png',
     binary: true,
   },
+  {
+    name: 'architecture diagram separates OLTP writes from OLAP read path',
+    file: 'src/assets/storage-engine-architecture.svg',
+    includes: [
+      'Apps use Cassandra for reads and writes.',
+      'Apps query analytical services backed by SSTables.',
+      'Application analytical reads',
+      'Trino + Arrow Flight',
+      'Iceberg materializer',
+      'CQLite SSTable reader',
+      'snapshot read',
+      'optional fresh tail export',
+    ],
+    ordered: [
+      'Application analytical reads',
+      'Trino + Arrow Flight',
+      'Iceberg materializer',
+      'CQLite SSTable reader',
+    ],
+    excludes: [
+      'Operational writes, reads, repair, and lifecycle stay in Cassandra.',
+      'CQLite reads Cassandra files for analytics without owning OLTP.',
+    ],
+  },
 ];
 
 let failed = false;
@@ -68,6 +92,35 @@ for (const check of checks) {
       );
       failed = true;
       checkFailed = true;
+    }
+  }
+
+  if (check.excludes) {
+    for (const unexpected of check.excludes) {
+      if (contents.includes(unexpected)) {
+        console.error(
+          `FAIL ${check.name}: ${check.file} still includes ${JSON.stringify(unexpected)}`
+        );
+        failed = true;
+        checkFailed = true;
+      }
+    }
+  }
+
+  if (check.ordered) {
+    let cursor = -1;
+
+    for (const expected of check.ordered) {
+      const nextIndex = contents.indexOf(expected, cursor + 1);
+      if (nextIndex === -1) {
+        console.error(
+          `FAIL ${check.name}: ${check.file} does not include ${JSON.stringify(expected)} after the previous ordered label`
+        );
+        failed = true;
+        checkFailed = true;
+        break;
+      }
+      cursor = nextIndex;
     }
   }
 

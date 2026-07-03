@@ -75,10 +75,10 @@ flowchart TB
   end
 
   subgraph OLAP["OLAP Plane"]
-    CQLite["CQLite SSTable reader"]
-    Flight["Arrow Flight"]
-    Trino["Trino"]
+    ReadApp["Application analytical reads"]
+    Query["Trino + Arrow Flight"]
     Iceberg["Iceberg materializer"]
+    CQLite["CQLite SSTable reader"]
   end
 
   subgraph SSTables["SSTable Foundation"]
@@ -92,9 +92,9 @@ flowchart TB
   App --> CommitLog --> Lifecycle
   Lifecycle --> SSTables
   SSTables --> CQLite
-  CQLite --> Flight
-  Flight --> Trino
-  CQLite --> Iceberg
+  ReadApp --> Query
+  Query --> Iceberg
+  Iceberg --> CQLite
   CommitLog -. fresh tail export .-> Tail
 ```
 
