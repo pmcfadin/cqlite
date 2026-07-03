@@ -241,3 +241,93 @@ describe('QueryResult and ColumnInfo Tests (Issue #303)', () => {
     });
   });
 });
+
+describe('Row property order matches SELECT order (Issue #1446)', () => {
+  let db = null;
+
+  beforeAll(async () => {
+    skipIfNoDatasets();
+    db = await Database.open(global.testPaths.SSTABLES_DIR, {
+      schema: global.testPaths.SCHEMA_BASIC_TYPES,
+    });
+  });
+
+  afterAll(async () => {
+    if (db) {
+      await db.close();
+      db = null;
+    }
+  });
+
+  test('executeNative: Object.keys(row) matches SELECT column order (SELECT *)', async () => {
+    const result = await db.executeNative(
+      'SELECT * FROM test_basic.simple_table LIMIT 5'
+    );
+    // Dataset rule: present-but-empty fixtures FAIL loudly, never skip.
+    expect(result.rowCount).toBeGreaterThan(0);
+    const expected = result.columns.map((c) => c.name);
+    for (const row of result.rows) {
+      expect(Object.keys(row)).toEqual(expected);
+    }
+  });
+
+  test('executeNative: Object.keys(row) honors an explicit reordered projection', async () => {
+    const result = await db.executeNative(
+      'SELECT name, id, age FROM test_basic.simple_table LIMIT 5'
+    );
+    expect(result.rowCount).toBeGreaterThan(0);
+    expect(result.columns.map((c) => c.name)).toEqual(['name', 'id', 'age']);
+    for (const row of result.rows) {
+      expect(Object.keys(row)).toEqual(['name', 'id', 'age']);
+    }
+  });
+
+  test('executeNative: every selected column is present on every row (never undefined)', async () => {
+    // For normal projections core populates every selected column, so the row
+    // shape is stable: Object.keys equals the projection and no cell is omitted.
+    const cols = ['id', 'name', 'age', 'salary', 'active'];
+    const result = await db.executeNative(
+      `SELECT ${cols.join(', ')} FROM test_basic.simple_table LIMIT 10`
+    );
+    expect(result.rowCount).toBeGreaterThan(0);
+    for (const row of result.rows) {
+      expect(Object.keys(row)).toEqual(cols);
+      for (const k of cols) {
+        expect(row[k]).not.toBeUndefined();
+      }
+    }
+  });
+
+  test('executeNative: aggregate projection emits no phantom metadata column', async () => {
+    // Regression (#1446 roborev job 2736): aggregate result metadata uses a
+    // fallback name (col_0) while the row value is keyed by the expression name
+    // (Count(*)). A metadata column absent from values must be skipped, not
+    // null-filled — otherwise the row gains a phantom `col_0: null`.
+    const result = await db.executeNative(
+      'SELECT COUNT(*) FROM test_basic.simple_table'
+    );
+    expect(result.rowCount).toBe(1);
+    const row = result.rows[0];
+    const keys = Object.keys(row);
+    // The real aggregate cell is present with a non-null value...
+    expect(keys.length).toBe(1);
+    expect(row[keys[0]]).not.toBeNull();
+    // ...and no phantom null-filled metadata column leaks through.
+    for (const [k, v] of Object.entries(row)) {
+      expect(v === null).toBe(false);
+    }
+  });
+
+  test('executeStreaming: Object.keys(row) matches SELECT column order', async () => {
+    const stream = db.executeStreaming(
+      'SELECT name, id, age FROM test_basic.simple_table LIMIT 5'
+    );
+    let seen = 0;
+    for await (const row of stream) {
+      expect(Object.keys(row)).toEqual(['name', 'id', 'age']);
+      seen += 1;
+    }
+    // Present-but-empty fixtures FAIL loudly, never skip.
+    expect(seen).toBeGreaterThan(0);
+  });
+});
