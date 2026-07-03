@@ -84,6 +84,12 @@ pub enum Value {
     Inet(Vec<u8>),
 }
 
+// size_of::<Value>() layout pin (issue #1565, Epic A A4 ratchet). Measured 88
+// bytes today; Epic E #1517 E1 shrinks the three inlined rare variants (Decimal,
+// Duration, the widest inline payload) toward <= 40. If Value grows past this,
+// the build fails — measure and tighten, do not just bump.
+const _: () = assert!(std::mem::size_of::<Value>() <= 88);
+
 /// Ordered interned cells of a single decoded row (issue #1334).
 ///
 /// Each entry is `(column_name, value)` where the name is a shared `Arc<str>`
