@@ -1085,6 +1085,7 @@ mod tests {
     /// `into_cells()` — so the column silently disappeared from SELECT/export.
     /// This drives the real conversion path and asserts the value surfaces; it
     /// would fail (build_row_from_scan → None → panic) under marker-suppression.
+    #[cfg(feature = "state_machine")]
     #[tokio::test]
     async fn convert_parsed_row_live_value_surfaces_via_build_row_from_scan() {
         let reader = match create_test_reader("test_basic", "simple_table").await {
@@ -1153,6 +1154,7 @@ mod tests {
     /// `"data"` blob. Before the fix the site decoded then discarded the value and
     /// always emitted `ScanRow::RawRow`, so a schema-aware non-stitching scan lost
     /// the typed column value.
+    #[cfg(feature = "state_machine")]
     #[test]
     fn fallback_decoded_value_with_name_surfaces_as_typed_row() {
         let decoded = Value::Integer(42);
@@ -1214,6 +1216,7 @@ mod tests {
     /// `"data"` column via the public `build_row_from_scan` — the exact pre-#1334
     /// bare-`Value::Blob` behavior — so the legacy blob can never silently
     /// disappear from SELECT/export.
+    #[cfg(feature = "state_machine")]
     #[test]
     fn raw_fallback_surfaces_via_build_row_from_scan() {
         let key = RowKey::new(b"pk".to_vec());

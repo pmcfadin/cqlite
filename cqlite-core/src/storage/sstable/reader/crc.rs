@@ -266,6 +266,8 @@ impl CrcDb {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Writer round-trip helpers live in the write-support-gated `writer` module.
+    #[cfg(feature = "write-support")]
     use crate::storage::sstable::writer::crc_writer::{write_crc_db, CrcTrailer, CRC_CHUNK_SIZE};
 
     fn synth_crc_db(chunk_size: u32, crcs: &[u32]) -> Vec<u8> {
@@ -490,6 +492,7 @@ mod tests {
 
     /// Round-trip: the #1197 writer output parses back to identical values, and
     /// each recovered CRC32 equals `crc32fast` over the corresponding raw chunk.
+    #[cfg(feature = "write-support")]
     #[tokio::test]
     async fn round_trips_the_writer_output_multi_chunk() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -613,6 +616,7 @@ mod tests {
 
     /// Compaction trailer (issue #1222) appends one trailing `0` entry; the reader
     /// exposes it as an extra entry that a real read never dereferences.
+    #[cfg(feature = "write-support")]
     #[tokio::test]
     async fn compaction_trailer_is_extra_harmless_entry() {
         let dir = tempfile::tempdir().expect("tempdir");
