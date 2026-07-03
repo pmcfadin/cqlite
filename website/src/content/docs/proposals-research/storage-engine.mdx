@@ -10,7 +10,6 @@ tableOfContents: false
 import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 import MermaidDiagram from '../../../components/MermaidDiagram.astro';
 import storageEngineConcept from '../../../assets/storage-engine-parallel-planes.png';
-import dataPathsDiagram from '../../../assets/storage-engine-data-paths.svg';
 
 export const architectureMermaid = `flowchart LR
   subgraph OLTP["Cassandra OLTP Plane"]
@@ -33,6 +32,31 @@ export const architectureMermaid = `flowchart LR
   OStore -. optional fresh tail export .-> Tail
   SSTables -->|snapshot read| CQLite
   Tail -. fresh tail read .-> CQLite`;
+
+export const dataPathsMermaid = `flowchart TB
+  subgraph Cold["Cold path"]
+    direction LR
+    SSTables["Flushed SSTables"] --> ColdCQLite["CQLite reader"]
+    ColdCQLite --> Flight["Arrow Flight"]
+    Flight --> Trino["Trino"]
+    ColdCQLite --> Iceberg["Iceberg materializer"]
+  end
+
+  subgraph Fresh["Fresh tail path"]
+    direction LR
+    Write["Cassandra write"] --> Memtable["CqliteMemtable"]
+    Memtable --> TailGen["Tail gen-* SSTable"]
+    TailGen --> Merge["CQLite k-way LWW merge"]
+    Merge --> Query["Flight / Trino query"]
+  end
+
+  subgraph Research["Research path"]
+    direction LR
+    Notes["Raw research notes"] --> Synthesis["Synthesis report"]
+    Synthesis --> Proposal["Official proposal"]
+    Proposal --> Tasks["Implementation tasks"]
+    Tasks --> Roadmap["Roadmap"]
+  end`;
 
 # Storage Engine Direction
 
@@ -83,16 +107,11 @@ systems such as Arrow Flight, Trino, and Iceberg.
 
 ## Data paths
 
-<figure>
-  <img
-    src={dataPathsDiagram.src}
-    alt="Cold path, fresh tail path, and research path for the storage-engine proposal."
-  />
-  <figcaption>
-    The proposal separates runtime data movement from how research is promoted
-    into roadmap work.
-  </figcaption>
-</figure>
+<MermaidDiagram
+  chart={dataPathsMermaid}
+  caption="The proposal separates runtime data movement from how research is promoted into roadmap work."
+  sourceLabel="Mermaid source for the data-path diagram"
+/>
 
 ### Cold path
 
