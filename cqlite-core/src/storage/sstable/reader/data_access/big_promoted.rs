@@ -498,6 +498,10 @@ impl SSTableReader {
                     })?;
                 {
                     let mut file_guard = cursor.file.lock().await;
+                    // A5 read-work counter (SEEK_CALLS; consumer E4): the BIG
+                    // promoted-index reverse-block target-chunk seek on the point-read
+                    // path. No-op in release (design.md Decision 1/2).
+                    crate::storage::sstable::read_work_counters::record_seek();
                     file_guard.seek(SeekFrom::Start(chunk_start)).await?;
                 }
                 cursor
@@ -522,6 +526,10 @@ impl SSTableReader {
                     // Last partition: extends to the end of the Data.db data section.
                     None => {
                         let mut file_guard = cursor.file.lock().await;
+                        // A5 read-work counter (SEEK_CALLS; consumer E4): last-partition
+                        // seek-to-end bounding the uncompressed reverse-block window.
+                        // No-op in release (design.md Decision 1/2).
+                        crate::storage::sstable::read_work_counters::record_seek();
                         file_guard.seek(SeekFrom::End(0)).await?
                     }
                 };

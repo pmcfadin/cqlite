@@ -42,9 +42,6 @@
 
 #![allow(dead_code)]
 
-use std::io::Write as _;
-use std::path::{Path, PathBuf};
-
 #[cfg(feature = "cli-helpers")]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "cli-helpers")]
@@ -69,16 +66,6 @@ pub const WARMUP: usize = 200;
 /// ops gives 2 samples at/above the p999 rank while still running in a few
 /// seconds against the small fixture (point reads are sub-millisecond).
 pub const MEASURED_N: usize = 2000;
-
-/// Default history-ledger path, anchored to the crate dir (not the CWD) so the
-/// bench appends to the same file regardless of where cargo runs it.
-///
-/// This holds **generated run data** (machine/run-specific) and is gitignored.
-/// Epic A5 (cold-open bench + persisted ledger) introduces a unified
-/// `history.jsonl`; this path is documented to fold into A5's ledger then.
-pub fn default_ledger_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benches/tail-latency-history.jsonl")
-}
 
 // ---------------------------------------------------------------------------
 // Percentile math (pure — unit-tested with no dataset dependency)
@@ -174,65 +161,28 @@ impl HarnessReport {
         serde_json::to_string_pretty(self)
             .unwrap_or_else(|e| format!("{{\"error\":\"serialize HarnessReport: {e}\"}}"))
     }
-}
 
-// ---------------------------------------------------------------------------
-// History ledger
-// ---------------------------------------------------------------------------
-
-/// One appended ledger record: timestamp + commit + both stat blocks + ratios.
-#[derive(serde::Serialize)]
-struct LedgerRecord {
-    ts: u64,
-    commit: String,
-    mixed: TailStats,
-    scan_free: TailStats,
-    p99_over_p50: f64,
-    p99_mixed_over_scan_free: f64,
-}
-
-/// Best-effort current commit SHA: `GIT_COMMIT` env override, else `git rev-parse
-/// HEAD`, else `"unknown"`. Never fails (ledger append must not abort a run).
-fn current_commit() -> String {
-    if let Ok(sha) = std::env::var("GIT_COMMIT") {
-        let sha = sha.trim().to_string();
-        if !sha.is_empty() {
-            return sha;
-        }
+    /// Flatten this report into the unified history-ledger metric rows
+    /// (`(metric, value, unit)`) the shared `bench_ledger::append_metrics` consumes
+    /// (Issue #1566, Epic A / A5). One row per percentile (`ns`) and per derived
+    /// ratio (`ratio`), so the ledger holds one line per metric under the
+    /// `tail_latency` bench id.
+    pub fn ledger_metrics(&self) -> Vec<(&'static str, f64, &'static str)> {
+        vec![
+            ("mixed_p50", self.mixed.p50 as f64, "ns"),
+            ("mixed_p99", self.mixed.p99 as f64, "ns"),
+            ("mixed_p999", self.mixed.p999 as f64, "ns"),
+            ("scan_free_p50", self.scan_free.p50 as f64, "ns"),
+            ("scan_free_p99", self.scan_free.p99 as f64, "ns"),
+            ("scan_free_p999", self.scan_free.p999 as f64, "ns"),
+            ("p99_over_p50", self.p99_over_p50, "ratio"),
+            (
+                "p99_mixed_over_scan_free",
+                self.p99_mixed_over_scan_free,
+                "ratio",
+            ),
+        ]
     }
-    std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .and_then(|out| String::from_utf8(out.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
-/// Append one JSON-line record for `report` to the ledger at `path`
-/// (creating it if absent). Generated run data; the ledger is gitignored.
-pub fn append_ledger(path: &Path, report: &HarnessReport) -> std::io::Result<()> {
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let record = LedgerRecord {
-        ts,
-        commit: current_commit(),
-        mixed: report.mixed,
-        scan_free: report.scan_free,
-        p99_over_p50: report.p99_over_p50,
-        p99_mixed_over_scan_free: report.p99_mixed_over_scan_free,
-    };
-    let line = serde_json::to_string(&record).map_err(std::io::Error::other)?;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    writeln!(file, "{line}")
 }
 
 // ---------------------------------------------------------------------------

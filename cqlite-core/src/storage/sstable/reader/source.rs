@@ -151,8 +151,16 @@ pub(crate) enum ScanSource {
 impl ScanSource {
     /// Mint a fresh, independent [`BlockSource`] for one scan.
     pub(crate) async fn open(&self, path: &Path) -> Result<BlockSource> {
+        // A5 read-work counters (FILE_OPENS; consumer C2): each arm below counts the
+        // exact number of open(2)s it performs — the Buffered arm and the Direct
+        // buffered-fallback each do one File::open, and the Direct cursor open(2) is
+        // counted inside `DirectCursor::open_direct`. The Mapped arm reuses the
+        // shared `Arc<Mmap>` (no open(2)), so it records nothing. No-op in release
+        // (design.md Decision 1/2). This is the per-scan open site C2 targets.
+        use crate::storage::sstable::read_work_counters::record_file_open;
         Ok(match self {
             ScanSource::Buffered { file_len } => {
+                record_file_open();
                 BlockSource::buffered_sized(File::open(path).await?, *file_len)
             }
             ScanSource::Mapped(mmap) => BlockSource::mapped(mmap.clone()),
@@ -169,6 +177,7 @@ impl ScanSource {
                             path.display(),
                             e
                         );
+                        record_file_open();
                         BlockSource::buffered_sized(File::open(path).await?, *file_len)
                     }
                 }
@@ -373,6 +382,12 @@ impl DirectCursor {
     /// support direct I/O, so callers can fall back to buffered reads.
     pub(crate) fn open(path: &Path, window: usize) -> io::Result<Self> {
         let file = Self::open_direct(path)?;
+        // A5 read-work counter (FILE_OPENS; consumer C2): one per SUCCESSFUL
+        // direct-I/O open(2) (used by both the reader's cold-open direct path and
+        // per-scan direct reopens). Counted after `open_direct` succeeds so a failed
+        // direct open that falls back to a buffered open (which counts its own
+        // open(2)) is not double-counted. No-op in release (design.md Decision 1/2).
+        crate::storage::sstable::read_work_counters::record_file_open();
         let len = file.metadata()?.len();
         let align = DIRECT_IO_ALIGN;
         // Round the window up to the alignment, but saturate instead of

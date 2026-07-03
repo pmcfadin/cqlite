@@ -745,6 +745,10 @@ impl SSTableReader {
         path: &Path,
         file_size: u64,
     ) -> Result<(BlockSource, ScanSource)> {
+        // A5 read-work counter (FILE_OPENS; consumer C2): one per open(2) that mints
+        // a reader fd — here the buffered cold-open / graceful-fallback site. No-op
+        // in release (design.md Decision 1/2).
+        crate::storage::sstable::read_work_counters::record_file_open();
         Ok((
             BlockSource::buffered_sized(File::open(path).await?, file_size),
             ScanSource::Buffered {
@@ -870,6 +874,10 @@ impl SSTableReader {
     /// `io::Error`. This is why mmap is opt-in and gated on immutable local
     /// files; see [`Config`]'s `storage.use_mmap` for the full constraints.
     fn map_file(path: &Path) -> Result<memmap2::Mmap> {
+        // A5 read-work counter (FILE_OPENS; consumer C2): one per open(2) that mints
+        // a reader fd — here the mmap cold-open site. No-op in release (design.md
+        // Decision 1/2).
+        crate::storage::sstable::read_work_counters::record_file_open();
         let std_file = std::fs::File::open(path)?;
         // SAFETY: read-only mapping of a file assumed immutable for the
         // reader's lifetime; see the function-level note above.

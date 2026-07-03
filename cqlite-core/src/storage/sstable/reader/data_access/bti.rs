@@ -603,6 +603,10 @@ impl SSTableReader {
                     })?;
                 {
                     let mut file_guard = cursor.file.lock().await;
+                    // A5 read-work counter (SEEK_CALLS; consumer E4): BTI point-lookup
+                    // target-chunk seek on the production read path. No-op in release
+                    // (design.md Decision 1/2).
+                    crate::storage::sstable::read_work_counters::record_seek();
                     file_guard.seek(SeekFrom::Start(chunk_start)).await?;
                 }
                 cursor
@@ -615,6 +619,10 @@ impl SSTableReader {
                 let header_size = self.calculate_header_size();
                 {
                     let mut file_guard = cursor.file.lock().await;
+                    // A5 read-work counter (SEEK_CALLS; consumer E4): whole-section
+                    // fallback seek-to-data-start. No-op in release (design.md
+                    // Decision 1/2).
+                    crate::storage::sstable::read_work_counters::record_seek();
                     file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
                 }
                 let whole = self.stitch_all_chunks(&cursor).await?;
@@ -863,6 +871,10 @@ impl SSTableReader {
                     })?;
                 {
                     let mut file_guard = cursor.file.lock().await;
+                    // A5 read-work counter (SEEK_CALLS; consumer E4): BTI
+                    // single-partition target-chunk seek on the production read path.
+                    // No-op in release (design.md Decision 1/2).
+                    crate::storage::sstable::read_work_counters::record_seek();
                     file_guard.seek(SeekFrom::Start(chunk_start)).await?;
                 }
                 cursor
@@ -875,6 +887,10 @@ impl SSTableReader {
                 let header_size = self.calculate_header_size();
                 {
                     let mut file_guard = cursor.file.lock().await;
+                    // A5 read-work counter (SEEK_CALLS; consumer E4): whole-section
+                    // fallback seek-to-data-start. No-op in release (design.md
+                    // Decision 1/2).
+                    crate::storage::sstable::read_work_counters::record_seek();
                     file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
                 }
                 let whole = self.stitch_all_chunks(&cursor).await?;
@@ -1216,6 +1232,9 @@ impl SSTableReader {
         let header_size = self.calculate_header_size();
         {
             let mut file_guard = cursor.file.lock().await;
+            // A5 read-work counter (SEEK_CALLS; consumer E4): scan seek-to-data-start
+            // before stitching the section. No-op in release (design.md Decision 1/2).
+            crate::storage::sstable::read_work_counters::record_seek();
             file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
         }
         let whole = self.stitch_all_chunks(&cursor).await?;

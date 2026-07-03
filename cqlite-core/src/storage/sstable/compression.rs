@@ -241,6 +241,10 @@ impl Compression {
 
     /// Decompress data using traditional method (for small blocks)
     pub fn decompress(&self, data: &[u8]) -> Result<Vec<u8>> {
+        // A5 read-work counter (DECOMPRESS_CALLS; consumers B1/E3): one per chunk
+        // decompress. This is the single choke point every compressed-chunk read
+        // path funnels through. No-op in release (design.md Decision 1/2).
+        crate::storage::sstable::read_work_counters::record_decompress();
         match self.algorithm {
             CompressionAlgorithm::None => Ok(data.to_vec()),
             CompressionAlgorithm::Lz4 => {

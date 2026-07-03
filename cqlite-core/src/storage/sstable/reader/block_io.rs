@@ -412,6 +412,10 @@ async fn read_nb_format_chunk_data(
         // Seek to chunk offset (adjusted by header_offset for files with embedded headers)
         // CompressionInfo chunk offsets are relative to start of compressed data
         let absolute_offset = chunk_offset + header_offset;
+        // A5 read-work counter (SEEK_CALLS; consumer E4): one per block-read seek in
+        // the production compressed-chunk read path. No-op in release (design.md
+        // Decision 1/2).
+        crate::storage::sstable::read_work_counters::record_seek();
         file_guard
             .seek(std::io::SeekFrom::Start(absolute_offset))
             .await

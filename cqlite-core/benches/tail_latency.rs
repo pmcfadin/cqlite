@@ -12,9 +12,13 @@
 //! env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
 //!   cargo bench -p cqlite-core --features cli-helpers --bench tail_latency
 //! ```
-//! It prints the harness JSON to stdout and appends one record to the history
-//! ledger (`benches/tail-latency-history.jsonl`, gitignored). Under default
-//! features (no `cli-helpers`) it prints a note and exits 0 without measuring.
+//! It prints the harness JSON to stdout and appends one record PER metric to the
+//! unified history ledger (`target/profiling/history.jsonl`, gitignored) via the
+//! shared `bench_ledger` module (Issue #1566, Epic A / A5). Under default features
+//! (no `cli-helpers`) it prints a note and exits 0 without measuring.
+
+#[path = "bench_ledger/mod.rs"]
+mod bench_ledger;
 
 #[path = "fixtures/mod.rs"]
 mod fixtures;
@@ -29,12 +33,14 @@ fn main() {
             Some(report) => {
                 // Machine-readable JSON to stdout.
                 println!("{}", report.to_json());
-                // Persist one record to the (gitignored) history ledger.
-                let ledger = harness::default_ledger_path();
-                if let Err(e) = harness::append_ledger(&ledger, &report) {
+                // Persist one record PER metric to the unified (gitignored) ledger.
+                // Best-effort: a ledger write must never fail a measurement run.
+                if let Err(e) =
+                    bench_ledger::append_metrics("tail_latency", &report.ledger_metrics())
+                {
                     eprintln!(
-                        "tail_latency: could not append ledger {}: {e}",
-                        ledger.display()
+                        "tail_latency: could not append unified ledger {}: {e}",
+                        bench_ledger::ledger_path().display()
                     );
                 }
             }
