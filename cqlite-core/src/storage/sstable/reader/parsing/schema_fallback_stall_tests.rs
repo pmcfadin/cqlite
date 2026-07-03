@@ -108,6 +108,9 @@ fn concurrent_schema_fallback_does_not_stall_runtime() {
             .expect("register schema");
         let registry = Arc::new(tokio::sync::RwLock::new(registry_instance));
 
+        // Deliberate sync attach followed by an explicit async pre-resolve — the
+        // pattern the deprecation directs (issue #1692).
+        #[allow(deprecated)]
         reader.set_schema_registry(registry.clone());
         // Pre-resolve the registry schema into the sync cache while no write guard
         // is held (this is the #1692 fix — the sync path reads this cache instead
@@ -191,6 +194,9 @@ fn is_registry_resolved(schema: &Option<TableSchema>) -> bool {
 ///   and an explicit `resolve_registry_schema()` after `set_schema_registry`
 ///   populate the cache, so `effective_schema()` returns the MARKED registry
 ///   schema.
+/// - A subsequent registry MISS clears the cache (finding 1): after the table is
+///   removed, `resolve_registry_schema()` must leave `registry_schema` `None`
+///   rather than serving the previously-cached (stale) schema.
 #[test]
 fn direct_set_schema_registry_caller_resolves_registry_schema() {
     let Some(path) = simple_table_data_db() else {
@@ -227,6 +233,7 @@ fn direct_set_schema_registry_caller_resolves_registry_schema() {
             .await
             .expect("open nb fixture");
         reader.schema = None; // force Strategy 1 (header) to miss
+        #[allow(deprecated)]
         reader.set_schema_registry(registry.clone());
         assert!(
             !is_registry_resolved(&reader.effective_schema()),
@@ -252,6 +259,34 @@ fn direct_set_schema_registry_caller_resolves_registry_schema() {
         assert!(
             is_registry_resolved(&reader2.effective_schema()),
             "attach_schema_registry() must resolve the registry schema for a direct caller"
+        );
+
+        // Case D (roborev #1692, finding 1): a subsequent MISS must CLEAR the
+        // previously-cached schema — resolve_registry_schema must never serve a
+        // stale schema after the table becomes unresolvable. `reader` still holds
+        // the marked schema from Case B; remove the table from the SAME registry
+        // (no set_schema_registry in between, which would itself invalidate the
+        // cache) and re-resolve. Run last so the removal can't disturb A/B/C.
+        registry
+            .write()
+            .await
+            .remove_schema("test_basic", "simple_table")
+            .await
+            .expect("remove schema");
+        assert!(
+            is_registry_resolved(&reader.effective_schema()),
+            "precondition: reader still holds the marked registry schema from Case B"
+        );
+        reader.resolve_registry_schema().await;
+        assert!(
+            reader.registry_schema.is_none(),
+            "resolve_registry_schema() must CLEAR the sync cache on a registry miss \
+             (stale-schema regression); the doc guarantees a miss leaves the cache None"
+        );
+        assert!(
+            !is_registry_resolved(&reader.effective_schema()),
+            "after a miss the sync path must fall through to the unmarked header-derived \
+             schema, not the stale registry-marked one"
         );
     });
 }

@@ -1007,6 +1007,13 @@ impl SSTableReader {
     /// header-column construction (or `None`). The crate's own async wiring path
     /// (`open_reader_with_schema`) already does this.
     #[cfg(feature = "state_machine")]
+    #[deprecated(
+        note = "attaches the registry but CANNOT pre-resolve the sync schema-fallback cache \
+                (would need a forbidden block_on, issue #1692); registry schemas will not be \
+                available to a subsequent sync `get_table_schema`. Use the async \
+                `attach_schema_registry` (which pre-resolves), or call `resolve_registry_schema` \
+                after this from an async context, for registry-schema-aware reads."
+    )]
     pub fn set_schema_registry(
         &mut self,
         schema_registry: Arc<tokio::sync::RwLock<crate::schema::SchemaRegistry>>,
@@ -1036,6 +1043,9 @@ impl SSTableReader {
         &mut self,
         schema_registry: Arc<tokio::sync::RwLock<crate::schema::SchemaRegistry>>,
     ) {
+        // Intentional internal use of the sync attach step; we immediately
+        // pre-resolve below, which is exactly what the deprecation directs.
+        #[allow(deprecated)]
         self.set_schema_registry(schema_registry);
         self.resolve_registry_schema().await;
     }

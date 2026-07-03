@@ -51,6 +51,11 @@ impl SSTableReader {
             }
         };
 
+        // Invalidate any previously-cached schema BEFORE the lookup so a miss
+        // ALWAYS leaves the cache `None` (never serves a stale schema after the
+        // table is removed/unresolvable). The hit path re-populates it below.
+        self.registry_schema = None;
+
         let registry = registry_rwlock.read().await;
         match registry.get_schema(&keyspace, &table_name).await {
             Ok(schema) => {
@@ -68,6 +73,7 @@ impl SSTableReader {
                     table_name,
                     e
                 );
+                // Cache already cleared above; a miss leaves it `None`.
             }
         }
     }

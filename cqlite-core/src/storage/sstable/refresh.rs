@@ -141,6 +141,9 @@ impl SSTableManager {
         {
             let schema_reg_guard = self.schema_registry.read().await;
             if let Some(ref registry_rwlock) = *schema_reg_guard {
+                // Deliberate sync attach: we pre-resolve immediately below in this
+                // async context (the deprecation's recommended pattern; issue #1692).
+                #[allow(deprecated)]
                 reader.set_schema_registry(Arc::clone(registry_rwlock));
 
                 // Pre-resolve the registry schema into the reader's sync cache here,

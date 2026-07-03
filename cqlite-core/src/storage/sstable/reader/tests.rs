@@ -377,7 +377,10 @@ mod tests {
         eprintln!("Opening SSTable at {:?}", data_file);
         let mut reader = SSTableReader::open(&data_file, &config, platform.clone()).await?;
 
-        // Register schema registry with reader so it can look up schema during parsing
+        // Register schema registry with reader so it can look up schema during parsing.
+        // Deliberately exercising the sync attach path here (deprecated in
+        // state_machine builds; issue #1692).
+        #[allow(deprecated)]
         reader.set_schema_registry(registry.clone());
 
         // Verify it's V5CompressedLegacy format
