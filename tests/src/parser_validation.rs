@@ -244,47 +244,33 @@ mod vint_validation_tests {
     #[test]
     #[ignore = "Manual parser validation; enable with --features integration_e2e"]
     fn test_vint_cassandra_compatibility() {
-        // Test cases based on Cassandra VInt implementation
-        let test_cases = vec![
-            // (value, expected_bytes)
-            (0, vec![0x80]),
-            (1, vec![0x81]),
-            (-1, vec![0xFF]),
-            (63, vec![0xBF]),
-            (-64, vec![0xC0]),
-            (127, vec![0xC0, 0x7F]),
-            (-128, vec![0xC0, 0x80]),
-            (255, vec![0xC0, 0xFF]),
-            (256, vec![0xE0, 0x01, 0x00]),
-            (-256, vec![0xE0, 0xFF, 0x00]),
-            (65535, vec![0xE0, 0xFF, 0xFF]),
-            (65536, vec![0xF0, 0x01, 0x00, 0x00]),
-            (1000000, vec![0xF0, 0x0F, 0x42, 0x40]),
+        // Issue #1624: `encode_vint_cassandra`/`encode_vint_fixed` emit values in
+        // [-64, 63] as a single NON-standard byte in 0x80..=0xFF (e.g. 0 -> 0x80,
+        // -1 -> 0xFF, -64 -> 0xC0). That form is not Cassandra-faithful (real
+        // Cassandra encodes 0 as 0x00) and is intentionally no longer decoded:
+        // after the framing fix a bare 0x80/0xC0/0xFF is correctly treated as a
+        // truncated multi-byte lead. So this encode/decode pair round-trips only
+        // OUTSIDE [-64, 63]. (The prior hard-coded `expected_bytes` never matched
+        // the encoder's actual output — e.g. encode_vint_cassandra(127) is
+        // [0x80,0xFE], not [0xC0,0x7F] — so those byte-level asserts were already
+        // broken on main; this test is #[ignore]d/manual.) J4 will delete
+        // vint_fixed.rs entirely; small-value round-trip is covered by the
+        // corrected unit tests in parser/vint_fixed.rs and parser/vint.rs.
+        let roundtrip_values = vec![
+            127, -128, 255, -256, 256, -256, 65535, 65536, 1_000_000, -1_000_000,
         ];
 
-        for (value, expected_bytes) in test_cases {
-            // Test encoding with Cassandra-compatible format
+        for value in roundtrip_values {
+            // Encode with the Cassandra-compatible encoder (unchanged by #1624).
             let encoded = encode_vint_cassandra(value);
             println!("Testing VInt encoding: {} -> {:?}", value, encoded);
 
-            // Test decoding
+            // The corrected decoder must accept the encoder's own multi-byte output
+            // and round-trip it exactly.
             let (remaining, decoded) =
                 parse_vint_cassandra(&encoded).expect("Failed to parse VInt");
             assert!(remaining.is_empty(), "Should consume all bytes");
             assert_eq!(decoded, value, "VInt roundtrip failed for value {}", value);
-
-            // For known test cases, verify byte-level compatibility
-            if expected_bytes.len() <= 4 {
-                // Only check simple cases
-                // Note: Our implementation might differ slightly in multi-byte encoding
-                // but should maintain semantic compatibility
-                let (_, test_decoded) =
-                    parse_vint_cassandra(&expected_bytes).expect("Failed to parse expected bytes");
-                assert_eq!(
-                    test_decoded, value,
-                    "Expected bytes should decode to same value"
-                );
-            }
         }
     }
 
