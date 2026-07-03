@@ -79,7 +79,7 @@ pub struct Database {
 
 impl Database {
     /// Check if database is open, raising RuntimeError if closed.
-    fn ensure_open(&self) -> PyResult<()> {
+    pub(crate) fn ensure_open(&self) -> PyResult<()> {
         if self.closed.load(Ordering::SeqCst) {
             Err(PyRuntimeError::new_err("Database is closed"))
         } else {

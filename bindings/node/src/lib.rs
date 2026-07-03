@@ -24,6 +24,7 @@ mod database;
 mod error;
 mod observability;
 mod prepared;
+mod refresh;
 mod runtime;
 mod streaming;
 mod value;
@@ -40,6 +41,7 @@ pub use database::WriteStats;
 pub use observability::OtelOptions;
 pub use prepared::PreparedStatement;
 pub use prepared::PreparedStatementStats;
+pub use refresh::RefreshReport;
 pub use streaming::StreamingResult;
 
 use napi_derive::napi;

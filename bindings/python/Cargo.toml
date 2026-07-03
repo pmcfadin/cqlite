@@ -15,7 +15,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 cqlite-core = { path = "../../cqlite-core", features = ["state_machine", "all-compression", "cli-helpers", "write-support", "parquet"] }
-pyo3 = { workspace = true, features = ["extension-module", "abi3-py39"] }
+pyo3 = { workspace = true, features = ["extension-module", "abi3-py39", "multiple-pymethods"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

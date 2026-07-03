@@ -560,6 +560,34 @@ export interface MaintenanceReport {
 }
 
 /**
+ * Report returned by `Database.refresh()`.
+ *
+ * Describes what an explicit directory refresh applied to the database's held
+ * SSTable reader set: newly present generations become queryable, removed
+ * generations stop being queried, and unchanged generations keep their warm
+ * parsed state (they are not re-parsed).
+ *
+ * @example
+ * ```typescript
+ * const report = await db.refresh();
+ * console.log(
+ *   `scanned ${report.tablesScanned} tables, ` +
+ *   `+${report.readersAdded}/-${report.readersRemoved} readers`
+ * );
+ * ```
+ */
+export interface RefreshReport {
+  /** Number of distinct logical tables present after the refresh. */
+  tablesScanned: number;
+
+  /** Number of SSTable generations newly opened and made queryable. */
+  readersAdded: number;
+
+  /** Number of SSTable generations dropped from the reader set. */
+  readersRemoved: number;
+}
+
+/**
  * Configuration for streaming query execution.
  *
  * Controls memory usage during large result set iteration.
@@ -1010,6 +1038,35 @@ export declare class Database {
    * ```
    */
   getStats(): Promise<DatabaseStats>;
+
+  /**
+   * Re-discover the data directory and apply changes to the held reader set.
+   *
+   * A `Database` is a snapshot at `open()`: a Cassandra flush/compaction (or a
+   * CQLite `--flush`) may add or remove SSTable generations under a warm handle,
+   * and those changes become queryable only after an explicit `refresh()`. This
+   * re-runs the same TOC/filename-based discovery `open()` used (no content
+   * sniffing, no heuristics) and applies the diff:
+   * - newly present generations become queryable,
+   * - removed generations stop being queried,
+   * - unchanged generations keep their warm parsed Index/Statistics/bloom state.
+   *
+   * In-flight queries are never affected: a scan already running completes
+   * against the pre-refresh set; a query issued after this Promise resolves sees
+   * the post-refresh set. The refresh is atomic and fail-closed — if any newly
+   * discovered generation fails to open (e.g. a corrupt `Statistics.db`), the
+   * Promise rejects and the previously held reader set is left unchanged.
+   *
+   * @returns Promise resolving to a RefreshReport with the applied counts
+   * @throws {CqliteError} If the database is closed or a new generation fails to open
+   *
+   * @example
+   * ```typescript
+   * const report = await db.refresh();
+   * console.log(`+${report.readersAdded}/-${report.readersRemoved} readers`);
+   * ```
+   */
+  refresh(): Promise<RefreshReport>;
 
   /**
    * Close the database and release resources.

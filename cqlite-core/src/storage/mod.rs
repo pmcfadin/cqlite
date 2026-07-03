@@ -234,6 +234,29 @@ impl StorageEngine {
         self.sstables.get(table_id, key).await
     }
 
+    /// Re-scan the data directory and atomically apply added/removed SSTable
+    /// generations to the held reader set (issue #1749).
+    ///
+    /// # Freshness contract
+    ///
+    /// A `StorageEngine` (and the [`Database`](crate::Database) built on it)
+    /// snapshots the discovered SSTable generations **at open**; it does not
+    /// re-scan on its own. This is the ONLY way the reader set changes for a
+    /// long-lived handle. Re-runs the same TOC/filename-based discovery `open`
+    /// used — no content sniffing.
+    ///
+    /// - Added generations become queryable; removed generations stop being
+    ///   queried; unchanged generations keep their warm parsed state.
+    /// - **In-flight queries are unaffected**: a scan already running holds its
+    ///   own `Arc` reader clones and completes against the pre-refresh set;
+    ///   queries started after the refresh see the new set.
+    /// - **Atomic / fail-closed**: if any newly discovered generation fails to
+    ///   open (e.g. a corrupt `Statistics.db`, issue #1626), the typed error is
+    ///   returned and the previously held reader set is left fully unchanged.
+    pub async fn refresh(&self) -> Result<sstable::RefreshReport> {
+        self.sstables.refresh_tables().await
+    }
+
     /// Delete a key
     ///
     /// NOTE: Write functionality removed in Issue #175 (WAL/MemTable infrastructure deleted).

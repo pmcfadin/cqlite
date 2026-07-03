@@ -229,6 +229,25 @@ function createWrappedDatabase(NativeDatabase, wrapPreparedStatement) {
       }
     }
 
+    /**
+     * Re-discover the data directory and apply changes to the held reader set.
+     *
+     * Newly present SSTable generations become queryable, removed generations
+     * stop being queried, and unchanged generations keep their warm parsed
+     * state. In-flight queries are unaffected; the refresh is atomic and
+     * fail-closed. See index.d.ts for the full contract (issue #1749).
+     *
+     * @returns {Promise<Object>} RefreshReport with tablesScanned, readersAdded, readersRemoved
+     * @throws {CqliteError} If the database is closed or a new generation fails to open
+     */
+    async refresh() {
+      try {
+        return await this._native.refresh();
+      } catch (error) {
+        throw enhanceError(error);
+      }
+    }
+
     async close() {
       try {
         return await this._native.close();

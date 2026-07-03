@@ -71,6 +71,10 @@ describe('TypeScript Definitions (Issue #312)', () => {
       expect(dtsContent).toMatch(/export\s+interface\s+DatabaseStats\b/);
     });
 
+    test('should export RefreshReport interface (issue #1749)', () => {
+      expect(dtsContent).toMatch(/export\s+interface\s+RefreshReport\b/);
+    });
+
     test('should export DatabaseOptions interface', () => {
       expect(dtsContent).toMatch(/export\s+interface\s+DatabaseOptions\b/);
     });
@@ -123,6 +127,10 @@ describe('TypeScript Definitions (Issue #312)', () => {
 
     test('should have getStats method', () => {
       expect(dtsContent).toMatch(/getStats\s*\(\s*\)\s*:\s*Promise\s*<\s*DatabaseStats\s*>/);
+    });
+
+    test('should have refresh method (issue #1749)', () => {
+      expect(dtsContent).toMatch(/refresh\s*\(\s*\)\s*:\s*Promise\s*<\s*RefreshReport\s*>/);
     });
 
     test('should have close method', () => {

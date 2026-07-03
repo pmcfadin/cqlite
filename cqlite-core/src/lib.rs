@@ -60,6 +60,10 @@ pub use crate::{
     types::*,
 };
 
+// Explicit SSTable directory refresh report (issue #1749). Not feature-gated —
+// `Database::refresh()` is available in the minimal build too.
+pub use storage::sstable::RefreshReport;
+
 // Re-export query types when state_machine feature is enabled
 #[cfg(feature = "state_machine")]
 pub use query::SchemaStatus;
@@ -287,6 +291,35 @@ impl Database {
             memory,
             config,
         })
+    }
+
+    /// Re-scan the data directory and atomically apply added/removed SSTable
+    /// generations to this handle's reader set (issue #1749).
+    ///
+    /// # Freshness contract
+    ///
+    /// A `Database` is a **snapshot at [`open`](Self::open)**: it discovers the
+    /// SSTable generations once and never re-scans on its own. A Cassandra
+    /// flush/compaction (or a CQLite `--flush`) may add or remove generations
+    /// underneath a warm handle at any time; those changes become visible only
+    /// after an explicit `refresh()`. Re-runs the same TOC/filename-based
+    /// discovery `open` used — no content sniffing, no heuristics.
+    ///
+    /// - Newly present generations become queryable; removed generations stop
+    ///   being queried; unchanged generations keep their warm parsed
+    ///   Index/Statistics/bloom state (not rebuilt).
+    /// - **In-flight queries are never affected**: a scan already running holds
+    ///   its own `Arc` reader clones and completes against the pre-refresh set. A
+    ///   query issued after `refresh()` returns sees the post-refresh set.
+    /// - **Atomic and fail-closed**: if any newly discovered generation fails to
+    ///   open (e.g. a corrupt `Statistics.db`, issue #1626), `refresh()` returns
+    ///   the typed error and leaves the previously held reader set fully
+    ///   unchanged — no partial view.
+    ///
+    /// Returns a [`RefreshReport`] describing what this call applied. Explicit
+    /// refresh only: there is no filesystem watching or per-query staleness check.
+    pub async fn refresh(&self) -> Result<RefreshReport> {
+        self.storage.refresh().await
     }
 
     /// Execute a SQL query and return the result

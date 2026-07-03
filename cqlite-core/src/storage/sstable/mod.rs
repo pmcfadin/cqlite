@@ -24,6 +24,10 @@ pub mod work_counters;
 pub use reader::SSTableReader;
 pub mod schema_aware_reader;
 pub use schema_aware_reader::SchemaAwareReader;
+/// Explicit directory refresh (issue #1749): re-scan + atomic diff-and-swap of
+/// the held reader set. Not `state_machine`-gated — meaningful for minimal builds.
+pub mod refresh;
+pub use refresh::RefreshReport;
 mod reverse_scan; // BIG reverse partition iteration (issue #1184); file is tombstones-gated.
 pub mod row_cell_state_machine;
 pub mod statistics_reader;
@@ -64,7 +68,7 @@ mod schema_aware_reader_test;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 #[cfg(feature = "tombstones")]
 use self::tombstone_merger::{EntryMetadata, GenerationValue, TombstoneMerger};
@@ -232,6 +236,17 @@ pub struct SSTableManager {
     /// Configuration
     config: Config,
 
+    /// How this manager discovers SSTable generations, recorded so
+    /// [`SSTableManager::refresh_tables`] re-runs the same discovery (issue #1749).
+    discovery_source: refresh::DiscoverySource,
+
+    /// Serializes concurrent [`SSTableManager::refresh_tables`] calls end-to-end
+    /// (discovery through swap) so two refreshes cannot interleave — a stale
+    /// discovery set from one refresh can never remove a generation a concurrent
+    /// refresh just added (TOCTOU, issue #1749, Decision 4). Held ONLY across a
+    /// refresh; queries never take this lock (they use the `RwLock` read guards).
+    refresh_lock: Arc<Mutex<()>>,
+
     /// Schema registry for schema-aware operations (feature-gated)
     #[cfg(feature = "state_machine")]
     schema_registry: Arc<RwLock<Option<Arc<RwLock<crate::schema::SchemaRegistry>>>>>,
@@ -257,6 +272,8 @@ impl SSTableManager {
             table_readers,
             platform,
             config: config.clone(),
+            discovery_source: refresh::DiscoverySource::BasePath,
+            refresh_lock: Arc::new(Mutex::new(())),
             #[cfg(feature = "state_machine")]
             schema_registry: Arc::new(RwLock::new(schema_registry)),
         };
@@ -343,6 +360,8 @@ impl SSTableManager {
             table_readers,
             platform: platform.clone(),
             config: config.clone(),
+            discovery_source: refresh::DiscoverySource::TableDirs(table_dirs.clone()),
+            refresh_lock: Arc::new(Mutex::new(())),
             #[cfg(feature = "state_machine")]
             schema_registry: Arc::new(RwLock::new(schema_registry)),
         };
@@ -397,74 +416,29 @@ impl SSTableManager {
                         log::debug!("SSTableManager found SSTable file: {:?}", path);
 
                         let sstable_id = SSTableId::from_filename(filename);
-                        // Try to open the SSTable reader
-                        match reader::SSTableReader::open(
-                            &path,
-                            &self.config,
-                            self.platform.clone(),
-                        )
-                        .await
-                        {
-                            #[cfg_attr(not(feature = "state_machine"), allow(unused_mut))]
-                            Ok(mut reader) => {
+                        // Open + wire registries via the shared helper so refresh
+                        // opens readers identically (issue #1749). A per-file open
+                        // error is logged and skipped here (best-effort load).
+                        match self.open_reader_with_schema(&path).await {
+                            Ok(reader_arc) => {
                                 log::debug!(
                                     "SSTableManager successfully loaded SSTable: {}",
                                     sstable_id.0
                                 );
 
-                                // Set schema registry if available (before wrapping in Arc)
-                                #[cfg(feature = "state_machine")]
-                                {
-                                    let schema_reg_guard = self.schema_registry.read().await;
-                                    if let Some(ref registry_rwlock) = *schema_reg_guard {
-                                        log::debug!(
-                                            "SSTableManager setting schema registry on reader: {}",
-                                            sstable_id.0
-                                        );
-                                        reader.set_schema_registry(Arc::clone(registry_rwlock));
-
-                                        // Also set UDT registry for UDT-aware collection parsing (Issue #238)
-                                        let schema_registry = registry_rwlock.read().await;
-                                        let udt_registry_lock = schema_registry.get_udt_registry();
-                                        let udt_registry = udt_registry_lock.read().await.clone();
-                                        reader.set_udt_registry(udt_registry);
-                                    }
-                                }
-
-                                let reader_arc = Arc::new(reader);
-
                                 // Store by SSTableId (existing)
                                 readers.insert(sstable_id, reader_arc.clone());
 
-                                // Extract fully-qualified "keyspace.table" key so that
-                                // same-named tables in different keyspaces (e.g.
-                                // test_basic.simple_table vs test_oa.simple_table) are
-                                // stored under distinct entries (Issue #680).
-                                if let Some((keyspace, table_name)) =
-                                    extract_keyspace_and_table_name(&path)
-                                {
-                                    let qualified_key = format!("{}.{}", keyspace, table_name);
+                                // Fully-qualified "keyspace.table" key (or unqualified
+                                // fallback) via the shared keying helper (Issue #680).
+                                if let Some(key) = refresh::table_dir_table_key(&path) {
                                     log::debug!(
                                         "SSTableManager mapping table '{}' to SSTable '{}'",
-                                        qualified_key,
+                                        key,
                                         path.display()
                                     );
-
                                     table_readers
-                                        .entry(qualified_key)
-                                        .or_insert_with(Vec::new)
-                                        .push(reader_arc);
-                                } else if let Some(table_name) = extract_table_name(&path) {
-                                    // Fallback for flat/non-Cassandra directory layouts that
-                                    // lack a keyspace parent: use unqualified name.
-                                    log::debug!(
-                                        "SSTableManager mapping table '{}' (no keyspace) to SSTable '{}'",
-                                        table_name,
-                                        path.display()
-                                    );
-
-                                    table_readers
-                                        .entry(table_name)
+                                        .entry(key)
                                         .or_insert_with(Vec::new)
                                         .push(reader_arc);
                                 } else {
@@ -535,63 +509,21 @@ impl SSTableManager {
                 None => continue,
             };
             let sstable_id = SSTableId::from_filename(&filename);
-            // Try to open the SSTable reader, but don't fail if one file is problematic
-            match reader::SSTableReader::open(&path, &self.config, self.platform.clone()).await {
-                #[cfg_attr(not(feature = "state_machine"), allow(unused_mut))]
-                Ok(mut reader) => {
-                    // Set schema registry if available (before wrapping in Arc)
-                    #[cfg(feature = "state_machine")]
-                    {
-                        let schema_reg_guard = self.schema_registry.read().await;
-                        if let Some(ref registry_rwlock) = *schema_reg_guard {
-                            reader.set_schema_registry(Arc::clone(registry_rwlock));
-
-                            // Also set UDT registry for UDT-aware collection parsing (Issue #238)
-                            let schema_registry = registry_rwlock.read().await;
-                            let udt_registry_lock = schema_registry.get_udt_registry();
-                            let udt_registry = udt_registry_lock.read().await.clone();
-                            reader.set_udt_registry(udt_registry);
-                        }
-                    }
-
-                    let reader_arc = Arc::new(reader);
-
+            // Open + wire registries via the shared helper so refresh opens
+            // readers identically (issue #1749). Don't fail the whole load if one
+            // file is problematic — skip it (best-effort initial load).
+            match self.open_reader_with_schema(&path).await {
+                Ok(reader_arc) => {
                     // Store by SSTableId
                     readers.insert(sstable_id, reader_arc.clone());
 
-                    // Build a fully-qualified "keyspace.table" key so that same-named
-                    // tables in different keyspaces (e.g. test_basic.simple_table vs
-                    // test_oa.simple_table) are stored under distinct entries (Issue #680).
-                    //
-                    // Priority:
-                    //   1. keyspace + table extracted from the filesystem path
-                    //   2. Unqualified table name (flat layout without a keyspace parent)
-                    //   3. Table name from the SSTable header (last resort)
-                    let table_key: Option<String> = if let Some((keyspace, table_name)) =
-                        extract_keyspace_and_table_name(&path)
-                    {
-                        // Only use if the table name is meaningful (not just the base_dir)
-                        if table_name.as_str() != base_dir_name {
-                            Some(format!("{}.{}", keyspace, table_name))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                    .or_else(|| {
-                        extract_table_name(&path).filter(|name| name.as_str() != base_dir_name)
-                    })
-                    .or_else(|| {
-                        // Fallback: use table name from SSTable header (populated from
-                        // Statistics.db or path during reader::open)
-                        let header_table = reader_arc.header().table_name.clone();
-                        if header_table != "test_table" && !header_table.is_empty() {
-                            Some(header_table)
-                        } else {
-                            None
-                        }
-                    });
+                    // Fully-qualified "keyspace.table" key (base-dir-excluded, with
+                    // header fallback) via the shared keying helper (Issue #680).
+                    let table_key = refresh::base_path_table_key(
+                        &path,
+                        &base_dir_name,
+                        &reader_arc.header().table_name,
+                    );
 
                     if let Some(key) = table_key {
                         log::debug!(
