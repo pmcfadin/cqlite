@@ -39,6 +39,29 @@ fn require_fixtures() -> bool {
     )
 }
 
+/// Whether the *corrupt corpus* is required to be present (hard-fail on absent),
+/// as opposed to the generic fetched dataset (`require_fixtures`).
+///
+/// Issue #1799 (red main): the corrupt uncompressed fixture
+/// (`corruption/test_comp_corrupt/uncompressed_data_bit_flip/nb-1-big-Data.db`)
+/// is **not** part of the fetched dataset — its binaries are gitignored and are
+/// only regenerated from a Cassandra container by the strict
+/// `compression-corruption-parity` lane (`generate-corruption-corpus.sh`). The
+/// generic `Core lib/doc tests` lane sets `CQLITE_REQUIRE_FIXTURES=1` for the
+/// ~70 fetched-dataset tests but never provides this corpus, so gating this
+/// test's hard assertion on `require_fixtures()` panicked deterministically
+/// there. Gate the hard requirement on a *corpus-specific* flag that is set
+/// only in the lane that actually regenerates the fixture; everywhere else an
+/// absent corrupt fixture is a clean SKIP.
+fn require_corrupt_fixtures() -> bool {
+    matches!(
+        std::env::var("CQLITE_REQUIRE_CORRUPT_FIXTURES")
+            .ok()
+            .as_deref(),
+        Some("1") | Some("true") | Some("TRUE")
+    )
+}
+
 fn datasets_root() -> Option<PathBuf> {
     if let Ok(root) = std::env::var("CQLITE_DATASETS_ROOT") {
         let p = PathBuf::from(root);
@@ -57,10 +80,13 @@ fn corrupt_data_db() -> Option<PathBuf> {
     match path {
         Some(p) if p.exists() => Some(p),
         _ => {
+            // The corrupt corpus is only regenerated in the strict
+            // compression-corruption-parity lane (issue #1799); hard-fail only
+            // when that lane explicitly requires it, otherwise SKIP clean.
             assert!(
-                !require_fixtures(),
-                "CQLITE_REQUIRE_FIXTURES=1 but the corrupt uncompressed fixture is absent: \
-                 {CORRUPT_DATA_DB}"
+                !require_corrupt_fixtures(),
+                "CQLITE_REQUIRE_CORRUPT_FIXTURES=1 but the corrupt uncompressed fixture is \
+                 absent: {CORRUPT_DATA_DB}"
             );
             eprintln!("SKIP: corrupt uncompressed fixture absent ({CORRUPT_DATA_DB}).");
             None

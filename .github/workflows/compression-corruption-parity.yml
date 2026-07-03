@@ -190,6 +190,20 @@ jobs:
               --test sstable_parity_corruption_verify \
               -- --nocapture
 
+      - name: Run BIG promoted-CRC lib proof over corrupt corpus (strict, issue #1799)
+        # The uncompressed read-time CRC proof (issue #1396) lives as an in-crate
+        # `--lib` test (big_promoted_crc_tests), so it does NOT run in the strict
+        # `--test`-only step above. It is the ONLY lane that regenerates the
+        # corrupt uncompressed fixture, so enforce the hard requirement HERE with
+        # the corpus-specific flag: an absent/rotted corrupt fixture or a
+        # corrupt-detection regression FAILS the job (never a silent skip).
+        run: |
+          env CQLITE_REQUIRE_CORRUPT_FIXTURES=1 \
+            CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
+            cargo test -p cqlite-core --features write-support,cli-helpers \
+              --lib big_promoted_crc_tests \
+              -- --nocapture
+
       # issue #1028: structured failure summary for the parity-failure-issue automation.
       - name: Emit parity-failures.json (on failure)
         if: failure()
