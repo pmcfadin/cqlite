@@ -17,6 +17,8 @@ mod key_parsing;
 // can reach `V5CompressedLegacyParser::parse_block_emit` for the block-emit fuzz
 // target. This widens crate-internal visibility only — the module and its
 // `parse_block_emit` remain unreachable from outside cqlite-core.
+#[cfg(test)]
+mod schema_fallback_stall_tests;
 pub(crate) mod v5_compressed_legacy;
 mod value_parsing;
 #[cfg(test)]
@@ -71,7 +73,9 @@ use super::{super::row_cell_state_machine::ParsedRow, types::SSTableReader};
 /// assert_eq!(keyspace, "test_basic");
 /// assert_eq!(table, "simple_table");
 /// ```
-fn extract_keyspace_table_from_path(path: &Path) -> Result<(String, String)> {
+pub(in crate::storage::sstable::reader) fn extract_keyspace_table_from_path(
+    path: &Path,
+) -> Result<(String, String)> {
     // Get parent directory containing table_name-uuid
     let table_dir = path
         .parent()
@@ -141,53 +145,28 @@ impl SSTableReader {
             return Some(schema.clone());
         }
 
-        // Strategy 2: Look up schema from schema registry (if available)
+        // Strategy 2: Use the schema pre-resolved from the registry (issue #1692).
+        //
+        // This tier is reached only when the header schema (Strategy 1) is absent.
+        // The registry is async (an `Arc<RwLock<SchemaRegistry>>` whose `get_schema`
+        // itself awaits), so it CANNOT be consulted safely from this sync fn: the
+        // old code `block_on`-ed the async lock on a tokio worker thread, which —
+        // with a small runtime and a pending registry WRITE guard — could park the
+        // workers and stall the whole runtime (AG3). Instead the registry schema is
+        // resolved ONCE, properly awaited, at the async wiring point
+        // (`SSTableReader::resolve_registry_schema`, called from
+        // `open_reader_with_schema`) and cached in `self.registry_schema`. Here we
+        // just read that plain field — no async lock, no `block_on`, no worker
+        // parking. A registry miss leaves it `None` and we fall through to header
+        // construction below, exactly as the old `block_on` path did on a miss.
         #[cfg(feature = "state_machine")]
         {
-            if let Some(registry_rwlock) = self.schema_registry.as_ref() {
-                // We need to call async methods from a sync context.
-                // Use futures::executor::block_on() which is safe here since this is
-                // called from parsing contexts that are already in async contexts.
-                if tokio::runtime::Handle::try_current().is_ok() {
-                    // We're in a tokio context, use block_on
-                    use futures::executor::block_on;
-
-                    let registry = block_on(registry_rwlock.read());
-
-                    // Extract keyspace/table from SSTable path (authoritative source)
-                    // Directory structure: {keyspace}/{table_name}-{uuid}/Data.db
-                    let (keyspace, table_name) = match extract_keyspace_table_from_path(
-                        &self.file_path,
-                    ) {
-                        Ok(names) => names,
-                        Err(e) => {
-                            debug!(
-                                "get_table_schema: Failed to extract names from path {}: {}. Falling back to header names.",
-                                self.file_path.display(), e
-                            );
-                            // Fallback to header names if path parsing fails
-                            (self.header.keyspace.clone(), self.header.table_name.clone())
-                        }
-                    };
-
-                    match block_on(registry.get_schema(&keyspace, &table_name)) {
-                        Ok(schema) => {
-                            debug!(
-                                "get_table_schema: Using schema from registry for {}.{}",
-                                keyspace, table_name
-                            );
-                            return Some(schema);
-                        }
-                        Err(e) => {
-                            debug!(
-                                "get_table_schema: Schema not found in registry for {}.{}: {}",
-                                keyspace, table_name, e
-                            );
-                        }
-                    }
-                } else {
-                    debug!("get_table_schema: Not in tokio context, skipping registry lookup");
-                }
+            if let Some(schema) = self.registry_schema.as_deref() {
+                debug!(
+                    "get_table_schema: Using pre-resolved registry schema for {}.{}",
+                    schema.keyspace, schema.table
+                );
+                return Some(schema.clone());
             }
         }
 
