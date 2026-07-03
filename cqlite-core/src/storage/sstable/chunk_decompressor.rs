@@ -19,6 +19,21 @@ pub struct ChunkDecompressor {
     max_cached_chunks: usize,
     /// Data file path for error reporting
     data_file_path: Option<String>,
+    /// Cached Data.db length, captured on the first chunk read (issue #1586).
+    ///
+    /// The file is an immutable SSTable, so its size is derived exactly once
+    /// with a single seek probe and then reused for every subsequent chunk's
+    /// `compressed_chunk_size` bounds math — instead of re-seeking to `End(0)`
+    /// (and back) on every chunk read.
+    cached_data_file_size: Option<u64>,
+    /// The reader's logical position after the most recent chunk read within the
+    /// current `read_data` / `decompress_chunk_by_index` call (issue #1586).
+    ///
+    /// Sequential chunk reads leave the reader positioned exactly at the next
+    /// chunk's offset, so the explicit `seek(Start(offset))` can be skipped when
+    /// it would be a no-op. Reset to `None` at each public entry point so it is
+    /// only ever trusted within a single call against a single reader.
+    stream_pos: Option<u64>,
 }
 
 impl ChunkDecompressor {
@@ -38,6 +53,8 @@ impl ChunkDecompressor {
             chunk_cache: HashMap::new(),
             max_cached_chunks: 16, // Cache up to 16 chunks (16 * 16KB = 256KB max memory)
             data_file_path: None,
+            cached_data_file_size: None,
+            stream_pos: None,
         })
     }
 
@@ -56,6 +73,8 @@ impl ChunkDecompressor {
             chunk_cache: HashMap::new(),
             max_cached_chunks: 16,
             data_file_path: Some(data_file_path),
+            cached_data_file_size: None,
+            stream_pos: None,
         })
     }
 
@@ -69,6 +88,12 @@ impl ChunkDecompressor {
         let mut result = Vec::with_capacity(length);
         let mut remaining = length;
         let mut current_offset = offset;
+
+        // The reader's logical position is unknown at the start of a call (the
+        // caller may have passed a fresh reader), so the first chunk read always
+        // seeks; subsequent sequential reads within this call skip the redundant
+        // seek (issue #1586).
+        self.stream_pos = None;
 
         while remaining > 0 {
             // Determine which chunk contains this offset
@@ -152,7 +177,7 @@ impl ChunkDecompressor {
 
     /// Decompress a specific chunk from the compressed data file
     fn decompress_chunk<R: Read + Seek>(
-        &self,
+        &mut self,
         reader: &mut R,
         chunk_index: usize,
     ) -> Result<Vec<u8>> {
@@ -162,12 +187,23 @@ impl ChunkDecompressor {
             .compressed_chunk_offset(chunk_index)
             .ok_or_else(|| Error::InvalidFormat(format!("No offset for chunk {}", chunk_index)))?;
 
-        // Determine record size (compressed payload + 4-byte inline CRC) using file size
-        let current_pos = reader.stream_position().map_err(Error::Io)?;
-        let file_size = reader.seek(SeekFrom::End(0)).map_err(Error::Io)?;
-        reader
-            .seek(SeekFrom::Start(current_pos))
-            .map_err(Error::Io)?;
+        // Determine record size (compressed payload + 4-byte inline CRC) using the
+        // Data.db length. The SSTable is immutable, so its size is derived once
+        // with a single seek probe and cached — never re-probed per chunk (#1586).
+        let file_size = match self.cached_data_file_size {
+            Some(size) => size,
+            None => {
+                let current_pos = reader.stream_position().map_err(Error::Io)?;
+                let size = reader.seek(SeekFrom::End(0)).map_err(Error::Io)?;
+                reader
+                    .seek(SeekFrom::Start(current_pos))
+                    .map_err(Error::Io)?;
+                self.cached_data_file_size = Some(size);
+                // The probe restored the reader to `current_pos`.
+                self.stream_pos = Some(current_pos);
+                size
+            }
+        };
 
         // compressed_chunk_size returns the full record delta including the 4-byte inline CRC.
         // CompressedSequentialWriter.java:203: chunkOffset += compressedLength + 4
@@ -189,10 +225,16 @@ impl ChunkDecompressor {
         }
         let compressed_len = (record_size - 4) as usize;
 
-        // Seek to compressed chunk offset and read compressed payload only
-        reader
-            .seek(SeekFrom::Start(compressed_offset))
-            .map_err(Error::Io)?;
+        // Seek to compressed chunk offset and read compressed payload only.
+        // Skip the seek when the previous sequential chunk read already left the
+        // reader positioned exactly here (issue #1586 step 3).
+        if self.stream_pos != Some(compressed_offset) {
+            reader
+                .seek(SeekFrom::Start(compressed_offset))
+                .map_err(Error::Io)?;
+        }
+        // Position is unknown until the record's bytes are fully read.
+        self.stream_pos = None;
 
         let mut compressed_data = vec![0u8; compressed_len];
         reader.read_exact(&mut compressed_data).map_err(Error::Io)?;
@@ -201,6 +243,10 @@ impl ChunkDecompressor {
         // Authority: CompressedSequentialWriter.java:192 + read path lines 275-282.
         let mut crc_bytes = [0u8; 4];
         reader.read_exact(&mut crc_bytes).map_err(Error::Io)?;
+        // The record (payload + 4-byte CRC) has been consumed; the reader now sits
+        // at the next chunk's offset, so a subsequent sequential read can skip its
+        // seek (issue #1586).
+        self.stream_pos = Some(compressed_offset.saturating_add(record_size));
         let stored_crc = u32::from_be_bytes(crc_bytes);
         let computed_crc = crc32fast::hash(&compressed_data);
         if stored_crc != computed_crc {
@@ -540,6 +586,9 @@ impl ChunkDecompressor {
         reader: &mut R,
         chunk_index: usize,
     ) -> Result<Vec<u8>> {
+        // Single-chunk entry point: the reader position is unknown here too, so
+        // force the first (only) read to seek (issue #1586).
+        self.stream_pos = None;
         self.get_decompressed_chunk(reader, chunk_index)
     }
 
@@ -612,5 +661,97 @@ mod tests {
         decompressor.clear_cache();
         let (cached_after_clear, _) = decompressor.cache_stats();
         assert_eq!(cached_after_clear, 0);
+    }
+
+    /// A `Read + Seek` wrapper that counts every `seek()` call (which includes
+    /// `stream_position()`, since the default `Seek::stream_position` is
+    /// `seek(SeekFrom::Current(0))`). Used to prove the chunk read path does not
+    /// re-derive the immutable file size with a seek probe on every chunk
+    /// (issue #1586).
+    struct SeekCountingReader {
+        inner: std::io::Cursor<Vec<u8>>,
+        seeks: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl std::io::Read for SeekCountingReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.inner.read(buf)
+        }
+    }
+
+    impl Seek for SeekCountingReader {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            self.seeks.set(self.seeks.get() + 1);
+            self.inner.seek(pos)
+        }
+    }
+
+    /// Build a synthetic `k`-chunk LZ4 Data.db body plus its `CompressionInfo`.
+    /// Each chunk record is `[LE u32 uncompressed_len][lz4 bytes][BE u32 CRC32]`
+    /// exactly as Cassandra's `CompressedSequentialWriter` lays them out.
+    #[cfg(feature = "lz4")]
+    fn build_multichunk_lz4(
+        k: usize,
+        chunk_len: usize,
+        last_len: usize,
+    ) -> (Vec<u8>, CompressionInfo) {
+        let mut data_db: Vec<u8> = Vec::new();
+        let mut offsets: Vec<u64> = Vec::new();
+        let mut data_length: u64 = 0;
+        for i in 0..k {
+            offsets.push(data_db.len() as u64);
+            let unclen = if i + 1 == k { last_len } else { chunk_len };
+            let uncompressed: Vec<u8> = (0..unclen).map(|j| ((i * 7 + j) % 251) as u8).collect();
+            data_length += unclen as u64;
+            let mut payload = (unclen as u32).to_le_bytes().to_vec();
+            payload.extend_from_slice(&lz4_flex::compress(&uncompressed));
+            let crc = crc32fast::hash(&payload);
+            data_db.extend_from_slice(&payload);
+            data_db.extend_from_slice(&crc.to_be_bytes());
+        }
+        let info = CompressionInfo {
+            algorithm: "LZ4Compressor".to_string(),
+            chunk_length: chunk_len as u32,
+            data_length,
+            chunk_offsets: offsets,
+            option_pairs: vec![],
+            max_compressed_length: i32::MAX as u32,
+        };
+        (data_db, info)
+    }
+
+    /// Issue #1586: reading every chunk of a K-chunk file must NOT re-probe the
+    /// immutable file size with a `seek(End)`/`seek(Start)` dance on each chunk.
+    /// A full `read_all_data` scan must issue `<= K + O(1)` seeks, not the ~4*K
+    /// seeks the per-chunk size probe produced. On unfixed code this asserts
+    /// ~4*K and FAILS; after threading the cached file size it passes.
+    #[cfg(feature = "lz4")]
+    #[test]
+    fn read_all_data_does_not_reprobe_file_size_per_chunk() {
+        let k = 8usize;
+        let (data_db, info) = build_multichunk_lz4(k, 200, 50);
+        let mut decompressor = ChunkDecompressor::new(info, CassandraVersion::V5_0Release).unwrap();
+
+        let seeks = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let mut reader = SeekCountingReader {
+            inner: std::io::Cursor::new(data_db),
+            seeks: seeks.clone(),
+        };
+
+        let out = decompressor
+            .read_all_data(&mut reader)
+            .expect("read_all_data");
+        assert_eq!(out.len(), 7 * 200 + 50, "all decompressed bytes returned");
+
+        // Budget: one initial size probe (a small constant) plus at most one
+        // positioning seek per chunk. The per-chunk file-size re-probe (3 extra
+        // seeks/chunk) must be gone.
+        let total = seeks.get();
+        let budget = k + 4;
+        assert!(
+            total <= budget,
+            "expected <= {budget} seeks for {k} chunks (K + O(1)), got {total} \
+             — per-chunk file-size re-probe not eliminated (issue #1586)"
+        );
     }
 }
