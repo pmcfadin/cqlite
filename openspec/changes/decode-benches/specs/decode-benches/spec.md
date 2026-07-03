@@ -7,10 +7,23 @@ block-path decode entry (`SSTableReader::parse_value_with_schema_type`), reached
 `#[doc(hidden)]` bench-only shim, never a re-implemented copy of the dispatch. The bench SHALL NOT bench
 dead decode paths (`optimized_complex_types`, `zero_copy_parser`).
 
+UDT wire-decode fidelity boundary: the live string entry resolves types via the registry-free
+`ComparatorType::from_data_type`, which maps a UDT reference to `Custom("udt:…")` and therefore can never
+yield a `ComparatorType::Udt` arm from a type string (a genuine UDT comparator only arises from the
+registry-aware entry, a different code path that is out of scope here). The UDT decode is therefore
+benched via its structural twin `tuple` — in Cassandra `UserType extends TupleType`, so the on-wire decode
+(i32-BE field lengths, per-field recursion) is identical — and this equivalence SHALL be documented at the
+bench.
+
 #### Scenario: Each CQL type is decoded through the real entry
 - **WHEN** the `decode/type_<name>` bench runs for a given CQL type
 - **THEN** the representative buffer is decoded by calling the crate's `parse_value_with_schema_type` (via the `bench-internals` shim), not a copy
 - **AND** the bench setup asserts the decode yields the expected `Value` variant, so a no-op or wrong-path decode fails loudly
+
+#### Scenario: UDT decode is covered via its structural-twin tuple wire format
+- **WHEN** the per-type group covers UDT
+- **THEN** it benches the UDT wire-decode via the `tuple` arm (identical i32-BE field-length wire format), because the registry-free live string entry cannot produce a `ComparatorType::Udt`
+- **AND** the equivalence and its reason are documented at the bench
 
 #### Scenario: The bench-internals shim is opt-in and invisible in default builds
 - **WHEN** `cqlite-core` is built without the `bench-internals` feature
