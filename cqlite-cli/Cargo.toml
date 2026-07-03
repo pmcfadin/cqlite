@@ -116,6 +116,8 @@ serial_test = "3.0"
 # Test infrastructure dependencies
 test-log = "0.2"
 wait-timeout = "0.2"
+# Send SIGINT to a spawned CLI child in the graceful-shutdown test (issue #1693).
+libc = { workspace = true }
 rustc_version = "0.4"
 
 # Enhanced testing framework dependencies
