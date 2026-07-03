@@ -135,6 +135,11 @@ write/flush/compact workflows.
   knowledge of replication, consistency levels, or coordinator routing.
 - **Memory target**: CQLite targets less than 128 MB for files up to 1 GB.
   Files larger than 1 GB may require the streaming API or a partition-key filter.
+- **Snapshot-at-open freshness**: a long-lived handle reads the generations that
+  existed when it was opened and does not auto-detect new or compacted-away files.
+  Call `refresh()` to re-scan; filesystem watching is a non-goal. See
+  [Read Surfaces and Freshness](/cqlite/user-docs/read-surfaces-and-freshness/) for
+  the per-surface contract.
 
 ## Workarounds for unsupported scenarios
 
