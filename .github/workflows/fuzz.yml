@@ -84,7 +84,7 @@ jobs:
           cache-key: fuzz-nightly
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: cargo +nightly install cargo-fuzz --locked
 
       - name: Run bounded fuzz smoke
         # matrix.target is a trusted static literal, but pass it via a quoted env
@@ -134,7 +134,7 @@ jobs:
           cache-key: fuzz-nightly
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: cargo +nightly install cargo-fuzz --locked
 
       - name: Run long fuzz budget
         env:
