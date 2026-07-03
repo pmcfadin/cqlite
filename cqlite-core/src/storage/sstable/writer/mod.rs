@@ -781,6 +781,22 @@ impl SSTableWriter {
                     .update_local_deletion_time(rt.local_deletion_time);
             }
 
+            // Issue #1721: a decoupled row tombstone (#932
+            // `Mutation::row_tombstone = Some((deletion_time, ldt))`) is emitted
+            // by DataWriter as a `HAS_DELETION` row stamped with its OWN
+            // `(deletion_time, ldt)` — DECOUPLED from `timestamp_micros`, so the
+            // per-cell/mutation folds above never see it. Fold both through the
+            // same `update_*` chokepoints as `partition_tombstone` so
+            // `min_local_deletion_time` covers the tombstone's `ldt`; otherwise
+            // the below-baseline guard in data_writer/rows.rs (static sibling
+            // static_rows.rs) rejects the row when `ldt` sits below the
+            // incremental baseline. LIVE sentinels are filtered inside the
+            // chokepoints (#851), so route the raw values straight through.
+            if let Some((deletion_time, ldt)) = mutation.row_tombstone {
+                self.stats.update_timestamp(deletion_time);
+                self.stats.update_local_deletion_time(ldt);
+            }
+
             // Issue #851: row_count (totalRows) and column_count
             // (totalColumnsSet) are NOT re-derived per-mutation here. The two
             // previous attempts re-grouped rows in this loop and kept diverging
@@ -1087,6 +1103,21 @@ impl SSTableWriter {
             for rt in &mutation.range_tombstones {
                 min_timestamp = min_timestamp.min(rt.deletion_time);
                 min_ldt = min_ldt.min(rt.local_deletion_time);
+            }
+
+            // Issue #1721: a decoupled row tombstone (#932
+            // `Mutation::row_tombstone = Some((deletion_time, ldt))`) is emitted by
+            // DataWriter as a `HAS_DELETION` row stamped with its OWN
+            // `(deletion_time, ldt)` — DECOUPLED from `timestamp_micros`, so the
+            // folds above never see it. The pre-seeded flush path locks THIS
+            // baseline; without folding the row tombstone, `min_ldt` stays
+            // `i32::MAX` and the below-baseline guard in data_writer/rows.rs rejects
+            // the row (and the `deletion_time` delta underflows against
+            // `min_timestamp`). Mirror the `partition_tombstone` fold; LIVE
+            // sentinels never reach this field.
+            if let Some((deletion_time, ldt)) = mutation.row_tombstone {
+                min_timestamp = min_timestamp.min(deletion_time);
+                min_ldt = min_ldt.min(ldt);
             }
         }
 
