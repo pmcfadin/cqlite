@@ -13,7 +13,12 @@ import pytest
 
 import cqlite
 
-from conftest import DATASETS, skip_if_no_datasets
+from conftest import (
+    DATASETS,
+    SCHEMA_BASIC_TYPES,
+    skip_if_no_datasets,
+    skip_if_no_schema,
+)
 
 
 class TestExecuteImports:
@@ -381,3 +386,38 @@ class TestSchemaLessStreamingSelectOrder:
         assert list(streamed[0].keys()) == mat_keys, (
             "streaming column order must match materialized output"
         )
+
+    def test_schemaless_materialized_point_lookup_keeps_values(self):
+        """Legacy materialized point-lookup must not drop values (issue #1445).
+
+        A simple ``WHERE id = <literal>`` SELECT is intentionally kept on the
+        legacy `QueryExecutor`, which wraps rows via `QueryResult::with_rows(..)`
+        and leaves `metadata.columns` empty. Before the fix, the materialized
+        `Row` shape was built solely from those empty columns, so the returned
+        row exposed ZERO columns and dropped every value.
+        """
+        skip_if_no_datasets()
+        skip_if_no_schema(SCHEMA_BASIC_TYPES)
+        # Grab a real partition key via a schema-full read (the schema-less
+        # scan omits the partition key column, so we need the schema here).
+        with cqlite.open(DATASETS, schema=SCHEMA_BASIC_TYPES) as db:
+            seed = db.execute("SELECT * FROM test_basic.simple_table LIMIT 1")
+            assert len(seed) > 0, "fixture present but returned 0 rows"
+            id_value = seed.rows[0]["id"]
+
+        # Schema-less point lookup routes through the legacy executor's
+        # empty-metadata `with_rows` path.
+        with cqlite.open(DATASETS) as db:
+            result = db.execute(
+                f"SELECT * FROM test_basic.simple_table WHERE id = {id_value}"
+            )
+            assert len(result) > 0, "point lookup returned no row"
+            row = result.rows[0]
+            keys = list(row.keys())
+            assert keys, "legacy materialized point lookup dropped all columns"
+            assert keys == sorted(keys), "columns must be in sorted order"
+            assert list(row.to_dict().keys()) == keys
+            assert list(row.values()) == [row[k] for k in keys]
+            assert any(row[k] is not None for k in keys), (
+                "legacy materialized point lookup surfaced no values"
+            )

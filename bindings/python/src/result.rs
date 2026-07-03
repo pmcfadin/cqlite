@@ -175,7 +175,23 @@ impl QueryResult {
         // result (issue #1445), from the authoritative SELECT order. Every row
         // shares it by reference-count instead of re-cloning column-name
         // Strings per row.
-        let shape = build_row_shape(py, &result.metadata.columns);
+        //
+        // Fallback (issue #1445): the legacy materialized executor wraps rows via
+        // `QueryResult::with_rows(..)` (e.g. point lookups in
+        // `cqlite-core::query::executor`), which leaves `metadata.columns` empty
+        // even though the rows carry values. Without this, every `Row` would be
+        // built with zero columns and drop all its values. When metadata columns
+        // are empty but rows exist, derive the shape from the first row's value
+        // keys (sorted, mirroring the SELECT executor's schema-less path) so the
+        // materialized output matches.
+        let shape = if result.metadata.columns.is_empty() {
+            match result.rows.first() {
+                Some(first_row) => build_row_shape_from_row_keys(py, first_row),
+                None => build_row_shape(py, &result.metadata.columns),
+            }
+        } else {
+            build_row_shape(py, &result.metadata.columns)
+        };
 
         // Convert all rows eagerly and wrap in Py<Row>
         let rows: Vec<Py<Row>> = result
