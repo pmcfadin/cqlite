@@ -267,25 +267,47 @@ fi
 #    NESTED helper/module files under tests/<subdir>/ must NOT be picked (a Bash
 #    `case` glob like `*/tests/*.rs` matches `/`, so it wrongly matched them and
 #    made --lite FAIL on valid helper-only changes). The gate exposes the mapping
-#    via the hidden `--classify-test-targets` hook (stdin paths -> "<pkg>|<name>").
+#    via the hidden `--classify-test-targets` hook (stdin paths ->
+#    "<pkg>|<name>|<required-features>", one line per OWNING package).
 classify_out=$(printf '%s\n' \
   "cqlite-core/tests/write_read_roundtrip/data_multi.rs" \
   "cqlite-cli/tests/common/mod.rs" \
   "cqlite-core/src/storage/sstable/reader.rs" \
   "cqlite-core/tests/compact_command.rs" \
+  "tests/cassandra5_header_tests.rs" \
+  "cqlite-cli/tests/issue_1388_compact_major_drop.rs" \
   | bash "$GATE" --classify-test-targets 2>/dev/null)
-# Nested helper + module files must be EXCLUDED.
-if printf '%s\n' "$classify_out" | grep -qE '\|(data_multi|mod)$'; then
+# Nested helper + module files must be EXCLUDED (testname is the middle field).
+if printf '%s\n' "$classify_out" | grep -qE '\|(data_multi|mod)\|'; then
   bad "classify: nested helper (write_read_roundtrip/data_multi.rs or common/mod.rs) wrongly picked as a --test target"
   echo "------- classify output -------"; printf '%s\n' "$classify_out"; echo "-------------------------------"
 else
   ok "classify: nested helper/module files NOT treated as --test targets"
 fi
-# A real direct integration-test target must still be picked, mapped to its pkg.
-if printf '%s\n' "$classify_out" | grep -qxF "cqlite-core|compact_command"; then
+# A real direct integration-test target must still be picked, mapped to its pkg
+# (features field empty for a target with no required-features).
+if printf '%s\n' "$classify_out" | grep -qxF "cqlite-core|compact_command|"; then
   ok "classify: real integration-test target (compact_command) picked with correct package"
 else
   bad "classify: real integration-test target compact_command was NOT picked"
+  echo "------- classify output -------"; printf '%s\n' "$classify_out"; echo "-------------------------------"
+fi
+# Finding 1: a top-level tests/*.rs target is owned by BOTH the workspace-root
+# `cqlite` package AND the cqlite-integration-tests crate; BOTH must be emitted
+# so the root package's target is never silently dropped from --lite selection.
+if printf '%s\n' "$classify_out" | grep -qxF "cqlite|cassandra5_header_tests|" \
+   && printf '%s\n' "$classify_out" | grep -qxF "cqlite-integration-tests|cassandra5_header_tests|"; then
+  ok "classify: root-cqlite + integration-tests BOTH emitted for a top-level tests/*.rs target (finding 1)"
+else
+  bad "classify: top-level tests/*.rs target did NOT emit both owning packages (root cqlite dropped)"
+  echo "------- classify output -------"; printf '%s\n' "$classify_out"; echo "-------------------------------"
+fi
+# Finding 2: a target that declares required-features must carry them through so
+# --lite compiles it WITH those features instead of invoking it feature-less.
+if printf '%s\n' "$classify_out" | grep -qxF "cqlite-cli|issue_1388_compact_major_drop|write-support"; then
+  ok "classify: required-features (write-support) passed through for a feature-gated target (finding 2)"
+else
+  bad "classify: required-features NOT passed through for issue_1388_compact_major_drop"
   echo "------- classify output -------"; printf '%s\n' "$classify_out"; echo "-------------------------------"
 fi
 
@@ -298,7 +320,7 @@ if [ -x /bin/bash ]; then
   if /bin/bash "$GATE" --lite-list >/dev/null 2>&1 \
      && printf '%s\n' "cqlite-core/tests/compact_command.rs" \
         | /bin/bash "$GATE" --classify-test-targets 2>/dev/null \
-        | grep -qxF "cqlite-core|compact_command"; then
+        | grep -qxF "cqlite-core|compact_command|"; then
     ok "bash-compat: --lite classification path runs under /bin/bash (major ${bin_bash_major:-?})"
   else
     bad "bash-compat: --lite classification path failed under /bin/bash (major ${bin_bash_major:-?})"

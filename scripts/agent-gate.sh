@@ -202,8 +202,12 @@ export CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-$REPO_ROOT/test-data/datase
 # These helpers use no Bash-4-only features (no associative arrays), so the whole
 # --lite path runs under macOS's default Bash 3.2.
 
-# Emit "<abs_src_path>\t<pkg>\t<testname>" for every Cargo test target, or nothing
-# if metadata cannot be produced/parsed.
+# Emit "<abs_src_path>\t<pkg>\t<testname>\t<required-features>" for every Cargo
+# test target (required-features comma-joined, empty when none), or nothing if
+# metadata cannot be produced/parsed. A single src_path can appear on MULTIPLE
+# lines: the workspace-root package `cqlite` and the `cqlite-integration-tests`
+# crate both own the top-level tests/*.rs files, and every owning package's
+# target must be runnable (issue #1821 roborev finding 1).
 _test_target_index() {
   local meta
   meta=$(cargo metadata --no-deps --format-version 1 2>/dev/null) || return 0
@@ -211,7 +215,8 @@ _test_target_index() {
   if command -v jq >/dev/null 2>&1; then
     printf '%s' "$meta" | jq -r \
       '.packages[] | .name as $p | .targets[]
-       | select(.kind[] == "test") | "\(.src_path)\t\($p)\t\(.name)"'
+       | select(.kind[] == "test")
+       | "\(.src_path)\t\($p)\t\(.name)\t\((."required-features" // []) | join(","))"'
   elif command -v python3 >/dev/null 2>&1; then
     printf '%s' "$meta" | python3 -c '
 import json, sys
@@ -219,37 +224,51 @@ d = json.load(sys.stdin)
 for p in d["packages"]:
     for t in p["targets"]:
         if "test" in t.get("kind", []):
-            print("%s\t%s\t%s" % (t["src_path"], p["name"], t["name"]))
+            feats = ",".join(t.get("required-features") or [])
+            print("%s\t%s\t%s\t%s" % (t["src_path"], p["name"], t["name"], feats))
 '
   fi
 }
 
-# Read changed repo-relative paths on stdin; print "<pkg>|<testname>" for each
-# that is an ACTUAL Cargo integration-test target. Nested helper/module files are
-# excluded. Deterministic; Bash 3.2-safe.
+# Read changed repo-relative paths on stdin; print "<pkg>|<testname>|<features>"
+# for EVERY Cargo `--test` target that a changed path is (features comma-joined,
+# possibly empty). A single path may emit MULTIPLE lines when several packages own
+# it (root `cqlite` + `cqlite-integration-tests` both own top-level tests/*.rs) —
+# all owners are emitted so none is silently dropped (issue #1821 finding 1).
+# Nested helper/module files are excluded. Deterministic; Bash 3.2-safe.
 classify_test_targets() {
-  local index f abs hit pkg base
+  local index f abs hits pkg base
   index=$(_test_target_index)
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     case "$f" in *.rs) ;; *) continue ;; esac
     if [ -n "$index" ]; then
       abs="$REPO_ROOT/$f"
-      hit=$(printf '%s\n' "$index" \
-        | awk -F'\t' -v p="$abs" '$1 == p { print $2 "|" $3; exit }')
-      [ -n "$hit" ] && printf '%s\n' "$hit"
+      # ALL owning targets (no early exit), "<pkg>|<name>|<features>" per line.
+      hits=$(printf '%s\n' "$index" \
+        | awk -F'\t' -v p="$abs" '$1 == p { print $2 "|" $3 "|" $4 }')
+      [ -n "$hits" ] && printf '%s\n' "$hits"
     else
-      # No JSON parser available: precise direct-child check for the four
-      # auto-discovery packages only. `<pkg>/tests/<stem>.rs` with no further `/`.
+      # No JSON parser available: precise direct-child check restricted to the
+      # auto-discovery packages. `<pkg>/tests/<stem>.rs` with no further `/`.
+      # Required-features are unknown without metadata, so emit an empty field.
       case "$f" in
         cqlite-core/tests/*.rs)            pkg=cqlite-core;      base=${f#cqlite-core/tests/} ;;
         cqlite-cli/tests/*.rs)             pkg=cqlite-cli;       base=${f#cqlite-cli/tests/} ;;
         cqlite-flight/tests/*.rs)          pkg=cqlite-flight;    base=${f#cqlite-flight/tests/} ;;
         tools/cassandra-parity/tests/*.rs) pkg=cassandra-parity; base=${f#tools/cassandra-parity/tests/} ;;
+        tests/*.rs)                        pkg=cqlite;           base=${f#tests/} ;;
         *) continue ;;
       esac
       case "$base" in */*) continue ;; esac   # nested helper -> not a --test target
-      printf '%s|%s\n' "$pkg" "${base%.rs}"
+      # Top-level tests/*.rs is owned by BOTH the root package and the
+      # cqlite-integration-tests crate; emit both so neither is dropped.
+      if [ "$pkg" = cqlite ]; then
+        printf 'cqlite|%s|\n' "${base%.rs}"
+        printf 'cqlite-integration-tests|%s|\n' "${base%.rs}"
+      else
+        printf '%s|%s|\n' "$pkg" "${base%.rs}"
+      fi
     fi
   done
 }
@@ -996,15 +1015,28 @@ run_scoped_tests() {
     printf '%s\n' "$pkgset" | grep -qxF "$pkg" || pkgset="${pkgset}${pkg}"$'\n'
   done <<<"$changed"
 
-  # Authoritative added/changed --test targets ("<pkg>|<testname>" per line).
-  # Uses Cargo metadata so NESTED helper files (tests/<subdir>/*.rs) are excluded
-  # rather than turned into a bogus `--test <stem>` that would fail --lite.
+  # Authoritative added/changed --test targets ("<pkg>|<testname>|<features>" per
+  # line). Uses Cargo metadata so NESTED helper files (tests/<subdir>/*.rs) are
+  # excluded rather than turned into a bogus `--test <stem>` that would fail --lite.
   local newtests
   newtests=$(printf '%s\n' "$changed" | classify_test_targets)
+
+  # Union the packages that OWN a changed --test target into the package set —
+  # not just the path-prefix packages. Some owners (notably the workspace-root
+  # `cqlite` package, which owns the top-level tests/*.rs targets) have no path
+  # prefix of their own and would otherwise be dropped (issue #1821 finding 1).
+  local tpkg
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    tpkg=${key%%|*}
+    [ -n "$tpkg" ] || continue
+    printf '%s\n' "$pkgset" | grep -qxF "$tpkg" || pkgset="${pkgset}${tpkg}"$'\n'
+  done <<<"$newtests"
 
   # package -> manifest dir (to detect a src/lib.rs target).
   pkg_dir() {
     case "$1" in
+      cqlite)                     echo "." ;;
       cqlite-core)                echo "cqlite-core" ;;
       cqlite-cli)                 echo "cqlite-cli" ;;
       cqlite-flight)              echo "cqlite-flight" ;;
@@ -1026,22 +1058,53 @@ run_scoped_tests() {
   fi
   echo ">>> [$name] blast-radius packages: $scoped_note"
 
-  local p dir key
+  # Union a comma-list of features into a newline-set (Bash 3.2-safe dedup).
+  add_features() {
+    local set=$1 list=$2 x oldifs=$IFS
+    IFS=,
+    for x in $list; do
+      [ -n "$x" ] || continue
+      printf '%s\n' "$set" | grep -qxF "$x" || set="${set}${x}"$'\n'
+    done
+    IFS=$oldifs
+    printf '%s' "$set"
+  }
+
+  local p dir key rest tname feats
   for p in "${pkgs[@]}"; do
     dir=$(pkg_dir "$p")
     local -a args=(test -p "$p")
-    [ "$p" = cqlite-core ] && args+=(--features cli-helpers)
+    local featset=""
+    # cqlite-core lib tests need cli-helpers (matches the full gate's core-tests).
+    [ "$p" = cqlite-core ] && featset=$(add_features "$featset" cli-helpers)
     local haslib=0
     [ -n "$dir" ] && [ -f "$dir/src/lib.rs" ] && haslib=1
     [ "$haslib" -eq 1 ] && args+=(--lib)
     local -a stems=()
+    # Collect every changed --test target this package owns AND union each
+    # target's required-features so it is compiled with the features it needs —
+    # never invoked feature-less (issue #1821 finding 2).
     while IFS= read -r key; do
       [ -n "$key" ] || continue
-      case "$key" in "$p|"*) stems+=(--test "${key#*|}") ;; esac
+      case "$key" in
+        "$p|"*)
+          rest=${key#*|}          # "<name>|<features>"
+          tname=${rest%%|*}
+          feats=${rest#*|}        # "" when the target has no required-features
+          [ "$feats" = "$rest" ] && feats=""
+          stems+=(--test "$tname")
+          featset=$(add_features "$featset" "$feats")
+          ;;
+      esac
     done <<<"$newtests"
     # Bash 3.2 under `set -u` treats "${stems[@]}" of an EMPTY array as unbound,
     # so only expand it when non-empty (count expansion is always safe).
     [ "${#stems[@]}" -gt 0 ] && args+=("${stems[@]}")
+    # Pass the unioned required-features (if any) so feature-gated targets
+    # (write-support / delta-export / duckdb-tests / ...) actually compile.
+    local featjoin
+    featjoin=$(printf '%s' "$featset" | awk 'NF{ printf (n++?",":"") $0 }')
+    [ -n "$featjoin" ] && args+=(--features "$featjoin")
     # A test-only crate with no changed --test target has nothing runnable to
     # scope to; compile-check it (--no-run) rather than run its whole (slow) suite.
     if [ "$haslib" -eq 0 ] && [ "${#stems[@]}" -eq 0 ]; then
