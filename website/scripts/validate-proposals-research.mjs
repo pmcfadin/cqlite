@@ -37,18 +37,55 @@ const checks = [
     ],
   },
   {
+    name: 'storage-engine architecture renders Mermaid instead of static SVG',
+    file: 'src/content/docs/proposals-research/storage-engine.mdx',
+    includes: [
+      "import MermaidDiagram from '../../../components/MermaidDiagram.astro';",
+      'const architectureMermaid = `',
+      '<MermaidDiagram',
+      'chart={architectureMermaid}',
+      'sourceLabel="Mermaid source for the architecture diagram"',
+    ],
+    excludes: [
+      "import architectureDiagram from '../../../assets/storage-engine-architecture.svg';",
+      'src={architectureDiagram.src}',
+      'storage-engine-architecture.svg',
+    ],
+  },
+  {
+    name: 'Mermaid diagram component renders and preserves source',
+    file: 'src/components/MermaidDiagram.astro',
+    includes: [
+      "import mermaid from 'mermaid';",
+      'data-mermaid-diagram',
+      'mermaid.render',
+      'sourceLabel',
+    ],
+  },
+  {
     name: 'generated concept image is present',
     file: 'src/assets/storage-engine-parallel-planes.png',
     binary: true,
   },
   {
-    name: 'architecture diagram separates OLTP writes from OLAP read path',
+    name: 'static architecture SVG was removed',
     file: 'src/assets/storage-engine-architecture.svg',
+    absent: true,
+  },
+  {
+    name: 'architecture Mermaid separates OLTP writes from OLAP read path',
+    file: 'src/content/docs/proposals-research/storage-engine.mdx',
     includes: [
-      'Apps use Cassandra for reads and writes.',
-      'Apps query analytical services backed by SSTables.',
+      'Cassandra OLTP Plane',
+      'Trino / Iceberg OLAP Plane',
+      'Application reads/writes',
+      'CommitLog',
+      'Memtable',
+      'Flush, compaction, repair',
+      'SSTable Foundation',
       'Application analytical reads',
-      'Trino + Arrow Flight',
+      'Trino',
+      'Arrow Flight',
       'Iceberg materializer',
       'CQLite SSTable reader',
       'snapshot read',
@@ -56,13 +93,15 @@ const checks = [
     ],
     ordered: [
       'Application analytical reads',
-      'Trino + Arrow Flight',
+      'Trino',
+      'Arrow Flight',
       'Iceberg materializer',
       'CQLite SSTable reader',
     ],
     excludes: [
       'Operational writes, reads, repair, and lifecycle stay in Cassandra.',
       'CQLite reads Cassandra files for analytics without owning OLTP.',
+      'src={architectureDiagram.src}',
     ],
   },
 ];
@@ -71,6 +110,16 @@ let failed = false;
 
 for (const check of checks) {
   const path = join(root, check.file);
+  if (check.absent) {
+    if (existsSync(path)) {
+      console.error(`FAIL ${check.name}: ${check.file} should not exist`);
+      failed = true;
+    } else {
+      console.log(`PASS ${check.name}`);
+    }
+    continue;
+  }
+
   if (!existsSync(path)) {
     console.error(`FAIL ${check.name}: missing ${check.file}`);
     failed = true;
