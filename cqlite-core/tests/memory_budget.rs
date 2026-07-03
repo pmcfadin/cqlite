@@ -43,17 +43,20 @@ const PROJECT_HEAP_BUDGET_BYTES: u64 = 128 * 1024 * 1024;
 /// real data rather than a synthetic 10k-row table.
 const FULL_SCAN_ITERATIONS: usize = 10;
 
-/// Full-scan total-bytes regression net. Measured 209,380,005 bytes on `main`
-/// today (SIMPLE, 10 iterations); ceiling = measured + ~20% slack for
-/// allocator/toolchain variance. Epic E (E2/E3) ratchets this DOWN toward the
-/// streaming target as the read path stops materializing whole result sets —
-/// tighten this constant when E2/E3 land, do not just leave the slack.
+/// Full-scan total-bytes regression net for the SELECT loop ONLY (fixture copy +
+/// ingest are excluded — the profiler starts after `open_read_db`). Measured
+/// 207,016,624 bytes on `main` today (SIMPLE, 10 iterations); ceiling = measured
+/// + ~22% slack for allocator/toolchain variance. Epic E (E2/E3) ratchets this
+/// DOWN toward the streaming target as the read path stops materializing whole
+/// result sets — tighten this constant when E2/E3 land, do not just leave slack.
 const CEILING_TOTAL_BYTES: u64 = 252_000_000;
 
-/// Materializing-read peak-heap regression net. Measured 4,944,842 bytes on
-/// `main` today (TYPE_HEAVY); ceiling = measured + ~21% slack. Epic E ratchets
-/// this DOWN as peak working-set shrinks; it also sits far below the 128 MiB
-/// project budget asserted alongside it.
+/// Materializing-read peak-heap regression net for the query's working set ONLY
+/// (fixture copy + ingest excluded — profiler starts after `open_read_db`).
+/// Measured 4,579,884 bytes on `main` today (TYPE_HEAVY); ceiling = measured +
+/// ~31% slack (peak varies more than totals). Epic E ratchets this DOWN as peak
+/// working-set shrinks; it also sits far below the 128 MiB project budget
+/// asserted alongside it.
 const CEILING_PEAK_BYTES: u64 = 6_000_000;
 
 /// Total bytes allocated during a repeated full-table `SELECT *` over the
@@ -65,9 +68,14 @@ fn select_full_scan_alloc_budget() {
     let fx = fixtures::ReadFixture::SIMPLE;
     let sql = format!("SELECT * FROM {}", fx.qualified());
 
+    // Open the fixture (copy + schema ingest + db open) BEFORE starting the
+    // profiler so those one-time setup allocations are NOT attributed to the
+    // budget — this must be a *read-path* regression net, not a fixture/ingest
+    // one (roborev #1565). Only the repeated SELECT loop below is measured.
+    let loaded = fixtures::open_read_db(&fx);
+
     let _profiler = dhat::Profiler::builder().testing().build();
 
-    let loaded = fixtures::open_read_db(&fx);
     for i in 0..FULL_SCAN_ITERATIONS {
         let result = rt
             .block_on(loaded.db.execute(&sql))
@@ -105,9 +113,13 @@ fn materialized_select_byte_ceiling() {
     let fx = fixtures::ReadFixture::TYPE_HEAVY;
     let sql = format!("SELECT * FROM {}", fx.qualified());
 
+    // Open the fixture BEFORE the profiler so the measured peak reflects only the
+    // query's working set, not one-time fixture-copy/ingest allocations
+    // (roborev #1565).
+    let loaded = fixtures::open_read_db(&fx);
+
     let _profiler = dhat::Profiler::builder().testing().build();
 
-    let loaded = fixtures::open_read_db(&fx);
     let result = rt
         .block_on(loaded.db.execute(&sql))
         .expect("type-heavy query");
