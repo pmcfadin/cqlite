@@ -106,6 +106,14 @@ struct Counters {
     /// A regression that materialises the whole partition before reversing pushes
     /// this to the partition's full row count instead of one block's worth.
     reverse_peak_block_rows: AtomicU64,
+    /// Full re-reads of a finished `Data.db` performed to compute checksums
+    /// (Issue #1663). Bumped once each time the re-read CRC oracle
+    /// (`crc_writer::build_crc_bytes`) or the digest re-read
+    /// (`SSTableWriter::compute_crc32`) OPENS `Data.db`. The streaming write path
+    /// accumulates both checksums as it writes, so a non-empty
+    /// `SSTableWriter::finish()` must leave this at 0; a regression that
+    /// reintroduces the finish-time double re-read bumps it (2 on the old path).
+    data_db_checksum_full_reads: AtomicU64,
 }
 
 impl Counters {
@@ -118,6 +126,7 @@ impl Counters {
             rows_decoded: AtomicU64::new(0),
             reverse_blocks_decoded: AtomicU64::new(0),
             reverse_peak_block_rows: AtomicU64::new(0),
+            data_db_checksum_full_reads: AtomicU64::new(0),
         }
     }
 
@@ -157,6 +166,16 @@ impl Counters {
             .fetch_max(rows, Ordering::Relaxed);
     }
 
+    #[cfg(feature = "write-support")]
+    fn add_data_db_checksum_full_read(&self) {
+        self.data_db_checksum_full_reads
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn data_db_checksum_full_reads(&self) -> u64 {
+        self.data_db_checksum_full_reads.load(Ordering::Relaxed)
+    }
+
     fn reverse_blocks_decoded(&self) -> u64 {
         self.reverse_blocks_decoded.load(Ordering::Relaxed)
     }
@@ -193,6 +212,7 @@ impl Counters {
         self.rows_decoded.store(0, Ordering::Relaxed);
         self.reverse_blocks_decoded.store(0, Ordering::Relaxed);
         self.reverse_peak_block_rows.store(0, Ordering::Relaxed);
+        self.data_db_checksum_full_reads.store(0, Ordering::Relaxed);
     }
 }
 
@@ -284,6 +304,31 @@ pub(crate) fn add_reverse_block_decoded() {
 #[cfg(not(feature = "tombstones"))]
 pub(crate) fn observe_reverse_block_rows(rows: u64) {
     COUNTERS.observe_reverse_block_rows(rows);
+}
+
+/// Record one full re-read of a finished `Data.db` performed to compute
+/// checksums (Issue #1663). Called once at each site that OPENS `Data.db` to
+/// checksum it: the re-read CRC oracle (`crc_writer::build_crc_bytes`) and the
+/// digest re-read (`SSTableWriter::compute_crc32`).
+///
+/// Gated on `write-support` because both increment sites live in the writer,
+/// which is only compiled with that feature; the getter and [`reset`] are
+/// available in every build for the test API.
+#[cfg(feature = "write-support")]
+pub fn add_data_db_checksum_full_read() {
+    COUNTERS.add_data_db_checksum_full_read();
+}
+
+/// Number of full `Data.db` re-reads performed for checksum computation since
+/// the last [`reset`] (Issue #1663).
+///
+/// The streaming write path accumulates the whole-file digest and the per-chunk
+/// `CRC.db` values as it writes, so a non-empty `SSTableWriter::finish()` must
+/// leave this at 0. A regression that reintroduces the finish-time double
+/// re-read (one for `Digest.crc32`, one for `CRC.db`) bumps it to 2, failing the
+/// issue-#1663 work guard.
+pub fn data_db_checksum_full_reads() -> u64 {
+    COUNTERS.data_db_checksum_full_reads()
 }
 
 /// Number of candidate SSTables parsed by partition-targeted lookups since the

@@ -29,7 +29,7 @@
 //! | Udt | `object` with `_type`, `_keyspace`, and field properties |
 
 use cqlite_core::types::Value;
-use napi::{Env, JsFunction, JsObject, JsUnknown, Result};
+use napi::{Env, JsFunction, JsObject, JsString, JsUnknown, Result};
 
 /// Convert a CQL Value to a JavaScript value with native types.
 ///
@@ -431,17 +431,79 @@ fn udt_to_object(env: &Env, udt: &cqlite_core::UdtValue) -> Result<JsUnknown> {
     Ok(obj.into_unknown())
 }
 
-/// Convert row values to a JavaScript object.
+/// Reusable, once-per-result column-key structure for row construction.
 ///
-/// This is a convenience function for converting query result rows.
+/// Issue #1446: both the interned `JsString` handles and the membership set are
+/// built a single time per result set (they depend only on the column list,
+/// which is constant across every row) so a wide-table scan pays neither the
+/// `O(rows × columns)` string re-interning nor a per-row `HashSet` rebuild.
+pub struct ColumnKeys {
+    /// `(lookup_name, pre-interned JS key)` in authoritative SELECT order.
+    /// `JsString` is a `Copy` handle valid for the enclosing `Env` scope.
+    ordered: Vec<(String, JsString)>,
+    /// Membership set of the ordered names, for O(1) "is this value covered by
+    /// the authoritative column list?" checks in [`row_to_object`].
+    known: std::collections::HashSet<String>,
+}
+
+/// Intern the SELECT-order column names into a reusable [`ColumnKeys`].
+///
+/// Called once per result set; the returned structure is borrowed for every row.
+pub fn intern_column_keys(env: &Env, names: &[String]) -> Result<ColumnKeys> {
+    let ordered = names
+        .iter()
+        .map(|name| Ok((name.clone(), env.create_string(name)?)))
+        .collect::<Result<Vec<_>>>()?;
+    let known = names.iter().cloned().collect();
+    Ok(ColumnKeys { ordered, known })
+}
+
+/// Convert row values to a JavaScript object in authoritative SELECT order.
+///
+/// Issue #1446: property insertion order equals `columns` order (V8 preserves
+/// string-key insertion order), so `Object.keys(row)` matches
+/// `columns.map(c => c.name)` — not `HashMap` hash order. `keys` are the
+/// once-per-result handles from [`intern_column_keys`], reused across every row.
 pub fn row_to_object(
     env: &Env,
+    keys: &ColumnKeys,
     values: &std::collections::HashMap<String, Value>,
 ) -> Result<JsObject> {
     let mut obj = env.create_object()?;
-    for (col_name, value) in values {
-        let js_value = value_to_napi(env, value)?;
-        obj.set_named_property(col_name, js_value)?;
+    // Emit the selected columns that are present in this row's values, in
+    // authoritative SELECT order (#1446). For the normal case where metadata
+    // names match the value keys, this is every column, so `Object.keys(row)`
+    // equals `columns.map(c => c.name)`. A metadata column with no matching value
+    // is skipped (not null-filled): for aggregate queries core's metadata uses a
+    // fallback name like `col_0` while the value is keyed by the expression name
+    // like `Count(*)`, and null-filling would emit a phantom `col_0: null`
+    // alongside the real cell.
+    for (col_name, js_key) in &keys.ordered {
+        if let Some(value) = values.get(col_name) {
+            let js_value = value_to_napi(env, value)?;
+            obj.set_property(*js_key, js_value)?;
+        }
+    }
+    // Never drop cells (#1446 roborev): emit any values the authoritative column
+    // list does not cover — an aggregate value keyed differently from its
+    // metadata name, or a streaming `SELECT *` whose schema lookup failed leaves
+    // `metadata.columns` empty while rows are still yielded — in a deterministic
+    // (name-sorted) order rather than dropping them or using nondeterministic
+    // hash order. Extras are detected by membership against the precomputed
+    // `known` set (built once per result), so the common path where metadata
+    // covers every cell allocates no set and does no sort.
+    let mut extra: Vec<&String> = values
+        .keys()
+        .filter(|name| !keys.known.contains(name.as_str()))
+        .collect();
+    if !extra.is_empty() {
+        extra.sort();
+        for name in extra {
+            if let Some(value) = values.get(name) {
+                let js_value = value_to_napi(env, value)?;
+                obj.set_named_property(name, js_value)?;
+            }
+        }
     }
     Ok(obj)
 }

@@ -70,7 +70,7 @@ pub use compression_info_writer::{
     CompressionAlgorithm, CompressionInfoWriter, CompressionMetadata,
 };
 #[cfg(feature = "write-support")]
-pub use data_writer::DataWriter;
+pub use data_writer::{DataWriter, StreamFinish};
 #[cfg(feature = "write-support")]
 pub use digest_writer::DigestWriter;
 #[cfg(feature = "write-support")]
