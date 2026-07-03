@@ -50,6 +50,35 @@ Three orthogonal families: **(1) cut the churn at the source** (#1793/#1736/#182
 duplicated compile work** (#1822/#1737), **(3) make higher concurrency safe** (#1825). Do all three;
 they compound.
 
+## Testing principle: focus the iteration loop, keep the merge gate complete
+
+Speed comes from running tests **faster/in parallel** (nextest #1737), **not recompiling** (sccache
+#1822), and **focusing the inner loop** (`--lite` tiering + path→component scoping, #1821) — NOT from
+permanently skipping tests before merge. CQLite's whole value is byte-for-byte Cassandra parity; the
+merge gate's job is to catch the regression you didn't predict. So:
+- **Per-test change-based selection (test-impact analysis) is deliberately kept OUT of the merge gate.**
+  Rust has no trustworthy per-test dependency graph, so any selection is itself a heuristic — and
+  skipping a byte-parity test on a bad guess is the exact silent-failure class this project guards
+  against. Fine as an optional inner-loop accelerator only.
+- **Path→component scoping** (touch `bindings/python/**` → skip node-bindings, etc.) is a safe, coarse
+  win for the `--lite` inner loop — folds into #1821. The full gate still runs everything pre-merge.
+
+### Goldens-in-gate, Docker-in-nightly (the parity boundary)
+
+- **The agent gate runs against STATIC GOLDEN datasets** (`CQLITE_DATASETS_ROOT`), never live
+  containers. Fast + deterministic + complete.
+- **Live Docker (Cassandra 5.0) is for fixture *generation/regeneration* only** — nightly /
+  `workflow_dispatch` parity lanes (`cassandra-parity.yml`, `tombstone-ttl-parity.yml`,
+  `cql-type-parity.yml`, `nightly-docker-parity`, `exhaustive-regeneration.yml`) and
+  `test-data/scripts/*.sh`. Intentionally off the gate + PRs.
+- **⚠️ Leak found 2026-07-03:** a few parity tests (`cqlite-core/tests/issue_911_bti_*.rs`,
+  `cqlite-cli/tests/compatibility/**`) probe `docker info` and run containers *if Docker + a Cassandra
+  image are present*. This gate machine HAS Docker + `cassandra:5.0/5.0.2/4.1` cached, so those tests
+  **fire during `core-tests`**, adding real wall-clock + non-determinism to the 694s floor. Folded into
+  **#1737**: measure their cost, and skip the Docker-spawning tests in the gate/`--lite` path (env
+  guard or nextest filter) so the gate stays on goldens — without dropping the coverage (it stays in
+  the nightly Docker lanes).
+
 ## Activity log
 
 - **2026-07-03** — Ran telemetry retro over 91 records; produced the time-suck analysis above.

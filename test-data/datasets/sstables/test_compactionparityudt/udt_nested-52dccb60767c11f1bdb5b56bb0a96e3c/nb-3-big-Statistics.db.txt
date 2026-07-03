@@ -1,0 +1,64 @@
+SSTable: /data/test_compactionparityudt/udt_nested-52dccb60767c11f1bdb5b56bb0a96e3c/nb-3-big
+Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
+Bloom Filter FP chance: 0.01
+Minimum timestamp: 01/01/1970 00:00:00 (1000)
+Maximum timestamp: 01/01/1970 00:00:00 (2000)
+Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
+SSTable min local deletion time: no tombstones (9223372036854775807)
+SSTable max local deletion time: no tombstones (9223372036854775807)
+Compressor: -
+TTL min: 0
+TTL max: 0
+First token: -4069959284402364209 (1)
+Last token: 9010454139840013625 (3)
+Covered clusterings: ALL
+Estimated droppable tombstones: 0.0
+SSTable Level: 0
+Repaired at: 0
+Originating host id: f0f2d3a7-b16b-43a5-b72f-244ac78e7769
+Pending repair: --
+Replay positions covered: {CommitLogPosition(segmentId=1783041040220, position=66612)=CommitLogPosition(segmentId=1783041040220, position=74628)}
+totalColumnsSet: 3
+totalRows: 3
+Estimated tombstone drop times: 
+   Drop Time | Count  (%)  Histogram 
+   Percentiles
+   50th      0 
+   75th      0 
+   95th      0 
+   98th      0 
+   99th      0 
+   Min       0 
+   Max       0 
+Partition Size: 
+   Size (bytes) | Count  (%)  Histogram 
+   86 (86 B)    |     3 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      86 (86 B)
+   75th      86 (86 B)
+   95th      86 (86 B)
+   98th      86 (86 B)
+   99th      86 (86 B)
+   Min       73 (73 B)
+   Max       86 (86 B)
+Column Count: 
+   Columns | Count  (%)  Histogram 
+   1       |     3 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      1
+   75th      1
+   95th      1
+   98th      1
+   99th      1
+   Min       0
+   Max       1
+Local token space coverage: NaN
+Estimated cardinality: 3
+EncodingStats minTTL: 0
+EncodingStats minLocalDeletionTime: 09/22/2015 00:00:00 (1442880000)
+EncodingStats minTimestamp: 01/01/1970 00:00:00 (1000)
+KeyType: org.apache.cassandra.db.marshal.Int32Type
+ClusteringTypes: []
+StaticColumns: 
+RegularColumns: e:org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.UserType(test_compactionparityudt,656d706c6f796565,6e616d65:org.apache.cassandra.db.marshal.UTF8Type,686f6d65:org.apache.cassandra.db.marshal.UserType(test_compactionparityudt,61646472657373,737472656574:org.apache.cassandra.db.marshal.UTF8Type,63697479:org.apache.cassandra.db.marshal.UTF8Type,7a6970:org.apache.cassandra.db.marshal.UTF8Type),6c6576656c:org.apache.cassandra.db.marshal.Int32Type))
+IsTransient: false
