@@ -107,6 +107,17 @@ pub fn to_py_err(err: cqlite_core::Error) -> PyErr {
     }
 }
 
+/// Map a tokio runtime-initialization failure to a Python exception.
+///
+/// The shared async runtime is built lazily (see `runtime::try_get_runtime`).
+/// If the host is out of threads/file descriptors/memory the build fails with an
+/// [`std::io::Error`]; surfacing it here as a catchable Python exception (via the
+/// same `Io` → `IOError` mapping as any other I/O failure) lets `open()` raise
+/// instead of the process aborting under `panic = "abort"` (issue #1438).
+pub fn runtime_init_to_py_err(err: std::io::Error) -> PyErr {
+    to_py_err(cqlite_core::Error::Io(err))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,6 +429,21 @@ mod tests {
             let _py_err = to_py_err(err);
             // If we got here, the mapping didn't panic
         }
+    }
+
+    #[test]
+    fn test_runtime_init_error_maps_to_catchable_exception() {
+        // A runtime-init failure must surface as a catchable Python exception
+        // (IOError), never a process abort (issue #1438).
+        let io_err =
+            std::io::Error::other("cannot spawn worker threads: resource temporarily unavailable");
+        let py_err = runtime_init_to_py_err(io_err);
+
+        Python::with_gil(|py| {
+            assert!(py_err.is_instance_of::<PyIOError>(py));
+            let msg = get_error_message(py, py_err);
+            assert!(msg.contains("cannot spawn worker threads"));
+        });
     }
 
     #[test]

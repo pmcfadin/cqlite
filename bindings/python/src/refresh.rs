@@ -6,7 +6,7 @@
 use pyo3::prelude::*;
 
 use crate::database::Database;
-use crate::error::to_py_err;
+use crate::error::{runtime_init_to_py_err, to_py_err};
 use crate::runtime::block_on;
 
 /// Result returned by `Database.refresh()`.
@@ -127,6 +127,7 @@ impl Database {
         // Python threads keep running (same pattern as execute).
         let core_report = py
             .allow_threads(|| block_on(db.refresh()))
+            .map_err(runtime_init_to_py_err)?
             .map_err(to_py_err)?;
 
         Ok(RefreshReport::from_core(core_report))
