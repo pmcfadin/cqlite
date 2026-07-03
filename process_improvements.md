@@ -42,7 +42,7 @@ Retro weighted failure ranking:
 | Reduce recurring `rework` (retro #1) | #1793 | push recurring finding classes left so they never trigger a fix→re-gate round | open |
 | Reduce recurring `roborev_findings` | #1736 | same family — pre-empt the recurring finding classes | open |
 | Tiered gate (`--lite`) + review-first | #1821 | fast inner-loop gate subset for iteration + full gate once pre-merge; conditional internal review before roborev | open |
-| **Shared compiler cache (sccache)** | **#1822** | per-worktree `target/` + shared object cache to delete cross-worktree cold-compile duplication; rejected shared `CARGO_TARGET_DIR` (build-lock serializes parallel gates) | **in progress — measured spike** |
+| **Shared compiler cache (sccache)** | **#1822** | per-worktree `target/` + shared object cache to delete cross-worktree cold-compile duplication; rejected shared `CARGO_TARGET_DIR` (build-lock serializes parallel gates) | ✅ **DONE (PR #1833)** — 562s / 25.6% saved on fresh-worktree case, 100% hit rate |
 | Machine-wide gate concurrency cap | #1825 | bound simultaneous full-gate runs so higher session concurrency stays safe (also: concurrent gates skew wall-clock measurements) | open |
 | Gate perf: nextest + shared build cache | #1737 | ~15–20min sequential gate bottleneck; nextest + build cache (overlaps #1822) | open |
 
@@ -58,3 +58,14 @@ they compound.
   `test-validator` subagent to run the cold-vs-warm gate measurement in an isolated worktree; wire
   into `agent-gate.sh` (auto-detect, graceful no-op) only if the measured delta justifies it.
   Merge-on-green authorized by owner. Awaiting the cold/warm measurement table.
+- **2026-07-03** — **#1822 landed (PR #1833, `1547fea6`).** Spike measured 3 scenarios with
+  sccache 0.16.0: COLD (empty cache) 36.6 min / 10% hit → FRESH_WITH_CACHE (new worktree, warm
+  cache) **27.3 min / 100% hit** → WARM (incremental `target/`) 17.3 min. **562s (25.6%) saved on
+  the fresh-worktree case** — the cross-worktree scenario sccache targets. Compile-bound components
+  24–91% faster (format-compat 91%, smoke/minimal-build 76%, cli/write/integration 53–56%);
+  test-execution-bound (core-tests) <5%, as expected. **Decision: WIRED IN** — auto-detect in
+  `agent-gate.sh` (opt-out `CQLITE_DISABLE_SCCACHE=1`), `CARGO_INCREMENTAL=0`, `CARGO_TARGET_DIR`
+  rejected. Final gate with wiring: RESULT PASS (99.9% hit). roborev clean.
+  Insight: incremental `target/` state still beats sccache for *repeated local edits* in one
+  worktree — the two are complementary (sccache for fresh worktrees, incremental for local
+  iteration). #1737 (nextest + build cache) now partially subsumed by this; flag for dedup.
