@@ -104,6 +104,105 @@ fn select_full_scan_alloc_budget() {
     );
 }
 
+/// allocations-per-row ceiling for a full `SELECT *` over the widest real fixture,
+/// pinned at the current-main measured value plus variance slack (a ratchet Epic
+/// J/K children lower as the O(rows×cols) transient-string dispatch is fixed).
+///
+/// MEASURED on `main` today (test_wide_rows.many_columns_table): total_blocks=2282,
+/// rows=50, cols=8 (populated columns in the first row) → allocs/row=45.6,
+/// allocs/cell=5.7. Ceiling = measured allocs/row + ~30% slack for
+/// allocator/toolchain/platform variance (block counts differ slightly by std/OS).
+const CEILING_ALLOCS_PER_ROW: f64 = 60.0;
+
+/// allocations-per-cell ceiling for the same full scan; measured 5.7 → +~35% slack.
+const CEILING_ALLOCS_PER_CELL: f64 = 8.0;
+
+/// allocations-per-row and allocations-per-cell for a full-table `SELECT *` driven
+/// through the real public query path over the widest real fixture must stay within
+/// their pinned ceilings (issue #1615, Epic H). Fails closed: a present-but-empty
+/// fixture panics; an entirely-absent optional fixture SKIPs.
+#[test]
+#[serial_test::serial]
+fn select_full_scan_alloc_per_row_budget() {
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+    // Prefer the widest fixture (every CQL type, 100 columns); fall back to the
+    // CI-guaranteed SIMPLE fixture; SKIP only if neither is present.
+    let fx = if fixtures::fixture_present(&fixtures::ReadFixture::MANY_COLUMNS) {
+        fixtures::ReadFixture::MANY_COLUMNS
+    } else if fixtures::fixture_present(&fixtures::ReadFixture::SIMPLE) {
+        eprintln!(
+            "alloc_per_row_budget: many_columns_table absent — falling back to SIMPLE fixture"
+        );
+        fixtures::ReadFixture::SIMPLE
+    } else {
+        eprintln!("alloc_per_row_budget: no wide fixture present — skipping (skip-register)");
+        return;
+    };
+    let sql = format!("SELECT * FROM {}", fx.qualified());
+
+    // Open BEFORE the profiler so fixture-copy/ingest allocations are excluded and
+    // only the read path is attributed (mirrors the other budgets in this file).
+    let loaded = fixtures::open_read_db(&fx);
+
+    let _profiler = dhat::Profiler::builder().testing().build();
+
+    let result = rt
+        .block_on(loaded.db.execute(&sql))
+        .expect("wide full-scan query");
+
+    // Fail closed: a present fixture that yields no rows is a broken measurement,
+    // never a silent 0-row pass.
+    assert!(
+        !result.rows.is_empty(),
+        "zero rows from {} — fixtures not fetched or fixture broken? \
+         Run: bash test-data/scripts/fetch-datasets.sh",
+        fx.qualified()
+    );
+
+    let rows = result.rows.len();
+    // Column count is read from the data, never hardcoded (fixture-independent).
+    let cols = result.rows[0].values.len();
+    assert!(
+        cols > 0,
+        "first row of {} decoded zero columns",
+        fx.qualified()
+    );
+
+    let stats = dhat::HeapStats::get();
+    let allocs_per_row = stats.total_blocks as f64 / rows as f64;
+    let allocs_per_cell = stats.total_blocks as f64 / (rows as f64 * cols as f64);
+    println!(
+        "select_full_scan_alloc_per_row_budget: fixture={} total_blocks={} rows={} cols={} \
+         allocs_per_row={:.1} allocs_per_cell={:.1}",
+        fx.qualified(),
+        stats.total_blocks,
+        rows,
+        cols,
+        allocs_per_row,
+        allocs_per_cell
+    );
+
+    assert!(
+        allocs_per_row <= CEILING_ALLOCS_PER_ROW,
+        "allocs/row {:.1} exceeded ceiling {:.1} (fixture {}, {} rows × {} cols)",
+        allocs_per_row,
+        CEILING_ALLOCS_PER_ROW,
+        fx.qualified(),
+        rows,
+        cols
+    );
+    assert!(
+        allocs_per_cell <= CEILING_ALLOCS_PER_CELL,
+        "allocs/cell {:.1} exceeded ceiling {:.1} (fixture {}, {} rows × {} cols)",
+        allocs_per_cell,
+        CEILING_ALLOCS_PER_CELL,
+        fx.qualified(),
+        rows,
+        cols
+    );
+}
+
 /// Peak heap bytes for a materializing type-heavy `SELECT *` must stay within
 /// the pinned ceiling AND under the project's 128 MiB budget.
 #[test]

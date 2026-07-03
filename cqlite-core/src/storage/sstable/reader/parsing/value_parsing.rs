@@ -495,6 +495,21 @@ impl SSTableReader {
         }
     }
 
+    /// Bench-only forwarder to the crate-private block-path decode entry
+    /// [`parse_value_with_schema_type`](Self::parse_value_with_schema_type).
+    ///
+    /// `parse_value_with_schema_type` is `pub(in crate::storage::sstable::reader)`,
+    /// so the `decode` bench (issue #1615, Epic H) — an external crate — cannot call
+    /// it directly. This shim exposes the REAL dispatch (not a re-implemented copy)
+    /// through a single `#[doc(hidden)]`, non-default, `bench-internals`-gated symbol,
+    /// forwarding its arguments verbatim. It adds no behavior: with the feature off it
+    /// does not exist and the public API is unchanged.
+    #[cfg(feature = "bench-internals")]
+    #[doc(hidden)]
+    pub fn decode_value_for_bench(&self, value_data: &[u8], data_type: &str) -> Result<Value> {
+        self.parse_value_with_schema_type(value_data, data_type)
+    }
+
     /// Parse value directly using ComparatorType (helper method for nested collection elements)
     ///
     /// This function provides complete recursive type parsing for collection elements,
