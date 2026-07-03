@@ -179,10 +179,9 @@ impl QueryResult {
         // Fallback (issue #1445): the legacy materialized executor wraps rows
         // via `QueryResult::with_rows(..)` (e.g. point lookups in
         // `cqlite-core::query::executor`), leaving `metadata.columns` empty even
-        // though rows carry values — without this every `Row` gets zero columns
-        // and drops all values. When empty but rows exist, derive the shape from
-        // the first row's value keys (sorted, mirroring the SELECT executor's
-        // schema-less path) so materialized output matches.
+        // though rows carry values — without this every `Row` gets zero columns.
+        // When empty but rows exist, derive the shape from the first row's value
+        // keys (sorted, mirroring the SELECT executor's schema-less path).
         let shape = if result.metadata.columns.is_empty() {
             match result.rows.first() {
                 Some(first_row) => build_row_shape_from_row_keys(py, first_row),
@@ -242,8 +241,7 @@ impl QueryResultIter {
 /// Built **once per result** from `metadata.columns` (the authoritative SELECT
 /// order) and shared by reference-count (`Arc`) with every row, so a wide-table
 /// scan no longer re-clones each column-name `String` per row. `keys` drives the
-/// SELECT-ordered iteration surface (`keys()`/`items()`/`to_dict()`); `index`
-/// gives O(1) name→position lookup for `__getitem__`/`get`/`__contains__`.
+/// SELECT-ordered iteration surface; `index` gives O(1) name→position lookup.
 #[derive(Clone)]
 struct RowShape {
     /// Interned column-name handles in SELECT order.
@@ -272,14 +270,11 @@ fn build_row_shape(py: Python<'_>, columns: &[cqlite_core::query::result::Column
     }
 }
 
-/// Build the shared row shape from a `QueryRow`'s value keys.
-///
-/// Used by the streaming path when `metadata.columns` is empty (schema-less
-/// `SELECT *`): core's `get_result_columns()` can return no columns even though
-/// the streamed rows carry values. Keys are sorted alphabetically to mirror the
-/// materialized/core ordering (see `select_executor::execute`, issue #129/#140,
-/// which populates `metadata.columns` from the first row's sorted `values`
-/// keys), so streaming output matches materialized output.
+/// Build the shared row shape from a `QueryRow`'s value keys, used when
+/// `metadata.columns` is empty but rows carry values (schema-less `SELECT *`).
+/// Keys are sorted alphabetically to mirror the materialized/core ordering
+/// (`select_executor::execute`, issue #129/#140, populates `metadata.columns`
+/// from the first row's sorted `values` keys) so both outputs match.
 fn build_row_shape_from_row_keys(
     py: Python<'_>,
     row: &cqlite_core::query::result::QueryRow,
@@ -423,18 +418,15 @@ impl Row {
 impl Row {
     /// Convert from a core `QueryRow`, placing values positionally per `shape`.
     ///
-    /// `shape` carries the SELECT order + name index shared across the whole
-    /// result (built once by [`build_row_shape`]); values are placed by name
-    /// lookup so the row is correct even if the core row's `HashMap` iteration
-    /// order differs from column order. A column present in `shape` but absent
-    /// from the row becomes Python `None`.
-    ///
-    /// Any row value whose key is **not** in `shape` is never dropped (issue
-    /// #1445): such keys are appended after the shaped columns in sorted order.
-    /// This preserves values where `metadata.columns` does not name every row
-    /// value — notably aggregates, keyed by alias (e.g. `Count(*)`) while
-    /// metadata carries a placeholder (`col_0`). When every row key is covered
-    /// (the common scan case) the shared shape is reused unchanged.
+    /// Values are placed by name lookup so the row is correct regardless of the
+    /// core row's `HashMap` iteration order. When every row key is covered (the
+    /// common scan case) the shared `shape` is reused unchanged and any shaped
+    /// column the row omitted null-fills in SELECT order. When a row carries a
+    /// value the shape does not name (issue #1445) — notably aggregates, keyed
+    /// by alias like `Count(*)` while metadata carries a placeholder `col_0` —
+    /// a per-row shape is built from the shaped columns the row actually
+    /// returned plus its uncovered values (sorted), so nothing is dropped and
+    /// the placeholder is not exposed as a phantom `None` column.
     pub(crate) fn from_core(
         py: Python<'_>,
         row: &cqlite_core::query::result::QueryRow,
@@ -449,20 +441,30 @@ impl Row {
             }
         }
 
-        let mut values: Vec<PyObject> = slots
-            .into_iter()
-            .map(|v| v.unwrap_or_else(|| py.None()))
-            .collect();
-
         if uncovered.is_empty() {
-            // Fast path: every row value is covered by the shared shape.
+            // Fast path: every row value is covered by the shared shape;
+            // shaped columns the row omitted null-fill (SELECT-order contract).
+            let values = slots
+                .into_iter()
+                .map(|v| v.unwrap_or_else(|| py.None()))
+                .collect();
             return Ok(Self { shape, values });
         }
 
-        // Slow path: extend the shape for THIS row so no value is dropped.
+        // Slow path: the shape does not name every row value. Emit only shaped
+        // columns the row actually returned (no phantom `None` placeholders),
+        // then append the uncovered values in sorted order so nothing is lost.
         uncovered.sort_unstable();
-        let mut keys: Vec<Py<PyString>> = shape.keys.iter().map(|k| k.clone_ref(py)).collect();
-        let mut index: HashMap<String, usize> = (*shape.index).clone();
+        let mut keys: Vec<Py<PyString>> = Vec::new();
+        let mut index: HashMap<String, usize> = HashMap::new();
+        let mut values: Vec<PyObject> = Vec::new();
+        for (i, key) in shape.keys.iter().enumerate() {
+            if let Some(value) = slots[i].take() {
+                index.insert(key.bind(py).to_string(), keys.len());
+                keys.push(key.clone_ref(py));
+                values.push(value);
+            }
+        }
         for name in uncovered {
             if let Some(value) = row.values.get(name) {
                 index.insert(name.to_string(), keys.len());
@@ -635,14 +637,12 @@ impl StreamingIterator {
     /// count is never recorded twice. Poisoned locks are skipped rather than
     /// risking a double panic.
     /// Return the shared row shape for this stream, building it once from the
-    /// iterator's `metadata.columns` (the authoritative SELECT order) and
-    /// caching it for every subsequent row (issue #1445).
-    ///
-    /// When `metadata.columns` is empty — core's streaming `get_result_columns()`
-    /// returns no columns for schema-less `SELECT *` even though the streamed rows
-    /// carry values — the shape is instead built from `first_row`'s value keys
-    /// (sorted, matching the materialized path) so rows don't lose all their
-    /// values (issue #1445 streaming regression).
+    /// iterator's `metadata.columns` (SELECT order) and caching it for every
+    /// row (issue #1445). When `metadata.columns` is empty — core's streaming
+    /// `get_result_columns()` returns no columns for a schema-less `SELECT *`
+    /// even though the streamed rows carry values — the shape is instead built
+    /// from `first_row`'s value keys (sorted, matching the materialized path)
+    /// so streamed rows don't lose all their values.
     fn row_shape(
         &self,
         py: Python<'_>,

@@ -447,3 +447,9 @@ class TestSchemaLessStreamingSelectOrder:
             assert expected_count in d.values(), (
                 f"COUNT(*) value {expected_count} was dropped from row {d}"
             )
+            # No phantom placeholder column: the metadata placeholder (col_0)
+            # must not be exposed as an extra None-valued column when the actual
+            # aggregate value is keyed under its alias instead.
+            assert None not in d.values(), (
+                f"aggregate row exposed a phantom None column: {d}"
+            )
