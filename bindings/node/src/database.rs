@@ -1139,35 +1139,21 @@ impl Database {
         Ok(writer.rows_written() as i64)
     }
 
-    /// Execute a CQL query or write statement and return results with native JavaScript types.
+    /// Execute a CQL query or write statement, returning native JavaScript types
+    /// (`BigInt`, `Buffer`, `Date`, `Set`, `Map`). For INSERT/UPDATE/DELETE,
+    /// `rowsAffected` is 1 and `rows` is empty. See `lib/index.d.ts` for details.
     ///
-    /// This method returns native JavaScript types instead of JSON:
-    /// - BigInt for bigint/counter columns (preserves 64-bit precision)
-    /// - Buffer for blob columns
-    /// - Date for timestamp/date columns
-    /// - Set for set columns
-    /// - Map for map columns
+    /// ## Performance — O(rows) on the event-loop thread
     ///
-    /// For INSERT/UPDATE/DELETE, `rowsAffected` is set to 1 and `rows` is empty.
+    /// The result is scanned off the event loop, but each row's JS object is
+    /// built on the event-loop thread (napi `Env` is thread-bound) — O(rows) of
+    /// on-loop work that cannot be moved off-loop. Use `executeStreaming()` for
+    /// result sets beyond ~a few thousand rows; sets larger than
+    /// `CQLITE_NODE_MAX_NATIVE_ROWS` (default 100_000) are rejected with a typed
+    /// error rather than freezing timers/HTTP handlers (issue #1442).
     ///
     /// @param query - CQL statement to execute
     /// @returns Promise resolving to NativeQueryResult with native typed rows
-    ///
-    /// @example
-    /// ```javascript
-    /// const result = await db.executeNative('SELECT * FROM users LIMIT 10');
-    /// console.log(`Got ${result.rowCount} rows`);
-    /// for (const row of result.rows) {
-    ///   // row.id is a BigInt if the column is bigint type
-    ///   // row.created_at is a Date if the column is timestamp
-    ///   // row.data is a Buffer if the column is blob
-    ///   console.log(row.name, typeof row.id);
-    /// }
-    ///
-    /// // Write (requires writable: true in open options)
-    /// const wr = await db.executeNative("INSERT INTO users (id, name) VALUES (uuid(), 'Alice')");
-    /// console.log(`Rows affected: ${wr.rowsAffected}`);
-    /// ```
     #[napi(
         js_name = "executeNative",
         ts_return_type = "Promise<{rows: object[], rowCount: number, rowsAffected: number, executionTimeMs: number, columns: ColumnInfo[]}>"
@@ -1195,6 +1181,7 @@ impl Database {
             inner: self.inner.clone(),
             query,
             traceparent: self.traceparent.clone(),
+            max_native_rows: crate::error::native_row_limit(),
             #[cfg(feature = "write-support")]
             write_engine: self.write_engine.clone(),
         }))
@@ -1385,6 +1372,8 @@ pub struct ExecuteNativeTask {
     query: String,
     /// Per-handle default traceparent for the per-call span (issue #1040).
     traceparent: Option<String>,
+    /// On-event-loop row-materialization bound (issue #1442); read on the JS thread.
+    max_native_rows: usize,
     /// Write engine handle, present only when write support is compiled and writable=true.
     #[cfg(feature = "write-support")]
     write_engine: Option<Arc<Mutex<cqlite_core::storage::write_engine::WriteEngine>>>,
@@ -1456,6 +1445,16 @@ impl napi::Task for ExecuteNativeTask {
         )
         .map_err(runtime_init_error)??;
 
+        // Bound on-event-loop work (issue #1442): the per-row JS-object build in
+        // `resolve()` runs on the JS thread and cannot be moved off-loop, so a
+        // huge set is rejected here (before the deep clone below) rather than
+        // freezing timers/HTTP handlers. Steer the caller to executeStreaming.
+        if result.rows.len() > self.max_native_rows {
+            return Err(crate::error::native_rows_exceeded_error(
+                result.rows.len(),
+                self.max_native_rows,
+            ));
+        }
         let row_count = result.rows.len() as u32;
         crate::observability::record_rows(&span_for_record, row_count as u64);
         Ok(QueryResultData {
