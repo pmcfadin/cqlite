@@ -359,14 +359,72 @@ impl Default for AllocatorConfig {
     }
 }
 
+/// Default byte ceiling for a materialized SELECT result set (issue #1582).
+///
+/// 64 MiB. See [`QueryConfig::max_result_bytes`] for the derivation from the
+/// project's <128MB process memory target.
+pub const DEFAULT_MAX_RESULT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Serde default for [`QueryConfig::max_result_bytes`] (issue #1582).
+///
+/// Backward-compat: a `QueryConfig` serialized before this field existed (e.g.
+/// a Python JSON/dict config) has no `max_result_bytes` key. Without a serde
+/// default, deserialization fails with a missing-field error; with it, such a
+/// config takes the shipped [`DEFAULT_MAX_RESULT_BYTES`] budget.
+fn default_max_result_bytes() -> u64 {
+    DEFAULT_MAX_RESULT_BYTES
+}
+
+/// Serde default for [`QueryConfig::max_result_rows`] (issue #1582).
+///
+/// Backward-compat + robustness: a `QueryConfig` serialized without this key
+/// (or a partial JSON/dict config) still deserializes, taking the shipped
+/// 1,000,000-row secondary safety valve rather than failing with a missing
+/// field. Keeps the knob real (not decorative) and consistent with
+/// [`default_max_result_bytes`].
+fn default_max_result_rows() -> u64 {
+    1_000_000
+}
+
 /// Query engine configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryConfig {
     /// Maximum query execution time
     pub max_execution_time: Duration,
 
-    /// Maximum number of rows to return in a result set
+    /// Maximum number of rows to return in a result set.
+    ///
+    /// A *secondary* safety valve, retained for defense-in-depth (issue #1582).
+    /// The primary guard on a materialized result is now `max_result_bytes`: a
+    /// row count is the wrong unit because 1M skinny rows can fit comfortably
+    /// while 100k wide rows blow the <128MB memory target. Still load-bearing:
+    /// the materializing SELECT path enforces this row-count ceiling alongside
+    /// the byte budget (lowering it makes a wide-row-count result trip even
+    /// under the byte budget), so it is a real knob, not decoration.
+    #[serde(default = "default_max_result_rows")]
     pub max_result_rows: u64,
+
+    /// Byte ceiling on a MATERIALIZED result set (issue #1582 / D6).
+    ///
+    /// While the SELECT executor collects a materialized `Vec<QueryRow>`, it
+    /// tracks a running estimate of the result's logical size (via the shared
+    /// [`crate::memory::estimate_row_size`] estimator) and fails with
+    /// [`crate::Error::ResultTooLarge`] once this ceiling is crossed — telling
+    /// the caller to add a `LIMIT` or use the streaming API. This is the
+    /// correct-unit primary guard; `max_result_rows` remains as a secondary
+    /// valve. Streaming queries are bounded by their channel buffer, so this
+    /// budget does not apply to them.
+    ///
+    /// Default: [`DEFAULT_MAX_RESULT_BYTES`] (64 MiB). Chosen well below the
+    /// project's <128MB process memory target: the estimator measures *logical*
+    /// content bytes and does not count per-row container overhead
+    /// (`HashMap<Arc<str>, Value>` slots, `String`/`Vec` capacity slack, row
+    /// metadata), which in practice roughly doubles real heap use — so a 64 MiB
+    /// logical ceiling keeps a fully-materialized result comfortably inside the
+    /// process budget while leaving headroom for readers, caches, and decode
+    /// buffers.
+    #[serde(default = "default_max_result_bytes")]
+    pub max_result_bytes: u64,
 
     /// Query plan cache size
     pub plan_cache_size: usize,
@@ -392,6 +450,7 @@ impl Default for QueryConfig {
         Self {
             max_execution_time: Duration::from_secs(300), // 5 minutes
             max_result_rows: 1_000_000,
+            max_result_bytes: DEFAULT_MAX_RESULT_BYTES,
             plan_cache_size: 1000,
             enable_optimization: true,
             parallel: ParallelQueryConfig::default(),
@@ -730,6 +789,40 @@ mod tests {
                 > Config::default().storage.memtable_size_threshold
         );
         assert!(config.memory.max_memory > Config::default().memory.max_memory);
+    }
+
+    /// Issue #1582: a `QueryConfig` serialized BEFORE the byte-budget fields
+    /// existed (e.g. a pre-upgrade Python JSON/dict config) has no
+    /// `max_result_bytes`/`max_result_rows` keys. The `#[serde(default = ...)]`
+    /// on both fields must let it deserialize, taking the shipped defaults rather
+    /// than failing with a missing-field error.
+    #[test]
+    fn budget_fields_deserialize_with_serde_default_when_absent() {
+        // Serialize a default QueryConfig, then STRIP both budget fields to
+        // emulate an old serialized config that predates them.
+        let mut value =
+            serde_json::to_value(QueryConfig::default()).expect("serialize QueryConfig");
+        let obj = value
+            .as_object_mut()
+            .expect("QueryConfig serializes as object");
+        obj.remove("max_result_bytes");
+        obj.remove("max_result_rows");
+        assert!(
+            !obj.contains_key("max_result_bytes") && !obj.contains_key("max_result_rows"),
+            "both fields must be absent for this regression to be meaningful"
+        );
+
+        let restored: QueryConfig =
+            serde_json::from_value(value).expect("old config (no budget fields) must deserialize");
+        assert_eq!(
+            restored.max_result_bytes, DEFAULT_MAX_RESULT_BYTES,
+            "absent max_result_bytes must take the serde default"
+        );
+        assert_eq!(
+            restored.max_result_rows,
+            default_max_result_rows(),
+            "absent max_result_rows must take the serde default"
+        );
     }
 
     #[test]

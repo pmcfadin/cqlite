@@ -132,9 +132,10 @@ pub(crate) fn classify(err: &Error) -> ErrorCategory {
 
         Error::ConstraintViolation(_) | Error::AlreadyExists(_) => ErrorCategory::Constraints,
 
-        Error::QueryExecution(_) | Error::UnsupportedQuery(_) | Error::InvalidInput(_) => {
-            ErrorCategory::Query
-        }
+        Error::QueryExecution(_)
+        | Error::ResultTooLarge { .. }
+        | Error::UnsupportedQuery(_)
+        | Error::InvalidInput(_) => ErrorCategory::Query,
 
         // Catch-all for the remaining variants and any future additions. Listed
         // explicitly (no wildcard arm besides wasm) so that adding a new Error

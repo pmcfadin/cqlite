@@ -19,10 +19,11 @@ use super::{
     sort_rows_by_token, validate_token_predicates, PartitionLookupOutcome, SSTablePredicate,
 };
 use super::{
-    AccessPath, ColumnInfo, Error, ExecutionContext, ExecutionStep, FallbackReason,
-    OptimizedQueryPlan, ProjectionFlags, QueryResult, QueryRow, Result, SelectExecutor,
-    StorageEngine, TableId, TableSchema,
+    AccessPath, ColumnInfo, ExecutionContext, ExecutionStep, FallbackReason, OptimizedQueryPlan,
+    ProjectionFlags, QueryResult, QueryRow, Result, SelectExecutor, StorageEngine, TableId,
+    TableSchema,
 };
+use crate::query::result_budget::enforce_materialized_rows;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -93,7 +94,27 @@ impl SelectExecutor {
 
         // Handle queries without FROM clause (like SELECT 1)
         if plan.statement.from_clause.is_none() {
-            return self.execute_constant_query(&plan.statement, &context);
+            let mut result = self.execute_constant_query(&plan.statement, &context)?;
+            // Issue #1582 (roborev): apply the statement's LIMIT/OFFSET to the
+            // constant rows BEFORE the byte + row-count budget check, so the budget
+            // is enforced on the rows ACTUALLY returned (post LIMIT/OFFSET) —
+            // consistent with the table-backed path below. In particular `LIMIT 0`
+            // must return empty, never `ResultTooLarge`; an over-budget constant
+            // SELECT with NO limit still trips the guard on its final rows.
+            let offset = plan.statement.offset.unwrap_or(0) as usize;
+            let limit = plan
+                .statement
+                .limit
+                .as_ref()
+                .map(|l| l.count as usize)
+                .unwrap_or(usize::MAX);
+            result.rows = result.rows.into_iter().skip(offset).take(limit).collect();
+            // Keep the row-count metadata consistent with the returned rows.
+            let returned = result.rows.len() as u64;
+            result.rows_affected = returned;
+            result.metadata.total_rows = Some(returned);
+            enforce_materialized_rows(&result.rows, self.max_result_bytes, self.max_result_rows)?;
+            return Ok(result);
         }
 
         // Execute the plan step by step
@@ -187,6 +208,31 @@ impl SelectExecutor {
                 }
             }
         }
+
+        // Issue #1582 (D6, narrow subset): enforce the byte-bounded result budget
+        // (primary) + the row-count safety valve (secondary) with a SINGLE robust
+        // check on the FINAL materialized result — AFTER every execution step
+        // (Limit/Offset/Filter/Sort/Aggregate/Project) has produced the rows that
+        // will actually be returned. Because this sees ONLY the returned rows
+        // (post LIMIT/OFFSET), a `LIMIT 10` query never trips and OFFSET-skipped
+        // rows are never charged. This replaces the earlier during-collection
+        // machinery (LIMIT/OFFSET pushdown, per-row early-stop, storage-layer row limit),
+        // which kept generating correctness edge cases; a single final-result
+        // check has no such edges. Reuses the shared `estimate_value_size`
+        // estimator (via `enforce_materialized_rows`).
+        //
+        // SCOPE (owner-accepted boundaries, tracked on #1582 — NOT bugs to fix in
+        // this narrow subset):
+        //   * Does NOT bound PEAK scan memory: `storage.scan` still materializes
+        //     each reader's matching rows before this point (deferred to #1897).
+        //   * Does NOT cover the LEGACY point-lookup `QueryExecutor` path
+        //     (`WHERE id = ?` short lookups route there, not through this modern
+        //     executor) — deferred to the D6 redesign.
+        enforce_materialized_rows(
+            &intermediate_results,
+            self.max_result_bytes,
+            self.max_result_rows,
+        )?;
 
         let total_rows = intermediate_results.len() as u64;
 
@@ -585,6 +631,14 @@ impl SelectExecutor {
     /// handled by the free helpers `build_row_from_scan` and
     /// `evaluate_predicates`, which are shared with the streaming background
     /// task to keep the two execution paths in lockstep.
+    ///
+    /// Issue #1582 (D6, narrow subset): this scan NO LONGER applies any
+    /// byte/row budget or LIMIT/OFFSET pushdown itself. It materializes the
+    /// predicate-matching rows and returns them; the single byte/row budget check
+    /// is applied ONCE by [`SelectExecutor::execute`] on the FINAL result, after
+    /// the whole step pipeline. `storage.scan` receives no query-derived row limit
+    /// (its `limit` argument stays `None`), so a `WHERE non_pk = ? LIMIT N` cannot
+    /// silently drop matching rows past the first N raw rows.
     #[cfg_attr(feature = "tombstones", allow(unused_variables))]
     pub(super) async fn execute_sstable_scan(
         &self,
@@ -597,7 +651,11 @@ impl SelectExecutor {
         schema_opt: Option<&TableSchema>,
         context: &mut ExecutionContext,
     ) -> Result<Vec<QueryRow>> {
-        const MAX_RESULTS: usize = 1_000_000;
+        // FINDING 2 (Issue #955 follow-up): a `token(...)` predicate is evaluated
+        // by hashing the row's raw partition key, so its argument columns MUST be
+        // the full partition key in declared order or the result is silently
+        // wrong. Reject (Cassandra-style) before scanning/evaluating.
+        validate_token_predicates(predicates, schema_opt)?;
 
         log::info!(
             "Executing SSTableScan: table=\"{}\", predicates={:?}, include_cell_metadata={}",
@@ -621,12 +679,6 @@ impl SelectExecutor {
                 table_name
             ),
         }
-
-        // FINDING 2 (Issue #955 follow-up): a `token(...)` predicate is evaluated
-        // by hashing the row's raw partition key, so its argument columns MUST be
-        // the full partition key in declared order or the result is silently
-        // wrong. Reject (Cassandra-style) before scanning/evaluating.
-        validate_token_predicates(predicates, schema_opt)?;
 
         // Issue #693: When WRITETIME(col) or TTL(col) is in the SELECT, use the
         // metadata-carrying scan so per-cell timestamps reach the QueryRow.
@@ -695,12 +747,6 @@ impl SelectExecutor {
 
                 if evaluate_predicates(&row, predicates)? {
                     results.push(row);
-                }
-
-                if results.len() > MAX_RESULTS {
-                    return Err(Error::query_execution(
-                        "Result set too large, consider adding LIMIT".to_string(),
-                    ));
                 }
             }
         } else {
@@ -794,6 +840,9 @@ impl SelectExecutor {
                     // Issue #960: report the honest reason a full scan was chosen.
                     context.access_path = Some(AccessPath::FallbackFullScan { reason });
                     crate::query::access_path::record(AccessPath::FallbackFullScan { reason });
+                    // Issue #1582 (D6, narrow subset): no query-derived row limit
+                    // is pushed into the predicate-unaware `storage.scan` — the sole
+                    // budget check is applied once on the FINAL result in `execute`.
                     self.storage
                         .scan(table, None, None, None, schema_opt)
                         .await?
@@ -813,12 +862,6 @@ impl SelectExecutor {
 
                 if evaluate_predicates(&row, predicates)? {
                     results.push(row);
-                }
-
-                if results.len() > MAX_RESULTS {
-                    return Err(Error::query_execution(
-                        "Result set too large, consider adding LIMIT".to_string(),
-                    ));
                 }
             }
         }

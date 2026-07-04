@@ -24,6 +24,7 @@ pub mod parser;
 pub mod planner;
 pub mod prepared;
 pub mod result;
+pub(crate) mod result_budget;
 pub mod writetime_ttl_validator;
 
 // Advanced SELECT query components

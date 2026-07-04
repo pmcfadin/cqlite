@@ -207,6 +207,12 @@ fn project_expr_reshapes_row(expr: &SelectExpression) -> bool {
     !matches!(expr, SelectExpression::Column(_))
 }
 
+/// Default row-count safety valve for the bare `SelectExecutor` constructors
+/// (issue #1582). Matches [`crate::config::QueryConfig::max_result_rows`]'s
+/// default; the query engine overrides it via
+/// [`SelectExecutor::with_max_result_rows`].
+const DEFAULT_MAX_RESULT_ROWS: usize = 1_000_000;
+
 /// SELECT query executor for SSTable-based storage
 pub struct SelectExecutor {
     /// Schema manager for metadata
@@ -215,6 +221,23 @@ pub struct SelectExecutor {
     storage: Arc<StorageEngine>,
     /// Clock used for TTL "remaining seconds" computation (injectable for tests).
     clock: Arc<dyn NowSeconds>,
+    /// Byte ceiling on a materialized result set (issue #1582 / D6).
+    ///
+    /// The materializing scan path accumulates a running estimate of the result
+    /// bytes and fails with [`Error::ResultTooLarge`] once this is exceeded.
+    /// Wired from [`crate::config::QueryConfig::max_result_bytes`] by the query
+    /// engine; defaults to [`crate::config::DEFAULT_MAX_RESULT_BYTES`] for the
+    /// bare constructors. Streaming queries are bounded by their channel buffer
+    /// and do not consult this budget.
+    max_result_bytes: usize,
+    /// Row-count safety valve on a materialized result set (issue #1582).
+    ///
+    /// Secondary to `max_result_bytes` (bytes are the correct memory unit), but
+    /// still load-bearing: the materializing scan fails once the collected row
+    /// count exceeds this valve. Wired from
+    /// [`crate::config::QueryConfig::max_result_rows`] by the query engine;
+    /// defaults to 1,000,000 for the bare constructors.
+    max_result_rows: usize,
 }
 
 impl std::fmt::Debug for SelectExecutor {
@@ -261,12 +284,41 @@ struct ExecutionContext {
 
 impl SelectExecutor {
     /// Create a new SELECT executor with a system (wall-clock) now source.
+    ///
+    /// Uses the default materialized-result byte budget
+    /// ([`crate::config::DEFAULT_MAX_RESULT_BYTES`]); call
+    /// [`SelectExecutor::with_max_result_bytes`] to override it (the query
+    /// engine wires it from [`crate::config::QueryConfig::max_result_bytes`]).
     pub fn new(schema: Arc<SchemaManager>, storage: Arc<StorageEngine>) -> Self {
         Self {
             _schema: schema,
             storage,
             clock: Arc::new(SystemClock),
+            max_result_bytes: usize::try_from(crate::config::DEFAULT_MAX_RESULT_BYTES)
+                .unwrap_or(usize::MAX),
+            max_result_rows: DEFAULT_MAX_RESULT_ROWS,
         }
+    }
+
+    /// Override the byte ceiling on a materialized result set (issue #1582).
+    ///
+    /// Builder-style: the query engine calls this with
+    /// [`crate::config::QueryConfig::max_result_bytes`] so the config knob is
+    /// load-bearing on the read path.
+    pub fn with_max_result_bytes(mut self, max_result_bytes: usize) -> Self {
+        self.max_result_bytes = max_result_bytes;
+        self
+    }
+
+    /// Override the row-count safety valve on a materialized result set (issue
+    /// #1582).
+    ///
+    /// Builder-style: the query engine calls this with
+    /// [`crate::config::QueryConfig::max_result_rows`] so the config knob is
+    /// load-bearing on the read path (not a hardcoded constant).
+    pub fn with_max_result_rows(mut self, max_result_rows: usize) -> Self {
+        self.max_result_rows = max_result_rows;
+        self
     }
 
     /// Create a SELECT executor with a custom clock (for deterministic tests).
@@ -280,6 +332,9 @@ impl SelectExecutor {
             _schema: schema,
             storage,
             clock,
+            max_result_bytes: usize::try_from(crate::config::DEFAULT_MAX_RESULT_BYTES)
+                .unwrap_or(usize::MAX),
+            max_result_rows: DEFAULT_MAX_RESULT_ROWS,
         }
     }
 
