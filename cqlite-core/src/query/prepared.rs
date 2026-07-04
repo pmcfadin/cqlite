@@ -41,6 +41,61 @@ struct PreparedSelect {
     optimizer: Arc<super::select_optimizer::SelectOptimizer>,
     /// Shared SELECT executor (same instance the engine uses for literal SELECTs).
     executor: Arc<super::select_executor::SelectExecutor>,
+    /// Issue #1587 (E5): memoized optimized plan for the most recently bound
+    /// parameter tuple. The optimized plan is a pure function of the *bound*
+    /// statement (predicate pushdown / partition targeting depends on the
+    /// concrete parameter values), so the cache is keyed by the exact params:
+    /// a repeated execute with identical params reuses the plan (optimize runs
+    /// ONCE), while a different parameter tuple correctly re-optimizes. This
+    /// preserves results byte-for-byte and never serves a stale plan for the
+    /// wrong parameters.
+    plan_cache: std::sync::Mutex<Option<CachedOptimizedPlan>>,
+}
+
+/// A memoized optimized plan tagged with the parameter tuple that produced it
+/// (issue #1587, E5).
+#[cfg(feature = "state_machine")]
+#[derive(Debug)]
+struct CachedOptimizedPlan {
+    params: Vec<Value>,
+    plan: Arc<super::select_optimizer::OptimizedQueryPlan>,
+}
+
+#[cfg(feature = "state_machine")]
+impl PreparedSelect {
+    /// Return the optimized plan for `params`, reusing the memoized plan when the
+    /// parameter tuple is unchanged and otherwise binding + re-optimizing (issue
+    /// #1587, E5). The `std::sync::Mutex` is never held across an `.await`: a hit
+    /// clones the `Arc` and releases the lock before returning; a miss optimizes
+    /// with no lock held, then briefly re-locks to store the result.
+    async fn plan_for(
+        &self,
+        params: &[Value],
+    ) -> Result<Arc<super::select_optimizer::OptimizedQueryPlan>> {
+        {
+            let guard = self
+                .plan_cache
+                .lock()
+                .map_err(|_| Error::query_execution("prepared plan cache lock poisoned"))?;
+            if let Some(cached) = guard.as_ref() {
+                if cached.params == params {
+                    return Ok(Arc::clone(&cached.plan));
+                }
+            }
+        }
+
+        let mut statement = self.statement.clone();
+        statement.bind_parameters(params)?;
+        let plan = Arc::new(self.optimizer.optimize(statement).await?);
+
+        if let Ok(mut guard) = self.plan_cache.lock() {
+            *guard = Some(CachedOptimizedPlan {
+                params: params.to_vec(),
+                plan: Arc::clone(&plan),
+            });
+        }
+        Ok(plan)
+    }
 }
 
 /// Prepared query statement
@@ -159,6 +214,7 @@ impl PreparedQuery {
                 statement,
                 optimizer,
                 executor: select_executor,
+                plan_cache: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -174,10 +230,11 @@ impl PreparedQuery {
 
         #[cfg(feature = "state_machine")]
         if let Some(pipeline) = &self.select_pipeline {
-            let mut statement = pipeline.statement.clone();
-            statement.bind_parameters(params)?;
-            let optimized = pipeline.optimizer.optimize(statement).await?;
-            return pipeline.executor.execute(optimized).await;
+            // Issue #1587 (E5): reuse the memoized optimized plan when the params
+            // are unchanged; the executor takes an owned plan, so clone the
+            // (cheap, already-built) cached plan rather than re-optimizing.
+            let plan = pipeline.plan_for(params).await?;
+            return pipeline.executor.execute((*plan).clone()).await;
         }
 
         // Default execution path: no hints, so skip the plan clone in
@@ -242,11 +299,10 @@ impl PreparedQuery {
             }
             // Bind the context's positional params and run the same SELECT
             // optimizer + executor as `execute`, so the fast path engages.
+            // Issue #1587 (E5): reuse the memoized plan for unchanged params.
             self.validate_params(&context.positional_params)?;
-            let mut statement = pipeline.statement.clone();
-            statement.bind_parameters(&context.positional_params)?;
-            let optimized = pipeline.optimizer.optimize(statement).await?;
-            return pipeline.executor.execute(optimized).await;
+            let plan = pipeline.plan_for(&context.positional_params).await?;
+            return pipeline.executor.execute((*plan).clone()).await;
         }
 
         // Avoid cloning the plan if no hints would override it.
@@ -586,5 +642,113 @@ mod tests {
         // Null matches any expected type.
         assert!(type_matches(&Value::Null, &DataType::Integer));
         assert!(!type_matches(&Value::Integer(42), &DataType::Text));
+    }
+
+    /// Issue #1587 (E5): a prepared SELECT reuses its optimized plan across
+    /// repeated executes with identical parameters — `optimize` runs AT MOST
+    /// once — and re-optimizes only when the parameter tuple changes (so it can
+    /// never serve a stale plan for the wrong parameters). `#[tokio::test]` runs
+    /// on the current-thread runtime, so the optimizer's thread-local invocation
+    /// counter reflects exactly this future's calls.
+    #[tokio::test]
+    async fn prepared_select_reuses_optimized_plan_across_executes() {
+        use crate::query::select_optimizer::OPTIMIZE_INVOCATIONS;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = Config::default();
+        let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
+        let storage = Arc::new(
+            crate::storage::StorageEngine::open(temp_dir.path(), &config, platform, None)
+                .await
+                .unwrap(),
+        );
+        let schema = Arc::new(
+            crate::schema::SchemaManager::new(temp_dir.path())
+                .await
+                .unwrap(),
+        );
+        let executor = Arc::new(crate::query::executor::QueryExecutor::new(
+            storage.clone(),
+            schema.clone(),
+            &config,
+        ));
+        let optimizer = Arc::new(super::super::select_optimizer::SelectOptimizer::new(
+            schema.clone(),
+            storage.clone(),
+        ));
+        let select_executor = Arc::new(super::super::select_executor::SelectExecutor::new(
+            schema.clone(),
+            storage.clone(),
+        ));
+
+        let cql = "SELECT * FROM t WHERE id = ?";
+        let statement = super::super::select_parser::parse_select(cql).unwrap();
+        let marker_count = statement.bind_marker_count();
+        assert_eq!(marker_count, 1);
+
+        let parsed_query = ParsedQuery {
+            query_type: crate::query::QueryType::Select,
+            table: Some(crate::TableId::new("t")),
+            columns: vec!["*".to_string()],
+            where_clause: None,
+            values: vec![],
+            set_clause: std::collections::HashMap::new(),
+            order_by: vec![],
+            limit: None,
+            cql: cql.to_string(),
+        };
+        let plan = crate::query::planner::QueryPlan {
+            plan_type: crate::query::planner::PlanType::PointLookup,
+            table: Some(crate::TableId::new("t")),
+            estimated_cost: 1.0,
+            estimated_rows: 1,
+            selected_indexes: vec![],
+            steps: vec![],
+            hints: crate::query::planner::QueryHints::default(),
+        };
+
+        let prepared = PreparedQuery::new_select(
+            parsed_query,
+            plan,
+            executor,
+            statement,
+            marker_count,
+            optimizer,
+            select_executor,
+        );
+
+        // 100 executes with the SAME parameter tuple: optimize must run <= 1.
+        OPTIMIZE_INVOCATIONS.with(|c| c.set(0));
+        let params = vec![Value::Integer(1)];
+        for _ in 0..100 {
+            // The executor result itself is irrelevant here (empty store); the
+            // plan is optimized + cached before execution regardless.
+            let _ = prepared.execute(&params).await;
+        }
+        let after_same = OPTIMIZE_INVOCATIONS.with(|c| c.get());
+        assert!(
+            after_same <= 1,
+            "issue #1587: prepared statement must optimize at most once across 100 \
+             executes with identical params, got {after_same}"
+        );
+
+        // A DIFFERENT parameter tuple must re-optimize (no stale plan reuse).
+        let _ = prepared.execute(&[Value::Integer(2)]).await;
+        let after_diff = OPTIMIZE_INVOCATIONS.with(|c| c.get());
+        assert_eq!(
+            after_diff,
+            after_same + 1,
+            "a new parameter tuple must re-optimize (correctness over reuse)"
+        );
+
+        // Re-running the FIRST params again reuses that memoized plan only if it
+        // is still the most-recent entry; here params changed, so it re-optimizes
+        // — but never MORE than once per distinct consecutive tuple.
+        let _ = prepared.execute(&[Value::Integer(2)]).await;
+        let after_repeat = OPTIMIZE_INVOCATIONS.with(|c| c.get());
+        assert_eq!(
+            after_repeat, after_diff,
+            "repeating the last params must hit the memoized plan (no re-optimize)"
+        );
     }
 }

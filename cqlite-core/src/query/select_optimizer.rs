@@ -4,6 +4,17 @@ use super::select_ast::*;
 use crate::{schema::SchemaManager, storage::StorageEngine, Error, Result, TableId, Value};
 use std::sync::Arc;
 
+// Test-only counter for the number of times `SelectOptimizer::optimize` runs
+// (issue #1587, E5). A prepared statement must reuse its optimized plan across
+// repeated executes with identical parameters, so this stays `<= 1` over many
+// executes. Same thread-local rationale as the executor's other work counters
+// (`#[tokio::test]` current-thread runtime keeps the future on this thread).
+#[cfg(test)]
+thread_local! {
+    pub(crate) static OPTIMIZE_INVOCATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
 /// Query optimizer for SELECT statements
 #[derive(Debug)]
 pub struct SelectOptimizer {
@@ -153,6 +164,9 @@ impl SelectOptimizer {
 
     /// Optimize a SELECT statement
     pub async fn optimize(&self, statement: SelectStatement) -> Result<OptimizedQueryPlan> {
+        #[cfg(test)]
+        OPTIMIZE_INVOCATIONS.with(|c| c.set(c.get() + 1));
+
         let mut plan = OptimizedQueryPlan {
             statement: statement.clone(),
             execution_steps: Vec::new(),
