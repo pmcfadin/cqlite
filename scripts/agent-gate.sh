@@ -1919,10 +1919,18 @@ run_delta() {
       DN+=("$c"); DS+=(FAIL); DT+=("0s"); OVERALL=FAIL
     fi
   done
+  # Append the scoped-tests entry run_scoped_tests pushed onto NAMES. Guard the
+  # KEYS expansion with a count check: the `"${!arr[@]+"${!arr[@]}"}"` empty-array
+  # idiom that works for VALUES does NOT work for the keys form `${!arr[@]}` — bash
+  # reads `${!NAMES[@]+...}` as INDIRECT expansion and errors ("invalid variable
+  # name") on the array's string contents, aborting run_delta before emit_summary.
+  # `${#NAMES[@]}` is set -u-safe even when empty.
   local i
-  for i in "${!NAMES[@]+"${!NAMES[@]}"}"; do
-    DN+=("${NAMES[$i]}"); DS+=("${STATUSES[$i]}"); DT+=("${TIMES[$i]}")
-  done
+  if [ "${#NAMES[@]}" -gt 0 ]; then
+    for i in "${!NAMES[@]}"; do
+      DN+=("${NAMES[$i]}"); DS+=("${STATUSES[$i]}"); DT+=("${TIMES[$i]}")
+    done
+  fi
 
   declare -a SUMMARY_META=()
   SUMMARY_META+=("${anchor_meta[@]}")
