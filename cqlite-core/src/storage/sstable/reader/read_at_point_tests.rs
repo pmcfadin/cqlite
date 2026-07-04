@@ -87,43 +87,45 @@ async fn eight_concurrent_point_reads_do_not_convoy() {
     let size = 48u32;
 
     // --- Control: a lock-holding source serializes (reproduces the convoy). ---
-    {
+    let control = {
         let mut reader = open_reader(&path).await.expect("open control reader");
         let real = reader.clone_point_source();
         reader.set_point_source(Arc::new(SerializingReadAt::new(real, delay)));
         let reader = Arc::new(reader);
-        let elapsed = concurrent_point_reads(reader, &offsets, size).await;
-        assert!(
-            elapsed >= Duration::from_millis(60),
-            "control (lock-across-I/O) must serialize the 8 reads (~convoy); got {:?} \
-             — if this is fast the harness is not actually contending",
-            elapsed
-        );
-    }
+        concurrent_point_reads(reader, &offsets, size).await
+    };
 
     // --- Treatment: the migrated positional source runs the 8 reads in parallel. ---
-    {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let treatment = {
         let mut reader = open_reader(&path).await.expect("open treatment reader");
         let real = reader.clone_point_source();
-        let calls = Arc::new(AtomicUsize::new(0));
         reader.set_point_source(Arc::new(SleepingReadAt::new(real, delay, calls.clone())));
         let reader = Arc::new(reader);
-        let elapsed = concurrent_point_reads(reader, &offsets, size).await;
-        assert!(
-            calls.load(Ordering::Relaxed) >= offsets.len(),
-            "point path must route through `point_source` (>= {} reads); got {} \
-             — a 0 here means get_cached_data no longer uses point_source",
-            offsets.len(),
-            calls.load(Ordering::Relaxed)
-        );
-        assert!(
-            elapsed < Duration::from_millis(55),
-            "migrated positional point reads must NOT convoy: 8 × {:?} in parallel \
-             should finish well under 8×delay; got {:?}",
-            delay,
-            elapsed
-        );
-    }
+        concurrent_point_reads(reader, &offsets, size).await
+    };
+
+    // Routing proof (deterministic; this is what is RED on `main`, where
+    // get_cached_data/verify_uncompressed_range still lock `self.file` and never
+    // touch `point_source`): the point path must reach the injected source.
+    assert!(
+        calls.load(Ordering::Relaxed) >= offsets.len(),
+        "point path must route through `point_source` (>= {} reads); got {} \
+         — a 0 here means the point path no longer uses point_source",
+        offsets.len(),
+        calls.load(Ordering::Relaxed)
+    );
+
+    // Parallelism proof, expressed RELATIVE to the measured control (no absolute
+    // wall-clock threshold, so it does not flake on a slow/loaded CI host): the
+    // serialized control does ~8× the sleeping work, so the parallel treatment
+    // must be at least ~2× faster. On `main` (mutex convoy) treatment ≈ control.
+    assert!(
+        treatment.saturating_mul(2) < control,
+        "migrated positional point reads must NOT convoy: parallel treatment {treatment:?} \
+         should be far faster than the serialized control {control:?} (>= 2×); \
+         near-equal means the reads still serialize"
+    );
 }
 
 /// Scenario: two concurrent interleaved point reads at different offsets each
