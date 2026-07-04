@@ -97,18 +97,19 @@ async fn scan_oracle(reader: &SSTableReader) -> HashMap<Vec<u8>, ScanRow> {
     map
 }
 
-/// The fixture must be genuinely MULTI-CHUNK for these tests to be meaningful.
-fn assert_multi_chunk(reader: &SSTableReader) -> u64 {
-    let comp = reader
-        .compression_info
-        .as_ref()
-        .expect("BIG fixture is chunk-compressed (CompressionInfo.db present)");
-    let n = comp.chunk_offsets.len();
-    assert!(
-        n > 1,
-        "this test requires a multi-chunk fixture; {KEYSPACE}/{TABLE} has {n} chunk(s)"
-    );
-    comp.chunk_length as u64
+/// Return the fixture's chunk length when it is genuinely MULTI-CHUNK (so the
+/// chunk-targeting tests are meaningful), or `None` when the fixture is present
+/// but single-chunk / uncompressed (no `CompressionInfo.db` or a single chunk).
+///
+/// A present-but-not-multi-chunk fixture is treated as a SKIP by callers (same
+/// graceful skip as a fixture-absent run), NOT a hard failure — a legitimately
+/// single-chunk fixture must not fail the suite.
+fn multi_chunk_len(reader: &SSTableReader) -> Option<u64> {
+    let comp = reader.compression_info.as_ref()?;
+    if comp.chunk_offsets.len() <= 1 {
+        return None;
+    }
+    Some(comp.chunk_length as u64)
 }
 
 // -------------------------------------------------------------------------
@@ -123,7 +124,10 @@ async fn present_key_get_does_not_sequential_scan() {
         return;
     };
     let reader = open_reader(&dd).await;
-    assert_multi_chunk(&reader);
+    if multi_chunk_len(&reader).is_none() {
+        eprintln!("SKIP: {KEYSPACE}/{TABLE} present but not multi-chunk");
+        return;
+    }
     let oracle = scan_oracle(&reader).await;
     let present_key = oracle.keys().next().expect("at least one key").clone();
 
@@ -178,7 +182,10 @@ async fn get_reads_bounded_chunks_not_whole_file() {
         return;
     };
     let reader = open_reader(&dd).await;
-    let chunk_len = assert_multi_chunk(&reader);
+    let Some(chunk_len) = multi_chunk_len(&reader) else {
+        eprintln!("SKIP: {KEYSPACE}/{TABLE} present but not multi-chunk");
+        return;
+    };
     let n_chunks = reader
         .compression_info
         .as_ref()
@@ -238,11 +245,11 @@ async fn get_reads_bounded_chunks_not_whole_file() {
              whole-file count {n_chunks}"
         );
     }
-    assert_eq!(
-        head_cost, tail_cost,
-        "chunk-targeted work must be independent of the partition's file position \
-         (head {head_cost} vs deep-tail {tail_cost})"
-    );
+    // NOTE: we do NOT assert `head_cost == tail_cost`. Chunk-targeting is already
+    // proven by the bounded `(1..=2).contains(&cost)` check above; a strict
+    // equality would flake if exactly one probed partition straddles a chunk
+    // boundary (cost 2) while the other does not (cost 1) — both are correct
+    // chunk-targeted reads, just off by one covering chunk.
     eprintln!(
         "get_reads_bounded_chunks_not_whole_file PASSED \
          (head={head_cost} tail={tail_cost} of {n_chunks} chunks)"
@@ -261,7 +268,10 @@ async fn absent_key_returns_none_without_scan() {
         return;
     };
     let reader = open_reader(&dd).await;
-    assert_multi_chunk(&reader);
+    if multi_chunk_len(&reader).is_none() {
+        eprintln!("SKIP: {KEYSPACE}/{TABLE} present but not multi-chunk");
+        return;
+    }
     let oracle = scan_oracle(&reader).await;
 
     // Synthesize a 16-byte key that is definitely NOT in the fixture.
@@ -308,7 +318,10 @@ async fn get_value_matches_full_scan_oracle_for_all_keys() {
         return;
     };
     let reader = open_reader(&dd).await;
-    assert_multi_chunk(&reader);
+    if multi_chunk_len(&reader).is_none() {
+        eprintln!("SKIP: {KEYSPACE}/{TABLE} present but not multi-chunk");
+        return;
+    }
     let oracle = scan_oracle(&reader).await;
 
     let mut checked = 0usize;
@@ -345,12 +358,13 @@ async fn get_value_matches_full_scan_oracle_for_all_keys() {
 // a partition whose entry lies past the parse-stop point returned `None` from
 // `get()` even though `scan()` still finds it in Data.db (get/scan divergence).
 //
-// The fix only treats a miss as authoritative when the map is KNOWN-COMPLETE;
-// otherwise it falls back to the whole-file scan. This test builds a degraded
+// The fix makes EVERY `index_reader` miss fall back to the whole-file scan
+// oracle (the bloom pre-check remains the fast definitive-absent path for the
+// common case). This test exercises the MID-ENTRY truncation case; the
+// boundary-aligned case (whole trailing entries dropped) is covered by
+// `boundary_truncated_index_get_falls_back_to_scan` below. Both build a degraded
 // fixture by truncating a COPY of a real Index.db (never mutating the shared
-// dataset) and asserts every scan-visible key is still found by `get()`.
-// FAILS without the fix (get() returns None for the post-truncation key),
-// PASSES with it.
+// dataset) and assert every scan-visible key is still found by `get()`.
 // -------------------------------------------------------------------------
 
 /// Copy the full SSTable component set (every sibling of `data_db`, e.g.
@@ -366,7 +380,10 @@ fn copy_component_set(data_db: &Path, dst_dir: &Path) -> PathBuf {
     let stem = data_name
         .strip_suffix("-Data.db")
         .expect("Data.db name ends with -Data.db");
-    for entry in std::fs::read_dir(src_dir).expect("read source SSTable dir").flatten() {
+    for entry in std::fs::read_dir(src_dir)
+        .expect("read source SSTable dir")
+        .flatten()
+    {
         let name = entry.file_name().to_string_lossy().to_string();
         // Copy this generation's real components, but NOT the `.jsonl` golden.
         if name.starts_with(&format!("{stem}-")) && !name.ends_with(".jsonl") {
@@ -397,13 +414,17 @@ async fn truncated_index_get_falls_back_to_scan() {
 
     // 2. Truncate the Index.db copy MID-ENTRY: drop the tail so the final entry
     //    fails to parse. The parser stops early (partial prefix map, leftover
-    //    remaining ⇒ NOT known-complete); the token-tail partition(s) are lost
-    //    from the map but still present in Data.db.
-    let orig_len = std::fs::metadata(&index_copy).expect("Index.db metadata").len();
-    assert!(orig_len > 32, "Index.db unexpectedly tiny ({orig_len} bytes)");
+    //    bytes discarded); the token-tail partition(s) are lost from the map but
+    //    still present in Data.db.
+    let orig_len = std::fs::metadata(&index_copy)
+        .expect("Index.db metadata")
+        .len();
+    assert!(
+        orig_len > 32,
+        "Index.db unexpectedly tiny ({orig_len} bytes)"
+    );
     // Remove the last 8 bytes — cuts into the final entry's key so `take` fails,
-    // leaving a non-empty `remaining` (guaranteed is_complete == false), and
-    // only the final entry is affected (earlier entries parse intact).
+    // and only the final entry is affected (earlier entries parse intact).
     let truncated_len = orig_len - 8;
     let f = std::fs::OpenOptions::new()
         .write(true)
@@ -451,7 +472,9 @@ async fn truncated_index_get_falls_back_to_scan() {
         let got = reader
             .get(&table_id(), &RowKey::new(raw_key.clone()))
             .await
-            .unwrap_or_else(|e| panic!("get() errored for post-truncation key {raw_key:02x?}: {e}"));
+            .unwrap_or_else(|e| {
+                panic!("get() errored for post-truncation key {raw_key:02x?}: {e}")
+            });
         let got = got.unwrap_or_else(|| {
             panic!(
                 "REGRESSION: get() returned None for key {raw_key:02x?} that scan() finds \
@@ -466,6 +489,203 @@ async fn truncated_index_get_falls_back_to_scan() {
     }
     eprintln!(
         "truncated_index_get_falls_back_to_scan PASSED \
+         ({} dropped keys recovered via scan fallback, {resolvable} still indexed)",
+        missing.len()
+    );
+}
+
+// -------------------------------------------------------------------------
+// Test 6 (roborev correctness regression, boundary-aligned): the specific case
+// the previous parse-consumption completeness signal could NOT detect.
+//
+// The pre-fix code marked the Index.db map "known-complete" whenever the entry
+// parser consumed all bytes to EOF (empty leftover). That detects MID-ENTRY
+// truncation (test 5) but NOT truncation aligned to an EXACT entry boundary:
+// dropping WHOLE trailing entries leaves the surviving prefix parsing cleanly
+// with NO leftover bytes, so the map looked "complete" while partitions were
+// silently missing → an index miss for a dropped-but-scan-visible key returned
+// `None` from `get()` (get/scan divergence).
+//
+// The fix removes the unreliable completeness signal entirely: EVERY index miss
+// falls back to the whole-file scan oracle. This test truncates a COPY of a real
+// Index.db at an EXACT entry boundary (drop the last whole entry, computed by
+// walking the on-disk entry layout) and asserts every dropped-but-scan-visible
+// key is still returned by `get()` byte-identical to `scan()`.
+// FAILS without the fix (get() returns None for the dropped key), PASSES with it.
+// -------------------------------------------------------------------------
+
+/// Decode a Cassandra unsigned vint at `buf[pos..]`, returning
+/// `(value, total_bytes_consumed)`, or `None` if the vint is truncated.
+///
+/// Encoding: the first byte's leading 1-bits give the number of EXTRA bytes;
+/// the remaining low bits of the first byte are the value's high bits, followed
+/// by the extra bytes big-endian (Cassandra `VIntCoding`).
+fn read_unsigned_vint(buf: &[u8], pos: usize) -> Option<(u64, usize)> {
+    let first = *buf.get(pos)?;
+    let extra = first.leading_ones() as usize;
+    if extra == 0 {
+        return Some((first as u64, 1));
+    }
+    if pos + 1 + extra > buf.len() {
+        return None;
+    }
+    // For extra >= 7 the first byte carries no value bits (all marker bits).
+    let mask = if extra >= 7 {
+        0u8
+    } else {
+        0xffu8 >> (extra + 1)
+    };
+    let mut val = (first & mask) as u64;
+    for i in 0..extra {
+        val = (val << 8) | buf[pos + 1 + i] as u64;
+    }
+    Some((val, 1 + extra))
+}
+
+/// Walk the headerless BIG Index.db entry layout from `start`, returning the byte
+/// offset AFTER each complete entry (i.e. every exact entry boundary). Each entry
+/// is `[key_len: u16 BE][key][data_offset: uvint][promoted_len: uvint][promoted]`.
+///
+/// Returns `None` when the bytes don't look like the expected headerless layout
+/// (implausible key length) so the caller can SKIP rather than truncate blindly.
+/// Real Cassandra 5.0 `nb` Index.db is headerless (starts with the u16 key_len).
+fn entry_end_offsets(buf: &[u8]) -> Option<Vec<usize>> {
+    let mut pos = 0usize;
+    let mut ends = Vec::new();
+    while pos + 2 <= buf.len() {
+        let key_len = u16::from_be_bytes([buf[pos], buf[pos + 1]]) as usize;
+        // Plausibility guard: a real partition key is 1..=4096 bytes. An
+        // implausible length means this isn't the headerless entry layout.
+        if key_len == 0 || key_len > 4096 {
+            return None;
+        }
+        let mut p = pos + 2;
+        if p + key_len > buf.len() {
+            break; // partial trailing entry (key truncated)
+        }
+        p += key_len;
+        // data_offset uvint
+        let (_data_off, n1) = read_unsigned_vint(buf, p)?;
+        p += n1;
+        // promoted_index_len uvint + promoted_index_data
+        let (promoted_len, n2) = read_unsigned_vint(buf, p)?;
+        p += n2;
+        let promoted_len = promoted_len as usize;
+        if p + promoted_len > buf.len() {
+            break; // partial trailing entry (promoted data truncated)
+        }
+        p += promoted_len;
+        ends.push(p);
+        pos = p;
+    }
+    Some(ends)
+}
+
+#[tokio::test]
+async fn boundary_truncated_index_get_falls_back_to_scan() {
+    let Some(dd) = big_data_db() else {
+        eprintln!("SKIP: {KEYSPACE}/{TABLE} BIG fixture not available");
+        return;
+    };
+
+    // 1. Copy the component set to a temp dir so we never mutate the shared dataset.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let copied_data = copy_component_set(&dd, tmp.path());
+    let index_copy = tmp.path().join(
+        copied_data
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .replace("-Data.db", "-Index.db"),
+    );
+
+    // 2. Compute the EXACT entry boundaries of the real Index.db, then truncate
+    //    at the boundary that drops the LAST WHOLE entry. The surviving prefix
+    //    parses cleanly with NO leftover bytes — the boundary-aligned case the
+    //    old parse-consumption signal could not detect.
+    let index_bytes = std::fs::read(&index_copy).expect("read Index.db copy");
+    let Some(ends) = entry_end_offsets(&index_bytes) else {
+        eprintln!("SKIP: {KEYSPACE}/{TABLE} Index.db is not the headerless BIG layout");
+        return;
+    };
+    if ends.len() < 2 {
+        eprintln!("SKIP: {KEYSPACE}/{TABLE} Index.db has <2 entries; cannot drop a whole entry");
+        return;
+    }
+    // Drop the last whole entry: truncate at the boundary after the penultimate
+    // entry. This is an EXACT boundary ⇒ the prefix parses cleanly to EOF.
+    let truncated_len = ends[ends.len() - 2] as u64;
+    let full_len = index_bytes.len() as u64;
+    assert!(
+        truncated_len < full_len,
+        "boundary truncation must actually shorten the file ({truncated_len} < {full_len})"
+    );
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&index_copy)
+        .expect("open Index.db copy for truncation");
+    f.set_len(truncated_len).expect("truncate Index.db copy");
+    drop(f);
+
+    // 3. Open the reader over the DEGRADED copy and enumerate all keys via scan
+    //    (the whole-file oracle is unaffected by the Index.db truncation).
+    let reader = open_reader(&copied_data).await;
+    let oracle = scan_oracle(&reader).await;
+
+    // 4. Partition oracle keys by whether the boundary-truncated Index.db still
+    //    resolves them. Dropping whole trailing entries must leave at least one
+    //    scan-visible key that now MISSES the index — the key the boundary-aligned
+    //    #1572 regression would silently drop.
+    let mut missing: Vec<Vec<u8>> = Vec::new();
+    let mut resolvable = 0usize;
+    for k in oracle.keys() {
+        if reader
+            .lookup_partition_with_index(k)
+            .await
+            .expect("index lookup must not error")
+            .is_some()
+        {
+            resolvable += 1;
+        } else {
+            missing.push(k.clone());
+        }
+    }
+    // Self-check that the boundary walk was correct: the surviving prefix must
+    // still resolve a non-empty set of keys (a bad walk / wrong header assumption
+    // would corrupt the prefix and resolve none).
+    assert!(
+        resolvable > 0,
+        "boundary truncation should leave a clean parsed prefix (some keys still resolvable)"
+    );
+    assert!(
+        !missing.is_empty(),
+        "dropping a whole trailing entry must remove at least one scan-visible key \
+         from the Index.db map (else the boundary-aligned scenario is not exercised)"
+    );
+
+    // 5. Correctness: every scan-visible key whose Index.db entry was dropped must
+    //    STILL be found by get() (via the scan fallback), byte-identical to scan.
+    //    Without the fix, the boundary-aligned truncation looked "complete" so the
+    //    index miss returned None here → get/scan divergence.
+    for raw_key in &missing {
+        let got = reader
+            .get(&table_id(), &RowKey::new(raw_key.clone()))
+            .await
+            .unwrap_or_else(|e| panic!("get() errored for dropped key {raw_key:02x?}: {e}"));
+        let got = got.unwrap_or_else(|| {
+            panic!(
+                "REGRESSION: get() returned None for key {raw_key:02x?} that scan() finds \
+                 (boundary-aligned Index.db miss treated as definitive absent)"
+            )
+        });
+        let expected = oracle.get(raw_key).expect("oracle has the key");
+        assert_eq!(
+            &got, expected,
+            "get() (scan fallback) row differs from the scan oracle for key {raw_key:02x?}"
+        );
+    }
+    eprintln!(
+        "boundary_truncated_index_get_falls_back_to_scan PASSED \
          ({} dropped keys recovered via scan fallback, {resolvable} still indexed)",
         missing.len()
     );
