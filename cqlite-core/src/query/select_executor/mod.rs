@@ -46,7 +46,7 @@ use super::{
     select_optimizer::{AggregationPlan, ExecutionStep, OptimizedQueryPlan, SSTablePredicate},
 };
 use crate::{
-    schema::{CqlType, SchemaManager},
+    schema::{CqlType, SchemaManager, TableSchema},
     storage::StorageEngine,
     types::{RowKey, Value},
     Error, Result, TableId,
@@ -296,7 +296,16 @@ impl SelectExecutor {
             return self.execute_and_stream(plan, config).await;
         };
 
-        let columns = self.get_result_columns(&plan.statement).await?;
+        // Issue #1587 (E5): resolve the schema ONCE for the whole streaming query
+        // and share it (by reference here, and moved into the spawned task below)
+        // so column-metadata building, the pre-spawn token validation, and the
+        // background scan all reuse one `Arc<TableSchema>` instead of each
+        // re-locking the registry and deep-cloning a fresh schema (2–4× per query).
+        let query_schema: Option<Arc<TableSchema>> = self.resolve_table_schema(&table_id).await;
+
+        let columns = self
+            .get_result_columns(&plan.statement, query_schema.as_deref())
+            .await?;
 
         // Create bounded channel for backpressure
         let (tx, rx) = mpsc::channel(config.buffer_size);
@@ -319,32 +328,22 @@ impl SelectExecutor {
         // caller would receive an apparently-successful iterator that yields zero
         // rows — silently hiding an invalid `token(...)` query. Validating here
         // surfaces the error synchronously from `execute_streaming`, matching the
-        // materializing `execute()` path. The schema must be resolved before the
-        // spawn for this, so we resolve it per scan step here.
+        // materializing `execute()` path. Uses the already-resolved schema.
         for step in &execution_steps {
-            if let ExecutionStep::SSTableScan {
-                table, predicates, ..
-            } = step
-            {
-                let (keyspace, table_name) = parse_table_id(table);
-                let schema_opt = self
-                    ._schema
-                    .find_schema_by_table(&keyspace, &table_name)
-                    .await;
-                validate_token_predicates(predicates, schema_opt.as_ref())?;
+            if let ExecutionStep::SSTableScan { predicates, .. } = step {
+                validate_token_predicates(predicates, query_schema.as_deref())?;
             }
         }
 
-        // Clone what we need for the background task
+        // Clone what we need for the background task.
         let storage = Arc::clone(&self.storage);
-        let schema_manager = Arc::clone(&self._schema);
         let buffer_size = config.buffer_size;
 
         // Spawn background task to stream rows
         tokio::spawn(async move {
             if let Err(e) = Self::execute_streaming_background(
                 storage,
-                schema_manager,
+                query_schema,
                 table_id,
                 execution_steps,
                 tx,
@@ -926,23 +925,39 @@ impl SelectExecutor {
         }
     }
 
-    async fn get_result_columns(&self, statement: &SelectStatement) -> Result<Vec<ColumnInfo>> {
+    /// Resolve a table's schema ONCE per query into a shared `Arc<TableSchema>`
+    /// (issue #1587, E5). Every downstream planning/execution step then borrows
+    /// the SAME schema (`Arc::clone` is a ref-count bump) instead of re-taking the
+    /// registry lock and deep-cloning a fresh `TableSchema` per step (which was
+    /// 2–4 deep clones per query). The registry itself is untouched (AJ1/AJ2 own
+    /// its shape) — this is purely query-side de-duplication.
+    async fn resolve_table_schema(&self, table: &TableId) -> Option<Arc<TableSchema>> {
+        let (keyspace, table_name) = parse_table_id(table);
+        self._schema
+            .find_schema_by_table(&keyspace, &table_name)
+            .await
+            .map(Arc::new)
+    }
+
+    /// Build result-column metadata from an ALREADY-RESOLVED schema (issue #1587,
+    /// E5). The caller resolves the schema once per query and passes it here, so
+    /// this never re-clones it out of the registry.
+    async fn get_result_columns(
+        &self,
+        statement: &SelectStatement,
+        schema: Option<&TableSchema>,
+    ) -> Result<Vec<ColumnInfo>> {
         let mut columns = Vec::new();
 
         match &statement.select_clause {
             SelectClause::All => {
-                // For SELECT *, look up the schema to get column names and CQL types.
+                // For SELECT *, use the schema to get column names and CQL types.
                 // This is needed for streaming mode where we can't wait for the first row.
                 if let Some(ref from_clause) = statement.from_clause {
                     let table_id = self.extract_table_id(from_clause)?;
                     let (keyspace_opt, table_name) = parse_table_id(&table_id);
 
-                    // Look up schema from SchemaManager
-                    if let Some(schema) = self
-                        ._schema
-                        .find_schema_by_table(&keyspace_opt, &table_name)
-                        .await
-                    {
+                    if let Some(schema) = schema {
                         // Collect all schema columns (sorted alphabetically for determinism)
                         let mut schema_cols: Vec<&crate::schema::Column> =
                             schema.columns.iter().collect();
@@ -971,20 +986,9 @@ impl SelectExecutor {
                 }
             }
             SelectClause::Columns(exprs) | SelectClause::Distinct(exprs) => {
-                // Try to resolve a schema for the FROM table (if present) so we can
-                // attach authoritative CQL types to explicitly projected columns (Issue #674).
-                let schema_opt = if let Some(ref from_clause) = statement.from_clause {
-                    if let Ok(table_id) = self.extract_table_id(from_clause) {
-                        let (keyspace_opt, table_name) = parse_table_id(&table_id);
-                        self._schema
-                            .find_schema_by_table(&keyspace_opt, &table_name)
-                            .await
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
+                // Issue #674: attach authoritative CQL types to explicitly projected
+                // columns from the pre-resolved schema.
+                let schema_opt = schema;
 
                 for (i, expr) in exprs.iter().enumerate() {
                     // Issue #692: WriteTimeTtl expressions produce fixed-schema output
@@ -1023,7 +1027,7 @@ impl SelectExecutor {
                     };
 
                     // Look up CQL type for this column in the schema (Issue #674).
-                    let cql_type_opt = schema_opt.as_ref().and_then(|schema| {
+                    let cql_type_opt = schema_opt.and_then(|schema| {
                         schema
                             .columns
                             .iter()
@@ -1062,6 +1066,58 @@ mod tests {
     use crate::query::result::{CellExpiration, CellWriteMetadata};
     use crate::{platform::Platform, Config};
     use tempfile::TempDir;
+
+    /// Issue #1587 (E5): a query resolves its table schema ONCE and shares it by
+    /// `Arc`, so a single `execute()` deep-clones the `TableSchema` out of the
+    /// registry exactly once — NOT once per planning/execution step (column
+    /// metadata + scan + fallback each re-resolved before, giving 2–4 clones).
+    /// Runs over empty storage so the count is deterministic and data-free: the
+    /// SELECT-* column metadata AND the scan step both consume the pre-resolved
+    /// schema.
+    #[tokio::test]
+    async fn execute_resolves_schema_once_per_query() {
+        use crate::schema::TABLE_SCHEMA_CLONES;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = Config::default();
+        let platform = Arc::new(Platform::new(&config).await.unwrap());
+        let storage = Arc::new(
+            StorageEngine::open(
+                temp_dir.path(),
+                &config,
+                platform.clone(),
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        let schema = Arc::new(SchemaManager::new(temp_dir.path()).await.unwrap());
+        schema
+            .parse_and_register_cql_schema(
+                "CREATE TABLE ks.t (id int PRIMARY KEY, name text, age int)",
+            )
+            .await
+            .expect("schema registers");
+
+        let executor = SelectExecutor::new(schema.clone(), storage.clone());
+        let optimizer =
+            crate::query::select_optimizer::SelectOptimizer::new(schema.clone(), storage.clone());
+
+        let statement = crate::query::select_parser::parse_select("SELECT * FROM ks.t").unwrap();
+        // Optimization performs no schema resolution; reset the counter AFTER it.
+        let plan = optimizer.optimize(statement).await.unwrap();
+
+        TABLE_SCHEMA_CLONES.with(|c| c.set(0));
+        let _ = executor.execute(plan).await.expect("query executes");
+        let clones = TABLE_SCHEMA_CLONES.with(|c| c.get());
+
+        assert_eq!(
+            clones, 1,
+            "issue #1587: a query must deep-clone its schema out of the registry once \
+             (was 2–4: column-metadata + scan + fallback each re-resolved), got {clones}"
+        );
+    }
 
     async fn create_test_executor() -> SelectExecutor {
         let temp_dir = TempDir::new().unwrap();
@@ -1419,7 +1475,7 @@ mod tests {
             allow_filtering: false,
         };
 
-        let cols = executor.get_result_columns(&stmt).await.unwrap();
+        let cols = executor.get_result_columns(&stmt, None).await.unwrap();
         assert_eq!(cols.len(), 1);
         assert_eq!(cols[0].name, "writetime(name)");
         assert_eq!(cols[0].data_type, crate::types::DataType::BigInt);
@@ -1451,7 +1507,7 @@ mod tests {
             allow_filtering: false,
         };
 
-        let cols = executor.get_result_columns(&stmt).await.unwrap();
+        let cols = executor.get_result_columns(&stmt, None).await.unwrap();
         assert_eq!(cols.len(), 1);
         assert_eq!(cols[0].name, "ttl(score)");
         assert_eq!(cols[0].data_type, crate::types::DataType::Integer);
@@ -1483,7 +1539,7 @@ mod tests {
             allow_filtering: false,
         };
 
-        let cols = executor.get_result_columns(&stmt).await.unwrap();
+        let cols = executor.get_result_columns(&stmt, None).await.unwrap();
         assert_eq!(cols.len(), 1);
         assert_eq!(
             cols[0].name, "wt",

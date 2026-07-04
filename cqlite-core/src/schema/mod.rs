@@ -47,6 +47,17 @@ pub use registry::{
     SchemaVersion, ValidationReport,
 };
 
+// Test-only counter for the number of times `find_schema_by_table` deep-clones a
+// `TableSchema` out of the registry (issue #1587, E5). A query must resolve its
+// schema ONCE and share it by `Arc`, so this stays `== 1` per query (it was 2–4
+// when each planning/execution step re-resolved). Same thread-local rationale as
+// the query executor's other work counters.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TABLE_SCHEMA_CLONES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
 pub use parser::SchemaParser;
 
 #[cfg(feature = "experimental")]
@@ -915,12 +926,14 @@ impl SchemaManager {
         if let Some(ks) = keyspace {
             let key = format!("{}.{}", ks, table);
             if let Some(schema) = schemas.get(&key) {
+                #[cfg(test)]
+                TABLE_SCHEMA_CLONES.with(|c| c.set(c.get() + 1));
                 return Some(schema.clone());
             }
         }
 
         // Then try to find any schema matching the table name
-        schemas
+        let found = schemas
             .values()
             .find(|schema| {
                 cql_parser::table_name_matches(
@@ -930,7 +943,12 @@ impl SchemaManager {
                     table,
                 )
             })
-            .cloned()
+            .cloned();
+        #[cfg(test)]
+        if found.is_some() {
+            TABLE_SCHEMA_CLONES.with(|c| c.set(c.get() + 1));
+        }
+        found
     }
 
     /// Extract table information from CQL without full parsing
