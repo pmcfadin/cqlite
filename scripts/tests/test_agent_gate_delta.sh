@@ -38,8 +38,26 @@ LITE_START="==== AGENT-GATE LITE SUMMARY ===="
 
 PASS=0
 FAIL=0
-ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
-bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
+SKIP=0
+ok()   { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
+bad()  { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
+skip() { printf 'skip - %s\n' "$1"; SKIP=$((SKIP + 1)); }
+
+# Metadata-parser availability (roborev job 3336). The .rs-ALLOW classification is
+# cargo-metadata-backed: --delta-classify's _test_target_index parses `cargo
+# metadata` with jq OR python3. On a machine with NEITHER, the index is empty and
+# EVERY .rs fails closed to REFUSE — which is the correct degraded behavior, but it
+# would make the .rs-ALLOW cases below FAIL and hard-fail the gate. So gate every
+# metadata-dependent .rs-ALLOW assertion on parser availability: run it for real
+# when a parser exists (the normal CI/dev case — full coverage preserved), else SKIP
+# it and assert the fail-closed degraded behavior instead. Path-only cases (*.md
+# ALLOW, all REFUSE cases, the python-tier gap cases) do NOT depend on a parser and
+# run unconditionally.
+if command -v jq >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1; then
+  METADATA_PARSER=1
+else
+  METADATA_PARSER=0
+fi
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-delta-test.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
@@ -67,12 +85,25 @@ assert_verdict "src-file-refuses" REFUSE \
 # The offending src file must be the one marked REFUSE (not the test file).
 src_out=$(printf '%s\n' "cqlite-core/src/storage/sstable/reader.rs" "cqlite-core/tests/write_read_roundtrip.rs" \
   | bash "$GATE" --delta-classify 2>/dev/null)
-if printf '%s\n' "$src_out" | grep -qxF "REFUSE cqlite-core/src/storage/sstable/reader.rs" \
-   && printf '%s\n' "$src_out" | grep -qxF "ALLOW cqlite-core/tests/write_read_roundtrip.rs"; then
-  ok "src-file-refuses: the src file is marked REFUSE, the test file ALLOW"
+if [ "$METADATA_PARSER" -eq 1 ]; then
+  if printf '%s\n' "$src_out" | grep -qxF "REFUSE cqlite-core/src/storage/sstable/reader.rs" \
+     && printf '%s\n' "$src_out" | grep -qxF "ALLOW cqlite-core/tests/write_read_roundtrip.rs"; then
+    ok "src-file-refuses: the src file is marked REFUSE, the test file ALLOW"
+  else
+    bad "src-file-refuses: per-file classification wrong"
+    echo "------- classify output -------"; printf '%s\n' "$src_out"; echo "-------------------------------"
+  fi
 else
-  bad "src-file-refuses: per-file classification wrong"
-  echo "------- classify output -------"; printf '%s\n' "$src_out"; echo "-------------------------------"
+  skip "SKIP: no jq/python3 metadata parser — .rs ALLOW cases require cargo metadata (src-file-refuses per-file ALLOW)"
+  # Degraded fail-closed: with no parser, the src file AND the real --test target
+  # .rs both REFUSE (the test-target line can no longer be ALLOW).
+  if printf '%s\n' "$src_out" | grep -qxF "REFUSE cqlite-core/src/storage/sstable/reader.rs" \
+     && printf '%s\n' "$src_out" | grep -qxF "REFUSE cqlite-core/tests/write_read_roundtrip.rs"; then
+    ok "src-file-refuses (no parser): both src and the real --test target .rs REFUSE (fail-closed)"
+  else
+    bad "src-file-refuses (no parser): expected both paths REFUSE without a metadata parser"
+    echo "------- classify output -------"; printf '%s\n' "$src_out"; echo "-------------------------------"
+  fi
 fi
 
 # 2. test-only → ALLOW (would proceed to emit a delta block). Cover the EXECUTABLE
@@ -80,12 +111,24 @@ fi
 #    targets in cqlite-core / cqlite-cli / the workspace root, plus a
 #    bindings/python/tests/ file (the #1893 python tier). These are actual files in
 #    the workspace, so cargo metadata resolves them to --test targets.
-assert_verdict "test-only-allows" ALLOW \
-  "cqlite-core/tests/write_read_roundtrip.rs" \
-  "cqlite-core/tests/compaction_integration.rs" \
-  "cqlite-cli/tests/integration_tests.rs" \
-  "tests/cache_metrics_test.rs" \
-  "bindings/python/tests/test_parity.py"
+if [ "$METADATA_PARSER" -eq 1 ]; then
+  assert_verdict "test-only-allows" ALLOW \
+    "cqlite-core/tests/write_read_roundtrip.rs" \
+    "cqlite-core/tests/compaction_integration.rs" \
+    "cqlite-cli/tests/integration_tests.rs" \
+    "tests/cache_metrics_test.rs" \
+    "bindings/python/tests/test_parity.py"
+else
+  skip "SKIP: no jq/python3 metadata parser — .rs ALLOW cases require cargo metadata (test-only-allows)"
+  # Degraded fail-closed: without a parser the real --test target .rs files can no
+  # longer be resolved, so the set REFUSES (a fresh full gate is required).
+  assert_verdict "test-only-allows (no parser, fail-closed)" REFUSE \
+    "cqlite-core/tests/write_read_roundtrip.rs" \
+    "cqlite-core/tests/compaction_integration.rs" \
+    "cqlite-cli/tests/integration_tests.rs" \
+    "tests/cache_metrics_test.rs" \
+    "bindings/python/tests/test_parity.py"
+fi
 
 # 2a. A .rs whose name matches the OLD *_test(s).rs glob but that lives in src/ (or
 #     scripts/, or the excluded fuzz/ crate) is NOT a Cargo --test target → REFUSE
@@ -197,18 +240,33 @@ assert_verdict "deleted-md-allows"         ALLOW  "some/nested/NOTES.md"
 assert_verdict "nested-helper-mod-refuses" REFUSE "cqlite-core/tests/write_read_roundtrip/type_coverage.rs"
 assert_verdict "nested-common-mod-refuses" REFUSE "cqlite-core/tests/common/mod.rs"
 assert_verdict "nested-support-mod-refuses" REFUSE "cqlite-core/tests/parity_support/mod.rs"
-assert_verdict "top-level-integration-target-allows" ALLOW "cqlite-core/tests/compaction_integration.rs"
-assert_verdict "top-level-integration-root-allows" ALLOW "tests/cache_metrics_test.rs"
-# Per-file check: in a mixed nested-helper + top-level-target diff, the nested
-# helper is the one marked REFUSE while the top-level target stays ALLOW.
 nested_out=$(printf '%s\n' "cqlite-core/tests/write_read_roundtrip/type_coverage.rs" "cqlite-core/tests/write_read_roundtrip.rs" \
   | bash "$GATE" --delta-classify 2>/dev/null)
-if printf '%s\n' "$nested_out" | grep -qxF "REFUSE cqlite-core/tests/write_read_roundtrip/type_coverage.rs" \
-   && printf '%s\n' "$nested_out" | grep -qxF "ALLOW cqlite-core/tests/write_read_roundtrip.rs"; then
-  ok "nested-vs-target: nested helper REFUSE, top-level target ALLOW"
+if [ "$METADATA_PARSER" -eq 1 ]; then
+  assert_verdict "top-level-integration-target-allows" ALLOW "cqlite-core/tests/compaction_integration.rs"
+  assert_verdict "top-level-integration-root-allows" ALLOW "tests/cache_metrics_test.rs"
+  # Per-file check: in a mixed nested-helper + top-level-target diff, the nested
+  # helper is the one marked REFUSE while the top-level target stays ALLOW.
+  if printf '%s\n' "$nested_out" | grep -qxF "REFUSE cqlite-core/tests/write_read_roundtrip/type_coverage.rs" \
+     && printf '%s\n' "$nested_out" | grep -qxF "ALLOW cqlite-core/tests/write_read_roundtrip.rs"; then
+    ok "nested-vs-target: nested helper REFUSE, top-level target ALLOW"
+  else
+    bad "nested-vs-target: per-file classification wrong"
+    echo "------- classify output -------"; printf '%s\n' "$nested_out"; echo "-------------------------------"
+  fi
 else
-  bad "nested-vs-target: per-file classification wrong"
-  echo "------- classify output -------"; printf '%s\n' "$nested_out"; echo "-------------------------------"
+  skip "SKIP: no jq/python3 metadata parser — .rs ALLOW cases require cargo metadata (top-level-integration-target-allows / nested-vs-target)"
+  # Degraded fail-closed: without a parser even a real top-level --test target
+  # REFUSES, so both the nested helper and the top-level target REFUSE.
+  assert_verdict "top-level-integration-target-refuses (no parser, fail-closed)" REFUSE "cqlite-core/tests/compaction_integration.rs"
+  assert_verdict "top-level-integration-root-refuses (no parser, fail-closed)" REFUSE "tests/cache_metrics_test.rs"
+  if printf '%s\n' "$nested_out" | grep -qxF "REFUSE cqlite-core/tests/write_read_roundtrip/type_coverage.rs" \
+     && printf '%s\n' "$nested_out" | grep -qxF "REFUSE cqlite-core/tests/write_read_roundtrip.rs"; then
+    ok "nested-vs-target (no parser): both nested helper and top-level target REFUSE (fail-closed)"
+  else
+    bad "nested-vs-target (no parser): expected both paths REFUSE without a metadata parser"
+    echo "------- classify output -------"; printf '%s\n' "$nested_out"; echo "-------------------------------"
+  fi
 fi
 
 # 5d. FAIL-CLOSED python-tier gap (issue #1892, roborev job 3333): --delta ALLOWS
@@ -369,5 +427,5 @@ if [ -x /bin/bash ]; then
 fi
 
 echo "----"
-echo "passed: $PASS  failed: $FAIL"
+echo "passed: $PASS  failed: $FAIL  skipped: $SKIP"
 [ "$FAIL" -eq 0 ]
