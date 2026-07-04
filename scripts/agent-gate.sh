@@ -1283,7 +1283,11 @@ run_parity_report() {
 # warm from the earlier parity-report component, so it stays cheap. Also runs
 # scripts/tests/test_bootstrap_agent_machine.sh (#1921), which proves the
 # new-machine bootstrap's pure-check paths never install anything (it runs with
-# --skip-smoke, so it never invokes the real gate — no recursion). SKIP-aware:
+# --skip-smoke, so it never invokes the real gate — no recursion). Also runs
+# scripts/tests/test_agent_gate_delta.sh (#1892), which drives the hidden
+# --delta-classify hook + --delta entry guards + --delta-...-emit-summary-selftest
+# to assert the test/docs-only fail-closed re-cert policy and DISTINCT delta
+# markers (hermetic — classification/emission only, never runs cargo). SKIP-aware:
 # the summary test's truncation case relies on a python3 reader, so with no
 # python3 we record SKIP (loud, never silent PASS); any test failure -> hard FAIL.
 run_tooling_tests() {
@@ -1316,6 +1320,21 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_parity_report.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (parity-report self-test); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # --delta re-cert self-test (#1892): no python3 needed, always runs (hermetic —
+  # classification + entry guards + delta summary emission, no cargo). A failure
+  # FAILs the component, mirroring the parity-report/keyspace-scoping guards.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_delta.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_delta.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (delta re-cert self-test); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
