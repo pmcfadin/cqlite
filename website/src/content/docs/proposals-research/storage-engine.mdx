@@ -11,56 +11,53 @@ import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 import MermaidDiagram from '../../../components/MermaidDiagram.astro';
 import storageEngineConcept from '../../../assets/storage-engine-parallel-planes.png';
 
-export const architectureMermaid = `flowchart TB
+export const architectureMermaid = `flowchart LR
   subgraph OLTP["Cassandra OLTP Plane"]
     direction TB
-    OApp["Application reads/writes"] --> OStore["CommitLog +<br/>Memtable"] --> Lifecycle["Flush, compaction, repair"]
-  end
-
-  subgraph Foundation["SSTable Foundation"]
-    direction TB
-    SSTables["Data.db / Index.db<br/>Summary.db / Statistics.db"]
-    Tail["Optional fresh<br/>tail gen-*"]
-    SSTables ~~~ Tail
+    App["Application reads/writes"]
+    CommitLog["CommitLog + Memtable"]
+    Lifecycle["Flush, compaction, repair"]
+    App --> CommitLog --> Lifecycle
   end
 
   subgraph OLAP["Trino / Iceberg OLAP Plane"]
     direction TB
-    AApp["Application analytical reads"] --> Services["Trino / Arrow Flight<br/>Iceberg materializer"] --> CQLite["CQLite SSTable reader"]
+    ReadApp["Application analytical reads"]
+    Query["Trino / Arrow Flight"]
+    Iceberg["Iceberg materializer"]
+    CQLite["CQLite SSTable reader"]
+    ReadApp --> Query --> Iceberg --> CQLite
   end
 
-  Lifecycle -->|flush creates durable SSTables| SSTables
-  OStore -. optional fresh tail export .-> Tail
-  SSTables -->|snapshot read| CQLite
+  subgraph Foundation["SSTable Foundation"]
+    direction TB
+    Data["Data.db / Index.db<br/>Summary.db / Statistics.db"]
+    Tail["Optional fresh tail gen-*"]
+  end
+
+  Lifecycle -->|flush creates durable SSTables| Data
+  Data -->|snapshot read| CQLite
+  CommitLog -. optional fresh tail export .-> Tail
   Tail -. fresh tail read .-> CQLite`;
 
 export const dataPathsMermaid = `flowchart TB
   subgraph Cold["Cold path"]
-    direction TB
-    SSTables["Flushed<br/>SSTables"] --> ColdCQLite["CQLite reader"]
-    ColdCQLite --> Flight["Arrow Flight"]
-    Flight --> Trino["Trino"]
-    ColdCQLite --> Iceberg["Iceberg<br/>materializer"]
+    direction LR
+    ColdSST["Flushed SSTables"] --> ColdCQLite["CQLite"] --> ColdOut["Flight / Trino / Iceberg"]
   end
 
   subgraph Fresh["Fresh tail path"]
-    direction TB
-    Write["Cassandra write"] --> Memtable["CqliteMemtable"]
-    Memtable --> TailGen["Tail gen-*<br/>SSTable"]
-    TailGen --> Merge["CQLite k-way<br/>LWW merge"]
-    Merge --> Query["Flight / Trino query"]
+    direction LR
+    FreshWrite["Cassandra write"] --> FreshTail["Tail gen-*"] --> FreshMerge["CQLite merge"]
   end
 
   subgraph Research["Research path"]
-    direction TB
-    Notes["Raw research<br/>notes"] --> Synthesis["Synthesis report"]
-    Synthesis --> Proposal["Official proposal"]
-    Proposal --> Tasks["Implementation<br/>tasks"]
-    Tasks --> Roadmap["Roadmap"]
+    direction LR
+    Notes["Raw notes"] --> Proposal["Proposal"] --> Roadmap["Tasks + roadmap"]
   end
 
-  Cold ~~~ Fresh
-  Fresh ~~~ Research`;
+  ColdOut ~~~ FreshWrite
+  FreshMerge ~~~ Notes`;
 
 # Storage Engine Direction
 
@@ -105,6 +102,7 @@ systems such as Arrow Flight, Trino, and Iceberg.
 
 <MermaidDiagram
   chart={architectureMermaid}
+  size="compact"
   caption="Cassandra owns OLTP reads, writes, and lifecycle. OLAP applications enter through Trino, Arrow Flight, or Iceberg, and CQLite reads the shared SSTable foundation."
   sourceLabel="Mermaid source for the architecture diagram"
 />
@@ -113,6 +111,7 @@ systems such as Arrow Flight, Trino, and Iceberg.
 
 <MermaidDiagram
   chart={dataPathsMermaid}
+  size="compact"
   caption="The proposal separates runtime data movement from how research is promoted into roadmap work."
   sourceLabel="Mermaid source for the data-path diagram"
 />

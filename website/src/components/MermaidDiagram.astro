@@ -3,16 +3,18 @@ interface Props {
   chart: string;
   caption?: string;
   sourceLabel?: string;
+  size?: 'default' | 'compact';
 }
 
 const {
   chart,
   caption,
   sourceLabel = 'Mermaid source',
+  size = 'default',
 } = Astro.props;
 ---
 
-<figure class="mermaid-figure">
+<figure class="mermaid-figure" data-size={size}>
   <pre class="mermaid-fallback" data-mermaid-diagram>{chart}</pre>
   {caption && <figcaption>{caption}</figcaption>}
 </figure>
@@ -28,16 +30,20 @@ const {
   mermaid.initialize({
     startOnLoad: false,
     securityLevel: 'strict',
+    markdownAutoWrap: false,
     theme: 'base',
     flowchart: {
       curve: 'basis',
       htmlLabels: true,
+      nodeSpacing: 24,
+      rankSpacing: 32,
     },
     themeVariables: {
       fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif',
       primaryColor: '#eef5ff',
       primaryBorderColor: '#c8d9fa',
       primaryTextColor: '#23304a',
+      fontSize: '13px',
       lineColor: '#2f6fed',
       clusterBkg: '#ffffff',
       clusterBorder: '#ccd6e6',
@@ -84,6 +90,11 @@ const {
     margin: 1.5rem 0;
   }
 
+  .mermaid-figure[data-size="compact"] {
+    max-width: min(42rem, 100%);
+    margin: 1.25rem auto;
+  }
+
   .mermaid-fallback,
   :global(.mermaid-rendered) {
     border: 1px solid var(--sl-color-gray-5);
@@ -91,6 +102,11 @@ const {
     background: var(--sl-color-bg);
     overflow-x: auto;
     padding: 1rem;
+  }
+
+  .mermaid-figure[data-size="compact"] .mermaid-fallback,
+  .mermaid-figure[data-size="compact"] :global(.mermaid-rendered) {
+    padding: 0.625rem;
   }
 
   .mermaid-fallback {
@@ -109,6 +125,10 @@ const {
     margin: 0 auto;
   }
 
+  .mermaid-figure[data-size="compact"] :global(.mermaid-rendered svg) {
+    width: min(100%, 36rem) !important;
+  }
+
   .mermaid-source {
     margin: 1rem 0 2rem;
   }
@@ -118,7 +138,7 @@ const {
   }
 
   @media (min-width: 72rem) {
-    .mermaid-figure {
+    .mermaid-figure:not([data-size="compact"]) {
       width: min(1000px, calc(100vw - var(--sl-sidebar-width) - 4rem));
       margin-left: 50%;
       transform: translateX(-50%);
@@ -126,7 +146,7 @@ const {
   }
 
   @media (max-width: 760px) {
-    :global(.mermaid-rendered svg) {
+    .mermaid-figure:not([data-size="compact"]) :global(.mermaid-rendered svg) {
       min-width: 640px;
       max-width: none !important;
     }
