@@ -24,13 +24,38 @@ full trail.
 | Deferred | The idea remains documented, but is not part of the first implementation pass. |
 | Rejected for now | The option has enough downside that it should not steer near-term work. |
 
-## Featured proposal
+## Research topics
 
 <CardGrid>
   <LinkCard
     title="Storage Engine Direction"
     description="Why CQLite should sit beside Cassandra as an analytical plane over SSTables, instead of replacing Cassandra's internal storage engine."
     href="/cqlite/proposals-research/storage-engine/"
+  />
+  <LinkCard
+    title="Memtable Freshness"
+    description="How the project should close the gap between flushed SSTables and Cassandra's live unflushed tail."
+    href="/cqlite/proposals-research/memtable-freshness/"
+  />
+  <LinkCard
+    title="Lakehouse Materialization"
+    description="How delta envelopes become queryable Iceberg tables without forcing every consumer to own merge logic."
+    href="/cqlite/proposals-research/iceberg-materializer/"
+  />
+  <LinkCard
+    title="Cassandra Seam Inventory"
+    description="The seam map behind the adjacent-OLAP decision: what Cassandra lets us plug into, and what remains hardwired."
+    href="/cqlite/proposals-research/cassandra-seams/"
+  />
+  <LinkCard
+    title="Read Path & Query Providers"
+    description="How the Flight, Trino, DataFusion, and partition-read enhancement issues fit into a single query-provider direction."
+    href="/cqlite/proposals-research/read-path-query-providers/"
+  />
+  <LinkCard
+    title="Compaction & Maintenance"
+    description="How standalone compaction, explicit gc-before / now-sec inputs, and maintenance scheduling fit together."
+    href="/cqlite/proposals-research/compaction-maintenance/"
   />
 </CardGrid>
 
