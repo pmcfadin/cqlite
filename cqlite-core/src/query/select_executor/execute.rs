@@ -687,6 +687,15 @@ impl SelectExecutor {
         query_wide_limit_zero: bool,
         context: &mut ExecutionContext,
     ) -> Result<Vec<QueryRow>> {
+        // FINDING 2 (Issue #955 follow-up): a `token(...)` predicate is evaluated
+        // by hashing the row's raw partition key, so its argument columns MUST be
+        // the full partition key in declared order or the result is silently
+        // wrong. Reject (Cassandra-style) BEFORE the LIMIT-0 short-circuits below
+        // (roborev, issue #1582): an invalid `token(...)` restriction is a query
+        // error the caller must see even when the query-wide limit is zero — a
+        // LIMIT-0 fast path must never swallow predicate validation.
+        validate_token_predicates(predicates, schema_opt)?;
+
         // Issue #1582 (D6): a query-wide `LIMIT 0` collects nothing regardless of
         // the plan shape. When a reordering/reducing step made `collect_bound`
         // `None`, the `collect_bound == Some(0)` short-circuit below cannot fire —
@@ -776,11 +785,8 @@ impl SelectExecutor {
             ),
         }
 
-        // FINDING 2 (Issue #955 follow-up): a `token(...)` predicate is evaluated
-        // by hashing the row's raw partition key, so its argument columns MUST be
-        // the full partition key in declared order or the result is silently
-        // wrong. Reject (Cassandra-style) before scanning/evaluating.
-        validate_token_predicates(predicates, schema_opt)?;
+        // (token-predicate validation now runs at the top of this method, before
+        // the LIMIT-0 short-circuits — see the comment there.)
 
         // Issue #693: When WRITETIME(col) or TTL(col) is in the SELECT, use the
         // metadata-carrying scan so per-cell timestamps reach the QueryRow.

@@ -602,6 +602,68 @@ async fn limit_zero_with_reordering_step_returns_empty_not_too_large() {
     );
 }
 
+/// roborev FINDING (Medium): an INVALID `token(...)` restriction must be rejected
+/// BEFORE either `LIMIT 0` short-circuit — a LIMIT-0 fast path must never swallow
+/// token-predicate validation. The fix moves `validate_token_predicates(...)` to
+/// be the FIRST statement of `execute_sstable_scan`, ahead of both the
+/// `query_wide_limit_zero` early-return (the reordering/`Sort` path) and the
+/// `collect_bound == Some(0)` short-circuit (the ordinary LIMIT-0 path).
+///
+/// `token(ck)` names a CLUSTERING column, not the partition key (`id`), so
+/// `validate_token_predicates` rejects it (mirrors the unit test
+/// `validate_token_predicates_rejects_non_pk_column`). The optimizer only checks
+/// the token FORM (operator + integer literal + column args), NOT partition-key
+/// membership, so the predicate passes planning and reaches `execute_sstable_scan`
+/// as a real `token()` `SSTablePredicate` — which is exactly the path the fix
+/// guards. Both LIMIT-0 shapes must surface `Error::QueryExecution`, NOT `Ok`:
+///   * `token(ck) >= 0 LIMIT 0` — no reordering step, so
+///     `compute_scan_collect_bound` yields `Some(0)` (the `collect_bound` path).
+///   * `token(ck) >= 0 ORDER BY ck LIMIT 0` — the `Sort` step forces
+///     `compute_scan_collect_bound` to `None`, so the `query_wide_limit_zero` path
+///     is the one that would have swallowed the error pre-fix.
+///
+/// Pre-fix (validation AFTER the short-circuits) BOTH queries returned `Ok` with
+/// zero rows → RED. Post-fix (validation FIRST) both return the token-validation
+/// `Error::QueryExecution` → GREEN.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invalid_token_predicate_with_limit_zero_errors_not_empty() {
+    let temp = TempDir::new().unwrap();
+    let (data_dir, schema_path) = prepare_wide_ck(temp.path()).await;
+
+    let db = open_db_with_budget(data_dir, schema_path, SHARED_BUDGET_BYTES).await;
+
+    // Assert an invalid-token LIMIT-0 SELECT surfaces the token-validation error
+    // instead of silently returning an empty result.
+    let assert_token_error =
+        |result: Result<cqlite_core::QueryResult, Error>, path: &str| match result {
+            Err(Error::QueryExecution(msg)) => {
+                assert!(
+                    msg.contains("token"),
+                    "{path}: token-validation error must mention token(); got {msg:?}"
+                );
+            }
+            Ok(res) => panic!(
+                "{path}: invalid token() with LIMIT 0 must error, not return {} rows \
+                 (a LIMIT-0 short-circuit must never swallow token validation)",
+                res.rows.len()
+            ),
+            Err(other) => panic!("{path}: expected Error::QueryExecution, got {other:?}"),
+        };
+
+    // Path 1: plain LIMIT 0 → `collect_bound == Some(0)` short-circuit.
+    let collect_bound_sql =
+        format!("SELECT * FROM {KS}.{WIDE_CK_TBL} WHERE token(ck) >= 0 LIMIT 0");
+    assert_token_error(db.execute(&collect_bound_sql).await, "collect_bound path");
+
+    // Path 2: ORDER BY forces a Sort step → `query_wide_limit_zero` early-return.
+    let query_wide_sql =
+        format!("SELECT * FROM {KS}.{WIDE_CK_TBL} WHERE token(ck) >= 0 ORDER BY ck LIMIT 0");
+    assert_token_error(
+        db.execute(&query_wide_sql).await,
+        "query_wide_limit_zero path",
+    );
+}
+
 /// Test 2: MANY skinny rows whose total bytes stay under the SAME budget that
 /// tripped the wide fixture complete fine and return every row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
