@@ -449,8 +449,9 @@ impl SSTableReader {
     ///   decompresses the chunk that contains that offset and continues forward
     ///   chunk-by-chunk ONLY until the target partition is fully parsed — it never
     ///   decompresses earlier chunks or the rest of the file (issue #831 perf
-    ///   finding). The whole-section [`stitch_all_chunks`] fallback is used only
-    ///   when chunk targeting is impossible (no/zero `chunk_length`).
+    ///   finding). The whole-section `point_read_whole_section` fallback (one
+    ///   positioned read of the entire data section) is used only when chunk
+    ///   targeting is impossible (no/zero `chunk_length`).
     /// - **Prefix-collision guard**: the trie may return a candidate for a
     ///   prefix-colliding key, so the decoded partition key is verified to equal
     ///   the queried key before any row is returned.
@@ -614,12 +615,16 @@ impl SSTableReader {
     ///
     /// Fallbacks (preserve prior behaviour exactly): when `compression_info` is
     /// `None` (uncompressed BTI Data.db) or `chunk_length` is 0/absent, this
-    /// decompresses the WHOLE section via [`stitch_all_chunks`] (`window_base = 0`)
-    /// and runs the same single-partition parse.
+    /// reads the WHOLE section in one positioned read via
+    /// `point_read_whole_section` (`window_base = 0`, CRC-verified when a CRC.db
+    /// is present) and runs the same single-partition parse.
     ///
-    /// Uses its own per-scan [`ScanCursor`] (private file position + chunk
-    /// index), so concurrent lookups run in parallel without serialization
-    /// (issue #815).
+    /// Chunks are fetched with positioned (`read_at`) reads on the shared
+    /// `point_source` — no per-lookup `open(2)`, no `ScanCursor`, and no mutex.
+    /// `chunk_index` is a plain local (a lookup is single-threaded within
+    /// itself), so concurrent lookups run in parallel without serialization;
+    /// safety comes from `read_at` taking `&self` (issue #1573, superseding the
+    /// per-scan-cursor approach of issue #815).
     pub(super) async fn bti_decompress_and_parse_target(
         &self,
         offset: usize,
@@ -1234,8 +1239,10 @@ impl SSTableReader {
     /// Murmur3 token order and truncated to `limit` — identical post-processing
     /// to the V5CompressedLegacy stitched path.
     ///
-    /// Uses its own per-scan [`ScanCursor`], so it runs in parallel with other
-    /// scans on this reader without serialization (issue #815).
+    /// Uses its own per-scan
+    /// [`ScanCursor`](crate::storage::sstable::reader::source::ScanCursor), so it
+    /// runs in parallel with other scans on this reader without serialization
+    /// (issue #815).
     ///
     /// [`parse_block_with_cell_metadata`]: crate::storage::sstable::reader::parsing::V5CompressedLegacyParser::parse_block_with_cell_metadata
     ///
