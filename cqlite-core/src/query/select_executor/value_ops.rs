@@ -60,7 +60,12 @@ pub(super) fn try_compare_values(a: &Value, b: &Value) -> Result<std::cmp::Order
             Error::query_execution("Cannot compare incompatible types".to_string())
         });
     }
-    log::debug!("Cannot compare {:?} with {:?}", a, b);
+    // Data-safety (issue #1694): log the operand TYPES, never their values.
+    log::debug!(
+        "Cannot compare values of incompatible types: {:?} vs {:?}",
+        a.data_type(),
+        b.data_type()
+    );
     Err(Error::query_execution(
         "Cannot compare incompatible types".to_string(),
     ))

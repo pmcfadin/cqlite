@@ -69,6 +69,24 @@ pub enum ExecutionStep {
     },
 }
 
+impl ExecutionStep {
+    /// Static variant label for diagnostics. Data-safety (issue #1694): this
+    /// intentionally returns only the variant NAME (a shape), never the step's
+    /// contents (predicate values, filter expressions, literals), so it is safe
+    /// to log at any level.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            ExecutionStep::SSTableScan { .. } => "SSTableScan",
+            ExecutionStep::Filter { .. } => "Filter",
+            ExecutionStep::Sort { .. } => "Sort",
+            ExecutionStep::Aggregate { .. } => "Aggregate",
+            ExecutionStep::Limit { .. } => "Limit",
+            ExecutionStep::PerPartitionLimit { .. } => "PerPartitionLimit",
+            ExecutionStep::Project { .. } => "Project",
+        }
+    }
+}
+
 /// SSTable-level predicate that can be pushed down
 #[derive(Debug, Clone)]
 pub struct SSTablePredicate {
