@@ -110,6 +110,15 @@ impl SelectExecutor {
             plan.execution_steps.clone()
         };
 
+        // Issue #1582 (FINDING 2): if the plan's only post-scan steps are LIMIT
+        // and projection, the materializing scan may stop collecting once it has
+        // `offset + count` rows — the exact set a later LIMIT keeps — so a LIMITed
+        // query over a wide table is honored WITHOUT the byte budget tripping on
+        // matching rows beyond the limit. Any reordering/reducing step (Sort, PER
+        // PARTITION LIMIT, Aggregate, Filter) makes early-stop unsafe, so the scan
+        // then collects the full (still byte-budget-bounded) result.
+        let scan_collect_bound = compute_scan_collect_bound(&execution_steps);
+
         for step in &execution_steps {
             match step {
                 ExecutionStep::SSTableScan {
@@ -125,6 +134,7 @@ impl SelectExecutor {
                             projection,
                             plan.statement.order_by.as_ref(),
                             query_schema.as_deref(),
+                            scan_collect_bound,
                             &mut context,
                         )
                         .await?;
@@ -585,6 +595,30 @@ impl SelectExecutor {
     /// handled by the free helpers `build_row_from_scan` and
     /// `evaluate_predicates`, which are shared with the streaming background
     /// task to keep the two execution paths in lockstep.
+    ///
+    /// Issue #1582 (D6): a running byte estimate ([`estimate_query_row_bytes`]) is
+    /// accumulated as rows are collected and fails fast with
+    /// [`Error::ResultTooLarge`] once the configured budget is crossed, so an
+    /// oversized result is rejected with an actionable message (add `LIMIT` /
+    /// stream) rather than silently materializing an unbounded `Vec`.
+    ///
+    /// `collect_bound` (FINDING 2) is the max number of matching rows to collect —
+    /// `Some(offset + count)` when the caller determined the plan's post-scan steps
+    /// cannot reorder or drop rows (so the first `offset + count` matches are
+    /// exactly what a later LIMIT keeps), else `None`. It is propagated into the
+    /// underlying scan's `limit` AND used to early-stop collection, so a LIMITed
+    /// query completes without the byte budget biting on matching rows beyond the
+    /// limit.
+    ///
+    /// NOTE (FINDING 1 / peak memory): the underlying `storage.scan` still
+    /// materializes each SSTable's matching rows via the reader's index path before
+    /// this method sees them, so for an UNBOUNDED (`collect_bound == None`)
+    /// full scan the byte guard here is a fail-fast ceiling, not a peak-memory
+    /// bound. The only incremental primitive (`scan_stream`) does not read
+    /// CQLite-written single-generation SSTables (it returns zero rows via the
+    /// non-index block path), so it is not a drop-in for this materializing path;
+    /// truly bounding peak for an unbounded scan needs an index/BTI-aware
+    /// incremental reader scan — tracked as a follow-up, out of scope for #1582.
     #[cfg_attr(feature = "tombstones", allow(unused_variables))]
     pub(super) async fn execute_sstable_scan(
         &self,
@@ -595,6 +629,9 @@ impl SelectExecutor {
         // Issue #1587 (E5): schema resolved ONCE per query by the caller and
         // shared by reference — no per-scan registry lock + deep clone.
         schema_opt: Option<&TableSchema>,
+        // Issue #1582 (FINDING 2): early-stop bound (offset + count) when the plan
+        // permits it, else None. See the method doc.
+        collect_bound: Option<usize>,
         context: &mut ExecutionContext,
     ) -> Result<Vec<QueryRow>> {
         // Issue #1582 (D6): a ROW COUNT is the wrong unit for a memory guard —
@@ -681,8 +718,10 @@ impl SelectExecutor {
                     };
                     context.access_path = Some(metadata_path.clone());
                     crate::query::access_path::record(metadata_path);
+                    // Issue #1582 (FINDING 2): propagate the LIMIT bound into the
+                    // metadata scan too (see the non-metadata Fallback arm).
                     self.storage
-                        .scan_with_cell_metadata(table, None, None, None, schema_opt)
+                        .scan_with_cell_metadata(table, None, None, collect_bound, schema_opt)
                         .await?
                 }
             };
@@ -706,6 +745,21 @@ impl SelectExecutor {
                     result_bytes = result_bytes.saturating_add(estimate_query_row_bytes(&row));
                     results.push(row);
                     enforce_result_budget(&results, result_bytes, byte_budget, MAX_RESULTS)?;
+                    // FINDING 2: early-stop at the LIMIT bound where safe. NOTE
+                    // (FINDING 1 scope): the metadata (WRITETIME/TTL) full-scan
+                    // fallback above materializes via `scan_with_cell_metadata`
+                    // because there is no streaming metadata scan yet — the byte
+                    // guard here still fails-fast on the collected result, and the
+                    // early-stop avoids building surplus rows, but the underlying
+                    // metadata scan is not incrementally bounded. A streaming
+                    // metadata scan (the metadata analog of `scan_stream`) is a
+                    // documented follow-up; the dominant, unbounded risk is the
+                    // non-metadata full scan, which IS bounded above.
+                    if let Some(bound) = collect_bound {
+                        if results.len() >= bound {
+                            break;
+                        }
+                    }
                 }
             }
         } else {
@@ -799,8 +853,14 @@ impl SelectExecutor {
                     // Issue #960: report the honest reason a full scan was chosen.
                     context.access_path = Some(AccessPath::FallbackFullScan { reason });
                     crate::query::access_path::record(AccessPath::FallbackFullScan { reason });
+                    // Issue #1582 (FINDING 2): propagate the query-wide LIMIT bound
+                    // (offset + count) INTO the scan so it materializes only that
+                    // many rows and the multi-generation reconcile merge early-exits
+                    // — a LIMITed query is served without the byte budget biting on
+                    // matching rows beyond the limit. `collect_bound` is `Some` only
+                    // when the plan's post-scan steps cannot reorder/drop rows.
                     self.storage
-                        .scan(table, None, None, None, schema_opt)
+                        .scan(table, None, None, collect_bound, schema_opt)
                         .await?
                 }
             };
@@ -820,12 +880,50 @@ impl SelectExecutor {
                     result_bytes = result_bytes.saturating_add(estimate_query_row_bytes(&row));
                     results.push(row);
                     enforce_result_budget(&results, result_bytes, byte_budget, MAX_RESULTS)?;
+                    // FINDING 2: the targeted / multi-partition paths return a Vec
+                    // already bounded by the partition(s); early-stop still avoids
+                    // building rows a later LIMIT would discard.
+                    if let Some(bound) = collect_bound {
+                        if results.len() >= bound {
+                            break;
+                        }
+                    }
                 }
             }
         }
 
         Ok(results)
     }
+}
+
+/// Compute the early-stop collection bound for the materializing scan (issue
+/// #1582 / FINDING 2).
+///
+/// Returns `Some(offset + count)` — the number of matching rows the scan may
+/// collect before stopping — ONLY when the plan's post-scan steps are limited to
+/// `Limit` and `Project`, i.e. no step (`Sort`, `PerPartitionLimit`, `Aggregate`,
+/// `Filter`) can reorder or drop rows. In that case the first `offset + count`
+/// matching rows are exactly the set a later `Limit { count, offset }` keeps, so
+/// early-stopping is result-preserving AND prevents the byte budget from tripping
+/// on matching rows beyond the limit. Any other step returns `None` (collect the
+/// full, still byte-budget-bounded result). Absent a `Limit`, returns `None`.
+fn compute_scan_collect_bound(steps: &[ExecutionStep]) -> Option<usize> {
+    let mut bound: Option<usize> = None;
+    for step in steps {
+        match step {
+            ExecutionStep::SSTableScan { .. } | ExecutionStep::Project { .. } => {}
+            ExecutionStep::Limit { count, offset } => {
+                // `count`/`offset` are u64; saturate the sum into usize for the
+                // in-memory collection bound.
+                let sum = count.saturating_add(offset.unwrap_or(0));
+                bound = Some(usize::try_from(sum).unwrap_or(usize::MAX));
+            }
+            // Any other step may reorder or drop rows; early-stopping the scan
+            // at the raw match count would then yield the wrong result set.
+            _ => return None,
+        }
+    }
+    bound
 }
 
 /// Estimate the logical size, in bytes, of a materialized [`QueryRow`], reusing

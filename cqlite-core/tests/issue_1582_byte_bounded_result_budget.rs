@@ -35,6 +35,11 @@
 //!   3. `max_result_bytes_knob_is_load_bearing` — the same skinny query passes
 //!      under a large budget and trips under a small budget: lowering the knob
 //!      changes what trips, so it is a real behavioral knob, not decoration.
+//!   4. `limited_query_over_wide_table_completes_under_budget` (FINDING 2) — a
+//!      LIMITed query over the wide fixture (whose UNLIMITED scan trips the guard)
+//!      completes and returns the limited rows: the LIMIT bound is propagated into
+//!      the scan and collection early-stops, so the budget never bites on matching
+//!      rows beyond the LIMIT.
 //!
 //! Run with:
 //!   cargo test --package cqlite-core \
@@ -65,6 +70,12 @@ const SKINNY_TBL: &str = "skinny_items";
 /// far below the 1M row-count safety valve.
 const WIDE_PAYLOAD_BYTES: usize = 10 * 1024;
 const WIDE_ROW_COUNT: i32 = 8;
+
+/// Rows the byte guard admits before it trips at [`SHARED_BUDGET_BYTES`]: each
+/// wide row estimates to ~`WIDE_PAYLOAD_BYTES` + a few bytes for the int key, so
+/// `floor(budget / row_bytes)` rows fit before the running estimate crosses the
+/// budget. Used as the LIMIT that must still complete under budget (FINDING 2).
+const WIDE_ROWS_UNDER_BUDGET: usize = 2;
 
 /// Many tiny rows: total bytes stay small even though the row COUNT is large
 /// relative to the wide fixture.
@@ -222,9 +233,59 @@ async fn wide_rows_trip_byte_guard_before_row_count_guard() {
                 rows < 1_000_000,
                 "byte guard must trip long before the 1M row-count guard; got rows={rows}"
             );
+            // The guard fails fast: it trips after collecting only the few rows
+            // that fill the budget (~`WIDE_ROWS_UNDER_BUDGET` + 1), a small handful
+            // strictly below the full fixture — not after collecting all of it.
+            assert!(
+                rows <= WIDE_ROWS_UNDER_BUDGET + 1,
+                "byte guard should fail fast a row past the budget fit \
+                 ({WIDE_ROWS_UNDER_BUDGET}); got rows={rows}"
+            );
         }
         other => panic!("expected Error::ResultTooLarge, got {other:?}"),
     }
+}
+
+/// FINDING 2: a LIMITed query over the same wide fixture — whose UNLIMITED scan
+/// trips the byte guard (see `wide_rows_trip_byte_guard_before_row_count_guard`)
+/// — must complete and return the limited rows, WITHOUT the budget biting on
+/// matching rows beyond the LIMIT.
+///
+/// This is the red→green for FINDING 2: before the fix the LIMIT was applied by a
+/// SEPARATE post-scan step, so the executor enforced the byte budget while
+/// collecting EVERY matching row and raised `ResultTooLarge` at ~row 3 — before
+/// the LIMIT step ever ran. Propagating the LIMIT bound into the scan's `limit`
+/// AND early-stopping collection at `offset + count` means only the limited rows
+/// are collected, so the budget never bites on rows beyond the LIMIT.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn limited_query_over_wide_table_completes_under_budget() {
+    let temp = TempDir::new().unwrap();
+    let (data_dir, schema_path) = prepare_wide(temp.path()).await;
+
+    let db = open_db_with_budget(data_dir, schema_path, SHARED_BUDGET_BYTES).await;
+
+    // Sanity: the UNLIMITED query trips the guard (proves the budget is binding).
+    let unlimited = format!("SELECT * FROM {KS}.{WIDE_TBL}");
+    let err = db
+        .execute(&unlimited)
+        .await
+        .expect_err("unlimited wide SELECT * must exceed the byte budget");
+    assert!(
+        matches!(err, Error::ResultTooLarge { .. }),
+        "unlimited query must trip the guard, got {err:?}"
+    );
+
+    // LIMIT within the budget fit must complete and return exactly that many rows.
+    let sql = format!("SELECT * FROM {KS}.{WIDE_TBL} LIMIT {WIDE_ROWS_UNDER_BUDGET}");
+    let result = db
+        .execute(&sql)
+        .await
+        .expect("a LIMITed query that fits the budget must complete, not trip ResultTooLarge");
+    assert_eq!(
+        result.rows.len(),
+        WIDE_ROWS_UNDER_BUDGET,
+        "LIMIT must be honored (early-stop before the byte budget bites)"
+    );
 }
 
 /// Test 2: MANY skinny rows whose total bytes stay under the SAME budget that
