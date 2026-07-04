@@ -102,16 +102,15 @@ impl Database {
         per_call.or(self.default_traceparent.as_deref())
     }
 
-    /// Return a clear error when a write method is called on a read-only database.
-    fn require_writable(&self) -> PyResult<()> {
-        if self.write_engine.is_none() {
-            return Err(PyRuntimeError::new_err(
-                "Database is read-only. \
-                 Open with writable=True and write_dir=<path> to enable write operations. \
-                 Example: cqlite.open(path, schema=schema, writable=True, write_dir='/tmp/writes')",
-            ));
-        }
-        Ok(())
+    /// The write engine, or a typed error if the database is read-only.
+    /// Replaces the `require_writable()? … .expect(Some)` two-step.
+    fn writable_engine(&self) -> PyResult<&Mutex<PyWriteEngine>> {
+        self.write_engine.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "Database is read-only. Open with writable=True and write_dir=<path> \
+                 to enable write operations.",
+            )
+        })
     }
 
     /// Detect DML statements (INSERT / UPDATE / DELETE / BEGIN BATCH).
@@ -593,12 +592,8 @@ impl Database {
     /// ```
     pub fn flush_run(&self) -> PyResult<String> {
         self.ensure_open()?;
-        self.require_writable()?;
 
-        let engine_mutex = self
-            .write_engine
-            .as_ref()
-            .expect("require_writable() guarantees write_engine is Some");
+        let engine_mutex = self.writable_engine()?;
 
         let mut engine = engine_mutex
             .lock()
@@ -641,12 +636,8 @@ impl Database {
     /// ```
     pub fn maintenance_step(&self, budget_ms: u64) -> PyResult<MaintenanceReport> {
         self.ensure_open()?;
-        self.require_writable()?;
 
-        let engine_mutex = self
-            .write_engine
-            .as_ref()
-            .expect("require_writable() guarantees write_engine is Some");
+        let engine_mutex = self.writable_engine()?;
 
         let mut engine = engine_mutex
             .lock()
@@ -684,12 +675,8 @@ impl Database {
     #[getter]
     pub fn write_stats(&self) -> PyResult<WriteStats> {
         self.ensure_open()?;
-        self.require_writable()?;
 
-        let engine_mutex = self
-            .write_engine
-            .as_ref()
-            .expect("require_writable() guarantees write_engine is Some");
+        let engine_mutex = self.writable_engine()?;
 
         let engine = engine_mutex
             .lock()
@@ -708,12 +695,7 @@ impl Database {
     fn execute_dml(&self, py: Python<'_>, query: &str) -> PyResult<QueryResult> {
         use std::time::Instant;
 
-        self.require_writable()?;
-
-        let engine_mutex = self
-            .write_engine
-            .as_ref()
-            .expect("require_writable() guarantees write_engine is Some");
+        let engine_mutex = self.writable_engine()?;
 
         let query_owned = query.to_string();
         let t0 = Instant::now();

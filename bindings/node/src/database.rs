@@ -411,6 +411,21 @@ impl Database {
         }
     }
 
+    /// The write engine, or a typed error if the database is read-only.
+    /// Replaces the `ensure_writable()? … .expect(Some)` two-step so the `Some`
+    /// unwrap is compiler-enforced (no reachable panic in a write path).
+    #[cfg(feature = "write-support")]
+    fn writable_engine(
+        &self,
+    ) -> napi::Result<&Arc<Mutex<cqlite_core::storage::write_engine::WriteEngine>>> {
+        self.write_engine.as_ref().ok_or_else(|| {
+            simple_error(
+                "Write support not enabled. Open with { writable: true, writeDir: '<path>' } \
+                 to enable write operations.",
+            )
+        })
+    }
+
     /// Determine whether a CQL statement is a write operation.
     ///
     /// Deliberately NOT feature-gated: the read-path entry points must be able to
@@ -820,12 +835,7 @@ impl Database {
             // engine.execute() call does not stall the napi async executor thread.
             #[cfg(feature = "write-support")]
             if Self::is_dml_statement(&query) {
-                self.ensure_writable()?;
-                let we_clone = Arc::clone(
-                    self.write_engine
-                        .as_ref()
-                        .expect("ensure_writable verified write_engine is Some"),
-                );
+                let we_clone = Arc::clone(self.writable_engine()?);
                 let (elapsed_ms, applied) = tokio::task::spawn_blocking(move || {
                     let start = std::time::Instant::now();
                     let mut engine = we_clone
@@ -1224,12 +1234,7 @@ impl Database {
 
         #[cfg(feature = "write-support")]
         {
-            self.ensure_writable()?;
-
-            let we = self
-                .write_engine
-                .as_ref()
-                .expect("ensure_writable verified write_engine is Some");
+            let we = self.writable_engine()?;
 
             // `flush()` is async and takes &mut self on the engine.
             // We hold the Mutex lock and block_on inside a spawn_blocking to avoid
@@ -1290,15 +1295,9 @@ impl Database {
 
         #[cfg(feature = "write-support")]
         {
-            self.ensure_writable()?;
-
             let budget_ms = options.as_ref().and_then(|o| o.budget_ms).unwrap_or(100) as u64;
 
-            let we = self
-                .write_engine
-                .as_ref()
-                .expect("ensure_writable verified write_engine is Some");
-            let we_clone = Arc::clone(we);
+            let we_clone = Arc::clone(self.writable_engine()?);
 
             let report = tokio::task::spawn_blocking(move || {
                 let mut engine = we_clone
@@ -1354,12 +1353,7 @@ impl Database {
 
         #[cfg(feature = "write-support")]
         {
-            self.ensure_writable()?;
-
-            let we = self
-                .write_engine
-                .as_ref()
-                .expect("ensure_writable verified write_engine is Some");
+            let we = self.writable_engine()?;
             let engine = we
                 .lock()
                 .map_err(|_| simple_error("Write engine lock poisoned"))?;
