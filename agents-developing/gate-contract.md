@@ -31,7 +31,7 @@ The gate mirrors the enforced CI gates (`.github/workflows/ci.yml`,
 | Component | Command |
 |-----------|---------|
 | `fmt` | `cargo fmt --all --check` |
-| `clippy` | `RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features` |
+| `clippy` | `RUSTFLAGS="-D warnings"` clippy, **scoped per-package** (issue #1844 — see below) |
 | `core-tests` | `cargo test -p cqlite-core --features cli-helpers` (one test skipped — see script) |
 | `integration-tests` | seven named `--test` targets in `cqlite-integration-tests` |
 | `write-tests` | `cargo test -p cqlite-core --features write-support` (lib + roundtrip + compaction) |
@@ -41,6 +41,30 @@ The gate mirrors the enforced CI gates (`.github/workflows/ci.yml`,
 | `smoke` | `bash test-data/scripts/smoke-test-all-tables.sh` (against a freshly built debug binary) |
 
 All components run even after a failure so one run reports everything.
+
+### Scoped clippy (issue #1844)
+
+`--workspace --all-features` enables *every* feature on *every* package, which pulls
+in two costly artifacts on **every** gate run in **every** worktree:
+
+- the **source-built DuckDB C++ amalgamation** (cqlite-cli `duckdb-tests` feature), and
+- the full **OpenTelemetry/OTLP** stack — both the tonic and reqwest transports
+  (`observability`/`observability-testing` on core/cli/flight/bindings).
+
+Neither is reusable by any other gate component (`-D warnings` gives clippy a distinct
+compile fingerprint), so they were pure per-gate tax. The `clippy` component therefore
+runs a **scoped per-package** lint that still covers the whole workspace with
+`-D warnings` but excludes only those two feature families. **parquet/arrow are NOT
+excluded** — they are reachable in normal builds (the
+cli-helpers→state_machine→`cqlite-core/parquet` chain) and stay linted. Both the full
+gate and `--lite` use the same scoping. See `run_clippy()` in `scripts/agent-gate.sh`.
+
+Coverage of the excluded features is **moved, not deleted**: set `CQLITE_CLIPPY_FULL=1`
+to run the historical `cargo clippy --workspace --all-targets --all-features -D warnings`
+matrix. `.github/workflows/gate.yml` (the nightly deep-check) sets it, so a lint that
+only fires behind `duckdb-tests` or `observability*` is still caught within 24h. The
+per-package feature lists in `run_clippy()` can drift as features are added; that
+nightly full pass is the drift backstop.
 
 ## Pre-condition: test data must be present
 
