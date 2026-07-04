@@ -102,18 +102,21 @@ scripts/agent-gate.sh
 scripts/agent-gate.sh --lite
 
 # TEST/DOCS-ONLY DELTA RE-CERTIFICATION (issue #1892) - NOT the gate of record.
-# After a full-gate PASS at commit X, if the ONLY changes since X are test files
-# (tests/ dirs, *_test(s).rs, __test__/, bindings/*/tests/) and/or docs (*.md,
-# docs/, website/), re-certify the X..Y diff with --delta instead of forcing a
-# whole new full gate. It FAILs CLOSED: any production file (src, scripts,
-# workflows, Cargo.*, config, test-data) in the X..Y diff REFUSES the re-cert and
-# a fresh full gate is required. On pass it runs ONLY file-size + fmt + the diff's
-# changed test targets and emits a DISTINCT "==== AGENT-GATE DELTA SUMMARY ===="
-# block (MODE: delta) that names the gate of record (the full PASS at X) + the
-# anchor run-id, so it can NEVER be pasted as a full SUMMARY. Record BOTH the
-# anchor's full SUMMARY and this DELTA block in the PR. Standing backstop: the
-# nightly gate.yml deep-check re-runs the FULL gate on main. Recovery default:
-# .agent-gate-delta-summary.txt.
+# After a full-gate PASS at commit X, if the ONLY changes since X are files the
+# re-cert can EXECUTE — rust cargo test code (.rs under tests/ dirs,
+# *_test(s).rs), python binding tests (bindings/python/tests/, run by the #1893
+# python tier), and/or docs (*.md anywhere; TOP-LEVEL docs/, website/) —
+# re-certify the X..Y diff with --delta instead of forcing a whole new full
+# gate. It FAILs CLOSED: ANYTHING else in the X..Y diff (src, scripts,
+# workflows, Cargo.*, config, test-data — and also node __test__/ files and
+# scripts/tests/*.sh, which --delta's components never execute) REFUSES the
+# re-cert and a fresh full gate is required. On pass it runs ONLY file-size +
+# fmt + the diff's changed test targets and emits a DISTINCT
+# "==== AGENT-GATE DELTA SUMMARY ====" block (MODE: delta) that names the gate
+# of record (the full PASS at X) + the anchor run-id, so it can NEVER be pasted
+# as a full SUMMARY. Record BOTH the anchor's full SUMMARY and this DELTA block
+# in the PR. Standing backstop: the nightly gate.yml deep-check re-runs the
+# FULL gate on main. Recovery default: .agent-gate-delta-summary.txt.
 scripts/agent-gate.sh --delta <anchor-sha> --anchor-run-id <full-gate-run-id>
 #   # or, to read the anchor run-id from the recorded full SUMMARY:
 scripts/agent-gate.sh --delta <anchor-sha> --anchor-summary-file <path-to-full-SUMMARY>
@@ -737,7 +740,7 @@ bash test-data/scripts/fetch-datasets.sh
 ## Agent-team conventions
 - Implementers commit after each meaningful unit of work so roborev reviews land while context is fresh.
 - **Tiered gate loop (issue #1821): iterate on `--lite`, run the FULL gate ONCE before merge.** The implement loop is `implement → lite (each fix round) → conditional internal rust-reviewer review → lite → FULL gate ONCE before merge → roborev → CI → merge`. Use `scripts/agent-gate.sh --lite` (fmt + file-size + workspace clippy + blast-radius-scoped tests, ~1-5 min) on every fix round; it is the fast iteration loop, **NOT the gate of record**. `--lite` NEVER replaces the full gate: run the full `scripts/agent-gate.sh` exactly ONCE before merge and it must PASS — its `==== AGENT-GATE SUMMARY ====` block is the only run that counts.
-- **Test/docs-only delta re-certification (issue #1892): a post-gate polish round that touches ONLY tests/docs re-certifies with `--delta`, not a whole new full gate.** After a full-gate PASS at commit `X`, if the diff `X..Y` touches ONLY test files (tests/ dirs, `*_test(s).rs`, `__test__/`, `bindings/*/tests/`) and/or docs (`*.md`, `docs/`, `website/`), run `scripts/agent-gate.sh --delta X --anchor-run-id <X's full-gate run-id>` (or `--anchor-summary-file <path to X's full SUMMARY>`). It FAILs CLOSED — **any** production change (src, scripts, workflows, `Cargo.*`, config, test-data) in `X..Y` REFUSES the re-cert and forces a fresh full gate. On pass it runs file-size + fmt + the diff's changed test targets and emits a DISTINCT `==== AGENT-GATE DELTA SUMMARY ====` block (MODE: delta). **Record BOTH artifacts in the PR:** the anchor's full SUMMARY (the gate of record) AND the `X..Y` DELTA block. The delta is NOT the gate of record and can never substitute for the full gate on a production change. The standing backstop is the nightly `.github/workflows/gate.yml` deep-check, which re-runs the FULL gate on `main` (owner condition, 2026-07-04). This closes the re-gate loophole where every roborev round on a Low test-robustness finding forced another 15–25 min full gate (e.g. #1853 burned 3 full gates and #1921 burned 2 on test/docs-only polish rounds).
+- **Test/docs-only delta re-certification (issue #1892): a post-gate polish round that touches ONLY executable tests/docs re-certifies with `--delta`, not a whole new full gate.** After a full-gate PASS at commit `X`, if the diff `X..Y` touches ONLY what the re-cert can EXECUTE — rust cargo test code (`.rs` under `tests/` dirs, `*_test(s).rs`), python binding tests (`bindings/python/tests/`, run by the #1893 python tier), and/or docs (`*.md` anywhere; TOP-LEVEL `docs/`, `website/`) — run `scripts/agent-gate.sh --delta X --anchor-run-id <X's full-gate run-id>` (or `--anchor-summary-file <path to X's full SUMMARY>`). It FAILs CLOSED — **anything** else in `X..Y` (src, scripts, workflows, `Cargo.*`, config, test-data — and also node `__test__/` files and `scripts/tests/*.sh`, which `--delta`'s components never execute) REFUSES the re-cert and forces a fresh full gate. On pass it runs file-size + fmt + the diff's changed test targets and emits a DISTINCT `==== AGENT-GATE DELTA SUMMARY ====` block (MODE: delta). **Record BOTH artifacts in the PR:** the anchor's full SUMMARY (the gate of record) AND the `X..Y` DELTA block. The delta is NOT the gate of record and can never substitute for the full gate on a production change. The standing backstop is the nightly `.github/workflows/gate.yml` deep-check, which re-runs the FULL gate on `main` (owner condition, 2026-07-04). This closes the re-gate loophole where every roborev round on a Low test-robustness finding forced another 15–25 min full gate (e.g. #1853 burned 3 full gates and #1921 burned 2 on test/docs-only polish rounds).
 - **Conditional review-first**: do an internal `rust-reviewer` pass BEFORE the first FULL gate when the diff changes a `pub` item, touches >1 call site of a changed symbol, or adds a new surface — catching those findings pre-full-gate avoids a wasted 12-25 min full-gate cycle per roborev round. Skip the review-first pass for mechanical/localized diffs.
 - Clear roborev findings (run /roborev-fix) before handing an issue off.
 - Stay within your assigned issue's scope; flag cross-cutting changes to the lead instead of editing another teammate's files.

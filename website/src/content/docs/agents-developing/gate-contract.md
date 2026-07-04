@@ -131,15 +131,21 @@ scripts/agent-gate.sh --delta X --anchor-run-id <X's full-gate run-id>
 scripts/agent-gate.sh --delta X --anchor-summary-file <path-to-X-full-SUMMARY>
 ```
 
-`--delta` verifies the diff `X..Y` (committed + working tree) touches **ONLY** test
-files (`tests/` dirs, `*_test(s).rs`, `__test__/`, `bindings/*/tests/`) and/or docs
-(`*.md`, `docs/`, `website/`). It is **fail-closed**: any production file (src,
-scripts, workflows, `Cargo.*`, config, test-data) makes it **REFUSE** and name the
-offending files — a production change always requires a fresh full gate. On pass it
-runs **only** file-size + fmt + the diff's changed test targets (the same
-blast-radius scoper `--lite` uses) and emits a DISTINCT
-`==== AGENT-GATE DELTA SUMMARY ====` block (`MODE: delta`, recovery default
-`.agent-gate-delta-summary.txt`).
+`--delta` verifies the diff `X..Y` (committed + working tree) touches **ONLY** what
+the re-cert can **EXECUTE**: rust cargo test code (`.rs` under `tests/` dirs,
+`*_test(s).rs` anywhere), python binding tests (`bindings/python/tests/` — run by
+the issue-1893 python tier), and/or docs (`*.md` anywhere; **top-level-anchored**
+`docs/`, `website/` only). It is **fail-closed**: anything else (src, scripts,
+workflows, `Cargo.*`, config, test-data) makes it **REFUSE** and name the
+offending files — a production change always requires a fresh full gate. The
+refusal deliberately includes two *test* classes the delta components cannot
+execute (roborev job 1452): node `__test__/` files (scoped-tests only
+compile-checks `cqlite-node`; it never runs jest) and shell self-tests
+(`scripts/tests/*.sh`, run only by the full gate's tooling-tests) — allowing them
+would mint a PASS DELTA block for an untested change. On pass it runs **only**
+file-size + fmt + the diff's changed test targets (the same blast-radius scoper
+`--lite` uses) and emits a DISTINCT `==== AGENT-GATE DELTA SUMMARY ====` block
+(`MODE: delta`, recovery default `.agent-gate-delta-summary.txt`).
 
 The delta block is **not the gate of record** and carries an explicit
 `gate-of-record:` line naming the full PASS at `X` plus the anchor run-id, so it can

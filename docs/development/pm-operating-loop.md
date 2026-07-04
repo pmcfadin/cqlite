@@ -87,17 +87,21 @@ every roborev/address round — usually a Low test-robustness or docs finding �
 file). #1853 burned ~3 full-gate cycles and #1921 ~2 on test/docs-only polish rounds. The fix closes that
 loophole **without** weakening the gate of record:
 
-- **After a full-gate PASS at commit `X`**, if the subsequent diff `X..Y` touches **ONLY** test files
-  (`tests/` dirs, `*_test(s).rs`, `__test__/`, `bindings/*/tests/`) and/or docs (`*.md`, `docs/`,
-  `website/`), re-certify with
+- **After a full-gate PASS at commit `X`**, if the subsequent diff `X..Y` touches **ONLY** what the
+  re-cert can **EXECUTE** — rust cargo test code (`.rs` under `tests/` dirs, `*_test(s).rs`), python
+  binding tests (`bindings/python/tests/`, run by the #1893 python tier), and/or docs (`*.md` anywhere;
+  TOP-LEVEL `docs/`, `website/`) — re-certify with
   `scripts/agent-gate.sh --delta X --anchor-run-id <X's full-gate run-id>`
   (or `--anchor-summary-file <path to X's full SUMMARY>`, which reads the run-id and refuses if that file
   is not a full-gate PASS block). It runs file-size + fmt + the diff's changed test targets and emits a
   DISTINCT `==== AGENT-GATE DELTA SUMMARY ====` block (MODE: delta).
-- **Fail-closed:** any production file in `X..Y` (src, scripts, workflows, `Cargo.*`, config, test-data)
-  makes `--delta` **REFUSE** and name the offending files — a production change always requires a fresh
-  full `scripts/agent-gate.sh`. The delta is NOT the gate of record and can never substitute for the full
-  gate on a production change.
+- **Fail-closed, executable-only scope:** anything else in `X..Y` (src, scripts, workflows, `Cargo.*`,
+  config, test-data) makes `--delta` **REFUSE** and name the offending files — a production change always
+  requires a fresh full `scripts/agent-gate.sh`. That refusal deliberately includes two *test* classes the
+  delta components cannot execute (roborev job 1452): node `__test__/` files (scoped-tests only
+  compile-checks `cqlite-node`, it never runs jest) and shell self-tests (`scripts/tests/*.sh`, run only by
+  the full gate's tooling-tests) — an ALLOW there would mint a PASS DELTA block for an untested change.
+  The delta is NOT the gate of record and can never substitute for the full gate on a production change.
 - **PR evidence:** record BOTH artifacts — the anchor's full SUMMARY (the gate of record) AND the `X..Y`
   DELTA block. The DELTA block's markers and `gate-of-record:` line make it impossible to paste a delta run
   as a full SUMMARY.

@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # Regression test for issue #1892: agent-gate.sh --delta test/docs-only
 # RE-CERTIFICATION. After a full-gate PASS at an anchor commit, a diff
-# anchor..HEAD that touches ONLY test files and/or docs may re-certify with
-# file-size + fmt + the changed test targets; ANY production file in the diff
-# FAILs closed (a fresh full gate is required). The delta run emits a DISTINCT
-# "==== AGENT-GATE DELTA SUMMARY ====" block (MODE: delta) that can never be
-# pasted as a full SUMMARY and names the gate of record (the full PASS at the
-# anchor) + the nightly backstop.
+# anchor..HEAD that touches ONLY what the re-cert can EXECUTE — rust cargo test
+# code (.rs under tests/ dirs, *_test(s).rs), python binding tests
+# (bindings/python/tests/, run by the #1893 python tier), and/or docs (*.md
+# anywhere; TOP-LEVEL docs/, website/) — may re-certify with file-size + fmt +
+# the changed test targets; ANYTHING else in the diff FAILs closed (a fresh full
+# gate is required), including node __test__/ files and scripts/tests/*.sh,
+# which --delta's components never execute (roborev job 1452). The delta run
+# emits a DISTINCT "==== AGENT-GATE DELTA SUMMARY ====" block (MODE: delta) that
+# can never be pasted as a full SUMMARY and names the gate of record (the full
+# PASS at the anchor) + the nightly backstop.
 #
 # Fast + hermetic by design: exercises the load-bearing NEW logic — the
 # fail-closed test/docs classification (via the hidden --delta-classify hook),
@@ -64,22 +68,41 @@ else
   echo "------- classify output -------"; printf '%s\n' "$src_out"; echo "-------------------------------"
 fi
 
-# 2. test-only → ALLOW (would proceed to emit a delta block). Cover every test
-#    class: tests/ dirs, bindings/*/tests/, node __test__/, *_test.rs / *_tests.rs.
+# 2. test-only → ALLOW (would proceed to emit a delta block). Cover every
+#    EXECUTABLE test class: .rs under tests/ dirs, bindings/python/tests/
+#    (python tier), *_test.rs / *_tests.rs.
 assert_verdict "test-only-allows" ALLOW \
   "cqlite-core/tests/write_read_roundtrip.rs" \
   "cqlite-cli/tests/unit_tests.rs" \
   "bindings/python/tests/test_parity.py" \
-  "bindings/node/__test__/database.test.js" \
   "cqlite-core/src/storage/reader_test.rs" \
   "cqlite-core/src/query/planner_tests.rs"
 
-# 3. docs-only → ALLOW. Cover *.md, docs/, website/.
+# 2b. NON-EXECUTABLE test classes → REFUSE (roborev job 1452): --delta's
+#     components (file-size, fmt, scoped-tests) never run node jest or the shell
+#     self-tests, so an ALLOW here would yield a PASS DELTA block for an
+#     untested change. Both must fail closed to the full gate.
+assert_verdict "node-test-file-refuses" REFUSE \
+  "bindings/node/__test__/database.test.js"
+assert_verdict "shell-selftest-refuses" REFUSE \
+  "scripts/tests/test_agent_gate_summary.sh"
+
+# 3. docs-only → ALLOW. Cover *.md anywhere + TOP-LEVEL docs/ and website/.
 assert_verdict "docs-only-allows" ALLOW \
   "README.md" \
   "docs/development/pm-operating-loop.md" \
   "docs/sstables-definitive-guide/README.md" \
   "website/src/index.html"
+assert_verdict "top-level-docs-allows" ALLOW "docs/profiling.md"
+
+# 3b. Deep (non-top-level) docs/ and website/ dirs are PRODUCTION (roborev job
+#     1452): the docs globs are top-level-anchored, so a hypothetical
+#     src/docs/mod.rs or a nested website/ dir must REFUSE (only *.md is
+#     allowed anywhere).
+assert_verdict "deep-docs-dir-refuses" REFUSE \
+  "cqlite-core/src/docs/mod.rs"
+assert_verdict "deep-website-dir-refuses" REFUSE \
+  "tools/website/generate.rs"
 
 # 4. mixed (test + production) → REFUSE (any production file poisons the delta).
 assert_verdict "mixed-refuses" REFUSE \

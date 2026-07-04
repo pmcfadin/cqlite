@@ -142,11 +142,15 @@
 #                                    [--anchor-summary-file <path>]
 #                                     # TEST/DOCS-ONLY RE-CERTIFICATION (issue #1892):
 #                                     # after a full-gate PASS at <anchor>, re-certify
-#                                     # a diff anchor..HEAD that touches ONLY test files
-#                                     # (tests/ dirs, *_test(s).rs, __test__/,
-#                                     # bindings/*/tests/) and/or docs (*.md, docs/,
-#                                     # website/). FAIL-CLOSED: any production file in
-#                                     # the diff REFUSES the re-cert (run the full gate).
+#                                     # a diff anchor..HEAD that touches ONLY what the
+#                                     # re-cert can EXECUTE: rust cargo tests (.rs under
+#                                     # tests/ dirs, *_test(s).rs), python binding tests
+#                                     # (bindings/python/tests/ — run by the #1893 python
+#                                     # tier), and/or docs (*.md anywhere; TOP-LEVEL
+#                                     # docs/, website/). FAIL-CLOSED: anything else in
+#                                     # the diff REFUSES the re-cert (run the full gate)
+#                                     # — incl. node __test__/ and scripts/tests/*.sh,
+#                                     # which --delta's components never execute.
 #                                     # On pass it runs ONLY file-size + fmt + the diff's
 #                                     # changed test targets and emits a DISTINCT
 #                                     # "==== AGENT-GATE DELTA SUMMARY ====" block
@@ -560,24 +564,39 @@ classify_scoped_plan() {
   return 0
 }
 
-# _delta_is_allowed_path <path> (issue #1892): TRUE (0) iff the path is a TEST file
-# or DOCS file per the delta-recert policy allowlist; FALSE (non-0) for everything
-# else. FAIL-CLOSED by construction — only an explicit test/docs match is allowed,
-# so any src, script, workflow, Cargo.*, or config change falls through to the
-# refusal path. Test classes: any `tests/` directory (covers cqlite-*/tests/,
-# bindings/*/tests/, top-level tests/), any `__test__/` directory (node jest), and
-# `*_test.rs` / `*_tests.rs`. Docs classes: any `*.md`, anything under `docs/`,
-# anything under `website/`. Defined before the arg-parse case so the hidden
-# --delta-classify hook (and run_delta) can call it. Bash 3.2-safe (case globs).
+# _delta_is_allowed_path <path> (issue #1892): TRUE (0) iff the path is a file the
+# delta re-cert can actually EXECUTE (or pure docs); FALSE (non-0) for everything
+# else. FAIL-CLOSED by construction — only an explicit executable-test/docs match
+# is allowed, so any src, script, workflow, Cargo.*, or config change falls
+# through to the refusal path.
+#
+# ALLOW only what run_delta's components EXECUTE (roborev job 1452): a class that
+# classifies ALLOW but that file-size/fmt/scoped-tests never run would produce a
+# PASS DELTA block for an untested change. Therefore:
+#   * rust cargo test code — `.rs` under any `tests/` directory + `*_test(s).rs`
+#     anywhere (the scoped-tests cargo scoper compiles/runs these);
+#   * python binding tests — `bindings/python/tests/*` (the #1893 python tier
+#     executes the whole not-slow pytest suite for a cqlite-py-owned diff);
+#   * docs — `*.md` anywhere; TOP-LEVEL-anchored `docs/*` and `website/*` only
+#     (roborev job 1452: a hypothetical src/docs/mod.rs is PRODUCTION — the old
+#     any-substring `*/docs/*` glob wrongly allowed it).
+# Deliberately REFUSED (require the full gate — --delta cannot execute them):
+# node jest files (`__test__/` — scoped-tests only compile-checks cqlite-node,
+# it never runs jest) and shell self-tests (`scripts/tests/*.sh` — no gate
+# component in the delta subset runs them; only the full gate's tooling-tests
+# does). Defined before the arg-parse case so the hidden --delta-classify hook
+# (and run_delta) can call it. Bash 3.2-safe (case globs).
 _delta_is_allowed_path() {
   case "$1" in
-    # docs
+    # docs — *.md anywhere; docs/ and website/ top-level ONLY
     *.md) return 0 ;;
-    docs/*|*/docs/*) return 0 ;;
-    website/*|*/website/*) return 0 ;;
-    # tests
-    tests/*|*/tests/*) return 0 ;;
-    __test__/*|*/__test__/*) return 0 ;;
+    docs/*) return 0 ;;
+    website/*) return 0 ;;
+    # python binding tests — executed by the #1893 python tier
+    bindings/python/tests/*) return 0 ;;
+    # rust cargo test code — executed/compiled by the scoped-tests cargo scoper
+    tests/*.rs) return 0 ;;
+    */tests/*.rs) return 0 ;;
     *_test.rs|*_tests.rs) return 0 ;;
     *) return 1 ;;
   esac
@@ -1878,15 +1897,19 @@ run_delta() {
   # FAIL-CLOSED: any production file in the diff refuses the delta re-cert. Name the
   # offending files and tell the caller to run the full gate.
   if [ "$n_offending" -gt 0 ]; then
-    echo "--- [delta] REFUSED: the diff anchor..HEAD changes production (non-test/docs) files:" >&2
+    echo "--- [delta] REFUSED: the diff anchor..HEAD changes files --delta cannot re-certify:" >&2
     while IFS= read -r f; do [ -n "$f" ] && printf '      %s\n' "$f" >&2; done <<<"$offending"
-    echo "    A production change requires a fresh FULL gate: scripts/agent-gate.sh" >&2
+    echo "    A fresh FULL gate is required: scripts/agent-gate.sh" >&2
+    echo "    --delta re-certifies ONLY what it can EXECUTE: rust cargo tests (.rs under tests/" >&2
+    echo "    dirs, *_test(s).rs), python binding tests (bindings/python/tests/), and docs (*.md;" >&2
+    echo "    top-level docs/, website/). Node __test__/ and shell scripts/tests changes require" >&2
+    echo "    the full gate — --delta cannot execute them." >&2
     emit_summary REFUSED \
       "${anchor_meta[@]}" \
       "delta-scope: file-size fmt scoped-tests (NOT RUN — refused before execution)" \
       "$(accelerators_line)" \
       "${file_meta[@]}" \
-      "refusal: $n_offending production file(s) changed — a full gate is required (test/docs-only diffs qualify for --delta)"
+      "refusal: $n_offending file(s) --delta cannot re-certify — a full gate is required (--delta executes only rust cargo tests, bindings/python/tests, and docs; node __test__/ + scripts/tests need the full gate)"
     [ "$SUMMARY_WRITE_FAILED" -eq 0 ] || { echo "agent-gate: exiting non-zero because the summary file could not be written (#1175)" >&2; exit 1; }
     exit 1
   fi
