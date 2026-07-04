@@ -481,19 +481,77 @@ else
 fi
 
 # 9b. Absent → WARN + `absent` marker. Build a minimal PATH bindir that symlinks
-#     the tools the selftest needs but deliberately OMITS sccache + cargo-nextest,
-#     so `command -v` finds neither regardless of whether they are installed on the
-#     host. Non-fatal: if the minimal-PATH run cannot start, skip with an info note.
+#     the tools the selftest path needs but deliberately OMITS sccache +
+#     cargo-nextest, so `command -v` inside the gate finds neither regardless of
+#     what is installed on the host.
+#
+#     FAIL-CLOSED (roborev, job 1438): a selftest guarding against silent
+#     degradation must never itself degrade silently. If the minimal-PATH run
+#     cannot start or trips a missing tool, that is a TEST FAILURE (`bad`) naming
+#     the tool to add to the allowlist below — never a quiet info-skip that turns
+#     this commit's most important assertion into a no-op on some hosts.
+#
+#     Allowlist provenance: traced empirically by running the selftest under a
+#     bash-only PATH and iterating until exit 0. The REQUIRED set (the selftest
+#     path hard-fails without them) is: bash dirname mktemp grep cp cat. The
+#     other coreutils below are headroom so a future gate change that touches a
+#     common tool (mkdir, tail, cut, wc, stat, ...) keeps working instead of
+#     failing this case. Tools the gate itself guards with fallbacks (nproc,
+#     sysctl, cargo, git, python3) are OPTIONAL here: absent-on-host is a
+#     specifically-known, documented platform difference (no nproc on macOS, no
+#     sysctl on Linux), so they are linked when present and skipped when not.
+#
+#     Tool paths resolve via `type -P` (forces a PATH *file* lookup; bash 3.2+)
+#     — NOT `command -v`, which can return a shell function/alias NAME from the
+#     host environment and produce a self-referential dangling symlink.
 accel_bin="$tmp/accel-bin"
 mkdir -p "$accel_bin"
-for tool in bash env git python3 grep sed awk cat head tr sort dirname basename \
-            mktemp rm ln cargo nproc sysctl uname date printf test; do
-  p=$(command -v "$tool" 2>/dev/null) || continue
-  ln -sf "$p" "$accel_bin/$tool" 2>/dev/null || true
+accel_link_fail=0
+# REQUIRED: the selftest path hard-fails without these — missing on the host is
+# itself a failure (fail-closed), not a skip.
+for tool in bash dirname mktemp grep cp cat; do
+  p=$(type -P "$tool" 2>/dev/null)
+  if [ -z "$p" ]; then
+    bad "accel-absent: required tool '$tool' not resolvable on this host (cannot build minimal PATH)"
+    accel_link_fail=1
+    continue
+  fi
+  if ! ln -sf "$p" "$accel_bin/$tool" 2>/dev/null; then
+    bad "accel-absent: could not link required tool '$tool' into minimal PATH"
+    accel_link_fail=1
+  fi
+done
+# OPTIONAL: gate-guarded/platform tools + coreutils headroom (see provenance note).
+for tool in env git python3 sed awk head tail tr sort cut wc stat mkdir rm ln mv \
+            touch chmod basename uname date sleep expr find xargs hostname \
+            cargo nproc sysctl; do
+  p=$(type -P "$tool" 2>/dev/null) || continue
+  [ -n "$p" ] && { ln -sf "$p" "$accel_bin/$tool" 2>/dev/null || true; }
 done
 absent_err="$tmp/absent.stderr"
-if PATH="$accel_bin" AGENT_GATE_SUMMARY_FILE="$tmp/absent.txt" \
-     "$accel_bin/bash" "$GATE" --emit-summary-selftest >/dev/null 2>"$absent_err"; then
+absent_rc=0
+if [ "$accel_link_fail" -eq 0 ]; then
+  PATH="$accel_bin" AGENT_GATE_SUMMARY_FILE="$tmp/absent.txt" \
+    "$accel_bin/bash" "$GATE" --emit-summary-selftest >/dev/null 2>"$absent_err" || absent_rc=$?
+  # Any 'command not found' means the gate now invokes a tool the allowlist
+  # lacks — fail loudly and NAME it so the fix is mechanical (add it above).
+  if grep -q 'command not found' "$absent_err"; then
+    bad "accel-absent: gate hit 'command not found' under minimal PATH — add the named tool(s) to the allowlist above"
+    grep 'command not found' "$absent_err" | sort -u
+    accel_link_fail=1
+  fi
+  # A non-zero rc WITHOUT a visible 'command not found' can still be a missing
+  # tool: emit_summary suppresses its verifier's stderr (grep ... 2>/dev/null),
+  # so e.g. a missing grep surfaces as a bogus 'could not write complete summary
+  # file' instead. Either way a non-zero rc here is a test FAILURE, never a skip.
+  if [ "$absent_rc" -ne 0 ] && [ "$accel_link_fail" -eq 0 ]; then
+    bad "accel-absent: selftest under minimal PATH exited $absent_rc (want 0; possibly a missing tool whose error was suppressed — see stderr)"
+    echo "------- stderr -------"; cat "$absent_err"; echo "----------------------"
+    accel_link_fail=1
+  fi
+fi
+if [ "$accel_link_fail" -eq 0 ]; then
+  ok "accel-absent: selftest EXECUTED under minimal PATH (exit 0, no missing tools)"
   if grep -qE '^accelerators: sccache=absent nextest=absent ' "$tmp/absent.txt"; then
     ok "accel-absent: missing accelerators marked absent in SUMMARY"
   else
@@ -507,8 +565,6 @@ if PATH="$accel_bin" AGENT_GATE_SUMMARY_FILE="$tmp/absent.txt" \
     bad "accel-absent: missing loud WARN for an absent accelerator"
     echo "------- stderr -------"; cat "$absent_err"; echo "----------------------"
   fi
-else
-  echo "info - accel-absent: selftest under minimal PATH did not start; skipping absent-WARN assertions"
 fi
 
 echo "----"
