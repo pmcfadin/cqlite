@@ -765,6 +765,11 @@ mod test_support;
 #[cfg(test)]
 pub(crate) mod decoder_lockstep_tests;
 
+// Issue #1636 (Epic #1603, finding J2): decoder-consolidation equivalence net.
+// Pins that the two live `ComparatorType` decoders share one structural body.
+#[cfg(test)]
+mod decoder_consolidation_tests;
+
 #[cfg(test)]
 mod regression_1741c_tests;
 

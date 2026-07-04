@@ -543,7 +543,7 @@ async fn synthetic_reader() -> SSTableReader {
         .expect("opening the synthetic BIG sstable should succeed")
 }
 
-async fn open_reader() -> Option<SSTableReader> {
+pub(crate) async fn open_reader() -> Option<SSTableReader> {
     #[cfg(feature = "write-support")]
     {
         // Dataset-independent: the lockstep net ALWAYS runs, no fixture needed.
