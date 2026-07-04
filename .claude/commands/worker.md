@@ -92,8 +92,11 @@ onto its own branch). Rules, non-negotiable:
       `run_in_background`, and check for that line before assuming a hang (the default 2-min timeout truncates
       a queued gate). If you must watch it, `grep` the summary file at <5-min intervals — never a silent wait.
    5. Spawn `spec-auditor` for **C** PASS (it audits the impl against `openspec/changes/<slug>/specs/**`);
-      run roborev (`--agent claude-code --model opus`) to clean. If a roborev round drives a code change,
-      iterate on `--lite`, then re-run the FULL gate once before merge.
+      run roborev with **this machine's configured agent** (commonly `codex` via `.roborev.toml`; no
+      `--agent`/`--model` flags needed) to clean. Pass explicit `--agent`/`--model` ONLY as a per-machine
+      troubleshooting override when the local config is broken — see
+      `docs/development/agent-machine-setup.md`. If a roborev round drives a code change, iterate on
+      `--lite`, then re-run the FULL gate once before merge.
    You coordinate and read summaries; you do not open the source yourself.
 7. **Terminal state — arm merge-on-green, then STOP.** Your terminal state is **PR-open + gate PASS +
    C PASS (design) + roborev clean**. Re-check for an open `HOLD: merge after #N` → keep merge-on-green
