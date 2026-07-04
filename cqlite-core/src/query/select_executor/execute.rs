@@ -323,13 +323,16 @@ impl SelectExecutor {
         // key, so we track the current partition and reset the counter at each
         // boundary. Issue #1590 (E8): the boundary is compared on the partition
         // key's 128-bit `partition_key_digest` (a heap-free hash of the key bytes
-        // we already hold) instead of cloning the raw key bytes into an owned
-        // `Vec<u8>` for every row (see the digest's collision note).
+        // we already hold) as a FAST pre-check, then confirmed by EXACT byte
+        // equality against the current partition's raw bytes — stored ONCE when
+        // the boundary advances, never cloned per row. This keeps correctness
+        // independent of digest collisions (a collision between two DISTINCT
+        // partitions never shares a counter).
         let per_partition_limit = execution_steps.iter().find_map(|step| match step {
             ExecutionStep::PerPartitionLimit { count } => Some(*count),
             _ => None,
         });
-        let mut current_partition: Option<u128> = None;
+        let mut current_partition: Option<(u128, Vec<u8>)> = None;
         let mut partition_count: u64 = 0;
 
         let mut sent: u64 = 0;
@@ -382,8 +385,17 @@ impl SelectExecutor {
                                 continue;
                             }
                             if let (Some(cap), Some(sig)) = (per_partition_limit, part_sig) {
-                                if current_partition != Some(sig) {
-                                    current_partition = Some(sig);
+                                // Fast digest pre-check, then EXACT byte confirm so a
+                                // digest collision between DISTINCT partitions never
+                                // shares a counter (issue #1590).
+                                let same = matches!(
+                                    &current_partition,
+                                    Some((d, bytes))
+                                        if *d == sig && bytes.as_slice() == row.key.0.as_slice()
+                                );
+                                if !same {
+                                    // Clone the key bytes ONCE per boundary, not per row.
+                                    current_partition = Some((sig, row.key.0.clone()));
                                     partition_count = 0;
                                 }
                                 if partition_count >= cap {
@@ -442,8 +454,17 @@ impl SelectExecutor {
                                 continue;
                             }
                             if let (Some(cap), Some(sig)) = (per_partition_limit, part_sig) {
-                                if current_partition != Some(sig) {
-                                    current_partition = Some(sig);
+                                // Fast digest pre-check, then EXACT byte confirm so a
+                                // digest collision between DISTINCT partitions never
+                                // shares a counter (issue #1590).
+                                let same = matches!(
+                                    &current_partition,
+                                    Some((d, bytes))
+                                        if *d == sig && bytes.as_slice() == row.key.0.as_slice()
+                                );
+                                if !same {
+                                    // Clone the key bytes ONCE per boundary, not per row.
+                                    current_partition = Some((sig, row.key.0.clone()));
                                     partition_count = 0;
                                 }
                                 if partition_count >= cap {
@@ -502,8 +523,17 @@ impl SelectExecutor {
                         // Apply PER PARTITION LIMIT: cap matching rows per
                         // partition, before OFFSET/LIMIT (Cassandra semantics).
                         if let (Some(cap), Some(sig)) = (per_partition_limit, part_sig) {
-                            if current_partition != Some(sig) {
-                                current_partition = Some(sig);
+                            // Fast digest pre-check, then EXACT byte confirm so a
+                            // digest collision between DISTINCT partitions never
+                            // shares a counter (issue #1590).
+                            let same = matches!(
+                                &current_partition,
+                                Some((d, bytes))
+                                    if *d == sig && bytes.as_slice() == row.key.0.as_slice()
+                            );
+                            if !same {
+                                // Clone the key bytes ONCE per boundary, not per row.
+                                current_partition = Some((sig, row.key.0.clone()));
                                 partition_count = 0;
                             }
                             if partition_count >= cap {

@@ -116,18 +116,63 @@ thread_local! {
 ///
 /// PER PARTITION LIMIT keys its per-partition counters on the partition. Keying
 /// a map (or an adjacent-boundary compare) on the raw `Vec<u8>` clones the key
-/// bytes for every row; keying on this fixed-size `u128` digest instead makes
-/// the per-row work a heap-free hash of the bytes we already hold. The digest is
-/// Cassandra's own `murmur3_x64_128` (already used for token routing), so it is
-/// stable and well-distributed. Collision safety: at 128 bits the birthday
-/// bound is ~2^64 distinct partitions before any collision is even probable —
-/// unreachable under the <128MB memory budget (and far beyond any real
-/// partition count) — so two distinct partitions never share a counter in
-/// practice. This is bookkeeping only (a query row-cap), never a security or
-/// correctness boundary.
+/// bytes for every row; using this fixed-size `u128` digest as the FAST outer
+/// lookup key makes the per-row work a heap-free hash of the bytes we already
+/// hold. The digest is Cassandra's own `murmur3_x64_128` (already used for token
+/// routing), so it is stable and well-distributed.
+///
+/// The digest is only a pre-check: both the batch counter map and the streaming
+/// boundary confirm an EXACT match on the raw partition-key bytes (stored ONCE
+/// per distinct partition, never cloned per row) before sharing a counter. So
+/// correctness does NOT depend on collision absence — two distinct partitions
+/// whose digests collide get separate counters and no valid row is dropped.
 pub(super) fn partition_key_digest(key_bytes: &[u8]) -> u128 {
     let (h1, h2) = crate::util::cassandra_murmur3::cassandra_murmur3_x64_128(key_bytes);
     ((h1 as u64 as u128) << 64) | (h2 as u64 as u128)
+}
+
+/// PER PARTITION LIMIT counter map for the batch path (issue #1590, E8).
+///
+/// The outer key is the fast 128-bit [`partition_key_digest`]; each bucket is a
+/// chain of `(raw_key_bytes, count)` entries disambiguated by EXACT byte
+/// equality. The chain is near-always length 1 — it grows only on a genuine
+/// digest collision between two DISTINCT partition keys — so the fast path is an
+/// `O(1)` digest hash plus a single byte compare, yet correctness never depends
+/// on collision absence.
+type PartitionCounts = HashMap<u128, Vec<(Vec<u8>, u64)>>;
+
+/// Admit one row under PER PARTITION LIMIT `count`, returning `true` when the
+/// row is within its partition's cap (and incrementing that partition's count).
+///
+/// `digest` is the fast outer lookup key; the raw `key_bytes` confirm the exact
+/// partition so a (vanishingly rare) digest collision between two distinct keys
+/// never shares a counter. The key's bytes are cloned at most ONCE — on the row
+/// that first opens the partition's counter — never per row.
+fn admit_partition_row(
+    counts: &mut PartitionCounts,
+    digest: u128,
+    key_bytes: &[u8],
+    count: u64,
+) -> bool {
+    let chain = counts.entry(digest).or_default();
+    let slot = match chain
+        .iter()
+        .position(|(bytes, _)| bytes.as_slice() == key_bytes)
+    {
+        Some(i) => &mut chain[i],
+        None => {
+            // The ONLY key-byte clone: once per distinct partition, not per row.
+            chain.push((key_bytes.to_vec(), 0));
+            let last = chain.len() - 1;
+            &mut chain[last]
+        }
+    };
+    if slot.1 < count {
+        slot.1 += 1;
+        true
+    } else {
+        false
+    }
 }
 
 /// Derive the output column name for a projected SELECT expression (issue #1584).
@@ -792,17 +837,18 @@ impl SelectExecutor {
     /// partition's rows are not contiguous — e.g. when an upstream `ORDER BY`
     /// interleaves rows from different partitions (roborev job 38).
     ///
-    /// Issue #1590 (E8): the counter map is keyed on the partition-key 128-bit
-    /// [`partition_key_digest`] instead of a cloned `Vec<u8>` of the raw key
-    /// bytes, so no key bytes are cloned per row (see the digest's collision
-    /// note).
+    /// Issue #1590 (E8): the counter map uses the partition-key 128-bit
+    /// [`partition_key_digest`] as a FAST outer lookup key, then confirms an
+    /// EXACT match on the raw key bytes (via [`admit_partition_row`]). No key
+    /// bytes are cloned per row — a partition's bytes are stored at most ONCE,
+    /// on the row that first opens its counter — and correctness stays
+    /// independent of digest collisions.
     fn execute_per_partition_limit(rows: Vec<QueryRow>, count: u64) -> Vec<QueryRow> {
         let mut out = Vec::with_capacity(rows.len());
-        let mut counts: HashMap<u128, u64> = HashMap::new();
+        let mut counts: PartitionCounts = HashMap::new();
         for row in rows {
-            let seen = counts.entry(partition_key_digest(&row.key.0)).or_insert(0);
-            if *seen < count {
-                *seen += 1;
+            let digest = partition_key_digest(&row.key.0);
+            if admit_partition_row(&mut counts, digest, &row.key.0, count) {
                 out.push(row);
             }
         }
@@ -1445,6 +1491,51 @@ mod tests {
                 "count={count}: digest-keyed per-partition-limit must equal raw-bytes reference"
             );
         }
+    }
+
+    /// Issue #1590 (E8, roborev fix #4 follow-up): PER PARTITION LIMIT uses the
+    /// 128-bit digest only as a FAST outer key; it confirms EXACT partition-key
+    /// bytes before sharing a counter. Correctness must NOT depend on
+    /// collision absence. Real 128-bit digest collisions can't be produced, so
+    /// drive [`admit_partition_row`] with a CONSTANT (forced-colliding) digest
+    /// for two DISTINCT keys and assert each key keeps its OWN counter — i.e. no
+    /// valid row is dropped when digests collide.
+    #[test]
+    fn per_partition_limit_exact_confirm_survives_digest_collision() {
+        let mut counts: PartitionCounts = HashMap::new();
+        // A single digest value shared by two genuinely distinct partitions.
+        const COLLIDING: u128 = 0xDEAD_BEEF;
+        let a = b"partition-a".as_slice();
+        let b = b"partition-b".as_slice();
+
+        // cap = 1 per partition. A's first row opens A's counter.
+        assert!(
+            admit_partition_row(&mut counts, COLLIDING, a, 1),
+            "A's first row is admitted"
+        );
+        // B collides on the digest but is a DISTINCT key: exact-byte confirm
+        // gives it its OWN counter, so its first row is admitted (NOT dropped by
+        // A's now-exhausted counter). This is the exact bug the finding flags.
+        assert!(
+            admit_partition_row(&mut counts, COLLIDING, b, 1),
+            "B's first row is admitted despite the colliding digest (separate counter)"
+        );
+        // Each partition's cap of 1 is now independently exhausted.
+        assert!(
+            !admit_partition_row(&mut counts, COLLIDING, a, 1),
+            "A's second row is capped"
+        );
+        assert!(
+            !admit_partition_row(&mut counts, COLLIDING, b, 1),
+            "B's second row is capped"
+        );
+        // Both distinct keys are chained under the one colliding digest bucket,
+        // proving the exact-confirm path (not the digest) disambiguates them.
+        assert_eq!(
+            counts.get(&COLLIDING).map(Vec::len),
+            Some(2),
+            "both distinct keys are chained under the colliding digest"
+        );
     }
 
     /// Issue #1587 (E5): ORDER BY uses decorate-sort-undecorate, so each row's
