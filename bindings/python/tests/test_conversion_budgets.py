@@ -39,17 +39,25 @@ WIDE_TABLE = "test_wide_rows.many_columns_table"
 ROW_LIMIT = 200
 
 # MEASURED BASELINE (2026-07-04, macOS arm64, maturin --profile dev):
-#   result = db.execute("SELECT * FROM test_wide_rows.many_columns_table LIMIT 200")
+#   MEASUREMENT WINDOW (issue #1449, roborev fix): the tracemalloc window now
+#   wraps BOTH `db.execute(...)` AND the `[dict(r) for r in result.rows]`
+#   materialization. Python's conversion of every row/cell to a PyObject is
+#   EAGER inside `execute()` (see result.rs `Row::from_core` / eager materialize),
+#   so the earlier window — which started tracemalloc AFTER execute() returned —
+#   measured only the dict re-packaging and left the W1-W4 conversion allocations
+#   (interned/ordered keys, one-time column-name interning) OUTSIDE the ratchet.
+#   With execute() now inside the window we capture the actual conversion cost:
 #   -> 50 rows x 101 columns present in the fixture
-#   materialize `[dict(r) for r in result.rows]` under tracemalloc
-#   -> traced peak = 412,150 bytes, i.e. per_row = 8,243.0 bytes (stable to the
-#      byte across 4 consecutive runs).
-# Budget = 13,000 bytes/row (~1.58x the observed 8,243) — modest headroom for
+#   -> traced peak observed across 10 consecutive runs = 8,967.0 .. 9,078.2
+#      bytes/row (vs the old post-execute-only ~8,243 — the ~800 bytes/row delta
+#      is the previously-unmeasured conversion allocation now inside the window).
+# Budget = 14,000 bytes/row (~1.54x the observed 9,078 max) — modest headroom for
 # interpreter/allocator variance across platforms and Python versions while
 # still tripping on a regression that roughly doubles per-row allocation (e.g.
-# re-interning every column key per row, or re-cloning row values). Documented
-# per the issue mandate: pinned to a measured number, never a guess.
-BUDGET_BYTES_PER_ROW = 13_000
+# re-interning every column key per row instead of the one-time #1445/#1446
+# interning). Documented per the issue mandate: pinned to a measured number,
+# never a guess.
+BUDGET_BYTES_PER_ROW = 14_000
 
 
 def test_per_row_alloc_budget():
@@ -62,7 +70,20 @@ def test_per_row_alloc_budget():
     skip_if_no_schema(SCHEMA_WIDE_ROWS)
 
     with cqlite.open(DATASETS, schema=SCHEMA_WIDE_ROWS) as db:
+        # Measure the CONVERSION PATH itself (issue #1449 roborev fix): the
+        # window MUST wrap execute() — Python converts every row/cell to a
+        # PyObject eagerly inside execute(), so measuring only the later
+        # `dict(r)` re-packaging left the W1-W4 conversion allocations
+        # unmeasured and a regression there would not trip this ratchet.
+        tracemalloc.start()
         result = db.execute(f"SELECT * FROM {WIDE_TABLE} LIMIT {ROW_LIMIT}")
+        materialized = [dict(r) for r in result.rows]
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+
+        # Keep the materialized data alive across the measurement so nothing is
+        # freed before `peak` is read. The length checks below run AFTER
+        # tracemalloc.stop() so they add no allocation to the measured window.
         n = len(result)
         # FAIL LOUDLY (never skip) on a present-but-empty/unreadable dataset:
         # a zero-row result would make the per-row math divide-by-zero and
@@ -71,15 +92,6 @@ def test_per_row_alloc_budget():
             f"fixture {WIDE_TABLE} present but returned 0 rows — datasets "
             "unreadable or table dropped (see issue #1230)"
         )
-
-        # Measure ONLY the materialization allocation, mirroring test_performance.py.
-        tracemalloc.start()
-        materialized = [dict(r) for r in result.rows]
-        _, peak = tracemalloc.get_traced_memory()
-        tracemalloc.stop()
-
-        # Keep the materialized data alive across the measurement so nothing is
-        # freed before `peak` is read.
         assert len(materialized) == n
 
         per_row = peak / n

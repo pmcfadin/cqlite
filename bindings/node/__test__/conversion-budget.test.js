@@ -32,22 +32,45 @@ const SCHEMA = global.testPaths.SCHEMA_WIDE_ROWS;
 const QUERY = 'SELECT * FROM test_wide_rows.many_columns_table LIMIT 200';
 const MEASURE_PASSES = 7;
 
+// MEASUREMENT WINDOW (issue #1449 roborev fix): each pass now wraps
+// `executeNative(QUERY)` ITSELF inside the gc'd heap-delta window (gc x2, sample
+// heapUsed, executeNative + touch all rows, sample heapUsed again). The earlier
+// window sampled only `rows.map(r => ({...r}))` — a shallow spread of rows that
+// executeNative had ALREADY materialized — so the per-row conversion allocation
+// (the JS value graph built in `resolve()`/`row_to_object`) landed OUTSIDE the
+// ratchet. With executeNative inside, the delta captures the actual per-row
+// converted-value footprint.
+//
 // MEASURED BASELINE (2026-07-04, macOS arm64, release-unwind .node):
 //   executeNative(QUERY) -> 50 rows, ~8 non-null columns each.
-//   Per pass: double gc, read heapUsed, materialize `rows.map(r => ({...r}))`,
-//   read heapUsed again; per_row = delta / rowCount.
-//   Median-of-7 (as this test computes it) settled at 151.2 bytes/row once V8
-//   warmed; a cold first pass measured ~214.6. Single-sample spread over 12
-//   runs was min=151.2 / max=221.0.
-// Budget = 350 bytes/row: comfortably above the warm 151 and the cold ~215
-// medians (~1.6x-2.3x headroom, so it does not flake on V8 GC / hidden-class
-// churn — heapUsed deltas are noisier than Python's tracemalloc, which is why we
-// assert the MEDIAN pass, not a worst-case single sample), yet well below a
-// regression that inflates per-row storage: a synthetic ~2x-properties regression
-// measured 1222 bytes/row (see the "Prove the budget bites" note in the issue
-// #1449 delivery summary), an order of magnitude over the budget. Pinned to a
-// measured number per the issue mandate, never a guess.
-const BUDGET_BYTES_PER_ROW = 350;
+//   Median-of-7 (as this test computes it) stabilized at 1295.2 bytes/row once
+//   V8 warmed (a cold experiment measured 1357.6). Single-sample spread over 12
+//   warm samples was min=1295.2 / max=1534.9.
+// Budget = 1800 bytes/row: ~1.33x-1.39x over the warm/cold medians (headroom for
+// V8 GC / hidden-class churn — heapUsed deltas are noisier than Python's
+// tracemalloc, which is why we assert the MEDIAN pass, not a worst-case single
+// sample), yet below a regression that inflates the per-row value graph: a
+// synthetic value-graph-doubling regression (converting + retaining each cell's
+// value twice) measured a median of 2086.1 bytes/row (min 2047.5) — comfortably
+// over this budget. Pinned to a measured number per the issue mandate.
+//
+// WHAT THIS BUDGET DOES AND DOES NOT PIN (issue #1449, measured — honest scope):
+// The V8 `heapUsed` delta pins the GROSS per-row JS value-graph footprint, so it
+// catches an O(rows x columns) duplication/boxing of converted cell values
+// (proven above: the doubling regression trips it). It CANNOT observe two of the
+// W1-W4 wins from the binding layer, both confirmed by measurement here:
+//   * #1447 (clone -> move of row values in executeNative's `compute()`): the
+//     clone is a RUST-heap allocation, dropped before the post-execute V8 sample,
+//     and never touches the V8 heap — reverting it moved the median 1335.0 ->
+//     1333.8 (noise).
+//   * #1445/#1446 (column-key interning): V8 internally dedups property-name
+//     strings, so emitting a fresh key string per cell instead of the interned
+//     handle moved the median 1335.0 -> 1333.8 (noise) at this table's scale.
+// Those two wins are pinned elsewhere: #1448 by the Rust `#[cfg(test)]`
+// `set_map_ctor_lookups_bounded_per_result` counter (bindings/node/src/value.rs);
+// #1445/#1446/#1447 would need Rust-side allocation counters to ratchet directly
+// (none exists yet) — this heap test does not overclaim them.
+const BUDGET_BYTES_PER_ROW = 1800;
 
 function median(nums) {
   const sorted = [...nums].sort((a, b) => a - b);
@@ -85,17 +108,23 @@ describe('conversion per-row heap budget (issue #1449)', () => {
     let rowCount = 0;
 
     for (let pass = 0; pass < MEASURE_PASSES; pass += 1) {
+      // Measure the CONVERSION PATH: executeNative() is INSIDE the window
+      // (issue #1449 roborev fix) so the per-row value-graph allocation it
+      // builds is captured, not just a shallow spread of already-materialized
+      // rows.
+      global.gc();
+      global.gc();
+      const before = process.memoryUsage().heapUsed;
       const result = await db.executeNative(QUERY);
+      // Touch every row so V8 cannot elide the materialized graph before the
+      // post-execute sample.
+      const materialized = result.rows.map((r) => ({ ...r }));
+      const after = process.memoryUsage().heapUsed;
+
       rowCount = result.rowCount;
       // FAIL LOUDLY (never skip) on a present-but-empty/unreadable dataset — a
       // zero-row result would divide-by-zero and false-green the ratchet.
       expect(rowCount).toBeGreaterThan(0);
-
-      global.gc();
-      global.gc();
-      const before = process.memoryUsage().heapUsed;
-      const materialized = result.rows.map((r) => ({ ...r }));
-      const after = process.memoryUsage().heapUsed;
       // Keep the materialized data alive across the sample so nothing is freed
       // before `after` is read.
       expect(materialized.length).toBe(rowCount);
