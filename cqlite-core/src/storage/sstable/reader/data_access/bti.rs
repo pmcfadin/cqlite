@@ -536,12 +536,17 @@ impl SSTableReader {
         let Some(ci) = self.compression_info.as_deref() else {
             return Ok(None);
         };
+        // header_offset is ALWAYS 0 for NB/BTI: CompressionInfo chunk offsets are
+        // absolute from Data.db byte 0 (any embedded header is part of the
+        // compressed data), exactly as the cursor path hardcodes in
+        // `read_next_block_impl`. Passing `actual_header_size` here would shift
+        // every chunk read and fail CRC.
         super::super::block_io::read_compressed_chunk_at(
             self.point_source.as_ref(),
             ci,
             chunk_idx,
             self.stats.file_size,
-            self.actual_header_size as u64,
+            0,
         )
     }
 
