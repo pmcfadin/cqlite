@@ -188,8 +188,26 @@ impl SelectExecutor {
                         Self::execute_per_partition_limit(intermediate_results, *count);
                 }
                 ExecutionStep::Limit { count, offset } => {
-                    intermediate_results =
-                        self.execute_limit(intermediate_results, *count, *offset, &mut context)?;
+                    // roborev FINDING B: when the materializing scan early-stopped
+                    // (`scan_collect_bound` is `Some`), it ALREADY applied this
+                    // LIMIT's OFFSET — skipping the leading matching rows uncharged
+                    // and collecting only `count`. Re-applying the OFFSET here would
+                    // wrongly drop the first `offset` of the already-offset rows, so
+                    // pass `None`: this step then only truncates to `count` (a
+                    // safety net; the scan already bounded the row count). When
+                    // early-stop was disallowed (`None`), the OFFSET is applied here
+                    // as before.
+                    let effective_offset = if scan_collect_bound.is_some() {
+                        None
+                    } else {
+                        *offset
+                    };
+                    intermediate_results = self.execute_limit(
+                        intermediate_results,
+                        *count,
+                        effective_offset,
+                        &mut context,
+                    )?;
                 }
                 ExecutionStep::Project { columns } => {
                     intermediate_results =
@@ -602,13 +620,15 @@ impl SelectExecutor {
     /// oversized result is rejected with an actionable message (add `LIMIT` /
     /// stream) rather than silently materializing an unbounded `Vec`.
     ///
-    /// `collect_bound` (FINDING 2) is the max number of MATCHING (post-predicate)
-    /// rows to collect — `Some(offset + count)` when the caller determined the
-    /// plan's post-scan steps cannot reorder or drop rows (so the first
-    /// `offset + count` matches are exactly what a later LIMIT keeps), else `None`.
-    /// It is used to early-stop collection AFTER per-row `evaluate_predicates`, so a
-    /// LIMITed query completes without the byte budget biting on matching rows
-    /// beyond the limit.
+    /// `collect_bound` (FINDING 2 + roborev FINDING B) bounds the MATCHING
+    /// (post-predicate) rows: `Some(ScanCollectBound { count, offset })` when the
+    /// caller determined the plan's post-scan steps cannot reorder or drop rows.
+    /// The scan then SKIPS the first `offset` matching rows WITHOUT pushing them
+    /// or charging their bytes, and collects the next `count` — exactly what a
+    /// later LIMIT keeps. Skipping the offset rows uncharged means a small final
+    /// result never fails `ResultTooLarge` because the discarded offset rows were
+    /// wide. The skip counts only rows that PASSED `evaluate_predicates`, composing
+    /// with FINDING 1 (a raw pre-predicate skip would drop matching rows).
     ///
     /// FINDING 1: `collect_bound` is pushed into the underlying `storage.scan`
     /// `limit` ONLY for a pure unfiltered scan (no executor-side predicate to
@@ -618,8 +638,8 @@ impl SelectExecutor {
     /// only the first `offset + count` RAW rows and silently drop matching rows
     /// further along the scan. The executor-side early-stop remains correct in both
     /// cases because it counts only rows that already passed the predicate. Also,
-    /// `collect_bound == Some(0)` short-circuits to an empty result before any scan
-    /// or budget work on every path (targeted, multi-targeted, fallback).
+    /// a `count == 0` bound (LIMIT 0) short-circuits to an empty result before any
+    /// scan or budget work on every path (targeted, multi-targeted, fallback).
     ///
     /// NOTE (FINDING 1 / peak memory): the underlying `storage.scan` still
     /// materializes each SSTable's matching rows via the reader's index path before
@@ -640,9 +660,10 @@ impl SelectExecutor {
         // Issue #1587 (E5): schema resolved ONCE per query by the caller and
         // shared by reference — no per-scan registry lock + deep clone.
         schema_opt: Option<&TableSchema>,
-        // Issue #1582 (FINDING 2): early-stop bound (offset + count) when the plan
-        // permits it, else None. See the method doc.
-        collect_bound: Option<usize>,
+        // Issue #1582 (FINDING 2 + roborev FINDING B): early-stop bound
+        // (count + uncharged offset skip) when the plan permits it, else None.
+        // See the method doc.
+        collect_bound: Option<ScanCollectBound>,
         context: &mut ExecutionContext,
     ) -> Result<Vec<QueryRow>> {
         // Issue #1582 (FINDING 2): a LIMIT 0 collects nothing. Short-circuit
@@ -650,12 +671,20 @@ impl SelectExecutor {
         // work on EVERY path (targeted, multi-targeted, fallback scan). Besides
         // being the correct empty result, this stops the targeted/wide path from
         // pushing a first matching row and byte-checking it — which could raise
-        // `ResultTooLarge` instead of returning empty. `collect_bound` is `Some(0)`
+        // `ResultTooLarge` instead of returning empty. A `count == 0` bound is set
         // only when the plan's post-scan steps cannot reorder/drop rows, so an
-        // empty result is result-preserving here.
-        if collect_bound == Some(0) {
+        // empty result is result-preserving here (LIMIT 0 is empty regardless of
+        // any OFFSET).
+        if matches!(collect_bound, Some(b) if b.count == 0) {
             return Ok(Vec::new());
         }
+
+        // roborev FINDING B: number of leading MATCHING rows to skip uncharged
+        // (the OFFSET) and the number of matching rows to RETURN (the LIMIT).
+        // `None` when the plan disallows early-stop → skip nothing, collect all.
+        let skip_count = collect_bound.map(|b| b.offset).unwrap_or(0);
+        let take_count = collect_bound.map(|b| b.count);
+        let mut skipped: usize = 0;
 
         // Issue #1582 (FINDING 1): the underlying `storage.scan` /
         // `scan_with_cell_metadata` receive a `None` key range and are NOT
@@ -670,8 +699,13 @@ impl SelectExecutor {
         // whether storage enforces a pushed predicate, treat it as NOT enforced.
         // The executor-side early-stop (below) stays safe in BOTH cases: it stops
         // only after a row has passed `evaluate_predicates`.
+        // For a pure unfiltered scan, storage must still yield offset + count raw
+        // rows (all of which match) so the executor can skip `offset` and return
+        // `count`. roborev FINDING B: the offset rows are skipped uncharged AFTER
+        // storage returns them; `storage.scan` is not predicate-aware, so this
+        // push is withheld the moment executor-side predicates exist.
         let storage_limit = if predicates.is_empty() {
-            collect_bound
+            collect_bound.map(|b| b.offset.saturating_add(b.count))
         } else {
             None
         };
@@ -789,11 +823,18 @@ impl SelectExecutor {
                 }
 
                 if evaluate_predicates(&row, predicates)? {
+                    // roborev FINDING B: skip the first `offset` MATCHING rows
+                    // uncharged — never push them nor add their bytes — so an
+                    // OFFSET's discarded rows cannot trip the byte budget.
+                    if skipped < skip_count {
+                        skipped += 1;
+                        continue;
+                    }
                     result_bytes = result_bytes.saturating_add(estimate_query_row_bytes(&row));
                     results.push(row);
                     enforce_result_budget(&results, result_bytes, byte_budget, max_rows)?;
-                    // FINDING 2: early-stop at the LIMIT bound where safe. NOTE
-                    // (FINDING 1 scope): the metadata (WRITETIME/TTL) full-scan
+                    // FINDING 2: early-stop at the LIMIT (`count`) bound where safe.
+                    // NOTE (FINDING 1 scope): the metadata (WRITETIME/TTL) full-scan
                     // fallback above materializes via `scan_with_cell_metadata`
                     // because there is no streaming metadata scan yet — the byte
                     // guard here still fails-fast on the collected result, and the
@@ -802,7 +843,7 @@ impl SelectExecutor {
                     // metadata scan (the metadata analog of `scan_stream`) is a
                     // documented follow-up; the dominant, unbounded risk is the
                     // non-metadata full scan, which IS bounded above.
-                    if let Some(bound) = collect_bound {
+                    if let Some(bound) = take_count {
                         if results.len() >= bound {
                             break;
                         }
@@ -928,13 +969,20 @@ impl SelectExecutor {
                 };
 
                 if evaluate_predicates(&row, predicates)? {
+                    // roborev FINDING B: skip the first `offset` MATCHING rows
+                    // uncharged — never push them nor add their bytes — so an
+                    // OFFSET's discarded rows cannot trip the byte budget.
+                    if skipped < skip_count {
+                        skipped += 1;
+                        continue;
+                    }
                     result_bytes = result_bytes.saturating_add(estimate_query_row_bytes(&row));
                     results.push(row);
                     enforce_result_budget(&results, result_bytes, byte_budget, max_rows)?;
                     // FINDING 2: the targeted / multi-partition paths return a Vec
-                    // already bounded by the partition(s); early-stop still avoids
-                    // building rows a later LIMIT would discard.
-                    if let Some(bound) = collect_bound {
+                    // already bounded by the partition(s); early-stop at `count`
+                    // still avoids building rows a later LIMIT would discard.
+                    if let Some(bound) = take_count {
                         if results.len() >= bound {
                             break;
                         }
@@ -947,27 +995,48 @@ impl SelectExecutor {
     }
 }
 
-/// Compute the early-stop collection bound for the materializing scan (issue
-/// #1582 / FINDING 2).
+/// Early-stop collection bound for the materializing scan (issue #1582).
 ///
-/// Returns `Some(offset + count)` — the number of matching rows the scan may
-/// collect before stopping — ONLY when the plan's post-scan steps are limited to
-/// `Limit` and `Project`, i.e. no step (`Sort`, `PerPartitionLimit`, `Aggregate`,
-/// `Filter`) can reorder or drop rows. In that case the first `offset + count`
-/// matching rows are exactly the set a later `Limit { count, offset }` keeps, so
-/// early-stopping is result-preserving AND prevents the byte budget from tripping
-/// on matching rows beyond the limit. Any other step returns `None` (collect the
-/// full, still byte-budget-bounded result). Absent a `Limit`, returns `None`.
-fn compute_scan_collect_bound(steps: &[ExecutionStep]) -> Option<usize> {
-    let mut bound: Option<usize> = None;
+/// `count` is the number of MATCHING (post-predicate) rows the scan RETURNS —
+/// the LIMIT — and `offset` is the number of leading matching rows the scan
+/// SKIPS (the OFFSET) WITHOUT pushing them or charging their bytes to the budget
+/// (roborev FINDING B). Skipping the offset rows uncharged means a small final
+/// result never fails `ResultTooLarge` merely because the discarded offset rows
+/// were wide.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScanCollectBound {
+    /// LIMIT: matching rows to collect + return after the offset skip.
+    count: usize,
+    /// OFFSET: leading matching rows to skip, uncharged, before collecting.
+    offset: usize,
+}
+
+/// Compute the early-stop collection bound for the materializing scan (issue
+/// #1582 / FINDING 2 + roborev FINDING B).
+///
+/// Returns `Some(ScanCollectBound { count, offset })` ONLY when the plan's
+/// post-scan steps are limited to `Limit` and `Project`, i.e. no step (`Sort`,
+/// `PerPartitionLimit`, `Aggregate`, `Filter`) can reorder or drop rows. In that
+/// case the scan may skip the first `offset` matching rows uncharged and collect
+/// the next `count` — exactly the set a later `Limit { count, offset }` keeps —
+/// so early-stopping is result-preserving AND keeps the byte budget from tripping
+/// on the skipped offset rows or on matching rows beyond the limit. Because the
+/// scan then fully applies the LIMIT/OFFSET, the caller neutralizes the OFFSET in
+/// the downstream `Limit` step (it re-applying the offset would drop the first
+/// `offset` of the already-offset rows). Any other step returns `None` (collect
+/// the full, still byte-budget-bounded result). Absent a `Limit`, returns `None`.
+fn compute_scan_collect_bound(steps: &[ExecutionStep]) -> Option<ScanCollectBound> {
+    let mut bound: Option<ScanCollectBound> = None;
     for step in steps {
         match step {
             ExecutionStep::SSTableScan { .. } | ExecutionStep::Project { .. } => {}
             ExecutionStep::Limit { count, offset } => {
-                // `count`/`offset` are u64; saturate the sum into usize for the
-                // in-memory collection bound.
-                let sum = count.saturating_add(offset.unwrap_or(0));
-                bound = Some(usize::try_from(sum).unwrap_or(usize::MAX));
+                // `count`/`offset` are u64; saturate into usize for the in-memory
+                // collection bounds.
+                bound = Some(ScanCollectBound {
+                    count: usize::try_from(*count).unwrap_or(usize::MAX),
+                    offset: usize::try_from(offset.unwrap_or(0)).unwrap_or(usize::MAX),
+                });
             }
             // Any other step may reorder or drop rows; early-stopping the scan
             // at the raw match count would then yield the wrong result set.
