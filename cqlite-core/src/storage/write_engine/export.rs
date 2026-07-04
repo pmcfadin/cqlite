@@ -241,32 +241,6 @@ fn build_cassandra_filename(generation: u64, component: &str) -> String {
     format!("nb-{}-big-{}", generation, component)
 }
 
-/// Decode an unsigned VInt from a byte slice at the given offset.
-///
-/// Returns `(value, bytes_consumed)` or an error if data is insufficient.
-/// Wraps `parser::vint::parse_vuint` with an offset-based interface.
-#[cfg(feature = "write-support")]
-fn decode_unsigned_vint(data: &[u8], offset: usize) -> Result<(u64, usize)> {
-    use crate::parser::vint::parse_vuint;
-
-    let slice = data.get(offset..).ok_or_else(|| {
-        Error::Storage(format!(
-            "VInt: offset {} beyond data length {}",
-            offset,
-            data.len()
-        ))
-    })?;
-    let (remaining, value) = parse_vuint(slice).map_err(|_| {
-        Error::Storage(format!(
-            "VInt: failed to decode at offset {} (data length {})",
-            offset,
-            data.len()
-        ))
-    })?;
-    let bytes_consumed = slice.len() - remaining.len();
-    Ok((value, bytes_consumed))
-}
-
 /// Export implementation methods (added to WriteEngine)
 #[cfg(feature = "write-support")]
 impl crate::storage::write_engine::WriteEngine {
@@ -537,17 +511,20 @@ impl crate::storage::write_engine::WriteEngine {
     }
 }
 
-/// Read partition and row counts from Statistics.db and Index.db
+/// Read partition and row counts from the exported Statistics.db.
 ///
-/// `totalRows` is decoded from the STATS component via the authoritative gated
-/// reader [`crate::parser::repair_metadata::read_table_counts`] (issue #944),
-/// which dynamically skips the two leading `EstimatedHistogram`s AND the
-/// tombstone histogram before reading the count (issue #1327). Partition count
-/// is derived from the number of index entries in the exported Index.db.
+/// Both counts come from the single authoritative gated STATS reader
+/// [`crate::parser::repair_metadata::read_table_counts`] (issue #944):
+/// - `partition_count` is the Σ of the self-describing `estimatedPartitionSize`
+///   histogram bucket counts. It needs no version gates and is format-agnostic,
+///   so it is correct for `nb` BIG *and* `da` BTI exports (issue #1622).
+/// - `totalRows` is decoded from the version-gated STATS body, which dynamically
+///   skips the two leading `EstimatedHistogram`s AND the tombstone histogram
+///   before reading the count (issue #1327).
 ///
-/// Index.db format (BIG format, NB variant):
-/// - Each entry: u16 BE key_len + key_bytes + VInt position + VInt promoted_size
-/// - Entries are sequential until EOF
+/// There is intentionally NO hand-rolled Index.db walk here: BTI SSTables have
+/// no Index.db (they use Partitions.db/Rows.db), so a BIG-only walk silently
+/// reported 0 partitions for BTI exports (issue #1622).
 #[cfg(feature = "write-support")]
 fn read_statistics_from_export(components: &[PathBuf]) -> Result<(u64, u64)> {
     // Find Statistics.db in exported components
@@ -574,25 +551,32 @@ fn read_statistics_from_export(components: &[PathBuf]) -> Result<(u64, u64)> {
     // the wrong offset (finding 2). Authoritative gates come from the exported
     // Statistics.db filename (`nb-{gen}-big-Statistics.db`).
     let gates = crate::storage::sstable::version_gate::VersionGates::from_path(stats_path).ok();
-    let row_count =
-        match crate::parser::repair_metadata::read_table_counts(&file_data, gates.as_ref()) {
-            Ok(counts) => counts.total_rows.unwrap_or_else(|| {
-                // `total_rows` is None only when the version-gated walk could not reach
-                // field 12 (e.g. unmodeled improved-min-max bounds). `nb` exports use
-                // the legacy min/max branch, which is always traversable, so this is a
-                // fail-safe rather than an expected path.
-                log::warn!("Statistics.db STATS walk could not reach totalRows; defaulting to 0");
-                0
-            }),
-            Err(e) => {
-                log::warn!("Failed to read totalRows from Statistics.db: {e}; defaulting to 0");
-                0
+    // Issue #1622: derive BOTH counts from the ONE authoritative gated STATS
+    // reader. `partition_count` is the Σ of the self-describing
+    // `estimatedPartitionSize` histogram bucket counts (needs no version gates
+    // and is format-agnostic), so it is correct for `nb` BIG *and* `da` BTI
+    // exports. The previous code hand-rolled a BIG-only `Index.db` walk
+    // (`count_index_entries`); a BTI SSTable has no `Index.db` (it uses
+    // `Partitions.db`/`Rows.db`), so that walk failed and the swallowed error
+    // left `partition_count == 0` even for tables with many partitions.
+    let counts = match crate::parser::repair_metadata::read_table_counts(&file_data, gates.as_ref())
+    {
+        Ok(counts) => counts,
+        Err(e) => {
+            log::warn!("Failed to read counts from Statistics.db: {e}; defaulting to 0");
+            crate::parser::repair_metadata::TableCounts {
+                partition_count: 0,
+                total_rows: None,
             }
-        };
-
-    // Count partitions from Index.db entries
-    let partition_count = count_index_entries(components).unwrap_or_else(|e| {
-        log::warn!("Failed to count Index.db entries: {}, defaulting to 0", e);
+        }
+    };
+    let partition_count = counts.partition_count;
+    let row_count = counts.total_rows.unwrap_or_else(|| {
+        // `total_rows` is None only when the version-gated walk could not reach
+        // field 12 (e.g. unmodeled improved-min-max bounds). `nb` exports use
+        // the legacy min/max branch, which is always traversable, so this is a
+        // fail-safe rather than an expected path.
+        log::warn!("Statistics.db STATS walk could not reach totalRows; defaulting to 0");
         0
     });
 
@@ -603,82 +587,6 @@ fn read_statistics_from_export(components: &[PathBuf]) -> Result<(u64, u64)> {
     );
 
     Ok((partition_count, row_count))
-}
-
-/// Count the number of partition entries in Index.db
-///
-/// Each partition has one entry in Index.db using BIG format (NB variant):
-/// ```text
-/// [key_len: u16 BE]                  ← Length of partition key bytes
-/// [key_bytes: key_len bytes]         ← Raw partition key bytes
-/// [position: unsigned VInt]          ← Data.db offset
-/// [promoted_index_size: unsigned VInt] ← Size of promoted index (0 for simple)
-/// [promoted_index: N bytes]          ← Optional promoted index data
-/// ```
-///
-/// Entries are sequential until EOF.
-#[cfg(feature = "write-support")]
-fn count_index_entries(components: &[PathBuf]) -> Result<u64> {
-    // Find Index.db in exported components
-    let index_path = components
-        .iter()
-        .find(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .map(|s| s.ends_with("Index.db"))
-                .unwrap_or(false)
-        })
-        .ok_or_else(|| Error::Storage("Index.db not found in export".to_string()))?;
-
-    let index_data = std::fs::read(index_path)
-        .map_err(|e| Error::Storage(format!("Failed to read Index.db: {}", e)))?;
-
-    let mut count = 0u64;
-    let mut offset = 0usize;
-
-    // Each BIG entry is at least 4 bytes: 2 (key_len) + 1 (pos VInt) + 1 (promoted VInt)
-    while offset + 4 <= index_data.len() {
-        // Read 2-byte key length (u16 BE)
-        let key_len = u16::from_be_bytes([index_data[offset], index_data[offset + 1]]) as usize;
-        offset += 2;
-
-        // Skip key bytes
-        if offset + key_len > index_data.len() {
-            log::warn!(
-                "Index.db: key at offset {} exceeds file bounds (key_len={})",
-                offset,
-                key_len
-            );
-            break;
-        }
-        offset += key_len;
-
-        // Read position as unsigned VInt
-        let (_, pos_bytes) = decode_unsigned_vint(&index_data, offset)?;
-        offset += pos_bytes;
-
-        // Read promoted_index_size as unsigned VInt
-        let (promoted_size, prom_bytes) = decode_unsigned_vint(&index_data, offset)?;
-        offset += prom_bytes;
-
-        // Skip promoted index bytes if present
-        if promoted_size > 0 {
-            let skip = promoted_size as usize;
-            if offset + skip > index_data.len() {
-                log::warn!(
-                    "Index.db: promoted index at offset {} exceeds file bounds",
-                    offset
-                );
-                break;
-            }
-            offset += skip;
-        }
-
-        count += 1;
-    }
-
-    log::debug!("Counted {} partition entries in Index.db", count);
-    Ok(count)
 }
 
 #[cfg(all(test, feature = "write-support"))]
@@ -1330,31 +1238,83 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_count_index_entries_big_format() {
-        let temp_dir = TempDir::new().unwrap();
+    /// Locate the shared test datasets root (`CQLITE_DATASETS_ROOT`). Returns
+    /// `None` (test skips cleanly) when unset or not a directory.
+    fn datasets_root() -> Option<std::path::PathBuf> {
+        let root = std::env::var("CQLITE_DATASETS_ROOT").ok()?;
+        let p = std::path::PathBuf::from(root);
+        if p.is_dir() {
+            Some(p)
+        } else {
+            None
+        }
+    }
 
-        // Build a synthetic BIG-format Index.db with 3 entries
-        // Format: [key_len:u16 BE][key_bytes][pos VInt][promoted VInt]
-        let mut index_data = Vec::new();
-        for i in 0u64..3 {
-            // Key length (4 bytes for int keys)
-            index_data.extend_from_slice(&4u16.to_be_bytes());
-            // 4-byte key
-            index_data.extend_from_slice(&(i as u32).to_be_bytes());
-            // Position as unsigned VInt (values < 128 = 1 byte)
-            index_data.push((i * 50) as u8);
-            // Promoted index size = 0 (1-byte VInt)
-            index_data.push(0x00);
+    /// Regression test for issue #1622: a BTI (`da`) export must report a
+    /// non-zero `partition_count`. Before the fix, `partition_count` came from a
+    /// hand-rolled BIG-only `Index.db` walk (`count_index_entries`); a BTI
+    /// SSTable has NO `Index.db` (it uses `Partitions.db`/`Rows.db`), so that
+    /// walk returned `Err("Index.db not found")`, the error was swallowed, and
+    /// the report claimed 0 partitions even for a table with many. The fix reads
+    /// the authoritative, format-agnostic partition count from the Statistics.db
+    /// `estimatedPartitionSize` histogram via `read_table_counts` — the same
+    /// gated reader already used for `row_count` (issue #1327).
+    ///
+    /// `test_da` is a local-only fixture, so this test SKIPS cleanly when the
+    /// binaries are absent; but a PRESENT fixture that reports 0 partitions is a
+    /// hard failure (matches the dataset-test posture in MEMORY).
+    ///
+    /// CI COVERAGE NOTE (issue #1622, roborev follow-up): this fixture-based test
+    /// SKIPS in default CI (the repo ships only `test_da` metadata sidecars, not
+    /// the binary Statistics.db). That is acceptable because the CORE fix under
+    /// test — `read_statistics_from_export` -> `read_table_counts` ->
+    /// `partition_count` (Σ of the `estimatedPartitionSize` histogram buckets) —
+    /// is FORMAT-AGNOSTIC: it has no BTI/`da`-vs-BIG/`nb` branch and no version
+    /// gate on the partition-count path (see `read_statistics_from_export`
+    /// above). `WriteEngine::flush` cannot emit `da`/BTI (it is hardwired to
+    /// `SSTableWriter::with_expected_partitions_and_registry`, i.e.
+    /// `SSTableFormat::Big`), so a self-contained WriteEngine-`da`-flush variant
+    /// is not constructible. The identical code path is therefore exercised in
+    /// CI by the `nb` test `test_export_partition_count_nonzero` below, which
+    /// flushes a real `nb` SSTable via `WriteEngine` and asserts the same
+    /// `partition_count > 0 && partition_count <= row_count` invariant through
+    /// the same `read_statistics_from_export` reader. This fixture test remains
+    /// as local BTI assurance (it proves the reader consumes a real `da`
+    /// Statistics.db) but is not required for CI coverage of the fix.
+    #[test]
+    fn test_read_statistics_from_export_bti_partition_count() {
+        let Some(root) = datasets_root() else {
+            eprintln!("CQLITE_DATASETS_ROOT unset; skipping BTI partition-count test");
+            return;
+        };
+        let dir = root.join("sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11");
+        if !dir.join("da-2-bti-Statistics.db").is_file() {
+            eprintln!("BTI da fixture absent at {dir:?}; skipping");
+            return;
         }
 
-        // Write to a temporary Index.db file
-        let index_path = temp_dir.path().join("nb-1-big-Index.db");
-        std::fs::write(&index_path, &index_data).unwrap();
+        // Feed the reader the exact BTI component set on disk (no Index.db).
+        let components: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e == "db")
+                    .unwrap_or(false)
+            })
+            .collect();
 
-        let components = vec![index_path];
-        let count = count_index_entries(&components).unwrap();
-        assert_eq!(count, 3, "Should count 3 BIG-format index entries");
+        let (partition_count, row_count) = read_statistics_from_export(&components).unwrap();
+
+        assert!(
+            partition_count > 0,
+            "BTI (da) export partition_count should be > 0, got {partition_count}"
+        );
+        assert!(
+            partition_count <= row_count,
+            "partition_count ({partition_count}) should be <= row_count ({row_count})"
+        );
     }
 
     #[tokio::test]
