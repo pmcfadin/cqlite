@@ -20,9 +20,11 @@
 #
 # Fast + hermetic by design: exercises the load-bearing NEW logic — the
 # fail-closed test/docs classification (via the hidden --delta-classify hook),
-# the entry-point guards (bad anchor / non-full anchor summary), and the DELTA
-# summary emission (via --delta ... --emit-summary-selftest). It NEVER runs
-# cargo (no component execution) and NEVER mutates the working tree.
+# the entry-point guards (bad anchor / non-full anchor summary), the DELTA
+# summary emission (via --delta ... --emit-summary-selftest), and the git-backed
+# fail-closed enumeration (a production->allowed RENAME must REFUSE — roborev job
+# 3338 — driven end-to-end in an isolated temp git repo). It NEVER runs cargo (no
+# component execution) and NEVER mutates the real working tree.
 #
 # Run standalone:   bash scripts/tests/test_agent_gate_delta.sh
 # Or via the gate:  scripts/agent-gate.sh runs it as part of `tooling-tests`.
@@ -424,6 +426,56 @@ if [ -x /bin/bash ]; then
   else
     bad "bash-compat: --delta classification path failed under /bin/bash (major ${bin_bash_major:-?})"
   fi
+fi
+
+# 10. GIT-BACKED end-to-end fail-closed REGRESSION (roborev job 3338): a RENAME of
+#     a PRODUCTION file to an allowed *.md path must REFUSE — it must NOT slip a
+#     green delta. With git rename detection ON (diff.renames), `git diff
+#     --name-only A B` collapses a rename to ONLY the destination path, so
+#     classifying by the destination alone would ALLOW (green) while hiding the
+#     production-file removal. run_delta passes --no-renames to BOTH diff
+#     invocations so a rename enumerates as delete-old + add-new; the old
+#     production path is then classified and (non-allowed) triggers the fail-closed
+#     REFUSE. This drives the REAL run_delta git enumeration (not the
+#     --delta-classify hook): the gate hard-cds to its own repo root, so we copy
+#     agent-gate.sh into an ISOLATED temp git repo where the rename lives.
+#     Hermetic — the REFUSE fires before any component runs (no cargo), and the
+#     real working tree is never touched.
+rn_repo="$tmp/rename-repo"
+mkdir -p "$rn_repo/scripts"
+cp "$GATE" "$rn_repo/scripts/agent-gate.sh"
+(
+  cd "$rn_repo" \
+    && git init -q \
+    && git config user.email t@cqlite.test && git config user.name cqlite-test \
+    && git config diff.renames true \
+    && mkdir -p docs \
+    && printf '#!/usr/bin/env bash\necho production\n' > scripts/deploy.sh \
+    && git add -A && git commit -qm anchor
+) >/dev/null 2>&1 && rn_ok=1 || rn_ok=0
+if [ "$rn_ok" = 1 ]; then
+  rn_anchor=$(cd "$rn_repo" && git rev-parse HEAD 2>/dev/null)
+  ( cd "$rn_repo" && git mv scripts/deploy.sh docs/deploy.md && git commit -qm rename ) >/dev/null 2>&1
+  rn_out="$tmp/rename.log"
+  ( cd "$rn_repo" && bash scripts/agent-gate.sh --delta "$rn_anchor" ) >"$rn_out" 2>&1
+  rn_rc=$?
+  # Precondition: with rename detection ON, the naive (renames-enabled) diff must
+  # collapse the rename to the destination only (old path absent). If the local git
+  # does not collapse it, the --no-renames path is not exercisable → SKIP.
+  rn_naive=$(cd "$rn_repo" && git diff --name-only "$rn_anchor" HEAD 2>/dev/null)
+  if printf '%s\n' "$rn_naive" | grep -qxF "scripts/deploy.sh"; then
+    skip "rename-refuses: git did not collapse the rename (detection unavailable) — --no-renames path not exercisable"
+  elif [ "$rn_rc" -ne 0 ] \
+    && grep -q "^RESULT: REFUSED" "$rn_out" \
+    && grep -qF "scripts/deploy.sh" "$rn_out" \
+    && ! grep -q "^RESULT: PASS" "$rn_out"; then
+    ok "rename-refuses: production->*.md rename REFUSES (old path enumerated via --no-renames), not a green delta"
+  else
+    bad "rename-refuses: a production->allowed rename did not REFUSE (rc=$rn_rc)"
+    echo "------- captured -------"; cat "$rn_out" 2>/dev/null; echo "------------------------"
+  fi
+else
+  skip "rename-refuses: could not set up temp git repo (git unavailable)"
 fi
 
 echo "----"

@@ -1957,10 +1957,17 @@ run_delta() {
   # workflow, Cargo.*, src, config) becomes offending and REFUSES the re-cert. This
   # is required for the fail-closed guarantee — dropping deletions would let a
   # production-file removal produce a green DELTA block. Dedup, drop blanks.
+  #
+  # --no-renames on BOTH invocations is REQUIRED (roborev job 3338): with git
+  # rename detection on (diff.renames), a rename collapses to only the DESTINATION
+  # path, so renaming a production file to an allowed *.md/test path would be
+  # classified solely by the destination and slip a green delta while hiding the
+  # production-file removal. --no-renames enumerates a rename as delete-old +
+  # add-new, so the old production path is classified and (non-allowed) REFUSES.
   local changed
   changed=$(printf '%s\n%s\n' \
-    "$(git diff --name-only "$anchor_sha" HEAD 2>/dev/null)" \
-    "$(git diff --name-only HEAD 2>/dev/null)" \
+    "$(git diff --name-only --no-renames "$anchor_sha" HEAD 2>/dev/null)" \
+    "$(git diff --name-only --no-renames HEAD 2>/dev/null)" \
     | awk 'NF && !seen[$0]++')
 
   # Precompute the executed-target .rs allow-set ONCE (cargo metadata called a
