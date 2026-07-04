@@ -638,9 +638,9 @@ impl StreamingDecompressor {
                     memory_limit
                 )));
             }
-            let read_cap = max_compressed.checked_add(1).ok_or_else(|| {
-                Error::storage("Snappy compressed read cap overflow".to_string())
-            })?;
+            let read_cap = max_compressed
+                .checked_add(1)
+                .ok_or_else(|| Error::storage("Snappy compressed read cap overflow".to_string()))?;
             let mut buf_reader = BufReader::new(reader).take(read_cap as u64);
             let mut compressed = Vec::new();
             buf_reader.read_to_end(&mut compressed).map_err(|e| {
@@ -660,9 +660,8 @@ impl StreamingDecompressor {
             // set above `max_output_size` must not be allowed to allocate past the
             // intended output cap. `snappy_decompress_raw` additionally enforces the
             // hard `MAX_DECOMPRESSED_SIZE` ceiling at the shared choke point.
-            let advertised = snap::raw::decompress_len(&compressed).map_err(|e| {
-                Error::storage(format!("Snappy (raw) length decode failed: {}", e))
-            })?;
+            let advertised = snap::raw::decompress_len(&compressed)
+                .map_err(|e| Error::storage(format!("Snappy (raw) length decode failed: {}", e)))?;
             let effective_limit = memory_limit.min(self.config.max_output_size);
             let projected = output.len().checked_add(advertised);
             if projected.is_none_or(|total| total > effective_limit) {
@@ -1106,8 +1105,7 @@ mod tests {
     async fn test_snappy_streaming_roundtrip_raw() {
         use std::io::Cursor;
         let compression = Compression::new(CompressionAlgorithm::Snappy).unwrap();
-        let data =
-            b"streaming raw snappy round-trip payload for issue 1862. ".repeat(64);
+        let data = b"streaming raw snappy round-trip payload for issue 1862. ".repeat(64);
 
         let compressed = compression.compress(&data).unwrap();
 
@@ -1227,7 +1225,8 @@ mod tests {
             .await
             .expect_err("over-cap compressed input must be rejected");
         assert!(
-            err.to_string().contains("Snappy compressed input exceeds bound"),
+            err.to_string()
+                .contains("Snappy compressed input exceeds bound"),
             "expected compressed read-cap error, got: {err}"
         );
     }

@@ -605,9 +605,10 @@ async fn read_block_direct(file: &Arc<Mutex<BlockSource>>, size: usize) -> Resul
     let mut block_data = vec![0u8; size];
     {
         let mut file_guard = file.lock().await;
-        file_guard.read_exact(&mut block_data).await.map_err(|e| {
-            io_error_with_context(format!("Failed to read block data ({size})"), e)
-        })?;
+        file_guard
+            .read_exact(&mut block_data)
+            .await
+            .map_err(|e| io_error_with_context(format!("Failed to read block data ({size})"), e))?;
     }
     Ok(block_data)
 }
@@ -916,7 +917,10 @@ async fn verify_uncompressed_chunks(
             .seek(std::io::SeekFrom::Start(end))
             .await
             .map_err(|e| {
-                io_error_with_context("failed to restore Data.db position after CRC verification", e)
+                io_error_with_context(
+                    "failed to restore Data.db position after CRC verification",
+                    e,
+                )
             })?;
     }
     Ok(())

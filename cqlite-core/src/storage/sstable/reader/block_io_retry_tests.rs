@@ -161,7 +161,8 @@ fn wrapped_read_error_preserves_kind_for_transient_classifier() {
         std::io::ErrorKind::TimedOut,
     ] {
         let src = std::io::Error::new(kind, "transient mid-read");
-        let wrapped = io_error_with_context("Failed to read uncompressed data block (64 bytes)", src);
+        let wrapped =
+            io_error_with_context("Failed to read uncompressed data block (64 bytes)", src);
         // Kind survives the context wrap...
         match &wrapped {
             Error::Io(io) => assert_eq!(io.kind(), kind, "kind must be preserved through wrap"),
@@ -181,7 +182,10 @@ fn wrapped_read_error_preserves_kind_for_transient_classifier() {
         std::io::ErrorKind::InvalidData,
         std::io::ErrorKind::NotFound,
     ] {
-        let wrapped = io_error_with_context("Failed to read block data (64)", std::io::Error::new(kind, "x"));
+        let wrapped = io_error_with_context(
+            "Failed to read block data (64)",
+            std::io::Error::new(kind, "x"),
+        );
         assert!(
             !is_transient_io(&wrapped),
             "non-transient kind {kind:?} must never be reclassified transient"
