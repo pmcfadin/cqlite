@@ -1079,6 +1079,10 @@ run_side_component() {
   CARGO_TARGET_DIR="$base/agent-gate-side/$1" dispatch_component "$1"
 }
 
+# Track which components were selected and which lane (fail-closed check after lanes drain).
+declare -a SELECTED_MAIN=() SELECTED_SIDE=()
+SIDE_LANE_EXIT=0
+
 # launch_components: two-lane bounded model (issue #1737). The MAIN lane runs every
 # selected non-side cargo component SERIALLY in canonical order (identical build
 # profile to the historical sequential gate -- no NEW cross-component thrash), with
@@ -1095,7 +1099,8 @@ launch_components() {
   for c in "${COMPONENTS[@]}"; do
     [ "$c" = file-size ] && continue
     _pool_selected "$c" || continue
-    if is_side_component "$c"; then side_lane+=("$c"); else main_lane+=("$c"); fi
+    if is_side_component "$c"; then side_lane+=("$c"); SELECTED_SIDE+=("$c")
+    else main_lane+=("$c"); SELECTED_MAIN+=("$c"); fi
   done
 
   if [ "$AGENT_GATE_JOBS" -le 1 ] || [ "${#side_lane[@]}" -eq 0 ]; then
@@ -1120,10 +1125,33 @@ launch_components() {
   local side_pid=$!
   # MAIN lane: serial, foreground (shared target dir, no intra-lane parallelism).
   for c in "${main_lane[@]}"; do dispatch_component "$c"; done
-  wait "$side_pid"
+  wait "$side_pid" || SIDE_LANE_EXIT=$?
 }
 
 launch_components
+
+# Fail-closed check (issue #1737 roborev): verify all SELECTED components produced result files.
+# A component that was selected but has no .result file crashed/exited before record_result,
+# which is a fail-OPEN hole. Treat missing results as synthetic FAIL + force overall FAIL.
+# Also check the SIDE lane's exit status.
+for _sc in "${SELECTED_SIDE[@]}"; do
+  [ -f "$LOG_DIR/$_sc.result" ] || {
+    echo "agent-gate: SIDE-lane component '$_sc' SELECTED but has no result file (crashed/exited early)" >&2
+    NAMES+=("$_sc"); STATUSES+=(FAIL); TIMES+=("0s")
+    OVERALL=FAIL
+  }
+done
+for _mc in "${SELECTED_MAIN[@]}"; do
+  [ -f "$LOG_DIR/$_mc.result" ] || {
+    echo "agent-gate: MAIN-lane component '$_mc' SELECTED but has no result file (crashed/exited early)" >&2
+    NAMES+=("$_mc"); STATUSES+=(FAIL); TIMES+=("0s")
+    OVERALL=FAIL
+  }
+done
+if [ "$SIDE_LANE_EXIT" -ne 0 ]; then
+  echo "agent-gate: SIDE lane exited with status $SIDE_LANE_EXIT (subshell failure)" >&2
+  OVERALL=FAIL
+fi
 
 # Reconstruct the summary arrays from per-component result files (issue #1737):
 # the bounded pool ran components in backgrounded subshells that cannot write the
