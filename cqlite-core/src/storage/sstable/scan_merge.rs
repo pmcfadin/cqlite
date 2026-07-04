@@ -28,11 +28,13 @@
 //!
 //! # Instrumentation
 //!
-//! [`MANAGER_SCAN_KEY_COMPARISONS`] counts key comparisons performed by the k-way
-//! merge, and [`MANAGER_SCAN_FULL_SORTS`] counts materialized full-vector sorts.
-//! Tests use these to assert the scan path is O(n log k) and never falls back to a
-//! full O(n log n) concat sort. Both use `Relaxed` atomics — the increment is
-//! negligible next to per-row decode work.
+//! Key-comparison counting used by the O(n log k) no-full-sort regression test is a
+//! **per-thread** counter ([`SCAN_KEY_COMPARISONS`], compiled only under `test`/the
+//! `metrics` feature) exposed to tests via [`kway_merge_counting`], which resets and
+//! reads it within a single call. Because it is thread-local rather than a
+//! process-global atomic, concurrent tests on cargo's multithreaded runner can never
+//! race on it, and the production merge path pays nothing (the increment is not even
+//! compiled in). [`MANAGER_SCAN_FULL_SORTS`] counts materialized full-vector sorts.
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -41,13 +43,18 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use crate::types::RowKey;
 use crate::util::cassandra_murmur3::cassandra_murmur3_token;
 
-/// Number of key comparisons performed by [`kway_merge_token_order`] since process
-/// start. Exposed for the O(n log k) no-full-sort regression assertion.
-pub(crate) static MANAGER_SCAN_KEY_COMPARISONS: AtomicU64 = AtomicU64::new(0);
-
 /// Number of materialized full-vector token-order sorts performed by
 /// [`sort_by_token_order`] since process start.
 pub(crate) static MANAGER_SCAN_FULL_SORTS: AtomicU64 = AtomicU64::new(0);
+
+/// Per-thread key-comparison counter for [`kway_merge_token_order`], incremented by
+/// [`Candidate::cmp`]. Thread-local (not a process-global atomic) so concurrent
+/// tests on cargo's multithreaded runner never race on it; compiled only under
+/// `test` or the `metrics` feature, so production `Candidate::cmp` pays nothing.
+#[cfg(any(test, feature = "metrics"))]
+thread_local! {
+    static SCAN_KEY_COMPARISONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 /// Heap element pairing an ordering key ([`Candidate`]) with its opaque payload
 /// `T`. Ordering delegates entirely to the [`Candidate`] so no `T: Ord` bound is
@@ -78,8 +85,9 @@ impl<T> Ord for HeapItem<T> {
 /// (hashed once per row, not per comparison), partition key, and reader index.
 /// Ordered ascending `(token, key_bytes, reader_idx)`; `reader_idx` breaks ties so
 /// equal-`(token, key)` rows from different readers emit in reader order,
-/// reproducing the stable concat order the old raw-byte `sort_by` gave. Every
-/// [`Candidate::cmp`] increments [`MANAGER_SCAN_KEY_COMPARISONS`].
+/// reproducing the stable concat order the old raw-byte `sort_by` gave. Under
+/// `test`/`metrics`, every [`Candidate::cmp`] bumps the per-thread
+/// [`SCAN_KEY_COMPARISONS`] counter; production builds compile no counting at all.
 struct Candidate {
     token: i64,
     key: RowKey,
@@ -88,7 +96,8 @@ struct Candidate {
 
 impl Candidate {
     fn cmp(&self, other: &Self) -> Ordering {
-        MANAGER_SCAN_KEY_COMPARISONS.fetch_add(1, AtomicOrdering::Relaxed);
+        #[cfg(any(test, feature = "metrics"))]
+        SCAN_KEY_COMPARISONS.with(|c| c.set(c.get().wrapping_add(1)));
         self.token
             .cmp(&other.token)
             .then_with(|| self.key.cmp(&other.key))
@@ -127,6 +136,12 @@ pub(crate) fn kway_merge_token_order<T>(
 
     let total: usize = per_reader.iter().map(|s| s.len()).sum();
     let cap = limit.map_or(total, |l| l.min(total));
+    if cap == 0 {
+        // `limit == Some(0)`: emit nothing. Guard here because the in-loop
+        // `out.len() == cap` early-exit is only checked *after* the first push, so
+        // it would never fire for cap == 0 and would leak the entire result set.
+        return Vec::new();
+    }
 
     // Convert each stream into a forward iterator so we can pull heads lazily.
     let mut iters: Vec<std::vec::IntoIter<(RowKey, T)>> =
@@ -210,6 +225,21 @@ pub(crate) fn sort_by_token_order<E>(
 mod tests {
     use super::*;
 
+    /// Runs [`kway_merge_token_order`] and returns the number of key comparisons it
+    /// performed on the current thread alongside the merged output. Resets and reads
+    /// the per-thread [`SCAN_KEY_COMPARISONS`] counter within this single call, so
+    /// the count is a purely local value — concurrent tests on other threads cannot
+    /// perturb it, eliminating the cross-test data race of a process-global counter.
+    fn kway_merge_counting<T>(
+        per_reader: Vec<Vec<(RowKey, T)>>,
+        limit: Option<usize>,
+    ) -> (Vec<(RowKey, T)>, u64) {
+        SCAN_KEY_COMPARISONS.with(|c| c.set(0));
+        let out = kway_merge_token_order(per_reader, limit);
+        let count = SCAN_KEY_COMPARISONS.with(|c| c.get());
+        (out, count)
+    }
+
     // UUID keys whose token order differs from raw-byte order (pinned in
     // `util::cassandra_murmur3` tests): token(0x22) < token(0x11) < token(0x33).
     fn uuid_key(b: u8) -> RowKey {
@@ -260,15 +290,30 @@ mod tests {
 
     #[test]
     fn single_reader_is_passthrough_no_comparisons() {
-        let before = MANAGER_SCAN_KEY_COMPARISONS.load(AtomicOrdering::Relaxed);
         let only = vec![(uuid_key(0x33), 1u32), (uuid_key(0x11), 2u32)];
         // Single stream: returned as-is (reader already token-ordered), no merge.
-        let merged = kway_merge_token_order(vec![only], None);
+        let (merged, cmps) = kway_merge_counting(vec![only], None);
         assert_eq!(merged.len(), 2);
-        let after = MANAGER_SCAN_KEY_COMPARISONS.load(AtomicOrdering::Relaxed);
         assert_eq!(
-            after, before,
+            cmps, 0,
             "single-stream fast path must not compare keys"
+        );
+    }
+
+    #[test]
+    fn limit_zero_returns_empty_with_multiple_readers() {
+        // ≥2 non-empty readers with limit=Some(0) must emit nothing, matching the
+        // single/zero-reader `truncate(0)` and `sort_by_token_order` behavior. The
+        // in-loop early-exit alone would leak everything (out.len() starts at 1 and
+        // never equals cap == 0), so the top-of-heap-path `cap == 0` guard is what
+        // makes this hold.
+        let reader_a = vec![(uuid_key(0x22), 1u32), (uuid_key(0x33), 3u32)];
+        let reader_b = vec![(uuid_key(0x11), 2u32)];
+        let merged = kway_merge_token_order(vec![reader_a, reader_b], Some(0));
+        assert!(
+            merged.is_empty(),
+            "limit=Some(0) with multiple non-empty readers must return no rows, got {}",
+            merged.len()
         );
     }
 
@@ -298,9 +343,7 @@ mod tests {
             per_reader.push(stream);
         }
 
-        MANAGER_SCAN_KEY_COMPARISONS.store(0, AtomicOrdering::Relaxed);
-        let merged = kway_merge_token_order(per_reader, None);
-        let cmps = MANAGER_SCAN_KEY_COMPARISONS.load(AtomicOrdering::Relaxed);
+        let (merged, cmps) = kway_merge_counting(per_reader, None);
 
         assert_eq!(merged.len(), n, "merge must emit every row");
 
