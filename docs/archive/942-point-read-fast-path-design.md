@@ -1,4 +1,11 @@
-# Design Doc: Route Single-Partition Reads to a Point-Read Fast Path
+# [RETIRED] Design Doc: Route Single-Partition Reads to a Point-Read Fast Path
+
+> **RETIRED 2026-07-04 — do NOT implement from this document.**
+> Its premise predates epic [#951](https://github.com/pmcfadin/cqlite/issues/951), which shipped the routing this doc proposes (`AccessPath` plan enum, `classify_partition_lookup`, `scan_partition*` with bloom + BTI-trie pruning, CLI `--explain`, the #958 work-bound CI guard). The Summary.db binary-search plan in §5 describes code that is dead on `main`; the real lookup path is the Index.db raw-key map (bounding it is [#1599](https://github.com/pmcfadin/cqlite/issues/1599)).
+> Validation record: the full archaeology of this doc vs `main` is in [#942 (comment)](https://github.com/pmcfadin/cqlite/issues/942#issuecomment-4871162090). Issue #942 is closed as superseded. The verified residue is tracked by epic [#1915](https://github.com/pmcfadin/cqlite/issues/1915) (children #1916 metadata-IN fan-out, #1917 concat-fallback token ordering, #1918 `CQLITE_READ_PATH` knob + differential lane), whose issue bodies are self-contained — they do not depend on this doc.
+> The correctness landmine surfaced during that validation (single-generation reads skipped reconciliation) was fixed as [#1741](https://github.com/pmcfadin/cqlite/issues/1741).
+
+---
 
 **Feeds:** GitHub issue [#942](https://github.com/pmcfadin/cqlite/issues/942) — "Use the read path for partition reads" (P2, enhancement, filed by @rustyrazorblade)
 **Intended use:** Input to OpenSpec workflow (`flow-groom` → proposal/design/tasks → epics + issues)
