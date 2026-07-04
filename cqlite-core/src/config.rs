@@ -787,15 +787,17 @@ mod tests {
         // an old serialized config that predates it.
         let mut value =
             serde_json::to_value(QueryConfig::default()).expect("serialize QueryConfig");
-        let obj = value.as_object_mut().expect("QueryConfig serializes as object");
+        let obj = value
+            .as_object_mut()
+            .expect("QueryConfig serializes as object");
         obj.remove("max_result_bytes");
         assert!(
             !obj.contains_key("max_result_bytes"),
             "field must be absent for this regression to be meaningful"
         );
 
-        let restored: QueryConfig =
-            serde_json::from_value(value).expect("old config (no max_result_bytes) must deserialize");
+        let restored: QueryConfig = serde_json::from_value(value)
+            .expect("old config (no max_result_bytes) must deserialize");
         assert_eq!(
             restored.max_result_bytes, DEFAULT_MAX_RESULT_BYTES,
             "absent field must take the serde default"
