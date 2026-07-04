@@ -447,6 +447,12 @@ fi
 #     develop --profile dev + the not-slow pytest tier) instead. The gate exposes
 #     the PLAN via the hidden `--classify-scoped-plan` hook (stdin paths ->
 #     "rust-pkg: <pkg>" / "python-tier: <cmd>"), asserted WITHOUT running maturin.
+#
+#     These cases drive the EXECUTOR's routing, not a parallel copy (roborev job
+#     1450): classify_scoped_plan is the single routing function — run_scoped_tests
+#     parses its output ("rust-pkg:" -> cargo packages, "python-tier:" -> the
+#     python-tier flag), so the plan the hook emits IS the routing the executor
+#     performs. Case 7e below structurally guards that consumption.
 
 # python-only diff -> python tier selected, NO rust cargo package (never cqlite-py).
 py_only=$(printf '%s\n' \
@@ -512,6 +518,29 @@ if printf '%s\n' "$rust_only" | grep -qxF "rust-pkg: cqlite-core" \
 else
   bad "py-route: rust-only diff behavior changed (unexpected python tier or missing cqlite-core)"
   echo "------- plan -------"; printf '%s\n' "$rust_only"; echo "--------------------"
+fi
+
+# 7e. Executor consumes the SINGLE routing function (roborev job 1450): the whole
+#     point of single-sourcing is that an executor-only edit cannot silently revert
+#     python routing to `cargo test -p cqlite-py` while the hook-based py-route
+#     cases above stay green. Structurally assert that run_scoped_tests' body
+#     invokes classify_scoped_plan (parses its plan) and contains NO duplicate
+#     routing: no second cqlite-py exclusion loop over a package set. Extracting
+#     the function body with awk is deterministic (top-level `}` ends it).
+rst_body=$(awk '/^run_scoped_tests\(\)/{f=1} f{print} f&&/^\}/{exit}' "$GATE")
+if printf '%s\n' "$rst_body" | grep -v '^[[:space:]]*#' | grep -q 'classify_scoped_plan'; then
+  ok "py-route: executor (run_scoped_tests) consumes classify_scoped_plan (single routing source)"
+else
+  bad "py-route: run_scoped_tests no longer calls classify_scoped_plan — routing has been duplicated or forked from the asserted plan"
+fi
+# The executor must not re-implement the cqlite-py exclusion itself: outside
+# comments, 'cqlite-py' must not appear in run_scoped_tests (the exclusion lives
+# only in classify_scoped_plan, which the py-route cases assert directly).
+if printf '%s\n' "$rst_body" | grep -v '^[[:space:]]*#' | grep -q 'cqlite-py'; then
+  bad "py-route: run_scoped_tests re-implements cqlite-py routing inline (must come from classify_scoped_plan only)"
+  printf '%s\n' "$rst_body" | grep -v '^[[:space:]]*#' | grep -n 'cqlite-py'
+else
+  ok "py-route: run_scoped_tests has no inline cqlite-py routing (exclusion single-sourced)"
 fi
 
 # 8. Bash 3.2 compatibility (issue #1821): macOS ships Bash 3.2 as /bin/bash and
