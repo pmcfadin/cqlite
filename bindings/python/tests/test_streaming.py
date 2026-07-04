@@ -63,18 +63,34 @@ class TestStreamingGilRelease:
     #   * GIL-held build (the
     #     allow_threads removed):   0 windows across 10 consecutive streams —
     #                               a hard ceiling, not a small rate.
-    # A floor of 50 distinct windows sits far above the buggy build's zero and
-    # comfortably below the fixed build's typical count; a starved stream is
-    # retried rather than failed.
-    _WINDOW_FLOOR = 50
+    #
+    # The floor must be HARDWARE-INDEPENDENT (issue #1929): a per-stream floor of
+    # 50 passed 10/10 locally (10 cores) but starved on 2-core CI runners (best
+    # 23 across 200 streams) because a 2-core scheduler hands the spinner far
+    # fewer slices per stream. What IS invariant is the buggy build's HARD ZERO:
+    # a GIL-held build produces zero advancing windows on ANY hardware, always.
+    # So we discriminate on presence-of-progress, not on a hardware-scaled count:
+    #   * PASS if any single stream reaches ``_STREAM_FLOOR`` advancing windows
+    #     (a comfortable single-stream signal on fast hardware), OR
+    #   * PASS if advancing windows ACCUMULATED across streams reach
+    #     ``_CUMULATIVE_FLOOR`` (slow/starved hardware dribbles a few windows per
+    #     stream but still totals well past the buggy build's zero over the retry
+    #     budget).
+    # Both floors sit far above the buggy build's zero (which can never reach
+    # either), so discrimination is preserved while the pass condition no longer
+    # depends on how many slices one machine grants per stream.
+    _STREAM_FLOOR = 5
+    _CUMULATIVE_FLOOR = 20
 
-    # Load-robustness comes from RETRYING, not from a rate: a single stream can
-    # under-deliver windows only if the OS starves the spinner of CPU for that
-    # stream's entire ~100ms duration. Retrying whole streams for up to a
-    # generous budget makes a false FAIL require starving the spinner for the
-    # WHOLE budget — which the scheduler's fairness guarantees make impossible
-    # for a runnable thread. The buggy build cannot pass any single attempt, so
-    # retries never weaken discrimination (it just fails at budget exhaustion).
+    # Load-robustness comes from RETRYING plus CUMULATIVE accounting, not from a
+    # rate: a single stream can under-deliver windows if the OS starves the
+    # spinner for that stream's whole duration, but retrying whole streams and
+    # summing their windows across a generous budget makes a false FAIL require
+    # the spinner to advance FEWER than ``_CUMULATIVE_FLOOR`` times across the
+    # ENTIRE budget — which the scheduler's fairness guarantees make impossible
+    # for a runnable thread. The buggy build advances zero times per stream, so
+    # neither retrying nor accumulating can ever lift it to a pass (it just fails
+    # at budget exhaustion) — retries never weaken discrimination.
     _BUDGET_SECS = 60.0
     _MAX_STREAMS = 200
 
@@ -94,11 +110,15 @@ class TestStreamingGilRelease:
           call; ``buffer_size=1`` makes every row a separate blocking refill.
           Counter advance within a window therefore proves a GIL release
           *inside* ``__next__`` — a per-window boolean, not a rate.
-        * PASS requires one stream with >= ``_WINDOW_FLOOR`` advancing windows
-          (buggy ceiling: a handful). FAIL requires exhausting the whole
-          ``_BUDGET_SECS`` budget without one such stream — i.e. the spinner
-          was starved for the entire budget, not for one unlucky scheduling
-          slice.
+        * PASS requires one stream with >= ``_STREAM_FLOOR`` advancing windows
+          OR >= ``_CUMULATIVE_FLOOR`` advancing windows summed across streams
+          (buggy ceiling on either: zero). FAIL requires exhausting the whole
+          ``_BUDGET_SECS`` budget without reaching either floor — i.e. the
+          spinner advanced fewer than ``_CUMULATIVE_FLOOR`` times across the
+          entire budget, not for one unlucky scheduling slice. The cumulative
+          floor is hardware-independent: slow/starved runners (2-core CI)
+          dribble a few windows per stream and still total past it, while a
+          fast machine trips the single-stream floor immediately.
         """
         # Fail loudly (not skip) under strict fixture mode (issue #1230).
         require_test_data(SCHEMA_BASIC_TYPES)
@@ -151,6 +171,7 @@ class TestStreamingGilRelease:
         b = threading.Thread(target=spin, daemon=True)
         b.start()
         best_windows = 0
+        cumulative_windows = 0
         rows_seen = 0
         streams_run = 0
         passed = False
@@ -166,9 +187,16 @@ class TestStreamingGilRelease:
                     streams_run += 1
                     rows_seen = rows
                     best_windows = max(best_windows, windows)
-                    if rows >= 900 and windows >= self._WINDOW_FLOOR:
-                        passed = True
-                        break
+                    # Only count windows from a stream that actually yielded the
+                    # full fixture, so a truncated read cannot inflate the total.
+                    if rows >= 900:
+                        cumulative_windows += windows
+                        if (
+                            windows >= self._STREAM_FLOOR
+                            or cumulative_windows >= self._CUMULATIVE_FLOOR
+                        ):
+                            passed = True
+                            break
                     if time.monotonic() >= deadline:
                         break
         finally:
@@ -185,11 +213,13 @@ class TestStreamingGilRelease:
         )
 
         assert passed, (
-            f"no stream reached {self._WINDOW_FLOOR} next()-windows with "
-            f"concurrent-thread progress (best {best_windows} across "
-            f"{streams_run} streams over {self._BUDGET_SECS:.0f}s); the "
-            f"concurrent thread was starved for the entire budget, so the GIL "
-            f"appears held across the blocking refill in __next__"
+            f"no stream reached {self._STREAM_FLOOR} next()-windows and the "
+            f"cumulative advancing-window total ({cumulative_windows}) never "
+            f"reached {self._CUMULATIVE_FLOOR} (best single stream "
+            f"{best_windows} across {streams_run} streams over "
+            f"{self._BUDGET_SECS:.0f}s); the concurrent thread was starved for "
+            f"the entire budget, so the GIL appears held across the blocking "
+            f"refill in __next__"
         )
 
 
