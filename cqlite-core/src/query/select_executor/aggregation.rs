@@ -139,7 +139,11 @@ pub(super) fn finalize_group(
     group_aggregates: Vec<AggregateValue>,
     agg_plan: &AggregationPlan,
 ) -> QueryRow {
-    let mut row_values: HashMap<std::sync::Arc<str>, Value> = HashMap::new();
+    // Issue #1584: one sized allocation per group — the row holds exactly the
+    // GROUP BY columns plus the aggregate results, so pre-size to that count and
+    // avoid rehash growth.
+    let mut row_values: HashMap<std::sync::Arc<str>, Value> =
+        HashMap::with_capacity(agg_plan.group_by_columns.len() + agg_plan.aggregates.len());
 
     for (i, col) in agg_plan.group_by_columns.iter().enumerate() {
         if let Some(v) = group_key.get(i) {

@@ -79,6 +79,35 @@ pub use writetime_ttl::{FixedClock, NowSeconds};
 // `validate_token_predicates` is used by the executor's scan paths.
 use predicate::validate_token_predicates;
 
+// Test-only counter for the number of times a projected column NAME is derived
+// (issue #1584). A thread-local `Cell` (not a global atomic) so parallel test
+// binaries cannot pollute one another; `#[tokio::test]` uses the current-thread
+// runtime, so the future under test runs on the same thread that reads it.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static PROJECTION_NAME_DERIVATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Derive the output column name for a projected SELECT expression (issue #1584).
+///
+/// Hoisted out of the per-row loop and called ONCE per column per query, so name
+/// derivation is `O(columns)` rather than `O(rows × columns)`. The produced
+/// `Arc<str>` is `clone`d (a ref-count bump) into every row, preserving the exact
+/// output name — the materialized rows are byte-identical to the prior per-row
+/// `String` derivation.
+fn projected_column_name(expr: &SelectExpression, index: usize) -> std::sync::Arc<str> {
+    #[cfg(test)]
+    PROJECTION_NAME_DERIVATIONS.with(|c| c.set(c.get() + 1));
+    match expr {
+        // Issue #692: WriteTimeTtl expressions use Cassandra-convention names.
+        SelectExpression::Column(col_ref) => col_ref.column.as_str().into(),
+        SelectExpression::Aliased(_, alias) => alias.as_str().into(),
+        SelectExpression::WriteTimeTtl(call) => writetime_ttl_column_name(call).into(),
+        _ => format!("col_{index}").into(),
+    }
+}
+
 /// SELECT query executor for SSTable-based storage
 pub struct SelectExecutor {
     /// Schema manager for metadata
@@ -743,21 +772,28 @@ impl SelectExecutor {
         columns: &[SelectExpression],
         _context: &mut ExecutionContext,
     ) -> Result<Vec<QueryRow>> {
-        let mut projected_rows = Vec::new();
+        // Issue #1584: derive the projected output column names ONCE per query
+        // (`O(columns)`), then only `Arc`-clone them into each row's value map
+        // (a ref-count bump). Previously each name was re-derived — `String`
+        // clone / `format!` — for every row × column (`O(rows × columns)`).
+        // Cloning the hoisted `Arc<str>` preserves the exact output name, so the
+        // materialized rows are byte-identical to the prior per-row derivation.
+        let column_names: Vec<std::sync::Arc<str>> = columns
+            .iter()
+            .enumerate()
+            .map(|(i, expr)| projected_column_name(expr, i))
+            .collect();
+
+        let mut projected_rows = Vec::with_capacity(rows.len());
 
         for row in rows {
-            let mut projected_values: HashMap<std::sync::Arc<str>, Value> = HashMap::new();
+            // Issue #1584: one sized allocation per row — no rehash growth.
+            let mut projected_values: HashMap<std::sync::Arc<str>, Value> =
+                HashMap::with_capacity(columns.len());
 
             for (i, expr) in columns.iter().enumerate() {
                 let value = self.evaluate_select_expression(expr, &row)?;
-                // Issue #692: WriteTimeTtl expressions use Cassandra-convention column names.
-                let column_name = match expr {
-                    SelectExpression::Column(col_ref) => col_ref.column.clone(),
-                    SelectExpression::Aliased(_, alias) => alias.clone(),
-                    SelectExpression::WriteTimeTtl(call) => writetime_ttl_column_name(call),
-                    _ => format!("col_{i}"),
-                };
-                projected_values.insert(column_name.into(), value);
+                projected_values.insert(column_names[i].clone(), value);
             }
 
             projected_rows.push(QueryRow {
@@ -1083,6 +1119,75 @@ mod tests {
         );
         assert_eq!(count(b), 2, "partition B has 2 rows, all kept");
         assert_eq!(out.len(), 4);
+    }
+
+    /// Issue #1584: projected column NAMES are derived once per query
+    /// (`O(columns)`), never per row (`O(rows × columns)`). Cloning the hoisted
+    /// `Arc<str>` per row is permitted; re-deriving / formatting a name per row is
+    /// the regression this pins. `#[tokio::test]` runs on the current-thread
+    /// runtime and the derivation counter is thread-local, so this is immune to
+    /// pollution from other tests running in parallel.
+    #[tokio::test]
+    async fn execute_projection_derives_names_once_per_query() {
+        let executor = create_test_executor().await;
+
+        let columns = vec![
+            SelectExpression::Column(ColumnRef {
+                table: None,
+                column: "a".to_string(),
+            }),
+            SelectExpression::Column(ColumnRef {
+                table: None,
+                column: "b".to_string(),
+            }),
+            SelectExpression::Column(ColumnRef {
+                table: None,
+                column: "c".to_string(),
+            }),
+        ];
+        let num_cols = columns.len();
+        let num_rows = 100usize;
+
+        let rows: Vec<QueryRow> = (0..num_rows)
+            .map(|r| {
+                let mut row = QueryRow::new(RowKey::new(vec![r as u8]));
+                row.set("a", Value::Integer(r as i32));
+                row.set("b", Value::Integer(r as i32));
+                row.set("c", Value::Integer(r as i32));
+                row
+            })
+            .collect();
+
+        let mut ctx = ExecutionContext {
+            table_id: TableId::new("ks.t"),
+            columns: Vec::new(),
+            rows_processed: 0,
+            scan_rows: 0,
+            projection_flags: ProjectionFlags::default(),
+            access_path: None,
+            reverse_served: false,
+        };
+
+        PROJECTION_NAME_DERIVATIONS.with(|c| c.set(0));
+        let projected = executor
+            .execute_projection(rows, &columns, &mut ctx)
+            .await
+            .expect("projection must succeed");
+        let derivations = PROJECTION_NAME_DERIVATIONS.with(|c| c.get());
+
+        assert_eq!(projected.len(), num_rows, "one projected row per input row");
+        assert_eq!(
+            derivations,
+            num_cols,
+            "issue #1584: column names must be derived once per query \
+             (O(cols) = {num_cols}), not per row (would be {})",
+            num_rows * num_cols
+        );
+        // Output preserved byte-identically: names + values intact.
+        assert_eq!(projected[0].values.get("a"), Some(&Value::Integer(0)));
+        assert_eq!(projected[0].values.get("b"), Some(&Value::Integer(0)));
+        assert_eq!(projected[0].values.get("c"), Some(&Value::Integer(0)));
+        assert_eq!(projected[99].values.get("a"), Some(&Value::Integer(99)));
     }
 
     /// The executor's `evaluate_select_expression` returns the correct value for
