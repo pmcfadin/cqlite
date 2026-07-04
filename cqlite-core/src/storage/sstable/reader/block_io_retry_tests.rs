@@ -101,7 +101,10 @@ async fn retry_does_not_retry_or_sleep_on_deterministic_corruption() {
     let err = retry_transient_once(&file, attempt).await.unwrap_err();
     let elapsed = start.elapsed();
 
-    assert!(matches!(err, Error::Corruption(_)), "typed corruption: {err}");
+    assert!(
+        matches!(err, Error::Corruption(_)),
+        "typed corruption: {err}"
+    );
     assert_eq!(
         calls.load(Ordering::Relaxed),
         1,

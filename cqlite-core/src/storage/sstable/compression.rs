@@ -1037,8 +1037,14 @@ mod tests {
 
         let mut attempts = 0usize;
         let out = super::snappy_decompress_raw(&chunk, &mut attempts).unwrap();
-        assert_eq!(out, good, "raw decode is byte-identical to the known-good input");
-        assert_eq!(attempts, 1, "exactly one decode attempt (no format guessing)");
+        assert_eq!(
+            out, good,
+            "raw decode is byte-identical to the known-good input"
+        );
+        assert_eq!(
+            attempts, 1,
+            "exactly one decode attempt (no format guessing)"
+        );
     }
 
     #[cfg(feature = "deflate")]
