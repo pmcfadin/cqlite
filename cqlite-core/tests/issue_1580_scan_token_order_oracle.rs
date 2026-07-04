@@ -60,7 +60,9 @@ const TABLE: &str = "simple_table";
 /// binary fixtures are present. Returns `None` (skip) when they are not — the
 /// gitignored `.db` binaries are absent in a clean checkout.
 fn test_da_dir() -> Option<PathBuf> {
-    let root = std::env::var("CQLITE_DATASETS_ROOT").ok().map(PathBuf::from)?;
+    let root = std::env::var("CQLITE_DATASETS_ROOT")
+        .ok()
+        .map(PathBuf::from)?;
     let dir = root.join("sstables").join(KEYSPACE);
     // Require an actual Data.db under the simple_table generation; a bare dir
     // (JSONL-only) must skip, not spuriously pass with zero rows.
@@ -73,9 +75,9 @@ fn test_da_dir() -> Option<PathBuf> {
             name.starts_with(&format!("{TABLE}-"))
                 && std::fs::read_dir(e.path())
                     .map(|inner| {
-                        inner.filter_map(|x| x.ok()).any(|x| {
-                            x.file_name().to_string_lossy().ends_with("-Data.db")
-                        })
+                        inner
+                            .filter_map(|x| x.ok())
+                            .any(|x| x.file_name().to_string_lossy().ends_with("-Data.db"))
                     })
                     .unwrap_or(false)
         });

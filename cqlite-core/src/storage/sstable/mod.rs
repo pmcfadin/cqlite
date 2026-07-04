@@ -31,6 +31,8 @@ pub mod refresh;
 pub use refresh::RefreshReport;
 mod reverse_scan; // BIG reverse partition iteration (issue #1184); file is tombstones-gated.
 pub mod row_cell_state_machine;
+/// Cross-SSTable scan ordering: k-way merge in Cassandra token order (issue #1580).
+mod scan_merge;
 pub mod statistics_reader;
 #[cfg(feature = "tombstones")]
 pub mod tombstone_merger;
@@ -834,41 +836,23 @@ impl SSTableManager {
                 }
             }
 
-            let mut all_results = Vec::new();
-
+            // Each reader returns rows already in Cassandra token order; k-way
+            // merge the per-reader streams in token order (issue #1580) instead of
+            // concatenating + re-sorting by RAW key bytes (wrong global order +
+            // O(n log n) on the async worker). The merge is O(n log k) and
+            // early-exits once `limit` is satisfied.
+            let mut per_reader = Vec::with_capacity(reader_list.len());
             for reader in reader_list {
-                log::debug!(
-                    "SSTableManager::scan - Calling scan on reader for file: {:?}",
-                    reader.file_path
-                );
-
                 let results = reader
                     .scan(table_id, start_key, end_key, None, schema)
                     .await?;
-
-                log::debug!(
-                    "SSTableManager::scan - Reader returned {} results",
-                    results.len()
-                );
-
-                all_results.extend(results);
+                per_reader.push(results);
             }
 
-            log::debug!(
-                "SSTableManager::scan - Total results from all readers: {}",
-                all_results.len()
-            );
-
-            // Sort results by key
-            all_results.sort_by(|a, b| a.0.cmp(&b.0));
-
-            // Apply limit
-            if let Some(limit) = limit {
-                all_results.truncate(limit);
-            }
+            let all_results = scan_merge::kway_merge_token_order(per_reader, limit);
 
             log::debug!(
-                "SSTableManager::scan - Returning {} final results",
+                "SSTableManager::scan - Returning {} final results (token-ordered k-way merge)",
                 all_results.len()
             );
 
@@ -1463,13 +1447,13 @@ impl SSTableManager {
         .await
         .map_err(|e| crate::Error::Storage(format!("cross-generation read merge task: {e}")))??;
 
-        // Match the plain-scan contract: sort by key bytes, then apply LIMIT. The
-        // merger already emits partitions in token order with clustering rows in
-        // order within a partition; a stable sort by key preserves that grouping.
-        merged.sort_by(|a, b| a.0.cmp(&b.0));
-        if let Some(limit) = limit {
-            merged.truncate(limit);
-        }
+        // Match the plain-scan contract: the merger already emits partitions in
+        // Cassandra token order with clustering rows contiguous within a
+        // partition. Preserve that with a stable TOKEN-order sort (issue #1580) —
+        // NOT a raw-key-byte sort, which would re-break the token ordering — then
+        // apply LIMIT. The sort is a no-op ordering-wise when the merger's output
+        // is already token-ordered; it only guards against a stray divergence.
+        scan_merge::sort_by_token_order(&mut merged, limit, |(k, _)| k);
         Ok(merged)
     }
 
@@ -1635,11 +1619,11 @@ impl SSTableManager {
             results.push((RowKey(key_bytes), value, meta_map));
         }
 
-        // Match the plain-scan contract: sort by key bytes, then apply LIMIT.
-        results.sort_by(|a, b| a.0.cmp(&b.0));
-        if let Some(limit) = limit {
-            results.truncate(limit);
-        }
+        // Match the plain-scan contract: stable TOKEN-order sort (issue #1580),
+        // not a raw-key-byte sort, then apply LIMIT. The metadata payload rides
+        // along in the tuple's tail, which `sort_by_token_order` orders by
+        // (token, key) — identical ordering to the plain merge path.
+        scan_merge::sort_by_token_order(&mut results, limit, |(k, _, _)| k);
         Ok(results)
     }
 
@@ -1720,20 +1704,27 @@ impl SSTableManager {
                 }
             }
 
-            let mut all_results = Vec::new();
-
+            // K-way merge the per-reader token-ordered streams (issue #1580),
+            // mirroring `scan`: the metadata payload rides alongside the row.
+            // Merging in token order (not raw key bytes) matches Cassandra's
+            // cross-SSTable order and avoids the full O(n log n) re-sort.
+            let mut per_reader = Vec::with_capacity(reader_list.len());
             for reader in reader_list {
                 let results = reader
                     .scan_with_cell_metadata(table_id, start_key, end_key, None, schema)
                     .await?;
-                all_results.extend(results);
+                per_reader.push(
+                    results
+                        .into_iter()
+                        .map(|(k, v, m)| (k, (v, m)))
+                        .collect::<Vec<_>>(),
+                );
             }
 
-            // Sort by key (token order) and apply limit
-            all_results.sort_by(|a, b| a.0.cmp(&b.0));
-            if let Some(limit) = limit {
-                all_results.truncate(limit);
-            }
+            let all_results = scan_merge::kway_merge_token_order(per_reader, limit)
+                .into_iter()
+                .map(|(k, (v, m))| (k, v, m))
+                .collect();
 
             Ok(all_results)
         } else {
@@ -1877,11 +1868,18 @@ impl SSTableManager {
                 })
                 .collect();
 
-            // Prime one head per stream.
-            let mut heads: Vec<Option<(RowKey, ScanRow)>> = Vec::with_capacity(streams.len());
+            // Prime one head per stream. Each head carries its precomputed
+            // Cassandra Murmur3 token so the merge orders by (token, key) — the
+            // authoritative cross-SSTable order (issue #1580) — and never hashes a
+            // key more than once. Comparing by raw `RowKey` bytes here (as this
+            // path previously did) diverged from `scan`'s token order.
+            let token_of = |key: &RowKey| {
+                crate::util::cassandra_murmur3::cassandra_murmur3_token(key.as_bytes())
+            };
+            let mut heads: Vec<Option<(i64, RowKey, ScanRow)>> = Vec::with_capacity(streams.len());
             for stream in streams.iter_mut() {
                 match stream.recv().await {
-                    Some(Ok(entry)) => heads.push(Some(entry)),
+                    Some(Ok((key, row))) => heads.push(Some((token_of(&key), key, row))),
                     Some(Err(e)) => {
                         let _ = out_tx.send(Err(e)).await;
                         return;
@@ -1890,17 +1888,18 @@ impl SSTableManager {
                 }
             }
 
-            // K-way merge: repeatedly emit the smallest-key head, ties broken by
-            // reader index to match the stable concat+sort order of `scan`.
+            // K-way merge: repeatedly emit the head with the smallest
+            // (token, key), ties broken by reader index to match the stable
+            // token-order merge of `scan`.
             loop {
                 let mut min_idx: Option<usize> = None;
                 for (i, head) in heads.iter().enumerate() {
-                    if let Some((ref key, _)) = head {
+                    if let Some((ref token, ref key, _)) = head {
                         match min_idx {
                             None => min_idx = Some(i),
                             Some(m) => {
-                                if let Some((ref min_key, _)) = heads[m] {
-                                    if key < min_key {
+                                if let Some((ref min_token, ref min_key, _)) = heads[m] {
+                                    if (token, key) < (min_token, min_key) {
                                         min_idx = Some(i);
                                     }
                                 }
@@ -1915,11 +1914,11 @@ impl SSTableManager {
 
                 // Take the winning entry and advance only that stream.
                 let entry = match heads[idx].take() {
-                    Some(entry) => entry,
+                    Some((_, key, row)) => (key, row),
                     None => break, // unreachable: min_idx points to a Some head
                 };
                 match streams[idx].recv().await {
-                    Some(Ok(next)) => heads[idx] = Some(next),
+                    Some(Ok((key, row))) => heads[idx] = Some((token_of(&key), key, row)),
                     Some(Err(e)) => {
                         let _ = out_tx.send(Err(e)).await;
                         return;
