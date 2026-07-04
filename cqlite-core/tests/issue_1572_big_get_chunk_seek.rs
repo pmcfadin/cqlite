@@ -316,8 +316,9 @@ async fn get_value_matches_full_scan_oracle_for_all_keys() {
             .get(&table_id(), &RowKey::new(raw_key.clone()))
             .await
             .unwrap_or_else(|e| panic!("get() errored for key {raw_key:02x?}: {e}"));
-        let got = got
-            .unwrap_or_else(|| panic!("get() returned None for a key the scan found: {raw_key:02x?}"));
+        let got = got.unwrap_or_else(|| {
+            panic!("get() returned None for a key the scan found: {raw_key:02x?}")
+        });
         assert_eq!(
             &got, expected,
             "fixed get() row differs from the whole-file scan oracle for key {raw_key:02x?}"
