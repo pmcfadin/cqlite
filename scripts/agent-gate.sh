@@ -32,6 +32,16 @@
 #                      --test issue_1589_window_drain_bytes (the scan/compaction
 #                      windows advance a cursor + compact once per refill instead
 #                      of front-draining per partition — issue #1589); same gate.
+#   byte-budget-guard  cargo test -p cqlite-core --features write-support,cli-helpers,state_machine
+#                      --test issue_1582_byte_bounded_result_budget (issue #1582,
+#                      Epic D6). Byte-bounded result budget: the materializing
+#                      SELECT path fails fast with Error::ResultTooLarge once the
+#                      configured max_result_bytes is exceeded, and a LIMITed query
+#                      is honored before the budget bites. Feature-gated to a combo
+#                      no other gate component runs while naming this target, so the
+#                      guard has an executing regression net. Builds its own
+#                      WriteEngine fixtures -> needs NO datasets (not in
+#                      DATASET_COMPONENTS).
 #   memory-budget      cargo test -p cqlite-core --features cli-helpers,dhat-heap
 #                      --test memory_budget -- --test-threads=1 (issue #1565, Epic
 #                      A/A4). dhat allocation/peak-heap regression net over the real
@@ -538,7 +548,7 @@ classify_scoped_plan() {
   return 0
 }
 
-COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity python-bindings node-bindings delivery-telemetry parity-report binding-unwind-profile tooling-tests minimal-build smoke)
+COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard byte-budget-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity python-bindings node-bindings delivery-telemetry parity-report binding-unwind-profile tooling-tests minimal-build smoke)
 # --lite (issue #1821) runs ONLY this fast subset: file-size ratchet, fmt,
 # FULL-workspace clippy (cross-crate API breaks are the cheap-insurance class),
 # and blast-radius-scoped tests (the touched package's --lib + the diff's new
@@ -1881,6 +1891,9 @@ dispatch_component() {
       --test issue_1143_scan_offload_thread \
       --test issue_1333_scan_scratch_reuse \
       --test issue_1589_window_drain_bytes ;;
+    byte-budget-guard) run_component byte-budget-guard cargo test --package cqlite-core \
+      --features write-support,cli-helpers,state_machine \
+      --test issue_1582_byte_bounded_result_budget ;;
     memory-budget) run_component memory-budget cargo test --package cqlite-core \
       --features cli-helpers,dhat-heap \
       --test memory_budget -- --test-threads=1 ;;
