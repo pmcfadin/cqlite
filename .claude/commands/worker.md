@@ -46,8 +46,20 @@ onto its own branch). Rules, non-negotiable:
    has commandeered the shared checkout. Do NOT touch it; proceed only via your own worktree (steps below
    all use `git -C`), and report to the manager: `⚠️ root checkout is on <branch>, not main — that session
    needs its own worktree`.
+   **Single-worker-per-machine preflight (#1930, owner decision 2026-07-04):** there is **exactly ONE
+   flow-lead worker per machine** — it is the SOLE machine-load authority. Before starting, detect a peer
+   worker on this box: an existing `~/projects/cqlite-wt/issue-*` worktree you did not create, and/or a
+   recent "🔧/🔒 Claimed by flow-lead worker" issue comment from another session. If a second live worker
+   is running here, **STOP** — do NOT start a second one (two same-machine workers share worktree paths,
+   `target/`/sccache, and the gate semaphore → clobbered edits, cargo-lock contention, duplicate PRs, and
+   tail-latency gate flakes). One worker fans out to subagents for throughput; a second worker adds none.
+   Cross-*machine* concurrency is fine — it's coordinated by the origin branch lock.
 2. **Pick up** (`flow-board` pickup rule): the **oldest issue whose board `Status=Ready`** with **no**
-   `issue-N-*` lock on origin. **Select by board `Status` ONLY — never by the `status:ready` label**
+   `issue-N-*` lock on origin. **Any-slug lock check (#1930):** test for **ANY** claim branch on the
+   issue, not your exact slug — `git ls-remote --heads origin "issue-<N>-*"`; if it returns anything,
+   the issue is already claimed (a peer may have used a different slug, e.g.
+   `issue-1632-parser-hardening` vs `issue-1632-parser-hardening-bundle`, which defeats an exact-slug
+   push race) → skip it. **Select by board `Status` ONLY — never by the `status:ready` label**
    (Path A, #1886: labels are decorative; the board is the sole dispatch authority). If the board is
    unreachable, STOP and report — do NOT fall back to labels to find work. **Empty Ready → report "Ready
    empty" and stop** (near a release the Ready column is *meant* to drain to zero; that is "done," not a
@@ -91,6 +103,12 @@ onto its own branch). Rules, non-negotiable:
       `waiting for gate slot (N in use)…` once) then run 15-20 min — use a long Bash `timeout` or
       `run_in_background`, and check for that line before assuming a hang (the default 2-min timeout truncates
       a queued gate). If you must watch it, `grep` the summary file at <5-min intervals — never a silent wait.
+      **Full-gate concurrency = 1, always (#1930).** As the single machine-load authority, run the full
+      gate SERIALLY — never 2+ full gates at once, even though the #1825 cap "allows" N=2. The cap prevents
+      SIGKILL but NOT timing flakes: two concurrent gates flaked `mixed_p99_bounded_by_k_times_baseline`
+      (`cqlite-core/tests/tail_latency_harness.rs`) under CPU oversubscription (#1625 core-tests: 693s solo
+      → 87s + FAIL alongside a peer gate). If you pipeline lanes, overlap implementation + read-only reviews
+      freely, but funnel every lane's FULL gate through one serial slot.
    5. Spawn `spec-auditor` for **C** PASS (it audits the impl against `openspec/changes/<slug>/specs/**`);
       run roborev with **this machine's configured agent** (commonly `codex` via `.roborev.toml`; no
       `--agent`/`--model` flags needed) to clean. Pass explicit `--agent`/`--model` ONLY as a per-machine
@@ -127,6 +145,12 @@ diff and breaks 1:1:1:1. Instead:
   then resume the original. Do not fold an unrelated fix into your current branch.
 
 ## Hard rules
+- **One worker per machine — you are the sole machine-load authority (#1930).** Exactly ONE flow-lead
+  worker runs per machine. Never start a second one alongside a live peer (they share worktree paths,
+  `target/`/sccache, and the gate semaphore). Throughput comes from fanning out to subagents, NOT from a
+  second worker. Full-gate concurrency = **1** (serial), always — the #1825 cap stops SIGKILL, not timing
+  flakes. Before claiming, check for **ANY** `issue-<N>-*` branch (any slug), not just your exact slug.
+  Cross-*machine* concurrency stays coordinated by the origin branch lock.
 - **Worktrees only — never touch the root checkout's branch.** All git ops via `git -C <worktree>` / after
   `cd <worktree>`; branch from `origin/main`; the branch push is your lock; stage explicit paths; never
   edit another worker's files. If the root is on a non-main branch, isolate in your worktree and surface

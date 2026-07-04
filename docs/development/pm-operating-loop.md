@@ -4,7 +4,7 @@ Two roles. One board. The manager orchestrates; the workers do everything else.
 
 ## Roles
 
-| | **Manager** (one window, `/manager`) | **flow-lead workers** (N windows / machines) |
+| | **Manager** (one window, `/manager`) | **flow-lead workers** (**one per machine**; N machines) |
 |---|---|---|
 | Writes code / claims / merges? | **Never by hand** (runs the merge-on-green poller for the fleet) | Yes — owns the issue end-to-end |
 | Board | Controls **Ready** (what + order); reconciles; reaps | Reads Ready; claims the oldest unlocked item |
@@ -109,6 +109,26 @@ The pipeline measures itself so improvement is data-driven, not anecdotal:
 
 The `delivery-telemetry` agent-gate component (SKIP-aware on `python3`) covers the tool: schema
 round-trip, lint-rejects-malformed, fixture-ledger → expected top failure, and dedupe.
+
+## Concurrency: one worker per machine (#1930, owner decision 2026-07-04)
+
+- **Exactly one flow-lead worker per machine.** That worker OWNS the machine's Ready-queue throughput and
+  is the SOLE authority on machine load. It fans out *implementation* to many subagents (cheap: edits +
+  `--lite` gates) and lets read-only reviews (rust-reviewer/spec-auditor) overlap, but it **serializes the
+  full `agent-gate.sh` (concurrency = 1)** and caps heavy fan-out. This is the doctrine DEFAULT
+  ("one lead → subagents, zero dup by construction"); N bare independent leads on one box is the
+  discouraged path.
+- **Full-gate concurrency = 1, always.** Never run 2+ full gates at once, regardless of the #1825 cap.
+  The cap prevents SIGKILL under load but NOT timing flakes: two concurrent full gates flaked
+  `mixed_p99_bounded_by_k_times_baseline` (`cqlite-core/tests/tail_latency_harness.rs`) under CPU
+  oversubscription (#1625 core-tests: 693s solo → 87s + FAIL alongside a peer gate).
+- **Any-slug pre-claim check.** Two same-machine sessions once claimed #1632 with *different slugs*
+  (`issue-1632-parser-hardening` vs `issue-1632-parser-hardening-bundle`), so the exact-slug push never
+  collided and the lock didn't fire. Before claiming, check for **ANY** `issue-<N>-*` branch:
+  `git ls-remote --heads origin "issue-<N>-*"` → skip if present.
+- **Cross-machine coordination is unchanged:** one-worker-*per-machine* composes with multiple machines —
+  each machine runs one worker; the origin `issue-<N>-<slug>` branch lock coordinates across machines. The
+  branch lock is no longer load-bearing *within* a machine.
 
 ## Merge sequencing (why HOLD exists)
 
