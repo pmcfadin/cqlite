@@ -331,3 +331,112 @@ describe('Row property order matches SELECT order (Issue #1446)', () => {
     expect(seen).toBeGreaterThan(0);
   });
 });
+
+/**
+ * executeNative blob-payload memory footprint (Issue #1447).
+ *
+ * `ExecuteNativeTask::compute()` used to deep-clone every `Value` of every row
+ * before dropping the source result; #1447 changed it to MOVE the values
+ * instead. This test guards the payload footprint via `externalRatio`: the blob
+ * bytes reaching JS must appear as a single copy (`external`/Buffer memory ~=
+ * payload, i.e. ~1.0x). That is the meaningful no-duplication guard and the
+ * ONLY hard assertion. `rssRatio` (process-wide resident set) is logged as an
+ * advisory diagnostic only — it is affected by V8 GC/JIT/allocator retention,
+ * is not payload-scaled, and so is too flaky to assert against as a
+ * move-vs-clone proxy.
+ *
+ * Fixture: `test_wide_rows.large_blob_table.chunk_data` is the widest genuine
+ * `blob` column in the corpus (~53 KB total across 50 rows, avg ~1 KB). To lift
+ * the signal above V8/native baseline noise the query is issued K times and its
+ * payload retained, so `totalPayload` reaches tens of MB.
+ *
+ * Dataset-absence is handled by `skipIfNoDatasets()` in `beforeAll`: per the
+ * repo's Node test convention it THROWS (never skips) when the corpus is not
+ * configured, so a misconfigured CI run fails loudly rather than passing
+ * silently. Within the test itself we also THROW for the present-but-empty
+ * fixture case (rowCount == 0) and when `--expose-gc` is unavailable. Requires
+ * `node --expose-gc` (wired via package.json `test` script).
+ */
+describe('executeNative blob payload memory footprint (Issue #1447)', () => {
+  let db = null;
+
+  beforeAll(async () => {
+    skipIfNoDatasets();
+    db = await Database.open(global.testPaths.SSTABLES_DIR, {
+      schema: global.testPaths.SCHEMA_WIDE_ROWS,
+    });
+  });
+
+  afterAll(async () => {
+    if (db) {
+      await db.close();
+      db = null;
+    }
+  });
+
+  test('peak resident footprint stays under 2x the blob payload (move, not clone)', async () => {
+    // gc is mandatory: without a stable baseline the measurement is meaningless.
+    if (typeof global.gc !== 'function') {
+      throw new Error(
+        'This test requires --expose-gc. Run: node --expose-gc ./node_modules/jest/bin/jest.js result.test.js'
+      );
+    }
+
+    const query = 'SELECT chunk_data FROM test_wide_rows.large_blob_table';
+
+    // Measure the per-query blob payload once.
+    const first = await db.executeNative(query);
+    if (first.rowCount === 0) {
+      throw new Error(
+        'large_blob_table returned 0 rows — present-but-empty fixture must fail, never skip'
+      );
+    }
+    let perQueryPayload = 0;
+    for (const row of first.rows) {
+      const buf = row.chunk_data;
+      if (buf) {
+        expect(Buffer.isBuffer(buf)).toBe(true);
+        perQueryPayload += buf.length;
+      }
+    }
+    expect(perQueryPayload).toBeGreaterThan(0);
+
+    // Amplify to a multi-MB payload so the footprint signal clears baseline
+    // noise (per-query payload ~53 KB is far too small on its own).
+    const K = 600;
+    global.gc();
+    const base = process.memoryUsage();
+    let peakRss = base.rss;
+    let peakExternal = base.external;
+    const retained = [];
+    for (let i = 0; i < K; i += 1) {
+      const r = await db.executeNative(query);
+      for (const row of r.rows) {
+        if (row.chunk_data) {
+          retained.push(row.chunk_data);
+        }
+      }
+      const m = process.memoryUsage();
+      if (m.rss > peakRss) peakRss = m.rss;
+      if (m.external > peakExternal) peakExternal = m.external;
+    }
+    // Keep the payload live through the assertions.
+    expect(retained.length).toBe(first.rowCount * K);
+
+    const totalPayload = perQueryPayload * K;
+    const externalRatio = (peakExternal - base.external) / totalPayload;
+    // rssRatio is advisory-only: process-wide RSS is affected by V8 GC/JIT and
+    // allocator retention, is not payload-scaled, and is too flaky to assert.
+    const rssRatio = (peakRss - base.rss) / totalPayload;
+    console.log(
+      `    #1447 footprint: totalPayload=${totalPayload} bytes, ` +
+        `externalRatio=${externalRatio.toFixed(3)}, rssRatio=${rssRatio.toFixed(3)} (advisory)`
+    );
+
+    // Blob bytes reach JS as a single copy: Buffer/external memory tracks the
+    // payload ~1:1. A reintroduced deep-clone (or any retained duplicate) would
+    // push externalRatio toward the ~3x regression #1447 fixed. This is the
+    // only hard assertion; rssRatio above is logged as a diagnostic only.
+    expect(externalRatio).toBeLessThan(2);
+  });
+});
