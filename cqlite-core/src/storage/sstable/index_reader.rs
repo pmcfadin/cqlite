@@ -133,6 +133,17 @@ pub struct IndexReader {
     index_data: IndexData,
     /// Platform abstraction for file operations
     platform: Arc<Platform>,
+    /// Whether the partition map is KNOWN-COMPLETE (issue #1572 correctness).
+    ///
+    /// `true` only when entry parsing consumed every byte of the entry section
+    /// with no early `break` and no leftover `remaining` (see
+    /// [`parse_all_partition_keys_with_summary`], which `break`s on the first
+    /// unparseable entry and returns the parsed prefix). A truncated /
+    /// partially-corrupt / unexpectedly-encoded `Index.db` opens successfully
+    /// with a PARTIAL map — `false` — so point-lookup callers must fall back to
+    /// a whole-file scan rather than treat an index miss as a definitive absent.
+    /// Derived from authoritative parse-consumption (no heuristics, issue #28).
+    is_complete: bool,
 }
 
 impl IndexReader {
@@ -167,9 +178,14 @@ impl IndexReader {
             )));
         }
 
-        // Parse the index data with optional Summary.db correlation
-        let index_data = match parse_index_data_with_summary(&buffer, summary_reader) {
-            Ok((_, data)) => data,
+        // Parse the index data with optional Summary.db correlation.
+        // `remaining` is the leftover after entry parsing: empty ⇒ every entry
+        // byte was consumed with no early `break`, so the map is KNOWN-COMPLETE
+        // (issue #1572). Non-empty ⇒ the parser stopped early (truncated /
+        // corrupt / unexpectedly-encoded input) leaving a PARTIAL map.
+        let (index_data, is_complete) = match parse_index_data_with_summary(&buffer, summary_reader)
+        {
+            Ok((remaining, data)) => (data, remaining.is_empty()),
             Err(e) => {
                 return Err(Error::corruption(format!(
                     "Failed to parse Index.db: {:?}",
@@ -182,7 +198,19 @@ impl IndexReader {
             file_path: path.to_path_buf(),
             index_data,
             platform,
+            is_complete,
         })
+    }
+
+    /// Whether this reader's partition map is KNOWN-COMPLETE (issue #1572).
+    ///
+    /// Returns `true` only when Index.db entry parsing consumed all entry bytes
+    /// with no early stop. When `false`, an index MISS is NOT authoritative: the
+    /// map may be a partial prefix of a truncated/corrupt Index.db, so callers
+    /// that treat a miss as a definitive absent must instead fall back to a
+    /// whole-file scan to preserve correctness on degraded inputs.
+    pub(crate) fn is_complete(&self) -> bool {
+        self.is_complete
     }
 
     /// Get all partition entries

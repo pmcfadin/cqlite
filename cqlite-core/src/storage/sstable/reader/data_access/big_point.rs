@@ -31,14 +31,16 @@ impl SSTableReader {
     /// 1. Bloom pre-check (unchanged) — a definite miss short-circuits to `None`.
     /// 2. Fast path: `index_reader` (raw-key `Index.db` map) resolves the
     ///    uncompressed partition offset; only the covering chunk(s) are read,
-    ///    CRC-checked, decompressed, and decoded. `index_reader` is the COMPLETE
-    ///    partition index for a BIG SSTable, so a MISS is a definitive absent —
-    ///    no full scan.
-    /// 3. `scan_for_key` is kept ONLY for genuinely index-less readers (no
-    ///    `index_reader`), and — conservatively — for the rare exact index hit
-    ///    that decodes to no matching row (schema-unavailable soft-miss or a
-    ///    benign per-row table-guard rejection), where the whole-file oracle
-    ///    preserves the pre-#1572 result.
+    ///    CRC-checked, decompressed, and decoded. When the `Index.db` map is
+    ///    KNOWN-COMPLETE (`IndexReader::is_complete()`), a MISS is a definitive
+    ///    absent — no full scan.
+    /// 3. `scan_for_key` is kept for genuinely index-less readers (no
+    ///    `index_reader`); for the rare exact index hit that decodes to no
+    ///    matching row (schema-unavailable soft-miss or a benign per-row
+    ///    table-guard rejection); AND for an index MISS when the map is NOT
+    ///    known-complete (truncated/corrupt/partial `Index.db`, issue #1572) —
+    ///    in every case the whole-file oracle preserves the pre-#1572 result and
+    ///    keeps `get()`/`scan()` in agreement.
     ///
     /// `fully_qualified_match` is threaded through to the shared decode's per-row
     /// table-consistency guard exactly as the BTI path does (issue #1321 / #1284).
@@ -110,10 +112,28 @@ impl SSTableReader {
                     // safe scan_for_key oracle to preserve the pre-#1572 result.
                 }
                 None => {
-                    // Complete Index.db map miss ⇒ partition is definitively absent
-                    // from this SSTable. No full scan (guardrail: definitive negative
-                    // without a whole-file decompress).
-                    return Ok(None);
+                    // Index.db map miss. Treat it as a definitive absent ONLY when
+                    // the map is KNOWN-COMPLETE (issue #1572 correctness): entry
+                    // parsing consumed every entry byte with no early stop. A
+                    // truncated / partially-corrupt / unexpectedly-encoded Index.db
+                    // opens successfully with a PARTIAL prefix map, and a partition
+                    // whose entry lies past the parse-stop point would then miss the
+                    // map yet still be present in Data.db — a silent get/scan
+                    // divergence. When the map is NOT known-complete, fall back to
+                    // the whole-file `scan_for_key` oracle (pre-#1572 behaviour),
+                    // keeping the SCAN_FOR_KEY_CALLS counter observable on that path.
+                    let index_complete = self
+                        .index_reader
+                        .as_ref()
+                        .map(|r| r.is_complete())
+                        .unwrap_or(false);
+                    if index_complete {
+                        // Complete Index.db map miss ⇒ definitively absent. No full
+                        // scan (guardrail: definitive negative without a whole-file
+                        // decompress).
+                        return Ok(None);
+                    }
+                    return self.scan_for_key(table_id, key).await;
                 }
             }
         }

@@ -333,3 +333,140 @@ async fn get_value_matches_full_scan_oracle_for_all_keys() {
     );
     eprintln!("get_value_matches_full_scan_oracle_for_all_keys PASSED ({checked} keys)");
 }
+
+// -------------------------------------------------------------------------
+// Test 5 (roborev correctness regression): a TRUNCATED / partial Index.db
+// must not turn an index MISS into a silent wrong-answer.
+//
+// `IndexReader::open` does NOT guarantee a complete partition map: entry
+// parsing `break`s on the first unparseable entry and the leftover bytes are
+// discarded, so a truncated Index.db opens successfully with a PARTIAL prefix
+// map. The #1572 fast path treated an index miss as a definitive absent →
+// a partition whose entry lies past the parse-stop point returned `None` from
+// `get()` even though `scan()` still finds it in Data.db (get/scan divergence).
+//
+// The fix only treats a miss as authoritative when the map is KNOWN-COMPLETE;
+// otherwise it falls back to the whole-file scan. This test builds a degraded
+// fixture by truncating a COPY of a real Index.db (never mutating the shared
+// dataset) and asserts every scan-visible key is still found by `get()`.
+// FAILS without the fix (get() returns None for the post-truncation key),
+// PASSES with it.
+// -------------------------------------------------------------------------
+
+/// Copy the full SSTable component set (every sibling of `data_db`, e.g.
+/// `nb-1-big-*`) into `dst_dir`, returning the copied Data.db path.
+fn copy_component_set(data_db: &Path, dst_dir: &Path) -> PathBuf {
+    let src_dir = data_db.parent().expect("Data.db has a parent dir");
+    let data_name = data_db
+        .file_name()
+        .expect("Data.db file name")
+        .to_string_lossy()
+        .to_string();
+    // Component stem is everything up to `-Data.db` (e.g. `nb-1-big`).
+    let stem = data_name
+        .strip_suffix("-Data.db")
+        .expect("Data.db name ends with -Data.db");
+    for entry in std::fs::read_dir(src_dir).expect("read source SSTable dir").flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        // Copy this generation's real components, but NOT the `.jsonl` golden.
+        if name.starts_with(&format!("{stem}-")) && !name.ends_with(".jsonl") {
+            std::fs::copy(entry.path(), dst_dir.join(&name))
+                .unwrap_or_else(|e| panic!("copy {name}: {e}"));
+        }
+    }
+    dst_dir.join(&data_name)
+}
+
+#[tokio::test]
+async fn truncated_index_get_falls_back_to_scan() {
+    let Some(dd) = big_data_db() else {
+        eprintln!("SKIP: {KEYSPACE}/{TABLE} BIG fixture not available");
+        return;
+    };
+
+    // 1. Copy the component set to a temp dir so we never mutate the shared dataset.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let copied_data = copy_component_set(&dd, tmp.path());
+    let index_copy = tmp.path().join(
+        copied_data
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .replace("-Data.db", "-Index.db"),
+    );
+
+    // 2. Truncate the Index.db copy MID-ENTRY: drop the tail so the final entry
+    //    fails to parse. The parser stops early (partial prefix map, leftover
+    //    remaining ⇒ NOT known-complete); the token-tail partition(s) are lost
+    //    from the map but still present in Data.db.
+    let orig_len = std::fs::metadata(&index_copy).expect("Index.db metadata").len();
+    assert!(orig_len > 32, "Index.db unexpectedly tiny ({orig_len} bytes)");
+    // Remove the last 8 bytes — cuts into the final entry's key so `take` fails,
+    // leaving a non-empty `remaining` (guaranteed is_complete == false), and
+    // only the final entry is affected (earlier entries parse intact).
+    let truncated_len = orig_len - 8;
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&index_copy)
+        .expect("open Index.db copy for truncation");
+    f.set_len(truncated_len).expect("truncate Index.db copy");
+    drop(f);
+
+    // 3. Open the reader over the DEGRADED copy and enumerate all keys via scan
+    //    (the whole-file oracle is unaffected by the Index.db truncation).
+    let reader = open_reader(&copied_data).await;
+    let oracle = scan_oracle(&reader).await;
+
+    // 4. Partition oracle keys by whether the truncated Index.db still resolves
+    //    them. A partial map means at least one scan-visible key now MISSES the
+    //    index — that is the key the #1572 regression would silently drop.
+    let mut missing: Vec<Vec<u8>> = Vec::new();
+    let mut resolvable = 0usize;
+    for k in oracle.keys() {
+        if reader
+            .lookup_partition_with_index(k)
+            .await
+            .expect("index lookup must not error")
+            .is_some()
+        {
+            resolvable += 1;
+        } else {
+            missing.push(k.clone());
+        }
+    }
+    assert!(
+        resolvable > 0,
+        "truncation should leave a parsed prefix (some keys still resolvable)"
+    );
+    assert!(
+        !missing.is_empty(),
+        "truncation must drop at least one scan-visible key from the Index.db map \
+         (else the degraded-input scenario is not exercised)"
+    );
+
+    // 5. Correctness: every scan-visible key whose Index.db entry was lost must
+    //    STILL be found by get() (via the scan fallback), byte-identical to scan.
+    //    Without the fix, get() returns None here → get/scan divergence.
+    for raw_key in &missing {
+        let got = reader
+            .get(&table_id(), &RowKey::new(raw_key.clone()))
+            .await
+            .unwrap_or_else(|e| panic!("get() errored for post-truncation key {raw_key:02x?}: {e}"));
+        let got = got.unwrap_or_else(|| {
+            panic!(
+                "REGRESSION: get() returned None for key {raw_key:02x?} that scan() finds \
+                 (partial Index.db miss treated as definitive absent)"
+            )
+        });
+        let expected = oracle.get(raw_key).expect("oracle has the key");
+        assert_eq!(
+            &got, expected,
+            "get() (scan fallback) row differs from the scan oracle for key {raw_key:02x?}"
+        );
+    }
+    eprintln!(
+        "truncated_index_get_falls_back_to_scan PASSED \
+         ({} dropped keys recovered via scan fallback, {resolvable} still indexed)",
+        missing.len()
+    );
+}
