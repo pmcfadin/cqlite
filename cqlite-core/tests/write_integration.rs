@@ -1443,19 +1443,19 @@ async fn test_write_throughput() -> Result<()> {
     let elapsed = start.elapsed();
     let rows_per_sec = num_rows as f64 / elapsed.as_secs_f64();
 
+    // Info only: throughput is wall-clock/load-sensitive, so it's printed, not
+    // asserted (issue #1903). A regression net belongs in the criterion bench /
+    // perf-regression lane (docs/profiling.md), not the correctness suite.
     println!(
         "Write throughput: {:.0} rows/sec ({} rows in {:?})",
         rows_per_sec, num_rows, elapsed
     );
 
-    // Target: 50 rows/sec (conservative for CI with WAL sync per write)
-    // WAL fsync is intentionally per-write for durability, which limits throughput
-    // Production systems typically batch writes or use async WAL for higher throughput
-    assert!(
-        rows_per_sec >= 50.0,
-        "Write throughput {:.0} rows/sec below target of 50 rows/sec",
-        rows_per_sec
-    );
+    // Load-immune invariants by construction: every write returned Ok, every
+    // unique-pk row landed in the memtable, and flush persists all partitions.
+    assert_eq!(engine.memtable_row_count(), num_rows as usize);
+    let info = engine.flush().await?.expect("Should have data to flush");
+    assert_eq!(info.partition_count, num_rows as usize);
 
     Ok(())
 }
