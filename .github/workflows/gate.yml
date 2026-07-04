@@ -217,6 +217,14 @@ jobs:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
           CQLITE_REQUIRE_FIXTURES: '1'
           AGENT_GATE_SUMMARY_FILE: ${{ github.workspace }}/agent-gate-summary.txt
+          # Full-matrix clippy backstop (issue #1844). The routine local gate runs a
+          # SCOPED per-package clippy that skips the source-built DuckDB C++
+          # amalgamation (cqlite-cli `duckdb-tests`) and the OpenTelemetry/OTLP stack
+          # (`observability`/`observability-testing`) — pure per-gate tax locally. This
+          # nightly deep-check restores the historical
+          # `cargo clippy --workspace --all-targets --all-features -D warnings` pass so
+          # any lint behind those excluded features is still caught within 24h.
+          CQLITE_CLIPPY_FULL: '1'
         run: bash scripts/agent-gate.sh
 
       # Legibility (issue #1269) — resource state after the gate, on success or
