@@ -141,10 +141,28 @@ fn validate_decompression_size(uncompressed_size: usize) -> Result<()> {
 fn snappy_decompress_raw(data: &[u8], decode_attempts: &mut usize) -> Result<Vec<u8>> {
     use snap::raw::Decoder;
     *decode_attempts += 1;
+
+    // CENTRALIZED bomb guard (issue #1588): a raw Snappy block carries its
+    // decompressed length as a leading varint. Inspect it FIRST and reject an
+    // over-limit block WITHOUT calling `decompress_vec` — `decompress_vec`
+    // pre-allocates `decompress_len` bytes up front, so an adversarial block
+    // declaring a huge size would allocate before any post-decode guard runs.
+    // This single choke point protects EVERY caller (chunk decode + streaming).
+    let advertised = snap::raw::decompress_len(data)
+        .map_err(|e| Error::storage(format!("Snappy (raw) length decode failed: {}", e)))?;
+    if advertised > MAX_DECOMPRESSED_SIZE {
+        return Err(Error::storage(format!(
+            "Decompression bomb protection: advertised size {} exceeds limit {} (128MB)",
+            advertised, MAX_DECOMPRESSED_SIZE
+        )));
+    }
+
     let mut decoder = Decoder::new();
     let decompressed = decoder
         .decompress_vec(data)
         .map_err(|e| Error::storage(format!("Snappy (raw) decompression failed: {}", e)))?;
+    // Belt-and-suspenders: the advertised length is attacker-controlled, so
+    // re-check the ACTUAL decoded size against the hard cap.
     if decompressed.len() > MAX_DECOMPRESSED_SIZE {
         return Err(Error::storage(format!(
             "Decompression bomb protection: decompressed size {} exceeds limit {} (128MB)",
@@ -637,14 +655,20 @@ impl StreamingDecompressor {
             self.bytes_processed += compressed.len();
 
             // Pre-allocation bomb guard: reject before allocating the output buffer.
+            // Bound by the MINIMUM of every relevant limit — the streaming memory
+            // budget AND the configured output cap (issue #1588). A `max_memory_mb`
+            // set above `max_output_size` must not be allowed to allocate past the
+            // intended output cap. `snappy_decompress_raw` additionally enforces the
+            // hard `MAX_DECOMPRESSED_SIZE` ceiling at the shared choke point.
             let advertised = snap::raw::decompress_len(&compressed).map_err(|e| {
                 Error::storage(format!("Snappy (raw) length decode failed: {}", e))
             })?;
+            let effective_limit = memory_limit.min(self.config.max_output_size);
             let projected = output.len().checked_add(advertised);
-            if projected.is_none_or(|total| total > memory_limit) {
+            if projected.is_none_or(|total| total > effective_limit) {
                 return Err(Error::storage(format!(
                     "Decompression bomb protection: advertised Snappy size {} exceeds limit {} bytes",
-                    advertised, memory_limit
+                    advertised, effective_limit
                 )));
             }
 
@@ -1149,6 +1173,37 @@ mod tests {
         );
     }
 
+    /// SECURITY (issue #1588): when `max_memory_mb` is configured ABOVE
+    /// `max_output_size`, the advertised-size guard must still bound to the
+    /// MINIMUM of the two (the output cap), so a block that fits the memory
+    /// budget but exceeds the output cap is rejected before allocating.
+    #[cfg(feature = "snappy")]
+    #[tokio::test]
+    async fn test_snappy_streaming_output_cap_bounds_below_memory_limit() {
+        use std::io::Cursor;
+
+        // 100MB memory budget, but only a 1MB output cap. Advertise 50MB: within
+        // the memory budget yet over the output cap -> must be rejected.
+        let config = ChunkedDecompressionConfig {
+            max_memory_mb: 100,
+            chunk_size: 1024,
+            max_output_size: 1024 * 1024,
+        };
+        let mut input = snappy_len_prefix(50 * 1024 * 1024);
+        input.push(0x00); // stub tag byte; guard fires before any decode
+
+        let compression = Compression::new(CompressionAlgorithm::Snappy).unwrap();
+        let mut decompressor = compression.create_streaming_decompressor(config);
+        let err = decompressor
+            .decompress_streaming(Cursor::new(input), None)
+            .await
+            .expect_err("advertised size over output cap must be rejected");
+        assert!(
+            err.to_string().contains("Decompression bomb protection"),
+            "expected output-cap-bounded bomb error, got: {err}"
+        );
+    }
+
     /// SECURITY (issue #1588): a COMPRESSED input larger than the max Snappy
     /// encoding of the memory budget cannot legitimately decode in-budget, so the
     /// read is capped and the oversized input errors without buffering it all.
@@ -1196,6 +1251,35 @@ mod tests {
             attempts, 1,
             "exactly one decode attempt (no format guessing)"
         );
+    }
+
+    /// SECURITY (issue #1588): the SHARED `snappy_decompress_raw` helper — the
+    /// choke point used by the CHUNK (non-streaming) decode path — must reject a
+    /// block whose ADVERTISED decompressed length exceeds `MAX_DECOMPRESSED_SIZE`
+    /// WITHOUT allocating (i.e. before `decompress_vec` pre-allocates that size).
+    /// This proves the guard lives at the helper, not only in the streaming caller.
+    #[cfg(feature = "snappy")]
+    #[test]
+    fn test_snappy_raw_helper_advertised_len_bomb_rejected_no_alloc() {
+        // Craft a tiny raw block: a varint advertising 200MB (> 128MB cap) plus a
+        // stub tag byte. The length guard fires before any output allocation.
+        let mut chunk = snappy_len_prefix(200 * 1024 * 1024);
+        chunk.push(0x00);
+
+        let mut attempts = 0usize;
+        let err = super::snappy_decompress_raw(&chunk, &mut attempts)
+            .expect_err("over-limit advertised length must be rejected at the helper");
+        assert!(
+            err.to_string().contains("Decompression bomb protection"),
+            "expected typed decompression-bomb error, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("advertised size"),
+            "guard must fire on the ADVERTISED length before decode/alloc, got: {err}"
+        );
+        // The decode attempt is counted, but the rejection happens before the
+        // `decompress_vec` allocation of the advertised 200MB.
+        assert_eq!(attempts, 1, "helper is entered exactly once");
     }
 
     #[cfg(feature = "deflate")]
