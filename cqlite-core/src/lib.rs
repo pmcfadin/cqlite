@@ -60,6 +60,70 @@ pub mod fuzz_support;
 // NOTE: memory_safety_runner moved to tools/memory-safety-runner (Issue #245)
 // NOTE: memory_safety_tests disabled - MemTable removed in Issue #175
 
+// Test-only heap-allocation probe (issue #1590, E8). Installed as the global
+// allocator for `cqlite-core`'s unit-test binary so a test can count the heap
+// allocations a specific code path performs (see the `cartesian_product`
+// allocation regression test in the SELECT executor's `lookup` module). It
+// delegates every operation to the system allocator and only bumps a per-thread
+// counter while a measurement is ACTIVE, so it is inert for every other test.
+#[cfg(test)]
+pub(crate) mod test_alloc_probe {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    thread_local! {
+        static COUNT: Cell<u64> = const { Cell::new(0) };
+        static ACTIVE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) struct CountingAllocator;
+
+    // SAFETY: every storage operation is delegated verbatim to `System`; the only
+    // added work is bumping a `Copy` thread-local counter, which never allocates
+    // (the `thread_local!`s are `const`-initialized, so first access is
+    // alloc-free — no reentrancy into the allocator).
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            bump();
+            System.alloc(layout)
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            System.dealloc(ptr, layout)
+        }
+        // Counting `realloc` as an allocation is deliberate: it distinguishes a
+        // `Vec::clone()` + `push()` (a clone-alloc then a grow-realloc) from a
+        // single sized `Vec::with_capacity()` fill.
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            bump();
+            System.realloc(ptr, layout, new_size)
+        }
+    }
+
+    fn bump() {
+        let _ = ACTIVE.try_with(|a| {
+            if a.get() {
+                let _ = COUNT.try_with(|c| c.set(c.get() + 1));
+            }
+        });
+    }
+
+    /// Count the heap allocations `f` performs ON THE CURRENT THREAD (thread-local
+    /// counter, so concurrent tests do not pollute each other). Returns
+    /// `(allocations, f's result)`.
+    pub(crate) fn measure<R>(f: impl FnOnce() -> R) -> (u64, R) {
+        ACTIVE.with(|a| a.set(true));
+        COUNT.with(|c| c.set(0));
+        let r = f();
+        let n = COUNT.with(|c| c.get());
+        ACTIVE.with(|a| a.set(false));
+        (n, r)
+    }
+}
+
+#[cfg(test)]
+#[global_allocator]
+static TEST_ALLOC: test_alloc_probe::CountingAllocator = test_alloc_probe::CountingAllocator;
+
 // Re-export main types for convenience
 pub use crate::{
     config::Config,

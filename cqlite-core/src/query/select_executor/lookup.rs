@@ -466,19 +466,43 @@ impl super::SelectExecutor {
 }
 
 /// Cartesian product of per-column value sets, preserving column order and the
-/// input order within each column. Empty input yields a single empty tuple.
+/// input order within each column. Empty input yields a single empty tuple; any
+/// empty column set yields no tuples.
+///
+/// Issue #1590 (E8): builds each output combination into ONE sized allocation
+/// via a mixed-radix odometer over the per-column value indices, instead of the
+/// old level-by-level build that did `prefix.clone()` + `push()` per combo (a
+/// clone-alloc plus a grow-realloc). Enumeration order is identical — the
+/// rightmost (last) column advances fastest, exactly as the level-by-level build
+/// grew the last column innermost — so the produced key set is byte-identical.
+/// The caller (`classify_partition_lookup`) bounds the product by
+/// `MAX_IN_TARGETED_LOOKUPS` with checked arithmetic BEFORE calling, so `total`
+/// never overflows here.
 fn cartesian_product(per_column: &[Vec<Value>]) -> Vec<Vec<Value>> {
-    let mut out: Vec<Vec<Value>> = vec![Vec::new()];
-    for column_values in per_column {
-        let mut next = Vec::with_capacity(out.len() * column_values.len());
-        for prefix in &out {
-            for value in column_values {
-                let mut combo = prefix.clone();
-                combo.push(value.clone());
-                next.push(combo);
-            }
+    let total: usize = per_column.iter().map(Vec::len).product();
+    if total == 0 {
+        // An empty column set means no complete tuples (matches the old build,
+        // whose next-level capacity `out.len() * 0` produced an empty `out`).
+        return Vec::new();
+    }
+    let num_cols = per_column.len();
+    let mut out: Vec<Vec<Value>> = Vec::with_capacity(total);
+    // `idx[c]` = the current value index within column `c`.
+    let mut idx = vec![0usize; num_cols];
+    for _ in 0..total {
+        let mut combo = Vec::with_capacity(num_cols);
+        for (c, col) in per_column.iter().enumerate() {
+            combo.push(col[idx[c]].clone());
         }
-        out = next;
+        out.push(combo);
+        // Advance the odometer, rightmost column fastest.
+        for c in (0..num_cols).rev() {
+            idx[c] += 1;
+            if idx[c] < per_column[c].len() {
+                break;
+            }
+            idx[c] = 0;
+        }
     }
     out
 }
@@ -757,6 +781,61 @@ mod tests {
                 PartitionLookupOutcome::Fallback(FallbackReason::NoSchema)
             ),
             "no schema must report the NoSchema fallback reason",
+        );
+    }
+
+    /// Issue #1590 (E8): the `IN`-list / composite `IN` key expansion
+    /// (`cartesian_product`) builds each output combination into one sized
+    /// allocation instead of `prefix.clone()` + `push()` (a clone-alloc plus a
+    /// grow-realloc per combo). This pins two properties: (1) the output is
+    /// byte-identical to the old prefix-clone build (no behavior change), and
+    /// (2) the index-based build allocates strictly fewer times than that
+    /// reference — the regression that fails on the old impl (where the two
+    /// builds are the same code and allocate identically).
+    #[test]
+    fn cartesian_product_builds_each_combo_in_one_allocation() {
+        use crate::test_alloc_probe::measure;
+
+        // The OLD level-by-level build, kept verbatim as the allocation + output
+        // reference (`prefix.clone()` then `push()`).
+        fn reference(per_column: &[Vec<Value>]) -> Vec<Vec<Value>> {
+            let mut out: Vec<Vec<Value>> = vec![Vec::new()];
+            for column_values in per_column {
+                let mut next = Vec::with_capacity(out.len() * column_values.len());
+                for prefix in &out {
+                    for value in column_values {
+                        let mut combo = prefix.clone();
+                        combo.push(value.clone());
+                        next.push(combo);
+                    }
+                }
+                out = next;
+            }
+            out
+        }
+
+        // A composite `IN` over three columns (4×4×4 = 64 combos, the classifier
+        // cap): every combo has length 3, so the old prefix-clone path pays a
+        // clone + a grow-realloc per combo while the index-based build pays one
+        // sized allocation per combo.
+        let per_column: Vec<Vec<Value>> = vec![
+            (0..4).map(Value::Integer).collect(),
+            (0..4).map(|i| Value::Integer(i + 100)).collect(),
+            (0..4).map(|i| Value::Integer(i + 1000)).collect(),
+        ];
+
+        let (ref_allocs, ref_out) = measure(|| reference(&per_column));
+        let (new_allocs, new_out) = measure(|| cartesian_product(&per_column));
+
+        assert_eq!(
+            new_out, ref_out,
+            "cartesian product output must be byte-identical to the prefix-clone build"
+        );
+        assert_eq!(new_out.len(), 64, "4×4×4 composite IN expands to 64 keys");
+        assert!(
+            new_allocs < ref_allocs,
+            "index-based cartesian_product must allocate strictly fewer times than \
+             the prefix-clone reference: {new_allocs} vs {ref_allocs}"
         );
     }
 }
