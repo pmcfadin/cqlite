@@ -632,6 +632,13 @@ pub fn row_to_object(
 mod tests {
     use super::*;
 
+    /// Serializes every test that resets/reads the process-global
+    /// `ctor_lookups` counter. The increment site lives in library code (a true
+    /// process-global, unlike the local-instance trick in `cqlite-core`'s
+    /// `work_counters`), so two `reset`-then-assert tests running under Rust's
+    /// default parallel runner would race. Both counter tests take this guard.
+    static CTOR_COUNTER_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_decimal_to_string_positive() {
         // 123 with scale 2 = 1.23
@@ -684,10 +691,11 @@ mod tests {
     // test on purpose: the counter is a process-global (the increment site is in
     // library code, unlike the local-instance trick in `cqlite-core`'s
     // `work_counters`), so splitting them into two `reset`-then-assert tests would
-    // race under Rust's default parallel test runner. No other test in this module
-    // touches the counter, so this single serial test is deterministic.
+    // race under Rust's default parallel test runner. Tests that touch the counter
+    // serialize on `CTOR_COUNTER_GUARD`.
     #[test]
     fn ctor_cache_fetches_at_most_once_per_cache() {
+        let _guard = CTOR_COUNTER_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         testing::reset_ctor_lookups();
 
         // Zero lookups when no set/map cell is ever converted (a `ConvCtx` never
@@ -709,5 +717,54 @@ mod tests {
         .expect("second hit");
         assert_eq!(*second, 7);
         assert_eq!(testing::ctor_lookups(), 1);
+    }
+
+    // Issue #1449: FFI-call BUDGET ratchet for the #1448 constructor-caching win.
+    //
+    // The `ctor_lookups` counter is Rust-`#[cfg(test)]` only and NOT exposed to
+    // JS, so per the issue this FFI-call budget is asserted here (Rust) while the
+    // JS test owns the per-row heap-delta budget.
+    //
+    // A `ConvCtx` lives for a WHOLE result conversion; its two `OnceCell`s back
+    // the `Set` and `Map` constructor caches. `row_to_object` -> `value_to_napi`
+    // routes every set/map cell through `set_constructor`/`map_constructor`, both
+    // of which delegate to the single `cache_get_or_try_init` fetch-vs-cached
+    // decision point. So converting a wide result of ROWS rows, each with several
+    // set AND map cells, must still fetch each global constructor at most once for
+    // the entire result — total lookups <= 2 (one Set cache + one Map cache),
+    // regardless of row/cell count. A regression to per-cell `get_global()` would
+    // make this O(rows x collection-cells).
+    //
+    // This exercises `cache_get_or_try_init` directly on two shared cells (exactly
+    // what `set_constructor`/`map_constructor` delegate to) because instantiating a
+    // real `ConvCtx` needs a live napi `Env`, which is unavailable in a unit test.
+    #[test]
+    fn set_map_ctor_lookups_bounded_per_result() {
+        let _guard = CTOR_COUNTER_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        testing::reset_ctor_lookups();
+
+        // One pair of caches shared across the whole simulated result, as a real
+        // per-result `ConvCtx` holds.
+        let set_cell: OnceCell<u32> = OnceCell::new();
+        let map_cell: OnceCell<u32> = OnceCell::new();
+
+        const ROWS: usize = 200;
+        const COLLECTION_CELLS_PER_ROW: usize = 5;
+        for _ in 0..ROWS {
+            for _ in 0..COLLECTION_CELLS_PER_ROW {
+                let _ = cache_get_or_try_init(&set_cell, || Ok(1u32)).expect("set ctor");
+                let _ = cache_get_or_try_init(&map_cell, || Ok(2u32)).expect("map ctor");
+            }
+        }
+
+        // 2 caches, each accessed ROWS * COLLECTION_CELLS_PER_ROW = 1000 times,
+        // but each fetched exactly once -> total 2. Budget is 2 (<=1 per cache).
+        let lookups = testing::ctor_lookups();
+        assert!(
+            lookups <= 2,
+            "constructor lookups {lookups} exceeded FFI-call budget of 2 \
+             (<=1 per Set/Map cache per result); a regression to per-cell \
+             get_global() would make this O(rows x collection-cells) — see #1449"
+        );
     }
 }
