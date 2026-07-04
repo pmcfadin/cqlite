@@ -63,6 +63,14 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
      * fetch per table. Concurrent-safe via {@link ConcurrentHashMap#computeIfAbsent}
      * (Trino may plan on multiple threads); the derivation is idempotent and never
      * returns null (it returns {@link TableStatistics#empty()} on any failure).
+     *
+     * <p>Negative ({@code empty()}) results are memoized on purpose. This cache is scoped
+     * to a single short-lived, per-planning-pass {@code ConnectorMetadata} instance, and
+     * memoizing {@code empty()} deliberately avoids re-hammering a failing/timing-out
+     * Sidecar (with slow timeouts) within that pass. The accepted tradeoff: a transient
+     * blip is not retried until the next planning pass (a new metadata instance). This is
+     * consistent with the spec's fail-closed requirement, where {@code empty()} is the
+     * correct grounded-or-not answer (issue #1336).
      */
     private final Map<SchemaTableName, TableStatistics> nonAggregatedStatsCache =
             new ConcurrentHashMap<>();
@@ -997,6 +1005,10 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
         }
         // Non-aggregated scan: report the logical (de-replicated) row count, memoized
         // per (keyspace, table) so one planning pass fetches at most once per table.
+        // Negative empty() results are cached on purpose (issue #1336): this cache lives
+        // only for this short-lived per-planning-pass metadata instance, so memoizing
+        // empty() avoids re-hammering a down/slow Sidecar within the pass. The tradeoff is
+        // that a transient blip is not retried until the next pass (a new metadata instance).
         SchemaTableName key = new SchemaTableName(handle.keyspace(), handle.table());
         return nonAggregatedStatsCache.computeIfAbsent(
                 key, k -> logicalRowCountStatistics(handle));
