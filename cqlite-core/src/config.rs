@@ -812,8 +812,8 @@ mod tests {
             "both fields must be absent for this regression to be meaningful"
         );
 
-        let restored: QueryConfig = serde_json::from_value(value)
-            .expect("old config (no budget fields) must deserialize");
+        let restored: QueryConfig =
+            serde_json::from_value(value).expect("old config (no budget fields) must deserialize");
         assert_eq!(
             restored.max_result_bytes, DEFAULT_MAX_RESULT_BYTES,
             "absent max_result_bytes must take the serde default"
