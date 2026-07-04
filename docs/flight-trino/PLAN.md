@@ -46,6 +46,36 @@ filtering pinned to a single replica, Trino would see each row RF times. cqlite'
 compaction reconciles only *within* a node; cross-replica dedup is the connector's
 job (one range → one replica) backed by the server's range filter.
 
+### Statistics semantics: two different de-replication mechanisms (issue #1336)
+The **scan path** and the **optimizer-stats path** both have to undo RF over-counting,
+but by different means, and they must not be confused:
+
+- **Scan path — dedupe by token range.** One split per read-replica token range, pinned
+  to exactly one replica; the server filters output to that `(start, end]` range, so each
+  logical row is emitted once cluster-wide (above).
+- **Stats path — de-replicate by uniform replica-count division.** `table_stats` has no
+  token fields, so `CqliteFlightMetadata.getTableStatistics` sums the whole-table
+  `live_rows` across the keyspace's DISTINCT scoped replica hosts (≈ RF × logical
+  cardinality) and reports `ROW_COUNT = live_rows / R`. `R` is the **uniform per-token-range
+  distinct scoped read-replica count** derived ONLY from the authoritative Sidecar
+  `tokenRangeReplicas` response (never by parsing `replication = {...}` strategy strings —
+  no-heuristics mandate #28), under the same `localDatacenter` scoping the stats sum was
+  collected under.
+
+**Fail-closed conditions** (report `TableStatistics.empty()`, today's behavior — statistics
+failures never fail query planning): non-uniform per-range replica counts (topology
+mid-transition), a zero-replica range, `table_stats` `complete=false` (undecodable
+`Statistics.db` / unreachable replica / #1327 count contradiction), or ANY Sidecar/Flight
+error or timeout. The result is memoized per `(keyspace, table)` so one planning pass
+fetches `tokenRangeReplicas` and `table_stats` at most once each per table.
+
+**Caveats (documented, accepted):** under replica divergence (repair lag, differing
+compaction of expired data) the quotient is the mean across replicas — a well-behaved
+`Estimate`, not an exact count. **Transient replication** (Cassandra experimental) is
+invisible in Sidecar's replica lists, so such keyspaces may over-divide; documented out of
+scope. The AUTOMATIC GROUP-BY pushdown gate (`estimateGroupRatio`) is UNCHANGED — it uses
+the RF-invariant `partition_count / live_rows` ratio where replica over-count cancels.
+
 ---
 
 ## 3. Grounded API facts (from spike — quote these when implementing)
