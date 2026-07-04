@@ -10,7 +10,17 @@
 # Components mirror the enforced CI gates (.github/workflows/ci.yml,
 # ci-minimal-features.yml, python-ci.yml) plus the local smoke suite:
 #   fmt                cargo fmt --all --check
-#   clippy             RUSTFLAGS="-D warnings" clippy --workspace --all-targets --all-features
+#   clippy             RUSTFLAGS="-D warnings" clippy, SCOPED per-package (issue
+#                      #1844): whole-workspace lint that deliberately does NOT
+#                      compile the source-built DuckDB C++ amalgamation
+#                      (cqlite-cli `duckdb-tests`) or the OpenTelemetry/OTLP stack
+#                      (`observability`/`observability-testing`) — both are pure
+#                      per-gate tax (-D warnings gives clippy a distinct fingerprint,
+#                      so no other component reuses them). parquet/arrow stay linted.
+#                      Set CQLITE_CLIPPY_FULL=1 to run the historical
+#                      `--workspace --all-targets --all-features` matrix instead; the
+#                      nightly gate.yml deep-check sets it so the otel/duckdb-inclusive
+#                      lint still runs within 24h (coverage moved, not deleted).
 #   core-tests         cargo test -p cqlite-core --features cli-helpers (CI skip-list applied)
 #   scan-offload-guard cargo test -p cqlite-core --features cli-helpers,scan-offload-probe
 #                      --test issue_1143_scan_offload_thread (windowed-scan parse
@@ -112,8 +122,9 @@
 # Usage:
 #   scripts/agent-gate.sh             # full gate (the only run that counts)
 #   scripts/agent-gate.sh --lite      # FAST ITERATION gate (issue #1821): runs
-#                                     # ONLY file-size + fmt + FULL-workspace clippy
-#                                     # (-D warnings) + BLAST-RADIUS-SCOPED tests
+#                                     # ONLY file-size + fmt + scoped workspace clippy
+#                                     # (-D warnings; same #1844 duckdb/otel-excluded
+#                                     # scoping as the full gate) + BLAST-RADIUS-SCOPED tests
 #                                     # (the touched package's --lib + the diff's
 #                                     # new --test targets; NOT core-tests/write/
 #                                     # cli/bindings/parity/smoke). ~1-5 min vs
@@ -685,6 +696,63 @@ fi
 # drains. This keeps the SUMMARY block deterministic regardless of finish order.
 record_result() { # <name> <status> <seconds>
   printf '%s %s\n' "$2" "$3" > "$LOG_DIR/$1.result"
+}
+
+# run_clippy: the `clippy` component's command (issue #1844). By default it runs a
+# SCOPED per-package clippy that lints the whole workspace with -D warnings WITHOUT
+# compiling two costly, gate-irrelevant artifacts on every run/worktree:
+#   * the source-built DuckDB C++ amalgamation (cqlite-cli `duckdb-tests` feature),
+#   * the full OpenTelemetry/OTLP stack (`observability`/`observability-testing` on
+#     cqlite-core/cli/flight/bindings — both the tonic AND reqwest transports).
+# `--workspace --all-features` would enable EVERY feature on EVERY package and pull
+# in both. `-D warnings` alone already gives clippy a distinct compile fingerprint,
+# so those artifacts are never reused by any other component — pure per-gate tax.
+#
+# parquet/arrow are NOT excluded: they are reachable in normal builds (cqlite-cli's
+# cli-helpers→state_machine→cqlite-core/parquet chain), so they stay linted here.
+# ONLY duckdb + otel move to the nightly backstop.
+#
+# Coverage of the excluded features is NOT deleted — it moves to a nightly full
+# matrix: set CQLITE_CLIPPY_FULL=1 to run the historical
+# `--workspace --all-targets --all-features` pass instead. `.github/workflows/gate.yml`
+# (the nightly deep-check) sets it, so the full otel/duckdb-inclusive lint still runs
+# within 24h. The explicit per-package feature lists below can drift as features are
+# added; that nightly `--all-features` pass is the backstop that catches any omission.
+run_clippy() {
+  if [ "${CQLITE_CLIPPY_FULL:-0}" = 1 ]; then
+    env RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
+    return
+  fi
+
+  # (1) Whole workspace at all-features, EXCLUDING the five packages that carry the
+  #     duckdb/otel optional features. --all-features only turns on features of the
+  #     SELECTED packages, so with these excluded no `duckdb-tests`/`observability`
+  #     feature is ever activated — and cqlite-core, built here only as a transitive
+  #     dependency of the remaining crates, never gets its `observability` feature.
+  env RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features \
+    --exclude cqlite-core --exclude cqlite-cli --exclude cqlite-flight \
+    --exclude cqlite-py --exclude cqlite-node || return 1
+
+  # (2) cqlite-core: every feature EXCEPT observability/observability-testing/metrics
+  #     (the OpenTelemetry stack). Keep this in sync with cqlite-core/Cargo.toml when
+  #     features are added; the nightly CQLITE_CLIPPY_FULL=1 pass is the drift guard.
+  env RUSTFLAGS="-D warnings" cargo clippy -p cqlite-core --all-targets --features \
+"all-compression,antlr,arrow,bench-internals,benchmarks,ci_zero_tolerance,cli-helpers,deflate,delta-scan,dhat-heap,docker-integration,enhanced-index-validation,events,experimental,extended-index-validation,fuzz,legacy-heuristics,lz4,parquet,pest,scan-offload-probe,snappy,state_machine,test-coverage-tracking,test-infrastructure,test-property-testing,test-quality-gates,test-schema-validation,tombstones,unit-tests-only,wasm,work-counters,write-support,zstd" \
+    || return 1
+
+  # (3) cqlite-cli: every feature EXCEPT duckdb-tests + observability. Pulls in
+  #     parquet/arrow via state_machine and delta-scan via delta-export, so the
+  #     normal-build reachable surface stays linted.
+  env RUSTFLAGS="-D warnings" cargo clippy -p cqlite-cli --all-targets --features \
+"benchmarks,ci_zero_tolerance,cli-helpers,delta-export,experimental,integration-tests,interactive,state_machine,tui,write-support" \
+    || return 1
+
+  # (4) cqlite-flight + the Python/Node bindings at their DEFAULT features (none of
+  #     which enable observability), plus cqlite-node's write-support code path. This
+  #     lints their real binding/connector surface without linking the otel shim.
+  env RUSTFLAGS="-D warnings" cargo clippy --all-targets \
+    -p cqlite-flight -p cqlite-py -p cqlite-node --features cqlite-node/write-support \
+    || return 1
 }
 
 run_component() { # run_component <name> <cmd...>
@@ -1311,7 +1379,7 @@ run_lite() {
   echo
   echo "==================================================================="
   echo "  AGENT-GATE --lite  :  FAST ITERATION GATE — *NOT* THE GATE OF RECORD"
-  echo "  Runs: file-size + fmt + workspace clippy + blast-radius-scoped tests."
+  echo "  Runs: file-size + fmt + scoped workspace clippy + blast-radius-scoped tests."
   echo "  It SKIPS core-tests, write/cli, bindings, parity, smoke, etc."
   echo "  Before merge you MUST run the full  scripts/agent-gate.sh  and it must"
   echo "  PASS — its ==== AGENT-GATE SUMMARY ==== block is the ONLY run that counts."
@@ -1320,7 +1388,7 @@ run_lite() {
 
   run_file_size
   run_component fmt cargo fmt --all --check
-  run_component clippy env RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
+  run_component clippy run_clippy
   run_scoped_tests
 
   declare -a SUMMARY_META=()
@@ -1604,7 +1672,7 @@ _pool_selected() {
 dispatch_component() {
   case "$1" in
     fmt) run_component fmt cargo fmt --all --check ;;
-    clippy) run_component clippy env RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features ;;
+    clippy) run_component clippy run_clippy ;;
     core-tests) run_core_tests ;;
     tombstones-scan) run_component tombstones-scan cargo test --package cqlite-core \
       --features write-support,cli-helpers,tombstones \

@@ -68,10 +68,19 @@ Subagents in `.claude/agents/` for specialized tasks:
 # write-support tests, CLI tests, minimal-features build, and smoke, then
 # emits a machine-checkable summary block. Paste that block verbatim when
 # reporting validation; ad-hoc cargo runs do not count as "the gate passed".
+#
+# clippy is SCOPED per-package (issue #1844): it lints the whole workspace with
+# -D warnings but does NOT compile the source-built DuckDB C++ amalgamation
+# (cqlite-cli `duckdb-tests`) or the OpenTelemetry/OTLP stack
+# (`observability`/`observability-testing`) — both were pure per-gate tax.
+# parquet/arrow stay linted. Coverage of the excluded features moves to nightly:
+# CQLITE_CLIPPY_FULL=1 runs the full `--workspace --all-targets --all-features`
+# matrix, which .github/workflows/gate.yml (nightly deep-check) sets.
 scripts/agent-gate.sh
 
 # FAST ITERATION gate (issue #1821) - NOT the gate of record.
-# Runs ONLY file-size + fmt + FULL-workspace clippy (-D warnings) +
+# Runs ONLY file-size + fmt + scoped workspace clippy (-D warnings, same #1844
+# duckdb/otel-excluded scoping as the full gate) +
 # blast-radius-scoped tests (the touched package's --lib + the diff's new --test
 # targets, mapped from `git diff --name-only origin/main...HEAD`; defaults to
 # `cqlite-core --lib` when no rust package is in the diff). ~1-5 min vs 12-25 min.
