@@ -127,6 +127,34 @@ fn validate_decompression_size(uncompressed_size: usize) -> Result<()> {
     Ok(())
 }
 
+/// Decode a RAW Snappy block (Cassandra 5.0 `SnappyCompressor`: no length prefix)
+/// in EXACTLY one attempt.
+///
+/// The authoritative CompressionInfo.db algorithm determines the single format —
+/// no framed-then-raw guessing (no-heuristics mandate #28, issue #1588). A guess
+/// could silently mis-decode an adversarial chunk to wrong bytes; strict raw
+/// decoding surfaces a typed error instead.
+///
+/// `decode_attempts` is incremented once per decode call. Production passes a
+/// throwaway `&mut 0`; tests thread a real counter to assert a single attempt.
+#[cfg(feature = "snappy")]
+fn snappy_decompress_raw(data: &[u8], decode_attempts: &mut usize) -> Result<Vec<u8>> {
+    use snap::raw::Decoder;
+    *decode_attempts += 1;
+    let mut decoder = Decoder::new();
+    let decompressed = decoder
+        .decompress_vec(data)
+        .map_err(|e| Error::storage(format!("Snappy (raw) decompression failed: {}", e)))?;
+    if decompressed.len() > MAX_DECOMPRESSED_SIZE {
+        return Err(Error::storage(format!(
+            "Decompression bomb protection: decompressed size {} exceeds limit {} (128MB)",
+            decompressed.len(),
+            MAX_DECOMPRESSED_SIZE
+        )));
+    }
+    Ok(decompressed)
+}
+
 /// Compression handler
 pub struct Compression {
     algorithm: CompressionAlgorithm,
@@ -162,17 +190,15 @@ impl Compression {
                 {
                     use snap::raw::Encoder;
 
-                    // Use Cassandra-compatible Snappy parameters
+                    // Cassandra 5.0's SnappyCompressor writes a RAW Snappy block with NO
+                    // length prefix (see writer::compressed_data_writer::SnappyCompressor
+                    // and org.apache.cassandra.io.compress.SnappyCompressor). Emit raw so
+                    // it round-trips through the strict raw decode path below (#1588). A
+                    // 4-byte size prefix was NEVER a Cassandra-compatible format.
                     let mut encoder = Encoder::new();
-                    let compressed = encoder
+                    encoder
                         .compress_vec(data)
-                        .map_err(|e| Error::storage(format!("Snappy compression failed: {}", e)))?;
-
-                    // Prepend uncompressed size (4 bytes, big-endian) for Cassandra compatibility
-                    let mut result = Vec::with_capacity(4 + compressed.len());
-                    result.extend_from_slice(&(data.len() as u32).to_be_bytes());
-                    result.extend_from_slice(&compressed);
-                    Ok(result)
+                        .map_err(|e| Error::storage(format!("Snappy compression failed: {}", e)))
                 }
                 #[cfg(not(feature = "snappy"))]
                 {
@@ -279,45 +305,13 @@ impl Compression {
             CompressionAlgorithm::Snappy => {
                 #[cfg(feature = "snappy")]
                 {
-                    use snap::raw::Decoder;
-
-                    // Try two formats:
-                    // 1. With 4-byte size prefix (legacy Cassandra format)
-                    // 2. Raw Snappy without prefix (Cassandra 5.0 nb format)
-
-                    let mut decoder = Decoder::new();
-
-                    // First, try with 4-byte prefix if data is long enough
-                    if data.len() >= 4 {
-                        let uncompressed_size =
-                            u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
-
-                        // Only try prefixed format if size is reasonable (not a decompression bomb)
-                        // If size is unreasonable, it's likely raw Snappy without a prefix
-                        if uncompressed_size > 0 && uncompressed_size <= MAX_DECOMPRESSED_SIZE {
-                            let compressed_data = &data[4..];
-                            if let Ok(decompressed) = decoder.decompress_vec(compressed_data) {
-                                if decompressed.len() == uncompressed_size {
-                                    return Ok(decompressed);
-                                }
-                            }
-                        }
-                    }
-
-                    // Fall back to raw Snappy (no prefix) - Cassandra 5.0 nb format
-                    let decompressed = decoder.decompress_vec(data).map_err(|e| {
-                        Error::storage(format!("Snappy decompression failed (both formats): {}", e))
-                    })?;
-
-                    // Validate decompressed size
-                    if decompressed.len() > MAX_DECOMPRESSED_SIZE {
-                        return Err(Error::storage(format!(
-                            "Decompression bomb protection: decompressed size {} exceeds limit {} (128MB)",
-                            decompressed.len(), MAX_DECOMPRESSED_SIZE
-                        )));
-                    }
-
-                    Ok(decompressed)
+                    // Decode EXACTLY one format (raw Snappy), determined by the
+                    // authoritative CompressionInfo.db algorithm — never by trying
+                    // framed-then-raw and keeping whichever "succeeds" (no-heuristics
+                    // mandate #28, issue #1588). The framed-guess could silently return
+                    // wrong bytes for an adversarial chunk; strict raw decoding rejects
+                    // it. `&mut 0` discards the (test-only) attempt counter.
+                    snappy_decompress_raw(data, &mut 0)
                 }
                 #[cfg(not(feature = "snappy"))]
                 {
@@ -1015,14 +1009,32 @@ mod tests {
 
         let compressed = compression.compress(&data).unwrap();
 
-        // Verify format: 4-byte size prefix + compressed data
-        assert!(compressed.len() >= 4);
-        let size_prefix =
-            u32::from_be_bytes([compressed[0], compressed[1], compressed[2], compressed[3]]);
-        assert_eq!(size_prefix, data.len() as u32);
+        // Cassandra 5.0 SnappyCompressor emits a RAW Snappy block with NO length
+        // prefix (#1588). The compressed bytes are exactly what a raw Snappy
+        // decoder consumes; there is no 4-byte big-endian size header.
+        let raw_roundtrip = {
+            use snap::raw::Decoder;
+            Decoder::new().decompress_vec(&compressed).unwrap()
+        };
+        assert_eq!(raw_roundtrip, data, "compress() output must be raw Snappy");
 
         let decompressed = compression.decompress(&compressed).unwrap();
         assert_eq!(decompressed, data);
+    }
+
+    /// A legitimate RAW Snappy chunk decodes to the known-good bytes in EXACTLY
+    /// one decode attempt (issue #1588 decision #14: single-attempt + byte-identity).
+    #[cfg(feature = "snappy")]
+    #[test]
+    fn test_snappy_decode_single_attempt_and_byte_identical() {
+        use snap::raw::Encoder;
+        let good = b"the quick brown fox jumps over the lazy dog. ".repeat(8);
+        let chunk = Encoder::new().compress_vec(&good).unwrap();
+
+        let mut attempts = 0usize;
+        let out = super::snappy_decompress_raw(&chunk, &mut attempts).unwrap();
+        assert_eq!(out, good, "raw decode is byte-identical to the known-good input");
+        assert_eq!(attempts, 1, "exactly one decode attempt (no format guessing)");
     }
 
     #[cfg(feature = "deflate")]
