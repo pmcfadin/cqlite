@@ -606,8 +606,14 @@ async fn writetime_parity_test_basic_ttl_test_table() {
 async fn ttl_test_table_fully_expired_returns_zero_live_rows_at_wall_clock() {
     let test_name = "ttl_test_table_fully_expired_returns_zero_live_rows_at_wall_clock";
 
-    // Ensure no override leaks in from a sibling (belt-and-suspenders; `#[serial]`
-    // already guarantees the pinned test's guard has dropped before we run).
+    // Ensure no override leaks in from a sibling. `#[serial]` only guarantees
+    // mutual exclusion (no sibling runs concurrently with this one) — it does
+    // NOT guarantee ordering or that a sibling's guard has already dropped
+    // cleanly (e.g. after a panic before its `Drop` restore runs, though the
+    // pinned sibling's guard is itself panic-safe). The actual safety here
+    // comes from this explicit `remove_var` unconditionally clearing the
+    // override before we read the clock — do not delete it on the assumption
+    // that `#[serial]` orders anything.
     std::env::remove_var(TTL_NOW_OVERRIDE_ENV);
 
     let Some(db) = open_db("/test_basic/", &["basic-types.cql"]).await else {
