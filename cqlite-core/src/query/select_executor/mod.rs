@@ -726,14 +726,14 @@ impl SelectExecutor {
 
         let mut agg_state = AggregationState {
             groups: Vec::new(),
+            group_index: HashMap::new(),
             memory_usage_bytes: 0,
             memory_limit_bytes: DEFAULT_AGGREGATION_MEMORY_LIMIT,
         };
 
         for row in rows {
             let group_key = build_group_key(&row, &agg_plan.group_by_columns);
-            let group_index =
-                find_or_init_group(&mut agg_state.groups, group_key, &agg_plan.aggregates);
+            let group_index = find_or_init_group(&mut agg_state, group_key, &agg_plan.aggregates);
             let group_aggregates = &mut agg_state.groups[group_index].1;
 
             for (i, agg_comp) in agg_plan.aggregates.iter().enumerate() {
