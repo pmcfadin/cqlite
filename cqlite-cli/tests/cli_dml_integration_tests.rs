@@ -26,18 +26,15 @@ fn schemas_dir() -> PathBuf {
     project_root().join("test-data/schemas")
 }
 
-/// Run CLI command with write support and capture output
+/// Run CLI command with write support and capture output.
+///
+/// Uses the pre-built binary (`CARGO_BIN_EXE_cqlite`), avoiding a nested
+/// `cargo run` rebuild per test. This test target declares
+/// `required-features = ["write-support"]` in `cqlite-cli/Cargo.toml`, so the
+/// harness compiles the `cqlite` binary with `write-support` enabled and
+/// `CARGO_BIN_EXE_cqlite` points at that write-capable binary.
 fn run_write_cli(args: &[&str]) -> Output {
-    Command::new("cargo")
-        .args([
-            "run",
-            "--quiet",
-            "--package",
-            "cqlite-cli",
-            "--features",
-            "write-support",
-            "--",
-        ])
+    Command::new(env!("CARGO_BIN_EXE_cqlite"))
         .args(args)
         .current_dir(project_root())
         .output()

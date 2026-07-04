@@ -26,11 +26,11 @@ mod e2e_tests {
 
     /// Helper to run CLI with timeout
     fn run_cli_with_timeout(args: &[&str], timeout: Duration) -> Result<std::process::Output> {
-        let mut cmd = Command::new("cargo");
-        cmd.args(["run", "--bin", CLI_BINARY, "--"]).args(args);
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cqlite"));
+        cmd.args(args);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        println!("Running command: cargo run --bin {CLI_BINARY} -- {args:?}");
+        println!("Running command: {CLI_BINARY} {args:?}");
 
         let start = Instant::now();
         let mut child = cmd.spawn()?;
@@ -43,8 +43,7 @@ mod e2e_tests {
                 // Simpler approach: re-exec using output() when quick; here, we can just return a minimal Output.
                 // To preserve logs, we re-run with output() if it was fast; else, provide empty.
                 // For test stability, re-run to capture output:
-                let output = Command::new("cargo")
-                    .args(["run", "--bin", CLI_BINARY, "--"])
+                let output = Command::new(env!("CARGO_BIN_EXE_cqlite"))
                     .args(args)
                     .output()?;
                 println!(

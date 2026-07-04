@@ -39,12 +39,10 @@ use tempfile::TempDir;
 // Helper Functions
 // ============================================================================
 
-const CLI_BINARY: &str = "cqlite";
-
-/// Run CLI command and capture output
+/// Run CLI command and capture output using the pre-built binary
+/// (`CARGO_BIN_EXE_cqlite`), avoiding a nested `cargo run` rebuild per test.
 fn run_cli_command(args: &[&str]) -> Output {
-    Command::new("cargo")
-        .args(["run", "--quiet", "--bin", CLI_BINARY, "--"])
+    Command::new(env!("CARGO_BIN_EXE_cqlite"))
         .args(args)
         .output()
         .expect("Failed to execute CLI command")

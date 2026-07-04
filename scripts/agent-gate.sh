@@ -1341,12 +1341,19 @@ run_scoped_tests() {
   echo ">>> [$name] blast-radius packages: $scoped_note"
 
   # Union a comma-list of features into a newline-set (Bash 3.2-safe dedup).
+  # The separator is placed BETWEEN elements (not trailing): `add_features` is
+  # called via `featset=$(add_features ...)`, and command substitution strips
+  # trailing newlines, so a trailing-newline scheme would glue the first element
+  # of the next call onto the last existing element (e.g. "write-support" +
+  # "delta-export" -> "write-supportdelta-export"). Prepending "$set"+newline
+  # only when non-empty keeps every element on its own line regardless.
   add_features() {
-    local set=$1 list=$2 x oldifs=$IFS
+    local set=$1 list=$2 x oldifs=$IFS nl
+    nl=$'\n'
     IFS=,
     for x in $list; do
       [ -n "$x" ] || continue
-      printf '%s\n' "$set" | grep -qxF "$x" || set="${set}${x}"$'\n'
+      printf '%s\n' "$set" | grep -qxF "$x" || set="${set:+${set}${nl}}${x}"
     done
     IFS=$oldifs
     printf '%s' "$set"

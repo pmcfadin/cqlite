@@ -18,11 +18,10 @@ use tempfile::TempDir;
 /// - Data corruption scenarios
 /// - Security and permission issues
 
-const _CLI_BINARY: &str = "cqlite"; // TODO: Use in actual CLI tests
-
+/// Run CLI commands using the pre-built binary (`CARGO_BIN_EXE_cqlite`),
+/// avoiding a nested `cargo run` rebuild per test.
 fn run_cli_command(args: &[&str]) -> Result<std::process::Output> {
-    Command::new("cargo")
-        .args(&["run", "--bin", _CLI_BINARY, "--"])
+    Command::new(env!("CARGO_BIN_EXE_cqlite"))
         .args(args)
         .output()
         .map_err(|e| anyhow::anyhow!("Failed to run CLI command: {}", e))

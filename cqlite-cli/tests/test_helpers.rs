@@ -16,14 +16,23 @@ use tempfile::TempDir;
 /// - File and directory management
 /// - Performance measurement tools
 
-pub const CLI_BINARY: &str = "cqlite";
 #[allow(dead_code)]
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Path to the pre-built `cqlite` binary for this test crate.
+///
+/// `CARGO_BIN_EXE_cqlite` is injected by Cargo at compile time and points at the
+/// exact binary the harness built for these integration tests (with whatever
+/// features the test invocation selected). Using it avoids spawning a nested
+/// `cargo run` per test, which re-locks the build graph and can rebuild
+/// mid-test-run.
+pub fn cqlite_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cqlite")
+}
+
 /// Execute CLI command with arguments
 pub fn run_cli(args: &[&str]) -> Result<Output> {
-    Command::new("cargo")
-        .args(["run", "--bin", CLI_BINARY, "--"])
+    Command::new(cqlite_bin())
         .args(args)
         .output()
         .map_err(|e| anyhow::anyhow!("Failed to execute CLI command: {}", e))
@@ -340,13 +349,12 @@ pub fn extract_timing_ms(output: &Output) -> Option<f64> {
     None
 }
 
-/// Check if CLI binary is available
+/// Check if CLI binary is available.
+///
+/// With `CARGO_BIN_EXE_cqlite` the harness has already built the binary as a test
+/// dependency, so it exists on disk by construction; confirm the path is present.
 pub fn cli_available() -> bool {
-    Command::new("cargo")
-        .args(["check", "--bin", CLI_BINARY])
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    Path::new(cqlite_bin()).exists()
 }
 
 /// Performance measurement utilities

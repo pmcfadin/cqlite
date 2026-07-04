@@ -74,12 +74,14 @@ fn schemas_dir() -> PathBuf {
 }
 
 /// Run the cqlite CLI with the given arguments, returning (stdout, stderr, success).
+///
+/// Uses the pre-built binary (`CARGO_BIN_EXE_cqlite`), avoiding a nested
+/// `cargo run` rebuild per test.
 fn run_cli(args: &[&str]) -> (String, String, bool) {
-    let output = Command::new("cargo")
-        .args(["run", "--quiet", "--package", "cqlite-cli", "--"])
+    let output = Command::new(env!("CARGO_BIN_EXE_cqlite"))
         .args(args)
         .output()
-        .expect("failed to spawn cargo run");
+        .expect("failed to spawn cqlite");
     (
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),

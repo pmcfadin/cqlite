@@ -30,8 +30,6 @@ use std::process::Command;
 // Test Configuration
 // =============================================================================
 
-const CLI_BINARY: &str = "cqlite";
-
 /// Get datasets root from environment or default path
 fn get_datasets_root() -> PathBuf {
     std::env::var("CQLITE_DATASETS_ROOT")
@@ -110,13 +108,8 @@ fn run_select_query(keyspace: &str, table: &str, schema_file: &str) -> QueryTest
     let schema_path = get_schemas_dir().join(schema_file);
     let query = format!("SELECT * FROM {}.{} LIMIT 10", keyspace, table);
 
-    let output = Command::new("cargo")
+    let output = Command::new(env!("CARGO_BIN_EXE_cqlite"))
         .args([
-            "run",
-            "--quiet",
-            "--bin",
-            CLI_BINARY,
-            "--",
             "--schema",
             schema_path.to_str().unwrap(),
             "--data-dir",

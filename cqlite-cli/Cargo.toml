@@ -160,6 +160,14 @@ name = "issue_1388_compact_major_drop"
 path = "tests/issue_1388_compact_major_drop.rs"
 required-features = ["write-support"]
 
+# Issue #1846: this target spawns the pre-built `cqlite` binary via
+# CARGO_BIN_EXE_cqlite and exercises write-path DML, so it must be compiled with
+# `write-support` for that binary to be write-capable.
+[[test]]
+name = "cli_dml_integration_tests"
+path = "tests/cli_dml_integration_tests.rs"
+required-features = ["write-support"]
+
 [features]
 # M2+ production defaults: Interactive REPL with query engine
 default = ["interactive", "tui", "cli-helpers"]

@@ -39,21 +39,12 @@ use tempfile::TempDir;
 
 /// Run the pre-built `cqlite` binary compiled with `--features delta-export`.
 ///
-/// Uses `cargo run --quiet --features delta-export` to ensure the correct
-/// feature set is active.  `assert_cmd::cargo_bin` cannot select cargo features
-/// for the binary it resolves, so it cannot be used here without losing the
-/// delta-export feature.
+/// This test target declares `required-features = ["delta-export", ...]` in
+/// `cqlite-cli/Cargo.toml`, so the harness compiles the `cqlite` binary with
+/// `delta-export` enabled and `CARGO_BIN_EXE_cqlite` points at that binary.
+/// Using it avoids a nested `cargo run` rebuild per test.
 fn run_cli(args: &[&str]) -> std::process::Output {
-    Command::new("cargo")
-        .args([
-            "run",
-            "--quiet",
-            "--package",
-            "cqlite-cli",
-            "--features",
-            "delta-export",
-            "--",
-        ])
+    Command::new(env!("CARGO_BIN_EXE_cqlite"))
         .args(args)
         .output()
         .expect("failed to spawn cqlite")
