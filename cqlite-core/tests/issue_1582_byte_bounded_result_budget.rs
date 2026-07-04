@@ -48,6 +48,15 @@
 //!      (roborev FINDING 2) — `WHERE pk = ? LIMIT 0` over a wide table under a
 //!      sub-row budget returns empty, never `ResultTooLarge`: LIMIT 0
 //!      short-circuits before any scan/lookup/push/budget work.
+//!   7. `limit_offset_skips_wide_rows_uncharged_against_budget`
+//!      (roborev FINDING B) — `LIMIT 2 OFFSET N` over the wide fixture, where the
+//!      skipped OFFSET rows would blow the budget but the 2 returned rows fit,
+//!      SUCCEEDS: the offset rows are skipped uncharged, so only the returned
+//!      rows are budgeted.
+//!   8. `max_result_rows_knob_is_load_bearing` (roborev FINDING A) — lowering
+//!      `max_result_rows` under a generous byte budget makes the skinny query
+//!      trip the row-count safety valve; a high value passes. The knob is real,
+//!      not a hardcoded constant.
 //!
 //! Run with:
 //!   cargo test --package cqlite-core \
@@ -180,8 +189,22 @@ async fn open_db_with_budget(
     schema_path: std::path::PathBuf,
     max_result_bytes: u64,
 ) -> Database {
+    // Default row-count valve (1M) — byte budget is the guard under test here.
+    open_db_with_budgets(data_dir, schema_path, max_result_bytes, 1_000_000).await
+}
+
+/// Open the query stack wiring BOTH the byte budget and the `max_result_rows`
+/// row-count safety valve through config (roborev FINDING A: the row-count knob
+/// must be load-bearing, not a hardcoded constant).
+async fn open_db_with_budgets(
+    data_dir: std::path::PathBuf,
+    schema_path: std::path::PathBuf,
+    max_result_bytes: u64,
+    max_result_rows: u64,
+) -> Database {
     let mut core_config = Config::default();
     core_config.query.max_result_bytes = max_result_bytes;
+    core_config.query.max_result_rows = max_result_rows;
 
     let result = ingest(IngestionConfig {
         schema_paths: vec![schema_path],
@@ -490,6 +513,101 @@ async fn max_result_bytes_knob_is_load_bearing() {
                 assert_eq!(budget_bytes, tiny_budget as usize);
             }
             other => panic!("expected Error::ResultTooLarge under tiny budget, got {other:?}"),
+        }
+    }
+}
+
+/// FINDING B (roborev MEDIUM): `LIMIT ... OFFSET ...` must NOT charge the skipped
+/// OFFSET rows against the byte budget. A query whose FINAL result is small must
+/// SUCCEED even when the skipped rows are wide enough that charging them would
+/// exceed the budget.
+///
+/// The wide fixture has `WIDE_ROW_COUNT` rows of ~`WIDE_PAYLOAD_BYTES` each.
+/// `LIMIT WIDE_ROWS_UNDER_BUDGET OFFSET WIDE_OFFSET` under `SHARED_BUDGET_BYTES`:
+/// the `WIDE_OFFSET` skipped rows total ~40 KiB (well over the ~24 KiB budget),
+/// but the 2 returned rows total ~20 KiB (under budget). Pre-fix the scan
+/// collected `offset + count` matching rows and charged EACH, tripping the byte
+/// guard at ~row 3 → RED (`ResultTooLarge`). Post-fix the offset rows are skipped
+/// uncharged (never pushed, never budgeted) and only the 2 returned rows are
+/// budgeted → GREEN.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn limit_offset_skips_wide_rows_uncharged_against_budget() {
+    // Skip 4 wide rows (~40 KiB, over budget), return 2 (~20 KiB, under budget).
+    const WIDE_OFFSET: usize = 4;
+    // Sanity on the fixture sizing: offset + limit must fit inside the fixture.
+    assert!(WIDE_OFFSET + WIDE_ROWS_UNDER_BUDGET <= WIDE_ROW_COUNT as usize);
+
+    let temp = TempDir::new().unwrap();
+    let (data_dir, schema_path) = prepare_wide(temp.path()).await;
+
+    let db = open_db_with_budget(data_dir, schema_path, SHARED_BUDGET_BYTES).await;
+
+    let sql = format!(
+        "SELECT * FROM {KS}.{WIDE_TBL} LIMIT {WIDE_ROWS_UNDER_BUDGET} OFFSET {WIDE_OFFSET}"
+    );
+    let result = db.execute(&sql).await.expect(
+        "LIMIT/OFFSET must skip the wide OFFSET rows uncharged and budget only the \
+         returned rows, not trip ResultTooLarge",
+    );
+    assert_eq!(
+        result.rows.len(),
+        WIDE_ROWS_UNDER_BUDGET,
+        "must return exactly the LIMIT rows after skipping the OFFSET rows"
+    );
+}
+
+/// FINDING A (roborev MEDIUM): the `max_result_rows` row-count safety valve must
+/// be load-bearing (wired from config), not a hardcoded 1,000,000 constant.
+///
+/// Under a GENEROUS byte budget (so the byte guard never fires), the skinny
+/// query passes with a high `max_result_rows` and TRIPS the row-count valve when
+/// `max_result_rows` is lowered below the fixture's row count. Lowering the knob
+/// changes what trips → it is a real behavioral knob. Pre-fix the guard used a
+/// hardcoded `MAX_RESULTS = 1_000_000`, so lowering the config value had NO
+/// effect and the query still passed → RED.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn max_result_rows_knob_is_load_bearing() {
+    let temp = TempDir::new().unwrap();
+    let (data_dir, schema_path) = prepare_skinny(temp.path()).await;
+
+    let sql = format!("SELECT * FROM {KS}.{SKINNY_TBL}");
+
+    // High row-count valve (and generous byte budget): the query PASSES.
+    {
+        let db = open_db_with_budgets(
+            data_dir.clone(),
+            schema_path.clone(),
+            DEFAULT_MAX_RESULT_BYTES,
+            1_000_000,
+        )
+        .await;
+        let result = db
+            .execute(&sql)
+            .await
+            .expect("skinny SELECT * passes under a high row-count valve");
+        assert_eq!(result.rows.len(), SKINNY_ROW_COUNT as usize);
+    }
+
+    // Low row-count valve (same generous byte budget): the SAME query now TRIPS.
+    // Lowering the config knob changed what trips → the valve is load-bearing.
+    {
+        let low_rows: u64 = (SKINNY_ROW_COUNT as u64) / 2; // < fixture row count
+        let db = open_db_with_budgets(data_dir, schema_path, DEFAULT_MAX_RESULT_BYTES, low_rows)
+            .await;
+        let err = db
+            .execute(&sql)
+            .await
+            .expect_err("lowering max_result_rows must make the skinny query trip the valve");
+        // The row-count valve raises the legacy query-execution error (add LIMIT),
+        // NOT ResultTooLarge (which is the byte guard, generous here).
+        match err {
+            Error::QueryExecution(msg) => {
+                assert!(
+                    msg.contains("LIMIT"),
+                    "row-count valve error should advise adding LIMIT; got {msg:?}"
+                );
+            }
+            other => panic!("expected Error::QueryExecution from the row-count valve, got {other:?}"),
         }
     }
 }
