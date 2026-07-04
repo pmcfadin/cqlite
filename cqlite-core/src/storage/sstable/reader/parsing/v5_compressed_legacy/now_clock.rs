@@ -62,47 +62,61 @@ mod tests {
     // an unexpectedly pinned clock. Invariant: any test anywhere in this crate
     // that sets CQLITE_TTL_NOW_OVERRIDE_SECS must be #[serial].
 
-    /// Runs `f` with the override var set/mutated inside it, then restores
-    /// whatever value (or absence) preceded the call — never clobbers a value
-    /// a developer's shell may have exported outside the test process.
+    /// RAII guard (roborev #1853 finding 2): saves whatever value (or absence)
+    /// preceded the override, sets the new value, and restores the prior state
+    /// on `Drop` — including on a panicking assertion unwind, unlike a
+    /// non-RAII "restore after f()" helper which would leak the override into
+    /// every subsequent test in the binary if the closure panicked. Never
+    /// clobbers a value a developer's shell may have exported outside the
+    /// test process. Mirrors the `EnvVarGuard` pattern in
+    /// `issue_694_writetime_ttl_parity.rs`.
     #[cfg(debug_assertions)]
-    fn with_saved_override<R>(f: impl FnOnce() -> R) -> R {
-        let prior = std::env::var(TTL_NOW_OVERRIDE_ENV).ok();
-        let result = f();
-        match prior {
-            Some(v) => std::env::set_var(TTL_NOW_OVERRIDE_ENV, v),
-            None => std::env::remove_var(TTL_NOW_OVERRIDE_ENV),
+    struct OverrideGuard {
+        prior: Option<String>,
+    }
+
+    #[cfg(debug_assertions)]
+    impl OverrideGuard {
+        fn set(value: &str) -> Self {
+            let prior = std::env::var(TTL_NOW_OVERRIDE_ENV).ok();
+            std::env::set_var(TTL_NOW_OVERRIDE_ENV, value);
+            Self { prior }
         }
-        result
+    }
+
+    #[cfg(debug_assertions)]
+    impl Drop for OverrideGuard {
+        fn drop(&mut self) {
+            match self.prior.take() {
+                Some(v) => std::env::set_var(TTL_NOW_OVERRIDE_ENV, v),
+                None => std::env::remove_var(TTL_NOW_OVERRIDE_ENV),
+            }
+        }
     }
 
     #[test]
     #[serial]
     #[cfg(debug_assertions)]
     fn override_env_pins_now() {
-        with_saved_override(|| {
-            std::env::set_var(TTL_NOW_OVERRIDE_ENV, "1759716000");
-            let got = now_epoch_secs();
-            assert_eq!(
-                got, 1_759_716_000,
-                "override must be honored verbatim under debug_assertions"
-            );
-        });
+        let _guard = OverrideGuard::set("1759716000");
+        let got = now_epoch_secs();
+        assert_eq!(
+            got, 1_759_716_000,
+            "override must be honored verbatim under debug_assertions"
+        );
     }
 
     #[test]
     #[serial]
     #[cfg(debug_assertions)]
     fn invalid_override_falls_back_to_wall_clock() {
-        with_saved_override(|| {
-            std::env::set_var(TTL_NOW_OVERRIDE_ENV, "not-a-number");
-            let got = now_epoch_secs();
-            // Wall clock in 2026+ is comfortably past this override candidate.
-            assert!(
-                got > 1_759_716_000,
-                "an invalid override must fall back to the wall clock, got {got}"
-            );
-        });
+        let _guard = OverrideGuard::set("not-a-number");
+        let got = now_epoch_secs();
+        // Wall clock in 2026+ is comfortably past this override candidate.
+        assert!(
+            got > 1_759_716_000,
+            "an invalid override must fall back to the wall clock, got {got}"
+        );
     }
 
     #[test]

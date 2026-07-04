@@ -406,6 +406,26 @@ fn format_uuid(bytes: &[u8]) -> Option<String> {
 async fn writetime_parity_test_basic_ttl_test_table() {
     let test_name = "writetime_parity_test_basic_ttl_test_table";
 
+    // Issue #1853 roborev finding 1: the pinned-now override seam
+    // (CQLITE_TTL_NOW_OVERRIDE_SECS, consumed by now_epoch_secs() in
+    // v5_compressed_legacy) is `#[cfg(debug_assertions)]`-only in library code —
+    // it compiles out entirely in `--release`. Under a release-mode test binary
+    // the guard below would be a no-op, every row would be TTL-shadowed as
+    // expired at the real wall clock, and the query would return 0 rows,
+    // driving this test into `skip_or_fail_closed`'s "0 rows — Data.db absent?"
+    // branch: a misleading message, and a spurious panic under
+    // CQLITE_PARITY_REQUIRE_DATASETS=1 (the exact dead-coverage shape #1853
+    // exists to fix). Skip explicitly with an honest reason instead. The
+    // standard agent gate and `cargo test` both build in debug, so this
+    // WRITETIME/TTL value-parity coverage is live there; it is debug-only.
+    if !cfg!(debug_assertions) {
+        eprintln!(
+            "{test_name}: SKIPPED (pinned-now override seam requires a debug build; \
+             TTL value-parity for this fixture is debug-only, see issue #1853)"
+        );
+        return;
+    }
+
     // Issue #1853: pin the reader's read-time TTL "now" clock to just after the
     // fixture's capture epoch so the long-expired (86400s TTL from 2025-10-06)
     // rows are LIVE again and the WRITETIME/TTL value-parity assertions below
@@ -601,6 +621,21 @@ async fn ttl_test_table_fully_expired_returns_zero_live_rows_at_wall_clock() {
     // below is the asserted semantic outcome.
     if !data_db_present("test_basic", "ttl_test_table-") {
         skip_or_fail_closed(test_name, "Data.db absent");
+        return;
+    }
+
+    // Issue #1853 roborev finding 3: guard against a vacuous pass. Without this,
+    // an EMPTY fixture (e.g. a regeneration that accidentally wrote zero rows)
+    // would also produce "0 live rows" and pass for the wrong reason. Load the
+    // same golden the pinned sibling test uses and require it to carry at least
+    // one row, so the empty-result assertion below provably means "expired",
+    // not "there was nothing to expire".
+    let Some((_jsonl_path, golden_rows)) = load_golden("test_basic", "ttl_test_table-") else {
+        skip_or_fail_closed(test_name, "no JSONL golden");
+        return;
+    };
+    if golden_rows.is_empty() {
+        skip_or_fail_closed(test_name, "empty golden");
         return;
     }
 
