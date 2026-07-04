@@ -1104,11 +1104,11 @@ impl SelectExecutor {
                         continue;
                     }
 
-                    let column_name = match expr {
-                        SelectExpression::Column(col_ref) => col_ref.column.clone(),
-                        SelectExpression::Aliased(_, alias) => alias.clone(),
-                        _ => format!("col_{i}"),
-                    };
+                    // Issue #1763: name aggregate result columns via the SAME
+                    // single source (`result_column_name` → `aggregate_output_name`)
+                    // that keys the emitted row values in `finalize_group`, so
+                    // metadata and row keys can never diverge (never `col_N`).
+                    let column_name = crate::query::select_naming::result_column_name(expr, i);
 
                     // Look up CQL type for this column in the schema (Issue #674).
                     let cql_type_opt = schema_opt.and_then(|schema| {

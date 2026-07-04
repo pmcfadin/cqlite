@@ -423,9 +423,17 @@ impl SelectStatement {
 }
 
 impl SelectExpression {
-    /// Check if this expression is an aggregate function
+    /// Check if this expression is an aggregate function.
+    ///
+    /// An aliased aggregate (`COUNT(*) AS total`) is still an aggregate: unwrap
+    /// `Aliased` so `SELECT COUNT(*) AS total` is planned through the aggregation
+    /// step rather than falling into row-level projection (issue #1763).
     pub fn is_aggregate(&self) -> bool {
-        matches!(self, SelectExpression::Aggregate(_))
+        match self {
+            SelectExpression::Aggregate(_) => true,
+            SelectExpression::Aliased(inner, _) => inner.is_aggregate(),
+            _ => false,
+        }
     }
 
     /// Update `max_plus_one` to `max(current, marker_index + 1)` over every

@@ -1,6 +1,9 @@
 //! Query optimizer for SELECT statements - basic planning and predicate pushdown.
 
 use super::select_ast::*;
+use super::select_naming::{
+    aggregate_column_and_alias, aggregate_output_name, extract_column_name, unwrap_aggregate,
+};
 use crate::{schema::SchemaManager, storage::StorageEngine, Error, Result, TableId, Value};
 use std::sync::Arc;
 
@@ -543,14 +546,6 @@ fn extract_projection_columns(select_clause: &SelectClause) -> Vec<String> {
     }
 }
 
-fn extract_column_name(expr: &SelectExpression) -> Option<String> {
-    match expr {
-        SelectExpression::Column(col_ref) => Some(col_ref.column.clone()),
-        SelectExpression::Aliased(_, alias) => Some(alias.clone()),
-        _ => None,
-    }
-}
-
 fn plan_aggregation(statement: &SelectStatement) -> AggregationPlan {
     let group_by_columns = statement
         .group_by
@@ -561,44 +556,27 @@ fn plan_aggregation(statement: &SelectStatement) -> AggregationPlan {
     let mut aggregates = Vec::new();
     if let SelectClause::Columns(exprs) = &statement.select_clause {
         for expr in exprs {
-            if let SelectExpression::Aggregate(agg) = expr {
-                let (column, alias) = aggregate_column_and_alias(agg);
-                aggregates.push(AggregateComputation {
-                    function: agg.function.clone(),
-                    column,
-                    alias,
-                    distinct: agg.distinct,
-                });
-            }
+            // Issue #1763: handle both bare `COUNT(*)` and aliased
+            // `COUNT(*) AS total`. The output name (`alias`) is derived by the
+            // SINGLE shared source `aggregate_output_name`, so the row value key
+            // emitted by `finalize_group` can never diverge from the result
+            // metadata column name built by `get_result_columns`.
+            let Some((agg, alias)) = unwrap_aggregate(expr).zip(aggregate_output_name(expr)) else {
+                continue;
+            };
+            let (column, _) = aggregate_column_and_alias(agg);
+            aggregates.push(AggregateComputation {
+                function: agg.function.clone(),
+                column,
+                alias,
+                distinct: agg.distinct,
+            });
         }
     }
 
     AggregationPlan {
         group_by_columns,
         aggregates,
-    }
-}
-
-/// Resolve `(column, alias)` for an aggregate. `COUNT(*)` and any aggregate
-/// referencing `*` yields `("*", "Func(*)")`; a single named column yields
-/// `(name, "Func_name")`; anything else falls back to `("*", "Func")`.
-fn aggregate_column_and_alias(agg: &AggregateFunction) -> (String, String) {
-    let references_star = agg.args.is_empty()
-        || agg
-            .args
-            .iter()
-            .any(|arg| matches!(arg, SelectExpression::Column(c) if c.column == "*"));
-
-    if references_star {
-        return ("*".to_string(), format!("{:?}(*)", agg.function));
-    }
-
-    match agg.args.first().and_then(extract_column_name) {
-        Some(col_name) => {
-            let alias = format!("{:?}_{}", agg.function, col_name);
-            (col_name, alias)
-        }
-        None => ("*".to_string(), format!("{:?}", agg.function)),
     }
 }
 
