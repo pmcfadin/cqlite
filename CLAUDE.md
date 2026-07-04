@@ -150,6 +150,31 @@ sccache --stop-server
 sccache --start-server
 ```
 
+### Gate Parallelism and nextest (issue #1737)
+
+The gate runs **~75% faster** than v0.12.0 on warm machines via two levers:
+
+1. **nextest for core-tests** (the 67% execution floor): `cargo-nextest` parallelizes across test binaries + CPU cores; `core-tests` runs under nextest with an additional `cargo test --doc` pass (nextest skips doctests). Auto-detected; falls back to `cargo test` when unavailable.
+
+2. **Capped 2-lane component parallelism** (issue #1737): a **serial MAIN cargo lane** (shared target, no NEW feature-thrash) runs concurrently with a **SIDE lane** that runs python-bindings and node-bindings in isolated `CARGO_TARGET_DIR`s (kills the cross-lane build-lock / feature-cache-invalidation that would balloon binding times under a naive shared-target pool). Concurrency is capped by `AGENT_GATE_JOBS` (default `min(4, ncpu/2)`), composing safely with #1825's machine-wide bound. Each component records its verdict to a file; the parent reconstructs the SUMMARY in canonical order after lanes drain, so interleaved output never corrupts the machine-checkable block.
+
+**Environment knobs** (all optional; auto-configured):
+
+```bash
+# nextest parallelism for core-tests (auto-detected on PATH)
+CQLITE_DISABLE_NEXTEST=1 bash scripts/agent-gate.sh      # force plain cargo test
+
+# Component concurrency cap (default: min(4, ncpu/2))
+AGENT_GATE_JOBS=1 bash scripts/agent-gate.sh              # sequential (legacy behavior)
+AGENT_GATE_JOBS=8 bash scripts/agent-gate.sh              # increase cap (with caution)
+
+# Live Docker parity tests (issue #911, default: skip for static-golden mandate)
+CQLITE_SKIP_DOCKER_TESTS=0 bash scripts/agent-gate.sh     # include live Cassandra sstabledump tests
+#   (normally skipped; still run in nightly Docker CI lanes; adds ~30s non-determinism when Docker is present)
+```
+
+**Graceful fallback**: absent `cargo-nextest`, no `/bin/bash wait -n` (macOS stock 3.2), or `AGENT_GATE_JOBS=1` → gate degrades gracefully to the historical sequential run without loss of coverage.
+
 
 # Build
 cargo build
