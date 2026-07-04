@@ -481,4 +481,92 @@ mod tests {
         }
         std::fs::remove_file(&path).ok();
     }
+
+    /// The `O_DIRECT` backend's per-call 4K alignment math (`aligned_off`/`head`/
+    /// `want_end`/`checked_next_multiple_of`), aligned bounce buffer, and
+    /// short-read/EOF handling must return EXACTLY the bytes a plain positioned
+    /// read would, at every awkward alignment: offset 0, an unaligned offset, an
+    /// offset spanning a 4K block boundary, and a partial final block at/near EOF.
+    /// `PlainFileReadAt` over the same file is the oracle. Guarded `#[cfg(unix)]`
+    /// and SKIPS GRACEFULLY when the temp filesystem refuses `O_DIRECT` (common on
+    /// tmpfs/overlayfs) — mirroring `source::direct_cursor_reads_and_seeks`.
+    #[cfg(unix)]
+    #[test]
+    fn direct_read_at_matches_plain_oracle_at_boundaries() {
+        // File size deliberately NOT a 4096 multiple → forces a partial final
+        // block and non-trivial `aligned_len` rounding.
+        let len = DIRECT_IO_ALIGN * 2 + 1234;
+        let mut data = vec![0u8; len];
+        // Deterministic pseudo-random content (LCG) so mismatches are meaningful.
+        let mut x = 0x1234_5678u32;
+        for b in data.iter_mut() {
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *b = (x >> 24) as u8;
+        }
+        let path = temp_file(&data, "direct");
+        let oracle = PlainFileReadAt::open(&path, data.len() as u64).unwrap();
+
+        // Open may fail on filesystems without O_DIRECT support → skip cleanly.
+        let direct = match DirectReadAt::open(&path, data.len() as u64) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("O_DIRECT open unsupported here ({e}); skipping DirectReadAt test");
+                std::fs::remove_file(&path).ok();
+                return;
+            }
+        };
+        // Some filesystems accept the O_DIRECT open but refuse aligned reads
+        // (EINVAL) → probe once and skip cleanly rather than fail.
+        let mut probe = [0u8; 16];
+        if let Err(e) = direct.read_at(0, &mut probe) {
+            eprintln!("O_DIRECT read unsupported here ({e}); skipping DirectReadAt test");
+            std::fs::remove_file(&path).ok();
+            return;
+        }
+
+        // (offset, length) pairs exercising each alignment corner.
+        let align = DIRECT_IO_ALIGN as u64;
+        let cases: &[(u64, usize)] = &[
+            (0, 100),               // offset 0, within first block
+            (37, 200),              // unaligned, within first block
+            (align - 10, 50),       // spans the first 4K boundary
+            (align, DIRECT_IO_ALIGN), // aligned start, spans into next block
+            (align + 7, 5000),      // unaligned start crossing multiple blocks
+            ((len - 300) as u64, 300), // exact final bytes (partial final block)
+            ((len - 10) as u64, 5), // near EOF within the partial final block
+        ];
+        for &(off, n) in cases {
+            let mut want = vec![0u8; n];
+            oracle.read_exact_at(off, &mut want).unwrap();
+            let mut got = vec![0u8; n];
+            direct.read_exact_at(off, &mut got).unwrap();
+            assert_eq!(got, want, "DirectReadAt mismatch at off={off} n={n}");
+        }
+
+        // Short read at EOF: request more than remains → exactly the tail, and
+        // byte-for-byte identical to the oracle's short read.
+        let tail_off = (len - 100) as u64;
+        let mut big = vec![0u8; 500];
+        let got_n = direct.read_at(tail_off, &mut big).unwrap();
+        let mut oracle_big = vec![0u8; 500];
+        let oracle_n = oracle.read_at(tail_off, &mut oracle_big).unwrap();
+        assert_eq!(got_n, oracle_n, "short-read length must match oracle");
+        assert_eq!(got_n, 100, "should read exactly the 100 remaining bytes");
+        assert_eq!(&big[..got_n], &oracle_big[..oracle_n]);
+
+        // Fully past EOF → 0 bytes (matches File/pread and MmapReadAt).
+        let mut none = [0u8; 32];
+        assert_eq!(direct.read_at(len as u64, &mut none).unwrap(), 0);
+        assert_eq!(direct.read_at(len as u64 + align, &mut none).unwrap(), 0);
+
+        // read_exact_at fully past EOF → UnexpectedEof, consistent with the
+        // other backends.
+        let err = direct.read_exact_at(len as u64, &mut none).unwrap_err();
+        match err {
+            Error::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::UnexpectedEof),
+            other => panic!("expected UnexpectedEof, got {other:?}"),
+        }
+
+        std::fs::remove_file(&path).ok();
+    }
 }

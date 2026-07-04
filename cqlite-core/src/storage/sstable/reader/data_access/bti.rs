@@ -565,7 +565,21 @@ impl SSTableReader {
         let len = end.saturating_sub(header_size);
         let mut whole = vec![0u8; len as usize];
         if len > 0 {
-            self.point_source.read_exact_at(header_size, &mut whole)?;
+            // Read the section in BOUNDED windows rather than one section-sized
+            // `read_exact_at`. A `DirectReadAt` backend allocates a per-call
+            // aligned bounce buffer as large as the requested range, so a single
+            // whole-section read would transiently ~double resident memory vs the
+            // <128MB target for a large section. Windowing caps the bounce buffer
+            // at ~`WHOLE_SECTION_READ_WINDOW` regardless of backend (issue #1573
+            // roborev); `whole` itself is the returned data and is unavoidable.
+            const WHOLE_SECTION_READ_WINDOW: usize = 1 << 20; // 1 MiB
+            let mut filled = 0usize;
+            while filled < whole.len() {
+                let win_end = (filled + WHOLE_SECTION_READ_WINDOW).min(whole.len());
+                self.point_source
+                    .read_exact_at(header_size + filled as u64, &mut whole[filled..win_end])?;
+                filled = win_end;
+            }
         }
         // CRC-verify the covering chunk(s) when a CRC.db is present (no-op for BTI
         // and compressed tables). `verify_uncompressed_range` takes a u32 size, so
