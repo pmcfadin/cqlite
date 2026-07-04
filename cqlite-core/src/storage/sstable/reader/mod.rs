@@ -30,6 +30,9 @@ pub(crate) mod parsing; // Needs to be accessible from row_cell_state_machine
 mod partition_lookup;
 // Positional (`pread`-style) point-read backends (issue #1573, Epic C / C2).
 mod read_at;
+// Concurrency scenarios for the ReadAt point-read migration (issue #1573).
+#[cfg(test)]
+mod read_at_point_tests;
 // sync-fallback registry-schema pre-resolution (issue #1692)
 #[cfg(feature = "state_machine")]
 mod registry_schema;
@@ -797,6 +800,22 @@ impl SSTableReader {
     #[cfg(test)]
     pub(crate) async fn is_mmap_backed(&self) -> bool {
         self.file.lock().await.is_mmap()
+    }
+
+    /// Clone the reader's shared positional point source (issue #1573 convoy
+    /// scenario). Test-only: lets a test wrap the real source in a slow/serializing
+    /// decorator, then reinstall it via [`set_point_source`](Self::set_point_source).
+    #[cfg(test)]
+    pub(crate) fn clone_point_source(&self) -> Arc<dyn read_at::ReadAt> {
+        self.point_source.clone()
+    }
+
+    /// Replace the reader's point source (issue #1573 convoy scenario). Test-only;
+    /// requires `&mut self`, so it must be called BEFORE the reader is shared
+    /// behind an `Arc` across the concurrent point reads under test.
+    #[cfg(test)]
+    pub(crate) fn set_point_source(&mut self, src: Arc<dyn read_at::ReadAt>) {
+        self.point_source = src;
     }
 
     /// Whether this reader's block source is backed by direct I/O.

@@ -137,6 +137,42 @@ impl<R: ReadAt> ReadAt for SleepingReadAt<R> {
     }
 }
 
+/// CONTROL double for the convoy scenario: a slow source whose `read_at` holds a
+/// `std::sync::Mutex` ACROSS the sleep+read, exactly reproducing the pre-#1573
+/// `Arc<Mutex<BlockSource>>` cursor that serialized point reads. Used to prove the
+/// convoy harness CAN serialize (~N×delay), so the parallel result on the real
+/// migrated `point_source` (no mutex) is a real speedup, not a fast harness.
+#[cfg(test)]
+pub(crate) struct SerializingReadAt<R: ReadAt> {
+    inner: R,
+    delay: std::time::Duration,
+    lock: std::sync::Mutex<()>,
+}
+
+#[cfg(test)]
+impl<R: ReadAt> SerializingReadAt<R> {
+    pub(crate) fn new(inner: R, delay: std::time::Duration) -> Self {
+        Self {
+            inner,
+            delay,
+            lock: std::sync::Mutex::new(()),
+        }
+    }
+}
+
+#[cfg(test)]
+impl<R: ReadAt> ReadAt for SerializingReadAt<R> {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize> {
+        // Hold the lock across the "I/O" (sleep) — the convoy the refactor removes.
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        std::thread::sleep(self.delay);
+        self.inner.read_at(offset, buf)
+    }
+    fn len(&self) -> u64 {
+        self.inner.len()
+    }
+}
+
 /// Positional reads over a plain file handle.
 ///
 /// Wraps ONE shared `std::fs::File`. On Unix, `FileExt::read_at` issues a `pread`

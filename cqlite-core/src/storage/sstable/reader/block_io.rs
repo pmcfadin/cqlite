@@ -1069,6 +1069,86 @@ mod tests {
     use tempfile::TempDir;
 
     // =========================================================================
+    // Positional compressed-chunk read: CRC-before-decompress (issue #1573, C2)
+    // =========================================================================
+
+    /// An in-memory [`ReadAt`](super::read_at::ReadAt) for exercising the
+    /// positional chunk reader without touching the filesystem.
+    struct MemReadAt(Vec<u8>);
+    impl crate::storage::sstable::reader::read_at::ReadAt for MemReadAt {
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize> {
+            let start = offset as usize;
+            if start >= self.0.len() {
+                return Ok(0);
+            }
+            let avail = &self.0[start..];
+            let n = avail.len().min(buf.len());
+            buf[..n].copy_from_slice(&avail[..n]);
+            Ok(n)
+        }
+        fn len(&self) -> u64 {
+            self.0.len() as u64
+        }
+    }
+
+    /// A chunk whose stored CRC does not match its payload fails CRC in
+    /// `read_compressed_chunk_at` — the error is raised BEFORE any decompression
+    /// is attempted (the function returns the compressed bytes only after the CRC
+    /// verifies, so a corrupt chunk never reaches the caller's decompressor).
+    /// Guardrail #1411: CRC-then-decompress ordering.
+    #[test]
+    fn read_compressed_chunk_at_verifies_crc_before_returning() {
+        use crate::storage::sstable::compression_info::CompressionInfo;
+
+        // Two records: [payload0][crc0][payload1][WRONG crc1].
+        let payload0 = b"first-chunk-bytes".to_vec();
+        let payload1 = b"second-chunk-bytes".to_vec();
+        let crc0 = crc32fast::hash(&payload0);
+        let good_crc1 = crc32fast::hash(&payload1);
+        let wrong_crc1 = good_crc1 ^ 0xffff_ffff; // deliberately corrupt
+
+        let mut file = Vec::new();
+        file.extend_from_slice(&payload0);
+        file.extend_from_slice(&crc0.to_be_bytes());
+        let off1 = file.len() as u64;
+        file.extend_from_slice(&payload1);
+        file.extend_from_slice(&wrong_crc1.to_be_bytes());
+        let file_size = file.len() as u64;
+
+        let ci = CompressionInfo {
+            algorithm: "LZ4Compressor".to_string(),
+            option_pairs: vec![],
+            chunk_length: 64 * 1024,
+            max_compressed_length: i32::MAX as u32,
+            data_length: (payload0.len() + payload1.len()) as u64,
+            chunk_offsets: vec![0, off1],
+        };
+        let src = MemReadAt(file);
+
+        // Chunk 0 verifies and returns its exact compressed bytes.
+        let got = read_compressed_chunk_at(&src, &ci, 0, file_size, 0)
+            .expect("chunk 0 read")
+            .expect("chunk 0 present");
+        assert_eq!(got, payload0, "verified chunk returns its exact payload");
+
+        // Chunk 1's CRC is wrong: a corruption error is raised (before any
+        // decompress the caller would do on the returned bytes).
+        let err = read_compressed_chunk_at(&src, &ci, 1, file_size, 0)
+            .expect_err("corrupt CRC must error before decompress");
+        match err {
+            Error::InvalidFormat(m) => {
+                assert!(m.contains("CRC32 mismatch"), "unexpected error text: {m}")
+            }
+            other => panic!("expected InvalidFormat CRC mismatch, got {other:?}"),
+        }
+
+        // Past the last chunk is a clean EOF (None), never a panic.
+        assert!(read_compressed_chunk_at(&src, &ci, 2, file_size, 0)
+            .expect("EOF read ok")
+            .is_none());
+    }
+
+    // =========================================================================
     // ASCII corruption detection tests
     // =========================================================================
 
