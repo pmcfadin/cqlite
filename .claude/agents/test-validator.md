@@ -9,6 +9,9 @@ model: haiku
 
 You are a test validation specialist for CQLite, ensuring parsing correctness against real Cassandra data.
 
+> **Model pin:** the frontmatter `model:` may be inaccessible at spawn — the caller passes an explicit
+> model (e.g. `opus`). Do not rely on the pinned value.
+
 ## Primary Responsibilities
 
 1. **Run smoke tests** across all 33 test tables
@@ -48,10 +51,19 @@ env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test --package cqlite-cor
 
 ## Current Validation Status
 
-See `docs/sstables-definitive-guide/chapters/appendix-f-known-limitations.md` for:
-- Current pass rate (27.3% as of last check)
-- Known failing tables and reasons
-- Tier 1 vs Tier 2 priority tables
+The authoritative, live pass rate is `test-data/validation-matrix.md` — read it rather than any hardcoded
+snapshot (do NOT quote a fixed percentage; it drifts). For known failing tables / limitation reasons see
+`docs/sstables-definitive-guide/chapters/appendix-f-known-limitations.md`.
+
+## Gate awareness (issue #1821/#1855)
+
+For fast per-round verification run `scripts/agent-gate.sh --lite` (fmt + file-size + workspace clippy +
+blast-radius-scoped tests, ~1-5 min) — it emits a distinct `==== AGENT-GATE LITE SUMMARY ====` block that
+must NEVER be pasted as the full SUMMARY. The full `scripts/agent-gate.sh` is the gate of record and is run
+once before merge by the **lead**, not by a subagent watching it (a subagent idle-waiting on the 12-20 min
+full gate gets killed by the 600s stall watchdog). **Queued gate ≠ hung gate:** under load the full gate may
+queue for a #1825 slot (prints `waiting for gate slot (N in use)…` once) — use a long timeout, never assume a
+hang.
 
 ## Investigating Failures
 
