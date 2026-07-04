@@ -194,12 +194,18 @@ impl Memtable {
     /// Estimate the size in bytes a CQL value would add to the memtable.
     ///
     /// Implemented as a BOUNDED ITERATIVE traversal (issue #1625): an explicit
-    /// heap-allocated worklist of `&Value` replaces the previous recursive
-    /// estimator. Because traversal state lives on the heap there is NO
-    /// stack-overflow risk, so there is NO depth cap and therefore NO collapsing
-    /// of deeply nested children to a conservative floor — a large scalar buried
-    /// arbitrarily deep (e.g. `List([List([List([Text(128KB)])])])`) is counted
-    /// at its real heap size, closing the hard-limit bypass.
+    /// worklist of `&Value` replaces the previous recursive estimator. Because
+    /// traversal state is not on the call stack there is NO stack-overflow risk,
+    /// so there is NO depth cap and therefore NO collapsing of deeply nested
+    /// children to a conservative floor — a large scalar buried arbitrarily deep
+    /// (e.g. `List([List([List([Text(128KB)])])])`) is counted at its real heap
+    /// size, closing the hard-limit bypass.
+    ///
+    /// The worklist is a stack-backed [`SmallVec`] with 32 inline slots, so the
+    /// common case (shallow/normal mutations — what the #1660 write-path
+    /// allocation budget test exercises) performs the whole traversal with ZERO
+    /// heap allocation on the admission/accounting hot path. Only pathologically
+    /// deep/wide values spill the worklist to the heap.
     ///
     /// Scalars contribute their real heap size (`Text`/`Blob`/`Varint`/`Inet`/
     /// `Json`/`Decimal` byte length; fixed widths otherwise). Collections, maps,
@@ -214,11 +220,16 @@ impl Memtable {
     /// estimate can never wrap around a small value.
     fn estimate_value_size(value: &crate::types::Value) -> usize {
         use crate::types::Value;
+        use smallvec::SmallVec;
 
         let mut total: usize = 0;
         let mut visited: usize = 0;
-        // Explicit heap worklist of borrowed values still to be measured.
-        let mut worklist: Vec<&Value> = vec![value];
+        // Stack-backed worklist of borrowed values still to be measured. The 32
+        // inline slots cover normal nesting/width, so shallow/normal mutations
+        // (the #1660 write-path allocation budget case) traverse with ZERO heap
+        // allocation; only pathological deep/wide values spill to the heap.
+        let mut worklist: SmallVec<[&Value; 32]> = SmallVec::new();
+        worklist.push(value);
 
         while let Some(v) = worklist.pop() {
             visited += 1;
