@@ -28,7 +28,7 @@
 //!
 //! | Backend | `read_at` | Notes |
 //! |---------|-----------|-------|
-//! | [`PlainFileReadAt`] | `FileExt::read_at` (Unix) / `seek_read` (Windows) on ONE shared `File` | Positioned reads on a shared fd are independent — no lock. |
+//! | [`PlainFileReadAt`] | `FileExt::read_at` (Unix, lock-free) / `Mutex`-guarded `seek_read` (Windows) on ONE shared `File` | Unix `pread` is positional so reads are independent (no lock); Windows `seek_read` moves the shared cursor, so it is serialized under a `Mutex`. Positioned reads on a shared fd are independent — no lock. |
 //! | [`MmapReadAt`] | slice indexing into the resident map | Bounds-checked; zero syscalls per read. |
 //! | [`DirectReadAt`] (Unix) | aligned positioned read honoring the `O_DIRECT` 4K rule | A per-call aligned bounce buffer keeps `&self` (no shared cursor). |
 //!
@@ -175,12 +175,27 @@ impl<R: ReadAt> ReadAt for SerializingReadAt<R> {
 
 /// Positional reads over a plain file handle.
 ///
-/// Wraps ONE shared `std::fs::File`. On Unix, `FileExt::read_at` issues a `pread`
-/// that does not touch the fd's offset, so concurrent reads on this single handle
-/// are independent — no lock, no per-lookup `open(2)`. Opened once at reader open
-/// and shared for the reader's lifetime (design.md Decision 3).
+/// Wraps ONE shared `std::fs::File`, opened once at reader open and shared for the
+/// reader's lifetime (design.md Decision 3).
+///
+/// On **Unix**, `FileExt::read_at` issues a `pread` that does not touch the fd's
+/// offset, so concurrent reads on this single handle are independent — no lock, no
+/// per-lookup `open(2)`.
+///
+/// On **Windows** there is no positional `pread`: `seek_read` MOVES the handle's
+/// file pointer, so two concurrent reads on one shared handle would race the cursor
+/// and return the wrong bytes (silent corruption). The Windows arm therefore guards
+/// the handle with a `std::sync::Mutex` and performs the seek+read under the lock,
+/// serializing Windows point reads for correctness while still opening the fd only
+/// once. The Unix arm keeps its lock-free `Arc<File>` (issue #1573 roborev finding).
 pub(crate) struct PlainFileReadAt {
+    /// Unix: shared handle, read lock-free via positional `pread` (no cursor).
+    #[cfg(unix)]
     file: Arc<std::fs::File>,
+    /// Windows: `seek_read` mutates the shared cursor, so the handle is `Mutex`-
+    /// guarded and read+seek happen atomically under the lock (see struct docs).
+    #[cfg(windows)]
+    file: std::sync::Mutex<std::fs::File>,
     len: u64,
 }
 
@@ -188,7 +203,10 @@ impl PlainFileReadAt {
     /// Wrap an already-open file handle whose length is `len`.
     pub(crate) fn new(file: std::fs::File, len: u64) -> Self {
         Self {
+            #[cfg(unix)]
             file: Arc::new(file),
+            #[cfg(windows)]
+            file: std::sync::Mutex::new(file),
             len,
         }
     }
@@ -212,14 +230,19 @@ impl ReadAt for PlainFileReadAt {
 
     #[cfg(windows)]
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize> {
-        // Windows has no `pread`; `seek_read` is the platform equivalent. It DOES
-        // move the handle's file pointer, so concurrent callers on one handle can
-        // race the cursor — acceptable here because the correctness scenarios run
-        // on the Unix backends in CI (design.md Risks: "Windows drift"). Windows
-        // builds that need concurrent point reads would front this with per-caller
-        // handles; not required for the Cassandra-5.0 read floor CQLite targets.
+        // Windows has no positional `pread`; `seek_read` MOVES the handle's file
+        // pointer, so two concurrent `read_at` calls on the one shared handle would
+        // race the cursor and return the wrong bytes (silent corruption). We hold a
+        // `Mutex` across the seek+read so Windows point reads are serialized and
+        // correct, while still opening the fd only once (issue #1573 roborev
+        // finding). This intentionally trades Windows concurrency for correctness;
+        // the Unix arm above needs no lock because `FileExt::read_at` is positional
+        // and never touches the fd offset. Recover a poisoned lock in-place (a
+        // panicking reader cannot leave the handle in a torn state) rather than
+        // `unwrap`/`expect` in library code.
         use std::os::windows::fs::FileExt;
-        Ok(self.file.seek_read(buf, offset)?)
+        let file = self.file.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(file.seek_read(buf, offset)?)
     }
 
     fn len(&self) -> u64 {
