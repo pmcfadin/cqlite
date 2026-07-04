@@ -753,7 +753,7 @@ impl SelectExecutor {
 
         let mut agg_state = AggregationState {
             groups: Vec::new(),
-            group_index: HashMap::new(),
+            group_index: rustc_hash::FxHashMap::default(),
             memory_usage_bytes: 0,
             memory_limit_bytes: DEFAULT_AGGREGATION_MEMORY_LIMIT,
         };

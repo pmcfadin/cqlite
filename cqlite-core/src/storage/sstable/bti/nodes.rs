@@ -9,7 +9,7 @@ use nom::{
     number::complete::{be_u16, be_u64, be_u8},
     IResult,
 };
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 /// BTI trie node types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,7 +212,7 @@ pub struct NodeParser {
     position: u64,
     /// Page cache for efficient reading
     #[allow(dead_code)]
-    page_cache: HashMap<u64, Vec<u8>>,
+    page_cache: FxHashMap<u64, Vec<u8>>,
 }
 
 impl Default for NodeParser {
@@ -226,7 +226,7 @@ impl NodeParser {
     pub fn new() -> Self {
         Self {
             position: 0,
-            page_cache: HashMap::new(),
+            page_cache: FxHashMap::default(),
         }
     }
 

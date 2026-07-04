@@ -6,7 +6,7 @@
 use super::compression_info::CompressionInfo;
 use crate::parser::header::CassandraVersion;
 use crate::{Error, Result};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::io::{Read, Seek, SeekFrom};
 
 /// Chunk-based decompressor for SSTable Data.db files
@@ -14,7 +14,7 @@ pub struct ChunkDecompressor {
     /// Compression metadata from CompressionInfo.db
     compression_info: CompressionInfo,
     /// Cache of decompressed chunks
-    chunk_cache: HashMap<usize, Vec<u8>>,
+    chunk_cache: FxHashMap<usize, Vec<u8>>,
     /// Maximum number of chunks to cache
     max_cached_chunks: usize,
     /// Data file path for error reporting
@@ -50,7 +50,7 @@ impl ChunkDecompressor {
 
         Ok(Self {
             compression_info,
-            chunk_cache: HashMap::new(),
+            chunk_cache: FxHashMap::default(),
             max_cached_chunks: 16, // Cache up to 16 chunks (16 * 16KB = 256KB max memory)
             data_file_path: None,
             cached_data_file_size: None,
@@ -70,7 +70,7 @@ impl ChunkDecompressor {
 
         Ok(Self {
             compression_info,
-            chunk_cache: HashMap::new(),
+            chunk_cache: FxHashMap::default(),
             max_cached_chunks: 16,
             data_file_path: Some(data_file_path),
             cached_data_file_size: None,

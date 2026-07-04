@@ -12,6 +12,7 @@ use crate::{
     query::result::QueryRow,
     types::{RowKey, Value},
 };
+use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
@@ -40,7 +41,12 @@ pub(super) struct AggregationState {
     /// keys (and every NaN key, which is never `==` itself) simply fall through
     /// the exact check, so grouping semantics are byte-identical to the prior
     /// linear scan.
-    pub(super) group_index: HashMap<u64, Vec<usize>>,
+    ///
+    /// Issue #1590 (E8): `FxHashMap` rather than the default `HashMap`. The key
+    /// is already a well-mixed `u64` group-key hash, so SipHashing it again is
+    /// wasted work; Fx hashes the integer key directly. Collisions remain safe —
+    /// the `Vec<usize>` bucket + exact `==` confirmation above is unchanged.
+    pub(super) group_index: FxHashMap<u64, Vec<usize>>,
     /// Memory usage tracking
     pub(super) memory_usage_bytes: usize,
     /// Maximum memory limit
@@ -293,7 +299,7 @@ mod tests {
     fn new_state() -> AggregationState {
         AggregationState {
             groups: Vec::new(),
-            group_index: HashMap::new(),
+            group_index: FxHashMap::default(),
             memory_usage_bytes: 0,
             memory_limit_bytes: usize::MAX,
         }

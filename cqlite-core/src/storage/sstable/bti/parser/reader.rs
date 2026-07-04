@@ -10,7 +10,7 @@ use crate::{
     },
     types::Value,
 };
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::io::{Read, Seek, SeekFrom};
 
 use super::encoding::{encode_clustering_bound_oss50, encode_clustering_bound_oss50_with_order};
@@ -140,7 +140,7 @@ pub struct PartitionsParser<R: Read + Seek> {
     /// Byte-comparable encoder for key encoding
     encoder: ByteComparableEncoder,
     /// Node cache for performance
-    node_cache: HashMap<u64, BtiNode>,
+    node_cache: FxHashMap<u64, BtiNode>,
 }
 
 impl<R: Read + Seek> PartitionsParser<R> {
@@ -157,7 +157,7 @@ impl<R: Read + Seek> PartitionsParser<R> {
             reader,
             header,
             encoder: ByteComparableEncoder::new(),
-            node_cache: HashMap::new(),
+            node_cache: FxHashMap::default(),
         })
     }
 
@@ -270,7 +270,7 @@ pub struct RowsParser<R: Read + Seek> {
     /// Byte-comparable encoder for key encoding
     encoder: ByteComparableEncoder,
     /// Node cache for performance
-    node_cache: HashMap<u64, BtiNode>,
+    node_cache: FxHashMap<u64, BtiNode>,
 }
 
 impl<R: Read + Seek> RowsParser<R> {
@@ -308,7 +308,7 @@ impl<R: Read + Seek> RowsParser<R> {
             reader,
             header,
             encoder: ByteComparableEncoder::new(),
-            node_cache: HashMap::new(),
+            node_cache: FxHashMap::default(),
         })
     }
 
