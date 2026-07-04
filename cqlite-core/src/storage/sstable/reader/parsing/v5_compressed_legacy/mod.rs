@@ -678,9 +678,25 @@ fn extract_clustering_values(cells: &HashMap<Arc<str>, Value>, schema: &TableSch
         .collect()
 }
 
+/// Issue #1853: `#[doc(hidden)]` test-only seam to pin the read-time TTL "now"
+/// clock deterministically. When `CQLITE_TTL_NOW_OVERRIDE_SECS` holds a valid
+/// `i64` (epoch seconds), it overrides the wall clock for read-time TTL expiry
+/// so parity tests can read a long-expired fixture "as of" its capture time.
+/// An unset or malformed value is IGNORED (falls back to the wall clock) and
+/// never panics — this is a library-code path.
+const TTL_NOW_OVERRIDE_ENV: &str = "CQLITE_TTL_NOW_OVERRIDE_SECS";
+
 /// Issue #1741: current wall-clock as epoch seconds, for read-time TTL expiry.
 /// Falls back to `0` (nothing appears expired) if the clock is before the epoch.
+///
+/// Issue #1853: honors the `CQLITE_TTL_NOW_OVERRIDE_SECS` test seam first; an
+/// invalid/absent override leaves the wall-clock behavior unchanged.
 fn now_epoch_secs() -> i64 {
+    if let Ok(raw) = std::env::var(TTL_NOW_OVERRIDE_ENV) {
+        if let Ok(override_secs) = raw.trim().parse::<i64>() {
+            return override_secs;
+        }
+    }
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

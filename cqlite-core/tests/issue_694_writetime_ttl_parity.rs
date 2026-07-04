@@ -40,6 +40,42 @@ use std::path::{Path, PathBuf};
 use cqlite_core::ingestion::{ingest, IngestionConfig};
 use cqlite_core::types::Value;
 use cqlite_core::Database;
+use serial_test::serial;
+
+// ---------------------------------------------------------------------------
+// Issue #1853: read-time TTL "now" override seam (test side)
+// ---------------------------------------------------------------------------
+
+/// `#[doc(hidden)]` reader seam consumed by `now_epoch_secs()` in
+/// `v5_compressed_legacy`: when set to a valid `i64` (epoch seconds), it pins the
+/// read-time TTL shadowing clock so a long-expired fixture can be read "as of" its
+/// capture time. Set/removed only by `#[serial]` tests here to avoid env races.
+const TTL_NOW_OVERRIDE_ENV: &str = "CQLITE_TTL_NOW_OVERRIDE_SECS";
+
+/// Pinned "now" for the deterministic value-parity test: 2025-10-06T02:00:00Z.
+/// This is AFTER every golden row's `tstamp` (~2025-10-06T01:12:06Z) and BEFORE
+/// its `expires_at` (2025-10-07T01:12:06Z), so all rows are live under the pin.
+const TTL_PIN_NOW_SECS: i64 = 1_759_716_000;
+
+/// RAII guard: sets an env var for a test's duration and removes it on drop
+/// (including on assertion-panic unwind). Paired with `#[serial]` so no other
+/// test in this binary reads the process-global env concurrently with the set.
+struct EnvVarGuard {
+    key: &'static str,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        std::env::set_var(key, value);
+        Self { key }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        std::env::remove_var(self.key);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Fail-closed gate (issue #1242)
@@ -234,6 +270,24 @@ fn find_table_dir(parent: &Path, prefix: &str) -> Option<PathBuf> {
     })
 }
 
+/// Returns `true` when the physical `Data.db` (nb or oa) for a keyspace/table
+/// prefix is present on disk. Lets the wall-clock semantic test (#1853)
+/// distinguish "0 live rows because every row is TTL-expired" (Data.db PRESENT —
+/// the asserted outcome) from "0 rows because Data.db is absent" (which must
+/// still trip the fail-closed guard under `CQLITE_PARITY_REQUIRE_DATASETS=1`).
+fn data_db_present(keyspace: &str, table_prefix: &str) -> bool {
+    let Some(datasets_root) = get_datasets_root() else {
+        return false;
+    };
+    let ks_dir = datasets_root.join("sstables").join(keyspace);
+    let Some(table_dir) = find_table_dir(&ks_dir, table_prefix) else {
+        return false;
+    };
+    ["nb-1-big-Data.db", "oa-1-big-Data.db"]
+        .iter()
+        .any(|f| table_dir.join(f).exists())
+}
+
 /// Load the JSONL golden for a given keyspace + table prefix from the datasets root.
 /// Returns `None` (with an explanatory eprintln) if the file is missing.
 fn load_golden(keyspace: &str, table_prefix: &str) -> Option<(PathBuf, Vec<GoldenRow>)> {
@@ -336,8 +390,17 @@ fn format_uuid(bytes: &[u8]) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[serial]
 async fn writetime_parity_test_basic_ttl_test_table() {
     let test_name = "writetime_parity_test_basic_ttl_test_table";
+
+    // Issue #1853: pin the reader's read-time TTL "now" clock to just after the
+    // fixture's capture epoch so the long-expired (86400s TTL from 2025-10-06)
+    // rows are LIVE again and the WRITETIME/TTL value-parity assertions below
+    // actually run. Without this, #1790's (correct) read-time shadowing hides
+    // every row (expired ~9 months ago) → 0 rows → dead coverage locally and a
+    // fail-closed panic in CI. Deterministic regardless of the real wall clock.
+    let _now_guard = EnvVarGuard::set(TTL_NOW_OVERRIDE_ENV, &TTL_PIN_NOW_SECS.to_string());
 
     let Some(db) = open_db("/test_basic/", &["basic-types.cql"]).await else {
         skip_or_fail_closed(test_name, "no datasets or schema");
@@ -496,6 +559,63 @@ async fn writetime_parity_test_basic_ttl_test_table() {
 }
 
 // ---------------------------------------------------------------------------
+// Issue #1853: semantic assertion at real wall-clock now (no override).
+//   The `ttl_test_table` fixture has every row written 2025-10-06 with TTL=86400s
+//   (expired ~2025-10-07). At the current wall clock those rows are all expired,
+//   so a SELECT must return ZERO live rows — permanently asserting #1790's
+//   read-time SELECT-semantic TTL shadowing. Here 0 rows is the EXPECTED outcome,
+//   so this test must NOT reuse the sibling's "0 rows → Data.db absent?" fail-
+//   closed branch; it preserves the missing-Data.db protection by checking that
+//   Data.db is physically present BEFORE asserting the empty result.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial]
+async fn ttl_test_table_fully_expired_returns_zero_live_rows_at_wall_clock() {
+    let test_name = "ttl_test_table_fully_expired_returns_zero_live_rows_at_wall_clock";
+
+    // Ensure no override leaks in from a sibling (belt-and-suspenders; `#[serial]`
+    // already guarantees the pinned test's guard has dropped before we run).
+    std::env::remove_var(TTL_NOW_OVERRIDE_ENV);
+
+    let Some(db) = open_db("/test_basic/", &["basic-types.cql"]).await else {
+        skip_or_fail_closed(test_name, "no datasets or schema");
+        return;
+    };
+
+    // Preserve the fail-closed missing-Data.db protection (issue #1242): if the
+    // required flag is set but the physical Data.db is absent, panic rather than
+    // silently pass as "0 live rows". When Data.db IS present, the empty result
+    // below is the asserted semantic outcome.
+    if !data_db_present("test_basic", "ttl_test_table-") {
+        skip_or_fail_closed(test_name, "Data.db absent");
+        return;
+    }
+
+    let result = db
+        .execute(
+            "SELECT id, WRITETIME(temporary_data), TTL(temporary_data) \
+             FROM test_basic.ttl_test_table LIMIT 20",
+        )
+        .await
+        .expect("WRITETIME/TTL query should succeed");
+
+    assert!(
+        result.rows.is_empty(),
+        "{}: expected 0 live rows (all TTL=86400s rows from 2025-10-06 are \
+         expired at wall-clock now) but got {} — #1790 read-time TTL shadowing \
+         regressed",
+        test_name,
+        result.rows.len()
+    );
+
+    eprintln!(
+        "{}: OK — expired ttl_test_table returns 0 live rows at wall clock",
+        test_name
+    );
+}
+
+// ---------------------------------------------------------------------------
 // test_collections.collection_table
 //   Schema: id UUID PRIMARY KEY, tags SET<TEXT>, scores LIST<INT>, ...
 //   Golden: partition.key[0] = UUID; liveness_info.tstamp only (no TTL).
@@ -503,6 +623,7 @@ async fn writetime_parity_test_basic_ttl_test_table() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[serial]
 async fn writetime_parity_test_collections_collection_table() {
     let test_name = "writetime_parity_test_collections_collection_table";
 
@@ -652,6 +773,7 @@ fn parse_sstabledump_ts_to_millis(s: &str) -> Option<i64> {
 }
 
 #[tokio::test]
+#[serial]
 async fn writetime_parity_test_timeseries_sensor_data() {
     let test_name = "writetime_parity_test_timeseries_sensor_data";
 
@@ -804,6 +926,7 @@ async fn writetime_parity_test_timeseries_sensor_data() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[serial]
 async fn writetime_parity_test_wide_rows_product_catalog() {
     let test_name = "writetime_parity_test_wide_rows_product_catalog";
 
