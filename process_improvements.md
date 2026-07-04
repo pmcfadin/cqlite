@@ -44,7 +44,7 @@ Retro weighted failure ranking:
 | Tiered gate (`--lite`) + review-first | #1821 | fast inner-loop gate subset for iteration + full gate once pre-merge; conditional internal review before roborev | 🔜 almost done (PR #1828) |
 | **Shared compiler cache (sccache)** | **#1822** | per-worktree `target/` + shared object cache to delete cross-worktree cold-compile duplication; rejected shared `CARGO_TARGET_DIR` (build-lock serializes parallel gates) | ✅ **DONE (PR #1833)** — 562s / 25.6% saved on fresh-worktree case, 100% hit rate |
 | Machine-wide gate concurrency cap | #1825 | bound simultaneous full-gate runs so higher session concurrency stays safe (also: concurrent gates skew wall-clock measurements) | open |
-| **Gate perf: nextest + parallel components** | **#1737** | **← designated NEXT lever.** Re-scoped post-#1822 to the 2 remaining levers: `cargo-nextest` for the core-tests floor (694s/67% of the gate — test *execution*, not compile) + capped parallelism of independent components. Target ≥40% off the 17.3-min warm baseline | 🔧 **in progress** (issue-1737 worktree; subagent implementing) |
+| **Gate perf: nextest + parallel components** | **#1737** | `cargo-nextest` for the core-tests floor + capped 2-lane parallel components + live-Docker parity tests skipped by default (kept in nightly lanes) + fail-closed result collection | ✅ **DONE (PR #1841)** — **258s vs 697s same-machine (63% off) / 75% vs 1036s ref**; nextest 2917 passing, no tests dropped |
 
 Three orthogonal families: **(1) cut the churn at the source** (#1793/#1736/#1821), **(2) delete
 duplicated compile work** (#1822/#1737), **(3) make higher concurrency safe** (#1825). Do all three;
@@ -106,3 +106,21 @@ merge gate's job is to catch the regression you didn't predict. So:
   concurrency-capped per #1825). Moved out of #1737: build cache → #1822 (done), two-tier → #1821.
   Claimed #1737 and dispatched a `test-validator` subagent to implement + measure (≥40% target off
   the 1036s baseline).
+- **2026-07-03** — **#1737 landed (PR #1841, `0c6aeee6`).** cargo-nextest for core-tests + capped
+  2-lane parallel components → **258s vs 697s same-machine baseline (63% off) / 75% vs the 1036s
+  reference** — clears ≥40% and sub-6-min stretch. nextest ran **2917 tests passing**, doctests
+  preserved (separate `--doc` pass), no tests dropped. Also **skipped live-Docker parity tests in the
+  gate by default** (`CQLITE_SKIP_DOCKER_TESTS=1`; they spin up Cassandra + add non-determinism —
+  coverage kept in the nightly Docker lanes), and added **fail-closed result collection**
+  (roborev round-1 caught a fail-OPEN hole: a side-lane component dying before writing its `.result`
+  was silently omitted while the gate still reported PASS → now any missing result or nonzero
+  side-lane exit forces RESULT: FAIL). Delivery cost: 1 roborev finding (fixed), 2 rebases (main
+  moved + #1693 graceful-shutdown cli test conflict, resolved preserving both).
+  **Caveat:** the gate's final RESULT was FAIL — but *solely* the 3 `issue_1020` UDT compaction-parity
+  tests, a **pre-existing main-red from committed duplicate fixtures** (commit e51bf879, tracked by
+  **#1840**), which fail on `main` under any runner and are unrelated to #1737. Owner-authorized merge
+  over that red; #1840 (which fixture generation is canonical) stays a separate fix.
+- **Gate wall-clock arc (this session):** compile-dedup (sccache, #1822) took the fresh-worktree gate
+  36.6→27.3 min; then nextest + parallelism (#1737) took the warm gate **17.3 → ~4.3 min**. The gate
+  went from a ~15–20 min sequential bottleneck to sub-5-min, with compile cost erased and the
+  test-execution floor parallelized.
