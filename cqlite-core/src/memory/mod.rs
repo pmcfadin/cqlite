@@ -367,7 +367,7 @@ pub(crate) fn estimate_value_size(value: &Value) -> usize {
         Value::Varint(data) => data.len(),
         Value::Decimal { unscaled, .. } => 4 + unscaled.len(), // scale + unscaled data
         Value::Duration { .. } => 12,                          // 3 * 4 bytes
-        Value::Tombstone(_) => 16, // timestamp + type + optional TTL
+        Value::Tombstone(_) => 16,                             // timestamp + type + optional TTL
     }
 }
 
