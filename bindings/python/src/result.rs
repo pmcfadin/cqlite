@@ -587,8 +587,16 @@ impl ColumnInfo {
 /// ```
 #[pyclass(module = "cqlite")]
 pub struct StreamingIterator {
-    /// The wrapped core iterator (Mutex for interior mutability without &mut self)
-    inner: Mutex<cqlite_core::query::result::QueryResultIterator>,
+    /// The wrapped core iterator (Mutex for interior mutability without &mut self).
+    ///
+    /// Wrapped in `Arc` so `__next__` can clone the handle (cheap, `Send`) and
+    /// acquire the lock *inside* a `py.allow_threads(...)` closure. The lock
+    /// guard is `!Send` and so cannot cross the GIL-release boundary; the `Arc`
+    /// can. This lets the blocking `block_on(next_async())` run with the GIL
+    /// released while the guard lives and dies entirely inside the closure
+    /// (issue #1441). `QueryResultIterator` is `Send` (its receiver is `Send`),
+    /// so `Arc<Mutex<..>>` is `Send`.
+    inner: Arc<Mutex<cqlite_core::query::result::QueryResultIterator>>,
     /// Per-call observability span (`python.execute_streaming`, issue #1039).
     ///
     /// The span is kept alive for the whole iteration so the streamed rows are
@@ -623,7 +631,7 @@ impl StreamingIterator {
         span: tracing::Span,
     ) -> Self {
         Self {
-            inner: Mutex::new(iter),
+            inner: Arc::new(Mutex::new(iter)),
             span: Mutex::new(Some(span)),
             row_shape: Mutex::new(None),
         }
@@ -699,24 +707,48 @@ impl StreamingIterator {
     ///
     /// Raises StopIteration when no more rows are available.
     fn __next__(&self, py: Python<'_>) -> PyResult<Py<Row>> {
-        // Lock must be held across the async operation because next_async()
-        // mutates the iterator's internal state (rows_received counter and
-        // channel receiver). This is safe because Python's GIL ensures only
-        // one Python thread accesses this iterator at a time. The block_on
-        // call waits on a bounded channel receive, so lock contention is minimal.
-        let mut iter = self
-            .inner
-            .lock()
-            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Iterator lock poisoned"))?;
+        // Release the GIL while blocking on the buffer refill (issue #1441).
+        //
+        // The blocking work — acquiring the iterator lock and driving
+        // `block_on(next_async())` (which awaits a bounded-channel `recv`) — runs
+        // inside `py.allow_threads(...)` so other Python threads make progress
+        // during the disk-refill latency. Only the `Send` `Arc` crosses the
+        // closure boundary; the `!Send` `MutexGuard` lives and dies inside it.
+        //
+        // The iterator's `rows_received`/receiver state stays single-threaded:
+        // the GIL serializes Python-side access to a given iterator, so at most
+        // one `__next__` per iterator is in flight and the `Mutex` is
+        // uncontended. A poisoned lock is mapped to a sentinel *inside* the
+        // closure and converted to `PyRuntimeError` after the GIL is
+        // re-acquired (a `PyErr` cannot be built without `py`).
+        let inner = Arc::clone(&self.inner);
+        let refill = py.allow_threads(move || match inner.lock() {
+            Ok(mut iter) => Ok(block_on(iter.next_async())),
+            Err(_) => Err(()),
+        });
 
-        let next_result = block_on(iter.next_async()).map_err(runtime_init_to_py_err)?;
+        // GIL re-acquired. Convert the lock-poison sentinel first (a `PyErr`
+        // cannot be built inside the closure without `py`), then surface any
+        // runtime/`block_on` error as a catchable `PyErr` (issue #1789).
+        let next_result = refill
+            .map_err(|()| pyo3::exceptions::PyRuntimeError::new_err("Iterator lock poisoned"))?
+            .map_err(runtime_init_to_py_err)?;
 
         match next_result {
             Some(Ok(row)) => {
                 // Convert core row to Python Row, sharing the per-stream ordered
                 // shape (built once) so column names are interned per stream, not
-                // per row, and columns stay in SELECT order (issue #1445).
-                let shape = self.row_shape(py, &iter, &row)?;
+                // per row, and columns stay in SELECT order (issue #1445). The
+                // blocking refill above already ran with the GIL released; the
+                // shape only needs the iterator's metadata, so re-acquire the
+                // lock here (uncontended — the GIL serializes access to a given
+                // iterator) rather than across the released-GIL section.
+                let shape = {
+                    let iter = self.inner.lock().map_err(|_| {
+                        pyo3::exceptions::PyRuntimeError::new_err("Iterator lock poisoned")
+                    })?;
+                    self.row_shape(py, &iter, &row)?
+                };
                 let py_row = Row::from_core(py, &row, shape)?;
                 Py::new(py, py_row)
             }
@@ -725,9 +757,9 @@ impl StreamingIterator {
                 // Stream exhausted. Finalize the span now (idempotently) so the
                 // per-stream span and its final row count are exported even if
                 // the exhausted iterator stays alive until a later
-                // Database.close()/flush. Release the `inner` lock first because
-                // finalize_span() re-acquires it.
-                drop(iter);
+                // Database.close()/flush. The iterator lock was already released
+                // inside the `allow_threads` closure above, so finalize_span()
+                // (which re-acquires it) cannot deadlock.
                 self.finalize_span();
                 Err(PyStopIteration::new_err(()))
             }

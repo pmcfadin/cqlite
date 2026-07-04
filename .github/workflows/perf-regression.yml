@@ -39,7 +39,9 @@ env:
   CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
   # Features needed by the benches: cli-helpers for the read suite (queryable
   # Database), write-support for the write suite (WriteEngine).
-  BENCH_FEATURES: "cli-helpers,write-support"
+  # bench-internals adds the decode_value_for_bench shim the `decode` bench needs
+  # (issue #1615); it changes no other bench and no production default build.
+  BENCH_FEATURES: "cli-helpers,write-support,bench-internals"
   # Criterion run config — kept small for CI. Tune here if the gate is too noisy
   # (more samples → stabler medians, slower job).
   BENCH_ARGS: "--sample-size 20 --warm-up-time 1 --measurement-time 3"
@@ -109,7 +111,7 @@ jobs:
             read -r -a BENCH_ARGV <<< "$BENCH_ARGS"
           fi
           cargo bench -p cqlite-core --features "$BENCH_FEATURES" \
-            --bench read --bench write --bench concurrent_scan --bench read_while_write --bench compaction \
+            --bench read --bench write --bench concurrent_scan --bench read_while_write --bench compaction --bench decode \
             -- --save-baseline pr "${BENCH_ARGV[@]}"
 
       - name: Benchmark main → baseline 'base'
@@ -131,7 +133,23 @@ jobs:
           if [[ -f cqlite-core/benches/compaction.rs ]]; then
             BENCH_TARGETS+=(--bench compaction)
           fi
-          cargo bench -p cqlite-core --features "$BENCH_FEATURES" \
+          # The `decode` bench target (issue #1615) may not exist on `main` yet;
+          # include it only when present, mirroring the `compaction` guard. The
+          # compare script SKIPs any bench missing from the baseline, so a first-PR
+          # baseline with no decode data stays green.
+          if [[ -f cqlite-core/benches/decode_bench.rs ]]; then
+            BENCH_TARGETS+=(--bench decode)
+          fi
+          # `bench-internals` (issue #1615) is defined by the PR but may not exist
+          # on `main` yet. Passing it to `cargo bench` on a checkout that does not
+          # define it fails feature resolution BEFORE the guarded --bench decode is
+          # skipped, so build a base-specific feature list that appends it only when
+          # the checked-out Cargo.toml declares it (mirrors the target guards above).
+          BASE_FEATURES="cli-helpers,write-support"
+          if grep -q '^bench-internals' cqlite-core/Cargo.toml; then
+            BASE_FEATURES="$BASE_FEATURES,bench-internals"
+          fi
+          cargo bench -p cqlite-core --features "$BASE_FEATURES" \
             "${BENCH_TARGETS[@]}" -- --save-baseline base "${BENCH_ARGV[@]}"
 
       - name: Restore PR ref (for the gate script + policy)

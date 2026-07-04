@@ -173,6 +173,19 @@ impl ReadFixture {
         schema_file: "collections.cql",
     };
 
+    /// `test_wide_rows.many_columns_table` — one `UUID` PK + `col_001..col_100`
+    /// spanning every CQL primitive plus collections (text/int/bigint/float/double/
+    /// boolean/timestamp/uuid/blob/decimal/set/list/map/inet/date/time/duration/
+    /// timeuuid/varchar/ascii/tinyint/smallint). The widest real fixture; the
+    /// allocations-per-row / per-cell budget target (issue #1615). **Optional** —
+    /// not present in every checkout, so callers must guard on [`fixture_present`]
+    /// and fall back to [`Self::SIMPLE`] (or SKIP) when absent.
+    pub const MANY_COLUMNS: ReadFixture = ReadFixture {
+        keyspace: "test_wide_rows",
+        table: "many_columns_table",
+        schema_file: "wide-rows.cql",
+    };
+
     /// Fully-qualified `keyspace.table` for use in CQL queries.
     pub fn qualified(&self) -> String {
         format!("{}.{}", self.keyspace, self.table)
