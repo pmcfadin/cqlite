@@ -70,6 +70,18 @@ Subagents in `.claude/agents/` for specialized tasks:
 # reporting validation; ad-hoc cargo runs do not count as "the gate passed".
 scripts/agent-gate.sh
 
+# FAST ITERATION gate (issue #1821) - NOT the gate of record.
+# Runs ONLY file-size + fmt + FULL-workspace clippy (-D warnings) +
+# blast-radius-scoped tests (the touched package's --lib + the diff's new --test
+# targets, mapped from `git diff --name-only origin/main...HEAD`; defaults to
+# `cqlite-core --lib` when no rust package is in the diff). ~1-5 min vs 12-25 min.
+# Use it on EVERY fix round of the implement/roborev loop. It emits a DISTINCT
+# "==== AGENT-GATE LITE SUMMARY ====" block (MODE: lite) that can NEVER be pasted
+# as the full SUMMARY, and its recovery default is .agent-gate-lite-summary.txt.
+# Lite NEVER replaces the full gate: run the full scripts/agent-gate.sh ONCE
+# before merge and it must PASS - that SUMMARY is the only run that counts.
+scripts/agent-gate.sh --lite
+
 # Capture the gate ROBUSTLY (issue #1175). The SUMMARY block is the only
 # artifact that counts. The foreground redirect never buffers — prefer it:
 bash scripts/agent-gate.sh > gate.log 2>&1 < /dev/null
@@ -621,6 +633,8 @@ bash test-data/scripts/fetch-datasets.sh
 
 ## Agent-team conventions
 - Implementers commit after each meaningful unit of work so roborev reviews land while context is fresh.
+- **Tiered gate loop (issue #1821): iterate on `--lite`, run the FULL gate ONCE before merge.** The implement loop is `implement → lite (each fix round) → conditional internal rust-reviewer review → lite → FULL gate ONCE before merge → roborev → CI → merge`. Use `scripts/agent-gate.sh --lite` (fmt + file-size + workspace clippy + blast-radius-scoped tests, ~1-5 min) on every fix round; it is the fast iteration loop, **NOT the gate of record**. `--lite` NEVER replaces the full gate: run the full `scripts/agent-gate.sh` exactly ONCE before merge and it must PASS — its `==== AGENT-GATE SUMMARY ====` block is the only run that counts.
+- **Conditional review-first**: do an internal `rust-reviewer` pass BEFORE the first FULL gate when the diff changes a `pub` item, touches >1 call site of a changed symbol, or adds a new surface — catching those findings pre-full-gate avoids a wasted 12-25 min full-gate cycle per roborev round. Skip the review-first pass for mechanical/localized diffs.
 - Clear roborev findings (run /roborev-fix) before handing an issue off.
 - Stay within your assigned issue's scope; flag cross-cutting changes to the lead instead of editing another teammate's files.
 - An issue is "done" only when tests pass, coverage meets threshold, roborev is clean, and both the spec-auditor and coverage-reviewer sign off.
@@ -644,6 +658,7 @@ bash test-data/scripts/fetch-datasets.sh
 ### Delivery pipeline (flow-lead)
 - The delivery lead is the **`flow-lead`** manager agent (the repo's default agent; `claude --agent flow-lead`). It orchestrates — it spawns and sequences the specialists (`sstable-developer`, `rust-reviewer`, `spec-auditor`/C, `test-validator`, `coverage-reviewer`) + roborev + `agent-gate.sh` — and does not write production code itself.
 - Pipeline verbs (skills): `flow-groom` → `flow-activate` (Seam 1: spec approval) → `flow-implement` (gate → C → roborev → PR) → `flow-address` → `flow-finalize` (archive + cleanup + close); `flow-board` surfaces the single next thing. Full doctrine: https://pmcfadin.github.io/cqlite/agents-developing/delivery-pipeline/.
+- **Tiered gate inside `flow-implement` (issue #1821).** The implement/fix loop runs `scripts/agent-gate.sh --lite` (fmt + file-size + workspace clippy + blast-radius-scoped tests, ~1-5 min) on EACH fix round, does a **conditional internal `rust-reviewer` review-first** pass before the first FULL gate (when the diff changes a `pub` item, touches >1 call site of a changed symbol, or adds a new surface; skip for mechanical/localized diffs), then runs the FULL `scripts/agent-gate.sh` exactly ONCE before merge — its `==== AGENT-GATE SUMMARY ====` block is the only run that counts. Loop: `implement → lite (each round) → conditional review-first → lite → FULL gate ONCE → roborev → CI → merge`. **`--lite` NEVER replaces the full gate.** Rationale + measurement plan: `process_improvements.md`.
 - **1:1:1:1**: one issue ↔ one worktree/branch `issue-<N>-<slug>` ↔ one OpenSpec change `<slug>` ↔ one PR. Backlog = issues + labels (one `P0`–`P3`, one `status:*`).
 - **Coordination & concurrency:** a GitHub Project board (`Status` field) is the shared claim board; a session claims by **pushing the `issue-<N>-<slug>` branch to origin** (the cross-machine lock — assignee `@me` is identical for one user on two machines) + assignee + `Status=In Progress`, then re-reads. Default model is **one lead → subagents**; multiple independent sessions MUST use the claim protocol; never run N bare leads without it. `flow-board` reaps abandoned `In Progress` claims. Falls back to `status:*` labels if the `project` scope/board is absent. See the delivery-pipeline doc.
 - When spawning a subagent, pass an explicit accessible model (e.g. opus) — the pinned frontmatter model is not always accessible.

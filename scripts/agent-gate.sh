@@ -107,7 +107,20 @@
 #
 # Usage:
 #   scripts/agent-gate.sh             # full gate (the only run that counts)
-#   scripts/agent-gate.sh --list      # list components without running
+#   scripts/agent-gate.sh --lite      # FAST ITERATION gate (issue #1821): runs
+#                                     # ONLY file-size + fmt + FULL-workspace clippy
+#                                     # (-D warnings) + BLAST-RADIUS-SCOPED tests
+#                                     # (the touched package's --lib + the diff's
+#                                     # new --test targets; NOT core-tests/write/
+#                                     # cli/bindings/parity/smoke). ~1-5 min vs
+#                                     # 12-25 min. It is NOT the gate of record and
+#                                     # emits a DISTINCT "==== AGENT-GATE LITE
+#                                     # SUMMARY ====" block (MODE: lite) so it can
+#                                     # never be pasted as the full SUMMARY. The
+#                                     # full gate MUST PASS once before merge. Its
+#                                     # recovery default is .agent-gate-lite-summary.txt.
+#   scripts/agent-gate.sh --list      # list full-gate components without running
+#   scripts/agent-gate.sh --lite-list # list the --lite components without running
 #   scripts/agent-gate.sh --only fmt,clippy   # debugging aid; output is
 #                                     # marked PARTIAL and never counts as the gate
 #   scripts/agent-gate.sh --emit-summary-selftest
@@ -184,7 +197,9 @@ fi
 if [ "${CQLITE_DISABLE_SCCACHE:-0}" != 1 ] && command -v sccache >/dev/null 2>&1; then
   export RUSTC_WRAPPER=sccache
   export CARGO_INCREMENTAL=0
-  echo "agent-gate: sccache detected; using as RUSTC_WRAPPER with CARGO_INCREMENTAL=0 (#1822)"
+  # Diagnostic banner on STDERR: hidden hook modes (--classify-*) must keep their
+  # STDOUT empty, and this dispatch runs before the hook branch (issue #1821).
+  echo "agent-gate: sccache detected; using as RUSTC_WRAPPER with CARGO_INCREMENTAL=0 (#1822)" >&2
 fi
 export CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-$REPO_ROOT/test-data/datasets}"
 
@@ -241,16 +256,199 @@ fi
 # CQLITE_SKIP_DOCKER_TESTS=0 restores them here (when Docker is available).
 export CQLITE_SKIP_DOCKER_TESTS="${CQLITE_SKIP_DOCKER_TESTS:-1}"
 
+# --- Authoritative Cargo integration-test target mapping (issue #1821) --------
+# roborev finding: a Bash `case` glob such as `*/tests/*.rs` also matches NESTED
+# helper/module files (e.g. cqlite-core/tests/write_read_roundtrip/data_multi.rs,
+# cqlite-cli/tests/common/mod.rs) that are NOT Cargo `--test` targets. Passing
+# such a stem as `--test <stem>` makes --lite FAIL on valid helper-only changes.
+# We therefore map a changed .rs file to a `--test` target ONLY via authoritative
+# Cargo metadata (each integration target's exact src_path + name + required-features
+# — no path/name heuristics). A metadata parser (jq OR python3) is a PREREQUISITE
+# for per-`--test`-target selection: without one we cannot learn a target's
+# required-features, and emitting a feature-gated target feature-less would make
+# --lite FAIL spuriously in a minimal shell env (roborev round-3 finding). So when
+# NEITHER jq nor python3 is available we emit NO `--test` targets at all — run_lite
+# scopes to the touched packages' `--lib` only (safe: --lib carries no per-target
+# required-features) and prints a note pointing at the full gate for integration
+# coverage. Hand-parsing Cargo.toml for required-features would just be another
+# heuristic, so we deliberately do not. These helpers use no Bash-4-only features
+# (no associative arrays), so the whole --lite path runs under macOS's Bash 3.2.
+
+# Emit "<abs_src_path>\t<pkg>\t<testname>\t<required-features>" for every Cargo
+# test target (required-features comma-joined, empty when none), or nothing if
+# metadata cannot be produced/parsed. A single src_path can appear on MULTIPLE
+# lines: the workspace-root package `cqlite` and the `cqlite-integration-tests`
+# crate both own the top-level tests/*.rs files, and every owning package's
+# target must be runnable (issue #1821 roborev finding 1).
+_test_target_index() {
+  # Test hook (issue #1821 roborev round 3): force the no-metadata-parser path so
+  # the tooling self-test can assert the parser-absent behaviour hermetically,
+  # without PATH surgery on jq/python3/cargo.
+  [ "${AGENT_GATE_TEST_NO_METADATA_PARSER:-0}" = 1 ] && return 0
+  local meta
+  meta=$(cargo metadata --no-deps --format-version 1 2>/dev/null) || return 0
+  [ -n "$meta" ] || return 0
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s' "$meta" | jq -r \
+      '.packages[] | .name as $p | .targets[]
+       | select(.kind[] == "test")
+       | "\(.src_path)\t\($p)\t\(.name)\t\((."required-features" // []) | join(","))"'
+  elif command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$meta" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+for p in d["packages"]:
+    for t in p["targets"]:
+        if "test" in t.get("kind", []):
+            feats = ",".join(t.get("required-features") or [])
+            print("%s\t%s\t%s\t%s" % (t["src_path"], p["name"], t["name"], feats))
+'
+  fi
+}
+
+# Read changed repo-relative paths on stdin; print "<pkg>|<testname>|<features>"
+# for EVERY Cargo `--test` target that a changed path is (features comma-joined,
+# possibly empty). A single path may emit MULTIPLE lines when several packages own
+# it (root `cqlite` + `cqlite-integration-tests` both own top-level tests/*.rs) —
+# all owners are emitted so none is silently dropped (issue #1821 finding 1).
+# Nested helper/module files are excluded. Deterministic; Bash 3.2-safe.
+#
+# Authoritative Cargo metadata (jq OR python3) is REQUIRED: without a parser we
+# cannot know a target's required-features, and emitting a feature-gated target
+# feature-less would make --lite FAIL spuriously (roborev round-3 finding). So
+# when metadata is unavailable this emits NOTHING — the caller (run_scoped_tests)
+# then scopes to package --lib only and says so, rather than guessing targets.
+classify_test_targets() {
+  local index f abs hits
+  index=$(_test_target_index)
+  # No metadata parser (or metadata unavailable) -> emit no --test targets.
+  [ -n "$index" ] || return 0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$f" in *.rs) ;; *) continue ;; esac
+    abs="$REPO_ROOT/$f"
+    # ALL owning targets (no early exit), "<pkg>|<name>|<features>" per line.
+    hits=$(printf '%s\n' "$index" \
+      | awk -F'\t' -v p="$abs" '$1 == p { print $2 "|" $3 "|" $4 }')
+    [ -n "$hits" ] && printf '%s\n' "$hits"
+  done
+}
+
+# Emit "<abs_manifest_dir>\t<pkg>\t<has_lib>" for EVERY workspace package, or
+# nothing when metadata cannot be produced/parsed. `has_lib` is 1 when the
+# package has a library target that `cargo test --lib` can run (a target whose
+# kind includes "lib" or "rlib"; a cdylib-only binding crate is 0). This is the
+# single authoritative source of package ownership — it covers ALL members
+# (core, cli, flight, parity, integration-tests, format-compat, tools/*,
+# bindings/*, examples, the workspace-root `cqlite`), so no member can fall
+# through a hand-maintained list (issue #1821 recurring roborev finding).
+_package_index() {
+  # Test hook: force the no-metadata-parser path hermetically (issue #1821).
+  [ "${AGENT_GATE_TEST_NO_METADATA_PARSER:-0}" = 1 ] && return 0
+  local meta
+  meta=$(cargo metadata --no-deps --format-version 1 2>/dev/null) || return 0
+  [ -n "$meta" ] || return 0
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s' "$meta" | jq -r \
+      '.packages[]
+       | (.manifest_path | sub("/[^/]+$"; "")) as $dir
+       | (if any(.targets[]; (.kind[] == "lib") or (.kind[] == "rlib")) then 1 else 0 end) as $lib
+       | "\($dir)\t\(.name)\t\($lib)"'
+  elif command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$meta" | python3 -c '
+import json, os, sys
+d = json.load(sys.stdin)
+for p in d["packages"]:
+    dr = os.path.dirname(p["manifest_path"])
+    lib = 1 if any(("lib" in t["kind"]) or ("rlib" in t["kind"]) for t in p["targets"]) else 0
+    print("%s\t%s\t%d" % (dr, p["name"], lib))
+'
+  fi
+}
+
+# Given the package index (as $1) and changed repo-relative paths on stdin, print
+# "<pkg>|<has_lib>" for the workspace package that OWNS each path: the package
+# whose manifest directory is the LONGEST prefix of the path. The workspace-root
+# package (manifest dir == repo root) is EXCLUDED as a path owner — its directory
+# is a prefix of everything, so treating it as an owner would make it a degenerate
+# catch-all for docs/scripts/config changes; it still enters the package set via
+# test-target ownership when a top-level tests/*.rs it owns changes. Deterministic;
+# one owner per path; Bash 3.2-safe (no associative arrays).
+_owners_from_index() {
+  local index=$1 f abs
+  [ -n "$index" ] || return 0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    abs="$REPO_ROOT/$f"
+    printf '%s\n' "$index" | awk -F'\t' -v path="$abs" -v root="$REPO_ROOT" '
+      $1 == root { next }
+      { if (substr(path, 1, length($1) + 1) == $1 "/" && length($1) > bl) { bl = length($1); best = $2 "|" $3 } }
+      END { if (best != "") print best }'
+  done
+}
+
+# Self-test / debug hook: map stdin paths -> "<pkg>|<has_lib>" via metadata-derived
+# longest-prefix ownership. Empty when no metadata parser is available.
+classify_package_owners() { _owners_from_index "$(_package_index)"; }
+
+# Single source of truth for the no-parser fallback's scoped-test command (issue
+# #1821 roborev): when NEITHER jq nor python3 is present we cannot derive package
+# ownership from Cargo metadata, so we scope to `cqlite-core --lib`. Crucially this
+# RUNS the core lib tests (no `--no-run`) — a compile-only check would give false
+# confidence that tests passed. cli-helpers matches the full gate's core-tests.
+# Both run_scoped_tests and the --scoped-test-cmd-noparser self-test hook use this.
+_scoped_test_cmd_noparser() {
+  echo "test -p cqlite-core --lib --features cli-helpers"
+}
+
 COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity python-bindings node-bindings delivery-telemetry parity-report binding-unwind-profile tooling-tests minimal-build smoke)
+# --lite (issue #1821) runs ONLY this fast subset: file-size ratchet, fmt,
+# FULL-workspace clippy (cross-crate API breaks are the cheap-insurance class),
+# and blast-radius-scoped tests (the touched package's --lib + the diff's new
+# test targets), NOT the full core-tests/write/cli/bindings/parity set. It is the
+# FAST ITERATION loop, NOT the gate of record — the full gate must PASS once
+# before merge. See run_lite() below.
+LITE_COMPONENTS=(file-size fmt clippy scoped-tests)
 ONLY=""
 SELFTEST=0
+LITE=0
 case "${1:-}" in
   --list) printf '%s\n' "${COMPONENTS[@]}"; exit 0 ;;
+  # --lite alone runs the fast gate; `--lite --emit-summary-selftest` drives the
+  # LITE summary block through the real emission path (for tooling-tests) without
+  # running any component.
+  --lite) LITE=1; [ "${2:-}" = --emit-summary-selftest ] && SELFTEST=1 ;;
+  --lite-list) printf '%s\n' "${LITE_COMPONENTS[@]}"; exit 0 ;;
+  # Hidden self-test hook (issue #1821): map stdin paths -> "<pkg>|<testname>"
+  # for actual Cargo test targets (nested helpers excluded). No side effects.
+  --classify-test-targets) classify_test_targets; exit 0 ;;
+  # Hidden self-test hook (issue #1821): map stdin paths -> "<pkg>|<has_lib>"
+  # via metadata-derived longest-prefix package ownership. No side effects.
+  --classify-package-owners) classify_package_owners; exit 0 ;;
+  # Hidden self-test hook (issue #1821 roborev): print the no-parser fallback's
+  # scoped-test command so the self-test can assert it RUNS tests (--lib, never
+  # --no-run). No side effects; does not invoke cargo.
+  --scoped-test-cmd-noparser) echo "cargo $(_scoped_test_cmd_noparser)"; exit 0 ;;
   --only) ONLY="${2:?--only needs a comma-separated component list}" ;;
   --emit-summary-selftest) SELFTEST=1 ;;
   "") ;;
   *) echo "unknown argument: $1" >&2; exit 2 ;;
 esac
+
+# Summary-block markers + optional MODE line (issue #1821). The DEFAULT (full
+# gate) values are the historical literals, so a no-flag run's output is
+# byte-for-byte unchanged. --lite swaps in DISTINCT markers plus a MODE line so a
+# lite summary can NEVER be mistaken for — or pasted as — the full gate's SUMMARY
+# (which remains the only run that counts). Everything that writes/greps the block
+# uses these variables; for LITE=0 they equal the old literals exactly.
+SUMMARY_START_MARKER="==== AGENT-GATE SUMMARY ===="
+SUMMARY_END_MARKER="==== END AGENT-GATE SUMMARY ===="
+SUMMARY_MODE_LINE=""
+if [ "$LITE" -eq 1 ]; then
+  SUMMARY_START_MARKER="==== AGENT-GATE LITE SUMMARY ===="
+  SUMMARY_END_MARKER="==== END AGENT-GATE LITE SUMMARY ===="
+  SUMMARY_MODE_LINE="MODE: lite (FAST ITERATION — NOT the gate of record; full agent-gate.sh must PASS once before merge)"
+fi
 
 LOG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate.XXXXXX")
 # Per-run nonce (#1175 roborev finding 1): the LOG_DIR is a fresh per-run mktemp
@@ -266,7 +464,14 @@ RUN_ID="$LOG_DIR"
 # the same $REPO_ROOT. Concurrent same-checkout runs MUST each set a unique
 # AGENT_GATE_SUMMARY_FILE or they clobber each other's recovery artifact;
 # separate worktrees get distinct repo roots and are already isolated.
-SUMMARY_FILE="${AGENT_GATE_SUMMARY_FILE:-$REPO_ROOT/.agent-gate-summary.txt}"
+# The lite run uses a DISTINCT default recovery filename (issue #1821) so it can
+# never clobber the full gate's recovery artifact, and so `cat`-ing the default
+# after a lite run can never be misread as the full gate's result.
+if [ "$LITE" -eq 1 ]; then
+  SUMMARY_FILE="${AGENT_GATE_SUMMARY_FILE:-$REPO_ROOT/.agent-gate-lite-summary.txt}"
+else
+  SUMMARY_FILE="${AGENT_GATE_SUMMARY_FILE:-$REPO_ROOT/.agent-gate-summary.txt}"
+fi
 # Resolve a caller-provided RELATIVE AGENT_GATE_SUMMARY_FILE against the caller's
 # original CWD, not the repo root we cd'd into (#1175 roborev finding 1). Absolute
 # paths are used verbatim; the unset default above is already absolute.
@@ -296,10 +501,11 @@ SUMMARY_WRITE_FAILED=0
 # sentinel (unwritable path) we do not abort here; emit_summary's authoritative
 # write guard catches an unwritable path at the end and forces a FAIL.
 {
-  echo "==== AGENT-GATE SUMMARY ===="
+  echo "$SUMMARY_START_MARKER"
   echo "run-id: $RUN_ID"
+  [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
   echo "RESULT: INCOMPLETE (gate did not finish)"
-  echo "==== END AGENT-GATE SUMMARY ===="
+  echo "$SUMMARY_END_MARKER"
 } > "$SUMMARY_FILE" 2>/dev/null || true
 
 # emit_summary <result> [meta-line ...]
@@ -339,14 +545,15 @@ emit_summary() {
   write_err=$(
     {
       echo
-      echo "==== AGENT-GATE SUMMARY ===="
+      echo "$SUMMARY_START_MARKER"
       echo "run-id: $RUN_ID"
+      [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
       local line
       for line in "$@"; do echo "$line"; done
       echo "logs: $LOG_DIR"
       echo "summary-file: $SUMMARY_FILE"
       echo "RESULT: $result"
-      echo "==== END AGENT-GATE SUMMARY ===="
+      echo "$SUMMARY_END_MARKER"
     } > "$SUMMARY_FILE" 2>&1
     printf '\037rc=%d' "$?"
   ) || true
@@ -366,7 +573,7 @@ emit_summary() {
     reason="write failed (rc=$write_rc)${write_err:+: $write_err}"
   elif [ ! -s "$SUMMARY_FILE" ]; then
     reason="${write_err:-file missing or empty}"
-  elif ! grep -q '==== END AGENT-GATE SUMMARY ====' "$SUMMARY_FILE" 2>/dev/null; then
+  elif ! grep -qF "$SUMMARY_END_MARKER" "$SUMMARY_FILE" 2>/dev/null; then
     reason="incomplete write (end marker missing)${write_err:+: $write_err}"
   elif ! grep -qF "run-id: $RUN_ID" "$SUMMARY_FILE" 2>/dev/null; then
     reason="stale file (run-id of this run not found — write did not land)${write_err:+: $write_err}"
@@ -401,14 +608,15 @@ emit_summary() {
   else
     {
       echo
-      echo "==== AGENT-GATE SUMMARY ===="
+      echo "$SUMMARY_START_MARKER"
       echo "run-id: $RUN_ID"
+      [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
       local line
       for line in "$@"; do echo "$line"; done
       echo "logs: $LOG_DIR"
       echo "summary-file: $SUMMARY_FILE (WRITE FAILED — see stderr)"
       echo "RESULT: $emit_result"
-      echo "==== END AGENT-GATE SUMMARY ===="
+      echo "$SUMMARY_END_MARKER"
     } > "$LOG_SUMMARY_FILE" 2>/dev/null || true
   fi
 
@@ -423,14 +631,15 @@ emit_summary() {
   else
     {
       echo
-      echo "==== AGENT-GATE SUMMARY ===="
+      echo "$SUMMARY_START_MARKER"
       echo "run-id: $RUN_ID"
+      [ -n "$SUMMARY_MODE_LINE" ] && echo "$SUMMARY_MODE_LINE"
       local line
       for line in "$@"; do echo "$line"; done
       echo "logs: $LOG_DIR"
       echo "summary-file: $SUMMARY_FILE (WRITE FAILED — see stderr)"
       echo "RESULT: $emit_result"
-      echo "==== END AGENT-GATE SUMMARY ===="
+      echo "$SUMMARY_END_MARKER"
     } 2>/dev/null || true
   fi
 }
@@ -894,6 +1103,240 @@ run_file_size() {
   record_result "$name" "$status" "$((end - start))"
   echo ">>> [$name] $status ($((end - start))s)"
 }
+
+# scoped-tests (issue #1821, --lite only): the blast-radius-scoped test component.
+# Map each changed path to its cargo package and run ONLY those packages' --lib
+# tests plus the diff's new/changed `--test` targets — NOT the full
+# core-tests/write/cli/bindings/parity set. Falls back to `cqlite-core --lib` and
+# says so when no rust workspace package is in the diff (docs/scripts/bindings-only
+# changes). Package detection uses the SAME base-ref resolution as file-size.
+run_scoped_tests() {
+  local name=scoped-tests
+  local log="$LOG_DIR/$name.log"
+  local start end status=PASS
+  start=$(date +%s)
+  : >"$log"
+
+  local base="" ref
+  for ref in origin/main main origin/master master; do
+    if git rev-parse --verify -q "$ref" >/dev/null 2>&1; then
+      base=$(git merge-base HEAD "$ref" 2>/dev/null) && [ -n "$base" ] && break
+    fi
+  done
+
+  local changed
+  if [ -n "$base" ]; then
+    changed=$(printf '%s\n%s\n' \
+      "$(git diff --name-only "$base"...HEAD 2>/dev/null)" \
+      "$(git diff --name-only HEAD 2>/dev/null)")
+  else
+    changed=$(git diff --name-only HEAD 2>/dev/null)
+  fi
+
+  # Package ownership and per-`--test` scoping REQUIRE an authoritative
+  # Cargo-metadata parser (jq or python3). Without one we cannot map a path to its
+  # owning workspace member NOR learn a target's required-features (running a
+  # feature-gated target feature-less would FAIL --lite spuriously). So when
+  # NEITHER is present we scope to `cqlite-core --lib` ONLY and say so — we emit no
+  # per-package/per-target selection and reintroduce NO hardcoded path mapping. The
+  # AGENT_GATE_TEST_NO_METADATA_PARSER hook forces this branch for the self-test.
+  local have_meta_parser=1
+  if [ "${AGENT_GATE_TEST_NO_METADATA_PARSER:-0}" = 1 ] || \
+     { ! command -v jq >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; }; then
+    have_meta_parser=0
+    echo ">>> [$name] no jq/python3 — scoping to cqlite-core --lib only; run the full gate for integration-test coverage"
+  fi
+
+  # No-parser fallback (issue #1821 roborev): without a metadata parser we do NOT
+  # consult pkg_has_lib (it can't know without metadata and would degrade to a
+  # compile-only --no-run). Run an explicit, unconditional cqlite-core --lib test
+  # that ACTUALLY RUNS the core lib tests, then finish this component and return —
+  # the metadata-derived per-package selection below is skipped entirely.
+  if [ "$have_meta_parser" -eq 0 ]; then
+    local -a args=()
+    read -r -a args <<<"$(_scoped_test_cmd_noparser)"
+    echo ">>> [$name] cargo ${args[*]}"
+    if ! cargo "${args[@]}" >>"$log" 2>&1; then
+      status=FAIL
+      OVERALL=FAIL
+    fi
+    if [ "$status" = FAIL ]; then
+      echo "--- [$name] FAILED; last 60 lines of $log ---"
+      tail -60 "$log"
+      echo "--- end of $name output ---"
+    fi
+    end=$(date +%s)
+    NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
+    echo ">>> [$name] $status ($((end - start))s)"
+    return
+  fi
+
+  # Metadata-derived package ownership (issue #1821): the single authoritative
+  # source. `pkgindex` is "<manifest_dir>\t<pkg>\t<has_lib>" for every member;
+  # `owners` is the longest-prefix owning package of each changed path
+  # ("<pkg>|<has_lib>"); `newtests` is every changed --test target
+  # ("<pkg>|<testname>|<features>"). All empty in the no-parser fallback. This
+  # replaces the old hardcoded path-prefix `case` and `pkg_dir` maps, which kept
+  # missing real members (tools/*, bindings/*, examples, ...); every workspace
+  # member is now covered because ownership comes from `cargo metadata`.
+  local pkgindex="" owners="" newtests=""
+  if [ "$have_meta_parser" -eq 1 ]; then
+    pkgindex=$(_package_index)
+    owners=$(printf '%s\n' "$changed" | _owners_from_index "$pkgindex")
+    newtests=$(printf '%s\n' "$changed" | classify_test_targets)
+  fi
+
+  # has_lib lookup for ANY package name, straight from the metadata index (1 when
+  # the package has a lib/rlib target `cargo test --lib` can run, else 0).
+  pkg_has_lib() {
+    printf '%s\n' "$pkgindex" \
+      | awk -F'\t' -v p="$1" '$2 == p { print $3; f = 1; exit } END { if (!f) print 0 }'
+  }
+
+  # Bash 3.2-safe newline-delimited package set (grep -qxF dedup). Built from BOTH
+  # path owners AND the owners of every changed --test target — the latter covers
+  # members with no path prefix of their own (notably the workspace-root `cqlite`
+  # package, which owns the top-level tests/*.rs targets; issue #1821 finding 1).
+  local pkgset="" pkg key tpkg
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    pkg=${key%%|*}
+    [ -n "$pkg" ] || continue
+    printf '%s\n' "$pkgset" | grep -qxF "$pkg" || pkgset="${pkgset}${pkg}"$'\n'
+  done <<<"$owners"
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    tpkg=${key%%|*}
+    [ -n "$tpkg" ] || continue
+    printf '%s\n' "$pkgset" | grep -qxF "$tpkg" || pkgset="${pkgset}${tpkg}"$'\n'
+  done <<<"$newtests"
+
+  local -a pkgs=()
+  while IFS= read -r pkg; do [ -n "$pkg" ] && pkgs+=("$pkg"); done <<<"$pkgset"
+  local scoped_note
+  if [ "${#pkgs[@]}" -eq 0 ]; then
+    pkgs=(cqlite-core)
+    scoped_note="cqlite-core --lib (default; no rust workspace package in the diff)"
+  else
+    scoped_note="${pkgs[*]}"
+  fi
+  echo ">>> [$name] blast-radius packages: $scoped_note"
+
+  # Union a comma-list of features into a newline-set (Bash 3.2-safe dedup).
+  add_features() {
+    local set=$1 list=$2 x oldifs=$IFS
+    IFS=,
+    for x in $list; do
+      [ -n "$x" ] || continue
+      printf '%s\n' "$set" | grep -qxF "$x" || set="${set}${x}"$'\n'
+    done
+    IFS=$oldifs
+    printf '%s' "$set"
+  }
+
+  local p rest tname feats
+  for p in "${pkgs[@]}"; do
+    local -a args=(test -p "$p")
+    local featset=""
+    # cqlite-core lib tests need cli-helpers (matches the full gate's core-tests).
+    [ "$p" = cqlite-core ] && featset=$(add_features "$featset" cli-helpers)
+    # Lib presence comes from Cargo metadata (no src/lib.rs probing). A package
+    # with no lib target runs only its changed --test targets (issue #1821).
+    local haslib
+    haslib=$(pkg_has_lib "$p")
+    [ "$haslib" -eq 1 ] && args+=(--lib)
+    local -a stems=()
+    # Collect every changed --test target this package owns AND union each
+    # target's required-features so it is compiled with the features it needs —
+    # never invoked feature-less (issue #1821 finding 2).
+    while IFS= read -r key; do
+      [ -n "$key" ] || continue
+      case "$key" in
+        "$p|"*)
+          rest=${key#*|}          # "<name>|<features>"
+          tname=${rest%%|*}
+          feats=${rest#*|}        # "" when the target has no required-features
+          [ "$feats" = "$rest" ] && feats=""
+          stems+=(--test "$tname")
+          featset=$(add_features "$featset" "$feats")
+          ;;
+      esac
+    done <<<"$newtests"
+    # Bash 3.2 under `set -u` treats "${stems[@]}" of an EMPTY array as unbound,
+    # so only expand it when non-empty (count expansion is always safe).
+    [ "${#stems[@]}" -gt 0 ] && args+=("${stems[@]}")
+    # Pass the unioned required-features (if any) so feature-gated targets
+    # (write-support / delta-export / duckdb-tests / ...) actually compile.
+    local featjoin
+    featjoin=$(printf '%s' "$featset" | awk 'NF{ printf (n++?",":"") $0 }')
+    [ -n "$featjoin" ] && args+=(--features "$featjoin")
+    # A test-only crate with no changed --test target has nothing runnable to
+    # scope to; compile-check it (--no-run) rather than run its whole (slow) suite.
+    if [ "$haslib" -eq 0 ] && [ "${#stems[@]}" -eq 0 ]; then
+      args+=(--no-run)
+    fi
+    echo ">>> [$name] cargo ${args[*]}"
+    if ! cargo "${args[@]}" >>"$log" 2>&1; then
+      status=FAIL
+      OVERALL=FAIL
+    fi
+  done
+
+  if [ "$status" = FAIL ]; then
+    echo "--- [$name] FAILED; last 60 lines of $log ---"
+    tail -60 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
+# run_lite (issue #1821): the FAST ITERATION gate. Runs file-size + fmt +
+# FULL-workspace clippy + blast-radius-scoped tests, emits a DISTINCTLY-labeled
+# LITE summary, and EXITS — it never falls through to the full-gate flow below, so
+# the no-flag path is completely unchanged. It is NOT the gate of record.
+run_lite() {
+  echo
+  echo "==================================================================="
+  echo "  AGENT-GATE --lite  :  FAST ITERATION GATE — *NOT* THE GATE OF RECORD"
+  echo "  Runs: file-size + fmt + workspace clippy + blast-radius-scoped tests."
+  echo "  It SKIPS core-tests, write/cli, bindings, parity, smoke, etc."
+  echo "  Before merge you MUST run the full  scripts/agent-gate.sh  and it must"
+  echo "  PASS — its ==== AGENT-GATE SUMMARY ==== block is the ONLY run that counts."
+  echo "==================================================================="
+  echo
+
+  run_file_size
+  run_component fmt cargo fmt --all --check
+  run_component clippy env RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
+  run_scoped_tests
+
+  declare -a SUMMARY_META=()
+  SUMMARY_META+=("commit: $(git rev-parse --short HEAD) branch: $(git rev-parse --abbrev-ref HEAD) dirty: $(test -n "$(git status --porcelain)" && echo yes || echo no)")
+  SUMMARY_META+=("lite-scope: file-size fmt clippy scoped-tests (full gate NOT run — run it once before merge)")
+  local i
+  for i in "${!NAMES[@]}"; do
+    SUMMARY_META+=("$(printf '%-18s %s (%s)' "${NAMES[$i]}:" "${STATUSES[$i]}" "${TIMES[$i]}")")
+  done
+  emit_summary "$OVERALL" "${SUMMARY_META[@]}"
+
+  if [ "$SUMMARY_WRITE_FAILED" -ne 0 ]; then
+    echo "agent-gate: exiting non-zero because the summary file could not be written (#1175)" >&2
+    exit 1
+  fi
+  case "$OVERALL" in
+    PASS) exit 0 ;;
+    *) exit 1 ;;
+  esac
+}
+
+# --lite (issue #1821): run the fast subset and EXIT before the full-gate flow.
+# Kept fully separate from the full-gate execution below so the no-flag path is
+# byte-for-byte unchanged.
+if [ "$LITE" -eq 1 ]; then
+  run_lite
+fi
 
 # file-size runs first and needs no dataset, so it executes before the dataset
 # preflight (which exits early when data is missing).

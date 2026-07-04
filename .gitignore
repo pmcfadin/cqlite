@@ -204,6 +204,8 @@ docs/sstable-guide-audit/
 
 # agent-gate caller-known summary (default recovery path, issue #1175)
 /.agent-gate-summary.txt
+# agent-gate --lite caller-known summary (distinct recovery path, issue #1821)
+/.agent-gate-lite-summary.txt
 
 # parity-report self-test probe (issue #1338): removed by trap, ignored as a safety net
 test-data/.tmp-parity-manifest-mutated.yml

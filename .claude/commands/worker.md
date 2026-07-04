@@ -67,11 +67,22 @@ onto its own branch). Rules, non-negotiable:
      approval**. Do NOT write any code until the owner approves the spec. No new work without an approved spec.
    - **Oracle-driven bug** (Cassandra/sstabledump source of truth + a pinned parity test) → skip OpenSpec,
      go straight to implement.
-6. **Run to completion** (`flow-implement <N>`) — **by dispatching subagents, not by hand**: spawn
-   `sstable-developer` (model: opus) to implement TDD against the approved spec and run `agent-gate.sh` to
-   PASS, returning the summary block; spawn `spec-auditor` for **C** PASS (it audits the impl against
-   `openspec/changes/<slug>/specs/**`); run roborev (`--agent claude-code --model opus`) to clean. You
-   coordinate and read summaries; you do not open the source yourself.
+6. **Run to completion** (`flow-implement <N>`) — **by dispatching subagents, not by hand**. Drive the
+   tiered-gate loop (issue #1821) in this order:
+   1. Spawn `sstable-developer` (model: opus) to implement TDD against the approved spec.
+   2. On EACH fix round the implementer runs `scripts/agent-gate.sh --lite` (fmt + file-size + workspace
+      clippy + blast-radius-scoped tests, ~1-5 min — the FAST ITERATION gate, NOT the gate of record; its
+      `==== AGENT-GATE LITE SUMMARY ====` block must never be pasted as the full SUMMARY). Iterate on lite
+      until it is PASS and the change is complete.
+   3. **Conditional review-first**: before the first FULL gate, spawn `rust-reviewer` (model: opus) when the
+      diff changes a `pub` item, touches >1 call site of a changed symbol, or adds a new surface; address
+      findings and re-run `--lite`. Skip this for mechanical/localized diffs.
+   4. Run the FULL `scripts/agent-gate.sh` EXACTLY ONCE; it must PASS — that `==== AGENT-GATE SUMMARY ====`
+      block is the only run that counts. **`--lite` NEVER replaces it.**
+   5. Spawn `spec-auditor` for **C** PASS (it audits the impl against `openspec/changes/<slug>/specs/**`);
+      run roborev (`--agent claude-code --model opus`) to clean. If a roborev round drives a code change,
+      iterate on `--lite`, then re-run the FULL gate once before merge.
+   You coordinate and read summaries; you do not open the source yourself.
 7. **Terminal state — arm merge-on-green, then STOP.** Your terminal state is **PR-open + gate PASS +
    C PASS (design) + roborev clean**. Re-check for an open `HOLD: merge after #N` → keep merge-on-green
    gated behind #N (the manager sequences it). Rebase on `origin/main`; resolve any conflict in YOUR
@@ -107,7 +118,9 @@ diff and breaks 1:1:1:1. Instead:
   it — never `checkout`/`reset` the root to "fix" it.
 - **Finalize cleans up YOUR worktree only** (`git worktree remove`), then deletes the origin lock branch.
   Never `git checkout main` / `git reset` the shared root checkout as part of cleanup.
-- The gate is the only run that counts — paste its summary block. **But `agent-gate.sh`
+- **Tiered gate (issue #1821):** iterate on `scripts/agent-gate.sh --lite` (step 6.2), run the FULL gate
+  exactly ONCE before merge (step 6.4). `--lite` NEVER replaces the full gate. The full gate is the only
+  run that counts — paste its `==== AGENT-GATE SUMMARY ====` block. **But `agent-gate.sh`
   PASS ≠ CI green** (L2, flow-meta #1310): the local gate does NOT run every CI lane —
   it uses pre-existing datasets and a subset of test targets. When a change touches a
   **regenerate path, a fixture parser, or a fail-closed CI guard**, reproduce the

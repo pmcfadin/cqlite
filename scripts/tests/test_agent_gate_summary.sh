@@ -235,6 +235,200 @@ else
   ok "stale-early: old run-id no longer present"
 fi
 
+# 6. LITE summary emission (issue #1821): `--lite --emit-summary-selftest` must
+#    emit a DISTINCTLY-labeled block ("==== AGENT-GATE LITE SUMMARY ====" + a
+#    "MODE: lite" line) so a lite summary can NEVER be pasted as the full gate's
+#    SUMMARY, and the caller-known recovery file must still be complete for lite.
+LITE_START="==== AGENT-GATE LITE SUMMARY ===="
+LITE_END="==== END AGENT-GATE LITE SUMMARY ===="
+lite_file="$tmp/lite-summary.txt"
+AGENT_GATE_SUMMARY_FILE="$lite_file" \
+  bash "$GATE" --lite --emit-summary-selftest >"$tmp/lite.log" 2>&1
+lite_rc=$?
+assert_exit "lite-selftest" "$lite_rc" 0
+if grep -qF "$LITE_START" "$lite_file" && grep -qF "$LITE_END" "$lite_file" \
+   && grep -q "^MODE: lite" "$lite_file" && grep -q "^RESULT: " "$lite_file"; then
+  ok "lite-selftest: distinct LITE markers + MODE: lite present in caller-known file"
+else
+  bad "lite-selftest: missing LITE markers or MODE line (file: $lite_file)"
+  echo "------- captured -------"; cat "$lite_file"; echo "------------------------"
+fi
+# The lite block MUST NOT carry the full-gate markers (would be pasteable as the
+# full SUMMARY). The full START marker is a prefix of the LITE one, so match the
+# full marker only when it is NOT the LITE marker (i.e. its own line boundaries).
+if grep -qxF "$START_MARKER" "$lite_file"; then
+  bad "lite-selftest: block also contains the FULL '$START_MARKER' line (must not)"
+else
+  ok "lite-selftest: block does not contain the full-gate SUMMARY marker line"
+fi
+
+# 7. scoped-test target classification (issue #1821): a changed file is treated
+#    as a Cargo `--test` target ONLY if it is an actual integration-test target.
+#    NESTED helper/module files under tests/<subdir>/ must NOT be picked (a Bash
+#    `case` glob like `*/tests/*.rs` matches `/`, so it wrongly matched them and
+#    made --lite FAIL on valid helper-only changes). The gate exposes the mapping
+#    via the hidden `--classify-test-targets` hook (stdin paths ->
+#    "<pkg>|<name>|<required-features>", one line per OWNING package).
+classify_out=$(printf '%s\n' \
+  "cqlite-core/tests/write_read_roundtrip/data_multi.rs" \
+  "cqlite-cli/tests/common/mod.rs" \
+  "cqlite-core/src/storage/sstable/reader.rs" \
+  "cqlite-core/tests/compact_command.rs" \
+  "tests/cassandra5_header_tests.rs" \
+  "cqlite-cli/tests/issue_1388_compact_major_drop.rs" \
+  | bash "$GATE" --classify-test-targets 2>/dev/null)
+# Nested helper + module files must be EXCLUDED (testname is the middle field).
+if printf '%s\n' "$classify_out" | grep -qE '\|(data_multi|mod)\|'; then
+  bad "classify: nested helper (write_read_roundtrip/data_multi.rs or common/mod.rs) wrongly picked as a --test target"
+  echo "------- classify output -------"; printf '%s\n' "$classify_out"; echo "-------------------------------"
+else
+  ok "classify: nested helper/module files NOT treated as --test targets"
+fi
+# A real direct integration-test target must still be picked, mapped to its pkg
+# (features field empty for a target with no required-features).
+if printf '%s\n' "$classify_out" | grep -qxF "cqlite-core|compact_command|"; then
+  ok "classify: real integration-test target (compact_command) picked with correct package"
+else
+  bad "classify: real integration-test target compact_command was NOT picked"
+  echo "------- classify output -------"; printf '%s\n' "$classify_out"; echo "-------------------------------"
+fi
+# Finding 1: a top-level tests/*.rs target is owned by BOTH the workspace-root
+# `cqlite` package AND the cqlite-integration-tests crate; BOTH must be emitted
+# so the root package's target is never silently dropped from --lite selection.
+if printf '%s\n' "$classify_out" | grep -qxF "cqlite|cassandra5_header_tests|" \
+   && printf '%s\n' "$classify_out" | grep -qxF "cqlite-integration-tests|cassandra5_header_tests|"; then
+  ok "classify: root-cqlite + integration-tests BOTH emitted for a top-level tests/*.rs target (finding 1)"
+else
+  bad "classify: top-level tests/*.rs target did NOT emit both owning packages (root cqlite dropped)"
+  echo "------- classify output -------"; printf '%s\n' "$classify_out"; echo "-------------------------------"
+fi
+# Finding 2: a target that declares required-features must carry them through so
+# --lite compiles it WITH those features instead of invoking it feature-less.
+if printf '%s\n' "$classify_out" | grep -qxF "cqlite-cli|issue_1388_compact_major_drop|write-support"; then
+  ok "classify: required-features (write-support) passed through for a feature-gated target (finding 2)"
+else
+  bad "classify: required-features NOT passed through for issue_1388_compact_major_drop"
+  echo "------- classify output -------"; printf '%s\n' "$classify_out"; echo "-------------------------------"
+fi
+
+# 7a. Metadata-derived PACKAGE ownership (issue #1821 roborev round 4): the old
+#     hardcoded path-prefix `case` + `pkg_dir` maps only listed a SUBSET of
+#     workspace members, so a change under an unlisted real member (tools/*,
+#     bindings/*, examples, ...) fell through and ran the WRONG (cqlite-core --lib)
+#     tests — a defect roborev re-found each round. Ownership now comes from
+#     `cargo metadata` (longest manifest-dir prefix), covering EVERY member. The
+#     mapping is exposed via the hidden `--classify-package-owners` hook
+#     (stdin paths -> "<pkg>|<has_lib>", one owner per path).
+owners_out=$(printf '%s\n' \
+  "tools/format-validator/src/lib.rs" \
+  "tools/sstabledump-validator/src/main.rs" \
+  "bindings/python/src/lib.rs" \
+  "bindings/node/src/database.rs" \
+  "examples/basic.rs" \
+  "cqlite-core/src/storage/sstable/reader.rs" \
+  "tests/format-compatibility/src/lib.rs" \
+  "docs/some-doc.md" \
+  | bash "$GATE" --classify-package-owners 2>/dev/null)
+# A currently-missed tools/* member must resolve to ITS package (has a lib -> 1).
+if printf '%s\n' "$owners_out" | grep -qxF "format-validator|1"; then
+  ok "owners: tools/format-validator resolves to its own package (was falling through)"
+else
+  bad "owners: tools/format-validator/src/lib.rs did NOT resolve to format-validator"
+  echo "------- owners output -------"; printf '%s\n' "$owners_out"; echo "-----------------------------"
+fi
+# A bindings/* member must resolve to its cdylib package (no lib target -> 0).
+if printf '%s\n' "$owners_out" | grep -qxF "cqlite-py|0" \
+   && printf '%s\n' "$owners_out" | grep -qxF "cqlite-node|0"; then
+  ok "owners: bindings/{python,node} resolve to cqlite-py|0 / cqlite-node|0 (cdylib, no --lib)"
+else
+  bad "owners: bindings/* did NOT resolve to their packages with has_lib=0"
+  echo "------- owners output -------"; printf '%s\n' "$owners_out"; echo "-----------------------------"
+fi
+# The examples crate must resolve to its own package (has a lib -> 1).
+if printf '%s\n' "$owners_out" | grep -qxF "cqlite-examples|1"; then
+  ok "owners: examples/ resolves to cqlite-examples (was falling through)"
+else
+  bad "owners: examples/basic.rs did NOT resolve to cqlite-examples"
+  echo "------- owners output -------"; printf '%s\n' "$owners_out"; echo "-----------------------------"
+fi
+# A nested member (tests/format-compatibility) must win over its parent tests/.
+if printf '%s\n' "$owners_out" | grep -qxF "format-compatibility-tests|0"; then
+  ok "owners: nested tests/format-compatibility wins longest-prefix over tests/"
+else
+  bad "owners: tests/format-compatibility did NOT resolve to format-compatibility-tests"
+  echo "------- owners output -------"; printf '%s\n' "$owners_out"; echo "-----------------------------"
+fi
+# The workspace-root `cqlite` package (manifest dir == repo root) is a degenerate
+# catch-all prefix and must NOT be a path owner — a docs-only change resolves to
+# NO package (falls through to the cqlite-core --lib default), not to root cqlite.
+if printf '%s\n' "$owners_out" | grep -q '^cqlite|'; then
+  bad "owners: repo-root 'cqlite' package wrongly claimed a path (degenerate catch-all)"
+  echo "------- owners output -------"; printf '%s\n' "$owners_out"; echo "-----------------------------"
+else
+  ok "owners: repo-root 'cqlite' package excluded as a path owner (docs change -> fallback)"
+fi
+# No metadata parser -> NO ownership resolution at all (lib-only fallback).
+noparser_owners=$(AGENT_GATE_TEST_NO_METADATA_PARSER=1 printf '%s\n' \
+  "tools/format-validator/src/lib.rs" \
+  | AGENT_GATE_TEST_NO_METADATA_PARSER=1 bash "$GATE" --classify-package-owners 2>/dev/null)
+if [ -z "$noparser_owners" ]; then
+  ok "owners: no-parser fallback emits NO ownership (scopes to cqlite-core --lib)"
+else
+  bad "owners: no-parser fallback emitted ownership without a metadata parser"
+  echo "------- owners output -------"; printf '%s\n' "$noparser_owners"; echo "-----------------------------"
+fi
+
+# 7b. No metadata parser (issue #1821 roborev round 3): per-`--test`-target
+#     selection REQUIRES a Cargo-metadata parser (jq OR python3). When NEITHER is
+#     available the fallback must emit NO `--test` targets at all — otherwise it
+#     would run feature-gated targets (e.g. issue_1388_compact_major_drop, which
+#     needs write-support) feature-less and FAIL --lite spuriously in a minimal
+#     shell env. run_scoped_tests then scopes to package --lib only. We force the
+#     no-parser branch hermetically via AGENT_GATE_TEST_NO_METADATA_PARSER=1
+#     (no PATH surgery on jq/python3/cargo) and feed the SAME paths as test 7,
+#     including a feature-gated target and real direct targets.
+noparser_out=$(AGENT_GATE_TEST_NO_METADATA_PARSER=1 printf '%s\n' \
+  "cqlite-core/tests/compact_command.rs" \
+  "tests/cassandra5_header_tests.rs" \
+  "cqlite-cli/tests/issue_1388_compact_major_drop.rs" \
+  | AGENT_GATE_TEST_NO_METADATA_PARSER=1 bash "$GATE" --classify-test-targets 2>/dev/null)
+if [ -z "$noparser_out" ]; then
+  ok "no-parser: fallback emits NO --test targets (lib-only) when jq/python3 absent"
+else
+  bad "no-parser: fallback emitted --test targets without a metadata parser (should be lib-only)"
+  echo "------- classify output -------"; printf '%s\n' "$noparser_out"; echo "-------------------------------"
+fi
+
+# 7c. No metadata parser RUNS the core lib tests (issue #1821 roborev): the
+#     lib-only fallback must ACTUALLY RUN cqlite-core's tests, not compile-check
+#     them. The old code consulted pkg_has_lib (empty index -> 0) and degraded to
+#     `--no-run`. Assert the fallback command includes `--lib` and does NOT include
+#     `--no-run`. Force the no-parser branch hermetically via the existing hook.
+noparser_cmd=$(AGENT_GATE_TEST_NO_METADATA_PARSER=1 bash "$GATE" --scoped-test-cmd-noparser 2>/dev/null)
+if printf '%s\n' "$noparser_cmd" | grep -qF -- '--lib' \
+   && ! printf '%s\n' "$noparser_cmd" | grep -qF -- '--no-run'; then
+  ok "no-parser: fallback RUNS cqlite-core --lib tests (has --lib, no --no-run)"
+else
+  bad "no-parser: fallback command does not run lib tests (want --lib, not --no-run)"
+  echo "------- scoped cmd -------"; printf '%s\n' "$noparser_cmd"; echo "--------------------------"
+fi
+
+# 8. Bash 3.2 compatibility (issue #1821): macOS ships Bash 3.2 as /bin/bash and
+#    the gate is invoked as plain `bash scripts/agent-gate.sh`. The --lite path
+#    must not use Bash-4-only features (associative arrays). Exercise the hook
+#    under /bin/bash when it is the 3.x default so the test is meaningful there.
+if [ -x /bin/bash ]; then
+  bin_bash_major=$(/bin/bash -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null)
+  if /bin/bash "$GATE" --lite-list >/dev/null 2>&1 \
+     && printf '%s\n' "cqlite-core/tests/compact_command.rs" \
+        | /bin/bash "$GATE" --classify-test-targets 2>/dev/null \
+        | grep -qxF "cqlite-core|compact_command|"; then
+    ok "bash-compat: --lite classification path runs under /bin/bash (major ${bin_bash_major:-?})"
+  else
+    bad "bash-compat: --lite classification path failed under /bin/bash (major ${bin_bash_major:-?})"
+  fi
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]
