@@ -79,6 +79,33 @@ must never auto-land against an empty required-check set.
 **`ScheduleWakeup` is still valid** for genuinely external, harness-untracked state; what is forbidden is
 using it to busy-poll a PR's own external CI after the work is complete.
 
+## Post-gate delta re-certification (test/docs-only rounds, issue #1892)
+
+The "full gate exactly once" rule (issue #1821) held on **zero** non-trivial issues in the #1889 retro:
+every roborev/address round — usually a Low test-robustness or docs finding — re-triggered a full gate at
+15–25 min each, adding zero signal for the delta (the scoped tests often don't even run the changed test
+file). #1853 burned ~3 full-gate cycles and #1921 ~2 on test/docs-only polish rounds. The fix closes that
+loophole **without** weakening the gate of record:
+
+- **After a full-gate PASS at commit `X`**, if the subsequent diff `X..Y` touches **ONLY** test files
+  (`tests/` dirs, `*_test(s).rs`, `__test__/`, `bindings/*/tests/`) and/or docs (`*.md`, `docs/`,
+  `website/`), re-certify with
+  `scripts/agent-gate.sh --delta X --anchor-run-id <X's full-gate run-id>`
+  (or `--anchor-summary-file <path to X's full SUMMARY>`, which reads the run-id and refuses if that file
+  is not a full-gate PASS block). It runs file-size + fmt + the diff's changed test targets and emits a
+  DISTINCT `==== AGENT-GATE DELTA SUMMARY ====` block (MODE: delta).
+- **Fail-closed:** any production file in `X..Y` (src, scripts, workflows, `Cargo.*`, config, test-data)
+  makes `--delta` **REFUSE** and name the offending files — a production change always requires a fresh
+  full `scripts/agent-gate.sh`. The delta is NOT the gate of record and can never substitute for the full
+  gate on a production change.
+- **PR evidence:** record BOTH artifacts — the anchor's full SUMMARY (the gate of record) AND the `X..Y`
+  DELTA block. The DELTA block's markers and `gate-of-record:` line make it impossible to paste a delta run
+  as a full SUMMARY.
+- **Standing backstop (owner condition, 2026-07-04):** long-term quality is backstopped by the nightly
+  full run on `main` — `.github/workflows/gate.yml` (deep-check) re-runs the FULL gate with
+  `CQLITE_CLIPPY_FULL=1`, deeper than the local gate. The `--delta` doctrine references this backstop; a
+  red nightly is the safety net for anything a delta round scoped past.
+
 ## Pipelining independent lanes (don't serialize on waits, retro #1889)
 
 The lead pipelines near-independent issues instead of serializing on long waits (full gate 15-25 min, CI,
