@@ -54,6 +54,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   must switch to a supported format. A parse-rejection regression test guards
   against the variant being silently re-added (#283).
 
+### Fixed
+
+<!-- DRAFT (release-prep): curated from the merge log since v0.12.0; owner to
+     verify/trim wording before the release commit. See
+     docs/development/release-0.13-checklist.md. -->
+
+- **No-heuristics: removed blob-decode byte-pattern guessing.** The raw-decode
+  path no longer infers a value's type from its byte pattern; blobs that happened
+  to look like other types are returned faithfully as blobs, per the no-heuristics
+  mandate (#1630).
+- **Unknown-table reads fail honestly** rather than returning a fabricated
+  `uuid id` default schema (also listed under Changed as a breaking behavior;
+  #1710).
+- **BTI `export-sstable` partition count** is now read from the authoritative
+  `Statistics.db` reader instead of a derived estimate (#1622).
+- **Deterministic raw-only Snappy decode** with transient-only retry — removes a
+  nondeterministic decode fallback on the raw path (#1588).
+- **Full-scan no longer issues duplicate scans.** Retired
+  `execute_parallel_table_scan` in favor of bounded streaming, eliminating the
+  4× duplicate table scan on the full-scan path (#1691).
+
+### Performance
+
+<!-- DRAFT (release-prep): this release's headline theme is read-path + bindings
+     performance. Owner to confirm framing before the release commit. -->
+
+- **Read-path constant-factor bundle (Epic E):** query-engine hot-path cleanups
+  (schema `Arc`, single projection, cached sort keys, plan cache, GROUP BY hash;
+  #1587), read-path idiom bundle (de-async, `FxHash`, OFFSET skip/take,
+  per-partition digest, IN-expansion allocation cuts; #1590), and dropping the
+  `table_readers` read guard before scanning (#1591).
+- **Point-read I/O (C2):** a `ReadAt` positional-read trait removes the point-read
+  cursor convoy and the per-lookup `open(2)` (#1573).
+- **Node bindings throughput:** batch-fetch streaming rows per async task (#1443),
+  move (not deep-clone) row values in `executeNative` (#1447), and cache `Set`/`Map`
+  constructors per result conversion (#1448).
+
 ## [v0.12.0] - 2026-06-22
 
 The compaction release. CQLite now rewrites and compacts Cassandra 5.0 SSTables
