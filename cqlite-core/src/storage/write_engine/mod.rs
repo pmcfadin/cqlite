@@ -888,6 +888,19 @@ impl WriteEngine {
         let hard_limit = self.config.memtable_hard_limit;
         let incoming = self.memtable.estimate_mutation_size(mutation);
 
+        // (0) Fail-closed sentinel: the estimator returns `usize::MAX` when a
+        // mutation is pathological/unmeasurable (node-cap hit). Reject it
+        // EXPLICITLY and unconditionally — a `>` comparison against a
+        // configurable `hard_limit == usize::MAX` would otherwise be false and
+        // admit the very mutation the sentinel is meant to fence off.
+        if incoming == usize::MAX {
+            return Err(Error::Storage(
+                "Write rejected: mutation size could not be bounded (estimator \
+                 fail-closed sentinel); refusing admission"
+                    .to_string(),
+            ));
+        }
+
         // (1) Single-mutation ceiling: one mutation may not exceed the hard
         // limit on its own, regardless of how empty the memtable is.
         if incoming > hard_limit {

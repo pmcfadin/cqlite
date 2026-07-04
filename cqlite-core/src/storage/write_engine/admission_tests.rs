@@ -366,8 +366,45 @@ fn test_pathological_node_cap_fails_closed() {
 
     let err = engine.write(mutation).unwrap_err();
     assert!(
-        matches!(err, Error::Storage(ref m) if m.contains("hard limit")),
-        "node-cap fail-closed value must be rejected, got: {err:?}"
+        matches!(err, Error::Storage(ref m) if m.contains("fail-closed sentinel")),
+        "node-cap fail-closed value must be rejected via the sentinel guard, got: {err:?}"
+    );
+    assert_eq!(engine.memtable_size(), 0);
+}
+
+/// The estimator's `usize::MAX` fail-closed sentinel must be rejected EXPLICITLY,
+/// independent of `hard_limit`. With `hard_limit == usize::MAX` (a configurable
+/// value), the `incoming > hard_limit` ceiling check is `usize::MAX > usize::MAX`
+/// = false, so pre-fix the pathological mutation was ADMITTED, defeating the
+/// fail-closed guard. The dedicated sentinel check makes admission REJECT it
+/// regardless of how `hard_limit` is configured (issue #1625).
+#[test]
+fn test_sentinel_rejected_with_max_hard_limit() {
+    let temp_dir = TempDir::new().unwrap();
+    let config = WriteEngineConfig::new(
+        temp_dir.path().join("data"),
+        temp_dir.path().join("wal"),
+        create_test_schema(),
+    )
+    .with_flush_threshold(1024 * 1024)
+    .with_hard_limit(usize::MAX)
+    .with_durability(Durability::Disabled);
+    let mut engine = WriteEngine::new(config).unwrap();
+
+    // Pathological wide value that trips MAX_ESTIMATE_NODES → estimator returns
+    // usize::MAX.
+    let value = Value::List((0..1_000_001i32).map(Value::Integer).collect());
+    let mutation = mutation_with_value(value);
+    assert_eq!(
+        engine.memtable.estimate_mutation_size(&mutation),
+        usize::MAX,
+        "hitting the node cap must fail closed with usize::MAX"
+    );
+
+    let err = engine.write(mutation).unwrap_err();
+    assert!(
+        matches!(err, Error::Storage(ref m) if m.contains("fail-closed sentinel")),
+        "sentinel must be rejected even when hard_limit == usize::MAX, got: {err:?}"
     );
     assert_eq!(engine.memtable_size(), 0);
 }
