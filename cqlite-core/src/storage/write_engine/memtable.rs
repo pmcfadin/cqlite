@@ -78,8 +78,14 @@ impl Memtable {
 
         // Add mutation
         mutations.push(mutation);
-        self.row_count += 1;
-        self.size_bytes += mutation_size;
+        self.row_count = self.row_count.saturating_add(1);
+        // `saturating_add`: `mutation_size` can legitimately be `usize::MAX`
+        // (the estimator fails closed at the node cap, issue #1625). Admission
+        // rejects over-limit mutations, but a direct `Memtable` user (bypassing
+        // admission) or a `WriteEngine` with `memtable_hard_limit == usize::MAX`
+        // could otherwise panic in debug (overflow check) or wrap in release —
+        // the ledger update MUST be self-safe.
+        self.size_bytes = self.size_bytes.saturating_add(mutation_size);
 
         Ok(())
     }
@@ -231,6 +237,20 @@ impl Memtable {
         let mut worklist: SmallVec<[&Value; 32]> = SmallVec::new();
         worklist.push(value);
 
+        // Would scheduling `incoming` more children push the total node count
+        // past the cap? `visited` (popped so far) + `pending` (already queued) +
+        // `incoming` is the upper bound on nodes this traversal will touch. This
+        // is checked BEFORE enqueuing so a single flat collection with far more
+        // than `MAX_ESTIMATE_NODES` elements can never grow the worklist
+        // proportional to its element count — the DoS guard fails closed WITHOUT
+        // the huge allocation (issue #1625).
+        let would_exceed_cap = |visited: usize, pending: usize, incoming: usize| -> bool {
+            visited
+                .saturating_add(pending)
+                .saturating_add(incoming)
+                > Self::MAX_ESTIMATE_NODES
+        };
+
         while let Some(v) = worklist.pop() {
             visited += 1;
             if visited > Self::MAX_ESTIMATE_NODES {
@@ -262,10 +282,18 @@ impl Memtable {
                 Value::Tombstone(_) => total = total.saturating_add(24),
                 Value::List(items) | Value::Set(items) | Value::Tuple(items) => {
                     total = total.saturating_add(16);
+                    if would_exceed_cap(visited, worklist.len(), items.len()) {
+                        return usize::MAX;
+                    }
                     worklist.extend(items.iter());
                 }
                 Value::Map(entries) => {
                     total = total.saturating_add(16);
+                    // Each entry enqueues both a key and a value.
+                    let incoming = entries.len().saturating_mul(2);
+                    if would_exceed_cap(visited, worklist.len(), incoming) {
+                        return usize::MAX;
+                    }
                     for (k, val) in entries {
                         worklist.push(k);
                         worklist.push(val);
@@ -273,6 +301,12 @@ impl Memtable {
                 }
                 Value::Udt(udt) => {
                     total = total.saturating_add(16);
+                    // Upper bound: at most one child per field (fields with a
+                    // value); check before touching any field so a wide UDT
+                    // cannot balloon the worklist.
+                    if would_exceed_cap(visited, worklist.len(), udt.fields.len()) {
+                        return usize::MAX;
+                    }
                     for field in &udt.fields {
                         total = total.saturating_add(field.name.len());
                         if let Some(fv) = field.value.as_ref() {
@@ -282,6 +316,9 @@ impl Memtable {
                 }
                 Value::Frozen(inner) => {
                     total = total.saturating_add(8);
+                    if would_exceed_cap(visited, worklist.len(), 1) {
+                        return usize::MAX;
+                    }
                     worklist.push(inner);
                 }
             }
@@ -908,6 +945,90 @@ mod tests {
             usize::MAX,
             "hitting the node cap must fail closed with usize::MAX (got {size})"
         );
+    }
+
+    #[test]
+    fn test_insert_with_pathological_value_saturates_ledger_no_panic() {
+        // Issue #1625 (roborev finding 1): a direct `Memtable` user bypasses the
+        // WriteEngine admission gate, so `insert_with_key` MUST be self-safe when
+        // the estimator returns `usize::MAX` (node cap fail-closed). The ledger
+        // update must saturate — never panic (debug overflow) or wrap (release).
+        let mut memtable = Memtable::new();
+
+        // A flat list past the node cap makes `mutation_size` == usize::MAX.
+        let pathological = Value::List(
+            (0..(Memtable::MAX_ESTIMATE_NODES as i32 + 5))
+                .map(Value::Integer)
+                .collect(),
+        );
+        let table_id = TableId::new("test_ks", "test_table");
+        let partition_key = PartitionKey::single("id", Value::Integer(1));
+        let key = DecoratedKey::from_key_bytes(1i32.to_be_bytes().to_vec()).unwrap();
+        let operations = vec![CellOperation::Write {
+            column: "big".to_string(),
+            value: pathological,
+        }];
+        let mutation = Mutation::new(table_id, partition_key, None, operations, 1, None);
+
+        // Sanity: the estimate really is usize::MAX for this mutation.
+        assert_eq!(memtable.estimate_mutation_size(&mutation), usize::MAX);
+
+        // Must not panic; ledger saturates at usize::MAX (no wrap to a small value).
+        memtable.insert_with_key(key, mutation).unwrap();
+        assert_eq!(memtable.size_bytes(), usize::MAX);
+    }
+
+    #[test]
+    fn test_insert_saturates_when_ledger_already_near_max() {
+        // Issue #1625 (roborev finding 1): incrementing an already-huge ledger by
+        // a normal mutation size must saturate, not wrap around to a small value.
+        let mut memtable = Memtable::new();
+        memtable.set_size_bytes_for_test(usize::MAX - 3);
+
+        let (key, mutation) = create_test_mutation(1, "Alice", None);
+        memtable.insert_with_key(key, mutation).unwrap();
+
+        assert_eq!(
+            memtable.size_bytes(),
+            usize::MAX,
+            "ledger must saturate at usize::MAX, never wrap"
+        );
+    }
+
+    #[test]
+    fn test_wide_collection_fails_closed_before_enqueuing_children() {
+        // Issue #1625 (roborev finding 2): a single flat collection whose element
+        // count exceeds MAX_ESTIMATE_NODES must fail closed (usize::MAX) at the
+        // ENQUEUE check — the worklist is never grown proportional to the element
+        // count. Verified for every enqueue site (list, map, UDT, frozen).
+        use crate::types::{UdtField, UdtValue};
+
+        let over = Memtable::MAX_ESTIMATE_NODES + 5;
+
+        // List / Set / Tuple enqueue site.
+        let list = Value::List((0..over as i32).map(Value::Integer).collect());
+        assert_eq!(Memtable::estimate_value_size(&list), usize::MAX);
+
+        // Map enqueue site (keys + values).
+        let map = Value::Map(
+            (0..over as i32)
+                .map(|i| (Value::Integer(i), Value::Integer(i)))
+                .collect(),
+        );
+        assert_eq!(Memtable::estimate_value_size(&map), usize::MAX);
+
+        // UDT enqueue site (field values).
+        let udt = Value::Udt(UdtValue {
+            type_name: "t".to_string(),
+            keyspace: "ks".to_string(),
+            fields: (0..over)
+                .map(|i| UdtField {
+                    name: String::new(),
+                    value: Some(Value::Integer(i as i32)),
+                })
+                .collect(),
+        });
+        assert_eq!(Memtable::estimate_value_size(&udt), usize::MAX);
     }
 
     #[test]
