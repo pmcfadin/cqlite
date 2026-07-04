@@ -38,6 +38,10 @@
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+// Used only by `MANAGER_SCAN_FULL_SORTS` / `sort_by_token_order`, both of which
+// have call sites solely under `write-support`; gate the import to match so the
+// minimal build (no `write-support`) has no unused import under `-D warnings`.
+#[cfg(feature = "write-support")]
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use crate::types::RowKey;
@@ -45,6 +49,12 @@ use crate::util::cassandra_murmur3::cassandra_murmur3_token;
 
 /// Number of materialized full-vector token-order sorts performed by
 /// [`sort_by_token_order`] since process start.
+///
+/// Only the `write-support` cross-generation merge paths materialize a merged
+/// `Vec` and call [`sort_by_token_order`], so this counter — and the function —
+/// are compiled only under that feature; the minimal build carries neither
+/// (they would otherwise be dead code and fail `-D warnings`).
+#[cfg(feature = "write-support")]
 pub(crate) static MANAGER_SCAN_FULL_SORTS: AtomicU64 = AtomicU64::new(0);
 
 // Per-thread key-comparison counter for `kway_merge_token_order`, incremented by
@@ -201,6 +211,12 @@ pub(crate) fn kway_merge_token_order<T>(
 /// raw-byte `sort_by`, so a stray raw-byte ordering can never leak out, while the
 /// sort is effectively a no-op when the input is already ordered. Computes each
 /// key's token once to avoid recomputation inside the comparator.
+///
+/// Compiled only under `write-support`: its sole call sites are the
+/// cross-generation merge paths, which are themselves `#[cfg(feature =
+/// "write-support")]`. Without the gate this is dead code in the minimal build
+/// and fails `-D warnings`.
+#[cfg(feature = "write-support")]
 pub(crate) fn sort_by_token_order<E>(
     results: &mut Vec<E>,
     limit: Option<usize>,
