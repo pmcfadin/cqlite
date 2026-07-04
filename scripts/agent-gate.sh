@@ -1075,7 +1075,10 @@ run_parity_report() {
 # `agent-gate.sh --only parity-report` invocations to assert the SKIP/PASS/FAIL
 # outcomes; that nesting is BOUNDED (--only parity-report never selects
 # tooling-tests, so it cannot recurse) and the cassandra-parity build is already
-# warm from the earlier parity-report component, so it stays cheap. SKIP-aware:
+# warm from the earlier parity-report component, so it stays cheap. Also runs
+# scripts/tests/test_bootstrap_agent_machine.sh (#1921), which proves the
+# new-machine bootstrap's pure-check paths never install anything (it runs with
+# --skip-smoke, so it never invokes the real gate — no recursion). SKIP-aware:
 # the summary test's truncation case relies on a python3 reader, so with no
 # python3 we record SKIP (loud, never silent PASS); any test failure -> hard FAIL.
 run_tooling_tests() {
@@ -1122,10 +1125,11 @@ run_tooling_tests() {
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh"
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh"
   if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_smoke_target_dir.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_gate_concurrency_cap.sh" >>"$log" 2>&1; then
+     bash "$REPO_ROOT/scripts/tests/test_gate_concurrency_cap.sh" >>"$log" 2>&1 &&
+     bash "$REPO_ROOT/scripts/tests/test_bootstrap_agent_machine.sh" >>"$log" 2>&1; then
     status=PASS
   else
     status=FAIL
