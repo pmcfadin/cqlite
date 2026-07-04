@@ -145,6 +145,87 @@ async fn retry_does_not_retry_non_transient_io() {
     );
 }
 
+/// Finding 1 (issue #1588): the block-data / uncompressed-piece read paths add
+/// human-readable context to their underlying `io::Error` via
+/// [`io_error_with_context`]. That wrapper MUST preserve the source
+/// [`std::io::ErrorKind`] so a REAL transient fault (EINTR/EAGAIN/timeout)
+/// surfacing THROUGH the wrap is still classified transient by
+/// [`is_transient_io`] and retried once. The old `io::Error::other(..)` wrap
+/// relabeled the kind to `Other`, silently defeating the retry. Corruption /
+/// format / `UnexpectedEof` kinds must still fail fast (never transient).
+#[test]
+fn wrapped_read_error_preserves_kind_for_transient_classifier() {
+    for kind in [
+        std::io::ErrorKind::Interrupted,
+        std::io::ErrorKind::WouldBlock,
+        std::io::ErrorKind::TimedOut,
+    ] {
+        let src = std::io::Error::new(kind, "transient mid-read");
+        let wrapped = io_error_with_context("Failed to read uncompressed data block (64 bytes)", src);
+        // Kind survives the context wrap...
+        match &wrapped {
+            Error::Io(io) => assert_eq!(io.kind(), kind, "kind must be preserved through wrap"),
+            other => panic!("expected Error::Io, got {other}"),
+        }
+        // ...and is therefore still classified transient and retried once.
+        assert!(
+            is_transient_io(&wrapped),
+            "wrapped transient read error must stay transient: {wrapped}"
+        );
+    }
+
+    // The corruption-fails-fast guarantee is NOT weakened: a wrapped
+    // non-transient kind stays non-transient.
+    for kind in [
+        std::io::ErrorKind::UnexpectedEof,
+        std::io::ErrorKind::InvalidData,
+        std::io::ErrorKind::NotFound,
+    ] {
+        let wrapped = io_error_with_context("Failed to read block data (64)", std::io::Error::new(kind, "x"));
+        assert!(
+            !is_transient_io(&wrapped),
+            "non-transient kind {kind:?} must never be reclassified transient"
+        );
+    }
+}
+
+/// End-to-end through [`retry_transient_once`]: an attempt whose FIRST failure is
+/// a transient fault produced by the read-path wrapper ([`io_error_with_context`],
+/// as the block-data / uncompressed-piece reads now build it) is retried EXACTLY
+/// once. This is the behaviour the old `io::Error::other(..)` wrap silently broke
+/// (issue #1588 finding 1): the wrapped error would have been classified `Other`
+/// and never retried.
+#[tokio::test]
+async fn wrapped_transient_read_error_is_retried_once() {
+    let (_dir, file) = blocksource_from(&[0u8; 16]).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+
+    let c = calls.clone();
+    let attempt = move || {
+        let c = c.clone();
+        async move {
+            let n = c.fetch_add(1, Ordering::Relaxed);
+            if n == 0 {
+                // Exactly what a read path now yields for an EINTR mid-read.
+                Err(io_error_with_context(
+                    "Failed to read uncompressed data block (64 bytes)",
+                    std::io::Error::new(std::io::ErrorKind::Interrupted, "EINTR"),
+                ))
+            } else {
+                Ok::<u32, Error>(7)
+            }
+        }
+    };
+
+    let out = retry_transient_once(&file, attempt).await.unwrap();
+    assert_eq!(out, 7);
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        2,
+        "a context-wrapped transient read fault is retried exactly once"
+    );
+}
+
 #[test]
 fn is_transient_io_classifies_only_eintr_class() {
     assert!(is_transient_io(&transient_io()));

@@ -588,44 +588,45 @@ impl StreamingDecompressor {
     ) -> Result<()> {
         #[cfg(feature = "snappy")]
         {
-            use snap::read::FrameDecoder;
             use std::io::BufReader;
 
-            let buf_reader = BufReader::new(reader);
-            let mut decoder = FrameDecoder::new(buf_reader);
-            let mut chunk_buffer = vec![0u8; self.config.chunk_size];
+            // Cassandra 5.0's `SnappyCompressor` emits a RAW Snappy block (no
+            // stream framing, no length prefix) — the SAME single authoritative
+            // format that `compress` and the chunk `decompress` path use
+            // (no-heuristics, issue #1588; this closes #1862). The previous
+            // `snap::read::FrameDecoder` decoded the DIFFERENT *framed* Snappy
+            // format, so the public streaming decompressor could not read bytes
+            // produced by `CompressionAlgorithm::Snappy`. Raw Snappy is not
+            // self-delimiting and carries no length prefix, so the whole
+            // compressed block must be read before it can be decoded — decode it
+            // through the same `snappy_decompress_raw` helper as the chunk path.
+            let mut buf_reader = BufReader::new(reader);
+            let mut compressed = Vec::new();
+            buf_reader.read_to_end(&mut compressed).map_err(|e| {
+                Error::storage(format!("Failed to read Snappy compressed data: {}", e))
+            })?;
+            self.bytes_processed += compressed.len();
 
-            loop {
-                let bytes_read = decoder.read(&mut chunk_buffer).map_err(|e| {
-                    Error::storage(format!("Snappy streaming decompression failed: {}", e))
-                })?;
+            let decompressed = snappy_decompress_raw(&compressed, &mut 0)?;
 
-                if bytes_read == 0 {
-                    break; // EOF
-                }
-
-                // Check memory limits
-                if output.len() + bytes_read > memory_limit {
-                    return Err(Error::storage(format!(
-                        "Memory limit exceeded during Snappy decompression: {} bytes (limit: {} bytes)",
-                        output.len() + bytes_read,
-                        memory_limit
-                    )));
-                }
-
-                output.extend_from_slice(&chunk_buffer[..bytes_read]);
-                self.bytes_processed += bytes_read;
-
-                // Yield control for large operations
-                if self.bytes_processed % (4 * 1024 * 1024) == 0 {
-                    tokio::task::yield_now().await;
-                }
+            if output.len() + decompressed.len() > memory_limit {
+                return Err(Error::storage(format!(
+                    "Memory limit exceeded during Snappy decompression: {} bytes (limit: {} bytes)",
+                    output.len() + decompressed.len(),
+                    memory_limit
+                )));
             }
+
+            output.extend_from_slice(&decompressed);
+            // Yield once after a potentially large decode so we do not starve the
+            // runtime (the read+decode above is a single bounded operation).
+            tokio::task::yield_now().await;
 
             Ok(())
         }
         #[cfg(not(feature = "snappy"))]
         {
+            let _ = (reader, output, memory_limit);
             Err(Error::storage(
                 "Snappy compression not available".to_string(),
             ))
@@ -1024,6 +1025,34 @@ mod tests {
 
         let decompressed = compression.decompress(&compressed).unwrap();
         assert_eq!(decompressed, data);
+    }
+
+    /// Finding 2 (issue #1588; closes #1862): the public streaming Snappy
+    /// decompressor must decode the SAME single authoritative raw Snappy format
+    /// that `compress` (and the chunk `decompress` path) use. Previously it used
+    /// `snap::read::FrameDecoder` (the DIFFERENT framed format), so bytes produced
+    /// by `CompressionAlgorithm::Snappy` were unreadable through streaming.
+    /// Round-trip: compress raw -> streaming-decompress -> byte-identical.
+    #[cfg(feature = "snappy")]
+    #[tokio::test]
+    async fn test_snappy_streaming_roundtrip_raw() {
+        use std::io::Cursor;
+        let compression = Compression::new(CompressionAlgorithm::Snappy).unwrap();
+        let data =
+            b"streaming raw snappy round-trip payload for issue 1862. ".repeat(64);
+
+        let compressed = compression.compress(&data).unwrap();
+
+        let mut decompressor =
+            compression.create_streaming_decompressor(ChunkedDecompressionConfig::default());
+        let out = decompressor
+            .decompress_streaming(Cursor::new(compressed), Some(data.len()))
+            .await
+            .expect("streaming decode of raw Snappy must succeed");
+        assert_eq!(
+            out, data,
+            "streaming Snappy must decode raw compress() output byte-for-byte"
+        );
     }
 
     /// A legitimate RAW Snappy chunk decodes to the known-good bytes in EXACTLY
