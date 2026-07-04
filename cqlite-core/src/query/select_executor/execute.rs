@@ -94,7 +94,14 @@ impl SelectExecutor {
 
         // Handle queries without FROM clause (like SELECT 1)
         if plan.statement.from_clause.is_none() {
-            return self.execute_constant_query(&plan.statement, &context);
+            let result = self.execute_constant_query(&plan.statement, &context)?;
+            // Issue #1582 (roborev): constant queries return BEFORE the final-result
+            // budget check below, so apply the SAME byte + row-count budget to their
+            // materialized rows here — otherwise a large literal result set (many /
+            // large constant expressions) could exceed `max_result_bytes` without
+            // raising `ResultTooLarge`.
+            enforce_materialized_rows(&result.rows, self.max_result_bytes, self.max_result_rows)?;
+            return Ok(result);
         }
 
         // Execute the plan step by step

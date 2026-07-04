@@ -350,6 +350,52 @@ async fn max_result_bytes_knob_is_load_bearing() {
     }
 }
 
+/// A constant `SELECT` (no FROM clause, e.g. `SELECT '<big literal>'`) routes
+/// through `execute_constant_query`, which returned BEFORE the final-result
+/// budget check. This regression (roborev, #1582) proves the SAME byte budget is
+/// now applied to a constant result: a large literal trips `ResultTooLarge`,
+/// while a small literal under a generous budget still completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn over_budget_constant_query_trips_byte_guard() {
+    let temp = TempDir::new().unwrap();
+    // Any valid DB — a constant query touches no table, so the skinny fixture's
+    // schema/data are irrelevant; we just need an open query stack whose budget
+    // is wired from config.
+    let (data_dir, schema_path) = prepare_skinny(temp.path()).await;
+
+    let tiny_budget: u64 = 512;
+    // A single text literal far larger than the budget (Text estimates to its
+    // byte length; see `estimate_value_size`).
+    let big_literal_len = (tiny_budget as usize) * 4;
+    let big_literal: String = "x".repeat(big_literal_len);
+
+    let db = open_db_with_budget(data_dir, schema_path, tiny_budget).await;
+
+    let sql = format!("SELECT '{big_literal}'");
+    let err = db
+        .execute(&sql)
+        .await
+        .expect_err("an over-budget constant SELECT must trip the byte guard");
+
+    match err {
+        Error::ResultTooLarge {
+            budget_bytes,
+            estimated_bytes,
+            ..
+        } => {
+            assert_eq!(
+                budget_bytes, tiny_budget as usize,
+                "error must report the configured budget"
+            );
+            assert!(
+                estimated_bytes > budget_bytes,
+                "estimated bytes ({estimated_bytes}) must exceed budget ({budget_bytes})"
+            );
+        }
+        other => panic!("expected Error::ResultTooLarge from a constant query, got {other:?}"),
+    }
+}
+
 /// The `max_result_rows` row-count safety valve must be load-bearing (wired from
 /// config), not a hardcoded 1,000,000 constant.
 ///
