@@ -110,8 +110,12 @@ function wrapAsync(fn) {
  *
  * @param {() => Promise<{rows: Array<Object>, done: boolean}>} refill
  *   Fetches the next batch from the native stream. May throw (already enhanced).
- * @param {() => (void|Promise<void>)} onReturn
- *   Invoked on early termination (`return()`/`break`) to close the native stream.
+ * @param {(yielded: number) => (void|Promise<void>)} onReturn
+ *   Invoked on early termination (`return()`/`break`) to close the native
+ *   stream. Receives the exact number of rows this iterator YIELDED to the
+ *   consumer, so the native span records rows-yielded rather than the whole
+ *   fetched batch (the un-yielded tail of the last batch is discarded here on
+ *   early break). See issue #1443.
  * @param {() => boolean} [isCancelled]
  *   Optional predicate checked before each `next()`; when it returns true the
  *   iterator discards any buffered rows and reports `done` immediately. This is
@@ -123,6 +127,10 @@ function batchedAsyncIterator(refill, onReturn, isCancelled) {
   let buffer = [];
   let bufIdx = 0;
   let exhausted = false;
+  // Exact count of rows YIELDED to the consumer (one per `next()` that returns
+  // a value). Passed to `onReturn` on early break so the native span records
+  // rows-yielded, not the whole fetched batch (issue #1443).
+  let yielded = 0;
   return {
     async next() {
       // Honour an external close(): discard buffered rows and end immediately.
@@ -134,6 +142,7 @@ function batchedAsyncIterator(refill, onReturn, isCancelled) {
       }
       // Drain the buffered batch first — no native call, no threadpool dispatch.
       if (bufIdx < buffer.length) {
+        yielded++;
         return { value: buffer[bufIdx++], done: false };
       }
       if (exhausted) {
@@ -150,17 +159,20 @@ function batchedAsyncIterator(refill, onReturn, isCancelled) {
         exhausted = true;
       }
       if (bufIdx < buffer.length) {
+        yielded++;
         return { value: buffer[bufIdx++], done: false };
       }
       return { value: undefined, done: true };
     },
     async return() {
       // Early `break`/`return()`: discard any un-yielded buffered rows and close
-      // the native stream (which terminates the producer and finalises the span).
+      // the native stream (which terminates the producer and finalises the
+      // span). Pass the exact rows yielded so the span is not over-counted by
+      // the discarded buffer tail (issue #1443).
       buffer = [];
       bufIdx = 0;
       exhausted = true;
-      await onReturn();
+      await onReturn(yielded);
       return { value: undefined, done: true };
     },
   };
@@ -218,9 +230,9 @@ function createAsyncIterator(nativeStream) {
             throw enhanceError(error);
           }
         },
-        () => {
+        (yielded) => {
           closed = true;
-          nativeStream.close();
+          nativeStream.close(yielded);
         },
         () => closed
       );
@@ -465,10 +477,10 @@ function createWrappedDatabase(NativeDatabase, wrapPreparedStatement) {
                 throw enhanceError(error);
               }
             },
-            () => {
+            (yielded) => {
               closed = true;
               nativeStreamPromise = null;
-              nativeStream?.close();
+              nativeStream?.close(yielded);
             },
             () => closed
           );

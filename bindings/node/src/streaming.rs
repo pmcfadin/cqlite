@@ -129,11 +129,20 @@ impl StreamingResult {
         })
     }
 
-    /// Record the final rows-yielded count onto the stream span. Reads the
-    /// authoritative count from the iterator (or 0 once cleaned up).
-    fn finalize_span(&self) {
-        let rows = self.rows_received().unwrap_or(0);
-        self.span.record("rows", rows as u64);
+    /// Record the final rows-YIELDED count onto the stream span (issue #1443).
+    ///
+    /// The span's `"rows"` metric is documented as "rows yielded to the
+    /// consumer". On EARLY TERMINATION the JS wrapper discards the un-yielded
+    /// tail of the last fetched batch, so `iter.rows_received()` (advanced by
+    /// the whole fetched batch in `collect_chunk`) over-counts. When the wrapper
+    /// can supply the exact number of rows it actually yielded, `yielded` is
+    /// `Some` and we record THAT. When it is `None` — natural exhaustion, or an
+    /// external/direct `close()` where the yielded count is unknown — we fall
+    /// back to `iter.rows_received()`, which is accurate on exhaustion (every
+    /// fetched row was yielded) and is the best available signal otherwise.
+    fn finalize_span(&self, yielded: Option<u64>) {
+        let rows = yielded.unwrap_or_else(|| self.rows_received().unwrap_or(0) as u64);
+        self.span.record("rows", rows);
     }
 }
 
@@ -353,12 +362,19 @@ impl StreamingResult {
     ///
     /// Safe to call multiple times - subsequent calls are no-ops.
     /// This method is synchronous and does not need to be awaited.
+    ///
+    /// `yielded` (issue #1443) is the exact number of rows the JS wrapper
+    /// actually yielded to the consumer, passed on an early `break`/`return()`
+    /// so the span records rows YIELDED rather than the whole fetched batch (the
+    /// wrapper discards the un-yielded tail). It is omitted (`None`) for an
+    /// external/direct `close()`, where the yielded count is unknown and
+    /// `rows_received()` is used instead.
     #[napi]
-    pub fn close(&self) -> napi::Result<()> {
+    pub fn close(&self, yielded: Option<u32>) -> napi::Result<()> {
         // Finalise the stream span with the rows yielded so far before the
         // iterator is dropped (issue #1040). Reads the count first so an early
         // `break` from a `for await` loop still records progress.
-        self.finalize_span();
+        self.finalize_span(yielded.map(u64::from));
 
         // Use unwrap_or_else to handle poisoned mutex gracefully
         let mut guard = self.inner.lock().unwrap_or_else(|poisoned| {
