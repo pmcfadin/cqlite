@@ -678,14 +678,10 @@ fn extract_clustering_values(cells: &HashMap<Arc<str>, Value>, schema: &TableSch
         .collect()
 }
 
-/// Issue #1741: current wall-clock as epoch seconds, for read-time TTL expiry.
-/// Falls back to `0` (nothing appears expired) if the clock is before the epoch.
-fn now_epoch_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
+// Issue #1741 / #1853: `now_epoch_secs()` (the read-time TTL "now" clock, with
+// its `CQLITE_TTL_NOW_OVERRIDE_SECS` test seam) lives in `now_clock` — split
+// out to keep this module under the file-size ratchet (epic #1116).
+use now_clock::now_epoch_secs;
 
 // Unfiltered marker constants (from Cassandra UnfilteredSerializer.java lines 102-109)
 // Issue #229: These markers were being misinterpreted as row data, causing parsing failures
@@ -746,6 +742,7 @@ mod cell_value;
 mod compaction;
 mod complex_column;
 mod frozen;
+mod now_clock;
 mod partition_shadow;
 mod raw_type_value;
 mod raw_value;
