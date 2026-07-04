@@ -68,8 +68,10 @@ impl Memtable {
     /// the decorated key from the partition key using the table schema.
     #[tracing::instrument(name = "memtable.insert", skip(self, key, mutation))]
     pub fn insert_with_key(&mut self, key: DecoratedKey, mutation: Mutation) -> Result<()> {
-        // Calculate mutation size (conservative estimate)
-        let mutation_size = Self::estimate_mutation_size(&mutation);
+        // Calculate mutation size (conservative estimate). This is the SAME
+        // computation the admission gate consults via `estimate_mutation_size`,
+        // so accounting and admission can never drift (issue #1625).
+        let mutation_size = Self::mutation_size(&mutation);
 
         // Get or create mutation list for this partition
         let mutations = self.data.entry(key).or_default();
@@ -132,6 +134,25 @@ impl Memtable {
     /// Maximum nesting depth for collection size estimation (prevents stack overflow)
     const MAX_NESTING_DEPTH: usize = 32;
 
+    /// Conservative per-element byte estimate used when the recursion depth cap
+    /// is reached (issue #1625). The cap prevents stack overflow on pathological
+    /// nesting, but the previous flat `1024`-per-value fallback systematically
+    /// UNDER-counted a wide collection sitting at the depth boundary (a
+    /// thousand-element list counted as ~1KB), letting an over-budget mutation
+    /// slip past admission. Scaling by the collection's element count keeps the
+    /// estimate non-recursive (still stack-safe) while refusing to under-count.
+    const DEEP_ELEMENT_ESTIMATE: usize = 1024;
+
+    /// Estimate the number of bytes a mutation would add to this memtable.
+    ///
+    /// Returns the SAME value that [`Memtable::insert_with_key`] adds to
+    /// `size_bytes`, so the write-engine admission gate (issue #1625) and the
+    /// running size accounting agree by construction — both funnel through the
+    /// private [`Memtable::mutation_size`] computation, so there is no drift.
+    pub(crate) fn estimate_mutation_size(&self, m: &Mutation) -> usize {
+        Self::mutation_size(m)
+    }
+
     /// Estimate the size of a mutation in bytes
     ///
     /// Conservative estimate includes:
@@ -139,7 +160,7 @@ impl Memtable {
     /// - Partition key size (key bytes)
     /// - Clustering key size (if present)
     /// - Cell operation sizes (column names + values)
-    fn estimate_mutation_size(mutation: &Mutation) -> usize {
+    fn mutation_size(mutation: &Mutation) -> usize {
         let mut size = 48; // Base struct overhead
 
         // Partition key size
@@ -176,10 +197,14 @@ impl Memtable {
     fn estimate_value_size_with_depth(value: &crate::types::Value, depth: usize) -> usize {
         use crate::types::Value;
 
-        // Prevent excessive recursion for deeply nested structures
+        // Prevent excessive recursion for deeply nested structures (stack-safety
+        // cap — MUST stay). Instead of a flat, systematically under-counting
+        // `1024` fallback (issue #1625), estimate the value's size WITHOUT
+        // recursing further: exact byte length for cheap-to-measure scalars, and
+        // an element-count-scaled conservative floor for collections so a wide
+        // collection parked at the depth boundary is not counted as ~1KB.
         if depth >= Self::MAX_NESTING_DEPTH {
-            // Return conservative estimate: assume 1KB for deeply nested value
-            return 1024;
+            return Self::estimate_value_size_at_cap(value);
         }
 
         match value {
@@ -247,6 +272,44 @@ impl Memtable {
         }
     }
 
+    /// Non-recursive size estimate used once the recursion depth cap is hit.
+    ///
+    /// Stack-safe (never recurses): scalars report their exact byte length, and
+    /// collections report a conservative floor scaled by their DIRECT element
+    /// count (`DEEP_ELEMENT_ESTIMATE` per element). This replaces the old flat
+    /// `1024` fallback so a wide collection sitting exactly at the depth cap is
+    /// no longer under-counted as ~1KB (issue #1625) — the value it returns is
+    /// large enough to trip the memtable hard-limit admission gate.
+    fn estimate_value_size_at_cap(value: &crate::types::Value) -> usize {
+        use crate::types::Value;
+
+        let per = Self::DEEP_ELEMENT_ESTIMATE;
+        match value {
+            Value::Null => 0,
+            Value::Boolean(_) | Value::TinyInt(_) => 1,
+            Value::SmallInt(_) => 2,
+            Value::Integer(_) | Value::Float32(_) | Value::Date(_) => 4,
+            Value::BigInt(_)
+            | Value::Counter(_)
+            | Value::Timestamp(_)
+            | Value::Time(_)
+            | Value::Float(_) => 8,
+            Value::Uuid(_) | Value::Duration { .. } => 16,
+            Value::Text(s) => s.len(),
+            Value::Blob(bytes) | Value::Varint(bytes) | Value::Inet(bytes) => bytes.len(),
+            Value::Decimal { scale: _, unscaled } => 4 + unscaled.len(),
+            Value::Json(json) => json.to_string().len(),
+            Value::Tombstone(_) => 24,
+            // Collections: conservative, element-count-scaled, NON-recursive.
+            Value::List(items) | Value::Set(items) | Value::Tuple(items) => {
+                16 + items.len().saturating_mul(per)
+            }
+            Value::Map(entries) => 16 + entries.len().saturating_mul(2 * per),
+            Value::Udt(udt) => 16 + udt.fields.len().saturating_mul(per),
+            Value::Frozen(_) => 8 + per,
+        }
+    }
+
     /// Estimate the size of a cell operation
     fn estimate_operation_size(
         op: &crate::storage::write_engine::mutation::CellOperation,
@@ -282,6 +345,14 @@ impl Memtable {
             }
             CellOperation::ComplexDeletion { column, .. } => column.len() + 16,
         }
+    }
+
+    /// Test-only: force the tracked approximate size, used to exercise the
+    /// admission gate's `saturating_add` overflow guard near `usize::MAX`
+    /// (issue #1625) — a size unreachable through real inserts.
+    #[cfg(test)]
+    pub(crate) fn set_size_bytes_for_test(&mut self, size: usize) {
+        self.size_bytes = size;
     }
 
     /// Get current timestamp in microseconds since Unix epoch
@@ -746,6 +817,46 @@ mod tests {
 
         // Size with depth limit should be >= 1024 due to conservative estimate
         assert!(size_over >= 1024);
+    }
+
+    #[test]
+    fn test_estimate_mutation_size_matches_insert_accounting() {
+        // Issue #1625: the admission gate and the running size accounting must
+        // agree by construction — `estimate_mutation_size(&m)` must equal the
+        // delta `size_bytes()` gains from inserting the same mutation.
+        let mut memtable = Memtable::new();
+        let (key, mutation) = create_test_mutation(7, "some data here", Some(42));
+
+        let before = memtable.size_bytes();
+        let predicted = memtable.estimate_mutation_size(&mutation);
+        memtable.insert_with_key(key, mutation).unwrap();
+        let actual_delta = memtable.size_bytes() - before;
+
+        assert_eq!(
+            predicted, actual_delta,
+            "estimate_mutation_size must equal the size delta insert applies"
+        );
+        assert!(predicted > 0);
+    }
+
+    #[test]
+    fn test_deep_wide_collection_not_undercounted() {
+        // Issue #1625: a WIDE collection parked exactly at the recursion depth
+        // cap must NOT be counted as the old flat ~1KB. Build 32 single-element
+        // wrapper lists (depths 0..31) with a 500-element list at the cap
+        // (depth 32); the cap estimate should dwarf 1KB.
+        let wide = Value::List((0..500).map(Value::Integer).collect());
+        let mut nested = wide;
+        for _ in 0..32 {
+            nested = Value::List(vec![nested]);
+        }
+
+        let size = Memtable::estimate_value_size(&nested);
+        // 500 elements * DEEP_ELEMENT_ESTIMATE floor => far larger than 1KB.
+        assert!(
+            size > 100 * 1024,
+            "wide collection at depth cap must not be under-counted (got {size})"
+        );
     }
 
     #[test]
