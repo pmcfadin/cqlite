@@ -542,6 +542,28 @@ scripts/agent-gate.sh --list
 
 Exit codes: `0` = PASS, `1` = FAIL, `3` = PARTIAL (—only mode).
 
+## Machine-wide concurrency cap (issue #1825)
+
+[Section titled “Machine-wide concurrency cap (issue #1825)”](#machine-wide-concurrency-cap-issue-1825)
+
+Running many sessions/worktrees at once used to let \~15 full gates hit the CPU simultaneously (load 30–60), which SIGKILLed gates mid-`core-tests`. The full gate now takes a **cross-process bounded semaphore**: at most **N** full `agent-gate.sh` runs execute machine-wide at once. Excess invocations **queue** (block) for a slot and print one line — `waiting for gate slot (N in use)…` — then proceed when a slot frees. **They never fail from the cap**, and a non-interactive caller blocks cleanly rather than spin-failing.
+
+* **`--lite` and `--only` runs are EXEMPT** — never queued. `--lite` is cheap by design; `--only` is a PARTIAL run (and is used by nested tooling self-tests, so capping it could self-deadlock the queue).
+* **N** defaults to `max(2, floor((ncpu-2)/4))` — a conservative fraction of cores that still lets a couple of gates run on a small box. Override with `CQLITE_GATE_MAX_CONCURRENCY`.
+* **SIGKILL-safe stale-slot reaping:** each slot is an `fcntl.flock` held by a small background daemon (`scripts/lib/gate_slot_daemon.py`) that the gate starts and monitors. Because the daemon opens the lock fd *after* it is forked, the gate’s heavy children (`cargo`/`nextest`) never inherit the lock — a SIGKILLed gate frees its slot within one poll interval even while orphaned children run on. A crashed gate can never permanently leak a slot.
+* Works **across worktrees** (shared slot dir, not per-checkout) and composes with the per-gate component parallelism (`AGENT_GATE_JOBS`) and `sccache`: the cap bounds the *worst case* (several sessions hitting their one full gate at once), the others cut average load and per-compile time.
+
+**Environment knobs** (all optional):
+
+```bash
+CQLITE_GATE_MAX_CONCURRENCY=4 bash scripts/agent-gate.sh   # raise N on a big box
+CQLITE_GATE_SLOTS_DIR=/path bash scripts/agent-gate.sh     # slot dir (default $TMPDIR/cqlite-gate-slots)
+CQLITE_GATE_POLL_SECS=1 bash scripts/agent-gate.sh         # queue/liveness poll (default 2s)
+CQLITE_GATE_DISABLE_CAP=1 bash scripts/agent-gate.sh       # force-disable the cap
+```
+
+The cap fails **open** (disabled, with a loud stderr note) when `python3` or the daemon is unavailable — the gate must never be un-runnable because of the cap. A hermetic self-test proving queueing at N, `--lite` exemption, and SIGKILL slot release lives at `scripts/tests/test_gate_concurrency_cap.sh` and runs inside the `tooling-tests` component.
+
 ## Capturing the gate robustly (issue #1175)
 
 [Section titled “Capturing the gate robustly (issue #1175)”](#capturing-the-gate-robustly-issue-1175)
