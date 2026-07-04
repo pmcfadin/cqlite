@@ -49,14 +49,6 @@ pub(crate) static MANAGER_SCAN_KEY_COMPARISONS: AtomicU64 = AtomicU64::new(0);
 /// [`sort_by_token_order`] since process start.
 pub(crate) static MANAGER_SCAN_FULL_SORTS: AtomicU64 = AtomicU64::new(0);
 
-/// A candidate head in the k-way merge: the current unemitted row of one reader
-/// stream, tagged with its precomputed token so the token is hashed once per row
-/// (not once per comparison).
-///
-/// Ordering is ascending `(token, key_bytes, reader_idx)`. `reader_idx` breaks
-/// ties so equal-`(token, key)` rows from different readers emit in reader order —
-/// reproducing the stable concat order the old `sort_by` gave. Every `cmp`
-/// increments [`MANAGER_SCAN_KEY_COMPARISONS`].
 /// Heap element pairing an ordering key ([`Candidate`]) with its opaque payload
 /// `T`. Ordering delegates entirely to the [`Candidate`] so no `T: Ord` bound is
 /// needed — the row value/metadata never participates in the merge order.
@@ -82,6 +74,12 @@ impl<T> Ord for HeapItem<T> {
     }
 }
 
+/// The ordering key for one reader stream's current head: its precomputed token
+/// (hashed once per row, not per comparison), partition key, and reader index.
+/// Ordered ascending `(token, key_bytes, reader_idx)`; `reader_idx` breaks ties so
+/// equal-`(token, key)` rows from different readers emit in reader order,
+/// reproducing the stable concat order the old raw-byte `sort_by` gave. Every
+/// [`Candidate::cmp`] increments [`MANAGER_SCAN_KEY_COMPARISONS`].
 struct Candidate {
     token: i64,
     key: RowKey,
