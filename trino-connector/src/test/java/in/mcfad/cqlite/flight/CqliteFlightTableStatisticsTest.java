@@ -19,12 +19,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * row; a grouped aggregate's group count is unknown. These tests pin that the
  * optimizer-facing stats reflect the output, not the underlying SSTable rows.
  *
- * <p>A NON-aggregated handle now reports {@link TableStatistics#empty()} (unknown):
- * the {@code table_stats} row total is summed across ALL keyspace replicas (≈ RF ×
- * logical cardinality) and is not de-duplicated to one copy of the token space, so
- * we deliberately do not expose it as an optimizer row count (issue #944). Both
- * branches of {@code getTableStatistics} now return before touching Sidecar/Flight,
- * so a {@code new CqliteFlightMetadata(null, null, null)} suffices to exercise them.
+ * <p>A NON-aggregated handle now reports a LOGICAL (de-replicated) row count
+ * {@code live_rows / R} WHEN it can be grounded, and FAILS CLOSED to
+ * {@link TableStatistics#empty()} when it cannot (issue #1336). The end-to-end
+ * grounded derivation (RF=3 → 200, memoization, per-condition fail-closed) is pinned
+ * in {@link CqliteFlightLogicalRowCountTest}; here we pin (a) the aggregated branches
+ * (which still return before touching Sidecar/Flight) and (b) that the non-aggregated
+ * branch fails closed to {@code empty()} when the derivation cannot be grounded
+ * (here: no Sidecar available), never throwing into query planning.
  */
 class CqliteFlightTableStatisticsTest {
 
@@ -93,19 +95,21 @@ class CqliteFlightTableStatisticsTest {
     }
 
     @Test
-    void nonAggregatedHandleReportsUnknownRowCount() {
-        // The table_stats row total is replica-summed (≈ RF × logical cardinality)
-        // and not de-duplicated to one copy of the token space, so we do NOT expose
-        // it as an optimizer row count (issue #944) — report unknown so Trino
-        // estimates instead of trusting a knowably-wrong physical-replica total.
+    void nonAggregatedHandleFailsClosedWhenDerivationUngrounded() {
+        // Non-aggregated: the connector now reports a LOGICAL row count live_rows / R
+        // when it can ground R from tokenRangeReplicas AND get complete table_stats
+        // (pinned end to end in CqliteFlightLogicalRowCountTest). When it CANNOT be
+        // grounded — here there is no Sidecar/Flight at all — it fails closed to
+        // empty() (today's safe behavior) and never throws into query planning
+        // (issue #1336).
         CqliteFlightTableHandle plain = new CqliteFlightTableHandle("ks", "t", "ddl");
         assertFalse(plain.isAggregated());
 
         TableStatistics stats = metadata.getTableStatistics(null, plain);
         assertEquals(TableStatistics.empty(), stats,
-                "non-aggregated row count is replica-summed → empty (not exposed)");
+                "an ungrounded logical-row-count derivation fails closed to empty");
         assertTrue(stats.getRowCount().isUnknown(),
-                "non-aggregated row count must be unknown (replica-summed, not logical)");
+                "row count must be unknown when the derivation cannot be grounded");
     }
 
     @Test
