@@ -110,8 +110,35 @@ const MATCH_GRP: i32 = 7;
 const NON_MATCH_GRP: i32 = 0;
 const MATCH_COUNT: usize = 10;
 
+/// Wide fixture with a UUID `id` PK (roborev legacy-path finding). A UUID `WHERE
+/// id = <uuid>` point lookup satisfies `is_simple_id_lookup` (≤ 8 tokens,
+/// `WHERE id =`) and is routed through the LEGACY `QueryExecutor`: because the
+/// value is a `Uuid` (not an `Integer`), `condition_to_row_key` falls through to
+/// `value_to_row_key`, which produces the exact 16-byte partition key the real
+/// SSTable stores — so the legacy `storage.get` actually returns the wide row
+/// (unlike an int `id`, which the legacy path maps to a synthetic `user_key_N`
+/// that never matches a real SSTable partition key).
+const WIDE_UUID_TBL: &str = "wide_uuid_items";
+/// The partition looked up by the legacy-path tests (`0x11` repeated 16×). Its
+/// canonical UUID literal (below) is what the CQL `WHERE id = ...` clause carries.
+const LOOKUP_UUID: [u8; 16] = [0x11u8; 16];
+const LOOKUP_UUID_LITERAL: &str = "11111111-1111-1111-1111-111111111111";
+
 fn wide_schema_cql() -> String {
     format!("CREATE TABLE {KS}.{WIDE_TBL} (\n  id int PRIMARY KEY,\n  payload blob\n);\n")
+}
+
+fn wide_uuid_schema_cql() -> String {
+    format!("CREATE TABLE {KS}.{WIDE_UUID_TBL} (\n  id uuid PRIMARY KEY,\n  payload blob\n);\n")
+}
+
+fn wide_uuid_row(id_bytes: [u8; 16], ts: i64) -> Mutation {
+    let pk = PartitionKey::single("id", Value::Uuid(id_bytes));
+    let ops = vec![CellOperation::Write {
+        column: "payload".to_string(),
+        value: Value::Blob(vec![0xABu8; WIDE_PAYLOAD_BYTES]),
+    }];
+    Mutation::new(TableId::new(KS, WIDE_UUID_TBL), pk, None, ops, ts, None)
 }
 
 fn skinny_schema_cql() -> String {
@@ -239,6 +266,33 @@ async fn prepare_wide(root: &std::path::Path) -> (std::path::PathBuf, std::path:
     })
     .await
     .expect("build wide fixture");
+    (data_dir, schema_path)
+}
+
+/// Build a wide UUID-PK fixture: a handful of distinct-UUID single-row
+/// partitions, one keyed by [`LOOKUP_UUID`]. Each row's ~10 KiB payload dwarfs
+/// [`SUB_ROW_BUDGET_BYTES`].
+async fn prepare_wide_uuid(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let data_dir = root.join("wide_uuid_data");
+    let wal_dir = root.join("wide_uuid_wal");
+    let schema_path = root.join("wide_uuid_schema.cql");
+    std::fs::write(&schema_path, wide_uuid_schema_cql()).expect("write wide uuid schema");
+    let (d, w) = (data_dir.clone(), wal_dir.clone());
+    tokio::task::spawn_blocking(move || {
+        let rows: Vec<Mutation> = (0..WIDE_ROW_COUNT)
+            .map(|i| {
+                let uuid = if i == 0 {
+                    LOOKUP_UUID
+                } else {
+                    [(0x20u8 + i as u8); 16]
+                };
+                wide_uuid_row(uuid, 100)
+            })
+            .collect();
+        build_fixture(&d, &w, &wide_uuid_schema_cql(), rows);
+    })
+    .await
+    .expect("build wide uuid fixture");
     (data_dir, schema_path)
 }
 
@@ -554,6 +608,124 @@ async fn limit_offset_skips_wide_rows_uncharged_against_budget() {
         WIDE_ROWS_UNDER_BUDGET,
         "must return exactly the LIMIT rows after skipping the OFFSET rows"
     );
+}
+
+/// roborev FINDING (Medium): a WIDE-partition POINT LOOKUP that satisfies
+/// `is_simple_id_lookup` (`WHERE id = <value>` with ≤ 8 whitespace tokens) is
+/// routed through the LEGACY `QueryExecutor`, which — pre-fix — did NOT enforce
+/// the D6 byte budget. So a single wide row materialized unbounded and bypassed
+/// the guard entirely. Post-fix the budget is enforced POST-materialization on the
+/// legacy `QueryResult` at BOTH legacy return points (plan-cache hit and
+/// fall-through), reusing the SAME estimator/enforcement as the optimizer path.
+///
+/// `SUB_ROW_BUDGET_BYTES` (512 B) is smaller than one ~10 KiB wide row, so the
+/// point lookup of that one row must trip `ResultTooLarge`. The SQL is exactly 8
+/// whitespace tokens and contains `WHERE id =`, so it trips `is_simple_id_lookup`
+/// and exercises the legacy path under test (NOT the optimizer path).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wide_point_lookup_via_legacy_path_trips_byte_budget() {
+    let temp = TempDir::new().unwrap();
+    let (data_dir, schema_path) = prepare_wide_uuid(temp.path()).await;
+
+    let db = open_db_with_budget(data_dir, schema_path, SUB_ROW_BUDGET_BYTES).await;
+
+    // 8 whitespace tokens + "WHERE id =" → is_simple_id_lookup == true → legacy path.
+    let sql = format!("SELECT * FROM {KS}.{WIDE_UUID_TBL} WHERE id = {LOOKUP_UUID_LITERAL}");
+    assert_eq!(
+        sql.split_whitespace().count(),
+        8,
+        "test SQL must be <= 8 tokens to trip is_simple_id_lookup"
+    );
+    assert!(sql.contains("WHERE id ="));
+
+    let err = db
+        .execute(&sql)
+        .await
+        .expect_err("wide point lookup must exceed the sub-row byte budget on the legacy path");
+    match err {
+        Error::ResultTooLarge {
+            budget_bytes,
+            estimated_bytes,
+            rows,
+        } => {
+            assert_eq!(
+                budget_bytes, SUB_ROW_BUDGET_BYTES as usize,
+                "error must report the configured budget"
+            );
+            assert!(
+                estimated_bytes > budget_bytes,
+                "estimated bytes ({estimated_bytes}) must exceed budget ({budget_bytes})"
+            );
+            assert!(
+                rows >= 1,
+                "the materialized wide row must be counted; got rows={rows}"
+            );
+        }
+        other => panic!("expected Error::ResultTooLarge on the legacy path, got {other:?}"),
+    }
+}
+
+/// Control for the legacy-path budget: the SAME point lookup under a GENEROUS
+/// budget succeeds and returns the row — the guard is not over-firing on normal
+/// point reads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wide_point_lookup_via_legacy_path_succeeds_under_generous_budget() {
+    let temp = TempDir::new().unwrap();
+    let (data_dir, schema_path) = prepare_wide_uuid(temp.path()).await;
+
+    let db = open_db_with_budget(data_dir, schema_path, DEFAULT_MAX_RESULT_BYTES).await;
+
+    let sql = format!("SELECT * FROM {KS}.{WIDE_UUID_TBL} WHERE id = {LOOKUP_UUID_LITERAL}");
+    let result = db
+        .execute(&sql)
+        .await
+        .expect("point lookup under a generous budget must succeed");
+    assert_eq!(
+        result.rows.len(),
+        1,
+        "point lookup on id=0 must return exactly the one wide row"
+    );
+}
+
+/// Knob test on the legacy path: lowering `max_result_bytes` flips the SAME
+/// point-lookup query from Ok → `ResultTooLarge` — the byte budget is load-bearing
+/// on the legacy point-lookup path too, not just the optimizer path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn max_result_bytes_knob_is_load_bearing_on_legacy_point_lookup() {
+    let temp = TempDir::new().unwrap();
+    let (data_dir, schema_path) = prepare_wide_uuid(temp.path()).await;
+
+    let sql = format!("SELECT * FROM {KS}.{WIDE_UUID_TBL} WHERE id = {LOOKUP_UUID_LITERAL}");
+
+    // Generous budget: PASSES.
+    {
+        let db = open_db_with_budget(
+            data_dir.clone(),
+            schema_path.clone(),
+            DEFAULT_MAX_RESULT_BYTES,
+        )
+        .await;
+        let result = db
+            .execute(&sql)
+            .await
+            .expect("point lookup passes under the default budget");
+        assert_eq!(result.rows.len(), 1);
+    }
+
+    // Sub-row budget: the SAME query now TRIPS.
+    {
+        let db = open_db_with_budget(data_dir, schema_path, SUB_ROW_BUDGET_BYTES).await;
+        let err = db
+            .execute(&sql)
+            .await
+            .expect_err("lowering max_result_bytes must make the point lookup trip");
+        match err {
+            Error::ResultTooLarge { budget_bytes, .. } => {
+                assert_eq!(budget_bytes, SUB_ROW_BUDGET_BYTES as usize);
+            }
+            other => panic!("expected Error::ResultTooLarge under sub-row budget, got {other:?}"),
+        }
+    }
 }
 
 /// FINDING A (roborev MEDIUM): the `max_result_rows` row-count safety valve must

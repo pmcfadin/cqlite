@@ -19,10 +19,11 @@ use super::{
     sort_rows_by_token, validate_token_predicates, PartitionLookupOutcome, SSTablePredicate,
 };
 use super::{
-    AccessPath, ColumnInfo, Error, ExecutionContext, ExecutionStep, FallbackReason,
-    OptimizedQueryPlan, ProjectionFlags, QueryResult, QueryRow, Result, SelectExecutor,
-    StorageEngine, TableId, TableSchema,
+    AccessPath, ColumnInfo, ExecutionContext, ExecutionStep, FallbackReason, OptimizedQueryPlan,
+    ProjectionFlags, QueryResult, QueryRow, Result, SelectExecutor, StorageEngine, TableId,
+    TableSchema,
 };
+use crate::query::result_budget::{enforce_result_budget, estimate_query_row_bytes};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -1046,40 +1047,6 @@ fn compute_scan_collect_bound(steps: &[ExecutionStep]) -> Option<ScanCollectBoun
     bound
 }
 
-/// Estimate the logical size, in bytes, of a materialized [`QueryRow`], reusing
-/// the shared row-cache estimator (issue #1582). Sums the per-value estimate
-/// over the row's column values.
-fn estimate_query_row_bytes(row: &QueryRow) -> usize {
-    row.values
-        .values()
-        .map(crate::memory::estimate_value_size)
-        .sum()
-}
-
-/// Enforce the byte-bounded result budget (primary) and the row-count safety
-/// valve (secondary) on a materialized result set (issue #1582 / D6).
-///
-/// `result_bytes` is the running logical-byte estimate of `results`. Returns
-/// [`Error::ResultTooLarge`] (with a remedy message: add `LIMIT` or stream) when
-/// the byte budget is exceeded, or the legacy query-execution error when the
-/// row-count valve trips.
-fn enforce_result_budget(
-    results: &[QueryRow],
-    result_bytes: usize,
-    byte_budget: usize,
-    max_rows: usize,
-) -> Result<()> {
-    if result_bytes > byte_budget {
-        return Err(Error::ResultTooLarge {
-            budget_bytes: byte_budget,
-            estimated_bytes: result_bytes,
-            rows: results.len(),
-        });
-    }
-    if results.len() > max_rows {
-        return Err(Error::query_execution(
-            "Result set too large, consider adding LIMIT".to_string(),
-        ));
-    }
-    Ok(())
-}
+// The byte-budget estimator + enforcement live in `crate::query::result_budget`
+// (shared verbatim with the legacy engine point-lookup path, issue #1582 / D6);
+// this module reuses them via the `use` alias below rather than forking the logic.

@@ -138,6 +138,21 @@ impl QueryEngine {
         })
     }
 
+    /// Enforce the byte-bounded result budget (issue #1582 / D6) on a result
+    /// materialized by the LEGACY [`QueryExecutor`] — the simple `WHERE id =
+    /// <value>` point-lookup path, which is routed to `self.executor` (not the
+    /// budgeted `SelectExecutor`) for key-handling consistency with INSERT. A
+    /// wide-partition point lookup would otherwise materialize unbounded and
+    /// bypass the guard. Reuses the SAME estimator + enforcement as the optimizer
+    /// path so the byte ceiling and the row-count safety valve behave identically.
+    fn enforce_legacy_result_budget(&self, result: &QueryResult) -> Result<()> {
+        super::result_budget::enforce_materialized_rows(
+            &result.rows,
+            self.config.query.max_result_bytes as usize,
+            self.config.query.max_result_rows as usize,
+        )
+    }
+
     /// Increment the total queries counter
     fn inc_total_queries(&self) {
         self.stats.write().total_queries += 1;
@@ -201,6 +216,13 @@ impl QueryEngine {
                 "query",
                 self.executor.execute(&cached_entry.plan).await,
             )?;
+            // D6 (issue #1582): the legacy point-lookup path bypasses the
+            // SelectExecutor's byte budget; enforce it here before returning.
+            self.enforce_legacy_result_budget(&result)
+                .inspect_err(|e| {
+                    self.inc_error_queries();
+                    crate::observability::record_error(e, "query");
+                })?;
             self.update_execution_stats(&mut result, start_time);
             return Ok(result);
         }
@@ -218,6 +240,13 @@ impl QueryEngine {
 
         let mut result =
             crate::observability::record_result("query", self.executor.execute(&plan).await)?;
+        // D6 (issue #1582): the legacy point-lookup path bypasses the
+        // SelectExecutor's byte budget; enforce it here before returning.
+        self.enforce_legacy_result_budget(&result)
+            .inspect_err(|e| {
+                self.inc_error_queries();
+                crate::observability::record_error(e, "query");
+            })?;
         self.update_execution_stats(&mut result, start_time);
         Ok(result)
     }
