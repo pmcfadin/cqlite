@@ -180,26 +180,17 @@ pub fn parse_cql_value(input: &[u8], type_id: CqlTypeId) -> IResult<&[u8], Value
             }
         }
         CqlTypeId::Blob => {
-            // For test compatibility, if input is exactly the expected size without length prefix, return it as-is
-            if input.len() == 16
-                && input
-                    == [
-                        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
-                        0x0C, 0x0D, 0x0E, 0x0F,
-                    ]
-            {
-                return Ok((&[], Value::Blob(input.to_vec())));
-            }
-            // Try 4-byte big-endian length prefix first (for test compatibility)
-            if input.len() >= 4 {
-                let length = u32::from_be_bytes([input[0], input[1], input[2], input[3]]) as usize;
-                if input.len() >= 4 + length {
-                    let blob_bytes = &input[4..4 + length];
-                    return Ok((&input[4 + length..], Value::Blob(blob_bytes.to_vec())));
-                }
-            }
-            // Fallback to VInt parsing
-            parse_blob(input)
+            // The caller has already extracted exactly the bytes belonging to
+            // this cell (length-framing is done at the cell level before
+            // parse_cql_value is invoked), so the entire `input` slice IS the
+            // blob value verbatim — mirroring the sibling Ascii/Varchar arm,
+            // parse_cql_value_raw and parse_blob_value. Framing is the caller's
+            // responsibility via this function's contract; the decoder never
+            // sniffs byte patterns to infer a length (no-heuristics mandate,
+            // issues #28 / #1630). The genuinely VInt-framed decode lives in
+            // parse_blob (used by parse_cql_value_with_schema and the write
+            // side's tagged serialization), not here.
+            Ok((&[], Value::Blob(input.to_vec())))
         }
         CqlTypeId::Uuid | CqlTypeId::Timeuuid => parse_uuid(input),
         CqlTypeId::Timestamp => parse_timestamp(input),
