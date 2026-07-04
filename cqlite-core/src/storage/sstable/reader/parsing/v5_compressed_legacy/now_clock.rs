@@ -3,6 +3,35 @@
 //! Extracted from `mod.rs` (campsite rule / file-size ratchet, epic #1116) so
 //! the parser module doesn't grow past the source-file threshold.
 
+/// Issue #1853 roborev round 3: ALL of the override-parsing/fallback logic as
+/// a PURE function — no env access, no globals. This makes the override path
+/// unit-testable via plain argument passing instead of process-global
+/// `std::env::set_var`/`remove_var`, which is unsound to share with any other
+/// test in the same `cqlite-core` lib-test binary that constructs a
+/// `V5CompressedLegacyParser` in parallel (e.g. `block_entries.rs`,
+/// `frozen.rs`) — a pure function makes that race unrepresentable rather than
+/// merely guarded (roborev findings 1435-Low-1 and 1436-Medium both addressed
+/// structurally, not procedurally).
+///
+/// `raw_override`, when `Some` and parseable as an `i64` (epoch seconds), is
+/// honored verbatim (bypassing the wall clock entirely) — mirrors
+/// `now_epoch_secs()`'s prior "valid override always wins" behavior. `None`
+/// or an unparseable string falls back to `wall_clock_secs`.
+fn now_from(raw_override: Option<&str>, wall_clock_secs: i64) -> i64 {
+    raw_override
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
+        .unwrap_or(wall_clock_secs)
+}
+
+/// Current wall clock as epoch seconds, saturating to `0` (nothing appears
+/// expired) if the clock is somehow before the Unix epoch.
+fn wall_clock_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Issue #1853: test-only seam to pin the read-time TTL "now" clock
 /// deterministically. When `CQLITE_TTL_NOW_OVERRIDE_SECS` holds a valid `i64`
 /// (epoch seconds), it overrides the wall clock for read-time TTL expiry so
@@ -23,10 +52,11 @@
 /// exists to fix. Reusing the `experimental` feature was also rejected — it
 /// would muddy that flag's no-heuristics meaning.
 ///
-/// Invariant: any test that sets this var must be `#[serial]` (see the `tests`
-/// module below) — it is a process-global mutation and races with any other
-/// test in the same binary that constructs a `V5CompressedLegacyParser`
-/// in parallel.
+/// Reading this env var is only ever done here, from the separate-process
+/// `issue_694_writetime_ttl_parity.rs` integration test binary (whose own
+/// `EnvVarGuard` mutation therefore races nothing in-process) — never from a
+/// `cqlite-core` unit test, which instead exercises the override/parse/
+/// fallback logic directly via the pure `now_from()` above (roborev round 3).
 #[cfg(debug_assertions)]
 const TTL_NOW_OVERRIDE_ENV: &str = "CQLITE_TTL_NOW_OVERRIDE_SECS";
 
@@ -36,98 +66,48 @@ const TTL_NOW_OVERRIDE_ENV: &str = "CQLITE_TTL_NOW_OVERRIDE_SECS";
 /// Issue #1853: in debug builds, honors the `CQLITE_TTL_NOW_OVERRIDE_SECS` test
 /// seam first; an invalid/absent override leaves the wall-clock behavior
 /// unchanged. In release builds this is a straight `SystemTime::now()` call —
-/// the override seam is compiled out entirely.
+/// the override seam (including the env read itself) is compiled out entirely.
 pub(super) fn now_epoch_secs() -> i64 {
     #[cfg(debug_assertions)]
-    if let Ok(raw) = std::env::var(TTL_NOW_OVERRIDE_ENV) {
-        if let Ok(override_secs) = raw.trim().parse::<i64>() {
-            return override_secs;
-        }
-    }
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    let raw_override = std::env::var(TTL_NOW_OVERRIDE_ENV).ok();
+    #[cfg(not(debug_assertions))]
+    let raw_override: Option<String> = None;
+
+    now_from(raw_override.as_deref(), wall_clock_now_secs())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
 
-    // #[serial]: these tests mutate the process-global CQLITE_TTL_NOW_OVERRIDE_SECS
-    // env var; without serialization cargo's intra-binary parallel test threads
-    // (including other test files, e.g. regression_1741h_tests.rs, that construct
-    // a V5CompressedLegacyParser) could race each other's set/remove and observe
-    // an unexpectedly pinned clock. Invariant: any test anywhere in this crate
-    // that sets CQLITE_TTL_NOW_OVERRIDE_SECS must be #[serial].
+    // Issue #1853 roborev round 3: these tests call the PURE `now_from()`
+    // directly with an explicit override argument — no env::set_var/remove_var,
+    // no guard type, no #[serial]. There is no process-global mutation here for
+    // any parallel test (in this binary or any other) to race.
 
-    /// RAII guard (roborev #1853 finding 2): saves whatever value (or absence)
-    /// preceded the override, sets the new value, and restores the prior state
-    /// on `Drop` — including on a panicking assertion unwind, unlike a
-    /// non-RAII "restore after f()" helper which would leak the override into
-    /// every subsequent test in the binary if the closure panicked. Never
-    /// clobbers a value a developer's shell may have exported outside the
-    /// test process. Mirrors the `EnvVarGuard` pattern in
-    /// `issue_694_writetime_ttl_parity.rs`.
-    #[cfg(debug_assertions)]
-    struct OverrideGuard {
-        prior: Option<String>,
-    }
-
-    #[cfg(debug_assertions)]
-    impl OverrideGuard {
-        fn set(value: &str) -> Self {
-            let prior = std::env::var(TTL_NOW_OVERRIDE_ENV).ok();
-            std::env::set_var(TTL_NOW_OVERRIDE_ENV, value);
-            Self { prior }
-        }
-    }
-
-    #[cfg(debug_assertions)]
-    impl Drop for OverrideGuard {
-        fn drop(&mut self) {
-            match self.prior.take() {
-                Some(v) => std::env::set_var(TTL_NOW_OVERRIDE_ENV, v),
-                None => std::env::remove_var(TTL_NOW_OVERRIDE_ENV),
-            }
-        }
+    #[test]
+    fn override_pins_now() {
+        let got = now_from(Some("1759716000"), wall_clock_now_secs());
+        assert_eq!(got, 1_759_716_000, "override must be honored verbatim");
     }
 
     #[test]
-    #[serial]
-    #[cfg(debug_assertions)]
-    fn override_env_pins_now() {
-        let _guard = OverrideGuard::set("1759716000");
-        let got = now_epoch_secs();
-        assert_eq!(
-            got, 1_759_716_000,
-            "override must be honored verbatim under debug_assertions"
-        );
-    }
-
-    #[test]
-    #[serial]
-    #[cfg(debug_assertions)]
     fn invalid_override_falls_back_to_wall_clock() {
-        let _guard = OverrideGuard::set("not-a-number");
-        let got = now_epoch_secs();
-        // Wall clock in 2026+ is comfortably past this override candidate.
-        assert!(
-            got > 1_759_716_000,
-            "an invalid override must fall back to the wall clock, got {got}"
+        let wall = wall_clock_now_secs();
+        let got = now_from(Some("not-a-number"), wall);
+        assert_eq!(
+            got, wall,
+            "an invalid override must fall back to the wall clock"
         );
     }
 
     #[test]
-    #[serial]
     fn absent_override_falls_back_to_wall_clock() {
-        #[cfg(debug_assertions)]
-        std::env::remove_var(TTL_NOW_OVERRIDE_ENV);
-        let got = now_epoch_secs();
-        assert!(
-            got > 1_759_716_000,
-            "no override set must fall back to the wall clock, got {got}"
+        let wall = wall_clock_now_secs();
+        let got = now_from(None, wall);
+        assert_eq!(
+            got, wall,
+            "no override set must fall back to the wall clock"
         );
     }
 }
