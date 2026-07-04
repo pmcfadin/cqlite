@@ -42,7 +42,19 @@
 //!
 //! Gated on cli-helpers + state_machine + lz4, excluded under `tombstones` (which
 //! compiles out the seek + work counters). Requires `CQLITE_DATASETS_ROOT` with the
-//! fetched binaries; skipped (not failed) when absent.
+//! fetched binaries.
+//!
+//! ## Skip vs fail-closed (issue #1856)
+//!
+//! The `test_da/wide_table-*` fixture's `-Data.db`/`-CompressionInfo.db` binaries
+//! are local-only (NOT in the fetchable `cassandra5-small-full-v3.4` asset). The
+//! fixture *directory* can exist on a fresh checkout carrying only the committed
+//! JSONL/CRC/TOC while those binaries are absent — the NORMAL state of a worktree
+//! gate. In that state the test SKIPS (honest eprintln naming the absent binary),
+//! never panics. It hard-FAILS (fail-closed) only when
+//! `CQLITE_PARITY_REQUIRE_DATASETS=1` is set (the required parity gate), so that
+//! gate can never green-pass without actually running. When the binary IS present,
+//! a 0-row full scan is a genuine read regression (failure), never a skip.
 
 #![cfg(all(
     feature = "write-support",
@@ -80,6 +92,30 @@ fn datasets_root() -> Option<PathBuf> {
         .filter(|p| p.exists())
 }
 
+/// CI fail-closed switch (issue #1856, mirrors #1242). The required parity gate
+/// sets `CQLITE_PARITY_REQUIRE_DATASETS=1`; in that mode an absent fixture must
+/// PANIC rather than silently skip and green-pass. Locally (env unset) the test
+/// keeps its skip-on-absence behavior.
+fn parity_datasets_required() -> bool {
+    std::env::var("CQLITE_PARITY_REQUIRE_DATASETS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Skip (honest eprintln) when local, but FAIL-CLOSED (panic) under
+/// `CQLITE_PARITY_REQUIRE_DATASETS=1`. `reason` names the actual cause (e.g. the
+/// absent `-Data.db` binary) so the log/panic can never be misleading (#1853).
+fn skip_or_fail_closed(reason: &str) {
+    if parity_datasets_required() {
+        panic!(
+            "multichunk_row_seek_returns_full_partition: \
+             CQLITE_PARITY_REQUIRE_DATASETS=1 but {reason} — required parity gate cannot \
+             green-pass without running fail-closed (issue #1856)"
+        );
+    }
+    eprintln!("Skipping (multi-chunk-row seek): {reason}");
+}
+
 fn schemas_dir() -> Option<PathBuf> {
     if let Some(root) = datasets_root() {
         if let Some(dir) = root.parent().and_then(|p| {
@@ -94,7 +130,13 @@ fn schemas_dir() -> Option<PathBuf> {
     dir.exists().then_some(dir)
 }
 
-/// Locate the real `test_da/wide_table-<uuid>/` SSTable directory.
+/// Locate the real `test_da/wide_table-<uuid>/` SSTable directory that actually
+/// carries the local-only `-Data.db` binary.
+///
+/// A fresh checkout can have the directory present with only the committed
+/// JSONL/CRC/TOC and NO `-Data.db` (the binary is not in the fetchable asset), so
+/// the presence check requires the binary itself — not just the directory — to
+/// avoid a false `Some` that later hard-panics (issue #1856).
 fn real_wide_table_dir() -> Option<PathBuf> {
     let base = datasets_root()?.join("sstables").join("test_da");
     let entries = std::fs::read_dir(&base).ok()?;
@@ -102,13 +144,26 @@ fn real_wide_table_dir() -> Option<PathBuf> {
         let path = entry.path();
         if path.is_dir() {
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with("wide_table-") {
+                if name.starts_with("wide_table-") && dir_has_data_db(&path) {
                     return Some(path);
                 }
             }
         }
     }
     None
+}
+
+/// True when `dir` contains a `*-Data.db` component (the local-only binary).
+fn dir_has_data_db(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        e.path()
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with("-Data.db"))
+    })
 }
 
 /// Decompress a chunked LZ4 `Data.db` into its raw (uncompressed) data section.
@@ -173,8 +228,13 @@ fn build_repacked_sstable(temp: &TempDir) -> Option<PathBuf> {
             info_path = Some(dst.clone());
         }
     }
-    let data_path = data_path.expect("Data.db must be present");
-    let info_path = info_path.expect("CompressionInfo.db must be present");
+    // A fixture dir may exist with only the committed JSONL/CRC/TOC and no
+    // local-only `-Data.db`/`-CompressionInfo.db` binary. Treat that as a genuine
+    // absence (return `None` -> skip), never a panic (issue #1856). `real_wide_table_dir`
+    // already requires `-Data.db`, so this is belt-and-suspenders for the pair.
+    let (Some(data_path), Some(info_path)) = (data_path, info_path) else {
+        return None;
+    };
 
     // Decompress with the ORIGINAL CompressionInfo, then re-compress small-chunked.
     let original_compressed = std::fs::read(&data_path).expect("read Data.db");
@@ -255,7 +315,7 @@ fn fingerprints(rows: &[QueryRow]) -> Vec<BTreeMap<String, String>> {
 async fn multichunk_row_seek_returns_full_partition() {
     let temp = TempDir::new().expect("temp dir");
     let Some(data_dir) = build_repacked_sstable(&temp) else {
-        eprintln!("Skipping (multi-chunk-row seek): test_da.wide_table dataset not present");
+        skip_or_fail_closed("test_da.wide_table fixture -Data.db binary not present");
         return;
     };
     let db = open_db(&data_dir).await;
@@ -265,12 +325,13 @@ async fn multichunk_row_seek_returns_full_partition() {
         .execute(&format!("SELECT pk, ck, payload FROM {QUALIFIED_TABLE}"))
         .await
         .expect("full scan");
-    if full.rows.is_empty() {
-        eprintln!(
-            "Skipping (multi-chunk-row seek): wide_table returned 0 rows (Data.db not fetched?)"
-        );
-        return;
-    }
+    // The `-Data.db` binary IS present (required by `real_wide_table_dir`), so a
+    // 0-row scan is a genuine read regression, not an absent-fixture skip (#1856).
+    assert!(
+        !full.rows.is_empty(),
+        "Issue #1856: wide_table -Data.db is present but the full scan returned 0 rows — \
+         a genuine read regression, not an absent-fixture skip"
+    );
 
     let mut by_partition: BTreeMap<i32, Vec<QueryRow>> = BTreeMap::new();
     for row in full.rows {
