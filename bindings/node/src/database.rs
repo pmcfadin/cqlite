@@ -1479,13 +1479,10 @@ impl napi::Task for ExecuteNativeTask {
 
         // Create rows array with native types
         let mut rows_arr = env.create_array_with_length(output.rows.len())?;
-        // Issue #1446: intern SELECT-order column-name keys ONCE per result (not
-        // per row) and reuse them so every row's properties are emitted in
-        // authoritative column order rather than HashMap hash order.
+        // Issue #1446: intern SELECT-order column-name keys ONCE per result (not per row) so props emit in authoritative column order, not HashMap hash order.
         let col_names: Vec<String> = output.columns.iter().map(|c| c.name.clone()).collect();
         let col_keys = crate::value::intern_column_keys(&env, &col_names)?;
-        // Issue #1448: one conversion context per result caches the global
-        // `Set`/`Map` constructors (fetched at most once each here, not per cell).
+        // Issue #1448: one conversion context per result caches the global `Set`/`Map` constructors (fetched at most once each here, not per cell).
         let ctx = crate::value::ConvCtx::new(&env);
         for (i, row_values) in output.rows.iter().enumerate() {
             let row_obj = crate::value::row_to_object(&ctx, &col_keys, row_values)?;
