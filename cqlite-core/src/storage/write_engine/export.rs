@@ -1330,31 +1330,67 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_count_index_entries_big_format() {
-        let temp_dir = TempDir::new().unwrap();
+    /// Locate the shared test datasets root (`CQLITE_DATASETS_ROOT`). Returns
+    /// `None` (test skips cleanly) when unset or not a directory.
+    fn datasets_root() -> Option<std::path::PathBuf> {
+        let root = std::env::var("CQLITE_DATASETS_ROOT").ok()?;
+        let p = std::path::PathBuf::from(root);
+        if p.is_dir() {
+            Some(p)
+        } else {
+            None
+        }
+    }
 
-        // Build a synthetic BIG-format Index.db with 3 entries
-        // Format: [key_len:u16 BE][key_bytes][pos VInt][promoted VInt]
-        let mut index_data = Vec::new();
-        for i in 0u64..3 {
-            // Key length (4 bytes for int keys)
-            index_data.extend_from_slice(&4u16.to_be_bytes());
-            // 4-byte key
-            index_data.extend_from_slice(&(i as u32).to_be_bytes());
-            // Position as unsigned VInt (values < 128 = 1 byte)
-            index_data.push((i * 50) as u8);
-            // Promoted index size = 0 (1-byte VInt)
-            index_data.push(0x00);
+    /// Regression test for issue #1622: a BTI (`da`) export must report a
+    /// non-zero `partition_count`. Before the fix, `partition_count` came from a
+    /// hand-rolled BIG-only `Index.db` walk (`count_index_entries`); a BTI
+    /// SSTable has NO `Index.db` (it uses `Partitions.db`/`Rows.db`), so that
+    /// walk returned `Err("Index.db not found")`, the error was swallowed, and
+    /// the report claimed 0 partitions even for a table with many. The fix reads
+    /// the authoritative, format-agnostic partition count from the Statistics.db
+    /// `estimatedPartitionSize` histogram via `read_table_counts` — the same
+    /// gated reader already used for `row_count` (issue #1327).
+    ///
+    /// `test_da` is a local-only fixture, so this test SKIPS cleanly when the
+    /// binaries are absent; but a PRESENT fixture that reports 0 partitions is a
+    /// hard failure (matches the dataset-test posture in MEMORY).
+    #[test]
+    fn test_read_statistics_from_export_bti_partition_count() {
+        let Some(root) = datasets_root() else {
+            eprintln!("CQLITE_DATASETS_ROOT unset; skipping BTI partition-count test");
+            return;
+        };
+        let dir =
+            root.join("sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11");
+        if !dir.join("da-2-bti-Statistics.db").is_file() {
+            eprintln!("BTI da fixture absent at {dir:?}; skipping");
+            return;
         }
 
-        // Write to a temporary Index.db file
-        let index_path = temp_dir.path().join("nb-1-big-Index.db");
-        std::fs::write(&index_path, &index_data).unwrap();
+        // Feed the reader the exact BTI component set on disk (no Index.db).
+        let components: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e == "db")
+                    .unwrap_or(false)
+            })
+            .collect();
 
-        let components = vec![index_path];
-        let count = count_index_entries(&components).unwrap();
-        assert_eq!(count, 3, "Should count 3 BIG-format index entries");
+        let (partition_count, row_count) =
+            read_statistics_from_export(&components).unwrap();
+
+        assert!(
+            partition_count > 0,
+            "BTI (da) export partition_count should be > 0, got {partition_count}"
+        );
+        assert!(
+            partition_count <= row_count,
+            "partition_count ({partition_count}) should be <= row_count ({row_count})"
+        );
     }
 
     #[tokio::test]
