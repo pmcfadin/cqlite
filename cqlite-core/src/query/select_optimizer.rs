@@ -193,6 +193,27 @@ impl SelectOptimizer {
             FromClause::Table(t) | FromClause::TableAlias(t, _) => t.clone(),
         };
 
+        // Issue #1763: reject `SELECT DISTINCT <aggregate>` (e.g.
+        // `SELECT DISTINCT COUNT(*)`). `is_aggregate()` now unwraps aliased
+        // aggregates inside a `DISTINCT` clause, so `requires_aggregation()`
+        // returns true and an aggregation is planned — but `plan_aggregation`
+        // collects its computations ONLY from `SelectClause::Columns`, so a
+        // DISTINCT aggregate would plan an aggregation with NO computations and
+        // silently drop the result column. DISTINCT over an aggregate is also not
+        // a meaningful shape (the aggregate already collapses all rows to a
+        // single value, making DISTINCT redundant) and Cassandra rejects it.
+        // Fail cleanly here rather than return a wrong result.
+        if let SelectClause::Distinct(exprs) = &statement.select_clause {
+            if exprs.iter().any(|e| e.is_aggregate()) {
+                return Err(Error::query_execution(
+                    "SELECT DISTINCT with an aggregate function is not supported; \
+                     DISTINCT over an aggregate is redundant because the aggregate \
+                     already collapses rows to a single value"
+                        .to_string(),
+                ));
+            }
+        }
+
         if let Some(where_clause) = &statement.where_clause {
             // Validate EVERY token() restriction in the WHERE tree before pushdown
             // (roborev FINDING: token() under OR/NOT was never traversed, so an

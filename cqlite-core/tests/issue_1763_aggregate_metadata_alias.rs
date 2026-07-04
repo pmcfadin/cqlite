@@ -18,6 +18,7 @@
 use std::path::{Path, PathBuf};
 
 use cqlite_core::ingestion::{ingest, IngestionConfig};
+use cqlite_core::query::result::StreamingConfig;
 use cqlite_core::Database;
 
 fn datasets_root() -> Option<PathBuf> {
@@ -312,6 +313,122 @@ async fn grouped_dimension_unaliased_metadata_equals_row_key() {
             row.values.keys().collect::<Vec<_>>()
         );
     }
+}
+
+/// Streaming path parity (roborev Medium #1: metadata != row-key on
+/// `execute_streaming`). The streaming producer IGNORED the `Project` step, so an
+/// aliased projection (`category AS cat`) streamed rows keyed by the SOURCE
+/// column (`category`) while the query metadata used the SELECT output name
+/// (`cat`) — a silent disagreement between metadata and row value keys. The fix
+/// makes `requires_materialization` fall back to the materialized
+/// execute()-then-stream path whenever a `Project` renames/evaluates an
+/// expression. Assert the streamed rows are keyed by the SELECT output name
+/// (`cat`, NOT `category`), carry a non-null value, and match the metadata name.
+#[tokio::test]
+async fn streaming_aliased_projection_row_key_equals_metadata() {
+    let db = match setup("basic-types.cql", "/test_basic/").await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let mut iter = db
+        .execute_streaming(
+            "SELECT category AS cat FROM test_basic.multi_partition_table",
+            StreamingConfig::default(),
+        )
+        .await
+        .expect("streaming aliased projection must start");
+
+    // Metadata uses the SELECT output name.
+    let meta_names: Vec<String> = iter
+        .metadata
+        .columns
+        .iter()
+        .map(|c| c.name.clone())
+        .collect();
+    assert_eq!(
+        meta_names,
+        vec!["cat".to_string()],
+        "streaming metadata column is the SELECT alias `cat`"
+    );
+
+    let mut saw_row = false;
+    while let Some(row_result) = iter.next_async().await {
+        let row = row_result.expect("streamed row must not error");
+        saw_row = true;
+        // The row VALUE must be keyed by the SELECT output name, matching metadata.
+        assert!(
+            row.values.contains_key("cat"),
+            "roborev #1 (streaming): metadata name `cat` MUST be a row value key; \
+             row keys were {:?}",
+            row.values.keys().collect::<Vec<_>>()
+        );
+        // The raw source column name must NOT leak as a row value key.
+        assert!(
+            !row.values.contains_key("category"),
+            "roborev #1 (streaming): raw source column `category` must not leak as a \
+             row value key when the SELECT aliases it to `cat`; row keys were {:?}",
+            row.values.keys().collect::<Vec<_>>()
+        );
+        // The aliased clustering value must be present (non-null).
+        assert!(
+            !row.values
+                .get("cat")
+                .is_none_or(cqlite_core::types::Value::is_null),
+            "roborev #1 (streaming): aliased projection `cat` must carry a non-null value"
+        );
+    }
+    assert!(
+        saw_row,
+        "streaming aliased projection must yield at least one row"
+    );
+}
+
+/// DISTINCT + aliased aggregate regression (roborev Medium #2). `is_aggregate()`
+/// now unwraps aliased aggregates inside `SELECT DISTINCT`, so
+/// `SELECT DISTINCT COUNT(*) AS total` planned an aggregation whose
+/// `plan_aggregation` collected NO computations (it reads only
+/// `SelectClause::Columns`) — returning a row MISSING `total` (silent wrong
+/// result). DISTINCT over an aggregate is not a meaningful shape (Cassandra
+/// rejects it), so CQLite rejects it with a clear error rather than dropping the
+/// column.
+#[tokio::test]
+async fn distinct_over_aggregate_is_rejected() {
+    let db = match setup("basic-types.cql", "/test_basic/").await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let result = db
+        .execute("SELECT DISTINCT COUNT(*) AS total FROM test_basic.multi_partition_table")
+        .await;
+
+    let err = result.expect_err(
+        "roborev #2: SELECT DISTINCT over an aggregate must return a clear Err, not a \
+         row silently missing the aggregate column",
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("DISTINCT") && msg.contains("aggregate"),
+        "roborev #2: rejection message should explain DISTINCT-over-aggregate; got {msg:?}"
+    );
+
+    // The same shape without an alias is rejected identically (the regression was
+    // introduced by unwrapping aliased aggregates, but the shape itself is the
+    // unsupported one).
+    let unaliased = db
+        .execute("SELECT DISTINCT COUNT(*) FROM test_basic.multi_partition_table")
+        .await;
+    assert!(
+        unaliased.is_err(),
+        "roborev #2: unaliased SELECT DISTINCT COUNT(*) must also be rejected"
+    );
 }
 
 /// CLI-surface parity: `QueryResult::to_json` (the exact renderer behind the CLI

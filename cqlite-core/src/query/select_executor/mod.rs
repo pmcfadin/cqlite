@@ -194,6 +194,19 @@ fn projected_column_name(expr: &SelectExpression, index: usize) -> std::sync::Ar
     }
 }
 
+/// True when a `Project` expression RENAMES or EVALUATES its input rather than
+/// passing a stored column through unchanged (issue #1763).
+///
+/// A plain `Column` is emitted by the SSTable scan under the same name a
+/// `Project` would re-key it to, so streaming it directly matches the query
+/// metadata. Anything else — an alias (`category AS cat`), an aggregate, an
+/// arithmetic/function expression, or a literal — reshapes or renames the row,
+/// so the streaming path must materialize (fall back to execute-then-stream) to
+/// apply the `Project` and keep row value keys equal to the metadata names.
+fn project_expr_reshapes_row(expr: &SelectExpression) -> bool {
+    !matches!(expr, SelectExpression::Column(_))
+}
+
 /// SELECT query executor for SSTable-based storage
 pub struct SelectExecutor {
     /// Schema manager for metadata
@@ -453,6 +466,22 @@ impl SelectExecutor {
             match step {
                 ExecutionStep::Sort { .. } => return true,
                 ExecutionStep::Aggregate { .. } => return true,
+                // Issue #1763: the streaming producer (`execute_streaming_background`)
+                // IGNORES `Project`, so it emits rows keyed by the SOURCE stored
+                // column names (e.g. `category`) even when the SELECT renames or
+                // evaluates them (e.g. `category AS cat`) — silently disagreeing
+                // with the query metadata, which uses the SELECT output names.
+                // A `Project` that RENAMES (alias) or EVALUATES (aggregate /
+                // arithmetic / literal / function) any item must fall back to the
+                // materialized execute()-then-stream path, which applies the
+                // `Project`. A `Project` of only plain `Column`s does not reshape
+                // the row (the scan already keyed those cells by the same names),
+                // so it can stream without materializing.
+                ExecutionStep::Project { columns }
+                    if columns.iter().any(project_expr_reshapes_row) =>
+                {
+                    return true
+                }
                 _ => {}
             }
         }
