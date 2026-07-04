@@ -795,12 +795,18 @@ impl SelectExecutor {
         _context: &mut ExecutionContext,
     ) -> Result<Vec<QueryRow>> {
         let start_index = offset.unwrap_or(0) as usize;
-        if start_index >= rows.len() {
-            return Ok(Vec::new());
+        let limit = count as usize;
+        // Issue #1590 (E8): with no OFFSET, truncate in place — no allocation and
+        // no element shift. With an OFFSET, apply it via `skip`/`take` instead of
+        // `drain(..offset)`: `drain` memmoves every surviving element left, while
+        // `skip` drops the prefix and yields the survivors without shifting. The
+        // resulting rows are identical (same slice, same order); `skip` past the
+        // end yields nothing, matching the old `start_index >= len` early return.
+        if start_index == 0 {
+            rows.truncate(limit);
+            return Ok(rows);
         }
-        rows.drain(..start_index);
-        rows.truncate(count as usize);
-        Ok(rows)
+        Ok(rows.into_iter().skip(start_index).take(limit).collect())
     }
 
     /// Execute projection step
@@ -1282,6 +1288,78 @@ mod tests {
         assert_eq!(projected[0].values.get("b"), Some(&Value::Integer(0)));
         assert_eq!(projected[0].values.get("c"), Some(&Value::Integer(0)));
         assert_eq!(projected[99].values.get("a"), Some(&Value::Integer(99)));
+    }
+
+    /// Issue #1590 (E8): `execute_limit` now applies OFFSET via `skip`/`take`
+    /// (was `drain(..offset)` + `truncate`). This pins that the new path yields
+    /// the SAME rows as the old drain/truncate reference across a matrix of
+    /// (len, offset, limit) — including offset past the end, zero offset, and
+    /// limit exceeding the remainder. No behavior change.
+    #[tokio::test]
+    async fn execute_limit_offset_matches_drain_truncate_reference() {
+        let executor = create_test_executor().await;
+        let mut ctx = ExecutionContext {
+            table_id: TableId::new("ks.t"),
+            columns: Vec::new(),
+            rows_processed: 0,
+            scan_rows: 0,
+            projection_flags: ProjectionFlags::default(),
+            access_path: None,
+            reverse_served: false,
+        };
+
+        let make = |len: usize| -> Vec<QueryRow> {
+            (0..len)
+                .map(|r| {
+                    let mut row = QueryRow::new(RowKey::new(vec![r as u8]));
+                    row.set("a", Value::Integer(r as i32));
+                    row
+                })
+                .collect()
+        };
+        // The old in-place algorithm, kept verbatim as the parity oracle.
+        let reference = |mut rows: Vec<QueryRow>, count: u64, offset: Option<u64>| {
+            let start_index = offset.unwrap_or(0) as usize;
+            if start_index >= rows.len() {
+                return Vec::new();
+            }
+            rows.drain(..start_index);
+            rows.truncate(count as usize);
+            rows
+        };
+        let tags = |rows: &[QueryRow]| -> Vec<i32> {
+            rows.iter()
+                .map(|r| match r.values.get("a") {
+                    Some(Value::Integer(v)) => *v,
+                    _ => -1,
+                })
+                .collect()
+        };
+
+        for len in [0usize, 1, 5, 10] {
+            for offset in [
+                None,
+                Some(0u64),
+                Some(1),
+                Some(3),
+                Some(9),
+                Some(10),
+                Some(50),
+            ] {
+                for count in [0u64, 1, 3, 10, 1000] {
+                    let got = executor
+                        .execute_limit(make(len), count, offset, &mut ctx)
+                        .expect("limit must succeed");
+                    let want = reference(make(len), count, offset);
+                    assert_eq!(
+                        tags(&got),
+                        tags(&want),
+                        "len={len} offset={offset:?} count={count}: skip/take must \
+                         equal drain/truncate"
+                    );
+                }
+            }
+        }
     }
 
     /// Issue #1587 (E5): ORDER BY uses decorate-sort-undecorate, so each row's
