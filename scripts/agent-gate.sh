@@ -687,6 +687,33 @@ delta_classify_stdin() {
   echo "VERDICT: $verdict"
 }
 
+# _delta_python_tier_gap <python-tier-note>  (issue #1892, roborev job 3333)
+# TRUE (0) iff the delta re-cert has an UNSOUND python gap: the ALLOWED set (read on
+# stdin, newline-separated) includes a `bindings/python/tests/*` file — so the #1893
+# python tier is REQUIRED to re-certify the diff — AND that tier did NOT actually run
+# to a verdict (the note does not begin with "python-tier: PASS" or "python-tier: FAIL",
+# i.e. it was SKIPPED — python3 missing or venv/pip/maturin setup failed — or never set).
+# Because --delta runs NO clippy, a SKIPPED python tier leaves the changed python tests
+# with ZERO compile/test backstop, so a PASS DELTA block would be an unsound green.
+# Returns 1 (no gap) when there is no python test file in scope (a docs/rust-only delta
+# is unaffected by python3 being absent) or when the tier ran (PASS/FAIL — a FAIL flows
+# through as RESULT: FAIL). Pure: reads the allowed set on stdin, no cargo/git/side
+# effects — exposed via the hidden --delta-python-gap hook so scripts/tests can assert
+# the SAME decision run_delta consumes (single-source; drift is impossible).
+_delta_python_tier_gap() {
+  local note="${1:-}" line py_tests=0
+  while IFS= read -r line; do
+    case "$line" in
+      bindings/python/tests/*) py_tests=1; break ;;
+    esac
+  done
+  [ "$py_tests" -eq 1 ] || return 1
+  case "$note" in
+    "python-tier: PASS"*|"python-tier: FAIL"*) return 1 ;;
+  esac
+  return 0
+}
+
 COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity python-bindings node-bindings delivery-telemetry parity-report binding-unwind-profile tooling-tests minimal-build smoke)
 # --lite (issue #1821) runs ONLY this fast subset: file-size ratchet, fmt,
 # FULL-workspace clippy (cross-crate API breaks are the cheap-insurance class),
@@ -765,6 +792,12 @@ case "${1:-}" in
   # Hidden self-test hook (issue #1892): classify stdin paths as test/docs (ALLOW)
   # or production (REFUSE) and print a final VERDICT. No side effects; no cargo/git.
   --delta-classify) delta_classify_stdin; exit 0 ;;
+  # Hidden self-test hook (issue #1892, roborev job 3333): read the delta's ALLOWED
+  # paths on stdin + the python-tier note as $2; print "GAP" (unsound: python tests
+  # in scope but the tier did not run → run_delta REFUSES) or "OK". This is the SAME
+  # _delta_python_tier_gap decision run_delta consumes, so the self-test asserts the
+  # real fail-closed behavior hermetically (no cargo/maturin/git).
+  --delta-python-gap) _delta_python_tier_gap "${2:-}" && echo GAP || echo OK; exit 0 ;;
   --only) ONLY="${2:?--only needs a comma-separated component list}" ;;
   --emit-summary-selftest) SELFTEST=1 ;;
   "") ;;
@@ -2035,6 +2068,36 @@ run_delta() {
     for i in "${!NAMES[@]}"; do
       DN+=("${NAMES[$i]}"); DS+=("${STATUSES[$i]}"); DT+=("${TIMES[$i]}")
     done
+  fi
+
+  # FAIL-CLOSED (issue #1892, roborev job 3333): --delta ALLOWS bindings/python/tests/*
+  # on the premise that the #1893 python tier actually RUNS them (via run_scoped_tests).
+  # But --delta does NOT run clippy, so there is NO compile/test backstop. If the python
+  # tier was SKIPPED (python3 missing, or venv/pip/maturin setup failed) while a python
+  # test file is in the allowed set, the changed bindings/python/tests/* files were NEVER
+  # re-certified — emitting RESULT: PASS would be an unsound green. Refuse instead.
+  #   * A python-test PASS or FAIL means the tier ran (PYTHON_TIER_NOTE starts PASS/FAIL);
+  #     a FAIL already set OVERALL=FAIL above and flows through as RESULT: FAIL.
+  #   * A SKIPPED/never-ran note (or empty) means it did NOT run → REFUSE here.
+  #   * A docs/rust-only delta has NO python test file in the allowed set, so python3
+  #     being absent is irrelevant and the delta must still PASS normally.
+  if printf '%s\n' "$allowed" | _delta_python_tier_gap "$PYTHON_TIER_NOTE"; then
+    echo "--- [delta] REFUSED: bindings/python/tests/* changed but the python tier did NOT run (${PYTHON_TIER_NOTE:-python-tier: not run})." >&2
+    echo "    --delta cannot re-certify changed bindings/python/tests/* files without the python tier;" >&2
+    echo "    a fresh FULL gate is required: scripts/agent-gate.sh" >&2
+    declare -a SUMMARY_META=()
+    SUMMARY_META+=("${anchor_meta[@]}")
+    SUMMARY_META+=("delta-scope: file-size fmt scoped-tests (python tier REQUIRED but did NOT run — re-cert incomplete)")
+    SUMMARY_META+=("${PYTHON_TIER_NOTE:-python-tier: NOT RUN — python-binding tests NOT validated by this delta run}")
+    SUMMARY_META+=("$(accelerators_line)")
+    SUMMARY_META+=("${file_meta[@]}")
+    for i in "${!DN[@]}"; do
+      SUMMARY_META+=("$(printf '%-18s %s (%s)' "${DN[$i]}:" "${DS[$i]}" "${DT[$i]}")")
+    done
+    SUMMARY_META+=("refusal: python tier skipped — cannot re-certify changed bindings/python/tests/* files; run the full gate (scripts/agent-gate.sh)")
+    emit_summary REFUSED "${SUMMARY_META[@]}"
+    [ "$SUMMARY_WRITE_FAILED" -eq 0 ] || { echo "agent-gate: exiting non-zero because the summary file could not be written (#1175)" >&2; exit 1; }
+    exit 1
   fi
 
   declare -a SUMMARY_META=()

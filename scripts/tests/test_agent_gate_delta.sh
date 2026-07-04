@@ -211,6 +211,54 @@ else
   echo "------- classify output -------"; printf '%s\n' "$nested_out"; echo "-------------------------------"
 fi
 
+# 5d. FAIL-CLOSED python-tier gap (issue #1892, roborev job 3333): --delta ALLOWS
+#     bindings/python/tests/* ONLY on the premise that the #1893 python tier RUNS
+#     them. --delta runs NO clippy, so if the python tier is SKIPPED (python3
+#     missing, or venv/pip/maturin setup failed) while a python test file is in the
+#     allowed set, the changed tests were NEVER re-certified and a PASS DELTA block
+#     would be an unsound green — run_delta must REFUSE. run_delta consumes the SAME
+#     _delta_python_tier_gap decision the hidden --delta-python-gap hook exposes, so
+#     these assert the real fail-closed behavior hermetically (no cargo/maturin/git).
+assert_python_gap() {  # <label> <expected GAP|OK> <note> <allowed-paths...>
+  local label="$1" expected="$2" note="$3"; shift 3
+  local got
+  got=$(printf '%s\n' "$@" | bash "$GATE" --delta-python-gap "$note" 2>/dev/null | head -1)
+  if [ "$got" = "$expected" ]; then
+    ok "$label: $got (expected $expected)"
+  else
+    bad "$label: '$got' (expected $expected)"
+  fi
+}
+# python test in scope + tier SKIPPED (no python3) → GAP → run_delta REFUSES (not PASS).
+assert_python_gap "py-skip-no-python3-gaps" GAP \
+  "python-tier: SKIPPED (no python3 on PATH) — python-binding diff NOT validated by this lite run; run the full gate" \
+  "bindings/python/tests/test_parity.py"
+# python test in scope + tier SKIPPED (toolchain: venv/pip/maturin) → GAP.
+assert_python_gap "py-skip-toolchain-gaps" GAP \
+  "python-tier: SKIPPED (toolchain: venv/pip/maturin setup failed — offline?) — python-binding diff NOT validated by this lite run; run the full gate" \
+  "bindings/python/tests/test_parity.py"
+# python test in scope + EMPTY note (tier never set) → GAP (fail-closed default).
+assert_python_gap "py-empty-note-gaps" GAP "" \
+  "bindings/python/tests/test_value_parity.py" \
+  "docs/x.md"
+# python test in scope + tier PASS → OK: the tier ran, so the delta proceeds normally.
+assert_python_gap "py-pass-ok" OK \
+  "python-tier: PASS (maturin develop --profile dev && pytest bindings/python/tests -m 'not slow' -q)" \
+  "bindings/python/tests/test_parity.py"
+# python test in scope + tier FAIL → OK for the GAP check: a pytest FAIL already sets
+# OVERALL=FAIL in run_delta and flows through as RESULT: FAIL, not as this refusal.
+assert_python_gap "py-fail-not-a-gap" OK \
+  "python-tier: FAIL (pytest failure — a real code failure)" \
+  "bindings/python/tests/test_parity.py"
+# NO python test file in scope (docs/rust-only) + SKIPPED/empty note → OK: the python
+# tier is irrelevant, so python3 being absent must NOT block a docs/rust-only delta.
+assert_python_gap "docs-rust-only-no-gap-when-skipped" OK \
+  "python-tier: SKIPPED (no python3 on PATH)" \
+  "README.md" \
+  "cqlite-core/tests/write_read_roundtrip.rs"
+assert_python_gap "docs-only-no-gap-empty-note" OK "" \
+  "docs/development/pm-operating-loop.md"
+
 # 6. DELTA summary emission + marker distinctness. `--delta <anchor>
 #    --emit-summary-selftest` drives the DELTA block through the real emission
 #    path (no components). It must carry the DISTINCT delta markers + a MODE:
