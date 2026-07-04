@@ -248,7 +248,7 @@ impl SSTableReader {
         let whole = self.stitch_all_chunks(&cursor).await?;
 
         let effective_schema = self.get_table_schema(None);
-        let parser = self.build_v5_parser();
+        let parser = self.build_v5_parser(false);
         let rows = parser.parse_block_for_compaction(&whole, effective_schema.as_ref(), self)?;
 
         let mut seen: HashSet<Vec<u8>> = HashSet::new();
@@ -291,7 +291,7 @@ impl SSTableReader {
         let whole = self.stitch_all_chunks(&cursor).await?;
 
         let effective_schema = self.get_table_schema(None);
-        let parser = self.build_v5_parser();
+        let parser = self.build_v5_parser(false);
 
         // `seen` dedups partition keys; the recorded position is the FIRST row's
         // offset for a partition (a partition spans contiguous rows, so the first
@@ -347,7 +347,7 @@ impl SSTableReader {
         let whole = self.stitch_all_chunks(&cursor).await?;
 
         let effective_schema = self.get_table_schema(None);
-        let parser = self.build_v5_parser();
+        let parser = self.build_v5_parser(false);
 
         // First pass: recover the distinct partition-start offsets in on-disk
         // order (a partition spans contiguous rows, so the first row's offset is
@@ -440,7 +440,7 @@ impl SSTableReader {
             return Ok(Vec::new());
         }
 
-        let parser = self.build_v5_parser();
+        let parser = self.build_v5_parser(false);
 
         // Group clustering tuples by partition-start offset (partitions appear in
         // ascending on-disk offset order; rows within a partition are emitted in
@@ -578,7 +578,7 @@ impl SSTableReader {
 
         // Resolve the schema the parser needs (cells lack column names on disk).
         let owned_schema = schema.cloned().or_else(|| self.get_table_schema(None));
-        let parser = self.build_v5_parser();
+        let parser = self.build_v5_parser(false);
 
         // Sliding window with a FRONT CURSOR (issue #1589): confirmed partitions are
         // consumed by advancing the cursor, and the reclaimed prefix is compacted

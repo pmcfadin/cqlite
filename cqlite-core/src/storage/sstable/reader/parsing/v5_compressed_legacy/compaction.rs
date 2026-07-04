@@ -348,37 +348,45 @@ impl V5CompressedLegacyParser {
         // with partition count, not row count.
         let resolution = RowColumnResolution::build(schema, reader);
 
-        const CASSANDRA_MAX_KEY_SIZE: usize = 65536;
-        const FORMAT_MAX_KEY_SIZE: usize = 255;
-
-        if data.len() < 2 {
-            return Ok(if at_final_chunk {
-                ParseStep::Done
-            } else {
-                ParseStep::NeedMore
-            });
+        // #1741 (roborev HIGH): size the header need-more decision correctly for
+        // the oa/da DeletionTime form. A DELETED oa/da partition carries the full
+        // 12-byte DeletionTime, not the 1-byte LIVE sentinel; a header split across
+        // a NON-FINAL chunk with only the first deletion byte present must return
+        // `NeedMore`, NOT be mis-parsed and skipped as `Emitted(1)` — on the
+        // compaction path that would DROP the partition tombstone and let older /
+        // deleted data survive or resurface. The nb path is unchanged (fixed
+        // 12-byte signed form). No heuristics: keyed off the authoritative
+        // `hasUIntDeletionTime` gate and the canonical DeletionTime sentinel.
+        match self.partition_header_readiness(data) {
+            PartitionHeaderReadiness::Malformed => return Ok(ParseStep::Emitted(1)),
+            PartitionHeaderReadiness::Incomplete => {
+                return Ok(if at_final_chunk {
+                    ParseStep::Done
+                } else {
+                    ParseStep::NeedMore
+                });
+            }
+            PartitionHeaderReadiness::Ready => {}
         }
 
-        let key_len = data[1] as usize;
-        let header_min_size = 1 + 1 + key_len + 4 + 8;
-
-        if key_len == 0 || key_len > FORMAT_MAX_KEY_SIZE.min(CASSANDRA_MAX_KEY_SIZE) {
-            return Ok(ParseStep::Emitted(1));
-        }
-
-        if header_min_size > data.len() {
-            return Ok(if at_final_chunk {
-                ParseStep::Done
-            } else {
-                ParseStep::NeedMore
-            });
-        }
-
-        let (partition_key, mut offset, partition_deletion) =
-            match self.parse_partition_header_full(data, 0) {
-                Ok(v) => v,
-                Err(_) => return Ok(ParseStep::Emitted(1)),
-            };
+        let (partition_key, mut offset, partition_deletion) = match self
+            .parse_partition_header_full(data, 0)
+        {
+            Ok(v) => v,
+            // Defense-in-depth: `Ready` guarantees the DeletionTime is fully
+            // present, so this cannot be a truncation. On a non-final chunk
+            // only re-request bytes if the header is still incomplete;
+            // otherwise skip a byte to resynchronise (NeedMore on a complete
+            // buffer would loop forever). Under `Ready` this stays a byte skip.
+            Err(_) => {
+                if !at_final_chunk
+                    && self.partition_header_readiness(data) == PartitionHeaderReadiness::Incomplete
+                {
+                    return Ok(ParseStep::NeedMore);
+                }
+                return Ok(ParseStep::Emitted(1));
+            }
+        };
 
         // Issue #1074: on the COMPACTION path the static row is emitted as its own
         // partition-level `CompactionRow` (Cassandra's `Row.staticRow`), NOT folded
@@ -570,6 +578,8 @@ impl V5CompressedLegacyParser {
                 true,
                 Some(&mut complex_capture),
                 &resolution,
+                // Compaction is a physical consumer: no read-side shadowing.
+                None,
             ) {
                 Ok((
                     cells,

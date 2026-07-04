@@ -276,13 +276,19 @@ impl SSTableReader {
     /// This helper method extracts the stitching logic from get_all_entries so it can be
     /// reused by sequential_scan and other methods that need to handle V5CompressedLegacy
     /// format where partitions can span chunk boundaries.
+    ///
+    /// `read_shadowing` (issue #1741): `true` for user-facing SELECT scans
+    /// (`scan_for_key`, `sequential_scan`), `false` for the physical
+    /// `get_all_entries` (integrity verification / data-manager) so it counts every
+    /// on-disk row.
     pub(super) async fn stitch_and_parse_all_chunks(
         &self,
         cursor: &ScanCursor,
         schema: Option<&crate::schema::TableSchema>,
+        read_shadowing: bool,
     ) -> Result<Vec<(TableId, RowKey, ScanRow)>> {
         let stitched_buffer = self.stitch_all_chunks(cursor).await?;
-        let parser = self.build_v5_parser();
+        let parser = self.build_v5_parser(read_shadowing);
 
         // Get schema (use provided schema or reader's schema)
         let reader_schema;
@@ -321,7 +327,7 @@ impl SSTableReader {
         )>,
     > {
         let stitched_buffer = self.stitch_all_chunks(cursor).await?;
-        let parser = self.build_v5_parser();
+        let parser = self.build_v5_parser(true);
 
         let reader_schema;
         let table_schema = if let Some(s) = schema {
@@ -415,9 +421,17 @@ impl SSTableReader {
     /// Build a [`V5CompressedLegacyParser`] configured from this reader's header,
     /// statistics (EncodingStats), version gates, and UDT registry.
     ///
+    /// `read_shadowing` (issue #1741) MUST be `true` for user-facing query reads
+    /// (`scan`/`scan_stream`/`scan_with_cell_metadata`/point `get`) so the emit path
+    /// applies SELECT-semantic partition/range-tombstone shadowing and TTL expiry, and
+    /// `false` for PHYSICAL consumers that must see every on-disk row — integrity
+    /// verification via `get_all_entries`, `sstable_data_manager`, delta-scan, and the
+    /// compaction read path (which reconciles tombstones itself across generations).
+    ///
     /// [`V5CompressedLegacyParser`]: crate::storage::sstable::reader::parsing::V5CompressedLegacyParser
     pub(super) fn build_v5_parser(
         &self,
+        read_shadowing: bool,
     ) -> crate::storage::sstable::reader::parsing::V5CompressedLegacyParser {
         let keyspace = self.header.keyspace.clone();
         let table_name = self.header.table_name.clone();
@@ -444,7 +458,9 @@ impl SSTableReader {
         )
         // VG1: thread VersionGates from SSTableReader down to row parser so
         // that VG3 can flip gate-sensitive code paths without re-deriving gates.
-        .with_version_gates(self.version_gates.clone());
+        .with_version_gates(self.version_gates.clone())
+        // Issue #1741: SELECT-semantic read shadowing (see fn docs).
+        .with_read_shadowing(read_shadowing);
         // Add UDT registry if available for UDT-aware collection parsing (Issue #238)
         if let Some(ref registry) = self.udt_registry {
             parser.with_udt_registry(registry.clone())
@@ -814,7 +830,7 @@ impl SSTableReader {
 
         // Build a parser (re-using the existing builder so version-gates and
         // UDT registry are threaded through correctly).
-        let parser = self.build_v5_parser();
+        let parser = self.build_v5_parser(false);
 
         Ok((stitched, parser))
     }

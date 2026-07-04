@@ -465,7 +465,13 @@ impl SSTableWriter {
         // single partition instead of buffering the whole component. The file is
         // opened lazily on the first partition (creating sstable_dir as needed).
         let data_path = Self::component_path_for(&sstable_dir, generation, format, "Data.db");
-        let data_writer = DataWriter::with_sink(stats.clone(), data_path);
+        // Issue #1741: `da` (BTI) SSTables must serialize the partition-level
+        // `DeletionTime` in the oa layout so the reader's `hasUIntDeletionTime`
+        // branch reads the LIVE sentinel correctly (a legacy `nb` layout in a `da`
+        // file is misread as a partition tombstone). `nb` (BIG) keeps the legacy
+        // layout, byte-identical to before.
+        let data_writer = DataWriter::with_sink(stats.clone(), data_path)
+            .with_oa_partition_deletion(matches!(format, SSTableFormat::Bti));
 
         // Index.db writer.
         //

@@ -7,6 +7,7 @@ use pyo3::exceptions::PyKeyError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyFrozenSet, PyList, PyTuple};
 
+use crate::error::to_py_err;
 use cqlite_core::Value;
 
 /// Convert a CQL Value to a Python object.
@@ -283,7 +284,15 @@ fn varint_to_pyint(py: Python<'_>, bytes: &[u8]) -> PyResult<PyObject> {
 }
 
 /// Convert decimal to Python decimal.Decimal.
-fn decimal_to_pydecimal(py: Python<'_>, scale: i32, unscaled: &[u8]) -> PyResult<PyObject> {
+///
+/// `pub(crate)` so the internal `_decimal_from_parts` test helper (lib.rs) can
+/// drive this exact conversion path directly, exercising the fail-closed
+/// corrupt-DECIMAL guard (issue #1741) without a multi-kilobyte on-disk fixture.
+pub(crate) fn decimal_to_pydecimal(
+    py: Python<'_>,
+    scale: i32,
+    unscaled: &[u8],
+) -> PyResult<PyObject> {
     let decimal_mod = py.import("decimal")?;
     let decimal_class = decimal_mod.getattr("Decimal")?;
 
@@ -310,6 +319,65 @@ fn decimal_to_pydecimal(py: Python<'_>, scale: i32, unscaled: &[u8]) -> PyResult
             .into_any()
             .unbind())
     } else {
+        // Fail-closed guard (issue #1741, abort-safety regression). Real Cassandra
+        // DECIMAL values are tiny; a multi-thousand-digit unscaled value or an
+        // absurd scale only arises from a CORRUPT SSTable. The rendering below
+        // would otherwise (a) call Python `str()` on the unscaled int — which
+        // raises a bare `ValueError` once the digit count exceeds
+        // `sys.get_int_max_str_digits()` (py3.11+, default 4300) — or (b) use
+        // `scale` as a `format!` width, which panics with "Formatting argument
+        // out of range". Neither is a catchable driver error (the former escapes
+        // as an uncaught `ValueError`, aborting the caller), so we refuse to
+        // stringify an unbounded integer and instead surface a typed corruption
+        // error. This preserves the abort-safety guarantee (issue #1437/#1440):
+        // a corrupt SSTable raises `CqliteError`, it never crashes the driver.
+        //
+        // The read-side tombstone/TTL shadowing added for #1741 changed which
+        // corrupt row surfaces first on the truncated/bitflipped fixtures,
+        // exposing this pre-existing binding fragility (the unscaled-`str()`
+        // path) that the previous emit order happened to avoid.
+        const DECIMAL_HARD_DIGIT_CAP: usize = 1_000_000;
+        // Python's own configured int->str safety threshold (py3.11+, 0 ==
+        // unlimited). Absent on older interpreters, where there is no such limit;
+        // fall back to the hard cap so the `format!`-width panic is still avoided.
+        let py_int_limit: usize = py
+            .import("sys")
+            .and_then(|sys| sys.getattr("get_int_max_str_digits"))
+            .and_then(|f| f.call0())
+            .and_then(|v| v.extract::<i64>())
+            .map(|n| if n <= 0 { 0 } else { n as usize })
+            .unwrap_or(0);
+        let cap = match py_int_limit {
+            0 => DECIMAL_HARD_DIGIT_CAP,
+            n => n.min(DECIMAL_HARD_DIGIT_CAP),
+        };
+        // TIGHT upper bound on the decimal digit count of |unscaled|. For an
+        // N-byte SIGNED two's-complement integer one bit is the sign, so the
+        // MAGNITUDE is at most 2^(8N-1) — hence at most ceil((8N-1) * log10(2))
+        // decimal digits. That product is never an integer (log10(2) is
+        // irrational × an integer), so `ceil` equals `floor + 1`, which is the
+        // EXACT digit-count upper bound: no extra rounding margin is needed. The
+        // previous `ceil(N * log10(256)) + 1` added a spurious +1 and over-rejected
+        // a minimal value whose magnitude sits exactly at the cap (e.g. a 1785-byte
+        // integer fits in 4300 digits but the old formula computed 4301). Rejecting
+        // only when this tight bound STILL exceeds `cap` lets every representable
+        // value render while a truly unbounded/corrupt byte length is still refused
+        // (fail-closed) — the abort-safety guarantee is preserved. Compute the bit
+        // count in f64 so `8*len - 1` cannot underflow `usize` (len == 0 yields a
+        // negative product → 0 digits after the clamp); the float->int `as`
+        // saturates in Rust, so the guard never wraps or under-counts an oversized
+        // value.
+        let magnitude_bits = 8.0 * (unscaled.len() as f64) - 1.0;
+        let max_digits = (magnitude_bits * std::f64::consts::LOG10_2).ceil().max(0.0) as usize;
+        if max_digits > cap || (scale.unsigned_abs() as usize) > cap {
+            return Err(to_py_err(cqlite_core::Error::corruption(format!(
+                "DECIMAL cell not representable (scale={scale}, unscaled_len={} bytes, \
+                 cap={cap} digits): corrupt SSTable — refusing to stringify an unbounded \
+                 integer (issue #1741)",
+                unscaled.len()
+            ))));
+        }
+
         // Create string representation for exact decimal
         // Convert Python int to string by calling str()
         let builtins = py.import("builtins")?;

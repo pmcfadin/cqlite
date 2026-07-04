@@ -1291,7 +1291,7 @@ fn udt_whole_write_roundtrips_sparse_out_of_order() {
     // True round-trip through the reader.
     let parser = person_reader();
     let (value, _off, _meta) = parser
-        .parse_complex_column_inner(&buf, 0, &col, &col.data_type, true, row_ts, None)
+        .parse_complex_column_inner(&buf, 0, &col, &col.data_type, true, row_ts, None, None)
         .expect("reader must parse the UDT complex column");
 
     match value {

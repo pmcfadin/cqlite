@@ -18,6 +18,11 @@ impl V5CompressedLegacyParser {
         reader: &crate::storage::sstable::reader::types::SSTableReader,
         want_cell_metadata: bool,
         resolution: &RowColumnResolution,
+        // Issue #1741 (Finding 1): read-side shadow for per-cell tombstone/TTL
+        // filtering. `Some` only on user-facing SELECT reads (`read_shadowing`);
+        // `None` for every physical consumer (compaction / delta-scan / tests), which
+        // stay byte-unchanged.
+        shadow: Option<&PartitionShadow>,
     ) -> Result<ParsedRow> {
         self.parse_row_data_with_offset_impl(
             data,
@@ -27,6 +32,7 @@ impl V5CompressedLegacyParser {
             want_cell_metadata,
             None,
             resolution,
+            shadow,
         )
     }
 
@@ -46,6 +52,7 @@ impl V5CompressedLegacyParser {
         want_cell_metadata: bool,
         mut compaction_complex_out: Option<&mut CompactionComplexColumns>,
         resolution: &RowColumnResolution,
+        shadow: Option<&PartitionShadow>,
     ) -> Result<ParsedRow> {
         // Cells map keyed by the interned column-name handle (issue #1334): the
         // name is a schema-owned `Arc<str>` shared across every cell/row, so
@@ -145,6 +152,16 @@ impl V5CompressedLegacyParser {
             }
         }
 
+        // Issue #1741 (Finding 1): per-cell shadow context for this row. `Some` only
+        // on the user-facing SELECT path. `covering` is the deletion (µs) that shadows
+        // any data older than it (partition tombstone folded with the open range
+        // tombstone when this row's clustering falls inside it); `now` is the read
+        // clock for per-cell TTL expiry. A data cell / whole collection whose
+        // effective write ts <= `covering`, or which is TTL-expired at `now`, is
+        // dropped below (no new per-cell allocation — the insert is made conditional).
+        let cell_ctx: Option<(Option<i64>, i64)> =
+            shadow.map(|sh| sh.cell_context(&clustering_values));
+
         // Step 3: Parse row metadata (row_size, prev_size, timestamps, etc.)
         //
         // CRITICAL (Issue #237): Save offset where row_size VInt STARTS.
@@ -152,7 +169,7 @@ impl V5CompressedLegacyParser {
         // Formula: next_offset = (row_metadata_offset + row_size_vint_len) + row_size
         // This offset is right after the clustering prefix (which was already parsed).
         let row_metadata_offset = offset;
-        let (row_header, row_size) =
+        let (mut row_header, row_size) =
             self.parse_row_metadata(data, offset, row_flags, extended_flags)?;
 
         // CRITICAL VALIDATION: row_size must be reasonable
@@ -329,6 +346,16 @@ impl V5CompressedLegacyParser {
             log::debug!("V5CompressedLegacy: Row has HAS_COMPLEX_DELETION flag (0x40) set");
         }
 
+        // Issue #1741 read-side shadowing aggregate. Computed from scalars the cell
+        // parser already returns (no new allocation, no extra HashMap): the max data
+        // cell write timestamp, the max expiring-cell expiry, and whether any data
+        // cell is live-forever. Stashed on `row_header` after the loop and consulted
+        // by the read emit paths to hide partition/range-tombstone-shadowed and
+        // TTL-expired rows. Kept off the write/compaction reconciliation path.
+        let mut agg_max_cell_ts: Option<i64> = None;
+        let mut agg_max_expires_at: Option<i64> = None;
+        let mut agg_has_live_forever = false;
+
         for (col_idx, ctp) in columns_in_order.iter().enumerate() {
             // Skip columns marked MISSING by the row's bitmap (inline, no per-row
             // allocation). `col_idx` is the ON-DISK column index — exactly what the
@@ -410,6 +437,9 @@ impl V5CompressedLegacyParser {
                         has_complex_deletion,
                         row_ts,
                         Some(&mut element_buf),
+                        // Compaction / delta read path: NO per-element filtering (it
+                        // needs every element for reconciliation) — byte-unchanged.
+                        None,
                     )
                     .map(|(value, new_offset, col_meta)| {
                         if emit {
@@ -425,6 +455,33 @@ impl V5CompressedLegacyParser {
                         (value, new_offset, col_meta)
                     })
                 } else {
+                    // Issue #1741 (per-element filtering): on the user-facing SELECT
+                    // read path (`cell_ctx.is_some()`), thread the covering deletion +
+                    // read clock + row-liveness ts into the element loop so shadowed /
+                    // TTL-expired elements are skipped from the emitted container.
+                    // `None` when no shadow context is active (tombstone-free reads and
+                    // physical consumers) — byte-unchanged.
+                    let element_filter = cell_ctx.map(|(cover, now)| ElementShadow {
+                        cover,
+                        now,
+                        row_ts: row_header.timestamp,
+                        // Issue #1741: the effective row expiry a USE_ROW_TTL
+                        // collection element inherits — computed EXACTLY like the
+                        // scalar USE_ROW_TTL cell path (see the `None if use_row_ttl`
+                        // arm below): the pk-liveness localExpirationTime
+                        // (`liveness_expires_at_seconds`, year-2106-safe i64 from
+                        // HAS_TTL), falling back to the row `local_deletion_time`
+                        // re-read UNSIGNED on oa/da when the GC clock is post-2038.
+                        row_expires_at: row_header.liveness_expires_at_seconds.or_else(|| {
+                            row_header.local_deletion_time.map(|s| {
+                                if self.has_uint_deletion_time() {
+                                    (s as u32) as i64
+                                } else {
+                                    s as i64
+                                }
+                            })
+                        }),
+                    });
                     self.parse_complex_column(
                         data,
                         offset,
@@ -432,6 +489,7 @@ impl V5CompressedLegacyParser {
                         complex_type,
                         has_complex_deletion,
                         reader,
+                        element_filter,
                     )
                 };
                 match parse_result {
@@ -449,22 +507,68 @@ impl V5CompressedLegacyParser {
                         // here — that would silently change WRITETIME(col) on the ordinary path
                         // (roborev Finding 1).
                         if emit {
-                            if let Some(ref mut meta_map) = cell_meta {
-                                let row_ts = row_header.timestamp.unwrap_or(0);
-                                meta_map.insert(
-                                    column.name.clone(),
-                                    CellWriteMetadata {
-                                        write_timestamp_micros: row_ts,
-                                        expiration: None,
-                                    },
+                            // Issue #1741 (Finding 2): the collection's effective max
+                            // write ts is the newest of its element-level timestamps and
+                            // the row liveness ts inherited by USE_ROW_TIMESTAMP elements.
+                            // Folding `max_element_writetime` (not just the row ts) means a
+                            // collection element NEWER than a partition/range tombstone
+                            // keeps the row visible even when the row ts predates the
+                            // tombstone. `max_element_writetime` folds ALL live elements
+                            // (including shadow-dropped ones), so a wholly-shadowed
+                            // collection still contributes its element ts here.
+                            let coll_eff_ts = col_meta
+                                .max_element_writetime
+                                .max(row_header.timestamp.unwrap_or(i64::MIN));
+                            // Issue #1741 (per-element filtering): the shadowed/expired
+                            // elements have ALREADY been skipped from `value` inside
+                            // `parse_complex_column_inner`. The collection now reads as
+                            // ABSENT (null) iff the read-side filter EMPTIED it (every
+                            // element was shadowed/expired: `shadow_filtered_element_count
+                            // > 0` AND the container is empty). A collection empty for any
+                            // OTHER reason (genuinely empty / all element-tombstones, where
+                            // `shadow_filtered_element_count == 0`) keeps its prior
+                            // behavior, so tombstone-free reads and physical consumers are
+                            // byte-unchanged. `cover == None` never filters an element, so
+                            // a non-shadowing read never treats a collection as absent.
+                            let collection_absent = col_meta.shadow_filtered_element_count > 0
+                                && Self::complex_value_is_empty(&value);
+                            // Fold the collection into the ROW aggregate REGARDLESS of
+                            // absence (so a wholly-shadowed collection is still recognised
+                            // as shadowed by `row_hidden`, and Finding 2's newest-element ts
+                            // keeps a surviving row visible). Its expiring elements
+                            // contribute their expiry; `has_live_forever_element` is already
+                            // computed POST-filter, so a wholly-shadowed collection never
+                            // sets live-forever.
+                            if coll_eff_ts != i64::MIN {
+                                agg_max_cell_ts = Some(
+                                    agg_max_cell_ts.map_or(coll_eff_ts, |m| m.max(coll_eff_ts)),
                                 );
                             }
-                            // DS4 (Issue #700): Store ComplexColumnMeta for delta-scan callers.
-                            if let Some(ref mut ccm_map) = complex_col_meta {
-                                ccm_map.insert(column.name.clone(), col_meta);
+                            if let Some(e) = col_meta.max_element_expires_at {
+                                agg_max_expires_at =
+                                    Some(agg_max_expires_at.map_or(e, |m| m.max(e)));
                             }
-                            // Issue #1334: interned name handle (Arc::clone), no String alloc.
-                            cells.insert(Arc::clone(&ctp.name), value);
+                            if col_meta.has_live_forever_element {
+                                agg_has_live_forever = true;
+                            }
+                            if !collection_absent {
+                                if let Some(ref mut meta_map) = cell_meta {
+                                    let row_ts = row_header.timestamp.unwrap_or(0);
+                                    meta_map.insert(
+                                        column.name.clone(),
+                                        CellWriteMetadata {
+                                            write_timestamp_micros: row_ts,
+                                            expiration: None,
+                                        },
+                                    );
+                                }
+                                // DS4 (Issue #700): Store ComplexColumnMeta for delta-scan.
+                                if let Some(ref mut ccm_map) = complex_col_meta {
+                                    ccm_map.insert(column.name.clone(), col_meta);
+                                }
+                                // Issue #1334: interned name handle (Arc::clone), no alloc.
+                                cells.insert(Arc::clone(&ctp.name), value);
+                            }
                         }
                         offset = new_offset;
                     }
@@ -477,6 +581,10 @@ impl V5CompressedLegacyParser {
                     }
                 }
             } else {
+                // Issue #1741: peek the cell flags (offset points at the flags byte)
+                // to detect USE_ROW_TTL (0x10), which makes a cell with no explicit
+                // expiry inherit the ROW's expiry rather than being live-forever.
+                let cell_flags = data.get(offset).copied().unwrap_or(0);
                 match self.parse_cell_value_schema_order(data, offset, column, header_type, reader)
                 {
                     Ok((value, cell_own_ts, cell_exp, new_offset)) => {
@@ -494,6 +602,82 @@ impl V5CompressedLegacyParser {
                         // `emit` is false for a DROPPED column (issue #1080 Part 2): we still
                         // advanced `offset` to consume its bytes, but emit no cell/metadata.
                         if emit {
+                            // Issue #1741 read-side shadowing aggregate (scalars only,
+                            // no allocation). A cell tombstone is not live data. A live
+                            // cell contributes its effective write timestamp and, if
+                            // expiring (explicit per-cell TTL, or USE_ROW_TTL inheriting
+                            // the row's expiry), its expiry; otherwise it is live-forever.
+                            // Computed BEFORE the metadata block, which moves `cell_exp`.
+                            let mut dropped = false;
+                            if !matches!(value, Value::Tombstone(_)) {
+                                let eff_ts = cell_own_ts.or(row_header.timestamp);
+                                // A USE_ROW_TTL cell inherits the ROW's expiry. For a
+                                // TTL-bearing INSERT that expiry is the pk-liveness
+                                // localExpirationTime (`liveness_expires_at_seconds`,
+                                // from HAS_TTL); `local_deletion_time` is set only by
+                                // HAS_DELETION (row tombstone), so it is the fallback.
+                                let use_row_ttl = (cell_flags & 0x10) != 0;
+                                let eff_exp: Option<i64> = match cell_exp.as_ref() {
+                                    Some(e) => Some(e.expires_at_seconds),
+                                    None if use_row_ttl => {
+                                        // Liveness expiry is already the year-2106-safe
+                                        // i64 (unsigned-reinterpreted at decode, #1741 F1).
+                                        // The `local_deletion_time` fallback is stored as
+                                        // the `(u32) as i32` on-disk representation, so on
+                                        // oa/da a post-2038 GC clock must be re-read UNSIGNED
+                                        // here too rather than sign-extended negative.
+                                        row_header.liveness_expires_at_seconds.or_else(|| {
+                                            row_header.local_deletion_time.map(|s| {
+                                                if self.has_uint_deletion_time() {
+                                                    (s as u32) as i64
+                                                } else {
+                                                    s as i64
+                                                }
+                                            })
+                                        })
+                                    }
+                                    None => None,
+                                };
+                                // Issue #1741 (Finding 1): per-cell shadow/TTL filter.
+                                // Drop this data cell from the EMITTED map when its
+                                // effective write ts is shadowed by the covering deletion
+                                // (`eff_ts <= cover`) or it is TTL-expired at `now`.
+                                // `cell_ctx` is `None` for physical reads → never drops →
+                                // byte-unchanged.
+                                if let Some((cover, now)) = cell_ctx {
+                                    dropped = PartitionShadow::cell_shadowed_or_expired(
+                                        cover, now, eff_ts, eff_exp,
+                                    );
+                                }
+                                // Fold this cell into the ROW aggregate that drives the
+                                // row-level `row_hidden` decision. A dropped (shadowed/
+                                // expired) cell STILL contributes its ts + expiry — so a
+                                // row reduced to nothing is recognised as shadowed/expired
+                                // (its max ts stays `<= covering` / its expiry stays past)
+                                // rather than looking like an empty/truncated parse — but
+                                // it is NEVER counted live-forever (it is not live).
+                                if let Some(t) = eff_ts {
+                                    agg_max_cell_ts = Some(agg_max_cell_ts.map_or(t, |m| m.max(t)));
+                                }
+                                match eff_exp {
+                                    Some(e) => {
+                                        agg_max_expires_at =
+                                            Some(agg_max_expires_at.map_or(e, |m| m.max(e)));
+                                    }
+                                    None => {
+                                        if !dropped {
+                                            agg_has_live_forever = true;
+                                        }
+                                    }
+                                }
+                            }
+                            if dropped {
+                                offset = new_offset;
+                                continue;
+                            }
+                            // Only compute and store per-cell metadata when the caller requested it.
+                            // On the normal read hot-path (want_cell_metadata == false), cell_meta is
+                            // None and this entire block is skipped — zero allocations per cell.
                             if let Some(ref mut meta_map) = cell_meta {
                                 // Resolve effective write timestamp:
                                 // use cell's own timestamp when present, else row-level liveness timestamp.
@@ -542,6 +726,11 @@ impl V5CompressedLegacyParser {
                 }
             }
         }
+
+        // Issue #1741: stash the read-side shadowing aggregate onto the header.
+        row_header.max_data_cell_timestamp = agg_max_cell_ts;
+        row_header.max_data_cell_expires_at = agg_max_expires_at;
+        row_header.has_live_forever_data_cell = agg_has_live_forever;
 
         log::debug!(
             "V5CompressedLegacy: Parsed {}/{} on-disk columns (missing columns are NULL)",

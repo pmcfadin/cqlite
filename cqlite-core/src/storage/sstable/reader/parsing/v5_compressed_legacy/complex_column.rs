@@ -34,6 +34,10 @@ impl V5CompressedLegacyParser {
         complex_type: &str,
         has_complex_deletion: bool,
         _reader: &crate::storage::sstable::reader::types::SSTableReader,
+        // Issue #1741 (per-element filtering): read-side shadow/TTL context. `Some`
+        // only on the user-facing SELECT read path; `None` keeps physical consumers
+        // byte-unchanged.
+        element_filter: Option<ElementShadow>,
     ) -> Result<(Value, usize, ComplexColumnMeta)> {
         self.parse_complex_column_inner(
             data,
@@ -43,6 +47,7 @@ impl V5CompressedLegacyParser {
             has_complex_deletion,
             0,
             None,
+            element_filter,
         )
     }
 
@@ -77,6 +82,11 @@ impl V5CompressedLegacyParser {
         mut elements_out: Option<
             &mut Vec<crate::storage::sstable::reader::compaction_row::ComplexElement>,
         >,
+        // Issue #1741 (per-element filtering): read-side shadow/TTL context. `Some`
+        // ONLY on the user-facing SELECT read path (where `elements_out` is `None`);
+        // `None` on every physical consumer (compaction / delta-scan / unit tests),
+        // where no element is ever dropped so output is byte-unchanged.
+        element_filter: Option<ElementShadow>,
     ) -> Result<(Value, usize, ComplexColumnMeta)> {
         use crate::storage::sstable::reader::compaction_row::ComplexElement;
 
@@ -225,6 +235,19 @@ impl V5CompressedLegacyParser {
         let mut max_element_writetime: i64 = 0;
         let mut element_tombstone_count: u64 = 0;
 
+        // Issue #1741 (Finding 3): read-time TTL aggregate over LIVE elements.
+        // `has_live_forever_element` becomes true when a live element carries no
+        // TTL of any kind (never IS_EXPIRING); `max_element_expires_at` folds the
+        // explicit per-element expiries. Scalar-only, no per-cell allocation.
+        let mut has_live_forever_element = false;
+        let mut max_element_expires_at: Option<i64> = None;
+
+        // Issue #1741 (per-element filtering): count of LIVE elements dropped from
+        // the emitted container by the read-side shadow/TTL filter. Stays `0` when
+        // `element_filter` is `None` (physical consumers), so their output is
+        // byte-unchanged.
+        let mut shadow_filtered_element_count: usize = 0;
+
         /// Helper to update max_element_writetime from a parsed cell.
         #[inline]
         fn update_max_writetime(max: &mut i64, cell: &ComplexCellParse) {
@@ -232,6 +255,35 @@ impl V5CompressedLegacyParser {
                 if ts > *max {
                     *max = ts;
                 }
+            }
+        }
+
+        /// Issue #1741 (Finding 3): fold ONE live (non-deleted) element's TTL into
+        /// the collection aggregate. A non-expiring element is live-forever (keeps
+        /// the row visible) — but ONLY when it is not itself dropped by the read-side
+        /// shadow/TTL filter (`dropped`), so a wholly-shadowed collection never marks
+        /// live-forever. An expiring element with an EXPLICIT per-element expiry
+        /// contributes that expiry REGARDLESS of `dropped` (so an all-expired
+        /// collection still folds a past expiry that cannot keep the row alive, and
+        /// signals `has_ttl`); an expiring element inheriting the row TTL
+        /// (`USE_ROW_TTL`, no per-element `localDeletionTime`) is governed by the
+        /// row-liveness expiry, so it neither marks live-forever nor folds here.
+        /// Far-future `localDeletionTime` in `[2^31, 2^32)` is recovered via
+        /// `as u32 as i64`, matching the row-liveness expiry clock.
+        #[inline]
+        fn fold_element_expiry(
+            has_live_forever: &mut bool,
+            max_exp: &mut Option<i64>,
+            cell: &ComplexCellParse,
+            dropped: bool,
+        ) {
+            if !cell.is_expiring {
+                if !dropped {
+                    *has_live_forever = true;
+                }
+            } else if let Some(ldt) = cell.element_local_deletion_time {
+                let e = ldt as u32 as i64;
+                *max_exp = Some(max_exp.map_or(e, |m: i64| m.max(e)));
             }
         }
 
@@ -273,7 +325,26 @@ impl V5CompressedLegacyParser {
                 // DS4: Track element timestamp for live elements only (roborev Finding 2).
                 // Tombstoned elements are skipped above; their timestamps must not
                 // inflate the max_element_writetime reported for the collection.
+                // ALWAYS folded (even for a shadow-dropped element) so a wholly-
+                // shadowed collection still contributes its element ts to the row
+                // aggregate and is recognised as shadowed.
                 update_max_writetime(&mut max_element_writetime, &cell);
+                // Issue #1741 (per-element): is THIS element shadowed by the covering
+                // deletion or TTL-expired at the read clock? Always `false` when the
+                // filter is `None` (physical consumers) — byte-unchanged.
+                let dropped = Self::element_dropped(element_filter, &cell);
+                // Issue #1741 (Finding 3): fold the live element's TTL/expiry
+                // (live-forever only when NOT dropped).
+                fold_element_expiry(
+                    &mut has_live_forever_element,
+                    &mut max_element_expires_at,
+                    &cell,
+                    dropped,
+                );
+                if dropped {
+                    shadow_filtered_element_count += 1;
+                    continue;
+                }
 
                 // Epic #899: surface this live element to the compaction path.
                 record_element(
@@ -332,7 +403,23 @@ impl V5CompressedLegacyParser {
                 // DS4: Track element timestamp for live elements only (roborev Finding 2).
                 // Tombstoned elements are skipped above; their timestamps must not
                 // inflate the max_element_writetime reported for the collection.
+                // ALWAYS folded (even for a shadow-dropped element) so the row
+                // aggregate still sees a wholly-shadowed collection as shadowed.
                 update_max_writetime(&mut max_element_writetime, &cell);
+                // Issue #1741 (per-element): shadow/TTL filter for THIS set member.
+                let dropped = Self::element_dropped(element_filter, &cell);
+                // Issue #1741 (Finding 3): fold the live element's TTL/expiry
+                // (live-forever only when NOT dropped).
+                fold_element_expiry(
+                    &mut has_live_forever_element,
+                    &mut max_element_expires_at,
+                    &cell,
+                    dropped,
+                );
+                if dropped {
+                    shadow_filtered_element_count += 1;
+                    continue;
+                }
 
                 // For sets: the path bytes ARE the element value (cell value is always empty).
                 // If cell.value is Some (unusual case where a set cell has a non-empty value),
@@ -411,7 +498,26 @@ impl V5CompressedLegacyParser {
                     );
                 } else {
                     // DS4: Track element timestamp for live map entries only.
+                    // ALWAYS folded (even for a shadow-dropped entry) so the row
+                    // aggregate sees a wholly-shadowed map as shadowed.
                     update_max_writetime(&mut max_element_writetime, &cell);
+                    // Issue #1741 (per-element): shadow/TTL filter for THIS entry —
+                    // drop the WHOLE (key, value) entry when its own cell is shadowed
+                    // by the covering deletion or TTL-expired. `false` when the filter
+                    // is `None` (physical consumers), so maps stay byte-unchanged.
+                    let dropped = Self::element_dropped(element_filter, &cell);
+                    // Issue #1741 (Finding 3): fold the live entry's TTL/expiry
+                    // (live-forever only when NOT dropped).
+                    fold_element_expiry(
+                        &mut has_live_forever_element,
+                        &mut max_element_expires_at,
+                        &cell,
+                        dropped,
+                    );
+                    if dropped {
+                        shadow_filtered_element_count += 1;
+                        continue;
+                    }
                 }
 
                 // Decode the map key (from cell_path) up front so it can be both
@@ -502,6 +608,22 @@ impl V5CompressedLegacyParser {
                     continue;
                 }
                 update_max_writetime(&mut max_element_writetime, &cell);
+                // Issue #1741 (per-element): shadow/TTL filter for THIS UDT field —
+                // a shadowed/expired field is left absent (its `field_values` slot
+                // stays `None`). `false` when the filter is `None` (byte-unchanged).
+                let dropped = Self::element_dropped(element_filter, &cell);
+                // Issue #1741 (Finding 3): fold the live UDT field's TTL/expiry
+                // (live-forever only when NOT dropped).
+                fold_element_expiry(
+                    &mut has_live_forever_element,
+                    &mut max_element_expires_at,
+                    &cell,
+                    dropped,
+                );
+                if dropped {
+                    shadow_filtered_element_count += 1;
+                    continue;
+                }
 
                 // Decode the field value with its DECLARED type. `cell.value` is the
                 // raw bytes wrapped as Blob (BytesType) above; an empty-value cell
@@ -581,8 +703,69 @@ impl V5CompressedLegacyParser {
                 max_element_writetime,
                 element_tombstone_count,
                 complex_deletion,
+                has_live_forever_element,
+                max_element_expires_at,
+                shadow_filtered_element_count,
             },
         ))
+    }
+
+    /// Issue #1741 (per-element filtering): whether a LIVE collection element is
+    /// dropped by read-side shadow/TTL filtering. `None` filter (every physical
+    /// consumer — compaction / delta-scan / unit tests) NEVER drops, keeping their
+    /// output byte-unchanged. A covering deletion shadows an element whose effective
+    /// write ts (its own, or the inherited row ts for `USE_ROW_TIMESTAMP`) is
+    /// `<= cover`; an EXPIRING element with an explicit per-element `localDeletionTime
+    /// <= now` is TTL-expired. An element inheriting the row TTL (`USE_ROW_TTL`, no
+    /// per-element `localDeletionTime`) has `element_local_deletion_time == None` and
+    /// is TTL-checked against the row liveness expiry (`filter.row_expires_at`),
+    /// EXACTLY as the scalar `USE_ROW_TTL` cell path does — so an expired inherited-TTL
+    /// element is dropped even when another live cell keeps the row visible. An
+    /// element with no authoritative write ts is never shadowed
+    /// (no-heuristics, issue #28). Reuses the SAME decision as the simple-cell path
+    /// ([`PartitionShadow::cell_shadowed_or_expired`]) so both stay consistent.
+    #[inline]
+    fn element_dropped(filter: Option<ElementShadow>, cell: &ComplexCellParse) -> bool {
+        let Some(f) = filter else {
+            return false;
+        };
+        // Effective element write ts: its own, else the inherited row ts for a
+        // USE_ROW_TIMESTAMP element (`element_writetime == None`). The read path
+        // always sets `f.row_ts` from the row header, so this is authoritative. When
+        // neither is present the element has no authoritative ts (`eff_ts = None`),
+        // which `cell_shadowed_or_expired` never shadows (no-heuristics).
+        let eff_ts = cell.element_writetime.or(f.row_ts);
+        // An EXPIRING element's effective expiry mirrors the scalar USE_ROW_TTL cell
+        // path EXACTLY: an explicit per-element `localDeletionTime` wins (recovered
+        // from the far-future [2^31,2^32) encoding via `as u32 as i64`); an element
+        // that inherits the row TTL (`USE_ROW_TTL`, no per-element LDT) uses the row
+        // liveness expiry (`f.row_expires_at`). A non-expiring element is live-forever
+        // (no expiry). This makes scalar and collection-element USE_ROW_TTL semantics
+        // identical, so an inherited-TTL element that has expired is dropped even when
+        // another (live) cell keeps the row visible.
+        let eff_exp = if cell.is_expiring {
+            match cell.element_local_deletion_time {
+                Some(l) => Some(l as u32 as i64),
+                None => f.row_expires_at,
+            }
+        } else {
+            None
+        };
+        PartitionShadow::cell_shadowed_or_expired(f.cover, f.now, eff_ts, eff_exp)
+    }
+
+    /// Issue #1741 (per-element filtering): whether a parsed non-frozen collection
+    /// value emitted ZERO surviving elements (so the read path treats it as absent /
+    /// null). Only the collection variants are meaningful; any other value returns
+    /// `false` (never treated as an empty collection).
+    pub(super) fn complex_value_is_empty(value: &Value) -> bool {
+        match value {
+            Value::List(v) => v.is_empty(),
+            Value::Set(v) => v.is_empty(),
+            Value::Map(v) => v.is_empty(),
+            Value::Udt(u) => u.fields.iter().all(|f| f.value.is_none()),
+            _ => false,
+        }
     }
 
     /// Parse a single complex cell and extract its value.
@@ -825,6 +1008,7 @@ impl V5CompressedLegacyParser {
             element_writetime,
             element_ttl,
             element_local_deletion_time,
+            is_expiring,
         })
     }
 
@@ -1370,6 +1554,390 @@ mod tests {
         );
     }
 
+    /// Issue #1741 (Finding 3): a non-frozen collection's read-time TTL aggregate
+    /// must reflect its ELEMENTS, not blanket "live-forever". Build a `list<blob>`
+    /// with one EXPIRING element (explicit `localDeletionTime = 1000`) and one
+    /// LIVE-FOREVER element (no TTL), and assert the derived aggregate:
+    ///   * `has_live_forever_element == true` (the no-TTL element keeps the row visible)
+    ///   * `max_element_expires_at == Some(1000)` (the expiring element's expiry).
+    ///
+    /// Then a collection whose elements are ALL expiring must report
+    /// `has_live_forever_element == false` (so an otherwise-expired row is NOT kept
+    /// alive by the collection), and an all-deleted collection contributes neither.
+    #[test]
+    fn test_1741_collection_element_ttl_aggregate() {
+        use super::super::test_support::helpers::encode_unsigned;
+
+        // Deltas are absolute (min_timestamp / min_local_deletion_time / min_ttl = 0).
+        let parser = V5CompressedLegacyParser::new("k".to_string(), "t".to_string(), 0, 0, Some(0));
+        let column = crate::schema::Column {
+            name: "c".to_string(),
+            data_type: "list<blob>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        // One expiring element (flags IS_EXPIRING 0x02): ts, ldt, ttl, path, value.
+        // All deltas are < 128 so each VUInt is a single byte (unambiguous layout).
+        let expiring = |ldt: u64, val: u8| {
+            let mut b = vec![0x02u8];
+            encode_unsigned(1, &mut b); // timestamp delta
+            encode_unsigned(ldt, &mut b); // localDeletionTime delta == absolute expiry
+            encode_unsigned(1, &mut b); // ttl delta
+            encode_unsigned(0, &mut b); // path_len
+            encode_unsigned(1, &mut b); // value_len
+            b.push(val);
+            b
+        };
+        // One live-forever element (flags 0x08 USE_ROW_TIMESTAMP, no TTL fields).
+        let live_forever = |val: u8| {
+            let mut b = vec![0x08u8];
+            encode_unsigned(0, &mut b); // path_len
+            encode_unsigned(1, &mut b); // value_len
+            b.push(val);
+            b
+        };
+        // A deleted element (flags IS_DELETED 0x01): timestamp, ldt (deleted), path,
+        // no ttl (not expiring), no value (deleted).
+        let deleted = |ldt: u64| {
+            let mut b = vec![0x01u8];
+            encode_unsigned(1, &mut b); // timestamp delta (not USE_ROW_TIMESTAMP)
+            encode_unsigned(ldt, &mut b); // localDeletionTime delta
+            encode_unsigned(0, &mut b); // path_len
+            b
+        };
+
+        // Case A: expiring + live-forever.
+        let mut data = Vec::new();
+        encode_unsigned(2, &mut data); // cell_count
+        data.extend_from_slice(&expiring(100, 0xAA));
+        data.extend_from_slice(&live_forever(0xBB));
+        let (_v, _off, meta) = parser
+            .parse_complex_column_inner(&data, 0, &column, "list<blob>", false, 0, None, None)
+            .expect("parse list<blob>");
+        assert!(
+            meta.has_live_forever_element,
+            "a live-forever element must keep the row visible"
+        );
+        assert_eq!(
+            meta.max_element_expires_at,
+            Some(100),
+            "the expiring element's explicit expiry must fold into the aggregate"
+        );
+        assert_eq!(meta.element_tombstone_count, 0);
+
+        // Case B: all elements expiring — NO live-forever, max is the larger expiry.
+        let mut data = Vec::new();
+        encode_unsigned(2, &mut data);
+        data.extend_from_slice(&expiring(100, 0xAA));
+        data.extend_from_slice(&expiring(120, 0xBB));
+        let (_v, _off, meta) = parser
+            .parse_complex_column_inner(&data, 0, &column, "list<blob>", false, 0, None, None)
+            .expect("parse list<blob>");
+        assert!(
+            !meta.has_live_forever_element,
+            "an all-expiring collection must NOT keep an otherwise-expired row alive"
+        );
+        assert_eq!(meta.max_element_expires_at, Some(120));
+
+        // Case C: all elements deleted — neither live-forever nor an expiry.
+        let mut data = Vec::new();
+        encode_unsigned(2, &mut data);
+        data.extend_from_slice(&deleted(100));
+        data.extend_from_slice(&deleted(120));
+        let (_v, _off, meta) = parser
+            .parse_complex_column_inner(&data, 0, &column, "list<blob>", false, 0, None, None)
+            .expect("parse list<blob>");
+        assert!(!meta.has_live_forever_element);
+        assert_eq!(meta.max_element_expires_at, None);
+        assert_eq!(meta.element_tombstone_count, 2);
+    }
+
+    /// Issue #1741 (per-element filtering, test 2 — expired vs live): a non-frozen
+    /// collection with ONE expired element (explicit per-element
+    /// `localDeletionTime <= now`) and ONE live-forever element must emit ONLY the
+    /// live element when the read-side [`ElementShadow`] filter is active. The
+    /// dropped element folds its (past) expiry into the aggregate but never marks
+    /// `live-forever`.
+    ///
+    /// Pinned as a UNIT test (not end-to-end) because the writer stamps an expiring
+    /// cell's `localDeletionTime` as `now + ttl`, so a PAST-expired per-element TTL
+    /// is not synthesizable via a fresh writer flush — the same rationale as the
+    /// existing `per_cell_shadow_and_ttl_drop_decision` pin. This drives the exact
+    /// element loop the read path calls (`element_filter = Some`).
+    ///
+    /// Revert-verify: with the filter `None` (the physical-consumer path) the list
+    /// keeps BOTH elements and `shadow_filtered_element_count == 0` — proving the
+    /// differential is the filter, not the parse.
+    #[test]
+    fn test_1741_per_element_ttl_filter_keeps_only_live() {
+        use super::super::test_support::helpers::encode_unsigned;
+
+        let parser = V5CompressedLegacyParser::new("k".to_string(), "t".to_string(), 0, 0, Some(0));
+        let column = crate::schema::Column {
+            name: "c".to_string(),
+            data_type: "list<blob>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+        // Expiring element (IS_EXPIRING 0x02): own ts, ldt (absolute expiry), ttl,
+        // empty path, one value byte.
+        let expiring = |ldt: u64, val: u8| {
+            let mut b = vec![0x02u8];
+            encode_unsigned(1, &mut b); // timestamp delta
+            encode_unsigned(ldt, &mut b); // localDeletionTime delta == absolute expiry
+            encode_unsigned(1, &mut b); // ttl delta
+            encode_unsigned(0, &mut b); // path_len
+            encode_unsigned(1, &mut b); // value_len
+            b.push(val);
+            b
+        };
+        // Live-forever element (USE_ROW_TIMESTAMP 0x08, no TTL fields).
+        let live_forever = |val: u8| {
+            let mut b = vec![0x08u8];
+            encode_unsigned(0, &mut b); // path_len
+            encode_unsigned(1, &mut b); // value_len
+            b.push(val);
+            b
+        };
+
+        let mut data = Vec::new();
+        encode_unsigned(2, &mut data); // cell_count
+        data.extend_from_slice(&expiring(100, 0xAA)); // expires at 100
+        data.extend_from_slice(&live_forever(0xBB));
+
+        // now = 200 (> 100) so the expiring element is TTL-expired; no covering
+        // deletion. row_ts feeds the USE_ROW_TIMESTAMP element's inherited ts.
+        let filter = ElementShadow {
+            cover: None,
+            now: 200,
+            row_ts: Some(5),
+            row_expires_at: None,
+        };
+        let (value, _off, meta) = parser
+            .parse_complex_column_inner(
+                &data,
+                0,
+                &column,
+                "list<blob>",
+                false,
+                0,
+                None,
+                Some(filter),
+            )
+            .expect("parse list<blob>");
+        assert_eq!(
+            value,
+            Value::List(vec![Value::Blob(vec![0xBB])]),
+            "only the live-forever element survives; the expired element is dropped"
+        );
+        assert_eq!(meta.shadow_filtered_element_count, 1);
+        assert!(
+            meta.has_live_forever_element,
+            "the surviving live-forever element keeps the row visible"
+        );
+        assert_eq!(meta.max_element_expires_at, Some(100));
+
+        // Revert-verify: with NO filter the parse keeps both elements.
+        let (value_unfiltered, _off, meta_unfiltered) = parser
+            .parse_complex_column_inner(&data, 0, &column, "list<blob>", false, 0, None, None)
+            .expect("parse list<blob>");
+        assert_eq!(
+            value_unfiltered,
+            Value::List(vec![Value::Blob(vec![0xAA]), Value::Blob(vec![0xBB])]),
+            "the physical (no-filter) parse must keep BOTH elements (byte-unchanged)"
+        );
+        assert_eq!(meta_unfiltered.shadow_filtered_element_count, 0);
+    }
+
+    /// Issue #1741 (per-element filtering, test 3 — all shadowed/expired): a
+    /// collection whose every element is shadowed by the covering deletion OR
+    /// TTL-expired emits an EMPTY container, reports `shadow_filtered_element_count
+    /// == cell_count`, and never marks live-forever. The read call site turns that
+    /// (empty container + filtered count > 0) into an ABSENT column so it cannot by
+    /// itself keep an otherwise-dead row alive.
+    ///
+    /// Revert-verify: with the filter `None` the container keeps every element and
+    /// `shadow_filtered_element_count == 0`.
+    #[test]
+    fn test_1741_per_element_all_shadowed_collection_is_empty() {
+        use super::super::test_support::helpers::encode_unsigned;
+
+        let parser = V5CompressedLegacyParser::new("k".to_string(), "t".to_string(), 0, 0, Some(0));
+        let column = crate::schema::Column {
+            name: "c".to_string(),
+            data_type: "list<blob>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+        // Two plain (non-expiring) elements each carrying its OWN write ts (delta),
+        // both OLDER than the covering deletion below.
+        let plain = |ts_delta: u64, val: u8| {
+            let mut b = vec![0x00u8];
+            encode_unsigned(ts_delta, &mut b); // timestamp delta == absolute ts
+            encode_unsigned(0, &mut b); // path_len
+            encode_unsigned(1, &mut b); // value_len
+            b.push(val);
+            b
+        };
+        let mut data = Vec::new();
+        encode_unsigned(2, &mut data);
+        data.extend_from_slice(&plain(10, 0xAA)); // ts = 10
+        data.extend_from_slice(&plain(20, 0xBB)); // ts = 20
+
+        // Covering deletion at 100 (µs) shadows both elements (10, 20 <= 100).
+        let filter = ElementShadow {
+            cover: Some(100),
+            now: 0,
+            row_ts: None,
+            row_expires_at: None,
+        };
+        let (value, _off, meta) = parser
+            .parse_complex_column_inner(
+                &data,
+                0,
+                &column,
+                "list<blob>",
+                false,
+                0,
+                None,
+                Some(filter),
+            )
+            .expect("parse list<blob>");
+        assert!(
+            V5CompressedLegacyParser::complex_value_is_empty(&value),
+            "every element is shadowed by the covering deletion, so the container is empty"
+        );
+        assert_eq!(meta.shadow_filtered_element_count, 2);
+        assert!(
+            !meta.has_live_forever_element,
+            "a wholly-shadowed collection must NOT keep an otherwise-dead row alive"
+        );
+        // The shadowed elements STILL fold their write ts into the aggregate so the
+        // row is recognised as shadowed (max 20 <= covering 100).
+        assert_eq!(meta.max_element_writetime, 20);
+
+        // Revert-verify: with NO filter the container keeps both elements.
+        let (value_unfiltered, _off, meta_unfiltered) = parser
+            .parse_complex_column_inner(&data, 0, &column, "list<blob>", false, 0, None, None)
+            .expect("parse list<blob>");
+        assert_eq!(
+            value_unfiltered,
+            Value::List(vec![Value::Blob(vec![0xAA]), Value::Blob(vec![0xBB])])
+        );
+        assert_eq!(meta_unfiltered.shadow_filtered_element_count, 0);
+    }
+
+    /// Issue #1741 (roborev Medium — inherited-row-TTL collection elements): an
+    /// expiring collection element that INHERITS the row TTL (`USE_ROW_TTL` 0x10,
+    /// `is_expiring` true, NO explicit per-element `localDeletionTime`) must be
+    /// dropped when the inherited row liveness expiry is past `now`, EXACTLY as the
+    /// scalar `USE_ROW_TTL` cell path does — even though the row itself survives
+    /// (another live element keeps it visible). Before the fix such an element had
+    /// `element_local_deletion_time == None`, so its computed `eff_exp` was `None`
+    /// and it was KEPT (the expired inherited-TTL element leaked into the result).
+    ///
+    /// Scenario: a `list<blob>` with (1) a USE_ROW_TTL element inheriting an EXPIRED
+    /// row TTL and (2) a live-forever element that keeps the collection non-empty →
+    /// only the live-forever element survives.
+    ///
+    /// Pinned as a UNIT test (not end-to-end) for the same reason as
+    /// `test_1741_per_element_ttl_filter_keeps_only_live`: the writer stamps an
+    /// expiring row's `liveness_expires_at_seconds` as `now + ttl`, so a PAST-expired
+    /// inherited TTL is not synthesizable via a fresh writer flush. This drives the
+    /// exact element loop the read path calls (`element_filter = Some`) with the row
+    /// liveness expiry threaded into `ElementShadow::row_expires_at`.
+    ///
+    /// Revert-verify: with the filter `None` (physical-consumer path) BOTH elements
+    /// survive and `shadow_filtered_element_count == 0` — proving the differential is
+    /// the filter, not the parse.
+    #[test]
+    fn test_1741_per_element_inherited_row_ttl_expired_is_dropped() {
+        use super::super::test_support::helpers::encode_unsigned;
+
+        let parser = V5CompressedLegacyParser::new("k".to_string(), "t".to_string(), 0, 0, Some(0));
+        let column = crate::schema::Column {
+            name: "c".to_string(),
+            data_type: "list<blob>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+        // USE_ROW_TTL element (flags 0x12 = IS_EXPIRING 0x02 | USE_ROW_TTL 0x10):
+        // it carries its OWN timestamp (USE_ROW_TIMESTAMP not set) but NO per-element
+        // localDeletionTime / TTL (both omitted under USE_ROW_TTL). Its expiry is
+        // inherited from the row liveness expiry.
+        let use_row_ttl = |val: u8| {
+            let mut b = vec![0x12u8];
+            encode_unsigned(1, &mut b); // timestamp delta
+            encode_unsigned(0, &mut b); // path_len
+            encode_unsigned(1, &mut b); // value_len
+            b.push(val);
+            b
+        };
+        // Live-forever element (USE_ROW_TIMESTAMP 0x08, no TTL fields).
+        let live_forever = |val: u8| {
+            let mut b = vec![0x08u8];
+            encode_unsigned(0, &mut b); // path_len
+            encode_unsigned(1, &mut b); // value_len
+            b.push(val);
+            b
+        };
+        let mut data = Vec::new();
+        encode_unsigned(2, &mut data); // cell_count
+        data.extend_from_slice(&use_row_ttl(0xAA)); // inherits (expired) row TTL
+        data.extend_from_slice(&live_forever(0xBB)); // keeps the collection non-empty
+
+        // Row liveness expiry = 100 (epoch s), now = 200 (> 100) → the inherited-TTL
+        // element is EXPIRED. No covering deletion. row_ts feeds the inherited write ts.
+        let filter = ElementShadow {
+            cover: None,
+            now: 200,
+            row_ts: Some(5),
+            row_expires_at: Some(100),
+        };
+        let (value, _off, meta) = parser
+            .parse_complex_column_inner(
+                &data,
+                0,
+                &column,
+                "list<blob>",
+                false,
+                0,
+                None,
+                Some(filter),
+            )
+            .expect("parse list<blob>");
+        assert_eq!(
+            value,
+            Value::List(vec![Value::Blob(vec![0xBB])]),
+            "the inherited-row-TTL element is expired and must be dropped; only the \
+             live-forever element survives (pre-fix: BOTH leaked)"
+        );
+        assert_eq!(
+            meta.shadow_filtered_element_count, 1,
+            "exactly the expired inherited-TTL element was filtered"
+        );
+        assert!(
+            meta.has_live_forever_element,
+            "the surviving live-forever element keeps the row visible"
+        );
+
+        // Revert-verify: with NO filter (physical consumer) BOTH elements survive.
+        let (value_unfiltered, _off, meta_unfiltered) = parser
+            .parse_complex_column_inner(&data, 0, &column, "list<blob>", false, 0, None, None)
+            .expect("parse list<blob>");
+        assert_eq!(
+            value_unfiltered,
+            Value::List(vec![Value::Blob(vec![0xAA]), Value::Blob(vec![0xBB])]),
+            "the physical (no-filter) parse keeps BOTH elements (byte-unchanged)"
+        );
+        assert_eq!(meta_unfiltered.shadow_filtered_element_count, 0);
+    }
+
     /// Regression test for Issue #481 regression: `list<frozen<udt>>` elements
     /// were being returned as `Value::Blob` instead of `Value::Udt`.
     ///
@@ -1456,7 +2024,7 @@ mod tests {
         blob.extend_from_slice(&udt_bytes);
 
         let (value, consumed, _meta) = parser
-            .parse_complex_column_inner(&blob, 0, &column, &column.data_type, false, 0, None)
+            .parse_complex_column_inner(&blob, 0, &column, &column.data_type, false, 0, None, None)
             .expect("parse_complex_column_inner must succeed for list<frozen<address_type>>");
         assert_eq!(consumed, blob.len(), "all bytes must be consumed");
 
@@ -1710,7 +2278,7 @@ mod tests {
         blob.extend(build_set_cell_bytes(world));
 
         let (value, consumed, _meta) = parser
-            .parse_complex_column_inner(&blob, 0, &column, &column.data_type, false, 0, None)
+            .parse_complex_column_inner(&blob, 0, &column, &column.data_type, false, 0, None, None)
             .expect("parse_complex_column_inner should succeed");
 
         assert_eq!(consumed, blob.len());
@@ -1763,7 +2331,7 @@ mod tests {
         blob.extend(build_set_tombstone_cell_bytes(dead));
 
         let (value, consumed, meta) = parser
-            .parse_complex_column_inner(&blob, 0, &column, &column.data_type, false, 0, None)
+            .parse_complex_column_inner(&blob, 0, &column, &column.data_type, false, 0, None, None)
             .expect("parse_complex_column_inner should succeed");
 
         assert_eq!(consumed, blob.len(), "parser must consume the entire blob");
@@ -1834,6 +2402,7 @@ mod tests {
                 &column.data_type,
                 true, /* has_complex_deletion */
                 0,
+                None,
                 None,
             )
             .expect("parse_complex_column_inner must succeed for collection tombstone");
@@ -1950,6 +2519,7 @@ mod tests {
                 true, // has_complex_deletion
                 min_timestamp,
                 Some(&mut elements),
+                None,
             )
             .expect("parse must succeed");
 

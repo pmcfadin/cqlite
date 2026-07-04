@@ -58,6 +58,21 @@ fn _built_with_panic_abort() -> bool {
     cfg!(panic = "abort")
 }
 
+/// Test-support: render a CQL DECIMAL from its raw parts — `scale` and the
+/// big-endian two's-complement `unscaled` magnitude — through the exact
+/// production conversion (`value::decimal_to_pydecimal`).
+///
+/// Lets the pytest suite exercise the fail-closed corrupt-DECIMAL guard (issue
+/// #1741) directly: a large-but-REPRESENTABLE unscaled value must render as a
+/// `decimal.Decimal`, while a genuinely oversized one must raise a typed
+/// `CqliteError` (never abort the interpreter) — without needing a multi-kilobyte
+/// on-disk fixture. Not part of the stable public API; the leading underscore
+/// marks it internal test support.
+#[pyfunction]
+fn _decimal_from_parts(py: Python<'_>, scale: i32, unscaled: Vec<u8>) -> PyResult<PyObject> {
+    value::decimal_to_pydecimal(py, scale, &unscaled)
+}
+
 /// Python module for CQLite.
 #[pymodule]
 fn _cqlite(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -67,6 +82,10 @@ fn _cqlite(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Test-support introspection (issue #1437). See the fn doc comment.
     m.add_function(wrap_pyfunction!(_built_with_panic_abort, m)?)?;
+
+    // Test-support: direct DECIMAL rendering path for the corrupt-guard tests
+    // (issue #1741). See the fn doc comment.
+    m.add_function(wrap_pyfunction!(_decimal_from_parts, m)?)?;
 
     // Register exception types
     error::register_exceptions(m)?;

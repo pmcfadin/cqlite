@@ -1,6 +1,90 @@
 use super::*;
 
+/// `DeletionTime.Serializer` LIVE sentinel for oa/da (`hasUIntDeletionTime`)
+/// partitions: a single byte `0x80` (`IS_LIVE_DELETION = 0b1000_0000`) encodes a
+/// live partition; any other leading byte introduces the full 12-byte deleted
+/// form (8-byte `markedForDeleteAt` + 4-byte unsigned `localDeletionTime`).
+/// Authority: `DeletionTime.java:208` (`Serializer.serialize`).
+pub(super) const OA_IS_LIVE_DELETION: u8 = 0x80;
+
+/// Whether the leading partition header in a sliding-window chunk buffer can be
+/// safely parsed yet. Computed WITHOUT consuming bytes so the two sliding
+/// parsers ([`V5CompressedLegacyParser::parse_one_partition_with_timestamps`] and
+/// [`V5CompressedLegacyParser::parse_one_partition_for_compaction`]) agree on the
+/// need-more decision for both the nb (fixed 12-byte) and oa/da (1-byte LIVE /
+/// 12-byte DELETED) `DeletionTime` forms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PartitionHeaderReadiness {
+    /// Enough bytes are present to parse the full header, INCLUDING the complete
+    /// partition `DeletionTime` for its live/deleted form. Parsing cannot fail
+    /// due to truncation.
+    Ready,
+    /// The header — or, for an oa/da deleted partition, its 12-byte
+    /// `DeletionTime` — is split across the chunk boundary. More bytes must be
+    /// appended before it can be parsed (non-final chunk → `NeedMore`).
+    Incomplete,
+    /// The header shape is invalid (zero or over-long key length): the caller
+    /// should skip one byte to resynchronise.
+    Malformed,
+}
+
 impl V5CompressedLegacyParser {
+    /// Decide whether the leading partition header in `data` is fully present.
+    ///
+    /// Issue #1741 (roborev HIGH): the oa/da (`hasUIntDeletionTime`) partition
+    /// `DeletionTime` is 1 byte only when LIVE (the [`OA_IS_LIVE_DELETION`]
+    /// sentinel); a DELETED partition carries the full 12-byte form. Sizing the
+    /// header minimum at a flat 1 byte let a deleted partition header that was
+    /// split across a NON-FINAL chunk (partition key + only the first deletion
+    /// byte present) pass the guard, so `parse_partition_header_full` failed
+    /// mid-buffer and the sliding parser returned `Emitted(1)` instead of
+    /// `NeedMore` — desyncing the scan and, on the compaction path, dropping the
+    /// partition tombstone (data-resurrection risk).
+    ///
+    /// This peeks the deletion-time discriminator to size the header correctly
+    /// and, when a `Ready` verdict is returned, guarantees the subsequent
+    /// `parse_partition_header_full` has every byte it needs — so a truncated
+    /// deletion-time can never be mis-parsed as a complete partition. No
+    /// heuristics: the branch keys off the authoritative `hasUIntDeletionTime`
+    /// version-gate flag and the canonical `DeletionTime` sentinel.
+    pub(super) fn partition_header_readiness(&self, data: &[u8]) -> PartitionHeaderReadiness {
+        // Cassandra partition key size limits (see the block loop guards).
+        const CASSANDRA_MAX_KEY_SIZE: usize = 65536; // 64KB per Cassandra spec
+        const FORMAT_MAX_KEY_SIZE: usize = 255; // u8 length field limit
+
+        // flags(1) + key_len(1) must both be present before anything else.
+        if data.len() < 2 {
+            return PartitionHeaderReadiness::Incomplete;
+        }
+        let key_len = data[1] as usize;
+        if key_len == 0 || key_len > FORMAT_MAX_KEY_SIZE.min(CASSANDRA_MAX_KEY_SIZE) {
+            return PartitionHeaderReadiness::Malformed;
+        }
+
+        // Offset of the DeletionTime, immediately after flags + key_len + key.
+        let deletion_offset = 2 + key_len;
+        let deletion_time_min = if self.has_uint_deletion_time() {
+            // oa/da: peek the DeletionTime discriminator to size the header.
+            match data.get(deletion_offset) {
+                // Discriminator byte itself is not present yet — split header.
+                None => return PartitionHeaderReadiness::Incomplete,
+                // LIVE sentinel (0x80): exactly 1 byte.
+                Some(&b) if (b & OA_IS_LIVE_DELETION) != 0 => 1,
+                // Any other leading byte introduces the full 12-byte deleted form.
+                Some(_) => 12,
+            }
+        } else {
+            // nb: fixed 12-byte signed DeletionTime (4-byte LDT + 8-byte MFDA).
+            12
+        };
+
+        if deletion_offset + deletion_time_min > data.len() {
+            PartitionHeaderReadiness::Incomplete
+        } else {
+            PartitionHeaderReadiness::Ready
+        }
+    }
+
     /// Parse row flags only (Issue #213 fix: split from parse_row_header)
     ///
     /// # Format
@@ -384,7 +468,20 @@ impl V5CompressedLegacyParser {
             let ldt_bytes_consumed = data[pos..].len() - remaining.len();
             pos += ldt_bytes_consumed;
 
-            let absolute_ldt = self.min_local_deletion_time.wrapping_add(ldt_delta as i64) as i32;
+            // Liveness localExpirationTime (SECONDS). Same VG3 unsigned-deletion-time
+            // reinterpretation as the row/complex-cell deletion LDT reader below
+            // (BigFormat.java:409, hasUIntDeletionTime): on oa/da a post-2038 expiry
+            // occupies [2^31, 2^32) and must be read as UNSIGNED (year-2106-safe) so
+            // it stays a large POSITIVE second count. Storing it as `i64` here (vs the
+            // old `as i32`) prevents the wrap-to-negative that would make the read-time
+            // TTL filter treat a still-live row as long-expired and hide it (#1741 F1).
+            // nb (signed) values are capped at ~2038 so sign-extension is a no-op.
+            let raw_liveness_ldt = self.min_local_deletion_time.wrapping_add(ldt_delta as i64);
+            let absolute_ldt: i64 = if self.has_uint_deletion_time() {
+                (raw_liveness_ldt as u32) as i64
+            } else {
+                raw_liveness_ldt as i32 as i64
+            };
 
             debug!(
                 "V5CompressedLegacy: Row TTL: ttl_delta={}, min={:?}, ttl={}, ldt_delta={}, ldt={}",
@@ -539,6 +636,12 @@ impl V5CompressedLegacyParser {
                 header_size,
                 row_size_vint_len,
                 missing_columns_bitmap,
+                // Issue #1741: populated after the cell loop in
+                // `parse_row_data_with_offset_impl`; defaults describe a row with no
+                // decoded data cells.
+                max_data_cell_timestamp: None,
+                max_data_cell_expires_at: None,
+                has_live_forever_data_cell: false,
             },
             row_size,
         ))
@@ -651,10 +754,9 @@ impl V5CompressedLegacyParser {
                 ));
             }
             let del_flags = data[offset];
-            const IS_LIVE_DELETION: u8 = 0x80; // DeletionTime.java:208
-            if (del_flags & IS_LIVE_DELETION) != 0 {
+            if (del_flags & OA_IS_LIVE_DELETION) != 0 {
                 // LIVE partition: exactly 1 byte — no tombstone.
-                if del_flags != IS_LIVE_DELETION {
+                if del_flags != OA_IS_LIVE_DELETION {
                     return Err(Error::corruption(format!(
                         "V5CompressedLegacy: Invalid IS_LIVE_DELETION byte 0x{:02x} at offset {} \
                          (only 0x80 is valid for oa-format LIVE partitions, per DeletionTime.java:227-229)",

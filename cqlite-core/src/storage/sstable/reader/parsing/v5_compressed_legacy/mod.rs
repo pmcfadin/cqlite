@@ -334,11 +334,13 @@ struct RowHeader {
     /// This is the `expires_at` for the row liveness — distinct from
     /// `local_deletion_time` which is the GC-grace clock for row tombstones.
     /// `None` when `HAS_TTL` was not set.
-    /// Only read by the delta-scan emit path (`parse_block_emit_delta`); allow it
-    /// to be unused when that feature is off so non-delta builds compile under
-    /// `-D warnings`.
-    #[cfg_attr(not(feature = "delta-scan"), allow(dead_code))]
-    liveness_expires_at_seconds: Option<i32>,
+    ///
+    /// Stored as `i64` (not `i32`): on oa/da (`hasUIntDeletionTime`) a post-2038 expiry
+    /// is decoded as an UNSIGNED 32-bit value in `[2^31, 2^32)`; keeping it `i64`
+    /// preserves the large positive second count so the read-time TTL filter does not
+    /// wrap it negative and hide a still-live row (#1741 F1). See the decode site in
+    /// `row_framing.rs` for the reinterpretation.
+    liveness_expires_at_seconds: Option<i64>,
     /// Row-level local deletion time in SECONDS (after delta decoding from
     /// min_local_deletion_time). This is the GC-grace clock, NOT the reconciliation
     /// timestamp; do not use it for last-write-wins comparisons.
@@ -358,6 +360,22 @@ struct RowHeader {
     /// bit=1 means column missing, bit=0 means column present.
     /// None when HAS_ALL_COLUMNS flag is set.
     missing_columns_bitmap: Option<u64>,
+    /// Issue #1741 read-side shadowing aggregate: max write timestamp (µs) across
+    /// this row's decoded DATA cells (excludes partition/clustering pseudo-cells;
+    /// a cell inheriting the row timestamp contributes the row liveness timestamp,
+    /// and a non-frozen collection contributes its newest element ts). Includes
+    /// shadow/TTL-dropped cells so a fully-reduced row is still recognised as
+    /// shadowed. `None` when the row decoded no data cell (e.g. a truncated parse).
+    /// Combined with `timestamp` to decide whether a tombstone shadows the WHOLE row.
+    max_data_cell_timestamp: Option<i64>,
+    /// Issue #1741: max effective expiry (epoch seconds) across this row's expiring
+    /// DATA cells (explicit per-cell TTL or a `USE_ROW_TTL` cell inheriting the
+    /// row's expiry; includes expired cells). `None` when none is expiring.
+    max_data_cell_expires_at: Option<i64>,
+    /// Issue #1741: `true` when at least one decoded DATA cell is LIVE (not
+    /// shadowed, not expired) and live-forever (no TTL). Keeps the row visible
+    /// regardless of liveness expiry. A shadowed/expired cell never sets this.
+    has_live_forever_data_cell: bool,
 }
 
 impl RowHeader {
@@ -408,6 +426,61 @@ impl RowHeader {
                 .unwrap_or(0),
         }
     }
+
+    /// Issue #1741: the row's maximum write timestamp (µs) across its liveness and
+    /// decoded data cells. Used for partition/range-tombstone shadowing.
+    fn max_write_timestamp(&self) -> i64 {
+        let mut m = self.timestamp.unwrap_or(i64::MIN);
+        if let Some(c) = self.max_data_cell_timestamp {
+            if c > m {
+                m = c;
+            }
+        }
+        m
+    }
+
+    /// Issue #1741: `true` when a deletion at `deleted_at_micros` shadows the WHOLE
+    /// row — i.e. every piece of the row's data is older than (or equal to) the
+    /// deletion. Follows Cassandra `DeletionTime.deletes(ts) = ts <= markedForDeleteAt`.
+    ///
+    /// Fail-safe: a row with NO authoritative timestamp (the `i64::MIN` sentinel —
+    /// no liveness and no decodable data cell, e.g. an empty/undecodable row) is
+    /// NOT shadowed. We only hide a row when authoritative metadata proves it
+    /// predates the deletion, never by guessing (no-heuristics mandate, issue #28).
+    fn shadowed_by_deletion_at(&self, deleted_at_micros: i64) -> bool {
+        let max_ts = self.max_write_timestamp();
+        max_ts != i64::MIN && max_ts <= deleted_at_micros
+    }
+
+    /// Issue #1741: read-time TTL expiry. `true` iff the row carries a TTL somewhere
+    /// AND every piece of its data (primary-key liveness + cells) has expired at
+    /// `now_secs`, matching what a Cassandra `SELECT` hides. Returns `false` for any
+    /// row with no TTL at all (never touches the tombstone-free common case).
+    fn row_liveness_expired(&self, now_secs: i64) -> bool {
+        let has_ttl =
+            self.liveness_expires_at_seconds.is_some() || self.max_data_cell_expires_at.is_some();
+        if !has_ttl {
+            return false;
+        }
+        // A live-forever data cell (written with no TTL) keeps the row visible.
+        if self.has_live_forever_data_cell {
+            return false;
+        }
+        // Primary-key liveness still live? Present iff HAS_TIMESTAMP; live-forever
+        // when it carries no TTL expiry, otherwise live until its expiry passes.
+        let liveness_live = self.timestamp.is_some()
+            && self
+                .liveness_expires_at_seconds
+                .is_none_or(|s| s > now_secs);
+        if liveness_live {
+            return false;
+        }
+        // Any expiring data cell still live keeps the row visible.
+        if self.max_data_cell_expires_at.is_some_and(|e| e > now_secs) {
+            return false;
+        }
+        true
+    }
 }
 
 /// Result of parsing a single complex cell (an element of a list/set, or a
@@ -448,6 +521,42 @@ struct ComplexCellParse {
     /// `as u32 as i32` representation (epic #899 invariant). `None` when the
     /// element carries no local deletion time.
     element_local_deletion_time: Option<i32>,
+    /// Issue #1741 (Finding 3): whether the element carries the IS_EXPIRING
+    /// (0x02) flag, i.e. it has a TTL (either an explicit per-element TTL, or an
+    /// inherited row TTL via `USE_ROW_TTL`). Needed for read-time collection-TTL
+    /// expiry: an expiring element is NOT live-forever, so an otherwise-expired
+    /// row must not be kept alive merely because it carries such an element.
+    is_expiring: bool,
+}
+
+/// Issue #1741 (per-element filtering): read-side per-element shadow/TTL filter
+/// context threaded into the complex-column element loop. `Some` ONLY on the
+/// user-facing SELECT read path (a covering partition/range deletion and/or the
+/// read clock is active); `None` for every physical consumer (compaction /
+/// delta-scan / unit tests), which stay byte-unchanged (the filter never drops an
+/// element when it is `None`).
+#[derive(Clone, Copy)]
+pub(crate) struct ElementShadow {
+    /// Covering deletion `markedForDeleteAt` (µs) for the row this collection
+    /// belongs to (the partition tombstone folded with the open range tombstone
+    /// when the row falls inside it), or `None` when nothing covers the row.
+    pub cover: Option<i64>,
+    /// Read clock (epoch seconds) for per-element TTL expiry.
+    pub now: i64,
+    /// Row-liveness write timestamp (µs) inherited by `USE_ROW_TIMESTAMP` elements
+    /// (flag 0x08 — the element carries no own timestamp); `None` when the row
+    /// carries no liveness marker, in which case such an element has no
+    /// authoritative write ts and is NEVER shadowed (no-heuristics, issue #28).
+    pub row_ts: Option<i64>,
+    /// Row-liveness expiry (epoch seconds) inherited by `USE_ROW_TTL` elements
+    /// (flag 0x10 — an expiring element that carries NO explicit per-element
+    /// `localDeletionTime`). This is the SAME effective row expiry the scalar
+    /// `USE_ROW_TTL` cell path computes (`liveness_expires_at_seconds`, falling
+    /// back to the row `local_deletion_time`), so scalar and collection-element
+    /// inherited-TTL semantics stay identical (issue #1741). `None` when the row
+    /// carries no liveness expiry, in which case such an element has no
+    /// authoritative expiry and is never TTL-expired here (no-heuristics, issue #28).
+    pub row_expires_at: Option<i64>,
 }
 
 /// Extra metadata produced by `parse_complex_column_inner` for delta-scan callers
@@ -478,6 +587,28 @@ pub(crate) struct ComplexColumnMeta {
     /// compaction read path to populate `ComplexColumn.complex_deletion`.
     /// Always `None` on the user-facing read path (where the field is unused).
     pub complex_deletion: Option<(i64, i32)>,
+    /// Issue #1741 (Finding 3): read-time TTL aggregate over this collection's
+    /// LIVE (non-deleted) elements. `true` when at least one live element carries
+    /// no TTL of any kind (genuinely live-forever) — such an element keeps the
+    /// row visible regardless of the row-liveness TTL. Computed from authoritative
+    /// per-element cell flags (no heuristics), scalar-only (no extra allocation).
+    pub has_live_forever_element: bool,
+    /// Issue #1741 (Finding 3): max effective expiry (epoch seconds) across this
+    /// collection's live elements that carry an EXPLICIT per-element TTL. `None`
+    /// when no live element has an explicit expiry (elements that inherit the row
+    /// TTL via `USE_ROW_TTL` are governed by the row-liveness expiry instead).
+    /// Folded into the row's `max_data_cell_expires_at` so a collection whose
+    /// elements are all expired does not keep an otherwise-expired row alive.
+    pub max_element_expires_at: Option<i64>,
+    /// Issue #1741 (per-element filtering): number of LIVE (non-tombstone)
+    /// elements DROPPED from the emitted container by the read-side per-element
+    /// shadow/TTL filter — i.e. elements shadowed by the covering deletion (own
+    /// write ts `<= cover`) or TTL-expired at the read clock. Always `0` for every
+    /// physical consumer (the filter is `None`), so their output is byte-unchanged.
+    /// The read call site uses `> 0` (together with an emptied container) to tell a
+    /// collection that the filter reduced to nothing (read as absent/null) apart
+    /// from one that was genuinely empty / all element-tombstones (kept as-is).
+    pub shadow_filtered_element_count: usize,
 }
 
 // Row header flag constants
@@ -501,6 +632,59 @@ fn row_has_non_key_cell(cells: &HashMap<Arc<str>, Value>, schema: &TableSchema) 
         !schema.partition_keys.iter().any(|k| k.name == name)
             && !schema.clustering_keys.iter().any(|c| c.name == name)
     })
+}
+
+/// Issue #932/#1741: build the user-facing `ScanRow` display value for a parsed
+/// clustering row from its decoded `cells` and row header. Shared by every
+/// user-facing emit path so the row-tombstone display rule lives in ONE place:
+/// a `HAS_DELETION` row that carries NO surviving non-key cell displays as a pure
+/// `Tombstone` marker (suppressed downstream by `filter_tombstone`); a row that
+/// still carries surviving cells displays as a live `Row` (the deletion shadows
+/// only already-absent older cells). An empty cell set becomes a null marker.
+fn build_display_row(
+    cells: HashMap<Arc<str>, Value>,
+    row_header_opt: Option<&RowHeader>,
+    schema: &TableSchema,
+) -> ScanRow {
+    let row_tombstone = row_header_opt.filter(|h| h.is_row_tombstone());
+    let has_data_cell = row_has_non_key_cell(&cells, schema);
+    if row_tombstone.is_some() && !has_data_cell {
+        ScanRow::Marker(
+            row_tombstone
+                .map(|h| h.row_tombstone())
+                .unwrap_or(Value::Null),
+        )
+    } else if cells.is_empty() {
+        ScanRow::Marker(Value::Null)
+    } else {
+        // Issue #1334: carry the interned `Arc<str>` name handles straight into
+        // the row carrier; emit-time alphabetical ordering preserved exactly.
+        let mut row_cells: RowCells = cells.into_iter().collect();
+        row_cells.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
+        ScanRow::Row(row_cells)
+    }
+}
+
+/// Issue #1741: extract a clustering row's clustering-key values (in schema
+/// clustering order) from its decoded cell map. Only called when a range
+/// tombstone is currently OPEN in the partition, so the per-row clone is off the
+/// tombstone-free hot path. Returns fewer values than the clustering arity only
+/// for a malformed/partial row (missing clustering pseudo-cells).
+fn extract_clustering_values(cells: &HashMap<Arc<str>, Value>, schema: &TableSchema) -> Vec<Value> {
+    schema
+        .clustering_keys
+        .iter()
+        .filter_map(|ck| cells.get(ck.name.as_str()).cloned())
+        .collect()
+}
+
+/// Issue #1741: current wall-clock as epoch seconds, for read-time TTL expiry.
+/// Falls back to `0` (nothing appears expired) if the clock is before the epoch.
+fn now_epoch_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 // Unfiltered marker constants (from Cassandra UnfilteredSerializer.java lines 102-109)
@@ -536,6 +720,24 @@ pub struct V5CompressedLegacyParser {
     /// identical to the existing `nb`-compatible path regardless of the gate
     /// values stored here.
     version_gates: std::sync::Arc<VersionGates>,
+    /// Issue #1741: apply read-side SELECT-semantic shadowing (hide partition/
+    /// range-tombstone-shadowed and TTL-expired rows) in the emit paths. `true`
+    /// ONLY for user-facing query reads (`scan`/`scan_stream`/`scan_with_cell_metadata`/
+    /// point `get`). `false` (the default) for PHYSICAL consumers that must see every
+    /// on-disk row — integrity verification (`get_all_entries` → `verify_sstable`),
+    /// `sstable_data_manager`, delta-scan, and the compaction read path (which
+    /// reconciles tombstones itself across generations). Un-gated: read correctness
+    /// does not depend on the `write-support` feature (AC2).
+    read_shadowing: bool,
+    /// Issue #1741 (F2): the read-time TTL "now" clock (epoch seconds), captured ONCE
+    /// when this parser (the user-facing scan/read context) is constructed and reused
+    /// for EVERY shadowing decision across all blocks/partitions of the read. A single
+    /// scan builds this parser once and drives many blocks through it, so sampling the
+    /// clock here — rather than per block in the emit loop — gives one consistent `now`
+    /// for the whole operation (a row exactly at an expiration-second boundary is then
+    /// decided uniformly regardless of which block parsed it). Only consulted when
+    /// `read_shadowing` is `true`; physical consumers ignore it and stay byte-unchanged.
+    now_secs: i64,
 }
 
 mod block_emit;
@@ -544,14 +746,32 @@ mod cell_value;
 mod compaction;
 mod complex_column;
 mod frozen;
+mod partition_shadow;
 mod raw_type_value;
 mod raw_value;
 mod row_data;
 mod row_framing;
 mod udt;
 
+use partition_shadow::{clustering_reversed_flags, PartitionShadow};
+// #1741: shared partition-header need-more classifier used by both sliding
+// parsers (`block_emit_windowed` + `compaction`) via their `use super::*` glob.
+use row_framing::PartitionHeaderReadiness;
+
 #[cfg(test)]
 mod test_support;
+
+#[cfg(test)]
+mod regression_1741c_tests;
+
+#[cfg(test)]
+mod regression_1741d_tests;
+
+#[cfg(test)]
+mod regression_1741h_tests;
+
+#[cfg(test)]
+mod regression_1741k_tests;
 
 impl V5CompressedLegacyParser {
     /// Create a new V5CompressedLegacy parser
@@ -580,7 +800,19 @@ impl V5CompressedLegacyParser {
             min_ttl,
             udt_registry: None,
             version_gates,
+            read_shadowing: false,
+            // Issue #1741 (F2): sample the read clock ONCE per parser (== once per
+            // read/scan operation); every block/partition below reuses this value.
+            now_secs: now_epoch_secs(),
         }
+    }
+
+    /// Issue #1741: enable read-side SELECT-semantic shadowing on this parser. Call
+    /// with `true` ONLY when building the parser for a user-facing query read; leave
+    /// the default (`false`) for physical/verification/compaction/delta reads.
+    pub fn with_read_shadowing(mut self, on: bool) -> Self {
+        self.read_shadowing = on;
+        self
     }
 
     /// Set the version gates for version-sensitive parsing decisions (VG1 plumbing).
@@ -608,6 +840,28 @@ impl V5CompressedLegacyParser {
             VersionGates::Big(g) => g.has_uint_deletion_time,
             VersionGates::Bti(g) => g.has_uint_deletion_time,
         }
+    }
+
+    /// Issue #1741 (Finding 2): `true` when this SSTable's authoritative
+    /// EncodingStats prove it carries NO deletions of any kind — hence NO range
+    /// tombstones. A clustering-slice read can then keep the O(slice) row-index
+    /// fast-forward and skip prefix priming entirely (a range tombstone opening
+    /// before the slice is impossible).
+    ///
+    /// `min_local_deletion_time` is `EncodingStats.minLocalDeletionTime`, the MIN
+    /// of every cell's `localDeletionTime`. A live cell contributes the LIVE
+    /// sentinel `Cell.NO_DELETION_TIME == Integer.MAX_VALUE`; a partition/row/
+    /// range/cell tombstone OR an expiring cell contributes a smaller value. So
+    /// the min equals `Integer.MAX_VALUE` iff the SSTable has no deletion and no
+    /// TTL. This OVER-approximates range-tombstone presence (a cell tombstone or
+    /// TTL also trips it), which is safe: priming then runs and stays correct. No
+    /// stats (`min == 0` from the `build_v5_parser` fallback) conservatively primes.
+    /// No heuristics — authoritative metadata only (issue #28).
+    #[inline]
+    fn sstable_may_have_range_tombstones(&self) -> bool {
+        // Integer.MAX_VALUE — Cassandra `Cell.NO_DELETION_TIME` LIVE sentinel.
+        const NO_DELETION_TIME: i64 = i32::MAX as i64;
+        self.min_local_deletion_time != NO_DELETION_TIME
     }
 
     /// Try to parse partition header at offset WITHOUT consuming it.

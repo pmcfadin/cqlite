@@ -67,21 +67,31 @@ impl SSTableReader {
     /// 1. SSTable header schema (V5.0+ formats)
     /// 2. Schema registry lookup (external schema files)
     /// 3. Header-constructed fallback schema
+    ///
+    /// `read_shadowing` (issue #1741): `true` for user-facing SELECT scans, `false`
+    /// for physical consumers (see [`SSTableReader::build_v5_parser`]).
     pub(in crate::storage::sstable::reader) fn parse_block_entries_with_schema(
         &self,
         block_data: &[u8],
         schema: Option<&crate::schema::TableSchema>,
+        read_shadowing: bool,
     ) -> Result<Vec<(TableId, RowKey, ScanRow)>> {
         // Pass the provided schema through to the parsing logic
         // This schema parameter flows through the call chain to get_table_schema()
-        self.parse_block_entries(block_data, schema)
+        self.parse_block_entries(block_data, schema, read_shadowing)
     }
 
-    /// Parse block entries from decompressed block data
+    /// Parse block entries from decompressed block data.
+    ///
+    /// `read_shadowing` (issue #1741): `true` for user-facing SELECT scans (applies
+    /// partition/range-tombstone shadowing + TTL expiry), `false` for physical
+    /// consumers that must see every on-disk row (see
+    /// [`SSTableReader::build_v5_parser`]).
     pub(in crate::storage::sstable::reader) fn parse_block_entries(
         &self,
         block_data: &[u8],
         schema: Option<&crate::schema::TableSchema>,
+        read_shadowing: bool,
     ) -> Result<Vec<(TableId, RowKey, ScanRow)>> {
         log::debug!(
             "parse_block_entries: Starting parse (data size: {} bytes, version: {:?})",
@@ -230,13 +240,26 @@ impl SSTableReader {
             let table_id_str = table_id.name();
             let (keyspace, table_name) = table_id_str.split_once('.').unwrap_or(("", table_id_str));
 
+            // NOTE: this site intentionally does NOT route through
+            // `self.build_v5_parser()`: that helper sources keyspace/table from
+            // `self.header`, which can be empty for V5CompressedLegacy `nb` files
+            // (see the non-empty validation above). This path uses the
+            // path-extracted keyspace/table as the reliable source. We still must
+            // thread the same VersionGates + read-shadowing + now_secs (captured in
+            // `new`) that `build_v5_parser` applies, so oa/da deletion-time layouts
+            // are gated correctly instead of falling back to DEFAULT gates.
             let parser = super::V5CompressedLegacyParser::new(
                 keyspace.to_string(),
                 table_name.to_string(),
                 min_timestamp,
                 min_local_deletion_time,
                 min_ttl,
-            );
+            )
+            // VG1: thread VersionGates from SSTableReader down to the row parser
+            // (mirrors `build_v5_parser`) so VG3 can flip gate-sensitive paths.
+            .with_version_gates(self.version_gates.clone());
+            // Issue #1741: apply SELECT-semantic read shadowing per the caller.
+            let parser = parser.with_read_shadowing(read_shadowing);
             // Add UDT registry if available for UDT-aware collection parsing (Issue #238)
             let parser = if let Some(ref registry) = self.udt_registry {
                 parser.with_udt_registry(registry.clone())
@@ -1270,7 +1293,7 @@ mod tests {
         block_data.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0]); // unknown 8-byte field
 
         // Try parsing - should route to V5CompressedLegacyParser
-        let result = reader.parse_block_entries(&block_data, None);
+        let result = reader.parse_block_entries(&block_data, None, false);
 
         // We expect either success or a specific parsing error (not a dispatch error)
         match result {
@@ -1338,7 +1361,7 @@ mod tests {
         // Pass invalid compressed data (should fall back to raw parsing)
         let invalid_compressed_data = vec![0xFF; 100];
 
-        let result = reader.parse_block_entries(&invalid_compressed_data, None);
+        let result = reader.parse_block_entries(&invalid_compressed_data, None, false);
 
         // Should attempt decompression, fail, then fall back to raw parsing
         // The raw parsing will likely fail too (invalid data), but we verify

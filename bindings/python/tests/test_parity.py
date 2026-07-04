@@ -23,7 +23,7 @@ from __future__ import annotations
 import functools
 import json
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from ipaddress import IPv4Address, IPv6Address
 from pathlib import Path
@@ -190,6 +190,125 @@ def count_rows_in_jsonl(jsonl_path: str | Path) -> int:
     """
     path = Path(jsonl_path) if isinstance(jsonl_path, str) else jsonl_path
     return _count_rows_in_jsonl_impl(path)
+
+
+def _parse_golden_expires_at(expires_at: str) -> datetime | None:
+    """Parse a golden ``liveness_info.expires_at`` ISO-8601 stamp to an aware UTC
+    ``datetime`` (e.g. ``"2025-10-07T01:12:06Z"``). Returns ``None`` if unparseable.
+    """
+    try:
+        return datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+
+
+def count_live_rows_in_jsonl(jsonl_path: str | Path) -> int:
+    """Count golden rows that are LIVE under Cassandra ``SELECT`` semantics NOW.
+
+    Issue #1741 / #1742: the read path now applies partition/range-tombstone
+    shadowing and wall-clock TTL expiry (matching a Cassandra ``SELECT``), so an
+    expired-TTL row is correctly HIDDEN from query results. The physical
+    sstabledump golden does NOT apply wall-clock TTL — it lists every on-disk row
+    — so a raw physical count over-counts once TTLs elapse.
+
+    This helper derives the expected LIVE count from the same authoritative
+    metadata the reader uses, rather than hard-coding ``0`` (which would be
+    wall-clock-fragile if fixtures are ever regenerated with future TTLs):
+
+      * excludes range-tombstone markers (``type != "row"``) and row tombstones
+        (``deletion_info`` with no surviving cells) — exactly like
+        :func:`count_rows_in_jsonl`; and
+      * additionally excludes a row that is TTL-expired NOW. A row whose row-level
+        ``liveness_info`` carries a ``ttl`` whose ``expires_at`` is at/before now is
+        HIDDEN unless a surviving cell keeps it alive — mirroring EXACTLY the
+        reader's ``has_live_forever_data_cell`` aggregate (``row_data.rs``, issue
+        #1741). A non-deleted cell keeps the row visible when it is either:
+
+          - explicitly still-live: it carries its own ``expires_at`` in the future
+            (a per-cell TTL not yet elapsed); or
+          - live-forever: it carries NO ``expires_at`` at all AND is written by a
+            SEPARATE non-TTL mutation — which the golden marks by an own ``tstamp``
+            distinct from the row liveness (the reader's non-``USE_ROW_TTL``,
+            non-``IS_EXPIRING`` scalar path). A cell with no ``expires_at`` and no
+            own ``tstamp`` shares the row liveness (``USE_ROW_TTL``) and expires with
+            it — this is the crucial distinction Finding 2 adds: previously ANY
+            no-``expires_at`` cell was implicitly treated as inherited-and-expired,
+            so a genuinely live-forever non-TTL update would have been undercounted.
+
+        Why an own ``tstamp`` (not merely a collection ``path``) is the live-forever
+        signal: the golden does NOT expose a per-element TTL flag, so a collection
+        ELEMENT that INHERITS a table ``default_time_to_live`` looks identical to a
+        live-forever element (both show no ``expires_at``). The reader resolves this
+        from the on-disk ``IS_EXPIRING``/``USE_ROW_TTL`` flags; the golden cannot, so
+        keying live-forever off ``path`` would DISAGREE with the reader. Concretely
+        ``test_timeseries.app_metrics`` has ``default_time_to_live = 2592000`` (30d),
+        so every cell — including each ``tags`` map element — inherited that TTL and
+        expired ~2025-11; a Cassandra ``SELECT`` returns 0, which the reader returns.
+
+        Consequences that match the reader: every TTL-expired fixture whose cells all
+        inherit the elapsed row TTL collapses to 0 — ``test_basic.ttl_test_table``→0,
+        ``test_timeseries.log_entries``/``tick_data``/``app_metrics``→0,
+        ``test_oa.ttl_table``/``test_da.ttl_table``→0.
+
+    For a table with NO TTL metadata this is identical to
+    :func:`count_rows_in_jsonl` (nothing extra is excluded), so non-TTL tables
+    keep asserting exact physical parity. ``now`` is captured once per call; the
+    fixtures' expiries are far from the present, so no one-second-boundary race
+    is possible.
+    """
+    path = Path(jsonl_path) if isinstance(jsonl_path, str) else jsonl_path
+    now = datetime.now(timezone.utc)
+    total = 0
+    with open(path, "r") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            partition = json.loads(line)
+            for row in partition.get("rows", []):
+                if row.get("type") != "row":
+                    continue
+                cells = row.get("cells") or []
+                if "deletion_info" in row and not cells:
+                    continue
+                liveness = row.get("liveness_info") or {}
+                expires_at = liveness.get("expires_at")
+                if liveness.get("ttl") and expires_at:
+                    exp = _parse_golden_expires_at(expires_at)
+                    if exp is not None and exp <= now:
+                        # Row-liveness TTL elapsed: the row survives only if some
+                        # non-deleted cell keeps it alive (mirrors the reader's
+                        # has_live_forever_data_cell / has_live_forever_element).
+                        cell_still_live = False
+                        for cell in cells:
+                            if "deletion_info" in cell:
+                                # A cell/collection tombstone is not live data.
+                                continue
+                            cell_exp = _parse_golden_expires_at(
+                                cell.get("expires_at")
+                            )
+                            if cell_exp is not None:
+                                # Explicit per-cell TTL: live iff still in the future.
+                                if cell_exp > now:
+                                    cell_still_live = True
+                                    break
+                                continue
+                            # No per-cell expiry -> live-forever ONLY if written by a
+                            # separate non-TTL mutation, which the golden marks with
+                            # an own ``tstamp`` distinct from the row liveness. A cell
+                            # with neither ``expires_at`` nor own ``tstamp`` inherits
+                            # the elapsed row TTL (USE_ROW_TTL) and does NOT keep the
+                            # row. A collection ``path`` alone is NOT a live-forever
+                            # signal: the golden cannot tell an inherited-TTL element
+                            # from a live-forever one, so keying off it would diverge
+                            # from the reader (see the docstring for app_metrics).
+                            if cell.get("tstamp") is not None:
+                                cell_still_live = True
+                                break
+                        if not cell_still_live:
+                            # Every cell shadowed/expired: a SELECT hides the row.
+                            continue
+                total += 1
+    return total
 
 
 def load_jsonl_partitions(jsonl_path: Path) -> list[dict]:
@@ -553,7 +672,12 @@ class TestRowCountParity:
         if jsonl_file is None:
             pytest.skip(f"JSONL reference not found for {keyspace}.{table}")
 
-        expected_count = count_rows_in_jsonl(jsonl_file)
+        # Issues #1741 (correct SELECT-side TTL/tombstone hiding) + #1742
+        # (query-semantics oracle): expected count is the golden's WALL-CLOCK-LIVE
+        # row count, not the raw physical count — TTL-expired rows are hidden by a
+        # Cassandra SELECT. For non-TTL tables this equals the physical count, so
+        # exact physical parity is unchanged.
+        expected_count = count_live_rows_in_jsonl(jsonl_file)
         result = database.execute(f"SELECT * FROM {keyspace}.{table}")
         actual_count = len(result.rows)
 
@@ -901,8 +1025,11 @@ class TestE2ESummary:
                 skipped.append((keyspace, table, "JSONL not found"))
                 continue
 
-            # Get expected row count
-            expected_count = count_rows_in_jsonl(jsonl_file)
+            # Get expected row count. Issues #1741/#1742: use the WALL-CLOCK-LIVE
+            # count so TTL-expired rows (correctly hidden by a Cassandra SELECT)
+            # are not over-counted; identical to the physical count for non-TTL
+            # tables, so exact physical parity is preserved there.
+            expected_count = count_live_rows_in_jsonl(jsonl_file)
 
             # Get schema file
             schema_file = get_schema_for_keyspace(keyspace)
@@ -1016,7 +1143,10 @@ class TestOaRowCountParity:
         if jsonl_file is None:
             pytest.skip(f"JSONL reference not found for test_oa.{table}")
 
-        expected_count = count_rows_in_jsonl(jsonl_file)
+        # Issues #1741/#1742: WALL-CLOCK-LIVE golden count (TTL-expired rows are
+        # hidden by a Cassandra SELECT). Equals the physical count for non-TTL
+        # oa tables, preserving exact physical parity there.
+        expected_count = count_live_rows_in_jsonl(jsonl_file)
         result = db_oa.execute(f"SELECT * FROM test_oa.{table}")
         actual_count = len(result.rows)
 

@@ -189,9 +189,19 @@ async fn bti_collection_table_select_star_returns_all_rows() {
     }
 }
 
-/// A `SELECT *` over the da/BTI `ttl_table` must return both partitions.
+/// A `SELECT *` over the da/BTI `ttl_table` returns ZERO rows because every row's
+/// TTL (`ttl=86400`, `expires_at = 2026-06-11T16:17:37Z`, baked into the fixture)
+/// has elapsed — a Cassandra `SELECT` hides expired rows.
+///
+/// This ORIGINALLY asserted "returns all rows": before issue #1741 the read path
+/// ignored TTL and served the expired rows as live (the P0 bug). The fix now applies
+/// read-time TTL expiry on the BTI read path too, so the correct result is 0 rows.
+/// The expiry is a FIXED past timestamp in the SSTable, so this is stable going
+/// forward in wall-clock time (the rows only get "more expired"). The BTI read-path's
+/// ability to decode live rows is covered by the sibling `simple_table` /
+/// `collection_table` cases above; this case now pins TTL shadowing on that path.
 #[tokio::test]
-async fn bti_ttl_table_select_star_returns_all_rows() {
+async fn bti_ttl_table_select_star_hides_expired_rows() {
     let db = match setup_test_database().await {
         Ok(db) => db,
         Err(e) => {
@@ -207,24 +217,9 @@ async fn bti_ttl_table_select_star_returns_all_rows() {
 
     assert_eq!(
         result.rows.len(),
-        2,
-        "Issue #660: da/BTI ttl_table has 2 partitions in the golden"
-    );
-
-    let values: Vec<String> = result
-        .rows
-        .iter()
-        .filter_map(|r| r.values.get("data").map(|v| format!("{:?}", v)))
-        .collect();
-    let joined = values.join(",");
-    assert!(
-        joined.contains("BTI TTL row 1"),
-        "missing TTL row 1: {}",
-        joined
-    );
-    assert!(
-        joined.contains("BTI TTL row 2"),
-        "missing TTL row 2: {}",
-        joined
+        0,
+        "Issue #1741: da/BTI ttl_table rows all expired (TTL 86400, expires 2026-06-11) \
+         — a Cassandra SELECT hides them, but the read path returned {} live rows",
+        result.rows.len()
     );
 }
