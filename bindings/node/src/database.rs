@@ -1484,8 +1484,11 @@ impl napi::Task for ExecuteNativeTask {
         // authoritative column order rather than HashMap hash order.
         let col_names: Vec<String> = output.columns.iter().map(|c| c.name.clone()).collect();
         let col_keys = crate::value::intern_column_keys(&env, &col_names)?;
+        // Issue #1448: one conversion context per result caches the global
+        // `Set`/`Map` constructors (fetched at most once each here, not per cell).
+        let ctx = crate::value::ConvCtx::new(&env);
         for (i, row_values) in output.rows.iter().enumerate() {
-            let row_obj = crate::value::row_to_object(&env, &col_keys, row_values)?;
+            let row_obj = crate::value::row_to_object(&ctx, &col_keys, row_values)?;
             rows_arr.set_element(i as u32, row_obj)?;
         }
 

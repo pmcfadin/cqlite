@@ -373,3 +373,95 @@ describe('Value Type Conversion Tests (Issue #302)', () => {
     }
   });
 });
+
+/**
+ * Issue #1448: constructor-cache correctness for set/map cells.
+ *
+ * The batch `executeNative` path now caches the global `Set`/`Map` constructors
+ * once per result conversion (instead of re-fetching per cell). This exercises
+ * that path over a real `test_collections` table with both a `set<...>` and a
+ * `map<...>` column, across many rows/cells, and asserts the produced values are
+ * genuine JS `Set`/`Map` instances — the observable contract the cache must not
+ * change (ordering/identity semantics are #1454, out of scope here).
+ *
+ * Realm note: `toBeInstanceOf(Set)` cannot be used here. Jest's `node`
+ * `testEnvironment` runs the test file in a separate realm from the napi
+ * addon's process realm, so a genuine `Set` returned by the addon fails the
+ * cross-realm `instanceof` identity check (the failure even reports
+ * "Received constructor: Set"). This mirrors the existing `isSet`/`isMap`
+ * helpers in `types.test.js`, which use the realm-safe brand check
+ * `Object.prototype.toString.call(v) === '[object Set]'`.
+ */
+const isSet = (v) =>
+  v !== null &&
+  v !== undefined &&
+  Object.prototype.toString.call(v) === '[object Set]';
+const isMap = (v) =>
+  v !== null &&
+  v !== undefined &&
+  Object.prototype.toString.call(v) === '[object Map]';
+
+describe('Set/Map constructor caching (#1448)', () => {
+  let db = null;
+
+  beforeAll(async () => {
+    skipIfNoDatasets();
+    db = await Database.open(global.testPaths.SSTABLES_DIR, {
+      schema: global.testPaths.SCHEMA_COLLECTIONS,
+    });
+  });
+
+  afterAll(async () => {
+    if (db) {
+      await db.close();
+      db = null;
+    }
+  });
+
+  test('set cols are Set, map cols are Map across all rows', async () => {
+    // collection_table (test-data/schemas/collections.cql):
+    //   tags SET<TEXT>, numbers_set SET<INT>,
+    //   properties MAP<TEXT,TEXT>, metadata_map MAP<TEXT,BIGINT>
+    const result = await db.executeNative(
+      'SELECT id, tags, numbers_set, properties, metadata_map ' +
+        'FROM test_collections.collection_table LIMIT 50'
+    );
+
+    // A present-but-empty result must FAIL, never silently skip (#1448 mandate):
+    // an empty table would make every per-row assertion vacuous.
+    if (!(result.rowCount > 0)) {
+      throw new Error(
+        `Expected rows from test_collections.collection_table, got rowCount=${result.rowCount}. ` +
+          'Fetch datasets (CQLITE_DATASETS_ROOT) so the constructor-cache path is actually exercised.'
+      );
+    }
+
+    const setCols = ['tags', 'numbers_set'];
+    const mapCols = ['properties', 'metadata_map'];
+    let setInstances = 0;
+    let mapInstances = 0;
+
+    for (const row of result.rows) {
+      for (const col of setCols) {
+        if (row[col] !== null && row[col] !== undefined) {
+          expect(isSet(row[col])).toBe(true);
+          setInstances += 1;
+        }
+      }
+      for (const col of mapCols) {
+        if (row[col] !== null && row[col] !== undefined) {
+          expect(isMap(row[col])).toBe(true);
+          mapInstances += 1;
+        }
+      }
+    }
+
+    // Prove the set AND map constructor paths were actually taken (not just that
+    // every cell happened to be null) — the whole point of caching those ctors.
+    expect(setInstances).toBeGreaterThan(0);
+    expect(mapInstances).toBeGreaterThan(0);
+    console.log(
+      `    #1448: ${result.rowCount} rows, ${setInstances} Set cells, ${mapInstances} Map cells`
+    );
+  });
+});

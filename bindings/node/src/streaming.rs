@@ -41,7 +41,7 @@ use napi_derive::napi;
 
 use crate::database::ColumnInfo;
 use crate::error::{runtime_init_error, to_napi_error};
-use crate::value::{intern_column_keys, row_to_object};
+use crate::value::{intern_column_keys, row_to_object, ConvCtx};
 
 /// Streaming query result iterator.
 ///
@@ -208,7 +208,12 @@ impl napi::Task for NextTask {
                 // per yielded row. The streaming win from #1446 is SELECT-order
                 // output (from `self.column_names`), not per-result interning.
                 let col_keys = intern_column_keys(&env, &self.column_names)?;
-                let row_obj = row_to_object(&env, &col_keys, &values)?;
+                // Issue #1448: a fresh conversion context per yielded row (napi
+                // handles are scoped to this `resolve` `Env`, so the ctor cache
+                // cannot outlive it) still fetches each ctor at most once per row
+                // instead of once per set/map cell in that row.
+                let ctx = ConvCtx::new(&env);
+                let row_obj = row_to_object(&ctx, &col_keys, &values)?;
                 result.set_named_property("value", row_obj)?;
                 result.set_named_property("done", env.get_boolean(false)?)?;
             }
