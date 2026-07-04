@@ -37,9 +37,17 @@
 //!      changes what trips, so it is a real behavioral knob, not decoration.
 //!   4. `limited_query_over_wide_table_completes_under_budget` (FINDING 2) — a
 //!      LIMITed query over the wide fixture (whose UNLIMITED scan trips the guard)
-//!      completes and returns the limited rows: the LIMIT bound is propagated into
-//!      the scan and collection early-stops, so the budget never bites on matching
-//!      rows beyond the LIMIT.
+//!      completes and returns the limited rows: collection early-stops after
+//!      predicate evaluation, so the budget never bites on matching rows beyond
+//!      the LIMIT.
+//!   5. `limit_with_non_pk_predicate_returns_all_matches_not_first_n_raw`
+//!      (roborev FINDING 1) — a `WHERE non_pk = ? LIMIT N` returns ALL N matching
+//!      rows, not the matches among the first N RAW rows: the LIMIT is NOT pushed
+//!      into the predicate-unaware `storage.scan`.
+//!   6. `limit_zero_targeted_returns_empty_never_result_too_large`
+//!      (roborev FINDING 2) — `WHERE pk = ? LIMIT 0` over a wide table under a
+//!      sub-row budget returns empty, never `ResultTooLarge`: LIMIT 0
+//!      short-circuits before any scan/lookup/push/budget work.
 //!
 //! Run with:
 //!   cargo test --package cqlite-core \
@@ -65,6 +73,9 @@ use tempfile::TempDir;
 const KS: &str = "budget_ks";
 const WIDE_TBL: &str = "wide_items";
 const SKINNY_TBL: &str = "skinny_items";
+/// Non-PK-filter fixture for FINDING 1 (LIMIT must not be pushed into storage
+/// ahead of executor-side predicate evaluation).
+const FILTERED_TBL: &str = "filtered_items";
 
 /// ~10 KiB per row → a handful of rows dwarfs a small byte budget while staying
 /// far below the 1M row-count safety valve.
@@ -81,12 +92,25 @@ const WIDE_ROWS_UNDER_BUDGET: usize = 2;
 /// relative to the wide fixture.
 const SKINNY_ROW_COUNT: i32 = 400;
 
+/// FINDING 1 fixture: total rows, and the group value a small, spread-out subset
+/// carries. Only every 20th row matches `MATCH_GRP` (10 rows), so the matching
+/// rows are scattered throughout token order — NOT confined to the first
+/// `MATCH_COUNT` rows a buggy storage-pushed LIMIT would return.
+const FILTERED_ROW_COUNT: i32 = 200;
+const MATCH_GRP: i32 = 7;
+const NON_MATCH_GRP: i32 = 0;
+const MATCH_COUNT: usize = 10;
+
 fn wide_schema_cql() -> String {
     format!("CREATE TABLE {KS}.{WIDE_TBL} (\n  id int PRIMARY KEY,\n  payload blob\n);\n")
 }
 
 fn skinny_schema_cql() -> String {
     format!("CREATE TABLE {KS}.{SKINNY_TBL} (\n  id int PRIMARY KEY,\n  n int\n);\n")
+}
+
+fn filtered_schema_cql() -> String {
+    format!("CREATE TABLE {KS}.{FILTERED_TBL} (\n  id int PRIMARY KEY,\n  grp int\n);\n")
 }
 
 fn wide_row(id: i32, ts: i64) -> Mutation {
@@ -105,6 +129,21 @@ fn skinny_row(id: i32, ts: i64) -> Mutation {
         value: Value::Integer(id),
     }];
     Mutation::new(TableId::new(KS, SKINNY_TBL), pk, None, ops, ts, None)
+}
+
+fn filtered_row(id: i32, ts: i64) -> Mutation {
+    let pk = PartitionKey::single("id", Value::Integer(id));
+    // Every 20th row matches MATCH_GRP; the rest carry NON_MATCH_GRP.
+    let grp = if id % 20 == 0 {
+        MATCH_GRP
+    } else {
+        NON_MATCH_GRP
+    };
+    let ops = vec![CellOperation::Write {
+        column: "grp".to_string(),
+        value: Value::Integer(grp),
+    }];
+    Mutation::new(TableId::new(KS, FILTERED_TBL), pk, None, ops, ts, None)
 }
 
 /// Flush a single generation for `table` with the supplied schema + rows.
@@ -195,9 +234,31 @@ async fn prepare_skinny(root: &std::path::Path) -> (std::path::PathBuf, std::pat
     (data_dir, schema_path)
 }
 
+async fn prepare_filtered(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let data_dir = root.join("filtered_data");
+    let wal_dir = root.join("filtered_wal");
+    let schema_path = root.join("filtered_schema.cql");
+    std::fs::write(&schema_path, filtered_schema_cql()).expect("write filtered schema");
+    let (d, w) = (data_dir.clone(), wal_dir.clone());
+    tokio::task::spawn_blocking(move || {
+        let rows: Vec<Mutation> = (0..FILTERED_ROW_COUNT)
+            .map(|i| filtered_row(i, 100))
+            .collect();
+        build_fixture(&d, &w, &filtered_schema_cql(), rows);
+    })
+    .await
+    .expect("build filtered fixture");
+    (data_dir, schema_path)
+}
+
 /// A byte budget that a handful of ~10 KiB wide rows exceeds, but the skinny
 /// fixture's total logical bytes (~few KiB) stays under.
 const SHARED_BUDGET_BYTES: u64 = 24 * 1024;
+
+/// A byte budget SMALLER than a single wide row (~10 KiB): a single-partition
+/// lookup that materializes one wide row would trip the guard under it — used to
+/// prove the FINDING 2 `LIMIT 0` short-circuit fires BEFORE any push/byte-check.
+const SUB_ROW_BUDGET_BYTES: u64 = 512;
 
 /// Test 1: a few WIDE rows trip the BYTE guard before the row-count guard.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -285,6 +346,86 @@ async fn limited_query_over_wide_table_completes_under_budget() {
         result.rows.len(),
         WIDE_ROWS_UNDER_BUDGET,
         "LIMIT must be honored (early-stop before the byte budget bites)"
+    );
+}
+
+/// FINDING 1 (roborev HIGH): a LIMIT must NOT be pushed into storage ahead of
+/// executor-side predicate evaluation. The optimizer folds `WHERE grp = ?` into
+/// the `SSTableScan` step's predicates WITHOUT a residual `Filter`, but
+/// `storage.scan` is not predicate-aware. If the query-wide `LIMIT N` bound is
+/// pushed into `storage.scan`, storage returns only the first `N` RAW (unfiltered)
+/// rows in token order; the matching rows scattered further along the scan are
+/// never seen, so the executor filters `N` raw rows down to far fewer than `N`
+/// matches → WRONG RESULTS.
+///
+/// This fixture has `MATCH_COUNT` matching rows spread across `FILTERED_ROW_COUNT`
+/// total rows. `SELECT * WHERE grp = MATCH_GRP LIMIT MATCH_COUNT` must return all
+/// `MATCH_COUNT` matches. Pre-fix (storage-pushed LIMIT) this returns only the
+/// matches that happen to fall within the first `MATCH_COUNT` token-ordered rows
+/// (≈ `MATCH_COUNT² / FILTERED_ROW_COUNT` ≈ 0–1) → RED. Post-fix the storage limit
+/// is withheld whenever executor-side predicates exist and the early-stop counts
+/// only rows that PASSED the predicate → all `MATCH_COUNT` matches → GREEN.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn limit_with_non_pk_predicate_returns_all_matches_not_first_n_raw() {
+    let temp = TempDir::new().unwrap();
+    let (data_dir, schema_path) = prepare_filtered(temp.path()).await;
+
+    // Generous budget: FINDING 1 is about correctness, not the byte guard.
+    let db = open_db_with_budget(data_dir, schema_path, DEFAULT_MAX_RESULT_BYTES).await;
+
+    let sql =
+        format!("SELECT * FROM {KS}.{FILTERED_TBL} WHERE grp = {MATCH_GRP} LIMIT {MATCH_COUNT}");
+    let result = db
+        .execute(&sql)
+        .await
+        .expect("filtered LIMIT query must succeed");
+
+    assert_eq!(
+        result.rows.len(),
+        MATCH_COUNT,
+        "LIMIT must return ALL matching rows, not the matches among the first N \
+         RAW rows a storage-pushed limit would return (FINDING 1)"
+    );
+}
+
+/// FINDING 2 (roborev MEDIUM): `WHERE pk = ? LIMIT 0` over a wide table must
+/// return an empty result, never `ResultTooLarge`. The budget here is SMALLER than
+/// a single wide row, so pre-fix the targeted lookup materialized the matching row
+/// and byte-checked it before the LIMIT-0 bound was honored → `ResultTooLarge`.
+/// Post-fix the `collect_bound == Some(0)` short-circuit returns empty before any
+/// scan/lookup/push/budget work.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn limit_zero_targeted_returns_empty_never_result_too_large() {
+    let temp = TempDir::new().unwrap();
+    let (data_dir, schema_path) = prepare_wide(temp.path()).await;
+
+    let db = open_db_with_budget(data_dir, schema_path, SUB_ROW_BUDGET_BYTES).await;
+
+    // Sanity: the same single-partition lookup with a NON-zero LIMIT trips the
+    // guard (one wide row exceeds the sub-row budget) — proving the budget is
+    // binding and that only the LIMIT-0 short-circuit makes this query empty rather
+    // than error. (A bare `WHERE id = 0` with no LIMIT is routed to the legacy
+    // executor by a word-count heuristic in `QueryEngine::execute`; keeping a LIMIT
+    // clause here routes through the optimizer path under test.)
+    let point = format!("SELECT * FROM {KS}.{WIDE_TBL} WHERE id = 0 LIMIT 5");
+    let err = db
+        .execute(&point)
+        .await
+        .expect_err("a single wide row must exceed the sub-row byte budget");
+    assert!(
+        matches!(err, Error::ResultTooLarge { .. }),
+        "point lookup of one wide row must trip the guard, got {err:?}"
+    );
+
+    let sql = format!("SELECT * FROM {KS}.{WIDE_TBL} WHERE id = 0 LIMIT 0");
+    let result = db
+        .execute(&sql)
+        .await
+        .expect("LIMIT 0 must short-circuit to an empty result, never ResultTooLarge");
+    assert!(
+        result.rows.is_empty(),
+        "LIMIT 0 must return zero rows; got {}",
+        result.rows.len()
     );
 }
 
