@@ -16,8 +16,6 @@ use tempfile::TempDir;
 /// - Interactive REPL mode
 /// - SSTable reading capabilities
 
-const CLI_BINARY: &str = "cqlite";
-
 /// Test helper to create a temporary database
 pub fn create_temp_database() -> Result<(TempDir, PathBuf)> {
     let temp_dir = TempDir::new()?;
@@ -25,10 +23,10 @@ pub fn create_temp_database() -> Result<(TempDir, PathBuf)> {
     Ok((temp_dir, db_path))
 }
 
-/// Test helper to run CLI commands
+/// Test helper to run CLI commands using the pre-built binary
+/// (`CARGO_BIN_EXE_cqlite`), avoiding a nested `cargo run` rebuild per test.
 pub fn run_cli_command(args: &[&str]) -> Result<std::process::Output> {
-    Command::new("cargo")
-        .args(&["run", "--bin", CLI_BINARY, "--"])
+    Command::new(env!("CARGO_BIN_EXE_cqlite"))
         .args(args)
         .output()
         .map_err(|e| anyhow::anyhow!("Failed to run CLI command: {}", e))

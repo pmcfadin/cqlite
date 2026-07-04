@@ -24,12 +24,10 @@ use std::process::Command;
 #[path = "common/golden_snapshots.rs"]
 mod golden_snapshots;
 
-const CLI_BINARY: &str = "cqlite";
-
-/// Test helper to run CLI commands and capture output
+/// Test helper to run CLI commands and capture output using the pre-built
+/// binary (`CARGO_BIN_EXE_cqlite`), avoiding a nested `cargo run` rebuild per test.
 fn run_cli_command(args: &[&str]) -> std::process::Output {
-    Command::new("cargo")
-        .args(["run", "--quiet", "--bin", CLI_BINARY, "--"])
+    Command::new(env!("CARGO_BIN_EXE_cqlite"))
         .args(args)
         .output()
         .expect("Failed to execute CLI command")
