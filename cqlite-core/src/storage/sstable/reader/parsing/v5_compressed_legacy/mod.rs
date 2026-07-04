@@ -742,6 +742,7 @@ mod cell_value;
 mod compaction;
 mod complex_column;
 mod frozen;
+mod marshal_element;
 mod now_clock;
 mod partition_shadow;
 mod raw_type_value;

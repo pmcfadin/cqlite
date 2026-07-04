@@ -1,5 +1,7 @@
 use super::*;
 
+use super::marshal_element::MarshalCollectionElements;
+
 impl V5CompressedLegacyParser {
     /// Parse a single cell value WITHOUT column name (schema-order format)
     ///
@@ -853,22 +855,47 @@ impl V5CompressedLegacyParser {
                     inner_type
                 );
 
+                // Issue #1340: extract the AUTHORITATIVE marshal element type(s)
+                // ONCE per column from the on-disk SerializationHeader marshal type
+                // (`header_type`). When an element is a `frozen<UDT>`, threading the
+                // marshal type lets it decode to a typed `Value::Frozen(Value::Udt)`
+                // registry-free (precedence: header marshal → registry → Blob, no
+                // byte-pattern inference — no-heuristics #28). Parsed here, not in
+                // the per-element loop, to keep the hot path allocation-free.
+                let marshal_elems =
+                    header_type.and_then(Self::extract_marshal_collection_elements);
+
                 // Route to appropriate frozen collection parser
                 let (inner_value, new_offset) = if inner_type.starts_with("list<") {
-                    let element_type = self.extract_collection_element_type(&inner_type, "list")?;
-                    self.parse_frozen_list_value(data, offset, &element_type, column, _reader)?
+                    let schema_elem = self.extract_collection_element_type(&inner_type, "list")?;
+                    let marshal_elem = match &marshal_elems {
+                        Some(MarshalCollectionElements::Sequence(m)) => Some(m.as_str()),
+                        _ => None,
+                    };
+                    let element_type =
+                        Self::prefer_udt_marshal_element(marshal_elem, &schema_elem);
+                    self.parse_frozen_list_value(data, offset, element_type, column, _reader)?
                 } else if inner_type.starts_with("set<") {
-                    let element_type = self.extract_collection_element_type(&inner_type, "set")?;
-                    self.parse_frozen_set_value(data, offset, &element_type, column, _reader)?
+                    let schema_elem = self.extract_collection_element_type(&inner_type, "set")?;
+                    let marshal_elem = match &marshal_elems {
+                        Some(MarshalCollectionElements::Sequence(m)) => Some(m.as_str()),
+                        _ => None,
+                    };
+                    let element_type =
+                        Self::prefer_udt_marshal_element(marshal_elem, &schema_elem);
+                    self.parse_frozen_set_value(data, offset, element_type, column, _reader)?
                 } else if inner_type.starts_with("map<") {
-                    let (key_type, value_type) = self.extract_map_types(&inner_type)?;
+                    let (schema_key, schema_val) = self.extract_map_types(&inner_type)?;
+                    let (marshal_key, marshal_val) = match &marshal_elems {
+                        Some(MarshalCollectionElements::Map(k, v)) => {
+                            (Some(k.as_str()), Some(v.as_str()))
+                        }
+                        _ => (None, None),
+                    };
+                    let key_type = Self::prefer_udt_marshal_element(marshal_key, &schema_key);
+                    let value_type = Self::prefer_udt_marshal_element(marshal_val, &schema_val);
                     self.parse_frozen_map_value(
-                        data,
-                        offset,
-                        &key_type,
-                        &value_type,
-                        column,
-                        _reader,
+                        data, offset, key_type, value_type, column, _reader,
                     )?
                 } else if Self::is_udt_type(&column.data_type) {
                     // Frozen UDT - parse using UDT parser
