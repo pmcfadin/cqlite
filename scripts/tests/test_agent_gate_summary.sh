@@ -440,6 +440,77 @@ else
   echo "------- scoped cmd -------"; printf '%s\n' "$noparser_cmd"; echo "--------------------------"
 fi
 
+# 7d. Python-binding blast-radius routing (issue #1893): cqlite-py is a pyo3 cdylib
+#     whose `cargo test -p cqlite-py` ALWAYS fails the libpython link, so --lite was
+#     BLIND for python diffs (zero signal on ~1/3 of binding issues; e.g. #1891,
+#     #1929). A bindings/python change must now route to the python tier (maturin
+#     develop --profile dev + the not-slow pytest tier) instead. The gate exposes
+#     the PLAN via the hidden `--classify-scoped-plan` hook (stdin paths ->
+#     "rust-pkg: <pkg>" / "python-tier: <cmd>"), asserted WITHOUT running maturin.
+
+# python-only diff -> python tier selected, NO rust cargo package (never cqlite-py).
+py_only=$(printf '%s\n' \
+  "bindings/python/tests/conftest.py" \
+  "bindings/python/src/database.rs" \
+  | bash "$GATE" --classify-scoped-plan 2>/dev/null)
+if printf '%s\n' "$py_only" | grep -q "^python-tier: .*maturin develop --profile dev" \
+   && printf '%s\n' "$py_only" | grep -qF "pytest bindings/python/tests -m 'not slow'"; then
+  ok "py-route: python-only diff selects the maturin --profile dev + not-slow-pytest tier"
+else
+  bad "py-route: python-only diff did NOT select the python tier"
+  echo "------- plan -------"; printf '%s\n' "$py_only"; echo "--------------------"
+fi
+if printf '%s\n' "$py_only" | grep -q "^rust-pkg:"; then
+  bad "py-route: python-only diff still selected a rust cargo package (cqlite-py run is the always-failing path)"
+  echo "------- plan -------"; printf '%s\n' "$py_only"; echo "--------------------"
+else
+  ok "py-route: python-only diff selects NO rust cargo package (cqlite-py excluded)"
+fi
+
+# mixed diff (python + core) -> BOTH the rust-scoped package AND the python tier.
+mixed=$(printf '%s\n' \
+  "bindings/python/src/value.rs" \
+  "cqlite-core/src/storage/sstable/reader.rs" \
+  | bash "$GATE" --classify-scoped-plan 2>/dev/null)
+if printf '%s\n' "$mixed" | grep -qxF "rust-pkg: cqlite-core" \
+   && printf '%s\n' "$mixed" | grep -q "^python-tier: "; then
+  ok "py-route: mixed diff selects BOTH cqlite-core AND the python tier"
+else
+  bad "py-route: mixed diff did NOT select both rust + python tier"
+  echo "------- plan -------"; printf '%s\n' "$mixed"; echo "--------------------"
+fi
+# cqlite-py must NEVER appear as a rust cargo package in the mixed plan either.
+if printf '%s\n' "$mixed" | grep -q "cqlite-py"; then
+  bad "py-route: mixed diff plan referenced cqlite-py as a cargo package (must be python tier only)"
+  echo "------- plan -------"; printf '%s\n' "$mixed"; echo "--------------------"
+else
+  ok "py-route: mixed diff never runs cargo test -p cqlite-py"
+fi
+
+# node diff -> UNAFFECTED: scopes to cqlite-node, NO python tier.
+node_only=$(printf '%s\n' \
+  "bindings/node/src/database.rs" \
+  | bash "$GATE" --classify-scoped-plan 2>/dev/null)
+if printf '%s\n' "$node_only" | grep -qxF "rust-pkg: cqlite-node" \
+   && ! printf '%s\n' "$node_only" | grep -q "^python-tier:"; then
+  ok "py-route: node diff unaffected (cqlite-node, no python tier)"
+else
+  bad "py-route: node diff wrongly triggered the python tier or missed cqlite-node"
+  echo "------- plan -------"; printf '%s\n' "$node_only"; echo "--------------------"
+fi
+
+# rust-only diff -> UNCHANGED: scopes to the rust package, NO python tier.
+rust_only=$(printf '%s\n' \
+  "cqlite-core/src/storage/sstable/reader.rs" \
+  | bash "$GATE" --classify-scoped-plan 2>/dev/null)
+if printf '%s\n' "$rust_only" | grep -qxF "rust-pkg: cqlite-core" \
+   && ! printf '%s\n' "$rust_only" | grep -q "^python-tier:"; then
+  ok "py-route: rust-only diff unchanged (cqlite-core, no python tier)"
+else
+  bad "py-route: rust-only diff behavior changed (unexpected python tier or missing cqlite-core)"
+  echo "------- plan -------"; printf '%s\n' "$rust_only"; echo "--------------------"
+fi
+
 # 8. Bash 3.2 compatibility (issue #1821): macOS ships Bash 3.2 as /bin/bash and
 #    the gate is invoked as plain `bash scripts/agent-gate.sh`. The --lite path
 #    must not use Bash-4-only features (associative arrays). Exercise the hook
@@ -453,6 +524,14 @@ if [ -x /bin/bash ]; then
     ok "bash-compat: --lite classification path runs under /bin/bash (major ${bin_bash_major:-?})"
   else
     bad "bash-compat: --lite classification path failed under /bin/bash (major ${bin_bash_major:-?})"
+  fi
+  # 8b. The python-tier routing hook (issue #1893) must also run under /bin/bash 3.x.
+  if printf '%s\n' "bindings/python/tests/conftest.py" \
+       | /bin/bash "$GATE" --classify-scoped-plan 2>/dev/null \
+       | grep -q "^python-tier: "; then
+    ok "bash-compat: --classify-scoped-plan python routing runs under /bin/bash (major ${bin_bash_major:-?})"
+  else
+    bad "bash-compat: --classify-scoped-plan python routing failed under /bin/bash (major ${bin_bash_major:-?})"
   fi
 fi
 

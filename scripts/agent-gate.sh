@@ -460,6 +460,59 @@ _scoped_test_cmd_noparser() {
   echo "test -p cqlite-core --lib --features cli-helpers"
 }
 
+# The FAST python-binding tier --lite runs for a bindings/python diff (issue #1893)
+# INSTEAD of the always-libpython-link-failing `cargo test -p cqlite-py`. cqlite-py
+# is a pyo3 cdylib, so a plain `cargo test` on it never links libpython and gave
+# --lite ZERO python signal on ~1/3 of binding diffs. Single source of truth for
+# both the executor (run_scoped_tests) and the --classify-scoped-plan self-test hook.
+PYTHON_LITE_TIER_CMD="maturin develop --profile dev && pytest bindings/python/tests -m 'not slow'"
+
+# Read changed repo-relative paths on stdin; emit the deduped set of owning Cargo
+# workspace packages (one per line) — the SAME union of path-owners + changed
+# --test-target owners that run_scoped_tests scopes to. Bash 3.2-safe (no
+# associative arrays); empty when no metadata parser is available. Used by the
+# --classify-scoped-plan self-test hook so its detection can never drift from the
+# executor's (both derive ownership from `cargo metadata`).
+_scoped_pkgset() {
+  local changed index owners newtests pkgset="" key pkg tpkg
+  changed=$(cat)
+  index=$(_package_index)
+  owners=$(printf '%s\n' "$changed" | _owners_from_index "$index")
+  newtests=$(printf '%s\n' "$changed" | classify_test_targets)
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    pkg=${key%%|*}
+    [ -n "$pkg" ] || continue
+    printf '%s\n' "$pkgset" | grep -qxF "$pkg" || pkgset="${pkgset}${pkg}"$'\n'
+  done <<<"$owners"
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    tpkg=${key%%|*}
+    [ -n "$tpkg" ] || continue
+    printf '%s\n' "$pkgset" | grep -qxF "$tpkg" || pkgset="${pkgset}${tpkg}"$'\n'
+  done <<<"$newtests"
+  printf '%s' "$pkgset" | awk 'NF'
+}
+
+# Self-test / debug hook (issue #1893): map stdin changed paths -> the scoped-tests
+# PLAN without executing anything. Emits `rust-pkg: <pkg>` for every owning rust
+# workspace package EXCEPT cqlite-py, and `python-tier: <cmd>` once when a
+# bindings/python change is present (cqlite-py owns it). Proves --lite routes a
+# python diff to the maturin+pytest tier instead of the always-failing cargo run,
+# leaves node (cqlite-node) and rust-only diffs untouched, and NEVER emits a
+# cqlite-py cargo package. Deterministic; no side effects; does not invoke cargo test.
+classify_scoped_plan() {
+  local pkgset python_diff=0 pkg
+  pkgset=$(cat | _scoped_pkgset)
+  while IFS= read -r pkg; do
+    [ -n "$pkg" ] || continue
+    if [ "$pkg" = cqlite-py ]; then python_diff=1; continue; fi
+    echo "rust-pkg: $pkg"
+  done <<<"$pkgset"
+  [ "$python_diff" -eq 1 ] && echo "python-tier: $PYTHON_LITE_TIER_CMD"
+  return 0
+}
+
 COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity python-bindings node-bindings delivery-telemetry parity-report binding-unwind-profile tooling-tests minimal-build smoke)
 # --lite (issue #1821) runs ONLY this fast subset: file-size ratchet, fmt,
 # FULL-workspace clippy (cross-crate API breaks are the cheap-insurance class),
@@ -488,6 +541,10 @@ case "${1:-}" in
   # scoped-test command so the self-test can assert it RUNS tests (--lib, never
   # --no-run). No side effects; does not invoke cargo.
   --scoped-test-cmd-noparser) echo "cargo $(_scoped_test_cmd_noparser)"; exit 0 ;;
+  # Hidden self-test hook (issue #1893): map stdin changed paths -> the scoped-tests
+  # PLAN ("rust-pkg: <pkg>" / "python-tier: <cmd>") WITHOUT running cargo/maturin, so
+  # the self-test can assert python diffs route to the maturin+pytest tier.
+  --classify-scoped-plan) classify_scoped_plan; exit 0 ;;
   --only) ONLY="${2:?--only needs a comma-separated component list}" ;;
   --emit-summary-selftest) SELFTEST=1 ;;
   "") ;;
@@ -1232,6 +1289,13 @@ run_file_size() {
 # core-tests/write/cli/bindings/parity set. Falls back to `cqlite-core --lib` and
 # says so when no rust workspace package is in the diff (docs/scripts/bindings-only
 # changes). Package detection uses the SAME base-ref resolution as file-size.
+#
+# Python exception (issue #1893): cqlite-py is a pyo3 cdylib whose
+# `cargo test -p cqlite-py` can never link libpython, so a bindings/python diff is
+# routed to the fast python tier (maturin develop --profile dev + the not-slow
+# pytest tier) instead of the always-failing cargo run. Node (cqlite-node) and
+# rust-only diffs are unaffected; a mixed diff runs BOTH the rust-scoped targets
+# AND the python tier. See PYTHON_LITE_TIER_CMD / classify_scoped_plan above.
 run_scoped_tests() {
   local name=scoped-tests
   local log="$LOG_DIR/$name.log"
@@ -1333,14 +1397,31 @@ run_scoped_tests() {
     printf '%s\n' "$pkgset" | grep -qxF "$tpkg" || pkgset="${pkgset}${tpkg}"$'\n'
   done <<<"$newtests"
 
+  # Build the rust package set, EXCLUDING cqlite-py (issue #1893): it is a pyo3
+  # cdylib whose `cargo test -p cqlite-py` can never link libpython, so it always
+  # FAILed --lite and gave ZERO python signal on ~1/3 of binding diffs. A
+  # bindings/python change instead routes to the fast python tier (maturin develop
+  # --profile dev + the not-slow pytest tier) below — the real regression signal.
   local -a pkgs=()
-  while IFS= read -r pkg; do [ -n "$pkg" ] && pkgs+=("$pkg"); done <<<"$pkgset"
-  local scoped_note
-  if [ "${#pkgs[@]}" -eq 0 ]; then
+  local python_diff=0
+  while IFS= read -r pkg; do
+    [ -n "$pkg" ] || continue
+    if [ "$pkg" = cqlite-py ]; then
+      python_diff=1
+      continue
+    fi
+    pkgs+=("$pkg")
+  done <<<"$pkgset"
+  local scoped_note=""
+  [ "${#pkgs[@]}" -gt 0 ] && scoped_note="${pkgs[*]}"
+  if [ "$python_diff" -eq 1 ]; then
+    scoped_note="${scoped_note:+$scoped_note + }python tier (maturin develop --profile dev + pytest -m 'not slow')"
+  fi
+  # Fall back to the cqlite-core --lib default ONLY when the diff selected nothing
+  # at all — NOT when a python-only diff already routed to the python tier.
+  if [ "${#pkgs[@]}" -eq 0 ] && [ "$python_diff" -eq 0 ]; then
     pkgs=(cqlite-core)
     scoped_note="cqlite-core --lib (default; no rust workspace package in the diff)"
-  else
-    scoped_note="${pkgs[*]}"
   fi
   echo ">>> [$name] blast-radius packages: $scoped_note"
 
@@ -1363,8 +1444,11 @@ run_scoped_tests() {
     printf '%s' "$set"
   }
 
+  # Bash 3.2 under `set -u` treats "${pkgs[@]}" of an EMPTY array as unbound, and a
+  # python-only diff now legitimately leaves pkgs empty (python tier covers it), so
+  # expand with the ${arr[@]+"${arr[@]}"} guard rather than unconditionally.
   local p rest tname feats
-  for p in "${pkgs[@]}"; do
+  for p in ${pkgs[@]+"${pkgs[@]}"}; do
     local -a args=(test -p "$p")
     local featset=""
     # cqlite-core lib tests need cli-helpers (matches the full gate's core-tests).
@@ -1410,6 +1494,37 @@ run_scoped_tests() {
       OVERALL=FAIL
     fi
   done
+
+  # Python tier (issue #1893): the REAL python signal --lite runs for a
+  # bindings/python diff instead of the always-libpython-link-failing
+  # `cargo test -p cqlite-py`. Reuses the full gate's persistent venv
+  # (target/agent-gate-venv), but the FAST variant: `maturin develop --profile dev`
+  # (the documented dev build; overrides the release-unwind firewall pin) + the
+  # not-slow pytest tier. SKIP-aware — a missing python3 notes + skips (never FAILs
+  # --lite for a toolchain gap), matching the full gate's python-bindings component.
+  if [ "$python_diff" -eq 1 ]; then
+    if ! command -v python3 >/dev/null 2>&1; then
+      echo ">>> [$name] python binding diff but no python3 on PATH — SKIP python tier (run the full gate)"
+    else
+      local venv="$REPO_ROOT/target/agent-gate-venv"
+      echo ">>> [$name] python tier: maturin develop --profile dev + pytest -m 'not slow' (venv: $venv)"
+      if RUN_SLOW_TESTS=0 bash -c '
+          set -euo pipefail
+          venv="'"$venv"'"
+          [ -x "$venv/bin/python" ] || python3 -m venv "$venv"
+          . "$venv/bin/activate"
+          pip install --quiet --upgrade pip >/dev/null
+          pip install --quiet maturin pytest
+          maturin develop --profile dev -m bindings/python/Cargo.toml
+          pytest bindings/python/tests -m "not slow" -q' >>"$log" 2>&1; then
+        echo ">>> [$name] python tier PASS"
+      else
+        status=FAIL
+        OVERALL=FAIL
+        echo ">>> [$name] python tier FAIL"
+      fi
+    fi
+  fi
 
   if [ "$status" = FAIL ]; then
     echo "--- [$name] FAILED; last 60 lines of $log ---"
