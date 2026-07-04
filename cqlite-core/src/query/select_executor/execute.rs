@@ -120,6 +120,19 @@ impl SelectExecutor {
         // then collects the full (still byte-budget-bounded) result.
         let scan_collect_bound = compute_scan_collect_bound(&execution_steps);
 
+        // Issue #1582 (D6): a query-wide `LIMIT 0` ALWAYS yields an empty result.
+        // `compute_scan_collect_bound` returns `None` whenever the plan carries a
+        // reordering/reducing step (`Sort`, `Filter`, `Aggregate`,
+        // `PerPartitionLimit`), so the `collect_bound == Some(0)` short-circuit in
+        // `execute_sstable_scan` never fires for e.g. `... ORDER BY ck LIMIT 0` —
+        // the scan would then materialize the full (possibly wide) partition and
+        // could raise `ResultTooLarge`. Detect the actual `ExecutionStep::Limit`
+        // count == 0 here and signal the scan to return empty before collecting,
+        // independent of the collect bound (matching the other LIMIT-0 short-circuits).
+        let query_wide_limit_zero = execution_steps
+            .iter()
+            .any(|step| matches!(step, ExecutionStep::Limit { count: 0, .. }));
+
         for step in &execution_steps {
             match step {
                 ExecutionStep::SSTableScan {
@@ -136,6 +149,7 @@ impl SelectExecutor {
                             plan.statement.order_by.as_ref(),
                             query_schema.as_deref(),
                             scan_collect_bound,
+                            query_wide_limit_zero,
                             &mut context,
                         )
                         .await?;
@@ -665,8 +679,24 @@ impl SelectExecutor {
         // (count + uncharged offset skip) when the plan permits it, else None.
         // See the method doc.
         collect_bound: Option<ScanCollectBound>,
+        // Issue #1582 (D6): the plan carries a query-wide `LIMIT 0` execution step.
+        // Unlike `collect_bound`, this is set even when a reordering/reducing step
+        // (`Sort`/`Filter`/`Aggregate`/`PerPartitionLimit`) forced
+        // `compute_scan_collect_bound` to `None`, so a `... ORDER BY ck LIMIT 0`
+        // query still short-circuits to empty instead of scanning a wide partition.
+        query_wide_limit_zero: bool,
         context: &mut ExecutionContext,
     ) -> Result<Vec<QueryRow>> {
+        // Issue #1582 (D6): a query-wide `LIMIT 0` collects nothing regardless of
+        // the plan shape. When a reordering/reducing step made `collect_bound`
+        // `None`, the `collect_bound == Some(0)` short-circuit below cannot fire —
+        // return empty here BEFORE any scan/lookup/budget work so the scan never
+        // materializes a wide partition and raises `ResultTooLarge` on a LIMIT-0
+        // query. An empty result is correct: LIMIT 0 is empty regardless of ordering.
+        if query_wide_limit_zero {
+            return Ok(Vec::new());
+        }
+
         // Issue #1582 (FINDING 2): a LIMIT 0 collects nothing. Short-circuit
         // BEFORE any scan, lookup, row build, predicate eval, push, or byte-budget
         // work on EVERY path (targeted, multi-targeted, fallback scan). Besides

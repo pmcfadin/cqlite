@@ -73,7 +73,7 @@
 use cqlite_core::config::DEFAULT_MAX_RESULT_BYTES;
 use cqlite_core::ingestion::{ingest, IngestionConfig};
 use cqlite_core::storage::write_engine::{
-    CellOperation, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
+    CellOperation, ClusteringKey, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
 };
 use cqlite_core::types::Value;
 use cqlite_core::{Config, Database, Error};
@@ -119,6 +119,12 @@ const MATCH_COUNT: usize = 10;
 /// (unlike an int `id`, which the legacy path maps to a synthetic `user_key_N`
 /// that never matches a real SSTable partition key).
 const WIDE_UUID_TBL: &str = "wide_uuid_items";
+/// Wide fixture with a CLUSTERING column so `ORDER BY ck` is available. All rows
+/// live in ONE partition (`id = 0`) with a wide payload each, so the partition's
+/// materialized size dwarfs [`SHARED_BUDGET_BYTES`]. A plan with `ORDER BY`
+/// emits a `Sort` step, so `compute_scan_collect_bound` returns `None` — the exact
+/// uncovered path for the query-wide `LIMIT 0` short-circuit (D6 roborev finding).
+const WIDE_CK_TBL: &str = "wide_ck_items";
 /// The partition looked up by the legacy-path tests (`0x11` repeated 16×). Its
 /// canonical UUID literal (below) is what the CQL `WHERE id = ...` clause carries.
 const LOOKUP_UUID: [u8; 16] = [0x11u8; 16];
@@ -139,6 +145,29 @@ fn wide_uuid_row(id_bytes: [u8; 16], ts: i64) -> Mutation {
         value: Value::Blob(vec![0xABu8; WIDE_PAYLOAD_BYTES]),
     }];
     Mutation::new(TableId::new(KS, WIDE_UUID_TBL), pk, None, ops, ts, None)
+}
+
+fn wide_ck_schema_cql() -> String {
+    format!(
+        "CREATE TABLE {KS}.{WIDE_CK_TBL} (\n  id int,\n  ck int,\n  payload blob,\n  PRIMARY KEY (id, ck)\n);\n"
+    )
+}
+
+fn wide_ck_row(id: i32, ck: i32, ts: i64) -> Mutation {
+    let pk = PartitionKey::single("id", Value::Integer(id));
+    let clustering = ClusteringKey::single("ck", Value::Integer(ck));
+    let ops = vec![CellOperation::Write {
+        column: "payload".to_string(),
+        value: Value::Blob(vec![0xABu8; WIDE_PAYLOAD_BYTES]),
+    }];
+    Mutation::new(
+        TableId::new(KS, WIDE_CK_TBL),
+        pk,
+        Some(clustering),
+        ops,
+        ts,
+        None,
+    )
 }
 
 fn skinny_schema_cql() -> String {
@@ -293,6 +322,27 @@ async fn prepare_wide_uuid(root: &std::path::Path) -> (std::path::PathBuf, std::
     })
     .await
     .expect("build wide uuid fixture");
+    (data_dir, schema_path)
+}
+
+/// Build a single wide partition (`id = 0`) with [`WIDE_ROW_COUNT`] clustering
+/// rows, each carrying a ~10 KiB payload. `ORDER BY ck` over it emits a `Sort`
+/// step (so `compute_scan_collect_bound` is `None`), and the partition's
+/// materialized size (~80 KiB) dwarfs [`SHARED_BUDGET_BYTES`].
+async fn prepare_wide_ck(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let data_dir = root.join("wide_ck_data");
+    let wal_dir = root.join("wide_ck_wal");
+    let schema_path = root.join("wide_ck_schema.cql");
+    std::fs::write(&schema_path, wide_ck_schema_cql()).expect("write wide ck schema");
+    let (d, w) = (data_dir.clone(), wal_dir.clone());
+    tokio::task::spawn_blocking(move || {
+        let rows: Vec<Mutation> = (0..WIDE_ROW_COUNT)
+            .map(|ck| wide_ck_row(0, ck, 100))
+            .collect();
+        build_fixture(&d, &w, &wide_ck_schema_cql(), rows);
+    })
+    .await
+    .expect("build wide ck fixture");
     (data_dir, schema_path)
 }
 
@@ -502,6 +552,52 @@ async fn limit_zero_targeted_returns_empty_never_result_too_large() {
     assert!(
         result.rows.is_empty(),
         "LIMIT 0 must return zero rows; got {}",
+        result.rows.len()
+    );
+}
+
+/// FINDING D6 (roborev MEDIUM): a query-wide `LIMIT 0` must ALWAYS return an empty
+/// result, never `ResultTooLarge` — INCLUDING when the plan carries a reordering /
+/// reducing step (`Sort`, `Filter`, `Aggregate`, `PerPartitionLimit`) that makes
+/// `compute_scan_collect_bound` return `None`. Here `ORDER BY ck` emits a `Sort`
+/// step, so the `collect_bound == Some(0)` short-circuit never fires; pre-fix the
+/// fallback scan-collection loop had no LIMIT-0 early-return, so it scanned the full
+/// wide partition (~80 KiB) under the sub-partition [`SHARED_BUDGET_BYTES`] budget
+/// and raised `ResultTooLarge` instead of returning empty. Post-fix a query-wide
+/// `ExecutionStep::Limit { count: 0, .. }` short-circuits to an empty result BEFORE
+/// scanning, independent of whether a collect bound was computed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn limit_zero_with_reordering_step_returns_empty_not_too_large() {
+    let temp = TempDir::new().unwrap();
+    let (data_dir, schema_path) = prepare_wide_ck(temp.path()).await;
+
+    // Budget BELOW the wide partition's materialized size (8 × ~10 KiB ≫ 24 KiB).
+    let db = open_db_with_budget(data_dir, schema_path, SHARED_BUDGET_BYTES).await;
+
+    // Sanity: the SAME ORDER BY query with a NON-zero LIMIT scans the wide
+    // partition and trips the guard — the `Sort` step disables the collect-bound
+    // early-stop, so the full partition is collected and the budget bites. This
+    // proves the query exercises the uncovered `compute_scan_collect_bound == None`
+    // path (not a plan that early-stops).
+    let unlimited = format!("SELECT * FROM {KS}.{WIDE_CK_TBL} ORDER BY ck LIMIT {WIDE_ROW_COUNT}");
+    let err = db
+        .execute(&unlimited)
+        .await
+        .expect_err("wide ORDER BY scan must exceed the byte budget");
+    assert!(
+        matches!(err, Error::ResultTooLarge { .. }),
+        "unlimited ORDER BY query must trip the guard (Sort disables early-stop), got {err:?}"
+    );
+
+    // LIMIT 0 with the reordering Sort step must short-circuit to empty, never error.
+    let sql = format!("SELECT * FROM {KS}.{WIDE_CK_TBL} ORDER BY ck LIMIT 0");
+    let result = db
+        .execute(&sql)
+        .await
+        .expect("query-wide LIMIT 0 must short-circuit to empty, never ResultTooLarge");
+    assert!(
+        result.rows.is_empty(),
+        "LIMIT 0 must return zero rows even with a Sort step; got {}",
         result.rows.len()
     );
 }
