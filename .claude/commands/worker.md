@@ -46,8 +46,12 @@ onto its own branch). Rules, non-negotiable:
    has commandeered the shared checkout. Do NOT touch it; proceed only via your own worktree (steps below
    all use `git -C`), and report to the manager: `⚠️ root checkout is on <branch>, not main — that session
    needs its own worktree`.
-2. **Pick up** (`flow-board` pickup rule): the **oldest `Ready`** issue with **no** `issue-N-*` lock on
-   origin. None? Report "Ready empty" and stop.
+2. **Pick up** (`flow-board` pickup rule): the **oldest issue whose board `Status=Ready`** with **no**
+   `issue-N-*` lock on origin. **Select by board `Status` ONLY — never by the `status:ready` label**
+   (Path A, #1886: labels are decorative; the board is the sole dispatch authority). If the board is
+   unreachable, STOP and report — do NOT fall back to labels to find work. **Empty Ready → report "Ready
+   empty" and stop** (near a release the Ready column is *meant* to drain to zero; that is "done," not a
+   cue to dredge labels for more).
 3. **Claim it — in an isolated worktree branched from `origin/main` (this NEVER changes the root's branch):**
    ```
    git -C ~/projects/cqlite fetch origin main

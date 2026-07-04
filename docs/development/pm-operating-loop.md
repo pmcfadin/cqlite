@@ -30,8 +30,11 @@ ORDER: k                # queue rank when several are Ready at once
 
 ## Worker lifecycle (flow-lead)
 
-1. **Pick up**: take the oldest `Ready` issue with **no** `issue-N-*` lock on origin. Claim it
-   (branch push = the cross-machine lock); first push wins, losers take the next item.
+1. **Pick up**: take the oldest issue whose **board `Status=Ready`** with **no** `issue-N-*` lock on origin.
+   **Select by board `Status` ONLY — never by the `status:ready` label** (Path A, #1886: the board is the
+   sole dispatch authority; labels are decorative). **Empty Ready → stop** (no work is ready; near a release
+   Ready is meant to drain to zero — do NOT fall back to labels). Board unreachable → STOP and fix auth, do
+   not dispatch from labels. Claim it (branch push = the cross-machine lock); first push wins, losers take the next item.
 2. **Read orders**: read the issue's manager comments. Note any `HOLD` / `ORDER` / instructions.
 3. **Route — spec-first for new work**: design-driven / any new feature → run **`flow-activate` FIRST**
    (produces the OpenSpec proposal/design/specs/tasks, STOPS at Seam 1 for owner spec approval); no code
