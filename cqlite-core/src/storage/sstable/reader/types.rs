@@ -244,6 +244,17 @@ pub struct SSTableReader {
     /// Template for minting fresh per-scan [`BlockSource`]s so concurrent scans
     /// never share a mutable file position or chunk index (issue #815).
     pub(crate) scan_source: ScanSource,
+    /// Positional (`pread`-style) source for the POINT-READ path (issue #1573,
+    /// Epic C / C2). Opened ONCE at reader open and shared for the reader's
+    /// lifetime. Because [`ReadAt`](super::read_at::ReadAt) takes `&self` (no seek,
+    /// no mutable position), concurrent point reads on one reader neither
+    /// serialize on a cursor mutex nor `open(2)` `Data.db` per lookup — the two
+    /// point-path pathologies C2 removes. Shares the reader's `Arc<Mmap>` when the
+    /// backend is mmap (no extra mapping / fd); otherwise it holds one dedicated
+    /// read-only fd. Scans still use [`scan_source`](Self::scan_source); this
+    /// source is intentionally shaped so scans could adopt it later (audit F3)
+    /// without requiring it now.
+    pub(crate) point_source: std::sync::Arc<dyn super::read_at::ReadAt>,
     /// SSTable header information
     pub(crate) header: SSTableHeader,
     /// Parser for SSTable format

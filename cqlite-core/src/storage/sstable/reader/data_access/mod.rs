@@ -532,7 +532,6 @@ impl SSTableReader {
     async fn get_cached_data(&self, block_offset: u64, size: u32) -> Result<Vec<u8>> {
         use crate::parser::header::CassandraVersion;
         use crate::storage::sstable::compression::Compression;
-        use tokio::io::AsyncReadExt;
 
         let key = self.chunk_cache_key_ranged(NS_BIG_POINT, block_offset, size);
         if let Some(hit) = self.chunk_cache.get(&key) {
@@ -542,13 +541,11 @@ impl SSTableReader {
         self.record_cache_miss();
 
         // Read from disk (counted so a repeat read can prove zero underlying reads).
+        // Positioned read on the shared point source (issue #1573, C2): no cursor
+        // mutex is held across this I/O, so concurrent point reads do not convoy.
         model::CHUNK_READ_CALLS.fetch_add(1, Ordering::Relaxed);
-        let mut file = self.file.lock().await;
-        file.seek(SeekFrom::Start(block_offset)).await?;
-
         let mut buffer = vec![0u8; size as usize];
-        file.read_exact(&mut buffer).await?;
-        drop(file); // Release file lock early
+        self.point_source.read_exact_at(block_offset, &mut buffer)?;
 
         // Decompress if needed
         let data = if let Some(compression_reader) = &self.compression_reader {
@@ -595,19 +592,11 @@ impl SSTableReader {
     /// No-op when this reader has no `CRC.db` (compressed tables carry inline
     /// per-chunk CRCs; BTI ships none; an absent `CRC.db` is warn-and-proceed).
     async fn verify_uncompressed_range(&self, offset: u64, size: u32) -> Result<()> {
-        use tokio::io::AsyncReadExt;
-
         let Some(crc) = self.crc_reader.as_deref() else {
             return Ok(());
         };
         if size == 0 {
             return Ok(());
-        }
-        let cs = crc.chunk_size() as u64;
-        if cs == 0 {
-            return Err(Error::corruption(
-                "CRC.db chunk size is zero; cannot verify uncompressed read",
-            ));
         }
         let file_size = self.stats.file_size;
         // Fix 3 (issue #1396): a corrupt on-disk offset/size can overflow
@@ -625,7 +614,95 @@ impl SSTableReader {
                      Data.db length {file_size}; refusing to verify a corrupt offset"
                 ))
             })?;
-        let first = offset / cs;
+        // Each covering chunk is CRC'd over its on-disk bytes via a positioned
+        // read on the shared point source (issue #1573, C2): the verifier never
+        // holds a cursor mutex across I/O, so it neither convoys concurrent point
+        // reads nor disturbs any scan cursor's position.
+        self.verify_covering_chunks(crc, offset, end, |lo, hi, chunk| {
+            let mut buf = vec![0u8; (hi - lo) as usize];
+            self.point_source.read_exact_at(lo, &mut buf).map_err(|e| {
+                Error::corruption(format!(
+                    "failed to read uncompressed chunk {chunk} at Data.db offset 0x{lo:x} for CRC verification: {e}"
+                ))
+            })?;
+            Ok(crc32fast::hash(&buf))
+        })
+    }
+
+    /// In-buffer counterpart of [`Self::verify_uncompressed_range`] for the
+    /// whole-section point-read fallback (issue #1573): the section is ALREADY
+    /// resident in `section`, covering Data.db `[base, base + section.len())`, so
+    /// each fully-contained covering chunk is CRC-checked directly from memory —
+    /// the section is transferred from disk EXACTLY ONCE (the caller's windowed
+    /// read), not a second time for CRC. A chunk that straddles below `base` (only
+    /// possible when `base` is not `CRC.db`-chunk-aligned, e.g. a nonzero header
+    /// that does not fall on a chunk boundary) re-reads just that one chunk so the
+    /// CRC-before-use guarantee holds regardless of header alignment. Same CRC32
+    /// algorithm, chunk layout, memoization, and mismatch/typed-error semantics as
+    /// [`Self::verify_uncompressed_range`].
+    async fn verify_uncompressed_section_in_buffer(&self, base: u64, section: &[u8]) -> Result<()> {
+        let Some(crc) = self.crc_reader.as_deref() else {
+            return Ok(());
+        };
+        if section.is_empty() {
+            return Ok(());
+        }
+        let file_size = self.stats.file_size;
+        let end = base
+            .checked_add(section.len() as u64)
+            .filter(|end| *end <= file_size)
+            .ok_or_else(|| {
+                Error::corruption(format!(
+                    "uncompressed section [0x{base:x}, +{}) overflows or exceeds the Data.db \
+                     length {file_size}; refusing to verify a corrupt section",
+                    section.len()
+                ))
+            })?;
+        self.verify_covering_chunks(crc, base, end, |lo, hi, chunk| {
+            if lo >= base && hi <= end {
+                // Chunk fully resident in the already-read buffer — CRC from
+                // memory, no second I/O.
+                let s = (lo - base) as usize;
+                let e = (hi - base) as usize;
+                Ok(crc32fast::hash(&section[s..e]))
+            } else {
+                // Chunk extends below `base` (unaligned header) — read just it.
+                let mut buf = vec![0u8; (hi - lo) as usize];
+                self.point_source.read_exact_at(lo, &mut buf).map_err(|e| {
+                    Error::corruption(format!(
+                        "failed to read uncompressed chunk {chunk} at Data.db offset 0x{lo:x} for CRC verification: {e}"
+                    ))
+                })?;
+                Ok(crc32fast::hash(&buf))
+            }
+        })
+    }
+
+    /// Walk the `CRC.db` chunk(s) covering Data.db `[start, end)` (`end` already
+    /// bounds-checked `<= file_size` by the caller, `end > start`), skipping chunks
+    /// already verified for this reader, comparing each covering chunk's CRC32 to
+    /// `CRC.db`, and memoizing successes so a chunk is verified at most once per
+    /// reader lifetime. `compute(lo, hi, chunk)` yields the CRC32 of the chunk's
+    /// on-disk bytes `[lo, hi)`; callers supply either a positioned disk read or an
+    /// in-buffer slice, which is what lets the whole-section fallback read its bytes
+    /// exactly once. This is the single place the chunk geometry, mismatch error,
+    /// and memoization live — the two public verify entry points differ ONLY in how
+    /// they source each chunk's bytes.
+    fn verify_covering_chunks(
+        &self,
+        crc: &super::crc::CrcDb,
+        start: u64,
+        end: u64,
+        mut compute: impl FnMut(u64, u64, u64) -> Result<u32>,
+    ) -> Result<()> {
+        let cs = crc.chunk_size() as u64;
+        if cs == 0 {
+            return Err(Error::corruption(
+                "CRC.db chunk size is zero; cannot verify uncompressed read",
+            ));
+        }
+        let file_size = self.stats.file_size;
+        let first = start / cs;
         let last = (end - 1) / cs;
         for chunk in first..=last {
             // Skip chunks already verified for this reader.
@@ -643,17 +720,7 @@ impl SSTableReader {
             if hi <= lo {
                 break; // range extends past EOF; nothing real to verify
             }
-            let mut buf = vec![0u8; (hi - lo) as usize];
-            {
-                let mut file = self.file.lock().await;
-                file.seek(SeekFrom::Start(lo)).await?;
-                file.read_exact(&mut buf).await.map_err(|e| {
-                    Error::corruption(format!(
-                        "failed to read uncompressed chunk {chunk} at Data.db offset 0x{lo:x} for CRC verification: {e}"
-                    ))
-                })?;
-            }
-            let computed = crc32fast::hash(&buf);
+            let computed = compute(lo, hi, chunk)?;
             let expected = crc.crc_for_chunk(chunk as usize)?;
             if computed != expected {
                 return Err(Error::corruption(format!(

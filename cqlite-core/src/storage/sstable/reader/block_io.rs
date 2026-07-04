@@ -517,6 +517,112 @@ async fn read_nb_format_chunk_data(
     Ok(Some(chunk_data))
 }
 
+/// Positional (`pread`) sibling of [`read_nb_format_chunk_data`] for the
+/// POINT-READ path (issue #1573, C2).
+///
+/// Reads compressed chunk `chunk_idx` from a [`ReadAt`](super::read_at::ReadAt)
+/// source at its `CompressionInfo`-resolved offset, verifies the trailing CRC32,
+/// and returns the compressed bytes ready for the caller to decompress. Unlike
+/// the cursor version this takes no seek cursor and no mutex — the offset is a
+/// parameter, so concurrent point reads never serialize and never `open(2)` per
+/// call. Returns `Ok(None)` once `chunk_idx` is past the last chunk (EOF).
+///
+/// CRC-then-decompress ordering (guardrail #1411) is preserved verbatim: the CRC
+/// is checked HERE, before the caller decompresses. A mismatch is a typed
+/// `Error::InvalidFormat` naming the chunk + offset, identical to the cursor path,
+/// and the caller never sees (nor decompresses) the payload.
+pub(crate) fn read_compressed_chunk_at(
+    source: &dyn super::read_at::ReadAt,
+    comp_info: &crate::storage::sstable::compression_info::CompressionInfo,
+    chunk_idx: usize,
+    file_size: u64,
+    header_offset: u64,
+) -> Result<Option<Vec<u8>>> {
+    if chunk_idx >= comp_info.chunk_offsets.len() {
+        return Ok(None); // EOF
+    }
+
+    let chunk_offset = comp_info
+        .compressed_chunk_offset(chunk_idx)
+        .ok_or_else(|| Error::InvalidFormat(format!("No offset for chunk {}", chunk_idx)))?;
+
+    let total_chunk_size = comp_info
+        .compressed_chunk_size(chunk_idx, file_size)
+        .ok_or_else(|| {
+            Error::InvalidFormat(format!(
+                "Cannot determine size for chunk {} (file_size={})",
+                chunk_idx, file_size
+            ))
+        })?;
+
+    if total_chunk_size < 4 {
+        return Err(Error::InvalidFormat(format!(
+            "Chunk {} size too small: {} bytes (minimum 4 for CRC)",
+            chunk_idx, total_chunk_size
+        )));
+    }
+
+    // Bounds-check against the actual Data.db length BEFORE allocating — a corrupt
+    // CompressionInfo offset must surface as a recoverable error, never a
+    // multi-exabyte allocation (mirrors the cursor path's roborev #970 guard).
+    let chunk_end = chunk_offset
+        .checked_add(header_offset)
+        .and_then(|abs| abs.checked_add(total_chunk_size));
+    match chunk_end {
+        Some(end) if end <= file_size => {}
+        _ => {
+            return Err(Error::InvalidFormat(format!(
+                "Chunk {} at offset 0x{:x} with size {} exceeds Data.db length {} \
+                 — corrupt CompressionInfo.db chunk offset",
+                chunk_idx, chunk_offset, total_chunk_size, file_size
+            )));
+        }
+    }
+
+    let chunk_data_size = (total_chunk_size - 4) as usize;
+    let absolute_offset = chunk_offset + header_offset;
+
+    // A5 read-work counter (SEEK_CALLS; consumer E4): the positioned chunk read
+    // resolves its own offset (no cursor seek), but it stands in for the cursor
+    // path's per-chunk seek, so it is counted the same way for parity of the E4
+    // guard. No-op in release (design.md Decision 1/2).
+    crate::storage::sstable::read_work_counters::record_seek();
+
+    // ONE positioned read for payload + trailing CRC32 (E3: single read/chunk).
+    let mut buf = vec![0u8; chunk_data_size + 4];
+    source
+        .read_exact_at(absolute_offset, &mut buf)
+        .map_err(|e| {
+            Error::Io(std::io::Error::other(format!(
+                "Failed to read chunk {} ({} bytes at offset 0x{:x}): {}",
+                chunk_idx,
+                chunk_data_size + 4,
+                absolute_offset,
+                e
+            )))
+        })?;
+    let expected_crc = u32::from_be_bytes([
+        buf[chunk_data_size],
+        buf[chunk_data_size + 1],
+        buf[chunk_data_size + 2],
+        buf[chunk_data_size + 3],
+    ]);
+    buf.truncate(chunk_data_size);
+
+    // CRC BEFORE decompress (guardrail #1411): fail fast on mismatch; the caller
+    // never decompresses a chunk that did not verify.
+    let computed_crc = crc32fast::hash(&buf);
+    if computed_crc != expected_crc {
+        return Err(Error::InvalidFormat(format!(
+            "CRC32 mismatch for chunk {} at offset 0x{:x}: expected=0x{:08x}, \
+             computed=0x{:08x}, chunk_size={}",
+            chunk_idx, chunk_offset, expected_crc, computed_crc, chunk_data_size
+        )));
+    }
+
+    Ok(Some(buf))
+}
+
 /// Read block header for BTI format
 async fn read_bti_format_block_header(
     file: &Arc<Mutex<BlockSource>>,
@@ -963,6 +1069,86 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::AtomicUsize;
     use tempfile::TempDir;
+
+    // =========================================================================
+    // Positional compressed-chunk read: CRC-before-decompress (issue #1573, C2)
+    // =========================================================================
+
+    /// An in-memory [`ReadAt`](super::read_at::ReadAt) for exercising the
+    /// positional chunk reader without touching the filesystem.
+    struct MemReadAt(Vec<u8>);
+    impl crate::storage::sstable::reader::read_at::ReadAt for MemReadAt {
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize> {
+            let start = offset as usize;
+            if start >= self.0.len() {
+                return Ok(0);
+            }
+            let avail = &self.0[start..];
+            let n = avail.len().min(buf.len());
+            buf[..n].copy_from_slice(&avail[..n]);
+            Ok(n)
+        }
+        fn len(&self) -> u64 {
+            self.0.len() as u64
+        }
+    }
+
+    /// A chunk whose stored CRC does not match its payload fails CRC in
+    /// `read_compressed_chunk_at` — the error is raised BEFORE any decompression
+    /// is attempted (the function returns the compressed bytes only after the CRC
+    /// verifies, so a corrupt chunk never reaches the caller's decompressor).
+    /// Guardrail #1411: CRC-then-decompress ordering.
+    #[test]
+    fn read_compressed_chunk_at_verifies_crc_before_returning() {
+        use crate::storage::sstable::compression_info::CompressionInfo;
+
+        // Two records: [payload0][crc0][payload1][WRONG crc1].
+        let payload0 = b"first-chunk-bytes".to_vec();
+        let payload1 = b"second-chunk-bytes".to_vec();
+        let crc0 = crc32fast::hash(&payload0);
+        let good_crc1 = crc32fast::hash(&payload1);
+        let wrong_crc1 = good_crc1 ^ 0xffff_ffff; // deliberately corrupt
+
+        let mut file = Vec::new();
+        file.extend_from_slice(&payload0);
+        file.extend_from_slice(&crc0.to_be_bytes());
+        let off1 = file.len() as u64;
+        file.extend_from_slice(&payload1);
+        file.extend_from_slice(&wrong_crc1.to_be_bytes());
+        let file_size = file.len() as u64;
+
+        let ci = CompressionInfo {
+            algorithm: "LZ4Compressor".to_string(),
+            option_pairs: vec![],
+            chunk_length: 64 * 1024,
+            max_compressed_length: i32::MAX as u32,
+            data_length: (payload0.len() + payload1.len()) as u64,
+            chunk_offsets: vec![0, off1],
+        };
+        let src = MemReadAt(file);
+
+        // Chunk 0 verifies and returns its exact compressed bytes.
+        let got = read_compressed_chunk_at(&src, &ci, 0, file_size, 0)
+            .expect("chunk 0 read")
+            .expect("chunk 0 present");
+        assert_eq!(got, payload0, "verified chunk returns its exact payload");
+
+        // Chunk 1's CRC is wrong: a corruption error is raised (before any
+        // decompress the caller would do on the returned bytes).
+        let err = read_compressed_chunk_at(&src, &ci, 1, file_size, 0)
+            .expect_err("corrupt CRC must error before decompress");
+        match err {
+            Error::InvalidFormat(m) => {
+                assert!(m.contains("CRC32 mismatch"), "unexpected error text: {m}")
+            }
+            other => panic!("expected InvalidFormat CRC mismatch, got {other:?}"),
+        }
+
+        // Past the last chunk is a clean EOF (None), never a panic.
+        assert!(read_compressed_chunk_at(&src, &ci, 2, file_size, 0)
+            .expect("EOF read ok")
+            .is_none());
+    }
 
     // =========================================================================
     // ASCII corruption detection tests
