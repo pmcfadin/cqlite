@@ -4,6 +4,10 @@ Issue: #1336 (deferred from #944 / PR #1329). Design-driven (connector architect
 distributed-stats semantics) → OpenSpec, Seam-1 owner approval required. Milestone: connector
 enhancement (post-v0.12, Flight/Trino track).
 
+**Owner approved (Seam 1): 2026-07-04.** Parked for a later implementation team — pick up by
+fetching branch `issue-1336-rf-correct-row-stats` (existing worktree/claim) and running
+`flow-implement 1336` against this change's `tasks.md`. Do not re-run `flow-activate`.
+
 ## Why
 
 `CqliteFlightMetadata.getTableStatistics` returns `TableStatistics.empty()` for every
