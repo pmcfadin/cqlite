@@ -1263,6 +1263,24 @@ mod tests {
     /// `test_da` is a local-only fixture, so this test SKIPS cleanly when the
     /// binaries are absent; but a PRESENT fixture that reports 0 partitions is a
     /// hard failure (matches the dataset-test posture in MEMORY).
+    ///
+    /// CI COVERAGE NOTE (issue #1622, roborev follow-up): this fixture-based test
+    /// SKIPS in default CI (the repo ships only `test_da` metadata sidecars, not
+    /// the binary Statistics.db). That is acceptable because the CORE fix under
+    /// test — `read_statistics_from_export` -> `read_table_counts` ->
+    /// `partition_count` (Σ of the `estimatedPartitionSize` histogram buckets) —
+    /// is FORMAT-AGNOSTIC: it has no BTI/`da`-vs-BIG/`nb` branch and no version
+    /// gate on the partition-count path (see `read_statistics_from_export`
+    /// above). `WriteEngine::flush` cannot emit `da`/BTI (it is hardwired to
+    /// `SSTableWriter::with_expected_partitions_and_registry`, i.e.
+    /// `SSTableFormat::Big`), so a self-contained WriteEngine-`da`-flush variant
+    /// is not constructible. The identical code path is therefore exercised in
+    /// CI by the `nb` test `test_export_partition_count_nonzero` below, which
+    /// flushes a real `nb` SSTable via `WriteEngine` and asserts the same
+    /// `partition_count > 0 && partition_count <= row_count` invariant through
+    /// the same `read_statistics_from_export` reader. This fixture test remains
+    /// as local BTI assurance (it proves the reader consumes a real `da`
+    /// Statistics.db) but is not required for CI coverage of the fix.
     #[test]
     fn test_read_statistics_from_export_bti_partition_count() {
         let Some(root) = datasets_root() else {
