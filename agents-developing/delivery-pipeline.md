@@ -84,8 +84,9 @@ is complete.
 
 ## State model
 
-- **Backlog** = GitHub issues + labels: one `P0`–`P3`, lifecycle
-  `status:{ready, spec-review, in-progress, in-review, addressing}`.
+- **Backlog** = GitHub issues; the Project `Status` field is the authoritative lifecycle
+  (`Backlog → Ready → In Progress → In Review → Done`). Each issue carries one `P0`–`P3`; `status:*`
+  labels are decorative only (Path A, #1886 — see [the claim board](#the-shared-claim-board)).
 - **1:1:1:1** — one issue ↔ one worktree/branch `issue-<N>-<slug>` ↔ one OpenSpec change `<slug>` ↔ one
   PR. Worktrees branch from `origin/main` and lack the gitignored `Data.db` binaries — run the gate with
   `CQLITE_DATASETS_ROOT` pointed at the main repo's `test-data/datasets`.
@@ -106,8 +107,11 @@ fresh even when an action came from the phone or web with no `flow-*` run.
 board and normalize the `Status` options. The built-in workflow automations (merge/close → `Done`,
 assigned → `In Progress`) cannot be set via CLI; the script prints the manual web-UI step for them.
 
-**Graceful degradation:** if the `project` scope or the board is absent, every `flow-*` skill falls back
-to the existing `status:*` label model (+ assignee) and never blocks — the Project is purely additive.
+**Path A — the board is the sole dispatch authority (issue #1886):** work is selected and claimed by
+the Project `Status` field ONLY. `status:*` labels are **decorative and non-authoritative** — never use
+them to select or claim work. If the `project` scope or the board is **unreachable, STOP and fix the auth**
+(`gh auth refresh -s project`) — do **not** fall back to labels to find work. An empty `Ready` column means
+no work is ready (near a release it is *meant* to drain to zero), not a cue to dredge labels.
 
 ## The claim protocol (no duplicate work)
 
@@ -162,6 +166,46 @@ longer a hand-merge step** — the PR auto-lands via [merge-on-green](#merge-on-
 the merge event moves the board item to `Done`. The owner intervenes on merge (from the mobile app / web
 UI) **only on escalation** — a genuine design-call roborev finding, a scope/product question, or work
 outside the issue.
+
+## Tiered gate + division of labor (issues #1821, #1855)
+
+Inside `flow-implement` the gate is **tiered**: the implementer iterates on
+`scripts/agent-gate.sh --lite` (~1–5 min) every fix round, and the **worker/orchestrator** runs the FULL
+`scripts/agent-gate.sh` **exactly once** before merge — its `==== AGENT-GATE SUMMARY ====` block is the
+only run that counts. `--lite` never replaces the full gate. **Division of labor:** an implementer
+subagent (`sstable-developer`) edits/commits/pushes and verifies with `--lite`/targeted tests **only** — it
+must **never** invoke the full gate (a subagent idle-waiting on a 12–20 min gate is killed by the stall
+watchdog and takes its child gate process down with it). See the
+[gate contract](/cqlite/agents-developing/gate-contract/) for the full loop and the `accelerators:` line.
+
+## Machine setup + accelerators
+
+A fresh machine that will run the pipeline should first run
+`bash scripts/bootstrap-agent-machine.sh` (details in `docs/development/agent-machine-setup.md`): it
+verifies the gate accelerators (`sccache`, `cargo-nextest`, modern bash — issue #1848), the datasets +
+`CQLITE_DATASETS_ROOT`, `gh` auth + the `project` scope, and roborev's local config. **roborev follows the
+machine's configured agent** (commonly `codex` via `.roborev.toml`; no flags) — explicit `--agent`/`--model`
+is a per-machine troubleshooting override only, never doctrine.
+
+## Pipelining independent lanes (retro #1889)
+
+The lead **pipelines** near-independent issues rather than serializing on long waits (a full gate is
+15–25 min, plus CI and roborev round-trips):
+
+- While one lane's full gate / CI / roborev runs, the lead advances **other independent lanes** —
+  implementation and review stages overlap freely.
+- Merge-on-green is **armed per PR** (it lands when green) rather than blocking the queue on each PR's CI.
+- **Only the full-gate step serializes** across lanes (respecting the #1825 machine-wide cap and measured
+  ~2-gate contention); everything else overlaps.
+- Long waits use **scheduled wakeups**, never idle polling.
+
+## Operational caveats
+
+- **Subagent model pin.** The `model:` pinned in a subagent's frontmatter is not always accessible — always
+  pass an explicit, accessible `model` (e.g. `opus`) when spawning, or the spawn fails.
+- **GitHub REST resilience.** Board / `gh` operations run in bursts and can hit GitHub's secondary rate
+  limits. Batch reads (one `gh project item-list` over per-item polls) and, on a `403`/secondary-limit
+  response, back off and retry rather than failing the run.
 
 ## Self-improvement loop (telemetry + retro)
 

@@ -116,7 +116,12 @@ Write for AI agents: terse, imperative, copy-pasteable commands. Skip the prose.
 [Section titled “Quick-start for a new agent”](#quick-start-for-a-new-agent)
 
 ```bash
-# 1. Fetch test data
+# 0. New machine? Bootstrap accelerators + datasets + gh/roborev config first.
+#    (details: docs/development/agent-machine-setup.md)
+bash scripts/bootstrap-agent-machine.sh
+
+
+# 1. Fetch test data (bootstrap --yes does this too)
 bash test-data/scripts/fetch-datasets.sh
 
 
@@ -204,7 +209,7 @@ The worker **logs which path it armed**. **Green-signal guard:** merge-on-green 
 
 [Section titled “State model”](#state-model)
 
-* **Backlog** = GitHub issues + labels: one `P0`–`P3`, lifecycle `status:{ready, spec-review, in-progress, in-review, addressing}`.
+* **Backlog** = GitHub issues; the Project `Status` field is the authoritative lifecycle (`Backlog → Ready → In Progress → In Review → Done`). Each issue carries one `P0`–`P3`; `status:*` labels are decorative only (Path A, #1886 — see [the claim board](#the-shared-claim-board)).
 * **1:1:1:1** — one issue ↔ one worktree/branch `issue-<N>-<slug>` ↔ one OpenSpec change `<slug>` ↔ one PR. Worktrees branch from `origin/main` and lack the gitignored `Data.db` binaries — run the gate with `CQLITE_DATASETS_ROOT` pointed at the main repo’s `test-data/datasets`.
 * The **definition of done** is the [spec-driven audit](/cqlite/agents-developing/spec-driven-audit/) one: `agent-gate.sh` PASS + C PASS + roborev clean.
 
@@ -216,7 +221,7 @@ In-flight work is tracked on a shared **GitHub Project (v2)** with a single-sele
 
 **One-time setup (the owner’s action):** Projects v2 needs the `project` token scope — `gh auth refresh -s project` — then run `test-data/scripts/setup-project-board.sh` to create + link the board and normalize the `Status` options. The built-in workflow automations (merge/close → `Done`, assigned → `In Progress`) cannot be set via CLI; the script prints the manual web-UI step for them.
 
-**Graceful degradation:** if the `project` scope or the board is absent, every `flow-*` skill falls back to the existing `status:*` label model (+ assignee) and never blocks — the Project is purely additive.
+**Path A — the board is the sole dispatch authority (issue #1886):** work is selected and claimed by the Project `Status` field ONLY. `status:*` labels are **decorative and non-authoritative** — never use them to select or claim work. If the `project` scope or the board is **unreachable, STOP and fix the auth** (`gh auth refresh -s project`) — do **not** fall back to labels to find work. An empty `Ready` column means no work is ready (near a release it is *meant* to drain to zero), not a cue to dredge labels.
 
 ## The claim protocol (no duplicate work)
 
@@ -249,6 +254,36 @@ The Claude Code mobile app cannot run the local pipeline itself (no local bash, 
 * **Claude Code on the web (secondary, cloud).** A cloud session uses the repo-committed `.claude/` (skills/agents/hooks) but not user-scoped config or local data. Run the **cloud setup script** `test-data/scripts/cloud-setup.sh` first — it installs `openspec` + `gh` and fetches the dataset (`fetch-datasets.sh`) so `flow-implement` can run the gate in the cloud.
 
 **Spec approval is the only standing human seam, and it is GitHub-mobile-native** regardless of how you drive: approve the OpenSpec spec + design in the session (Seam 1). For worker-owned issues **merge is no longer a hand-merge step** — the PR auto-lands via [merge-on-green](#merge-on-green-no-ci-busy-wait) (the manager-owned poller today; `gh pr merge --auto` once required checks are configured on `main`), and the merge event moves the board item to `Done`. The owner intervenes on merge (from the mobile app / web UI) **only on escalation** — a genuine design-call roborev finding, a scope/product question, or work outside the issue.
+
+## Tiered gate + division of labor (issues #1821, #1855)
+
+[Section titled “Tiered gate + division of labor (issues #1821, #1855)”](#tiered-gate--division-of-labor-issues-1821-1855)
+
+Inside `flow-implement` the gate is **tiered**: the implementer iterates on `scripts/agent-gate.sh --lite` (\~1–5 min) every fix round, and the **worker/orchestrator** runs the FULL `scripts/agent-gate.sh` **exactly once** before merge — its `==== AGENT-GATE SUMMARY ====` block is the only run that counts. `--lite` never replaces the full gate. **Division of labor:** an implementer subagent (`sstable-developer`) edits/commits/pushes and verifies with `--lite`/targeted tests **only** — it must **never** invoke the full gate (a subagent idle-waiting on a 12–20 min gate is killed by the stall watchdog and takes its child gate process down with it). See the [gate contract](/cqlite/agents-developing/gate-contract/) for the full loop and the `accelerators:` line.
+
+## Machine setup + accelerators
+
+[Section titled “Machine setup + accelerators”](#machine-setup--accelerators)
+
+A fresh machine that will run the pipeline should first run `bash scripts/bootstrap-agent-machine.sh` (details in `docs/development/agent-machine-setup.md`): it verifies the gate accelerators (`sccache`, `cargo-nextest`, modern bash — issue #1848), the datasets + `CQLITE_DATASETS_ROOT`, `gh` auth + the `project` scope, and roborev’s local config. **roborev follows the machine’s configured agent** (commonly `codex` via `.roborev.toml`; no flags) — explicit `--agent`/`--model` is a per-machine troubleshooting override only, never doctrine.
+
+## Pipelining independent lanes (retro #1889)
+
+[Section titled “Pipelining independent lanes (retro #1889)”](#pipelining-independent-lanes-retro-1889)
+
+The lead **pipelines** near-independent issues rather than serializing on long waits (a full gate is 15–25 min, plus CI and roborev round-trips):
+
+* While one lane’s full gate / CI / roborev runs, the lead advances **other independent lanes** — implementation and review stages overlap freely.
+* Merge-on-green is **armed per PR** (it lands when green) rather than blocking the queue on each PR’s CI.
+* **Only the full-gate step serializes** across lanes (respecting the #1825 machine-wide cap and measured \~2-gate contention); everything else overlaps.
+* Long waits use **scheduled wakeups**, never idle polling.
+
+## Operational caveats
+
+[Section titled “Operational caveats”](#operational-caveats)
+
+* **Subagent model pin.** The `model:` pinned in a subagent’s frontmatter is not always accessible — always pass an explicit, accessible `model` (e.g. `opus`) when spawning, or the spawn fails.
+* **GitHub REST resilience.** Board / `gh` operations run in bursts and can hit GitHub’s secondary rate limits. Batch reads (one `gh project item-list` over per-item polls) and, on a `403`/secondary-limit response, back off and retry rather than failing the run.
 
 ## Self-improvement loop (telemetry + retro)
 
@@ -554,6 +589,36 @@ scripts/agent-gate.sh --list
 ```
 
 Exit codes: `0` = PASS, `1` = FAIL, `3` = PARTIAL (—only mode).
+
+## Tiered gate: `--lite` iterate, full gate once (issue #1821)
+
+[Section titled “Tiered gate: --lite iterate, full gate once (issue #1821)”](#tiered-gate---lite-iterate-full-gate-once-issue-1821)
+
+The gate is tiered. `scripts/agent-gate.sh --lite` runs only the fast subset (file-size + fmt + scoped workspace clippy + blast-radius-scoped tests, \~1–5 min). It is the **fast iteration loop, NOT the gate of record** — it emits a DISTINCT `==== AGENT-GATE LITE SUMMARY ====` block (`MODE: lite`) that must **never** be pasted as the full SUMMARY. Iterate on `--lite` every fix round; run the FULL `scripts/agent-gate.sh` **exactly once** before merge. `--lite` never replaces the full gate.
+
+**Division of labor (issue #1855).** In the worker → subagent model, an implementer subagent (`sstable-developer`) edits, commits, pushes, and verifies with `--lite`/targeted tests **only** — it must **never** invoke the full gate. The worker/orchestrator runs the FULL gate itself, exactly once. A subagent idle-waiting on a 12–20 min full gate gets killed by the stall watchdog and takes its child gate process down with it.
+
+## New-machine setup
+
+[Section titled “New-machine setup”](#new-machine-setup)
+
+A fresh machine that will run the gate should first run `bash scripts/bootstrap-agent-machine.sh` (see `docs/development/agent-machine-setup.md`): it installs/verifies the accelerators below, the datasets, `gh` auth + the `project` scope, and roborev’s local config, then prints the gate’s `accelerators:` line as a health check.
+
+## Accelerators are LOUD when missing (issue #1848)
+
+[Section titled “Accelerators are LOUD when missing (issue #1848)”](#accelerators-are-loud-when-missing-issue-1848)
+
+Every optional accelerator the gate depends on is auto-detected, and every SUMMARY block (full **and** `--lite`) carries a machine-checkable line:
+
+```plaintext
+accelerators: sccache=on nextest=on lanes=on
+```
+
+* **`sccache`** — cross-worktree compile cache (\~25.6% faster fresh builds).
+* **`nextest`** — parallel `core-tests` (the gate’s long pole).
+* **`lanes`** — parallel gate components (needs bash ≥4.3 for `wait -n`).
+
+State values: **`on`** (detected & used) · **`absent`** (missing → the gate prints a loud `WARN:` on STDERR with the one-line install command) · **`off`** (intentionally disabled via `CQLITE_DISABLE_SCCACHE` / `CQLITE_DISABLE_NEXTEST` / `AGENT_GATE_JOBS=1`; **no warn**) · **`lanes=serial`** (degraded by bash <4.3). An intentional opt-out is `off`, never `absent`. This exists because a machine silently ran \~3x slower for weeks with sccache and nextest both un-installed and no signal. If a pasted SUMMARY shows `absent`, install the tool — the state is visible in the block, not just scrollback.
 
 ## Machine-wide concurrency cap (issue #1825)
 
