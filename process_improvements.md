@@ -43,7 +43,7 @@ Retro weighted failure ranking:
 | Reduce recurring `roborev_findings` | #1736 | same family — pre-empt the recurring finding classes | open |
 | Tiered gate (`--lite`) + review-first | #1821 | fast inner-loop gate subset for iteration + full gate once pre-merge; conditional internal review before roborev | 🔜 almost done (PR #1828) |
 | **Shared compiler cache (sccache)** | **#1822** | per-worktree `target/` + shared object cache to delete cross-worktree cold-compile duplication; rejected shared `CARGO_TARGET_DIR` (build-lock serializes parallel gates) | ✅ **DONE (PR #1833)** — 562s / 25.6% saved on fresh-worktree case, 100% hit rate |
-| Machine-wide gate concurrency cap | #1825 | bound simultaneous full-gate runs so higher session concurrency stays safe (also: concurrent gates skew wall-clock measurements) | open |
+| **Machine-wide gate concurrency cap** | **#1825** | bound simultaneous full-gate runs (cross-process `flock` semaphore, SIGKILL-safe stale-slot reaping) so higher session concurrency stays safe; excess gates queue (`waiting for gate slot…`) instead of failing | ✅ **DONE** |
 | **Gate perf: nextest + parallel components** | **#1737** | `cargo-nextest` for the core-tests floor + capped 2-lane parallel components + live-Docker parity tests skipped by default (kept in nightly lanes) + fail-closed result collection | ✅ **DONE (PR #1841)** — **258s vs 697s same-machine (63% off) / 75% vs 1036s ref**; nextest 2917 passing, no tests dropped |
 
 Three orthogonal families: **(1) cut the churn at the source** (#1793/#1736/#1821), **(2) delete
