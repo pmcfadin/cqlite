@@ -581,9 +581,13 @@ classify_scoped_plan() {
 #     nested helper mod), so certifying one would be a wiring-evidence gap;
 #   * python binding tests — `bindings/python/tests/*` (the #1893 python tier
 #     executes the whole not-slow pytest suite for a cqlite-py-owned diff);
-#   * docs — `*.md` anywhere; TOP-LEVEL-anchored `docs/*` and `website/*` only
-#     (roborev job 1452: a hypothetical src/docs/mod.rs is PRODUCTION — the old
-#     any-substring `*/docs/*` glob wrongly allowed it).
+#   * docs — MARKDOWN ONLY (`*.md` anywhere, including under docs/ and website/).
+#     NON-markdown files under docs/ or website/ (assets, config like
+#     astro.config.mjs / package.json, app code like *.astro, and data artifacts
+#     like delivery-telemetry.jsonl) are REFUSED: no delta component builds or
+#     validates them, so a blanket docs/ or website/ allow would break the
+#     fail-closed promise (roborev job 3325). The old blanket `docs/*` and
+#     `website/*` globs were removed for exactly this reason.
 # Deliberately REFUSED (require the full gate — --delta cannot execute them):
 # node jest files (`__test__/` — scoped-tests only compile-checks cqlite-node,
 # it never runs jest) and shell self-tests (`scripts/tests/*.sh` — no gate
@@ -592,10 +596,11 @@ classify_scoped_plan() {
 # (and run_delta) can call it. Bash 3.2-safe (case globs).
 _delta_is_allowed_path() {
   case "$1" in
-    # docs — *.md anywhere; docs/ and website/ top-level ONLY
+    # docs — MARKDOWN ONLY, anywhere (incl. under docs/ and website/). NON-md
+    # files under docs/ or website/ (config, app code, assets, data artifacts)
+    # fall through to the *) refusal: no delta component builds/validates them
+    # (roborev job 3325). Do NOT re-add blanket docs/* or website/* allows.
     *.md) return 0 ;;
-    docs/*) return 0 ;;
-    website/*) return 0 ;;
     # python binding tests — executed by the #1893 python tier (must stay ABOVE the
     # nested-rust-refuse rule: the python tier runs the whole pytest suite, so
     # nested python test files are fine).

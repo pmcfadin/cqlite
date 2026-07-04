@@ -3,8 +3,9 @@
 # RE-CERTIFICATION. After a full-gate PASS at an anchor commit, a diff
 # anchor..HEAD that touches ONLY what the re-cert can EXECUTE — rust cargo test
 # code (.rs under tests/ dirs, *_test(s).rs), python binding tests
-# (bindings/python/tests/, run by the #1893 python tier), and/or docs (*.md
-# anywhere; TOP-LEVEL docs/, website/) — may re-certify with file-size + fmt +
+# (bindings/python/tests/, run by the #1893 python tier), and/or docs (markdown
+# ONLY: *.md anywhere; non-md files under docs/ or website/ are REFUSED) — may
+# re-certify with file-size + fmt +
 # the changed test targets; ANYTHING else in the diff FAILs closed (a fresh full
 # gate is required), including node __test__/ files and scripts/tests/*.sh,
 # which --delta's components never execute (roborev job 1452). The delta run
@@ -87,22 +88,34 @@ assert_verdict "node-test-file-refuses" REFUSE \
 assert_verdict "shell-selftest-refuses" REFUSE \
   "scripts/tests/test_agent_gate_summary.sh"
 
-# 3. docs-only → ALLOW. Cover *.md anywhere + TOP-LEVEL docs/ and website/.
+# 3. docs-only → ALLOW. The doc allowlist is MARKDOWN ONLY (*.md anywhere,
+#    including under docs/ and website/).
 assert_verdict "docs-only-allows" ALLOW \
   "README.md" \
   "docs/development/pm-operating-loop.md" \
-  "docs/sstables-definitive-guide/README.md" \
-  "website/src/index.html"
+  "docs/sstables-definitive-guide/README.md"
 assert_verdict "top-level-docs-allows" ALLOW "docs/profiling.md"
+# Markdown under docs/ and website/ stays ALLOWED via the *.md rule.
+assert_verdict "website-md-allows" ALLOW "website/docs/agents-developing/gate-contract.md"
+assert_verdict "docs-md-allows" ALLOW "docs/development/pm-operating-loop.md"
 
 # 3b. Deep (non-top-level) docs/ and website/ dirs are PRODUCTION (roborev job
-#     1452): the docs globs are top-level-anchored, so a hypothetical
-#     src/docs/mod.rs or a nested website/ dir must REFUSE (only *.md is
-#     allowed anywhere).
+#     1452): only *.md is allowed anywhere, so a hypothetical src/docs/mod.rs or
+#     a nested website/ dir must REFUSE.
 assert_verdict "deep-docs-dir-refuses" REFUSE \
   "cqlite-core/src/docs/mod.rs"
 assert_verdict "deep-website-dir-refuses" REFUSE \
   "tools/website/generate.rs"
+
+# 3c. NON-markdown files under docs/ or website/ → REFUSE (roborev job 3325):
+#     the blanket docs/* and website/* allows were removed because no delta
+#     component builds/validates config, app code, assets, or data artifacts.
+#     Only *.md content is pure documentation the delta can safely pass through.
+assert_verdict "website-config-refuses"    REFUSE "website/astro.config.mjs"
+assert_verdict "website-package-refuses"    REFUSE "website/package.json"
+assert_verdict "website-astro-comp-refuses" REFUSE "website/src/components/Foo.astro"
+assert_verdict "website-html-refuses"       REFUSE "website/src/index.html"
+assert_verdict "docs-jsonl-data-refuses"    REFUSE "docs/reports/delivery-telemetry.jsonl"
 
 # 4. mixed (test + production) → REFUSE (any production file poisons the delta).
 assert_verdict "mixed-refuses" REFUSE \
