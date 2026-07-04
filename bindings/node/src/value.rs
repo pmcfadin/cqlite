@@ -30,6 +30,118 @@
 
 use cqlite_core::types::Value;
 use napi::{Env, JsFunction, JsObject, JsString, JsUnknown, Result};
+use std::cell::OnceCell;
+
+/// Per-result-conversion context that caches the global `Set` and `Map`
+/// constructors (Issue #1448).
+///
+/// Before this, every CQL `set`/`map` cell re-fetched its JS constructor from
+/// scratch (`env.get_global()` + `get_named_property`) PER CELL. A result set
+/// with many collection cells paid that lookup once per cell. `ConvCtx` fetches
+/// each constructor at most once per result conversion, lazily: a result with no
+/// `set`/`map` cells performs zero constructor lookups.
+///
+/// INVARIANT: at most one `get_global()` + named-property lookup for `Set` and
+/// one for `Map` per `ConvCtx`, regardless of row/cell count; zero when the
+/// result has no set/map cells. The [`ctor_lookups`](self::testing::ctor_lookups)
+/// work counter proves this in tests.
+///
+/// One `ConvCtx` is constructed per result (batch: once in `resolve`; streaming:
+/// once per yielded row, since napi handles are scoped to each `resolve` `Env`)
+/// and threaded by shared reference through `row_to_object` → `value_to_napi` →
+/// `set_to_js_set`/`map_to_js_map`.
+pub struct ConvCtx<'a> {
+    env: &'a Env,
+    set_ctor: OnceCell<JsFunction>,
+    map_ctor: OnceCell<JsFunction>,
+}
+
+impl<'a> ConvCtx<'a> {
+    /// Build a fresh conversion context over `env`. No constructor lookups happen
+    /// here — both caches start empty and fill lazily on first use.
+    pub fn new(env: &'a Env) -> Self {
+        Self {
+            env,
+            set_ctor: OnceCell::new(),
+            map_ctor: OnceCell::new(),
+        }
+    }
+
+    /// The napi environment this context converts values into.
+    fn env(&self) -> &Env {
+        self.env
+    }
+
+    /// The cached global `Set` constructor, fetched at most once per context.
+    fn set_constructor(&self) -> Result<&JsFunction> {
+        cache_get_or_try_init(&self.set_ctor, || {
+            let global = self.env.get_global()?;
+            global.get_named_property::<JsFunction>("Set")
+        })
+    }
+
+    /// The cached global `Map` constructor, fetched at most once per context.
+    fn map_constructor(&self) -> Result<&JsFunction> {
+        cache_get_or_try_init(&self.map_ctor, || {
+            let global = self.env.get_global()?;
+            global.get_named_property::<JsFunction>("Map")
+        })
+    }
+}
+
+/// Stable-Rust equivalent of the unstable `OnceCell::get_or_try_init`: return the
+/// cached value if present, otherwise run the fallible `fetch` exactly once,
+/// cache it, and return the cached reference.
+///
+/// This is the single fetch-vs-cached decision point for the `ConvCtx`
+/// constructor caches, so the [`ctor_lookups`](self::testing::ctor_lookups) work
+/// counter is bumped here — and ONLY here, on the fetch path. Because `fetch` is
+/// generic, the caching decision is unit-testable in Rust without a live JS
+/// `Env` (see the tests below): the counter must read 1 after two calls on one
+/// cell, and 0 when `fetch` is never invoked.
+fn cache_get_or_try_init<T, F>(cell: &OnceCell<T>, fetch: F) -> Result<&T>
+where
+    F: FnOnce() -> Result<T>,
+{
+    if cell.get().is_none() {
+        let value = fetch()?;
+        #[cfg(test)]
+        testing::bump_ctor_lookups();
+        // The conversion path is single-threaded per `Env`, so no other caller
+        // can have populated the cell between the `get` above and here; `set`
+        // therefore succeeds. If it ever raced, we simply keep whichever value
+        // won and fall through to the shared `get` below (no `unwrap`).
+        let _ = cell.set(value);
+    }
+    cell.get()
+        .ok_or_else(|| napi::Error::from_reason("constructor cache not initialized"))
+}
+
+/// Test-only instrumentation proving the constructor-caching invariant of
+/// [`ConvCtx`] (Issue #1448): a process-global counter bumped exactly once per
+/// real constructor fetch in [`cache_get_or_try_init`], mirroring the read-work
+/// counter pattern in `cqlite-core`'s `work_counters`.
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static CTOR_LOOKUPS: AtomicU64 = AtomicU64::new(0);
+
+    /// Record one real constructor fetch (called only on the cache-miss path).
+    pub(crate) fn bump_ctor_lookups() {
+        CTOR_LOOKUPS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Number of constructor fetches since the last [`reset_ctor_lookups`].
+    pub(crate) fn ctor_lookups() -> u64 {
+        CTOR_LOOKUPS.load(Ordering::Relaxed)
+    }
+
+    /// Clear the counter so a test starts from a known zero.
+    pub(crate) fn reset_ctor_lookups() {
+        CTOR_LOOKUPS.store(0, Ordering::Relaxed);
+    }
+}
 
 /// Convert a CQL Value to a JavaScript value with native types.
 ///
@@ -42,13 +154,15 @@ use napi::{Env, JsFunction, JsObject, JsString, JsUnknown, Result};
 ///
 /// # Arguments
 ///
-/// * `env` - The napi environment
+/// * `ctx` - The per-result conversion context (holds the napi `Env` and the
+///   lazily-cached `Set`/`Map` constructors, Issue #1448)
 /// * `value` - The CQL value to convert
 ///
 /// # Returns
 ///
 /// A `JsUnknown` representing the JavaScript value
-pub fn value_to_napi(env: &Env, value: &Value) -> Result<JsUnknown> {
+pub fn value_to_napi(ctx: &ConvCtx, value: &Value) -> Result<JsUnknown> {
+    let env = ctx.env();
     match value {
         // Null
         Value::Null => env.get_null().map(|v| v.into_unknown()),
@@ -119,25 +233,25 @@ pub fn value_to_napi(env: &Env, value: &Value) -> Result<JsUnknown> {
         Value::Inet(bytes) => inet_to_string_js(env, bytes),
 
         // JSON -> recursive conversion
-        Value::Json(json) => json_to_napi(env, json),
+        Value::Json(json) => json_to_napi(ctx, json),
 
         // List -> Array
-        Value::List(items) => list_to_array(env, items),
+        Value::List(items) => list_to_array(ctx, items),
 
         // Set -> JavaScript Set
-        Value::Set(items) => set_to_js_set(env, items),
+        Value::Set(items) => set_to_js_set(ctx, items),
 
         // Map -> JavaScript Map
-        Value::Map(pairs) => map_to_js_map(env, pairs),
+        Value::Map(pairs) => map_to_js_map(ctx, pairs),
 
         // Tuple -> Array
-        Value::Tuple(items) => list_to_array(env, items),
+        Value::Tuple(items) => list_to_array(ctx, items),
 
         // UDT -> object with fields
-        Value::Udt(udt) => udt_to_object(env, udt),
+        Value::Udt(udt) => udt_to_object(ctx, udt),
 
         // Frozen -> unwrap inner value
-        Value::Frozen(inner) => value_to_napi(env, inner),
+        Value::Frozen(inner) => value_to_napi(ctx, inner),
 
         // Tombstone -> null (deleted data)
         Value::Tombstone(_) => env.get_null().map(|v| v.into_unknown()),
@@ -317,7 +431,8 @@ fn inet_to_string_js(env: &Env, bytes: &[u8]) -> Result<JsUnknown> {
 }
 
 /// Convert serde_json::Value to JavaScript value.
-fn json_to_napi(env: &Env, json: &serde_json::Value) -> Result<JsUnknown> {
+fn json_to_napi(ctx: &ConvCtx, json: &serde_json::Value) -> Result<JsUnknown> {
+    let env = ctx.env();
     match json {
         serde_json::Value::Null => env.get_null().map(|v| v.into_unknown()),
         serde_json::Value::Bool(b) => env.get_boolean(*b).map(|v| v.into_unknown()),
@@ -340,14 +455,14 @@ fn json_to_napi(env: &Env, json: &serde_json::Value) -> Result<JsUnknown> {
         serde_json::Value::Array(arr) => {
             let mut js_arr = env.create_array_with_length(arr.len())?;
             for (i, item) in arr.iter().enumerate() {
-                js_arr.set_element(i as u32, json_to_napi(env, item)?)?;
+                js_arr.set_element(i as u32, json_to_napi(ctx, item)?)?;
             }
             Ok(js_arr.into_unknown())
         }
         serde_json::Value::Object(obj) => {
             let mut js_obj = env.create_object()?;
             for (k, v) in obj {
-                js_obj.set_named_property(k, json_to_napi(env, v)?)?;
+                js_obj.set_named_property(k, json_to_napi(ctx, v)?)?;
             }
             Ok(js_obj.into_unknown())
         }
@@ -355,10 +470,11 @@ fn json_to_napi(env: &Env, json: &serde_json::Value) -> Result<JsUnknown> {
 }
 
 /// Convert CQL List to JavaScript Array.
-fn list_to_array(env: &Env, items: &[Value]) -> Result<JsUnknown> {
+fn list_to_array(ctx: &ConvCtx, items: &[Value]) -> Result<JsUnknown> {
+    let env = ctx.env();
     let mut arr = env.create_array_with_length(items.len())?;
     for (i, item) in items.iter().enumerate() {
-        let js_value = value_to_napi(env, item)?;
+        let js_value = value_to_napi(ctx, item)?;
         arr.set_element(i as u32, js_value)?;
     }
     Ok(arr.into_unknown())
@@ -366,43 +482,41 @@ fn list_to_array(env: &Env, items: &[Value]) -> Result<JsUnknown> {
 
 /// Convert CQL Set to JavaScript Set.
 ///
-/// Uses the global Set constructor to create a native JavaScript Set.
-fn set_to_js_set(env: &Env, items: &[Value]) -> Result<JsUnknown> {
-    // Get the Set constructor from global
-    let global = env.get_global()?;
-    let set_constructor: JsFunction = global.get_named_property("Set")?;
+/// Uses the `Set` constructor cached on `ctx` (Issue #1448): fetched from global
+/// at most once per result conversion, not once per set cell.
+fn set_to_js_set(ctx: &ConvCtx, items: &[Value]) -> Result<JsUnknown> {
+    let env = ctx.env();
 
     // Create an array of items first
     let mut arr = env.create_array_with_length(items.len())?;
     for (i, item) in items.iter().enumerate() {
-        let js_value = value_to_napi(env, item)?;
+        let js_value = value_to_napi(ctx, item)?;
         arr.set_element(i as u32, js_value)?;
     }
 
     // Create new Set from array: new Set(array)
-    let set_instance = set_constructor.new_instance(&[arr])?;
+    let set_instance = ctx.set_constructor()?.new_instance(&[arr])?;
     Ok(set_instance.into_unknown())
 }
 
 /// Convert CQL Map to JavaScript Map.
 ///
-/// Uses the global Map constructor to create a native JavaScript Map.
-fn map_to_js_map(env: &Env, pairs: &[(Value, Value)]) -> Result<JsUnknown> {
-    // Get the Map constructor from global
-    let global = env.get_global()?;
-    let map_constructor: JsFunction = global.get_named_property("Map")?;
+/// Uses the `Map` constructor cached on `ctx` (Issue #1448): fetched from global
+/// at most once per result conversion, not once per map cell.
+fn map_to_js_map(ctx: &ConvCtx, pairs: &[(Value, Value)]) -> Result<JsUnknown> {
+    let env = ctx.env();
 
     // Create an array of [key, value] pairs
     let mut entries = env.create_array_with_length(pairs.len())?;
     for (i, (key, value)) in pairs.iter().enumerate() {
         let mut pair = env.create_array_with_length(2)?;
-        pair.set_element(0, value_to_napi(env, key)?)?;
-        pair.set_element(1, value_to_napi(env, value)?)?;
+        pair.set_element(0, value_to_napi(ctx, key)?)?;
+        pair.set_element(1, value_to_napi(ctx, value)?)?;
         entries.set_element(i as u32, pair)?;
     }
 
     // Create new Map from entries: new Map([[k1, v1], [k2, v2], ...])
-    let map_instance = map_constructor.new_instance(&[entries])?;
+    let map_instance = ctx.map_constructor()?.new_instance(&[entries])?;
     Ok(map_instance.into_unknown())
 }
 
@@ -412,7 +526,8 @@ fn map_to_js_map(env: &Env, pairs: &[(Value, Value)]) -> Result<JsUnknown> {
 /// - `_type`: The UDT type name
 /// - `_keyspace`: The keyspace containing the UDT
 /// - All field names as properties
-fn udt_to_object(env: &Env, udt: &cqlite_core::UdtValue) -> Result<JsUnknown> {
+fn udt_to_object(ctx: &ConvCtx, udt: &cqlite_core::UdtValue) -> Result<JsUnknown> {
+    let env = ctx.env();
     let mut obj = env.create_object()?;
 
     // Add type metadata
@@ -422,7 +537,7 @@ fn udt_to_object(env: &Env, udt: &cqlite_core::UdtValue) -> Result<JsUnknown> {
     // Add fields
     for field in &udt.fields {
         let value = match &field.value {
-            Some(v) => value_to_napi(env, v)?,
+            Some(v) => value_to_napi(ctx, v)?,
             None => env.get_null()?.into_unknown(),
         };
         obj.set_named_property(&field.name, value)?;
@@ -464,11 +579,16 @@ pub fn intern_column_keys(env: &Env, names: &[String]) -> Result<ColumnKeys> {
 /// string-key insertion order), so `Object.keys(row)` matches
 /// `columns.map(c => c.name)` — not `HashMap` hash order. `keys` are the
 /// once-per-result handles from [`intern_column_keys`], reused across every row.
+///
+/// Issue #1448: `ctx` carries the napi `Env` plus the per-result-cached
+/// `Set`/`Map` constructors, threaded into [`value_to_napi`] so a scan with many
+/// collection cells fetches each constructor once per result, not once per cell.
 pub fn row_to_object(
-    env: &Env,
+    ctx: &ConvCtx,
     keys: &ColumnKeys,
     values: &std::collections::HashMap<String, Value>,
 ) -> Result<JsObject> {
+    let env = ctx.env();
     let mut obj = env.create_object()?;
     // Emit the selected columns that are present in this row's values, in
     // authoritative SELECT order (#1446). For the normal case where metadata
@@ -480,7 +600,7 @@ pub fn row_to_object(
     // alongside the real cell.
     for (col_name, js_key) in &keys.ordered {
         if let Some(value) = values.get(col_name) {
-            let js_value = value_to_napi(env, value)?;
+            let js_value = value_to_napi(ctx, value)?;
             obj.set_property(*js_key, js_value)?;
         }
     }
@@ -500,7 +620,7 @@ pub fn row_to_object(
         extra.sort();
         for name in extra {
             if let Some(value) = values.get(name) {
-                let js_value = value_to_napi(env, value)?;
+                let js_value = value_to_napi(ctx, value)?;
                 obj.set_named_property(name, js_value)?;
             }
         }
@@ -551,5 +671,43 @@ mod tests {
         // For -123: 256 - 123 = 133 = 0x85
         let unscaled = vec![0x85]; // -123 as two's complement byte
         assert_eq!(decimal_to_string(2, &unscaled), "-1.23");
+    }
+
+    // Issue #1448: prove the constructor-caching invariant without a live JS
+    // `Env`. `cache_get_or_try_init` is the single fetch-vs-cached decision point
+    // both `set_constructor` and `map_constructor` delegate to; exercising it with
+    // a plain `OnceCell<T>` and a counting `fetch` reproduces exactly the caching
+    // logic those methods use, so the work counter (bumped only on the fetch path)
+    // proves the "at most one lookup per cache, zero when unused" invariant.
+    //
+    // Both the zero-lookups case and the once-per-cache case live in a SINGLE
+    // test on purpose: the counter is a process-global (the increment site is in
+    // library code, unlike the local-instance trick in `cqlite-core`'s
+    // `work_counters`), so splitting them into two `reset`-then-assert tests would
+    // race under Rust's default parallel test runner. No other test in this module
+    // touches the counter, so this single serial test is deterministic.
+    #[test]
+    fn ctor_cache_fetches_at_most_once_per_cache() {
+        testing::reset_ctor_lookups();
+
+        // Zero lookups when no set/map cell is ever converted (a `ConvCtx` never
+        // reaches `cache_get_or_try_init` unless a collection cell needs a ctor).
+        assert_eq!(testing::ctor_lookups(), 0);
+
+        let cell: OnceCell<u32> = OnceCell::new();
+
+        // First access: cache miss -> exactly one fetch (counter goes 0 -> 1).
+        let first = cache_get_or_try_init(&cell, || Ok(7u32)).expect("first init");
+        assert_eq!(*first, 7);
+        assert_eq!(testing::ctor_lookups(), 1);
+
+        // Second access on the SAME cell: cache hit -> NO further fetch. This is
+        // the per-cell repeat that used to re-`get_global()` before #1448.
+        let second = cache_get_or_try_init(&cell, || {
+            panic!("must not fetch again once cached");
+        })
+        .expect("second hit");
+        assert_eq!(*second, 7);
+        assert_eq!(testing::ctor_lookups(), 1);
     }
 }
