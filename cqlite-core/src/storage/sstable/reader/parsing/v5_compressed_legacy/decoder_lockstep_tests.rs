@@ -74,6 +74,7 @@ use crate::schema::Column;
 use crate::storage::sstable::reader::types::SSTableReader;
 use crate::types::Value;
 use crate::{Config, Platform};
+#[cfg(not(feature = "write-support"))]
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -395,8 +396,30 @@ pub(crate) fn decode_block(
     reader.parse_value_with_schema_type(value_bytes, cql_type)
 }
 
+// ---------------------------------------------------------------------------
+// Reader handle for the decoders (issue #1617, roborev — dataset-independent).
+//
+// Both decode paths need ONLY an `&SSTableReader` *handle*, never its file bytes:
+// the v5 ladder takes it as an unused `&_reader`, and the block path is a method
+// that uses `self` solely for recursion (`ComparatorType::from_data_type` +
+// standalone value decoders). So the reader's own on-disk contents/schema are
+// irrelevant to every value decoded here — all decoded bytes are synthesized.
+//
+// * With `write-support` (the gate's `write-tests` lane + the explicit
+//   verification command), `open_reader` builds the handle from a MINIMAL
+//   synthetic BIG SSTable in a leaked tempdir, so the whole lockstep net runs
+//   UNCONDITIONALLY with NO on-disk dataset fixture. This is what fixes the
+//   silent-no-op coverage gap: the J1/J2 safety net now executes in any lane that
+//   doesn't fetch datasets.
+// * Without `write-support` (no `SSTableWriter` available — e.g. the `--lite`
+//   `cli-helpers`-only scoped run), it falls back to the real dataset fixture, or
+//   soft-SKIPs when absent (unless `CQLITE_REQUIRE_FIXTURES`), matching the repo
+//   convention. Dimension A remains always-compiled either way.
+// ---------------------------------------------------------------------------
+
 /// `true` when byte-parity fixtures are required (gate/CI); otherwise a missing
 /// fixture is a soft SKIP (matches the repo convention).
+#[cfg(not(feature = "write-support"))]
 fn require_fixtures() -> bool {
     matches!(
         std::env::var("CQLITE_REQUIRE_FIXTURES").ok().as_deref(),
@@ -409,6 +432,7 @@ fn require_fixtures() -> bool {
     )
 }
 
+#[cfg(not(feature = "write-support"))]
 fn datasets_root() -> Option<PathBuf> {
     if let Ok(root) = std::env::var("CQLITE_DATASETS_ROOT") {
         let p = PathBuf::from(root);
@@ -425,7 +449,10 @@ fn datasets_root() -> Option<PathBuf> {
 /// A real Cassandra 5.0 `nb` fixture used ONLY to obtain a genuine
 /// `SSTableReader` instance (both decoders require one — the v5 ladder takes it
 /// as an unused `&reader`, the block path is a method on it). The fixture bytes
-/// are not otherwise consulted; every value decoded here is synthesized.
+/// are not otherwise consulted; every value decoded here is synthesized. Only the
+/// non-`write-support` build reaches for this (the `write-support` build synthesizes
+/// its own reader with no dataset dependency).
+#[cfg(not(feature = "write-support"))]
 fn simple_table_data_db() -> Option<PathBuf> {
     let base = datasets_root()?.join("sstables/test_basic");
     let rd = std::fs::read_dir(&base).ok()?;
@@ -442,22 +469,104 @@ fn simple_table_data_db() -> Option<PathBuf> {
     None
 }
 
-async fn open_reader() -> Option<SSTableReader> {
-    let Some(path) = simple_table_data_db() else {
-        assert!(
-            !require_fixtures(),
-            "CQLITE_REQUIRE_FIXTURES=1 but the test_basic.simple_table fixture is absent"
-        );
-        eprintln!("SKIP decoder_lockstep: test_basic.simple_table fixture absent.");
-        return None;
+/// A single-partition BIG-format schema `t(pk int, v text)` PRIMARY KEY (pk). The
+/// concrete columns are irrelevant to the decoders (see the module note above);
+/// this table exists only so the writer emits a structurally valid, openable
+/// SSTable.
+#[cfg(feature = "write-support")]
+fn synthetic_schema() -> crate::schema::TableSchema {
+    use crate::schema::KeyColumn;
+    let col = |name: &str, ty: &str, nullable: bool| Column {
+        name: name.to_string(),
+        data_type: ty.to_string(),
+        nullable,
+        default: None,
+        is_static: false,
     };
+    crate::schema::TableSchema {
+        keyspace: "test_ks".to_string(),
+        table: "test_tbl".to_string(),
+        partition_keys: vec![KeyColumn {
+            name: "pk".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+        }],
+        clustering_keys: vec![],
+        columns: vec![col("pk", "int", false), col("v", "text", true)],
+        comments: std::collections::HashMap::new(),
+        dropped_columns: std::collections::HashMap::new(),
+    }
+}
+
+/// Build a genuine `SSTableReader` from a MINIMAL synthetic BIG SSTable written to
+/// a leaked tempdir — NO on-disk dataset fixture required (issue #1617 roborev).
+/// The reader is a decoder handle only; its bytes are never consulted here.
+#[cfg(feature = "write-support")]
+async fn synthetic_reader() -> SSTableReader {
+    use crate::storage::sstable::writer::{SSTableFormat, SSTableWriter};
+    use crate::storage::write_engine::mutation::{CellOperation, Mutation, PartitionKey, TableId};
+
+    let schema = synthetic_schema();
+    // Leak the tempdir so its backing files outlive the reader's file handles for
+    // the whole test (mirrors `regression_1741k`). The decoders never read the
+    // file, but keeping the files present keeps `open` robust to any access.
+    let dir = Box::leak(Box::new(
+        tempfile::TempDir::new().expect("create tempdir for synthetic sstable"),
+    ));
+    let mut writer =
+        SSTableWriter::with_format(dir.path().to_path_buf(), 1, &schema, 1, SSTableFormat::Big)
+            .expect("create synthetic SSTableWriter");
+
+    let m = Mutation::new(
+        TableId::new("test_ks", "test_tbl"),
+        PartitionKey::single("pk", Value::Integer(1)),
+        None,
+        vec![CellOperation::Write {
+            column: "v".to_string(),
+            value: Value::Text("x".to_string()),
+        }],
+        1_000_000,
+        None,
+    );
+    let key = m
+        .decorated_key(&schema)
+        .expect("decorate synthetic partition key");
+    writer
+        .write_partition(key, vec![m])
+        .expect("write synthetic partition");
+    let info = writer.finish().await.expect("finish synthetic sstable");
+
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await.expect("platform init"));
-    Some(
-        SSTableReader::open(&path, &config, platform)
-            .await
-            .expect("opening the structurally valid nb fixture should succeed"),
-    )
+    SSTableReader::open(&info.data_path, &config, platform)
+        .await
+        .expect("opening the synthetic BIG sstable should succeed")
+}
+
+async fn open_reader() -> Option<SSTableReader> {
+    #[cfg(feature = "write-support")]
+    {
+        // Dataset-independent: the lockstep net ALWAYS runs, no fixture needed.
+        Some(synthetic_reader().await)
+    }
+    #[cfg(not(feature = "write-support"))]
+    {
+        let Some(path) = simple_table_data_db() else {
+            assert!(
+                !require_fixtures(),
+                "CQLITE_REQUIRE_FIXTURES=1 but the test_basic.simple_table fixture is absent"
+            );
+            eprintln!("SKIP decoder_lockstep: test_basic.simple_table fixture absent.");
+            return None;
+        };
+        let config = Config::default();
+        let platform = Arc::new(Platform::new(&config).await.expect("platform init"));
+        Some(
+            SSTableReader::open(&path, &config, platform)
+                .await
+                .expect("opening the structurally valid nb fixture should succeed"),
+        )
+    }
 }
 
 // ===========================================================================
