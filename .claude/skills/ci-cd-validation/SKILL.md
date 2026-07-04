@@ -5,527 +5,65 @@ description: Pre-push validation checklist (cargo fmt, clippy with zero warnings
 
 # CI/CD Validation & Merge Workflow
 
-This skill provides guidance on validation workflows, CI/CD processes, and merge procedures for cqlite.
+Validation, CI monitoring, and merge procedures for cqlite. There is **one gate** —
+`scripts/agent-gate.sh` — run in a **tiered loop**. The old manual `cargo` checklist, coverage/tarpaulin
+gate, and human-merge steps were M1-era fossils and are gone (issue #1855); see the pointer files in this
+dir and `docs/development/pm-operating-loop.md`.
 
 ## When to Use This Skill
 
-- Running pre-push validation
-- Preparing pull requests
-- Monitoring CI pipeline
-- Merging changes
-- Preparing releases
-- Troubleshooting CI failures
+Pre-push validation · preparing PRs · monitoring CI · merging · releases · troubleshooting CI failures.
 
-## Pre-Push Validation Checklist
+## Quick Validation — the tiered gate loop (issue #1821)
 
-See [validation-checklist.md](validation-checklist.md) for complete steps.
-
-### Quick Validation
-
-**`scripts/agent-gate.sh` is THE canonical pre-PR gate (issue #719).** It mirrors the
-enforced CI gates plus the local smoke suite and emits a machine-checkable summary block.
-A claim that "the gate passed" must come from this script's summary (between the
-`AGENT-GATE SUMMARY` markers, ending in `RESULT: PASS`) — ad-hoc `cargo` runs do not count.
+`scripts/agent-gate.sh` is THE canonical pre-PR gate (issue #719): it mirrors the enforced CI gates plus
+the local smoke suite and emits a machine-checkable summary block. A claim that "the gate passed" must come
+from this script's summary (between the `AGENT-GATE SUMMARY` markers, ending in `RESULT: PASS`) — ad-hoc
+`cargo` runs do not count.
 
 ```bash
-# THE gate — run before every PR; paste its summary block when reporting validation
+# ITERATE — every fix round (fmt + file-size + workspace clippy + blast-radius-scoped tests, ~1-5 min).
+# Emits a DISTINCT ==== AGENT-GATE LITE SUMMARY ==== block that must NEVER be pasted as the full SUMMARY.
+scripts/agent-gate.sh --lite
+
+# BEFORE MERGE — the FULL gate, run EXACTLY ONCE by the lead. Its ==== AGENT-GATE SUMMARY ====
+# (ending RESULT: PASS) is the only run that counts. --lite never replaces it.
 scripts/agent-gate.sh
 
-# Components it runs (mirrors .github/workflows/ci.yml + ci-minimal-features.yml + smoke):
-#   fmt · clippy (-D warnings) · core-tests (cli-helpers) · integration-tests ·
-#   write-tests (write-support) · cli-tests · minimal-build · smoke
 # Debugging only (output marked PARTIAL, never counts as the gate):
 scripts/agent-gate.sh --only fmt,clippy
 ```
 
-The older `scripts/ci/validate-cleanup.sh` still exists for cleanup-specific checks, but
-`agent-gate.sh` is the authority for pre-PR validation.
+- **Division of labor (issue #1855):** subagents iterate on `--lite` / targeted tests and end at
+  commit + push + report. The **lead** runs the full gate + roborev — a subagent idle-waiting on a 12-20 min
+  full gate gets killed by the 600s stall watchdog and takes its child gate process down with it.
+- **Queued gate ≠ hung gate:** under load the full gate may **queue for a #1825 slot** (prints
+  `waiting for gate slot (N in use)…` once) then run 15-20 min — total wall time can exceed 20 min. Use a
+  long Bash `timeout` or `run_in_background` and check for that line before assuming a hang (the default
+  2-min timeout truncates a queued gate).
+- **Gate PASS ≠ CI green:** the local gate uses pre-existing datasets and a subset of `--test` targets.
+  When a change touches a **regenerate path, a fixture parser, or a fail-closed CI guard**, reproduce the
+  actual CI lane locally before relying on the gate.
 
-### Manual Step-by-Step
-
-#### 1. Format Code
-```bash
-cargo fmt --all
-git add -u
-git commit -m "style: cargo fmt" || echo "No formatting needed"
-```
-
-#### 2. Clippy (Zero Warnings)
-```bash
-# MUST pass with -D warnings (warnings = errors)
-cargo clippy --package cqlite-core --lib --all-features -- -D warnings
-```
-
-**Requirements:**
-- Zero warnings
-- Fix all issues before proceeding
-- No `#[allow(clippy::...)]` without justification
-
-#### 3. Build (Minimal Features)
-```bash
-# M1 scope: reading only, no default features
-cargo build --package cqlite-core --no-default-features --features=all-compression
-```
-
-**Must succeed** - tests feature gate correctness.
-
-#### 4. Build (All Features)
-```bash
-# Full feature set
-cargo build --package cqlite-core --all-features
-```
-
-**Must succeed** - tests complete build.
-
-#### 5. Run Tests (Library)
-```bash
-# Run all library tests
-cargo test --package cqlite-core --lib --all-features
-```
-
-**Track test count** - should not decrease unexpectedly.
-
-#### 6. Run Integration Tests
-```bash
-# Run integration tests
-cargo test --test '*'
-```
-
-**Must pass** - validates end-to-end functionality.
-
-#### 7. Coverage Check
-```bash
-# Generate coverage report
-cargo tarpaulin --out Html --output-dir coverage/
-```
-
-**Target:** ≥90% coverage (PRD requirement)
-
-## Feature Flag Testing
-
-### M1 Feature Gates
-
-**Core reading** (minimal):
-```bash
-cargo build --package cqlite-core \
-    --no-default-features \
-    --features=all-compression
-```
-
-**With benchmarks**:
-```bash
-cargo build --package cqlite-core \
-    --no-default-features \
-    --features=all-compression,benchmarks
-```
-
-**All features**:
-```bash
-cargo build --package cqlite-core --all-features
-```
-
-### Validate Feature Combinations
+## CI Monitoring
 
 ```bash
-# Test feature matrix
-for features in "all-compression" "all-compression,benchmarks" "all-features"; do
-    echo "Testing: $features"
-    cargo test --package cqlite-core --no-default-features --features=$features
-done
+gh run list --limit 10            # recent runs
+gh run view <run-id>              # a specific run
+gh run watch                      # watch live
+gh run view <run-id> --log-failed # failed-job logs only
 ```
 
-## CI Pipeline
-
-### GitHub Actions Workflows
-
-CI is split across ~20 workflows under `.github/workflows/` (there is no single
-`rust.yml`). The ones that gate merges / mirror `agent-gate.sh`:
-
-| Workflow | What it enforces |
-|----------|------------------|
-| `ci.yml` | fmt, clippy `-D warnings`, core + integration + write-support tests, build matrix |
-| `ci-minimal-features.yml` | minimal-features build (`--no-default-features --features all-compression`) |
-| `quality-gates.yml` | aggregate quality gate / pipeline summary |
-| `sstabledump-parity-gate.yml` | JSONL parity vs `sstabledump` |
-| `e2e-readback.yml` | E2E Cassandra readback (write-path validation) |
-| `cassandra-validation.yml` | dual-path Cassandra validation |
-| `smoke-tests.yml` | smoke across all tables |
-| `coverage.yml` / `coverage-baseline.yml` | coverage (informational, not a hard 90% gate) |
-| `perf-regression.yml` | benchmark regression vs `main` |
-
-Language/feature-specific: `python-ci.yml`, `node-ci.yml`, `flight-ci.yml`,
-`flight-trino-e2e.yml`, `trino-connector-ci.yml`, `m1-ci.yml`, `docs-site.yml`,
-`api-docs.yml`. Release: `release.yml`, `python-release.yml`, `node-release.yml`.
-
-**Locally, `scripts/agent-gate.sh` reproduces the merge-gating subset** (fmt, clippy,
-core/integration/write/cli tests, minimal build, smoke) — run it before pushing.
-
-### Monitoring CI
-
-#### View Status
-```bash
-# List recent runs
-gh run list --branch <branch-name> --limit 5
-
-# View specific run
-gh run view <run-id>
-
-# Watch live
-gh run watch <run-id>
-```
-
-#### Check Failures
-```bash
-# Download logs
-gh run view <run-id> --log
-
-# Download failed job logs
-gh run view <run-id> --log-failed
-```
-
-## Merge Process
-
-See [merge-process.md](merge-process.md) for detailed workflow.
-
-### Prerequisites
-
-Before merging:
-- ✅ All CI checks green (10/10)
-- ✅ Code review approved
-- ✅ Branch up to date with main
-- ✅ No conflicts
-- ✅ Coverage ≥90%
-
-### Merge Methods
-
-**Squash merge** (default for cleanup):
-```bash
-gh pr merge <pr-number> --squash --delete-branch
-```
-
-**Merge commit** (for feature branches):
-```bash
-gh pr merge <pr-number> --merge --delete-branch
-```
-
-**Rebase** (for clean history):
-```bash
-gh pr merge <pr-number> --rebase --delete-branch
-```
-
-### Commit Message Format
-
-```
-<type>(<scope>): <subject>
-
-<body>
-
-<footer>
-```
-
-**Types:**
-- `feat`: New feature
-- `fix`: Bug fix
-- `refactor`: Code refactoring
-- `perf`: Performance improvement
-- `test`: Test additions/changes
-- `docs`: Documentation
-- `style`: Formatting
-- `chore`: Build/tooling
-- `cleanup`: Dead code removal
-
-**Example:**
-```
-feat(parser): add support for duration CQL type
-
-Implement deserialization for duration type consisting of
-three VInts (months, days, nanoseconds).
-
-- Add Duration variant to CqlType enum
-- Implement parse_duration() with VInt handling
-- Add property tests for edge cases
-
-Closes #123
-```
-
-## Error Handling
-
-### Clippy Failures
-
-**Common issues:**
-```bash
-# Unused imports
-cargo clippy --fix
-
-# Unnecessary clones
-# Review each and remove if safe
-
-# Dead code warnings
-# Expected for cleanup issues - document
-```
-
-### Test Failures
-
-**Debugging:**
-```bash
-# Run single test with output
-cargo test --test test_name -- --nocapture
-
-# Run with backtrace
-RUST_BACKTRACE=1 cargo test test_name
-
-# Run with logging
-RUST_LOG=debug cargo test test_name
-```
-
-### Build Failures
-
-**Feature flag issues:**
-```bash
-# Check feature dependencies in Cargo.toml
-[features]
-default = ["all-compression"]
-all-compression = ["lz4", "snap", "flate2"]
-benchmarks = []  # NOT in default
-```
-
-**Dependency issues:**
-```bash
-# Clean and rebuild
-cargo clean
-cargo build
-```
-
-### Coverage Failures
-
-**Below 90%:**
-1. Identify uncovered lines
-2. Add unit tests for uncovered code
-3. Add property tests for edge cases
-4. Document why coverage can't reach 90% (if applicable)
-
-## Release Process
-
-### Pre-Release Checklist
-
-1. **All tests pass**
-   ```bash
-   cargo test --all-features
-   ```
-
-2. **Benchmarks run**
-   ```bash
-   cargo bench --features=benchmarks
-   ```
-
-3. **Documentation builds**
-   ```bash
-   cargo doc --no-deps --all-features
-   ```
-
-4. **Examples work**
-   ```bash
-   cargo run --example basic_usage
-   ```
-
-5. **Update CHANGELOG.md**
-   ```markdown
-   ## [0.1.0] - 2025-10-21
-   ### Added
-   - Initial release
-   - Cassandra 5.0 SSTable parsing
-   - All CQL types supported
-   ```
-
-6. **Update version**
-   ```toml
-   # Cargo.toml
-   [package]
-   version = "0.1.0"
-   ```
-
-### Creating Release
-
-```bash
-# Tag version
-git tag -a v0.1.0 -m "Release v0.1.0"
-git push origin v0.1.0
-
-# Create GitHub release
-gh release create v0.1.0 \
-    --title "v0.1.0 - Initial Release" \
-    --notes-file RELEASE_NOTES.md \
-    --draft  # Remove --draft when ready
-```
-
-## PRD Alignment
-
-**Milestone M1** (Core Reading Library):
-- 95% test coverage requirement
-- Zero clippy warnings
-- All CQL types validated
-
-**Milestone M6** (Performance & Release):
-- Benchmarks vs native tools
-- Release packaging
-- 90% codecov gate (stricter than M1)
-
-## Common Scenarios
-
-### Scenario 1: Pre-Push Validation
-
-```bash
-# Quick check before push
-cargo fmt --all
-cargo clippy --package cqlite-core --lib --all-features -- -D warnings
-cargo test --package cqlite-core --lib
-
-# If all pass:
-git push origin feature/my-branch
-```
-
-### Scenario 2: CI Failure Investigation
-
-```bash
-# Check CI logs
-gh run view --log
-
-# Reproduce locally
-cargo test --package cqlite-core --lib --features=all-compression
-
-# Fix and push
-git commit --amend
-git push --force-with-lease origin feature/my-branch
-```
-
-### Scenario 3: Merge Blocked by Coverage
-
-```bash
-# Generate coverage report
-cargo tarpaulin --out Html
-
-# Open report
-open tarpaulin-report.html
-
-# Identify uncovered code
-# Add tests
-# Re-run coverage
-```
-
-## Automation
-
-### Pre-Commit Hook
-
-```bash
-# .git/hooks/pre-commit
-#!/bin/bash
-set -e
-
-echo "Running pre-commit checks..."
-
-# Format
-cargo fmt --all -- --check
-
-# Clippy
-cargo clippy --package cqlite-core --lib --all-features -- -D warnings
-
-# Tests
-cargo test --package cqlite-core --lib
-
-echo "Pre-commit checks passed!"
-```
-
-### Pre-Push Hook
-
-```bash
-# .git/hooks/pre-push
-#!/bin/bash
-set -e
-
-echo "Running pre-push validation..."
-
-# Full validation
-./scripts/ci/validate-cleanup.sh
-
-echo "Pre-push validation passed!"
-```
-
-## Troubleshooting
-
-### Tests Pass Locally, Fail in CI
-
-**Possible causes:**
-- Platform-specific issues (Windows vs Linux)
-- Timing issues in async tests
-- File path differences
-
-**Solution:**
-```bash
-# Run in Docker matching CI environment
-docker run --rm -v $(pwd):/workspace -w /workspace rust:latest \
-    cargo test --all-features
-```
-
-### Clippy Different Results Locally vs CI
-
-**Cause:** Different Rust versions
-
-**Solution:**
-```bash
-# Check Rust version
-rustc --version
-
-# Match CI toolchain (Rust 1.85+; bindings require it). Keep stable current.
-rustup update
-rustup default stable
-```
-
-### Coverage Unstable
-
-**Cause:** Non-deterministic code or flaky tests
-
-**Solution:**
-- Run coverage multiple times
-- Identify unstable lines
-- Fix flaky tests
-
-## Best Practices
-
-1. **Validate locally before pushing**
-   - Saves CI resources
-   - Faster feedback loop
-
-2. **Fix clippy warnings immediately**
-   - Don't accumulate tech debt
-   - Easier to fix in context
-
-3. **Keep PRs small**
-   - Easier to review
-   - Easier to revert if needed
-
-4. **Write meaningful commit messages**
-   - Helps future debugging
-   - Documents intent
-
-5. **Monitor CI actively**
-   - Don't "fire and forget"
-   - Fix failures promptly
-
-## Next Steps
-
-After validation passes:
-1. Push branch
-2. Create PR
-3. Monitor CI
-4. Address review feedback
-5. Merge when green
-6. Verify main CI stays green
+## Merge
+
+Merge is **autonomous on green** — gate PASS + (design-driven) spec-auditor **C** PASS + roborev clean →
+`gh pr merge --squash --delete-branch`, then `flow-finalize <N>`. Merge is not a human gate; hold only for a
+genuine design call, a scope/product question, an unmet requirement, or a `HOLD: merge after #N` order. See
+[merge-process.md](merge-process.md) and `docs/development/pm-operating-loop.md`.
 
 ## References
 
-- `scripts/agent-gate.sh` - THE canonical pre-PR gate (issue #719)
-- [validation-checklist.md](validation-checklist.md) - Complete checklist
-- [merge-process.md](merge-process.md) - Detailed merge workflow
-- `.github/workflows/ci.yml` + `ci-minimal-features.yml` - merge-gating CI config (see workflow table above)
-- `scripts/ci/validate-cleanup.sh` - cleanup-specific validation script
-
+- `docs/development/pm-operating-loop.md` — delivery model (tiered gate, merge-on-green, telemetry)
+- The `flow-*` skills — pipeline stages (groom → activate → implement → address → finalize; board)
+- [validation-checklist.md](validation-checklist.md) · [merge-process.md](merge-process.md) — pointers
+- Gate contract: https://pmcfadin.github.io/cqlite/agents-developing/gate-contract/
