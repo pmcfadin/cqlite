@@ -19,7 +19,11 @@ use super::{
 };
 
 #[cfg(feature = "state_machine")]
-use super::{select_executor::SelectExecutor, select_optimizer::SelectOptimizer, select_parser};
+use super::{
+    select_executor::SelectExecutor,
+    select_optimizer::{OptimizedQueryPlan, SelectOptimizer},
+    select_parser,
+};
 use crate::{
     memory::MemoryManager, schema::SchemaManager, storage::StorageEngine, Config, Error, Result,
     Value,
@@ -78,6 +82,14 @@ pub struct QueryEngine {
     prepared_cache: DashMap<String, Arc<PreparedQuery>>,
     /// Query plan cache
     plan_cache: DashMap<String, QueryCacheEntry>,
+    /// Issue #1587 (E5): plan cache for the modern (state_machine) SELECT path,
+    /// keyed by the exact CQL text. The optimized plan is a pure function of the
+    /// literal CQL, so a repeated identical ad-hoc SELECT reuses the plan instead
+    /// of re-parsing + re-optimizing. Kept separate from `plan_cache` (which
+    /// holds legacy `QueryPlan`s and feeds `CacheStats`) so neither disturbs the
+    /// other. Value is `(inserted_at, plan)` for the same simple-LRU eviction.
+    #[cfg(feature = "state_machine")]
+    select_plan_cache: DashMap<String, (Instant, Arc<OptimizedQueryPlan>)>,
     /// Query statistics
     stats: Arc<parking_lot::RwLock<QueryStats>>,
     /// Configuration
@@ -113,6 +125,8 @@ impl QueryEngine {
             select_executor,
             prepared_cache: DashMap::new(),
             plan_cache: DashMap::new(),
+            #[cfg(feature = "state_machine")]
+            select_plan_cache: DashMap::new(),
             stats: Arc::new(parking_lot::RwLock::new(QueryStats::default())),
             config: config.clone(),
         })
@@ -274,21 +288,58 @@ impl QueryEngine {
 
         #[cfg(feature = "state_machine")]
         {
-            let select_statement = select_parser::parse_select(cql).inspect_err(|e| {
-                self.inc_error_queries();
-                crate::observability::record_error(e, "query");
-            })?;
-            let optimized_plan = crate::observability::record_result(
-                "query",
-                self.select_optimizer.optimize(select_statement).await,
-            )?;
+            // Issue #1587 (E5): reuse a previously-optimized plan for the exact
+            // same CQL text. The optimized plan is a pure function of the literal
+            // CQL, so this is byte-for-byte equivalent to re-parsing +
+            // re-optimizing — it only skips the redundant work.
+            let optimized_plan: Arc<OptimizedQueryPlan> =
+                if let Some(entry) = self.select_plan_cache.get(cql) {
+                    self.record_cache_hit();
+                    Arc::clone(&entry.value().1)
+                } else {
+                    let select_statement = select_parser::parse_select(cql).inspect_err(|e| {
+                        self.inc_error_queries();
+                        crate::observability::record_error(e, "query");
+                    })?;
+                    let plan = Arc::new(crate::observability::record_result(
+                        "query",
+                        self.select_optimizer.optimize(select_statement).await,
+                    )?);
+                    self.cache_select_plan(cql, Arc::clone(&plan));
+                    plan
+                };
             let mut result = crate::observability::record_result(
                 "query",
-                self.select_executor.execute(optimized_plan).await,
+                self.select_executor
+                    .execute((*optimized_plan).clone())
+                    .await,
             )?;
             self.update_execution_stats(&mut result, start_time);
             Ok(result)
         }
+    }
+
+    /// Insert an optimized SELECT plan into the modern plan cache, evicting the
+    /// oldest entry first when at capacity (simple LRU, matching the legacy
+    /// `cache_query_plan`). A configured `query_cache_size` of 0 disables it.
+    #[cfg(feature = "state_machine")]
+    fn cache_select_plan(&self, cql: &str, plan: Arc<OptimizedQueryPlan>) {
+        let cache_size = self.config.query.query_cache_size.unwrap_or(0);
+        if cache_size == 0 {
+            return;
+        }
+        if self.select_plan_cache.len() >= cache_size {
+            let oldest_key = self
+                .select_plan_cache
+                .iter()
+                .min_by_key(|entry| entry.value().0)
+                .map(|entry| entry.key().clone());
+            if let Some(key) = oldest_key {
+                self.select_plan_cache.remove(&key);
+            }
+        }
+        self.select_plan_cache
+            .insert(cql.to_string(), (Instant::now(), plan));
     }
 
     /// Execute a query with positional `?` parameters (Issue #961).
@@ -464,6 +515,8 @@ impl QueryEngine {
     pub fn clear_caches(&self) {
         self.prepared_cache.clear();
         self.plan_cache.clear();
+        #[cfg(feature = "state_machine")]
+        self.select_plan_cache.clear();
     }
 
     /// Clear prepared statement cache
@@ -474,6 +527,8 @@ impl QueryEngine {
     /// Clear query plan cache
     pub fn clear_plan_cache(&self) {
         self.plan_cache.clear();
+        #[cfg(feature = "state_machine")]
+        self.select_plan_cache.clear();
     }
 
     /// Get cache statistics
@@ -1039,6 +1094,71 @@ mod tests {
                 panic!("Should not be Available for non-existent table");
             }
         }
+    }
+
+    /// Issue #1587 (E5): the modern (state_machine) ad-hoc SELECT path caches the
+    /// optimized plan keyed by the exact CQL text, so N identical ad-hoc executes
+    /// of the same query optimize AT MOST ONCE. This is the `engine.rs` half of
+    /// the plan-reuse optimization (the prepared-statement half is covered by
+    /// `prepared_select_reuses_optimized_plan_across_executes`).
+    ///
+    /// `#[tokio::test]` runs on the current-thread runtime, so the optimizer's
+    /// thread-local invocation counter reflects exactly this future's calls. The
+    /// plan is cached BEFORE execution, so the (empty-store) execute result is
+    /// irrelevant — reuse holds regardless.
+    #[tokio::test]
+    #[cfg(feature = "state_machine")]
+    async fn adhoc_select_reuses_cached_optimized_plan() {
+        use crate::query::select_optimizer::OPTIMIZE_INVOCATIONS;
+
+        let temp_dir = TempDir::new().unwrap();
+        let mut config = Config::default();
+        // Enable the modern SELECT plan cache (0 disables it).
+        config.query.query_cache_size = Some(16);
+        let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
+        let storage = Arc::new(
+            crate::storage::StorageEngine::open(
+                temp_dir.path(),
+                &config,
+                platform,
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        let schema = Arc::new(
+            crate::schema::SchemaManager::new(temp_dir.path())
+                .await
+                .unwrap(),
+        );
+        let memory = Arc::new(crate::memory::MemoryManager::new(&config).unwrap());
+        let engine = QueryEngine::new(storage, schema, memory, &config).unwrap();
+
+        // A non-`WHERE id =` SELECT routes through the modern `execute_select_query`
+        // path (see `execute`'s `is_simple_id_lookup` gate), which owns the plan cache.
+        let cql = "SELECT * FROM t WHERE age > 5";
+
+        OPTIMIZE_INVOCATIONS.with(|c| c.set(0));
+        for _ in 0..75 {
+            let _ = engine.execute(cql).await;
+        }
+        let after_same = OPTIMIZE_INVOCATIONS.with(|c| c.get());
+        assert!(
+            after_same <= 1,
+            "issue #1587: an ad-hoc SELECT must optimize at most once across 75 \
+             identical executes (modern plan cache), got {after_same}"
+        );
+
+        // Clearing the cache must force exactly one re-optimize on the next run.
+        engine.clear_plan_cache();
+        let _ = engine.execute(cql).await;
+        let after_clear = OPTIMIZE_INVOCATIONS.with(|c| c.get());
+        assert_eq!(
+            after_clear,
+            after_same + 1,
+            "clearing the plan cache must re-optimize once (no stale reuse)"
+        );
     }
 }
 

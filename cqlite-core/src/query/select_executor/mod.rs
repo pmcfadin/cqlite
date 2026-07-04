@@ -46,7 +46,7 @@ use super::{
     select_optimizer::{AggregationPlan, ExecutionStep, OptimizedQueryPlan, SSTablePredicate},
 };
 use crate::{
-    schema::{CqlType, SchemaManager},
+    schema::{CqlType, SchemaManager, TableSchema},
     storage::StorageEngine,
     types::{RowKey, Value},
     Error, Result, TableId,
@@ -86,6 +86,17 @@ use predicate::validate_token_predicates;
 #[cfg(test)]
 thread_local! {
     pub(crate) static PROJECTION_NAME_DERIVATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+// Test-only counter for the number of times an ORDER BY sort-key expression is
+// evaluated (issue #1587, E5). With decorate-sort-undecorate this is exactly
+// `rows × order_by.items` (evaluated ONCE per row up front), never the
+// `O(n log n)` per-comparison evaluation the old comparator incurred. Same
+// thread-local rationale as `PROJECTION_NAME_DERIVATIONS`.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SORT_KEY_EVALUATIONS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
 }
 
@@ -285,7 +296,16 @@ impl SelectExecutor {
             return self.execute_and_stream(plan, config).await;
         };
 
-        let columns = self.get_result_columns(&plan.statement).await?;
+        // Issue #1587 (E5): resolve the schema ONCE for the whole streaming query
+        // and share it (by reference here, and moved into the spawned task below)
+        // so column-metadata building, the pre-spawn token validation, and the
+        // background scan all reuse one `Arc<TableSchema>` instead of each
+        // re-locking the registry and deep-cloning a fresh schema (2–4× per query).
+        let query_schema: Option<Arc<TableSchema>> = self.resolve_table_schema(&table_id).await;
+
+        let columns = self
+            .get_result_columns(&plan.statement, query_schema.as_deref())
+            .await?;
 
         // Create bounded channel for backpressure
         let (tx, rx) = mpsc::channel(config.buffer_size);
@@ -308,32 +328,22 @@ impl SelectExecutor {
         // caller would receive an apparently-successful iterator that yields zero
         // rows — silently hiding an invalid `token(...)` query. Validating here
         // surfaces the error synchronously from `execute_streaming`, matching the
-        // materializing `execute()` path. The schema must be resolved before the
-        // spawn for this, so we resolve it per scan step here.
+        // materializing `execute()` path. Uses the already-resolved schema.
         for step in &execution_steps {
-            if let ExecutionStep::SSTableScan {
-                table, predicates, ..
-            } = step
-            {
-                let (keyspace, table_name) = parse_table_id(table);
-                let schema_opt = self
-                    ._schema
-                    .find_schema_by_table(&keyspace, &table_name)
-                    .await;
-                validate_token_predicates(predicates, schema_opt.as_ref())?;
+            if let ExecutionStep::SSTableScan { predicates, .. } = step {
+                validate_token_predicates(predicates, query_schema.as_deref())?;
             }
         }
 
-        // Clone what we need for the background task
+        // Clone what we need for the background task.
         let storage = Arc::clone(&self.storage);
-        let schema_manager = Arc::clone(&self._schema);
         let buffer_size = config.buffer_size;
 
         // Spawn background task to stream rows
         tokio::spawn(async move {
             if let Err(e) = Self::execute_streaming_background(
                 storage,
-                schema_manager,
+                query_schema,
                 table_id,
                 execution_steps,
                 tx,
@@ -659,18 +669,37 @@ impl SelectExecutor {
         order_by: &OrderByClause,
         _context: &mut ExecutionContext,
     ) -> Result<Vec<QueryRow>> {
-        rows.sort_by(|a, b| {
+        // Issue #1587 (E5): decorate-sort-undecorate. Evaluate each row's ORDER
+        // BY key expressions ONCE (O(rows × items) total), then sort by the
+        // precomputed keys. The comparator itself performs NO
+        // `evaluate_select_expression` and NO `Value` clones — it only compares
+        // already-materialized keys. This drops the O(n log n) per-comparison
+        // expression evaluation + `Value::clone` the previous comparator
+        // incurred. The ordering is byte-identical: the same
+        // `compare_values_ordering` runs on the same per-row values, in the same
+        // ascending/descending sense, item by item, and `sort_by` remains a
+        // stable sort (ties keep input order).
+        let mut decorated: Vec<(Vec<Value>, QueryRow)> = Vec::with_capacity(rows.len());
+        for row in rows.drain(..) {
+            let mut keys = Vec::with_capacity(order_by.items.len());
             for item in &order_by.items {
-                let a_val = self
-                    .evaluate_select_expression(&item.expression, a)
-                    .unwrap_or(Value::Null);
-                let b_val = self
-                    .evaluate_select_expression(&item.expression, b)
-                    .unwrap_or(Value::Null);
+                #[cfg(test)]
+                SORT_KEY_EVALUATIONS.with(|c| c.set(c.get() + 1));
+                keys.push(
+                    self.evaluate_select_expression(&item.expression, &row)
+                        .unwrap_or(Value::Null),
+                );
+            }
+            decorated.push((keys, row));
+        }
 
+        decorated.sort_by(|(a_keys, _), (b_keys, _)| {
+            for (idx, item) in order_by.items.iter().enumerate() {
                 let ordering = match item.direction {
-                    SortDirection::Ascending => compare_values_ordering(&a_val, &b_val),
-                    SortDirection::Descending => compare_values_ordering(&b_val, &a_val),
+                    SortDirection::Ascending => compare_values_ordering(&a_keys[idx], &b_keys[idx]),
+                    SortDirection::Descending => {
+                        compare_values_ordering(&b_keys[idx], &a_keys[idx])
+                    }
                 };
                 if !ordering.is_eq() {
                     return ordering;
@@ -679,7 +708,7 @@ impl SelectExecutor {
             std::cmp::Ordering::Equal
         });
 
-        Ok(rows)
+        Ok(decorated.into_iter().map(|(_, row)| row).collect())
     }
 
     /// Execute the aggregation step. Splits naturally into three phases:
@@ -696,14 +725,14 @@ impl SelectExecutor {
 
         let mut agg_state = AggregationState {
             groups: Vec::new(),
+            group_index: HashMap::new(),
             memory_usage_bytes: 0,
             memory_limit_bytes: DEFAULT_AGGREGATION_MEMORY_LIMIT,
         };
 
         for row in rows {
             let group_key = build_group_key(&row, &agg_plan.group_by_columns);
-            let group_index =
-                find_or_init_group(&mut agg_state.groups, group_key, &agg_plan.aggregates);
+            let group_index = find_or_init_group(&mut agg_state, group_key, &agg_plan.aggregates);
             let group_aggregates = &mut agg_state.groups[group_index].1;
 
             for (i, agg_comp) in agg_plan.aggregates.iter().enumerate() {
@@ -896,23 +925,39 @@ impl SelectExecutor {
         }
     }
 
-    async fn get_result_columns(&self, statement: &SelectStatement) -> Result<Vec<ColumnInfo>> {
+    /// Resolve a table's schema ONCE per query into a shared `Arc<TableSchema>`
+    /// (issue #1587, E5). Every downstream planning/execution step then borrows
+    /// the SAME schema (`Arc::clone` is a ref-count bump) instead of re-taking the
+    /// registry lock and deep-cloning a fresh `TableSchema` per step (which was
+    /// 2–4 deep clones per query). The registry itself is untouched (AJ1/AJ2 own
+    /// its shape) — this is purely query-side de-duplication.
+    async fn resolve_table_schema(&self, table: &TableId) -> Option<Arc<TableSchema>> {
+        let (keyspace, table_name) = parse_table_id(table);
+        self._schema
+            .find_schema_by_table(&keyspace, &table_name)
+            .await
+            .map(Arc::new)
+    }
+
+    /// Build result-column metadata from an ALREADY-RESOLVED schema (issue #1587,
+    /// E5). The caller resolves the schema once per query and passes it here, so
+    /// this never re-clones it out of the registry.
+    async fn get_result_columns(
+        &self,
+        statement: &SelectStatement,
+        schema: Option<&TableSchema>,
+    ) -> Result<Vec<ColumnInfo>> {
         let mut columns = Vec::new();
 
         match &statement.select_clause {
             SelectClause::All => {
-                // For SELECT *, look up the schema to get column names and CQL types.
+                // For SELECT *, use the schema to get column names and CQL types.
                 // This is needed for streaming mode where we can't wait for the first row.
                 if let Some(ref from_clause) = statement.from_clause {
                     let table_id = self.extract_table_id(from_clause)?;
                     let (keyspace_opt, table_name) = parse_table_id(&table_id);
 
-                    // Look up schema from SchemaManager
-                    if let Some(schema) = self
-                        ._schema
-                        .find_schema_by_table(&keyspace_opt, &table_name)
-                        .await
-                    {
+                    if let Some(schema) = schema {
                         // Collect all schema columns (sorted alphabetically for determinism)
                         let mut schema_cols: Vec<&crate::schema::Column> =
                             schema.columns.iter().collect();
@@ -941,20 +986,9 @@ impl SelectExecutor {
                 }
             }
             SelectClause::Columns(exprs) | SelectClause::Distinct(exprs) => {
-                // Try to resolve a schema for the FROM table (if present) so we can
-                // attach authoritative CQL types to explicitly projected columns (Issue #674).
-                let schema_opt = if let Some(ref from_clause) = statement.from_clause {
-                    if let Ok(table_id) = self.extract_table_id(from_clause) {
-                        let (keyspace_opt, table_name) = parse_table_id(&table_id);
-                        self._schema
-                            .find_schema_by_table(&keyspace_opt, &table_name)
-                            .await
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
+                // Issue #674: attach authoritative CQL types to explicitly projected
+                // columns from the pre-resolved schema.
+                let schema_opt = schema;
 
                 for (i, expr) in exprs.iter().enumerate() {
                     // Issue #692: WriteTimeTtl expressions produce fixed-schema output
@@ -993,7 +1027,7 @@ impl SelectExecutor {
                     };
 
                     // Look up CQL type for this column in the schema (Issue #674).
-                    let cql_type_opt = schema_opt.as_ref().and_then(|schema| {
+                    let cql_type_opt = schema_opt.and_then(|schema| {
                         schema
                             .columns
                             .iter()
@@ -1032,6 +1066,58 @@ mod tests {
     use crate::query::result::{CellExpiration, CellWriteMetadata};
     use crate::{platform::Platform, Config};
     use tempfile::TempDir;
+
+    /// Issue #1587 (E5): a query resolves its table schema ONCE and shares it by
+    /// `Arc`, so a single `execute()` deep-clones the `TableSchema` out of the
+    /// registry exactly once — NOT once per planning/execution step (column
+    /// metadata + scan + fallback each re-resolved before, giving 2–4 clones).
+    /// Runs over empty storage so the count is deterministic and data-free: the
+    /// SELECT-* column metadata AND the scan step both consume the pre-resolved
+    /// schema.
+    #[tokio::test]
+    async fn execute_resolves_schema_once_per_query() {
+        use crate::schema::TABLE_SCHEMA_CLONES;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = Config::default();
+        let platform = Arc::new(Platform::new(&config).await.unwrap());
+        let storage = Arc::new(
+            StorageEngine::open(
+                temp_dir.path(),
+                &config,
+                platform.clone(),
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        let schema = Arc::new(SchemaManager::new(temp_dir.path()).await.unwrap());
+        schema
+            .parse_and_register_cql_schema(
+                "CREATE TABLE ks.t (id int PRIMARY KEY, name text, age int)",
+            )
+            .await
+            .expect("schema registers");
+
+        let executor = SelectExecutor::new(schema.clone(), storage.clone());
+        let optimizer =
+            crate::query::select_optimizer::SelectOptimizer::new(schema.clone(), storage.clone());
+
+        let statement = crate::query::select_parser::parse_select("SELECT * FROM ks.t").unwrap();
+        // Optimization performs no schema resolution; reset the counter AFTER it.
+        let plan = optimizer.optimize(statement).await.unwrap();
+
+        TABLE_SCHEMA_CLONES.with(|c| c.set(0));
+        let _ = executor.execute(plan).await.expect("query executes");
+        let clones = TABLE_SCHEMA_CLONES.with(|c| c.get());
+
+        assert_eq!(
+            clones, 1,
+            "issue #1587: a query must deep-clone its schema out of the registry once \
+             (was 2–4: column-metadata + scan + fallback each re-resolved), got {clones}"
+        );
+    }
 
     async fn create_test_executor() -> SelectExecutor {
         let temp_dir = TempDir::new().unwrap();
@@ -1190,6 +1276,199 @@ mod tests {
         assert_eq!(projected[99].values.get("a"), Some(&Value::Integer(99)));
     }
 
+    /// Issue #1587 (E5): ORDER BY uses decorate-sort-undecorate, so each row's
+    /// sort key is evaluated EXACTLY once (`O(rows × items)`), never inside the
+    /// comparator (`O(n log n)` evaluations + a `Value::clone` per comparison).
+    /// The counter pins the linear evaluation budget; the value assertions pin
+    /// that the resulting order is byte-identical to the comparator sort.
+    #[tokio::test]
+    async fn execute_sort_evaluates_keys_once_per_row() {
+        let executor = create_test_executor().await;
+
+        let num_rows = 64usize;
+        // Reverse-sorted input so the sort must actually reorder every row (a
+        // pre-sorted input could let some sorts short-circuit comparisons).
+        let rows: Vec<QueryRow> = (0..num_rows)
+            .rev()
+            .map(|r| {
+                let mut row = QueryRow::new(RowKey::new(vec![r as u8]));
+                row.set("k", Value::Integer(r as i32));
+                row
+            })
+            .collect();
+
+        let order_by = OrderByClause {
+            items: vec![OrderByItem {
+                expression: SelectExpression::Column(ColumnRef {
+                    table: None,
+                    column: "k".to_string(),
+                }),
+                direction: SortDirection::Ascending,
+            }],
+        };
+
+        let mut ctx = ExecutionContext {
+            table_id: TableId::new("ks.t"),
+            columns: Vec::new(),
+            rows_processed: 0,
+            scan_rows: 0,
+            projection_flags: ProjectionFlags::default(),
+            access_path: None,
+            reverse_served: false,
+        };
+
+        SORT_KEY_EVALUATIONS.with(|c| c.set(0));
+        let sorted = executor
+            .execute_sort(rows, &order_by, &mut ctx)
+            .await
+            .expect("sort must succeed");
+        let evaluations = SORT_KEY_EVALUATIONS.with(|c| c.get());
+
+        // Exactly one evaluation per (row × order-by item). A comparator-based
+        // sort would evaluate ~2 per pairwise comparison — strictly more than
+        // `num_rows` for any non-trivial input (e.g. ~2·n·log2(n) ≫ n here).
+        assert_eq!(
+            evaluations, num_rows,
+            "issue #1587: sort keys must be evaluated once per row (n = {num_rows}), \
+             not O(n log n) times inside the comparator"
+        );
+
+        // Ordering preserved byte-identically: ascending 0..num_rows.
+        assert_eq!(sorted.len(), num_rows);
+        for (i, row) in sorted.iter().enumerate() {
+            assert_eq!(
+                row.values.get("k"),
+                Some(&Value::Integer(i as i32)),
+                "row {i} must sort into ascending position"
+            );
+        }
+    }
+
+    /// Issue #1587 (E5): the decorate-sort-undecorate refactor must PRESERVE the
+    /// ORDER BY ordering for float keys — including NaN and signed zero — exactly
+    /// as the pre-refactor per-comparison sort produced it. It reuses the shared
+    /// `compare_values_ordering` comparator with a stable `sort_by`, so this test
+    /// drives the decorate-sort path (via `execute_sort`) and asserts:
+    ///
+    ///   * with NaN present, the decorated output is order-IDENTICAL to a direct
+    ///     reference sort over the same keys and comparator (ASC and DESC) — the
+    ///     core preservation guarantee; and
+    ///   * over a NaN-free float input (where the comparator IS a total order),
+    ///     finite keys are correctly ordered and signed zeros (-0.0 vs +0.0, which
+    ///     compare Equal) keep input order (stable).
+    ///
+    /// NOTE (pre-existing gaps, out of scope for #1587): `compare_values_ordering`
+    /// compares floats via `f64::partial_cmp` (NaN → Equal, -0.0 == +0.0). So it
+    /// does NOT reproduce Cassandra/Java float ordering (NaN sorted LAST,
+    /// -0.0 < +0.0), and — because a NaN key makes the comparator a NON-total
+    /// order — a NaN in the input leaves even the finite keys in an unspecified
+    /// order. This test therefore pins the ordering the decorate-sort ACTUALLY
+    /// preserves, not the (currently absent) Java semantics. Making ORDER BY match
+    /// Cassandra float ordering is a separate behavior change; reported separately.
+    #[tokio::test]
+    async fn execute_sort_preserves_float_nan_signed_zero_ordering() {
+        let executor = create_test_executor().await;
+
+        let make_rows = |inputs: &[(u8, f64)]| -> Vec<QueryRow> {
+            inputs
+                .iter()
+                .map(|(tag, f)| {
+                    let mut row = QueryRow::new(RowKey::new(vec![*tag]));
+                    row.set("f", Value::Float(*f));
+                    row
+                })
+                .collect()
+        };
+        let order_by = |dir: &SortDirection| OrderByClause {
+            items: vec![OrderByItem {
+                expression: SelectExpression::Column(ColumnRef {
+                    table: None,
+                    column: "f".to_string(),
+                }),
+                direction: dir.clone(),
+            }],
+        };
+        let mut ctx = ExecutionContext {
+            table_id: TableId::new("ks.t"),
+            columns: Vec::new(),
+            rows_processed: 0,
+            scan_rows: 0,
+            projection_flags: ProjectionFlags::default(),
+            access_path: None,
+            reverse_served: false,
+        };
+        let tags = |rows: &[QueryRow]| -> Vec<u8> { rows.iter().map(|r| r.key.0[0]).collect() };
+
+        // --- Part A: NaN present → decorate-sort is order-identical to reference.
+        // Tags 2 (-0.0) and 4 (+0.0) compare Equal; NaN appears twice (tags 1, 6).
+        let with_nan: [(u8, f64); 7] = [
+            (0, 2.0),
+            (1, f64::NAN),
+            (2, -0.0),
+            (3, 1.0),
+            (4, 0.0),
+            (5, -1.0),
+            (6, f64::NAN),
+        ];
+        for dir in [SortDirection::Ascending, SortDirection::Descending] {
+            let sorted = executor
+                .execute_sort(make_rows(&with_nan), &order_by(&dir), &mut ctx)
+                .await
+                .expect("sort must succeed");
+
+            let mut reference = make_rows(&with_nan);
+            reference.sort_by(|a, b| {
+                let (ka, kb) = (
+                    a.values.get("f").expect("key"),
+                    b.values.get("f").expect("key"),
+                );
+                match dir {
+                    SortDirection::Ascending => compare_values_ordering(ka, kb),
+                    SortDirection::Descending => compare_values_ordering(kb, ka),
+                }
+            });
+            assert_eq!(
+                tags(&sorted),
+                tags(&reference),
+                "issue #1587: decorate-sort must be order-identical to the reference \
+                 comparator sort for float/NaN keys ({dir:?})"
+            );
+        }
+
+        // --- Part B: NaN-free input → the comparator is a total order, so the
+        // decorate-sort must produce correct finite ordering and stable signed
+        // zeros. Tags 2 (-0.0) and 4 (+0.0) compare Equal (must keep input order).
+        let no_nan: [(u8, f64); 5] = [(0, 2.0), (2, -0.0), (3, 1.0), (4, 0.0), (5, -1.0)];
+        // Ascending: -1.0, then -0.0 (tag 2) then +0.0 (tag 4) [stable tie], 1.0, 2.0.
+        let asc = executor
+            .execute_sort(
+                make_rows(&no_nan),
+                &order_by(&SortDirection::Ascending),
+                &mut ctx,
+            )
+            .await
+            .expect("sort must succeed");
+        assert_eq!(
+            tags(&asc),
+            vec![5, 2, 4, 3, 0],
+            "ascending float order with stable signed zeros"
+        );
+        // Descending: 2.0, 1.0, then -0.0/+0.0 (stable tie: 2 before 4), -1.0.
+        let desc = executor
+            .execute_sort(
+                make_rows(&no_nan),
+                &order_by(&SortDirection::Descending),
+                &mut ctx,
+            )
+            .await
+            .expect("sort must succeed");
+        assert_eq!(
+            tags(&desc),
+            vec![0, 3, 2, 4, 5],
+            "descending float order with stable signed zeros"
+        );
+    }
+
     /// The executor's `evaluate_select_expression` returns the correct value for
     /// a WRITETIME call when cell metadata is pre-attached to the row.
     #[tokio::test]
@@ -1321,7 +1600,7 @@ mod tests {
             allow_filtering: false,
         };
 
-        let cols = executor.get_result_columns(&stmt).await.unwrap();
+        let cols = executor.get_result_columns(&stmt, None).await.unwrap();
         assert_eq!(cols.len(), 1);
         assert_eq!(cols[0].name, "writetime(name)");
         assert_eq!(cols[0].data_type, crate::types::DataType::BigInt);
@@ -1353,7 +1632,7 @@ mod tests {
             allow_filtering: false,
         };
 
-        let cols = executor.get_result_columns(&stmt).await.unwrap();
+        let cols = executor.get_result_columns(&stmt, None).await.unwrap();
         assert_eq!(cols.len(), 1);
         assert_eq!(cols[0].name, "ttl(score)");
         assert_eq!(cols[0].data_type, crate::types::DataType::Integer);
@@ -1385,7 +1664,7 @@ mod tests {
             allow_filtering: false,
         };
 
-        let cols = executor.get_result_columns(&stmt).await.unwrap();
+        let cols = executor.get_result_columns(&stmt, None).await.unwrap();
         assert_eq!(cols.len(), 1);
         assert_eq!(
             cols[0].name, "wt",

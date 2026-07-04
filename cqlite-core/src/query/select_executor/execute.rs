@@ -20,8 +20,8 @@ use super::{
 };
 use super::{
     AccessPath, ColumnInfo, Error, ExecutionContext, ExecutionStep, FallbackReason,
-    OptimizedQueryPlan, ProjectionFlags, QueryResult, QueryRow, Result, SchemaManager,
-    SelectExecutor, StorageEngine, TableId,
+    OptimizedQueryPlan, ProjectionFlags, QueryResult, QueryRow, Result, SelectExecutor,
+    StorageEngine, TableId, TableSchema,
 };
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -58,6 +58,17 @@ impl SelectExecutor {
             TableId::new("_dummy_")
         };
 
+        // Issue #1587 (E5): resolve the table's schema ONCE per query into a shared
+        // `Arc<TableSchema>`. Column-metadata building, the SSTable scan, and the
+        // SELECT-* metadata fallback all borrow this same schema (ref-count bump),
+        // instead of each independently re-locking the registry and deep-cloning a
+        // fresh `TableSchema` (2–4 deep clones per query before this).
+        let query_schema: Option<Arc<TableSchema>> = if plan.statement.from_clause.is_some() {
+            self.resolve_table_schema(&table_id).await
+        } else {
+            None
+        };
+
         // Issue #692: detect whether any WRITETIME/TTL select items are present
         // during planning and set the opt-in flag so the reader threads per-cell
         // metadata. This is the "planning" half of the executor wiring; the
@@ -72,7 +83,9 @@ impl SelectExecutor {
 
         let mut context = ExecutionContext {
             table_id,
-            columns: self.get_result_columns(&plan.statement).await?,
+            columns: self
+                .get_result_columns(&plan.statement, query_schema.as_deref())
+                .await?,
             rows_processed: 0,
             scan_rows: 0,
             projection_flags,
@@ -113,6 +126,7 @@ impl SelectExecutor {
                             predicates,
                             projection,
                             plan.statement.order_by.as_ref(),
+                            query_schema.as_deref(),
                             &mut context,
                         )
                         .await?;
@@ -189,33 +203,20 @@ impl SelectExecutor {
         // IMPORTANT: Must be sorted alphabetically for deterministic JSON output (Issue #129)!
         let mut columns = context.columns;
         if columns.is_empty() && !intermediate_results.is_empty() {
-            // Try to resolve schema to get proper CQL types (Issue #674).
-            let schema_opt = if let Some(ref from_clause) = plan.statement.from_clause {
-                if let Ok(table_id) = self.extract_table_id(from_clause) {
-                    let (keyspace, table_name) = parse_table_id(&table_id);
-                    self._schema
-                        .find_schema_by_table(&keyspace, &table_name)
-                        .await
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+            // Issue #1587 (E5): reuse the schema resolved once at the top of the
+            // query rather than re-locking the registry + deep-cloning here.
+            let schema_opt = query_schema.as_deref();
 
             let first_row = &intermediate_results[0];
             let mut col_names: Vec<_> = first_row.values.keys().collect();
             col_names.sort(); // Sort alphabetically for deterministic ordering (Issue #129)
 
-            let table_name_for_meta = schema_opt
-                .as_ref()
-                .map(|s| format!("{}.{}", s.keyspace, s.table));
+            let table_name_for_meta = schema_opt.map(|s| format!("{}.{}", s.keyspace, s.table));
 
             for (idx, col_name) in col_names.iter().enumerate() {
                 let col_name: &str = col_name;
                 // Look up CQL type from schema; derive flat DataType from it (Issue #674).
                 let col_info = match schema_opt
-                    .as_ref()
                     .and_then(|schema| schema.columns.iter().find(|c| c.name.as_str() == col_name))
                 {
                     Some(schema_col) => column_info_from_type_str(
@@ -294,7 +295,9 @@ impl SelectExecutor {
     /// Background task: Execute streaming scan and send rows through channel
     pub(super) async fn execute_streaming_background(
         storage: Arc<StorageEngine>,
-        schema_manager: Arc<SchemaManager>,
+        // Issue #1587 (E5): schema resolved ONCE per query by `execute_streaming`
+        // and moved into this task — no per-scan-step registry lock + deep clone.
+        query_schema: Option<Arc<TableSchema>>,
         _table_id: TableId,
         execution_steps: Vec<ExecutionStep>,
         tx: mpsc::Sender<Result<QueryRow>>,
@@ -343,15 +346,12 @@ impl SelectExecutor {
                     projection,
                     ..
                 } => {
-                    let (keyspace, table_name) = parse_table_id(table);
-                    let schema_opt = schema_manager
-                        .find_schema_by_table(&keyspace, &table_name)
-                        .await;
+                    let schema_opt = query_schema.as_deref();
 
                     // FINDING 2 (Issue #955 follow-up): reject a `token(...)` whose
                     // columns are not the full partition key in declared order
                     // before scanning (same rule as the materializing path).
-                    validate_token_predicates(predicates, schema_opt.as_ref())?;
+                    validate_token_predicates(predicates, schema_opt)?;
 
                     // Issue #949: a fully-constrained `WHERE pk = ?` is served by a
                     // partition-targeted lookup that prunes SSTables via bloom/BTI,
@@ -362,24 +362,22 @@ impl SelectExecutor {
                     // materializing `scan()` (last-write-wins + tombstone shadowing),
                     // which is the authoritative read semantics; it does not merely
                     // mirror `scan_stream`'s per-key merge.
-                    let lookup = classify_partition_lookup(predicates, schema_opt.as_ref());
+                    let lookup = classify_partition_lookup(predicates, schema_opt);
                     if let PartitionLookupOutcome::Targeted(ref pk_bytes) = lookup {
                         // Issue #960: the streaming analogue of the materializing
                         // partition-targeted lookup. Epic #951 (honest paths): the
                         // `tombstones` build's `scan_partition` is a full-scan +
                         // retain with NO prune, reported via `engaged == false`; only
                         // claim `StreamingPartitionLookup` when it really pruned.
-                        let (rows, engaged) = storage
-                            .scan_partition(table, pk_bytes, schema_opt.as_ref())
-                            .await?;
+                        let (rows, engaged) =
+                            storage.scan_partition(table, pk_bytes, schema_opt).await?;
                         crate::query::access_path::record(honest_targeted_path(
                             AccessPath::StreamingPartitionLookup,
                             engaged,
                         ));
                         for (key, value) in rows {
                             let part_sig = per_partition_limit.map(|_| key.0.clone());
-                            let Some(row) =
-                                build_row_from_scan(key, value, projection, schema_opt.as_ref())
+                            let Some(row) = build_row_from_scan(key, value, projection, schema_opt)
                             else {
                                 continue;
                             };
@@ -426,9 +424,8 @@ impl SelectExecutor {
                         let mut combined = Vec::new();
                         let mut all_engaged = true;
                         for pk_bytes in pk_keys {
-                            let (rows, engaged) = storage
-                                .scan_partition(table, pk_bytes, schema_opt.as_ref())
-                                .await?;
+                            let (rows, engaged) =
+                                storage.scan_partition(table, pk_bytes, schema_opt).await?;
                             all_engaged &= engaged;
                             combined.extend(rows);
                         }
@@ -439,8 +436,7 @@ impl SelectExecutor {
                         sort_rows_by_token(&mut combined);
                         for (key, value) in combined {
                             let part_sig = per_partition_limit.map(|_| key.0.clone());
-                            let Some(row) =
-                                build_row_from_scan(key, value, projection, schema_opt.as_ref())
+                            let Some(row) = build_row_from_scan(key, value, projection, schema_opt)
                             else {
                                 continue;
                             };
@@ -488,7 +484,7 @@ impl SelectExecutor {
                     // parses one entry at a time into this channel, so live heap
                     // stays bounded by `buffer_size` rather than O(result rows).
                     let mut scan_stream = storage
-                        .scan_stream(table, None, None, schema_opt.as_ref(), buffer_size)
+                        .scan_stream(table, None, None, schema_opt, buffer_size)
                         .await?;
 
                     while let Some(item) = scan_stream.recv().await {
@@ -496,8 +492,7 @@ impl SelectExecutor {
                         // Capture the partition key bytes before `key` is moved
                         // into row construction (only when needed).
                         let part_sig = per_partition_limit.map(|_| key.0.clone());
-                        let Some(row) =
-                            build_row_from_scan(key, value, projection, schema_opt.as_ref())
+                        let Some(row) = build_row_from_scan(key, value, projection, schema_opt)
                         else {
                             continue;
                         };
@@ -569,6 +564,9 @@ impl SelectExecutor {
         predicates: &[SSTablePredicate],
         projection: &[String],
         order_by: Option<&crate::query::select_ast::OrderByClause>,
+        // Issue #1587 (E5): schema resolved ONCE per query by the caller and
+        // shared by reference — no per-scan registry lock + deep clone.
+        schema_opt: Option<&TableSchema>,
         context: &mut ExecutionContext,
     ) -> Result<Vec<QueryRow>> {
         const MAX_RESULTS: usize = 1_000_000;
@@ -581,12 +579,8 @@ impl SelectExecutor {
         );
 
         let (keyspace, table_name) = parse_table_id(table);
-        let schema_opt = self
-            ._schema
-            .find_schema_by_table(&keyspace, &table_name)
-            .await;
 
-        match schema_opt.as_ref() {
+        match schema_opt {
             Some(schema) => log::info!(
                 "Found schema for {}.{} with {} columns",
                 schema.keyspace,
@@ -604,7 +598,7 @@ impl SelectExecutor {
         // by hashing the row's raw partition key, so its argument columns MUST be
         // the full partition key in declared order or the result is silently
         // wrong. Reject (Cassandra-style) before scanning/evaluating.
-        validate_token_predicates(predicates, schema_opt.as_ref())?;
+        validate_token_predicates(predicates, schema_opt)?;
 
         // Issue #693: When WRITETIME(col) or TTL(col) is in the SELECT, use the
         // metadata-carrying scan so per-cell timestamps reach the QueryRow.
@@ -618,7 +612,7 @@ impl SelectExecutor {
             // partition-lookup representation). The per-row predicate evaluation
             // below is unchanged, so the pk equality itself is still applied as a
             // correctness backstop and any bloom/BTI over-inclusion is filtered out.
-            let scan_results = match classify_partition_lookup(predicates, schema_opt.as_ref()) {
+            let scan_results = match classify_partition_lookup(predicates, schema_opt) {
                 PartitionLookupOutcome::Targeted(pk_bytes) => {
                     log::info!(
                         "SSTableScan(metadata): partition-key point lookup (key len={}) for \"{}\"",
@@ -633,7 +627,7 @@ impl SelectExecutor {
                     // rows are byte-identical either way).
                     let (rows, engaged) = self
                         .storage
-                        .scan_partition_with_cell_metadata(table, &pk_bytes, schema_opt.as_ref())
+                        .scan_partition_with_cell_metadata(table, &pk_bytes, schema_opt)
                         .await?;
                     let path = honest_targeted_path(AccessPath::MetadataPartitionLookup, engaged);
                     context.access_path = Some(path.clone());
@@ -651,7 +645,7 @@ impl SelectExecutor {
                     context.access_path = Some(metadata_path.clone());
                     crate::query::access_path::record(metadata_path);
                     self.storage
-                        .scan_with_cell_metadata(table, None, None, None, schema_opt.as_ref())
+                        .scan_with_cell_metadata(table, None, None, None, schema_opt)
                         .await?
                 }
             };
@@ -662,9 +656,7 @@ impl SelectExecutor {
                 context.rows_processed += 1;
                 context.scan_rows += 1;
 
-                let Some(mut row) =
-                    build_row_from_scan(key, value, projection, schema_opt.as_ref())
-                else {
+                let Some(mut row) = build_row_from_scan(key, value, projection, schema_opt) else {
                     continue;
                 };
 
@@ -691,7 +683,7 @@ impl SelectExecutor {
             // pinned or can't be encoded. The per-row predicate evaluation below is
             // unchanged, so clustering predicates and the pk equality itself are
             // still applied (and any over-inclusion is filtered out).
-            let scan_results = match classify_partition_lookup(predicates, schema_opt.as_ref()) {
+            let scan_results = match classify_partition_lookup(predicates, schema_opt) {
                 PartitionLookupOutcome::Targeted(pk_bytes) => {
                     log::info!(
                         "SSTableScan: partition-key point lookup (key len={}) for \"{}\"",
@@ -715,12 +707,7 @@ impl SelectExecutor {
                     #[cfg(not(feature = "tombstones"))]
                     {
                         self.targeted_partition_rows(
-                            table,
-                            &pk_bytes,
-                            predicates,
-                            order_by,
-                            schema_opt.as_ref(),
-                            context,
+                            table, &pk_bytes, predicates, order_by, schema_opt, context,
                         )
                         .await?
                     }
@@ -733,7 +720,7 @@ impl SelectExecutor {
                         // are byte-identical to the pruned build.
                         let (rows, engaged) = self
                             .storage
-                            .scan_partition(table, &pk_bytes, schema_opt.as_ref())
+                            .scan_partition(table, &pk_bytes, schema_opt)
                             .await?;
                         let path = honest_targeted_path(AccessPath::PartitionLookup, engaged);
                         context.access_path = Some(path.clone());
@@ -759,7 +746,7 @@ impl SelectExecutor {
                     for pk_bytes in &pk_keys {
                         let (rows, engaged) = self
                             .storage
-                            .scan_partition(table, pk_bytes, schema_opt.as_ref())
+                            .scan_partition(table, pk_bytes, schema_opt)
                             .await?;
                         all_engaged &= engaged;
                         combined.extend(rows);
@@ -780,7 +767,7 @@ impl SelectExecutor {
                     context.access_path = Some(AccessPath::FallbackFullScan { reason });
                     crate::query::access_path::record(AccessPath::FallbackFullScan { reason });
                     self.storage
-                        .scan(table, None, None, None, schema_opt.as_ref())
+                        .scan(table, None, None, None, schema_opt)
                         .await?
                 }
             };
@@ -792,8 +779,7 @@ impl SelectExecutor {
                 context.scan_rows += 1;
 
                 // build_row_from_scan returns None for tombstoned/null rows (Issue #191).
-                let Some(row) = build_row_from_scan(key, value, projection, schema_opt.as_ref())
-                else {
+                let Some(row) = build_row_from_scan(key, value, projection, schema_opt) else {
                     continue;
                 };
 
