@@ -10,9 +10,172 @@ Tests verify:
 5. Memory usage stays bounded
 """
 
+import sys
+import threading
+import time
+
 import pytest
 
 import cqlite
+
+from conftest import (
+    DATASETS,
+    SCHEMA_BASIC_TYPES,
+    require_test_data,
+)
+
+
+class TestStreamingGilRelease:
+    """Issue #1441: streaming __next__ must release the GIL during its blocking
+    buffer refill so other Python threads make progress."""
+
+    # The widest, most-scannable single-partition-ish fixture in the corpus
+    # (999 rows). Many rows keep the one-time per-stream setup GIL-release
+    # negligible next to the 999 per-row blocking refills, so the unmodified
+    # build reads ~0 for the metric below (GIL held the whole iteration).
+    _TABLE = "test_basic.simple_table"
+
+    # Metric: the fraction of streaming wall-time during which the GIL was free
+    # for the concurrent spinner, AGGREGATED across all attempts =
+    #     sum(during) / (rate_solo * sum(dS))
+    # where ``during`` is the spinner's increment count over one stream,
+    # ``rate_solo`` is the spinner's robustly-calibrated uncontended rate (max
+    # over sub-windows, so it is not underestimated when the spinner is briefly
+    # descheduled), and ``dS`` is that stream's duration. It is a RATE RATIO,
+    # hence invariant to machine/CI load.
+    #
+    # A SINGLE attempt is noisy in both directions (the OS scheduler landing the
+    # spinner inside a given microsecond GIL-release window is luck; and the
+    # unmodified build has rare eval-breaker GIL releases at loop boundaries that
+    # occasionally spike one attempt). Counting per-attempt clears is therefore
+    # fragile under load (the scheduler simply does not land the spinner in every
+    # narrow window). Instead we AGGREGATE the numerator and denominator over
+    # ``_ATTEMPTS`` streams and require the pooled fraction to clear a modest
+    # floor. Pooling smooths per-attempt scheduler noise: every fixed-build
+    # attempt contributes GIL-free time, while the buggy build's rare single-
+    # attempt spikes get diluted by the many near-zero attempts.
+    #
+    # Measured (this machine, under 4 saturating CPU hogs; warm cache):
+    #   * fixed build:     aggregate 0.30 - 0.60 (24 attempts; >= 0.18 even at 16)
+    #   * unmodified main: aggregate 0.0025 - 0.0098 (24 attempts; spinner starved
+    #                       the whole iteration; only rare eval-breaker releases)
+    # A floor of 0.05 sits ~5x above the buggy ceiling and well below the fixed
+    # floor — even a low-signal fixed run (~0.096 observed on a differently loaded
+    # machine) clears it with ~2x margin.
+    _ATTEMPTS = 24
+    _AGGREGATE_FLOOR = 0.05
+
+    def test_streaming_next_releases_gil(self):
+        """A concurrent Python thread runs during streaming iteration ONLY when
+        ``__next__`` releases the GIL.
+
+        Why this discriminates the bug (and is not flaky):
+
+        * Python's periodic thread switch is disabled for the window via
+          ``sys.setswitchinterval(1000)``. With voluntary preemption off, the
+          busy-spin thread (B) can run only when some thread *explicitly* hands
+          off the GIL. B still yields cooperatively (``time.sleep(0)`` always
+          drops the GIL), so the streaming thread never starves.
+        * A single stream over ``simple_table`` (999 rows) with ``buffer_size=1``
+          makes every row a separate blocking channel refill
+          (``block_on(next_async())``); the one-time query setup is negligible
+          next to 999 refills, so on the unmodified build B is starved for the
+          whole iteration.
+        * Robustness comes from AGGREGATING the GIL-free fraction across
+          ``_ATTEMPTS`` streams (pooled numerator / pooled denominator), not from
+          a single fragile reading or a per-attempt scheduler-lands-in-the-window
+          bucket count (see the class constants).
+        """
+        # Fail loudly (not skip) under strict fixture mode (issue #1230).
+        require_test_data(SCHEMA_BASIC_TYPES)
+
+        # No-GIL (free-threaded) builds have no GIL to release; the concurrency
+        # claim under test is GIL-specific.
+        if not getattr(sys, "_is_gil_enabled", lambda: True)():
+            pytest.skip("free-threaded build: no GIL to release")
+
+        counter = {"n": 0}
+        stop = threading.Event()
+
+        def spin():
+            # Cooperative busy loop. sleep(0) always releases the GIL, so the
+            # streaming thread is never blocked by B; but with the switch
+            # interval raised, B only advances while some thread hands off the
+            # GIL — i.e. while ``__next__`` is inside ``py.allow_threads(...)``.
+            while not stop.is_set():
+                counter["n"] += 1
+                time.sleep(0)
+
+        def stream_once(database):
+            config = cqlite.StreamingConfig(buffer_size=1)
+            c_start = counter["n"]
+            t_start = time.perf_counter()
+            rows = 0
+            for _row in database.execute_streaming(
+                f"SELECT * FROM {self._TABLE}", config=config
+            ):
+                rows += 1
+            dS = time.perf_counter() - t_start
+            during = counter["n"] - c_start
+            return during, dS, rows
+
+        # Accumulators for the pooled (aggregate) GIL-free fraction.
+        sum_during = 0
+        sum_dS = 0.0
+
+        old_interval = sys.getswitchinterval()
+        sys.setswitchinterval(1000)  # disable periodic preemption for the window
+        b = threading.Thread(target=spin, daemon=True)
+        b.start()
+        attempts_run = 0
+        rows_seen = 0
+        try:
+            time.sleep(0.05)  # let B warm up and get scheduled
+
+            # Robust uncontended rate: MAX over sub-windows so a brief deschedule
+            # during calibration cannot underestimate it (which would inflate the
+            # fractions below and risk a false pass on the buggy build).
+            rate_solo = 0.0
+            for _ in range(5):
+                c0 = counter["n"]
+                t0 = time.perf_counter()
+                time.sleep(0.03)
+                rate_solo = max(
+                    rate_solo, (counter["n"] - c0) / (time.perf_counter() - t0)
+                )
+            assert rate_solo > 0, "spinner made no progress during calibration"
+
+            with cqlite.open(DATASETS, schema=SCHEMA_BASIC_TYPES) as database:
+                for _ in range(self._ATTEMPTS):
+                    during, dS, rows = stream_once(database)
+                    rows_seen = rows
+                    sum_during += during
+                    sum_dS += dS
+                    attempts_run += 1
+        finally:
+            sys.setswitchinterval(old_interval)
+            stop.set()
+        b.join(timeout=5)
+
+        # Guard against a trivially-green run: the stream must actually have
+        # yielded the large fixture. A dropped/unfetched Data.db would otherwise
+        # make the assertion meaningless.
+        assert rows_seen >= 900, (
+            f"streaming yielded only {rows_seen} rows; need the ~999-row "
+            f"{self._TABLE} fixture for a meaningful GIL-release assertion"
+        )
+        assert attempts_run == self._ATTEMPTS, "not all streaming attempts ran"
+
+        # Pooled GIL-free fraction across all attempts. rate_solo is a constant,
+        # so this equals sum(during) / (rate_solo * sum(dS)).
+        aggregate = sum_during / (rate_solo * sum_dS) if sum_dS > 0 else 0.0
+        assert aggregate > self._AGGREGATE_FLOOR, (
+            f"aggregate GIL-free fraction {aggregate:.4f} across "
+            f"{self._ATTEMPTS} streaming attempts did not clear "
+            f"{self._AGGREGATE_FLOOR}; the concurrent thread was starved, so the "
+            f"GIL appears held across the blocking refill "
+            f"(rate_solo={rate_solo:.0f}/s)"
+        )
 
 
 class TestStreamingImports:
