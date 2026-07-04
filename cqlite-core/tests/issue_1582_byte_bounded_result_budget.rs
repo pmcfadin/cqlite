@@ -592,8 +592,8 @@ async fn max_result_rows_knob_is_load_bearing() {
     // Lowering the config knob changed what trips → the valve is load-bearing.
     {
         let low_rows: u64 = (SKINNY_ROW_COUNT as u64) / 2; // < fixture row count
-        let db = open_db_with_budgets(data_dir, schema_path, DEFAULT_MAX_RESULT_BYTES, low_rows)
-            .await;
+        let db =
+            open_db_with_budgets(data_dir, schema_path, DEFAULT_MAX_RESULT_BYTES, low_rows).await;
         let err = db
             .execute(&sql)
             .await
@@ -607,7 +607,9 @@ async fn max_result_rows_knob_is_load_bearing() {
                     "row-count valve error should advise adding LIMIT; got {msg:?}"
                 );
             }
-            other => panic!("expected Error::QueryExecution from the row-count valve, got {other:?}"),
+            other => {
+                panic!("expected Error::QueryExecution from the row-count valve, got {other:?}")
+            }
         }
     }
 }
