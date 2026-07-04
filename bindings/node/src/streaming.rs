@@ -227,9 +227,9 @@ impl napi::Task for NextTask {
             Ok(rows) => {
                 // Materialise the interned `Arc<str>` name handles into `String`
                 // keys at the FFI boundary (issue #1334): the JS-facing row maps
-                // are keyed by `String`. A partial (non-empty, < batch_size) chunk
-                // also means the stream is exhausted; we still yield it and let the
-                // next `next()` observe the empty chunk and clean up.
+                // are keyed by `String`. An empty chunk signals exhaustion; a
+                // non-empty chunk (partial OR full) is always yielded, and the
+                // next `next()` observes the empty chunk to terminate and clean up.
                 let batch = rows
                     .into_iter()
                     .map(|row| {
