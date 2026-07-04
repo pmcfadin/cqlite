@@ -1427,9 +1427,11 @@ acquire_gate_slot() {
   ready="$LOG_DIR/gate-slot.ready"
   rm -f "$ready" 2>/dev/null || true
   # Start the background lock-holder for THIS gate (pid $$). It writes $ready once
-  # it owns a slot and holds it until this gate exits.
+  # it owns a slot and holds it until this gate exits. Its std fds are detached to
+  # /dev/null so this long-lived background child can NEVER hold the gate's stdout
+  # pipe open and truncate a streamed SUMMARY under an until-EOF reader (#1175).
   python3 "$daemon" --slots-dir "$dir" --slots "$n" --gate-pid "$$" \
-    --ready-file "$ready" --poll-secs "$poll" &
+    --ready-file "$ready" --poll-secs "$poll" </dev/null >/dev/null 2>&1 &
   GATE_SLOT_DAEMON_PID=$!
   trap '_gate_release_slot' EXIT
   # Block until the daemon signals acquisition, printing the queued notice ONCE
