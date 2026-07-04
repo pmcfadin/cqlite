@@ -322,6 +322,13 @@ See the [examples/](examples/) directory for complete working examples:
 - [streaming.ts](examples/streaming.ts) - Large result handling
 - [performance.ts](examples/performance.ts) - Memory-optimized usage
 
+> **Streaming concurrency caveat:** `executeStreaming()` fetches each batch of
+> `K = bufferSize` rows on a libuv threadpool thread, so N concurrent streams can
+> each occupy a libuv threadpool thread for the duration of a batch fetch. Heavy
+> concurrent `fs`/`crypto` work in the same process may see added latency until
+> the follow-up ([#1901](https://github.com/pmcfadin/cqlite/issues/1901)) moves
+> streaming off the libuv pool onto the tokio runtime.
+
 ## Resources
 
 - [TypeScript Definitions](lib/index.d.ts) - Complete API type hints

@@ -1156,6 +1156,13 @@ export declare class Database {
    * - `bufferSize`: 1024 rows in flight (~1MB)
    * - `chunkSize`: 10,000 rows per fetch chunk (~10MB)
    *
+   * Concurrency caveat: each `next()` fetches a batch of `K = bufferSize` rows
+   * on a libuv threadpool thread, so N concurrent streams can each occupy a
+   * libuv threadpool thread for the duration of a batch fetch. Heavy concurrent
+   * `fs`/`crypto` work in the same process may therefore see added latency until
+   * the follow-up (cqlite#1901) lands, which moves streaming off the libuv pool
+   * onto the tokio runtime.
+   *
    * @param query - CQL SELECT statement to execute
    * @param config - Optional StreamingConfig for buffer/chunk sizes
    * @returns StreamingResult async iterable (iteration triggers query execution)
