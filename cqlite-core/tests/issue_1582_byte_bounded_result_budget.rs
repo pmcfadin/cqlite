@@ -433,6 +433,35 @@ async fn over_budget_constant_query_trips_byte_guard() {
     }
 }
 
+/// roborev #1582 (constant path): the no-FROM budget check must run on the rows
+/// ACTUALLY returned (post LIMIT/OFFSET), NOT on the pre-limit constant rows. So
+/// an over-budget constant `SELECT '<big literal>' LIMIT 0` returns empty, never
+/// `ResultTooLarge` — `LIMIT 0` yields an empty result and can never trip the guard.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn constant_query_limit_zero_returns_empty_not_result_too_large() {
+    let temp = TempDir::new().unwrap();
+    let (data_dir, schema_path) = prepare_skinny(temp.path()).await;
+
+    let tiny_budget: u64 = 512;
+    // Same over-budget literal as `over_budget_constant_query_trips_byte_guard`.
+    let big_literal_len = (tiny_budget as usize) * 4;
+    let big_literal: String = "x".repeat(big_literal_len);
+
+    let db = open_db_with_budget(data_dir, schema_path, tiny_budget).await;
+
+    let sql = format!("SELECT '{big_literal}' LIMIT 0");
+    let result = db
+        .execute(&sql)
+        .await
+        .expect("LIMIT 0 must return an empty result, never ResultTooLarge");
+
+    assert!(
+        result.rows.is_empty(),
+        "LIMIT 0 must return zero rows, got {}",
+        result.rows.len()
+    );
+}
+
 /// A simple `SELECT * ... WHERE id = <k>` point lookup routes through the LEGACY
 /// `QueryExecutor` (not the budgeted `SelectExecutor`; see `QueryEngine::execute`'s
 /// `is_simple_id_lookup` gate). A single very wide row must trip `ResultTooLarge`

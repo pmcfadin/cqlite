@@ -94,12 +94,25 @@ impl SelectExecutor {
 
         // Handle queries without FROM clause (like SELECT 1)
         if plan.statement.from_clause.is_none() {
-            let result = self.execute_constant_query(&plan.statement, &context)?;
-            // Issue #1582 (roborev): constant queries return BEFORE the final-result
-            // budget check below, so apply the SAME byte + row-count budget to their
-            // materialized rows here — otherwise a large literal result set (many /
-            // large constant expressions) could exceed `max_result_bytes` without
-            // raising `ResultTooLarge`.
+            let mut result = self.execute_constant_query(&plan.statement, &context)?;
+            // Issue #1582 (roborev): apply the statement's LIMIT/OFFSET to the
+            // constant rows BEFORE the byte + row-count budget check, so the budget
+            // is enforced on the rows ACTUALLY returned (post LIMIT/OFFSET) —
+            // consistent with the table-backed path below. In particular `LIMIT 0`
+            // must return empty, never `ResultTooLarge`; an over-budget constant
+            // SELECT with NO limit still trips the guard on its final rows.
+            let offset = plan.statement.offset.unwrap_or(0) as usize;
+            let limit = plan
+                .statement
+                .limit
+                .as_ref()
+                .map(|l| l.count as usize)
+                .unwrap_or(usize::MAX);
+            result.rows = result.rows.into_iter().skip(offset).take(limit).collect();
+            // Keep the row-count metadata consistent with the returned rows.
+            let returned = result.rows.len() as u64;
+            result.rows_affected = returned;
+            result.metadata.total_rows = Some(returned);
             enforce_materialized_rows(&result.rows, self.max_result_bytes, self.max_result_rows)?;
             return Ok(result);
         }
