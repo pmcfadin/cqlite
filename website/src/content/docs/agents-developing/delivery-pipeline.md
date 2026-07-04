@@ -136,10 +136,19 @@ stuck item. `flow-finalize` releases the claim by deleting the origin branch on 
 
 ## Concurrency model
 
+- **One active worker per machine; the worker paces the machine's load (#1930).** A single lead/worker
+  session owns a machine at a time — the load + worktree-isolation rule that sits *above* the claim
+  protocol. Two efforts on one box collide on the shared worktree and oversubscribe the CPU, which flakes
+  scheduling-sensitive tests (write-throughput, the streaming GIL-release test) and can SIGKILL gates. The
+  owning worker is responsible for load: **serialize your own full-gate runs — never two full
+  `scripts/agent-gate.sh` at once on one box** (the machine-wide gate cap is a backstop, not a license to
+  overlap). **Subagents are exempt:** a worker fanning out `sstable-developer`/reviewers is not "multiple
+  workers" — they never launch competing full gates. The rule targets independent lead/worker *sessions*.
 - **Default (recommended): one lead → subagents.** A single `flow-lead` spawns subagents and assigns each
   **disjoint** work — zero duplicate work by construction.
 - **Multiple independent sessions: the claim protocol is mandatory.** Each acquires work only through the
-  claim protocol above.
+  claim protocol above — and, per the rule above, independent sessions belong on *separate* machines
+  (one-per-machine handles a single box; different machines coordinate via the pushed branch lock).
 - **Agent Teams is optional, desktop-only.** `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` gives a built-in
   file-locked shared task list for coordinated parallel sessions, but it is experimental and desktop/tmux
   -only (no `/resume`, one team per session). Use it if you want; it is not required.
