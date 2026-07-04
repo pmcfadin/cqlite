@@ -453,11 +453,14 @@ py_only=$(printf '%s\n' \
   "bindings/python/tests/conftest.py" \
   "bindings/python/src/database.rs" \
   | bash "$GATE" --classify-scoped-plan 2>/dev/null)
-if printf '%s\n' "$py_only" | grep -q "^python-tier: .*maturin develop --profile dev" \
-   && printf '%s\n' "$py_only" | grep -qF "pytest bindings/python/tests -m 'not slow'"; then
-  ok "py-route: python-only diff selects the maturin --profile dev + not-slow-pytest tier"
+# The advertised plan string is COMPOSED from the same PYTHON_LITE_*_CMD component
+# constants the executor eval's (roborev job 1449), so asserting the exact canonical
+# command here pins what actually runs — not a parallel copy that can drift.
+if printf '%s\n' "$py_only" | grep -qxF \
+     "python-tier: maturin develop --profile dev -m bindings/python/Cargo.toml && pytest bindings/python/tests -m 'not slow' -q"; then
+  ok "py-route: python-only diff selects the maturin --profile dev + not-slow-pytest tier (exact canonical command)"
 else
-  bad "py-route: python-only diff did NOT select the python tier"
+  bad "py-route: python-only diff did NOT select the canonical python tier command"
   echo "------- plan -------"; printf '%s\n' "$py_only"; echo "--------------------"
 fi
 if printf '%s\n' "$py_only" | grep -q "^rust-pkg:"; then

@@ -134,6 +134,10 @@
 #                                     # never be pasted as the full SUMMARY. The
 #                                     # full gate MUST PASS once before merge. Its
 #                                     # recovery default is .agent-gate-lite-summary.txt.
+#                                     # A bindings/python diff routes scoped-tests to
+#                                     # maturin develop + fast pytest (issue #1893), so
+#                                     # python-diff rounds cost a maturin compile
+#                                     # (seconds warm, ~1-3 min cold).
 #   scripts/agent-gate.sh --list      # list full-gate components without running
 #   scripts/agent-gate.sh --lite-list # list the --lite components without running
 #   scripts/agent-gate.sh --only fmt,clippy   # debugging aid; output is
@@ -463,9 +467,17 @@ _scoped_test_cmd_noparser() {
 # The FAST python-binding tier --lite runs for a bindings/python diff (issue #1893)
 # INSTEAD of the always-libpython-link-failing `cargo test -p cqlite-py`. cqlite-py
 # is a pyo3 cdylib, so a plain `cargo test` on it never links libpython and gave
-# --lite ZERO python signal on ~1/3 of binding diffs. Single source of truth for
-# both the executor (run_scoped_tests) and the --classify-scoped-plan self-test hook.
-PYTHON_LITE_TIER_CMD="maturin develop --profile dev && pytest bindings/python/tests -m 'not slow'"
+# --lite ZERO python signal on ~1/3 of binding diffs.
+#
+# REAL single source of truth (roborev job 1449, Medium): the executor in
+# run_scoped_tests `eval`s EXACTLY these two component strings, and
+# PYTHON_LITE_TIER_CMD — the plan string --classify-scoped-plan advertises and the
+# self-test asserts — is composed from the SAME two components, so the advertised
+# plan and the executed command can never drift. Never edit one side alone: change
+# a component string and both the plan and the execution change together.
+PYTHON_LITE_MATURIN_CMD="maturin develop --profile dev -m bindings/python/Cargo.toml"
+PYTHON_LITE_PYTEST_CMD="pytest bindings/python/tests -m 'not slow' -q"
+PYTHON_LITE_TIER_CMD="$PYTHON_LITE_MATURIN_CMD && $PYTHON_LITE_PYTEST_CMD"
 
 # Read changed repo-relative paths on stdin; emit the deduped set of owning Cargo
 # workspace packages (one per line) — the SAME union of path-owners + changed
@@ -1415,7 +1427,7 @@ run_scoped_tests() {
   local scoped_note=""
   [ "${#pkgs[@]}" -gt 0 ] && scoped_note="${pkgs[*]}"
   if [ "$python_diff" -eq 1 ]; then
-    scoped_note="${scoped_note:+$scoped_note + }python tier (maturin develop --profile dev + pytest -m 'not slow')"
+    scoped_note="${scoped_note:+$scoped_note + }python tier ($PYTHON_LITE_TIER_CMD)"
   fi
   # Fall back to the cqlite-core --lib default ONLY when the diff selected nothing
   # at all — NOT when a python-only diff already routed to the python tier.
@@ -1498,30 +1510,42 @@ run_scoped_tests() {
   # Python tier (issue #1893): the REAL python signal --lite runs for a
   # bindings/python diff instead of the always-libpython-link-failing
   # `cargo test -p cqlite-py`. Reuses the full gate's persistent venv
-  # (target/agent-gate-venv), but the FAST variant: `maturin develop --profile dev`
-  # (the documented dev build; overrides the release-unwind firewall pin) + the
-  # not-slow pytest tier. SKIP-aware — a missing python3 notes + skips (never FAILs
-  # --lite for a toolchain gap), matching the full gate's python-bindings component.
+  # (target/agent-gate-venv). Both phases `eval` the PYTHON_LITE_*_CMD component
+  # constants that also compose the advertised PYTHON_LITE_TIER_CMD plan string
+  # (roborev job 1449) — plan/executor drift is structurally impossible.
+  #
+  # SKIP vs FAIL split (roborev job 1449, Low): TOOLCHAIN failures (venv creation,
+  # pip install — e.g. offline, or the maturin build environment itself missing) get
+  # a loud SKIP-note, never FAIL — --lite must stay usable offline, and a toolchain
+  # gap is not a code failure (clippy in this same lite run still compiles cqlite-py,
+  # and the full gate's python-bindings component hard-fails). A PYTEST failure is a
+  # real code failure and FAILs. NOTE: a python-diff --lite round costs a maturin
+  # compile of the extension (seconds warm via the persistent venv + sccache,
+  # ~1-3 min cold).
   if [ "$python_diff" -eq 1 ]; then
     if ! command -v python3 >/dev/null 2>&1; then
       echo ">>> [$name] python binding diff but no python3 on PATH — SKIP python tier (run the full gate)"
     else
       local venv="$REPO_ROOT/target/agent-gate-venv"
-      echo ">>> [$name] python tier: maturin develop --profile dev + pytest -m 'not slow' (venv: $venv)"
-      if RUN_SLOW_TESTS=0 bash -c '
+      echo ">>> [$name] python tier: $PYTHON_LITE_TIER_CMD (venv: $venv)"
+      if ! RUN_SLOW_TESTS=0 PY_MATURIN_CMD="$PYTHON_LITE_MATURIN_CMD" bash -c '
           set -euo pipefail
           venv="'"$venv"'"
           [ -x "$venv/bin/python" ] || python3 -m venv "$venv"
           . "$venv/bin/activate"
           pip install --quiet --upgrade pip >/dev/null
           pip install --quiet maturin pytest
-          maturin develop --profile dev -m bindings/python/Cargo.toml
-          pytest bindings/python/tests -m "not slow" -q' >>"$log" 2>&1; then
+          eval "$PY_MATURIN_CMD"' >>"$log" 2>&1; then
+        echo ">>> [$name] python tier SKIP (venv/pip/maturin toolchain setup failed — offline or toolchain gap, NOT a code failure; see $log; run the full gate when the toolchain is available)"
+      elif RUN_SLOW_TESTS=0 PY_PYTEST_CMD="$PYTHON_LITE_PYTEST_CMD" bash -c '
+          set -euo pipefail
+          . "'"$venv"'/bin/activate"
+          eval "$PY_PYTEST_CMD"' >>"$log" 2>&1; then
         echo ">>> [$name] python tier PASS"
       else
         status=FAIL
         OVERALL=FAIL
-        echo ">>> [$name] python tier FAIL"
+        echo ">>> [$name] python tier FAIL (pytest failure — a real code failure)"
       fi
     fi
   fi
