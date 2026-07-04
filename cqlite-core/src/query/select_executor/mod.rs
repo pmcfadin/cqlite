@@ -215,6 +215,15 @@ pub struct SelectExecutor {
     storage: Arc<StorageEngine>,
     /// Clock used for TTL "remaining seconds" computation (injectable for tests).
     clock: Arc<dyn NowSeconds>,
+    /// Byte ceiling on a materialized result set (issue #1582 / D6).
+    ///
+    /// The materializing scan path accumulates a running estimate of the result
+    /// bytes and fails with [`Error::ResultTooLarge`] once this is exceeded.
+    /// Wired from [`crate::config::QueryConfig::max_result_bytes`] by the query
+    /// engine; defaults to [`crate::config::DEFAULT_MAX_RESULT_BYTES`] for the
+    /// bare constructors. Streaming queries are bounded by their channel buffer
+    /// and do not consult this budget.
+    max_result_bytes: usize,
 }
 
 impl std::fmt::Debug for SelectExecutor {
@@ -261,12 +270,28 @@ struct ExecutionContext {
 
 impl SelectExecutor {
     /// Create a new SELECT executor with a system (wall-clock) now source.
+    ///
+    /// Uses the default materialized-result byte budget
+    /// ([`crate::config::DEFAULT_MAX_RESULT_BYTES`]); call
+    /// [`SelectExecutor::with_max_result_bytes`] to override it (the query
+    /// engine wires it from [`crate::config::QueryConfig::max_result_bytes`]).
     pub fn new(schema: Arc<SchemaManager>, storage: Arc<StorageEngine>) -> Self {
         Self {
             _schema: schema,
             storage,
             clock: Arc::new(SystemClock),
+            max_result_bytes: crate::config::DEFAULT_MAX_RESULT_BYTES as usize,
         }
+    }
+
+    /// Override the byte ceiling on a materialized result set (issue #1582).
+    ///
+    /// Builder-style: the query engine calls this with
+    /// [`crate::config::QueryConfig::max_result_bytes`] so the config knob is
+    /// load-bearing on the read path.
+    pub fn with_max_result_bytes(mut self, max_result_bytes: usize) -> Self {
+        self.max_result_bytes = max_result_bytes;
+        self
     }
 
     /// Create a SELECT executor with a custom clock (for deterministic tests).
@@ -280,6 +305,7 @@ impl SelectExecutor {
             _schema: schema,
             storage,
             clock,
+            max_result_bytes: crate::config::DEFAULT_MAX_RESULT_BYTES as usize,
         }
     }
 

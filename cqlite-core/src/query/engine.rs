@@ -111,8 +111,13 @@ impl QueryEngine {
         // Initialize advanced SELECT components
         #[cfg(feature = "state_machine")]
         let select_optimizer = Arc::new(SelectOptimizer::new(schema.clone(), storage.clone()));
+        // Issue #1582 (D6): wire the byte-bounded result budget from config so
+        // the `max_result_bytes` knob is load-bearing on the materializing path.
         #[cfg(feature = "state_machine")]
-        let select_executor = Arc::new(SelectExecutor::new(schema.clone(), storage));
+        let select_executor = Arc::new(
+            SelectExecutor::new(schema.clone(), storage)
+                .with_max_result_bytes(config.query.max_result_bytes as usize),
+        );
 
         Ok(Self {
             parser,

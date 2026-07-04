@@ -74,10 +74,12 @@ pub fn to_py_err(err: cqlite_core::Error) -> PyErr {
             SchemaError::new_err(message)
         }
 
-        // Query execution errors -> QueryError
-        cqlite_core::Error::QueryExecution(_) | cqlite_core::Error::UnsupportedQuery(_) => {
-            QueryError::new_err(message)
-        }
+        // Query execution errors -> QueryError. `ResultTooLarge` (issue #1582,
+        // byte-bounded result budget) is a query-shaped error whose message
+        // tells the user to add LIMIT or stream, so it maps to QueryError too.
+        cqlite_core::Error::QueryExecution(_)
+        | cqlite_core::Error::ResultTooLarge { .. }
+        | cqlite_core::Error::UnsupportedQuery(_) => QueryError::new_err(message),
 
         // CQL parsing errors -> ParseError
         cqlite_core::Error::CqlParse(_) => ParseError::new_err(message),
@@ -369,6 +371,7 @@ mod tests {
                 Error::Schema(_) => { /* Maps to SchemaError */ }
                 Error::Table(_) => { /* Maps to SchemaError */ }
                 Error::QueryExecution(_) => { /* Maps to QueryError */ }
+                Error::ResultTooLarge { .. } => { /* Maps to QueryError (issue #1582) */ }
                 Error::UnsupportedQuery(_) => { /* Maps to QueryError */ }
                 Error::CqlParse(_) => { /* Maps to ParseError */ }
                 Error::Configuration(_) => { /* Maps to PyValueError */ }

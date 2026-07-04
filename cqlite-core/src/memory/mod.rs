@@ -314,48 +314,60 @@ impl MemoryManager {
 
     /// Estimate row size
     fn estimate_row_size(&self, data: &[Value]) -> usize {
-        data.iter().map(|v| self.estimate_value_size(v)).sum()
+        estimate_row_size(data)
     }
+}
 
-    /// Estimate value size
-    #[allow(clippy::only_used_in_recursion)]
-    fn estimate_value_size(&self, value: &Value) -> usize {
-        match value {
-            Value::Null => 1,
-            Value::Boolean(_) => 1,
-            Value::Integer(_) => 4,
-            Value::BigInt(_) => 8,
-            Value::Counter(_) => 8,
-            Value::Float(_) => 8,
-            Value::Text(s) => s.len(),
-            Value::Blob(b) => b.len(),
-            Value::Timestamp(_) => 8,
-            Value::Date(_) => 4,
-            Value::Time(_) => 8,
-            Value::Uuid(_) => 16,
-            Value::Inet(bytes) => bytes.len(),
-            Value::Json(json) => json.to_string().len(),
-            Value::List(items) => items.iter().map(|v| self.estimate_value_size(v)).sum(),
-            Value::Map(map) => map
-                .iter()
-                .map(|(k, v)| self.estimate_value_size(k) + self.estimate_value_size(v))
-                .sum(),
-            Value::TinyInt(_) => 1,
-            Value::SmallInt(_) => 2,
-            Value::Float32(_) => 4,
-            Value::Set(items) => items.iter().map(|v| self.estimate_value_size(v)).sum(),
-            Value::Tuple(items) => items.iter().map(|v| self.estimate_value_size(v)).sum(),
-            Value::Udt(udt) => udt
-                .fields
-                .iter()
-                .map(|f| f.value.as_ref().map_or(0, |v| self.estimate_value_size(v)))
-                .sum(),
-            Value::Frozen(boxed_value) => self.estimate_value_size(boxed_value),
-            Value::Varint(data) => data.len(),
-            Value::Decimal { unscaled, .. } => 4 + unscaled.len(), // scale + unscaled data
-            Value::Duration { .. } => 12,                          // 3 * 4 bytes
-            Value::Tombstone(_) => 16, // timestamp + type + optional TTL
-        }
+/// Estimate the logical size, in bytes, of a row's values.
+///
+/// This is the single estimator reused by the row cache (eviction accounting)
+/// and by the SELECT executor's byte-bounded result budget (issue #1582), so
+/// both surfaces measure "row bytes" identically. It sums the per-value
+/// estimate over the row; it is a *logical* content estimate and deliberately
+/// does not model container overhead (HashMap slots, `Arc`/`String` capacity),
+/// which is why the executor's byte budget sits well below the process memory
+/// target to leave headroom for that overhead.
+pub(crate) fn estimate_row_size(data: &[Value]) -> usize {
+    data.iter().map(estimate_value_size).sum()
+}
+
+/// Estimate the logical size, in bytes, of a single CQL value.
+pub(crate) fn estimate_value_size(value: &Value) -> usize {
+    match value {
+        Value::Null => 1,
+        Value::Boolean(_) => 1,
+        Value::Integer(_) => 4,
+        Value::BigInt(_) => 8,
+        Value::Counter(_) => 8,
+        Value::Float(_) => 8,
+        Value::Text(s) => s.len(),
+        Value::Blob(b) => b.len(),
+        Value::Timestamp(_) => 8,
+        Value::Date(_) => 4,
+        Value::Time(_) => 8,
+        Value::Uuid(_) => 16,
+        Value::Inet(bytes) => bytes.len(),
+        Value::Json(json) => json.to_string().len(),
+        Value::List(items) => items.iter().map(estimate_value_size).sum(),
+        Value::Map(map) => map
+            .iter()
+            .map(|(k, v)| estimate_value_size(k) + estimate_value_size(v))
+            .sum(),
+        Value::TinyInt(_) => 1,
+        Value::SmallInt(_) => 2,
+        Value::Float32(_) => 4,
+        Value::Set(items) => items.iter().map(estimate_value_size).sum(),
+        Value::Tuple(items) => items.iter().map(estimate_value_size).sum(),
+        Value::Udt(udt) => udt
+            .fields
+            .iter()
+            .map(|f| f.value.as_ref().map_or(0, estimate_value_size))
+            .sum(),
+        Value::Frozen(boxed_value) => estimate_value_size(boxed_value),
+        Value::Varint(data) => data.len(),
+        Value::Decimal { unscaled, .. } => 4 + unscaled.len(), // scale + unscaled data
+        Value::Duration { .. } => 12,                          // 3 * 4 bytes
+        Value::Tombstone(_) => 16, // timestamp + type + optional TTL
     }
 }
 
