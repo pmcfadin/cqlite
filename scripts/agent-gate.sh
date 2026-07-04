@@ -1691,9 +1691,15 @@ launch_components() {
     else main_lane+=("$c"); SELECTED_MAIN+=("$c"); fi
   done
 
+  # Bash 3.2 under `set -u` treats "${arr[@]}" of an EMPTY array as unbound (fixed
+  # in bash 4.4+; #1841 latent bug surfaced by the #1825 concurrency-cap self-test,
+  # which runs a nested `--only <one-component>` gate -- exactly the case where
+  # main_lane or side_lane is empty). Guard every such expansion below with the
+  # `"${arr[@]+"${arr[@]}"}"` idiom, which is a no-op when non-empty and expands to
+  # nothing (never unbound) when empty. Same idiom already used for `stems` above.
   if [ "$AGENT_GATE_JOBS" -le 1 ] || [ "${#side_lane[@]}" -eq 0 ]; then
-    for c in "${main_lane[@]}"; do dispatch_component "$c"; done
-    for c in "${side_lane[@]}"; do run_side_component "$c"; done
+    for c in "${main_lane[@]+"${main_lane[@]}"}"; do dispatch_component "$c"; done
+    for c in "${side_lane[@]+"${side_lane[@]}"}"; do run_side_component "$c"; done
     return
   fi
 
@@ -1703,7 +1709,7 @@ launch_components() {
   # SIDE lane: a background sub-pool capped at side_jobs (each isolated target dir).
   (
     srun=0
-    for sc in "${side_lane[@]}"; do
+    for sc in "${side_lane[@]+"${side_lane[@]}"}"; do
       run_side_component "$sc" &
       srun=$(( srun + 1 ))
       if [ "$srun" -ge "$side_jobs" ]; then wait -n 2>/dev/null || true; srun=$(( srun - 1 )); fi
@@ -1712,7 +1718,7 @@ launch_components() {
   ) &
   local side_pid=$!
   # MAIN lane: serial, foreground (shared target dir, no intra-lane parallelism).
-  for c in "${main_lane[@]}"; do dispatch_component "$c"; done
+  for c in "${main_lane[@]+"${main_lane[@]}"}"; do dispatch_component "$c"; done
   wait "$side_pid" || SIDE_LANE_EXIT=$?
 }
 
@@ -1721,15 +1727,17 @@ launch_components
 # Fail-closed check (issue #1737 roborev): verify all SELECTED components produced result files.
 # A component that was selected but has no .result file crashed/exited before record_result,
 # which is a fail-OPEN hole. Treat missing results as synthetic FAIL + force overall FAIL.
-# Also check the SIDE lane's exit status.
-for _sc in "${SELECTED_SIDE[@]}"; do
+# Also check the SIDE lane's exit status. Bash-3.2-safe empty-array guard (#1841,
+# same hazard as launch_components above): a `--only <main-only-component>` run
+# leaves SELECTED_SIDE empty, and vice versa.
+for _sc in "${SELECTED_SIDE[@]+"${SELECTED_SIDE[@]}"}"; do
   [ -f "$LOG_DIR/$_sc.result" ] || {
     echo "agent-gate: SIDE-lane component '$_sc' SELECTED but has no result file (crashed/exited early)" >&2
     NAMES+=("$_sc"); STATUSES+=(FAIL); TIMES+=("0s")
     OVERALL=FAIL
   }
 done
-for _mc in "${SELECTED_MAIN[@]}"; do
+for _mc in "${SELECTED_MAIN[@]+"${SELECTED_MAIN[@]}"}"; do
   [ -f "$LOG_DIR/$_mc.result" ] || {
     echo "agent-gate: MAIN-lane component '$_mc' SELECTED but has no result file (crashed/exited early)" >&2
     NAMES+=("$_mc"); STATUSES+=(FAIL); TIMES+=("0s")
