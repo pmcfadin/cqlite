@@ -134,13 +134,16 @@ impl Memtable {
     /// Maximum nesting depth for collection size estimation (prevents stack overflow)
     const MAX_NESTING_DEPTH: usize = 32;
 
-    /// Conservative per-element byte estimate used when the recursion depth cap
-    /// is reached (issue #1625). The cap prevents stack overflow on pathological
-    /// nesting, but the previous flat `1024`-per-value fallback systematically
-    /// UNDER-counted a wide collection sitting at the depth boundary (a
-    /// thousand-element list counted as ~1KB), letting an over-budget mutation
-    /// slip past admission. Scaling by the collection's element count keeps the
-    /// estimate non-recursive (still stack-safe) while refusing to under-count.
+    /// Conservative per-element byte FLOOR used when the recursion depth cap is
+    /// reached (issue #1625). The cap prevents stack overflow on pathological
+    /// nesting, but the original flat `1024`-per-value fallback systematically
+    /// UNDER-counted collections sitting at the depth boundary, letting an
+    /// over-budget mutation slip past admission. At the cap the estimator now
+    /// sums a SHALLOW per-direct-child estimate: a large direct scalar counts its
+    /// real heap size, while every element (and any nested-collection child we do
+    /// not recurse into) contributes at least this floor. That closes both the
+    /// wide-collection and the deep-narrow-wrapping-a-large-scalar undercounts
+    /// while staying non-recursive (stack-safe).
     const DEEP_ELEMENT_ESTIMATE: usize = 1024;
 
     /// Estimate the number of bytes a mutation would add to this memtable.
@@ -274,16 +277,20 @@ impl Memtable {
 
     /// Non-recursive size estimate used once the recursion depth cap is hit.
     ///
-    /// Stack-safe (never recurses): scalars report their exact byte length, and
-    /// collections report a conservative floor scaled by their DIRECT element
-    /// count (`DEEP_ELEMENT_ESTIMATE` per element). This replaces the old flat
-    /// `1024` fallback so a wide collection sitting exactly at the depth cap is
-    /// no longer under-counted as ~1KB (issue #1625) — the value it returns is
-    /// large enough to trip the memtable hard-limit admission gate.
+    /// Stack-safe (never recurses past DIRECT children): a scalar value at the
+    /// cap reports its exact byte length. A collection/map/UDT/tuple at the cap
+    /// sums a SHALLOW estimate of each direct child (see
+    /// [`shallow_child_estimate`](Self::shallow_child_estimate)) which counts a
+    /// large direct scalar child at its real heap size. This closes the
+    /// hard-limit bypass where a deep NARROW collection wrapping a large scalar
+    /// (e.g. 32 wrapper lists around `List([Text(128KB)])`) was estimated at the
+    /// old flat ~1KB and slipped past admission while retaining far more memory
+    /// (issue #1625). We still never recurse below direct children — a nested
+    /// collection child counts only the `DEEP_ELEMENT_ESTIMATE` floor — so the
+    /// depth cap stays a genuine stack-safety guard.
     fn estimate_value_size_at_cap(value: &crate::types::Value) -> usize {
         use crate::types::Value;
 
-        let per = Self::DEEP_ELEMENT_ESTIMATE;
         match value {
             Value::Null => 0,
             Value::Boolean(_) | Value::TinyInt(_) => 1,
@@ -300,14 +307,75 @@ impl Memtable {
             Value::Decimal { scale: _, unscaled } => 4 + unscaled.len(),
             Value::Json(json) => json.to_string().len(),
             Value::Tombstone(_) => 24,
-            // Collections: conservative, element-count-scaled, NON-recursive.
-            Value::List(items) | Value::Set(items) | Value::Tuple(items) => {
-                16 + items.len().saturating_mul(per)
-            }
-            Value::Map(entries) => 16 + entries.len().saturating_mul(2 * per),
-            Value::Udt(udt) => 16 + udt.fields.len().saturating_mul(per),
-            Value::Frozen(_) => 8 + per,
+            // Collections: SHALLOW sum over DIRECT children, NON-recursive.
+            // Each direct scalar child contributes its real heap size (floored
+            // at DEEP_ELEMENT_ESTIMATE); each nested-collection child contributes
+            // only the floor (we intentionally do not recurse — stack safety).
+            Value::List(items) | Value::Set(items) | Value::Tuple(items) => items
+                .iter()
+                .map(Self::shallow_child_estimate)
+                .fold(0usize, usize::saturating_add)
+                .saturating_add(16),
+            Value::Map(entries) => entries
+                .iter()
+                .map(|(k, v)| {
+                    Self::shallow_child_estimate(k).saturating_add(Self::shallow_child_estimate(v))
+                })
+                .fold(0usize, usize::saturating_add)
+                .saturating_add(16),
+            Value::Udt(udt) => udt
+                .fields
+                .iter()
+                .map(|field| {
+                    field.name.len().saturating_add(
+                        field.value.as_ref().map_or(0, Self::shallow_child_estimate),
+                    )
+                })
+                .fold(0usize, usize::saturating_add)
+                .saturating_add(16),
+            Value::Frozen(inner) => Self::shallow_child_estimate(inner).saturating_add(8),
         }
+    }
+
+    /// Shallow (NON-recursive) size estimate for a single DIRECT child of a
+    /// value parked at the recursion depth cap (issue #1625).
+    ///
+    /// A known scalar reports its real heap size (`Text`/`Blob`/`Json`/`Varint`/
+    /// `Inet`/`Decimal` byte length, fixed widths otherwise), floored at
+    /// `DEEP_ELEMENT_ESTIMATE` so every element still counts at least the
+    /// conservative floor. A nested collection/map/UDT/tuple/frozen child is NOT
+    /// recursed into — it contributes exactly the floor — which keeps the
+    /// estimator stack-safe while ensuring a large direct scalar is no longer
+    /// systematically under-counted.
+    fn shallow_child_estimate(value: &crate::types::Value) -> usize {
+        use crate::types::Value;
+
+        let floor = Self::DEEP_ELEMENT_ESTIMATE;
+        let scalar = match value {
+            Value::Null => 0,
+            Value::Boolean(_) | Value::TinyInt(_) => 1,
+            Value::SmallInt(_) => 2,
+            Value::Integer(_) | Value::Float32(_) | Value::Date(_) => 4,
+            Value::BigInt(_)
+            | Value::Counter(_)
+            | Value::Timestamp(_)
+            | Value::Time(_)
+            | Value::Float(_) => 8,
+            Value::Uuid(_) | Value::Duration { .. } => 16,
+            Value::Text(s) => s.len(),
+            Value::Blob(bytes) | Value::Varint(bytes) | Value::Inet(bytes) => bytes.len(),
+            Value::Decimal { scale: _, unscaled } => 4usize.saturating_add(unscaled.len()),
+            Value::Json(json) => json.to_string().len(),
+            Value::Tombstone(_) => 24,
+            // Nested collections: do NOT recurse (stack safety) — count the floor.
+            Value::List(_)
+            | Value::Set(_)
+            | Value::Tuple(_)
+            | Value::Map(_)
+            | Value::Udt(_)
+            | Value::Frozen(_) => 0,
+        };
+        scalar.max(floor)
     }
 
     /// Estimate the size of a cell operation
@@ -856,6 +924,31 @@ mod tests {
         assert!(
             size > 100 * 1024,
             "wide collection at depth cap must not be under-counted (got {size})"
+        );
+    }
+
+    #[test]
+    fn test_deep_narrow_collection_large_scalar_not_undercounted() {
+        // Issue #1625 (roborev finding): a deep NARROW collection wrapping a
+        // large DIRECT scalar must not be systematically under-counted. Wrap a
+        // `List([Text(128KB)])` in 32 single-element lists so the inner list
+        // lands exactly at the depth cap; its Text child is a DIRECT child.
+        //
+        // Pre-fix: the cap estimator scaled by element count × 1024, so this was
+        // counted as ~1KB (16 + 1*1024 = 1040) — small enough to slip a 64KB gate.
+        // Post-fix: the shallow per-child estimate counts the 128KB scalar at its
+        // real heap size, so the estimate is on the order of the large scalar.
+        let big = 128 * 1024;
+        let mut nested = Value::List(vec![Value::Text("x".repeat(big))]);
+        for _ in 0..32 {
+            nested = Value::List(vec![nested]);
+        }
+
+        let size = Memtable::estimate_value_size(&nested);
+        assert!(
+            size >= big,
+            "deep narrow collection with a large scalar must count the scalar's \
+             real heap size, not the old ~1KB floor (got {size}, expected >= {big})"
         );
     }
 

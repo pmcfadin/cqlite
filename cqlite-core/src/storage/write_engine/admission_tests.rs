@@ -177,6 +177,49 @@ fn test_deeply_nested_mutation_trips_gate() {
     assert_eq!(engine.memtable_size(), 0);
 }
 
+/// A deep NARROW collection wrapping a LARGE direct scalar must also trip the
+/// gate (issue #1625 roborev finding). Pre-fix, the depth-cap estimator scaled a
+/// collection by element COUNT × 1024, so `List([Text(128KB)])` parked at the cap
+/// was counted as ~1KB and passed a 64KB hard limit while retaining 128KB. The
+/// shallow per-child estimate now counts the large direct scalar at its real
+/// heap size, so the write is rejected.
+#[test]
+fn test_deep_narrow_collection_with_large_scalar_trips_gate() {
+    let temp_dir = TempDir::new().unwrap();
+    let config = WriteEngineConfig::new(
+        temp_dir.path().join("data"),
+        temp_dir.path().join("wal"),
+        create_test_schema(),
+    )
+    .with_flush_threshold(1024 * 1024)
+    .with_hard_limit(64 * 1024) // 64KB
+    .with_durability(Durability::Disabled);
+
+    let mut engine = WriteEngine::new(config).unwrap();
+
+    // Innermost: a single-element list holding one 128KB text scalar. Wrapped in
+    // 32 single-element lists so the `List([Text(128KB)])` lands exactly at the
+    // recursion depth cap (its Text child is a DIRECT child of the capped node).
+    let mut nested = Value::List(vec![Value::Text("x".repeat(128 * 1024))]);
+    for _ in 0..32 {
+        nested = Value::List(vec![nested]);
+    }
+    let table_id = TableId::new("test_ks", "test_table");
+    let pk = PartitionKey::single("id", Value::Integer(1));
+    let ops = vec![CellOperation::Write {
+        column: "name".to_string(),
+        value: nested,
+    }];
+    let mutation = Mutation::new(table_id, pk, None, ops, 1_000_000, None);
+
+    let err = engine.write(mutation).unwrap_err();
+    assert!(
+        matches!(err, Error::Storage(ref m) if m.contains("hard limit")),
+        "deep narrow collection with a large scalar must trip the gate, got: {err:?}"
+    );
+    assert_eq!(engine.memtable_size(), 0);
+}
+
 /// The projected-sum uses `saturating_add`, so a memtable size near `usize::MAX`
 /// cannot overflow (a plain `+` would panic under debug overflow checks). The
 /// write is cleanly rejected instead of panicking.
