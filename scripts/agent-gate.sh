@@ -1935,6 +1935,12 @@ run_delta() {
   declare -a SUMMARY_META=()
   SUMMARY_META+=("${anchor_meta[@]}")
   SUMMARY_META+=("delta-scope: file-size fmt scoped-tests (test/docs-only re-cert; clippy/core/write/cli/bindings/parity/smoke NOT run — see gate-of-record)")
+  # Python-tier verdict marker (issue #1893, roborev job 1450): a python-test-only
+  # delta diff routes scoped-tests to the maturin+pytest tier, and its verdict —
+  # especially a SKIP (offline/toolchain), where the block could otherwise read
+  # PASS while the python diff was NOT validated — must be detectable from the
+  # DELTA block alone, exactly as run_lite renders it for the LITE block.
+  [ -n "$PYTHON_TIER_NOTE" ] && SUMMARY_META+=("$PYTHON_TIER_NOTE")
   SUMMARY_META+=("$(accelerators_line)")
   SUMMARY_META+=("${file_meta[@]}")
   for i in "${!DN[@]}"; do
