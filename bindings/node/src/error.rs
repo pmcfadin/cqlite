@@ -171,6 +171,43 @@ pub fn runtime_init_error(err: std::io::Error) -> napi::Error {
     to_napi_error(Error::Io(err))
 }
 
+/// Default cap on the number of rows `executeNative` will materialize into JS
+/// objects on the event-loop thread (issue #1442).
+///
+/// `executeNative` scans off the event loop, but the per-row JS-object build in
+/// `resolve()` is O(rows) work that MUST run on the JS thread (napi `Env` is
+/// thread-bound), so it cannot be moved off-loop. A very large result set would
+/// therefore freeze timers/HTTP handlers for the duration of the burst. This
+/// bound rejects such calls with a typed error steering the caller to
+/// `executeStreaming`. Kept generous so ordinary queries are unaffected.
+pub const DEFAULT_MAX_NATIVE_ROWS: usize = 100_000;
+
+/// Resolve the `executeNative` on-loop row cap (issue #1442).
+///
+/// Reads `CQLITE_NODE_MAX_NATIVE_ROWS` (a positive integer) as a documented
+/// override; falls back to [`DEFAULT_MAX_NATIVE_ROWS`]. Call this on the JS
+/// thread (in `execute_native`) and pass the value into the task so `compute()`
+/// never reads the process environment from a worker thread.
+pub fn native_row_limit() -> usize {
+    std::env::var("CQLITE_NODE_MAX_NATIVE_ROWS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_MAX_NATIVE_ROWS)
+}
+
+/// Typed error for an `executeNative` result set that exceeds the on-loop cap.
+///
+/// Steers the caller to `executeStreaming` rather than freezing the event loop
+/// materializing every row (issue #1442).
+pub fn native_rows_exceeded_error(rows: usize, limit: usize) -> napi::Error {
+    simple_error(format!(
+        "executeNative result set of {rows} rows exceeds the on-event-loop \
+         materialization limit of {limit}; use executeStreaming() for large \
+         result sets (or raise CQLITE_NODE_MAX_NATIVE_ROWS)"
+    ))
+}
+
 /// Create a napi::Error with a simple message (no metadata).
 ///
 /// Use this for errors that don't originate from cqlite_core::Error,

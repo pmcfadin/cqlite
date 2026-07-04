@@ -1045,6 +1045,18 @@ export declare class Database {
    * - Native Buffer handling for binary data
    * - Native Set/Map operations
    *
+   * ## Performance: O(rows) work on the event-loop thread
+   *
+   * The result set is scanned off the event loop, but every row is materialized
+   * into a JS object on the event-loop thread (a napi `Env` is thread-bound, so
+   * this work cannot be moved off-loop). It is therefore O(rows) of synchronous
+   * on-loop work: a large result set will freeze timers, HTTP handlers, and
+   * other callbacks for the duration of the burst. Prefer
+   * {@link Database.executeStreaming} for result sets beyond ~a few thousand
+   * rows. Result sets larger than `CQLITE_NODE_MAX_NATIVE_ROWS` (default
+   * 100,000) are rejected with a typed error advising `executeStreaming`
+   * instead of freezing the loop (issue #1442).
+   *
    * @param query - CQL SELECT statement to execute
    * @returns Promise resolving to NativeQueryResult with native typed rows
    * @throws {CqliteError} If the query fails
