@@ -527,13 +527,13 @@ mod tests {
         // (offset, length) pairs exercising each alignment corner.
         let align = DIRECT_IO_ALIGN as u64;
         let cases: &[(u64, usize)] = &[
-            (0, 100),               // offset 0, within first block
-            (37, 200),              // unaligned, within first block
-            (align - 10, 50),       // spans the first 4K boundary
-            (align, DIRECT_IO_ALIGN), // aligned start, spans into next block
-            (align + 7, 5000),      // unaligned start crossing multiple blocks
+            (0, 100),                  // offset 0, within first block
+            (37, 200),                 // unaligned, within first block
+            (align - 10, 50),          // spans the first 4K boundary
+            (align, DIRECT_IO_ALIGN),  // aligned start, spans into next block
+            (align + 7, 5000),         // unaligned start crossing multiple blocks
             ((len - 300) as u64, 300), // exact final bytes (partial final block)
-            ((len - 10) as u64, 5), // near EOF within the partial final block
+            ((len - 10) as u64, 5),    // near EOF within the partial final block
         ];
         for &(off, n) in cases {
             let mut want = vec![0u8; n];

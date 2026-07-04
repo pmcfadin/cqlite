@@ -582,16 +582,14 @@ impl SSTableReader {
             }
         }
         // CRC-verify the covering chunk(s) when a CRC.db is present (no-op for BTI
-        // and compressed tables). `verify_uncompressed_range` takes a u32 size, so
-        // walk the section in ≤ u32::MAX windows; the verifier memoizes per chunk,
-        // so a boundary-straddling window never re-CRCs a chunk.
+        // and compressed tables) BEFORE returning the bytes. The section is already
+        // resident in `whole`, so verify against those in-memory bytes rather than
+        // re-reading the identical range from `point_source` — the section is
+        // transferred from disk EXACTLY ONCE (issue #1573 roborev), preserving the
+        // CRC-before-use ordering and the CRC algorithm unchanged.
         if self.crc_reader.is_some() {
-            let mut off = header_size;
-            while off < end {
-                let span = (end - off).min(u32::MAX as u64) as u32;
-                self.verify_uncompressed_range(off, span).await?;
-                off += span as u64;
-            }
+            self.verify_uncompressed_section_in_buffer(header_size, &whole)
+                .await?;
         }
         Ok(whole)
     }
