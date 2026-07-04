@@ -108,12 +108,24 @@ claims by pushing that branch, sets assignee + `Status=In Progress` for visibili
 proceeds only if it holds the branch. See `flow-activate` / `flow-implement` for the steps and `flow-board`
 for the render + reaper.
 
+- **One active worker per machine; the worker paces the machine's load (#1930).** A single lead/worker
+  session owns a machine at a time — this is the load + worktree-isolation rule that sits *above* the
+  claim protocol. Two efforts on one box collide on the shared worktree (the 2026-07-04 #1582 retro: a
+  second session live-edited the worktree mid-gate, breaking the tree) and oversubscribe the CPU, which
+  flakes scheduling-sensitive tests (`test_write_throughput`, `test_streaming_next_releases_gil`) and can
+  SIGKILL gates. The owning worker is responsible for load: **serialize your OWN full-gate runs — never two
+  full `scripts/agent-gate.sh` at once on one box** (the machine-wide gate cap #1825 is a backstop, not a
+  license to overlap). **Subagents are exempt** — a worker fanning out `sstable-developer`/reviewers is not
+  "multiple workers"; the worker orchestrates and paces them, and they never launch competing full gates.
+  The rule targets independent lead/worker *sessions*. The claim protocol below still governs *cross-machine*
+  issue ownership (one-per-machine handles a single box; different machines coordinate via the branch lock).
 - **Default (recommended): one lead → subagents.** A single `flow-lead` spawns subagents and assigns each
   **disjoint** work — zero dup by construction. Subagents never self-select overlapping work; the lead
   hands out distinct tasks.
 - **Multiple independent sessions: the claim protocol is mandatory.** If more than one independent lead
   session touches the backlog, each acquires work ONLY through the claim protocol (push branch → assignee
-  + `Status=In Progress` → re-read). This is how the dup-work race is prevented.
+  + `Status=In Progress` → re-read). This is how the dup-work race is prevented. Combined with the
+  one-per-machine rule above: independent sessions belong on *separate* machines, each claim-protocol-gated.
 - **Agent Teams is optional, desktop-only.** `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` provides a built-in
   file-locked shared task list for coordinated parallel sessions, but it is experimental + desktop/tmux-only
   (no `/resume`, one team per session). Use it if you want; it is not required.
