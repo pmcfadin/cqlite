@@ -15,8 +15,8 @@
 
 use super::{
     build_row_from_scan, classify_partition_lookup, column_info_from_type_str, evaluate_predicates,
-    honest_targeted_path, parse_table_id, select_has_writetime_ttl, sort_rows_by_token,
-    validate_token_predicates, PartitionLookupOutcome, SSTablePredicate,
+    honest_targeted_path, parse_table_id, partition_key_digest, select_has_writetime_ttl,
+    sort_rows_by_token, validate_token_predicates, PartitionLookupOutcome, SSTablePredicate,
 };
 use super::{
     AccessPath, ColumnInfo, Error, ExecutionContext, ExecutionStep, FallbackReason,
@@ -320,13 +320,16 @@ impl SelectExecutor {
 
         // Issue #757: PER PARTITION LIMIT caps rows per partition before the
         // query-wide LIMIT/OFFSET. The scan yields rows grouped by partition
-        // key, so we track the current partition (by its raw key bytes) and
-        // reset the counter at each boundary.
+        // key, so we track the current partition and reset the counter at each
+        // boundary. Issue #1590 (E8): the boundary is compared on the partition
+        // key's 128-bit `partition_key_digest` (a heap-free hash of the key bytes
+        // we already hold) instead of cloning the raw key bytes into an owned
+        // `Vec<u8>` for every row (see the digest's collision note).
         let per_partition_limit = execution_steps.iter().find_map(|step| match step {
             ExecutionStep::PerPartitionLimit { count } => Some(*count),
             _ => None,
         });
-        let mut current_partition: Option<Vec<u8>> = None;
+        let mut current_partition: Option<u128> = None;
         let mut partition_count: u64 = 0;
 
         let mut sent: u64 = 0;
@@ -369,7 +372,8 @@ impl SelectExecutor {
                             engaged,
                         ));
                         for (key, value) in rows {
-                            let part_sig = per_partition_limit.map(|_| key.0.clone());
+                            let part_sig =
+                                per_partition_limit.map(|_| partition_key_digest(&key.0));
                             let Some(row) = build_row_from_scan(key, value, projection, schema_opt)
                             else {
                                 continue;
@@ -378,7 +382,7 @@ impl SelectExecutor {
                                 continue;
                             }
                             if let (Some(cap), Some(sig)) = (per_partition_limit, part_sig) {
-                                if current_partition.as_deref() != Some(sig.as_slice()) {
+                                if current_partition != Some(sig) {
                                     current_partition = Some(sig);
                                     partition_count = 0;
                                 }
@@ -428,7 +432,8 @@ impl SelectExecutor {
                         ));
                         sort_rows_by_token(&mut combined);
                         for (key, value) in combined {
-                            let part_sig = per_partition_limit.map(|_| key.0.clone());
+                            let part_sig =
+                                per_partition_limit.map(|_| partition_key_digest(&key.0));
                             let Some(row) = build_row_from_scan(key, value, projection, schema_opt)
                             else {
                                 continue;
@@ -437,7 +442,7 @@ impl SelectExecutor {
                                 continue;
                             }
                             if let (Some(cap), Some(sig)) = (per_partition_limit, part_sig) {
-                                if current_partition.as_deref() != Some(sig.as_slice()) {
+                                if current_partition != Some(sig) {
                                     current_partition = Some(sig);
                                     partition_count = 0;
                                 }
@@ -482,9 +487,9 @@ impl SelectExecutor {
 
                     while let Some(item) = scan_stream.recv().await {
                         let (key, value) = item?;
-                        // Capture the partition key bytes before `key` is moved
+                        // Capture the partition-key digest before `key` is moved
                         // into row construction (only when needed).
-                        let part_sig = per_partition_limit.map(|_| key.0.clone());
+                        let part_sig = per_partition_limit.map(|_| partition_key_digest(&key.0));
                         let Some(row) = build_row_from_scan(key, value, projection, schema_opt)
                         else {
                             continue;
@@ -497,7 +502,7 @@ impl SelectExecutor {
                         // Apply PER PARTITION LIMIT: cap matching rows per
                         // partition, before OFFSET/LIMIT (Cassandra semantics).
                         if let (Some(cap), Some(sig)) = (per_partition_limit, part_sig) {
-                            if current_partition.as_deref() != Some(sig.as_slice()) {
+                            if current_partition != Some(sig) {
                                 current_partition = Some(sig);
                                 partition_count = 0;
                             }

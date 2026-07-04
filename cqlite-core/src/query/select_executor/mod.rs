@@ -111,6 +111,25 @@ thread_local! {
         const { std::cell::Cell::new(0) };
 }
 
+/// 128-bit digest of a partition key's raw bytes for PER PARTITION LIMIT
+/// bookkeeping (issue #1590, E8).
+///
+/// PER PARTITION LIMIT keys its per-partition counters on the partition. Keying
+/// a map (or an adjacent-boundary compare) on the raw `Vec<u8>` clones the key
+/// bytes for every row; keying on this fixed-size `u128` digest instead makes
+/// the per-row work a heap-free hash of the bytes we already hold. The digest is
+/// Cassandra's own `murmur3_x64_128` (already used for token routing), so it is
+/// stable and well-distributed. Collision safety: at 128 bits the birthday
+/// bound is ~2^64 distinct partitions before any collision is even probable —
+/// unreachable under the <128MB memory budget (and far beyond any real
+/// partition count) — so two distinct partitions never share a counter in
+/// practice. This is bookkeeping only (a query row-cap), never a security or
+/// correctness boundary.
+pub(super) fn partition_key_digest(key_bytes: &[u8]) -> u128 {
+    let (h1, h2) = crate::util::cassandra_murmur3::cassandra_murmur3_x64_128(key_bytes);
+    ((h1 as u64 as u128) << 64) | (h2 as u64 as u128)
+}
+
 /// Derive the output column name for a projected SELECT expression (issue #1584).
 ///
 /// Hoisted out of the per-row loop and called ONCE per column per query, so name
@@ -768,16 +787,20 @@ impl SelectExecutor {
     }
 
     /// Execute PER PARTITION LIMIT: keep at most `count` rows per partition,
-    /// preserving order (Issue #757). Counts are keyed on the partition (raw key
-    /// bytes) rather than tracking only the most recent partition, so the cap
-    /// holds even when a partition's rows are not contiguous — e.g. when an
-    /// upstream `ORDER BY` interleaves rows from different partitions (roborev
-    /// job 38).
+    /// preserving order (Issue #757). Counts are keyed on the partition rather
+    /// than tracking only the most recent partition, so the cap holds even when a
+    /// partition's rows are not contiguous — e.g. when an upstream `ORDER BY`
+    /// interleaves rows from different partitions (roborev job 38).
+    ///
+    /// Issue #1590 (E8): the counter map is keyed on the partition-key 128-bit
+    /// [`partition_key_digest`] instead of a cloned `Vec<u8>` of the raw key
+    /// bytes, so no key bytes are cloned per row (see the digest's collision
+    /// note).
     fn execute_per_partition_limit(rows: Vec<QueryRow>, count: u64) -> Vec<QueryRow> {
         let mut out = Vec::with_capacity(rows.len());
-        let mut counts: HashMap<Vec<u8>, u64> = HashMap::new();
+        let mut counts: HashMap<u128, u64> = HashMap::new();
         for row in rows {
-            let seen = counts.entry(row.key.0.clone()).or_insert(0);
+            let seen = counts.entry(partition_key_digest(&row.key.0)).or_insert(0);
             if *seen < count {
                 *seen += 1;
                 out.push(row);
@@ -1359,6 +1382,68 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Issue #1590 (E8): PER PARTITION LIMIT now keys its per-partition counters
+    /// on the partition-key 128-bit digest instead of a cloned `Vec<u8>` of the
+    /// raw key bytes. Pin that the digest-keyed batch path yields the SAME rows
+    /// as the raw-bytes reference — including NON-contiguous (interleaved)
+    /// partitions, where the cap must still be enforced per distinct partition.
+    #[test]
+    fn per_partition_limit_digest_matches_raw_bytes_reference() {
+        // Partition key bytes → row tag. Interleave partitions so the counter
+        // cannot rely on contiguity (roborev job 38 invariant).
+        let spec: [(&[u8], i32); 9] = [
+            (b"pk-a", 0),
+            (b"pk-b", 1),
+            (b"pk-a", 2),
+            (b"pk-c", 3),
+            (b"pk-b", 4),
+            (b"pk-a", 5),
+            (b"pk-a", 6),
+            (b"pk-c", 7),
+            (b"pk-b", 8),
+        ];
+        let make = || -> Vec<QueryRow> {
+            spec.iter()
+                .map(|(pk, tag)| {
+                    let mut row = QueryRow::new(RowKey::new(pk.to_vec()));
+                    row.set("a", Value::Integer(*tag));
+                    row
+                })
+                .collect()
+        };
+        // Old raw-`Vec<u8>`-keyed algorithm, kept verbatim as the parity oracle.
+        let reference = |rows: Vec<QueryRow>, count: u64| -> Vec<QueryRow> {
+            let mut out = Vec::with_capacity(rows.len());
+            let mut counts: HashMap<Vec<u8>, u64> = HashMap::new();
+            for row in rows {
+                let seen = counts.entry(row.key.0.clone()).or_insert(0);
+                if *seen < count {
+                    *seen += 1;
+                    out.push(row);
+                }
+            }
+            out
+        };
+        let tags = |rows: &[QueryRow]| -> Vec<i32> {
+            rows.iter()
+                .map(|r| match r.values.get("a") {
+                    Some(Value::Integer(v)) => *v,
+                    _ => -1,
+                })
+                .collect()
+        };
+
+        for count in [0u64, 1, 2, 3, 100] {
+            let got = SelectExecutor::execute_per_partition_limit(make(), count);
+            let want = reference(make(), count);
+            assert_eq!(
+                tags(&got),
+                tags(&want),
+                "count={count}: digest-keyed per-partition-limit must equal raw-bytes reference"
+            );
         }
     }
 
