@@ -48,6 +48,9 @@ pub use verify::{
 pub mod writer;
 
 // Test modules
+/// F1: scan must not hold the table_readers read guard across its I/O (Issue #1591).
+#[cfg(test)]
+mod issue_1591_scan_lock_test;
 /// VG1: Thread VersionGates through the read path (Issue #653).
 #[cfg(test)]
 mod issue_653_version_gates_plumbing_test;
@@ -220,6 +223,39 @@ fn is_apple_double_sidecar(filename: &str) -> bool {
     filename.starts_with("._")
 }
 
+/// Deterministic test gate that pauses a scan mid-flight so a test can observe
+/// whether the `table_readers` read guard is held across the scan's I/O (issue
+/// #1591). Armed per-manager (never process-globally) so parallel tests never
+/// interfere: only scans on the manager whose gate is armed ever wait. No
+/// wall-clock sleeps — the scan signals `reached` when it arrives and blocks on
+/// `release` until the test lets it proceed.
+#[cfg(test)]
+pub(crate) mod scan_gate {
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    /// Two one-shot rendezvous points shared between the paused scan and the test.
+    #[derive(Debug, Default)]
+    pub(crate) struct Gate {
+        /// Scan → test: "I have arrived at the gate."
+        pub reached: Notify,
+        /// Test → scan: "you may proceed."
+        pub release: Notify,
+    }
+
+    /// Called from inside `scan`'s per-reader loop. When a gate is armed on this
+    /// manager, signal arrival and block until the test releases it; otherwise a
+    /// no-op. Placed at the per-reader I/O so it sits INSIDE the read-guarded
+    /// region before the fix and OUTSIDE it after (the guard is dropped at the
+    /// snapshot boundary) — the exact seam the test asserts on.
+    pub(crate) async fn wait_if_armed(gate: &Option<Arc<Gate>>) {
+        if let Some(gate) = gate {
+            gate.reached.notify_one();
+            gate.release.notified().await;
+        }
+    }
+}
+
 /// SSTable manager that handles multiple SSTable files
 #[derive(Debug)]
 pub struct SSTableManager {
@@ -260,6 +296,13 @@ pub struct SSTableManager {
     /// `SSTableReader::open_with_cache`) so all readers of one dataset — including
     /// those added by a later `refresh_tables` — share one cache and one budget.
     pub(crate) chunk_cache: Arc<crate::storage::cache::DecompressedChunkCache>,
+
+    /// Per-manager deterministic scan gate (issue #1591 test infrastructure).
+    /// `None` in production; a test arms it via [`arm_scan_gate`](Self::arm_scan_gate)
+    /// to pause this manager's scans mid-flight. Being per-manager (not a global)
+    /// keeps parallel tests isolated.
+    #[cfg(test)]
+    scan_gate: std::sync::Mutex<Option<Arc<scan_gate::Gate>>>,
 }
 
 impl SSTableManager {
@@ -291,6 +334,8 @@ impl SSTableManager {
                     config.memory.block_cache.max_size as usize,
                 ),
             ),
+            #[cfg(test)]
+            scan_gate: std::sync::Mutex::new(None),
         };
 
         // Load existing SSTable files
@@ -384,6 +429,8 @@ impl SSTableManager {
                     config.memory.block_cache.max_size as usize,
                 ),
             ),
+            #[cfg(test)]
+            scan_gate: std::sync::Mutex::new(None),
         };
 
         // Load SSTables from the provided table directories
@@ -651,20 +698,13 @@ impl SSTableManager {
         // readers for the resolved target table across generations, so the relaxed
         // guard can only ever apply to the readers that ARE the target table; a
         // wrong-keyspace same-named reader is never in the merge set.
-        let table_readers = self.table_readers.read().await;
-        let table_name = table_id.name();
-
-        let Some(reader_list) = Self::resolve_reader_list(&table_readers, table_name) else {
+        //
+        // Issue #1591: snapshot the resolved readers + the authoritative
+        // `fully_qualified_match` signal and DROP the read guard before any I/O.
+        let (reader_list, fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
+        if reader_list.is_empty() {
             return Ok(None);
-        };
-
-        // Authoritative resolution-mode signal, shared verbatim with the
-        // non-tombstones path: an exact fully-qualified match (or an unqualified
-        // query) may relax the per-row table guard across a benign header-keyspace
-        // divergence; a fully-qualified query resolved via the bare-name fallback
-        // keeps STRICT keyspace matching. Because the merge set is now the resolved
-        // list, this only ever relaxes readers that are the resolved target table.
-        let fully_qualified_match = Self::fully_qualified_match(&table_readers, table_name);
+        }
 
         let mut all_values = Vec::new();
 
@@ -672,7 +712,7 @@ impl SSTableManager {
         // unchanged: still build a `GenerationValue` per reader and resolve via
         // `TombstoneMerger::merge_generations`). Only the SET of readers being merged
         // changed — the resolved list instead of every reader globally.
-        for reader in reader_list {
+        for reader in &reader_list {
             if let Some(value) = reader
                 .get_with_resolution(table_id, key, fully_qualified_match)
                 .await?
@@ -710,27 +750,22 @@ impl SSTableManager {
     ///      with flat/non-Cassandra directory layouts that have no keyspace parent.
     #[cfg(not(feature = "tombstones"))]
     pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<ScanRow>> {
-        let table_readers = self.table_readers.read().await;
-
-        let table_name = table_id.name();
-
-        let Some(reader_list) = Self::resolve_reader_list(&table_readers, table_name) else {
-            return Ok(None);
-        };
-
-        // Did resolution match the FULLY-QUALIFIED `keyspace.table` key exactly, or
-        // fall back to the bare table name? An unqualified query is treated as an
-        // exact match (no keyspace to mismatch). This authoritative signal gates the
-        // get() point-lookup table-consistency guard exactly like the seek path
-        // (#1284): only an exact FQ match may relax to a name-only check across a
-        // header-keyspace divergence; a fully-qualified query resolved via the
-        // bare-name fallback keeps strict keyspace matching so get() never returns
-        // another keyspace's same-named rows (issue #1321). Computed via the shared
-        // helper used identically by the tombstones-build manager get().
-        let fully_qualified_match = Self::fully_qualified_match(&table_readers, table_name);
+        // Issue #1591: snapshot the resolved readers + the authoritative
+        // `fully_qualified_match` signal and DROP the read guard before any I/O,
+        // so a queued writer never FIFO-parks this point read behind a slow scan.
+        //
+        // `fully_qualified_match`: did resolution match the FULLY-QUALIFIED
+        // `keyspace.table` key exactly, or fall back to the bare table name? An
+        // unqualified query is treated as an exact match (no keyspace to mismatch).
+        // This authoritative signal gates the get() point-lookup table-consistency
+        // guard exactly like the seek path (#1284): only an exact FQ match may relax
+        // to a name-only check across a header-keyspace divergence; a fully-qualified
+        // query resolved via the bare-name fallback keeps strict keyspace matching so
+        // get() never returns another keyspace's same-named rows (issue #1321).
+        let (reader_list, fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
 
         // Return the first value found across all SSTables for this table
-        for reader in reader_list {
+        for reader in &reader_list {
             if let Some(value) = reader
                 .get_with_resolution(table_id, key, fully_qualified_match)
                 .await?
@@ -786,88 +821,92 @@ impl SSTableManager {
         limit: Option<usize>,
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<(RowKey, ScanRow)>> {
-        let table_readers = self.table_readers.read().await;
-
         log::debug!("SSTableManager::scan - Scanning table_id='{}'", table_id);
 
-        let table_name = table_id.name();
+        // Issue #1591: snapshot the reader list and DROP the read guard before any
+        // I/O. Holding it across the whole scan let one queued writer FIFO-park
+        // every later point read behind the slowest in-flight scan.
+        let (reader_list, _fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
 
-        let readers = Self::resolve_reader_list(&table_readers, table_name);
-
-        if let Some(reader_list) = readers {
-            log::debug!(
-                "SSTableManager::scan - Found {} readers for table '{}'",
-                reader_list.len(),
-                table_id
-            );
-
-            // Issue #883: when a table directory holds more than one SSTable
-            // generation, plain concatenation of each reader's live rows is wrong —
-            // it duplicates rows that exist in several generations and resurrects
-            // rows deleted in a later generation (each reader suppresses only its
-            // OWN tombstones). Reconcile across generations with the same
-            // last-write-wins + tombstone-shadowing rule compaction uses, reusing
-            // the authoritative k-way merger (write-support only; requires schema).
-            #[cfg(feature = "write-support")]
-            if reader_list.len() > 1 {
-                if let Some(schema) = schema {
-                    match self
-                        .merge_generations_for_read(reader_list, schema, start_key, end_key, limit)
-                        .await
-                    {
-                        Ok(merged) => {
-                            log::debug!(
-                                "SSTableManager::scan - cross-generation merge produced {} rows",
-                                merged.len()
-                            );
-                            return Ok(merged);
-                        }
-                        Err(e) => {
-                            // Never fail a read because the merge path hit an
-                            // unsupported format; fall back to concatenation.
-                            log::warn!(
-                                "SSTableManager::scan - cross-generation merge failed for '{}' ({}); \
-                                 falling back to per-reader concatenation",
-                                table_id,
-                                e
-                            );
-                        }
-                    }
-                }
-            }
-
-            // Each reader returns rows already in Cassandra token order; k-way
-            // merge the per-reader streams in token order (issue #1580) instead of
-            // concatenating + re-sorting by RAW key bytes (wrong global order +
-            // O(n log n) on the async worker). The merge is O(n log k) and
-            // early-exits once `limit` is satisfied.
-            let mut per_reader = Vec::with_capacity(reader_list.len());
-            for reader in reader_list {
-                let results = reader
-                    .scan(table_id, start_key, end_key, None, schema)
-                    .await?;
-                per_reader.push(results);
-            }
-
-            let all_results = scan_merge::kway_merge_token_order(per_reader, limit);
-
-            log::debug!(
-                "SSTableManager::scan - Returning {} final results (token-ordered k-way merge)",
-                all_results.len()
-            );
-
-            Ok(all_results)
-        } else {
+        if reader_list.is_empty() {
             log::debug!(
                 "SSTableManager::scan - No readers found for table '{}'",
                 table_id
             );
-            log::debug!(
-                "SSTableManager::scan - Available tables: {:?}",
-                table_readers.keys().collect::<Vec<_>>()
-            );
-            Ok(Vec::new())
+            return Ok(Vec::new());
         }
+
+        log::debug!(
+            "SSTableManager::scan - Found {} readers for table '{}'",
+            reader_list.len(),
+            table_id
+        );
+
+        // Issue #883: when a table directory holds more than one SSTable
+        // generation, plain concatenation of each reader's live rows is wrong —
+        // it duplicates rows that exist in several generations and resurrects
+        // rows deleted in a later generation (each reader suppresses only its
+        // OWN tombstones). Reconcile across generations with the same
+        // last-write-wins + tombstone-shadowing rule compaction uses, reusing
+        // the authoritative k-way merger (write-support only; requires schema).
+        #[cfg(feature = "write-support")]
+        if reader_list.len() > 1 {
+            if let Some(schema) = schema {
+                match self
+                    .merge_generations_for_read(&reader_list, schema, start_key, end_key, limit)
+                    .await
+                {
+                    Ok(merged) => {
+                        log::debug!(
+                            "SSTableManager::scan - cross-generation merge produced {} rows",
+                            merged.len()
+                        );
+                        return Ok(merged);
+                    }
+                    Err(e) => {
+                        // Never fail a read because the merge path hit an
+                        // unsupported format; fall back to concatenation.
+                        log::warn!(
+                            "SSTableManager::scan - cross-generation merge failed for '{}' ({}); \
+                             falling back to per-reader concatenation",
+                            table_id,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        // Each reader returns rows already in Cassandra token order; k-way
+        // merge the per-reader streams in token order (issue #1580) instead of
+        // concatenating + re-sorting by RAW key bytes (wrong global order +
+        // O(n log n) on the async worker). The merge is O(n log k) and
+        // early-exits once `limit` is satisfied.
+        let mut per_reader = Vec::with_capacity(reader_list.len());
+        for reader in &reader_list {
+            #[cfg(test)]
+            {
+                // Issue #1591: deterministic pause during the scan's I/O. On the
+                // fixed path the `table_readers` read guard is already dropped
+                // here (we operate on a cloned snapshot), so a test can prove no
+                // guard is held across the scan.
+                let gate = self.scan_gate.lock().ok().and_then(|g| g.clone());
+                scan_gate::wait_if_armed(&gate).await;
+            }
+            let results = reader
+                .scan(table_id, start_key, end_key, None, schema)
+                .await?;
+            per_reader.push(results);
+        }
+
+        let all_results = scan_merge::kway_merge_token_order(per_reader, limit);
+
+        log::debug!(
+            "SSTableManager::scan - Returning {} final results (token-ordered k-way merge)",
+            all_results.len()
+        );
+
+        Ok(all_results)
     }
 
     /// Partition-targeted scan: return only the rows for a single partition key,
@@ -993,12 +1032,12 @@ impl SSTableManager {
         Vec<(RowKey, ScanRow, HashMap<String, CellWriteMetadata>)>,
         bool,
     )> {
-        let table_readers = self.table_readers.read().await;
-        let table_name = table_id.name();
-
-        let Some(reader_list) = Self::resolve_reader_list(&table_readers, table_name) else {
+        // Issue #1591: snapshot the reader list and DROP the read guard before any
+        // I/O (bloom/BTI prune, per-candidate decode, cross-generation merge).
+        let (reader_list, _fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
+        if reader_list.is_empty() {
             return Ok((Vec::new(), true));
-        };
+        }
 
         // Prune: keep only SSTables whose bloom filter / BTI trie admit the key.
         // This is the property #962 requires — only candidates are opened, never N.
@@ -1143,22 +1182,21 @@ impl SSTableManager {
         clustering: Option<&reader::ClusteringSlice>,
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<(Vec<(RowKey, ScanRow)>, bool)> {
-        let table_readers = self.table_readers.read().await;
-        let table_name = table_id.name();
-
-        let Some(reader_list) = Self::resolve_reader_list(&table_readers, table_name) else {
+        // Issue #1591: snapshot the reader list + the authoritative
+        // `fully_qualified_match` signal and DROP the read guard before any I/O.
+        //
+        // `fully_qualified_match`: did resolution match the FULLY-QUALIFIED
+        // `keyspace.table` key exactly, or fall back to the bare table name? An
+        // unqualified query is treated as an exact match (no keyspace to mismatch).
+        // This authoritative signal gates the seek's table-consistency guard: only
+        // an exact FQ match may relax to a name-only check across a header-keyspace
+        // divergence; a fully-qualified query resolved via the bare-name fallback
+        // keeps strict keyspace matching so it never returns another keyspace's
+        // same-named rows (#1284 review).
+        let (reader_list, fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
+        if reader_list.is_empty() {
             return Ok((Vec::new(), false));
-        };
-
-        // Did resolution match the FULLY-QUALIFIED `keyspace.table` key exactly, or
-        // fall back to the bare table name? An unqualified query is treated as an
-        // exact match (no keyspace to mismatch). This authoritative signal gates
-        // the seek's table-consistency guard: only an exact FQ match may relax to a
-        // name-only check across a header-keyspace divergence; a fully-qualified
-        // query resolved via the bare-name fallback keeps strict keyspace matching
-        // so it never returns another keyspace's same-named rows (#1284 review).
-        let fully_qualified_match =
-            !table_name.contains('.') || table_readers.contains_key(table_name);
+        }
 
         // Prune: keep only SSTables whose bloom filter / BTI trie admit the key.
         let candidates: Vec<Arc<reader::SSTableReader>> = reader_list
@@ -1654,82 +1692,124 @@ impl SSTableManager {
         limit: Option<usize>,
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<(RowKey, ScanRow, HashMap<String, CellWriteMetadata>)>> {
-        let table_readers = self.table_readers.read().await;
-        let table_name = table_id.name();
+        // Issue #1591: snapshot the reader list and DROP the read guard before any
+        // I/O (per-reader metadata decode and cross-generation merge).
+        let (reader_list, _fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
+        if reader_list.is_empty() {
+            return Ok(Vec::new());
+        }
 
-        let readers = if table_readers.contains_key(table_name) {
-            table_readers.get(table_name)
-        } else {
-            let unqualified_name = if let Some(dot_pos) = table_name.rfind('.') {
-                &table_name[dot_pos + 1..]
-            } else {
-                table_name
-            };
-            table_readers.get(unqualified_name)
-        };
-
-        if let Some(reader_list) = readers {
-            // Issue #885: the metadata path (WRITETIME/TTL projection) must
-            // reconcile across SSTable generations exactly like the plain `scan`
-            // path (#883) — otherwise a multi-generation directory returns
-            // duplicate rows and resurrects rows/cells deleted in a later
-            // generation. Drive the same authoritative k-way merger, then surface
-            // the WINNING cell's per-cell write timestamp / TTL (write-support
-            // only; requires schema). Single-generation reads skip this entirely.
-            #[cfg(feature = "write-support")]
-            if reader_list.len() > 1 {
-                if let Some(schema) = schema {
-                    match self
-                        .merge_generations_for_read_with_metadata(
-                            reader_list,
-                            schema,
-                            start_key,
-                            end_key,
-                            limit,
-                        )
-                        .await
-                    {
-                        Ok(merged) => return Ok(merged),
-                        Err(e) => {
-                            // Never fail a read because the merge path hit an
-                            // unsupported format; fall back to concatenation.
-                            log::warn!(
-                                "SSTableManager::scan_with_cell_metadata - cross-generation merge \
-                                 failed for '{}' ({}); falling back to per-reader concatenation",
-                                table_id,
-                                e
-                            );
-                        }
+        // Issue #885: the metadata path (WRITETIME/TTL projection) must
+        // reconcile across SSTable generations exactly like the plain `scan`
+        // path (#883) — otherwise a multi-generation directory returns
+        // duplicate rows and resurrects rows/cells deleted in a later
+        // generation. Drive the same authoritative k-way merger, then surface
+        // the WINNING cell's per-cell write timestamp / TTL (write-support
+        // only; requires schema). Single-generation reads skip this entirely.
+        #[cfg(feature = "write-support")]
+        if reader_list.len() > 1 {
+            if let Some(schema) = schema {
+                match self
+                    .merge_generations_for_read_with_metadata(
+                        &reader_list,
+                        schema,
+                        start_key,
+                        end_key,
+                        limit,
+                    )
+                    .await
+                {
+                    Ok(merged) => return Ok(merged),
+                    Err(e) => {
+                        // Never fail a read because the merge path hit an
+                        // unsupported format; fall back to concatenation.
+                        log::warn!(
+                            "SSTableManager::scan_with_cell_metadata - cross-generation merge \
+                             failed for '{}' ({}); falling back to per-reader concatenation",
+                            table_id,
+                            e
+                        );
                     }
                 }
             }
-
-            // K-way merge the per-reader token-ordered streams (issue #1580),
-            // mirroring `scan`: the metadata payload rides alongside the row.
-            // Merging in token order (not raw key bytes) matches Cassandra's
-            // cross-SSTable order and avoids the full O(n log n) re-sort.
-            let mut per_reader = Vec::with_capacity(reader_list.len());
-            for reader in reader_list {
-                let results = reader
-                    .scan_with_cell_metadata(table_id, start_key, end_key, None, schema)
-                    .await?;
-                per_reader.push(
-                    results
-                        .into_iter()
-                        .map(|(k, v, m)| (k, (v, m)))
-                        .collect::<Vec<_>>(),
-                );
-            }
-
-            let all_results = scan_merge::kway_merge_token_order(per_reader, limit)
-                .into_iter()
-                .map(|(k, (v, m))| (k, v, m))
-                .collect();
-
-            Ok(all_results)
-        } else {
-            Ok(Vec::new())
         }
+
+        // K-way merge the per-reader token-ordered streams (issue #1580),
+        // mirroring `scan`: the metadata payload rides alongside the row.
+        // Merging in token order (not raw key bytes) matches Cassandra's
+        // cross-SSTable order and avoids the full O(n log n) re-sort.
+        let mut per_reader = Vec::with_capacity(reader_list.len());
+        for reader in &reader_list {
+            let results = reader
+                .scan_with_cell_metadata(table_id, start_key, end_key, None, schema)
+                .await?;
+            per_reader.push(
+                results
+                    .into_iter()
+                    .map(|(k, v, m)| (k, (v, m)))
+                    .collect::<Vec<_>>(),
+            );
+        }
+
+        let all_results = scan_merge::kway_merge_token_order(per_reader, limit)
+            .into_iter()
+            .map(|(k, (v, m))| (k, v, m))
+            .collect();
+
+        Ok(all_results)
+    }
+
+    /// Snapshot the resolved reader set for `table_id` and DROP the
+    /// `table_readers` read guard before returning (issue #1591).
+    ///
+    /// Returns the cloned `Arc<SSTableReader>` handles serving the table plus the
+    /// authoritative `fully_qualified_match` signal (see
+    /// [`fully_qualified_match`](Self::fully_qualified_match)), acquiring the read
+    /// guard only long enough to clone the small `Vec` of `Arc`s.
+    ///
+    /// # Why (tail-latency fix)
+    ///
+    /// `tokio::sync::RwLock` is FIFO-fair: a single queued writer (reader reload,
+    /// schema set, generation removal) parks EVERY later-arriving reader behind
+    /// the longest in-flight read guard. Holding the guard across a whole
+    /// multi-reader scan therefore made one slow scan plus one admin write stall
+    /// every subsequent point read — bimodal tail latency. Cloning the `Arc` list
+    /// and releasing the guard immediately means scans and point reads run without
+    /// holding the lock across their I/O, so a queued writer can never park them.
+    ///
+    /// # Semantics (unchanged)
+    ///
+    /// A scan operating on this snapshot may miss a reader added to the map AFTER
+    /// the snapshot was taken. That is the SAME semantics as holding the guard:
+    /// the guard would have blocked the writer until the scan finished, so the
+    /// scan never observed the new reader either. Readers removed from the map
+    /// mid-scan stay alive for the snapshot holder — that is precisely what the
+    /// `Arc` clone guarantees.
+    async fn resolve_reader_snapshot(
+        &self,
+        table_id: &TableId,
+    ) -> (Vec<Arc<reader::SSTableReader>>, bool) {
+        let table_readers = self.table_readers.read().await;
+        let table_name = table_id.name();
+        let fully_qualified_match = Self::fully_qualified_match(&table_readers, table_name);
+        let readers = Self::resolve_reader_list(&table_readers, table_name)
+            .cloned()
+            .unwrap_or_default();
+        // Guard dropped here, before any reader I/O.
+        (readers, fully_qualified_match)
+    }
+
+    /// Arm this manager's deterministic scan gate (issue #1591 test only).
+    /// The next `scan` on this manager pauses at its per-reader I/O, signalling
+    /// [`Gate::reached`](scan_gate::Gate) and blocking on
+    /// [`Gate::release`](scan_gate::Gate) until the test lets it continue.
+    #[cfg(test)]
+    fn arm_scan_gate(&self) -> Arc<scan_gate::Gate> {
+        let gate = Arc::new(scan_gate::Gate::default());
+        if let Ok(mut slot) = self.scan_gate.lock() {
+            *slot = Some(Arc::clone(&gate));
+        }
+        gate
     }
 
     /// Resolve the readers serving `table_id`, returning cloned `Arc` handles.
