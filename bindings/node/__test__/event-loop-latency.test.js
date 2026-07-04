@@ -3,23 +3,28 @@
  *
  * executeNative scans OFF the event loop, but every result row is materialized
  * into a JS object on the event-loop thread in `resolve()` (a napi `Env` is
- * thread-bound, so this work CANNOT be moved off-loop). That per-row build is
- * therefore O(rows) of synchronous on-loop work: an unbounded burst would
- * freeze timers/HTTP handlers. The fix BOUNDS on-loop work — it does not move
- * it off-loop:
+ * thread-bound, so this work CANNOT be moved off-loop). That per-call build is
+ * therefore O(rows-in-that-call) of synchronous on-loop work. The fix BOUNDS
+ * on-loop work — it does not move it off-loop:
  *
  *   (a) a documented cap (`CQLITE_NODE_MAX_NATIVE_ROWS`, default 100_000)
  *       rejects an oversized single result with a typed error steering the
  *       caller to executeStreaming (verified below), and
  *   (b) callers are documented to prefer executeStreaming for large sets.
  *
- * The shipped fixtures cap a SINGLE-CALL result at ~100 rows, so this test
- * accumulates >= 50,000 materialized rows across many bounded native calls
- * while a 10ms timer runs, and asserts the timer never stalls beyond 50ms —
- * i.e. per-call on-loop materialization stays bounded and interleaves with the
- * event loop. This is a genuine regression guard: if a future change made
- * executeNative do O(total) blocking work on the loop, the max gap would blow
- * past the threshold.
+ * What the first test actually measures: the shipped fixtures cap a SINGLE-CALL
+ * result at ~100 rows, so a single executeNative can never do an O(total)
+ * on-loop freeze here. Instead we fire MANY bounded native calls (accumulating
+ * >= 50,000 materialized rows total) while a 10ms timer runs, and assert the
+ * timer never stalls beyond MAX_GAP_MS. This validates that per-call
+ * materialization stays bounded and interleaves cleanly with the event loop —
+ * i.e. the loop of many small calls exercises bounded per-call interleaving
+ * with the timer. It is NOT a single-call O(total) freeze test (the fixtures
+ * cannot produce one); the guard-rejection behavior for a genuinely oversized
+ * single result is covered separately by the oversized-rejection test below.
+ * The bound is still meaningful: if a change made per-call materialization
+ * super-linear or removed the interleaving, the accumulated on-loop time would
+ * push the max timer gap past MAX_GAP_MS.
  *
  * Per the Node test doctrine (no strict-fixtures flag): this test THROWS
  * (does not skip) if data is missing or a query yields 0 rows when rows are
@@ -35,8 +40,21 @@ const SCHEMA = global.testPaths.SCHEMA_WIDE_ROWS;
 // A wide table with the most rows available in the fixture set.
 const QUERY = 'SELECT * FROM test_wide_rows.wide_partition_table';
 const TARGET_ROWS = 50000;
-const MAX_GAP_MS = 50;
+// Tolerant bound chosen to cleanly separate scheduler jitter from a genuine
+// regression. A 10ms setInterval routinely drifts tens of ms under real load
+// (GC pauses, OS scheduling, concurrent gate/build processes), so a tight
+// bound near the interval would flake and block unrelated PRs (the exact
+// wall-clock-race hazard the repo pre-roborev checklist and #1774 warn about).
+// A REAL regression here — reintroducing an unbounded O(total) on-loop
+// materialization burst over 50k rows — freezes the loop for hundreds of ms to
+// seconds, an order of magnitude above jitter. 400ms sits well above realistic
+// jitter yet far below any genuine O(total) freeze, so the test stays reliable
+// while still failing hard on a real regression.
+const MAX_GAP_MS = 400;
 const TIMER_INTERVAL_MS = 10;
+// Keep the child process below jest's 30s worker/test default so a hung child
+// fails fast (with diagnostics) instead of blocking the worker forever.
+const CHILD_TIMEOUT_MS = 20000;
 
 function requireData() {
   if (!global.DATASETS_AVAILABLE) {
@@ -60,7 +78,7 @@ describe('executeNative event-loop latency (issue #1442)', () => {
     }
   });
 
-  test('materializing >= 50k rows keeps the event loop responsive (< 50ms max gap)', async () => {
+  test(`materializing >= 50k rows keeps the event loop responsive (< ${MAX_GAP_MS}ms max gap)`, async () => {
     // Establish per-call row count and fail loudly if the source is empty.
     const probe = await db.executeNative(QUERY);
     if (probe.rowCount === 0) {
@@ -136,12 +154,24 @@ describe('executeNative event-loop latency (issue #1442)', () => {
     `;
     const res = spawnSync(process.execPath, ['-e', script], {
       encoding: 'utf8',
+      // Bound the child below jest's default so a hang in the freeze-detection
+      // guard itself fails fast with diagnostics rather than blocking forever.
+      timeout: CHILD_TIMEOUT_MS,
       env: {
         ...process.env,
         CQLITE_NODE_MAX_NATIVE_ROWS: '10',
         CQLITE_DATASETS_ROOT: global.testPaths.TEST_DATA_ROOT,
       },
     });
+    // Surface child failure/hang details so a timeout, crash, or signal fails
+    // with actionable diagnostics instead of a bare status mismatch. (Jest 29
+    // ignores expect()'s 2nd-arg message, so we throw explicitly.)
+    const diag =
+      `child status=${res.status} signal=${res.signal} error=${res.error}\n` +
+      `stdout: ${res.stdout}\nstderr: ${res.stderr}`;
+    if (res.error || res.signal !== null || res.status !== 0) {
+      throw new Error(`oversized-rejection child did not exit cleanly:\n${diag}`);
+    }
     // status 0 => rejected with the typed executeStreaming error.
     expect(res.status).toBe(0);
     expect(res.stdout).toMatch(/executeStreaming/);
