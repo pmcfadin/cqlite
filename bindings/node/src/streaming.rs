@@ -79,14 +79,22 @@ pub struct StreamingResult {
     /// exhaustion/close. `Span` is cheap to clone and is a no-op when telemetry
     /// is disabled.
     span: tracing::Span,
+    /// Rows fetched per `next()` AsyncTask (issue #1443). Each `next()` pulls a
+    /// BATCH of up to this many rows via `collect_chunk`, amortising the libuv
+    /// threadpool dispatch + `block_on` over K rows instead of paying it per
+    /// row. Sourced from the stream's `bufferSize` (bounded-channel capacity),
+    /// so the batch never exceeds the backpressure window.
+    batch_size: usize,
 }
 
 impl StreamingResult {
-    /// Create a new StreamingResult from a core QueryResultIterator and the
-    /// owning per-stream span.
+    /// Create a new StreamingResult from a core QueryResultIterator, the
+    /// owning per-stream span, and the per-`next()` batch size (the stream's
+    /// `bufferSize`, issue #1443).
     pub fn new(
         iter: cqlite_core::query::result::QueryResultIterator,
         span: tracing::Span,
+        batch_size: usize,
     ) -> napi::Result<Self> {
         // Cache column metadata from iterator
         let columns: Vec<ColumnInfo> = iter
@@ -105,11 +113,19 @@ impl StreamingResult {
 
         let column_names = Arc::new(columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>());
 
+        // Per-`next()` batch size (issue #1443): the stream's `bufferSize`,
+        // which is the bounded-channel backpressure window, so batching this
+        // many rows per `collect_chunk` never exceeds it. `collect_chunk` caps
+        // at MAX_CHUNK_SIZE, so any value is safe; a floor of 1 guarantees
+        // forward progress (bufferSize is validated non-zero upstream today).
+        let batch_size = batch_size.max(1);
+
         Ok(Self {
             inner: Arc::new(Mutex::new(Some(iter))),
             columns,
             column_names,
             span,
+            batch_size,
         })
     }
 
@@ -122,22 +138,29 @@ impl StreamingResult {
 }
 
 /// Result from next() - represents iterator protocol result.
+///
+/// Issue #1443: `next()` fetches a BATCH of rows per AsyncTask, so `Value`
+/// carries a `Vec` of row maps rather than a single row. The JS wrapper buffers
+/// the batch and yields one row per `for await` iteration, keeping the per-row
+/// consumer contract unchanged while amortising dispatch over K rows.
 pub enum NextResult {
-    /// More data available
-    Value(HashMap<String, cqlite_core::types::Value>),
-    /// Stream exhausted
+    /// One or more rows are available (a non-empty batch).
+    Value(Vec<HashMap<String, cqlite_core::types::Value>>),
+    /// Stream exhausted (no more rows).
     Done,
 }
 
-/// Async task for fetching the next row.
+/// Async task for fetching the next batch of rows.
 pub struct NextTask {
     inner: Arc<Mutex<Option<cqlite_core::query::result::QueryResultIterator>>>,
-    /// SELECT-order column names for this stream, used to emit the yielded row's
-    /// properties in column order rather than HashMap hash order (#1446).
+    /// SELECT-order column names for this stream, used to emit each yielded
+    /// row's properties in column order rather than HashMap hash order (#1446).
     column_names: Arc<Vec<String>>,
     /// Stream span, finalised with the row count when the stream ends or errors
     /// (issue #1040).
     span: tracing::Span,
+    /// Rows to fetch in this task (issue #1443); the stream's `bufferSize`.
+    batch_size: usize,
 }
 
 impl napi::Task for NextTask {
@@ -162,36 +185,53 @@ impl napi::Task for NextTask {
             None => return Ok(NextResult::Done),
         };
 
-        // Get next row from core iterator using the global runtime. The fetch is
-        // `.instrument`-ed by the stream span (no guard across the runtime).
-        let next = crate::runtime::block_on(iter.next_async().instrument(self.span.clone()))
-            .map_err(runtime_init_error)?;
-        match next {
-            Some(Ok(row)) => {
-                // Materialise the interned `Arc<str>` name handles into `String`
-                // keys at the FFI boundary (issue #1334): the JS-facing row map is
-                // keyed by `String`.
-                let values = row
-                    .values
-                    .into_iter()
-                    .map(|(k, v)| (k.to_string(), v))
-                    .collect();
-                Ok(NextResult::Value(values))
+        // Fetch a BATCH of up to `batch_size` rows from the core iterator using
+        // the global runtime (issue #1443). One `block_on` amortises the libuv
+        // dispatch over K rows instead of paying it per row, and frees the
+        // threadpool thread again quickly so concurrent `fs`/`crypto` work is not
+        // starved. `collect_chunk` respects the bounded channel's backpressure
+        // (the producer still blocks when the buffer is full) and caps at
+        // MAX_CHUNK_SIZE, so the batch never grows unbounded. The fetch is
+        // `.instrument`-ed by the stream span (no guard held across the runtime).
+        let chunk = crate::runtime::block_on(
+            iter.collect_chunk(self.batch_size)
+                .instrument(self.span.clone()),
+        )
+        .map_err(runtime_init_error)?;
+        match chunk {
+            Ok(rows) if rows.is_empty() => {
+                // Empty chunk means the stream is exhausted (`collect_chunk` only
+                // returns fewer than requested when the channel closed). Finalise
+                // span with the total yielded, cleanup.
+                let yielded: u64 = iter.rows_received();
+                self.span.record("rows", yielded);
+                *guard = None;
+                Ok(NextResult::Done)
             }
-            Some(Err(e)) => {
+            Ok(rows) => {
+                // Materialise the interned `Arc<str>` name handles into `String`
+                // keys at the FFI boundary (issue #1334): the JS-facing row maps
+                // are keyed by `String`. A partial (non-empty, < batch_size) chunk
+                // also means the stream is exhausted; we still yield it and let the
+                // next `next()` observe the empty chunk and clean up.
+                let batch = rows
+                    .into_iter()
+                    .map(|row| {
+                        row.values
+                            .into_iter()
+                            .map(|(k, v)| (k.to_string(), v))
+                            .collect::<HashMap<String, cqlite_core::types::Value>>()
+                    })
+                    .collect();
+                Ok(NextResult::Value(batch))
+            }
+            Err(e) => {
                 // Error occurred - record at the boundary, finalise span, cleanup.
                 crate::observability::record_boundary_error(&e);
                 let yielded: u64 = iter.rows_received();
                 self.span.record("rows", yielded);
                 *guard = None;
                 Err(to_napi_error(e))
-            }
-            None => {
-                // Stream exhausted - finalise span with the total yielded, cleanup.
-                let yielded: u64 = iter.rows_received();
-                self.span.record("rows", yielded);
-                *guard = None;
-                Ok(NextResult::Done)
             }
         }
     }
@@ -200,25 +240,34 @@ impl napi::Task for NextTask {
         let mut result = env.create_object()?;
 
         match output {
-            NextResult::Value(values) => {
-                // Streaming yields one row per `next()` AsyncTask, and napi value
-                // handles are scoped to this `resolve` callback's `Env`, so the
-                // key handles cannot be cached across rows the way the batch
-                // `executeNative` path does — interning here is necessarily once
-                // per yielded row. The streaming win from #1446 is SELECT-order
-                // output (from `self.column_names`), not per-result interning.
+            NextResult::Value(batch) => {
+                // Build a JS ARRAY of row objects for the batch (issue #1443).
+                // The interned SELECT-order column keys are computed once per
+                // batch and reused across every row (as `executeNative` does),
+                // so interning cost is now amortised over K rows rather than paid
+                // per row. The JS wrapper buffers this array and yields one row
+                // per `for await` iteration, so the per-row consumer contract is
+                // unchanged; batching is invisible to consumers. Column order
+                // (#1446) is preserved via `self.column_names`.
                 let col_keys = intern_column_keys(&env, &self.column_names)?;
-                // Issue #1448: a fresh conversion context per yielded row (napi
-                // handles are scoped to this `resolve` `Env`, so the ctor cache
-                // cannot outlive it) still fetches each ctor at most once per row
-                // instead of once per set/map cell in that row.
+                // Issue #1448: ONE conversion context per `resolve` call, reused
+                // across every row in the batch (napi handles are scoped to this
+                // `resolve` `Env`, so the ctor cache cannot outlive it). Each
+                // Set/Map ctor is fetched at most once per batch rather than once
+                // per set/map cell — the same ctor-cache invariant #1448 uses for
+                // `executeNative`, now amortised over the whole batch.
                 let ctx = ConvCtx::new(&env);
-                let row_obj = row_to_object(&ctx, &col_keys, &values)?;
-                result.set_named_property("value", row_obj)?;
+                let mut rows_arr = env.create_array_with_length(batch.len())?;
+                for (i, values) in batch.iter().enumerate() {
+                    let row_obj = row_to_object(&ctx, &col_keys, values)?;
+                    rows_arr.set_element(i as u32, row_obj)?;
+                }
+                result.set_named_property("rows", rows_arr)?;
                 result.set_named_property("done", env.get_boolean(false)?)?;
             }
             NextResult::Done => {
-                result.set_named_property("value", env.get_undefined()?)?;
+                let empty = env.create_array_with_length(0)?;
+                result.set_named_property("rows", empty)?;
                 result.set_named_property("done", env.get_boolean(true)?)?;
             }
         }
@@ -229,16 +278,18 @@ impl napi::Task for NextTask {
 
 #[napi]
 impl StreamingResult {
-    /// Get the next row from the stream.
+    /// Get the next BATCH of rows from the stream (issue #1443).
     ///
-    /// Returns an object matching JavaScript's iterator protocol:
-    /// - `{ value: Row, done: false }` - More rows available
-    /// - `{ value: undefined, done: true }` - Stream exhausted
+    /// Each call fetches up to `bufferSize` rows in a single AsyncTask, so the
+    /// JS wrapper can buffer them and yield one row per `for await` iteration
+    /// without a per-row threadpool dispatch. Returns an object:
+    /// - `{ rows: Array<Row>, done: false }` - a non-empty batch of rows
+    /// - `{ rows: [], done: true }` - stream exhausted
     ///
     /// Errors are thrown as exceptions with structured error properties
     /// (code, category, isRecoverable).
     ///
-    /// @returns Promise resolving to iterator result object
+    /// @returns Promise resolving to a batch result object
     #[napi]
     pub fn next(&self) -> AsyncTask<NextTask> {
         // Clone the Arc reference + span to share with the task
@@ -246,6 +297,7 @@ impl StreamingResult {
             inner: self.inner.clone(),
             column_names: self.column_names.clone(),
             span: self.span.clone(),
+            batch_size: self.batch_size,
         })
     }
 

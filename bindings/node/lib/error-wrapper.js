@@ -96,6 +96,77 @@ function wrapAsync(fn) {
 }
 
 /**
+ * Build an AsyncIterator that yields ONE row per `next()` while fetching rows
+ * from the native stream in BATCHES (issue #1443).
+ *
+ * The native `StreamingResult.next()` returns `{ rows: Array<Row>, done }` — a
+ * whole batch per AsyncTask/`block_on` (K == the stream's `bufferSize`), instead
+ * of one row per task. This wrapper buffers that batch and drains it one row at
+ * a time, so the public per-row `for await ... of` contract is UNCHANGED
+ * (consumers still see exactly one row per iteration; batching is invisible).
+ * Amortising dispatch over K rows both raises throughput and stops a busy stream
+ * from monopolising libuv's small (default 4) threadpool and starving concurrent
+ * `fs`/`crypto` work.
+ *
+ * @param {() => Promise<{rows: Array<Object>, done: boolean}>} refill
+ *   Fetches the next batch from the native stream. May throw (already enhanced).
+ * @param {() => (void|Promise<void>)} onReturn
+ *   Invoked on early termination (`return()`/`break`) to close the native stream.
+ * @param {() => boolean} [isCancelled]
+ *   Optional predicate checked before each `next()`; when it returns true the
+ *   iterator discards any buffered rows and reports `done` immediately. This is
+ *   how an external `close()` on the stream object takes effect even though the
+ *   batch buffer lives in this iterator's closure.
+ * @returns {AsyncIterator} Iterator yielding one row per `next()`.
+ */
+function batchedAsyncIterator(refill, onReturn, isCancelled) {
+  let buffer = [];
+  let bufIdx = 0;
+  let exhausted = false;
+  return {
+    async next() {
+      // Honour an external close(): discard buffered rows and end immediately.
+      if (isCancelled && isCancelled()) {
+        buffer = [];
+        bufIdx = 0;
+        exhausted = true;
+        return { value: undefined, done: true };
+      }
+      // Drain the buffered batch first — no native call, no threadpool dispatch.
+      if (bufIdx < buffer.length) {
+        return { value: buffer[bufIdx++], done: false };
+      }
+      if (exhausted) {
+        return { value: undefined, done: true };
+      }
+      // Refill: exactly ONE AsyncTask/block_on fetches a whole batch.
+      const batch = await refill();
+      buffer = (batch && batch.rows) || [];
+      bufIdx = 0;
+      // An empty batch always signals exhaustion (native `Done`); a `done` flag
+      // is honoured defensively too. A non-empty batch may still be the final
+      // one — the next refill then observes the empty batch and ends the stream.
+      if (!batch || batch.done || buffer.length === 0) {
+        exhausted = true;
+      }
+      if (bufIdx < buffer.length) {
+        return { value: buffer[bufIdx++], done: false };
+      }
+      return { value: undefined, done: true };
+    },
+    async return() {
+      // Early `break`/`return()`: discard any un-yielded buffered rows and close
+      // the native stream (which terminates the producer and finalises the span).
+      buffer = [];
+      bufIdx = 0;
+      exhausted = true;
+      await onReturn();
+      return { value: undefined, done: true };
+    },
+  };
+}
+
+/**
  * Create an async iterable wrapper around a native StreamingResult.
  *
  * Implements JavaScript's AsyncIterable protocol for use with `for await...of`.
@@ -105,6 +176,7 @@ function wrapAsync(fn) {
  * @returns {Object} An async iterable object with streaming functionality
  */
 function createAsyncIterator(nativeStream) {
+  let closed = false;
   return {
     /**
      * Number of rows received so far.
@@ -127,38 +199,31 @@ function createAsyncIterator(nativeStream) {
      * Safe to call multiple times.
      */
     close() {
+      closed = true;
       return nativeStream.close();
     },
 
     /**
      * Implement Symbol.asyncIterator for `for await...of` support.
+     *
+     * Yields one row per iteration while fetching in batches (issue #1443).
      * @returns {AsyncIterator}
      */
     [Symbol.asyncIterator]() {
-      return {
-        /**
-         * Get the next row from the stream.
-         * @returns {Promise<{value: Object|undefined, done: boolean}>}
-         */
-        async next() {
+      return batchedAsyncIterator(
+        async () => {
           try {
-            const result = await nativeStream.next();
-            return result;
+            return await nativeStream.next();
           } catch (error) {
             throw enhanceError(error);
           }
         },
-
-        /**
-         * Handle early termination (e.g., break from loop).
-         * Called automatically by JavaScript runtime.
-         * @returns {Promise<{value: undefined, done: true}>}
-         */
-        async return() {
+        () => {
+          closed = true;
           nativeStream.close();
-          return { value: undefined, done: true };
         },
-      };
+        () => closed
+      );
     },
   };
 }
@@ -383,11 +448,16 @@ function createWrappedDatabase(NativeDatabase, wrapPreparedStatement) {
 
         /**
          * Implement Symbol.asyncIterator for `for await...of` support.
+         *
+         * Yields one row per iteration while the native stream is fetched in
+         * batches (issue #1443): each refill is a single AsyncTask/block_on that
+         * returns up to `bufferSize` rows, which are then drained one at a time.
+         * The per-row consumer contract is unchanged; batching is invisible.
          * @returns {AsyncIterator}
          */
         [Symbol.asyncIterator]() {
-          return {
-            async next() {
+          return batchedAsyncIterator(
+            async () => {
               try {
                 const stream = await ensureInitialized();
                 return await stream.next();
@@ -395,13 +465,13 @@ function createWrappedDatabase(NativeDatabase, wrapPreparedStatement) {
                 throw enhanceError(error);
               }
             },
-            async return() {
+            () => {
               closed = true;
               nativeStreamPromise = null;
               nativeStream?.close();
-              return { value: undefined, done: true };
             },
-          };
+            () => closed
+          );
         },
       };
     }
