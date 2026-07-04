@@ -198,7 +198,9 @@ fi
 if [ "${CQLITE_DISABLE_SCCACHE:-0}" != 1 ] && command -v sccache >/dev/null 2>&1; then
   export RUSTC_WRAPPER=sccache
   export CARGO_INCREMENTAL=0
-  echo "agent-gate: sccache detected; using as RUSTC_WRAPPER with CARGO_INCREMENTAL=0 (#1822)"
+  # Diagnostic banner on STDERR: hidden hook modes (--classify-*) must keep their
+  # STDOUT empty, and this dispatch runs before the hook branch (issue #1821).
+  echo "agent-gate: sccache detected; using as RUSTC_WRAPPER with CARGO_INCREMENTAL=0 (#1822)" >&2
 fi
 export CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-$REPO_ROOT/test-data/datasets}"
 
