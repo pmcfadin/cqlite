@@ -36,6 +36,50 @@ use crate::{
 #[cfg(feature = "experimental")]
 use crate::types::Value;
 
+// Test/feature-gated whole-table-scan invocation counter (issue #1691).
+//
+// Counts entries into the two whole-table scan initiators — `StorageEngine::scan`
+// (materializing) and `StorageEngine::scan_stream` (bounded streaming). It exists to
+// pin the retirement of `execute_parallel_table_scan`: a `TableScan` plan must issue
+// exactly ONE whole-table pass, not the 4× duplicate passes the retired multi-worker
+// path produced.
+//
+// It is thread-local, mirroring the "thread-local invocation counter reflects exactly
+// this future's calls" pattern (issue #831 / `access_path`). A test drives its
+// measured operation on a current-thread Tokio runtime, so both `scan` and
+// `scan_stream` increment on the *calling* thread (the count records the entry, not
+// the spawned producer's work). This isolates the count from the thousands of other
+// lib tests running on their own threads — a process-global atomic would be polluted
+// by any concurrent test that scans. Zero-overhead in release: the body compiles to a
+// no-op and the cell is not even linked.
+#[cfg(any(test, feature = "work-counters"))]
+thread_local! {
+    static TABLE_SCAN_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Record one whole-table scan initiation (`scan` / `scan_stream`) on the current
+/// thread. Unconditional at the call site; the body is a no-op in release builds
+/// (issue #1691).
+#[inline(always)]
+pub(crate) fn record_table_scan_call() {
+    #[cfg(any(test, feature = "work-counters"))]
+    TABLE_SCAN_CALLS.with(|c| c.set(c.get().saturating_add(1)));
+}
+
+/// Number of whole-table scan initiations on the current thread since the last
+/// [`reset_table_scan_calls`] (issue #1691; test/feature builds only).
+#[cfg(any(test, feature = "work-counters"))]
+pub fn table_scan_call_count() -> u64 {
+    TABLE_SCAN_CALLS.with(|c| c.get())
+}
+
+/// Clear the current thread's whole-table scan counter before a measured operation
+/// (issue #1691; test/feature builds only).
+#[cfg(any(test, feature = "work-counters"))]
+pub fn reset_table_scan_calls() {
+    TABLE_SCAN_CALLS.with(|c| c.set(0));
+}
+
 /// Main storage engine that coordinates all storage components
 ///
 /// NOTE: Issue #176 removed write infrastructure (compaction, manifest).
@@ -288,6 +332,7 @@ impl StorageEngine {
         limit: Option<usize>,
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<(RowKey, ScanRow)>> {
+        record_table_scan_call();
         // Scan SSTables directly
         self.sstables
             .scan(table_id, start_key, end_key, limit, schema)
@@ -436,6 +481,7 @@ impl StorageEngine {
         schema: Option<&crate::schema::TableSchema>,
         buffer_size: usize,
     ) -> Result<tokio::sync::mpsc::Receiver<Result<(RowKey, ScanRow)>>> {
+        record_table_scan_call();
         self.sstables
             .scan_stream(table_id, start_key, end_key, schema, buffer_size)
             .await

@@ -15,14 +15,13 @@
 // CQL is NOT SQL - it's a query language specifically designed for Cassandra's distributed architecture.
 
 use super::{
-    planner::{ExecutionStep, IndexSelection, ParallelizationInfo, QueryPlan, StepType},
+    planner::{ExecutionStep, IndexSelection, QueryPlan, StepType},
     ComparisonOperator, Condition,
 };
 use crate::{
     schema::SchemaManager, storage::StorageEngine, Config, Error, Result, RowKey, ScanRow, TableId,
     Value,
 };
-use crossbeam::channel;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,16 +30,15 @@ use std::time::Instant;
 // Use QueryResult and QueryRow from result module
 pub use super::result::{QueryResult, QueryRow};
 
-/// Default worker count when no parallelization hint is supplied.
-const DEFAULT_PARALLEL_WORKERS: usize = 4;
-
-/// Static fallback used when no plan step requested parallelization. Borrowed to
-/// keep `execute_parallel_table_scan` allocation-free in the hot path.
-static DEFAULT_PARALLELIZATION: ParallelizationInfo = ParallelizationInfo {
-    can_parallelize: true,
-    suggested_threads: DEFAULT_PARALLEL_WORKERS,
-    partition_key: None,
-};
+/// Bounded buffer (rows) for the streaming table-scan drain (issue #1691).
+///
+/// The producer parks once this many rows are in flight, so live heap during a
+/// `TableScan` stays bounded by `buffer_size` regardless of result size. This
+/// replaces the retired `execute_parallel_table_scan`, whose unbounded crossbeam
+/// channel buffered the entire result set at once and whose N (default 4) workers
+/// each issued the *identical* full `storage.scan` (4 duplicate whole-table passes
+/// for one plan).
+const TABLE_SCAN_STREAM_BUFFER: usize = 1024;
 
 /// Query executor
 #[derive(Debug, Clone)]
@@ -385,13 +383,17 @@ impl QueryExecutor {
         #[cfg(debug_assertions)]
         log::debug!("executor: Scanning for table: {:?}", table.name());
 
+        // Issue #1691: a plan that requested parallelization is served by the
+        // SAME bounded streaming scan the SelectExecutor uses (one whole-table
+        // pass, bounded mpsc, `spawn_blocking` discipline inside `scan_stream`),
+        // NOT by the retired multi-worker duplicate-scan path.
         let can_parallelize = plan
             .steps
             .iter()
             .any(|step| step.parallelization.can_parallelize);
 
         let mut rows = if can_parallelize {
-            self.execute_parallel_table_scan(table, &plan.steps).await?
+            self.streaming_scan_rows(table).await?
         } else {
             self.full_scan_rows(table).await?
         };
@@ -468,60 +470,29 @@ impl QueryExecutor {
 
     // -- table scans --------------------------------------------------------
 
-    /// Execute parallel table scan.
+    /// Stream a full table scan through the bounded streaming path and
+    /// materialize results (issue #1691).
     ///
-    /// NOTE: All workers currently issue the same `storage.scan(...)` and the
-    /// receiver deduplicates implicitly by virtue of preserving emission order;
-    /// this matches the behavior present before refactoring. A real parallel
-    /// scan would partition the key range across workers.
-    #[tracing::instrument(name = "query.parallel_table_scan", skip_all)]
-    async fn execute_parallel_table_scan(
-        &self,
-        table: &TableId,
-        steps: &[ExecutionStep],
-    ) -> Result<Vec<QueryRow>> {
-        let parallelization = steps
-            .iter()
-            .find(|step| step.parallelization.can_parallelize)
-            .map(|step| &step.parallelization)
-            .unwrap_or(&DEFAULT_PARALLELIZATION);
-
-        let thread_count = parallelization.suggested_threads;
-        let (tx, rx) = channel::unbounded();
-
-        let mut handles = Vec::with_capacity(thread_count);
-        for worker_id in 0..thread_count {
-            let storage = self.storage.clone();
-            let table = table.clone();
-            let tx = tx.clone();
-
-            handles.push(tokio::spawn(async move {
-                match storage.scan(&table, None, None, None, None).await {
-                    Ok(results) => {
-                        for pair in results {
-                            // Receiver hung up — bail out early.
-                            if tx.send(pair).is_err() {
-                                break;
-                            }
-                        }
-                    }
-                    Err(e) => log::error!("Worker {} error: {:?}", worker_id, e),
-                }
-            }));
-        }
-
-        // Drop our local sender so `rx` closes once the workers finish.
-        drop(tx);
+    /// This is the retirement of `execute_parallel_table_scan`. It issues a
+    /// SINGLE whole-table pass via [`StorageEngine::scan_stream`] — the same
+    /// bounded-`mpsc`, `spawn_blocking` machinery the `SelectExecutor` streaming
+    /// path uses (issue #790) — instead of spawning N workers that each re-ran
+    /// the identical `storage.scan`. Live heap during production stays bounded by
+    /// [`TABLE_SCAN_STREAM_BUFFER`] rows: the reader parses one entry at a time
+    /// into the channel and parks when the consumer falls behind, replacing the
+    /// old unbounded `crossbeam` channel that held the entire result set at once.
+    #[tracing::instrument(name = "query.table_scan_stream", skip_all)]
+    async fn streaming_scan_rows(&self, table: &TableId) -> Result<Vec<QueryRow>> {
+        let mut scan_stream = self
+            .storage
+            .scan_stream(table, None, None, None, TABLE_SCAN_STREAM_BUFFER)
+            .await?;
 
         let mut rows = Vec::new();
-        while let Ok((row_key, row_data)) = rx.recv() {
+        while let Some(item) = scan_stream.recv().await {
+            let (row_key, row_data) = item?;
             rows.push(self.storage_data_to_query_row(row_data, &row_key)?);
         }
-
-        for handle in handles {
-            let _ = handle.await;
-        }
-
         Ok(rows)
     }
 
@@ -1141,6 +1112,83 @@ mod tests {
         assert!(
             !suppressed.values.contains_key("data"),
             "a Marker must NOT surface the raw blob (this is the suppression the fix avoids)"
+        );
+    }
+
+    // -- retirement of execute_parallel_table_scan (issue #1691) -----------
+
+    /// A `TableScan` plan whose step requested parallelization (`suggested_threads`
+    /// = 4, mirroring the retired path's default worker count). It routes to
+    /// `execute_table_scan` (no INSERT step, non-empty steps ⇒ not CREATE TABLE)
+    /// and takes the `can_parallelize` branch.
+    fn parallelizable_table_scan_plan() -> QueryPlan {
+        use super::super::planner::{ParallelizationInfo, PlanType, QueryHints, StepType};
+        QueryPlan {
+            plan_type: PlanType::TableScan,
+            table: Some(TableId::new("t")),
+            estimated_cost: 0.0,
+            estimated_rows: 1,
+            selected_indexes: Vec::new(),
+            steps: vec![ExecutionStep {
+                step_type: StepType::Scan,
+                columns: Vec::new(),
+                conditions: Vec::new(),
+                cost: 0.0,
+                parallelization: ParallelizationInfo {
+                    can_parallelize: true,
+                    suggested_threads: 4,
+                    partition_key: None,
+                },
+            }],
+            hints: QueryHints::default(),
+        }
+    }
+
+    /// Issue #1691 (verification-first): the parallelizable `TableScan` branch must
+    /// issue EXACTLY ONE whole-table scan pass. The retired
+    /// `execute_parallel_table_scan` spawned `suggested_threads` (4) workers, each
+    /// re-running the identical full `storage.scan` — four duplicate whole-table
+    /// passes for a single plan. With the retirement, the branch routes through the
+    /// bounded streaming `scan_stream`, a single pass.
+    ///
+    /// This is RED on the pre-fix routing (the counter reads 4) and GREEN after
+    /// (reads 1); it needs no on-disk data because the counter observes scan
+    /// *initiations*, which the retired path made 4× even over an empty table.
+    /// The counter is thread-local and this is a current-thread `#[tokio::test]`,
+    /// so the scan runs on this thread and other parallel tests cannot pollute it.
+    #[tokio::test]
+    async fn table_scan_parallel_branch_issues_one_whole_table_pass() {
+        let (_tmp, executor, _) = make_executor().await;
+        crate::storage::reset_table_scan_calls();
+
+        let plan = parallelizable_table_scan_plan();
+        let _ = executor.execute(&plan).await.expect("table scan executes");
+
+        assert_eq!(
+            crate::storage::table_scan_call_count(),
+            1,
+            "the parallelizable TableScan branch must issue exactly ONE whole-table \
+             scan pass; the retired execute_parallel_table_scan issued one per worker (4×)"
+        );
+    }
+
+    /// The bounded streaming branch drains its results correctly (no rows dropped
+    /// by the `scan_stream` backpressure discipline) and still issues one pass.
+    /// Over an empty table this is the trivial-but-load-bearing lower bound: the
+    /// branch returns an empty result set and never fans out into multiple scans.
+    #[tokio::test]
+    async fn streaming_scan_branch_returns_all_rows_bounded() {
+        let (_tmp, executor, _) = make_executor().await;
+        crate::storage::reset_table_scan_calls();
+
+        let plan = parallelizable_table_scan_plan();
+        let result = executor.execute(&plan).await.expect("table scan executes");
+
+        assert!(result.rows.is_empty(), "empty table yields no rows");
+        assert_eq!(
+            crate::storage::table_scan_call_count(),
+            1,
+            "the streaming drain must not re-issue the scan"
         );
     }
 }

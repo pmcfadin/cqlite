@@ -43,7 +43,6 @@ zstd = { workspace = true, optional = true }
 crc32fast = { workspace = true }
 
 # Concurrency and collections
-crossbeam = { workspace = true }
 parking_lot = { workspace = true }
 dashmap = { workspace = true }
 lru = "0.16"
