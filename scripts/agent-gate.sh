@@ -1445,13 +1445,13 @@ acquire_gate_slot() {
       return 0
     fi
     if [ "$printed" -eq 0 ] && [ "$waited" -ge 3 ]; then
-      echo "waiting for gate slot ($n in use)…"
+      echo "waiting for gate slot ($n in use)…" >&2
       printed=1
     fi
     waited=$(( waited + 1 ))
     sleep 0.2
   done
-  [ "$printed" -eq 1 ] && echo "agent-gate: gate slot acquired -- proceeding (#1825)"
+  [ "$printed" -eq 1 ] && echo "agent-gate: gate slot acquired -- proceeding (#1825)" >&2
 }
 
 # Test-only stub (issue #1825 concurrency self-test): when CQLITE_GATE_STUB_RUNDIR

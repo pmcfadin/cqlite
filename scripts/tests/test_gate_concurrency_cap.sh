@@ -75,8 +75,12 @@ mkdir -p "$a_run"
 N=2; M=5
 declare -a a_pids=()
 for _ in $(seq 1 "$M"); do
+  # STUB_SLEEP is deliberately generous (4s): case (a)'s lower-bound assertion
+  # (a_max >= N) needs the N concurrent holders to overlap in time long enough that
+  # a loaded machine's sampler is guaranteed to observe them together. A short sleep
+  # could let holders come and go between polls and spuriously miss the overlap.
   CQLITE_GATE_SLOTS_DIR="$a_slots" CQLITE_GATE_MAX_CONCURRENCY="$N" \
-    CQLITE_GATE_STUB_RUNDIR="$a_run" CQLITE_GATE_STUB_SLEEP=2 CQLITE_GATE_POLL_SECS=0.3 \
+    CQLITE_GATE_STUB_RUNDIR="$a_run" CQLITE_GATE_STUB_SLEEP=4 CQLITE_GATE_POLL_SECS=0.3 \
     bash "$GATE" >/dev/null 2>&1 &
   a_pids+=("$!")
 done
@@ -91,7 +95,7 @@ while [ "$(date +%s)" -lt "$a_deadline" ]; do
   running=0
   for p in "${a_pids[@]}"; do kill -0 "$p" 2>/dev/null && running=$((running + 1)); done
   [ "$running" -eq 0 ] && break
-  sleep 0.15
+  sleep 0.05
 done
 
 a_fail=0

@@ -16,6 +16,14 @@ fd AFTER it is forked, so the gate's later children never hold the lock; killing
 the gate frees the slot within one poll interval regardless of orphaned children.
 That is the SIGKILL-safe stale-slot-reaping guarantee.
 
+PID-reuse caveat (accepted, low-probability trade-off): liveness is a ``kill(pid, 0)``
+probe on the gate PID. If a SIGKILLed gate's PID is recycled by an UNRELATED process
+before the daemon's next poll, ``_gate_alive`` returns True and the slot stays held
+until that unrelated PID also exits. This only delays a slot release (never leaks one
+permanently, never over-admits gates), the window is a single poll interval, and PID
+reuse landing on exactly the gate PID in that window is rare -- so we accept it rather
+than complicating the probe (e.g. with start-time / pidfd matching).
+
 Contract:
   * Blocks (queues) when all N slots are busy; never fails from contention.
   * Exits 0 after a clean release; exits non-zero only on a usage/IO error before
