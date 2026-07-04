@@ -993,10 +993,14 @@ mod tests {
 
         let compression = Compression::new(CompressionAlgorithm::Snappy).unwrap();
         let got = compression.decompress(&adversarial).ok();
-        assert_ne!(
-            got,
-            Some(p_wrong),
-            "strict raw decode must not return the framed-guess bytes (no-heuristics, #1588)"
+        // Strict raw decode must not merely differ from the framed guess — it must
+        // FAIL (typed error) rather than silently produce any bytes: the leading
+        // 4-byte pseudo-header parses as a malformed raw Snappy stream (a
+        // zero-length literal with trailing data), which the raw decoder rejects.
+        assert!(
+            got.is_none(),
+            "strict raw decode must ERROR on the ambiguous chunk, not return bytes \
+             (no-heuristics, #1588); got {got:?}"
         );
     }
 
