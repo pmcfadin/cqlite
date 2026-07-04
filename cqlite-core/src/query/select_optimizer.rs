@@ -1,7 +1,12 @@
 //! Query optimizer for SELECT statements - basic planning and predicate pushdown.
 
 use super::select_ast::*;
+use super::select_naming::{
+    aggregate_column_and_alias, aggregate_output_name, projection_source_and_output,
+    unwrap_aggregate,
+};
 use crate::{schema::SchemaManager, storage::StorageEngine, Error, Result, TableId, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 // Test-only counter for the number of times `SelectOptimizer::optimize` runs
@@ -143,7 +148,13 @@ pub enum SSTableFilterOp {
 /// Aggregation execution plan
 #[derive(Debug, Clone)]
 pub struct AggregationPlan {
+    /// Raw stored column names `build_group_key` reads from each scanned row.
     pub group_by_columns: Vec<String>,
+    /// Issue #1763: SELECT OUTPUT name per grouped dimension (parallel to
+    /// `group_by_columns`); `finalize_group` emits the value under this name so it
+    /// equals the metadata column name (both from `select_naming`). Alias when
+    /// projected with one, else the column name.
+    pub group_by_output_names: Vec<String>,
     pub aggregates: Vec<AggregateComputation>,
 }
 
@@ -181,6 +192,27 @@ impl SelectOptimizer {
         let table_id = match from_clause {
             FromClause::Table(t) | FromClause::TableAlias(t, _) => t.clone(),
         };
+
+        // Issue #1763: reject `SELECT DISTINCT <aggregate>` (e.g.
+        // `SELECT DISTINCT COUNT(*)`). `is_aggregate()` now unwraps aliased
+        // aggregates inside a `DISTINCT` clause, so `requires_aggregation()`
+        // returns true and an aggregation is planned — but `plan_aggregation`
+        // collects its computations ONLY from `SelectClause::Columns`, so a
+        // DISTINCT aggregate would plan an aggregation with NO computations and
+        // silently drop the result column. DISTINCT over an aggregate is also not
+        // a meaningful shape (the aggregate already collapses all rows to a
+        // single value, making DISTINCT redundant) and Cassandra rejects it.
+        // Fail cleanly here rather than return a wrong result.
+        if let SelectClause::Distinct(exprs) = &statement.select_clause {
+            if exprs.iter().any(|e| e.is_aggregate()) {
+                return Err(Error::query_execution(
+                    "SELECT DISTINCT with an aggregate function is not supported; \
+                     DISTINCT over an aggregate is redundant because the aggregate \
+                     already collapses rows to a single value"
+                        .to_string(),
+                ));
+            }
+        }
 
         if let Some(where_clause) = &statement.where_clause {
             // Validate EVERY token() restriction in the WHERE tree before pushdown
@@ -534,71 +566,80 @@ fn literal_value(expr: &SelectExpression) -> Option<Value> {
     }
 }
 
+/// Columns the SSTable scan must READ: the SOURCE stored column names, NOT the
+/// SELECT output aliases.
+///
+/// Issue #1763: `build_row_from_scan` filters decoded cells by physical column
+/// name, so an aliased projection (`category AS cat`) MUST scan `category` —
+/// projecting `cat` would drop the cell (null value; the `Project` step / grouped
+/// dimension could not find it). Output naming is applied afterwards (`Project`
+/// step / metadata / `finalize_group`), all via `select_naming`. Aggregates name
+/// no stored cell and are excluded.
 fn extract_projection_columns(select_clause: &SelectClause) -> Vec<String> {
     match select_clause {
         SelectClause::All => Vec::new(),
-        SelectClause::Columns(exprs) | SelectClause::Distinct(exprs) => {
-            exprs.iter().filter_map(extract_column_name).collect()
-        }
-    }
-}
-
-fn extract_column_name(expr: &SelectExpression) -> Option<String> {
-    match expr {
-        SelectExpression::Column(col_ref) => Some(col_ref.column.clone()),
-        SelectExpression::Aliased(_, alias) => Some(alias.clone()),
-        _ => None,
+        SelectClause::Columns(exprs) | SelectClause::Distinct(exprs) => exprs
+            .iter()
+            .filter_map(|e| projection_source_and_output(e).map(|(source, _)| source))
+            .collect(),
     }
 }
 
 fn plan_aggregation(statement: &SelectStatement) -> AggregationPlan {
-    let group_by_columns = statement
+    let group_by_columns: Vec<String> = statement
         .group_by
         .as_ref()
         .map(|g| g.columns.iter().map(|col| col.column.clone()).collect())
         .unwrap_or_default();
 
+    // Issue #1763 (grouped dimensions): map each grouped column to its SELECT
+    // OUTPUT name via the SAME `select_naming` source `get_result_columns` uses,
+    // so `finalize_group` emits the grouped value under the metadata column name.
+    // `col AS alias` yields `alias`; bare or not-projected yields the column name.
+    let mut output_for_source: HashMap<String, String> = HashMap::new();
+    if let SelectClause::Columns(exprs) | SelectClause::Distinct(exprs) = &statement.select_clause {
+        for expr in exprs {
+            if let Some((source, output)) = projection_source_and_output(expr) {
+                // First projection of a source column wins (matches metadata order).
+                output_for_source.entry(source).or_insert(output);
+            }
+        }
+    }
+    let group_by_output_names: Vec<String> = group_by_columns
+        .iter()
+        .map(|col| {
+            output_for_source
+                .get(col.as_str())
+                .cloned()
+                .unwrap_or_else(|| col.clone())
+        })
+        .collect();
+
     let mut aggregates = Vec::new();
     if let SelectClause::Columns(exprs) = &statement.select_clause {
         for expr in exprs {
-            if let SelectExpression::Aggregate(agg) = expr {
-                let (column, alias) = aggregate_column_and_alias(agg);
-                aggregates.push(AggregateComputation {
-                    function: agg.function.clone(),
-                    column,
-                    alias,
-                    distinct: agg.distinct,
-                });
-            }
+            // Issue #1763: handle both bare `COUNT(*)` and aliased
+            // `COUNT(*) AS total`. The output name (`alias`) is derived by the
+            // SINGLE shared source `aggregate_output_name`, so the row value key
+            // emitted by `finalize_group` can never diverge from the result
+            // metadata column name built by `get_result_columns`.
+            let Some((agg, alias)) = unwrap_aggregate(expr).zip(aggregate_output_name(expr)) else {
+                continue;
+            };
+            let (column, _) = aggregate_column_and_alias(agg);
+            aggregates.push(AggregateComputation {
+                function: agg.function.clone(),
+                column,
+                alias,
+                distinct: agg.distinct,
+            });
         }
     }
 
     AggregationPlan {
         group_by_columns,
+        group_by_output_names,
         aggregates,
-    }
-}
-
-/// Resolve `(column, alias)` for an aggregate. `COUNT(*)` and any aggregate
-/// referencing `*` yields `("*", "Func(*)")`; a single named column yields
-/// `(name, "Func_name")`; anything else falls back to `("*", "Func")`.
-fn aggregate_column_and_alias(agg: &AggregateFunction) -> (String, String) {
-    let references_star = agg.args.is_empty()
-        || agg
-            .args
-            .iter()
-            .any(|arg| matches!(arg, SelectExpression::Column(c) if c.column == "*"));
-
-    if references_star {
-        return ("*".to_string(), format!("{:?}(*)", agg.function));
-    }
-
-    match agg.args.first().and_then(extract_column_name) {
-        Some(col_name) => {
-            let alias = format!("{:?}_{}", agg.function, col_name);
-            (col_name, alias)
-        }
-        None => ("*".to_string(), format!("{:?}", agg.function)),
     }
 }
 

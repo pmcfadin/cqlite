@@ -249,9 +249,14 @@ pub(super) fn finalize_group(
     let mut row_values: HashMap<std::sync::Arc<str>, Value> =
         HashMap::with_capacity(agg_plan.group_by_columns.len() + agg_plan.aggregates.len());
 
-    for (i, col) in agg_plan.group_by_columns.iter().enumerate() {
+    // Issue #1763: emit each grouped dimension under its SELECT OUTPUT name
+    // (alias when present, else the column name) — the SAME `select_naming` source
+    // that names the result metadata column — so the grouped dimension's row value
+    // key can never diverge from its metadata name. The group KEY was read by the
+    // raw stored column (`build_group_key`); only the emitted key differs.
+    for (i, out_name) in agg_plan.group_by_output_names.iter().enumerate() {
         if let Some(v) = group_key.get(i) {
-            row_values.insert(col.as_str().into(), v.clone());
+            row_values.insert(out_name.as_str().into(), v.clone());
         }
     }
 
@@ -287,6 +292,7 @@ mod tests {
     fn count_star_plan() -> AggregationPlan {
         AggregationPlan {
             group_by_columns: vec!["g".to_string()],
+            group_by_output_names: vec!["g".to_string()],
             aggregates: vec![AggregateComputation {
                 function: AggregateType::Count,
                 column: "*".to_string(),

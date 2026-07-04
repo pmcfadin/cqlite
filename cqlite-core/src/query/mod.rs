@@ -34,6 +34,8 @@ pub mod select_executor;
 #[cfg(feature = "state_machine")]
 pub mod select_integration_tests;
 #[cfg(feature = "state_machine")]
+pub mod select_naming;
+#[cfg(feature = "state_machine")]
 pub mod select_optimizer;
 #[cfg(feature = "state_machine")]
 pub mod select_parser;
