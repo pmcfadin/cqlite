@@ -573,8 +573,12 @@ classify_scoped_plan() {
 # ALLOW only what run_delta's components EXECUTE (roborev job 1452): a class that
 # classifies ALLOW but that file-size/fmt/scoped-tests never run would produce a
 # PASS DELTA block for an untested change. Therefore:
-#   * rust cargo test code — `.rs` under any `tests/` directory + `*_test(s).rs`
-#     anywhere (the scoped-tests cargo scoper compiles/runs these);
+#   * rust cargo test code — TOP-LEVEL `.rs` under a `tests/` directory +
+#     `*_test(s).rs` anywhere (the scoped-tests cargo scoper compiles/runs these).
+#     NESTED rust helper mods under a tests/ dir (e.g. tests/parity_bundle/mod.rs)
+#     are REFUSED: they are not Cargo integration-test *targets* (run_scoped_tests
+#     runs the package `--lib` plus top-level `tests/<name>.rs` targets, never a
+#     nested helper mod), so certifying one would be a wiring-evidence gap;
 #   * python binding tests — `bindings/python/tests/*` (the #1893 python tier
 #     executes the whole not-slow pytest suite for a cqlite-py-owned diff);
 #   * docs — `*.md` anywhere; TOP-LEVEL-anchored `docs/*` and `website/*` only
@@ -592,9 +596,18 @@ _delta_is_allowed_path() {
     *.md) return 0 ;;
     docs/*) return 0 ;;
     website/*) return 0 ;;
-    # python binding tests — executed by the #1893 python tier
+    # python binding tests — executed by the #1893 python tier (must stay ABOVE the
+    # nested-rust-refuse rule: the python tier runs the whole pytest suite, so
+    # nested python test files are fine).
     bindings/python/tests/*) return 0 ;;
-    # rust cargo test code — executed/compiled by the scoped-tests cargo scoper
+    # NESTED rust helper mods under a tests/ dir are REFUSED (roborev job 3323):
+    # they are not Cargo integration-test *targets*, so scoped-tests never
+    # compiles/runs them. Must come BEFORE the top-level tests/*.rs allows below
+    # (first matching case wins).
+    tests/*/*.rs) return 1 ;;
+    */tests/*/*.rs) return 1 ;;
+    # rust cargo test code — TOP-LEVEL cargo test targets, executed/compiled by the
+    # scoped-tests cargo scoper.
     tests/*.rs) return 0 ;;
     */tests/*.rs) return 0 ;;
     *_test.rs|*_tests.rs) return 0 ;;
@@ -1846,13 +1859,16 @@ run_delta() {
   fi
   [ -n "$anchor_run_id" ] || anchor_run_id="(not provided)"
 
-  # Changed files anchor..HEAD (committed) plus the working tree. --diff-filter=d
-  # drops deletions (a deleted path cannot be classified against the tree and is
-  # never a production-file regression). Dedup, drop blanks.
+  # Changed files anchor..HEAD (committed) plus the working tree. Deletions ARE
+  # included (no --diff-filter=d) and classified by path via _delta_is_allowed_path:
+  # a deleted docs/test file stays allowed, but a deleted production file (script,
+  # workflow, Cargo.*, src, config) becomes offending and REFUSES the re-cert. This
+  # is required for the fail-closed guarantee — dropping deletions would let a
+  # production-file removal produce a green DELTA block. Dedup, drop blanks.
   local changed
   changed=$(printf '%s\n%s\n' \
-    "$(git diff --name-only --diff-filter=d "$anchor_sha" HEAD 2>/dev/null)" \
-    "$(git diff --name-only --diff-filter=d HEAD 2>/dev/null)" \
+    "$(git diff --name-only "$anchor_sha" HEAD 2>/dev/null)" \
+    "$(git diff --name-only HEAD 2>/dev/null)" \
     | awk 'NF && !seen[$0]++')
 
   # Partition into allowed (test/docs) and offending (everything else). FAIL-CLOSED.

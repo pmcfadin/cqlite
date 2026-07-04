@@ -118,6 +118,40 @@ assert_verdict "script-refuses"          REFUSE "scripts/agent-gate.sh"
 assert_verdict "workflow-refuses"        REFUSE ".github/workflows/gate.yml"
 assert_verdict "test-data-refuses"       REFUSE "test-data/schemas/basic-types.cql"
 
+# 5b. DELETIONS flow through the same PATH classifier (roborev job 3323): run_delta
+#     no longer drops deletions (--diff-filter=d removed), so a DELETED path is
+#     classified by path string exactly like an added/modified one. The classifier
+#     itself is path-only (it cannot see add-vs-delete) — which is the point: a
+#     deleted production file becomes offending and REFUSES, a deleted docs/test
+#     file stays allowed. These assert the classification the deletion path relies on.
+assert_verdict "deleted-script-refuses"    REFUSE "scripts/foo.sh"
+assert_verdict "deleted-workflow-refuses"  REFUSE ".github/workflows/x.yml"
+assert_verdict "deleted-src-refuses"       REFUSE "cqlite-core/src/lib.rs"
+assert_verdict "deleted-doc-allows"        ALLOW  "docs/x.md"
+assert_verdict "deleted-md-allows"         ALLOW  "some/nested/NOTES.md"
+
+# 5c. NESTED rust test-helper mods under a tests/ dir → REFUSE (roborev job 3323):
+#     they are not Cargo integration-test *targets* (run_scoped_tests runs the
+#     package --lib + top-level tests/<name>.rs targets, never a nested helper
+#     mod), so certifying one would be a wiring-evidence gap. A TOP-LEVEL
+#     integration-test target under the same tests/ dir stays ALLOWED.
+assert_verdict "nested-helper-mod-refuses" REFUSE "cqlite-core/tests/parity_bundle/mod.rs"
+assert_verdict "nested-helper-deep-refuses" REFUSE "foo/tests/sub/helper.rs"
+assert_verdict "top-level-tests-anchored-refuses" REFUSE "tests/util/helper.rs"
+assert_verdict "top-level-integration-target-allows" ALLOW "cqlite-core/tests/parity_test.rs"
+assert_verdict "top-level-integration-anchored-allows" ALLOW "tests/roundtrip.rs"
+# Per-file check: in a mixed nested-helper + top-level-target diff, the nested
+# helper is the one marked REFUSE while the top-level target stays ALLOW.
+nested_out=$(printf '%s\n' "cqlite-core/tests/parity_bundle/mod.rs" "cqlite-core/tests/parity_test.rs" \
+  | bash "$GATE" --delta-classify 2>/dev/null)
+if printf '%s\n' "$nested_out" | grep -qxF "REFUSE cqlite-core/tests/parity_bundle/mod.rs" \
+   && printf '%s\n' "$nested_out" | grep -qxF "ALLOW cqlite-core/tests/parity_test.rs"; then
+  ok "nested-vs-target: nested helper REFUSE, top-level target ALLOW"
+else
+  bad "nested-vs-target: per-file classification wrong"
+  echo "------- classify output -------"; printf '%s\n' "$nested_out"; echo "-------------------------------"
+fi
+
 # 6. DELTA summary emission + marker distinctness. `--delta <anchor>
 #    --emit-summary-selftest` drives the DELTA block through the real emission
 #    path (no components). It must carry the DISTINCT delta markers + a MODE:
