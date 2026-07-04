@@ -81,8 +81,16 @@ onto its own branch). Rules, non-negotiable:
    3. **Conditional review-first**: before the first FULL gate, spawn `rust-reviewer` (model: opus) when the
       diff changes a `pub` item, touches >1 call site of a changed symbol, or adds a new surface; address
       findings and re-run `--lite`. Skip this for mechanical/localized diffs.
-   4. Run the FULL `scripts/agent-gate.sh` EXACTLY ONCE; it must PASS — that `==== AGENT-GATE SUMMARY ====`
-      block is the only run that counts. **`--lite` NEVER replaces it.**
+   4. **YOU (the worker/orchestrator) run the FULL `scripts/agent-gate.sh` EXACTLY ONCE** — NOT the
+      implementer subagent. **Division of labor (issue #1855):** the `sstable-developer` subagent edits +
+      commits + pushes and verifies with `--lite`/targeted tests ONLY; it MUST NEVER invoke the full gate.
+      A subagent idle-waiting on a 12-20 min gate gets killed by the 600s stall watchdog and takes its child
+      gate process down with it (3 implementers lost this way 2026-07-03/04). It must PASS — that
+      `==== AGENT-GATE SUMMARY ====` block is the only run that counts. **`--lite` NEVER replaces it.**
+      **Queued gate ≠ hung gate:** under load the full gate may **queue for a #1825 slot** (prints
+      `waiting for gate slot (N in use)…` once) then run 15-20 min — use a long Bash `timeout` or
+      `run_in_background`, and check for that line before assuming a hang (the default 2-min timeout truncates
+      a queued gate). If you must watch it, `grep` the summary file at <5-min intervals — never a silent wait.
    5. Spawn `spec-auditor` for **C** PASS (it audits the impl against `openspec/changes/<slug>/specs/**`);
       run roborev (`--agent claude-code --model opus`) to clean. If a roborev round drives a code change,
       iterate on `--lite`, then re-run the FULL gate once before merge.
