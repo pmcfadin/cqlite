@@ -124,6 +124,22 @@ for the render + reaper.
   surface the auth failure and STOP; do NOT dispatch from `status:*` labels (they are decorative and go
   stale). You MAY render a read-only label view for status, but no claim/selection without the board.
 
+## Pipelining independent lanes (don't serialize on waits, retro #1889)
+
+Long waits (full gate 15-25 min, CI, roborev round-trips) are the real cost — never idle on them. Pipeline
+near-independent issues instead of running one to done before starting the next:
+
+- **(a) Overlap the middle.** While one lane's full gate / CI / roborev runs, launch or advance other
+  independent lanes (different files/surfaces) — implementation + review stages overlap freely.
+- **(b) Arm merge-on-green per PR, then move on.** Do NOT block the queue on each PR's CI; arm merge-on-green
+  and advance to the next lane. The PR lands when green (see Autonomy).
+- **(c) Full gates run serially.** Different lanes' full gates are run one-at-a-time by you (respect the
+  #1825 cap + measured ~2-gate contention); only the full-gate step serializes — the rest overlaps.
+- **(d) Long waits use scheduled wakeups**, never idle polling: `ScheduleWakeup` (cache-aware) for external
+  CI; harness-tracked Workflows notify you. Poll a queued gate's summary file with a cheap `grep` at
+  <5-min intervals if you must watch — never a silent wait (a **queued gate ≠ hung gate**: under load it
+  first prints `waiting for gate slot (N in use)…`).
+
 ## State model
 
 - **Backlog = the claim board (GitHub Project) is the source of truth (Path A, #1886).** Exactly one

@@ -75,13 +75,21 @@ OpenSpec change `<slug>` (design-driven only).
    `rust-reviewer` pass (explicit `model: opus`) now and address its findings — this catches structural
    findings before a 12-25 min full-gate cycle is spent. **Skip this step** for mechanical/localized diffs.
    Re-run `scripts/agent-gate.sh --lite` after any review-driven change.
-6. **Gate (correctness) — run the FULL `scripts/agent-gate.sh` EXACTLY ONCE before merge.** After the
-   fix-round loop converges (and step 5, if applicable), run the FULL gate in the worktree; it must be
-   PASS. **`--lite` NEVER replaces this** — the full `==== AGENT-GATE SUMMARY ====` block is the ONLY run
-   that counts. Loop shape: `implement → lite (each round) → conditional review-first → lite → FULL gate
-   ONCE → roborev → CI → merge`. Paste the
-   AGENT-GATE SUMMARY block. A known-flaky lane (e.g. `test_flush_throughput`, py3.9) that passes on
-   re-run is not a failure — note it.
+6. **Gate (correctness) — YOU (the lead) run the FULL `scripts/agent-gate.sh` EXACTLY ONCE before merge.**
+   **Division of labor (issue #1855):** the implementer subagent's job ends at commit + push + report with
+   `--lite`/targeted-test evidence — it MUST NEVER invoke the full gate. The LEAD runs the full gate and
+   roborev, because a subagent idle-waiting on a 12-20 min gate gets killed by the 600s stall watchdog and
+   the dying agent takes its child gate process down with it (3 implementers lost this way 2026-07-03/04).
+   After the fix-round loop converges (and step 5, if applicable), run the FULL gate in the worktree; it
+   must be PASS. **`--lite` NEVER replaces this** — the full `==== AGENT-GATE SUMMARY ====` block is the
+   ONLY run that counts. Loop shape: `implement → lite (each round) → conditional review-first → lite →
+   FULL gate ONCE → roborev → CI → merge`. Paste the AGENT-GATE SUMMARY block. A known-flaky lane (e.g.
+   `test_flush_throughput`, py3.9) that passes on re-run is not a failure — note it.
+   - **Queued gate ≠ hung gate.** Under load the full gate may **queue for a #1825 slot** (prints
+     `waiting for gate slot (N in use)…` once) then run 15-20 min — total wall time can exceed 20 min. Use a
+     long Bash `timeout` or `run_in_background`; check for that `waiting for gate slot` line before assuming a
+     hang. The default 2-min Bash timeout truncates a queued gate. If you must watch it, poll the summary
+     file with a cheap `grep` at <5-min intervals — never a silent wait.
    - **Gate PASS ≠ CI green** (L2, flow-meta #1310). The local gate does NOT run every CI lane (it uses
      pre-existing datasets and a subset of `--test` targets). When the change touches a **regenerate path,
      a fixture parser, or a fail-closed CI guard**, reproduce the **actual CI lane** locally before relying
@@ -110,6 +118,11 @@ OpenSpec change `<slug>` (design-driven only).
    # run the flow-board detection snippet first (switches to the project-capable account), then
    # gh project item-edit ... Status=In Review when have_project=1; else the label above + loud ⚠️ warning.
    ```
+   **GitHub API resilience:** `gh pr create` / `gh issue comment` ride the **GraphQL** bucket, which
+   throttles **separately** from REST (each 5k pts/hr, independent per-bucket windows). If GraphQL is
+   exhausted, fall back to `gh api` REST: PR create → `repos/OWNER/REPO/pulls`, comment →
+   `repos/OWNER/REPO/issues/N/comments`, merge → `repos/OWNER/REPO/pulls/N/merge`. Never stall a pipeline
+   step on a single exhausted bucket.
 10. **Terminal state — arm merge-on-green, then STOP.** The worker's terminal state for an issue is
    **PR-open + `agent-gate.sh` PASS + (design-driven) spec-auditor C PASS + roborev clean**. At that point
    you arm the merge-on-green mechanism and **end your turn** — there is no human merge click, and you do

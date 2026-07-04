@@ -96,5 +96,9 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    ```bash
    gh issue close <N> --reason completed --comment "Merged via #<pr> (<commit>). <one-line why>."
    ```
+   **GitHub API resilience:** `gh issue close`/`gh issue comment` ride the **GraphQL** bucket, which
+   throttles **separately** from REST (each 5k pts/hr, independent per-bucket windows). If GraphQL is
+   exhausted, fall back to `gh api` REST (comment → `repos/OWNER/REPO/issues/N/comments`,
+   close → `PATCH repos/OWNER/REPO/issues/N -f state=closed`). Never stall finalize on one exhausted bucket.
 8. **Report** the closed issue, the live capability (if a spec was synced), and surface the next board
    item.

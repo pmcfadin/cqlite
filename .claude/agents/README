@@ -1,29 +1,32 @@
 # CQLite Subagents
 
-Focused subagents for CQLite development. These are automatically invoked by Claude when relevant.
+Focused subagents for CQLite development. Each `.md` file here is one agent (its frontmatter has the
+canonical `description`). **Pass an explicit `model` on spawn** — the pinned frontmatter model may be
+inaccessible.
 
 ## Available Agents
 
-| Agent | Model | Purpose |
-|-------|-------|---------|
-| `sstable-developer` | sonnet | SSTable parsing, binary format debugging, Cassandra 5 compatibility |
-| `rust-reviewer` | sonnet | Code review, quality standards enforcement |
-| `test-validator` | haiku | Test execution, sstabledump validation, failure investigation |
+| Agent | Purpose |
+|-------|---------|
+| `flow-lead` | Delivery lead/PM — drives the flow-* pipeline, sequences the specialists, never writes production code |
+| `sstable-developer` | SSTable parsing/implementation, binary-format debugging, Cassandra 5 compatibility |
+| `rust-reviewer` | Read-only Rust code review (Read/Glob/Grep), quality-standards enforcement |
+| `test-validator` | Test execution, sstabledump parity, failure investigation |
+| `spec-auditor` | Intent audit (C) — implementation vs OpenSpec change / issue acceptance criteria |
+| `coverage-reviewer` | Test-quality review — whether tests are meaningful, not merely present |
+| `compaction-parity-auditor` | Byte-for-byte write/compaction parity gap audit vs Apache Cassandra |
 
 ## Usage
 
-Agents are invoked automatically based on task context. You can also explicitly request them:
-
-- "Use the sstable-developer agent to debug this parsing issue"
-- "Have the rust-reviewer check this PR"
-- "Run test-validator to check current pass rate"
+Invoked automatically by task context, or explicitly ("use the sstable-developer agent to…"). Specialists
+are sequenced by the lead via the `flow-*` pipeline (`docs/development/pm-operating-loop.md`).
 
 ## Related Skills
 
-Skills in `.claude/skills/` provide domain knowledge that's auto-loaded:
+Skills in `.claude/skills/` provide domain knowledge (auto-loaded) and pipeline verbs:
 
-- `sstable-parsing` - Format specifications, debugging techniques
-- `cql-type-system` - CQL type deserialization
-- `rust-patterns` - Rust-specific patterns for this codebase
-- `ci-cd-validation` - Pre-push validation checklist
-- `test-data-management` - Working with test SSTables
+- `sstable-parsing` · `cql-type-system` · `rust-patterns` · `rust-skills` — domain knowledge
+- `ci-cd-validation` — tiered gate loop + merge-on-green
+- `test-data-management` — working with test SSTables
+- `flow-groom` / `flow-activate` / `flow-implement` / `flow-address` / `flow-finalize` / `flow-board` —
+  the delivery pipeline (`start-epic`/`pm-status` are deprecated pointers → flow-*)

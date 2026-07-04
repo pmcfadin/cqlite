@@ -49,16 +49,26 @@ Skills in `.claude/skills/` activate automatically when relevant:
 | `ci-cd-validation` | Pre-push checks, CI requirements |
 | `test-data-management` | Test SSTable generation, validation |
 | `rust-skills` | General idiomatic Rust (265 rules: ownership, errors, async, API design, anti-patterns); invoke with `/rust-skills` |
+| `ci-cd-validation` | Tiered gate loop (lite iterate, full once), CI monitoring, merge-on-green |
+
+**Delivery pipeline skills** (in `.claude/skills/`): `flow-groom` → `flow-activate` → `flow-implement` →
+`flow-address` → `flow-finalize`, plus `flow-board` (claim board + next thing). See
+`docs/development/pm-operating-loop.md`. (`start-epic`/`pm-status` are deprecated pointers → flow-*.)
 
 ## Available Subagents
 
-Subagents in `.claude/agents/` for specialized tasks:
+Subagents in `.claude/agents/` for specialized tasks (pass an explicit `model` on spawn — the pinned
+frontmatter model may be inaccessible):
 
-| Agent | Model | Purpose |
-|-------|-------|---------|
-| `sstable-developer` | sonnet | SSTable implementation, format debugging |
-| `rust-reviewer` | sonnet | Code review, quality enforcement |
-| `test-validator` | haiku | Test execution, sstabledump parity |
+| Agent | Purpose |
+|-------|---------|
+| `flow-lead` | Delivery lead/PM — drives the flow-* pipeline, sequences the specialists |
+| `sstable-developer` | SSTable implementation, format debugging |
+| `rust-reviewer` | Read-only Rust code review, quality enforcement |
+| `test-validator` | Test execution, sstabledump parity, failure triage |
+| `spec-auditor` | Intent audit (C) — impl vs OpenSpec/issue acceptance criteria |
+| `coverage-reviewer` | Test-quality review (meaningful, not just present) |
+| `compaction-parity-auditor` | Write/compaction byte-parity gap audit vs Cassandra |
 
 ## Essential Commands
 
