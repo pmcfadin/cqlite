@@ -138,10 +138,10 @@ fn test_admission_and_accounting_agree() {
     assert_eq!(engine.memtable_row_count(), 1);
 }
 
-/// A deeply nested (> MAX_NESTING_DEPTH) value must be estimated large enough to
-/// trip the hard-limit gate rather than counted as the old flat ~1KB. A
-/// 500-element list parked at the depth cap estimates in the hundreds of KB, so
-/// it exceeds a 64KB hard limit and is rejected.
+/// A deeply nested value carrying a genuinely large payload must trip the
+/// hard-limit gate. The iterative estimator (issue #1625) counts REAL bytes at
+/// every depth (no floor scaling), so a deep list of 500 × 200-byte strings
+/// (~100KB) is estimated accurately and exceeds a 64KB hard limit.
 #[test]
 fn test_deeply_nested_mutation_trips_gate() {
     let temp_dir = TempDir::new().unwrap();
@@ -156,8 +156,9 @@ fn test_deeply_nested_mutation_trips_gate() {
 
     let mut engine = WriteEngine::new(config).unwrap();
 
-    // 32 single-element wrapper lists with a wide list at the depth cap.
-    let mut nested = Value::List((0..500).map(Value::Integer).collect());
+    // 32 single-element wrapper lists around a wide list of 500 × 200-byte
+    // strings (~100KB of real payload).
+    let mut nested = Value::List((0..500).map(|_| Value::Text("y".repeat(200))).collect());
     for _ in 0..32 {
         nested = Value::List(vec![nested]);
     }
@@ -169,6 +170,13 @@ fn test_deeply_nested_mutation_trips_gate() {
     }];
     let mutation = Mutation::new(table_id, pk, None, ops, 1_000_000, None);
 
+    // ~100KB of real payload (500 * 200), accurately estimated (not a floor).
+    let estimate = engine.memtable.estimate_mutation_size(&mutation);
+    assert!(
+        estimate >= 500 * 200,
+        "estimate must reflect ~100KB of real payload, got {estimate}"
+    );
+
     let err = engine.write(mutation).unwrap_err();
     assert!(
         matches!(err, Error::Storage(ref m) if m.contains("hard limit")),
@@ -178,11 +186,11 @@ fn test_deeply_nested_mutation_trips_gate() {
 }
 
 /// A deep NARROW collection wrapping a LARGE direct scalar must also trip the
-/// gate (issue #1625 roborev finding). Pre-fix, the depth-cap estimator scaled a
-/// collection by element COUNT × 1024, so `List([Text(128KB)])` parked at the cap
-/// was counted as ~1KB and passed a 64KB hard limit while retaining 128KB. The
-/// shallow per-child estimate now counts the large direct scalar at its real
-/// heap size, so the write is rejected.
+/// gate (issue #1625 roborev finding). Pre-fix, any node past the recursion
+/// depth cap collapsed to a ~1KB floor, so `List([Text(128KB)])` parked at the
+/// cap was counted as ~1KB and passed a 64KB hard limit while retaining 128KB.
+/// The iterative estimator counts the large scalar at its real heap size
+/// regardless of depth, so the write is rejected.
 #[test]
 fn test_deep_narrow_collection_with_large_scalar_trips_gate() {
     let temp_dir = TempDir::new().unwrap();
@@ -216,6 +224,150 @@ fn test_deep_narrow_collection_with_large_scalar_trips_gate() {
     assert!(
         matches!(err, Error::Storage(ref m) if m.contains("hard limit")),
         "deep narrow collection with a large scalar must trip the gate, got: {err:?}"
+    );
+    assert_eq!(engine.memtable_size(), 0);
+}
+
+/// Build a `WriteEngine` with a 64KB hard limit for the deep-scalar tests.
+fn engine_with_64k_limit() -> (TempDir, WriteEngine) {
+    let temp_dir = TempDir::new().unwrap();
+    let config = WriteEngineConfig::new(
+        temp_dir.path().join("data"),
+        temp_dir.path().join("wal"),
+        create_test_schema(),
+    )
+    .with_flush_threshold(1024 * 1024)
+    .with_hard_limit(64 * 1024) // 64KB
+    .with_durability(Durability::Disabled);
+    let engine = WriteEngine::new(config).unwrap();
+    (temp_dir, engine)
+}
+
+/// Wrap a value in `levels` single-element lists.
+fn wrap_in_lists(mut inner: Value, levels: usize) -> Value {
+    for _ in 0..levels {
+        inner = Value::List(vec![inner]);
+    }
+    inner
+}
+
+fn mutation_with_value(value: Value) -> Mutation {
+    let table_id = TableId::new("test_ks", "test_table");
+    let pk = PartitionKey::single("id", Value::Integer(1));
+    let ops = vec![CellOperation::Write {
+        column: "name".to_string(),
+        value,
+    }];
+    Mutation::new(table_id, pk, None, ops, 1_000_000, None)
+}
+
+/// A large scalar buried a FEW levels deep (`List([List([Text(128KB)])])`,
+/// 2 levels) must be estimated at its REAL heap size — not the old ~1KB
+/// depth-cap floor — and REJECTED against a 64KB hard limit. The iterative
+/// estimator has no depth cap, so no wrapping level can hide the scalar
+/// (issue #1625, 3rd iteration).
+#[test]
+fn test_large_scalar_two_levels_deep_rejected() {
+    let (_tmp, mut engine) = engine_with_64k_limit();
+
+    // List([List([Text(128KB)])]).
+    let value = wrap_in_lists(Value::List(vec![Value::Text("x".repeat(128 * 1024))]), 1);
+    let mutation = mutation_with_value(value);
+
+    // Estimate must be ~128KB (real size), NOT the ~1KB floor.
+    let estimate = engine.memtable.estimate_mutation_size(&mutation);
+    assert!(
+        estimate >= 128 * 1024,
+        "estimate must reflect the buried 128KB scalar, got {estimate}"
+    );
+
+    let err = engine.write(mutation).unwrap_err();
+    assert!(
+        matches!(err, Error::Storage(ref m) if m.contains("hard limit")),
+        "2-level-buried large scalar must trip the gate, got: {err:?}"
+    );
+    assert_eq!(engine.memtable_size(), 0);
+}
+
+/// The same bypass at 3+ levels: `List([List([List([Text(128KB)])])])`.
+/// Pre-fix this reached the depth cap far enough down that the child collapsed
+/// to the ~1KB floor and admission ADMITTED it; the iterative estimator counts
+/// the real size and REJECTS it (issue #1625).
+#[test]
+fn test_large_scalar_three_levels_deep_rejected() {
+    let (_tmp, mut engine) = engine_with_64k_limit();
+
+    // List([List([List([Text(128KB)])])]).
+    let value = wrap_in_lists(Value::List(vec![Value::Text("x".repeat(128 * 1024))]), 2);
+    let mutation = mutation_with_value(value);
+
+    let estimate = engine.memtable.estimate_mutation_size(&mutation);
+    assert!(
+        estimate >= 128 * 1024,
+        "estimate must reflect the buried 128KB scalar, got {estimate}"
+    );
+
+    let err = engine.write(mutation).unwrap_err();
+    assert!(
+        matches!(err, Error::Storage(ref m) if m.contains("hard limit")),
+        "3-level-buried large scalar must trip the gate, got: {err:?}"
+    );
+    assert_eq!(engine.memtable_size(), 0);
+}
+
+/// A large scalar buried BELOW where the old 32-level depth cap sat (33 wrapper
+/// lists, so the innermost `Text(128KB)` is at depth 34) must still be counted
+/// at its real size and rejected. Pre-fix, any node past depth 32 collapsed to
+/// the shallow floor and this slipped past admission (issue #1625).
+#[test]
+fn test_large_scalar_below_old_depth_cap_rejected() {
+    let (_tmp, mut engine) = engine_with_64k_limit();
+
+    // 33 wrapper lists around Text(128KB): innermost scalar is well past the
+    // old MAX_NESTING_DEPTH (32).
+    let value = wrap_in_lists(Value::Text("x".repeat(128 * 1024)), 33);
+    let mutation = mutation_with_value(value);
+
+    let estimate = engine.memtable.estimate_mutation_size(&mutation);
+    assert!(
+        estimate >= 128 * 1024,
+        "estimate must reflect the 128KB scalar below the old cap, got {estimate}"
+    );
+
+    let err = engine.write(mutation).unwrap_err();
+    assert!(
+        matches!(err, Error::Storage(ref m) if m.contains("hard limit")),
+        "scalar below old depth cap must trip the gate, got: {err:?}"
+    );
+    assert_eq!(engine.memtable_size(), 0);
+}
+
+/// A pathological WIDE value that exceeds `MAX_ESTIMATE_NODES` (1_000_000) must
+/// fail CLOSED: the bounded iterative estimator stops at the node cap and
+/// returns `usize::MAX`, so the mutation is REJECTED — without stack overflow,
+/// arithmetic overflow, or hang. Construction is a single flat allocation so the
+/// test runs fast (issue #1625 DoS guard).
+#[test]
+fn test_pathological_node_cap_fails_closed() {
+    let (_tmp, mut engine) = engine_with_64k_limit();
+
+    // A flat list of 1_000_001 small integers: outer node + 1_000_001 children
+    // = 1_000_002 visited > MAX_ESTIMATE_NODES (1_000_000) → fail closed.
+    let value = Value::List((0..1_000_001i32).map(Value::Integer).collect());
+    let mutation = mutation_with_value(value);
+
+    // Estimator saturates to usize::MAX (fail-closed), never a small under-count.
+    let estimate = engine.memtable.estimate_mutation_size(&mutation);
+    assert_eq!(
+        estimate,
+        usize::MAX,
+        "hitting the node cap must fail closed with usize::MAX"
+    );
+
+    let err = engine.write(mutation).unwrap_err();
+    assert!(
+        matches!(err, Error::Storage(ref m) if m.contains("hard limit")),
+        "node-cap fail-closed value must be rejected, got: {err:?}"
     );
     assert_eq!(engine.memtable_size(), 0);
 }

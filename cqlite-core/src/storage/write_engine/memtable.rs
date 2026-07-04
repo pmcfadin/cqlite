@@ -131,20 +131,19 @@ impl Memtable {
         // Keep created_at unchanged - represents original creation time
     }
 
-    /// Maximum nesting depth for collection size estimation (prevents stack overflow)
-    const MAX_NESTING_DEPTH: usize = 32;
-
-    /// Conservative per-element byte FLOOR used when the recursion depth cap is
-    /// reached (issue #1625). The cap prevents stack overflow on pathological
-    /// nesting, but the original flat `1024`-per-value fallback systematically
-    /// UNDER-counted collections sitting at the depth boundary, letting an
-    /// over-budget mutation slip past admission. At the cap the estimator now
-    /// sums a SHALLOW per-direct-child estimate: a large direct scalar counts its
-    /// real heap size, while every element (and any nested-collection child we do
-    /// not recurse into) contributes at least this floor. That closes both the
-    /// wide-collection and the deep-narrow-wrapping-a-large-scalar undercounts
-    /// while staying non-recursive (stack-safe).
-    const DEEP_ELEMENT_ESTIMATE: usize = 1024;
+    /// Upper bound on the number of value nodes the ITERATIVE size estimator
+    /// visits before it fails closed (issue #1625).
+    ///
+    /// The estimator walks a value with an explicit heap worklist (no recursion,
+    /// so no stack-overflow risk and no depth cap collapsing deep children to a
+    /// floor). To bound worst-case work on a pathologically huge/deep value, the
+    /// traversal stops after visiting this many nodes and returns a
+    /// CONSERVATIVE-LARGE estimate (`usize::MAX`) that is GUARANTEED to exceed any
+    /// hard limit, so admission REJECTS the value rather than under-counting it.
+    /// Failing closed on the pathological case is the correct behavior for a DoS
+    /// guard. `1_000_000` is far beyond any legitimate mutation's node count yet
+    /// keeps the traversal cheap.
+    const MAX_ESTIMATE_NODES: usize = 1_000_000;
 
     /// Estimate the number of bytes a mutation would add to this memtable.
     ///
@@ -164,218 +163,120 @@ impl Memtable {
     /// - Clustering key size (if present)
     /// - Cell operation sizes (column names + values)
     fn mutation_size(mutation: &Mutation) -> usize {
-        let mut size = 48; // Base struct overhead
+        // Base struct overhead. All accumulation uses `saturating_add` because
+        // `estimate_value_size` may return `usize::MAX` (fail-closed) for a
+        // pathological value (issue #1625); a plain `+` would panic under debug
+        // overflow checks.
+        let mut size: usize = 48;
 
         // Partition key size
         for (col_name, value) in &mutation.partition_key.columns {
-            size += col_name.len();
-            size += Self::estimate_value_size_with_depth(value, 0);
+            size = size.saturating_add(col_name.len());
+            size = size.saturating_add(Self::estimate_value_size(value));
         }
 
         // Clustering key size
         if let Some(ref clustering_key) = mutation.clustering_key {
             for (col_name, value) in &clustering_key.columns {
-                size += col_name.len();
-                size += Self::estimate_value_size_with_depth(value, 0);
+                size = size.saturating_add(col_name.len());
+                size = size.saturating_add(Self::estimate_value_size(value));
             }
         }
 
         // Cell operations
         for op in &mutation.operations {
-            size += Self::estimate_operation_size(op);
+            size = size.saturating_add(Self::estimate_operation_size(op));
         }
 
         size
     }
 
-    /// Estimate the size of a CQL value in bytes
+    /// Estimate the size in bytes a CQL value would add to the memtable.
+    ///
+    /// Implemented as a BOUNDED ITERATIVE traversal (issue #1625): an explicit
+    /// heap-allocated worklist of `&Value` replaces the previous recursive
+    /// estimator. Because traversal state lives on the heap there is NO
+    /// stack-overflow risk, so there is NO depth cap and therefore NO collapsing
+    /// of deeply nested children to a conservative floor — a large scalar buried
+    /// arbitrarily deep (e.g. `List([List([List([Text(128KB)])])])`) is counted
+    /// at its real heap size, closing the hard-limit bypass.
+    ///
+    /// Scalars contribute their real heap size (`Text`/`Blob`/`Varint`/`Inet`/
+    /// `Json`/`Decimal` byte length; fixed widths otherwise). Collections, maps,
+    /// UDTs, tuples and frozen values contribute their per-container overhead and
+    /// push their children (maps push keys AND values; UDTs count field names and
+    /// push field values) onto the worklist.
+    ///
+    /// To bound worst-case work on a pathologically huge/deep value, traversal
+    /// stops after visiting [`MAX_ESTIMATE_NODES`](Self::MAX_ESTIMATE_NODES) and
+    /// FAILS CLOSED, returning `usize::MAX` so admission REJECTS the value rather
+    /// than under-counting it. All accumulation uses `saturating_add`, so the
+    /// estimate can never wrap around a small value.
     fn estimate_value_size(value: &crate::types::Value) -> usize {
-        Self::estimate_value_size_with_depth(value, 0)
-    }
-
-    /// Estimate the size of a CQL value in bytes with depth tracking
-    ///
-    /// Limits recursion depth to prevent stack overflow from deeply nested collections.
-    /// When max depth is reached, returns a conservative fixed estimate.
-    fn estimate_value_size_with_depth(value: &crate::types::Value, depth: usize) -> usize {
         use crate::types::Value;
 
-        // Prevent excessive recursion for deeply nested structures (stack-safety
-        // cap — MUST stay). Instead of a flat, systematically under-counting
-        // `1024` fallback (issue #1625), estimate the value's size WITHOUT
-        // recursing further: exact byte length for cheap-to-measure scalars, and
-        // an element-count-scaled conservative floor for collections so a wide
-        // collection parked at the depth boundary is not counted as ~1KB.
-        if depth >= Self::MAX_NESTING_DEPTH {
-            return Self::estimate_value_size_at_cap(value);
+        let mut total: usize = 0;
+        let mut visited: usize = 0;
+        // Explicit heap worklist of borrowed values still to be measured.
+        let mut worklist: Vec<&Value> = vec![value];
+
+        while let Some(v) = worklist.pop() {
+            visited += 1;
+            if visited > Self::MAX_ESTIMATE_NODES {
+                // Pathological value: fail closed so admission rejects it.
+                return usize::MAX;
+            }
+
+            match v {
+                Value::Null => {}
+                Value::Boolean(_) | Value::TinyInt(_) => total = total.saturating_add(1),
+                Value::SmallInt(_) => total = total.saturating_add(2),
+                Value::Integer(_) | Value::Float32(_) | Value::Date(_) => {
+                    total = total.saturating_add(4)
+                }
+                Value::BigInt(_)
+                | Value::Counter(_)
+                | Value::Timestamp(_)
+                | Value::Time(_)
+                | Value::Float(_) => total = total.saturating_add(8),
+                Value::Uuid(_) | Value::Duration { .. } => total = total.saturating_add(16),
+                Value::Text(s) => total = total.saturating_add(s.len()),
+                Value::Blob(bytes) | Value::Varint(bytes) | Value::Inet(bytes) => {
+                    total = total.saturating_add(bytes.len())
+                }
+                Value::Decimal { scale: _, unscaled } => {
+                    total = total.saturating_add(4).saturating_add(unscaled.len())
+                }
+                Value::Json(json) => total = total.saturating_add(json.to_string().len()),
+                Value::Tombstone(_) => total = total.saturating_add(24),
+                Value::List(items) | Value::Set(items) | Value::Tuple(items) => {
+                    total = total.saturating_add(16);
+                    worklist.extend(items.iter());
+                }
+                Value::Map(entries) => {
+                    total = total.saturating_add(16);
+                    for (k, val) in entries {
+                        worklist.push(k);
+                        worklist.push(val);
+                    }
+                }
+                Value::Udt(udt) => {
+                    total = total.saturating_add(16);
+                    for field in &udt.fields {
+                        total = total.saturating_add(field.name.len());
+                        if let Some(fv) = field.value.as_ref() {
+                            worklist.push(fv);
+                        }
+                    }
+                }
+                Value::Frozen(inner) => {
+                    total = total.saturating_add(8);
+                    worklist.push(inner);
+                }
+            }
         }
 
-        match value {
-            Value::Null => 0,
-            Value::Boolean(_) => 1,
-            Value::TinyInt(_) => 1,
-            Value::SmallInt(_) => 2,
-            Value::Integer(_) => 4,
-            Value::BigInt(_) | Value::Counter(_) | Value::Timestamp(_) | Value::Time(_) => 8,
-            Value::Float32(_) => 4,
-            Value::Float(_) => 8,
-            Value::Text(s) => s.len(),
-            Value::Blob(bytes) | Value::Varint(bytes) | Value::Inet(bytes) => bytes.len(),
-            Value::Uuid(_) => 16,
-            Value::Date(_) => 4,
-            Value::Decimal { scale: _, unscaled } => 4 + unscaled.len(),
-            Value::Duration { .. } => 16,
-            Value::List(items) => {
-                items
-                    .iter()
-                    .map(|item| Self::estimate_value_size_with_depth(item, depth + 1))
-                    .sum::<usize>()
-                    + 16
-            }
-            Value::Set(items) => {
-                items
-                    .iter()
-                    .map(|item| Self::estimate_value_size_with_depth(item, depth + 1))
-                    .sum::<usize>()
-                    + 16
-            }
-            Value::Map(entries) => {
-                entries
-                    .iter()
-                    .map(|(k, v)| {
-                        Self::estimate_value_size_with_depth(k, depth + 1)
-                            + Self::estimate_value_size_with_depth(v, depth + 1)
-                    })
-                    .sum::<usize>()
-                    + 16
-            }
-            Value::Udt(udt) => {
-                udt.fields
-                    .iter()
-                    .map(|field| {
-                        field.name.len()
-                            + field
-                                .value
-                                .as_ref()
-                                .map_or(0, |v| Self::estimate_value_size_with_depth(v, depth + 1))
-                    })
-                    .sum::<usize>()
-                    + 16
-            }
-            Value::Tuple(items) => {
-                items
-                    .iter()
-                    .map(|item| Self::estimate_value_size_with_depth(item, depth + 1))
-                    .sum::<usize>()
-                    + 16
-            }
-            Value::Json(json) => json.to_string().len(),
-            Value::Frozen(inner) => Self::estimate_value_size_with_depth(inner, depth + 1) + 8,
-            Value::Tombstone(_) => 24, // timestamp + type + ttl overhead
-        }
-    }
-
-    /// Non-recursive size estimate used once the recursion depth cap is hit.
-    ///
-    /// Stack-safe (never recurses past DIRECT children): a scalar value at the
-    /// cap reports its exact byte length. A collection/map/UDT/tuple at the cap
-    /// sums a SHALLOW estimate of each direct child (see
-    /// [`shallow_child_estimate`](Self::shallow_child_estimate)) which counts a
-    /// large direct scalar child at its real heap size. This closes the
-    /// hard-limit bypass where a deep NARROW collection wrapping a large scalar
-    /// (e.g. 32 wrapper lists around `List([Text(128KB)])`) was estimated at the
-    /// old flat ~1KB and slipped past admission while retaining far more memory
-    /// (issue #1625). We still never recurse below direct children — a nested
-    /// collection child counts only the `DEEP_ELEMENT_ESTIMATE` floor — so the
-    /// depth cap stays a genuine stack-safety guard.
-    fn estimate_value_size_at_cap(value: &crate::types::Value) -> usize {
-        use crate::types::Value;
-
-        match value {
-            Value::Null => 0,
-            Value::Boolean(_) | Value::TinyInt(_) => 1,
-            Value::SmallInt(_) => 2,
-            Value::Integer(_) | Value::Float32(_) | Value::Date(_) => 4,
-            Value::BigInt(_)
-            | Value::Counter(_)
-            | Value::Timestamp(_)
-            | Value::Time(_)
-            | Value::Float(_) => 8,
-            Value::Uuid(_) | Value::Duration { .. } => 16,
-            Value::Text(s) => s.len(),
-            Value::Blob(bytes) | Value::Varint(bytes) | Value::Inet(bytes) => bytes.len(),
-            Value::Decimal { scale: _, unscaled } => 4 + unscaled.len(),
-            Value::Json(json) => json.to_string().len(),
-            Value::Tombstone(_) => 24,
-            // Collections: SHALLOW sum over DIRECT children, NON-recursive.
-            // Each direct scalar child contributes its real heap size (floored
-            // at DEEP_ELEMENT_ESTIMATE); each nested-collection child contributes
-            // only the floor (we intentionally do not recurse — stack safety).
-            Value::List(items) | Value::Set(items) | Value::Tuple(items) => items
-                .iter()
-                .map(Self::shallow_child_estimate)
-                .fold(0usize, usize::saturating_add)
-                .saturating_add(16),
-            Value::Map(entries) => entries
-                .iter()
-                .map(|(k, v)| {
-                    Self::shallow_child_estimate(k).saturating_add(Self::shallow_child_estimate(v))
-                })
-                .fold(0usize, usize::saturating_add)
-                .saturating_add(16),
-            Value::Udt(udt) => udt
-                .fields
-                .iter()
-                .map(|field| {
-                    field.name.len().saturating_add(
-                        field.value.as_ref().map_or(0, Self::shallow_child_estimate),
-                    )
-                })
-                .fold(0usize, usize::saturating_add)
-                .saturating_add(16),
-            Value::Frozen(inner) => Self::shallow_child_estimate(inner).saturating_add(8),
-        }
-    }
-
-    /// Shallow (NON-recursive) size estimate for a single DIRECT child of a
-    /// value parked at the recursion depth cap (issue #1625).
-    ///
-    /// A known scalar reports its real heap size (`Text`/`Blob`/`Json`/`Varint`/
-    /// `Inet`/`Decimal` byte length, fixed widths otherwise), floored at
-    /// `DEEP_ELEMENT_ESTIMATE` so every element still counts at least the
-    /// conservative floor. A nested collection/map/UDT/tuple/frozen child is NOT
-    /// recursed into — it contributes exactly the floor — which keeps the
-    /// estimator stack-safe while ensuring a large direct scalar is no longer
-    /// systematically under-counted.
-    fn shallow_child_estimate(value: &crate::types::Value) -> usize {
-        use crate::types::Value;
-
-        let floor = Self::DEEP_ELEMENT_ESTIMATE;
-        let scalar = match value {
-            Value::Null => 0,
-            Value::Boolean(_) | Value::TinyInt(_) => 1,
-            Value::SmallInt(_) => 2,
-            Value::Integer(_) | Value::Float32(_) | Value::Date(_) => 4,
-            Value::BigInt(_)
-            | Value::Counter(_)
-            | Value::Timestamp(_)
-            | Value::Time(_)
-            | Value::Float(_) => 8,
-            Value::Uuid(_) | Value::Duration { .. } => 16,
-            Value::Text(s) => s.len(),
-            Value::Blob(bytes) | Value::Varint(bytes) | Value::Inet(bytes) => bytes.len(),
-            Value::Decimal { scale: _, unscaled } => 4usize.saturating_add(unscaled.len()),
-            Value::Json(json) => json.to_string().len(),
-            Value::Tombstone(_) => 24,
-            // Nested collections: do NOT recurse (stack safety) — count the floor.
-            Value::List(_)
-            | Value::Set(_)
-            | Value::Tuple(_)
-            | Value::Map(_)
-            | Value::Udt(_)
-            | Value::Frozen(_) => 0,
-        };
-        scalar.max(floor)
+        total
     }
 
     /// Estimate the size of a cell operation
@@ -384,19 +285,25 @@ impl Memtable {
     ) -> usize {
         use crate::storage::write_engine::mutation::CellOperation;
 
+        // `saturating_add` throughout: `estimate_value_size` may return
+        // `usize::MAX` (fail-closed) for a pathological value (issue #1625).
         match op {
-            CellOperation::Write { column, value } => {
-                column.len() + Self::estimate_value_size(value) + 8 // +8 for overhead
-            }
+            CellOperation::Write { column, value } => column
+                .len()
+                .saturating_add(Self::estimate_value_size(value))
+                .saturating_add(8), // +8 for overhead
             CellOperation::WriteWithTtl {
                 column,
                 value,
                 ttl_seconds: _,
             } => {
                 // TTL cells: same as Write + 4 bytes for TTL + 4 bytes for local_deletion_time
-                column.len() + Self::estimate_value_size(value) + 16
+                column
+                    .len()
+                    .saturating_add(Self::estimate_value_size(value))
+                    .saturating_add(16)
             }
-            CellOperation::Delete { column, .. } => column.len() + 8,
+            CellOperation::Delete { column, .. } => column.len().saturating_add(8),
             CellOperation::DeleteRow => 8,
             // Epic #899: per-element complex ops. Each carries a column name,
             // the preserved cell path, an optional value, and temporal metadata.
@@ -405,13 +312,12 @@ impl Memtable {
                 cell_path,
                 value,
                 ..
-            } => {
-                column.len()
-                    + cell_path.len()
-                    + value.as_ref().map(Self::estimate_value_size).unwrap_or(0)
-                    + 16 // flags + ts/ldt/ttl deltas + length prefixes overhead
-            }
-            CellOperation::ComplexDeletion { column, .. } => column.len() + 16,
+            } => column
+                .len()
+                .saturating_add(cell_path.len())
+                .saturating_add(value.as_ref().map(Self::estimate_value_size).unwrap_or(0))
+                .saturating_add(16), // flags + ts/ldt/ttl deltas + length prefixes overhead
+            CellOperation::ComplexDeletion { column, .. } => column.len().saturating_add(16),
         }
     }
 
@@ -763,38 +669,36 @@ mod tests {
 
     #[test]
     fn test_memtable_nested_collection_depth_limit() {
-        // Create a deeply nested list structure (40 levels deep)
+        // Issue #1625: a deeply nested list wrapping a tiny scalar is handled by
+        // the ITERATIVE estimator without stack overflow and counted ACCURATELY
+        // (no depth cap, no floor). 40 lists (16 each) around Integer(42) (4).
         let mut nested_value = Value::Integer(42);
         for _ in 0..40 {
             nested_value = Value::List(vec![nested_value]);
         }
 
-        // Should not panic and should return conservative estimate
         let size = Memtable::estimate_value_size(&nested_value);
-
-        // At depth 32, should return 1024 for each remaining level
-        // First 32 levels recurse normally, remaining 8 levels return 1024 each
-        assert!(size > 0);
-        assert!(
-            size >= 1024,
-            "Should use conservative estimate at max depth"
+        assert_eq!(
+            size,
+            40 * 16 + 4,
+            "deep list of a tiny scalar must be counted accurately, not floored"
         );
     }
 
     #[test]
     fn test_memtable_nested_map_depth_limit() {
-        // Create deeply nested map structure
+        // Issue #1625: deep map nesting counted accurately. 35 maps, each +16
+        // overhead + Integer key (4), innermost Text("bottom") (6). No floor.
         let mut nested_value = Value::Text("bottom".to_string());
         for _ in 0..35 {
             nested_value = Value::Map(vec![(Value::Integer(1), nested_value)]);
         }
 
-        // Should not panic
         let size = Memtable::estimate_value_size(&nested_value);
-        assert!(size > 0);
-        assert!(
-            size >= 1024,
-            "Should use conservative estimate for deep nesting"
+        assert_eq!(
+            size,
+            35 * (16 + 4) + 6,
+            "deep map of a tiny scalar must be counted accurately, not floored"
         );
     }
 
@@ -802,7 +706,8 @@ mod tests {
     fn test_memtable_nested_udt_depth_limit() {
         use crate::types::{UdtField, UdtValue};
 
-        // Create deeply nested UDT structure
+        // Issue #1625: deep UDT nesting counted accurately. 35 UDTs, each +16
+        // overhead + field name "field" (5), innermost Integer(1) (4). No floor.
         let mut nested_value = Value::Integer(1);
         for i in 0..35 {
             let udt = UdtValue {
@@ -816,24 +721,29 @@ mod tests {
             nested_value = Value::Udt(udt);
         }
 
-        // Should not panic
         let size = Memtable::estimate_value_size(&nested_value);
-        assert!(size > 0);
-        assert!(size >= 1024);
+        assert_eq!(
+            size,
+            35 * (16 + 5) + 4,
+            "deep UDT of a tiny scalar must be counted accurately, not floored"
+        );
     }
 
     #[test]
     fn test_memtable_frozen_nested_depth_limit() {
-        // Create deeply nested frozen values
+        // Issue #1625: deep Frozen nesting must NOT stack-overflow (iterative)
+        // and is counted accurately. 40 frozen (8 each) around Integer(99) (4).
         let mut nested_value = Value::Integer(99);
         for _ in 0..40 {
             nested_value = Value::Frozen(Box::new(nested_value));
         }
 
-        // Should not panic or cause stack overflow
         let size = Memtable::estimate_value_size(&nested_value);
-        assert!(size > 0);
-        assert!(size >= 1024);
+        assert_eq!(
+            size,
+            40 * 8 + 4,
+            "deep frozen of a tiny scalar must be counted accurately, not floored"
+        );
     }
 
     #[test]
@@ -869,22 +779,21 @@ mod tests {
 
     #[test]
     fn test_memtable_depth_limit_exact_boundary() {
-        // Test at exactly the max depth (32 levels)
+        // Issue #1625: with the iterative estimator there is no depth cap, so
+        // adding a wrapper level increases the estimate by exactly one List's
+        // overhead (16) — no discontinuity/jump to a floor at any depth.
         let mut nested_value = Value::Integer(1);
         for _ in 0..32 {
             nested_value = Value::List(vec![nested_value]);
         }
 
-        // Should handle max depth normally
         let size = Memtable::estimate_value_size(&nested_value);
-        assert!(size > 0);
+        assert_eq!(size, 32 * 16 + 4);
 
-        // Add one more level - should hit depth limit on deepest value
+        // One more wrapper: exactly +16, not a jump to any conservative floor.
         nested_value = Value::List(vec![nested_value]);
         let size_over = Memtable::estimate_value_size(&nested_value);
-
-        // Size with depth limit should be >= 1024 due to conservative estimate
-        assert!(size_over >= 1024);
+        assert_eq!(size_over, size + 16);
     }
 
     #[test]
@@ -908,22 +817,28 @@ mod tests {
     }
 
     #[test]
-    fn test_deep_wide_collection_not_undercounted() {
-        // Issue #1625: a WIDE collection parked exactly at the recursion depth
-        // cap must NOT be counted as the old flat ~1KB. Build 32 single-element
-        // wrapper lists (depths 0..31) with a 500-element list at the cap
-        // (depth 32); the cap estimate should dwarf 1KB.
-        let wide = Value::List((0..500).map(Value::Integer).collect());
+    fn test_deep_wide_collection_counted_accurately() {
+        // Issue #1625: a WIDE collection buried under many wrapper lists must be
+        // counted at its REAL byte size regardless of depth. The iterative
+        // estimator has no depth cap, so the 500 × 200-byte strings (~100KB) at
+        // the bottom are summed exactly — not collapsed to any floor.
+        let wide = Value::List((0..500).map(|_| Value::Text("y".repeat(200))).collect());
         let mut nested = wide;
         for _ in 0..32 {
             nested = Value::List(vec![nested]);
         }
 
         let size = Memtable::estimate_value_size(&nested);
-        // 500 elements * DEEP_ELEMENT_ESTIMATE floor => far larger than 1KB.
+        let real_payload = 500 * 200; // 100_000 bytes of text
         assert!(
-            size > 100 * 1024,
-            "wide collection at depth cap must not be under-counted (got {size})"
+            size >= real_payload,
+            "wide collection must count real bytes at any depth (got {size})"
+        );
+        // Accurate, not wildly inflated: real payload + bounded per-container
+        // overhead only.
+        assert!(
+            size < real_payload + 10 * 1024,
+            "estimate must be accurate, not floor-inflated (got {size})"
         );
     }
 
@@ -931,13 +846,11 @@ mod tests {
     fn test_deep_narrow_collection_large_scalar_not_undercounted() {
         // Issue #1625 (roborev finding): a deep NARROW collection wrapping a
         // large DIRECT scalar must not be systematically under-counted. Wrap a
-        // `List([Text(128KB)])` in 32 single-element lists so the inner list
-        // lands exactly at the depth cap; its Text child is a DIRECT child.
+        // `List([Text(128KB)])` in 32 single-element lists.
         //
-        // Pre-fix: the cap estimator scaled by element count × 1024, so this was
-        // counted as ~1KB (16 + 1*1024 = 1040) — small enough to slip a 64KB gate.
-        // Post-fix: the shallow per-child estimate counts the 128KB scalar at its
-        // real heap size, so the estimate is on the order of the large scalar.
+        // Pre-fix: any node past the depth cap collapsed to a ~1KB floor — small
+        // enough to slip a 64KB gate. Post-fix: the iterative estimator counts
+        // the 128KB scalar at its real heap size regardless of depth.
         let big = 128 * 1024;
         let mut nested = Value::List(vec![Value::Text("x".repeat(big))]);
         for _ in 0..32 {
@@ -949,6 +862,40 @@ mod tests {
             size >= big,
             "deep narrow collection with a large scalar must count the scalar's \
              real heap size, not the old ~1KB floor (got {size}, expected >= {big})"
+        );
+    }
+
+    #[test]
+    fn test_large_scalar_buried_below_old_cap_counted() {
+        // Issue #1625 (3rd iteration): a large scalar buried MANY levels below
+        // where the old depth cap (32) sat must be counted at real size. Wrap a
+        // 128KB text in 40 single-element lists — well past the old cap — and
+        // confirm the iterative estimator still sees the full 128KB.
+        let big = 128 * 1024;
+        let mut nested = Value::Text("z".repeat(big));
+        for _ in 0..40 {
+            nested = Value::List(vec![nested]);
+        }
+
+        let size = Memtable::estimate_value_size(&nested);
+        assert!(
+            size >= big,
+            "scalar buried below the old depth cap must be counted at real size \
+             (got {size}, expected >= {big})"
+        );
+    }
+
+    #[test]
+    fn test_pathological_node_cap_returns_usize_max() {
+        // Issue #1625: exceeding MAX_ESTIMATE_NODES must FAIL CLOSED (usize::MAX),
+        // never under-count — and never overflow or hang. A flat list of
+        // 1_000_001 integers is a single fast allocation that trips the cap.
+        let value = Value::List((0..1_000_001i32).map(Value::Integer).collect());
+        let size = Memtable::estimate_value_size(&value);
+        assert_eq!(
+            size,
+            usize::MAX,
+            "hitting the node cap must fail closed with usize::MAX (got {size})"
         );
     }
 
