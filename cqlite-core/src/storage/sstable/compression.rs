@@ -127,6 +127,52 @@ fn validate_decompression_size(uncompressed_size: usize) -> Result<()> {
     Ok(())
 }
 
+/// Decode a RAW Snappy block (Cassandra 5.0 `SnappyCompressor`: no length prefix)
+/// in EXACTLY one attempt.
+///
+/// The authoritative CompressionInfo.db algorithm determines the single format —
+/// no framed-then-raw guessing (no-heuristics mandate #28, issue #1588). A guess
+/// could silently mis-decode an adversarial chunk to wrong bytes; strict raw
+/// decoding surfaces a typed error instead.
+///
+/// `decode_attempts` is incremented once per decode call. Production passes a
+/// throwaway `&mut 0`; tests thread a real counter to assert a single attempt.
+#[cfg(feature = "snappy")]
+fn snappy_decompress_raw(data: &[u8], decode_attempts: &mut usize) -> Result<Vec<u8>> {
+    use snap::raw::Decoder;
+    *decode_attempts += 1;
+
+    // CENTRALIZED bomb guard (issue #1588): a raw Snappy block carries its
+    // decompressed length as a leading varint. Inspect it FIRST and reject an
+    // over-limit block WITHOUT calling `decompress_vec` — `decompress_vec`
+    // pre-allocates `decompress_len` bytes up front, so an adversarial block
+    // declaring a huge size would allocate before any post-decode guard runs.
+    // This single choke point protects EVERY caller (chunk decode + streaming).
+    let advertised = snap::raw::decompress_len(data)
+        .map_err(|e| Error::storage(format!("Snappy (raw) length decode failed: {}", e)))?;
+    if advertised > MAX_DECOMPRESSED_SIZE {
+        return Err(Error::storage(format!(
+            "Decompression bomb protection: advertised size {} exceeds limit {} (128MB)",
+            advertised, MAX_DECOMPRESSED_SIZE
+        )));
+    }
+
+    let mut decoder = Decoder::new();
+    let decompressed = decoder
+        .decompress_vec(data)
+        .map_err(|e| Error::storage(format!("Snappy (raw) decompression failed: {}", e)))?;
+    // Belt-and-suspenders: the advertised length is attacker-controlled, so
+    // re-check the ACTUAL decoded size against the hard cap.
+    if decompressed.len() > MAX_DECOMPRESSED_SIZE {
+        return Err(Error::storage(format!(
+            "Decompression bomb protection: decompressed size {} exceeds limit {} (128MB)",
+            decompressed.len(),
+            MAX_DECOMPRESSED_SIZE
+        )));
+    }
+    Ok(decompressed)
+}
+
 /// Compression handler
 pub struct Compression {
     algorithm: CompressionAlgorithm,
@@ -162,17 +208,15 @@ impl Compression {
                 {
                     use snap::raw::Encoder;
 
-                    // Use Cassandra-compatible Snappy parameters
+                    // Cassandra 5.0's SnappyCompressor writes a RAW Snappy block with NO
+                    // length prefix (see writer::compressed_data_writer::SnappyCompressor
+                    // and org.apache.cassandra.io.compress.SnappyCompressor). Emit raw so
+                    // it round-trips through the strict raw decode path below (#1588). A
+                    // 4-byte size prefix was NEVER a Cassandra-compatible format.
                     let mut encoder = Encoder::new();
-                    let compressed = encoder
+                    encoder
                         .compress_vec(data)
-                        .map_err(|e| Error::storage(format!("Snappy compression failed: {}", e)))?;
-
-                    // Prepend uncompressed size (4 bytes, big-endian) for Cassandra compatibility
-                    let mut result = Vec::with_capacity(4 + compressed.len());
-                    result.extend_from_slice(&(data.len() as u32).to_be_bytes());
-                    result.extend_from_slice(&compressed);
-                    Ok(result)
+                        .map_err(|e| Error::storage(format!("Snappy compression failed: {}", e)))
                 }
                 #[cfg(not(feature = "snappy"))]
                 {
@@ -279,45 +323,13 @@ impl Compression {
             CompressionAlgorithm::Snappy => {
                 #[cfg(feature = "snappy")]
                 {
-                    use snap::raw::Decoder;
-
-                    // Try two formats:
-                    // 1. With 4-byte size prefix (legacy Cassandra format)
-                    // 2. Raw Snappy without prefix (Cassandra 5.0 nb format)
-
-                    let mut decoder = Decoder::new();
-
-                    // First, try with 4-byte prefix if data is long enough
-                    if data.len() >= 4 {
-                        let uncompressed_size =
-                            u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
-
-                        // Only try prefixed format if size is reasonable (not a decompression bomb)
-                        // If size is unreasonable, it's likely raw Snappy without a prefix
-                        if uncompressed_size > 0 && uncompressed_size <= MAX_DECOMPRESSED_SIZE {
-                            let compressed_data = &data[4..];
-                            if let Ok(decompressed) = decoder.decompress_vec(compressed_data) {
-                                if decompressed.len() == uncompressed_size {
-                                    return Ok(decompressed);
-                                }
-                            }
-                        }
-                    }
-
-                    // Fall back to raw Snappy (no prefix) - Cassandra 5.0 nb format
-                    let decompressed = decoder.decompress_vec(data).map_err(|e| {
-                        Error::storage(format!("Snappy decompression failed (both formats): {}", e))
-                    })?;
-
-                    // Validate decompressed size
-                    if decompressed.len() > MAX_DECOMPRESSED_SIZE {
-                        return Err(Error::storage(format!(
-                            "Decompression bomb protection: decompressed size {} exceeds limit {} (128MB)",
-                            decompressed.len(), MAX_DECOMPRESSED_SIZE
-                        )));
-                    }
-
-                    Ok(decompressed)
+                    // Decode EXACTLY one format (raw Snappy), determined by the
+                    // authoritative CompressionInfo.db algorithm — never by trying
+                    // framed-then-raw and keeping whichever "succeeds" (no-heuristics
+                    // mandate #28, issue #1588). The framed-guess could silently return
+                    // wrong bytes for an adversarial chunk; strict raw decoding rejects
+                    // it. `&mut 0` discards the (test-only) attempt counter.
+                    snappy_decompress_raw(data, &mut 0)
                 }
                 #[cfg(not(feature = "snappy"))]
                 {
@@ -594,44 +606,94 @@ impl StreamingDecompressor {
     ) -> Result<()> {
         #[cfg(feature = "snappy")]
         {
-            use snap::read::FrameDecoder;
             use std::io::BufReader;
 
-            let buf_reader = BufReader::new(reader);
-            let mut decoder = FrameDecoder::new(buf_reader);
-            let mut chunk_buffer = vec![0u8; self.config.chunk_size];
-
-            loop {
-                let bytes_read = decoder.read(&mut chunk_buffer).map_err(|e| {
-                    Error::storage(format!("Snappy streaming decompression failed: {}", e))
-                })?;
-
-                if bytes_read == 0 {
-                    break; // EOF
-                }
-
-                // Check memory limits
-                if output.len() + bytes_read > memory_limit {
-                    return Err(Error::storage(format!(
-                        "Memory limit exceeded during Snappy decompression: {} bytes (limit: {} bytes)",
-                        output.len() + bytes_read,
-                        memory_limit
-                    )));
-                }
-
-                output.extend_from_slice(&chunk_buffer[..bytes_read]);
-                self.bytes_processed += bytes_read;
-
-                // Yield control for large operations
-                if self.bytes_processed % (4 * 1024 * 1024) == 0 {
-                    tokio::task::yield_now().await;
-                }
+            // Cassandra 5.0's `SnappyCompressor` emits a RAW Snappy block (no
+            // stream framing, no length prefix) — the SAME single authoritative
+            // format that `compress` and the chunk `decompress` path use
+            // (no-heuristics, issue #1588; this closes #1862). The previous
+            // `snap::read::FrameDecoder` decoded the DIFFERENT *framed* Snappy
+            // format, so the public streaming decompressor could not read bytes
+            // produced by `CompressionAlgorithm::Snappy`. Raw Snappy is not
+            // self-delimiting and carries no length prefix, so the whole
+            // compressed block must be read before it can be decoded — decode it
+            // through the same `snappy_decompress_raw` helper as the chunk path.
+            //
+            // SECURITY (issue #1588): bound BOTH allocations before they happen so
+            // a huge/malicious reader cannot exceed the streaming memory budget or
+            // OOM before the guards run:
+            //  1. Cap the COMPRESSED read. Any Snappy block that legitimately
+            //     decodes to <= `memory_limit` bytes cannot be larger than the
+            //     maximum Snappy encoding of `memory_limit` bytes
+            //     (`snap::raw::max_compress_len`). A larger input cannot produce
+            //     in-budget output, so we refuse to buffer it (read `cap + 1` via
+            //     `take` to detect overrun without reading unbounded input).
+            //  2. Reject a decompression bomb using the advertised uncompressed
+            //     length (`snap::raw::decompress_len`, the raw block's varint
+            //     prefix) BEFORE allocating the output buffer.
+            let max_compressed = snap::raw::max_compress_len(memory_limit);
+            if max_compressed == 0 {
+                return Err(Error::storage(format!(
+                    "Snappy streaming memory limit {} too large to bound compressed input",
+                    memory_limit
+                )));
             }
+            let read_cap = max_compressed
+                .checked_add(1)
+                .ok_or_else(|| Error::storage("Snappy compressed read cap overflow".to_string()))?;
+            let mut buf_reader = BufReader::new(reader).take(read_cap as u64);
+            let mut compressed = Vec::new();
+            buf_reader.read_to_end(&mut compressed).map_err(|e| {
+                Error::storage(format!("Failed to read Snappy compressed data: {}", e))
+            })?;
+            if compressed.len() > max_compressed {
+                return Err(Error::storage(format!(
+                    "Snappy compressed input exceeds bound {} bytes (memory limit: {} bytes)",
+                    max_compressed, memory_limit
+                )));
+            }
+            self.bytes_processed += compressed.len();
+
+            // Pre-allocation bomb guard: reject before allocating the output buffer.
+            // Bound by the MINIMUM of every relevant limit — the streaming memory
+            // budget AND the configured output cap (issue #1588). A `max_memory_mb`
+            // set above `max_output_size` must not be allowed to allocate past the
+            // intended output cap. `snappy_decompress_raw` additionally enforces the
+            // hard `MAX_DECOMPRESSED_SIZE` ceiling at the shared choke point.
+            let advertised = snap::raw::decompress_len(&compressed)
+                .map_err(|e| Error::storage(format!("Snappy (raw) length decode failed: {}", e)))?;
+            let effective_limit = memory_limit.min(self.config.max_output_size);
+            let projected = output.len().checked_add(advertised);
+            if projected.is_none_or(|total| total > effective_limit) {
+                return Err(Error::storage(format!(
+                    "Decompression bomb protection: advertised Snappy size {} exceeds limit {} bytes",
+                    advertised, effective_limit
+                )));
+            }
+
+            // Belt-and-suspenders: enforce against the ACTUAL decoded size (the
+            // advertised length is attacker-controlled); `snappy_decompress_raw`
+            // additionally caps at MAX_DECOMPRESSED_SIZE.
+            let decompressed = snappy_decompress_raw(&compressed, &mut 0)?;
+
+            if output.len() + decompressed.len() > memory_limit {
+                return Err(Error::storage(format!(
+                    "Memory limit exceeded during Snappy decompression: {} bytes (limit: {} bytes)",
+                    output.len() + decompressed.len(),
+                    memory_limit
+                )));
+            }
+
+            output.extend_from_slice(&decompressed);
+            // Yield once after a potentially large decode so we do not starve the
+            // runtime (the read+decode above is a single bounded operation).
+            tokio::task::yield_now().await;
 
             Ok(())
         }
         #[cfg(not(feature = "snappy"))]
         {
+            let _ = (reader, output, memory_limit);
             Err(Error::storage(
                 "Snappy compression not available".to_string(),
             ))
@@ -975,6 +1037,41 @@ mod tests {
     // Note: Test methods temporarily disabled due to compilation issues
     // The functionality is tested via integration tests
 
+    /// Adversarial oracle (issue #1588, decision #14): a chunk whose leading 4
+    /// bytes ALSO parse as a plausible framed big-endian length header, followed
+    /// by a valid RAW-snappy body of exactly that many output bytes.
+    ///
+    /// Under the (deleted) framed-then-raw guessing, `decompress` read the 4-byte
+    /// BE prefix `S`, decoded `data[4..]` as raw snappy to `P_wrong` (whose length
+    /// equals `S`), and RETURNED those bytes — silently wrong. The authoritative
+    /// Cassandra 5.0 format for a `SnappyCompressor` chunk is RAW snappy with NO
+    /// length prefix, so strict raw decoding of the WHOLE chunk must NOT return
+    /// `P_wrong` (it rejects the malformed leading zero-varint stream). This is the
+    /// no-heuristics enforcement: decode exactly one format determined by metadata.
+    #[cfg(feature = "snappy")]
+    #[test]
+    fn test_snappy_decode_is_strict_raw_only_no_format_guessing() {
+        use snap::raw::Encoder;
+        let p_wrong = b"WRONG-framed-decode-abcdefghijklmnopqrstuvwxyz".to_vec();
+        let s = p_wrong.len() as u32;
+        let mut enc = Encoder::new();
+        let inner = enc.compress_vec(&p_wrong).unwrap(); // valid raw snappy -> p_wrong
+        let mut adversarial = s.to_be_bytes().to_vec(); // plausible framed BE header
+        adversarial.extend_from_slice(&inner);
+
+        let compression = Compression::new(CompressionAlgorithm::Snappy).unwrap();
+        let got = compression.decompress(&adversarial).ok();
+        // Strict raw decode must not merely differ from the framed guess — it must
+        // FAIL (typed error) rather than silently produce any bytes: the leading
+        // 4-byte pseudo-header parses as a malformed raw Snappy stream (a
+        // zero-length literal with trailing data), which the raw decoder rejects.
+        assert!(
+            got.is_none(),
+            "strict raw decode must ERROR on the ambiguous chunk, not return bytes \
+             (no-heuristics, #1588); got {got:?}"
+        );
+    }
+
     #[cfg(feature = "snappy")]
     #[test]
     fn test_snappy_compression_cassandra_format() {
@@ -984,14 +1081,204 @@ mod tests {
 
         let compressed = compression.compress(&data).unwrap();
 
-        // Verify format: 4-byte size prefix + compressed data
-        assert!(compressed.len() >= 4);
-        let size_prefix =
-            u32::from_be_bytes([compressed[0], compressed[1], compressed[2], compressed[3]]);
-        assert_eq!(size_prefix, data.len() as u32);
+        // Cassandra 5.0 SnappyCompressor emits a RAW Snappy block with NO length
+        // prefix (#1588). The compressed bytes are exactly what a raw Snappy
+        // decoder consumes; there is no 4-byte big-endian size header.
+        let raw_roundtrip = {
+            use snap::raw::Decoder;
+            Decoder::new().decompress_vec(&compressed).unwrap()
+        };
+        assert_eq!(raw_roundtrip, data, "compress() output must be raw Snappy");
 
         let decompressed = compression.decompress(&compressed).unwrap();
         assert_eq!(decompressed, data);
+    }
+
+    /// Finding 2 (issue #1588; closes #1862): the public streaming Snappy
+    /// decompressor must decode the SAME single authoritative raw Snappy format
+    /// that `compress` (and the chunk `decompress` path) use. Previously it used
+    /// `snap::read::FrameDecoder` (the DIFFERENT framed format), so bytes produced
+    /// by `CompressionAlgorithm::Snappy` were unreadable through streaming.
+    /// Round-trip: compress raw -> streaming-decompress -> byte-identical.
+    #[cfg(feature = "snappy")]
+    #[tokio::test]
+    async fn test_snappy_streaming_roundtrip_raw() {
+        use std::io::Cursor;
+        let compression = Compression::new(CompressionAlgorithm::Snappy).unwrap();
+        let data = b"streaming raw snappy round-trip payload for issue 1862. ".repeat(64);
+
+        let compressed = compression.compress(&data).unwrap();
+
+        let mut decompressor =
+            compression.create_streaming_decompressor(ChunkedDecompressionConfig::default());
+        let out = decompressor
+            .decompress_streaming(Cursor::new(compressed), Some(data.len()))
+            .await
+            .expect("streaming decode of raw Snappy must succeed");
+        assert_eq!(
+            out, data,
+            "streaming Snappy must decode raw compress() output byte-for-byte"
+        );
+    }
+
+    /// Encode a Snappy raw-block length prefix (LEB128 varint) for `n`.
+    #[cfg(feature = "snappy")]
+    fn snappy_len_prefix(mut n: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let mut b = (n & 0x7f) as u8;
+            n >>= 7;
+            if n != 0 {
+                b |= 0x80;
+            }
+            out.push(b);
+            if n == 0 {
+                break;
+            }
+        }
+        out
+    }
+
+    /// SECURITY (issue #1588): a streaming Snappy block whose ADVERTISED
+    /// uncompressed length exceeds the memory budget is rejected BEFORE the
+    /// output buffer is allocated (no OOM). The crafted input is tiny (only a
+    /// length prefix + a stub), so it passes the compressed read cap and reaches
+    /// the pre-allocation length guard.
+    #[cfg(feature = "snappy")]
+    #[tokio::test]
+    async fn test_snappy_streaming_advertised_len_bomb_rejected() {
+        use std::io::Cursor;
+
+        // 1MB budget; advertise 100MB uncompressed.
+        let config = ChunkedDecompressionConfig {
+            max_memory_mb: 1,
+            chunk_size: 1024,
+            max_output_size: 128 * 1024 * 1024,
+        };
+        let mut input = snappy_len_prefix(100 * 1024 * 1024);
+        input.push(0x00); // stub tag byte; guard fires before any decode
+
+        let compression = Compression::new(CompressionAlgorithm::Snappy).unwrap();
+        let mut decompressor = compression.create_streaming_decompressor(config);
+        // `None` expected_size so the caller-side pre-check does not short-circuit.
+        let err = decompressor
+            .decompress_streaming(Cursor::new(input), None)
+            .await
+            .expect_err("advertised-size bomb must be rejected");
+        assert!(
+            err.to_string().contains("Decompression bomb protection"),
+            "expected pre-allocation bomb error, got: {err}"
+        );
+    }
+
+    /// SECURITY (issue #1588): when `max_memory_mb` is configured ABOVE
+    /// `max_output_size`, the advertised-size guard must still bound to the
+    /// MINIMUM of the two (the output cap), so a block that fits the memory
+    /// budget but exceeds the output cap is rejected before allocating.
+    #[cfg(feature = "snappy")]
+    #[tokio::test]
+    async fn test_snappy_streaming_output_cap_bounds_below_memory_limit() {
+        use std::io::Cursor;
+
+        // 100MB memory budget, but only a 1MB output cap. Advertise 50MB: within
+        // the memory budget yet over the output cap -> must be rejected.
+        let config = ChunkedDecompressionConfig {
+            max_memory_mb: 100,
+            chunk_size: 1024,
+            max_output_size: 1024 * 1024,
+        };
+        let mut input = snappy_len_prefix(50 * 1024 * 1024);
+        input.push(0x00); // stub tag byte; guard fires before any decode
+
+        let compression = Compression::new(CompressionAlgorithm::Snappy).unwrap();
+        let mut decompressor = compression.create_streaming_decompressor(config);
+        let err = decompressor
+            .decompress_streaming(Cursor::new(input), None)
+            .await
+            .expect_err("advertised size over output cap must be rejected");
+        assert!(
+            err.to_string().contains("Decompression bomb protection"),
+            "expected output-cap-bounded bomb error, got: {err}"
+        );
+    }
+
+    /// SECURITY (issue #1588): a COMPRESSED input larger than the max Snappy
+    /// encoding of the memory budget cannot legitimately decode in-budget, so the
+    /// read is capped and the oversized input errors without buffering it all.
+    #[cfg(feature = "snappy")]
+    #[tokio::test]
+    async fn test_snappy_streaming_oversized_compressed_rejected() {
+        use std::io::Cursor;
+
+        let config = ChunkedDecompressionConfig {
+            max_memory_mb: 1,
+            chunk_size: 1024,
+            max_output_size: 128 * 1024 * 1024,
+        };
+        // 4MB of bytes, well past max_compress_len(1MB) (~1.2MB).
+        let oversized = vec![0u8; 4 * 1024 * 1024];
+
+        let compression = Compression::new(CompressionAlgorithm::Snappy).unwrap();
+        let mut decompressor = compression.create_streaming_decompressor(config);
+        let err = decompressor
+            .decompress_streaming(Cursor::new(oversized), None)
+            .await
+            .expect_err("over-cap compressed input must be rejected");
+        assert!(
+            err.to_string()
+                .contains("Snappy compressed input exceeds bound"),
+            "expected compressed read-cap error, got: {err}"
+        );
+    }
+
+    /// A legitimate RAW Snappy chunk decodes to the known-good bytes in EXACTLY
+    /// one decode attempt (issue #1588 decision #14: single-attempt + byte-identity).
+    #[cfg(feature = "snappy")]
+    #[test]
+    fn test_snappy_decode_single_attempt_and_byte_identical() {
+        use snap::raw::Encoder;
+        let good = b"the quick brown fox jumps over the lazy dog. ".repeat(8);
+        let chunk = Encoder::new().compress_vec(&good).unwrap();
+
+        let mut attempts = 0usize;
+        let out = super::snappy_decompress_raw(&chunk, &mut attempts).unwrap();
+        assert_eq!(
+            out, good,
+            "raw decode is byte-identical to the known-good input"
+        );
+        assert_eq!(
+            attempts, 1,
+            "exactly one decode attempt (no format guessing)"
+        );
+    }
+
+    /// SECURITY (issue #1588): the SHARED `snappy_decompress_raw` helper — the
+    /// choke point used by the CHUNK (non-streaming) decode path — must reject a
+    /// block whose ADVERTISED decompressed length exceeds `MAX_DECOMPRESSED_SIZE`
+    /// WITHOUT allocating (i.e. before `decompress_vec` pre-allocates that size).
+    /// This proves the guard lives at the helper, not only in the streaming caller.
+    #[cfg(feature = "snappy")]
+    #[test]
+    fn test_snappy_raw_helper_advertised_len_bomb_rejected_no_alloc() {
+        // Craft a tiny raw block: a varint advertising 200MB (> 128MB cap) plus a
+        // stub tag byte. The length guard fires before any output allocation.
+        let mut chunk = snappy_len_prefix(200 * 1024 * 1024);
+        chunk.push(0x00);
+
+        let mut attempts = 0usize;
+        let err = super::snappy_decompress_raw(&chunk, &mut attempts)
+            .expect_err("over-limit advertised length must be rejected at the helper");
+        assert!(
+            err.to_string().contains("Decompression bomb protection"),
+            "expected typed decompression-bomb error, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("advertised size"),
+            "guard must fire on the ADVERTISED length before decode/alloc, got: {err}"
+        );
+        // The decode attempt is counted, but the rejection happens before the
+        // `decompress_vec` allocation of the advertised 200MB.
+        assert_eq!(attempts, 1, "helper is entered exactly once");
     }
 
     #[cfg(feature = "deflate")]

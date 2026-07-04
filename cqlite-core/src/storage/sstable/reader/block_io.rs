@@ -52,35 +52,8 @@ pub(crate) async fn read_next_block(
     current_chunk_index: &std::sync::atomic::AtomicUsize,
     header_offset: u64,
 ) -> Result<Option<Vec<u8>>> {
-    read_next_block_with_retry(
-        file,
-        cassandra_version,
-        config,
-        compression_info,
-        crc_reader,
-        current_chunk_index,
-        header_offset,
-        3,
-    )
-    .await
-}
-
-/// Read block with retry logic for handling transient I/O errors
-#[allow(clippy::too_many_arguments)]
-async fn read_next_block_with_retry(
-    file: &Arc<Mutex<BlockSource>>,
-    cassandra_version: &crate::parser::header::CassandraVersion,
-    config: &SSTableReaderConfig,
-    compression_info: &Option<Arc<crate::storage::sstable::compression_info::CompressionInfo>>,
-    crc_reader: Option<&CrcDb>,
-    current_chunk_index: &std::sync::atomic::AtomicUsize,
-    header_offset: u64,
-    max_retries: usize,
-) -> Result<Option<Vec<u8>>> {
-    let mut retry_count = 0;
-
-    loop {
-        match read_next_block_impl(
+    retry_transient_once(file, || {
+        read_next_block_impl(
             file,
             cassandra_version,
             config,
@@ -89,38 +62,94 @@ async fn read_next_block_with_retry(
             current_chunk_index,
             header_offset,
         )
-        .await
-        {
-            Ok(result) => return Ok(result),
-            Err(e) => {
-                // Never retry a non-recoverable error (issue #1396). Retries exist
-                // for TRANSIENT I/O faults; a CRC/corruption error is deterministic
-                // and non-recoverable. Critically, the uncompressed piecewise read
-                // advances the stream position BEFORE verifying, so retrying a
-                // failed CRC would silently skip the corrupt piece and return the
-                // NEXT one — turning fail-fast corruption into a silent truncation.
-                // Surface it immediately instead.
-                if !e.is_recoverable() {
-                    return Err(e);
-                }
-                retry_count += 1;
-                if retry_count >= max_retries {
-                    log::error!("Failed to read block after {} retries: {}", max_retries, e);
-                    return Err(e);
-                }
+    })
+    .await
+}
 
-                log::warn!(
-                    "Block read failed (attempt {}/{}): {}, retrying...",
-                    retry_count,
-                    max_retries,
-                    e
-                );
+/// Classify an error as a TRANSIENT I/O fault (EINTR-class) that a single
+/// re-seek + re-read may clear.
+///
+/// Only genuinely-transient kernel faults qualify: `Interrupted` (EINTR),
+/// `WouldBlock` (EAGAIN) and `TimedOut`. Everything else — deterministic
+/// corruption/format errors (a CRC/format mismatch never heals on re-read), and
+/// non-transient I/O (`NotFound`, `PermissionDenied`, `UnexpectedEof`, …) — is
+/// NOT retried (issue #1588). This is intentionally stricter than
+/// [`Error::is_recoverable`], which classes ALL `Io` as recoverable; a
+/// deterministic re-read of the same bytes cannot fix a permanent failure and
+/// only wastes work.
+fn is_transient_io(e: &Error) -> bool {
+    match e {
+        Error::Io(io) => matches!(
+            io.kind(),
+            std::io::ErrorKind::Interrupted
+                | std::io::ErrorKind::WouldBlock
+                | std::io::ErrorKind::TimedOut
+        ),
+        _ => false,
+    }
+}
 
-                // Brief delay before retry
-                tokio::time::sleep(tokio::time::Duration::from_millis(10 * retry_count as u64))
-                    .await;
+/// Wrap an underlying [`std::io::Error`] with human-readable `context` WITHOUT
+/// discarding its [`ErrorKind`](std::io::ErrorKind).
+///
+/// Preserving the source kind is load-bearing for [`is_transient_io`] (issue
+/// #1588). Every read/seek in this file is retried at most once through
+/// [`retry_transient_once`], and that retry fires ONLY when the classifier sees a
+/// truthful transient kind (EINTR / EAGAIN / timeout). The block-data and
+/// uncompressed-piece read paths used to wrap their source error with
+/// `std::io::Error::other(..)`, which relabels the kind as `Other` — so a REAL
+/// transient fault surfacing through those paths was silently NOT retried
+/// (dropping the transient-retry semantics this issue mandates). Constructing the
+/// wrapper with the SAME kind keeps the classifier honest, while corruption /
+/// format / `UnexpectedEof` kinds keep failing fast (they are not transient).
+fn io_error_with_context(context: impl std::fmt::Display, source: std::io::Error) -> Error {
+    let kind = source.kind();
+    Error::Io(std::io::Error::new(kind, format!("{context}: {source}")))
+}
+
+/// Run `attempt`, retrying it EXACTLY once — and only on a transient I/O fault —
+/// after re-seeking the source back to the ORIGINAL offset (issue #1588).
+///
+/// Two defects this closes:
+/// 1. **Moved-position re-read.** A sequential read (e.g. the legacy block-header
+///    path, or the uncompressed piecewise read) advances the stream position past
+///    a partially-read block before a mid-read fault. Retrying WITHOUT re-seeking
+///    re-enters the reader at the MOVED position and reads DIFFERENT bytes (a
+///    silent wrong-block read). Capturing the position up front and seeking back
+///    makes the retry re-read the SAME bytes.
+/// 2. **Sleeping / retrying deterministic errors.** The old loop slept 10/20ms and
+///    re-read up to 3 times even for deterministic corruption (CRC/format), which
+///    can never heal. Deterministic errors now fail fast: no sleep, no retry, the
+///    typed error is returned immediately.
+async fn retry_transient_once<F, Fut, T>(file: &Arc<Mutex<BlockSource>>, attempt: F) -> Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    // Capture the original offset BEFORE the first attempt so a transient retry
+    // re-reads exactly the same bytes.
+    let original_pos = {
+        let mut guard = file.lock().await;
+        guard.stream_position().await.map_err(Error::Io)?
+    };
+
+    match attempt().await {
+        Ok(v) => Ok(v),
+        Err(e) if is_transient_io(&e) => {
+            log::warn!(
+                "transient I/O fault ({e}); re-seeking to offset {original_pos} and retrying once"
+            );
+            {
+                let mut guard = file.lock().await;
+                guard
+                    .seek(std::io::SeekFrom::Start(original_pos))
+                    .await
+                    .map_err(Error::Io)?;
             }
+            attempt().await
         }
+        // Deterministic corruption/format and non-transient I/O: fail fast, no sleep.
+        Err(e) => Err(e),
     }
 }
 
@@ -503,10 +532,7 @@ async fn read_bti_format_block_header(
                 return Ok(None);
             }
             Err(e) => {
-                return Err(Error::Io(std::io::Error::other(format!(
-                    "Failed to read BTI block header: {}",
-                    e
-                ))));
+                return Err(io_error_with_context("Failed to read BTI block header", e));
             }
         }
     };
@@ -550,10 +576,10 @@ async fn read_legacy_format_block_header(
                 return Ok(None);
             }
             Err(e) => {
-                return Err(Error::Io(std::io::Error::other(format!(
-                    "Failed to read legacy block header: {}",
-                    e
-                ))));
+                return Err(io_error_with_context(
+                    "Failed to read legacy block header",
+                    e,
+                ));
             }
         }
     };
@@ -579,12 +605,10 @@ async fn read_block_direct(file: &Arc<Mutex<BlockSource>>, size: usize) -> Resul
     let mut block_data = vec![0u8; size];
     {
         let mut file_guard = file.lock().await;
-        file_guard.read_exact(&mut block_data).await.map_err(|e| {
-            Error::Io(std::io::Error::other(format!(
-                "Failed to read block data ({}): {}",
-                size, e
-            )))
-        })?;
+        file_guard
+            .read_exact(&mut block_data)
+            .await
+            .map_err(|e| io_error_with_context(format!("Failed to read block data ({size})"), e))?;
     }
     Ok(block_data)
 }
@@ -648,12 +672,7 @@ async fn read_large_block_streaming(
     let mut file_guard = file.lock().await;
     read_into_vec_capped(&mut *file_guard, size, config.read_buffer_size)
         .await
-        .map_err(|e| {
-            Error::Io(std::io::Error::other(format!(
-                "Failed to read block chunk: {}",
-                e
-            )))
-        })
+        .map_err(|e| io_error_with_context("Failed to read block chunk", e))
 }
 
 /// Read uncompressed data block (no compression, no block headers): the data
@@ -687,21 +706,17 @@ async fn read_uncompressed_data_block(
 ) -> Result<Option<Vec<u8>>> {
     let (current_pos, file_size) = {
         let mut file_guard = file.lock().await;
-        let current = file_guard.stream_position().await.map_err(|e| {
-            Error::Io(std::io::Error::other(format!(
-                "Failed to get stream position: {}",
-                e
-            )))
-        })?;
+        let current = file_guard
+            .stream_position()
+            .await
+            .map_err(|e| io_error_with_context("Failed to get stream position", e))?;
 
         // File size from the cached immutable length — no seek(End)/back probe on
         // every piece read (issue #1586).
-        let size = file_guard.len().await.map_err(|e| {
-            Error::Io(std::io::Error::other(format!(
-                "Failed to get file size: {}",
-                e
-            )))
-        })?;
+        let size = file_guard
+            .len()
+            .await
+            .map_err(|e| io_error_with_context("Failed to get file size", e))?;
 
         (current, size)
     };
@@ -767,10 +782,10 @@ async fn read_uncompressed_data_block(
         read_into_vec_capped(&mut *file_guard, to_read, config.read_buffer_size)
             .await
             .map_err(|e| {
-                Error::Io(std::io::Error::other(format!(
-                    "Failed to read uncompressed data block ({} bytes): {}",
-                    to_read, e
-                )))
+                io_error_with_context(
+                    format!("Failed to read uncompressed data block ({to_read} bytes)"),
+                    e,
+                )
             })?
     };
 
@@ -902,9 +917,10 @@ async fn verify_uncompressed_chunks(
             .seek(std::io::SeekFrom::Start(end))
             .await
             .map_err(|e| {
-                Error::Io(std::io::Error::other(format!(
-                    "failed to restore Data.db position after CRC verification: {e}"
-                )))
+                io_error_with_context(
+                    "failed to restore Data.db position after CRC verification",
+                    e,
+                )
             })?;
     }
     Ok(())
@@ -927,9 +943,10 @@ async fn read_range_into(
         .seek(std::io::SeekFrom::Start(lo))
         .await
         .map_err(|e| {
-            Error::Io(std::io::Error::other(format!(
-                "failed to seek Data.db to 0x{lo:x} for CRC chunk completion: {e}"
-            )))
+            io_error_with_context(
+                format!("failed to seek Data.db to 0x{lo:x} for CRC chunk completion"),
+                e,
+            )
         })?;
     guard.read_exact(&mut buf).await.map_err(|e| {
         Error::corruption(format!(
@@ -1825,3 +1842,11 @@ mod tests {
         }
     }
 }
+
+// Retry-policy guards (issue #1588) live in a sibling file to keep this source
+// file under the campsite-rule size limit (issue #1135). `use super::*` in the
+// included module resolves to this module's private items
+// (`retry_transient_once`, `is_transient_io`).
+#[cfg(test)]
+#[path = "block_io_retry_tests.rs"]
+mod retry_tests;

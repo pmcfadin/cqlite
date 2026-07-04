@@ -331,9 +331,9 @@ impl ChunkDecompressor {
     /// streaming Deflate/Zstd decoders against decompression bombs. Falls back to
     /// the 128MB global cap if chunk_length is unset/zero.
     ///
-    /// Only the streaming Deflate/Zstd paths consume this bound, so the method is
+    /// Only the Snappy/Deflate/Zstd paths consume this bound, so the method is
     /// gated to match its callers and stay dead-code-free under minimal builds.
-    #[cfg(any(feature = "deflate", feature = "zstd"))]
+    #[cfg(any(feature = "snappy", feature = "deflate", feature = "zstd"))]
     fn chunk_size_guard(&self) -> u64 {
         match self.compression_info.chunk_length {
             0 => 128 * 1024 * 1024,
@@ -429,8 +429,28 @@ impl ChunkDecompressor {
         #[cfg(feature = "snappy")]
         {
             use snap::raw::Decoder;
-            let mut decoder = Decoder::new();
 
+            // Decompression-bomb guard (issue #1588): a raw Snappy block advertises
+            // its decompressed length as a leading varint, and `decompress_vec`
+            // pre-allocates that size BEFORE decoding. Reject an over-limit advertised
+            // length up front — a chunk decodes to at most `chunk_length` bytes — so a
+            // crafted block cannot force a huge allocation (mirrors the Deflate/Zstd
+            // chunk guards, which bound by `chunk_size_guard()`).
+            let max_chunk = self.chunk_size_guard();
+            let advertised = snap::raw::decompress_len(compressed_data).map_err(|e| {
+                Error::InvalidFormat(format!(
+                    "Snappy length decode failed for chunk {}: {}",
+                    chunk_index, e
+                ))
+            })?;
+            if advertised as u64 > max_chunk {
+                return Err(Error::InvalidFormat(format!(
+                    "Snappy chunk {} advertises {} bytes, beyond chunk_length {} (decompression-bomb guard)",
+                    chunk_index, advertised, max_chunk
+                )));
+            }
+
+            let mut decoder = Decoder::new();
             match decoder.decompress_vec(compressed_data) {
                 Ok(decompressed) => Ok(decompressed),
                 Err(e) => Err(Error::InvalidFormat(format!(
