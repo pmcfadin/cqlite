@@ -761,6 +761,12 @@ use row_framing::PartitionHeaderReadiness;
 #[cfg(test)]
 mod test_support;
 
+// Issue #1617 (Epic H / finding H4): decoder + codec lockstep parity net.
+// Pins equivalence between the v5 string-ladder and block/`ComparatorType`
+// decoders (and the write side) so the J1/J2 consolidation refactors are safe.
+#[cfg(test)]
+pub(crate) mod decoder_lockstep_tests;
+
 #[cfg(test)]
 mod regression_1741c_tests;
 
