@@ -10,6 +10,11 @@ Project claim board + PR/CI state + worktrees), reconcile drift and reap abandon
 and drive the **single** item waiting on them. Read-only render; the unblock step acts only through the
 owner unless a set is pre-authorized for merge-on-green.
 
+> **GitHub API resilience:** `gh issue`/`gh pr`/`gh project` writes ride the **GraphQL** bucket, which
+> throttles **separately** from REST (each 5k pts/hr, independent per-bucket windows). If GraphQL is
+> exhausted, fall back to `gh api` REST equivalents (e.g. comment → `repos/OWNER/REPO/issues/N/comments`,
+> merge → `repos/OWNER/REPO/pulls/N/merge`). Never stall the board sweep on one exhausted bucket.
+
 ## Project-or-labels detection (shared by all flow-* skills)
 
 The board is a **GitHub Project (v2)** with a `Status` single-select
