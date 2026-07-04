@@ -45,7 +45,11 @@ async fn open_reader(path: &std::path::Path) -> Option<SSTableReader> {
 /// Issue every offset concurrently through `read_value_at_offset` on a shared
 /// reader and return the wall time. Each offset is distinct so the shared chunk
 /// cache does not collapse the reads into one.
-async fn concurrent_point_reads(reader: Arc<SSTableReader>, offsets: &[u64], size: u32) -> Duration {
+async fn concurrent_point_reads(
+    reader: Arc<SSTableReader>,
+    offsets: &[u64],
+    size: u32,
+) -> Duration {
     let start = Instant::now();
     let mut handles = Vec::new();
     for &off in offsets {

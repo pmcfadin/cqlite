@@ -590,15 +590,17 @@ pub(crate) fn read_compressed_chunk_at(
 
     // ONE positioned read for payload + trailing CRC32 (E3: single read/chunk).
     let mut buf = vec![0u8; chunk_data_size + 4];
-    source.read_exact_at(absolute_offset, &mut buf).map_err(|e| {
-        Error::Io(std::io::Error::other(format!(
-            "Failed to read chunk {} ({} bytes at offset 0x{:x}): {}",
-            chunk_idx,
-            chunk_data_size + 4,
-            absolute_offset,
-            e
-        )))
-    })?;
+    source
+        .read_exact_at(absolute_offset, &mut buf)
+        .map_err(|e| {
+            Error::Io(std::io::Error::other(format!(
+                "Failed to read chunk {} ({} bytes at offset 0x{:x}): {}",
+                chunk_idx,
+                chunk_data_size + 4,
+                absolute_offset,
+                e
+            )))
+        })?;
     let expected_crc = u32::from_be_bytes([
         buf[chunk_data_size],
         buf[chunk_data_size + 1],

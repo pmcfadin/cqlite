@@ -490,7 +490,9 @@ impl SSTableReader {
                     Arc::new(read_at::PlainFileReadAt::open(path, file_size)?)
                 }
             },
-            ScanSource::Buffered { .. } => Arc::new(read_at::PlainFileReadAt::open(path, file_size)?),
+            ScanSource::Buffered { .. } => {
+                Arc::new(read_at::PlainFileReadAt::open(path, file_size)?)
+            }
         };
 
         // Parse header - read available bytes, not a fixed size

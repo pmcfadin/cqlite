@@ -389,11 +389,8 @@ mod tests {
     use std::sync::Barrier;
 
     fn temp_file(bytes: &[u8], tag: &str) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "cqlite_readat_{}_{}.bin",
-            tag,
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("cqlite_readat_{}_{}.bin", tag, std::process::id()));
         std::fs::write(&path, bytes).unwrap();
         path
     }
