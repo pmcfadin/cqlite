@@ -2,8 +2,8 @@
 
 use super::select_ast::*;
 use super::select_naming::{
-    aggregate_column_and_alias, aggregate_output_name, projection_source_and_output,
-    unwrap_aggregate,
+    aggregate_arg_source_columns, aggregate_column_and_alias, aggregate_output_name,
+    projection_source_and_output, unwrap_aggregate,
 };
 use crate::{schema::SchemaManager, storage::StorageEngine, Error, Result, TableId, Value};
 use std::collections::HashMap;
@@ -592,14 +592,38 @@ fn literal_value(expr: &SelectExpression) -> Option<Value> {
 /// projecting `cat` would drop the cell (null value; the `Project` step / grouped
 /// dimension could not find it). Output naming is applied afterwards (`Project`
 /// step / metadata / `finalize_group`), all via `select_naming`. Aggregates name
-/// no stored cell and are excluded.
+/// no stored cell — but their ARGUMENT columns ARE stored cells and MUST be
+/// scanned (issue #1952): the projection is the UNION of the projected/grouped
+/// dimension source columns AND every non-star aggregate argument source column.
+/// Omitting the latter meant `SELECT category, SUM(value) ... GROUP BY category`
+/// scanned only `category`, so `build_row_from_scan` filtered `value` out and the
+/// aggregate silently computed from missing inputs (SUM/AVG → 0/null, COUNT(col)
+/// → 0, MIN/MAX → null). `COUNT(*)` contributes no argument column, and an empty
+/// projection (`SELECT *`) still means scan-all.
 fn extract_projection_columns(select_clause: &SelectClause) -> Vec<String> {
     match select_clause {
         SelectClause::All => Vec::new(),
-        SelectClause::Columns(exprs) | SelectClause::Distinct(exprs) => exprs
-            .iter()
-            .filter_map(|e| projection_source_and_output(e).map(|(source, _)| source))
-            .collect(),
+        SelectClause::Columns(exprs) | SelectClause::Distinct(exprs) => {
+            let mut columns: Vec<String> = Vec::new();
+            let mut push_unique = |col: String| {
+                if !columns.contains(&col) {
+                    columns.push(col);
+                }
+            };
+            for expr in exprs {
+                // Dimension / plain-column source (the SELECT output side is named
+                // later; the scan reads the SOURCE column).
+                if let Some((source, _)) = projection_source_and_output(expr) {
+                    push_unique(source);
+                }
+                // Aggregate argument source columns (the #1952 fix). Empty for
+                // `COUNT(*)` and non-aggregate expressions.
+                for source in aggregate_arg_source_columns(expr) {
+                    push_unique(source);
+                }
+            }
+            columns
+        }
     }
 }
 
