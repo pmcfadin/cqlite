@@ -146,15 +146,7 @@ impl QueryExecutor {
                 .iter()
                 .map(|s| format!("{:?}", s.step_type))
                 .collect(),
-            parallelization: plan
-                .steps
-                .iter()
-                .find(|s| s.parallelization.can_parallelize)
-                .map(|s| super::result::ParallelizationInfo {
-                    threads_used: s.parallelization.suggested_threads,
-                    effective: true,
-                    partitions: Vec::new(),
-                }),
+            parallelization: Self::parallelization_for(plan),
         });
         Ok(query_result)
     }
@@ -205,6 +197,45 @@ impl QueryExecutor {
     /// ambiguous (it cannot be told apart from "not yet recorded"), whereas an
     /// explicit marker makes EXPLAIN-style output and bindings stats truthful
     /// and self-describing.
+    /// Report the parallelization metadata for the *actually executed* path, for
+    /// the `parallelization` field of [`super::result::PlanInfo`].
+    ///
+    /// # Truthfulness contract (no-heuristics spirit, issue #28; issue #1691)
+    ///
+    /// A step's `parallelization.can_parallelize` reflects only what the *planner*
+    /// suggested, not what the executor did. Since issue #1691 the `TableScan`
+    /// path is served by a SINGLE bounded `scan_stream` pass
+    /// (`streaming_scan_rows`) rather than N parallel workers, so for that path we
+    /// report the truth: one thread, `effective: false`. Reporting the planner's
+    /// suggested thread count with `effective: true` here would be inaccurate.
+    ///
+    /// For any other plan type we still surface the planner's suggested thread
+    /// count with `effective: true` when a step opts into parallelization.
+    fn parallelization_for(plan: &QueryPlan) -> Option<super::result::ParallelizationInfo> {
+        use super::planner::PlanType;
+
+        let step = plan
+            .steps
+            .iter()
+            .find(|s| s.parallelization.can_parallelize)?;
+
+        // The table-scan path no longer forks parallel workers; it executes a
+        // single bounded streaming pass. Report that truthfully.
+        if matches!(plan.plan_type, PlanType::TableScan) {
+            return Some(super::result::ParallelizationInfo {
+                threads_used: 1,
+                effective: false,
+                partitions: Vec::new(),
+            });
+        }
+
+        Some(super::result::ParallelizationInfo {
+            threads_used: step.parallelization.suggested_threads,
+            effective: true,
+            partitions: Vec::new(),
+        })
+    }
+
     fn indexes_used_for(plan: &QueryPlan) -> Vec<String> {
         use super::planner::{IndexType, PlanType, StepType};
 
@@ -1050,6 +1081,60 @@ mod tests {
         };
         let plan = plan_with(super::super::planner::PlanType::IndexScan, vec![secondary]);
         assert_eq!(QueryExecutor::indexes_used_for(&plan), vec!["scan"]);
+    }
+
+    // -- parallelization metadata truthfulness (issue #1691) --------------
+
+    /// A step that the planner marked parallelizable.
+    fn parallelizable_step() -> ExecutionStep {
+        use super::super::planner::{ParallelizationInfo, StepType};
+        ExecutionStep {
+            step_type: StepType::Scan,
+            columns: Vec::new(),
+            conditions: Vec::new(),
+            cost: 0.0,
+            parallelization: ParallelizationInfo {
+                can_parallelize: true,
+                suggested_threads: 8,
+                partition_key: None,
+            },
+        }
+    }
+
+    /// Issue #1691: the TableScan path now runs through a SINGLE bounded
+    /// `scan_stream` pass, not N parallel workers. Even when the planner
+    /// suggested 8 threads, the reported metadata must be truthful:
+    /// `threads_used == 1` and `effective == false`.
+    #[test]
+    fn test_parallelization_table_scan_reports_single_threaded() {
+        let mut plan = plan_with(super::super::planner::PlanType::TableScan, Vec::new());
+        plan.steps = vec![parallelizable_step()];
+
+        let info = QueryExecutor::parallelization_for(&plan)
+            .expect("a parallelizable step should still yield metadata");
+        assert_eq!(info.threads_used, 1);
+        assert!(!info.effective);
+        assert!(info.partitions.is_empty());
+    }
+
+    /// A plan with no parallelizable step yields no parallelization metadata.
+    #[test]
+    fn test_parallelization_absent_when_no_step_parallelizes() {
+        let plan = plan_with(super::super::planner::PlanType::TableScan, Vec::new());
+        assert!(QueryExecutor::parallelization_for(&plan).is_none());
+    }
+
+    /// Non-scan plan types still surface the planner's suggested thread count as
+    /// effective — only the retired table-scan path is neutralized.
+    #[test]
+    fn test_parallelization_non_scan_reports_planner_threads() {
+        let mut plan = plan_with(super::super::planner::PlanType::Aggregation, Vec::new());
+        plan.steps = vec![parallelizable_step()];
+
+        let info = QueryExecutor::parallelization_for(&plan)
+            .expect("a parallelizable step should yield metadata");
+        assert_eq!(info.threads_used, 8);
+        assert!(info.effective);
     }
 
     #[tokio::test]
