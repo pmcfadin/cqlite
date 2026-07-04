@@ -9,7 +9,9 @@ Covers:
 - writable=True validation (write_dir and schema required)
 """
 
+import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -605,3 +607,193 @@ def test_compaction_partial_config_dict_rejected(tmp_path, write_schema):
             write_dir=str(tmp_path / "write_dir"),
             config={"storage": {"compaction": {"auto_compaction": False}}},
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #1444 — write path releases the GIL during blocking I/O
+# ---------------------------------------------------------------------------
+#
+# These tests generate their own SSTables in a tmp dir, so they do NOT touch
+# the fixture corpus (no dataset skip / _require_fixtures_strict needed). They
+# use a self-calibrated free-run rate so the floor tolerates a heavily-loaded
+# machine (this repo runs many concurrent gates) rather than a tight
+# wall-clock number that would flake.
+
+
+def _spin_counter():
+    """Start a daemon thread spinning a pure-Python counter.
+
+    Returns ``(counter, stop, thread)`` where ``counter[0]`` is the live count.
+    A pure-Python loop can only advance while it holds the GIL, so its progress
+    during another thread's C call is a direct probe of whether that call
+    released the GIL.
+    """
+    counter = [0]
+    stop = threading.Event()
+    ready = threading.Event()
+
+    def run():
+        ready.set()
+        c = 0
+        while not stop.is_set():
+            c += 1
+            counter[0] = c
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    ready.wait()
+    return counter, stop, t
+
+
+@pytest.mark.slow
+def test_flush_run_releases_gil(tmp_path, write_schema):
+    """flush_run() releases the GIL for the duration of its blocking I/O.
+
+    Thread B spins a pure-Python counter; the main thread (A) calls
+    flush_run(). On ``main`` (pre-#1444) the write engine held the GIL for the
+    whole flush, starving thread B; after the fix thread B advances at close to
+    its free-run rate. We compare the spinner's *rate* during the flush to a
+    self-calibrated free-run rate, which is duration- and load-independent.
+    """
+    # A short GIL switch interval shrinks the boundary "leakage" so the
+    # held-GIL bug shows near-zero progress (makes the test discriminating).
+    old_interval = sys.getswitchinterval()
+    sys.setswitchinterval(0.001)
+
+    data_dir = tmp_path / "data_dir"
+    data_dir.mkdir()
+    write_dir = tmp_path / "write_dir"
+    db = cqlite.open(
+        str(data_dir),
+        schema=str(write_schema),
+        writable=True,
+        write_dir=str(write_dir),
+    )
+    try:
+        # Enough rows that the flush does real, measurable serialize + fsync I/O.
+        for i in range(20000):
+            db.execute(
+                f"INSERT INTO write_test.items (id, name, value) "
+                f"VALUES ({i}, 'gil_row_{i}', {i})"
+            )
+
+        counter, stop, t = _spin_counter()
+        try:
+            # Calibrate the spinner's free-run rate: the main thread sleeps,
+            # which (like the fix) releases the GIL, so the spinner runs freely.
+            c0 = counter[0]
+            time.sleep(0.05)
+            free_rate = (counter[0] - c0) / 0.05
+            assert free_rate > 0, "spinner made no progress during calibration"
+
+            # Measure the spinner's rate DURING the flush.
+            before = counter[0]
+            t_start = time.monotonic()
+            path = db.flush_run()
+            flush_secs = time.monotonic() - t_start
+            during_rate = (counter[0] - before) / flush_secs if flush_secs else 0.0
+        finally:
+            stop.set()
+            t.join(timeout=5)
+
+        assert path and Path(path).exists(), "flush must produce a Data.db"
+        # With the GIL released the spinner runs concurrently at a large fraction
+        # of its free rate; with the GIL held it is starved (rate ~0). 15% cleanly
+        # separates the two while tolerating a saturated machine.
+        assert during_rate >= 0.15 * free_rate, (
+            f"spinner starved during flush: {during_rate:.0f}/s vs free "
+            f"{free_rate:.0f}/s over {flush_secs*1000:.1f} ms — GIL was likely "
+            "held for the flush (issue #1444 regression)."
+        )
+    finally:
+        db.close()
+        sys.setswitchinterval(old_interval)
+
+
+@pytest.mark.slow
+def test_execute_dml_releases_gil(tmp_path, write_schema):
+    """A DML batch that triggers auto-flushes keeps the GIL released.
+
+    Companion to the flush test: DML routes through the same Send-guard
+    ``allow_threads`` path (issue #1444). A small flush_threshold makes the
+    inserts cross it repeatedly so ``execute()`` performs real flush I/O.
+    """
+    old_interval = sys.getswitchinterval()
+    sys.setswitchinterval(0.001)
+
+    data_dir = tmp_path / "data_dir"
+    data_dir.mkdir()
+    write_dir = tmp_path / "write_dir"
+    db = cqlite.open(
+        str(data_dir),
+        schema=str(write_schema),
+        writable=True,
+        write_dir=str(write_dir),
+        flush_threshold=4096,
+    )
+    try:
+        counter, stop, t = _spin_counter()
+        try:
+            c0 = counter[0]
+            time.sleep(0.05)
+            free_rate = (counter[0] - c0) / 0.05
+            assert free_rate > 0, "spinner made no progress during calibration"
+
+            before = counter[0]
+            t_start = time.monotonic()
+            for i in range(5000):
+                db.execute(
+                    f"INSERT INTO write_test.items (id, name, value) "
+                    f"VALUES ({i}, 'dml_{i}', {i})"
+                )
+            secs = time.monotonic() - t_start
+            during_rate = (counter[0] - before) / secs if secs else 0.0
+        finally:
+            stop.set()
+            t.join(timeout=5)
+
+        assert during_rate >= 0.10 * free_rate, (
+            f"spinner starved during DML batch: {during_rate:.0f}/s vs free "
+            f"{free_rate:.0f}/s — DML did not release the GIL (issue #1444)."
+        )
+    finally:
+        db.close()
+        sys.setswitchinterval(old_interval)
+
+
+def test_flush_readback_after_send_handle_change(tmp_path, write_schema):
+    """Single-writer correctness holds after the #1444 Send-handle change.
+
+    Proves moving the write engine to an Arc<tokio::Mutex> and running the flush
+    under allow_threads did not corrupt the write: the flushed Data.db is real,
+    non-empty, and every inserted row reads back with its exact values.
+    """
+    data_dir = tmp_path / "data_dir"
+    data_dir.mkdir()
+    write_dir = tmp_path / "write_dir"
+    db = cqlite.open(
+        str(data_dir),
+        schema=str(write_schema),
+        writable=True,
+        write_dir=str(write_dir),
+    )
+    try:
+        for i in range(50):
+            db.execute(
+                f"INSERT INTO write_test.items (id, name, value) "
+                f"VALUES ({i}, 'row_{i}', {i * 2})"
+            )
+        path = db.flush_run()
+        assert path and Path(path).exists(), "flush must produce a Data.db"
+        assert Path(path).stat().st_size > 0, "Data.db must be non-empty"
+    finally:
+        db.close()
+
+    with cqlite.open(str(write_dir / "data"), schema=str(write_schema)) as rd:
+        rows = [r.to_dict() for r in rd.execute("SELECT * FROM write_test.items")]
+
+    assert len(rows) == 50, f"expected 50 rows on read-back, got {len(rows)}"
+    by_id = {r["id"]: r for r in rows}
+    for i in range(50):
+        assert by_id[i]["name"] == f"row_{i}", f"name mismatch for id={i}: {by_id[i]}"
+        assert by_id[i]["value"] == i * 2, f"value mismatch for id={i}: {by_id[i]}"

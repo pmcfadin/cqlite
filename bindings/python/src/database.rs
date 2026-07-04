@@ -28,7 +28,9 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use tokio::sync::Mutex as AsyncMutex;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -69,7 +71,10 @@ pub struct Database {
     inner: Arc<cqlite_core::Database>,
     closed: AtomicBool,
     /// Optional write engine — present only when opened with `writable=True`.
-    write_engine: Option<Mutex<PyWriteEngine>>,
+    /// A `tokio::sync::Mutex` (not `std`) so its guard is `Send` and survives the
+    /// `py.allow_threads` boundary (issue #1444): blocking writes (WAL fsync +
+    /// SSTable materialization) run with the GIL released, matching the read path.
+    write_engine: Option<Arc<AsyncMutex<PyWriteEngine>>>,
     /// W3C `traceparent` captured at `open` time (issue #1039). When set, every
     /// per-call span is re-parented to this trace unless a per-call traceparent
     /// overrides it, so the bindings' Rust spans correlate with the caller's
@@ -102,14 +107,38 @@ impl Database {
         per_call.or(self.default_traceparent.as_deref())
     }
 
-    /// The write engine, or a typed error if the database is read-only.
-    /// Replaces the `require_writable()? … .expect(Some)` two-step.
-    fn writable_engine(&self) -> PyResult<&Mutex<PyWriteEngine>> {
+    /// The write engine handle, or a typed error if the database is read-only.
+    /// Replaces the `require_writable()? … .expect(Some)` two-step. Returns the
+    /// `&Arc<..>` so callers can `Arc::clone` a `Send` handle into an
+    /// `allow_threads` closure (issue #1444).
+    fn writable_engine(&self) -> PyResult<&Arc<AsyncMutex<PyWriteEngine>>> {
         self.write_engine.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err(
                 "Database is read-only. Open with writable=True and write_dir=<path> \
                  to enable write operations.",
             )
+        })
+    }
+
+    /// Run `f` with the write-engine guard held, releasing the GIL for the
+    /// duration (issue #1444). The `tokio::sync::Mutex` guard is `Send`, so the
+    /// blocking write executes inside `py.allow_threads` while the lock still
+    /// serializes writes (single-writer: no two flushes/DML overlap).
+    ///
+    /// The guard is taken with `blocking_lock()` on the (synchronous) Python
+    /// calling thread — NOT inside a `block_on`. `PyWriteEngine::flush`/`execute`
+    /// bridge their own async work via `block_on`; acquiring the lock via
+    /// `.lock().await` here would make this thread a runtime driver and nest
+    /// `block_on`s ("cannot start a runtime from within a runtime").
+    fn with_write_engine<T, F>(&self, py: Python<'_>, f: F) -> PyResult<T>
+    where
+        F: FnOnce(&mut PyWriteEngine) -> PyResult<T> + Send,
+        T: Send,
+    {
+        let engine = Arc::clone(self.writable_engine()?);
+        py.allow_threads(move || {
+            let mut guard = engine.blocking_lock();
+            f(&mut guard)
         })
     }
 
@@ -145,16 +174,19 @@ impl Database {
             return Ok(());
         }
 
-        // Close the write engine first (flushes remaining memtable)
-        if let Some(ref engine_mutex) = self.write_engine {
-            let mut engine = engine_mutex
-                .lock()
-                .map_err(|_| PyRuntimeError::new_err("Write engine lock poisoned during close"))?;
-            // close() flushes remaining data. MutexGuard is not Send, so we
-            // cannot release the GIL here. The flush on close is typically fast.
-            block_on(engine.inner.close())
-                .map_err(runtime_init_to_py_err)?
-                .map_err(to_py_err)?;
+        // Close the write engine first (flushes remaining memtable). The tokio
+        // guard is `Send`, so the flush-on-close I/O runs with the GIL released
+        // (issue #1444), the same as every other write op. `blocking_lock` on the
+        // synchronous calling thread + `block_on` inside mirrors `with_write_engine`
+        // (never nest `block_on`s).
+        if let Some(ref engine_arc) = self.write_engine {
+            let engine = Arc::clone(engine_arc);
+            py.allow_threads(move || {
+                let mut guard = engine.blocking_lock();
+                block_on(guard.inner.close())
+                    .map_err(runtime_init_to_py_err)?
+                    .map_err(to_py_err)
+            })?;
         }
 
         // Shutdown the read-side storage engine
@@ -590,19 +622,12 @@ impl Database {
     /// path = db.flush_run()
     /// assert Path(path).exists()
     /// ```
-    pub fn flush_run(&self) -> PyResult<String> {
+    pub fn flush_run(&self, py: Python<'_>) -> PyResult<String> {
         self.ensure_open()?;
-
-        let engine_mutex = self.writable_engine()?;
-
-        let mut engine = engine_mutex
-            .lock()
-            .map_err(|_| PyRuntimeError::new_err("Write engine lock poisoned"))?;
-
-        // Flush involves substantial I/O. We cannot release the GIL here because
-        // MutexGuard is not Send. Flush is typically fast (writes a single SSTable
-        // file). This is acceptable for the current implementation.
-        engine.flush().map_err(to_py_err)
+        // Flush is substantial I/O (WAL fsync + SSTable materialization). The
+        // `Send` tokio guard lets it run under `allow_threads`, so a large-memtable
+        // flush no longer freezes every other Python thread (issue #1444).
+        self.with_write_engine(py, |e| e.flush().map_err(to_py_err))
     }
 
     /// Perform one incremental maintenance step (compaction).
@@ -634,21 +659,12 @@ impl Database {
     /// report = db.maintenance_step(budget_ms=100)
     /// print(f"Merged {report.rows_merged} rows in {report.time_spent_ms:.1f} ms")
     /// ```
-    pub fn maintenance_step(&self, budget_ms: u64) -> PyResult<MaintenanceReport> {
+    pub fn maintenance_step(&self, py: Python<'_>, budget_ms: u64) -> PyResult<MaintenanceReport> {
         self.ensure_open()?;
-
-        let engine_mutex = self.writable_engine()?;
-
-        let mut engine = engine_mutex
-            .lock()
-            .map_err(|_| PyRuntimeError::new_err("Write engine lock poisoned"))?;
-
         let budget = std::time::Duration::from_millis(budget_ms);
-
-        // MutexGuard is not Send so we cannot release the GIL here.
-        // maintenance_step() is time-bounded and typically completes quickly.
-        let report = engine.maintenance_step(budget).map_err(to_py_err)?;
-
+        // GIL released for the duration; the guard serializes against flush/DML.
+        let report =
+            self.with_write_engine(py, move |e| e.maintenance_step(budget).map_err(to_py_err))?;
         Ok(MaintenanceReport::from_core(report))
     }
 
@@ -673,16 +689,11 @@ impl Database {
     /// print(f"Memtable: {stats.memtable_size} bytes, {stats.memtable_rows} rows")
     /// ```
     #[getter]
-    pub fn write_stats(&self) -> PyResult<WriteStats> {
+    pub fn write_stats(&self, py: Python<'_>) -> PyResult<WriteStats> {
         self.ensure_open()?;
-
-        let engine_mutex = self.writable_engine()?;
-
-        let engine = engine_mutex
-            .lock()
-            .map_err(|_| PyRuntimeError::new_err("Write engine lock poisoned"))?;
-
-        Ok(engine.write_stats())
+        // Same `Send`-guard path so acquiring the lock never blocks the GIL
+        // against a concurrent flush/DML holding it (issue #1444).
+        self.with_write_engine(py, |e| Ok(e.write_stats()))
     }
 }
 
@@ -695,26 +706,15 @@ impl Database {
     fn execute_dml(&self, py: Python<'_>, query: &str) -> PyResult<QueryResult> {
         use std::time::Instant;
 
-        let engine_mutex = self.writable_engine()?;
-
         let query_owned = query.to_string();
         let t0 = Instant::now();
 
-        // Release the GIL for the write (issue #1620). `execute()` now routes
+        // Release the GIL for the write (issue #1620, #1444). `execute()` routes
         // through `WriteEngine::execute_flushing`, which performs a REAL async
-        // SSTable flush (disk I/O) when the memtable crosses the flush threshold
-        // — so holding the GIL for its duration would block every other Python
-        // thread. The `MutexGuard` is created and dropped entirely inside the
-        // closure, so it never crosses the GIL boundary; the closure captures
-        // only `Send` values (`&Mutex<PyWriteEngine>` + `String`).
-        let rows_affected = py
-            .allow_threads(|| {
-                let mut engine = engine_mutex.lock().map_err(|_| {
-                    cqlite_core::error::Error::Storage("Write engine lock poisoned".to_string())
-                })?;
-                engine.execute(&query_owned)
-            })
-            .map_err(to_py_err)?;
+        // SSTable flush (disk I/O) once the memtable crosses the flush threshold;
+        // the `Send` tokio guard runs it entirely inside `allow_threads`.
+        let rows_affected =
+            self.with_write_engine(py, move |e| e.execute(&query_owned).map_err(to_py_err))?;
 
         let elapsed_ms = t0.elapsed().as_millis() as u64;
 
@@ -883,7 +883,7 @@ pub fn open(
     };
 
     // Build WriteEngine when writable=True.
-    let write_engine: Option<Mutex<PyWriteEngine>> = if writable {
+    let write_engine: Option<Arc<AsyncMutex<PyWriteEngine>>> = if writable {
         let wd = write_dir.expect("validated above");
         let schema_path_display = schema.clone().expect("validated above");
 
@@ -936,7 +936,7 @@ pub fn open(
         let engine = cqlite_core::storage::write_engine::WriteEngine::new(engine_config)
             .map_err(to_py_err)?;
 
-        Some(Mutex::new(PyWriteEngine::new(engine)))
+        Some(Arc::new(AsyncMutex::new(PyWriteEngine::new(engine))))
     } else {
         // Silence unused-variable warning
         let _ = (
