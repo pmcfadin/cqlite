@@ -1,17 +1,18 @@
-//! Shared byte-bounded result-budget enforcement (issue #1582 / D6).
+//! Byte-bounded result-budget enforcement (issue #1582 / D6, narrow subset).
 //!
-//! The materializing SELECT path guards a result set with a BYTE ceiling
+//! The modern materializing SELECT path ([`crate::query::select_executor`])
+//! guards its FINAL result with a BYTE ceiling
 //! ([`crate::config::QueryConfig::max_result_bytes`]) plus a secondary row-count
-//! safety valve ([`crate::config::QueryConfig::max_result_rows`]). Both the
-//! modern optimizer path ([`crate::query::select_executor`]) and the legacy
-//! [`QueryExecutor`](crate::query::executor::QueryExecutor) point-lookup path
-//! (used for simple `WHERE id = <value>` lookups so key handling stays
-//! consistent with INSERT) must apply the SAME guard, so the logic lives here in
-//! one place rather than being duplicated (a divergence hazard).
+//! safety valve ([`crate::config::QueryConfig::max_result_rows`]). The check is
+//! applied ONCE, on the fully-materialized result (after the whole step
+//! pipeline), by [`crate::query::select_executor::SelectExecutor::execute`].
+//!
+//! SCOPE: the LEGACY [`QueryExecutor`](crate::query::executor::QueryExecutor)
+//! point-lookup path (simple `WHERE id = <value>` lookups) is NOT covered by
+//! this budget — deferred to the D6 redesign (tracked on #1582).
 //!
 //! This module is compiled unconditionally (unlike `select_executor`, which is
-//! `state_machine`-gated) so the legacy engine path can reach it in every build
-//! configuration.
+//! `state_machine`-gated).
 
 use super::result::QueryRow;
 use crate::{Error, Result};
