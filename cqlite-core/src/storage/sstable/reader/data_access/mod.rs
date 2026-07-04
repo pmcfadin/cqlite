@@ -33,6 +33,9 @@ mod big_promoted_crc_tests;
 // `tests/`.
 #[cfg(test)]
 mod chunk_cache_wiring_tests;
+// BIG ("nb"/uncompressed) point lookup: raw-key Index.db resolve + covering-chunk
+// seek (issue #1572), replacing the whole-file scan_for_key fallback.
+mod big_point;
 mod compaction;
 mod model;
 mod sequential;
@@ -198,8 +201,6 @@ impl SSTableReader {
         key: &RowKey,
         fully_qualified_match: bool,
     ) -> Result<Option<ScanRow>> {
-        use crate::observability::{self as obs, catalog};
-
         // Issue #831 / #909: BTI ("da") readers resolve partitions via the
         // Partitions.db trie (O(log n)), never via Index.db (absent for BTI) or
         // the sequential scan. The trie is the AUTHORITATIVE presence oracle for a
@@ -216,59 +217,14 @@ impl SSTableReader {
                 .await;
         }
 
-        // First check bloom filter if available
-        if let Some(bloom_filter) = &self.bloom_filter {
-            let present = bloom_filter.might_contain(key.as_bytes());
-            obs::add_counter(
-                catalog::READ_BLOOM_CHECKS,
-                1,
-                &[
-                    (
-                        catalog::attr::RESULT,
-                        if present { "hit" } else { "miss" }.into(),
-                    ),
-                    (
-                        catalog::attr::SSTABLE_FORMAT,
-                        self.sstable_format_label().into(),
-                    ),
-                ],
-            );
-            if !present {
-                return Ok(None);
-            }
-        }
-
-        // Use index for efficient lookup if available
-        if let Some(index) = &self.index {
-            if let Some(entry) = index.find_entry(table_id, key).await? {
-                // When Index.db reports size=0 (Cassandra 5.0), fall back to sequential scan
-                if entry.size == 0 {
-                    log::debug!(
-                        "Index reports size=0 for key {:?}, using sequential scan fallback",
-                        key
-                    );
-                    return self.scan_for_key(table_id, key).await;
-                }
-
-                // Index offsets are relative to data section start - adjust for header
-                let file_offset = entry.offset + self.actual_header_size as u64;
-                return self.read_value_at_offset(file_offset, entry.size).await;
-            }
-
-            // Issue #517: The SSTableIndex is built from Index.db key *digests* (16-byte
-            // Murmur3 hashes), not raw partition key bytes.  A raw-key lookup via
-            // find_entry() always misses.  Fall back to scan_for_key() so that get()
-            // and scan() agree on which partitions exist.
-            log::debug!(
-                "Index lookup returned no entry for key {:?} (possible digest/raw-key mismatch), \
-                 falling back to sequential scan",
-                key
-            );
-            return self.scan_for_key(table_id, key).await;
-        } else {
-            // No index at all — fall back to sequential scan
-            return self.scan_for_key(table_id, key).await;
-        }
+        // BIG ("nb"/uncompressed) readers: raw-key Index.db resolve + covering-chunk
+        // seek (issue #1572). The bloom pre-check, the fast Index.db-resolved
+        // chunk-targeted decode, and the index-less `scan_for_key` fallback all live
+        // in `big_point`. Before #1572 this path called `self.index.find_entry()`
+        // with raw key bytes against a *digest*-keyed map (always a miss, issue
+        // #517), so every lookup fell through to a whole-file `scan_for_key`.
+        self.big_get_with_resolution(table_id, key, fully_qualified_match)
+            .await
     }
 
     /// Stitch all compressed chunks and parse as a single buffer (V5CompressedLegacy)

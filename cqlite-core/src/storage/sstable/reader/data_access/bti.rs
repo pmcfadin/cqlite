@@ -555,7 +555,7 @@ impl SSTableReader {
     /// Uses its own per-scan [`ScanCursor`] (private file position + chunk
     /// index), so concurrent lookups run in parallel without serialization
     /// (issue #815).
-    async fn bti_decompress_and_parse_target(
+    pub(super) async fn bti_decompress_and_parse_target(
         &self,
         offset: usize,
         key: &RowKey,

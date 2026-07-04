@@ -167,9 +167,22 @@ impl IndexReader {
             )));
         }
 
-        // Parse the index data with optional Summary.db correlation
+        // Parse the index data with optional Summary.db correlation.
+        //
+        // NOTE (issue #1572): `parse_all_partition_keys_with_summary` `break`s on
+        // the first unparseable entry and returns the parsed prefix, so a
+        // truncated / partially-corrupt Index.db opens successfully with a PARTIAL
+        // map. The leftover `remaining` being empty ONLY proves the surviving
+        // bytes parsed cleanly to EOF — it CANNOT detect truncation aligned to an
+        // exact entry boundary (whole trailing entries dropped ⇒ the prefix parses
+        // cleanly, `remaining` is empty, yet partitions are missing). There is no
+        // cleanly-available authoritative partition count at this layer to close
+        // that gap, so completeness is NOT tracked here; instead the BIG
+        // point-lookup miss branch always falls back to a whole-file scan rather
+        // than treating an index miss as a definitive absent (see
+        // `big_get_with_resolution`). No heuristics (issue #28).
         let index_data = match parse_index_data_with_summary(&buffer, summary_reader) {
-            Ok((_, data)) => data,
+            Ok((_remaining, data)) => data,
             Err(e) => {
                 return Err(Error::corruption(format!(
                     "Failed to parse Index.db: {:?}",
