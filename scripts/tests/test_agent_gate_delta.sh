@@ -2,13 +2,18 @@
 # Regression test for issue #1892: agent-gate.sh --delta test/docs-only
 # RE-CERTIFICATION. After a full-gate PASS at an anchor commit, a diff
 # anchor..HEAD that touches ONLY what the re-cert can EXECUTE — rust cargo test
-# code (.rs under tests/ dirs, *_test(s).rs), python binding tests
-# (bindings/python/tests/, run by the #1893 python tier), and/or docs (markdown
-# ONLY: *.md anywhere; non-md files under docs/ or website/ are REFUSED) — may
-# re-certify with file-size + fmt +
+# code (AUTHORITATIVE: a .rs file that IS a Cargo `--test` target scoped-tests
+# runs, discovered via cargo metadata — NOT globs; roborev job 3327), python
+# binding tests (bindings/python/tests/, run by the #1893 python tier), and/or
+# docs (markdown ONLY: *.md anywhere; non-md files under docs/ or website/ are
+# REFUSED) — may re-certify with file-size + fmt +
 # the changed test targets; ANYTHING else in the diff FAILs closed (a fresh full
-# gate is required), including node __test__/ files and scripts/tests/*.sh,
-# which --delta's components never execute (roborev job 1452). The delta run
+# gate is required), including a .rs that is NOT a --test target (nested helper
+# mods, src *_test(s).rs, scripts/*.rs, the workspace-excluded fuzz/ crate), node
+# __test__/ files, and scripts/tests/*.sh, which --delta's components never
+# execute (roborev jobs 1452 / 3327). Because the allow decision is now cargo
+# metadata-backed, the ALLOW cases below use REAL existing --test target files
+# (invented paths cargo does not know would correctly REFUSE). The delta run
 # emits a DISTINCT "==== AGENT-GATE DELTA SUMMARY ====" block (MODE: delta) that
 # can never be pasted as a full SUMMARY and names the gate of record (the full
 # PASS at the anchor) + the nightly backstop.
@@ -54,30 +59,67 @@ assert_verdict() {
   fi
 }
 
-# 1. src-file-in-diff → REFUSE (fail-closed). A production .rs file must refuse.
+# 1. src-file-in-diff → REFUSE (fail-closed). A production .rs file must refuse,
+#    while a REAL --test target file (cargo metadata-backed) stays ALLOW.
 assert_verdict "src-file-refuses" REFUSE \
   "cqlite-core/src/storage/sstable/reader.rs" \
-  "cqlite-core/tests/foo_roundtrip.rs"
+  "cqlite-core/tests/write_read_roundtrip.rs"
 # The offending src file must be the one marked REFUSE (not the test file).
-src_out=$(printf '%s\n' "cqlite-core/src/storage/sstable/reader.rs" "cqlite-core/tests/foo_roundtrip.rs" \
+src_out=$(printf '%s\n' "cqlite-core/src/storage/sstable/reader.rs" "cqlite-core/tests/write_read_roundtrip.rs" \
   | bash "$GATE" --delta-classify 2>/dev/null)
 if printf '%s\n' "$src_out" | grep -qxF "REFUSE cqlite-core/src/storage/sstable/reader.rs" \
-   && printf '%s\n' "$src_out" | grep -qxF "ALLOW cqlite-core/tests/foo_roundtrip.rs"; then
+   && printf '%s\n' "$src_out" | grep -qxF "ALLOW cqlite-core/tests/write_read_roundtrip.rs"; then
   ok "src-file-refuses: the src file is marked REFUSE, the test file ALLOW"
 else
   bad "src-file-refuses: per-file classification wrong"
   echo "------- classify output -------"; printf '%s\n' "$src_out"; echo "-------------------------------"
 fi
 
-# 2. test-only → ALLOW (would proceed to emit a delta block). Cover every
-#    EXECUTABLE test class: .rs under tests/ dirs, bindings/python/tests/
-#    (python tier), *_test.rs / *_tests.rs.
+# 2. test-only → ALLOW (would proceed to emit a delta block). Cover the EXECUTABLE
+#    classes with REAL, cargo metadata-known targets: top-level integration-test
+#    targets in cqlite-core / cqlite-cli / the workspace root, plus a
+#    bindings/python/tests/ file (the #1893 python tier). These are actual files in
+#    the workspace, so cargo metadata resolves them to --test targets.
 assert_verdict "test-only-allows" ALLOW \
   "cqlite-core/tests/write_read_roundtrip.rs" \
-  "cqlite-cli/tests/unit_tests.rs" \
-  "bindings/python/tests/test_parity.py" \
-  "cqlite-core/src/storage/reader_test.rs" \
-  "cqlite-core/src/query/planner_tests.rs"
+  "cqlite-core/tests/compaction_integration.rs" \
+  "cqlite-cli/tests/integration_tests.rs" \
+  "tests/cache_metrics_test.rs" \
+  "bindings/python/tests/test_parity.py"
+
+# 2a. A .rs whose name matches the OLD *_test(s).rs glob but that lives in src/ (or
+#     scripts/, or the excluded fuzz/ crate) is NOT a Cargo --test target → REFUSE
+#     (roborev job 3327). The old static-glob allow classified these as tests; the
+#     authoritative cargo-metadata decision refuses them.
+assert_verdict "src-test-suffix-refuses"     REFUSE "cqlite-core/src/storage/reader_test.rs"
+assert_verdict "src-tests-suffix-refuses"     REFUSE "cqlite-core/src/query/planner_tests.rs"
+assert_verdict "script-tests-suffix-refuses"  REFUSE "scripts/foo_tests.rs"
+assert_verdict "fuzz-crate-target-refuses"    REFUSE "fuzz/fuzz_targets/fuzz_vint.rs"
+# An invented top-level tests/*.rs path cargo does not know is REFUSED (it is not a
+# real --test target); only real target files are allowed.
+assert_verdict "unknown-test-target-refuses"  REFUSE "cqlite-core/tests/does_not_exist_1892.rs"
+
+# 2b. FAIL-CLOSED with no cargo-metadata parser (roborev job 3327). Force the
+#     no-metadata-parser path via AGENT_GATE_TEST_NO_METADATA_PARSER=1: the
+#     test-target index is empty, so NO .rs is allowed — even a REAL --test target
+#     file REFUSES, forcing the full gate. (*.md and python tests are path-only, so
+#     they stay ALLOW even without metadata.)
+no_meta_v=$(printf '%s\n' "cqlite-core/tests/write_read_roundtrip.rs" \
+  | AGENT_GATE_TEST_NO_METADATA_PARSER=1 bash "$GATE" --delta-classify 2>/dev/null \
+  | grep -E '^VERDICT: ' | head -1 | sed 's/^VERDICT: //')
+if [ "$no_meta_v" = REFUSE ]; then
+  ok "no-metadata-parser: a real --test target .rs REFUSES when metadata is unavailable (fail-closed)"
+else
+  bad "no-metadata-parser: expected REFUSE with no metadata parser (got '$no_meta_v')"
+fi
+no_meta_md=$(printf '%s\n' "README.md" \
+  | AGENT_GATE_TEST_NO_METADATA_PARSER=1 bash "$GATE" --delta-classify 2>/dev/null \
+  | grep -E '^VERDICT: ' | head -1 | sed 's/^VERDICT: //')
+if [ "$no_meta_md" = ALLOW ]; then
+  ok "no-metadata-parser: *.md still ALLOWs (path-only, independent of cargo metadata)"
+else
+  bad "no-metadata-parser: *.md should ALLOW without metadata (got '$no_meta_md')"
+fi
 
 # 2b. NON-EXECUTABLE test classes → REFUSE (roborev job 1452): --delta's
 #     components (file-size, fmt, scoped-tests) never run node jest or the shell
@@ -143,22 +185,26 @@ assert_verdict "deleted-src-refuses"       REFUSE "cqlite-core/src/lib.rs"
 assert_verdict "deleted-doc-allows"        ALLOW  "docs/x.md"
 assert_verdict "deleted-md-allows"         ALLOW  "some/nested/NOTES.md"
 
-# 5c. NESTED rust test-helper mods under a tests/ dir → REFUSE (roborev job 3323):
-#     they are not Cargo integration-test *targets* (run_scoped_tests runs the
-#     package --lib + top-level tests/<name>.rs targets, never a nested helper
-#     mod), so certifying one would be a wiring-evidence gap. A TOP-LEVEL
-#     integration-test target under the same tests/ dir stays ALLOWED.
-assert_verdict "nested-helper-mod-refuses" REFUSE "cqlite-core/tests/parity_bundle/mod.rs"
-assert_verdict "nested-helper-deep-refuses" REFUSE "foo/tests/sub/helper.rs"
-assert_verdict "top-level-tests-anchored-refuses" REFUSE "tests/util/helper.rs"
-assert_verdict "top-level-integration-target-allows" ALLOW "cqlite-core/tests/parity_test.rs"
-assert_verdict "top-level-integration-anchored-allows" ALLOW "tests/roundtrip.rs"
+# 5c. NESTED rust test-helper mods under a tests/ dir → REFUSE (roborev jobs 3323 /
+#     3327): they are not Cargo integration-test *targets* (run_scoped_tests runs
+#     the package --lib + top-level tests/<name>.rs targets, never a nested helper
+#     mod), so cargo metadata never resolves them to a --test target and certifying
+#     one would be a wiring-evidence gap. A TOP-LEVEL integration-test target stays
+#     ALLOWED. These use REAL existing files so the cargo metadata decision is
+#     exercised: write_read_roundtrip/type_coverage.rs is a submodule of the
+#     write_read_roundtrip target (not itself a target); common/mod.rs and
+#     parity_support/mod.rs are shared helper mods.
+assert_verdict "nested-helper-mod-refuses" REFUSE "cqlite-core/tests/write_read_roundtrip/type_coverage.rs"
+assert_verdict "nested-common-mod-refuses" REFUSE "cqlite-core/tests/common/mod.rs"
+assert_verdict "nested-support-mod-refuses" REFUSE "cqlite-core/tests/parity_support/mod.rs"
+assert_verdict "top-level-integration-target-allows" ALLOW "cqlite-core/tests/compaction_integration.rs"
+assert_verdict "top-level-integration-root-allows" ALLOW "tests/cache_metrics_test.rs"
 # Per-file check: in a mixed nested-helper + top-level-target diff, the nested
 # helper is the one marked REFUSE while the top-level target stays ALLOW.
-nested_out=$(printf '%s\n' "cqlite-core/tests/parity_bundle/mod.rs" "cqlite-core/tests/parity_test.rs" \
+nested_out=$(printf '%s\n' "cqlite-core/tests/write_read_roundtrip/type_coverage.rs" "cqlite-core/tests/write_read_roundtrip.rs" \
   | bash "$GATE" --delta-classify 2>/dev/null)
-if printf '%s\n' "$nested_out" | grep -qxF "REFUSE cqlite-core/tests/parity_bundle/mod.rs" \
-   && printf '%s\n' "$nested_out" | grep -qxF "ALLOW cqlite-core/tests/parity_test.rs"; then
+if printf '%s\n' "$nested_out" | grep -qxF "REFUSE cqlite-core/tests/write_read_roundtrip/type_coverage.rs" \
+   && printf '%s\n' "$nested_out" | grep -qxF "ALLOW cqlite-core/tests/write_read_roundtrip.rs"; then
   ok "nested-vs-target: nested helper REFUSE, top-level target ALLOW"
 else
   bad "nested-vs-target: per-file classification wrong"

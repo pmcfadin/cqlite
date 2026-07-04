@@ -570,15 +570,24 @@ classify_scoped_plan() {
 # is allowed, so any src, script, workflow, Cargo.*, or config change falls
 # through to the refusal path.
 #
-# ALLOW only what run_delta's components EXECUTE (roborev job 1452): a class that
-# classifies ALLOW but that file-size/fmt/scoped-tests never run would produce a
-# PASS DELTA block for an untested change. Therefore:
-#   * rust cargo test code — TOP-LEVEL `.rs` under a `tests/` directory +
-#     `*_test(s).rs` anywhere (the scoped-tests cargo scoper compiles/runs these).
-#     NESTED rust helper mods under a tests/ dir (e.g. tests/parity_bundle/mod.rs)
-#     are REFUSED: they are not Cargo integration-test *targets* (run_scoped_tests
-#     runs the package `--lib` plus top-level `tests/<name>.rs` targets, never a
-#     nested helper mod), so certifying one would be a wiring-evidence gap;
+# ALLOW only what run_delta's components EXECUTE (roborev jobs 1452 / 3323 / 3325 /
+# 3327): a class that classifies ALLOW but that file-size/fmt/scoped-tests never
+# run would produce a PASS DELTA block for an untested change. Therefore:
+#   * rust cargo test code — AUTHORITATIVE, NOT glob-based (roborev job 3327). A
+#     `.rs` path is allowed IFF it resolves to a Cargo `--test` target that
+#     scoped-tests actually runs (`run_scoped_tests` runs the owning package's
+#     `--lib` plus its top-level `--test <name>` targets). The allowed set is the
+#     metadata-derived subset of the changed `.rs` files whose absolute `src_path`
+#     matches a `--test` target in `_test_target_index` — the SAME authoritative
+#     discovery `classify_test_targets` uses (no static globs). This closes at the
+#     ROOT the whole class of glob holes the earlier `tests/*.rs` + `*_test(s).rs`
+#     approach left open: nested helper mods under a tests/ dir (not targets),
+#     repo-wide `*_test(s).rs` that are actually src or scripts (e.g.
+#     `scripts/foo_tests.rs`, `cqlite-core/src/reader_test.rs`), and the
+#     workspace-EXCLUDED `fuzz/` crate — none is a real, in-workspace `--test`
+#     target, so none is allowed. When no cargo-metadata parser is available the
+#     index is empty → NO `.rs` is allowed → the delta REFUSES any `.rs` change and
+#     forces the full gate (fail-closed).
 #   * python binding tests — `bindings/python/tests/*` (the #1893 python tier
 #     executes the whole not-slow pytest suite for a cqlite-py-owned diff);
 #   * docs — MARKDOWN ONLY (`*.md` anywhere, including under docs/ and website/).
@@ -590,10 +599,45 @@ classify_scoped_plan() {
 #     `website/*` globs were removed for exactly this reason.
 # Deliberately REFUSED (require the full gate — --delta cannot execute them):
 # node jest files (`__test__/` — scoped-tests only compile-checks cqlite-node,
-# it never runs jest) and shell self-tests (`scripts/tests/*.sh` — no gate
-# component in the delta subset runs them; only the full gate's tooling-tests
-# does). Defined before the arg-parse case so the hidden --delta-classify hook
-# (and run_delta) can call it. Bash 3.2-safe (case globs).
+# it never runs jest), shell self-tests (`scripts/tests/*.sh` — no gate component
+# in the delta subset runs them; only the full gate's tooling-tests does), and any
+# `.rs` that is not a Cargo `--test` target. The caller precomputes the
+# allowed-.rs set ONCE per delta run (via _delta_rs_target_paths, which calls cargo
+# metadata a single time) into _DELTA_RS_ALLOWED_SET; this function consults that
+# cached set for `.rs` paths — never invoking cargo per file. Defined before the
+# arg-parse case so the hidden --delta-classify hook (and run_delta) can call it.
+# Bash 3.2-safe (case globs + grep membership).
+
+# Newline-delimited set of changed .rs paths that ARE executed Cargo `--test`
+# targets, precomputed ONCE per delta run by the caller (delta_classify_stdin /
+# run_delta) via _delta_rs_target_paths. Empty by default (set -u-safe): with no
+# entries, _delta_is_allowed_path refuses every `.rs` path (fail-closed).
+_DELTA_RS_ALLOWED_SET=""
+
+# Read changed repo-relative paths on stdin; print the subset that ARE executed
+# Cargo `--test` targets (one repo-relative path per line). AUTHORITATIVE: matches
+# each `.rs` path's absolute `$REPO_ROOT/<path>` against the FIRST column of
+# `_test_target_index` (the metadata-derived src_path→target map that
+# `classify_test_targets` also uses), so the allowed set is exactly the files
+# `run_scoped_tests` runs as `--test <name>`. Calls `_test_target_index` ONCE
+# (cached in a var) — never once per file. When no metadata parser is available the
+# index is empty → prints NOTHING → no `.rs` is delta-allowed (fail-closed).
+# Non-.rs paths are ignored here (docs/python are handled by _delta_is_allowed_path
+# directly). Deterministic; Bash 3.2-safe (no associative arrays).
+_delta_rs_target_paths() {
+  local index f abs
+  index=$(_test_target_index)
+  [ -n "$index" ] || return 0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$f" in *.rs) ;; *) continue ;; esac
+    abs="$REPO_ROOT/$f"
+    if printf '%s\n' "$index" | awk -F'\t' -v p="$abs" '$1 == p { hit = 1 } END { exit !hit }'; then
+      printf '%s\n' "$f"
+    fi
+  done
+}
+
 _delta_is_allowed_path() {
   case "$1" in
     # docs — MARKDOWN ONLY, anywhere (incl. under docs/ and website/). NON-md
@@ -602,20 +646,19 @@ _delta_is_allowed_path() {
     # (roborev job 3325). Do NOT re-add blanket docs/* or website/* allows.
     *.md) return 0 ;;
     # python binding tests — executed by the #1893 python tier (must stay ABOVE the
-    # nested-rust-refuse rule: the python tier runs the whole pytest suite, so
-    # nested python test files are fine).
+    # *.rs rule; these are .py so the *.rs case would not match anyway, but keeping
+    # it first documents that the python tier runs the whole not-slow pytest suite).
     bindings/python/tests/*) return 0 ;;
-    # NESTED rust helper mods under a tests/ dir are REFUSED (roborev job 3323):
-    # they are not Cargo integration-test *targets*, so scoped-tests never
-    # compiles/runs them. Must come BEFORE the top-level tests/*.rs allows below
-    # (first matching case wins).
-    tests/*/*.rs) return 1 ;;
-    */tests/*/*.rs) return 1 ;;
-    # rust cargo test code — TOP-LEVEL cargo test targets, executed/compiled by the
-    # scoped-tests cargo scoper.
-    tests/*.rs) return 0 ;;
-    */tests/*.rs) return 0 ;;
-    *_test.rs|*_tests.rs) return 0 ;;
+    # rust cargo test code — AUTHORITATIVE, not glob-based (roborev job 3327): a
+    # `.rs` path is allowed IFF it is an executed Cargo `--test` target, i.e. a
+    # member of _DELTA_RS_ALLOWED_SET (precomputed once via _delta_rs_target_paths).
+    # This refuses nested helper mods, src `*_test(s).rs`, `scripts/*_tests.rs`, and
+    # the workspace-excluded `fuzz/` crate — none are real `--test` targets. With no
+    # metadata parser the set is empty → every `.rs` refuses (fail-closed).
+    *.rs)
+      printf '%s\n' "$_DELTA_RS_ALLOWED_SET" | grep -qxF "$1" && return 0
+      return 1
+      ;;
     *) return 1 ;;
   esac
 }
@@ -626,7 +669,13 @@ _delta_is_allowed_path() {
 # "VERDICT: REFUSE" (>=1 production file). Pure function — no git, cargo, or tree
 # mutation — so scripts/tests can assert the refusal decision hermetically.
 delta_classify_stdin() {
-  local f verdict=ALLOW
+  local f verdict=ALLOW changed
+  # Precompute the executed-target .rs allow-set ONCE (cargo metadata called a
+  # single time), then classify each path against it — the same authoritative
+  # decision run_delta makes. The --delta-classify hook runs IN the repo, so cargo
+  # metadata is available (fail-closed to REFUSE-all-.rs when it is not).
+  changed=$(cat)
+  _DELTA_RS_ALLOWED_SET=$(printf '%s\n' "$changed" | _delta_rs_target_paths)
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     if _delta_is_allowed_path "$f"; then
@@ -634,7 +683,7 @@ delta_classify_stdin() {
     else
       echo "REFUSE $f"; verdict=REFUSE
     fi
-  done
+  done <<<"$changed"
   echo "VERDICT: $verdict"
 }
 
@@ -648,9 +697,14 @@ COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard m
 LITE_COMPONENTS=(file-size fmt clippy scoped-tests)
 # --delta (issue #1892): TEST/DOCS-ONLY RE-CERTIFICATION after a full-gate PASS.
 # Given an anchor (the commit the full gate PASSed at), it verifies the diff
-# anchor..HEAD touches ONLY test files and/or docs (FAIL-CLOSED if any production
-# file changed), then re-certifies with this fast subset — file-size + fmt + the
-# diff's changed test targets. It is NOT the gate of record: the gate of record
+# anchor..HEAD touches ONLY files the delta can EXECUTE (FAIL-CLOSED if any
+# production file changed), then re-certifies with this fast subset — file-size +
+# fmt + the diff's changed test targets. The Rust allow decision is AUTHORITATIVE,
+# not glob-based (roborev job 3327): a `.rs` file is allowed IFF it is a Cargo
+# `--test` target that scoped-tests executes (via _delta_rs_target_paths /
+# _test_target_index), so nested helper mods, src `*_test(s).rs`, `scripts/*.rs`,
+# and the workspace-excluded `fuzz/` crate all refuse. It is NOT the gate of
+# record: the gate of record
 # remains the full agent-gate.sh PASS at the anchor, recorded alongside the delta
 # evidence in the PR. The standing backstop is the nightly full run on main
 # (.github/workflows/gate.yml deep-check). See run_delta() below.
@@ -1876,6 +1930,12 @@ run_delta() {
     "$(git diff --name-only HEAD 2>/dev/null)" \
     | awk 'NF && !seen[$0]++')
 
+  # Precompute the executed-target .rs allow-set ONCE (cargo metadata called a
+  # single time) before the partition loop, so _delta_is_allowed_path consults an
+  # authoritative cached set per .rs path rather than static globs (roborev job
+  # 3327). Empty when no metadata parser is available → every .rs refuses.
+  _DELTA_RS_ALLOWED_SET=$(printf '%s\n' "$changed" | _delta_rs_target_paths)
+
   # Partition into allowed (test/docs) and offending (everything else). FAIL-CLOSED.
   local f allowed="" offending=""
   while IFS= read -r f; do
@@ -1921,16 +1981,17 @@ run_delta() {
     echo "--- [delta] REFUSED: the diff anchor..HEAD changes files --delta cannot re-certify:" >&2
     while IFS= read -r f; do [ -n "$f" ] && printf '      %s\n' "$f" >&2; done <<<"$offending"
     echo "    A fresh FULL gate is required: scripts/agent-gate.sh" >&2
-    echo "    --delta re-certifies ONLY what it can EXECUTE: rust cargo tests (.rs under tests/" >&2
-    echo "    dirs, *_test(s).rs), python binding tests (bindings/python/tests/), and docs (*.md;" >&2
-    echo "    top-level docs/, website/). Node __test__/ and shell scripts/tests changes require" >&2
-    echo "    the full gate — --delta cannot execute them." >&2
+    echo "    --delta re-certifies ONLY what it can EXECUTE: rust files that ARE a Cargo" >&2
+    echo "    --test target (authoritative via cargo metadata, not globs), python binding" >&2
+    echo "    tests (bindings/python/tests/), and docs (*.md anywhere). A .rs that is not a" >&2
+    echo "    --test target (nested helper mods, src *_test(s).rs, scripts/*.rs, the excluded" >&2
+    echo "    fuzz/ crate), node __test__/, and shell scripts/tests require the full gate." >&2
     emit_summary REFUSED \
       "${anchor_meta[@]}" \
       "delta-scope: file-size fmt scoped-tests (NOT RUN — refused before execution)" \
       "$(accelerators_line)" \
       "${file_meta[@]}" \
-      "refusal: $n_offending file(s) --delta cannot re-certify — a full gate is required (--delta executes only rust cargo tests, bindings/python/tests, and docs; node __test__/ + scripts/tests need the full gate)"
+      "refusal: $n_offending file(s) --delta cannot re-certify — a full gate is required (--delta executes only rust files that ARE a Cargo --test target [authoritative, not glob-based], bindings/python/tests, and *.md docs; non-target .rs + node __test__/ + scripts/tests need the full gate)"
     [ "$SUMMARY_WRITE_FAILED" -eq 0 ] || { echo "agent-gate: exiting non-zero because the summary file could not be written (#1175)" >&2; exit 1; }
     exit 1
   fi
