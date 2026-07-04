@@ -83,6 +83,12 @@ impl SSTableReader {
                     // offset until the partition is complete, so no size is needed.
                     let schema_opt = self.get_table_schema(None);
                     let parser = self.build_v5_parser(true);
+                    // Pass `data_offset` raw (NO `actual_header_size` add): the
+                    // chunk-targeted decode operates in the uncompressed data-section
+                    // domain that begins at offset 0 (and for `nb`
+                    // `actual_header_size == 0` anyway). The legacy whole-section
+                    // fallback below seeks the file past the header itself, so it must
+                    // add `actual_header_size`; this path must not.
                     let found = self
                         .bti_decompress_and_parse_target(
                             data_offset as usize,

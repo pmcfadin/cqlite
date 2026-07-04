@@ -301,6 +301,7 @@ async fn absent_key_returns_none_without_scan() {
 // -------------------------------------------------------------------------
 
 #[tokio::test]
+#[serial]
 async fn get_value_matches_full_scan_oracle_for_all_keys() {
     let Some(dd) = big_data_db() else {
         eprintln!("SKIP: {KEYSPACE}/{TABLE} BIG fixture not available");
