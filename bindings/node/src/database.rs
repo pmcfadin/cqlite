@@ -1460,11 +1460,11 @@ impl napi::Task for ExecuteNativeTask {
         Ok(QueryResultData {
             rows: result
                 .rows
-                .iter()
+                .into_iter()
                 .map(|r| {
                     r.values
-                        .iter()
-                        .map(|(k, v)| (k.to_string(), v.clone()))
+                        .into_iter()
+                        .map(|(k, v)| (k.to_string(), v))
                         .collect()
                 })
                 .collect(),
