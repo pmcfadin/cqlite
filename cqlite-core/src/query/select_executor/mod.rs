@@ -24,6 +24,17 @@
 //!   continuation (issue #1174),
 //! - this `mod.rs` — the [`SelectExecutor`] orchestration and remaining
 //!   per-step helpers.
+//!
+//! ## Lint policy (issue #1590, E8)
+//!
+//! The read-path pipeline step helpers below are pure/synchronous — none awaits.
+//! Deny `clippy::unused_async` for this module (and its submodules) so a future
+//! edit cannot silently reintroduce the future/state-machine overhead of an
+//! `async fn` that never awaits (which also infects every caller with an
+//! `.await`). A crate-level deny is deliberately NOT used: `cqlite-core` still
+//! has many legitimately-flagged `async fn`s on its public surface (out of E8's
+//! scope), so the guard is scoped to the pipeline it protects.
+#![deny(clippy::unused_async)]
 
 mod aggregation;
 mod execute;
@@ -98,6 +109,70 @@ thread_local! {
 thread_local! {
     pub(crate) static SORT_KEY_EVALUATIONS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+}
+
+/// 128-bit digest of a partition key's raw bytes for PER PARTITION LIMIT
+/// bookkeeping (issue #1590, E8).
+///
+/// PER PARTITION LIMIT keys its per-partition counters on the partition. Keying
+/// a map (or an adjacent-boundary compare) on the raw `Vec<u8>` clones the key
+/// bytes for every row; using this fixed-size `u128` digest as the FAST outer
+/// lookup key makes the per-row work a heap-free hash of the bytes we already
+/// hold. The digest is Cassandra's own `murmur3_x64_128` (already used for token
+/// routing), so it is stable and well-distributed.
+///
+/// The digest is only a pre-check: both the batch counter map and the streaming
+/// boundary confirm an EXACT match on the raw partition-key bytes (stored ONCE
+/// per distinct partition, never cloned per row) before sharing a counter. So
+/// correctness does NOT depend on collision absence — two distinct partitions
+/// whose digests collide get separate counters and no valid row is dropped.
+pub(super) fn partition_key_digest(key_bytes: &[u8]) -> u128 {
+    let (h1, h2) = crate::util::cassandra_murmur3::cassandra_murmur3_x64_128(key_bytes);
+    ((h1 as u64 as u128) << 64) | (h2 as u64 as u128)
+}
+
+/// PER PARTITION LIMIT counter map for the batch path (issue #1590, E8).
+///
+/// The outer key is the fast 128-bit [`partition_key_digest`]; each bucket is a
+/// chain of `(raw_key_bytes, count)` entries disambiguated by EXACT byte
+/// equality. The chain is near-always length 1 — it grows only on a genuine
+/// digest collision between two DISTINCT partition keys — so the fast path is an
+/// `O(1)` digest hash plus a single byte compare, yet correctness never depends
+/// on collision absence.
+type PartitionCounts = HashMap<u128, Vec<(Vec<u8>, u64)>>;
+
+/// Admit one row under PER PARTITION LIMIT `count`, returning `true` when the
+/// row is within its partition's cap (and incrementing that partition's count).
+///
+/// `digest` is the fast outer lookup key; the raw `key_bytes` confirm the exact
+/// partition so a (vanishingly rare) digest collision between two distinct keys
+/// never shares a counter. The key's bytes are cloned at most ONCE — on the row
+/// that first opens the partition's counter — never per row.
+fn admit_partition_row(
+    counts: &mut PartitionCounts,
+    digest: u128,
+    key_bytes: &[u8],
+    count: u64,
+) -> bool {
+    let chain = counts.entry(digest).or_default();
+    let slot = match chain
+        .iter()
+        .position(|(bytes, _)| bytes.as_slice() == key_bytes)
+    {
+        Some(i) => &mut chain[i],
+        None => {
+            // The ONLY key-byte clone: once per distinct partition, not per row.
+            chain.push((key_bytes.to_vec(), 0));
+            let last = chain.len() - 1;
+            &mut chain[last]
+        }
+    };
+    if slot.1 < count {
+        slot.1 += 1;
+        true
+    } else {
+        false
+    }
 }
 
 /// Derive the output column name for a projected SELECT expression (issue #1584).
@@ -303,9 +378,7 @@ impl SelectExecutor {
         // re-locking the registry and deep-cloning a fresh schema (2–4× per query).
         let query_schema: Option<Arc<TableSchema>> = self.resolve_table_schema(&table_id).await;
 
-        let columns = self
-            .get_result_columns(&plan.statement, query_schema.as_deref())
-            .await?;
+        let columns = self.get_result_columns(&plan.statement, query_schema.as_deref())?;
 
         // Create bounded channel for backpressure
         let (tx, rx) = mpsc::channel(config.buffer_size);
@@ -427,7 +500,7 @@ impl SelectExecutor {
     // `execute` submodule alongside `execute` (issue #1174).
 
     /// Execute filtering step
-    async fn execute_filter(
+    fn execute_filter(
         &self,
         rows: Vec<QueryRow>,
         filter_expr: &WhereExpression,
@@ -663,7 +736,7 @@ impl SelectExecutor {
     }
 
     /// Execute sorting step
-    async fn execute_sort(
+    fn execute_sort(
         &self,
         mut rows: Vec<QueryRow>,
         order_by: &OrderByClause,
@@ -714,7 +787,7 @@ impl SelectExecutor {
     /// Execute the aggregation step. Splits naturally into three phases:
     /// build group key, accumulate per-aggregate state, then finalize each
     /// group into a result row.
-    async fn execute_aggregation(
+    fn execute_aggregation(
         &self,
         rows: Vec<QueryRow>,
         agg_plan: &AggregationPlan,
@@ -725,7 +798,7 @@ impl SelectExecutor {
 
         let mut agg_state = AggregationState {
             groups: Vec::new(),
-            group_index: HashMap::new(),
+            group_index: rustc_hash::FxHashMap::default(),
             memory_usage_bytes: 0,
             memory_limit_bytes: DEFAULT_AGGREGATION_MEMORY_LIMIT,
         };
@@ -759,18 +832,23 @@ impl SelectExecutor {
     }
 
     /// Execute PER PARTITION LIMIT: keep at most `count` rows per partition,
-    /// preserving order (Issue #757). Counts are keyed on the partition (raw key
-    /// bytes) rather than tracking only the most recent partition, so the cap
-    /// holds even when a partition's rows are not contiguous — e.g. when an
-    /// upstream `ORDER BY` interleaves rows from different partitions (roborev
-    /// job 38).
+    /// preserving order (Issue #757). Counts are keyed on the partition rather
+    /// than tracking only the most recent partition, so the cap holds even when a
+    /// partition's rows are not contiguous — e.g. when an upstream `ORDER BY`
+    /// interleaves rows from different partitions (roborev job 38).
+    ///
+    /// Issue #1590 (E8): the counter map uses the partition-key 128-bit
+    /// [`partition_key_digest`] as a FAST outer lookup key, then confirms an
+    /// EXACT match on the raw key bytes (via [`admit_partition_row`]). No key
+    /// bytes are cloned per row — a partition's bytes are stored at most ONCE,
+    /// on the row that first opens its counter — and correctness stays
+    /// independent of digest collisions.
     fn execute_per_partition_limit(rows: Vec<QueryRow>, count: u64) -> Vec<QueryRow> {
         let mut out = Vec::with_capacity(rows.len());
-        let mut counts: HashMap<Vec<u8>, u64> = HashMap::new();
+        let mut counts: PartitionCounts = HashMap::new();
         for row in rows {
-            let seen = counts.entry(row.key.0.clone()).or_insert(0);
-            if *seen < count {
-                *seen += 1;
+            let digest = partition_key_digest(&row.key.0);
+            if admit_partition_row(&mut counts, digest, &row.key.0, count) {
                 out.push(row);
             }
         }
@@ -778,7 +856,7 @@ impl SelectExecutor {
     }
 
     /// Execute limit step (apply OFFSET then truncate to LIMIT).
-    async fn execute_limit(
+    fn execute_limit(
         &self,
         mut rows: Vec<QueryRow>,
         count: u64,
@@ -786,16 +864,22 @@ impl SelectExecutor {
         _context: &mut ExecutionContext,
     ) -> Result<Vec<QueryRow>> {
         let start_index = offset.unwrap_or(0) as usize;
-        if start_index >= rows.len() {
-            return Ok(Vec::new());
+        let limit = count as usize;
+        // Issue #1590 (E8): with no OFFSET, truncate in place — no allocation and
+        // no element shift. With an OFFSET, apply it via `skip`/`take` instead of
+        // `drain(..offset)`: `drain` memmoves every surviving element left, while
+        // `skip` drops the prefix and yields the survivors without shifting. The
+        // resulting rows are identical (same slice, same order); `skip` past the
+        // end yields nothing, matching the old `start_index >= len` early return.
+        if start_index == 0 {
+            rows.truncate(limit);
+            return Ok(rows);
         }
-        rows.drain(..start_index);
-        rows.truncate(count as usize);
-        Ok(rows)
+        Ok(rows.into_iter().skip(start_index).take(limit).collect())
     }
 
     /// Execute projection step
-    async fn execute_projection(
+    fn execute_projection(
         &self,
         rows: Vec<QueryRow>,
         columns: &[SelectExpression],
@@ -837,7 +921,7 @@ impl SelectExecutor {
     }
 
     /// Execute a query without FROM clause (constant expressions like SELECT 1)
-    async fn execute_constant_query(
+    fn execute_constant_query(
         &self,
         statement: &SelectStatement,
         _context: &ExecutionContext,
@@ -942,7 +1026,7 @@ impl SelectExecutor {
     /// Build result-column metadata from an ALREADY-RESOLVED schema (issue #1587,
     /// E5). The caller resolves the schema once per query and passes it here, so
     /// this never re-clones it out of the registry.
-    async fn get_result_columns(
+    fn get_result_columns(
         &self,
         statement: &SelectStatement,
         schema: Option<&TableSchema>,
@@ -1257,7 +1341,6 @@ mod tests {
         PROJECTION_NAME_DERIVATIONS.with(|c| c.set(0));
         let projected = executor
             .execute_projection(rows, &columns, &mut ctx)
-            .await
             .expect("projection must succeed");
         let derivations = PROJECTION_NAME_DERIVATIONS.with(|c| c.get());
 
@@ -1274,6 +1357,185 @@ mod tests {
         assert_eq!(projected[0].values.get("b"), Some(&Value::Integer(0)));
         assert_eq!(projected[0].values.get("c"), Some(&Value::Integer(0)));
         assert_eq!(projected[99].values.get("a"), Some(&Value::Integer(99)));
+    }
+
+    /// Issue #1590 (E8): `execute_limit` now applies OFFSET via `skip`/`take`
+    /// (was `drain(..offset)` + `truncate`). This pins that the new path yields
+    /// the SAME rows as the old drain/truncate reference across a matrix of
+    /// (len, offset, limit) — including offset past the end, zero offset, and
+    /// limit exceeding the remainder. No behavior change.
+    #[tokio::test]
+    async fn execute_limit_offset_matches_drain_truncate_reference() {
+        let executor = create_test_executor().await;
+        let mut ctx = ExecutionContext {
+            table_id: TableId::new("ks.t"),
+            columns: Vec::new(),
+            rows_processed: 0,
+            scan_rows: 0,
+            projection_flags: ProjectionFlags::default(),
+            access_path: None,
+            reverse_served: false,
+        };
+
+        let make = |len: usize| -> Vec<QueryRow> {
+            (0..len)
+                .map(|r| {
+                    let mut row = QueryRow::new(RowKey::new(vec![r as u8]));
+                    row.set("a", Value::Integer(r as i32));
+                    row
+                })
+                .collect()
+        };
+        // The old in-place algorithm, kept verbatim as the parity oracle.
+        let reference = |mut rows: Vec<QueryRow>, count: u64, offset: Option<u64>| {
+            let start_index = offset.unwrap_or(0) as usize;
+            if start_index >= rows.len() {
+                return Vec::new();
+            }
+            rows.drain(..start_index);
+            rows.truncate(count as usize);
+            rows
+        };
+        let tags = |rows: &[QueryRow]| -> Vec<i32> {
+            rows.iter()
+                .map(|r| match r.values.get("a") {
+                    Some(Value::Integer(v)) => *v,
+                    _ => -1,
+                })
+                .collect()
+        };
+
+        for len in [0usize, 1, 5, 10] {
+            for offset in [
+                None,
+                Some(0u64),
+                Some(1),
+                Some(3),
+                Some(9),
+                Some(10),
+                Some(50),
+            ] {
+                for count in [0u64, 1, 3, 10, 1000] {
+                    let got = executor
+                        .execute_limit(make(len), count, offset, &mut ctx)
+                        .expect("limit must succeed");
+                    let want = reference(make(len), count, offset);
+                    assert_eq!(
+                        tags(&got),
+                        tags(&want),
+                        "len={len} offset={offset:?} count={count}: skip/take must \
+                         equal drain/truncate"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Issue #1590 (E8): PER PARTITION LIMIT now keys its per-partition counters
+    /// on the partition-key 128-bit digest instead of a cloned `Vec<u8>` of the
+    /// raw key bytes. Pin that the digest-keyed batch path yields the SAME rows
+    /// as the raw-bytes reference — including NON-contiguous (interleaved)
+    /// partitions, where the cap must still be enforced per distinct partition.
+    #[test]
+    fn per_partition_limit_digest_matches_raw_bytes_reference() {
+        // Partition key bytes → row tag. Interleave partitions so the counter
+        // cannot rely on contiguity (roborev job 38 invariant).
+        let spec: [(&[u8], i32); 9] = [
+            (b"pk-a", 0),
+            (b"pk-b", 1),
+            (b"pk-a", 2),
+            (b"pk-c", 3),
+            (b"pk-b", 4),
+            (b"pk-a", 5),
+            (b"pk-a", 6),
+            (b"pk-c", 7),
+            (b"pk-b", 8),
+        ];
+        let make = || -> Vec<QueryRow> {
+            spec.iter()
+                .map(|(pk, tag)| {
+                    let mut row = QueryRow::new(RowKey::new(pk.to_vec()));
+                    row.set("a", Value::Integer(*tag));
+                    row
+                })
+                .collect()
+        };
+        // Old raw-`Vec<u8>`-keyed algorithm, kept verbatim as the parity oracle.
+        let reference = |rows: Vec<QueryRow>, count: u64| -> Vec<QueryRow> {
+            let mut out = Vec::with_capacity(rows.len());
+            let mut counts: HashMap<Vec<u8>, u64> = HashMap::new();
+            for row in rows {
+                let seen = counts.entry(row.key.0.clone()).or_insert(0);
+                if *seen < count {
+                    *seen += 1;
+                    out.push(row);
+                }
+            }
+            out
+        };
+        let tags = |rows: &[QueryRow]| -> Vec<i32> {
+            rows.iter()
+                .map(|r| match r.values.get("a") {
+                    Some(Value::Integer(v)) => *v,
+                    _ => -1,
+                })
+                .collect()
+        };
+
+        for count in [0u64, 1, 2, 3, 100] {
+            let got = SelectExecutor::execute_per_partition_limit(make(), count);
+            let want = reference(make(), count);
+            assert_eq!(
+                tags(&got),
+                tags(&want),
+                "count={count}: digest-keyed per-partition-limit must equal raw-bytes reference"
+            );
+        }
+    }
+
+    /// Issue #1590 (E8, roborev fix #4 follow-up): PER PARTITION LIMIT uses the
+    /// 128-bit digest only as a FAST outer key; it confirms EXACT partition-key
+    /// bytes before sharing a counter. Correctness must NOT depend on
+    /// collision absence. Real 128-bit digest collisions can't be produced, so
+    /// drive [`admit_partition_row`] with a CONSTANT (forced-colliding) digest
+    /// for two DISTINCT keys and assert each key keeps its OWN counter — i.e. no
+    /// valid row is dropped when digests collide.
+    #[test]
+    fn per_partition_limit_exact_confirm_survives_digest_collision() {
+        let mut counts: PartitionCounts = HashMap::new();
+        // A single digest value shared by two genuinely distinct partitions.
+        const COLLIDING: u128 = 0xDEAD_BEEF;
+        let a = b"partition-a".as_slice();
+        let b = b"partition-b".as_slice();
+
+        // cap = 1 per partition. A's first row opens A's counter.
+        assert!(
+            admit_partition_row(&mut counts, COLLIDING, a, 1),
+            "A's first row is admitted"
+        );
+        // B collides on the digest but is a DISTINCT key: exact-byte confirm
+        // gives it its OWN counter, so its first row is admitted (NOT dropped by
+        // A's now-exhausted counter). This is the exact bug the finding flags.
+        assert!(
+            admit_partition_row(&mut counts, COLLIDING, b, 1),
+            "B's first row is admitted despite the colliding digest (separate counter)"
+        );
+        // Each partition's cap of 1 is now independently exhausted.
+        assert!(
+            !admit_partition_row(&mut counts, COLLIDING, a, 1),
+            "A's second row is capped"
+        );
+        assert!(
+            !admit_partition_row(&mut counts, COLLIDING, b, 1),
+            "B's second row is capped"
+        );
+        // Both distinct keys are chained under the one colliding digest bucket,
+        // proving the exact-confirm path (not the digest) disambiguates them.
+        assert_eq!(
+            counts.get(&COLLIDING).map(Vec::len),
+            Some(2),
+            "both distinct keys are chained under the colliding digest"
+        );
     }
 
     /// Issue #1587 (E5): ORDER BY uses decorate-sort-undecorate, so each row's
@@ -1320,7 +1582,6 @@ mod tests {
         SORT_KEY_EVALUATIONS.with(|c| c.set(0));
         let sorted = executor
             .execute_sort(rows, &order_by, &mut ctx)
-            .await
             .expect("sort must succeed");
         let evaluations = SORT_KEY_EVALUATIONS.with(|c| c.get());
 
@@ -1413,7 +1674,6 @@ mod tests {
         for dir in [SortDirection::Ascending, SortDirection::Descending] {
             let sorted = executor
                 .execute_sort(make_rows(&with_nan), &order_by(&dir), &mut ctx)
-                .await
                 .expect("sort must succeed");
 
             let mut reference = make_rows(&with_nan);
@@ -1446,7 +1706,6 @@ mod tests {
                 &order_by(&SortDirection::Ascending),
                 &mut ctx,
             )
-            .await
             .expect("sort must succeed");
         assert_eq!(
             tags(&asc),
@@ -1460,7 +1719,6 @@ mod tests {
                 &order_by(&SortDirection::Descending),
                 &mut ctx,
             )
-            .await
             .expect("sort must succeed");
         assert_eq!(
             tags(&desc),
@@ -1600,7 +1858,7 @@ mod tests {
             allow_filtering: false,
         };
 
-        let cols = executor.get_result_columns(&stmt, None).await.unwrap();
+        let cols = executor.get_result_columns(&stmt, None).unwrap();
         assert_eq!(cols.len(), 1);
         assert_eq!(cols[0].name, "writetime(name)");
         assert_eq!(cols[0].data_type, crate::types::DataType::BigInt);
@@ -1632,7 +1890,7 @@ mod tests {
             allow_filtering: false,
         };
 
-        let cols = executor.get_result_columns(&stmt, None).await.unwrap();
+        let cols = executor.get_result_columns(&stmt, None).unwrap();
         assert_eq!(cols.len(), 1);
         assert_eq!(cols[0].name, "ttl(score)");
         assert_eq!(cols[0].data_type, crate::types::DataType::Integer);
@@ -1664,7 +1922,7 @@ mod tests {
             allow_filtering: false,
         };
 
-        let cols = executor.get_result_columns(&stmt, None).await.unwrap();
+        let cols = executor.get_result_columns(&stmt, None).unwrap();
         assert_eq!(cols.len(), 1);
         assert_eq!(
             cols[0].name, "wt",

@@ -64,6 +64,10 @@ base64 = "0.21"
 # Hashing for Cassandra compatibility
 murmur3 = "0.5"
 
+# Fast non-cryptographic hasher (FxHashMap) for integer/digest-keyed hot-path
+# maps only — NOT for maps exposed to untrusted string keys (issue #1590, E8).
+rustc-hash = "1.1"
+
 # Arbitrary-precision integers for varint/decimal formatting (util::value_fmt)
 # and the Parquet export writer's Decimal128 rescaling
 num-bigint = "0.4"

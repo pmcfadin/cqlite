@@ -15,8 +15,8 @@
 
 use super::{
     build_row_from_scan, classify_partition_lookup, column_info_from_type_str, evaluate_predicates,
-    honest_targeted_path, parse_table_id, select_has_writetime_ttl, sort_rows_by_token,
-    validate_token_predicates, PartitionLookupOutcome, SSTablePredicate,
+    honest_targeted_path, parse_table_id, partition_key_digest, select_has_writetime_ttl,
+    sort_rows_by_token, validate_token_predicates, PartitionLookupOutcome, SSTablePredicate,
 };
 use super::{
     AccessPath, ColumnInfo, Error, ExecutionContext, ExecutionStep, FallbackReason,
@@ -83,9 +83,7 @@ impl SelectExecutor {
 
         let mut context = ExecutionContext {
             table_id,
-            columns: self
-                .get_result_columns(&plan.statement, query_schema.as_deref())
-                .await?,
+            columns: self.get_result_columns(&plan.statement, query_schema.as_deref())?,
             rows_processed: 0,
             scan_rows: 0,
             projection_flags,
@@ -95,7 +93,7 @@ impl SelectExecutor {
 
         // Handle queries without FROM clause (like SELECT 1)
         if plan.statement.from_clause.is_none() {
-            return self.execute_constant_query(&plan.statement, &context).await;
+            return self.execute_constant_query(&plan.statement, &context);
         }
 
         // Execute the plan step by step
@@ -133,18 +131,16 @@ impl SelectExecutor {
                     intermediate_results = rows;
                 }
                 ExecutionStep::Filter { expression, .. } => {
-                    intermediate_results = self
-                        .execute_filter(intermediate_results, expression, &mut context)
-                        .await?;
+                    intermediate_results =
+                        self.execute_filter(intermediate_results, expression, &mut context)?;
                 }
                 ExecutionStep::Sort { order_by, .. } => {
                     // Issue #1184: when the BIG reverse partition iterator already
                     // produced the rows in descending clustering order, skip the
                     // in-memory sort entirely (it remains the fallback otherwise).
                     if !context.reverse_served {
-                        intermediate_results = self
-                            .execute_sort(intermediate_results, order_by, &mut context)
-                            .await?;
+                        intermediate_results =
+                            self.execute_sort(intermediate_results, order_by, &mut context)?;
                     } else {
                         // Issue #1307 (hardening): skipping this Sort is sound ONLY
                         // because `reverse_served` is set exclusively by
@@ -174,23 +170,20 @@ impl SelectExecutor {
                     }
                 }
                 ExecutionStep::Aggregate { plan: agg_plan, .. } => {
-                    intermediate_results = self
-                        .execute_aggregation(intermediate_results, agg_plan, &mut context)
-                        .await?;
+                    intermediate_results =
+                        self.execute_aggregation(intermediate_results, agg_plan, &mut context)?;
                 }
                 ExecutionStep::PerPartitionLimit { count } => {
                     intermediate_results =
                         Self::execute_per_partition_limit(intermediate_results, *count);
                 }
                 ExecutionStep::Limit { count, offset } => {
-                    intermediate_results = self
-                        .execute_limit(intermediate_results, *count, *offset, &mut context)
-                        .await?;
+                    intermediate_results =
+                        self.execute_limit(intermediate_results, *count, *offset, &mut context)?;
                 }
                 ExecutionStep::Project { columns } => {
-                    intermediate_results = self
-                        .execute_projection(intermediate_results, columns, &mut context)
-                        .await?;
+                    intermediate_results =
+                        self.execute_projection(intermediate_results, columns, &mut context)?;
                 }
             }
         }
@@ -327,13 +320,19 @@ impl SelectExecutor {
 
         // Issue #757: PER PARTITION LIMIT caps rows per partition before the
         // query-wide LIMIT/OFFSET. The scan yields rows grouped by partition
-        // key, so we track the current partition (by its raw key bytes) and
-        // reset the counter at each boundary.
+        // key, so we track the current partition and reset the counter at each
+        // boundary. Issue #1590 (E8): the boundary is compared on the partition
+        // key's 128-bit `partition_key_digest` (a heap-free hash of the key bytes
+        // we already hold) as a FAST pre-check, then confirmed by EXACT byte
+        // equality against the current partition's raw bytes — stored ONCE when
+        // the boundary advances, never cloned per row. This keeps correctness
+        // independent of digest collisions (a collision between two DISTINCT
+        // partitions never shares a counter).
         let per_partition_limit = execution_steps.iter().find_map(|step| match step {
             ExecutionStep::PerPartitionLimit { count } => Some(*count),
             _ => None,
         });
-        let mut current_partition: Option<Vec<u8>> = None;
+        let mut current_partition: Option<(u128, Vec<u8>)> = None;
         let mut partition_count: u64 = 0;
 
         let mut sent: u64 = 0;
@@ -376,7 +375,8 @@ impl SelectExecutor {
                             engaged,
                         ));
                         for (key, value) in rows {
-                            let part_sig = per_partition_limit.map(|_| key.0.clone());
+                            let part_sig =
+                                per_partition_limit.map(|_| partition_key_digest(&key.0));
                             let Some(row) = build_row_from_scan(key, value, projection, schema_opt)
                             else {
                                 continue;
@@ -385,8 +385,17 @@ impl SelectExecutor {
                                 continue;
                             }
                             if let (Some(cap), Some(sig)) = (per_partition_limit, part_sig) {
-                                if current_partition.as_deref() != Some(sig.as_slice()) {
-                                    current_partition = Some(sig);
+                                // Fast digest pre-check, then EXACT byte confirm so a
+                                // digest collision between DISTINCT partitions never
+                                // shares a counter (issue #1590).
+                                let same = matches!(
+                                    &current_partition,
+                                    Some((d, bytes))
+                                        if *d == sig && bytes.as_slice() == row.key.0.as_slice()
+                                );
+                                if !same {
+                                    // Clone the key bytes ONCE per boundary, not per row.
+                                    current_partition = Some((sig, row.key.0.clone()));
                                     partition_count = 0;
                                 }
                                 if partition_count >= cap {
@@ -435,7 +444,8 @@ impl SelectExecutor {
                         ));
                         sort_rows_by_token(&mut combined);
                         for (key, value) in combined {
-                            let part_sig = per_partition_limit.map(|_| key.0.clone());
+                            let part_sig =
+                                per_partition_limit.map(|_| partition_key_digest(&key.0));
                             let Some(row) = build_row_from_scan(key, value, projection, schema_opt)
                             else {
                                 continue;
@@ -444,8 +454,17 @@ impl SelectExecutor {
                                 continue;
                             }
                             if let (Some(cap), Some(sig)) = (per_partition_limit, part_sig) {
-                                if current_partition.as_deref() != Some(sig.as_slice()) {
-                                    current_partition = Some(sig);
+                                // Fast digest pre-check, then EXACT byte confirm so a
+                                // digest collision between DISTINCT partitions never
+                                // shares a counter (issue #1590).
+                                let same = matches!(
+                                    &current_partition,
+                                    Some((d, bytes))
+                                        if *d == sig && bytes.as_slice() == row.key.0.as_slice()
+                                );
+                                if !same {
+                                    // Clone the key bytes ONCE per boundary, not per row.
+                                    current_partition = Some((sig, row.key.0.clone()));
                                     partition_count = 0;
                                 }
                                 if partition_count >= cap {
@@ -489,9 +508,9 @@ impl SelectExecutor {
 
                     while let Some(item) = scan_stream.recv().await {
                         let (key, value) = item?;
-                        // Capture the partition key bytes before `key` is moved
+                        // Capture the partition-key digest before `key` is moved
                         // into row construction (only when needed).
-                        let part_sig = per_partition_limit.map(|_| key.0.clone());
+                        let part_sig = per_partition_limit.map(|_| partition_key_digest(&key.0));
                         let Some(row) = build_row_from_scan(key, value, projection, schema_opt)
                         else {
                             continue;
@@ -504,8 +523,17 @@ impl SelectExecutor {
                         // Apply PER PARTITION LIMIT: cap matching rows per
                         // partition, before OFFSET/LIMIT (Cassandra semantics).
                         if let (Some(cap), Some(sig)) = (per_partition_limit, part_sig) {
-                            if current_partition.as_deref() != Some(sig.as_slice()) {
-                                current_partition = Some(sig);
+                            // Fast digest pre-check, then EXACT byte confirm so a
+                            // digest collision between DISTINCT partitions never
+                            // shares a counter (issue #1590).
+                            let same = matches!(
+                                &current_partition,
+                                Some((d, bytes))
+                                    if *d == sig && bytes.as_slice() == row.key.0.as_slice()
+                            );
+                            if !same {
+                                // Clone the key bytes ONCE per boundary, not per row.
+                                current_partition = Some((sig, row.key.0.clone()));
                                 partition_count = 0;
                             }
                             if partition_count >= cap {

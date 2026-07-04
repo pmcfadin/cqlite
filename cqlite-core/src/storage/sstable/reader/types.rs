@@ -1,6 +1,6 @@
 //! Public types for SSTable reader
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -255,10 +255,10 @@ pub struct SSTableReader {
     pub(crate) bloom_filter: Option<BloomFilter>,
     /// Compression reader
     pub(crate) compression_reader: Option<CompressionReader>,
-    /// Block metadata cache
-    pub(crate) block_meta_cache: HashMap<u64, BlockMeta>,
-    /// Block data cache (LRU)
-    pub(crate) block_cache: HashMap<u64, CachedBlock>,
+    /// Block metadata cache (issue #1590, E8: `FxHashMap` — u64-offset key).
+    pub(crate) block_meta_cache: FxHashMap<u64, BlockMeta>,
+    /// Block data cache (LRU) (issue #1590, E8: `FxHashMap` — u64-offset key).
+    pub(crate) block_cache: FxHashMap<u64, CachedBlock>,
     /// Reader configuration
     pub(crate) config: SSTableReaderConfig,
     /// The full [`Config`] this reader was opened with.

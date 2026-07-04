@@ -74,7 +74,7 @@ use header::{
     calculate_actual_header_size, extract_generation_from_path, parse_header_with_version_detection,
 };
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -731,8 +731,8 @@ impl SSTableReader {
             index,
             bloom_filter,
             compression_reader,
-            block_meta_cache: HashMap::new(),
-            block_cache: HashMap::new(),
+            block_meta_cache: FxHashMap::default(),
+            block_cache: FxHashMap::default(),
             config: reader_config,
             open_config,
             platform,
