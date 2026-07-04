@@ -597,7 +597,16 @@ impl SelectExecutor {
         schema_opt: Option<&TableSchema>,
         context: &mut ExecutionContext,
     ) -> Result<Vec<QueryRow>> {
+        // Issue #1582 (D6): a ROW COUNT is the wrong unit for a memory guard —
+        // 1M skinny rows may fit while a few thousand wide rows blow the <128MB
+        // target. The primary guard is a running BYTE estimate (below) against
+        // the configured budget; the row count remains only as a secondary
+        // safety valve.
         const MAX_RESULTS: usize = 1_000_000;
+        let byte_budget = self.max_result_bytes;
+        // Running estimate of the materialized result's logical size, accumulated
+        // with the SAME estimator the row cache uses (issue #1582).
+        let mut result_bytes: usize = 0;
 
         log::info!(
             "Executing SSTableScan: table=\"{}\", predicates={:?}, include_cell_metadata={}",
@@ -694,13 +703,9 @@ impl SelectExecutor {
                 }
 
                 if evaluate_predicates(&row, predicates)? {
+                    result_bytes = result_bytes.saturating_add(estimate_query_row_bytes(&row));
                     results.push(row);
-                }
-
-                if results.len() > MAX_RESULTS {
-                    return Err(Error::query_execution(
-                        "Result set too large, consider adding LIMIT".to_string(),
-                    ));
+                    enforce_result_budget(&results, result_bytes, byte_budget, MAX_RESULTS)?;
                 }
             }
         } else {
@@ -812,17 +817,51 @@ impl SelectExecutor {
                 };
 
                 if evaluate_predicates(&row, predicates)? {
+                    result_bytes = result_bytes.saturating_add(estimate_query_row_bytes(&row));
                     results.push(row);
-                }
-
-                if results.len() > MAX_RESULTS {
-                    return Err(Error::query_execution(
-                        "Result set too large, consider adding LIMIT".to_string(),
-                    ));
+                    enforce_result_budget(&results, result_bytes, byte_budget, MAX_RESULTS)?;
                 }
             }
         }
 
         Ok(results)
     }
+}
+
+/// Estimate the logical size, in bytes, of a materialized [`QueryRow`], reusing
+/// the shared row-cache estimator (issue #1582). Sums the per-value estimate
+/// over the row's column values.
+fn estimate_query_row_bytes(row: &QueryRow) -> usize {
+    row.values
+        .values()
+        .map(crate::memory::estimate_value_size)
+        .sum()
+}
+
+/// Enforce the byte-bounded result budget (primary) and the row-count safety
+/// valve (secondary) on a materialized result set (issue #1582 / D6).
+///
+/// `result_bytes` is the running logical-byte estimate of `results`. Returns
+/// [`Error::ResultTooLarge`] (with a remedy message: add `LIMIT` or stream) when
+/// the byte budget is exceeded, or the legacy query-execution error when the
+/// row-count valve trips.
+fn enforce_result_budget(
+    results: &[QueryRow],
+    result_bytes: usize,
+    byte_budget: usize,
+    max_rows: usize,
+) -> Result<()> {
+    if result_bytes > byte_budget {
+        return Err(Error::ResultTooLarge {
+            budget_bytes: byte_budget,
+            estimated_bytes: result_bytes,
+            rows: results.len(),
+        });
+    }
+    if results.len() > max_rows {
+        return Err(Error::query_execution(
+            "Result set too large, consider adding LIMIT".to_string(),
+        ));
+    }
+    Ok(())
 }
