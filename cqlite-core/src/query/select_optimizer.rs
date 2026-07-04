@@ -244,9 +244,29 @@ impl SelectOptimizer {
             if let SelectClause::Columns(exprs) | SelectClause::Distinct(exprs) =
                 &statement.select_clause
             {
-                plan.execution_steps.push(ExecutionStep::Project {
-                    columns: exprs.clone(),
-                });
+                // Issue #1587 (E5): a bare-column SELECT (every item a plain
+                // `Column`, no alias/function/arithmetic) is ALREADY projected by
+                // the SSTable scan — `SSTableScan.projection` is exactly these
+                // column names (see `extract_projection_columns`), and
+                // `build_row_from_scan` keeps precisely those cells, keyed by the
+                // same column name the `Project` step would re-key them to. So the
+                // second `Project` re-projects every row into a byte-identical
+                // value map: skip it and project each row ONCE (in the scan).
+                //
+                // The optimization is scoped to `SelectClause::Columns` (not
+                // `Distinct`, which is not a pure projection) and to all-plain-
+                // `Column` items — an alias / expression / `WRITETIME`/`TTL`
+                // reshapes or renames the row and still needs the `Project` step.
+                let is_bare_columns = matches!(&statement.select_clause, SelectClause::Columns(_))
+                    && exprs
+                        .iter()
+                        .all(|e| matches!(e, SelectExpression::Column(_)));
+
+                if !is_bare_columns {
+                    plan.execution_steps.push(ExecutionStep::Project {
+                        columns: exprs.clone(),
+                    });
+                }
             }
         }
 
@@ -607,6 +627,77 @@ mod tests {
         let schema = Arc::new(SchemaManager::new(temp_dir.path()).await.unwrap());
         let optimizer = SelectOptimizer { schema, storage };
         assert!(std::mem::size_of_val(&optimizer) > 0);
+    }
+
+    async fn make_optimizer() -> SelectOptimizer {
+        let temp_dir = TempDir::new().unwrap();
+        let config = Config::default();
+        let platform = Arc::new(Platform::new(&config).await.unwrap());
+        let storage = Arc::new(
+            StorageEngine::open(
+                temp_dir.path(),
+                &config,
+                platform.clone(),
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        let schema = Arc::new(SchemaManager::new(temp_dir.path()).await.unwrap());
+        SelectOptimizer { schema, storage }
+    }
+
+    fn project_step_count(plan: &OptimizedQueryPlan) -> usize {
+        plan.execution_steps
+            .iter()
+            .filter(|s| matches!(s, ExecutionStep::Project { .. }))
+            .count()
+    }
+
+    /// Issue #1587 (E5): a bare-column SELECT is projected exactly ONCE — by the
+    /// SSTable scan — with no redundant `Project` step re-projecting every row.
+    /// "row-projection-passes" = the scan pass (always 1) + one per `Project`
+    /// step; it must be 1 for a bare-column select (was 2 on main) and stay 2
+    /// for an aliased projection, which reshapes/renames the row.
+    #[tokio::test]
+    async fn bare_column_select_projects_rows_once() {
+        let optimizer = make_optimizer().await;
+
+        let bare = crate::query::select_parser::parse_select("SELECT a, b, c FROM t").unwrap();
+        let plan = optimizer.optimize(bare).await.unwrap();
+        let projection_passes = 1 + project_step_count(&plan);
+        assert_eq!(
+            projection_passes, 1,
+            "issue #1587: a bare-column SELECT must project each row once (scan only), not twice"
+        );
+
+        // The scan step already carries exactly the selected columns, in order.
+        let scan_projection = plan
+            .execution_steps
+            .iter()
+            .find_map(|s| match s {
+                ExecutionStep::SSTableScan { projection, .. } => Some(projection.clone()),
+                _ => None,
+            })
+            .expect("plan has an SSTable scan");
+        assert_eq!(scan_projection, vec!["a", "b", "c"]);
+
+        // Contrast: an aliased projection reshapes the row → keeps its Project pass.
+        let mut aliased = crate::query::select_parser::parse_select("SELECT a FROM t").unwrap();
+        aliased.select_clause = SelectClause::Columns(vec![SelectExpression::Aliased(
+            Box::new(SelectExpression::Column(ColumnRef {
+                table: None,
+                column: "a".to_string(),
+            })),
+            "x".to_string(),
+        )]);
+        let aplan = optimizer.optimize(aliased).await.unwrap();
+        assert_eq!(
+            1 + project_step_count(&aplan),
+            2,
+            "an aliased projection must keep its Project pass"
+        );
     }
 
     /// Build `<column> <op> <literal>` for predicate-conversion tests.
