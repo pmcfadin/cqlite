@@ -245,10 +245,7 @@ impl Memtable {
         // proportional to its element count — the DoS guard fails closed WITHOUT
         // the huge allocation (issue #1625).
         let would_exceed_cap = |visited: usize, pending: usize, incoming: usize| -> bool {
-            visited
-                .saturating_add(pending)
-                .saturating_add(incoming)
-                > Self::MAX_ESTIMATE_NODES
+            visited.saturating_add(pending).saturating_add(incoming) > Self::MAX_ESTIMATE_NODES
         };
 
         while let Some(v) = worklist.pop() {
