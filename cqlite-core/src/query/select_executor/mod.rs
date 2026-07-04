@@ -89,6 +89,17 @@ thread_local! {
         const { std::cell::Cell::new(0) };
 }
 
+// Test-only counter for the number of times an ORDER BY sort-key expression is
+// evaluated (issue #1587, E5). With decorate-sort-undecorate this is exactly
+// `rows × order_by.items` (evaluated ONCE per row up front), never the
+// `O(n log n)` per-comparison evaluation the old comparator incurred. Same
+// thread-local rationale as `PROJECTION_NAME_DERIVATIONS`.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SORT_KEY_EVALUATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
 /// Derive the output column name for a projected SELECT expression (issue #1584).
 ///
 /// Hoisted out of the per-row loop and called ONCE per column per query, so name
@@ -659,18 +670,37 @@ impl SelectExecutor {
         order_by: &OrderByClause,
         _context: &mut ExecutionContext,
     ) -> Result<Vec<QueryRow>> {
-        rows.sort_by(|a, b| {
+        // Issue #1587 (E5): decorate-sort-undecorate. Evaluate each row's ORDER
+        // BY key expressions ONCE (O(rows × items) total), then sort by the
+        // precomputed keys. The comparator itself performs NO
+        // `evaluate_select_expression` and NO `Value` clones — it only compares
+        // already-materialized keys. This drops the O(n log n) per-comparison
+        // expression evaluation + `Value::clone` the previous comparator
+        // incurred. The ordering is byte-identical: the same
+        // `compare_values_ordering` runs on the same per-row values, in the same
+        // ascending/descending sense, item by item, and `sort_by` remains a
+        // stable sort (ties keep input order).
+        let mut decorated: Vec<(Vec<Value>, QueryRow)> = Vec::with_capacity(rows.len());
+        for row in rows.drain(..) {
+            let mut keys = Vec::with_capacity(order_by.items.len());
             for item in &order_by.items {
-                let a_val = self
-                    .evaluate_select_expression(&item.expression, a)
-                    .unwrap_or(Value::Null);
-                let b_val = self
-                    .evaluate_select_expression(&item.expression, b)
-                    .unwrap_or(Value::Null);
+                #[cfg(test)]
+                SORT_KEY_EVALUATIONS.with(|c| c.set(c.get() + 1));
+                keys.push(
+                    self.evaluate_select_expression(&item.expression, &row)
+                        .unwrap_or(Value::Null),
+                );
+            }
+            decorated.push((keys, row));
+        }
 
+        decorated.sort_by(|(a_keys, _), (b_keys, _)| {
+            for (idx, item) in order_by.items.iter().enumerate() {
                 let ordering = match item.direction {
-                    SortDirection::Ascending => compare_values_ordering(&a_val, &b_val),
-                    SortDirection::Descending => compare_values_ordering(&b_val, &a_val),
+                    SortDirection::Ascending => compare_values_ordering(&a_keys[idx], &b_keys[idx]),
+                    SortDirection::Descending => {
+                        compare_values_ordering(&b_keys[idx], &a_keys[idx])
+                    }
                 };
                 if !ordering.is_eq() {
                     return ordering;
@@ -679,7 +709,7 @@ impl SelectExecutor {
             std::cmp::Ordering::Equal
         });
 
-        Ok(rows)
+        Ok(decorated.into_iter().map(|(_, row)| row).collect())
     }
 
     /// Execute the aggregation step. Splits naturally into three phases:
@@ -1188,6 +1218,74 @@ mod tests {
         assert_eq!(projected[0].values.get("b"), Some(&Value::Integer(0)));
         assert_eq!(projected[0].values.get("c"), Some(&Value::Integer(0)));
         assert_eq!(projected[99].values.get("a"), Some(&Value::Integer(99)));
+    }
+
+    /// Issue #1587 (E5): ORDER BY uses decorate-sort-undecorate, so each row's
+    /// sort key is evaluated EXACTLY once (`O(rows × items)`), never inside the
+    /// comparator (`O(n log n)` evaluations + a `Value::clone` per comparison).
+    /// The counter pins the linear evaluation budget; the value assertions pin
+    /// that the resulting order is byte-identical to the comparator sort.
+    #[tokio::test]
+    async fn execute_sort_evaluates_keys_once_per_row() {
+        let executor = create_test_executor().await;
+
+        let num_rows = 64usize;
+        // Reverse-sorted input so the sort must actually reorder every row (a
+        // pre-sorted input could let some sorts short-circuit comparisons).
+        let rows: Vec<QueryRow> = (0..num_rows)
+            .rev()
+            .map(|r| {
+                let mut row = QueryRow::new(RowKey::new(vec![r as u8]));
+                row.set("k", Value::Integer(r as i32));
+                row
+            })
+            .collect();
+
+        let order_by = OrderByClause {
+            items: vec![OrderByItem {
+                expression: SelectExpression::Column(ColumnRef {
+                    table: None,
+                    column: "k".to_string(),
+                }),
+                direction: SortDirection::Ascending,
+            }],
+        };
+
+        let mut ctx = ExecutionContext {
+            table_id: TableId::new("ks.t"),
+            columns: Vec::new(),
+            rows_processed: 0,
+            scan_rows: 0,
+            projection_flags: ProjectionFlags::default(),
+            access_path: None,
+            reverse_served: false,
+        };
+
+        SORT_KEY_EVALUATIONS.with(|c| c.set(0));
+        let sorted = executor
+            .execute_sort(rows, &order_by, &mut ctx)
+            .await
+            .expect("sort must succeed");
+        let evaluations = SORT_KEY_EVALUATIONS.with(|c| c.get());
+
+        // Exactly one evaluation per (row × order-by item). A comparator-based
+        // sort would evaluate ~2 per pairwise comparison — strictly more than
+        // `num_rows` for any non-trivial input (e.g. ~2·n·log2(n) ≫ n here).
+        assert_eq!(
+            evaluations, num_rows,
+            "issue #1587: sort keys must be evaluated once per row (n = {num_rows}), \
+             not O(n log n) times inside the comparator"
+        );
+
+        // Ordering preserved byte-identically: ascending 0..num_rows.
+        assert_eq!(sorted.len(), num_rows);
+        for (i, row) in sorted.iter().enumerate() {
+            assert_eq!(
+                row.values.get("k"),
+                Some(&Value::Integer(i as i32)),
+                "row {i} must sort into ascending position"
+            );
+        }
     }
 
     /// The executor's `evaluate_select_expression` returns the correct value for
