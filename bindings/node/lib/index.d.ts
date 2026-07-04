@@ -1163,6 +1163,10 @@ export declare class Database {
    * the follow-up (cqlite#1901) lands, which moves streaming off the libuv pool
    * onto the tokio runtime.
    *
+   * Error caveat: if an error occurs mid-stream, rows already read in the
+   * in-flight batch (up to `bufferSize`) are not delivered — the iterator
+   * rejects with the error (errors are terminal).
+   *
    * @param query - CQL SELECT statement to execute
    * @param config - Optional StreamingConfig for buffer/chunk sizes
    * @returns StreamingResult async iterable (iteration triggers query execution)

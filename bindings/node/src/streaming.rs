@@ -193,6 +193,13 @@ impl napi::Task for NextTask {
         // (the producer still blocks when the buffer is full) and caps at
         // MAX_CHUNK_SIZE, so the batch never grows unbounded. The fetch is
         // `.instrument`-ed by the stream span (no guard held across the runtime).
+        //
+        // Snapshot the delivered-row count BEFORE the fetch (issue #1443): on a
+        // mid-batch error, `collect_chunk` drops the up-to-(K-1) rows it already
+        // read (they are never yielded), yet `rows_received()` counted them. Prior
+        // batches were each fully delivered, so `rows_before` is exactly the rows
+        // actually emitted to the consumer at the point of failure.
+        let rows_before: u64 = iter.rows_received();
         let chunk = crate::runtime::block_on(
             iter.collect_chunk(self.batch_size)
                 .instrument(self.span.clone()),
@@ -227,9 +234,11 @@ impl napi::Task for NextTask {
             }
             Err(e) => {
                 // Error occurred - record at the boundary, finalise span, cleanup.
+                // Record `rows_before` (rows actually emitted before this failing
+                // batch), not `iter.rows_received()`, which over-counts the dropped
+                // partial batch (issue #1443).
                 crate::observability::record_boundary_error(&e);
-                let yielded: u64 = iter.rows_received();
-                self.span.record("rows", yielded);
+                self.span.record("rows", rows_before);
                 *guard = None;
                 Err(to_napi_error(e))
             }
