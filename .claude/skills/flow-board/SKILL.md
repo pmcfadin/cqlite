@@ -13,8 +13,10 @@ owner unless a set is pre-authorized for merge-on-green.
 ## Project-or-labels detection (shared by all flow-* skills)
 
 The board is a **GitHub Project (v2)** with a `Status` single-select
-(`Backlog/Ready/In Progress/In Review/Done`). Reading/writing it needs the `project` token scope. Detect
-once and degrade gracefully to the `status:*` label model (D6) — never block:
+(`Backlog/Ready/In Progress/In Review/Done`). **The board `Status` field is the SOLE dispatch authority
+(Path A, issue #1886).** `status:*` labels are decorative/non-authoritative — they are NOT a dispatch
+fallback and MUST NOT be used to select or claim work. Reading/writing the board needs the `project`
+token scope. Detect it once:
 
 ```bash
 # project_owner / project_number identify the CQLite Delivery board (see setup-project-board.sh output).
@@ -33,16 +35,17 @@ if [ -n "$project_number" ] \
    && gh project view "$project_number" --owner "$project_owner" >/dev/null 2>&1; then
   have_project=1
 fi
-# have_project=1 → use `gh project item-list/item-edit`; have_project=0 → use `status:*` labels + assignee.
+# have_project=1 → use `gh project item-list/item-edit`. have_project=0 → board is UNREACHABLE: STOP.
 ```
 
-When `have_project=0`, every Project read below is replaced by `gh issue list --label "status:*"` and
-every Project write (`Status=...`) by the equivalent `status:*` label flip — the pipeline keeps working
-on labels alone. **But the fallback MUST be loud**, never silent: whenever `have_project=0`, print
-`⚠️ board unavailable (active gh account lacks 'project' scope) — using status:* labels; board will NOT
-reflect this claim` so the owner knows the board is stale. A silent degrade is the exact bug that let
-two machines collide. The one-time fix is the owner's: `gh auth refresh -s project` on the
-`$project_account` + run `test-data/scripts/setup-project-board.sh`.
+**Path A: the board is the only authority — there is NO label dispatch fallback.** When `have_project=0`
+the board is unreachable, and because `status:*` labels are decorative they are NOT a safe substitute for
+selecting or claiming work (stale labels are exactly what caused the wrong-grabs). So on `have_project=0`:
+**do not dispatch.** Print
+`🛑 board unreachable (active gh account lacks 'project' scope) — CANNOT dispatch; status:* labels are decorative, not the queue. Fix auth first.`
+and STOP. You MAY still render a read-only status view from labels for the owner, but no claim, no
+selection, no "next thing" happens without the board. The one-time fix is the owner's:
+`gh auth refresh -s project` on the `$project_account` + run `test-data/scripts/setup-project-board.sh`.
 
 ## Steps
 
@@ -52,11 +55,13 @@ two machines collide. The one-time fix is the owner's: `gh auth refresh -s proje
    ```
    Show, per item: `#N (slug)  P?  Status  assignee  PR/CI  worktree`. Group by `Status`
    (`Backlog → Ready → In Progress → In Review → Done`); each `In Progress` item MUST show its assignee
-   (the claiming session/owner). If `have_project=0`, fall back:
+   (the claiming session/owner). If `have_project=0`, you may render a **read-only** status view from
+   labels (NOT a dispatch source — see Path A note above):
    ```bash
    gh issue list --state open --json number,title,labels,assignees,url --limit 100
    ```
-   Bucket by `status:*`; read the `P?` label as priority; show assignee from `assignees`.
+   Bucket by `status:*`; read the `P?` label as priority; show assignee from `assignees`. This view is
+   informational only — no claim/selection happens without the board.
 2. **PRs + CI:**
    ```bash
    gh pr list --state open --json number,headRefName,title,reviewDecision,url --limit 100
@@ -85,6 +90,9 @@ two machines collide. The one-time fix is the owner's: `gh auth refresh -s proje
 5. **Surface ONE next thing.** Pick the furthest-along item waiting on the owner — in order: a
    green-CI PR to merge (Seam 2), a committed spec to approve (Seam 1), an addressing PR with replies,
    then a STALLED claim to reclaim. Drive that one (render the spec inline / show the PR), or — if
-   nothing waits — offer a short **claim-aware** pick-list: only items that are `Ready` AND have **no**
-   `issue-<N>-*` branch on origin (already-claimed items are not offered) to `flow-activate`, highest
-   priority first. Don't dump the whole backlog; show the one, mention the rest.
+   nothing waits — offer a short **claim-aware** pick-list: only items whose **board `Status=Ready`** AND
+   have **no** `issue-<N>-*` branch on origin (already-claimed items are not offered) to `flow-activate`,
+   highest priority first. Selection is by **board `Status` only** — never by `status:ready` label.
+   **An empty board Ready column means no work is ready → say so and STOP.** Do NOT fall back to the
+   `status:*` label set to find more (near a release, Ready is *supposed* to drain to zero; dredging
+   labels is the exact wrong-grab bug). Don't dump the whole backlog; show the one, mention the rest.

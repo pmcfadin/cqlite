@@ -13,10 +13,11 @@ sequence workers with **signed issue comments**. That's it.
 - You set the tempo — by how fast, and in what order, you feed **Ready**.
 
 ## Your only two channels
-1. **Ready column = the dispatch queue.** Move an issue to Ready ONLY when it's truly ready, in the
-   order you want it worked. Workers take the **oldest Ready** item with no `issue-N-*` lock on origin.
-   A dependent issue stays **out of Ready** (hard gate) until its prerequisite merges — or goes to Ready
-   with a `HOLD` comment (soft gate) if you want it built early but merged late.
+1. **Board Ready column = the dispatch queue (the sole authority — Path A, #1886).** Move an issue to
+   Ready by setting its **board `Status`**, not a label (`status:*` labels are decorative and are NOT how
+   workers select). Workers take the **oldest board-`Status=Ready`** item with no `issue-N-*` lock on
+   origin. A dependent issue stays **out of Ready** (hard gate) until its prerequisite merges — or goes to
+   Ready with a `HOLD` comment (soft gate) if you want it built early but merged late.
 2. **Signed issue comments = work orders.** Start every order with the marker so workers parse you, not
    human chatter:
    ```

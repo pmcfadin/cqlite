@@ -119,16 +119,21 @@ for the render + reaper.
   (no `/resume`, one team per session). Use it if you want; it is not required.
 - **NEVER run N bare `flow-lead`s without the claim protocol.** Independent leads with no claim each pick
   the same top `Ready` item and collide. Either single-lead+subagents, or claim-protocol sessions.
-- **Graceful degradation.** When the `project` token scope or the board is absent, fall back to the
-  `status:*` label model (+ assignee) — the pipeline keeps working; the Project is additive.
+- **Board unreachable = STOP, not label-dispatch (Path A, #1886).** When the `project` token scope or the
+  board is absent, the board is the SOLE dispatch authority so there is nothing safe to select from —
+  surface the auth failure and STOP; do NOT dispatch from `status:*` labels (they are decorative and go
+  stale). You MAY render a read-only label view for status, but no claim/selection without the board.
 
 ## State model
 
-- **Backlog = the claim board (GitHub Project) + GitHub issues + labels.** Exactly one `P0`–`P3`;
-  lifecycle Project `Status` (`Backlog/Ready/In Progress/In Review/Done`), mirrored by
-  `status:{ready, spec-review, in-progress, in-review, addressing}` labels (the fallback when the Project
-  is absent). "What's next" = highest-priority `Ready`/`status:ready` item with **no** `issue-<N>-*`
-  branch already on origin (already-claimed items are skipped). Flag board/label drift.
+- **Backlog = the claim board (GitHub Project) is the source of truth (Path A, #1886).** Exactly one
+  `P0`–`P3`; the lifecycle Project `Status` (`Backlog/Ready/In Progress/In Review/Done`) is the **sole
+  dispatch authority**. `status:{ready, spec-review, in-progress, in-review, addressing}` labels are
+  **decorative/non-authoritative** — a convenience mirror, NOT a selection source. Newly created issues
+  auto-land at `Status=Backlog` (Project built-in "item added → Backlog"). "What's next" = highest-priority
+  item whose **board `Status=Ready`** with **no** `issue-<N>-*` branch already on origin (already-claimed
+  items are skipped). **An empty Ready column = no work is ready → STOP; never dredge `status:ready`
+  labels** (near a release Ready is meant to drain to zero — that is the wrong-grab bug that motivated Path A).
 - **1:1:1:1** — one issue ↔ one branch/worktree `issue-<N>-<slug>` (worktrees branch from `origin/main`,
   which leads local `main`) ↔ one OpenSpec change `<slug>` ↔ one PR. Worktrees lack the gitignored
   `Data.db` binaries — run the gate with `CQLITE_DATASETS_ROOT` pointed at the main repo's
