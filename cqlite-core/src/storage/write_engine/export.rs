@@ -559,10 +559,8 @@ fn read_statistics_from_export(components: &[PathBuf]) -> Result<(u64, u64)> {
     // (`count_index_entries`); a BTI SSTable has no `Index.db` (it uses
     // `Partitions.db`/`Rows.db`), so that walk failed and the swallowed error
     // left `partition_count == 0` even for tables with many partitions.
-    let counts = match crate::parser::repair_metadata::read_table_counts(
-        &file_data,
-        gates.as_ref(),
-    ) {
+    let counts = match crate::parser::repair_metadata::read_table_counts(&file_data, gates.as_ref())
+    {
         Ok(counts) => counts,
         Err(e) => {
             log::warn!("Failed to read counts from Statistics.db: {e}; defaulting to 0");
@@ -1271,8 +1269,7 @@ mod tests {
             eprintln!("CQLITE_DATASETS_ROOT unset; skipping BTI partition-count test");
             return;
         };
-        let dir =
-            root.join("sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11");
+        let dir = root.join("sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11");
         if !dir.join("da-2-bti-Statistics.db").is_file() {
             eprintln!("BTI da fixture absent at {dir:?}; skipping");
             return;
@@ -1290,8 +1287,7 @@ mod tests {
             })
             .collect();
 
-        let (partition_count, row_count) =
-            read_statistics_from_export(&components).unwrap();
+        let (partition_count, row_count) = read_statistics_from_export(&components).unwrap();
 
         assert!(
             partition_count > 0,
