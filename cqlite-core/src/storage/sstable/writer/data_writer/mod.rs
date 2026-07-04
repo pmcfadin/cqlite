@@ -193,6 +193,16 @@ pub struct DataWriter {
     crc: StreamingCrc,
     /// Encoding baselines used for delta encoding.
     stats: EncodingStatsBaselines,
+    /// Issue #1741: emit the partition-level `DeletionTime` in the oa/`da`
+    /// serialization (1-byte `0x80` LIVE sentinel; `markedForDeleteAt`(i64) +
+    /// `localDeletionTime`(u32) when deleted) rather than the legacy na/`nb`
+    /// layout (`localDeletionTime`(i32) + `markedForDeleteAt`(i64), LIVE encoded as
+    /// `i32::MAX`+`i64::MIN`). `true` ONLY for `da` (BTI) SSTables, whose reader
+    /// applies `hasUIntDeletionTime` (oa) decoding; a `da` file written with the
+    /// legacy layout has its live-partition sentinel misread as a tombstone (which
+    /// the read-side shadowing then treats as a partition delete). Default `false`
+    /// preserves byte-identical `nb` output.
+    oa_partition_deletion: bool,
 }
 
 mod cells;
@@ -282,7 +292,16 @@ impl DataWriter {
             position: 0,
             crc: StreamingCrc::new(),
             stats: EncodingStatsBaselines::from(&stats),
+            oa_partition_deletion: false,
         }
+    }
+
+    /// Issue #1741: select the oa/`da` partition-level `DeletionTime` serialization.
+    /// Call with `true` when producing a `da` (BTI) SSTable; the default (`false`)
+    /// keeps the legacy `nb` layout byte-identical.
+    pub fn with_oa_partition_deletion(mut self, on: bool) -> Self {
+        self.oa_partition_deletion = on;
+        self
     }
 
     /// Create a streaming Data.db writer that flushes each partition to `data_path`.
@@ -303,6 +322,7 @@ impl DataWriter {
             position: 0,
             crc: StreamingCrc::new(),
             stats: EncodingStatsBaselines::from(&stats),
+            oa_partition_deletion: false,
         }
     }
 

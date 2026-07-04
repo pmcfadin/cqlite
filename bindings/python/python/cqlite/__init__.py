@@ -5,6 +5,8 @@ from cqlite._cqlite import (
     version,
     # Test-support introspection (issue #1437)
     _built_with_panic_abort,
+    # Test-support: direct DECIMAL rendering path (issue #1741)
+    _decimal_from_parts,
     # Exception types
     CqliteError,
     SchemaError,
@@ -41,6 +43,8 @@ __all__ = [
     "version",
     # Test-support introspection (issue #1437)
     "_built_with_panic_abort",
+    # Test-support: direct DECIMAL rendering path (issue #1741)
+    "_decimal_from_parts",
     # Exception types
     "CqliteError",
     "SchemaError",

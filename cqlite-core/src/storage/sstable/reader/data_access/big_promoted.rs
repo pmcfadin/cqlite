@@ -373,7 +373,7 @@ impl SSTableReader {
             return Ok(None);
         };
 
-        let parser = self.build_v5_parser();
+        let parser = self.build_v5_parser(true);
         let key = RowKey::from(partition_key.to_vec());
         let avail = window.len().saturating_sub(within);
         let mut out: Vec<(RowKey, ScanRow)> = Vec::new();
@@ -437,7 +437,7 @@ impl SSTableReader {
         else {
             return Ok(None);
         };
-        let parser = self.build_v5_parser();
+        let parser = self.build_v5_parser(true);
         let key = RowKey::from(partition_key.to_vec());
         let avail = window.len().saturating_sub(within);
         let clamped = row_body_window.map(|(s, e)| (s.min(avail), e.min(avail)));

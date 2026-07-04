@@ -80,7 +80,7 @@ impl SSTableReader {
         // correct, but emitting ALL partitions instead of stopping at the first.
         if self.bti_partitions_db.is_some() {
             let entries = self
-                .bti_scan_with_metadata(start_key, end_key, limit, schema)
+                .bti_scan_with_metadata(start_key, end_key, limit, schema, true)
                 .await?;
             return Ok(entries.into_iter().map(|(k, v, _meta)| (k, v)).collect());
         }
@@ -203,7 +203,9 @@ impl SSTableReader {
                 "{}.{}",
                 self.header.keyspace, self.header.table_name
             ));
-            let entries = self.bti_scan_with_metadata(None, None, None, None).await?;
+            let entries = self
+                .bti_scan_with_metadata(None, None, None, None, false)
+                .await?;
             return Ok(entries
                 .into_iter()
                 .map(|(k, v, _meta)| (table_id.clone(), k, v))
@@ -230,12 +232,14 @@ impl SSTableReader {
             );
 
             // Use shared stitching helper method
-            let entries = self.stitch_and_parse_all_chunks(&cursor, None).await?;
+            let entries = self
+                .stitch_and_parse_all_chunks(&cursor, None, false)
+                .await?;
             results.extend(entries);
         } else {
             // Other formats: Read and parse blocks individually
             while let Some(block) = self.read_next_block(&cursor).await? {
-                let entries = self.parse_block_entries(&block, None)?;
+                let entries = self.parse_block_entries(&block, None, false)?;
                 results.extend(entries);
             }
         }
@@ -326,7 +330,8 @@ impl SSTableReader {
             // Non-stitching formats already read block-by-block; emit per block so
             // only one block's entries are live at a time.
             while let Some(block) = self.read_next_block(&cursor).await? {
-                let entries = self.parse_block_entries_with_schema(&block, schema.as_ref())?;
+                let entries =
+                    self.parse_block_entries_with_schema(&block, schema.as_ref(), true)?;
                 for (entry_table_id, entry_key, entry_value) in entries {
                     if !table_ids_match(&entry_table_id, &table_id) {
                         continue;
@@ -402,7 +407,11 @@ impl SSTableReader {
             // fails for all rows in a partition, causing no entries to be pushed and making
             // the key comparison always miss even when the key exists.
             let schema_opt = self.get_table_schema(None);
-            let parser = self.build_v5_parser();
+            // Issue #1741: point lookups apply SELECT-semantic read shadowing, so
+            // build the parser with read_shadowing = true. The stitch/parse split
+            // (issue #1411) is preserved: CRC/decompress failures already surfaced
+            // via `stitch_all_chunks` above; only `parse_block` may soft-miss.
+            let parser = self.build_v5_parser(true);
             let all_entries = match parser.parse_block(&stitched_buffer, schema_opt.as_ref(), self)
             {
                 Ok(entries) => entries,
@@ -458,7 +467,7 @@ impl SSTableReader {
 
         // Sequential scan through blocks
         while let Some(block) = self.read_next_block(&cursor).await? {
-            let entries = self.parse_block_entries(&block, None)?;
+            let entries = self.parse_block_entries(&block, None, true)?;
 
             for (entry_table_id, entry_key, entry_value) in entries {
                 if table_ids_match(&entry_table_id, table_id) && entry_key == *key {
@@ -529,7 +538,9 @@ impl SSTableReader {
             );
 
             // Stitch all chunks together (reuse logic from get_all_entries)
-            let all_entries = self.stitch_and_parse_all_chunks(&cursor, schema).await?;
+            let all_entries = self
+                .stitch_and_parse_all_chunks(&cursor, schema, true)
+                .await?;
             log::debug!(
                 "SSTableReader::sequential_scan - Stitched parsing returned {} total entries",
                 all_entries.len()
@@ -588,7 +599,7 @@ impl SSTableReader {
                 block.len()
             );
 
-            let entries = self.parse_block_entries_with_schema(&block, schema)?;
+            let entries = self.parse_block_entries_with_schema(&block, schema, true)?;
             log::debug!(
                 "SSTableReader::sequential_scan - Block {} contains {} entries",
                 block_count,
@@ -696,7 +707,7 @@ impl SSTableReader {
         // plain BTI scan, but surfaces per-cell write metadata for WRITETIME/TTL.
         if self.bti_partitions_db.is_some() {
             return self
-                .bti_scan_with_metadata(start_key, end_key, limit, schema)
+                .bti_scan_with_metadata(start_key, end_key, limit, schema, true)
                 .await;
         }
 

@@ -757,17 +757,42 @@ impl DataWriter {
         // Partition key bytes
         self.buffer.extend_from_slice(&key.key);
 
-        // Partition deletion info
-        if let Some(ts) = tombstone {
-            // Local deletion time (i32 BE, in seconds)
-            self.buffer
-                .write_all(&ts.local_deletion_time.to_be_bytes())?;
-            // Deletion timestamp (i64 BE, in microseconds)
-            self.buffer.write_all(&ts.deletion_time.to_be_bytes())?;
-        } else {
-            // DeletionTime.LIVE: Cassandra uses (Integer.MAX_VALUE, Long.MIN_VALUE)
-            self.buffer.write_all(&i32::MAX.to_be_bytes())?;
-            self.buffer.write_all(&i64::MIN.to_be_bytes())?;
+        // Partition deletion info.
+        //
+        // Issue #1741: the on-disk `DeletionTime` layout is format-specific. `da`
+        // (BTI, oa `hasUIntDeletionTime`) uses `DeletionTime.Serializer`:
+        //   LIVE    = 1 byte `0x80` (IS_LIVE_DELETION);
+        //   DELETED = markedForDeleteAt (i64 BE) + localDeletionTime (u32 BE) = 12 bytes.
+        // The legacy na/`nb` layout (`legacySerializer`) is always 12 bytes:
+        //   localDeletionTime (i32 BE) + markedForDeleteAt (i64 BE), LIVE encoded as
+        //   (Integer.MAX_VALUE, Long.MIN_VALUE). Writing the `nb` layout into a `da`
+        //   file makes the reader's oa branch misread the LIVE sentinel as a
+        //   tombstone (its first byte `0x7F` != `0x80`), which the read-side
+        //   shadowing then treats as a partition delete — so `da` MUST use the oa
+        //   layout. Authority: DeletionTime.java (Serializer / legacySerializer),
+        //   BigFormat.java:409 (`hasUIntDeletionTime`).
+        match (self.oa_partition_deletion, tombstone) {
+            (true, Some(ts)) => {
+                // oa DELETED: markedForDeleteAt (i64) then localDeletionTime (u32).
+                self.buffer.write_all(&ts.deletion_time.to_be_bytes())?;
+                self.buffer
+                    .write_all(&(ts.local_deletion_time as u32).to_be_bytes())?;
+            }
+            (true, None) => {
+                // oa LIVE: single IS_LIVE_DELETION byte.
+                self.buffer.write_all(&[0x80])?;
+            }
+            (false, Some(ts)) => {
+                // nb DELETED: localDeletionTime (i32) then markedForDeleteAt (i64).
+                self.buffer
+                    .write_all(&ts.local_deletion_time.to_be_bytes())?;
+                self.buffer.write_all(&ts.deletion_time.to_be_bytes())?;
+            }
+            (false, None) => {
+                // nb LIVE: DeletionTime.LIVE sentinel (Integer.MAX_VALUE, Long.MIN_VALUE).
+                self.buffer.write_all(&i32::MAX.to_be_bytes())?;
+                self.buffer.write_all(&i64::MIN.to_be_bytes())?;
+            }
         }
 
         Ok(())

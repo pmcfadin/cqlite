@@ -75,18 +75,35 @@ impl V5CompressedLegacyParser {
 
         let mut offset = 0;
         let mut partition_index = 0;
+        // Issue #1741 (F2): read-time TTL clock — captured ONCE per parser (== once per
+        // read/scan operation) in `V5CompressedLegacyParser::new`, reused for every
+        // block/partition here so a scan crossing an expiration-second boundary decides
+        // all rows with the SAME `now`.
+        let now_secs = self.now_secs;
+        // Issue #1741: authoritative per-clustering-column reversal flags (DESC),
+        // built ONCE per block so range-tombstone coverage compares clustering
+        // prefixes in physical storage order. Bounded by clustering arity.
+        let clustering_reversed = clustering_reversed_flags(schema);
 
         while offset < data.len() {
-            // Parse partition header: returns (RowKey, next_data_offset)
-            let (partition_key, next_data_offset) = match self.parse_partition_header(data, offset)
-            {
-                Ok(ph) => ph,
-                Err(_) => break,
-            };
+            // Parse partition header: returns (RowKey, next_data_offset, deletion)
+            let (partition_key, next_data_offset, partition_deletion) =
+                match self.parse_partition_header_full(data, offset) {
+                    Ok(ph) => ph,
+                    Err(_) => break,
+                };
 
             let table_id = TableId(format!("{}.{}", self.keyspace, self.table_name));
             offset = next_data_offset;
             partition_index += 1;
+
+            // Issue #1741: per-partition read-side shadowing (WRITETIME/TTL projection
+            // path), active ONLY for user-facing query reads (`self.read_shadowing`).
+            // Un-gated; hides partition/range-tombstone-shadowed and TTL-expired rows
+            // to match a Cassandra SELECT. `None` for physical consumers.
+            let mut shadow = self.read_shadowing.then(|| {
+                PartitionShadow::open(now_secs, partition_deletion, clustering_reversed.clone())
+            });
 
             let mut static_cells: HashMap<Arc<str>, Value> = HashMap::new();
             let mut static_cell_meta: HashMap<String, CellWriteMetadata> = HashMap::new();
@@ -99,6 +116,21 @@ impl V5CompressedLegacyParser {
                 }
 
                 if offset < data.len() && Self::is_range_tombstone_marker(data[offset]) {
+                    // Issue #1741: when shadowing is active, decode + feed the
+                    // range-tombstone FSM so covered rows are shadowed; otherwise
+                    // (physical read) only advance past the marker.
+                    if let Some(sh) = shadow.as_mut() {
+                        match self.parse_range_tombstone_marker_full(data, offset, schema) {
+                            Ok((bv, bk, dp, ds, next_offset)) => {
+                                if sh.feed_range_marker(bv, bk, dp, ds).is_err() {
+                                    break;
+                                }
+                                offset = next_offset;
+                                continue;
+                            }
+                            Err(_) => break,
+                        }
+                    }
                     match self.skip_range_tombstone_marker(data, offset, schema) {
                         Ok(next_offset) => {
                             offset = next_offset;
@@ -115,6 +147,7 @@ impl V5CompressedLegacyParser {
                     reader,
                     true,
                     &resolution,
+                    shadow.as_ref(),
                 ) {
                     Ok((
                         mut cells,
@@ -129,8 +162,24 @@ impl V5CompressedLegacyParser {
                         row_count += 1;
 
                         if is_static {
-                            static_cells = cells;
-                            static_cell_meta = row_cell_meta;
+                            // Issue #1741 (Finding 1): drop a static row's cells/metadata
+                            // when the static row is itself shadowed by the partition
+                            // tombstone or expired by its own TTL, so a surviving
+                            // clustering row does not resurface the stale static value.
+                            // Static rows have no clustering key (empty clustering); no-op
+                            // when shadowing is off.
+                            let static_hidden = shadow.as_ref().is_some_and(|sh| {
+                                row_header_opt
+                                    .as_ref()
+                                    .is_some_and(|h| sh.row_hidden(h, &[]))
+                            });
+                            if static_hidden {
+                                static_cells = HashMap::new();
+                                static_cell_meta = HashMap::new();
+                            } else {
+                                static_cells = cells;
+                                static_cell_meta = row_cell_meta;
+                            }
                         } else {
                             // Merge static cells / metadata into clustering row
                             for (k, v) in &static_cells {
@@ -140,43 +189,38 @@ impl V5CompressedLegacyParser {
                                 row_cell_meta.entry(k.clone()).or_insert_with(|| v.clone());
                             }
 
-                            let row_tombstone =
-                                row_header_opt.as_ref().filter(|h| h.is_row_tombstone());
+                            // Issue #1741: hide partition/range-tombstone-shadowed and
+                            // TTL-expired rows (matching a Cassandra SELECT). Active
+                            // only for query reads (shadow is `Some`). A row reduced to
+                            // only its primary key by per-cell filtering is hidden here
+                            // too: the dropped cells still fold into the row aggregate,
+                            // so `row_hidden` sees the whole row as shadowed/expired.
+                            let hidden = shadow.as_ref().is_some_and(|sh| {
+                                row_header_opt.as_ref().is_some_and(|h| {
+                                    let clustering = if sh.needs_clustering() {
+                                        extract_clustering_values(&cells, schema)
+                                    } else {
+                                        Vec::new()
+                                    };
+                                    sh.row_hidden(h, &clustering)
+                                })
+                            });
 
-                            // Issue #932: a HAS_DELETION row may ALSO carry surviving
-                            // cells (written strictly after the row deletion). For the
-                            // user-facing scan those cells — all newer than the
-                            // deletion — display as a live row; the deletion shadows
-                            // only already-absent older cells, so it has no display
-                            // effect here. Emit a pure `Tombstone` ONLY when no
-                            // non-primary-key cell survives.
-                            let has_data_cell = row_has_non_key_cell(&cells, schema);
-                            let row_value = if row_tombstone.is_some() && !has_data_cell {
-                                ScanRow::Marker(
-                                    row_tombstone
-                                        .map(|h| h.row_tombstone())
-                                        .unwrap_or(Value::Null),
-                                )
-                            } else if cells.is_empty() {
-                                ScanRow::Marker(Value::Null)
-                            } else {
-                                // Issue #1334: carry the interned `Arc<str>` name
-                                // handles straight into the row carrier (no
-                                // `Value::Text(String)` round-trip). Emit-time
-                                // alphabetical ordering preserved exactly.
-                                let mut row_cells: RowCells = cells.into_iter().collect();
-                                row_cells.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
-                                ScanRow::Row(row_cells)
-                            };
+                            // Issue #505/#932: row-tombstone display rule lives in the
+                            // shared `build_display_row` helper.
+                            let row_value =
+                                build_display_row(cells, row_header_opt.as_ref(), schema);
 
-                            match emit((
-                                table_id.clone(),
-                                partition_key.clone(),
-                                row_value,
-                                row_cell_meta,
-                            ))? {
-                                std::ops::ControlFlow::Continue(()) => {}
-                                std::ops::ControlFlow::Break(()) => return Ok(()),
+                            if !hidden {
+                                match emit((
+                                    table_id.clone(),
+                                    partition_key.clone(),
+                                    row_value,
+                                    row_cell_meta,
+                                ))? {
+                                    std::ops::ControlFlow::Continue(()) => {}
+                                    std::ops::ControlFlow::Break(()) => return Ok(()),
+                                }
                             }
                         }
 
@@ -502,6 +546,8 @@ impl V5CompressedLegacyParser {
                     reader,
                     true,
                     &resolution,
+                    // Delta-scan is a physical consumer: no read-side shadowing.
+                    None,
                 ) {
                     Ok((
                         cells,
@@ -528,7 +574,7 @@ impl V5CompressedLegacyParser {
                             // (Issue #702: delta-scan CellMeta.expires_at).
                             let liveness_exp = h
                                 .liveness_expires_at_seconds
-                                .map(|s| (s as i64).saturating_mul(1_000_000));
+                                .map(|s| s.saturating_mul(1_000_000));
                             (
                                 h.timestamp,
                                 h.is_row_tombstone(),

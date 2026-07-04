@@ -198,7 +198,7 @@ impl SSTableReader {
         //    Issue #954: when `row_body_window` is set, the parse is bounded to the
         //    clustering slice's row-index block extent so only O(slice) rows are
         //    decoded (the post-scan backstop trims the block-granularity slack).
-        let parser = self.build_v5_parser();
+        let parser = self.build_v5_parser(true);
         let key = RowKey::from(partition_key.to_vec());
         let decoded_rows = match self
             .bti_decompress_and_parse_target_all(
@@ -490,7 +490,7 @@ impl SSTableReader {
         //    (`window_base = 0`). Either way the parse below uses the same
         //    `within = offset - window_base` index.
         let schema_opt = self.get_table_schema(None);
-        let parser = self.build_v5_parser();
+        let parser = self.build_v5_parser(true);
 
         let found = self
             .bti_decompress_and_parse_target(
@@ -1226,12 +1226,18 @@ impl SSTableReader {
     /// scans on this reader without serialization (issue #815).
     ///
     /// [`parse_block_with_cell_metadata`]: crate::storage::sstable::reader::parsing::V5CompressedLegacyParser::parse_block_with_cell_metadata
+    ///
+    /// `read_shadowing` (issue #1741): `true` for user-facing SELECT scans
+    /// (`scan`, `scan_with_cell_metadata`), `false` for the physical
+    /// `get_all_entries` (integrity verification / data-manager) which must count
+    /// every on-disk row.
     pub(super) async fn bti_scan_with_metadata(
         &self,
         start_key: Option<&RowKey>,
         end_key: Option<&RowKey>,
         limit: Option<usize>,
         schema: Option<&crate::schema::TableSchema>,
+        read_shadowing: bool,
     ) -> Result<
         Vec<(
             RowKey,
@@ -1256,7 +1262,7 @@ impl SSTableReader {
         // Resolve schema via the four-tier strategy (provided > header > registry).
         // V5CompressedLegacy partition decode requires a schema (cells lack names).
         let effective_schema = self.get_table_schema(schema);
-        let parser = self.build_v5_parser();
+        let parser = self.build_v5_parser(read_shadowing);
         let parsed =
             parser.parse_block_with_cell_metadata(&whole, effective_schema.as_ref(), self)?;
 

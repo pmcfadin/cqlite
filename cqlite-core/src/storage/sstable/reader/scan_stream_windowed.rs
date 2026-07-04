@@ -521,7 +521,10 @@ impl SSTableReader {
     ) -> Result<()> {
         use crate::storage::sstable::compression::Compression;
 
-        let parser = self.build_v5_parser();
+        // Issue #1741: single-gen full-scan read path applies SELECT-semantic
+        // read shadowing (partition/range tombstone + TTL), so build the parser
+        // with read_shadowing = true.
+        let parser = self.build_v5_parser(true);
         // Sliding front-cursor window (issue #1589): compacts once per refill.
         let mut window = WindowCursor::new();
         let mut broke = false;
