@@ -36,10 +36,9 @@ impl SSTableManager {
         partition_key: &[u8],
         schema: Option<&TableSchema>,
     ) -> Result<Option<Vec<(RowKey, ScanRow)>>> {
-        let table_readers = self.table_readers.read().await;
-        let Some(reader_list) = Self::resolve_reader_list(&table_readers, table_id.name()) else {
-            return Ok(None);
-        };
+        // Issue #1591: snapshot the reader list and DROP the read guard before any
+        // I/O (candidate prune + the block-walk delegated to the reader).
+        let (reader_list, _fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
 
         // Prune to the candidate generations that admit the key. Reverse iteration
         // covers ONLY the single-generation case: with several generations the same
