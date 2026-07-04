@@ -1095,6 +1095,71 @@ mod tests {
             }
         }
     }
+
+    /// Issue #1587 (E5): the modern (state_machine) ad-hoc SELECT path caches the
+    /// optimized plan keyed by the exact CQL text, so N identical ad-hoc executes
+    /// of the same query optimize AT MOST ONCE. This is the `engine.rs` half of
+    /// the plan-reuse optimization (the prepared-statement half is covered by
+    /// `prepared_select_reuses_optimized_plan_across_executes`).
+    ///
+    /// `#[tokio::test]` runs on the current-thread runtime, so the optimizer's
+    /// thread-local invocation counter reflects exactly this future's calls. The
+    /// plan is cached BEFORE execution, so the (empty-store) execute result is
+    /// irrelevant — reuse holds regardless.
+    #[tokio::test]
+    #[cfg(feature = "state_machine")]
+    async fn adhoc_select_reuses_cached_optimized_plan() {
+        use crate::query::select_optimizer::OPTIMIZE_INVOCATIONS;
+
+        let temp_dir = TempDir::new().unwrap();
+        let mut config = Config::default();
+        // Enable the modern SELECT plan cache (0 disables it).
+        config.query.query_cache_size = Some(16);
+        let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
+        let storage = Arc::new(
+            crate::storage::StorageEngine::open(
+                temp_dir.path(),
+                &config,
+                platform,
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        let schema = Arc::new(
+            crate::schema::SchemaManager::new(temp_dir.path())
+                .await
+                .unwrap(),
+        );
+        let memory = Arc::new(crate::memory::MemoryManager::new(&config).unwrap());
+        let engine = QueryEngine::new(storage, schema, memory, &config).unwrap();
+
+        // A non-`WHERE id =` SELECT routes through the modern `execute_select_query`
+        // path (see `execute`'s `is_simple_id_lookup` gate), which owns the plan cache.
+        let cql = "SELECT * FROM t WHERE age > 5";
+
+        OPTIMIZE_INVOCATIONS.with(|c| c.set(0));
+        for _ in 0..75 {
+            let _ = engine.execute(cql).await;
+        }
+        let after_same = OPTIMIZE_INVOCATIONS.with(|c| c.get());
+        assert!(
+            after_same <= 1,
+            "issue #1587: an ad-hoc SELECT must optimize at most once across 75 \
+             identical executes (modern plan cache), got {after_same}"
+        );
+
+        // Clearing the cache must force exactly one re-optimize on the next run.
+        engine.clear_plan_cache();
+        let _ = engine.execute(cql).await;
+        let after_clear = OPTIMIZE_INVOCATIONS.with(|c| c.get());
+        assert_eq!(
+            after_clear,
+            after_same + 1,
+            "clearing the plan cache must re-optimize once (no stale reuse)"
+        );
+    }
 }
 
 #[cfg(test)]
