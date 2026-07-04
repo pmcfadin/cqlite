@@ -600,13 +600,57 @@ impl StreamingDecompressor {
             // self-delimiting and carries no length prefix, so the whole
             // compressed block must be read before it can be decoded — decode it
             // through the same `snappy_decompress_raw` helper as the chunk path.
-            let mut buf_reader = BufReader::new(reader);
+            //
+            // SECURITY (issue #1588): bound BOTH allocations before they happen so
+            // a huge/malicious reader cannot exceed the streaming memory budget or
+            // OOM before the guards run:
+            //  1. Cap the COMPRESSED read. Any Snappy block that legitimately
+            //     decodes to <= `memory_limit` bytes cannot be larger than the
+            //     maximum Snappy encoding of `memory_limit` bytes
+            //     (`snap::raw::max_compress_len`). A larger input cannot produce
+            //     in-budget output, so we refuse to buffer it (read `cap + 1` via
+            //     `take` to detect overrun without reading unbounded input).
+            //  2. Reject a decompression bomb using the advertised uncompressed
+            //     length (`snap::raw::decompress_len`, the raw block's varint
+            //     prefix) BEFORE allocating the output buffer.
+            let max_compressed = snap::raw::max_compress_len(memory_limit);
+            if max_compressed == 0 {
+                return Err(Error::storage(format!(
+                    "Snappy streaming memory limit {} too large to bound compressed input",
+                    memory_limit
+                )));
+            }
+            let read_cap = max_compressed.checked_add(1).ok_or_else(|| {
+                Error::storage("Snappy compressed read cap overflow".to_string())
+            })?;
+            let mut buf_reader = BufReader::new(reader).take(read_cap as u64);
             let mut compressed = Vec::new();
             buf_reader.read_to_end(&mut compressed).map_err(|e| {
                 Error::storage(format!("Failed to read Snappy compressed data: {}", e))
             })?;
+            if compressed.len() > max_compressed {
+                return Err(Error::storage(format!(
+                    "Snappy compressed input exceeds bound {} bytes (memory limit: {} bytes)",
+                    max_compressed, memory_limit
+                )));
+            }
             self.bytes_processed += compressed.len();
 
+            // Pre-allocation bomb guard: reject before allocating the output buffer.
+            let advertised = snap::raw::decompress_len(&compressed).map_err(|e| {
+                Error::storage(format!("Snappy (raw) length decode failed: {}", e))
+            })?;
+            let projected = output.len().checked_add(advertised);
+            if projected.is_none_or(|total| total > memory_limit) {
+                return Err(Error::storage(format!(
+                    "Decompression bomb protection: advertised Snappy size {} exceeds limit {} bytes",
+                    advertised, memory_limit
+                )));
+            }
+
+            // Belt-and-suspenders: enforce against the ACTUAL decoded size (the
+            // advertised length is attacker-controlled); `snappy_decompress_raw`
+            // additionally caps at MAX_DECOMPRESSED_SIZE.
             let decompressed = snappy_decompress_raw(&compressed, &mut 0)?;
 
             if output.len() + decompressed.len() > memory_limit {
@@ -1052,6 +1096,84 @@ mod tests {
         assert_eq!(
             out, data,
             "streaming Snappy must decode raw compress() output byte-for-byte"
+        );
+    }
+
+    /// Encode a Snappy raw-block length prefix (LEB128 varint) for `n`.
+    #[cfg(feature = "snappy")]
+    fn snappy_len_prefix(mut n: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let mut b = (n & 0x7f) as u8;
+            n >>= 7;
+            if n != 0 {
+                b |= 0x80;
+            }
+            out.push(b);
+            if n == 0 {
+                break;
+            }
+        }
+        out
+    }
+
+    /// SECURITY (issue #1588): a streaming Snappy block whose ADVERTISED
+    /// uncompressed length exceeds the memory budget is rejected BEFORE the
+    /// output buffer is allocated (no OOM). The crafted input is tiny (only a
+    /// length prefix + a stub), so it passes the compressed read cap and reaches
+    /// the pre-allocation length guard.
+    #[cfg(feature = "snappy")]
+    #[tokio::test]
+    async fn test_snappy_streaming_advertised_len_bomb_rejected() {
+        use std::io::Cursor;
+
+        // 1MB budget; advertise 100MB uncompressed.
+        let config = ChunkedDecompressionConfig {
+            max_memory_mb: 1,
+            chunk_size: 1024,
+            max_output_size: 128 * 1024 * 1024,
+        };
+        let mut input = snappy_len_prefix(100 * 1024 * 1024);
+        input.push(0x00); // stub tag byte; guard fires before any decode
+
+        let compression = Compression::new(CompressionAlgorithm::Snappy).unwrap();
+        let mut decompressor = compression.create_streaming_decompressor(config);
+        // `None` expected_size so the caller-side pre-check does not short-circuit.
+        let err = decompressor
+            .decompress_streaming(Cursor::new(input), None)
+            .await
+            .expect_err("advertised-size bomb must be rejected");
+        assert!(
+            err.to_string().contains("Decompression bomb protection"),
+            "expected pre-allocation bomb error, got: {err}"
+        );
+    }
+
+    /// SECURITY (issue #1588): a COMPRESSED input larger than the max Snappy
+    /// encoding of the memory budget cannot legitimately decode in-budget, so the
+    /// read is capped and the oversized input errors without buffering it all.
+    #[cfg(feature = "snappy")]
+    #[tokio::test]
+    async fn test_snappy_streaming_oversized_compressed_rejected() {
+        use std::io::Cursor;
+
+        let config = ChunkedDecompressionConfig {
+            max_memory_mb: 1,
+            chunk_size: 1024,
+            max_output_size: 128 * 1024 * 1024,
+        };
+        // 4MB of bytes, well past max_compress_len(1MB) (~1.2MB).
+        let oversized = vec![0u8; 4 * 1024 * 1024];
+
+        let compression = Compression::new(CompressionAlgorithm::Snappy).unwrap();
+        let mut decompressor = compression.create_streaming_decompressor(config);
+        let err = decompressor
+            .decompress_streaming(Cursor::new(oversized), None)
+            .await
+            .expect_err("over-cap compressed input must be rejected");
+        assert!(
+            err.to_string().contains("Snappy compressed input exceeds bound"),
+            "expected compressed read-cap error, got: {err}"
         );
     }
 
