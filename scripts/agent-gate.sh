@@ -86,7 +86,11 @@
 #                      (#1232) — fails if a generate-*.sh enumerates the whole
 #                      SSTable corpus and grep -z filters by keyspace; needs no
 #                      python3 so it runs even on the SKIP path, and any failure
-#                      hard-FAILs this component.
+#                      hard-FAILs this component. On the python3 path also runs
+#                      scripts/tests/test_gate_concurrency_cap.sh (#1825) — proves
+#                      the machine-wide full-gate concurrency cap queues at N,
+#                      exempts --lite, and releases a slot on SIGKILL (uses the
+#                      gate's hermetic stub mode, never real gate work).
 #   minimal-build      cargo build -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
 #   file-size          campsite-rule ratchet (epic #1116 / #1135): lists changed
@@ -214,7 +218,10 @@ export CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-$REPO_ROOT/test-data/datase
 NEXTEST=0
 if [ "${CQLITE_DISABLE_NEXTEST:-0}" != 1 ] && command -v cargo-nextest >/dev/null 2>&1; then
   NEXTEST=1
-  echo "agent-gate: cargo-nextest detected ($(cargo nextest --version 2>/dev/null | head -1)); core-tests uses nextest + a cargo test --doc pass (#1737)"
+  # Banner on STDERR: hidden hook modes (--classify-*, --scoped-test-cmd-noparser)
+  # must keep STDOUT empty, and this detection runs before the hook dispatch (same
+  # rule the sccache banner above already follows; #1821/#1825).
+  echo "agent-gate: cargo-nextest detected ($(cargo nextest --version 2>/dev/null | head -1)); core-tests uses nextest + a cargo test --doc pass (#1737)" >&2
 fi
 
 # Bounded component parallelism (issue #1737): independent gate components run
@@ -242,7 +249,10 @@ case "$AGENT_GATE_JOBS" in *[!0-9]*|'') AGENT_GATE_JOBS=1 ;; esac
 if [ "$AGENT_GATE_JOBS" -gt 1 ] && \
    ! { [ "${BASH_VERSINFO[0]:-0}" -gt 4 ] || \
        { [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] && [ "${BASH_VERSINFO[1]:-0}" -ge 3 ]; }; }; then
-  echo "agent-gate: bash < 4.3 lacks 'wait -n'; components run sequentially (AGENT_GATE_JOBS=1)"
+  # Banner on STDERR (see nextest note above): hidden hook modes must keep STDOUT
+  # empty, and this runs before the hook dispatch — under stock bash 3.2 this
+  # branch is always taken, so an stdout banner here corrupted --classify-* output.
+  echo "agent-gate: bash < 4.3 lacks 'wait -n'; components run sequentially (AGENT_GATE_JOBS=1)" >&2
   AGENT_GATE_JOBS=1
 fi
 
@@ -1005,9 +1015,10 @@ run_tooling_tests() {
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh"
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh"
   if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_agent_gate_smoke_target_dir.sh" >>"$log" 2>&1; then
+     bash "$REPO_ROOT/scripts/tests/test_agent_gate_smoke_target_dir.sh" >>"$log" 2>&1 &&
+     bash "$REPO_ROOT/scripts/tests/test_gate_concurrency_cap.sh" >>"$log" 2>&1; then
     status=PASS
   else
     status=FAIL
@@ -1331,12 +1342,146 @@ run_lite() {
   esac
 }
 
+# ---- Machine-wide full-gate concurrency cap (issue #1825) -------------------
+# A cross-process bounded semaphore around the FULL gate of record ONLY. At most N
+# full `agent-gate.sh` runs execute machine-wide at once; excess invocations BLOCK
+# (queue) for a slot — they NEVER fail from the cap. EXEMPT (never queued):
+#   * --lite runs (issue #1821): cheap fmt+clippy+scoped tests, must stay instant.
+#   * --only PARTIAL runs: they don't count as the gate AND are used by nested
+#     tooling self-tests (a capped parent runs `agent-gate.sh --only ...` as a
+#     child), so capping them could self-deadlock the queue.
+#   * --emit-summary-selftest / hidden hooks: they exit earlier, never reaching here.
+#
+# Mechanism (SIGKILL-safe by construction): N slot lockfiles under a SHARED,
+# machine-wide (NOT per-checkout) dir, each guarded by a non-blocking fcntl.flock.
+# A tiny background daemon (scripts/lib/gate_slot_daemon.py) acquires ONE slot,
+# signals us via a ready file, then HOLDS the lock while polling this gate's
+# liveness; it releases the slot when the gate exits. Crucially the daemon is a
+# SEPARATE process that opens the lock fd AFTER it is forked, so the gate's heavy
+# children (cargo, nextest, ...) never inherit the lock -- a SIGKILL of the gate
+# frees the slot within one poll interval even while orphaned children run on. (An
+# fd held by the gate shell itself would be inherited by cargo and keep the slot
+# locked after a SIGKILL, defeating stale-slot reaping -- hence the daemon.)
+#
+# N default: max(2, floor((ncpu-2)/4)) -- a conservative fraction of cores that
+# still lets a couple of gates run on a small box; overridable via
+# CQLITE_GATE_MAX_CONCURRENCY. Slots dir: $CQLITE_GATE_SLOTS_DIR (default
+# ${TMPDIR:-/tmp}/cqlite-gate-slots). Poll interval: $CQLITE_GATE_POLL_SECS
+# (default 2). The cap is skipped (with a loud stderr note) when python3 or the
+# daemon is unavailable, and can be force-disabled with CQLITE_GATE_DISABLE_CAP=1.
+# Non-interactive callers block cleanly (waiting on the daemon), never spin-fail.
+
+# Resolve N from the default formula + the CQLITE_GATE_MAX_CONCURRENCY override.
+_gate_max_concurrency() {
+  local dflt=$(( ( _ncpu - 2 ) / 4 ))
+  [ "$dflt" -lt 2 ] && dflt=2
+  local v="${CQLITE_GATE_MAX_CONCURRENCY:-$dflt}"
+  case "$v" in *[!0-9]*|'') v=$dflt ;; esac
+  [ "$v" -lt 1 ] && v=1
+  printf '%s' "$v"
+}
+
+# PID of the background slot daemon (empty when the cap is inactive for this run).
+GATE_SLOT_DAEMON_PID=""
+
+# Release the held slot by terminating the daemon (which closes its lock fd). Run
+# from the EXIT trap. Guarded to fire ONLY in the main gate shell: a backgrounded
+# `( ... ) &` pool subshell also runs the inherited EXIT trap on its own exit, and
+# must NOT tear down the parent's slot. BASHPID (bash 4+) differs from $$ inside a
+# subshell; on bash 3.2 (no BASHPID, no pool subshells) it defaults equal, so the
+# guard is a no-op there and only the real gate exit releases the slot.
+# shellcheck disable=SC2329  # invoked indirectly via `trap '_gate_release_slot' EXIT`
+_gate_release_slot() {
+  [ "${BASHPID:-$$}" = "$$" ] || return 0
+  [ -n "${GATE_SLOT_DAEMON_PID:-}" ] || return 0
+  kill "$GATE_SLOT_DAEMON_PID" 2>/dev/null || true
+  GATE_SLOT_DAEMON_PID=""
+}
+
+# Block until this full-gate run holds one of N machine-wide slots, then return so
+# the gate proceeds while the daemon keeps the slot held in the background. No-op
+# for the exempt run classes above. Fail-open (cap disabled) if python3/daemon are
+# missing or the daemon dies before acquiring -- the gate must never be un-runnable
+# because of the cap.
+acquire_gate_slot() {
+  [ "$LITE" -eq 1 ] && return 0
+  [ -n "$ONLY" ] && return 0
+  [ "${CQLITE_GATE_DISABLE_CAP:-0}" = 1 ] && return 0
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "agent-gate: python3 unavailable -- full-gate concurrency cap DISABLED (#1825)" >&2
+    return 0
+  fi
+  local n dir poll daemon ready
+  n=$(_gate_max_concurrency)
+  dir="${CQLITE_GATE_SLOTS_DIR:-${TMPDIR:-/tmp}/cqlite-gate-slots}"
+  poll="${CQLITE_GATE_POLL_SECS:-2}"
+  daemon="$REPO_ROOT/scripts/lib/gate_slot_daemon.py"
+  if [ ! -f "$daemon" ]; then
+    echo "agent-gate: slot daemon $daemon missing -- concurrency cap DISABLED (#1825)" >&2
+    return 0
+  fi
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    echo "agent-gate: cannot create slot dir $dir -- concurrency cap DISABLED (#1825)" >&2
+    return 0
+  fi
+  ready="$LOG_DIR/gate-slot.ready"
+  rm -f "$ready" 2>/dev/null || true
+  # Start the background lock-holder for THIS gate (pid $$). It writes $ready once
+  # it owns a slot and holds it until this gate exits. Its std fds are detached to
+  # /dev/null so this long-lived background child can NEVER hold the gate's stdout
+  # pipe open and truncate a streamed SUMMARY under an until-EOF reader (#1175).
+  python3 "$daemon" --slots-dir "$dir" --slots "$n" --gate-pid "$$" \
+    --ready-file "$ready" --poll-secs "$poll" </dev/null >/dev/null 2>&1 &
+  GATE_SLOT_DAEMON_PID=$!
+  trap '_gate_release_slot' EXIT
+  # Block until the daemon signals acquisition, printing the queued notice ONCE
+  # after a short grace (so an immediately-free slot stays quiet). If the daemon
+  # dies before acquiring, fail open rather than hang the gate forever.
+  local printed=0 waited=0
+  while [ ! -f "$ready" ]; do
+    if ! kill -0 "$GATE_SLOT_DAEMON_PID" 2>/dev/null; then
+      echo "agent-gate: slot daemon exited before acquiring -- cap DISABLED for this run (#1825)" >&2
+      GATE_SLOT_DAEMON_PID=""
+      return 0
+    fi
+    if [ "$printed" -eq 0 ] && [ "$waited" -ge 3 ]; then
+      echo "waiting for gate slot ($n in use)…" >&2
+      printed=1
+    fi
+    waited=$(( waited + 1 ))
+    sleep 0.2
+  done
+  [ "$printed" -eq 1 ] && echo "agent-gate: gate slot acquired -- proceeding (#1825)" >&2
+}
+
+# Test-only stub (issue #1825 concurrency self-test): when CQLITE_GATE_STUB_RUNDIR
+# is set, the gate acquires a real slot (subject to the cap + exemptions above),
+# advertises "I am working" by dropping a per-PID marker file, sleeps
+# CQLITE_GATE_STUB_SLEEP seconds, then exits 0 WITHOUT running any real component.
+# This lets scripts/tests/test_gate_concurrency_cap.sh exercise the machine-wide
+# semaphore (queueing at N, --lite exemption, SIGKILL slot release) hermetically,
+# without running actual gate work. Never triggered in normal use.
+if [ -n "${CQLITE_GATE_STUB_RUNDIR:-}" ]; then
+  acquire_gate_slot   # self-exempts for --lite / --only
+  mkdir -p "$CQLITE_GATE_STUB_RUNDIR" 2>/dev/null || true
+  _stub_marker="$CQLITE_GATE_STUB_RUNDIR/holding.$$"
+  : > "$_stub_marker" 2>/dev/null || true
+  sleep "${CQLITE_GATE_STUB_SLEEP:-2}"
+  rm -f "$_stub_marker" 2>/dev/null || true
+  exit 0
+fi
+
 # --lite (issue #1821): run the fast subset and EXIT before the full-gate flow.
 # Kept fully separate from the full-gate execution below so the no-flag path is
-# byte-for-byte unchanged.
+# byte-for-byte unchanged. --lite is EXEMPT from the #1825 cap (never queued).
 if [ "$LITE" -eq 1 ]; then
   run_lite
 fi
+
+# Machine-wide full-gate concurrency cap (issue #1825): block here until a slot is
+# free, so at most N full gates run at once across worktrees + the root checkout.
+# --lite already returned above; --only PARTIAL runs self-exempt inside.
+acquire_gate_slot
 
 # file-size runs first and needs no dataset, so it executes before the dataset
 # preflight (which exits early when data is missing).
@@ -1546,9 +1691,15 @@ launch_components() {
     else main_lane+=("$c"); SELECTED_MAIN+=("$c"); fi
   done
 
+  # Bash 3.2 under `set -u` treats "${arr[@]}" of an EMPTY array as unbound (fixed
+  # in bash 4.4+; #1841 latent bug surfaced by the #1825 concurrency-cap self-test,
+  # which runs a nested `--only <one-component>` gate -- exactly the case where
+  # main_lane or side_lane is empty). Guard every such expansion below with the
+  # `"${arr[@]+"${arr[@]}"}"` idiom, which is a no-op when non-empty and expands to
+  # nothing (never unbound) when empty. Same idiom already used for `stems` above.
   if [ "$AGENT_GATE_JOBS" -le 1 ] || [ "${#side_lane[@]}" -eq 0 ]; then
-    for c in "${main_lane[@]}"; do dispatch_component "$c"; done
-    for c in "${side_lane[@]}"; do run_side_component "$c"; done
+    for c in "${main_lane[@]+"${main_lane[@]}"}"; do dispatch_component "$c"; done
+    for c in "${side_lane[@]+"${side_lane[@]}"}"; do run_side_component "$c"; done
     return
   fi
 
@@ -1558,7 +1709,7 @@ launch_components() {
   # SIDE lane: a background sub-pool capped at side_jobs (each isolated target dir).
   (
     srun=0
-    for sc in "${side_lane[@]}"; do
+    for sc in "${side_lane[@]+"${side_lane[@]}"}"; do
       run_side_component "$sc" &
       srun=$(( srun + 1 ))
       if [ "$srun" -ge "$side_jobs" ]; then wait -n 2>/dev/null || true; srun=$(( srun - 1 )); fi
@@ -1567,7 +1718,7 @@ launch_components() {
   ) &
   local side_pid=$!
   # MAIN lane: serial, foreground (shared target dir, no intra-lane parallelism).
-  for c in "${main_lane[@]}"; do dispatch_component "$c"; done
+  for c in "${main_lane[@]+"${main_lane[@]}"}"; do dispatch_component "$c"; done
   wait "$side_pid" || SIDE_LANE_EXIT=$?
 }
 
@@ -1576,15 +1727,17 @@ launch_components
 # Fail-closed check (issue #1737 roborev): verify all SELECTED components produced result files.
 # A component that was selected but has no .result file crashed/exited before record_result,
 # which is a fail-OPEN hole. Treat missing results as synthetic FAIL + force overall FAIL.
-# Also check the SIDE lane's exit status.
-for _sc in "${SELECTED_SIDE[@]}"; do
+# Also check the SIDE lane's exit status. Bash-3.2-safe empty-array guard (#1841,
+# same hazard as launch_components above): a `--only <main-only-component>` run
+# leaves SELECTED_SIDE empty, and vice versa.
+for _sc in "${SELECTED_SIDE[@]+"${SELECTED_SIDE[@]}"}"; do
   [ -f "$LOG_DIR/$_sc.result" ] || {
     echo "agent-gate: SIDE-lane component '$_sc' SELECTED but has no result file (crashed/exited early)" >&2
     NAMES+=("$_sc"); STATUSES+=(FAIL); TIMES+=("0s")
     OVERALL=FAIL
   }
 done
-for _mc in "${SELECTED_MAIN[@]}"; do
+for _mc in "${SELECTED_MAIN[@]+"${SELECTED_MAIN[@]}"}"; do
   [ -f "$LOG_DIR/$_mc.result" ] || {
     echo "agent-gate: MAIN-lane component '$_mc' SELECTED but has no result file (crashed/exited early)" >&2
     NAMES+=("$_mc"); STATUSES+=(FAIL); TIMES+=("0s")
