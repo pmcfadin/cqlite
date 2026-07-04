@@ -283,9 +283,21 @@ fn data_db_present(keyspace: &str, table_prefix: &str) -> bool {
     let Some(table_dir) = find_table_dir(&ks_dir, table_prefix) else {
         return false;
     };
-    ["nb-1-big-Data.db", "oa-1-big-Data.db"]
-        .iter()
-        .any(|f| table_dir.join(f).exists())
+    // Issue #1853 roborev finding 3: don't hardcode `nb-1-big`/`oa-1-big` — a
+    // regenerated fixture at a different generation (e.g. `nb-2-big-Data.db`)
+    // would spuriously read as absent and trip the fail-closed guard. Glob for
+    // any `*-Data.db` in the table dir instead of a fixed generation/version.
+    std::fs::read_dir(&table_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.ends_with("-Data.db"))
+        })
 }
 
 /// Load the JSONL golden for a given keyspace + table prefix from the datasets root.
