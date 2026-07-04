@@ -19,12 +19,19 @@ use crate::{Error, Result};
 
 /// Estimate the logical size, in bytes, of a materialized [`QueryRow`], reusing
 /// the shared row-cache estimator ([`crate::memory::estimate_value_size`]). Sums
-/// the per-value estimate over the row's column values.
+/// the per-value estimate over the row's column values, plus the retained
+/// [`RowKey`](crate::types::RowKey) bytes (issue #1582): every materialized row
+/// keeps the original partition/clustering key, so a query projecting small
+/// non-key columns from rows with very large keys must still count the key bytes
+/// against `max_result_bytes`. Uses saturating addition so a pathological row can
+/// never overflow `usize`.
 pub(crate) fn estimate_query_row_bytes(row: &QueryRow) -> usize {
-    row.values
+    let values_bytes: usize = row
+        .values
         .values()
         .map(crate::memory::estimate_value_size)
-        .sum()
+        .sum();
+    values_bytes.saturating_add(row.key.as_bytes().len())
 }
 
 /// Sum [`estimate_query_row_bytes`] over a result set, saturating so a pathological
@@ -74,4 +81,71 @@ pub(crate) fn enforce_materialized_rows(
 ) -> Result<()> {
     let result_bytes = estimate_result_bytes(rows);
     enforce_result_budget(rows, result_bytes, byte_budget, max_rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::estimate_value_size;
+    use crate::query::result::{QueryRow, RowMetadata};
+    use crate::types::{RowKey, Value};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn row_with(key_bytes: usize, value: Value) -> QueryRow {
+        let mut values: HashMap<Arc<str>, Value> = HashMap::new();
+        values.insert(Arc::from("c"), value);
+        QueryRow {
+            values,
+            key: RowKey::new(vec![b'k'; key_bytes]),
+            metadata: RowMetadata::default(),
+            cell_metadata: None,
+        }
+    }
+
+    /// Issue #1582: a wide partition key with a tiny projected value must count
+    /// the retained key bytes against the budget. Value bytes alone stay under,
+    /// so the budget only trips because the key is included.
+    #[test]
+    fn wide_key_small_value_trips_budget() {
+        // Value::Integer estimates 4 bytes; key is 1000 bytes.
+        let rows = vec![row_with(1000, Value::Integer(1))];
+        let value_only = rows[0]
+            .values
+            .values()
+            .map(estimate_value_size)
+            .sum::<usize>();
+        assert_eq!(value_only, 4, "projected value estimate should be small");
+
+        // Budget sits above the value-only estimate but below value+key.
+        let budget = 500;
+        assert!(value_only <= budget, "keys-ignored estimate would NOT trip");
+
+        let err = enforce_materialized_rows(&rows, budget, usize::MAX)
+            .expect_err("wide key must push the row over the byte budget");
+        match err {
+            Error::ResultTooLarge {
+                budget_bytes,
+                estimated_bytes,
+                rows: n,
+            } => {
+                assert_eq!(budget_bytes, budget);
+                assert!(estimated_bytes > budget, "estimate must include key bytes");
+                assert!(
+                    estimated_bytes >= 1000,
+                    "estimate must include the 1000-byte key"
+                );
+                assert_eq!(n, 1);
+            }
+            other => panic!("expected ResultTooLarge, got {other:?}"),
+        }
+    }
+
+    /// Sanity: within-budget rows (key + value) still pass.
+    #[test]
+    fn small_key_small_value_passes() {
+        let rows = vec![row_with(8, Value::Integer(1))];
+        enforce_materialized_rows(&rows, 500, usize::MAX)
+            .expect("small key + value must stay under budget");
+    }
 }
