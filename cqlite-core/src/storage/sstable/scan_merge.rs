@@ -47,10 +47,10 @@ use crate::util::cassandra_murmur3::cassandra_murmur3_token;
 /// [`sort_by_token_order`] since process start.
 pub(crate) static MANAGER_SCAN_FULL_SORTS: AtomicU64 = AtomicU64::new(0);
 
-/// Per-thread key-comparison counter for [`kway_merge_token_order`], incremented by
-/// [`Candidate::cmp`]. Thread-local (not a process-global atomic) so concurrent
-/// tests on cargo's multithreaded runner never race on it; compiled only under
-/// `test` or the `metrics` feature, so production `Candidate::cmp` pays nothing.
+// Per-thread key-comparison counter for `kway_merge_token_order`, incremented by
+// `Candidate::cmp`. Thread-local (not a process-global atomic) so concurrent
+// tests on cargo's multithreaded runner never race on it; compiled only under
+// `test` or the `metrics` feature, so production `Candidate::cmp` pays nothing.
 #[cfg(any(test, feature = "metrics"))]
 thread_local! {
     static SCAN_KEY_COMPARISONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -294,10 +294,7 @@ mod tests {
         // Single stream: returned as-is (reader already token-ordered), no merge.
         let (merged, cmps) = kway_merge_counting(vec![only], None);
         assert_eq!(merged.len(), 2);
-        assert_eq!(
-            cmps, 0,
-            "single-stream fast path must not compare keys"
-        );
+        assert_eq!(cmps, 0, "single-stream fast path must not compare keys");
     }
 
     #[test]
