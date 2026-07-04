@@ -27,6 +27,28 @@ pub(crate) fn extract_column_name(expr: &SelectExpression) -> Option<String> {
     }
 }
 
+/// For a plain-column SELECT projection (possibly aliased), return
+/// `(source_column, output_name)` where `source_column` is the stored column the
+/// scan reads and `output_name` is what appears in `metadata.columns`.
+///
+/// Issue #1763 (grouped dimensions): `finalize_group` keys a grouped dimension's
+/// row VALUE by its SELECT OUTPUT name so it matches the metadata name, while the
+/// group KEY is still read from the row by the raw stored column. This pairs the
+/// two: `Column(x)` → `(x, x)`, `Aliased(Column(x), "a")` → `(x, "a")`. The
+/// output side is exactly what [`extract_column_name`] returns, so a grouped
+/// dimension's row key can never diverge from its metadata name. Returns `None`
+/// for aggregates, literals, arithmetic, etc.
+pub(crate) fn projection_source_and_output(expr: &SelectExpression) -> Option<(String, String)> {
+    match expr {
+        SelectExpression::Column(col_ref) => Some((col_ref.column.clone(), col_ref.column.clone())),
+        SelectExpression::Aliased(inner, alias) => match inner.as_ref() {
+            SelectExpression::Column(col_ref) => Some((col_ref.column.clone(), alias.clone())),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Borrow the `AggregateFunction` from an aggregate expression, unwrapping a
 /// surrounding `Aliased` (`COUNT(*) AS total`). Returns `None` for non-aggregate
 /// expressions.

@@ -200,6 +200,120 @@ async fn multi_aggregate_metadata_names_and_order_match_row_keys() {
     }
 }
 
+/// GROUP BY grouped-dimension name parity (roborev follow-up on #1763): for
+/// `SELECT category AS cat, COUNT(*) AS total ... GROUP BY category`, the grouped
+/// dimension's result METADATA name is the SELECT alias (`cat`), but before this
+/// fix `finalize_group` keyed the group VALUE under the raw GROUP BY column name
+/// (`category`) — so JSON/bindings read `cat` as null. Both the grouped dimension
+/// AND the aggregate must have metadata names that equal their row value keys,
+/// and the raw `category` name must NOT leak as a row key.
+#[tokio::test]
+async fn grouped_dimension_aliased_metadata_equals_row_key() {
+    let db = match setup("basic-types.cql", "/test_basic/").await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let result = db
+        .execute(
+            "SELECT category AS cat, COUNT(*) AS total \
+             FROM test_basic.multi_partition_table GROUP BY category",
+        )
+        .await
+        .expect("aliased grouped dimension query must execute");
+
+    let meta_names: Vec<String> = result
+        .metadata
+        .columns
+        .iter()
+        .map(|c| c.name.clone())
+        .collect();
+    assert_eq!(
+        meta_names,
+        vec!["cat".to_string(), "total".to_string()],
+        "grouped-dimension + aggregate metadata names in SELECT order"
+    );
+
+    let row = result
+        .rows
+        .first()
+        .expect("GROUP BY query must return at least one row");
+
+    // Every metadata column name (grouped dimension AND aggregate) is a row key.
+    for name in &meta_names {
+        assert!(
+            row.values.contains_key(name.as_str()),
+            "issue #1763: metadata column {name:?} MUST be a row value key; row keys \
+             were {:?}",
+            row.values.keys().collect::<Vec<_>>()
+        );
+    }
+    // The raw GROUP BY column name must NOT leak as a row key, and no key is null
+    // for a value that exists (the alias must carry the grouped value).
+    assert!(
+        !row.values.contains_key("category"),
+        "issue #1763: raw GROUP BY column name `category` must not leak as a row \
+         value key when the SELECT aliases it to `cat`; row keys were {:?}",
+        row.values.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !row.values
+            .get("cat")
+            .is_none_or(cqlite_core::types::Value::is_null),
+        "issue #1763: grouped dimension `cat` must carry the group value, not null"
+    );
+}
+
+/// Unaliased grouped dimension: metadata name == row key == the column name
+/// (`category`) — the single `select_naming` source yields the same name on both
+/// sides even without an alias.
+#[tokio::test]
+async fn grouped_dimension_unaliased_metadata_equals_row_key() {
+    let db = match setup("basic-types.cql", "/test_basic/").await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let result = db
+        .execute(
+            "SELECT category, COUNT(*) AS total \
+             FROM test_basic.multi_partition_table GROUP BY category",
+        )
+        .await
+        .expect("unaliased grouped dimension query must execute");
+
+    let meta_names: Vec<String> = result
+        .metadata
+        .columns
+        .iter()
+        .map(|c| c.name.clone())
+        .collect();
+    assert_eq!(
+        meta_names,
+        vec!["category".to_string(), "total".to_string()],
+        "unaliased grouped dimension keeps its column name in metadata"
+    );
+
+    let row = result
+        .rows
+        .first()
+        .expect("GROUP BY query must return at least one row");
+    for name in &meta_names {
+        assert!(
+            row.values.contains_key(name.as_str()),
+            "issue #1763: metadata column {name:?} MUST be a row value key; row keys \
+             were {:?}",
+            row.values.keys().collect::<Vec<_>>()
+        );
+    }
+}
+
 /// CLI-surface parity: `QueryResult::to_json` (the exact renderer behind the CLI
 /// `--out json` path) keys each row field by `metadata.columns[i].name` and looks
 /// the value up in `row.values`. Before the fix, an aggregate's metadata name

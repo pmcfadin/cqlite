@@ -2,9 +2,11 @@
 
 use super::select_ast::*;
 use super::select_naming::{
-    aggregate_column_and_alias, aggregate_output_name, extract_column_name, unwrap_aggregate,
+    aggregate_column_and_alias, aggregate_output_name, projection_source_and_output,
+    unwrap_aggregate,
 };
 use crate::{schema::SchemaManager, storage::StorageEngine, Error, Result, TableId, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 // Test-only counter for the number of times `SelectOptimizer::optimize` runs
@@ -146,7 +148,13 @@ pub enum SSTableFilterOp {
 /// Aggregation execution plan
 #[derive(Debug, Clone)]
 pub struct AggregationPlan {
+    /// Raw stored column names `build_group_key` reads from each scanned row.
     pub group_by_columns: Vec<String>,
+    /// Issue #1763: SELECT OUTPUT name per grouped dimension (parallel to
+    /// `group_by_columns`); `finalize_group` emits the value under this name so it
+    /// equals the metadata column name (both from `select_naming`). Alias when
+    /// projected with one, else the column name.
+    pub group_by_output_names: Vec<String>,
     pub aggregates: Vec<AggregateComputation>,
 }
 
@@ -537,21 +545,54 @@ fn literal_value(expr: &SelectExpression) -> Option<Value> {
     }
 }
 
+/// Columns the SSTable scan must READ: the SOURCE stored column names, NOT the
+/// SELECT output aliases.
+///
+/// Issue #1763: `build_row_from_scan` filters decoded cells by physical column
+/// name, so an aliased projection (`category AS cat`) MUST scan `category` —
+/// projecting `cat` would drop the cell (null value; the `Project` step / grouped
+/// dimension could not find it). Output naming is applied afterwards (`Project`
+/// step / metadata / `finalize_group`), all via `select_naming`. Aggregates name
+/// no stored cell and are excluded.
 fn extract_projection_columns(select_clause: &SelectClause) -> Vec<String> {
     match select_clause {
         SelectClause::All => Vec::new(),
-        SelectClause::Columns(exprs) | SelectClause::Distinct(exprs) => {
-            exprs.iter().filter_map(extract_column_name).collect()
-        }
+        SelectClause::Columns(exprs) | SelectClause::Distinct(exprs) => exprs
+            .iter()
+            .filter_map(|e| projection_source_and_output(e).map(|(source, _)| source))
+            .collect(),
     }
 }
 
 fn plan_aggregation(statement: &SelectStatement) -> AggregationPlan {
-    let group_by_columns = statement
+    let group_by_columns: Vec<String> = statement
         .group_by
         .as_ref()
         .map(|g| g.columns.iter().map(|col| col.column.clone()).collect())
         .unwrap_or_default();
+
+    // Issue #1763 (grouped dimensions): map each grouped column to its SELECT
+    // OUTPUT name via the SAME `select_naming` source `get_result_columns` uses,
+    // so `finalize_group` emits the grouped value under the metadata column name.
+    // `col AS alias` yields `alias`; bare or not-projected yields the column name.
+    let mut output_for_source: HashMap<String, String> = HashMap::new();
+    if let SelectClause::Columns(exprs) | SelectClause::Distinct(exprs) = &statement.select_clause {
+        for expr in exprs {
+            if let Some((source, output)) = projection_source_and_output(expr) {
+                // First projection of a source column wins (matches metadata order).
+                output_for_source.entry(source).or_insert(output);
+            }
+        }
+    }
+    let group_by_output_names: Vec<String> = group_by_columns
+        .iter()
+        .map(|col| {
+            output_for_source
+                .get(col.as_str())
+                .cloned()
+                .unwrap_or_else(|| col.clone())
+        })
+        .collect();
 
     let mut aggregates = Vec::new();
     if let SelectClause::Columns(exprs) = &statement.select_clause {
@@ -576,6 +617,7 @@ fn plan_aggregation(statement: &SelectStatement) -> AggregationPlan {
 
     AggregationPlan {
         group_by_columns,
+        group_by_output_names,
         aggregates,
     }
 }
