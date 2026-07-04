@@ -98,12 +98,13 @@ async fn scan_oracle(reader: &SSTableReader) -> HashMap<Vec<u8>, ScanRow> {
 }
 
 /// Return the fixture's chunk length when it is genuinely MULTI-CHUNK (so the
-/// chunk-targeting tests are meaningful), or `None` when the fixture is present
+/// chunk-targeting test is meaningful), or `None` when the fixture is present
 /// but single-chunk / uncompressed (no `CompressionInfo.db` or a single chunk).
 ///
-/// A present-but-not-multi-chunk fixture is treated as a SKIP by callers (same
-/// graceful skip as a fixture-absent run), NOT a hard failure — a legitimately
-/// single-chunk fixture must not fail the suite.
+/// Only `get_reads_bounded_chunks_not_whole_file` (the bytes-bounded micro-proof)
+/// consults this — a present-but-single-chunk fixture is a LOUD warn-skip there,
+/// NOT a hard failure. The scan-counter and oracle-parity proofs are decoupled
+/// from chunk count and run on any present fixture (roborev #1572 Medium).
 fn multi_chunk_len(reader: &SSTableReader) -> Option<u64> {
     let comp = reader.compression_info.as_ref()?;
     if comp.chunk_offsets.len() <= 1 {
@@ -123,11 +124,13 @@ async fn present_key_get_does_not_sequential_scan() {
         eprintln!("SKIP: {KEYSPACE}/{TABLE} BIG fixture not available");
         return;
     };
+    // This proof (SCAN_FOR_KEY delta == 0 on a present key) is valid on a
+    // single-chunk fixture too, so it must run whenever the fixture is PRESENT
+    // regardless of chunk count — it may only SKIP when Data.db is ABSENT
+    // (handled above). Decoupling the multi-chunk requirement from the core
+    // correctness proof means a fixture regression to single-chunk can never
+    // silently neuter the scan-counter guard (roborev #1572 Medium).
     let reader = open_reader(&dd).await;
-    if multi_chunk_len(&reader).is_none() {
-        eprintln!("SKIP: {KEYSPACE}/{TABLE} present but not multi-chunk");
-        return;
-    }
     let oracle = scan_oracle(&reader).await;
     let present_key = oracle.keys().next().expect("at least one key").clone();
 
@@ -182,8 +185,18 @@ async fn get_reads_bounded_chunks_not_whole_file() {
         return;
     };
     let reader = open_reader(&dd).await;
+    // This is the ONLY test that genuinely requires a MULTI-CHUNK fixture (it
+    // proves a get() decompresses a bounded number of chunks, not O(file)). If
+    // the fixture is PRESENT but single-chunk, the chunk-bound micro-proof cannot
+    // run — but that non-execution must be LOUD so a fixture regression to
+    // single-chunk can't quietly neuter the perf proof (roborev #1572 Medium).
+    // (A fixture-ABSENT run above is a quiet skip; this is a present-but-degraded
+    // warn-skip.)
     let Some(chunk_len) = multi_chunk_len(&reader) else {
-        eprintln!("SKIP: {KEYSPACE}/{TABLE} present but not multi-chunk");
+        eprintln!(
+            "WARNING: #1572 chunk-bound proof did not run — fixture present but single-chunk \
+             ({KEYSPACE}/{TABLE}); the bytes-bounded chunk-targeting proof was SKIPPED"
+        );
         return;
     };
     let n_chunks = reader
@@ -233,16 +246,16 @@ async fn get_reads_bounded_chunks_not_whole_file() {
     // Bounded: one covering chunk (up to 2 if the partition straddles a boundary),
     // NEVER O(file) = n_chunks. The `>= 1` lower bound is what fails on `main`
     // (the whole-file stitch never touches the wired decompress site).
+    // The `(1..=2).contains(&cost)` bound alone proves chunk-targeting for ANY
+    // `n_chunks >= 2` (a whole-file stitch would decompress `n_chunks`). We do NOT
+    // additionally assert `cost < n_chunks`: on an exactly-2-chunk fixture a
+    // partition straddling the boundary reads both chunks (`cost == 2`), a correct
+    // chunk-targeted read that `2 < 2` would false-fail (roborev #1572 Low).
     for (label, cost) in [("head", head_cost), ("tail", tail_cost)] {
         assert!(
             (1..=2).contains(&cost),
             "{label} get() must decompress a bounded 1..=2 chunks (chunk-targeted), \
              got {cost} on a {n_chunks}-chunk fixture"
-        );
-        assert!(
-            cost < n_chunks as u64,
-            "{label} get() decompressed {cost} chunks — must be far below the \
-             whole-file count {n_chunks}"
         );
     }
     // NOTE: we do NOT assert `head_cost == tail_cost`. Chunk-targeting is already
@@ -267,11 +280,10 @@ async fn absent_key_returns_none_without_scan() {
         eprintln!("SKIP: {KEYSPACE}/{TABLE} BIG fixture not available");
         return;
     };
+    // An Index.db-definitive absent (no sequential scan) holds on a single-chunk
+    // fixture too, so this runs whenever the fixture is PRESENT; it only SKIPs
+    // when Data.db is ABSENT (handled above) (roborev #1572 Medium).
     let reader = open_reader(&dd).await;
-    if multi_chunk_len(&reader).is_none() {
-        eprintln!("SKIP: {KEYSPACE}/{TABLE} present but not multi-chunk");
-        return;
-    }
     let oracle = scan_oracle(&reader).await;
 
     // Synthesize a 16-byte key that is definitely NOT in the fixture.
@@ -317,11 +329,12 @@ async fn get_value_matches_full_scan_oracle_for_all_keys() {
         eprintln!("SKIP: {KEYSPACE}/{TABLE} BIG fixture not available");
         return;
     };
+    // The correctness guard: get() byte-parity vs the whole-file scan oracle for
+    // EVERY key. Valid on a single-chunk fixture too, so it must run whenever the
+    // fixture is PRESENT — decoupling it from the multi-chunk requirement means a
+    // regression to a single-chunk fixture can never silently pass this proof
+    // (roborev #1572 Medium). It SKIPs only when Data.db is ABSENT (handled above).
     let reader = open_reader(&dd).await;
-    if multi_chunk_len(&reader).is_none() {
-        eprintln!("SKIP: {KEYSPACE}/{TABLE} present but not multi-chunk");
-        return;
-    }
     let oracle = scan_oracle(&reader).await;
 
     let mut checked = 0usize;
