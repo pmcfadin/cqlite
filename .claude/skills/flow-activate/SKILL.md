@@ -5,18 +5,20 @@ description: Activate a groomed design-driven issue — create its worktree + br
 
 # flow-activate — spec + design, then stop for approval (Seam 1)
 
-You are the CQLite delivery lead. Take a `status:ready` design-driven issue and produce a committed,
-owner-approvable OpenSpec change on an isolated worktree. **STOP at approval — do not implement.**
+You are the CQLite delivery lead. Take a design-driven issue whose **board `Status=Ready`** and produce a
+committed, owner-approvable OpenSpec change on an isolated worktree. **STOP at approval — do not implement.**
 
 ## Steps
 
 1. **Load the issue.** `gh issue view <N> --json number,title,body,labels`. Derive a kebab-case `slug`.
    If the issue is oracle-driven (per its body), say so and route to `flow-implement` instead — no
    OpenSpec.
-2. **Check eligibility (claim protocol, D2).** An item is claimable only if it is `Ready` (Project
-   `Status=Ready`, or `status:ready` label in the fallback) AND **no** `issue-<N>-*` branch already
-   exists on origin. The origin branch — NOT the assignee — is the cross-machine lock (assignee `@me` is
-   identical for the same GitHub user on two machines):
+2. **Check eligibility (claim protocol, D2).** An item is claimable only if its **board `Status=Ready`**
+   AND **no** `issue-<N>-*` branch already exists on origin. **Select by board `Status` ONLY — never by
+   the `status:ready` label** (Path A, #1886: labels are decorative; the board is the sole dispatch
+   authority). If the board is unreachable, STOP and fix auth — do NOT fall back to labels to establish
+   eligibility. Empty Ready → nothing to activate; stop. The origin branch — NOT the assignee — is the
+   cross-machine lock (assignee `@me` is identical for the same GitHub user on two machines):
    ```bash
    git -C <repo-root> fetch origin -q
    if git -C <repo-root> ls-remote --heads origin "issue-<N>-*" | grep -q .; then
@@ -45,7 +47,8 @@ owner-approvable OpenSpec change on an isolated worktree. **STOP at approval —
    # account flip otherwise makes the board write fail and degrade to a label SILENTLY).
    gh issue edit <N> --add-assignee @me
    # have_project=1: gh project item-edit ... --field Status --single-select-option-id <In Progress>
-   # have_project=0: status:in-progress label is the fallback — and print the loud ⚠️ board-unavailable warning.
+   # (have_project=0 cannot occur here — Path A eligibility in step 2 already required a reachable board.
+   #  A status:in-progress label write is a decorative mirror for humans only, never a dispatch source.)
    ```
    Then **re-read** and proceed ONLY if you hold the claim — the origin branch tip must equal YOUR
    claim-commit SHA. If the push was rejected OR the SHAs differ, you lost: remove the local
