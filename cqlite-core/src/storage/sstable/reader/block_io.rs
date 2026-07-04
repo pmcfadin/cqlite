@@ -458,32 +458,39 @@ async fn read_nb_format_chunk_data(
                 ))
             })?;
 
-        // Read chunk bytes (NOT including trailing CRC32)
-        let mut chunk_data = vec![0u8; chunk_data_size];
+        // E3 (issue #1585): read the compressed payload AND its trailing 4-byte
+        // CRC32 in ONE `read_exact` into a single `payload+CRC` buffer, then split
+        // the slice — rather than two separate `read_exact` calls (one for the
+        // payload, one for the CRC). Halves the per-chunk read count (A5). The CRC
+        // is still verified BEFORE the payload is handed to the decompressor
+        // (guardrail: unchanged CRC ordering).
+        //
+        // A5 read-work counter (READ_CALLS; consumer E3): exactly one logical
+        // chunk read. No-op in release (design.md Decision 1/2).
+        crate::storage::sstable::read_work_counters::record_read();
+        // A single `payload+CRC` heap buffer. E3 recycles this per-scan (see
+        // `read_nb_format_chunk_data_into`), so the steady-state windowed scan
+        // performs NO allocation here; this allocating entry point is retained for
+        // the non-windowed callers. CHUNK_PATH_ALLOCS records the allocation.
+        crate::storage::sstable::read_work_counters::record_chunk_path_alloc();
+        let mut chunk_data = vec![0u8; total_chunk_size as usize];
         file_guard.read_exact(&mut chunk_data).await.map_err(|e| {
             Error::Io(std::io::Error::new(
                 e.kind(),
                 format!(
-                    "Failed to read chunk {} data ({} bytes at offset 0x{:x}): {}",
-                    chunk_idx, chunk_data_size, chunk_offset, e
+                    "Failed to read chunk {} data+CRC ({} bytes at offset 0x{:x}): {}",
+                    chunk_idx, total_chunk_size, chunk_offset, e
                 ),
             ))
         })?;
-
-        // Read trailing CRC32 (4 bytes, big-endian)
-        let mut crc_bytes = [0u8; 4];
-        file_guard.read_exact(&mut crc_bytes).await.map_err(|e| {
-            Error::Io(std::io::Error::new(
-                e.kind(),
-                format!(
-                    "Failed to read CRC32 for chunk {} at offset 0x{:x}: {}",
-                    chunk_idx,
-                    chunk_offset + chunk_data_size as u64,
-                    e
-                ),
-            ))
-        })?;
-        let expected_crc = u32::from_be_bytes(crc_bytes);
+        // Split the trailing 4-byte big-endian CRC32 off the payload.
+        let expected_crc = u32::from_be_bytes([
+            chunk_data[chunk_data_size],
+            chunk_data[chunk_data_size + 1],
+            chunk_data[chunk_data_size + 2],
+            chunk_data[chunk_data_size + 3],
+        ]);
+        chunk_data.truncate(chunk_data_size);
 
         (chunk_data, expected_crc)
     };

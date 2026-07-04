@@ -93,6 +93,22 @@ struct Counters {
     seek_calls: AtomicU64,
     /// `open(2)` calls minting a reader `BlockSource` fd (`FILE_OPENS`) — consumer C2.
     file_opens: AtomicU64,
+    /// `read_exact` reads in the compressed-chunk read path (`READ_CALLS`) —
+    /// consumer E3. One per logical read of a compression chunk's bytes. Before
+    /// E3 a chunk cost TWO reads (payload then trailing CRC as separate
+    /// `read_exact` calls); E3 folds them into one `read_exact` into a single
+    /// `payload+CRC` buffer, so a steady-state chunk read records exactly one.
+    read_calls: AtomicU64,
+    /// Heap allocations in the per-chunk read→decompress→window-fill copy chain
+    /// (`CHUNK_PATH_ALLOCS`) — consumer E3. Bumped at each genuine heap allocation
+    /// the copy chain performs for one chunk: the compressed-bytes buffer
+    /// (`block_io`), the decompression output buffer (`compression`), and the
+    /// cached decompressed `Arc<[u8]>` (`DecompressedChunkCache`). Before E3 a
+    /// steady-state windowed-scan chunk allocated all three (≥3); after E3 the
+    /// compressed buffer is a recycled per-scan scratch and decompression writes
+    /// into a reused scratch, so only the cached `Arc` (issue B1, kept) allocates
+    /// — exactly one per chunk.
+    chunk_path_allocs: AtomicU64,
 }
 
 #[cfg(any(test, feature = "work-counters"))]
@@ -103,6 +119,8 @@ impl Counters {
             decompress_calls: AtomicU64::new(0),
             seek_calls: AtomicU64::new(0),
             file_opens: AtomicU64::new(0),
+            read_calls: AtomicU64::new(0),
+            chunk_path_allocs: AtomicU64::new(0),
         }
     }
 
@@ -122,6 +140,14 @@ impl Counters {
         self.file_opens.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn record_read(&self) {
+        self.read_calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_chunk_path_alloc(&self) {
+        self.chunk_path_allocs.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn trie_walks(&self) -> u64 {
         self.trie_walks.load(Ordering::Relaxed)
     }
@@ -138,11 +164,21 @@ impl Counters {
         self.file_opens.load(Ordering::Relaxed)
     }
 
+    fn read_calls(&self) -> u64 {
+        self.read_calls.load(Ordering::Relaxed)
+    }
+
+    fn chunk_path_allocs(&self) -> u64 {
+        self.chunk_path_allocs.load(Ordering::Relaxed)
+    }
+
     fn reset(&self) {
         self.trie_walks.store(0, Ordering::Relaxed);
         self.decompress_calls.store(0, Ordering::Relaxed);
         self.seek_calls.store(0, Ordering::Relaxed);
         self.file_opens.store(0, Ordering::Relaxed);
+        self.read_calls.store(0, Ordering::Relaxed);
+        self.chunk_path_allocs.store(0, Ordering::Relaxed);
     }
 }
 
@@ -198,6 +234,31 @@ pub fn record_file_open() {
     COUNTERS.record_file_open();
 }
 
+/// Record one logical `read_exact` of a compression chunk's bytes (`READ_CALLS`;
+/// consumer E3).
+///
+/// Called unconditionally at the single compressed-chunk read site in
+/// `reader/block_io.rs`; the body compiles to a no-op in a release build
+/// (design.md Decision 1).
+#[inline(always)]
+pub fn record_read() {
+    #[cfg(any(test, feature = "work-counters"))]
+    COUNTERS.record_read();
+}
+
+/// Record one heap allocation in the per-chunk read→decompress→window-fill copy
+/// chain (`CHUNK_PATH_ALLOCS`; consumer E3).
+///
+/// Called unconditionally at each genuine chunk-path allocation site (the
+/// compressed-bytes buffer in `block_io`, the decompression output buffer in
+/// `compression`, and the cached `Arc<[u8]>` in `DecompressedChunkCache`); the
+/// body compiles to a no-op in a release build (design.md Decision 1).
+#[inline(always)]
+pub fn record_chunk_path_alloc() {
+    #[cfg(any(test, feature = "work-counters"))]
+    COUNTERS.record_chunk_path_alloc();
+}
+
 /// Number of BTI trie descents since the last [`reset`] (`TRIE_WALKS`).
 #[cfg(any(test, feature = "work-counters"))]
 pub fn trie_walks() -> u64 {
@@ -221,6 +282,20 @@ pub fn seek_calls() -> u64 {
 #[cfg(any(test, feature = "work-counters"))]
 pub fn file_opens() -> u64 {
     COUNTERS.file_opens()
+}
+
+/// Number of compressed-chunk `read_exact` reads since the last [`reset`]
+/// (`READ_CALLS`).
+#[cfg(any(test, feature = "work-counters"))]
+pub fn read_calls() -> u64 {
+    COUNTERS.read_calls()
+}
+
+/// Number of per-chunk copy-chain heap allocations since the last [`reset`]
+/// (`CHUNK_PATH_ALLOCS`).
+#[cfg(any(test, feature = "work-counters"))]
+pub fn chunk_path_allocs() -> u64 {
+    COUNTERS.chunk_path_allocs()
 }
 
 /// Clear all four process-global counters. Integration tests call this before a
@@ -301,17 +376,32 @@ mod tests {
         c.record_file_open();
         c.record_file_open();
         c.record_file_open();
+        c.record_read();
+        c.record_read();
+        c.record_read();
+        c.record_read();
+        c.record_read();
+        c.record_chunk_path_alloc();
+        c.record_chunk_path_alloc();
+        c.record_chunk_path_alloc();
+        c.record_chunk_path_alloc();
+        c.record_chunk_path_alloc();
+        c.record_chunk_path_alloc();
 
         assert_eq!(c.trie_walks(), 1);
         assert_eq!(c.decompress_calls(), 2);
         assert_eq!(c.seek_calls(), 3);
         assert_eq!(c.file_opens(), 4);
+        assert_eq!(c.read_calls(), 5);
+        assert_eq!(c.chunk_path_allocs(), 6);
 
         c.reset();
         assert_eq!(c.trie_walks(), 0);
         assert_eq!(c.decompress_calls(), 0);
         assert_eq!(c.seek_calls(), 0);
         assert_eq!(c.file_opens(), 0);
+        assert_eq!(c.read_calls(), 0);
+        assert_eq!(c.chunk_path_allocs(), 0);
     }
 
     // The fd high-water helper returns a positive count on the supported platforms
