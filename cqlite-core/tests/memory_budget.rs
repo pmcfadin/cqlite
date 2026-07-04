@@ -104,6 +104,117 @@ fn select_full_scan_alloc_budget() {
     );
 }
 
+/// Per-fixture allocations-per-row / per-cell ceilings for a full `SELECT *`,
+/// pinned at the current-main measured value plus variance slack (a ratchet Epic
+/// J/K children lower as the O(rows×cols) transient-string dispatch is fixed).
+///
+/// Two fixtures are supported so the budget still runs when the optional wide
+/// fixture is absent, and each gets its OWN ceiling so neither ratchet is loosened
+/// by the other's very different shape (allocs/cell in particular scales inversely
+/// with column count):
+///
+/// - `many_columns_table` (preferred, wide): MEASURED total_blocks=2282, rows=50,
+///   cols=8 (populated columns in the first row) → allocs/row=45.6, allocs/cell=5.7.
+/// - `simple_table` (CI-guaranteed fallback): MEASURED total_blocks≈60337/scan,
+///   rows=999, cols=5 → allocs/row≈60.4, allocs/cell≈12.1.
+///
+/// Ceilings add ~25-35% slack for allocator/toolchain/platform variance (block
+/// counts differ slightly by std/OS). Returns `(per_row, per_cell)`.
+fn alloc_ceilings(fx: &fixtures::ReadFixture) -> (f64, f64) {
+    if fx.table == fixtures::ReadFixture::MANY_COLUMNS.table {
+        (60.0, 8.0) // measured 45.6 / 5.7
+    } else {
+        (78.0, 16.0) // SIMPLE fallback: measured 60.4 / 12.1
+    }
+}
+
+/// allocations-per-row and allocations-per-cell for a full-table `SELECT *` driven
+/// through the real public query path over the widest real fixture must stay within
+/// their pinned ceilings (issue #1615, Epic H). Fails closed: a present-but-empty
+/// fixture panics; an entirely-absent optional fixture SKIPs.
+#[test]
+#[serial_test::serial]
+fn select_full_scan_alloc_per_row_budget() {
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+    // Prefer the widest fixture (every CQL type, 100 columns); fall back to the
+    // CI-guaranteed SIMPLE fixture; SKIP only if neither is present.
+    let fx = if fixtures::fixture_present(&fixtures::ReadFixture::MANY_COLUMNS) {
+        fixtures::ReadFixture::MANY_COLUMNS
+    } else if fixtures::fixture_present(&fixtures::ReadFixture::SIMPLE) {
+        eprintln!(
+            "alloc_per_row_budget: many_columns_table absent — falling back to SIMPLE fixture"
+        );
+        fixtures::ReadFixture::SIMPLE
+    } else {
+        eprintln!("alloc_per_row_budget: no wide fixture present — skipping (skip-register)");
+        return;
+    };
+    let (ceiling_per_row, ceiling_per_cell) = alloc_ceilings(&fx);
+    let sql = format!("SELECT * FROM {}", fx.qualified());
+
+    // Open BEFORE the profiler so fixture-copy/ingest allocations are excluded and
+    // only the read path is attributed (mirrors the other budgets in this file).
+    let loaded = fixtures::open_read_db(&fx);
+
+    let _profiler = dhat::Profiler::builder().testing().build();
+
+    let result = rt
+        .block_on(loaded.db.execute(&sql))
+        .expect("wide full-scan query");
+
+    // Fail closed: a present fixture that yields no rows is a broken measurement,
+    // never a silent 0-row pass.
+    assert!(
+        !result.rows.is_empty(),
+        "zero rows from {} — fixtures not fetched or fixture broken? \
+         Run: bash test-data/scripts/fetch-datasets.sh",
+        fx.qualified()
+    );
+
+    let rows = result.rows.len();
+    // Column count is read from the data, never hardcoded (fixture-independent).
+    let cols = result.rows[0].values.len();
+    assert!(
+        cols > 0,
+        "first row of {} decoded zero columns",
+        fx.qualified()
+    );
+
+    let stats = dhat::HeapStats::get();
+    let allocs_per_row = stats.total_blocks as f64 / rows as f64;
+    let allocs_per_cell = stats.total_blocks as f64 / (rows as f64 * cols as f64);
+    println!(
+        "select_full_scan_alloc_per_row_budget: fixture={} total_blocks={} rows={} cols={} \
+         allocs_per_row={:.1} allocs_per_cell={:.1}",
+        fx.qualified(),
+        stats.total_blocks,
+        rows,
+        cols,
+        allocs_per_row,
+        allocs_per_cell
+    );
+
+    assert!(
+        allocs_per_row <= ceiling_per_row,
+        "allocs/row {:.1} exceeded ceiling {:.1} (fixture {}, {} rows × {} cols)",
+        allocs_per_row,
+        ceiling_per_row,
+        fx.qualified(),
+        rows,
+        cols
+    );
+    assert!(
+        allocs_per_cell <= ceiling_per_cell,
+        "allocs/cell {:.1} exceeded ceiling {:.1} (fixture {}, {} rows × {} cols)",
+        allocs_per_cell,
+        ceiling_per_cell,
+        fx.qualified(),
+        rows,
+        cols
+    );
+}
+
 /// Peak heap bytes for a materializing type-heavy `SELECT *` must stay within
 /// the pinned ceiling AND under the project's 128 MiB budget.
 #[test]

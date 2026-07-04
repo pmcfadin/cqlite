@@ -32,6 +32,16 @@
       "threshold_pct": 10
     },
     {
+      "id": "decode/wide_row_primitives",
+      "threshold_pct": 10,
+      "_note": "issue #1615 (Epic H) — rows/sec decoding a wide all-primitive row through the live block-path entry"
+    },
+    {
+      "id": "decode/text_heavy",
+      "threshold_pct": 10,
+      "_note": "issue #1615 (Epic H) — rows/sec decoding a text/blob-dominated column set (K5/K6)"
+    },
+    {
       "id": "write/ingest_wal_off",
       "threshold_pct": 10
     },

@@ -8,6 +8,13 @@
 //! - Collection types (list, set, map, tuple, UDT)
 
 // Sub-modules
+// Bench-only decode shim (issue #1615, Epic H). Compiled only under
+// `bench-internals`; adds one `#[doc(hidden)] pub fn decode_value_for_bench` on
+// `SSTableReader` so the external `decode` bench can measure the real block-path
+// decode dispatch without widening the default public API. Lives in its own tiny
+// module so value_parsing.rs stays within the source file-size ratchet.
+#[cfg(feature = "bench-internals")]
+mod bench_shim;
 mod block_entries;
 pub(crate) mod byte_comparable; // Needs to be accessible from row_cell_state_machine
 pub(crate) mod comparator_value_parsing; // Standalone comparator-based parsing for state machine
