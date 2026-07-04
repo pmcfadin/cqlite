@@ -52,35 +52,8 @@ pub(crate) async fn read_next_block(
     current_chunk_index: &std::sync::atomic::AtomicUsize,
     header_offset: u64,
 ) -> Result<Option<Vec<u8>>> {
-    read_next_block_with_retry(
-        file,
-        cassandra_version,
-        config,
-        compression_info,
-        crc_reader,
-        current_chunk_index,
-        header_offset,
-        3,
-    )
-    .await
-}
-
-/// Read block with retry logic for handling transient I/O errors
-#[allow(clippy::too_many_arguments)]
-async fn read_next_block_with_retry(
-    file: &Arc<Mutex<BlockSource>>,
-    cassandra_version: &crate::parser::header::CassandraVersion,
-    config: &SSTableReaderConfig,
-    compression_info: &Option<Arc<crate::storage::sstable::compression_info::CompressionInfo>>,
-    crc_reader: Option<&CrcDb>,
-    current_chunk_index: &std::sync::atomic::AtomicUsize,
-    header_offset: u64,
-    max_retries: usize,
-) -> Result<Option<Vec<u8>>> {
-    let mut retry_count = 0;
-
-    loop {
-        match read_next_block_impl(
+    retry_transient_once(file, || {
+        read_next_block_impl(
             file,
             cassandra_version,
             config,
@@ -89,38 +62,76 @@ async fn read_next_block_with_retry(
             current_chunk_index,
             header_offset,
         )
-        .await
-        {
-            Ok(result) => return Ok(result),
-            Err(e) => {
-                // Never retry a non-recoverable error (issue #1396). Retries exist
-                // for TRANSIENT I/O faults; a CRC/corruption error is deterministic
-                // and non-recoverable. Critically, the uncompressed piecewise read
-                // advances the stream position BEFORE verifying, so retrying a
-                // failed CRC would silently skip the corrupt piece and return the
-                // NEXT one — turning fail-fast corruption into a silent truncation.
-                // Surface it immediately instead.
-                if !e.is_recoverable() {
-                    return Err(e);
-                }
-                retry_count += 1;
-                if retry_count >= max_retries {
-                    log::error!("Failed to read block after {} retries: {}", max_retries, e);
-                    return Err(e);
-                }
+    })
+    .await
+}
 
-                log::warn!(
-                    "Block read failed (attempt {}/{}): {}, retrying...",
-                    retry_count,
-                    max_retries,
-                    e
-                );
+/// Classify an error as a TRANSIENT I/O fault (EINTR-class) that a single
+/// re-seek + re-read may clear.
+///
+/// Only genuinely-transient kernel faults qualify: `Interrupted` (EINTR),
+/// `WouldBlock` (EAGAIN) and `TimedOut`. Everything else — deterministic
+/// corruption/format errors (a CRC/format mismatch never heals on re-read), and
+/// non-transient I/O (`NotFound`, `PermissionDenied`, `UnexpectedEof`, …) — is
+/// NOT retried (issue #1588). This is intentionally stricter than
+/// [`Error::is_recoverable`], which classes ALL `Io` as recoverable; a
+/// deterministic re-read of the same bytes cannot fix a permanent failure and
+/// only wastes work.
+fn is_transient_io(e: &Error) -> bool {
+    match e {
+        Error::Io(io) => matches!(
+            io.kind(),
+            std::io::ErrorKind::Interrupted
+                | std::io::ErrorKind::WouldBlock
+                | std::io::ErrorKind::TimedOut
+        ),
+        _ => false,
+    }
+}
 
-                // Brief delay before retry
-                tokio::time::sleep(tokio::time::Duration::from_millis(10 * retry_count as u64))
-                    .await;
+/// Run `attempt`, retrying it EXACTLY once — and only on a transient I/O fault —
+/// after re-seeking the source back to the ORIGINAL offset (issue #1588).
+///
+/// Two defects this closes:
+/// 1. **Moved-position re-read.** A sequential read (e.g. the legacy block-header
+///    path, or the uncompressed piecewise read) advances the stream position past
+///    a partially-read block before a mid-read fault. Retrying WITHOUT re-seeking
+///    re-enters the reader at the MOVED position and reads DIFFERENT bytes (a
+///    silent wrong-block read). Capturing the position up front and seeking back
+///    makes the retry re-read the SAME bytes.
+/// 2. **Sleeping / retrying deterministic errors.** The old loop slept 10/20ms and
+///    re-read up to 3 times even for deterministic corruption (CRC/format), which
+///    can never heal. Deterministic errors now fail fast: no sleep, no retry, the
+///    typed error is returned immediately.
+async fn retry_transient_once<F, Fut, T>(file: &Arc<Mutex<BlockSource>>, attempt: F) -> Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    // Capture the original offset BEFORE the first attempt so a transient retry
+    // re-reads exactly the same bytes.
+    let original_pos = {
+        let mut guard = file.lock().await;
+        guard.stream_position().await.map_err(Error::Io)?
+    };
+
+    match attempt().await {
+        Ok(v) => Ok(v),
+        Err(e) if is_transient_io(&e) => {
+            log::warn!(
+                "transient I/O fault ({e}); re-seeking to offset {original_pos} and retrying once"
+            );
+            {
+                let mut guard = file.lock().await;
+                guard
+                    .seek(std::io::SeekFrom::Start(original_pos))
+                    .await
+                    .map_err(Error::Io)?;
             }
+            attempt().await
         }
+        // Deterministic corruption/format and non-transient I/O: fail fast, no sleep.
+        Err(e) => Err(e),
     }
 }
 
@@ -1206,6 +1217,151 @@ mod tests {
         tokio::fs::write(&path, bytes).await.expect("write data");
         let file = tokio::fs::File::open(&path).await.expect("open data");
         (dir, Arc::new(Mutex::new(BlockSource::buffered(file))))
+    }
+
+    // ========================================================================
+    // Retry policy: transient-only, single retry, re-seek to original offset
+    // (issue #1588)
+    // ========================================================================
+
+    use std::sync::atomic::Ordering;
+
+    fn transient_io() -> Error {
+        Error::Io(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "simulated EINTR",
+        ))
+    }
+
+    /// A transient (EINTR-class) fault triggers EXACTLY one retry, and that retry
+    /// re-reads the SAME (original) offset — proving the source is re-seeked back
+    /// after the first attempt advanced the position. This is the moved-position
+    /// bug: without the re-seek the second attempt would observe offset 8.
+    #[tokio::test]
+    async fn retry_transient_reseeks_to_original_offset() {
+        let (_dir, file) = blocksource_from(&[0u8; 16]).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::new(Mutex::new(Vec::<u64>::new()));
+
+        let f = file.clone();
+        let c = calls.clone();
+        let s = seen.clone();
+        let attempt = move || {
+            let f = f.clone();
+            let c = c.clone();
+            let s = s.clone();
+            async move {
+                let n = c.fetch_add(1, Ordering::Relaxed);
+                let pos = { f.lock().await.stream_position().await.unwrap() };
+                s.lock().await.push(pos);
+                if n == 0 {
+                    // Simulate a partial read that advanced the position, then a
+                    // transient fault mid-block.
+                    {
+                        let mut g = f.lock().await;
+                        g.seek(std::io::SeekFrom::Start(8)).await.unwrap();
+                    }
+                    Err(transient_io())
+                } else {
+                    Ok::<u32, Error>(99)
+                }
+            }
+        };
+
+        let out = retry_transient_once(&file, attempt).await.unwrap();
+        assert_eq!(out, 99);
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            2,
+            "exactly one transient retry (two attempts total)"
+        );
+        assert_eq!(
+            seen.lock().await.clone(),
+            vec![0, 0],
+            "retry must re-read the SAME original offset, not the moved position"
+        );
+    }
+
+    /// A deterministic corruption error is NOT retried and does NOT sleep: exactly
+    /// one attempt, returns fast. The attempt counter is the robust proof (no
+    /// wall-clock race); the elapsed bound is a generous secondary guard.
+    #[tokio::test]
+    async fn retry_does_not_retry_or_sleep_on_deterministic_corruption() {
+        let (_dir, file) = blocksource_from(&[0u8; 16]).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let c = calls.clone();
+        let attempt = move || {
+            let c = c.clone();
+            async move {
+                c.fetch_add(1, Ordering::Relaxed);
+                Err::<u32, Error>(Error::corruption("CRC32 mismatch"))
+            }
+        };
+
+        let start = std::time::Instant::now();
+        let err = retry_transient_once(&file, attempt).await.unwrap_err();
+        let elapsed = start.elapsed();
+
+        assert!(matches!(err, Error::Corruption(_)), "typed corruption: {err}");
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "corruption is deterministic — never retried"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "no sleep on the deterministic-error path: {elapsed:?}"
+        );
+    }
+
+    /// A NON-transient I/O error (e.g. NotFound) is not retried either: only
+    /// EINTR-class transient faults qualify, unlike the broad `is_recoverable`
+    /// classification which treats every `Io` as retryable.
+    #[tokio::test]
+    async fn retry_does_not_retry_non_transient_io() {
+        let (_dir, file) = blocksource_from(&[0u8; 16]).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let c = calls.clone();
+        let attempt = move || {
+            let c = c.clone();
+            async move {
+                c.fetch_add(1, Ordering::Relaxed);
+                Err::<u32, Error>(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "gone",
+                )))
+            }
+        };
+
+        let err = retry_transient_once(&file, attempt).await.unwrap_err();
+        assert!(matches!(err, Error::Io(_)));
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "non-transient I/O (NotFound) is not retried"
+        );
+    }
+
+    #[test]
+    fn is_transient_io_classifies_only_eintr_class() {
+        assert!(is_transient_io(&transient_io()));
+        assert!(is_transient_io(&Error::Io(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "eagain"
+        ))));
+        assert!(is_transient_io(&Error::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "etimedout"
+        ))));
+        // Deterministic / non-transient are NOT transient.
+        assert!(!is_transient_io(&Error::corruption("crc")));
+        assert!(!is_transient_io(&Error::invalid_format("bad")));
+        assert!(!is_transient_io(&Error::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "nf"
+        ))));
     }
 
     #[tokio::test]
