@@ -1344,6 +1344,131 @@ mod tests {
         }
     }
 
+    /// Issue #1587 (E5): the decorate-sort-undecorate refactor must PRESERVE the
+    /// ORDER BY ordering for float keys — including NaN and signed zero — exactly
+    /// as the pre-refactor per-comparison sort produced it. It reuses the shared
+    /// `compare_values_ordering` comparator with a stable `sort_by`, so this test
+    /// drives the decorate-sort path (via `execute_sort`) and asserts:
+    ///
+    ///   * with NaN present, the decorated output is order-IDENTICAL to a direct
+    ///     reference sort over the same keys and comparator (ASC and DESC) — the
+    ///     core preservation guarantee; and
+    ///   * over a NaN-free float input (where the comparator IS a total order),
+    ///     finite keys are correctly ordered and signed zeros (-0.0 vs +0.0, which
+    ///     compare Equal) keep input order (stable).
+    ///
+    /// NOTE (pre-existing gaps, out of scope for #1587): `compare_values_ordering`
+    /// compares floats via `f64::partial_cmp` (NaN → Equal, -0.0 == +0.0). So it
+    /// does NOT reproduce Cassandra/Java float ordering (NaN sorted LAST,
+    /// -0.0 < +0.0), and — because a NaN key makes the comparator a NON-total
+    /// order — a NaN in the input leaves even the finite keys in an unspecified
+    /// order. This test therefore pins the ordering the decorate-sort ACTUALLY
+    /// preserves, not the (currently absent) Java semantics. Making ORDER BY match
+    /// Cassandra float ordering is a separate behavior change; reported separately.
+    #[tokio::test]
+    async fn execute_sort_preserves_float_nan_signed_zero_ordering() {
+        let executor = create_test_executor().await;
+
+        let make_rows = |inputs: &[(u8, f64)]| -> Vec<QueryRow> {
+            inputs
+                .iter()
+                .map(|(tag, f)| {
+                    let mut row = QueryRow::new(RowKey::new(vec![*tag]));
+                    row.set("f", Value::Float(*f));
+                    row
+                })
+                .collect()
+        };
+        let order_by = |dir: &SortDirection| OrderByClause {
+            items: vec![OrderByItem {
+                expression: SelectExpression::Column(ColumnRef {
+                    table: None,
+                    column: "f".to_string(),
+                }),
+                direction: dir.clone(),
+            }],
+        };
+        let mut ctx = ExecutionContext {
+            table_id: TableId::new("ks.t"),
+            columns: Vec::new(),
+            rows_processed: 0,
+            scan_rows: 0,
+            projection_flags: ProjectionFlags::default(),
+            access_path: None,
+            reverse_served: false,
+        };
+        let tags = |rows: &[QueryRow]| -> Vec<u8> { rows.iter().map(|r| r.key.0[0]).collect() };
+
+        // --- Part A: NaN present → decorate-sort is order-identical to reference.
+        // Tags 2 (-0.0) and 4 (+0.0) compare Equal; NaN appears twice (tags 1, 6).
+        let with_nan: [(u8, f64); 7] = [
+            (0, 2.0),
+            (1, f64::NAN),
+            (2, -0.0),
+            (3, 1.0),
+            (4, 0.0),
+            (5, -1.0),
+            (6, f64::NAN),
+        ];
+        for dir in [SortDirection::Ascending, SortDirection::Descending] {
+            let sorted = executor
+                .execute_sort(make_rows(&with_nan), &order_by(&dir), &mut ctx)
+                .await
+                .expect("sort must succeed");
+
+            let mut reference = make_rows(&with_nan);
+            reference.sort_by(|a, b| {
+                let (ka, kb) = (
+                    a.values.get("f").expect("key"),
+                    b.values.get("f").expect("key"),
+                );
+                match dir {
+                    SortDirection::Ascending => compare_values_ordering(ka, kb),
+                    SortDirection::Descending => compare_values_ordering(kb, ka),
+                }
+            });
+            assert_eq!(
+                tags(&sorted),
+                tags(&reference),
+                "issue #1587: decorate-sort must be order-identical to the reference \
+                 comparator sort for float/NaN keys ({dir:?})"
+            );
+        }
+
+        // --- Part B: NaN-free input → the comparator is a total order, so the
+        // decorate-sort must produce correct finite ordering and stable signed
+        // zeros. Tags 2 (-0.0) and 4 (+0.0) compare Equal (must keep input order).
+        let no_nan: [(u8, f64); 5] = [(0, 2.0), (2, -0.0), (3, 1.0), (4, 0.0), (5, -1.0)];
+        // Ascending: -1.0, then -0.0 (tag 2) then +0.0 (tag 4) [stable tie], 1.0, 2.0.
+        let asc = executor
+            .execute_sort(
+                make_rows(&no_nan),
+                &order_by(&SortDirection::Ascending),
+                &mut ctx,
+            )
+            .await
+            .expect("sort must succeed");
+        assert_eq!(
+            tags(&asc),
+            vec![5, 2, 4, 3, 0],
+            "ascending float order with stable signed zeros"
+        );
+        // Descending: 2.0, 1.0, then -0.0/+0.0 (stable tie: 2 before 4), -1.0.
+        let desc = executor
+            .execute_sort(
+                make_rows(&no_nan),
+                &order_by(&SortDirection::Descending),
+                &mut ctx,
+            )
+            .await
+            .expect("sort must succeed");
+        assert_eq!(
+            tags(&desc),
+            vec![0, 3, 2, 4, 5],
+            "descending float order with stable signed zeros"
+        );
+    }
+
     /// The executor's `evaluate_select_expression` returns the correct value for
     /// a WRITETIME call when cell metadata is pre-attached to the row.
     #[tokio::test]
