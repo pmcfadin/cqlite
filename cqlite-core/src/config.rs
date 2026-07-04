@@ -791,31 +791,37 @@ mod tests {
         assert!(config.memory.max_memory > Config::default().memory.max_memory);
     }
 
-    /// Issue #1582 (FINDING 3): a `QueryConfig` serialized BEFORE
-    /// `max_result_bytes` existed (e.g. a pre-upgrade Python JSON/dict config)
-    /// has no such key. The `#[serde(default = ...)]` on the field must let it
-    /// deserialize, taking the shipped default rather than failing with a
-    /// missing-field error.
+    /// Issue #1582: a `QueryConfig` serialized BEFORE the byte-budget fields
+    /// existed (e.g. a pre-upgrade Python JSON/dict config) has no
+    /// `max_result_bytes`/`max_result_rows` keys. The `#[serde(default = ...)]`
+    /// on both fields must let it deserialize, taking the shipped defaults rather
+    /// than failing with a missing-field error.
     #[test]
-    fn max_result_bytes_deserializes_with_serde_default_when_absent() {
-        // Serialize a default QueryConfig, then STRIP the new field to emulate
-        // an old serialized config that predates it.
+    fn budget_fields_deserialize_with_serde_default_when_absent() {
+        // Serialize a default QueryConfig, then STRIP both budget fields to
+        // emulate an old serialized config that predates them.
         let mut value =
             serde_json::to_value(QueryConfig::default()).expect("serialize QueryConfig");
         let obj = value
             .as_object_mut()
             .expect("QueryConfig serializes as object");
         obj.remove("max_result_bytes");
+        obj.remove("max_result_rows");
         assert!(
-            !obj.contains_key("max_result_bytes"),
-            "field must be absent for this regression to be meaningful"
+            !obj.contains_key("max_result_bytes") && !obj.contains_key("max_result_rows"),
+            "both fields must be absent for this regression to be meaningful"
         );
 
         let restored: QueryConfig = serde_json::from_value(value)
-            .expect("old config (no max_result_bytes) must deserialize");
+            .expect("old config (no budget fields) must deserialize");
         assert_eq!(
             restored.max_result_bytes, DEFAULT_MAX_RESULT_BYTES,
-            "absent field must take the serde default"
+            "absent max_result_bytes must take the serde default"
+        );
+        assert_eq!(
+            restored.max_result_rows,
+            default_max_result_rows(),
+            "absent max_result_rows must take the serde default"
         );
     }
 

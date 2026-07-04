@@ -1,5 +1,6 @@
 //! Issue #1582 (Epic D6): the memory guard on a MATERIALIZED result set must be
-//! a BYTE ceiling, not a row count.
+//! a BYTE ceiling, not a row count — enforced as a SINGLE robust check on the
+//! FINAL result (narrow subset, owner decision).
 //!
 //! ## The bug this guards
 //!
@@ -8,55 +9,33 @@
 //! project's <128MB memory target, while a few thousand WIDE rows (large blobs,
 //! wide partitions) can blow it long before the row-count guard ever fires. The
 //! fix adds a byte ceiling — [`cqlite_core::config::QueryConfig::max_result_bytes`],
-//! default 64 MiB — accumulated with the SAME `estimate_row_size` estimator the
-//! row cache uses, and raises the typed [`cqlite_core::Error::ResultTooLarge`]
-//! (whose message tells the user to add `LIMIT` or stream) when it is crossed.
-//! The row-count guard is retained only as a secondary safety valve.
+//! default 64 MiB — summed over the FINAL returned rows with the SAME
+//! `estimate_value_size` estimator the row cache uses, and raises the typed
+//! [`cqlite_core::Error::ResultTooLarge`] (whose message tells the user to add
+//! `LIMIT` or stream) when it is crossed. The row-count guard is retained only as
+//! a secondary safety valve ([`cqlite_core::config::QueryConfig::max_result_rows`]).
+//!
+//! ## Narrow subset: one check on the FINAL result
+//!
+//! The budget is applied ONCE, on the fully-materialized result AFTER the whole
+//! step pipeline (Limit/Offset/Filter/Sort/Aggregate/Project) — not during
+//! collection. Because it sees only the RETURNED rows (post LIMIT/OFFSET), a
+//! `LIMIT N` query whose final result is small never trips, and OFFSET-skipped
+//! rows are never charged. This replaced the earlier during-collection machinery
+//! (LIMIT/OFFSET pushdown, per-row early-stop, storage-layer row limit) that kept
+//! generating correctness edge cases. SCOPE (owner-accepted, tracked on #1582):
+//! does NOT bound peak scan memory (deferred #1897) and does NOT cover the legacy
+//! `WHERE id = ?` point-lookup path (deferred to the D6 redesign).
 //!
 //! ## Why controlled `WriteEngine` fixtures (not the vendored `test_wide_rows`)
 //!
-//! The three assertions need EXACT, deterministic control over per-row width and
-//! row count so the byte budget can be tripped (or not) predictably regardless
-//! of environment — and they must not silently SKIP when the gitignored dataset
+//! The assertions need EXACT, deterministic control over per-row width and row
+//! count so the byte budget can be tripped (or not) predictably regardless of
+//! environment — and they must not silently SKIP when the gitignored dataset
 //! `.db` binaries are absent from a clean checkout. Building a wide fixture (a
 //! few large-blob rows) and a skinny fixture (many tiny rows) via the public
 //! `WriteEngine` API gives that determinism while still exercising the guard
 //! end-to-end through `Database::execute`.
-//!
-//! ## What the three tests assert (all FAIL on pre-fix `main`, which has no
-//! byte guard and no `max_result_bytes` knob)
-//!
-//!   1. `wide_rows_trip_byte_guard_before_row_count_guard` — a handful of wide
-//!      rows trips the BYTE guard; the collected row count is far below the 1M
-//!      row-count valve, proving the byte guard fired first.
-//!   2. `skinny_rows_under_byte_budget_complete` — MANY skinny rows whose TOTAL
-//!      bytes stay under the SAME budget that tripped the wide fixture complete
-//!      fine and return every row (byte unit, not row unit).
-//!   3. `max_result_bytes_knob_is_load_bearing` — the same skinny query passes
-//!      under a large budget and trips under a small budget: lowering the knob
-//!      changes what trips, so it is a real behavioral knob, not decoration.
-//!   4. `limited_query_over_wide_table_completes_under_budget` (FINDING 2) — a
-//!      LIMITed query over the wide fixture (whose UNLIMITED scan trips the guard)
-//!      completes and returns the limited rows: collection early-stops after
-//!      predicate evaluation, so the budget never bites on matching rows beyond
-//!      the LIMIT.
-//!   5. `limit_with_non_pk_predicate_returns_all_matches_not_first_n_raw`
-//!      (roborev FINDING 1) — a `WHERE non_pk = ? LIMIT N` returns ALL N matching
-//!      rows, not the matches among the first N RAW rows: the LIMIT is NOT pushed
-//!      into the predicate-unaware `storage.scan`.
-//!   6. `limit_zero_targeted_returns_empty_never_result_too_large`
-//!      (roborev FINDING 2) — `WHERE pk = ? LIMIT 0` over a wide table under a
-//!      sub-row budget returns empty, never `ResultTooLarge`: LIMIT 0
-//!      short-circuits before any scan/lookup/push/budget work.
-//!   7. `limit_offset_skips_wide_rows_uncharged_against_budget`
-//!      (roborev FINDING B) — `LIMIT 2 OFFSET N` over the wide fixture, where the
-//!      skipped OFFSET rows would blow the budget but the 2 returned rows fit,
-//!      SUCCEEDS: the offset rows are skipped uncharged, so only the returned
-//!      rows are budgeted.
-//!   8. `max_result_rows_knob_is_load_bearing` (roborev FINDING A) — lowering
-//!      `max_result_rows` under a generous byte budget makes the skinny query
-//!      trip the row-count safety valve; a high value passes. The knob is real,
-//!      not a hardcoded constant.
 //!
 //! Run with:
 //!   cargo test --package cqlite-core \
@@ -73,7 +52,7 @@
 use cqlite_core::config::DEFAULT_MAX_RESULT_BYTES;
 use cqlite_core::ingestion::{ingest, IngestionConfig};
 use cqlite_core::storage::write_engine::{
-    CellOperation, ClusteringKey, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
+    CellOperation, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
 };
 use cqlite_core::types::Value;
 use cqlite_core::{Config, Database, Error};
@@ -82,100 +61,31 @@ use tempfile::TempDir;
 const KS: &str = "budget_ks";
 const WIDE_TBL: &str = "wide_items";
 const SKINNY_TBL: &str = "skinny_items";
-/// Non-PK-filter fixture for FINDING 1 (LIMIT must not be pushed into storage
-/// ahead of executor-side predicate evaluation).
-const FILTERED_TBL: &str = "filtered_items";
 
 /// ~10 KiB per row → a handful of rows dwarfs a small byte budget while staying
 /// far below the 1M row-count safety valve.
 const WIDE_PAYLOAD_BYTES: usize = 10 * 1024;
 const WIDE_ROW_COUNT: i32 = 8;
 
-/// Rows the byte guard admits before it trips at [`SHARED_BUDGET_BYTES`]: each
-/// wide row estimates to ~`WIDE_PAYLOAD_BYTES` + a few bytes for the int key, so
-/// `floor(budget / row_bytes)` rows fit before the running estimate crosses the
-/// budget. Used as the LIMIT that must still complete under budget (FINDING 2).
+/// Number of wide rows whose combined bytes stay under [`SHARED_BUDGET_BYTES`]:
+/// each wide row estimates to ~`WIDE_PAYLOAD_BYTES` + a few bytes for the int
+/// key, so a `LIMIT` of this many keeps the FINAL result under budget.
 const WIDE_ROWS_UNDER_BUDGET: usize = 2;
 
 /// Many tiny rows: total bytes stay small even though the row COUNT is large
 /// relative to the wide fixture.
 const SKINNY_ROW_COUNT: i32 = 400;
 
-/// FINDING 1 fixture: total rows, and the group value a small, spread-out subset
-/// carries. Only every 20th row matches `MATCH_GRP` (10 rows), so the matching
-/// rows are scattered throughout token order — NOT confined to the first
-/// `MATCH_COUNT` rows a buggy storage-pushed LIMIT would return.
-const FILTERED_ROW_COUNT: i32 = 200;
-const MATCH_GRP: i32 = 7;
-const NON_MATCH_GRP: i32 = 0;
-const MATCH_COUNT: usize = 10;
-
-/// Wide fixture with a UUID `id` PK (roborev legacy-path finding). A UUID `WHERE
-/// id = <uuid>` point lookup satisfies `is_simple_id_lookup` (≤ 8 tokens,
-/// `WHERE id =`) and is routed through the LEGACY `QueryExecutor`: because the
-/// value is a `Uuid` (not an `Integer`), `condition_to_row_key` falls through to
-/// `value_to_row_key`, which produces the exact 16-byte partition key the real
-/// SSTable stores — so the legacy `storage.get` actually returns the wide row
-/// (unlike an int `id`, which the legacy path maps to a synthetic `user_key_N`
-/// that never matches a real SSTable partition key).
-const WIDE_UUID_TBL: &str = "wide_uuid_items";
-/// Wide fixture with a CLUSTERING column so `ORDER BY ck` is available. All rows
-/// live in ONE partition (`id = 0`) with a wide payload each, so the partition's
-/// materialized size dwarfs [`SHARED_BUDGET_BYTES`]. A plan with `ORDER BY`
-/// emits a `Sort` step, so `compute_scan_collect_bound` returns `None` — the exact
-/// uncovered path for the query-wide `LIMIT 0` short-circuit (D6 roborev finding).
-const WIDE_CK_TBL: &str = "wide_ck_items";
-/// The partition looked up by the legacy-path tests (`0x11` repeated 16×). Its
-/// canonical UUID literal (below) is what the CQL `WHERE id = ...` clause carries.
-const LOOKUP_UUID: [u8; 16] = [0x11u8; 16];
-const LOOKUP_UUID_LITERAL: &str = "11111111-1111-1111-1111-111111111111";
+/// A byte budget that a handful of ~10 KiB wide rows exceeds, but the skinny
+/// fixture's total logical bytes (~few KiB) stays under.
+const SHARED_BUDGET_BYTES: u64 = 24 * 1024;
 
 fn wide_schema_cql() -> String {
     format!("CREATE TABLE {KS}.{WIDE_TBL} (\n  id int PRIMARY KEY,\n  payload blob\n);\n")
 }
 
-fn wide_uuid_schema_cql() -> String {
-    format!("CREATE TABLE {KS}.{WIDE_UUID_TBL} (\n  id uuid PRIMARY KEY,\n  payload blob\n);\n")
-}
-
-fn wide_uuid_row(id_bytes: [u8; 16], ts: i64) -> Mutation {
-    let pk = PartitionKey::single("id", Value::Uuid(id_bytes));
-    let ops = vec![CellOperation::Write {
-        column: "payload".to_string(),
-        value: Value::Blob(vec![0xABu8; WIDE_PAYLOAD_BYTES]),
-    }];
-    Mutation::new(TableId::new(KS, WIDE_UUID_TBL), pk, None, ops, ts, None)
-}
-
-fn wide_ck_schema_cql() -> String {
-    format!(
-        "CREATE TABLE {KS}.{WIDE_CK_TBL} (\n  id int,\n  ck int,\n  payload blob,\n  PRIMARY KEY (id, ck)\n);\n"
-    )
-}
-
-fn wide_ck_row(id: i32, ck: i32, ts: i64) -> Mutation {
-    let pk = PartitionKey::single("id", Value::Integer(id));
-    let clustering = ClusteringKey::single("ck", Value::Integer(ck));
-    let ops = vec![CellOperation::Write {
-        column: "payload".to_string(),
-        value: Value::Blob(vec![0xABu8; WIDE_PAYLOAD_BYTES]),
-    }];
-    Mutation::new(
-        TableId::new(KS, WIDE_CK_TBL),
-        pk,
-        Some(clustering),
-        ops,
-        ts,
-        None,
-    )
-}
-
 fn skinny_schema_cql() -> String {
     format!("CREATE TABLE {KS}.{SKINNY_TBL} (\n  id int PRIMARY KEY,\n  n int\n);\n")
-}
-
-fn filtered_schema_cql() -> String {
-    format!("CREATE TABLE {KS}.{FILTERED_TBL} (\n  id int PRIMARY KEY,\n  grp int\n);\n")
 }
 
 fn wide_row(id: i32, ts: i64) -> Mutation {
@@ -194,21 +104,6 @@ fn skinny_row(id: i32, ts: i64) -> Mutation {
         value: Value::Integer(id),
     }];
     Mutation::new(TableId::new(KS, SKINNY_TBL), pk, None, ops, ts, None)
-}
-
-fn filtered_row(id: i32, ts: i64) -> Mutation {
-    let pk = PartitionKey::single("id", Value::Integer(id));
-    // Every 20th row matches MATCH_GRP; the rest carry NON_MATCH_GRP.
-    let grp = if id % 20 == 0 {
-        MATCH_GRP
-    } else {
-        NON_MATCH_GRP
-    };
-    let ops = vec![CellOperation::Write {
-        column: "grp".to_string(),
-        value: Value::Integer(grp),
-    }];
-    Mutation::new(TableId::new(KS, FILTERED_TBL), pk, None, ops, ts, None)
 }
 
 /// Flush a single generation for `table` with the supplied schema + rows.
@@ -250,8 +145,8 @@ async fn open_db_with_budget(
 }
 
 /// Open the query stack wiring BOTH the byte budget and the `max_result_rows`
-/// row-count safety valve through config (roborev FINDING A: the row-count knob
-/// must be load-bearing, not a hardcoded constant).
+/// row-count safety valve through config (the row-count knob must be
+/// load-bearing, not a hardcoded constant).
 async fn open_db_with_budgets(
     data_dir: std::path::PathBuf,
     schema_path: std::path::PathBuf,
@@ -298,54 +193,6 @@ async fn prepare_wide(root: &std::path::Path) -> (std::path::PathBuf, std::path:
     (data_dir, schema_path)
 }
 
-/// Build a wide UUID-PK fixture: a handful of distinct-UUID single-row
-/// partitions, one keyed by [`LOOKUP_UUID`]. Each row's ~10 KiB payload dwarfs
-/// [`SUB_ROW_BUDGET_BYTES`].
-async fn prepare_wide_uuid(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
-    let data_dir = root.join("wide_uuid_data");
-    let wal_dir = root.join("wide_uuid_wal");
-    let schema_path = root.join("wide_uuid_schema.cql");
-    std::fs::write(&schema_path, wide_uuid_schema_cql()).expect("write wide uuid schema");
-    let (d, w) = (data_dir.clone(), wal_dir.clone());
-    tokio::task::spawn_blocking(move || {
-        let rows: Vec<Mutation> = (0..WIDE_ROW_COUNT)
-            .map(|i| {
-                let uuid = if i == 0 {
-                    LOOKUP_UUID
-                } else {
-                    [(0x20u8 + i as u8); 16]
-                };
-                wide_uuid_row(uuid, 100)
-            })
-            .collect();
-        build_fixture(&d, &w, &wide_uuid_schema_cql(), rows);
-    })
-    .await
-    .expect("build wide uuid fixture");
-    (data_dir, schema_path)
-}
-
-/// Build a single wide partition (`id = 0`) with [`WIDE_ROW_COUNT`] clustering
-/// rows, each carrying a ~10 KiB payload. `ORDER BY ck` over it emits a `Sort`
-/// step (so `compute_scan_collect_bound` is `None`), and the partition's
-/// materialized size (~80 KiB) dwarfs [`SHARED_BUDGET_BYTES`].
-async fn prepare_wide_ck(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
-    let data_dir = root.join("wide_ck_data");
-    let wal_dir = root.join("wide_ck_wal");
-    let schema_path = root.join("wide_ck_schema.cql");
-    std::fs::write(&schema_path, wide_ck_schema_cql()).expect("write wide ck schema");
-    let (d, w) = (data_dir.clone(), wal_dir.clone());
-    tokio::task::spawn_blocking(move || {
-        let rows: Vec<Mutation> = (0..WIDE_ROW_COUNT)
-            .map(|ck| wide_ck_row(0, ck, 100))
-            .collect();
-        build_fixture(&d, &w, &wide_ck_schema_cql(), rows);
-    })
-    .await
-    .expect("build wide ck fixture");
-    (data_dir, schema_path)
-}
-
 async fn prepare_skinny(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
     let data_dir = root.join("skinny_data");
     let wal_dir = root.join("skinny_wal");
@@ -361,35 +208,12 @@ async fn prepare_skinny(root: &std::path::Path) -> (std::path::PathBuf, std::pat
     (data_dir, schema_path)
 }
 
-async fn prepare_filtered(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
-    let data_dir = root.join("filtered_data");
-    let wal_dir = root.join("filtered_wal");
-    let schema_path = root.join("filtered_schema.cql");
-    std::fs::write(&schema_path, filtered_schema_cql()).expect("write filtered schema");
-    let (d, w) = (data_dir.clone(), wal_dir.clone());
-    tokio::task::spawn_blocking(move || {
-        let rows: Vec<Mutation> = (0..FILTERED_ROW_COUNT)
-            .map(|i| filtered_row(i, 100))
-            .collect();
-        build_fixture(&d, &w, &filtered_schema_cql(), rows);
-    })
-    .await
-    .expect("build filtered fixture");
-    (data_dir, schema_path)
-}
-
-/// A byte budget that a handful of ~10 KiB wide rows exceeds, but the skinny
-/// fixture's total logical bytes (~few KiB) stays under.
-const SHARED_BUDGET_BYTES: u64 = 24 * 1024;
-
-/// A byte budget SMALLER than a single wide row (~10 KiB): a single-partition
-/// lookup that materializes one wide row would trip the guard under it — used to
-/// prove the FINDING 2 `LIMIT 0` short-circuit fires BEFORE any push/byte-check.
-const SUB_ROW_BUDGET_BYTES: u64 = 512;
-
-/// Test 1: a few WIDE rows trip the BYTE guard before the row-count guard.
+/// A wide, UNLIMITED FINAL result trips the BYTE guard before the row-count
+/// guard. The full fixture is collected and its combined bytes exceed the
+/// budget; the row count is far below the 1M row-count valve, proving the byte
+/// guard fired first.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn wide_rows_trip_byte_guard_before_row_count_guard() {
+async fn wide_final_result_trips_byte_guard() {
     let temp = TempDir::new().unwrap();
     let (data_dir, schema_path) = prepare_wide(temp.path()).await;
 
@@ -421,32 +245,17 @@ async fn wide_rows_trip_byte_guard_before_row_count_guard() {
                 rows < 1_000_000,
                 "byte guard must trip long before the 1M row-count guard; got rows={rows}"
             );
-            // The guard fails fast: it trips after collecting only the few rows
-            // that fill the budget (~`WIDE_ROWS_UNDER_BUDGET` + 1), a small handful
-            // strictly below the full fixture — not after collecting all of it.
-            assert!(
-                rows <= WIDE_ROWS_UNDER_BUDGET + 1,
-                "byte guard should fail fast a row past the budget fit \
-                 ({WIDE_ROWS_UNDER_BUDGET}); got rows={rows}"
-            );
         }
         other => panic!("expected Error::ResultTooLarge, got {other:?}"),
     }
 }
 
-/// FINDING 2: a LIMITed query over the same wide fixture — whose UNLIMITED scan
-/// trips the byte guard (see `wide_rows_trip_byte_guard_before_row_count_guard`)
-/// — must complete and return the limited rows, WITHOUT the budget biting on
-/// matching rows beyond the LIMIT.
-///
-/// This is the red→green for FINDING 2: before the fix the LIMIT was applied by a
-/// SEPARATE post-scan step, so the executor enforced the byte budget while
-/// collecting EVERY matching row and raised `ResultTooLarge` at ~row 3 — before
-/// the LIMIT step ever ran. Propagating the LIMIT bound into the scan's `limit`
-/// AND early-stopping collection at `offset + count` means only the limited rows
-/// are collected, so the budget never bites on rows beyond the LIMIT.
+/// A `LIMIT` keeps a big table under budget: the UNLIMITED scan over the wide
+/// fixture trips the guard, but `SELECT * ... LIMIT 2` produces a small FINAL
+/// result (2 wide rows, under budget), so the single final-result check never
+/// raises `ResultTooLarge`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn limited_query_over_wide_table_completes_under_budget() {
+async fn limit_keeps_big_table_under_budget() {
     let temp = TempDir::new().unwrap();
     let (data_dir, schema_path) = prepare_wide(temp.path()).await;
 
@@ -468,206 +277,18 @@ async fn limited_query_over_wide_table_completes_under_budget() {
     let result = db
         .execute(&sql)
         .await
-        .expect("a LIMITed query that fits the budget must complete, not trip ResultTooLarge");
+        .expect("a LIMITed query whose FINAL result fits the budget must complete");
     assert_eq!(
         result.rows.len(),
         WIDE_ROWS_UNDER_BUDGET,
-        "LIMIT must be honored (early-stop before the byte budget bites)"
+        "LIMIT must be honored and the final small result must not trip the byte budget"
     );
 }
 
-/// FINDING 1 (roborev HIGH): a LIMIT must NOT be pushed into storage ahead of
-/// executor-side predicate evaluation. The optimizer folds `WHERE grp = ?` into
-/// the `SSTableScan` step's predicates WITHOUT a residual `Filter`, but
-/// `storage.scan` is not predicate-aware. If the query-wide `LIMIT N` bound is
-/// pushed into `storage.scan`, storage returns only the first `N` RAW (unfiltered)
-/// rows in token order; the matching rows scattered further along the scan are
-/// never seen, so the executor filters `N` raw rows down to far fewer than `N`
-/// matches → WRONG RESULTS.
-///
-/// This fixture has `MATCH_COUNT` matching rows spread across `FILTERED_ROW_COUNT`
-/// total rows. `SELECT * WHERE grp = MATCH_GRP LIMIT MATCH_COUNT` must return all
-/// `MATCH_COUNT` matches. Pre-fix (storage-pushed LIMIT) this returns only the
-/// matches that happen to fall within the first `MATCH_COUNT` token-ordered rows
-/// (≈ `MATCH_COUNT² / FILTERED_ROW_COUNT` ≈ 0–1) → RED. Post-fix the storage limit
-/// is withheld whenever executor-side predicates exist and the early-stop counts
-/// only rows that PASSED the predicate → all `MATCH_COUNT` matches → GREEN.
+/// MANY skinny rows whose total bytes stay under the SAME budget that tripped the
+/// wide fixture complete fine and return every row (byte unit, not row unit).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn limit_with_non_pk_predicate_returns_all_matches_not_first_n_raw() {
-    let temp = TempDir::new().unwrap();
-    let (data_dir, schema_path) = prepare_filtered(temp.path()).await;
-
-    // Generous budget: FINDING 1 is about correctness, not the byte guard.
-    let db = open_db_with_budget(data_dir, schema_path, DEFAULT_MAX_RESULT_BYTES).await;
-
-    let sql =
-        format!("SELECT * FROM {KS}.{FILTERED_TBL} WHERE grp = {MATCH_GRP} LIMIT {MATCH_COUNT}");
-    let result = db
-        .execute(&sql)
-        .await
-        .expect("filtered LIMIT query must succeed");
-
-    assert_eq!(
-        result.rows.len(),
-        MATCH_COUNT,
-        "LIMIT must return ALL matching rows, not the matches among the first N \
-         RAW rows a storage-pushed limit would return (FINDING 1)"
-    );
-}
-
-/// FINDING 2 (roborev MEDIUM): `WHERE pk = ? LIMIT 0` over a wide table must
-/// return an empty result, never `ResultTooLarge`. The budget here is SMALLER than
-/// a single wide row, so pre-fix the targeted lookup materialized the matching row
-/// and byte-checked it before the LIMIT-0 bound was honored → `ResultTooLarge`.
-/// Post-fix the `collect_bound == Some(0)` short-circuit returns empty before any
-/// scan/lookup/push/budget work.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn limit_zero_targeted_returns_empty_never_result_too_large() {
-    let temp = TempDir::new().unwrap();
-    let (data_dir, schema_path) = prepare_wide(temp.path()).await;
-
-    let db = open_db_with_budget(data_dir, schema_path, SUB_ROW_BUDGET_BYTES).await;
-
-    // Sanity: the same single-partition lookup with a NON-zero LIMIT trips the
-    // guard (one wide row exceeds the sub-row budget) — proving the budget is
-    // binding and that only the LIMIT-0 short-circuit makes this query empty rather
-    // than error. (A bare `WHERE id = 0` with no LIMIT is routed to the legacy
-    // executor by a word-count heuristic in `QueryEngine::execute`; keeping a LIMIT
-    // clause here routes through the optimizer path under test.)
-    let point = format!("SELECT * FROM {KS}.{WIDE_TBL} WHERE id = 0 LIMIT 5");
-    let err = db
-        .execute(&point)
-        .await
-        .expect_err("a single wide row must exceed the sub-row byte budget");
-    assert!(
-        matches!(err, Error::ResultTooLarge { .. }),
-        "point lookup of one wide row must trip the guard, got {err:?}"
-    );
-
-    let sql = format!("SELECT * FROM {KS}.{WIDE_TBL} WHERE id = 0 LIMIT 0");
-    let result = db
-        .execute(&sql)
-        .await
-        .expect("LIMIT 0 must short-circuit to an empty result, never ResultTooLarge");
-    assert!(
-        result.rows.is_empty(),
-        "LIMIT 0 must return zero rows; got {}",
-        result.rows.len()
-    );
-}
-
-/// FINDING D6 (roborev MEDIUM): a query-wide `LIMIT 0` must ALWAYS return an empty
-/// result, never `ResultTooLarge` — INCLUDING when the plan carries a reordering /
-/// reducing step (`Sort`, `Filter`, `Aggregate`, `PerPartitionLimit`) that makes
-/// `compute_scan_collect_bound` return `None`. Here `ORDER BY ck` emits a `Sort`
-/// step, so the `collect_bound == Some(0)` short-circuit never fires; pre-fix the
-/// fallback scan-collection loop had no LIMIT-0 early-return, so it scanned the full
-/// wide partition (~80 KiB) under the sub-partition [`SHARED_BUDGET_BYTES`] budget
-/// and raised `ResultTooLarge` instead of returning empty. Post-fix a query-wide
-/// `ExecutionStep::Limit { count: 0, .. }` short-circuits to an empty result BEFORE
-/// scanning, independent of whether a collect bound was computed.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn limit_zero_with_reordering_step_returns_empty_not_too_large() {
-    let temp = TempDir::new().unwrap();
-    let (data_dir, schema_path) = prepare_wide_ck(temp.path()).await;
-
-    // Budget BELOW the wide partition's materialized size (8 × ~10 KiB ≫ 24 KiB).
-    let db = open_db_with_budget(data_dir, schema_path, SHARED_BUDGET_BYTES).await;
-
-    // Sanity: the SAME ORDER BY query with a NON-zero LIMIT scans the wide
-    // partition and trips the guard — the `Sort` step disables the collect-bound
-    // early-stop, so the full partition is collected and the budget bites. This
-    // proves the query exercises the uncovered `compute_scan_collect_bound == None`
-    // path (not a plan that early-stops).
-    let unlimited = format!("SELECT * FROM {KS}.{WIDE_CK_TBL} ORDER BY ck LIMIT {WIDE_ROW_COUNT}");
-    let err = db
-        .execute(&unlimited)
-        .await
-        .expect_err("wide ORDER BY scan must exceed the byte budget");
-    assert!(
-        matches!(err, Error::ResultTooLarge { .. }),
-        "unlimited ORDER BY query must trip the guard (Sort disables early-stop), got {err:?}"
-    );
-
-    // LIMIT 0 with the reordering Sort step must short-circuit to empty, never error.
-    let sql = format!("SELECT * FROM {KS}.{WIDE_CK_TBL} ORDER BY ck LIMIT 0");
-    let result = db
-        .execute(&sql)
-        .await
-        .expect("query-wide LIMIT 0 must short-circuit to empty, never ResultTooLarge");
-    assert!(
-        result.rows.is_empty(),
-        "LIMIT 0 must return zero rows even with a Sort step; got {}",
-        result.rows.len()
-    );
-}
-
-/// roborev FINDING (Medium): an INVALID `token(...)` restriction must be rejected
-/// BEFORE either `LIMIT 0` short-circuit — a LIMIT-0 fast path must never swallow
-/// token-predicate validation. The fix moves `validate_token_predicates(...)` to
-/// be the FIRST statement of `execute_sstable_scan`, ahead of both the
-/// `query_wide_limit_zero` early-return (the reordering/`Sort` path) and the
-/// `collect_bound == Some(0)` short-circuit (the ordinary LIMIT-0 path).
-///
-/// `token(ck)` names a CLUSTERING column, not the partition key (`id`), so
-/// `validate_token_predicates` rejects it (mirrors the unit test
-/// `validate_token_predicates_rejects_non_pk_column`). The optimizer only checks
-/// the token FORM (operator + integer literal + column args), NOT partition-key
-/// membership, so the predicate passes planning and reaches `execute_sstable_scan`
-/// as a real `token()` `SSTablePredicate` — which is exactly the path the fix
-/// guards. Both LIMIT-0 shapes must surface `Error::QueryExecution`, NOT `Ok`:
-///   * `token(ck) >= 0 LIMIT 0` — no reordering step, so
-///     `compute_scan_collect_bound` yields `Some(0)` (the `collect_bound` path).
-///   * `token(ck) >= 0 ORDER BY ck LIMIT 0` — the `Sort` step forces
-///     `compute_scan_collect_bound` to `None`, so the `query_wide_limit_zero` path
-///     is the one that would have swallowed the error pre-fix.
-///
-/// Pre-fix (validation AFTER the short-circuits) BOTH queries returned `Ok` with
-/// zero rows → RED. Post-fix (validation FIRST) both return the token-validation
-/// `Error::QueryExecution` → GREEN.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn invalid_token_predicate_with_limit_zero_errors_not_empty() {
-    let temp = TempDir::new().unwrap();
-    let (data_dir, schema_path) = prepare_wide_ck(temp.path()).await;
-
-    let db = open_db_with_budget(data_dir, schema_path, SHARED_BUDGET_BYTES).await;
-
-    // Assert an invalid-token LIMIT-0 SELECT surfaces the token-validation error
-    // instead of silently returning an empty result.
-    let assert_token_error =
-        |result: Result<cqlite_core::QueryResult, Error>, path: &str| match result {
-            Err(Error::QueryExecution(msg)) => {
-                assert!(
-                    msg.contains("token"),
-                    "{path}: token-validation error must mention token(); got {msg:?}"
-                );
-            }
-            Ok(res) => panic!(
-                "{path}: invalid token() with LIMIT 0 must error, not return {} rows \
-                 (a LIMIT-0 short-circuit must never swallow token validation)",
-                res.rows.len()
-            ),
-            Err(other) => panic!("{path}: expected Error::QueryExecution, got {other:?}"),
-        };
-
-    // Path 1: plain LIMIT 0 → `collect_bound == Some(0)` short-circuit.
-    let collect_bound_sql =
-        format!("SELECT * FROM {KS}.{WIDE_CK_TBL} WHERE token(ck) >= 0 LIMIT 0");
-    assert_token_error(db.execute(&collect_bound_sql).await, "collect_bound path");
-
-    // Path 2: ORDER BY forces a Sort step → `query_wide_limit_zero` early-return.
-    let query_wide_sql =
-        format!("SELECT * FROM {KS}.{WIDE_CK_TBL} WHERE token(ck) >= 0 ORDER BY ck LIMIT 0");
-    assert_token_error(
-        db.execute(&query_wide_sql).await,
-        "query_wide_limit_zero path",
-    );
-}
-
-/// Test 2: MANY skinny rows whose total bytes stay under the SAME budget that
-/// tripped the wide fixture complete fine and return every row.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn skinny_rows_under_byte_budget_complete() {
+async fn skinny_result_under_budget_completes() {
     let temp = TempDir::new().unwrap();
     let (data_dir, schema_path) = prepare_skinny(temp.path()).await;
 
@@ -687,8 +308,8 @@ async fn skinny_rows_under_byte_budget_complete() {
     );
 }
 
-/// Test 3: the `max_result_bytes` knob is load-bearing — the same skinny query
-/// passes under a large budget and trips under a small one.
+/// The `max_result_bytes` knob is load-bearing — the same skinny query passes
+/// under a large budget and trips under a small one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn max_result_bytes_knob_is_load_bearing() {
     let temp = TempDir::new().unwrap();
@@ -729,172 +350,12 @@ async fn max_result_bytes_knob_is_load_bearing() {
     }
 }
 
-/// FINDING B (roborev MEDIUM): `LIMIT ... OFFSET ...` must NOT charge the skipped
-/// OFFSET rows against the byte budget. A query whose FINAL result is small must
-/// SUCCEED even when the skipped rows are wide enough that charging them would
-/// exceed the budget.
-///
-/// The wide fixture has `WIDE_ROW_COUNT` rows of ~`WIDE_PAYLOAD_BYTES` each.
-/// `LIMIT WIDE_ROWS_UNDER_BUDGET OFFSET WIDE_OFFSET` under `SHARED_BUDGET_BYTES`:
-/// the `WIDE_OFFSET` skipped rows total ~40 KiB (well over the ~24 KiB budget),
-/// but the 2 returned rows total ~20 KiB (under budget). Pre-fix the scan
-/// collected `offset + count` matching rows and charged EACH, tripping the byte
-/// guard at ~row 3 → RED (`ResultTooLarge`). Post-fix the offset rows are skipped
-/// uncharged (never pushed, never budgeted) and only the 2 returned rows are
-/// budgeted → GREEN.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn limit_offset_skips_wide_rows_uncharged_against_budget() {
-    // Skip 4 wide rows (~40 KiB, over budget), return 2 (~20 KiB, under budget).
-    const WIDE_OFFSET: usize = 4;
-    // Sanity on the fixture sizing: offset + limit must fit inside the fixture.
-    assert!(WIDE_OFFSET + WIDE_ROWS_UNDER_BUDGET <= WIDE_ROW_COUNT as usize);
-
-    let temp = TempDir::new().unwrap();
-    let (data_dir, schema_path) = prepare_wide(temp.path()).await;
-
-    let db = open_db_with_budget(data_dir, schema_path, SHARED_BUDGET_BYTES).await;
-
-    let sql = format!(
-        "SELECT * FROM {KS}.{WIDE_TBL} LIMIT {WIDE_ROWS_UNDER_BUDGET} OFFSET {WIDE_OFFSET}"
-    );
-    let result = db.execute(&sql).await.expect(
-        "LIMIT/OFFSET must skip the wide OFFSET rows uncharged and budget only the \
-         returned rows, not trip ResultTooLarge",
-    );
-    assert_eq!(
-        result.rows.len(),
-        WIDE_ROWS_UNDER_BUDGET,
-        "must return exactly the LIMIT rows after skipping the OFFSET rows"
-    );
-}
-
-/// roborev FINDING (Medium): a WIDE-partition POINT LOOKUP that satisfies
-/// `is_simple_id_lookup` (`WHERE id = <value>` with ≤ 8 whitespace tokens) is
-/// routed through the LEGACY `QueryExecutor`, which — pre-fix — did NOT enforce
-/// the D6 byte budget. So a single wide row materialized unbounded and bypassed
-/// the guard entirely. Post-fix the budget is enforced POST-materialization on the
-/// legacy `QueryResult` at BOTH legacy return points (plan-cache hit and
-/// fall-through), reusing the SAME estimator/enforcement as the optimizer path.
-///
-/// `SUB_ROW_BUDGET_BYTES` (512 B) is smaller than one ~10 KiB wide row, so the
-/// point lookup of that one row must trip `ResultTooLarge`. The SQL is exactly 8
-/// whitespace tokens and contains `WHERE id =`, so it trips `is_simple_id_lookup`
-/// and exercises the legacy path under test (NOT the optimizer path).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn wide_point_lookup_via_legacy_path_trips_byte_budget() {
-    let temp = TempDir::new().unwrap();
-    let (data_dir, schema_path) = prepare_wide_uuid(temp.path()).await;
-
-    let db = open_db_with_budget(data_dir, schema_path, SUB_ROW_BUDGET_BYTES).await;
-
-    // 8 whitespace tokens + "WHERE id =" → is_simple_id_lookup == true → legacy path.
-    let sql = format!("SELECT * FROM {KS}.{WIDE_UUID_TBL} WHERE id = {LOOKUP_UUID_LITERAL}");
-    assert_eq!(
-        sql.split_whitespace().count(),
-        8,
-        "test SQL must be <= 8 tokens to trip is_simple_id_lookup"
-    );
-    assert!(sql.contains("WHERE id ="));
-
-    let err = db
-        .execute(&sql)
-        .await
-        .expect_err("wide point lookup must exceed the sub-row byte budget on the legacy path");
-    match err {
-        Error::ResultTooLarge {
-            budget_bytes,
-            estimated_bytes,
-            rows,
-        } => {
-            assert_eq!(
-                budget_bytes, SUB_ROW_BUDGET_BYTES as usize,
-                "error must report the configured budget"
-            );
-            assert!(
-                estimated_bytes > budget_bytes,
-                "estimated bytes ({estimated_bytes}) must exceed budget ({budget_bytes})"
-            );
-            assert!(
-                rows >= 1,
-                "the materialized wide row must be counted; got rows={rows}"
-            );
-        }
-        other => panic!("expected Error::ResultTooLarge on the legacy path, got {other:?}"),
-    }
-}
-
-/// Control for the legacy-path budget: the SAME point lookup under a GENEROUS
-/// budget succeeds and returns the row — the guard is not over-firing on normal
-/// point reads.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn wide_point_lookup_via_legacy_path_succeeds_under_generous_budget() {
-    let temp = TempDir::new().unwrap();
-    let (data_dir, schema_path) = prepare_wide_uuid(temp.path()).await;
-
-    let db = open_db_with_budget(data_dir, schema_path, DEFAULT_MAX_RESULT_BYTES).await;
-
-    let sql = format!("SELECT * FROM {KS}.{WIDE_UUID_TBL} WHERE id = {LOOKUP_UUID_LITERAL}");
-    let result = db
-        .execute(&sql)
-        .await
-        .expect("point lookup under a generous budget must succeed");
-    assert_eq!(
-        result.rows.len(),
-        1,
-        "point lookup on id=0 must return exactly the one wide row"
-    );
-}
-
-/// Knob test on the legacy path: lowering `max_result_bytes` flips the SAME
-/// point-lookup query from Ok → `ResultTooLarge` — the byte budget is load-bearing
-/// on the legacy point-lookup path too, not just the optimizer path.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn max_result_bytes_knob_is_load_bearing_on_legacy_point_lookup() {
-    let temp = TempDir::new().unwrap();
-    let (data_dir, schema_path) = prepare_wide_uuid(temp.path()).await;
-
-    let sql = format!("SELECT * FROM {KS}.{WIDE_UUID_TBL} WHERE id = {LOOKUP_UUID_LITERAL}");
-
-    // Generous budget: PASSES.
-    {
-        let db = open_db_with_budget(
-            data_dir.clone(),
-            schema_path.clone(),
-            DEFAULT_MAX_RESULT_BYTES,
-        )
-        .await;
-        let result = db
-            .execute(&sql)
-            .await
-            .expect("point lookup passes under the default budget");
-        assert_eq!(result.rows.len(), 1);
-    }
-
-    // Sub-row budget: the SAME query now TRIPS.
-    {
-        let db = open_db_with_budget(data_dir, schema_path, SUB_ROW_BUDGET_BYTES).await;
-        let err = db
-            .execute(&sql)
-            .await
-            .expect_err("lowering max_result_bytes must make the point lookup trip");
-        match err {
-            Error::ResultTooLarge { budget_bytes, .. } => {
-                assert_eq!(budget_bytes, SUB_ROW_BUDGET_BYTES as usize);
-            }
-            other => panic!("expected Error::ResultTooLarge under sub-row budget, got {other:?}"),
-        }
-    }
-}
-
-/// FINDING A (roborev MEDIUM): the `max_result_rows` row-count safety valve must
-/// be load-bearing (wired from config), not a hardcoded 1,000,000 constant.
+/// The `max_result_rows` row-count safety valve must be load-bearing (wired from
+/// config), not a hardcoded 1,000,000 constant.
 ///
 /// Under a GENEROUS byte budget (so the byte guard never fires), the skinny
 /// query passes with a high `max_result_rows` and TRIPS the row-count valve when
-/// `max_result_rows` is lowered below the fixture's row count. Lowering the knob
-/// changes what trips → it is a real behavioral knob. Pre-fix the guard used a
-/// hardcoded `MAX_RESULTS = 1_000_000`, so lowering the config value had NO
-/// effect and the query still passed → RED.
+/// `max_result_rows` is lowered below the fixture's row count.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn max_result_rows_knob_is_load_bearing() {
     let temp = TempDir::new().unwrap();
