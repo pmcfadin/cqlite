@@ -12,8 +12,11 @@ owner unless a set is pre-authorized for merge-on-green.
 
 > **GitHub API resilience:** `gh issue`/`gh pr`/`gh project` writes ride the **GraphQL** bucket, which
 > throttles **separately** from REST (each 5k pts/hr, independent per-bucket windows). If GraphQL is
-> exhausted, fall back to `gh api` REST equivalents (e.g. comment → `repos/OWNER/REPO/issues/N/comments`,
-> merge → `repos/OWNER/REPO/pulls/N/merge`). Never stall the board sweep on one exhausted bucket.
+> exhausted, issue the **same write** via its `gh api` REST endpoint (e.g. comment →
+> `repos/OWNER/REPO/issues/N/comments`, merge → `repos/OWNER/REPO/pulls/N/merge`). Never stall the board
+> sweep on one exhausted bucket. This is an **API-endpoint swap for the identical operation only** — it is
+> NOT a dispatch fallback: Path A (#1886) still holds, and selecting/claiming work from `status:*` labels
+> remains forbidden regardless of which API bucket is throttled.
 
 ## Project-or-labels detection (shared by all flow-* skills)
 
