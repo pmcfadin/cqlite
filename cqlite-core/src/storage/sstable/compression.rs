@@ -975,6 +975,37 @@ mod tests {
     // Note: Test methods temporarily disabled due to compilation issues
     // The functionality is tested via integration tests
 
+    /// Adversarial oracle (issue #1588, decision #14): a chunk whose leading 4
+    /// bytes ALSO parse as a plausible framed big-endian length header, followed
+    /// by a valid RAW-snappy body of exactly that many output bytes.
+    ///
+    /// Under the (deleted) framed-then-raw guessing, `decompress` read the 4-byte
+    /// BE prefix `S`, decoded `data[4..]` as raw snappy to `P_wrong` (whose length
+    /// equals `S`), and RETURNED those bytes — silently wrong. The authoritative
+    /// Cassandra 5.0 format for a `SnappyCompressor` chunk is RAW snappy with NO
+    /// length prefix, so strict raw decoding of the WHOLE chunk must NOT return
+    /// `P_wrong` (it rejects the malformed leading zero-varint stream). This is the
+    /// no-heuristics enforcement: decode exactly one format determined by metadata.
+    #[cfg(feature = "snappy")]
+    #[test]
+    fn test_snappy_decode_is_strict_raw_only_no_format_guessing() {
+        use snap::raw::Encoder;
+        let p_wrong = b"WRONG-framed-decode-abcdefghijklmnopqrstuvwxyz".to_vec();
+        let s = p_wrong.len() as u32;
+        let mut enc = Encoder::new();
+        let inner = enc.compress_vec(&p_wrong).unwrap(); // valid raw snappy -> p_wrong
+        let mut adversarial = s.to_be_bytes().to_vec(); // plausible framed BE header
+        adversarial.extend_from_slice(&inner);
+
+        let compression = Compression::new(CompressionAlgorithm::Snappy).unwrap();
+        let got = compression.decompress(&adversarial).ok();
+        assert_ne!(
+            got,
+            Some(p_wrong),
+            "strict raw decode must not return the framed-guess bytes (no-heuristics, #1588)"
+        );
+    }
+
     #[cfg(feature = "snappy")]
     #[test]
     fn test_snappy_compression_cassandra_format() {
