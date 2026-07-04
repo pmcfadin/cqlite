@@ -365,6 +365,16 @@ impl Default for AllocatorConfig {
 /// project's <128MB process memory target.
 pub const DEFAULT_MAX_RESULT_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Serde default for [`QueryConfig::max_result_bytes`] (issue #1582).
+///
+/// Backward-compat: a `QueryConfig` serialized before this field existed (e.g.
+/// a Python JSON/dict config) has no `max_result_bytes` key. Without a serde
+/// default, deserialization fails with a missing-field error; with it, such a
+/// config takes the shipped [`DEFAULT_MAX_RESULT_BYTES`] budget.
+fn default_max_result_bytes() -> u64 {
+    DEFAULT_MAX_RESULT_BYTES
+}
+
 /// Query engine configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryConfig {
@@ -398,6 +408,7 @@ pub struct QueryConfig {
     /// logical ceiling keeps a fully-materialized result comfortably inside the
     /// process budget while leaving headroom for readers, caches, and decode
     /// buffers.
+    #[serde(default = "default_max_result_bytes")]
     pub max_result_bytes: u64,
 
     /// Query plan cache size
@@ -763,6 +774,32 @@ mod tests {
                 > Config::default().storage.memtable_size_threshold
         );
         assert!(config.memory.max_memory > Config::default().memory.max_memory);
+    }
+
+    /// Issue #1582 (FINDING 3): a `QueryConfig` serialized BEFORE
+    /// `max_result_bytes` existed (e.g. a pre-upgrade Python JSON/dict config)
+    /// has no such key. The `#[serde(default = ...)]` on the field must let it
+    /// deserialize, taking the shipped default rather than failing with a
+    /// missing-field error.
+    #[test]
+    fn max_result_bytes_deserializes_with_serde_default_when_absent() {
+        // Serialize a default QueryConfig, then STRIP the new field to emulate
+        // an old serialized config that predates it.
+        let mut value =
+            serde_json::to_value(QueryConfig::default()).expect("serialize QueryConfig");
+        let obj = value.as_object_mut().expect("QueryConfig serializes as object");
+        obj.remove("max_result_bytes");
+        assert!(
+            !obj.contains_key("max_result_bytes"),
+            "field must be absent for this regression to be meaningful"
+        );
+
+        let restored: QueryConfig =
+            serde_json::from_value(value).expect("old config (no max_result_bytes) must deserialize");
+        assert_eq!(
+            restored.max_result_bytes, DEFAULT_MAX_RESULT_BYTES,
+            "absent field must take the serde default"
+        );
     }
 
     #[test]
