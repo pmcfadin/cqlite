@@ -134,6 +134,10 @@
 #                                     # never be pasted as the full SUMMARY. The
 #                                     # full gate MUST PASS once before merge. Its
 #                                     # recovery default is .agent-gate-lite-summary.txt.
+#                                     # A bindings/python diff routes scoped-tests to
+#                                     # maturin develop + fast pytest (issue #1893), so
+#                                     # python-diff rounds cost a maturin compile
+#                                     # (seconds warm, ~1-3 min cold).
 #   scripts/agent-gate.sh --list      # list full-gate components without running
 #   scripts/agent-gate.sh --lite-list # list the --lite components without running
 #   scripts/agent-gate.sh --only fmt,clippy   # debugging aid; output is
@@ -460,6 +464,80 @@ _scoped_test_cmd_noparser() {
   echo "test -p cqlite-core --lib --features cli-helpers"
 }
 
+# The FAST python-binding tier --lite runs for a bindings/python diff (issue #1893)
+# INSTEAD of the always-libpython-link-failing `cargo test -p cqlite-py`. cqlite-py
+# is a pyo3 cdylib, so a plain `cargo test` on it never links libpython and gave
+# --lite ZERO python signal on ~1/3 of binding diffs.
+#
+# REAL single source of truth (roborev job 1449, Medium): the executor in
+# run_scoped_tests `eval`s EXACTLY these two component strings, and
+# PYTHON_LITE_TIER_CMD — the plan string --classify-scoped-plan advertises and the
+# self-test asserts — is composed from the SAME two components, so the advertised
+# plan and the executed command can never drift. Never edit one side alone: change
+# a component string and both the plan and the execution change together.
+PYTHON_LITE_MATURIN_CMD="maturin develop --profile dev -m bindings/python/Cargo.toml"
+PYTHON_LITE_PYTEST_CMD="pytest bindings/python/tests -m 'not slow' -q"
+PYTHON_LITE_TIER_CMD="$PYTHON_LITE_MATURIN_CMD && $PYTHON_LITE_PYTEST_CMD"
+
+# Python-tier verdict marker for the LITE SUMMARY block (roborev job 1450, Low):
+# when a python-binding diff is in scope, the block itself must say what the tier
+# did — especially a SKIP (offline/toolchain), where scoped-tests can read PASS
+# while the python diff was NOT validated. A pasted green block that validated
+# nothing must be detectable from the block alone, not scrollback. Set by
+# run_scoped_tests; rendered by run_lite as a `python-tier:` line. Empty (no line)
+# when the diff has no python-binding change.
+PYTHON_TIER_NOTE=""
+
+# Read changed repo-relative paths on stdin; emit the deduped set of owning Cargo
+# workspace packages (one per line) — the union of path-owners + changed
+# --test-target owners, derived from `cargo metadata`. Bash 3.2-safe (no
+# associative arrays); empty when no metadata parser is available. Inner helper of
+# classify_scoped_plan — THE single routing function consumed by both the --lite
+# executor (run_scoped_tests) and the --classify-scoped-plan self-test hook.
+_scoped_pkgset() {
+  local changed index owners newtests pkgset="" key pkg tpkg
+  changed=$(cat)
+  index=$(_package_index)
+  owners=$(printf '%s\n' "$changed" | _owners_from_index "$index")
+  newtests=$(printf '%s\n' "$changed" | classify_test_targets)
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    pkg=${key%%|*}
+    [ -n "$pkg" ] || continue
+    printf '%s\n' "$pkgset" | grep -qxF "$pkg" || pkgset="${pkgset}${pkg}"$'\n'
+  done <<<"$owners"
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    tpkg=${key%%|*}
+    [ -n "$tpkg" ] || continue
+    printf '%s\n' "$pkgset" | grep -qxF "$tpkg" || pkgset="${pkgset}${tpkg}"$'\n'
+  done <<<"$newtests"
+  printf '%s' "$pkgset" | awk 'NF'
+}
+
+# THE scoped-tests ROUTING function (issue #1893; single-sourced per roborev job
+# 1450): map stdin changed paths -> the scoped-tests plan. Emits `rust-pkg: <pkg>`
+# for every owning rust workspace package EXCEPT cqlite-py, and `python-tier: <cmd>`
+# once when a bindings/python change is present (cqlite-py owns it — a pyo3 cdylib
+# whose `cargo test` can never link libpython). Node (cqlite-node) and rust-only
+# diffs are untouched. Deterministic; no side effects; does not invoke cargo test.
+#
+# TWO consumers, one computation: run_scoped_tests (the --lite executor) parses
+# these lines to decide what to run, and the hidden `--classify-scoped-plan` hook
+# exposes the same lines to the py-route self-tests — so the routing the tests
+# assert IS the routing the executor performs, never a parallel copy.
+classify_scoped_plan() {
+  local pkgset python_diff=0 pkg
+  pkgset=$(cat | _scoped_pkgset)
+  while IFS= read -r pkg; do
+    [ -n "$pkg" ] || continue
+    if [ "$pkg" = cqlite-py ]; then python_diff=1; continue; fi
+    echo "rust-pkg: $pkg"
+  done <<<"$pkgset"
+  [ "$python_diff" -eq 1 ] && echo "python-tier: $PYTHON_LITE_TIER_CMD"
+  return 0
+}
+
 COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity python-bindings node-bindings delivery-telemetry parity-report binding-unwind-profile tooling-tests minimal-build smoke)
 # --lite (issue #1821) runs ONLY this fast subset: file-size ratchet, fmt,
 # FULL-workspace clippy (cross-crate API breaks are the cheap-insurance class),
@@ -488,6 +566,10 @@ case "${1:-}" in
   # scoped-test command so the self-test can assert it RUNS tests (--lib, never
   # --no-run). No side effects; does not invoke cargo.
   --scoped-test-cmd-noparser) echo "cargo $(_scoped_test_cmd_noparser)"; exit 0 ;;
+  # Hidden self-test hook (issue #1893): map stdin changed paths -> the scoped-tests
+  # PLAN ("rust-pkg: <pkg>" / "python-tier: <cmd>") WITHOUT running cargo/maturin, so
+  # the self-test can assert python diffs route to the maturin+pytest tier.
+  --classify-scoped-plan) classify_scoped_plan; exit 0 ;;
   --only) ONLY="${2:?--only needs a comma-separated component list}" ;;
   --emit-summary-selftest) SELFTEST=1 ;;
   "") ;;
@@ -789,6 +871,13 @@ run_clippy() {
   # (4) cqlite-flight + the Python/Node bindings at their DEFAULT features (none of
   #     which enable observability), plus cqlite-node's write-support code path. This
   #     lints their real binding/connector surface without linking the otel shim.
+  #
+  #     INVARIANT (issue #1893): cqlite-py MUST stay in this linted set. --lite's
+  #     python tier classifies a venv/pip/maturin toolchain failure as SKIP (not
+  #     FAIL) precisely because this clippy pass still COMPILES cqlite-py in the
+  #     same lite run — it is the compile backstop that makes the SKIP safe.
+  #     Removing cqlite-py here would let a broken bindings/python/src build sail
+  #     through an offline --lite green.
   env RUSTFLAGS="-D warnings" cargo clippy --all-targets \
     -p cqlite-flight -p cqlite-py -p cqlite-node --features cqlite-node/write-support \
     || return 1
@@ -1232,6 +1321,13 @@ run_file_size() {
 # core-tests/write/cli/bindings/parity set. Falls back to `cqlite-core --lib` and
 # says so when no rust workspace package is in the diff (docs/scripts/bindings-only
 # changes). Package detection uses the SAME base-ref resolution as file-size.
+#
+# Python exception (issue #1893): cqlite-py is a pyo3 cdylib whose
+# `cargo test -p cqlite-py` can never link libpython, so a bindings/python diff is
+# routed to the fast python tier (maturin develop --profile dev + the not-slow
+# pytest tier) instead of the always-failing cargo run. Node (cqlite-node) and
+# rust-only diffs are unaffected; a mixed diff runs BOTH the rust-scoped targets
+# AND the python tier. See PYTHON_LITE_TIER_CMD / classify_scoped_plan above.
 run_scoped_tests() {
   local name=scoped-tests
   local log="$LOG_DIR/$name.log"
@@ -1293,18 +1389,15 @@ run_scoped_tests() {
     return
   fi
 
-  # Metadata-derived package ownership (issue #1821): the single authoritative
-  # source. `pkgindex` is "<manifest_dir>\t<pkg>\t<has_lib>" for every member;
-  # `owners` is the longest-prefix owning package of each changed path
-  # ("<pkg>|<has_lib>"); `newtests` is every changed --test target
-  # ("<pkg>|<testname>|<features>"). All empty in the no-parser fallback. This
-  # replaces the old hardcoded path-prefix `case` and `pkg_dir` maps, which kept
-  # missing real members (tools/*, bindings/*, examples, ...); every workspace
-  # member is now covered because ownership comes from `cargo metadata`.
-  local pkgindex="" owners="" newtests=""
+  # Metadata-derived per-TARGET selection (issue #1821): `pkgindex` is
+  # "<manifest_dir>\t<pkg>\t<has_lib>" for every member; `newtests` is every
+  # changed --test target ("<pkg>|<testname>|<features>"). Both empty in the
+  # no-parser fallback. These drive WHICH --test targets/features run within each
+  # routed package — the routing itself (which packages, python tier or not) comes
+  # from classify_scoped_plan below.
+  local pkgindex="" newtests=""
   if [ "$have_meta_parser" -eq 1 ]; then
     pkgindex=$(_package_index)
-    owners=$(printf '%s\n' "$changed" | _owners_from_index "$pkgindex")
     newtests=$(printf '%s\n' "$changed" | classify_test_targets)
   fi
 
@@ -1315,32 +1408,33 @@ run_scoped_tests() {
       | awk -F'\t' -v p="$1" '$2 == p { print $3; f = 1; exit } END { if (!f) print 0 }'
   }
 
-  # Bash 3.2-safe newline-delimited package set (grep -qxF dedup). Built from BOTH
-  # path owners AND the owners of every changed --test target — the latter covers
-  # members with no path prefix of their own (notably the workspace-root `cqlite`
-  # package, which owns the top-level tests/*.rs targets; issue #1821 finding 1).
-  local pkgset="" pkg key tpkg
-  while IFS= read -r key; do
-    [ -n "$key" ] || continue
-    pkg=${key%%|*}
-    [ -n "$pkg" ] || continue
-    printf '%s\n' "$pkgset" | grep -qxF "$pkg" || pkgset="${pkgset}${pkg}"$'\n'
-  done <<<"$owners"
-  while IFS= read -r key; do
-    [ -n "$key" ] || continue
-    tpkg=${key%%|*}
-    [ -n "$tpkg" ] || continue
-    printf '%s\n' "$pkgset" | grep -qxF "$tpkg" || pkgset="${pkgset}${tpkg}"$'\n'
-  done <<<"$newtests"
-
+  # ROUTING — single source of truth (issue #1893, roborev job 1450): the executor
+  # consumes classify_scoped_plan's output — the SAME function the hidden
+  # `--classify-scoped-plan` hook exposes and the py-route self-tests assert — so
+  # the routing logic (package-set union, cqlite-py exclusion, python-tier flag)
+  # exists exactly ONCE. An executor-only edit that re-routed a python diff back to
+  # `cargo test -p cqlite-py` is now impossible without also changing the asserted
+  # plan. Plan lines: "rust-pkg: <pkg>" and "python-tier: <cmd>".
+  local plan line
+  plan=$(printf '%s\n' "$changed" | classify_scoped_plan)
   local -a pkgs=()
-  while IFS= read -r pkg; do [ -n "$pkg" ] && pkgs+=("$pkg"); done <<<"$pkgset"
-  local scoped_note
-  if [ "${#pkgs[@]}" -eq 0 ]; then
+  local python_diff=0
+  while IFS= read -r line; do
+    case "$line" in
+      "rust-pkg: "*) pkgs+=("${line#rust-pkg: }") ;;
+      "python-tier: "*) python_diff=1 ;;
+    esac
+  done <<<"$plan"
+  local scoped_note=""
+  [ "${#pkgs[@]}" -gt 0 ] && scoped_note="${pkgs[*]}"
+  if [ "$python_diff" -eq 1 ]; then
+    scoped_note="${scoped_note:+$scoped_note + }python tier ($PYTHON_LITE_TIER_CMD)"
+  fi
+  # Fall back to the cqlite-core --lib default ONLY when the diff selected nothing
+  # at all — NOT when a python-only diff already routed to the python tier.
+  if [ "${#pkgs[@]}" -eq 0 ] && [ "$python_diff" -eq 0 ]; then
     pkgs=(cqlite-core)
     scoped_note="cqlite-core --lib (default; no rust workspace package in the diff)"
-  else
-    scoped_note="${pkgs[*]}"
   fi
   echo ">>> [$name] blast-radius packages: $scoped_note"
 
@@ -1363,8 +1457,11 @@ run_scoped_tests() {
     printf '%s' "$set"
   }
 
+  # Bash 3.2 under `set -u` treats "${pkgs[@]}" of an EMPTY array as unbound, and a
+  # python-only diff now legitimately leaves pkgs empty (python tier covers it), so
+  # expand with the ${arr[@]+"${arr[@]}"} guard rather than unconditionally.
   local p rest tname feats
-  for p in "${pkgs[@]}"; do
+  for p in ${pkgs[@]+"${pkgs[@]}"}; do
     local -a args=(test -p "$p")
     local featset=""
     # cqlite-core lib tests need cli-helpers (matches the full gate's core-tests).
@@ -1411,6 +1508,53 @@ run_scoped_tests() {
     fi
   done
 
+  # Python tier (issue #1893): the REAL python signal --lite runs for a
+  # bindings/python diff instead of the always-libpython-link-failing
+  # `cargo test -p cqlite-py`. Reuses the full gate's persistent venv
+  # (target/agent-gate-venv). Both phases `eval` the PYTHON_LITE_*_CMD component
+  # constants that also compose the advertised PYTHON_LITE_TIER_CMD plan string
+  # (roborev job 1449) — plan/executor drift is structurally impossible.
+  #
+  # SKIP vs FAIL split (roborev job 1449, Low): TOOLCHAIN failures (venv creation,
+  # pip install — e.g. offline, or the maturin build environment itself missing) get
+  # a loud SKIP-note, never FAIL — --lite must stay usable offline, and a toolchain
+  # gap is not a code failure (clippy in this same lite run still compiles cqlite-py,
+  # and the full gate's python-bindings component hard-fails). A PYTEST failure is a
+  # real code failure and FAILs. NOTE: a python-diff --lite round costs a maturin
+  # compile of the extension (seconds warm via the persistent venv + sccache,
+  # ~1-3 min cold).
+  if [ "$python_diff" -eq 1 ]; then
+    if ! command -v python3 >/dev/null 2>&1; then
+      echo ">>> [$name] python binding diff but no python3 on PATH — SKIP python tier (run the full gate)"
+      PYTHON_TIER_NOTE="python-tier: SKIPPED (no python3 on PATH) — python-binding diff NOT validated by this lite run; run the full gate"
+    else
+      local venv="$REPO_ROOT/target/agent-gate-venv"
+      echo ">>> [$name] python tier: $PYTHON_LITE_TIER_CMD (venv: $venv)"
+      if ! RUN_SLOW_TESTS=0 PY_MATURIN_CMD="$PYTHON_LITE_MATURIN_CMD" bash -c '
+          set -euo pipefail
+          venv="'"$venv"'"
+          [ -x "$venv/bin/python" ] || python3 -m venv "$venv"
+          . "$venv/bin/activate"
+          pip install --quiet --upgrade pip >/dev/null
+          pip install --quiet maturin pytest
+          eval "$PY_MATURIN_CMD"' >>"$log" 2>&1; then
+        echo ">>> [$name] python tier SKIP (venv/pip/maturin toolchain setup failed — offline or toolchain gap, NOT a code failure; see $log; run the full gate when the toolchain is available)"
+        PYTHON_TIER_NOTE="python-tier: SKIPPED (toolchain: venv/pip/maturin setup failed — offline?) — python-binding diff NOT validated by this lite run; run the full gate"
+      elif RUN_SLOW_TESTS=0 PY_PYTEST_CMD="$PYTHON_LITE_PYTEST_CMD" bash -c '
+          set -euo pipefail
+          . "'"$venv"'/bin/activate"
+          eval "$PY_PYTEST_CMD"' >>"$log" 2>&1; then
+        echo ">>> [$name] python tier PASS"
+        PYTHON_TIER_NOTE="python-tier: PASS ($PYTHON_LITE_TIER_CMD)"
+      else
+        status=FAIL
+        OVERALL=FAIL
+        echo ">>> [$name] python tier FAIL (pytest failure — a real code failure)"
+        PYTHON_TIER_NOTE="python-tier: FAIL (pytest failure — a real code failure)"
+      fi
+    fi
+  fi
+
   if [ "$status" = FAIL ]; then
     echo "--- [$name] FAILED; last 60 lines of $log ---"
     tail -60 "$log"
@@ -1444,6 +1588,10 @@ run_lite() {
   declare -a SUMMARY_META=()
   SUMMARY_META+=("commit: $(git rev-parse --short HEAD) branch: $(git rev-parse --abbrev-ref HEAD) dirty: $(test -n "$(git status --porcelain)" && echo yes || echo no)")
   SUMMARY_META+=("lite-scope: file-size fmt clippy scoped-tests (full gate NOT run — run it once before merge)")
+  # Python-tier verdict marker (roborev job 1450): when a python-binding diff was
+  # in scope, the block carries the tier's verdict — a SKIPPED marker makes a
+  # "green but validated nothing" block detectable from the block alone.
+  [ -n "$PYTHON_TIER_NOTE" ] && SUMMARY_META+=("$PYTHON_TIER_NOTE")
   SUMMARY_META+=("$(accelerators_line)")
   local i
   for i in "${!NAMES[@]}"; do
