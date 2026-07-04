@@ -100,14 +100,14 @@ struct Counters {
     /// `payload+CRC` buffer, so a steady-state chunk read records exactly one.
     read_calls: AtomicU64,
     /// Heap allocations in the per-chunk read→decompress→window-fill copy chain
-    /// (`CHUNK_PATH_ALLOCS`) — consumer E3. Bumped at each genuine heap allocation
-    /// the copy chain performs for one chunk: the compressed-bytes buffer
-    /// (`block_io`), the decompression output buffer (`compression`), and the
-    /// cached decompressed `Arc<[u8]>` (`DecompressedChunkCache`). Before E3 a
-    /// steady-state windowed-scan chunk allocated all three (≥3); after E3 the
-    /// compressed buffer is a recycled per-scan scratch and decompression writes
-    /// into a reused scratch, so only the cached `Arc` (issue B1, kept) allocates
-    /// — exactly one per chunk.
+    /// (`CHUNK_PATH_ALLOCS`) — consumer E3/#1940. **Instrumented today at ONE site
+    /// only**: the compressed-bytes `payload+CRC` buffer allocated in the cursor
+    /// chunk-read path (`block_io`). The other two copy-chain allocation sites —
+    /// the decompression output buffer (`compression`) and the cached decompressed
+    /// `Arc<[u8]>` (`DecompressedChunkCache`) — are NOT yet instrumented, so this
+    /// counter currently reflects the compressed-buffer allocation alone and
+    /// undercounts the full copy chain. Wiring those sites (and the ≤1-alloc/chunk
+    /// reduction they measure) is the A4 work deferred to issue #1940.
     chunk_path_allocs: AtomicU64,
 }
 
@@ -247,12 +247,14 @@ pub fn record_read() {
 }
 
 /// Record one heap allocation in the per-chunk read→decompress→window-fill copy
-/// chain (`CHUNK_PATH_ALLOCS`; consumer E3).
+/// chain (`CHUNK_PATH_ALLOCS`; consumer E3/#1940).
 ///
-/// Called unconditionally at each genuine chunk-path allocation site (the
-/// compressed-bytes buffer in `block_io`, the decompression output buffer in
-/// `compression`, and the cached `Arc<[u8]>` in `DecompressedChunkCache`); the
-/// body compiles to a no-op in a release build (design.md Decision 1).
+/// Called today at ONE site: the compressed-bytes `payload+CRC` buffer in the
+/// cursor chunk-read path (`block_io`). The remaining copy-chain allocation sites
+/// — the decompression output buffer (`compression`) and the cached `Arc<[u8]>`
+/// in `DecompressedChunkCache` — are NOT yet instrumented; wiring them is the A4
+/// ≤1-alloc/chunk work deferred to issue #1940. The body compiles to a no-op in a
+/// release build (design.md Decision 1).
 #[inline(always)]
 pub fn record_chunk_path_alloc() {
     #[cfg(any(test, feature = "work-counters"))]
