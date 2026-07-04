@@ -28,6 +28,8 @@ mod integrity;
 mod key_digest;
 pub(crate) mod parsing; // Needs to be accessible from row_cell_state_machine
 mod partition_lookup;
+// Positional (`pread`-style) point-read backends (issue #1573, Epic C / C2).
+mod read_at;
 // sync-fallback registry-schema pre-resolution (issue #1692)
 #[cfg(feature = "state_machine")]
 mod registry_schema;
@@ -464,6 +466,30 @@ impl SSTableReader {
         .await?;
         let file = Arc::new(Mutex::new(source));
 
+        // Build the POINT-READ positional source ONCE at open (issue #1573, C2).
+        // It shares the reader's `Arc<Mmap>` when the backend is mmap (no extra
+        // mapping / fd); for buffered/direct it holds one dedicated read-only fd,
+        // which is exactly the "open the fd once, positioned-read thereafter"
+        // contract that removes the BTI per-lookup `open(2)`. Every non-mmap
+        // backend degrades gracefully to a plain positioned fd if the faster
+        // backend is refused, mirroring `build_block_sources`.
+        let point_source: Arc<dyn read_at::ReadAt> = match &scan_source {
+            ScanSource::Mapped(mmap) => Arc::new(read_at::MmapReadAt::new(mmap.clone())),
+            #[cfg(unix)]
+            ScanSource::Direct { .. } => match read_at::DirectReadAt::open(path, file_size) {
+                Ok(d) => Arc::new(d) as Arc<dyn read_at::ReadAt>,
+                Err(e) => {
+                    log::warn!(
+                        "Direct-I/O point source for {} failed ({}); using buffered pread",
+                        path.display(),
+                        e
+                    );
+                    Arc::new(read_at::PlainFileReadAt::open(path, file_size)?)
+                }
+            },
+            ScanSource::Buffered { .. } => Arc::new(read_at::PlainFileReadAt::open(path, file_size)?),
+        };
+
         // Parse header - read available bytes, not a fixed size
         // NOTE: For NB format files (Cassandra 4.x+), Data.db often contains compressed row data
         // with no embedded header. The header.rs module detects this via filename pattern and
@@ -726,6 +752,7 @@ impl SSTableReader {
             file_path: path.to_path_buf(),
             file,
             scan_source,
+            point_source,
             header,
             parser,
             index,

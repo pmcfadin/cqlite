@@ -18,8 +18,6 @@ use std::io::SeekFrom;
 use tokio::io::AsyncSeekExt;
 
 #[cfg(not(feature = "tombstones"))]
-use super::super::source::ScanCursor;
-#[cfg(not(feature = "tombstones"))]
 use super::model::{physical_byte_bounds_for_slice, ClusteringRowWindow, ClusteringSlice};
 
 impl SSTableReader {
@@ -529,6 +527,56 @@ impl SSTableReader {
         (target_chunk, window_base, within)
     }
 
+    /// Positional (`pread`) fetch of compressed chunk `chunk_idx` for the
+    /// POINT-READ path (issue #1573, C2). Reads via the shared `point_source` — no
+    /// per-lookup `open(2)`, no cursor, no mutex — CRC-checks the chunk, and
+    /// returns the compressed bytes (the caller decompresses). `Ok(None)` at EOF.
+    /// Only called on the chunk-targeted path, where `CompressionInfo` is present.
+    pub(super) fn point_read_compressed_chunk(&self, chunk_idx: usize) -> Result<Option<Vec<u8>>> {
+        let Some(ci) = self.compression_info.as_deref() else {
+            return Ok(None);
+        };
+        super::super::block_io::read_compressed_chunk_at(
+            self.point_source.as_ref(),
+            ci,
+            chunk_idx,
+            self.stats.file_size,
+            self.actual_header_size as u64,
+        )
+    }
+
+    /// Positional (`pread`) read of the ENTIRE uncompressed data section for the
+    /// point-read whole-section fallback (issue #1573, C2) — used when chunk
+    /// targeting is impossible (no/zero `chunk_length`, i.e. an uncompressed BTI or
+    /// nb-without-CompressionInfo Data.db). Reads `[header_size, file_size)` in one
+    /// positioned read and, when a `CRC.db` is present (uncompressed BIG), verifies
+    /// the covering chunks BEFORE the bytes are parsed — preserving the CRC-then-use
+    /// ordering the cursor path enforced via `read_uncompressed_data_block`.
+    pub(super) async fn point_read_whole_section(&self) -> Result<Vec<u8>> {
+        let header_size = self.calculate_header_size() as u64;
+        // Authoritative file length straight from the positional source (== the
+        // reader's `file_size`; using the source keeps the read self-consistent).
+        let end = self.point_source.len();
+        let len = end.saturating_sub(header_size);
+        let mut whole = vec![0u8; len as usize];
+        if len > 0 {
+            self.point_source.read_exact_at(header_size, &mut whole)?;
+        }
+        // CRC-verify the covering chunk(s) when a CRC.db is present (no-op for BTI
+        // and compressed tables). `verify_uncompressed_range` takes a u32 size, so
+        // walk the section in ≤ u32::MAX windows; the verifier memoizes per chunk,
+        // so a boundary-straddling window never re-CRCs a chunk.
+        if self.crc_reader.is_some() {
+            let mut off = header_size;
+            while off < end {
+                let span = (end - off).min(u32::MAX as u64) as u32;
+                self.verify_uncompressed_range(off, span).await?;
+                off += span as u64;
+            }
+        }
+        Ok(whole)
+    }
+
     /// Decompress only the chunk(s) needed to fully parse the target partition at
     /// uncompressed `offset`, then parse and return its row value (issue #831).
     ///
@@ -572,9 +620,10 @@ impl SSTableReader {
     ) -> Result<Option<ScanRow>> {
         use crate::storage::sstable::compression::Compression;
 
-        // Issue #815: each lookup uses its own cursor so concurrent lookups on
-        // this reader never share a mutable file position / chunk index.
-        let cursor = self.new_scan_cursor().await?;
+        // Issue #1573 (C2): the point path fetches chunks via positioned reads on
+        // the shared `point_source` — no per-lookup `open(2)`, no cursor, no mutex.
+        // `chunk_index` is a plain local (a lookup is single-threaded within
+        // itself); concurrency safety comes from `read_at` being `&self`.
 
         // Determine the chunk-targeting parameters. `chunk_length == 0` (or no
         // CompressionInfo) means we cannot chunk-target -> whole-section fallback.
@@ -584,48 +633,20 @@ impl SSTableReader {
             .map(|ci| ci.chunk_length as usize)
             .filter(|&len| len > 0);
 
+        let mut chunk_index = 0usize;
         let (target_chunk, window_base, mut window) = match chunk_length {
             Some(len) => {
                 let (target_chunk, window_base, _within) = Self::bti_chunk_target(offset, len);
-                // Seek to the START of target_chunk so read_next_block() reads it
-                // first, and set the shared chunk index accordingly. Chunk offsets
-                // are relative to file start for NB/BTI (header_offset = 0).
-                let chunk_start = self
-                    .compression_info
-                    .as_ref()
-                    .and_then(|ci| ci.compressed_chunk_offset(target_chunk))
-                    .ok_or_else(|| {
-                        Error::corruption(format!(
-                            "BTI point lookup: no compressed offset for target chunk {} \
-                             (offset {}, chunk_length {})",
-                            target_chunk, offset, len
-                        ))
-                    })?;
-                {
-                    let mut file_guard = cursor.file.lock().await;
-                    // A5 read-work counter (SEEK_CALLS; consumer E4): BTI point-lookup
-                    // target-chunk seek on the production read path. No-op in release
-                    // (design.md Decision 1/2).
-                    crate::storage::sstable::read_work_counters::record_seek();
-                    file_guard.seek(SeekFrom::Start(chunk_start)).await?;
-                }
-                cursor
-                    .chunk_index
-                    .store(target_chunk, std::sync::atomic::Ordering::Relaxed);
+                // Positioned reads resolve their own offset from the chunk index, so
+                // no pre-seek is needed — just start at `target_chunk`.
+                chunk_index = target_chunk;
                 (target_chunk, window_base, Vec::<u8>::new())
             }
             None => {
-                // Whole-section fallback (uncompressed BTI, or chunk_length absent/0).
-                let header_size = self.calculate_header_size();
-                {
-                    let mut file_guard = cursor.file.lock().await;
-                    // A5 read-work counter (SEEK_CALLS; consumer E4): whole-section
-                    // fallback seek-to-data-start. No-op in release (design.md
-                    // Decision 1/2).
-                    crate::storage::sstable::read_work_counters::record_seek();
-                    file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
-                }
-                let whole = self.stitch_all_chunks(&cursor).await?;
+                // Whole-section fallback (uncompressed BTI, or chunk_length absent/0):
+                // one positioned read of the whole data section, CRC-verified when a
+                // CRC.db is present (see `point_read_whole_section`).
+                let whole = self.point_read_whole_section().await?;
                 (0usize, 0usize, whole)
             }
         };
@@ -647,16 +668,13 @@ impl SSTableReader {
             // If chunk-targeted, append the next chunk before each parse attempt
             // (the whole-section fallback already has all bytes in `window`).
             if chunk_targeted {
-                // Cache key: the ABSOLUTE chunk index about to be read. `read_next_block`
-                // reads `cursor.chunk_index` then increments it, so capture it first
-                // (issue #1567). Shared cache is consulted before decompress; a hit
-                // skips the decompressor (the compressed bytes were still read).
-                let this_chunk = cursor
-                    .chunk_index
-                    .load(std::sync::atomic::Ordering::Relaxed)
-                    as u64;
-                match self.read_next_block(&cursor).await? {
+                // Cache key: the ABSOLUTE chunk index about to be read (issue #1567).
+                // Shared cache is consulted before decompress; a hit skips the
+                // decompressor (the compressed bytes were still read + CRC-checked).
+                let this_chunk = chunk_index as u64;
+                match self.point_read_compressed_chunk(chunk_index)? {
                     Some(compressed_chunk) => {
+                        chunk_index += 1;
                         let key = self.chunk_cache_key(super::NS_BTI_CHUNK, this_chunk);
                         let decompressed_chunk: std::sync::Arc<[u8]> = if let Some(hit) =
                             self.chunk_cache.get(&key)
@@ -857,9 +875,8 @@ impl SSTableReader {
         schema_opt: Option<&crate::schema::TableSchema>,
         parser: &crate::storage::sstable::reader::parsing::V5CompressedLegacyParser,
     ) -> Result<Option<Vec<ScanRow>>> {
-        // Issue #815: each lookup uses its own cursor so concurrent lookups on
-        // this reader never share a mutable file position / chunk index.
-        let cursor = self.new_scan_cursor().await?;
+        // Issue #1573 (C2): positioned reads on the shared `point_source` — no
+        // per-lookup `open(2)`, no cursor, no mutex. `chunk_index` is a plain local.
 
         // Determine the chunk-targeting parameters. `chunk_length == 0` (or no
         // CompressionInfo) means we cannot chunk-target -> whole-section fallback.
@@ -869,45 +886,19 @@ impl SSTableReader {
             .map(|ci| ci.chunk_length as usize)
             .filter(|&len| len > 0);
 
+        let mut chunk_index = 0usize;
         let (target_chunk, window_base, mut window) = match chunk_length {
             Some(len) => {
                 let (target_chunk, window_base, _within) = Self::bti_chunk_target(offset, len);
-                let chunk_start = self
-                    .compression_info
-                    .as_ref()
-                    .and_then(|ci| ci.compressed_chunk_offset(target_chunk))
-                    .ok_or_else(|| {
-                        Error::corruption(format!(
-                            "BTI single-partition seek: no compressed offset for target chunk {} \
-                             (offset {}, chunk_length {})",
-                            target_chunk, offset, len
-                        ))
-                    })?;
-                {
-                    let mut file_guard = cursor.file.lock().await;
-                    // A5 read-work counter (SEEK_CALLS; consumer E4): BTI
-                    // single-partition target-chunk seek on the production read path.
-                    // No-op in release (design.md Decision 1/2).
-                    crate::storage::sstable::read_work_counters::record_seek();
-                    file_guard.seek(SeekFrom::Start(chunk_start)).await?;
-                }
-                cursor
-                    .chunk_index
-                    .store(target_chunk, std::sync::atomic::Ordering::Relaxed);
+                // Positioned reads resolve their own offset from the chunk index.
+                chunk_index = target_chunk;
                 (target_chunk, window_base, Vec::<u8>::new())
             }
             None => {
-                // Whole-section fallback (uncompressed BTI, or chunk_length absent/0).
-                let header_size = self.calculate_header_size();
-                {
-                    let mut file_guard = cursor.file.lock().await;
-                    // A5 read-work counter (SEEK_CALLS; consumer E4): whole-section
-                    // fallback seek-to-data-start. No-op in release (design.md
-                    // Decision 1/2).
-                    crate::storage::sstable::read_work_counters::record_seek();
-                    file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
-                }
-                let whole = self.stitch_all_chunks(&cursor).await?;
+                // Whole-section fallback (uncompressed BTI, or chunk_length absent/0):
+                // one positioned read of the whole data section, CRC-verified when a
+                // CRC.db is present (see `point_read_whole_section`).
+                let whole = self.point_read_whole_section().await?;
                 (0usize, 0usize, whole)
             }
         };
@@ -959,7 +950,7 @@ impl SSTableReader {
                     || !Self::bti_partition_key_bytes_available(&window, within, key.as_bytes())
                 {
                     match self
-                        .bti_pull_decompressed_chunk(&cursor, &mut window)
+                        .bti_pull_decompressed_chunk(&mut chunk_index, &mut window)
                         .await?
                     {
                         true => continue, // chunk appended; re-check the header
@@ -995,7 +986,7 @@ impl SSTableReader {
             let needed = end_offset.saturating_sub(window_base);
             while window.len() < needed {
                 if !self
-                    .bti_pull_decompressed_chunk(&cursor, &mut window)
+                    .bti_pull_decompressed_chunk(&mut chunk_index, &mut window)
                     .await?
                 {
                     break; // EOF: window holds all available bytes.
@@ -1048,12 +1039,16 @@ impl SSTableReader {
     #[cfg(not(feature = "tombstones"))]
     async fn bti_pull_decompressed_chunk(
         &self,
-        cursor: &ScanCursor,
+        chunk_index: &mut usize,
         window: &mut Vec<u8>,
     ) -> Result<bool> {
         use crate::storage::sstable::compression::Compression;
-        match self.read_next_block(cursor).await? {
+        // Issue #1573 (C2): positioned chunk fetch — no cursor, no mutex, no
+        // per-lookup open. CRC is verified inside `point_read_compressed_chunk`
+        // BEFORE we decompress here (guardrail #1411).
+        match self.point_read_compressed_chunk(*chunk_index)? {
             Some(compressed_chunk) => {
+                *chunk_index += 1;
                 let decompressed_chunk = if let Some(compression_reader) = &self.compression_reader
                 {
                     let compression = Compression::new(*compression_reader.algorithm())?;

@@ -532,7 +532,6 @@ impl SSTableReader {
     async fn get_cached_data(&self, block_offset: u64, size: u32) -> Result<Vec<u8>> {
         use crate::parser::header::CassandraVersion;
         use crate::storage::sstable::compression::Compression;
-        use tokio::io::AsyncReadExt;
 
         let key = self.chunk_cache_key_ranged(NS_BIG_POINT, block_offset, size);
         if let Some(hit) = self.chunk_cache.get(&key) {
@@ -542,13 +541,11 @@ impl SSTableReader {
         self.record_cache_miss();
 
         // Read from disk (counted so a repeat read can prove zero underlying reads).
+        // Positioned read on the shared point source (issue #1573, C2): no cursor
+        // mutex is held across this I/O, so concurrent point reads do not convoy.
         model::CHUNK_READ_CALLS.fetch_add(1, Ordering::Relaxed);
-        let mut file = self.file.lock().await;
-        file.seek(SeekFrom::Start(block_offset)).await?;
-
         let mut buffer = vec![0u8; size as usize];
-        file.read_exact(&mut buffer).await?;
-        drop(file); // Release file lock early
+        self.point_source.read_exact_at(block_offset, &mut buffer)?;
 
         // Decompress if needed
         let data = if let Some(compression_reader) = &self.compression_reader {
@@ -595,8 +592,6 @@ impl SSTableReader {
     /// No-op when this reader has no `CRC.db` (compressed tables carry inline
     /// per-chunk CRCs; BTI ships none; an absent `CRC.db` is warn-and-proceed).
     async fn verify_uncompressed_range(&self, offset: u64, size: u32) -> Result<()> {
-        use tokio::io::AsyncReadExt;
-
         let Some(crc) = self.crc_reader.as_deref() else {
             return Ok(());
         };
@@ -644,15 +639,14 @@ impl SSTableReader {
                 break; // range extends past EOF; nothing real to verify
             }
             let mut buf = vec![0u8; (hi - lo) as usize];
-            {
-                let mut file = self.file.lock().await;
-                file.seek(SeekFrom::Start(lo)).await?;
-                file.read_exact(&mut buf).await.map_err(|e| {
-                    Error::corruption(format!(
-                        "failed to read uncompressed chunk {chunk} at Data.db offset 0x{lo:x} for CRC verification: {e}"
-                    ))
-                })?;
-            }
+            // Positioned read on the shared point source (issue #1573, C2): the CRC
+            // verifier never holds a cursor mutex across I/O, so it neither convoys
+            // concurrent point reads nor disturbs any scan cursor's position.
+            self.point_source.read_exact_at(lo, &mut buf).map_err(|e| {
+                Error::corruption(format!(
+                    "failed to read uncompressed chunk {chunk} at Data.db offset 0x{lo:x} for CRC verification: {e}"
+                ))
+            })?;
             let computed = crc32fast::hash(&buf);
             let expected = crc.crc_for_chunk(chunk as usize)?;
             if computed != expected {

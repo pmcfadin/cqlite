@@ -331,6 +331,46 @@ fn offset_from(base: u64, offset: i64) -> io::Result<u64> {
     Ok(result)
 }
 
+/// Open a file handle in cache-bypassing (direct-I/O) mode for the current
+/// platform. Shared by the scan-cursor [`DirectCursor`] and the point-read
+/// [`DirectReadAt`](super::read_at::DirectReadAt) so both honor the exact same
+/// per-platform primitive.
+///
+/// - Linux/Android: `O_DIRECT`.
+/// - macOS: `F_NOCACHE` (the per-fd equivalent; no `O_DIRECT`).
+/// - other Unix: unsupported → the caller falls back to buffered I/O.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(crate) fn open_direct_file(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECT)
+        .open(path)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn open_direct_file(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::unix::io::AsRawFd;
+    let file = std::fs::File::open(path)?;
+    // SAFETY: `fcntl` with `F_NOCACHE` on a freshly opened, valid fd.
+    let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_NOCACHE, 1) };
+    if rc == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(file)
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "linux", target_os = "android", target_os = "macos"))
+))]
+pub(crate) fn open_direct_file(_path: &Path) -> io::Result<std::fs::File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "direct I/O is not supported on this platform",
+    ))
+}
+
 /// I/O alignment (bytes) for direct reads. `O_DIRECT` requires the file
 /// offset, transfer length, and user buffer to all be aligned to the logical
 /// block size of the underlying device. 4096 is a safe superset of the common
@@ -412,40 +452,8 @@ impl DirectCursor {
     }
 
     /// Open a file handle in cache-bypassing mode for the current platform.
-    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn open_direct(path: &Path) -> io::Result<std::fs::File> {
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECT)
-            .open(path)
-    }
-
-    /// macOS has no `O_DIRECT`; `F_NOCACHE` is the equivalent per-fd hint that
-    /// tells the unified buffer cache not to retain data for this descriptor.
-    #[cfg(target_os = "macos")]
-    fn open_direct(path: &Path) -> io::Result<std::fs::File> {
-        use std::os::unix::io::AsRawFd;
-        let file = std::fs::File::open(path)?;
-        // SAFETY: `fcntl` with `F_NOCACHE` on a freshly opened, valid fd.
-        let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_NOCACHE, 1) };
-        if rc == -1 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(file)
-    }
-
-    /// Other Unix targets: no portable cache-bypass primitive is wired up, so
-    /// report unsupported and let the caller fall back to buffered I/O.
-    #[cfg(all(
-        unix,
-        not(any(target_os = "linux", target_os = "android", target_os = "macos"))
-    ))]
-    fn open_direct(_path: &Path) -> io::Result<std::fs::File> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "direct I/O is not supported on this platform",
-        ))
+        open_direct_file(path)
     }
 
     /// Ensure the byte at `self.pos` is resident in `buf`, refilling with one
