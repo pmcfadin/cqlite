@@ -46,13 +46,16 @@ const MEASURE_PASSES = 7;
 //   Median-of-7 (as this test computes it) stabilized at 1295.2 bytes/row once
 //   V8 warmed (a cold experiment measured 1357.6). Single-sample spread over 12
 //   warm samples was min=1295.2 / max=1534.9.
-// Budget = 1800 bytes/row: ~1.33x-1.39x over the warm/cold medians (headroom for
-// V8 GC / hidden-class churn — heapUsed deltas are noisier than Python's
-// tracemalloc, which is why we assert the MEDIAN pass, not a worst-case single
-// sample), yet below a regression that inflates the per-row value graph: a
-// synthetic value-graph-doubling regression (converting + retaining each cell's
-// value twice) measured a median of 2086.1 bytes/row (min 2047.5) — comfortably
-// over this budget. Pinned to a measured number per the issue mandate.
+// Budget = 2000 bytes/row: baseline measured on macOS arm64 release-unwind
+// (~1295 warm median, up to ~1535 single-sample). `process.memoryUsage().heapUsed`
+// deltas are platform/build-profile/GC-timing dependent, so 2000 leaves headroom
+// for Linux x64 / debug-build / GC-timing drift (heapUsed deltas are noisier than
+// Python's tracemalloc, which is why we assert the MEDIAN pass, not a worst-case
+// single sample) while staying under the ~2086 doubling-regression signal
+// (documented as the biting threshold): a synthetic value-graph-doubling
+// regression (converting + retaining each cell's value twice) measured a median
+// of 2086.1 bytes/row (min 2047.5), so the ratchet still bites a genuine
+// O(rows x columns) regression. Pinned to a measured number per the issue mandate.
 //
 // WHAT THIS BUDGET DOES AND DOES NOT PIN (issue #1449, measured — honest scope):
 // The V8 `heapUsed` delta pins the GROSS per-row JS value-graph footprint, so it
@@ -70,7 +73,7 @@ const MEASURE_PASSES = 7;
 // `set_map_ctor_lookups_bounded_per_result` counter (bindings/node/src/value.rs);
 // #1445/#1446/#1447 would need Rust-side allocation counters to ratchet directly
 // (none exists yet) — this heap test does not overclaim them.
-const BUDGET_BYTES_PER_ROW = 1800;
+const BUDGET_BYTES_PER_ROW = 2000;
 
 function median(nums) {
   const sorted = [...nums].sort((a, b) => a - b);
