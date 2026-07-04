@@ -169,6 +169,55 @@ sccache --stop-server
 sccache --start-server
 ```
 
+### Accelerator degradation is LOUD, not silent (issue #1848)
+
+Every optional accelerator the gate depends on — **sccache** (cross-worktree
+compile cache), **cargo-nextest** (parallel core-tests), and **parallel component
+lanes** (needs bash ≥4.3 for `wait -n`) — is auto-detected. When one is **missing**
+the gate now emits a **loud `WARN:` line on STDERR** with the one-line install
+command, so a machine can never silently run ~3x slower again (the 2026-07-03/04
+field failures: sccache and nextest both un-installed for weeks, and stock macOS
+bash 3.2 serializing the lanes — all inert wins with no signal):
+
+```
+agent-gate: WARN: sccache not installed — cross-worktree compile caching DISABLED (~25.6% slower fresh builds); install: brew install sccache (#1848)
+agent-gate: WARN: cargo-nextest not installed — core-tests fall back to serial 'cargo test' (much slower long pole); install: brew install cargo-nextest (#1848)
+agent-gate: WARN: bash <4.3 lacks 'wait -n' — gate components run SERIALLY (no parallel lanes; AGENT_GATE_JOBS=1); install: brew install bash (#1848)
+```
+
+Every SUMMARY block (full **and** `--lite`) carries a **machine-checkable
+`accelerators:` line**, so degradation is visible in the pasted block, not just
+scrollback:
+
+```
+accelerators: sccache=on nextest=absent lanes=serial
+```
+
+State values: `on` (detected & used) · `absent` (missing → WARN) · `off`
+(intentionally disabled via `CQLITE_DISABLE_SCCACHE=1` / `CQLITE_DISABLE_NEXTEST=1`
+/ `AGENT_GATE_JOBS=1`; **no WARN**) · `lanes=serial` (degraded by bash <4.3). An
+intentional opt-out is `off`, never `absent`, and never warns. Self-test coverage:
+`scripts/tests/test_agent_gate_summary.sh` (cases 9a/9b assert the `off`/`absent`
+markers and the WARN).
+
+### Disk hygiene for multi-worktree gates (issue #1848)
+
+Each active worktree owns its own ~25–30GB `target/` dir. Several concurrent
+worktrees can exhaust the disk mid-gate (a confusing hard failure). `flow-finalize`
+removes a finished issue's worktree; additionally prune stale worktrees' `target/`
+dirs and size the shared cache with `SCCACHE_CACHE_SIZE` (recommend `30G` on the
+10-core machine).
+
+**macOS Time Machine local-snapshot gotcha:** deleting `target/` dirs alone often
+reclaims **nothing** while a Time Machine *local snapshot* is pinning the freed
+blocks. If free space does not recover after deleting build artifacts, check and
+thin snapshots:
+
+```bash
+tmutil listlocalsnapshots /                 # any snapshot pins freed blocks
+tmutil thinlocalsnapshots / 40000000000 4   # thin to reclaim (field: 9.1Gi -> 72Gi)
+```
+
 ### Gate Parallelism and nextest (issue #1737)
 
 The gate runs **~75% faster** than v0.12.0 on warm machines via two levers:

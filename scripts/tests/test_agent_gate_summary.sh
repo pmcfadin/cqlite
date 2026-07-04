@@ -48,6 +48,29 @@ trap 'rm -rf "$tmp"' EXIT
 # scratch dir, so (a) we never write the repo-root default during the test, and
 # (b) we can assert the EXACT caller-provided path is complete — the contract.
 
+# assert_accelerators <label> <file>: issue #1848 — the SUMMARY block must carry a
+# machine-checkable `accelerators:` line naming every optional accelerator's state
+# (sccache / nextest / lanes = on|absent|off|serial), so a silent degradation is
+# visible in the pasted block. Assert the line exists with all three keys and a
+# recognized state value (backward-compatible extension; the older markers still
+# assert via assert_complete).
+assert_accelerators() {
+  local label="$1" file="$2"
+  local line
+  line=$(grep -E '^accelerators: ' "$file" 2>/dev/null | head -1)
+  if [ -z "$line" ]; then
+    bad "$label: no 'accelerators:' line in SUMMARY block (file: $file)"
+    echo "------- captured -------"; cat "$file"; echo "------------------------"
+    return
+  fi
+  if printf '%s\n' "$line" \
+       | grep -Eq '^accelerators: sccache=(on|absent|off) nextest=(on|absent|off) lanes=(on|absent|off|serial)$'; then
+    ok "$label: accelerators line well-formed ($line)"
+  else
+    bad "$label: malformed accelerators line: '$line'"
+  fi
+}
+
 # assert_exit <label> <actual-rc> <expected-rc>: assert a captured exit status.
 # Positive selftest cases must exit 0; a regression that emits a complete summary
 # but exits non-zero would otherwise sail through assert_complete unnoticed.
@@ -67,6 +90,8 @@ AGENT_GATE_SUMMARY_FILE="$tmp/case1.txt" \
 assert_exit "tee-pipe" "${PIPESTATUS[0]}" 0
 assert_complete "tee-pipe" "$tmp/tee.log"
 assert_complete "tee-pipe-caller-file" "$tmp/case1.txt"
+# #1848: the full SUMMARY block carries a well-formed accelerators line.
+assert_accelerators "tee-pipe-caller-file" "$tmp/case1.txt"
 
 # 2. Backgrounded capture + wait (streamed copy must be complete).
 AGENT_GATE_SUMMARY_FILE="$tmp/case2.txt" \
@@ -253,6 +278,8 @@ else
   bad "lite-selftest: missing LITE markers or MODE line (file: $lite_file)"
   echo "------- captured -------"; cat "$lite_file"; echo "------------------------"
 fi
+# #1848: the LITE SUMMARY block also carries the accelerators line.
+assert_accelerators "lite-selftest" "$lite_file"
 # The lite block MUST NOT carry the full-gate markers (would be pasteable as the
 # full SUMMARY). The full START marker is a prefix of the LITE one, so match the
 # full marker only when it is NOT the LITE marker (i.e. its own line boundaries).
@@ -426,6 +453,117 @@ if [ -x /bin/bash ]; then
     ok "bash-compat: --lite classification path runs under /bin/bash (major ${bin_bash_major:-?})"
   else
     bad "bash-compat: --lite classification path failed under /bin/bash (major ${bin_bash_major:-?})"
+  fi
+fi
+
+# 9. Accelerator absence WARN + state markers (issue #1848). The gate must:
+#    (a) mark an intentionally-disabled accelerator (CQLITE_DISABLE_*) `off` and
+#        emit NO WARN; (b) mark a truly MISSING accelerator `absent` and emit a
+#        LOUD WARN with the one-line install command. A silent 3x-slower machine is
+#        the failure this guards against.
+#
+# 9a. Intentional disable → off + no WARN (deterministic; no PATH surgery).
+disable_err="$tmp/disable.stderr"
+AGENT_GATE_SUMMARY_FILE="$tmp/disable.txt" \
+  CQLITE_DISABLE_SCCACHE=1 CQLITE_DISABLE_NEXTEST=1 \
+  bash "$GATE" --emit-summary-selftest >/dev/null 2>"$disable_err"
+if grep -qE '^accelerators: sccache=off nextest=off ' "$tmp/disable.txt"; then
+  ok "accel-disable: CQLITE_DISABLE_* -> sccache=off nextest=off in SUMMARY"
+else
+  bad "accel-disable: disabled accelerators not marked off"
+  grep '^accelerators:' "$tmp/disable.txt" 2>/dev/null || cat "$tmp/disable.txt"
+fi
+if grep -q 'WARN: sccache not installed' "$disable_err" \
+   || grep -q 'WARN: cargo-nextest not installed' "$disable_err"; then
+  bad "accel-disable: emitted an absent-WARN for an INTENTIONALLY disabled accelerator"
+else
+  ok "accel-disable: no absent-WARN when accelerator intentionally disabled"
+fi
+
+# 9b. Absent → WARN + `absent` marker. Build a minimal PATH bindir that symlinks
+#     the tools the selftest path needs but deliberately OMITS sccache +
+#     cargo-nextest, so `command -v` inside the gate finds neither regardless of
+#     what is installed on the host.
+#
+#     FAIL-CLOSED (roborev, job 1438): a selftest guarding against silent
+#     degradation must never itself degrade silently. If the minimal-PATH run
+#     cannot start or trips a missing tool, that is a TEST FAILURE (`bad`) naming
+#     the tool to add to the allowlist below — never a quiet info-skip that turns
+#     this commit's most important assertion into a no-op on some hosts.
+#
+#     Allowlist provenance: traced empirically by running the selftest under a
+#     bash-only PATH and iterating until exit 0. The REQUIRED set (the selftest
+#     path hard-fails without them) is: bash dirname mktemp grep cp cat. The
+#     other coreutils below are headroom so a future gate change that touches a
+#     common tool (mkdir, tail, cut, wc, stat, ...) keeps working instead of
+#     failing this case. Tools the gate itself guards with fallbacks (nproc,
+#     sysctl, cargo, git, python3) are OPTIONAL here: absent-on-host is a
+#     specifically-known, documented platform difference (no nproc on macOS, no
+#     sysctl on Linux), so they are linked when present and skipped when not.
+#
+#     Tool paths resolve via `type -P` (forces a PATH *file* lookup; bash 3.2+)
+#     — NOT `command -v`, which can return a shell function/alias NAME from the
+#     host environment and produce a self-referential dangling symlink.
+accel_bin="$tmp/accel-bin"
+mkdir -p "$accel_bin"
+accel_link_fail=0
+# REQUIRED: the selftest path hard-fails without these — missing on the host is
+# itself a failure (fail-closed), not a skip.
+for tool in bash dirname mktemp grep cp cat; do
+  p=$(type -P "$tool" 2>/dev/null)
+  if [ -z "$p" ]; then
+    bad "accel-absent: required tool '$tool' not resolvable on this host (cannot build minimal PATH)"
+    accel_link_fail=1
+    continue
+  fi
+  if ! ln -sf "$p" "$accel_bin/$tool" 2>/dev/null; then
+    bad "accel-absent: could not link required tool '$tool' into minimal PATH"
+    accel_link_fail=1
+  fi
+done
+# OPTIONAL: gate-guarded/platform tools + coreutils headroom (see provenance note).
+for tool in env git python3 sed awk head tail tr sort cut wc stat mkdir rm ln mv \
+            touch chmod basename uname date sleep expr find xargs hostname \
+            cargo nproc sysctl; do
+  p=$(type -P "$tool" 2>/dev/null) || continue
+  [ -n "$p" ] && { ln -sf "$p" "$accel_bin/$tool" 2>/dev/null || true; }
+done
+absent_err="$tmp/absent.stderr"
+absent_rc=0
+if [ "$accel_link_fail" -eq 0 ]; then
+  PATH="$accel_bin" AGENT_GATE_SUMMARY_FILE="$tmp/absent.txt" \
+    "$accel_bin/bash" "$GATE" --emit-summary-selftest >/dev/null 2>"$absent_err" || absent_rc=$?
+  # Any 'command not found' means the gate now invokes a tool the allowlist
+  # lacks — fail loudly and NAME it so the fix is mechanical (add it above).
+  if grep -q 'command not found' "$absent_err"; then
+    bad "accel-absent: gate hit 'command not found' under minimal PATH — add the named tool(s) to the allowlist above"
+    grep 'command not found' "$absent_err" | sort -u
+    accel_link_fail=1
+  fi
+  # A non-zero rc WITHOUT a visible 'command not found' can still be a missing
+  # tool: emit_summary suppresses its verifier's stderr (grep ... 2>/dev/null),
+  # so e.g. a missing grep surfaces as a bogus 'could not write complete summary
+  # file' instead. Either way a non-zero rc here is a test FAILURE, never a skip.
+  if [ "$absent_rc" -ne 0 ] && [ "$accel_link_fail" -eq 0 ]; then
+    bad "accel-absent: selftest under minimal PATH exited $absent_rc (want 0; possibly a missing tool whose error was suppressed — see stderr)"
+    echo "------- stderr -------"; cat "$absent_err"; echo "----------------------"
+    accel_link_fail=1
+  fi
+fi
+if [ "$accel_link_fail" -eq 0 ]; then
+  ok "accel-absent: selftest EXECUTED under minimal PATH (exit 0, no missing tools)"
+  if grep -qE '^accelerators: sccache=absent nextest=absent ' "$tmp/absent.txt"; then
+    ok "accel-absent: missing accelerators marked absent in SUMMARY"
+  else
+    bad "accel-absent: missing accelerators not marked absent"
+    grep '^accelerators:' "$tmp/absent.txt" 2>/dev/null || cat "$tmp/absent.txt"
+  fi
+  if grep -q 'WARN: sccache not installed' "$absent_err" \
+     && grep -q 'WARN: cargo-nextest not installed' "$absent_err"; then
+    ok "accel-absent: loud WARN + install command emitted for each missing accelerator"
+  else
+    bad "accel-absent: missing loud WARN for an absent accelerator"
+    echo "------- stderr -------"; cat "$absent_err"; echo "----------------------"
   fi
 fi
 

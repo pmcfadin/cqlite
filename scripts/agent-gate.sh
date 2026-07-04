@@ -209,12 +209,25 @@ fi
 # ~/Library/Caches/Mozilla.sccache on macOS). Cache size limit:
 # $SCCACHE_CACHE_SIZE (default 10 GiB; raise for multi-user builds).
 # Measurement (issue #1822): 25.6% speedup on fresh worktrees with warm cache.
-if [ "${CQLITE_DISABLE_SCCACHE:-0}" != 1 ] && command -v sccache >/dev/null 2>&1; then
+#
+# Accelerator state (issue #1848): every optional accelerator the gate depends on
+# records a state in ACCEL_* — `on` (detected & used), `absent` (NOT installed →
+# a LOUD WARN with the one-line install command, so a machine is never silently
+# 3x slower again), or `off` (intentionally disabled via CQLITE_DISABLE_*; no
+# WARN). The states are stamped into a machine-checkable `accelerators:` line in
+# the SUMMARY block so degradation is visible in the pasted block, not just
+# scrollback. All WARN/banner text goes to STDERR: hidden hook modes (--classify-*)
+# must keep STDOUT empty, and this detection runs before the hook dispatch.
+ACCEL_SCCACHE=absent
+if [ "${CQLITE_DISABLE_SCCACHE:-0}" = 1 ]; then
+  ACCEL_SCCACHE=off
+elif command -v sccache >/dev/null 2>&1; then
   export RUSTC_WRAPPER=sccache
   export CARGO_INCREMENTAL=0
-  # Diagnostic banner on STDERR: hidden hook modes (--classify-*) must keep their
-  # STDOUT empty, and this dispatch runs before the hook branch (issue #1821).
+  ACCEL_SCCACHE=on
   echo "agent-gate: sccache detected; using as RUSTC_WRAPPER with CARGO_INCREMENTAL=0 (#1822)" >&2
+else
+  echo "agent-gate: WARN: sccache not installed — cross-worktree compile caching DISABLED (~25.6% slower fresh builds); install: brew install sccache (#1848)" >&2
 fi
 export CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-$REPO_ROOT/test-data/datasets}"
 
@@ -227,12 +240,19 @@ export CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-$REPO_ROOT/test-data/datase
 # additionally runs `cargo test --doc` so doctest coverage is never silently
 # dropped (same package/feature selection + same skip).
 NEXTEST=0
-if [ "${CQLITE_DISABLE_NEXTEST:-0}" != 1 ] && command -v cargo-nextest >/dev/null 2>&1; then
+ACCEL_NEXTEST=absent
+if [ "${CQLITE_DISABLE_NEXTEST:-0}" = 1 ]; then
+  ACCEL_NEXTEST=off
+elif command -v cargo-nextest >/dev/null 2>&1; then
   NEXTEST=1
+  ACCEL_NEXTEST=on
   # Banner on STDERR: hidden hook modes (--classify-*, --scoped-test-cmd-noparser)
   # must keep STDOUT empty, and this detection runs before the hook dispatch (same
   # rule the sccache banner above already follows; #1821/#1825).
   echo "agent-gate: cargo-nextest detected ($(cargo nextest --version 2>/dev/null | head -1)); core-tests uses nextest + a cargo test --doc pass (#1737)" >&2
+else
+  # #1848: absent accelerator → LOUD WARN + one-line install command (STDERR).
+  echo "agent-gate: WARN: cargo-nextest not installed — core-tests fall back to serial 'cargo test' (much slower long pole); install: brew install cargo-nextest (#1848)" >&2
 fi
 
 # Bounded component parallelism (issue #1737): independent gate components run
@@ -257,15 +277,33 @@ case "$AGENT_GATE_JOBS" in *[!0-9]*|'') AGENT_GATE_JOBS=1 ;; esac
 # The bounded pool relies on `wait -n` (bash 4.3+). On older bash (e.g. macOS's
 # stock /bin/bash 3.2) fall back to sequential execution rather than risk a
 # busy-poll race; correctness is identical, only wall-clock differs.
-if [ "$AGENT_GATE_JOBS" -gt 1 ] && \
-   ! { [ "${BASH_VERSINFO[0]:-0}" -gt 4 ] || \
-       { [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] && [ "${BASH_VERSINFO[1]:-0}" -ge 3 ]; }; }; then
-  # Banner on STDERR (see nextest note above): hidden hook modes must keep STDOUT
-  # empty, and this runs before the hook dispatch — under stock bash 3.2 this
-  # branch is always taken, so an stdout banner here corrupted --classify-* output.
-  echo "agent-gate: bash < 4.3 lacks 'wait -n'; components run sequentially (AGENT_GATE_JOBS=1)" >&2
-  AGENT_GATE_JOBS=1
+#
+# #1848: lanes are a gate accelerator too. lanes=on (parallel), lanes=serial
+# (degraded by bash <4.3 → LOUD WARN + install command), or lanes=off (component
+# parallelism intentionally not in play, e.g. AGENT_GATE_JOBS=1 or a low core
+# count; no WARN).
+ACCEL_LANES=off
+if [ "$AGENT_GATE_JOBS" -gt 1 ]; then
+  if [ "${BASH_VERSINFO[0]:-0}" -gt 4 ] || \
+     { [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] && [ "${BASH_VERSINFO[1]:-0}" -ge 3 ]; }; then
+    ACCEL_LANES=on
+  else
+    # Banner on STDERR (see nextest note above): hidden hook modes must keep STDOUT
+    # empty, and this runs before the hook dispatch — under stock bash 3.2 this
+    # branch is always taken, so an stdout banner here corrupted --classify-* output.
+    echo "agent-gate: WARN: bash <4.3 lacks 'wait -n' — gate components run SERIALLY (no parallel lanes; AGENT_GATE_JOBS=1); install: brew install bash (#1848)" >&2
+    AGENT_GATE_JOBS=1
+    ACCEL_LANES=serial
+  fi
 fi
+
+# accelerators_line: the machine-checkable one-liner stamped into every SUMMARY
+# block (full, lite, and the emission selftest). Values: on|absent|off|serial.
+# See the ACCEL_* detection above (#1848).
+accelerators_line() {
+  printf 'accelerators: sccache=%s nextest=%s lanes=%s' \
+    "${ACCEL_SCCACHE:-unknown}" "${ACCEL_NEXTEST:-unknown}" "${ACCEL_LANES:-unknown}"
+}
 
 # Static-golden mandate (coordinator directive for #1737): the local gate runs
 # against STATIC GOLDENS only. The live Docker/Cassandra sstabledump parity tests
@@ -677,6 +715,7 @@ if [ "$SELFTEST" -eq 1 ]; then
     "commit: selftest branch: selftest dirty: no"
     "datasets: 0 Data.db files under (selftest)"
     "ci-pins: (selftest)"
+    "$(accelerators_line)"
   )
   for i in "${!NAMES[@]}"; do
     meta+=("$(printf '%-18s %s (%s)' "${NAMES[$i]}:" "${STATUSES[$i]}" "${TIMES[$i]}")")
@@ -1394,6 +1433,7 @@ run_lite() {
   declare -a SUMMARY_META=()
   SUMMARY_META+=("commit: $(git rev-parse --short HEAD) branch: $(git rev-parse --abbrev-ref HEAD) dirty: $(test -n "$(git status --porcelain)" && echo yes || echo no)")
   SUMMARY_META+=("lite-scope: file-size fmt clippy scoped-tests (full gate NOT run — run it once before merge)")
+  SUMMARY_META+=("$(accelerators_line)")
   local i
   for i in "${!NAMES[@]}"; do
     SUMMARY_META+=("$(printf '%-18s %s (%s)' "${NAMES[$i]}:" "${STATUSES[$i]}" "${TIMES[$i]}")")
@@ -1839,6 +1879,7 @@ else
   SUMMARY_META+=("datasets: $DATA_COUNT")
 fi
 SUMMARY_META+=("ci-pins: $PINS")
+SUMMARY_META+=("$(accelerators_line)")
 if [ -n "$ONLY" ]; then
   SUMMARY_META+=("mode: PARTIAL (--only $ONLY) - does NOT count as the gate")
   [ "$OVERALL" = "PASS" ] && OVERALL=PARTIAL
