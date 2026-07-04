@@ -41,7 +41,11 @@ Write for AI agents: terse, imperative, copy-pasteable commands. Skip the prose.
 ## Quick-start for a new agent
 
 ```bash
-# 1. Fetch test data
+# 0. New machine? Bootstrap accelerators + datasets + gh/roborev config first.
+#    (details: docs/development/agent-machine-setup.md)
+bash scripts/bootstrap-agent-machine.sh
+
+# 1. Fetch test data (bootstrap --yes does this too)
 bash test-data/scripts/fetch-datasets.sh
 
 # 2. Run the gate

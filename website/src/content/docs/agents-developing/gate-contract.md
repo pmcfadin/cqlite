@@ -93,6 +93,52 @@ scripts/agent-gate.sh --list
 
 Exit codes: `0` = PASS, `1` = FAIL, `3` = PARTIAL (--only mode).
 
+## Tiered gate: `--lite` iterate, full gate once (issue #1821)
+
+The gate is tiered. `scripts/agent-gate.sh --lite` runs only the fast subset
+(file-size + fmt + scoped workspace clippy + blast-radius-scoped tests, ~1–5 min).
+It is the **fast iteration loop, NOT the gate of record** — it emits a DISTINCT
+`==== AGENT-GATE LITE SUMMARY ====` block (`MODE: lite`) that must **never** be
+pasted as the full SUMMARY. Iterate on `--lite` every fix round; run the FULL
+`scripts/agent-gate.sh` **exactly once** before merge. `--lite` never replaces the
+full gate.
+
+**Division of labor (issue #1855).** In the worker → subagent model, an
+implementer subagent (`sstable-developer`) edits, commits, pushes, and verifies
+with `--lite`/targeted tests **only** — it must **never** invoke the full gate. The
+worker/orchestrator runs the FULL gate itself, exactly once. A subagent idle-waiting
+on a 12–20 min full gate gets killed by the stall watchdog and takes its child gate
+process down with it.
+
+## New-machine setup
+
+A fresh machine that will run the gate should first run
+`bash scripts/bootstrap-agent-machine.sh` (see
+`docs/development/agent-machine-setup.md`): it installs/verifies the accelerators
+below, the datasets, `gh` auth + the `project` scope, and roborev's local config,
+then prints the gate's `accelerators:` line as a health check.
+
+## Accelerators are LOUD when missing (issue #1848)
+
+Every optional accelerator the gate depends on is auto-detected, and every SUMMARY
+block (full **and** `--lite`) carries a machine-checkable line:
+
+```
+accelerators: sccache=on nextest=on lanes=on
+```
+
+- **`sccache`** — cross-worktree compile cache (~25.6% faster fresh builds).
+- **`nextest`** — parallel `core-tests` (the gate's long pole).
+- **`lanes`** — parallel gate components (needs bash ≥4.3 for `wait -n`).
+
+State values: **`on`** (detected & used) · **`absent`** (missing → the gate prints a
+loud `WARN:` on STDERR with the one-line install command) · **`off`** (intentionally
+disabled via `CQLITE_DISABLE_SCCACHE` / `CQLITE_DISABLE_NEXTEST` / `AGENT_GATE_JOBS=1`;
+**no warn**) · **`lanes=serial`** (degraded by bash <4.3). An intentional opt-out is
+`off`, never `absent`. This exists because a machine silently ran ~3x slower for weeks
+with sccache and nextest both un-installed and no signal. If a pasted SUMMARY shows
+`absent`, install the tool — the state is visible in the block, not just scrollback.
+
 ## Machine-wide concurrency cap (issue #1825)
 
 Running many sessions/worktrees at once used to let ~15 full gates hit the CPU
