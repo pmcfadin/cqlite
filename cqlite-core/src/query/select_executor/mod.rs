@@ -294,7 +294,8 @@ impl SelectExecutor {
             _schema: schema,
             storage,
             clock: Arc::new(SystemClock),
-            max_result_bytes: crate::config::DEFAULT_MAX_RESULT_BYTES as usize,
+            max_result_bytes: usize::try_from(crate::config::DEFAULT_MAX_RESULT_BYTES)
+                .unwrap_or(usize::MAX),
             max_result_rows: DEFAULT_MAX_RESULT_ROWS,
         }
     }
@@ -331,7 +332,8 @@ impl SelectExecutor {
             _schema: schema,
             storage,
             clock,
-            max_result_bytes: crate::config::DEFAULT_MAX_RESULT_BYTES as usize,
+            max_result_bytes: usize::try_from(crate::config::DEFAULT_MAX_RESULT_BYTES)
+                .unwrap_or(usize::MAX),
             max_result_rows: DEFAULT_MAX_RESULT_ROWS,
         }
     }

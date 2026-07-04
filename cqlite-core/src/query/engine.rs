@@ -116,8 +116,12 @@ impl QueryEngine {
         #[cfg(feature = "state_machine")]
         let select_executor = Arc::new(
             SelectExecutor::new(schema.clone(), storage)
-                .with_max_result_bytes(config.query.max_result_bytes as usize)
-                .with_max_result_rows(config.query.max_result_rows as usize),
+                .with_max_result_bytes(
+                    usize::try_from(config.query.max_result_bytes).unwrap_or(usize::MAX),
+                )
+                .with_max_result_rows(
+                    usize::try_from(config.query.max_result_rows).unwrap_or(usize::MAX),
+                ),
         );
 
         Ok(Self {
@@ -150,8 +154,8 @@ impl QueryEngine {
     fn enforce_legacy_result_budget(&self, result: &QueryResult) -> Result<()> {
         super::result_budget::enforce_materialized_rows(
             &result.rows,
-            self.config.query.max_result_bytes as usize,
-            self.config.query.max_result_rows as usize,
+            usize::try_from(self.config.query.max_result_bytes).unwrap_or(usize::MAX),
+            usize::try_from(self.config.query.max_result_rows).unwrap_or(usize::MAX),
         )
         .inspect_err(|e| {
             self.inc_error_queries();
