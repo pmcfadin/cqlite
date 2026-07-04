@@ -138,8 +138,30 @@
 #                                     # maturin develop + fast pytest (issue #1893), so
 #                                     # python-diff rounds cost a maturin compile
 #                                     # (seconds warm, ~1-3 min cold).
+#   scripts/agent-gate.sh --delta <anchor> [--anchor-run-id <id>]
+#                                    [--anchor-summary-file <path>]
+#                                     # TEST/DOCS-ONLY RE-CERTIFICATION (issue #1892):
+#                                     # after a full-gate PASS at <anchor>, re-certify
+#                                     # a diff anchor..HEAD that touches ONLY test files
+#                                     # (tests/ dirs, *_test(s).rs, __test__/,
+#                                     # bindings/*/tests/) and/or docs (*.md, docs/,
+#                                     # website/). FAIL-CLOSED: any production file in
+#                                     # the diff REFUSES the re-cert (run the full gate).
+#                                     # On pass it runs ONLY file-size + fmt + the diff's
+#                                     # changed test targets and emits a DISTINCT
+#                                     # "==== AGENT-GATE DELTA SUMMARY ====" block
+#                                     # (MODE: delta) that names the gate of record
+#                                     # (the full PASS at <anchor>) + the anchor run-id,
+#                                     # so it can NEVER be pasted as a full SUMMARY.
+#                                     # It is NOT the gate of record; any production
+#                                     # change needs a fresh full gate. The nightly
+#                                     # gate.yml deep-check is the standing backstop.
+#                                     # Record BOTH the anchor's full SUMMARY and this
+#                                     # DELTA block in the PR. Recovery default:
+#                                     # .agent-gate-delta-summary.txt.
 #   scripts/agent-gate.sh --list      # list full-gate components without running
 #   scripts/agent-gate.sh --lite-list # list the --lite components without running
+#   scripts/agent-gate.sh --delta-list # list the --delta components without running
 #   scripts/agent-gate.sh --only fmt,clippy   # debugging aid; output is
 #                                     # marked PARTIAL and never counts as the gate
 #   scripts/agent-gate.sh --emit-summary-selftest
@@ -538,6 +560,47 @@ classify_scoped_plan() {
   return 0
 }
 
+# _delta_is_allowed_path <path> (issue #1892): TRUE (0) iff the path is a TEST file
+# or DOCS file per the delta-recert policy allowlist; FALSE (non-0) for everything
+# else. FAIL-CLOSED by construction — only an explicit test/docs match is allowed,
+# so any src, script, workflow, Cargo.*, or config change falls through to the
+# refusal path. Test classes: any `tests/` directory (covers cqlite-*/tests/,
+# bindings/*/tests/, top-level tests/), any `__test__/` directory (node jest), and
+# `*_test.rs` / `*_tests.rs`. Docs classes: any `*.md`, anything under `docs/`,
+# anything under `website/`. Defined before the arg-parse case so the hidden
+# --delta-classify hook (and run_delta) can call it. Bash 3.2-safe (case globs).
+_delta_is_allowed_path() {
+  case "$1" in
+    # docs
+    *.md) return 0 ;;
+    docs/*|*/docs/*) return 0 ;;
+    website/*|*/website/*) return 0 ;;
+    # tests
+    tests/*|*/tests/*) return 0 ;;
+    __test__/*|*/__test__/*) return 0 ;;
+    *_test.rs|*_tests.rs) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Hidden self-test hook (issue #1892): read changed repo-relative paths on stdin,
+# print "ALLOW <path>" / "REFUSE <path>" per path (fail-closed classification via
+# _delta_is_allowed_path), then a final "VERDICT: ALLOW" (all test/docs) or
+# "VERDICT: REFUSE" (>=1 production file). Pure function — no git, cargo, or tree
+# mutation — so scripts/tests can assert the refusal decision hermetically.
+delta_classify_stdin() {
+  local f verdict=ALLOW
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if _delta_is_allowed_path "$f"; then
+      echo "ALLOW $f"
+    else
+      echo "REFUSE $f"; verdict=REFUSE
+    fi
+  done
+  echo "VERDICT: $verdict"
+}
+
 COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity python-bindings node-bindings delivery-telemetry parity-report binding-unwind-profile tooling-tests minimal-build smoke)
 # --lite (issue #1821) runs ONLY this fast subset: file-size ratchet, fmt,
 # FULL-workspace clippy (cross-crate API breaks are the cheap-insurance class),
@@ -546,9 +609,27 @@ COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard m
 # FAST ITERATION loop, NOT the gate of record — the full gate must PASS once
 # before merge. See run_lite() below.
 LITE_COMPONENTS=(file-size fmt clippy scoped-tests)
+# --delta (issue #1892): TEST/DOCS-ONLY RE-CERTIFICATION after a full-gate PASS.
+# Given an anchor (the commit the full gate PASSed at), it verifies the diff
+# anchor..HEAD touches ONLY test files and/or docs (FAIL-CLOSED if any production
+# file changed), then re-certifies with this fast subset — file-size + fmt + the
+# diff's changed test targets. It is NOT the gate of record: the gate of record
+# remains the full agent-gate.sh PASS at the anchor, recorded alongside the delta
+# evidence in the PR. The standing backstop is the nightly full run on main
+# (.github/workflows/gate.yml deep-check). See run_delta() below.
+DELTA_COMPONENTS=(file-size fmt scoped-tests)
 ONLY=""
 SELFTEST=0
 LITE=0
+DELTA=0
+DELTA_ANCHOR=""
+DELTA_ANCHOR_RUN_ID=""
+DELTA_ANCHOR_SUMMARY_FILE=""
+# Optional base-ref override (issue #1892): run_file_size and run_scoped_tests
+# resolve their diff base from this when set, instead of merge-base with main.
+# --delta points it at the anchor commit so the ratchet + scoping cover exactly
+# the anchor..HEAD test/docs diff. Empty everywhere else (unchanged behavior).
+GATE_BASE_OVERRIDE=""
 case "${1:-}" in
   --list) printf '%s\n' "${COMPONENTS[@]}"; exit 0 ;;
   # --lite alone runs the fast gate; `--lite --emit-summary-selftest` drives the
@@ -556,6 +637,26 @@ case "${1:-}" in
   # running any component.
   --lite) LITE=1; [ "${2:-}" = --emit-summary-selftest ] && SELFTEST=1 ;;
   --lite-list) printf '%s\n' "${LITE_COMPONENTS[@]}"; exit 0 ;;
+  --delta-list) printf '%s\n' "${DELTA_COMPONENTS[@]}"; exit 0 ;;
+  # --delta <anchor> [--anchor-run-id <id>] [--anchor-summary-file <path>]
+  #                  [--emit-summary-selftest]
+  # Re-certify a test/docs-only diff anchor..HEAD (issue #1892). The anchor is the
+  # commit the full gate PASSed at. The anchor's full-gate run-id is recorded from
+  # --anchor-run-id, else read from --anchor-summary-file (which must itself be a
+  # FULL-gate PASS block — a lite/delta block cannot anchor a delta re-cert).
+  --delta)
+    DELTA=1
+    DELTA_ANCHOR="${2:?--delta needs an anchor commit/sha (the commit the full gate PASSed at)}"
+    shift 2 || true
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --anchor-run-id) DELTA_ANCHOR_RUN_ID="${2:?--anchor-run-id needs a value}"; shift 2 ;;
+        --anchor-summary-file) DELTA_ANCHOR_SUMMARY_FILE="${2:?--anchor-summary-file needs a path}"; shift 2 ;;
+        --emit-summary-selftest) SELFTEST=1; shift ;;
+        *) echo "unknown --delta option: $1" >&2; exit 2 ;;
+      esac
+    done
+    ;;
   # Hidden self-test hook (issue #1821): map stdin paths -> "<pkg>|<testname>"
   # for actual Cargo test targets (nested helpers excluded). No side effects.
   --classify-test-targets) classify_test_targets; exit 0 ;;
@@ -570,6 +671,9 @@ case "${1:-}" in
   # PLAN ("rust-pkg: <pkg>" / "python-tier: <cmd>") WITHOUT running cargo/maturin, so
   # the self-test can assert python diffs route to the maturin+pytest tier.
   --classify-scoped-plan) classify_scoped_plan; exit 0 ;;
+  # Hidden self-test hook (issue #1892): classify stdin paths as test/docs (ALLOW)
+  # or production (REFUSE) and print a final VERDICT. No side effects; no cargo/git.
+  --delta-classify) delta_classify_stdin; exit 0 ;;
   --only) ONLY="${2:?--only needs a comma-separated component list}" ;;
   --emit-summary-selftest) SELFTEST=1 ;;
   "") ;;
@@ -589,6 +693,13 @@ if [ "$LITE" -eq 1 ]; then
   SUMMARY_START_MARKER="==== AGENT-GATE LITE SUMMARY ===="
   SUMMARY_END_MARKER="==== END AGENT-GATE LITE SUMMARY ===="
   SUMMARY_MODE_LINE="MODE: lite (FAST ITERATION — NOT the gate of record; full agent-gate.sh must PASS once before merge)"
+elif [ "$DELTA" -eq 1 ]; then
+  # DISTINCT delta markers + a MODE line naming the gate of record (issue #1892):
+  # a delta summary can NEVER be mistaken for — or pasted as — a full SUMMARY. The
+  # gate of record remains the full agent-gate.sh PASS at the anchor.
+  SUMMARY_START_MARKER="==== AGENT-GATE DELTA SUMMARY ===="
+  SUMMARY_END_MARKER="==== END AGENT-GATE DELTA SUMMARY ===="
+  SUMMARY_MODE_LINE="MODE: delta (TEST/DOCS-ONLY RE-CERTIFICATION — NOT the gate of record; gate of record = the full agent-gate.sh PASS at anchor $DELTA_ANCHOR)"
 fi
 
 LOG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate.XXXXXX")
@@ -610,6 +721,11 @@ RUN_ID="$LOG_DIR"
 # after a lite run can never be misread as the full gate's result.
 if [ "$LITE" -eq 1 ]; then
   SUMMARY_FILE="${AGENT_GATE_SUMMARY_FILE:-$REPO_ROOT/.agent-gate-lite-summary.txt}"
+elif [ "$DELTA" -eq 1 ]; then
+  # DISTINCT delta recovery filename (issue #1892) so a delta run can never clobber
+  # the full or lite recovery artifact, and `cat`-ing it can never be misread as
+  # the full gate's result.
+  SUMMARY_FILE="${AGENT_GATE_SUMMARY_FILE:-$REPO_ROOT/.agent-gate-delta-summary.txt}"
 else
   SUMMARY_FILE="${AGENT_GATE_SUMMARY_FILE:-$REPO_ROOT/.agent-gate-summary.txt}"
 fi
@@ -1250,14 +1366,19 @@ run_file_size() {
   local start end status=PASS
   start=$(date +%s)
 
-  # Base ref: merge-base with the default branch. If none resolves, we can still
-  # do the advisory list but not the growth comparison.
+  # Base ref: an explicit override (issue #1892 --delta uses the anchor commit),
+  # else merge-base with the default branch. If none resolves, we can still do the
+  # advisory list but not the growth comparison.
   local base="" ref
-  for ref in origin/main main origin/master master; do
-    if git rev-parse --verify -q "$ref" >/dev/null 2>&1; then
-      base=$(git merge-base HEAD "$ref" 2>/dev/null) && [ -n "$base" ] && break
-    fi
-  done
+  if [ -n "${GATE_BASE_OVERRIDE:-}" ]; then
+    base="$GATE_BASE_OVERRIDE"
+  else
+    for ref in origin/main main origin/master master; do
+      if git rev-parse --verify -q "$ref" >/dev/null 2>&1; then
+        base=$(git merge-base HEAD "$ref" 2>/dev/null) && [ -n "$base" ] && break
+      fi
+    done
+  fi
 
   # Changed, non-deleted .rs files vs base (committed + working tree). With no
   # base, fall back to changes vs HEAD (uncommitted only).
@@ -1336,11 +1457,15 @@ run_scoped_tests() {
   : >"$log"
 
   local base="" ref
-  for ref in origin/main main origin/master master; do
-    if git rev-parse --verify -q "$ref" >/dev/null 2>&1; then
-      base=$(git merge-base HEAD "$ref" 2>/dev/null) && [ -n "$base" ] && break
-    fi
-  done
+  if [ -n "${GATE_BASE_OVERRIDE:-}" ]; then
+    base="$GATE_BASE_OVERRIDE"
+  else
+    for ref in origin/main main origin/master master; do
+      if git rev-parse --verify -q "$ref" >/dev/null 2>&1; then
+        base=$(git merge-base HEAD "$ref" 2>/dev/null) && [ -n "$base" ] && break
+      fi
+    done
+  fi
 
   local changed
   if [ -n "$base" ]; then
@@ -1609,6 +1734,197 @@ run_lite() {
   esac
 }
 
+# run_delta <anchor> (issue #1892): TEST/DOCS-ONLY RE-CERTIFICATION. Verifies the
+# diff anchor..HEAD (committed + working tree) touches ONLY test/docs files —
+# FAIL-CLOSED, naming any offending production file — then re-certifies with
+# file-size + fmt + the diff's changed test targets, emits a DISTINCTLY-labeled
+# DELTA summary, and EXITS (never falls through to the full-gate flow). It is NOT
+# the gate of record: the gate of record remains the full agent-gate.sh PASS at
+# the anchor, with the nightly gate.yml deep-check as the standing backstop.
+run_delta() {
+  local anchor="$1"
+  echo
+  echo "==================================================================="
+  echo "  AGENT-GATE --delta  :  TEST/DOCS-ONLY RE-CERTIFICATION — *NOT* THE GATE OF RECORD"
+  echo "  Anchor (full-gate PASS commit): $anchor"
+  echo "  Verifies the diff anchor..HEAD touches ONLY test/docs files, then runs:"
+  echo "  file-size + fmt + the changed test targets. It SKIPS clippy, core-tests,"
+  echo "  write/cli, bindings, parity, smoke, etc. — those were validated by the"
+  echo "  full gate at the anchor, and the nightly gate.yml deep-check re-runs the"
+  echo "  FULL gate on main. Record BOTH the anchor's full SUMMARY and this DELTA"
+  echo "  block in the PR."
+  echo "==================================================================="
+  echo
+
+  # Resolve the anchor to a full commit sha. A bad/unknown anchor is a usage error
+  # (RESULT: ERROR) — we cannot re-certify a diff against a commit that does not
+  # resolve.
+  local anchor_sha
+  if ! anchor_sha=$(git rev-parse --verify -q "${anchor}^{commit}" 2>/dev/null) || [ -z "$anchor_sha" ]; then
+    echo "--- [delta] ERROR: anchor '$anchor' does not resolve to a commit." >&2
+    echo "    Pass the commit the full gate PASSed at (a sha, tag, or ref)." >&2
+    emit_summary ERROR \
+      "delta-anchor: $anchor (UNRESOLVED)" \
+      "$(accelerators_line)" \
+      "error: anchor does not resolve to a commit — cannot re-certify"
+    exit 2
+  fi
+
+  # Anchor full-gate run-id: from --anchor-run-id, else read from the anchor
+  # summary file if given. The anchor summary file MUST be a FULL-gate PASS block:
+  # a lite/delta block cannot anchor a delta re-cert (that would let a fast run
+  # masquerade as the gate of record). Refuse loudly if it is not.
+  local anchor_run_id="${DELTA_ANCHOR_RUN_ID:-}"
+  if [ -z "$anchor_run_id" ] && [ -n "$DELTA_ANCHOR_SUMMARY_FILE" ]; then
+    if [ ! -f "$DELTA_ANCHOR_SUMMARY_FILE" ]; then
+      echo "--- [delta] ERROR: --anchor-summary-file '$DELTA_ANCHOR_SUMMARY_FILE' not found." >&2
+      emit_summary ERROR \
+        "delta-anchor: $anchor_sha" \
+        "$(accelerators_line)" \
+        "error: --anchor-summary-file not found: $DELTA_ANCHOR_SUMMARY_FILE"
+      exit 2
+    fi
+    if ! grep -qF "==== AGENT-GATE SUMMARY ====" "$DELTA_ANCHOR_SUMMARY_FILE" 2>/dev/null \
+       || grep -qF "==== AGENT-GATE LITE SUMMARY ====" "$DELTA_ANCHOR_SUMMARY_FILE" 2>/dev/null \
+       || grep -qF "==== AGENT-GATE DELTA SUMMARY ====" "$DELTA_ANCHOR_SUMMARY_FILE" 2>/dev/null; then
+      echo "--- [delta] ERROR: --anchor-summary-file is not a FULL-gate SUMMARY block." >&2
+      echo "    A delta re-cert must anchor to a full agent-gate.sh PASS, not a lite/delta run." >&2
+      emit_summary ERROR \
+        "delta-anchor: $anchor_sha" \
+        "$(accelerators_line)" \
+        "error: anchor summary is not a full-gate SUMMARY block (lite/delta cannot anchor a delta)"
+      exit 2
+    fi
+    if ! grep -qE '^RESULT: PASS' "$DELTA_ANCHOR_SUMMARY_FILE" 2>/dev/null; then
+      echo "--- [delta] ERROR: --anchor-summary-file did not record RESULT: PASS." >&2
+      echo "    A delta re-cert must anchor to a full-gate PASS." >&2
+      emit_summary ERROR \
+        "delta-anchor: $anchor_sha" \
+        "$(accelerators_line)" \
+        "error: anchor summary RESULT is not PASS — cannot anchor a delta re-cert"
+      exit 2
+    fi
+    anchor_run_id=$(grep -E '^run-id:' "$DELTA_ANCHOR_SUMMARY_FILE" 2>/dev/null | head -1 | sed 's/^run-id:[[:space:]]*//')
+  fi
+  [ -n "$anchor_run_id" ] || anchor_run_id="(not provided)"
+
+  # Changed files anchor..HEAD (committed) plus the working tree. --diff-filter=d
+  # drops deletions (a deleted path cannot be classified against the tree and is
+  # never a production-file regression). Dedup, drop blanks.
+  local changed
+  changed=$(printf '%s\n%s\n' \
+    "$(git diff --name-only --diff-filter=d "$anchor_sha" HEAD 2>/dev/null)" \
+    "$(git diff --name-only --diff-filter=d HEAD 2>/dev/null)" \
+    | awk 'NF && !seen[$0]++')
+
+  # Partition into allowed (test/docs) and offending (everything else). FAIL-CLOSED.
+  local f allowed="" offending=""
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if _delta_is_allowed_path "$f"; then
+      allowed="${allowed}${f}"$'\n'
+    else
+      offending="${offending}${f}"$'\n'
+    fi
+  done <<<"$changed"
+
+  local n_allowed n_offending
+  n_allowed=$(printf '%s' "$allowed" | awk 'NF' | wc -l | tr -d ' ')
+  n_offending=$(printf '%s' "$offending" | awk 'NF' | wc -l | tr -d ' ')
+
+  # Build the delta-files meta lines (indented list), or a placeholder when empty.
+  local -a file_meta=()
+  if [ "$n_allowed" -eq 0 ] && [ "$n_offending" -eq 0 ]; then
+    file_meta+=("delta-files (0): (no changes anchor..HEAD)")
+  else
+    file_meta+=("delta-files ($n_allowed allowed / $n_offending offending):")
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      file_meta+=("      [test/docs] $f")
+    done <<<"$allowed"
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      file_meta+=("      [PRODUCTION] $f")
+    done <<<"$offending"
+  fi
+
+  local -a anchor_meta=(
+    "commit: $(git rev-parse --short HEAD) branch: $(git rev-parse --abbrev-ref HEAD) dirty: $(test -n "$(git status --porcelain)" && echo yes || echo no)"
+    "delta-anchor: $anchor_sha (full-gate PASS commit)"
+    "delta-anchor-run-id: $anchor_run_id"
+    "gate-of-record: full agent-gate.sh run at $anchor_sha (this DELTA re-certifies a test/docs-only diff; it is NOT a substitute for the full gate)"
+    "nightly-backstop: .github/workflows/gate.yml deep-check re-runs the FULL gate on main (CQLITE_CLIPPY_FULL=1)"
+  )
+
+  # FAIL-CLOSED: any production file in the diff refuses the delta re-cert. Name the
+  # offending files and tell the caller to run the full gate.
+  if [ "$n_offending" -gt 0 ]; then
+    echo "--- [delta] REFUSED: the diff anchor..HEAD changes production (non-test/docs) files:" >&2
+    printf '      %s\n' $(printf '%s\n' "$offending" | awk 'NF') >&2
+    echo "    A production change requires a fresh FULL gate: scripts/agent-gate.sh" >&2
+    emit_summary REFUSED \
+      "${anchor_meta[@]}" \
+      "delta-scope: file-size fmt scoped-tests (NOT RUN — refused before execution)" \
+      "$(accelerators_line)" \
+      "${file_meta[@]}" \
+      "refusal: $n_offending production file(s) changed — a full gate is required (test/docs-only diffs qualify for --delta)"
+    [ "$SUMMARY_WRITE_FAILED" -eq 0 ] || { echo "agent-gate: exiting non-zero because the summary file could not be written (#1175)" >&2; exit 1; }
+    exit 1
+  fi
+
+  echo ">>> [delta] diff anchor..HEAD is test/docs-only ($n_allowed file(s)); re-certifying"
+
+  # Re-certify: file-size + fmt + the changed test targets, all scoped to the
+  # anchor..HEAD diff (GATE_BASE_OVERRIDE points file-size + scoped-tests at the
+  # anchor). run_file_size and run_component write result files; run_scoped_tests
+  # appends to NAMES and sets OVERALL on failure.
+  GATE_BASE_OVERRIDE="$anchor_sha"
+  run_file_size
+  run_component fmt cargo fmt --all --check
+  run_scoped_tests
+
+  # Reconstruct file-size + fmt verdicts from their result files (so a fmt or
+  # file-size FAIL fails the delta and shows in the block), then append the
+  # scoped-tests entry run_scoped_tests already pushed onto NAMES.
+  local -a DN=() DS=() DT=()
+  local c rf st secs
+  for c in file-size fmt; do
+    rf="$LOG_DIR/$c.result"
+    if [ -f "$rf" ]; then
+      st=""; secs=""
+      read -r st secs < "$rf" || true
+      [ -n "$st" ] || { st=FAIL; secs=0; }
+      DN+=("$c"); DS+=("$st"); DT+=("${secs}s")
+      [ "$st" = FAIL ] && OVERALL=FAIL
+    else
+      DN+=("$c"); DS+=(FAIL); DT+=("0s"); OVERALL=FAIL
+    fi
+  done
+  local i
+  for i in "${!NAMES[@]+"${!NAMES[@]}"}"; do
+    DN+=("${NAMES[$i]}"); DS+=("${STATUSES[$i]}"); DT+=("${TIMES[$i]}")
+  done
+
+  declare -a SUMMARY_META=()
+  SUMMARY_META+=("${anchor_meta[@]}")
+  SUMMARY_META+=("delta-scope: file-size fmt scoped-tests (test/docs-only re-cert; clippy/core/write/cli/bindings/parity/smoke NOT run — see gate-of-record)")
+  SUMMARY_META+=("$(accelerators_line)")
+  SUMMARY_META+=("${file_meta[@]}")
+  for i in "${!DN[@]}"; do
+    SUMMARY_META+=("$(printf '%-18s %s (%s)' "${DN[$i]}:" "${DS[$i]}" "${DT[$i]}")")
+  done
+  emit_summary "$OVERALL" "${SUMMARY_META[@]}"
+
+  if [ "$SUMMARY_WRITE_FAILED" -ne 0 ]; then
+    echo "agent-gate: exiting non-zero because the summary file could not be written (#1175)" >&2
+    exit 1
+  fi
+  case "$OVERALL" in
+    PASS) exit 0 ;;
+    *) exit 1 ;;
+  esac
+}
+
 # ---- Machine-wide full-gate concurrency cap (issue #1825) -------------------
 # A cross-process bounded semaphore around the FULL gate of record ONLY. At most N
 # full `agent-gate.sh` runs execute machine-wide at once; excess invocations BLOCK
@@ -1672,6 +1988,7 @@ _gate_release_slot() {
 # because of the cap.
 acquire_gate_slot() {
   [ "$LITE" -eq 1 ] && return 0
+  [ "$DELTA" -eq 1 ] && return 0
   [ -n "$ONLY" ] && return 0
   [ "${CQLITE_GATE_DISABLE_CAP:-0}" = 1 ] && return 0
   if ! command -v python3 >/dev/null 2>&1; then
@@ -1743,6 +2060,13 @@ fi
 # byte-for-byte unchanged. --lite is EXEMPT from the #1825 cap (never queued).
 if [ "$LITE" -eq 1 ]; then
   run_lite
+fi
+
+# --delta (issue #1892): test/docs-only re-certification. Verifies anchor..HEAD is
+# test/docs-only (fail-closed), runs file-size + fmt + changed test targets, and
+# EXITS before the full-gate flow. EXEMPT from the #1825 cap (never queued).
+if [ "$DELTA" -eq 1 ]; then
+  run_delta "$DELTA_ANCHOR"
 fi
 
 # Machine-wide full-gate concurrency cap (issue #1825): block here until a slot is
