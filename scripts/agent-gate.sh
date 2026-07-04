@@ -1879,7 +1879,7 @@ run_delta() {
   # offending files and tell the caller to run the full gate.
   if [ "$n_offending" -gt 0 ]; then
     echo "--- [delta] REFUSED: the diff anchor..HEAD changes production (non-test/docs) files:" >&2
-    printf '      %s\n' $(printf '%s\n' "$offending" | awk 'NF') >&2
+    while IFS= read -r f; do [ -n "$f" ] && printf '      %s\n' "$f" >&2; done <<<"$offending"
     echo "    A production change requires a fresh FULL gate: scripts/agent-gate.sh" >&2
     emit_summary REFUSED \
       "${anchor_meta[@]}" \
