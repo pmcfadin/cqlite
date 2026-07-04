@@ -24,6 +24,17 @@
 //!   continuation (issue #1174),
 //! - this `mod.rs` — the [`SelectExecutor`] orchestration and remaining
 //!   per-step helpers.
+//!
+//! ## Lint policy (issue #1590, E8)
+//!
+//! The read-path pipeline step helpers below are pure/synchronous — none awaits.
+//! Deny `clippy::unused_async` for this module (and its submodules) so a future
+//! edit cannot silently reintroduce the future/state-machine overhead of an
+//! `async fn` that never awaits (which also infects every caller with an
+//! `.await`). A crate-level deny is deliberately NOT used: `cqlite-core` still
+//! has many legitimately-flagged `async fn`s on its public surface (out of E8's
+//! scope), so the guard is scoped to the pipeline it protects.
+#![deny(clippy::unused_async)]
 
 mod aggregation;
 mod execute;
@@ -303,9 +314,7 @@ impl SelectExecutor {
         // re-locking the registry and deep-cloning a fresh schema (2–4× per query).
         let query_schema: Option<Arc<TableSchema>> = self.resolve_table_schema(&table_id).await;
 
-        let columns = self
-            .get_result_columns(&plan.statement, query_schema.as_deref())
-            .await?;
+        let columns = self.get_result_columns(&plan.statement, query_schema.as_deref())?;
 
         // Create bounded channel for backpressure
         let (tx, rx) = mpsc::channel(config.buffer_size);
@@ -427,7 +436,7 @@ impl SelectExecutor {
     // `execute` submodule alongside `execute` (issue #1174).
 
     /// Execute filtering step
-    async fn execute_filter(
+    fn execute_filter(
         &self,
         rows: Vec<QueryRow>,
         filter_expr: &WhereExpression,
@@ -663,7 +672,7 @@ impl SelectExecutor {
     }
 
     /// Execute sorting step
-    async fn execute_sort(
+    fn execute_sort(
         &self,
         mut rows: Vec<QueryRow>,
         order_by: &OrderByClause,
@@ -714,7 +723,7 @@ impl SelectExecutor {
     /// Execute the aggregation step. Splits naturally into three phases:
     /// build group key, accumulate per-aggregate state, then finalize each
     /// group into a result row.
-    async fn execute_aggregation(
+    fn execute_aggregation(
         &self,
         rows: Vec<QueryRow>,
         agg_plan: &AggregationPlan,
@@ -778,7 +787,7 @@ impl SelectExecutor {
     }
 
     /// Execute limit step (apply OFFSET then truncate to LIMIT).
-    async fn execute_limit(
+    fn execute_limit(
         &self,
         mut rows: Vec<QueryRow>,
         count: u64,
@@ -795,7 +804,7 @@ impl SelectExecutor {
     }
 
     /// Execute projection step
-    async fn execute_projection(
+    fn execute_projection(
         &self,
         rows: Vec<QueryRow>,
         columns: &[SelectExpression],
@@ -837,7 +846,7 @@ impl SelectExecutor {
     }
 
     /// Execute a query without FROM clause (constant expressions like SELECT 1)
-    async fn execute_constant_query(
+    fn execute_constant_query(
         &self,
         statement: &SelectStatement,
         _context: &ExecutionContext,
@@ -942,7 +951,7 @@ impl SelectExecutor {
     /// Build result-column metadata from an ALREADY-RESOLVED schema (issue #1587,
     /// E5). The caller resolves the schema once per query and passes it here, so
     /// this never re-clones it out of the registry.
-    async fn get_result_columns(
+    fn get_result_columns(
         &self,
         statement: &SelectStatement,
         schema: Option<&TableSchema>,
@@ -1257,7 +1266,6 @@ mod tests {
         PROJECTION_NAME_DERIVATIONS.with(|c| c.set(0));
         let projected = executor
             .execute_projection(rows, &columns, &mut ctx)
-            .await
             .expect("projection must succeed");
         let derivations = PROJECTION_NAME_DERIVATIONS.with(|c| c.get());
 
@@ -1320,7 +1328,6 @@ mod tests {
         SORT_KEY_EVALUATIONS.with(|c| c.set(0));
         let sorted = executor
             .execute_sort(rows, &order_by, &mut ctx)
-            .await
             .expect("sort must succeed");
         let evaluations = SORT_KEY_EVALUATIONS.with(|c| c.get());
 
@@ -1413,7 +1420,6 @@ mod tests {
         for dir in [SortDirection::Ascending, SortDirection::Descending] {
             let sorted = executor
                 .execute_sort(make_rows(&with_nan), &order_by(&dir), &mut ctx)
-                .await
                 .expect("sort must succeed");
 
             let mut reference = make_rows(&with_nan);
@@ -1446,7 +1452,6 @@ mod tests {
                 &order_by(&SortDirection::Ascending),
                 &mut ctx,
             )
-            .await
             .expect("sort must succeed");
         assert_eq!(
             tags(&asc),
@@ -1460,7 +1465,6 @@ mod tests {
                 &order_by(&SortDirection::Descending),
                 &mut ctx,
             )
-            .await
             .expect("sort must succeed");
         assert_eq!(
             tags(&desc),
@@ -1600,7 +1604,7 @@ mod tests {
             allow_filtering: false,
         };
 
-        let cols = executor.get_result_columns(&stmt, None).await.unwrap();
+        let cols = executor.get_result_columns(&stmt, None).unwrap();
         assert_eq!(cols.len(), 1);
         assert_eq!(cols[0].name, "writetime(name)");
         assert_eq!(cols[0].data_type, crate::types::DataType::BigInt);
@@ -1632,7 +1636,7 @@ mod tests {
             allow_filtering: false,
         };
 
-        let cols = executor.get_result_columns(&stmt, None).await.unwrap();
+        let cols = executor.get_result_columns(&stmt, None).unwrap();
         assert_eq!(cols.len(), 1);
         assert_eq!(cols[0].name, "ttl(score)");
         assert_eq!(cols[0].data_type, crate::types::DataType::Integer);
@@ -1664,7 +1668,7 @@ mod tests {
             allow_filtering: false,
         };
 
-        let cols = executor.get_result_columns(&stmt, None).await.unwrap();
+        let cols = executor.get_result_columns(&stmt, None).unwrap();
         assert_eq!(cols.len(), 1);
         assert_eq!(
             cols[0].name, "wt",

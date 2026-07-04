@@ -83,9 +83,7 @@ impl SelectExecutor {
 
         let mut context = ExecutionContext {
             table_id,
-            columns: self
-                .get_result_columns(&plan.statement, query_schema.as_deref())
-                .await?,
+            columns: self.get_result_columns(&plan.statement, query_schema.as_deref())?,
             rows_processed: 0,
             scan_rows: 0,
             projection_flags,
@@ -95,7 +93,7 @@ impl SelectExecutor {
 
         // Handle queries without FROM clause (like SELECT 1)
         if plan.statement.from_clause.is_none() {
-            return self.execute_constant_query(&plan.statement, &context).await;
+            return self.execute_constant_query(&plan.statement, &context);
         }
 
         // Execute the plan step by step
@@ -133,18 +131,16 @@ impl SelectExecutor {
                     intermediate_results = rows;
                 }
                 ExecutionStep::Filter { expression, .. } => {
-                    intermediate_results = self
-                        .execute_filter(intermediate_results, expression, &mut context)
-                        .await?;
+                    intermediate_results =
+                        self.execute_filter(intermediate_results, expression, &mut context)?;
                 }
                 ExecutionStep::Sort { order_by, .. } => {
                     // Issue #1184: when the BIG reverse partition iterator already
                     // produced the rows in descending clustering order, skip the
                     // in-memory sort entirely (it remains the fallback otherwise).
                     if !context.reverse_served {
-                        intermediate_results = self
-                            .execute_sort(intermediate_results, order_by, &mut context)
-                            .await?;
+                        intermediate_results =
+                            self.execute_sort(intermediate_results, order_by, &mut context)?;
                     } else {
                         // Issue #1307 (hardening): skipping this Sort is sound ONLY
                         // because `reverse_served` is set exclusively by
@@ -174,23 +170,20 @@ impl SelectExecutor {
                     }
                 }
                 ExecutionStep::Aggregate { plan: agg_plan, .. } => {
-                    intermediate_results = self
-                        .execute_aggregation(intermediate_results, agg_plan, &mut context)
-                        .await?;
+                    intermediate_results =
+                        self.execute_aggregation(intermediate_results, agg_plan, &mut context)?;
                 }
                 ExecutionStep::PerPartitionLimit { count } => {
                     intermediate_results =
                         Self::execute_per_partition_limit(intermediate_results, *count);
                 }
                 ExecutionStep::Limit { count, offset } => {
-                    intermediate_results = self
-                        .execute_limit(intermediate_results, *count, *offset, &mut context)
-                        .await?;
+                    intermediate_results =
+                        self.execute_limit(intermediate_results, *count, *offset, &mut context)?;
                 }
                 ExecutionStep::Project { columns } => {
-                    intermediate_results = self
-                        .execute_projection(intermediate_results, columns, &mut context)
-                        .await?;
+                    intermediate_results =
+                        self.execute_projection(intermediate_results, columns, &mut context)?;
                 }
             }
         }
