@@ -6,8 +6,6 @@
 //! Requires `CQLITE_DATASETS_ROOT` + fetched binaries; every test skips (never
 //! fails) when its fixture is absent, and never treats 0 rows as a skip.
 
-#![cfg(test)]
-
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
