@@ -116,7 +116,8 @@ impl QueryEngine {
         #[cfg(feature = "state_machine")]
         let select_executor = Arc::new(
             SelectExecutor::new(schema.clone(), storage)
-                .with_max_result_bytes(config.query.max_result_bytes as usize),
+                .with_max_result_bytes(config.query.max_result_bytes as usize)
+                .with_max_result_rows(config.query.max_result_rows as usize),
         );
 
         Ok(Self {

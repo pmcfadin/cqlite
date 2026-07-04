@@ -375,6 +375,17 @@ fn default_max_result_bytes() -> u64 {
     DEFAULT_MAX_RESULT_BYTES
 }
 
+/// Serde default for [`QueryConfig::max_result_rows`] (issue #1582).
+///
+/// Backward-compat + robustness: a `QueryConfig` serialized without this key
+/// (or a partial JSON/dict config) still deserializes, taking the shipped
+/// 1,000,000-row secondary safety valve rather than failing with a missing
+/// field. Keeps the knob real (not decorative) and consistent with
+/// [`default_max_result_bytes`].
+fn default_max_result_rows() -> u64 {
+    1_000_000
+}
+
 /// Query engine configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryConfig {
@@ -386,7 +397,11 @@ pub struct QueryConfig {
     /// A *secondary* safety valve, retained for defense-in-depth (issue #1582).
     /// The primary guard on a materialized result is now `max_result_bytes`: a
     /// row count is the wrong unit because 1M skinny rows can fit comfortably
-    /// while 100k wide rows blow the <128MB memory target.
+    /// while 100k wide rows blow the <128MB memory target. Still load-bearing:
+    /// the materializing SELECT path enforces this row-count ceiling alongside
+    /// the byte budget (lowering it makes a wide-row-count result trip even
+    /// under the byte budget), so it is a real knob, not decoration.
+    #[serde(default = "default_max_result_rows")]
     pub max_result_rows: u64,
 
     /// Byte ceiling on a MATERIALIZED result set (issue #1582 / D6).

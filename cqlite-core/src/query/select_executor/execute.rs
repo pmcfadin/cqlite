@@ -680,8 +680,9 @@ impl SelectExecutor {
         // 1M skinny rows may fit while a few thousand wide rows blow the <128MB
         // target. The primary guard is a running BYTE estimate (below) against
         // the configured budget; the row count remains only as a secondary
-        // safety valve.
-        const MAX_RESULTS: usize = 1_000_000;
+        // safety valve, sourced from the load-bearing `max_result_rows` config
+        // knob (roborev FINDING A — NOT a hardcoded constant).
+        let max_rows = self.max_result_rows;
         let byte_budget = self.max_result_bytes;
         // Running estimate of the materialized result's logical size, accumulated
         // with the SAME estimator the row cache uses (issue #1582).
@@ -790,7 +791,7 @@ impl SelectExecutor {
                 if evaluate_predicates(&row, predicates)? {
                     result_bytes = result_bytes.saturating_add(estimate_query_row_bytes(&row));
                     results.push(row);
-                    enforce_result_budget(&results, result_bytes, byte_budget, MAX_RESULTS)?;
+                    enforce_result_budget(&results, result_bytes, byte_budget, max_rows)?;
                     // FINDING 2: early-stop at the LIMIT bound where safe. NOTE
                     // (FINDING 1 scope): the metadata (WRITETIME/TTL) full-scan
                     // fallback above materializes via `scan_with_cell_metadata`
@@ -929,7 +930,7 @@ impl SelectExecutor {
                 if evaluate_predicates(&row, predicates)? {
                     result_bytes = result_bytes.saturating_add(estimate_query_row_bytes(&row));
                     results.push(row);
-                    enforce_result_budget(&results, result_bytes, byte_budget, MAX_RESULTS)?;
+                    enforce_result_budget(&results, result_bytes, byte_budget, max_rows)?;
                     // FINDING 2: the targeted / multi-partition paths return a Vec
                     // already bounded by the partition(s); early-stop still avoids
                     // building rows a later LIMIT would discard.

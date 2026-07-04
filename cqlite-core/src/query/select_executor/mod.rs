@@ -207,6 +207,12 @@ fn project_expr_reshapes_row(expr: &SelectExpression) -> bool {
     !matches!(expr, SelectExpression::Column(_))
 }
 
+/// Default row-count safety valve for the bare `SelectExecutor` constructors
+/// (issue #1582). Matches [`crate::config::QueryConfig::max_result_rows`]'s
+/// default; the query engine overrides it via
+/// [`SelectExecutor::with_max_result_rows`].
+const DEFAULT_MAX_RESULT_ROWS: usize = 1_000_000;
+
 /// SELECT query executor for SSTable-based storage
 pub struct SelectExecutor {
     /// Schema manager for metadata
@@ -224,6 +230,14 @@ pub struct SelectExecutor {
     /// bare constructors. Streaming queries are bounded by their channel buffer
     /// and do not consult this budget.
     max_result_bytes: usize,
+    /// Row-count safety valve on a materialized result set (issue #1582).
+    ///
+    /// Secondary to `max_result_bytes` (bytes are the correct memory unit), but
+    /// still load-bearing: the materializing scan fails once the collected row
+    /// count exceeds this valve. Wired from
+    /// [`crate::config::QueryConfig::max_result_rows`] by the query engine;
+    /// defaults to 1,000,000 for the bare constructors.
+    max_result_rows: usize,
 }
 
 impl std::fmt::Debug for SelectExecutor {
@@ -281,6 +295,7 @@ impl SelectExecutor {
             storage,
             clock: Arc::new(SystemClock),
             max_result_bytes: crate::config::DEFAULT_MAX_RESULT_BYTES as usize,
+            max_result_rows: DEFAULT_MAX_RESULT_ROWS,
         }
     }
 
@@ -291,6 +306,17 @@ impl SelectExecutor {
     /// load-bearing on the read path.
     pub fn with_max_result_bytes(mut self, max_result_bytes: usize) -> Self {
         self.max_result_bytes = max_result_bytes;
+        self
+    }
+
+    /// Override the row-count safety valve on a materialized result set (issue
+    /// #1582).
+    ///
+    /// Builder-style: the query engine calls this with
+    /// [`crate::config::QueryConfig::max_result_rows`] so the config knob is
+    /// load-bearing on the read path (not a hardcoded constant).
+    pub fn with_max_result_rows(mut self, max_result_rows: usize) -> Self {
+        self.max_result_rows = max_result_rows;
         self
     }
 
@@ -306,6 +332,7 @@ impl SelectExecutor {
             storage,
             clock,
             max_result_bytes: crate::config::DEFAULT_MAX_RESULT_BYTES as usize,
+            max_result_rows: DEFAULT_MAX_RESULT_ROWS,
         }
     }
 
