@@ -24,8 +24,10 @@
 //! rows are never charged. This replaced the earlier during-collection machinery
 //! (LIMIT/OFFSET pushdown, per-row early-stop, storage-layer row limit) that kept
 //! generating correctness edge cases. SCOPE (owner-accepted, tracked on #1582):
-//! does NOT bound peak scan memory (deferred #1897) and does NOT cover the legacy
-//! `WHERE id = ?` point-lookup path (deferred to the D6 redesign).
+//! does NOT bound peak scan memory (deferred #1897). The legacy `WHERE id =`
+//! point-lookup path (routed through `QueryExecutor`, not `SelectExecutor`) IS
+//! covered — the SAME byte budget is enforced at every legacy return site,
+//! including the plan-cache HIT return (roborev #1582 D6).
 //!
 //! ## Why controlled `WriteEngine` fixtures (not the vendored `test_wide_rows`)
 //!
@@ -61,6 +63,13 @@ use tempfile::TempDir;
 const KS: &str = "budget_ks";
 const WIDE_TBL: &str = "wide_items";
 const SKINNY_TBL: &str = "skinny_items";
+/// Text-keyed wide table used to exercise the LEGACY `WHERE id = <text>`
+/// point-lookup path. A TEXT partition key named `id` routes through the legacy
+/// `QueryExecutor` (`is_simple_id_lookup` gate) AND is findable by `storage.get`
+/// (the query-side `value_to_row_key(Text)` matches `PartitionKey::to_bytes`),
+/// unlike an INTEGER `id`, which the executor maps to a synthetic `user_key_N`.
+const WIDE_KEYED_TBL: &str = "wide_keyed_items";
+const WIDE_KEY: &str = "wide1";
 
 /// ~10 KiB per row → a handful of rows dwarfs a small byte budget while staying
 /// far below the 1M row-count safety valve.
@@ -86,6 +95,19 @@ fn wide_schema_cql() -> String {
 
 fn skinny_schema_cql() -> String {
     format!("CREATE TABLE {KS}.{SKINNY_TBL} (\n  id int PRIMARY KEY,\n  n int\n);\n")
+}
+
+fn wide_keyed_schema_cql() -> String {
+    format!("CREATE TABLE {KS}.{WIDE_KEYED_TBL} (\n  id text PRIMARY KEY,\n  payload blob\n);\n")
+}
+
+fn wide_keyed_row(id: &str, ts: i64) -> Mutation {
+    let pk = PartitionKey::single("id", Value::Text(id.to_string()));
+    let ops = vec![CellOperation::Write {
+        column: "payload".to_string(),
+        value: Value::Blob(vec![0xABu8; WIDE_PAYLOAD_BYTES]),
+    }];
+    Mutation::new(TableId::new(KS, WIDE_KEYED_TBL), pk, None, ops, ts, None)
 }
 
 fn wide_row(id: i32, ts: i64) -> Mutation {
@@ -190,6 +212,21 @@ async fn prepare_wide(root: &std::path::Path) -> (std::path::PathBuf, std::path:
     })
     .await
     .expect("build wide fixture");
+    (data_dir, schema_path)
+}
+
+async fn prepare_wide_keyed(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let data_dir = root.join("wide_keyed_data");
+    let wal_dir = root.join("wide_keyed_wal");
+    let schema_path = root.join("wide_keyed_schema.cql");
+    std::fs::write(&schema_path, wide_keyed_schema_cql()).expect("write wide-keyed schema");
+    let (d, w) = (data_dir.clone(), wal_dir.clone());
+    tokio::task::spawn_blocking(move || {
+        let rows = vec![wide_keyed_row(WIDE_KEY, 100)];
+        build_fixture(&d, &w, &wide_keyed_schema_cql(), rows);
+    })
+    .await
+    .expect("build wide-keyed fixture");
     (data_dir, schema_path)
 }
 
@@ -394,6 +431,65 @@ async fn over_budget_constant_query_trips_byte_guard() {
         }
         other => panic!("expected Error::ResultTooLarge from a constant query, got {other:?}"),
     }
+}
+
+/// A simple `SELECT * ... WHERE id = <k>` point lookup routes through the LEGACY
+/// `QueryExecutor` (not the budgeted `SelectExecutor`; see `QueryEngine::execute`'s
+/// `is_simple_id_lookup` gate). A single very wide row must trip `ResultTooLarge`
+/// there too — AND on the plan-cache HIT (the second identical execution), which
+/// before the fix returned WITHOUT applying the budget (roborev #1582 D6). The
+/// plan is cached BEFORE execution, so the cold cache-miss run leaves the plan in
+/// the cache and the second run takes the plan-cache-hit return path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn over_budget_point_lookup_trips_on_cold_and_cache_hit() {
+    let temp = TempDir::new().unwrap();
+    let (data_dir, schema_path) = prepare_wide_keyed(temp.path()).await;
+
+    // A budget far smaller than the single ~10 KiB wide row, so a one-row point
+    // lookup necessarily exceeds it; the default 1M row-count valve stays generous
+    // so the BYTE guard is what fires.
+    let tiny_budget: u64 = 512;
+    let db = open_db_with_budget(data_dir, schema_path, tiny_budget).await;
+
+    // `WHERE id = '<text>'` (<= 8 whitespace tokens) routes through the legacy
+    // point-lookup path; the text key is findable by `storage.get`.
+    let sql = format!("SELECT * FROM {KS}.{WIDE_KEYED_TBL} WHERE id = '{WIDE_KEY}'");
+
+    fn assert_trips(err: Error, tiny_budget: u64, phase: &str) {
+        match err {
+            Error::ResultTooLarge {
+                budget_bytes,
+                estimated_bytes,
+                ..
+            } => {
+                assert_eq!(
+                    budget_bytes, tiny_budget as usize,
+                    "{phase}: error must report the configured budget"
+                );
+                assert!(
+                    estimated_bytes > budget_bytes,
+                    "{phase}: estimated bytes ({estimated_bytes}) must exceed budget \
+                     ({budget_bytes})"
+                );
+            }
+            other => panic!("{phase}: expected Error::ResultTooLarge, got {other:?}"),
+        }
+    }
+
+    // Cold (cache-miss): plan built + cached, executed, budget enforced on exit.
+    let cold = db
+        .execute(&sql)
+        .await
+        .expect_err("cold point lookup returning one wide row must trip the byte guard");
+    assert_trips(cold, tiny_budget, "cold");
+
+    // Second identical execution takes the plan-cache HIT return path, which must
+    // ALSO enforce the budget (the gap this test guards).
+    let cache_hit = db
+        .execute(&sql)
+        .await
+        .expect_err("plan-cache-HIT point lookup must ALSO trip the byte guard");
+    assert_trips(cache_hit, tiny_budget, "cache-hit");
 }
 
 /// The `max_result_rows` row-count safety valve must be load-bearing (wired from
