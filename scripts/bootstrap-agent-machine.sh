@@ -114,22 +114,33 @@ else
 fi
 
 # modern bash — mirrors agent-gate.sh ACCEL_LANES (needs bash >=4.3 for `wait -n`).
-# Detect the newest bash available, not just the one running this script.
-detect_bash_ver() {
-  local b out
-  for b in bash /opt/homebrew/bin/bash /usr/local/bin/bash; do
-    out=$(command -v "$b" 2>/dev/null) || continue
-    "$out" -c 'echo "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"' 2>/dev/null && return 0
-  done
-  echo "0.0"
-}
-BV=$(detect_bash_ver | head -1)
-BV_MAJOR=${BV%%.*}
-BV_MINOR=${BV#*.}
-if [ "${BV_MAJOR:-0}" -gt 4 ] || { [ "${BV_MAJOR:-0}" -eq 4 ] && [ "${BV_MINOR:-0}" -ge 3 ]; }; then
-  ok "modern bash present (bash $BV) — parallel gate component lanes"
+# Iterate ALL candidate installs and track the NEWEST version found. The gate,
+# however, runs under whatever plain `bash` resolves to on PATH — so a machine
+# that HAS a modern bash but bad PATH order needs a PATH fix, not an install,
+# and the gate's lanes WARN persists until PATH is fixed.
+bash_ver_of() { "$1" -c 'echo "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"' 2>/dev/null; }
+ver_num() { local v="${1:-0.0}"; echo $(( ${v%%.*} * 100 + ${v#*.} )); }
+BEST_BV="0.0"; BEST_BV_PATH=""
+for b in bash /opt/homebrew/bin/bash /usr/local/bin/bash; do
+  p=$(command -v "$b" 2>/dev/null) || continue
+  v=$(bash_ver_of "$p") || continue
+  if [ "$(ver_num "$v")" -gt "$(ver_num "$BEST_BV")" ]; then
+    BEST_BV="$v"; BEST_BV_PATH="$p"
+  fi
+done
+PLAIN_BASH=$(command -v bash 2>/dev/null || true)
+PLAIN_BV="0.0"
+[ -n "$PLAIN_BASH" ] && PLAIN_BV=$(bash_ver_of "$PLAIN_BASH" || echo "0.0")
+if [ "$(ver_num "$PLAIN_BV")" -ge "$(ver_num 4.3)" ]; then
+  ok "modern bash present (bash $PLAIN_BV at $PLAIN_BASH) — parallel gate component lanes"
+elif [ "$(ver_num "$BEST_BV")" -ge "$(ver_num 4.3)" ]; then
+  # A modern bash IS installed, but plain `bash` resolves to an old one — the
+  # gate sees whatever `bash` resolves to, so this is a PATH-order problem.
+  warn "modern bash installed (bash $BEST_BV at $BEST_BV_PATH) but plain 'bash' resolves to ${PLAIN_BASH:-<none>} (bash $PLAIN_BV) — gate lanes run SERIALLY (lanes=serial)"
+  info "fix PATH order, no install needed: put $(dirname "$BEST_BV_PATH") ahead of /bin in PATH"
+  info "note: the gate sees whatever 'bash' resolves to — its lanes WARN persists until PATH is fixed"
 else
-  warn "bash <4.3 (found $BV) — gate lanes run SERIALLY (gate stamps lanes=serial)"
+  warn "bash <4.3 (newest found: $BEST_BV) — gate lanes run SERIALLY (gate stamps lanes=serial)"
   if [ "$PLATFORM" = macos ]; then
     # shellcheck disable=SC2046
     run_or_print bash $(brew_or_cargo bash bash)
@@ -144,7 +155,10 @@ hdr "GitHub CLI auth + project scope (Path A, #1886)"
 if have gh; then
   if gh auth status >/dev/null 2>&1; then
     ok "gh authenticated"
-    if gh auth status 2>&1 | grep -qE "Token scopes:.*'project'|Token scopes:.*project"; then
+    # Token-boundary match on the scopes line so a scope like 'project:read-only'
+    # (or any 'xprojecty' substring) can never false-positive as 'project'.
+    scopes_line=$(gh auth status 2>&1 | grep "Token scopes:" | head -1)
+    if printf '%s\n' "$scopes_line" | grep -qE "(^|[ ,'])project([ ,']|$)"; then
       ok "'project' scope present — board dispatch works"
     else
       warn "'project' scope MISSING — the board is the SOLE dispatch authority (Path A). Fix:"

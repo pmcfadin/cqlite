@@ -90,6 +90,8 @@ done
 # --- 5. Default run must PRINT an install command for a missing tool rather than
 #        run it. Force a missing accelerator by running with an empty-ish PATH that
 #        still has coreutils but no sccache; assert the guidance line appears. ---
+# Reset the tripwire so the no-install assertion below reflects ONLY this run.
+: >"$tripwire"
 guard_out=$(PATH="$tmp:/usr/bin:/bin" bash "$BOOTSTRAP" --skip-smoke 2>&1)
 if printf '%s' "$guard_out" | grep -Eq "install sccache:|sccache MISSING"; then
   ok "missing accelerator prints install guidance (does not auto-install)"
