@@ -458,32 +458,41 @@ async fn read_nb_format_chunk_data(
                 ))
             })?;
 
-        // Read chunk bytes (NOT including trailing CRC32)
-        let mut chunk_data = vec![0u8; chunk_data_size];
+        // E3 (issue #1585): read the compressed payload AND its trailing 4-byte
+        // CRC32 in ONE `read_exact` into a single `payload+CRC` buffer, then split
+        // the slice — rather than two separate `read_exact` calls (one for the
+        // payload, one for the CRC). Halves the per-chunk read count (A5). The CRC
+        // is still verified BEFORE the payload is handed to the decompressor
+        // (guardrail: unchanged CRC ordering).
+        //
+        // A5 read-work counter (READ_CALLS; consumer E3): exactly one logical
+        // chunk read. No-op in release (design.md Decision 1/2).
+        crate::storage::sstable::read_work_counters::record_read();
+        // A single `payload+CRC` heap buffer is allocated per chunk here.
+        // CHUNK_PATH_ALLOCS records THIS allocation — the one instrumented
+        // copy-chain alloc site today. Recycling this buffer per-scan (so a
+        // steady-state windowed scan allocates nothing here) is the A4
+        // ≤1-alloc/chunk work deferred to issue #1940; until then every call
+        // allocates and records exactly one.
+        crate::storage::sstable::read_work_counters::record_chunk_path_alloc();
+        let mut chunk_data = vec![0u8; total_chunk_size as usize];
         file_guard.read_exact(&mut chunk_data).await.map_err(|e| {
             Error::Io(std::io::Error::new(
                 e.kind(),
                 format!(
-                    "Failed to read chunk {} data ({} bytes at offset 0x{:x}): {}",
-                    chunk_idx, chunk_data_size, chunk_offset, e
+                    "Failed to read chunk {} data+CRC ({} bytes at offset 0x{:x}): {}",
+                    chunk_idx, total_chunk_size, chunk_offset, e
                 ),
             ))
         })?;
-
-        // Read trailing CRC32 (4 bytes, big-endian)
-        let mut crc_bytes = [0u8; 4];
-        file_guard.read_exact(&mut crc_bytes).await.map_err(|e| {
-            Error::Io(std::io::Error::new(
-                e.kind(),
-                format!(
-                    "Failed to read CRC32 for chunk {} at offset 0x{:x}: {}",
-                    chunk_idx,
-                    chunk_offset + chunk_data_size as u64,
-                    e
-                ),
-            ))
-        })?;
-        let expected_crc = u32::from_be_bytes(crc_bytes);
+        // Split the trailing 4-byte big-endian CRC32 off the payload.
+        let expected_crc = u32::from_be_bytes([
+            chunk_data[chunk_data_size],
+            chunk_data[chunk_data_size + 1],
+            chunk_data[chunk_data_size + 2],
+            chunk_data[chunk_data_size + 3],
+        ]);
+        chunk_data.truncate(chunk_data_size);
 
         (chunk_data, expected_crc)
     };
@@ -587,6 +596,14 @@ pub(crate) fn read_compressed_chunk_at(
     // path's per-chunk seek, so it is counted the same way for parity of the E4
     // guard. No-op in release (design.md Decision 1/2).
     crate::storage::sstable::read_work_counters::record_seek();
+
+    // A5 read-work counter (READ_CALLS; consumer E3): exactly one logical chunk
+    // read on the positional POINT-READ path too — this positioned fetch reads
+    // payload + trailing CRC in ONE `read_exact_at`, so a point lookup records
+    // exactly one read per chunk, matching the cursor path. Recording it here
+    // keeps READ_CALLS complete: without it, point lookups would decompress
+    // chunks while reporting zero reads. No-op in release (design.md Decision 1/2).
+    crate::storage::sstable::read_work_counters::record_read();
 
     // ONE positioned read for payload + trailing CRC32 (E3: single read/chunk).
     let mut buf = vec![0u8; chunk_data_size + 4];
@@ -1148,6 +1165,80 @@ mod tests {
         assert!(read_compressed_chunk_at(&src, &ci, 2, file_size, 0)
             .expect("EOF read ok")
             .is_none());
+    }
+
+    /// The positional POINT-READ path records `READ_CALLS` exactly once per chunk
+    /// fetched — the same one-read-per-chunk contract the cursor path proves. Each
+    /// `read_compressed_chunk_at` that verifies and returns a chunk bumps the
+    /// counter by exactly 1 (payload + trailing CRC are read in ONE `read_exact_at`),
+    /// so point lookups no longer decompress chunks while reporting zero reads. A
+    /// clean EOF read (past the last chunk) reads nothing and must NOT bump it.
+    ///
+    /// Counters are a shared process-global, so this test serializes on the
+    /// `serial_test` mutex (the counter-test convention; issue #1071) — a stale
+    /// value from a parallel test cannot satisfy an assertion after the `reset`.
+    #[test]
+    #[serial_test::serial]
+    fn read_compressed_chunk_at_records_one_read_per_chunk() {
+        use crate::storage::sstable::compression_info::CompressionInfo;
+        use crate::storage::sstable::read_work_counters as rwc;
+
+        // Two well-formed chunks: [payload0][crc0][payload1][crc1].
+        let payload0 = b"first-chunk-bytes".to_vec();
+        let payload1 = b"second-chunk-bytes".to_vec();
+        let crc0 = crc32fast::hash(&payload0);
+        let crc1 = crc32fast::hash(&payload1);
+
+        let mut file = Vec::new();
+        file.extend_from_slice(&payload0);
+        file.extend_from_slice(&crc0.to_be_bytes());
+        let off1 = file.len() as u64;
+        file.extend_from_slice(&payload1);
+        file.extend_from_slice(&crc1.to_be_bytes());
+        let file_size = file.len() as u64;
+
+        let ci = CompressionInfo {
+            algorithm: "LZ4Compressor".to_string(),
+            option_pairs: vec![],
+            chunk_length: 64 * 1024,
+            max_compressed_length: i32::MAX as u32,
+            data_length: (payload0.len() + payload1.len()) as u64,
+            chunk_offsets: vec![0, off1],
+        };
+        let src = MemReadAt(file);
+
+        // Measure the positional path from zero.
+        rwc::reset();
+        assert_eq!(rwc::read_calls(), 0, "reset must zero READ_CALLS");
+
+        // Each successful chunk fetch bumps READ_CALLS by exactly one.
+        read_compressed_chunk_at(&src, &ci, 0, file_size, 0)
+            .expect("chunk 0 read")
+            .expect("chunk 0 present");
+        assert_eq!(
+            rwc::read_calls(),
+            1,
+            "point-read of chunk 0 must record exactly one READ_CALL"
+        );
+
+        read_compressed_chunk_at(&src, &ci, 1, file_size, 0)
+            .expect("chunk 1 read")
+            .expect("chunk 1 present");
+        assert_eq!(
+            rwc::read_calls(),
+            2,
+            "point-read of chunk 1 must record exactly one more READ_CALL (total 2)"
+        );
+
+        // A clean EOF read (past the last chunk) fetches nothing: no read recorded.
+        assert!(read_compressed_chunk_at(&src, &ci, 2, file_size, 0)
+            .expect("EOF read ok")
+            .is_none());
+        assert_eq!(
+            rwc::read_calls(),
+            2,
+            "EOF (no chunk fetched) must NOT record a READ_CALL"
+        );
     }
 
     // =========================================================================
