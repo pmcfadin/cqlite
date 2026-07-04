@@ -79,7 +79,7 @@ use cqlite_core::storage::write_engine::merge::compact_sstables_with_registry;
 use cqlite_core::storage::write_engine::{
     CellOperation, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
 };
-use cqlite_core::types::{UdtField, UdtTypeDef, UdtValue, Value};
+use cqlite_core::types::{UdtField, UdtFieldDef, UdtTypeDef, UdtValue, Value};
 use cqlite_core::Config;
 use tempfile::TempDir;
 
@@ -700,46 +700,114 @@ fn peel_frozen(v: &Value) -> Value {
     }
 }
 
+/// Same as [`decode_typed_cell_map`] but wires a `UdtRegistry` (DDL-built person /
+/// address defs) into the reader BEFORE decoding. Used by the #1340 equivalence
+/// test to prove the header-marshal decode (registry-less) equals the registry
+/// decode (spec Req 2 scenario 1).
+async fn decode_typed_cell_map_with_registry(
+    dir: &Path,
+    schema: &TableSchema,
+    registry: UdtRegistry,
+) -> BTreeMap<(String, String), Value> {
+    let data_path =
+        single_data_db(dir).unwrap_or_else(|| panic!("no compacted Data.db in {dir:?}"));
+    let config = Config::default();
+    let platform = Arc::new(
+        Platform::new(&config)
+            .await
+            .expect("platform init for decode"),
+    );
+    let mut reader = SSTableReader::open(&data_path, &config, platform)
+        .await
+        .unwrap_or_else(|e| panic!("open {data_path:?} for decode failed: {e}"));
+    reader.set_udt_registry(registry);
+    let rows = reader
+        .iterate_all_partitions_for_compaction(Some(schema))
+        .await
+        .unwrap_or_else(|e| panic!("compaction iterate of {data_path:?} failed: {e}"));
+
+    let mut map: BTreeMap<(String, String), Value> = BTreeMap::new();
+    for row in &rows {
+        let pk = pk_repr(&row.key.0);
+        if let CompactionRowData::Live { simple, .. } = &row.row_data {
+            for cell in simple {
+                if matches!(cell.value, Value::Tombstone(_)) {
+                    continue;
+                }
+                map.insert((pk.clone(), cell.column.clone()), peel_frozen(&cell.value));
+            }
+        }
+    }
+    map
+}
+
+/// A `text` UDT field def (nullable) for the equivalence-test registry.
+fn tfield(name: &str) -> UdtFieldDef {
+    UdtFieldDef {
+        name: name.into(),
+        field_type: CqlType::Text,
+        nullable: true,
+    }
+}
+
+/// DDL-equivalent `person` + `address` UDT registry for `test_compactionparityudt`.
+fn collections_udt_registry() -> UdtRegistry {
+    let mut reg = UdtRegistry::new();
+    reg.register_udt(UdtTypeDef {
+        keyspace: KEYSPACE.into(),
+        name: "person".into(),
+        fields: vec![
+            tfield("first_name"),
+            tfield("last_name"),
+            UdtFieldDef {
+                name: "age".into(),
+                field_type: CqlType::Int,
+                nullable: true,
+            },
+        ],
+    });
+    reg.register_udt(UdtTypeDef {
+        keyspace: KEYSPACE.into(),
+        name: "address".into(),
+        fields: vec![tfield("street"), tfield("city"), tfield("zip")],
+    });
+    reg
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // Structural nested-decode assertions (the dedicated #1240 value round-trip)
 //
 // Decode contract of the compaction reader (compaction_row.rs): the OUTER frozen
 // collection is decoded STRUCTURALLY into a `List`/`Map` (proving it is NOT
-// collapsed to a top-level blob), while each INNER frozen-UDT element is preserved
-// as its frozen serialized BYTES (a `Blob`) — the compactor's job is to preserve
-// frozen element bytes for byte-identical re-serialization, not to re-decode them
-// per-field. So the structural floor we assert via this path is: outer collection
-// shape + element count/order + the inner-UDT element bytes ROUND-TRIP and EQUAL
-// the Cassandra reference. The TYPED inner-UDT field values (first_name/zip/…) are
-// pinned separately against the committed sstabledump JSONL golden below.
+// collapsed to a top-level blob). After issue #1340 each INNER `frozen<UDT>`
+// element is ALSO decoded to a typed `Value::Udt` from the file's own on-disk
+// SerializationHeader marshal type (registry-free), so the structural floor we
+// assert via this path is: outer collection shape + element count/order + the
+// per-element TYPED VALUE ROUND-TRIP and EQUALITY with the Cassandra reference
+// (both decoded through the SAME reader, so equal typed `Value`s prove the
+// header-marshal decode is identical across CQLite's output and Cassandra's).
+// The typed inner-UDT FIELD values (first_name/zip/…) are additionally pinned
+// against CQLite's OWN decode and the committed sstabledump JSONL golden below.
 // ════════════════════════════════════════════════════════════════════════════
 
-/// Bytes of a single decoded collection element (peels Frozen, accepts Blob).
-fn element_bytes(col: &str, pk: &str, el: &Value) -> Vec<u8> {
-    match peel_frozen(el) {
-        Value::Blob(b) => b,
-        // A future decode path that DOES re-decode the inner UDT would land here;
-        // serialize it back so the round-trip/equality check still holds.
-        Value::Udt(u) => panic!(
-            "{col}[pk={pk}]: inner element decoded to a typed UDT '{}' — decode contract \
-             changed; update this test to compare typed UDTs (this is an improvement, not a bug)",
-            u.type_name
-        ),
-        other => panic!(
-            "{col}[pk={pk}]: inner element is {other:?}, expected the frozen-UDT element bytes"
-        ),
-    }
+/// One decoded collection element, peeling `Frozen`. After #1340 an inner
+/// `frozen<UDT>` decodes to a typed `Value::Udt`; an element the reader cannot
+/// resolve stays a `Value::Blob`. Either way we return the peeled typed value so
+/// `ours` and the Cassandra `reference` (decoded through the SAME reader) compare
+/// equal at the typed level.
+fn element_value(el: &Value) -> Value {
+    peel_frozen(el)
 }
 
 /// Assert a decoded `lp` cell is a structured `List` (NOT a top-level blob) and
-/// return its per-element frozen-UDT bytes in order. Element COUNT + ORDER is the
+/// return its per-element typed values in order. Element COUNT + ORDER is the
 /// nested-collection structure under test.
 ///
 /// `lp` is `frozen<list<frozen<person>>>`, so we pin it STRICTLY as `Value::List`:
 /// a regression that decoded an ordered list as a `Value::Set` would silently
 /// pass an `List | Set` match yet drop the list's order guarantee, so a `Set`
 /// (or any other variant) is a hard failure here.
-fn assert_list_structure(pk: &str, v: &Value) -> Vec<Vec<u8>> {
+fn assert_list_structure(pk: &str, v: &Value) -> Vec<Value> {
     let list = match peel_frozen(v) {
         Value::List(items) => items,
         Value::Set(_) => panic!(
@@ -756,12 +824,12 @@ fn assert_list_structure(pk: &str, v: &Value) -> Vec<Vec<u8>> {
         !list.is_empty(),
         "lp[pk={pk}]: decoded to an EMPTY list — nested element decode dropped UDTs"
     );
-    list.iter().map(|el| element_bytes("lp", pk, el)).collect()
+    list.iter().map(element_value).collect()
 }
 
 /// Assert a decoded `ma` cell is a structured `Map<text, _>` (NOT a top-level
-/// blob) and return `key -> frozen-UDT-value-bytes` sorted by key.
-fn assert_map_structure(pk: &str, v: &Value) -> BTreeMap<String, Vec<u8>> {
+/// blob) and return `key -> typed-value` sorted by key.
+fn assert_map_structure(pk: &str, v: &Value) -> BTreeMap<String, Value> {
     let entries = match peel_frozen(v) {
         Value::Map(m) => m,
         other => panic!(
@@ -779,9 +847,49 @@ fn assert_map_structure(pk: &str, v: &Value) -> BTreeMap<String, Vec<u8>> {
             Value::Text(s) => s,
             other => panic!("ma[pk={pk}]: map key is {other:?}, expected text"),
         };
-        out.insert(key, element_bytes("ma", pk, &val));
+        out.insert(key, element_value(&val));
     }
     out
+}
+
+// ── Typed inner-UDT field accessors (issue #1340: assert CQLite's OWN decode) ──
+
+/// Peel to the inner `UdtValue` (through any `Frozen` wrappers). Panics loudly if
+/// the element did NOT decode to a typed UDT — that is the #1340 regression guard.
+fn as_udt(v: &Value) -> &UdtValue {
+    match v {
+        Value::Udt(u) => u,
+        Value::Frozen(inner) => as_udt(inner),
+        other => panic!(
+            "expected a typed Value::Udt (issue #1340 typed inner-UDT decode), got {other:?}"
+        ),
+    }
+}
+
+/// Read a text (or explicit-null) UDT field by name from CQLite's OWN decode.
+fn udt_text(u: &UdtValue, field: &str) -> Option<String> {
+    match u.fields.iter().find(|f| f.name == field) {
+        Some(f) => match &f.value {
+            Some(Value::Text(s)) => Some(s.clone()),
+            None => None,
+            Some(other) => panic!(
+                "UDT '{}' field '{field}': expected text or null, got {other:?}",
+                u.type_name
+            ),
+        },
+        None => panic!("UDT '{}' missing field '{field}'", u.type_name),
+    }
+}
+
+/// Read an int UDT field by name from CQLite's OWN decode.
+fn udt_int(u: &UdtValue, field: &str) -> i32 {
+    match u.fields.iter().find(|f| f.name == field).map(|f| &f.value) {
+        Some(Some(Value::Integer(i))) => *i,
+        other => panic!(
+            "UDT '{}' field '{field}': expected int, got {other:?}",
+            u.type_name
+        ),
+    }
 }
 
 // ── Typed inner-UDT pinning via the committed sstabledump JSONL golden ────────
@@ -926,8 +1034,8 @@ async fn nested_frozen_collection_of_udt_compaction_parity() {
         );
         assert_eq!(
             our_list, ref_list,
-            "lp[pk={pk}]: CQLite nested frozen<list<frozen<person>>> element bytes (count/order) \
-             != Cassandra reference"
+            "lp[pk={pk}]: CQLite nested frozen<list<frozen<person>>> typed element values \
+             (count/order) != Cassandra reference"
         );
         checked_lp += 1;
 
@@ -949,8 +1057,8 @@ async fn nested_frozen_collection_of_udt_compaction_parity() {
         );
         assert_eq!(
             our_map, ref_map,
-            "ma[pk={pk}]: CQLite nested frozen<map<text,frozen<address>>> key set + value bytes \
-             != Cassandra reference"
+            "ma[pk={pk}]: CQLite nested frozen<map<text,frozen<address>>> key set + typed value \
+             values != Cassandra reference"
         );
         checked_ma += 1;
     }
@@ -960,14 +1068,62 @@ async fn nested_frozen_collection_of_udt_compaction_parity() {
 
     eprintln!(
         "[issue_1240] STRUCTURAL ROUND-TRIP PASS — nested {NESTED_COLS:?} columns decoded as \
-         structured List/Map (outer-collection shape + element count/order + inner frozen-UDT \
-         element bytes) from CQLite's compacted output and matched the Cassandra reference on all \
+         structured List/Map (outer-collection shape + element count/order + typed inner frozen-UDT \
+         element values) from CQLite's compacted output and matched the Cassandra reference on all \
          3 partitions ({checked_lp} lp + {checked_ma} ma)."
     );
 
-    // ── 1b. TYPED inner-UDT value round-trip via the sstabledump JSONL golden ─
-    // The compaction reader keeps the inner frozen UDT opaque (byte-preserving),
-    // so pin the TYPED inner fields against the authoritative sstabledump golden:
+    // ── 1b. TYPED inner-UDT field values from CQLite's OWN decode (issue #1340) ─
+    // The header-marshal decode (registry-free compaction reader) must produce the
+    // right typed person/address FIELDS. Assert CQLite's OWN decoded `ours` cells
+    // field-by-field against the values the sstabledump golden carries (the golden
+    // itself is self-checked below). A blob fallback / wrong inner-UDT field decode
+    // would fail `as_udt` or mismatch a field here.
+    let expect_lp: &[(&str, &[(&str, &str, i32)])] = &[
+        ("1", &[("Ada", "Lovelace", 36)]),
+        ("2", &[("Grace", "Hopper", 85), ("Alan", "Turing", 41)]),
+        ("3", &[("Katherine", "Johnson", 101)]),
+    ];
+    for (pk, people) in expect_lp {
+        let list = assert_list_structure(
+            pk,
+            ours.get(&(pk.to_string(), "lp".to_string()))
+                .unwrap_or_else(|| panic!("CQLite output missing lp cell for pk={pk}")),
+        );
+        assert_eq!(list.len(), people.len(), "lp[pk={pk}]: person count");
+        for (el, (first, last, age)) in list.iter().zip(people.iter()) {
+            let u = as_udt(el);
+            assert_eq!(udt_text(u, "first_name").as_deref(), Some(*first), "lp[pk={pk}] first_name");
+            assert_eq!(udt_text(u, "last_name").as_deref(), Some(*last), "lp[pk={pk}] last_name");
+            assert_eq!(udt_int(u, "age"), *age, "lp[pk={pk}] age");
+        }
+    }
+    let expect_ma: &[(&str, &str, (&str, &str, &str))] = &[
+        ("1", "home", ("1 Navy Way", "Arlington", "22201")),
+        ("2", "office", ("9 Apollo", "Hampton", "23666")),
+        ("3", "h", ("9 Apollo", "Hampton", "23666")),
+    ];
+    for (pk, key, (street, city, zip)) in expect_ma {
+        let map = assert_map_structure(
+            pk,
+            ours.get(&(pk.to_string(), "ma".to_string()))
+                .unwrap_or_else(|| panic!("CQLite output missing ma cell for pk={pk}")),
+        );
+        let val = map
+            .get(*key)
+            .unwrap_or_else(|| panic!("ma[pk={pk}]: missing key '{key}'"));
+        let u = as_udt(val);
+        assert_eq!(udt_text(u, "street").as_deref(), Some(*street), "ma[pk={pk}] street");
+        assert_eq!(udt_text(u, "city").as_deref(), Some(*city), "ma[pk={pk}] city");
+        assert_eq!(udt_text(u, "zip").as_deref(), Some(*zip), "ma[pk={pk}] zip");
+    }
+    eprintln!(
+        "[issue_1240] TYPED INNER-UDT (OWN DECODE) PASS — CQLite's registry-free decode produced \
+         typed person/address fields for all nested-column cells."
+    );
+
+    // ── 1c. TYPED inner-UDT value round-trip via the sstabledump JSONL golden ─
+    // Pins the TYPED inner fields against the authoritative sstabledump golden:
     // a blob fallback or wrong inner-UDT field decode would not produce these
     // structured typed values (incl. field order). Every committed `ma` address
     // here carries a present `city`; the fixture does not exercise a null nested
@@ -1051,6 +1207,52 @@ async fn nested_frozen_collection_of_udt_compaction_parity() {
     );
 }
 
+/// Issue #1340 — equivalence: the fixture decoded via the header-marshal
+/// mechanism (registry-LESS reader) equals the decode via the existing
+/// `UdtRegistry` mechanism (spec Req 2 scenario 1). Same reader, same schema; the
+/// only difference is whether a DDL-built registry is wired. If the two decodes
+/// disagree, the header-marshal path is not producing the identical typed
+/// `Value::Udt` the registry path produces.
+#[tokio::test]
+async fn nested_frozen_collection_marshal_equals_registry_decode() {
+    let Some(ref_dir) = reference_dir() else {
+        if require_fixtures_strict() {
+            panic!(
+                "CQLITE_REQUIRE_FIXTURES=1 but the compacted reference for {KEYSPACE}.{TABLE} is \
+                 absent; generate with bash test-data/scripts/generate-compaction-parity-udt.sh"
+            );
+        }
+        eprintln!(
+            "[issue_1340] reference for {KEYSPACE}.{TABLE} absent (dataset not fetched); skipping"
+        );
+        return;
+    };
+
+    let schema = collections_schema();
+    let marshal_only = decode_typed_cell_map(&ref_dir, &schema).await;
+    let registry_wired =
+        decode_typed_cell_map_with_registry(&ref_dir, &schema, collections_udt_registry()).await;
+
+    assert!(
+        !marshal_only.is_empty(),
+        "registry-less decode produced ZERO cells — fixture present-but-zero-rows is a FAILURE"
+    );
+    assert_eq!(
+        marshal_only, registry_wired,
+        "issue #1340: header-marshal (registry-less) decode must equal the UdtRegistry decode"
+    );
+    // Prove the inner elements are actually TYPED (not both equally-Blob).
+    let lp = marshal_only
+        .get(&("1".to_string(), "lp".to_string()))
+        .expect("lp cell for pk=1");
+    let first = assert_list_structure("1", lp);
+    let _ = as_udt(&first[0]); // panics if not a typed UDT
+    eprintln!(
+        "[issue_1340] EQUIVALENCE PASS — registry-less header-marshal decode == UdtRegistry decode \
+         (typed Value::Udt inner elements) across all nested-column cells."
+    );
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // Issue #1289 — null INNER FIELD inside a nested-collection UDT
 //
@@ -1129,8 +1331,8 @@ async fn nested_collection_udt_null_inner_field_compaction_parity() {
         );
         assert_eq!(
             our_list, ref_list,
-            "lp[pk={pk}]: CQLite nested frozen<list<frozen<person>>> element bytes (null-last_name) \
-             != Cassandra reference"
+            "lp[pk={pk}]: CQLite nested frozen<list<frozen<person>>> typed element values \
+             (null-last_name) != Cassandra reference"
         );
         checked_lp += 1;
 
@@ -1150,8 +1352,8 @@ async fn nested_collection_udt_null_inner_field_compaction_parity() {
         );
         assert_eq!(
             our_map, ref_map,
-            "ma[pk={pk}]: CQLite nested frozen<map<text,frozen<address>>> key set + value bytes \
-             (null-city) != Cassandra reference"
+            "ma[pk={pk}]: CQLite nested frozen<map<text,frozen<address>>> key set + typed value \
+             values (null-city) != Cassandra reference"
         );
         checked_ma += 1;
     }
@@ -1162,6 +1364,58 @@ async fn nested_collection_udt_null_inner_field_compaction_parity() {
         "[issue_1289] STRUCTURAL ROUND-TRIP PASS — {TABLE_NULL} nested {NESTED_COLS:?} columns \
          (null inner field) decoded as structured List/Map and matched the Cassandra reference on \
          all 3 partitions ({checked_lp} lp + {checked_ma} ma)."
+    );
+
+    // ── 1b0. NULL inner field survives CQLite's OWN typed decode (issue #1340) ─
+    // The whole point of #1289: the registry-free header-marshal decode must
+    // represent the null inner field as a null UDT field (not dropped, not an
+    // error). Assert against CQLite's OWN decoded `ours` cells.
+    let mut own_null_fields = 0usize;
+    for pk in ["1", "2", "3"] {
+        let list = assert_list_structure(
+            pk,
+            ours.get(&(pk.to_string(), "lp".to_string()))
+                .unwrap_or_else(|| panic!("CQLite output missing lp cell for pk={pk}")),
+        );
+        for el in &list {
+            let u = as_udt(el);
+            assert!(
+                udt_text(u, "first_name").is_some(),
+                "lp[pk={pk}]: first_name should be present"
+            );
+            assert_eq!(
+                udt_text(u, "last_name"),
+                None,
+                "lp[pk={pk}]: person.last_name must decode to NULL"
+            );
+            own_null_fields += 1;
+        }
+        let map = assert_map_structure(
+            pk,
+            ours.get(&(pk.to_string(), "ma".to_string()))
+                .unwrap_or_else(|| panic!("CQLite output missing ma cell for pk={pk}")),
+        );
+        for (_k, val) in &map {
+            let u = as_udt(val);
+            assert!(
+                udt_text(u, "street").is_some(),
+                "ma[pk={pk}]: street should be present"
+            );
+            assert_eq!(
+                udt_text(u, "city"),
+                None,
+                "ma[pk={pk}]: address.city must decode to NULL"
+            );
+            own_null_fields += 1;
+        }
+    }
+    assert!(
+        own_null_fields >= 6,
+        "expected null inner fields across all surviving nested cells, saw {own_null_fields}"
+    );
+    eprintln!(
+        "[issue_1289] NULL INNER-FIELD (OWN DECODE) PASS — CQLite's registry-free decode \
+         represented person.last_name / address.city as NULL in {own_null_fields} cells."
     );
 
     // ── 1b. TYPED inner-UDT pin: the NULL inner field decodes to `null` ───────
