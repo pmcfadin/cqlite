@@ -483,6 +483,23 @@ pub mod utils {
             let sum: f64 = self.samples.iter().map(|&s| s - self.baseline_mb).sum();
             sum / self.samples.len() as f64
         }
+
+        /// Smallest observed delta (`sample - baseline`) across all samples.
+        ///
+        /// Unlike [`peak_usage_mb`](Self::peak_usage_mb) this is NOT clamped at
+        /// the baseline, so it may be negative when process RSS dips below the
+        /// baseline (routine page reclaim / allocator returning pages).
+        pub fn min_usage_mb(&self) -> f64 {
+            self.samples
+                .iter()
+                .map(|&s| s - self.baseline_mb)
+                .fold(f64::INFINITY, f64::min)
+        }
+
+        /// Number of recorded samples (the baseline counts as the first one).
+        pub fn sample_count(&self) -> usize {
+            self.samples.len()
+        }
     }
 
     /// Get current process memory usage in MB
@@ -638,8 +655,36 @@ mod tests {
         monitor.sample();
         monitor.sample();
 
-        assert!(monitor.peak_usage_mb() >= 0.0);
-        assert!(monitor.average_usage_mb() >= 0.0);
+        // The monitor records the baseline plus every explicit sample, so two
+        // sample() calls yield exactly three samples. This proves the monitor
+        // actually captured measurements (not a vacuous >= 0.0 tautology).
+        assert_eq!(
+            monitor.sample_count(),
+            3,
+            "expected baseline + 2 samples to be recorded"
+        );
+
+        // peak_usage_mb() is `peak.max(baseline) - baseline`, so it is >= 0 by
+        // construction regardless of RSS jitter.
+        let peak = monitor.peak_usage_mb();
+        assert!(peak >= 0.0, "peak usage must be non-negative, got {peak}");
+
+        // The average delta must lie within [min, max] of the observed deltas
+        // by construction (the mean of a set is bounded by its extremes). This
+        // makes NO monotonic-RSS or wall-clock assumption: RSS can dip below the
+        // baseline (page reclaim), so avg/min may be negative — only the
+        // ordering min <= avg <= peak is invariant. A regression that miscounts
+        // or misweights samples in average_usage_mb() would break this ordering.
+        let avg = monitor.average_usage_mb();
+        let min = monitor.min_usage_mb();
+        assert!(
+            avg >= min,
+            "average delta {avg} must be >= min observed delta {min}"
+        );
+        assert!(
+            avg <= peak,
+            "average delta {avg} must be <= peak delta {peak}"
+        );
     }
 
     #[tokio::test]
