@@ -56,17 +56,25 @@ fn schema_path() -> Option<PathBuf> {
 }
 
 fn require_fixtures_strict() -> bool {
-    std::env::var("CQLITE_REQUIRE_FIXTURES").map(|v| v == "1").unwrap_or(false)
+    std::env::var("CQLITE_REQUIRE_FIXTURES")
+        .map(|v| v == "1")
+        .unwrap_or(false)
 }
 
 async fn open_db() -> Option<Database> {
     let Some(root) = datasets_root() else {
-        assert!(!require_fixtures_strict(), "CQLITE_REQUIRE_FIXTURES=1 but CQLITE_DATASETS_ROOT unset");
+        assert!(
+            !require_fixtures_strict(),
+            "CQLITE_REQUIRE_FIXTURES=1 but CQLITE_DATASETS_ROOT unset"
+        );
         eprintln!("[issue_1340] CQLITE_DATASETS_ROOT unset; skipping");
         return None;
     };
     let Some(schema) = schema_path() else {
-        assert!(!require_fixtures_strict(), "CQLITE_REQUIRE_FIXTURES=1 but compaction-parity-udt.cql missing");
+        assert!(
+            !require_fixtures_strict(),
+            "CQLITE_REQUIRE_FIXTURES=1 but compaction-parity-udt.cql missing"
+        );
         eprintln!("[issue_1340] compaction-parity-udt.cql not found; skipping");
         return None;
     };
@@ -81,7 +89,10 @@ async fn open_db() -> Option<Database> {
     match ingest(config).await {
         Ok(res) => Some(res.database),
         Err(e) => {
-            assert!(!require_fixtures_strict(), "CQLITE_REQUIRE_FIXTURES=1 but ingest failed: {e}");
+            assert!(
+                !require_fixtures_strict(),
+                "CQLITE_REQUIRE_FIXTURES=1 but ingest failed: {e}"
+            );
             eprintln!("[issue_1340] ingest failed ({e}); skipping");
             None
         }
@@ -116,7 +127,7 @@ fn udt_int(u: &UdtValue, field: &str) -> i32 {
 }
 
 /// Peel to the `lp` list (frozen<list<frozen<person>>>).
-fn as_list<'a>(v: &'a Value) -> &'a [Value] {
+fn as_list(v: &Value) -> &[Value] {
     match v {
         Value::List(items) => items,
         Value::Frozen(inner) => as_list(inner),
@@ -125,7 +136,7 @@ fn as_list<'a>(v: &'a Value) -> &'a [Value] {
 }
 
 /// Peel to the `ma` map entries (frozen<map<text, frozen<address>>>).
-fn as_map<'a>(v: &'a Value) -> &'a [(Value, Value)] {
+fn as_map(v: &Value) -> &[(Value, Value)] {
     match v {
         Value::Map(entries) => entries,
         Value::Frozen(inner) => as_map(inner),
@@ -148,6 +159,7 @@ fn pk_int(row: &QueryRow) -> Option<i32> {
     }
 }
 
+#[allow(clippy::type_complexity)]
 #[tokio::test]
 async fn select_returns_structured_inner_udt_fields() {
     let Some(db) = open_db().await else {
@@ -157,9 +169,7 @@ async fn select_returns_structured_inner_udt_fields() {
     // The query surface itself resolves the keyspace/table + builds its schema
     // (incl. the person/address UDT defs) from the ingested DDL.
     let res = db
-        .execute(&format!(
-            "SELECT id, lp, ma FROM {KEYSPACE}.{TABLE}"
-        ))
+        .execute(&format!("SELECT id, lp, ma FROM {KEYSPACE}.{TABLE}"))
         .await
         .unwrap_or_else(|e| panic!("SELECT over {KEYSPACE}.{TABLE} failed: {e}"));
 
@@ -204,8 +214,16 @@ async fn select_returns_structured_inner_udt_fields() {
         assert_eq!(list.len(), people.len(), "lp[pk={pk}] person count");
         for (el, (first, last, age)) in list.iter().zip(people.iter()) {
             let u = as_udt(el);
-            assert_eq!(udt_text(u, "first_name").as_deref(), Some(*first), "lp[pk={pk}] first_name");
-            assert_eq!(udt_text(u, "last_name").as_deref(), Some(*last), "lp[pk={pk}] last_name");
+            assert_eq!(
+                udt_text(u, "first_name").as_deref(),
+                Some(*first),
+                "lp[pk={pk}] first_name"
+            );
+            assert_eq!(
+                udt_text(u, "last_name").as_deref(),
+                Some(*last),
+                "lp[pk={pk}] last_name"
+            );
             assert_eq!(udt_int(u, "age"), *age, "lp[pk={pk}] age");
         }
         checked_lp += 1;
@@ -225,8 +243,16 @@ async fn select_returns_structured_inner_udt_fields() {
             .find(|(k, _)| text_of(k) == *want_key)
             .unwrap_or_else(|| panic!("ma[pk={pk}] missing key '{want_key}'"));
         let u = as_udt(val);
-        assert_eq!(udt_text(u, "street").as_deref(), Some(*street), "ma[pk={pk}] street");
-        assert_eq!(udt_text(u, "city").as_deref(), Some(*city), "ma[pk={pk}] city");
+        assert_eq!(
+            udt_text(u, "street").as_deref(),
+            Some(*street),
+            "ma[pk={pk}] street"
+        );
+        assert_eq!(
+            udt_text(u, "city").as_deref(),
+            Some(*city),
+            "ma[pk={pk}] city"
+        );
         assert_eq!(udt_text(u, "zip").as_deref(), Some(*zip), "ma[pk={pk}] zip");
         checked_ma += 1;
     }

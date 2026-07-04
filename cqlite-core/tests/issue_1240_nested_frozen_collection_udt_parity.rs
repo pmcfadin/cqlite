@@ -1079,6 +1079,7 @@ async fn nested_frozen_collection_of_udt_compaction_parity() {
     // field-by-field against the values the sstabledump golden carries (the golden
     // itself is self-checked below). A blob fallback / wrong inner-UDT field decode
     // would fail `as_udt` or mismatch a field here.
+    #[allow(clippy::type_complexity)]
     let expect_lp: &[(&str, &[(&str, &str, i32)])] = &[
         ("1", &[("Ada", "Lovelace", 36)]),
         ("2", &[("Grace", "Hopper", 85), ("Alan", "Turing", 41)]),
@@ -1093,8 +1094,16 @@ async fn nested_frozen_collection_of_udt_compaction_parity() {
         assert_eq!(list.len(), people.len(), "lp[pk={pk}]: person count");
         for (el, (first, last, age)) in list.iter().zip(people.iter()) {
             let u = as_udt(el);
-            assert_eq!(udt_text(u, "first_name").as_deref(), Some(*first), "lp[pk={pk}] first_name");
-            assert_eq!(udt_text(u, "last_name").as_deref(), Some(*last), "lp[pk={pk}] last_name");
+            assert_eq!(
+                udt_text(u, "first_name").as_deref(),
+                Some(*first),
+                "lp[pk={pk}] first_name"
+            );
+            assert_eq!(
+                udt_text(u, "last_name").as_deref(),
+                Some(*last),
+                "lp[pk={pk}] last_name"
+            );
             assert_eq!(udt_int(u, "age"), *age, "lp[pk={pk}] age");
         }
     }
@@ -1113,8 +1122,16 @@ async fn nested_frozen_collection_of_udt_compaction_parity() {
             .get(*key)
             .unwrap_or_else(|| panic!("ma[pk={pk}]: missing key '{key}'"));
         let u = as_udt(val);
-        assert_eq!(udt_text(u, "street").as_deref(), Some(*street), "ma[pk={pk}] street");
-        assert_eq!(udt_text(u, "city").as_deref(), Some(*city), "ma[pk={pk}] city");
+        assert_eq!(
+            udt_text(u, "street").as_deref(),
+            Some(*street),
+            "ma[pk={pk}] street"
+        );
+        assert_eq!(
+            udt_text(u, "city").as_deref(),
+            Some(*city),
+            "ma[pk={pk}] city"
+        );
         assert_eq!(udt_text(u, "zip").as_deref(), Some(*zip), "ma[pk={pk}] zip");
     }
     eprintln!(
@@ -1395,7 +1412,7 @@ async fn nested_collection_udt_null_inner_field_compaction_parity() {
             ours.get(&(pk.to_string(), "ma".to_string()))
                 .unwrap_or_else(|| panic!("CQLite output missing ma cell for pk={pk}")),
         );
-        for (_k, val) in &map {
+        for val in map.values() {
             let u = as_udt(val);
             assert!(
                 udt_text(u, "street").is_some(),

@@ -862,8 +862,7 @@ impl V5CompressedLegacyParser {
                 // registry-free (precedence: header marshal → registry → Blob, no
                 // byte-pattern inference — no-heuristics #28). Parsed here, not in
                 // the per-element loop, to keep the hot path allocation-free.
-                let marshal_elems =
-                    header_type.and_then(Self::extract_marshal_collection_elements);
+                let marshal_elems = header_type.and_then(Self::extract_marshal_collection_elements);
 
                 // Route to appropriate frozen collection parser
                 let (inner_value, new_offset) = if inner_type.starts_with("list<") {
@@ -872,8 +871,7 @@ impl V5CompressedLegacyParser {
                         Some(MarshalCollectionElements::Sequence(m)) => Some(m.as_str()),
                         _ => None,
                     };
-                    let element_type =
-                        Self::prefer_udt_marshal_element(marshal_elem, &schema_elem);
+                    let element_type = Self::prefer_udt_marshal_element(marshal_elem, &schema_elem);
                     self.parse_frozen_list_value(data, offset, element_type, column, _reader)?
                 } else if inner_type.starts_with("set<") {
                     let schema_elem = self.extract_collection_element_type(&inner_type, "set")?;
@@ -881,8 +879,7 @@ impl V5CompressedLegacyParser {
                         Some(MarshalCollectionElements::Sequence(m)) => Some(m.as_str()),
                         _ => None,
                     };
-                    let element_type =
-                        Self::prefer_udt_marshal_element(marshal_elem, &schema_elem);
+                    let element_type = Self::prefer_udt_marshal_element(marshal_elem, &schema_elem);
                     self.parse_frozen_set_value(data, offset, element_type, column, _reader)?
                 } else if inner_type.starts_with("map<") {
                     let (schema_key, schema_val) = self.extract_map_types(&inner_type)?;

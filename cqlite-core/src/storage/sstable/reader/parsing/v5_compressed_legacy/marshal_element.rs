@@ -172,7 +172,8 @@ mod tests {
     #[test]
     fn bare_listtype_without_frozen_wrapper() {
         // Tolerate a header that is not wrapped in FrozenType(...).
-        let ht = "org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.Int32Type)";
+        let ht =
+            "org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.Int32Type)";
         assert_eq!(
             P::extract_marshal_collection_elements(ht),
             Some(MarshalCollectionElements::Sequence(
@@ -251,7 +252,10 @@ mod tests {
     #[test]
     fn empty_and_garbage_return_none() {
         assert_eq!(P::extract_marshal_collection_elements(""), None);
-        assert_eq!(P::extract_marshal_collection_elements("not a marshal type"), None);
+        assert_eq!(
+            P::extract_marshal_collection_elements("not a marshal type"),
+            None
+        );
         assert_eq!(P::extract_marshal_collection_elements("ListType("), None);
     }
 
@@ -259,7 +263,10 @@ mod tests {
     fn prefer_marshal_only_for_udt_elements() {
         let udt = "org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.UserType(ks,61))";
         // UDT-bearing marshal wins over the schema short form.
-        assert_eq!(P::prefer_udt_marshal_element(Some(udt), "frozen<person>"), udt);
+        assert_eq!(
+            P::prefer_udt_marshal_element(Some(udt), "frozen<person>"),
+            udt
+        );
         // Non-UDT marshal (primitive) keeps the schema short form (byte-parity path).
         assert_eq!(
             P::prefer_udt_marshal_element(Some("org.apache.cassandra.db.marshal.Int32Type"), "int"),
