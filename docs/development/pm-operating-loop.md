@@ -79,6 +79,19 @@ must never auto-land against an empty required-check set.
 **`ScheduleWakeup` is still valid** for genuinely external, harness-untracked state; what is forbidden is
 using it to busy-poll a PR's own external CI after the work is complete.
 
+## Pipelining independent lanes (don't serialize on waits, retro #1889)
+
+The lead pipelines near-independent issues instead of serializing on long waits (full gate 15-25 min, CI,
+roborev round-trips):
+
+- **(a)** While one lane's full gate / CI / roborev runs, the lead launches or advances other independent
+  lanes — implementation + review stages overlap freely.
+- **(b)** Merge-on-green is **armed per PR** (it lands when green) rather than blocking the queue on each
+  PR's CI; the lead advances to the next lane after arming.
+- **(c)** Full gates for different lanes are run **serially** by the lead (respecting the #1825 cap +
+  measured ~2-gate contention) — only the full-gate step serializes; everything else overlaps.
+- **(d)** Long waits use **scheduled wakeups**, never idle polling.
+
 ## Self-improvement loop (telemetry + retro)
 
 The pipeline measures itself so improvement is data-driven, not anecdotal:
