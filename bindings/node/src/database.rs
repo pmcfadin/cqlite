@@ -1039,11 +1039,9 @@ impl Database {
             Some(c) => c.to_core()?,
             None => cqlite_core::query::result::StreamingConfig::default(),
         };
-        // Per-`next()` batch size (#1443); captured before `core_config` moves.
-        let batch_size = core_config.buffer_size;
+        let batch_size = core_config.buffer_size; // per-`next()` batch (#1443), before move
 
-        // Execute streaming query via core library. The setup is instrumented by
-        // the stream span (no guard held across `.await`).
+        // Execute streaming query; setup instrumented by the stream span (no guard across `.await`).
         let span_for_iter = span.clone();
         let iter = async move {
             self.inner
