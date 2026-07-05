@@ -18,6 +18,8 @@
 
 > **Status**: v0.12.0 — Core reading, CLI, output writers, Python & Node.js bindings, and write support are production-ready, now with **byte-for-byte compaction parity against Apache Cassandra**, an Arrow Flight + Trino connector, canonical BTI (`da`) write/read, and CDC-style delta export. See [CHANGELOG.md](CHANGELOG.md).
 
+> **Upgrading to v0.13?** See the [v0.13 Migration Guide](docs/development/v0.13-migration-guide.md) for the 3 breaking changes (Python duration/time types, unknown-table errors, CLI YAML removal).
+
 CQLite provides SQLite-like local access to Apache Cassandra SSTables, enabling developers to read Cassandra 5.0+ data files without cluster dependencies. Built in Rust for performance and safety.
 
 > ⭐ **Find CQLite useful?** [**Star the repo**](https://github.com/pmcfadin/cqlite) — it is the clearest signal that this work matters and directly drives how much time goes into it.

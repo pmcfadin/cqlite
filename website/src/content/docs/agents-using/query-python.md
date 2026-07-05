@@ -59,7 +59,7 @@ Python receives native types — no string serialization:
 | `uuid`, `timeuuid` | `uuid.UUID` |
 | `timestamp` | `datetime.datetime` (UTC) |
 | `date` | `datetime.date` |
-| `time` | `datetime.timedelta` |
+| `time` | `int` (nanoseconds since midnight) |
 | `blob` | `bytes` |
 | `inet` | `str` (dotted decimal or IPv6) |
 | `decimal` | `decimal.Decimal` |
@@ -67,6 +67,8 @@ Python receives native types — no string serialization:
 | `list<T>` | `list` |
 | `set<T>` | `frozenset` |
 | `map<K,V>` | `dict` |
+
+> **v0.13:** `time` decodes to `int` (nanoseconds since midnight) and `duration` to `cqlite.Duration`. See the [v0.13 Migration Guide](https://github.com/pmcfadin/cqlite/blob/main/docs/development/v0.13-migration-guide.md).
 
 ## Row access
 

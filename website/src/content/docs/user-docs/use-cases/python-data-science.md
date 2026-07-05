@@ -130,14 +130,16 @@ Active users: 4 of 10
 | blob | `bytes` |
 | timestamp | `datetime.datetime` (timezone-aware, UTC) |
 | date | `datetime.date` |
-| time | `datetime.time` |
+| time | `int` (nanoseconds since midnight) |
 | uuid, timeuuid | `uuid.UUID` |
-| duration | `datetime.timedelta` |
+| duration | `cqlite.Duration(months, days, nanos)` |
 | inet | `ipaddress.IPv4Address` or `ipaddress.IPv6Address` |
 | list, set | `list` |
 | map | `dict` |
 | tuple | `tuple` |
 | UDT | `dict` (field name → value) |
+
+> **v0.13:** `time` and `duration` now decode to exact, lossless types. See the [v0.13 Migration Guide](https://github.com/pmcfadin/cqlite/blob/main/docs/development/v0.13-migration-guide.md).
 
 ## Streaming for large tables
 

@@ -555,8 +555,11 @@ warm-up. Full scans no longer share mutable file state: #815 removed the old
 file handle + chunk index), so N concurrent full scans run in parallel rather than
 serialized.
 
-**Python/CLI parity** (Issue #319): Python uses native types (datetime, UUID, bytes);
-CLI uses JSON strings. Normalization required for comparison — see
+**Python/CLI parity** (Issue #319): Python uses native types (v0.13 mapping:
+`timestamp`→`datetime`, `uuid`→`UUID`, `blob`→`bytes`, `time`→`int` ns since
+midnight, `duration`→`cqlite.Duration` — see the
+[v0.13 Migration Guide](docs/development/v0.13-migration-guide.md)); CLI uses JSON
+strings. Normalization required for comparison — see
 `bindings/python/tests/test_cli_parity.py`.
 
 ## Development Standards

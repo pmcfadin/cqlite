@@ -119,9 +119,11 @@ diff /tmp/ref-sorted.json /tmp/cqlite-sorted.json
 ```
 
 Type differences between sstabledump JSON and CQLite JSON are expected and documented:
-Python uses native types (datetime, UUID, bytes); CLI uses JSON strings. Normalization
-is needed for comparison — see `bindings/python/tests/test_cli_parity.py` for the
-normalization logic.
+Python uses native types (v0.13 mapping: `timestamp`→`datetime`, `uuid`→`UUID`,
+`blob`→`bytes`, `time`→`int` ns since midnight, `duration`→`cqlite.Duration` — see the
+v0.13 Migration Guide, `docs/development/v0.13-migration-guide.md`); CLI uses JSON
+strings. Normalization is needed for comparison — see
+`bindings/python/tests/test_cli_parity.py` for the normalization logic.
 
 ## Adding a new table to parity coverage
 
