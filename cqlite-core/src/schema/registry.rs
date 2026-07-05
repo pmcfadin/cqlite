@@ -939,6 +939,11 @@ impl SchemaRegistry {
     ///
     /// This method is used by SchemaManager when initialized with a pre-loaded registry
     /// to preserve the UDT definitions loaded during ingestion.
+    ///
+    /// Gated on `state_machine`: both callers (`storage::sstable::refresh` and the
+    /// `cli-helpers`-gated ingestion module) compile out without it, so it would be
+    /// dead code under `-D warnings` in the minimal-features build (issue #1972).
+    #[cfg(feature = "state_machine")]
     pub(crate) fn get_udt_registry(&self) -> Arc<RwLock<UdtRegistry>> {
         self.udt_registry.clone()
     }
