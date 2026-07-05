@@ -370,7 +370,8 @@ async fn verify_full_reports_uncompressed_chunk_crc_mismatch() {
     // EXISTS in CI even when the gitignored `nb-1-big-Data.db` is absent. Gating on
     // the dir let these tests slip past the skip and then hard-fail inside
     // `verify_sstable` on the missing Data.db. Gate on the Data.db and derive the dir.
-    let Some(data_db) = dataset_path_or_gate(CORRUPT_DATA_DB, "corrupt uncompressed fixture") else {
+    let Some(data_db) = dataset_path_or_gate(CORRUPT_DATA_DB, "corrupt uncompressed fixture")
+    else {
         return;
     };
     let dir = data_db
@@ -466,7 +467,8 @@ async fn manifest_carries_cassandra_oracle_and_cqlite_matches() {
     // EXISTS in CI even when the gitignored `nb-1-big-Data.db` is absent. Gating on
     // the dir let these tests slip past the skip and then hard-fail inside
     // `verify_sstable` on the missing Data.db. Gate on the Data.db and derive the dir.
-    let Some(data_db) = dataset_path_or_gate(CORRUPT_DATA_DB, "corrupt uncompressed fixture") else {
+    let Some(data_db) = dataset_path_or_gate(CORRUPT_DATA_DB, "corrupt uncompressed fixture")
+    else {
         return;
     };
     let dir = data_db
