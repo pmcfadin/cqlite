@@ -144,15 +144,27 @@ pub fn parse_decimal(input: &[u8]) -> IResult<&[u8], Value> {
 /// All three components are returned as-is in `Value::Duration` to preserve
 /// calendar semantics (months ≠ 30 days; days ≠ 24 hours in all time zones).
 pub fn parse_duration(input: &[u8]) -> IResult<&[u8], Value> {
-    let (input, months) = parse_vint(input)?;
-    let (input, days) = parse_vint(input)?;
-    let (input, nanos) = parse_vint(input)?;
+    let (rest, months_raw) = parse_vint(input)?;
+    let (rest, days_raw) = parse_vint(rest)?;
+    let (rest, nanos) = parse_vint(rest)?;
+
+    // months/days are i32 in Cassandra's DurationType. Reject (rather than
+    // silently truncate via `as i32`) any encoded value outside the i32 range so
+    // a corrupt encoding errors instead of wrapping around (issue #1632). Mirrors
+    // the reader-side guard in `comparator_value_parsing::parse_duration_value`
+    // (issue #765).
+    let months = i32::try_from(months_raw).map_err(|_| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+    })?;
+    let days = i32::try_from(days_raw).map_err(|_| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+    })?;
 
     Ok((
-        input,
+        rest,
         Value::Duration {
-            months: months as i32,
-            days: days as i32,
+            months,
+            days,
             nanos,
         },
     ))
@@ -369,6 +381,39 @@ mod tests {
             }
             other => panic!("Expected Duration value, got {:?}", other),
         }
+    }
+
+    /// Issue #1632 (hardening b): months/days are i32 in Cassandra's
+    /// DurationType. A corrupt encoding with a value outside the i32 range must be
+    /// rejected as an error, NOT silently truncated via `as i32`. Fails on the
+    /// pre-#1632 code where the cast wraps the value instead of erroring.
+    #[test]
+    fn test_parse_duration_months_out_of_i32_range_errors() {
+        use super::super::super::vint::{encode_vint, parse_vint};
+
+        let too_big = i32::MAX as i64 + 1;
+        // Sanity: the VInt round-trips to the intended out-of-range value.
+        let months_bytes = encode_vint(too_big);
+        assert_eq!(parse_vint(&months_bytes).unwrap().1, too_big);
+
+        let mut over = Vec::new();
+        over.extend_from_slice(&months_bytes); // months overflow i32
+        over.extend_from_slice(&encode_vint(0));
+        over.extend_from_slice(&encode_vint(0));
+        assert!(
+            parse_duration(&over).is_err(),
+            "months > i32::MAX must error, not truncate"
+        );
+
+        let too_small = i32::MIN as i64 - 1;
+        let mut under = Vec::new();
+        under.extend_from_slice(&encode_vint(0));
+        under.extend_from_slice(&encode_vint(too_small)); // days underflow i32
+        under.extend_from_slice(&encode_vint(0));
+        assert!(
+            parse_duration(&under).is_err(),
+            "days < i32::MIN must error, not truncate"
+        );
     }
 
     /// S2 regression: duration with all-zero components should produce Duration{{0,0,0}}.

@@ -18,6 +18,14 @@ use crate::{
     Error, Result,
 };
 
+/// Maximum nesting depth for recursive value decoding, mirroring the V5 frozen
+/// guard (`MAX_TYPE_NESTING_DEPTH` in `v5_compressed_legacy::mod`). A corrupt or
+/// adversarial deeply-nested type (e.g. `frozen<frozen<frozen<...>>>`) must
+/// return `Err` rather than recurse until the stack overflows and aborts the
+/// process (issue #1632). Shared by both exact-slice decoders — the standalone
+/// block-path decoder here and `SSTableReader::parse_value_with_comparator`.
+pub(crate) const MAX_VALUE_NESTING_DEPTH: usize = 10;
+
 /// Parse a value using a ComparatorType for schema-aware decoding
 ///
 /// This function handles all CQL types including:
@@ -37,6 +45,25 @@ pub fn parse_value_with_comparator(
     value_data: &[u8],
     comparator: &ComparatorType,
 ) -> Result<Value> {
+    parse_value_with_comparator_at_depth(value_data, comparator, 0)
+}
+
+/// Depth-tracking core of [`parse_value_with_comparator`]. Every recursive
+/// descent into a nested element/field/frozen inner type increments `depth`;
+/// exceeding [`MAX_VALUE_NESTING_DEPTH`] returns `Err` instead of recursing to a
+/// stack overflow (issue #1632). Guard-only: successful decoding of any value
+/// within the depth budget is byte-identical to before.
+fn parse_value_with_comparator_at_depth(
+    value_data: &[u8],
+    comparator: &ComparatorType,
+    depth: usize,
+) -> Result<Value> {
+    if depth > MAX_VALUE_NESTING_DEPTH {
+        return Err(Error::corruption(format!(
+            "Value decode recursion depth {} exceeds maximum {}",
+            depth, MAX_VALUE_NESTING_DEPTH
+        )));
+    }
     match comparator {
         ComparatorType::Boolean => {
             if value_data.len() == 1 {
@@ -210,29 +237,29 @@ pub fn parse_value_with_comparator(
         // element framing; tuple/UDT use Cassandra's 4-byte i32-BE field framing
         // (`TupleType`/`UserType` `putInt`, `-1` == null) — the same framing the
         // live block path (decoder #1) and the v5 frozen path already use.
-        ComparatorType::List(element_comparator) => super::value_parsing::parse_list_value_with(
-            value_data,
-            element_comparator,
-            parse_value_with_comparator,
-        ),
-        ComparatorType::Set(element_comparator) => super::value_parsing::parse_set_value_with(
-            value_data,
-            element_comparator,
-            parse_value_with_comparator,
-        ),
+        ComparatorType::List(element_comparator) => {
+            super::value_parsing::parse_list_value_with(value_data, element_comparator, |d, c| {
+                parse_value_with_comparator_at_depth(d, c, depth + 1)
+            })
+        }
+        ComparatorType::Set(element_comparator) => {
+            super::value_parsing::parse_set_value_with(value_data, element_comparator, |d, c| {
+                parse_value_with_comparator_at_depth(d, c, depth + 1)
+            })
+        }
         ComparatorType::Map(key_comparator, value_comparator) => {
             super::value_parsing::parse_map_value_with(
                 value_data,
                 key_comparator,
                 value_comparator,
-                parse_value_with_comparator,
+                |d, c| parse_value_with_comparator_at_depth(d, c, depth + 1),
             )
         }
-        ComparatorType::Tuple(field_comparators) => super::value_parsing::parse_tuple_value_with(
-            value_data,
-            field_comparators,
-            parse_value_with_comparator,
-        ),
+        ComparatorType::Tuple(field_comparators) => {
+            super::value_parsing::parse_tuple_value_with(value_data, field_comparators, |d, c| {
+                parse_value_with_comparator_at_depth(d, c, depth + 1)
+            })
+        }
         ComparatorType::Udt {
             type_name,
             keyspace,
@@ -241,7 +268,7 @@ pub fn parse_value_with_comparator(
             let udt = super::value_parsing::parse_udt_value_with(
                 value_data,
                 field_comparators,
-                parse_value_with_comparator,
+                |d, c| parse_value_with_comparator_at_depth(d, c, depth + 1),
             )?;
             // Preserve decoder #2's provenance (type_name/keyspace from the
             // comparator) rather than the helper's "unknown" placeholders.
@@ -252,7 +279,8 @@ pub fn parse_value_with_comparator(
             }))
         }
         ComparatorType::Frozen(inner_comparator) => {
-            let inner_value = parse_value_with_comparator(value_data, inner_comparator)?;
+            let inner_value =
+                parse_value_with_comparator_at_depth(value_data, inner_comparator, depth + 1)?;
             Ok(Value::Frozen(Box::new(inner_value)))
         }
         ComparatorType::Custom(name) => {
@@ -650,5 +678,59 @@ mod tests {
         let result = parse_value_with_comparator(&data, &comparator).unwrap();
 
         assert_eq!(result, Value::List(vec![Value::Blob(body)]));
+    }
+
+    // Issue #1632 (hardening a): a corrupt or adversarial deeply-nested type must
+    // return `Err` via the recursion-depth guard rather than recursing until the
+    // stack overflows and aborts the process. A `frozen<...>` chain recurses on
+    // the SAME bytes at every level (no byte consumed), so without the guard it
+    // would recurse unbounded.
+    #[test]
+    fn test_deeply_nested_frozen_type_errors_not_overflow() {
+        // 12 levels of frozen wrapping an int — exceeds MAX_VALUE_NESTING_DEPTH (10).
+        let mut comparator = ComparatorType::Int;
+        for _ in 0..12 {
+            comparator = ComparatorType::Frozen(Box::new(comparator));
+        }
+        let data = vec![0x00, 0x00, 0x00, 0x2A];
+        let result = parse_value_with_comparator(&data, &comparator);
+        assert!(
+            result.is_err(),
+            "12-level nested frozen type must Err, not stack-overflow/abort"
+        );
+    }
+
+    /// A modestly-nested type (within the limit) must still decode correctly, so
+    /// the guard does not regress successful-decode semantics (issue #1632).
+    #[test]
+    fn test_shallow_nested_frozen_still_decodes() {
+        let comparator = ComparatorType::Frozen(Box::new(ComparatorType::Frozen(Box::new(
+            ComparatorType::Int,
+        ))));
+        let data = vec![0x00, 0x00, 0x00, 0x2A]; // 42
+        let result = parse_value_with_comparator(&data, &comparator).unwrap();
+        assert_eq!(
+            result,
+            Value::Frozen(Box::new(Value::Frozen(Box::new(Value::Integer(42)))))
+        );
+    }
+
+    // Issue #1632 (hardening c): a corrupt, huge declared element count must not
+    // pre-allocate gigabytes. Capacity is clamped to REASONABLE_COLLECTION_CAPACITY
+    // and the short buffer makes the first element length exceed the data, so the
+    // decode returns `Err` promptly with bounded peak allocation (no OOM/panic).
+    #[test]
+    fn test_huge_declared_count_short_buffer_errors_bounded_alloc() {
+        let mut data = Vec::new();
+        encode_unsigned(1u64 << 30, &mut data); // declared count ~1 billion
+        encode_unsigned(1000, &mut data); // first element claims 1000 bytes...
+        data.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]); // ...but only 4 remain
+
+        let comparator = ComparatorType::List(Box::new(ComparatorType::Int));
+        let result = parse_value_with_comparator(&data, &comparator);
+        assert!(
+            result.is_err(),
+            "huge count + short buffer must Err without a huge pre-allocation"
+        );
     }
 }

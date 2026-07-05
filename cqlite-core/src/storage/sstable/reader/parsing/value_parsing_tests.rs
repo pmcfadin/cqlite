@@ -758,3 +758,109 @@ fn test_value_parsing_blob_fallback_disabled() {
     // Note: Float and Double parsing is handled by the main parser (parse_value_by_type)
     // rather than standalone functions, so they are not tested here.
 }
+
+// ============================================================================
+// Issue #1632 (hardening c/d): a corrupt, huge declared element/entry count must
+// not pre-allocate gigabytes. The shared collection helpers clamp pre-allocation
+// to min(count, REASONABLE_COLLECTION_CAPACITY); with a short buffer the first
+// element/key length exceeds the data, so parsing returns Err promptly with
+// bounded peak allocation (no OOM / panic).
+// ============================================================================
+
+#[test]
+fn test_parse_list_huge_count_short_buffer_errors_bounded_alloc() {
+    let mut data = Vec::new();
+    data.extend_from_slice(&encode_vuint(1u64 << 30)); // ~1 billion elements
+    data.extend_from_slice(&encode_vuint(1000)); // first element claims 1000 bytes...
+    data.extend_from_slice(&42i32.to_be_bytes()); // ...but only 4 remain
+
+    let result = parse_list_value_with(&data, &ComparatorType::Int, |d, _| parse_int_value(d));
+    assert!(
+        result.is_err(),
+        "huge count + short buffer must Err without a huge pre-allocation"
+    );
+}
+
+#[test]
+fn test_parse_map_huge_count_short_buffer_errors_bounded_alloc() {
+    let mut data = Vec::new();
+    data.extend_from_slice(&encode_vuint(1u64 << 30)); // ~1 billion entries
+    data.extend_from_slice(&encode_vuint(1000)); // first key claims 1000 bytes...
+    data.extend_from_slice(&42i32.to_be_bytes()); // ...but only 4 remain
+
+    let result = parse_map_value_with(&data, &ComparatorType::Int, &ComparatorType::Int, |d, _| {
+        parse_int_value(d)
+    });
+    assert!(
+        result.is_err(),
+        "huge count + short buffer must Err without a huge pre-allocation"
+    );
+}
+
+// Issue #1632 (hardening a): the SSTableReader value-decode surface carries the
+// identical `MAX_VALUE_NESTING_DEPTH` guard as the free-function comparator path
+// (covered by `test_deeply_nested_frozen_type_errors_not_overflow`). This mirrors
+// that test through the real `SSTableReader::parse_value_with_comparator_at_depth`
+// method (entered at depth 0, as the schema path does): a deeply-nested
+// `frozen<...>` type recurses on the SAME bytes at every level, so without the
+// guard it would recurse to a stack overflow. It must return `Err`.
+//
+// `SSTableReader` has no lightweight constructor, so this opens a real (fetched)
+// SSTable — the reader's own data content is irrelevant; the frozen recursion
+// operates only on the passed-in slice. Fixture-gated: SKIP when absent.
+#[tokio::test]
+async fn test_1632_sstablereader_deeply_nested_frozen_errors_not_overflow() {
+    use crate::{Config, Platform};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    // Resolve a reliably-present fetched fixture (test_basic/simple_table).
+    let root = match std::env::var("CQLITE_DATASETS_ROOT") {
+        Ok(r) if PathBuf::from(&r).is_dir() => PathBuf::from(r),
+        _ => match PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .map(|p| p.join("test-data/datasets"))
+        {
+            Some(p) if p.is_dir() => p,
+            _ => {
+                eprintln!("SKIP: datasets root absent.");
+                return;
+            }
+        },
+    };
+    let base = root.join("sstables/test_basic");
+    let data_db = std::fs::read_dir(&base).ok().and_then(|rd| {
+        rd.flatten().find_map(|e| {
+            let name = e.file_name();
+            let name = name.to_str()?;
+            if name.starts_with("simple_table-") {
+                let c = e.path().join("nb-1-big-Data.db");
+                return c.is_file().then_some(c);
+            }
+            None
+        })
+    });
+    let Some(path) = data_db else {
+        eprintln!("SKIP: test_basic/simple_table Data.db absent.");
+        return;
+    };
+
+    let config = Config::default();
+    let platform = Arc::new(Platform::new(&config).await.expect("platform init"));
+    let reader = SSTableReader::open(&path, &config, platform)
+        .await
+        .expect("opening the fetched simple_table fixture should succeed");
+
+    // 12 levels of frozen wrapping an int — exceeds MAX_VALUE_NESTING_DEPTH (10).
+    let mut comparator = ComparatorType::Int;
+    for _ in 0..12 {
+        comparator = ComparatorType::Frozen(Box::new(comparator));
+    }
+    // Any body works: frozen recurses without consuming bytes.
+    let data = vec![0x00, 0x00, 0x00, 0x2A];
+    let result = reader.parse_value_with_comparator_at_depth(&data, &comparator, 0);
+    assert!(
+        result.is_err(),
+        "12-level nested frozen type must Err via SSTableReader, not stack-overflow/abort"
+    );
+}

@@ -38,7 +38,7 @@ fn decode_method(
     comp: &ComparatorType,
     bytes: &[u8],
 ) -> crate::Result<Value> {
-    reader.parse_value_with_comparator(bytes, comp)
+    reader.parse_value_with_comparator_at_depth(bytes, comp, 0)
 }
 
 /// Canonical Cassandra tuple/UDT field framing: 4-byte big-endian `i32` length
