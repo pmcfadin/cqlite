@@ -675,6 +675,39 @@ except Exception as e:
   done < <(find "$sstables_dir" -type f -name "*-Data.db" -print0)
 }
 
+# Derive a Statistics.db.txt golden alongside each Data.db, so the corpus audit's
+# COVERAGE/PRESENCE check finds those `.db.txt` identities present after regen
+# (issue #2009). Mirrors the sstablemetadata derivation used by the other
+# generators (e.g. generate-write-load-parity.sh / generate-cql-type-parity.sh):
+# dump Statistics.db via sstablemetadata to `<...>-Statistics.db.txt` beside the
+# component. Uses the SAME running-container exec convention as
+# generate_sstabledump_jsonl above and honors the same --dry-run guard.
+generate_statistics_txt() {
+  local sstables_dir="$1"
+  log "Generating Statistics.db.txt golden files..."
+  while IFS= read -r -d '' data_file; do
+    local rel
+    rel="${data_file#"$sstables_dir"/}"
+    # As in generate_sstabledump_jsonl: the tar archive paths start with "data/";
+    # strip it before prepending the in-container base path.
+    local rel_sstabledump="${rel#data/}"
+    local stats_file="${data_file%Data.db}Statistics.db.txt"
+    log "  sstablemetadata: $rel"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      echo "[dry-run] sstablemetadata $data_file > $stats_file"
+    else
+      $ENGINE exec "$CONTAINER_NAME" bash -lc \
+        "/opt/cassandra/tools/bin/sstablemetadata /var/lib/cassandra/data/${rel_sstabledump}" \
+        > "$stats_file" 2>/dev/null || true
+      if [[ -s "$stats_file" ]]; then
+        log "  OK: $stats_file"
+      else
+        log "  WARNING: Empty statistics for $rel"
+      fi
+    fi
+  done < <(find "$sstables_dir" -type f -name "*-Data.db" -print0)
+}
+
 # ---------------------------------------------------------------------------
 # Main procedure
 # ---------------------------------------------------------------------------
@@ -847,6 +880,10 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
 
   # Generate JSONL golden files
   generate_sstabledump_jsonl "$SSTABLES_DIR"
+
+  # Derive Statistics.db.txt goldens so their identities are present after regen
+  # (issue #2009: the corpus audit's coverage/presence check expects them).
+  generate_statistics_txt "$SSTABLES_DIR"
 
   # Write a simple metadata.yml
   {
