@@ -1,0 +1,49 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Classify a set of compaction inputs by repair state."><title>classify_inputs in cqlite_core::storage::write_engine::merge::repair_state - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">classify_inputs</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.13.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">classify_<wbr>inputs</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#how-the-mixed-state-gate-decides-issue-1021" title="How the mixed-state gate decides (issue #1021)">How the mixed-state gate decides (issue #1021)</a><ul><li><a href="#genuinely-unparsed-inputs-fail-closed-high-safe-never-default-an-unknown" title="Genuinely-Unparsed inputs fail closed (HIGH-safe, never default an unknown)">Genuinely-Unparsed inputs fail closed (HIGH-safe, never default an unknown)</a></li></ul></li><li><a href="#errors" title="Errors">Errors</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="index.html">In cqlite_<wbr>core::<wbr>storage::<wbr>write_<wbr>engine::<wbr>merge::<wbr>repair_<wbr>state</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../../index.html">cqlite_core</a>::<wbr><a href="../../../index.html">storage</a>::<wbr><a href="../../index.html">write_engine</a>::<wbr><a href="../index.html">merge</a>::<wbr><a href="index.html">repair_state</a></div><h1>Function <span class="fn">classify_<wbr>inputs</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../../src/cqlite_core/storage/write_engine/merge/repair_state.rs.html#208-279">Source</a> </span></div><pre class="rust item-decl"><code>pub fn classify_inputs(input_paths: &amp;[<a class="struct" href="https://doc.rust-lang.org/1.96.1/std/path/struct.PathBuf.html" title="struct std::path::PathBuf">PathBuf</a>]) -&gt; <a class="type" href="../../../../error/type.Result.html" title="type cqlite_core::error::Result">Result</a>&lt;<a class="struct" href="struct.RepairState.html" title="struct cqlite_core::storage::write_engine::merge::repair_state::RepairState">RepairState</a>&gt;</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Classify a set of compaction inputs by repair state.</p>
+<p>Reads each input’s authoritatively decoded repair fields and either returns
+the single shared <a href="struct.RepairState.html" title="struct cqlite_core::storage::write_engine::merge::repair_state::RepairState"><code>RepairState</code></a> to preserve into the merged output, or a
+typed <a href="../../../../error/enum.Error.html#variant.Compaction" title="variant cqlite_core::error::Error::Compaction"><code>Error::Compaction</code></a> naming the conflicting states.</p>
+<h2 id="how-the-mixed-state-gate-decides-issue-1021"><a class="doc-anchor" href="#how-the-mixed-state-gate-decides-issue-1021">§</a>How the mixed-state gate decides (issue #1021)</h2>
+<p>Every repair field is now decoded AUTHORITATIVELY from real bytes for the
+supported formats: the version-gated STATS walk skips PAST the <code>improvedMinMax</code>
+covered-clustering <code>Slice</code> by resolving each clustering column’s
+<code>valueLengthIfFixed()</code> from the persisted <code>clusteringTypes</code>, so clustered
+<code>oa</code>/<code>da</code> SSTables no longer report <code>pendingRepair</code>/<code>isTransient</code> as
+<code>Unparsed</code>. The gate compares those decoded values:</p>
+<ul>
+<li><code>repairedAt</code> is ALWAYS decoded; a genuine mismatch is rejected.</li>
+<li><code>pendingRepair</code> / <code>isTransient</code>: a decoded mismatch between any two inputs
+(different UUIDs, <code>Some</code> vs decoded <code>None</code>, or <code>true</code> vs <code>false</code>) is
+rejected — Cassandra never mixes inputs across a repair boundary.</li>
+</ul>
+<h3 id="genuinely-unparsed-inputs-fail-closed-high-safe-never-default-an-unknown"><a class="doc-anchor" href="#genuinely-unparsed-inputs-fail-closed-high-safe-never-default-an-unknown">§</a>Genuinely-Unparsed inputs fail closed (HIGH-safe, never default an unknown)</h3>
+<p>A field can still be <a href="../../../../parser/repair_metadata/enum.RepairField.html#variant.Unparsed" title="variant cqlite_core::parser::repair_metadata::RepairField::Unparsed"><code>RepairField::Unparsed</code></a> only for a clustering column
+whose <code>AbstractType</code> this decoder does not model (an exotic / future type whose
+fixed-vs-variable length is unknown, so the covered-Slice cannot be skipped).
+In that case the field’s REAL value is unknown: it could be a pending-repair
+session id or a transient flag. We therefore CANNOT prove the inputs share a
+repair state, and — critically — we must NOT persist a fabricated <code>None</code> /
+<code>false</code> default derived from an <code>Unparsed</code> field (that would silently emit a
+real pending-repair / transient SSTable as unrepaired and merge it across a
+real boundary, violating AC2/AC3). So any <code>Unparsed</code> <code>pendingRepair</code> /
+<code>isTransient</code> on ANY input REJECTS the compaction (fail closed). This never
+fires for the supported corpus, where every field decodes authoritatively.</p>
+<p>The preserved output state carries the decoded <code>repairedAt</code> forward; for
+<code>pendingRepair</code> / <code>isTransient</code>, the single agreed decoded value (all decoded
+values agree by the checks above) is written — never a default synthesized
+from an <code>Unparsed</code> field.</p>
+<p>An empty input set returns the unrepaired state (a degenerate compaction
+produces an unrepaired output).</p>
+<h2 id="errors"><a class="doc-anchor" href="#errors">§</a>Errors</h2>
+<ul>
+<li>any input’s repair fields cannot be read/decoded from bytes (fails closed —
+a corrupt/truncated <code>Statistics.db</code>), or</li>
+<li>any input’s <code>pendingRepair</code> / <code>isTransient</code> is <code>Unparsed</code> (an unmodeled
+clustering type whose real repair value cannot be proven — fail closed rather
+than default an unknown), or</li>
+<li>the inputs disagree on an AUTHORITATIVELY decoded field (mixed <code>repairedAt</code>,
+or a decoded <code>pendingRepair</code>/<code>isTransient</code> that another input’s decoded state
+contradicts) — Cassandra refuses such a compaction, so CQLite rejects it
+rather than producing an output that silently merges across the repair
+boundary.</li>
+</ul>
+</div></details></section></div></main></body></html>

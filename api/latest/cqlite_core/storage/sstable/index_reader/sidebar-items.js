@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["IndexData","IndexHeader","IndexReader","IndexStatistics","PartitionIndexEntry","PromotedIndexData","PromotedIndexEntry"]};
+window.SIDEBAR_ITEMS = {"struct":["IndexData","IndexHeader","IndexReader","IndexStatistics","PartitionIndexEntry","PromotedIndexData"]};

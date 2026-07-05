@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/reader/parsing/key_parsing.rs`."><title>key_parsing.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../../" data-static-root-path="../../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.0 (ac68faa20 2026-05-25)" data-channel="1.96.0" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../../src-files.js"></script><script defer src="../../../../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/reader/parsing/</div>key_parsing.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Key parsing functions for composite and clustering keys
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/reader/parsing/key_parsing.rs`."><title>key_parsing.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../../" data-static-root-path="../../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../../../src-files.js"></script><script defer src="../../../../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/reader/parsing/</div>key_parsing.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Key parsing functions for composite and clustering keys
 <a href=#2 id=2 data-nosnippet>2</a>//!
 <a href=#3 id=3 data-nosnippet>3</a>//! This module handles parsing of composite keys in various Cassandra formats,
 <a href=#4 id=4 data-nosnippet>4</a>//! including partition keys, clustering keys, and multi-component keys.
@@ -444,7 +444,7 @@
 <a href=#444 id=444 data-nosnippet>444</a></span><span class="attr">#[cfg(test)]
 <a href=#445 id=445 data-nosnippet>445</a></span><span class="kw">mod </span>tests {
 <a href=#446 id=446 data-nosnippet>446</a>    <span class="kw">use </span>super::<span class="kw-2">*</span>;
-<a href=#447 id=447 data-nosnippet>447</a>    <span class="kw">use </span><span class="kw">crate</span>::parser::vint::encode_vint;
+<a href=#447 id=447 data-nosnippet>447</a>    <span class="kw">use </span><span class="kw">crate</span>::parser::vint::encode_vuint;
 <a href=#448 id=448 data-nosnippet>448</a>    <span class="kw">use </span><span class="kw">crate</span>::schema::KeyColumn;
 <a href=#449 id=449 data-nosnippet>449</a>    <span class="kw">use </span>std::collections::HashMap;
 <a href=#450 id=450 data-nosnippet>450</a>
@@ -495,11 +495,11 @@
 <a href=#495 id=495 data-nosnippet>495</a>        <span class="kw">let </span><span class="kw-2">mut </span>key = Vec::new();
 <a href=#496 id=496 data-nosnippet>496</a>
 <a href=#497 id=497 data-nosnippet>497</a>        <span class="comment">// Encode component count
-<a href=#498 id=498 data-nosnippet>498</a>        </span>key.extend_from_slice(<span class="kw-2">&amp;</span>encode_vint(components.len() <span class="kw">as </span>i64));
+<a href=#498 id=498 data-nosnippet>498</a>        </span>key.extend_from_slice(<span class="kw-2">&amp;</span>encode_vuint(components.len() <span class="kw">as </span>u64));
 <a href=#499 id=499 data-nosnippet>499</a>
 <a href=#500 id=500 data-nosnippet>500</a>        <span class="comment">// Encode each component with its length
 <a href=#501 id=501 data-nosnippet>501</a>        </span><span class="kw">for </span>component <span class="kw">in </span>components {
-<a href=#502 id=502 data-nosnippet>502</a>            key.extend_from_slice(<span class="kw-2">&amp;</span>encode_vint(component.len() <span class="kw">as </span>i64));
+<a href=#502 id=502 data-nosnippet>502</a>            key.extend_from_slice(<span class="kw-2">&amp;</span>encode_vuint(component.len() <span class="kw">as </span>u64));
 <a href=#503 id=503 data-nosnippet>503</a>            key.extend_from_slice(component);
 <a href=#504 id=504 data-nosnippet>504</a>        }
 <a href=#505 id=505 data-nosnippet>505</a>
@@ -560,10 +560,10 @@
 <a href=#560 id=560 data-nosnippet>560</a>
 <a href=#561 id=561 data-nosnippet>561</a>        <span class="kw">let </span><span class="kw-2">mut </span>key_data = Vec::new();
 <a href=#562 id=562 data-nosnippet>562</a>        <span class="comment">// Add UUID component with VInt length
-<a href=#563 id=563 data-nosnippet>563</a>        </span>key_data.extend_from_slice(<span class="kw-2">&amp;</span>encode_vint(uuid_bytes.len() <span class="kw">as </span>i64));
+<a href=#563 id=563 data-nosnippet>563</a>        </span>key_data.extend_from_slice(<span class="kw-2">&amp;</span>encode_vuint(uuid_bytes.len() <span class="kw">as </span>u64));
 <a href=#564 id=564 data-nosnippet>564</a>        key_data.extend_from_slice(<span class="kw-2">&amp;</span>uuid_bytes);
 <a href=#565 id=565 data-nosnippet>565</a>        <span class="comment">// Add Int component with VInt length
-<a href=#566 id=566 data-nosnippet>566</a>        </span>key_data.extend_from_slice(<span class="kw-2">&amp;</span>encode_vint(int_bytes.len() <span class="kw">as </span>i64));
+<a href=#566 id=566 data-nosnippet>566</a>        </span>key_data.extend_from_slice(<span class="kw-2">&amp;</span>encode_vuint(int_bytes.len() <span class="kw">as </span>u64));
 <a href=#567 id=567 data-nosnippet>567</a>        key_data.extend_from_slice(<span class="kw-2">&amp;</span>int_bytes);
 <a href=#568 id=568 data-nosnippet>568</a>
 <a href=#569 id=569 data-nosnippet>569</a>        <span class="kw">let </span>schema = create_composite_key_schema(<span class="kw-2">&amp;</span>[<span class="string">"uuid"</span>, <span class="string">"int"</span>]);
@@ -585,9 +585,9 @@
 <a href=#585 id=585 data-nosnippet>585</a>        <span class="kw">let </span>bigint_bytes = [<span class="number">0x00</span>, <span class="number">0x00</span>, <span class="number">0x00</span>, <span class="number">0x00</span>, <span class="number">0x00</span>, <span class="number">0x00</span>, <span class="number">0x01</span>, <span class="number">0x23</span>];
 <a href=#586 id=586 data-nosnippet>586</a>
 <a href=#587 id=587 data-nosnippet>587</a>        <span class="kw">let </span><span class="kw-2">mut </span>key_data = Vec::new();
-<a href=#588 id=588 data-nosnippet>588</a>        key_data.extend_from_slice(<span class="kw-2">&amp;</span>encode_vint(text_bytes.len() <span class="kw">as </span>i64));
+<a href=#588 id=588 data-nosnippet>588</a>        key_data.extend_from_slice(<span class="kw-2">&amp;</span>encode_vuint(text_bytes.len() <span class="kw">as </span>u64));
 <a href=#589 id=589 data-nosnippet>589</a>        key_data.extend_from_slice(text_bytes);
-<a href=#590 id=590 data-nosnippet>590</a>        key_data.extend_from_slice(<span class="kw-2">&amp;</span>encode_vint(bigint_bytes.len() <span class="kw">as </span>i64));
+<a href=#590 id=590 data-nosnippet>590</a>        key_data.extend_from_slice(<span class="kw-2">&amp;</span>encode_vuint(bigint_bytes.len() <span class="kw">as </span>u64));
 <a href=#591 id=591 data-nosnippet>591</a>        key_data.extend_from_slice(<span class="kw-2">&amp;</span>bigint_bytes);
 <a href=#592 id=592 data-nosnippet>592</a>
 <a href=#593 id=593 data-nosnippet>593</a>        <span class="kw">let </span>schema = create_composite_key_schema(<span class="kw-2">&amp;</span>[<span class="string">"text"</span>, <span class="string">"bigint"</span>]);
@@ -746,7 +746,7 @@
 <a href=#746 id=746 data-nosnippet>746</a>    </span><span class="kw">fn </span>test_parse_composite_key_too_large() {
 <a href=#747 id=747 data-nosnippet>747</a>        <span class="comment">// Create a key with 300 components (&gt;256 limit)
 <a href=#748 id=748 data-nosnippet>748</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>key_data = Vec::new();
-<a href=#749 id=749 data-nosnippet>749</a>        key_data.extend_from_slice(<span class="kw-2">&amp;</span>encode_vint(<span class="number">300</span>));
+<a href=#749 id=749 data-nosnippet>749</a>        key_data.extend_from_slice(<span class="kw-2">&amp;</span>encode_vuint(<span class="number">300</span>));
 <a href=#750 id=750 data-nosnippet>750</a>
 <a href=#751 id=751 data-nosnippet>751</a>        <span class="kw">let </span>result = parse_composite_key_v5_format_impl(<span class="kw-2">&amp;</span>key_data);
 <a href=#752 id=752 data-nosnippet>752</a>        <span class="macro">assert!</span>(result.is_err());
@@ -787,9 +787,9 @@
 <a href=#787 id=787 data-nosnippet>787</a>    </span><span class="attr">#[test]
 <a href=#788 id=788 data-nosnippet>788</a>    </span><span class="kw">fn </span>test_parse_composite_key_v5_format_zero_components() {
 <a href=#789 id=789 data-nosnippet>789</a>        <span class="comment">// Build proper v5 format with zero components
-<a href=#790 id=790 data-nosnippet>790</a>        // encode_vint(0) = [0x00] (1 byte), but we need at least 2 bytes
+<a href=#790 id=790 data-nosnippet>790</a>        // encode_vuint(0) = [0x00] (1 byte), but we need at least 2 bytes
 <a href=#791 id=791 data-nosnippet>791</a>        // So let's add a dummy byte to pass length check
-<a href=#792 id=792 data-nosnippet>792</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>key_data = encode_vint(<span class="number">0</span>); <span class="comment">// Zero components
+<a href=#792 id=792 data-nosnippet>792</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>key_data = encode_vuint(<span class="number">0</span>); <span class="comment">// Zero components
 <a href=#793 id=793 data-nosnippet>793</a>        </span>key_data.push(<span class="number">0x00</span>); <span class="comment">// Add extra byte to pass length check
 <a href=#794 id=794 data-nosnippet>794</a>
 <a href=#795 id=795 data-nosnippet>795</a>        </span><span class="kw">let </span>result = parse_composite_key_v5_format_impl(<span class="kw-2">&amp;</span>key_data);
@@ -837,8 +837,8 @@
 <a href=#837 id=837 data-nosnippet>837</a>    <span class="attr">#[test]
 <a href=#838 id=838 data-nosnippet>838</a>    </span><span class="kw">fn </span>test_parse_composite_key_v5_format_component_length_overflow() {
 <a href=#839 id=839 data-nosnippet>839</a>        <span class="kw">let </span><span class="kw-2">mut </span>key_data = Vec::new();
-<a href=#840 id=840 data-nosnippet>840</a>        key_data.extend_from_slice(<span class="kw-2">&amp;</span>encode_vint(<span class="number">1</span>)); <span class="comment">// 1 component
-<a href=#841 id=841 data-nosnippet>841</a>        </span>key_data.extend_from_slice(<span class="kw-2">&amp;</span>encode_vint(<span class="number">1000</span>)); <span class="comment">// Component length &gt; remaining data
+<a href=#840 id=840 data-nosnippet>840</a>        key_data.extend_from_slice(<span class="kw-2">&amp;</span>encode_vuint(<span class="number">1</span>)); <span class="comment">// 1 component
+<a href=#841 id=841 data-nosnippet>841</a>        </span>key_data.extend_from_slice(<span class="kw-2">&amp;</span>encode_vuint(<span class="number">1000</span>)); <span class="comment">// Component length &gt; remaining data
 <a href=#842 id=842 data-nosnippet>842</a>        </span>key_data.extend_from_slice(<span class="string">b"short"</span>); <span class="comment">// Only 5 bytes
 <a href=#843 id=843 data-nosnippet>843</a>
 <a href=#844 id=844 data-nosnippet>844</a>        </span><span class="kw">let </span>result = parse_composite_key_v5_format_impl(<span class="kw-2">&amp;</span>key_data);

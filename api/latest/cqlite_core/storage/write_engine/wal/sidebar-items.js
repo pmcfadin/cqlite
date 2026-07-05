@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["WriteAheadLog"]};
+window.SIDEBAR_ITEMS = {"enum":["TruncateError"],"struct":["RecoveryReport","WriteAheadLog"]};

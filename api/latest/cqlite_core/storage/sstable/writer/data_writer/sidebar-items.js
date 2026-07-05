@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["DataWriter","PartitionEmitCounts"]};
+window.SIDEBAR_ITEMS = {"struct":["DataWriter","PartitionEmitCounts","StreamFinish"]};

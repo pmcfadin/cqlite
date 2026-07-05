@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["CompressionInfo"]};
+window.SIDEBAR_ITEMS = {"constant":["SUPPORTED_COMPRESSOR_NAMES"],"fn":["is_supported_compressor_name"],"struct":["CompressionInfo"]};

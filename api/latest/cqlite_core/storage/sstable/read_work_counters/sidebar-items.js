@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["chunk_path_allocs","decompress_calls","fd_high_water","file_opens","read_calls","record_chunk_path_alloc","record_decompress","record_file_open","record_read","record_seek","record_trie_walk","reset","seek_calls","trie_walks"]};

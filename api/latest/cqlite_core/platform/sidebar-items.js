@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["fs","threading","time"],"struct":["Platform"]};
+window.SIDEBAR_ITEMS = {"mod":["fs"],"struct":["Platform"]};

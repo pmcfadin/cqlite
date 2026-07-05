@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["benchmarks","config","cql","discovery","error","export","ingestion","memory","parser","platform","query","schema","storage","types","util","version_hints"],"struct":["Database","DatabaseStats","PreparedStatement"]};
+window.SIDEBAR_ITEMS = {"mod":["benchmarks","config","cql","discovery","error","export","ingestion","memory","observability","parser","platform","query","schema","storage","types","util","version_hints"],"struct":["Database","DatabaseStats","PreparedStatement"]};
