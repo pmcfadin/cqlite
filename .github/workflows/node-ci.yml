@@ -190,6 +190,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     needs: build
     timeout-minutes: 20
+    # Issue #1979: windows-latest has 3 chronic, pre-existing, Windows-only test
+    # failures (refresh / write-smoke / execute-deprecation — filesystem/locking
+    # behaviors, e.g. refresh expects readersRemoved===1 but gets 0). They are NOT
+    # release-gating for v0.13 (owner decision 2026-07-05). Keep the leg RUNNING for
+    # visibility but non-blocking, so a windows failure does not red the workflow.
+    # ubuntu-latest + macos-14 remain required. Debt tracked in #1979.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
 
     strategy:
       fail-fast: false
