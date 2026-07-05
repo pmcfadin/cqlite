@@ -580,15 +580,15 @@ fn test_parse_list_truncated() {
     data.extend_from_slice(&42i32.to_be_bytes());
     // Missing second element
 
-    let result =
-        parse_list_value_with(&data, &ComparatorType::Int, |d, _| parse_int_value(d)).unwrap();
+    let result = parse_list_value_with(&data, &ComparatorType::Int, |d, _| parse_int_value(d));
 
-    // Should successfully parse 1 element (stops when no more data)
-    if let Value::List(elements) = result {
-        assert_eq!(elements.len(), 1);
-    } else {
-        panic!("Expected List value");
-    }
+    // A valid list holds EXACTLY `count` elements; a buffer that runs dry after
+    // 1 of 2 declared elements is a truncated cell and must Err, not silently
+    // return a short partial list (#1632).
+    assert!(
+        result.is_err(),
+        "list declaring more elements than present must Err (truncated), not accept a partial"
+    );
 }
 
 #[test]
@@ -797,6 +797,50 @@ fn test_parse_map_huge_count_short_buffer_errors_bounded_alloc() {
     );
 }
 
+// Issue #1632 acceptance criterion (roborev's exact case): a huge declared count
+// followed IMMEDIATELY by EOF (no element/entry bytes at all) is a truncated cell
+// and must Err — the old buffer-terminated loop silently returned Ok(empty). A
+// valid collection always carries exactly `count` fully-encoded elements, so
+// requiring `count` decoded elements never rejects well-formed data.
+
+#[test]
+fn test_parse_list_huge_count_eof_after_count_errors() {
+    let mut data = Vec::new();
+    data.extend_from_slice(&encode_vuint(1u64 << 30)); // ~1 billion elements, then EOF
+
+    let result = parse_list_value_with(&data, &ComparatorType::Int, |d, _| parse_int_value(d));
+    assert!(
+        result.is_err(),
+        "list: huge count then immediate EOF must Err (truncated), not Ok(empty)"
+    );
+}
+
+#[test]
+fn test_parse_set_huge_count_eof_after_count_errors() {
+    let mut data = Vec::new();
+    data.extend_from_slice(&encode_vuint(1u64 << 30)); // ~1 billion elements, then EOF
+
+    let result = parse_set_value_with(&data, &ComparatorType::Int, |d, _| parse_int_value(d));
+    assert!(
+        result.is_err(),
+        "set: huge count then immediate EOF must Err (truncated), not Ok(empty)"
+    );
+}
+
+#[test]
+fn test_parse_map_huge_count_eof_after_count_errors() {
+    let mut data = Vec::new();
+    data.extend_from_slice(&encode_vuint(1u64 << 30)); // ~1 billion entries, then EOF
+
+    let result = parse_map_value_with(&data, &ComparatorType::Int, &ComparatorType::Int, |d, _| {
+        parse_int_value(d)
+    });
+    assert!(
+        result.is_err(),
+        "map: huge count then immediate EOF must Err (truncated), not Ok(empty)"
+    );
+}
+
 // Issue #1632 (hardening a): the SSTableReader value-decode surface carries the
 // identical `MAX_VALUE_NESTING_DEPTH` guard as the free-function comparator path
 // (covered by `test_deeply_nested_frozen_type_errors_not_overflow`). This mirrors
@@ -810,11 +854,79 @@ fn test_parse_map_huge_count_short_buffer_errors_bounded_alloc() {
 // operates only on the passed-in slice. Fixture-gated: SKIP when absent.
 #[tokio::test]
 async fn test_1632_sstablereader_deeply_nested_frozen_errors_not_overflow() {
+    let Some(reader) = open_simple_table_fixture_reader().await else {
+        return; // SKIP: fixture absent (message already logged).
+    };
+
+    // 12 levels of frozen wrapping an int — exceeds MAX_VALUE_NESTING_DEPTH (10).
+    let mut comparator = ComparatorType::Int;
+    for _ in 0..12 {
+        comparator = ComparatorType::Frozen(Box::new(comparator));
+    }
+    // Any body works: frozen recurses without consuming bytes.
+    let data = vec![0x00, 0x00, 0x00, 0x2A];
+    let result = reader.parse_value_with_comparator_at_depth(&data, &comparator, 0);
+    assert!(
+        result.is_err(),
+        "12-level nested frozen type must Err via SSTableReader, not stack-overflow/abort"
+    );
+}
+
+// Issue #1632 (Finding 2): the schema-path `frozen<...>` arm
+// (`parse_value_with_schema_type`) must count the outer frozen layer just like
+// the block path (`parse_value_with_comparator_at_depth`). Before the fix the
+// schema path entered the inner comparator at depth 0, silently allowing ONE
+// extra nested level past MAX_VALUE_NESTING_DEPTH. This asserts the two paths
+// agree at BOTH the last-allowed depth (10 frozens → Ok) and one past it
+// (11 frozens → Err). Fixture-gated: SKIP when the dataset is absent.
+#[tokio::test]
+async fn test_1632_frozen_depth_schema_path_symmetric_with_block_path() {
+    let Some(reader) = open_simple_table_fixture_reader().await else {
+        return; // SKIP: fixture absent (message already logged).
+    };
+
+    // Any body works: frozen recurses without consuming bytes; an int leaf is 4B.
+    let data = vec![0x00, 0x00, 0x00, 0x2A];
+
+    // Build the equivalent block-path comparator for `n` frozen layers over int.
+    let frozen_comparator = |n: usize| -> ComparatorType {
+        let mut c = ComparatorType::Int;
+        for _ in 0..n {
+            c = ComparatorType::Frozen(Box::new(c));
+        }
+        c
+    };
+    // The type string `frozen<...<int>...>` for the schema path.
+    let frozen_type_string = |n: usize| -> String { "frozen<".repeat(n) + "int" + &">".repeat(n) };
+
+    // MAX_VALUE_NESTING_DEPTH is 10: 10 frozens is the last allowed depth, 11 exceeds it.
+    for (n, expect_ok) in [(10usize, true), (11usize, false)] {
+        let block = reader.parse_value_with_comparator_at_depth(&data, &frozen_comparator(n), 0);
+        let schema = reader.parse_value_with_schema_type(&data, &frozen_type_string(n));
+        assert_eq!(
+            block.is_ok(),
+            expect_ok,
+            "block path at {n} frozen layers should be ok={expect_ok}"
+        );
+        assert_eq!(
+            schema.is_ok(),
+            block.is_ok(),
+            "schema path must agree with block path at {n} frozen layers (symmetric depth counting)"
+        );
+    }
+}
+
+/// Open a reliably-present fetched fixture (`test_basic/simple_table`) as a real
+/// `SSTableReader`. The reader's own content is irrelevant to these depth/frozen
+/// tests — recursion operates only on the passed-in slice — but `SSTableReader`
+/// has no lightweight constructor. Returns `None` (after logging a SKIP) when the
+/// dataset is absent.
+#[cfg(test)]
+async fn open_simple_table_fixture_reader() -> Option<SSTableReader> {
     use crate::{Config, Platform};
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    // Resolve a reliably-present fetched fixture (test_basic/simple_table).
     let root = match std::env::var("CQLITE_DATASETS_ROOT") {
         Ok(r) if PathBuf::from(&r).is_dir() => PathBuf::from(r),
         _ => match PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -824,7 +936,7 @@ async fn test_1632_sstablereader_deeply_nested_frozen_errors_not_overflow() {
             Some(p) if p.is_dir() => p,
             _ => {
                 eprintln!("SKIP: datasets root absent.");
-                return;
+                return None;
             }
         },
     };
@@ -842,25 +954,14 @@ async fn test_1632_sstablereader_deeply_nested_frozen_errors_not_overflow() {
     });
     let Some(path) = data_db else {
         eprintln!("SKIP: test_basic/simple_table Data.db absent.");
-        return;
+        return None;
     };
 
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await.expect("platform init"));
-    let reader = SSTableReader::open(&path, &config, platform)
-        .await
-        .expect("opening the fetched simple_table fixture should succeed");
-
-    // 12 levels of frozen wrapping an int — exceeds MAX_VALUE_NESTING_DEPTH (10).
-    let mut comparator = ComparatorType::Int;
-    for _ in 0..12 {
-        comparator = ComparatorType::Frozen(Box::new(comparator));
-    }
-    // Any body works: frozen recurses without consuming bytes.
-    let data = vec![0x00, 0x00, 0x00, 0x2A];
-    let result = reader.parse_value_with_comparator_at_depth(&data, &comparator, 0);
-    assert!(
-        result.is_err(),
-        "12-level nested frozen type must Err via SSTableReader, not stack-overflow/abort"
-    );
+    Some(
+        SSTableReader::open(&path, &config, platform)
+            .await
+            .expect("opening the fetched simple_table fixture should succeed"),
+    )
 }

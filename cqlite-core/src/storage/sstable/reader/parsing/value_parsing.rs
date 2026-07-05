@@ -113,10 +113,15 @@ where
     // Clamp pre-allocation: a corrupt huge count must not pre-allocate GBs (#1632).
     let mut elements = Vec::with_capacity(element_count.min(REASONABLE_COLLECTION_CAPACITY));
 
-    // Parse each element
+    // Decode EXACTLY `element_count` elements. A valid collection cell holds
+    // exactly `count` fully-encoded elements, so a buffer that runs dry before
+    // `count` elements are decoded is corrupt/truncated and must Err — silently
+    // returning a short partial list would accept a truncated cell (#1632).
     for _ in 0..element_count {
         if offset >= data.len() {
-            break;
+            return Err(Error::corruption(
+                "List declared more elements than present in buffer (truncated)",
+            ));
         }
 
         // Parse element length
@@ -180,10 +185,15 @@ where
     // Clamp pre-allocation: a corrupt huge count must not pre-allocate GBs (#1632).
     let mut entries = Vec::with_capacity(entry_count.min(REASONABLE_COLLECTION_CAPACITY));
 
-    // Parse each key-value pair
+    // Decode EXACTLY `entry_count` key/value pairs. A valid map cell holds
+    // exactly `count` fully-encoded entries, so a buffer that runs dry before
+    // `count` entries are decoded is corrupt/truncated and must Err — silently
+    // returning a short partial map would accept a truncated cell (#1632).
     for _ in 0..entry_count {
         if offset >= data.len() {
-            break;
+            return Err(Error::corruption(
+                "Map declared more entries than present in buffer (truncated)",
+            ));
         }
 
         // Parse key length and data
@@ -447,9 +457,13 @@ impl SSTableReader {
                 field_comparators, ..
             } => self.parse_udt_value(value_data, field_comparators, 0),
             ComparatorType::Frozen(inner_comparator) => {
-                // For frozen types, parse the inner type directly
+                // The outer `frozen<...>` layer costs one nesting level, so enter
+                // the inner comparator at depth 1 — symmetric with the block path
+                // (`parse_value_with_comparator_at_depth`'s Frozen arm recurses at
+                // depth+1). Entering at depth 0 would silently allow one extra
+                // nested level past MAX_VALUE_NESTING_DEPTH (#1632, guard-only).
                 let inner_value =
-                    self.parse_value_with_comparator_at_depth(value_data, inner_comparator, 0)?;
+                    self.parse_value_with_comparator_at_depth(value_data, inner_comparator, 1)?;
                 Ok(Value::Frozen(Box::new(inner_value)))
             }
             _ => decode_scalar_comparator(value_data, &comparator),
