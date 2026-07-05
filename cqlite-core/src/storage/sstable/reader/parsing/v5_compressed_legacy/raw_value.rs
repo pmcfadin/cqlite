@@ -299,9 +299,25 @@ impl V5CompressedLegacyParser {
                     ))
                 })?;
 
+                // months/days are i32 in Cassandra's DurationType. Reject
+                // (rather than silently truncate via `as i32`) any encoded value
+                // outside the i32 range so a corrupt encoding errors instead of
+                // wrapping (issue #1632, item b).
+                let months = i32::try_from(months).map_err(|_| {
+                    Error::corruption(format!(
+                        "Frozen element '{}': duration months out of i32 range",
+                        column_name
+                    ))
+                })?;
+                let days = i32::try_from(days).map_err(|_| {
+                    Error::corruption(format!(
+                        "Frozen element '{}': duration days out of i32 range",
+                        column_name
+                    ))
+                })?;
                 Ok(Value::Duration {
-                    months: months as i32,
-                    days: days as i32,
+                    months,
+                    days,
                     nanos,
                 })
             }
@@ -715,6 +731,41 @@ mod tests {
             .parse_value_from_raw_bytes(&data, "duration", "col", 0)
             .unwrap();
         assert_eq!(val_short, val);
+    }
+
+    /// Issue #1632 (item b): the raw-value frozen `duration` arm must REJECT a
+    /// months/days VInt outside the i32 range instead of silently wrapping via
+    /// `as i32`. On pre-fix code `months as i32` wraps `i32::MAX + 1` to a
+    /// negative value and returns Ok; the guard turns it into an error.
+    #[test]
+    fn test_parse_value_from_raw_bytes_duration_months_out_of_i32_range_errors() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+        let zigzag = |v: i64| ((v << 1) ^ (v >> 63)) as u64;
+
+        // months = i32::MAX + 1 (overflows i32), days = 0, nanos = 0.
+        let mut over = Vec::new();
+        encode_unsigned(zigzag(i32::MAX as i64 + 1), &mut over);
+        encode_unsigned(zigzag(0), &mut over);
+        encode_unsigned(zigzag(0), &mut over);
+        assert!(
+            parser
+                .parse_value_from_raw_bytes(&over, "duration", "col", 0)
+                .is_err(),
+            "months > i32::MAX must error, not wrap via `as i32`"
+        );
+
+        // days = i32::MIN - 1 (underflows i32), months = 0, nanos = 0.
+        let mut under = Vec::new();
+        encode_unsigned(zigzag(0), &mut under);
+        encode_unsigned(zigzag(i32::MIN as i64 - 1), &mut under);
+        encode_unsigned(zigzag(0), &mut under);
+        assert!(
+            parser
+                .parse_value_from_raw_bytes(&under, "duration", "col", 0)
+                .is_err(),
+            "days < i32::MIN must error, not wrap via `as i32`"
+        );
     }
 
     #[test]

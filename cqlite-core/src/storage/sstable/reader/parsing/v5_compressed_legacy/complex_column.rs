@@ -230,6 +230,14 @@ impl V5CompressedLegacyParser {
             ))
         })?;
 
+        // Bound the up-front collection allocation by the bytes actually available
+        // (issue #1632): every element/entry consumes at least one byte, so the
+        // declared count can never legitimately exceed the remaining buffer. A
+        // corrupt count near MAX_FROZEN_COLLECTION_SIZE against a short buffer must
+        // not pre-allocate ~MBs; the per-element parse below still Errs on the short
+        // buffer. Guard-only: valid inputs allocate the same (declared) capacity.
+        let prealloc_cap = cell_count_usize.min(data.len().saturating_sub(offset));
+
         // DS4 (Issue #700): Track max element writetime and element tombstone count
         // across all cells in this collection.
         let mut max_element_writetime: i64 = 0;
@@ -298,7 +306,7 @@ impl V5CompressedLegacyParser {
         {
             // Parse list elements
             let element_type = self.extract_collection_element_type(&column.data_type, "list")?;
-            let mut elements = Vec::with_capacity(cell_count_usize);
+            let mut elements = Vec::with_capacity(prealloc_cap);
 
             for i in 0..cell_count_usize {
                 let cell =
@@ -371,7 +379,7 @@ impl V5CompressedLegacyParser {
             // VALUE is always empty (HAS_EMPTY_VALUE flag = 0x04 set).
             // We must parse the path bytes as the element value, not the (empty) cell value.
             let element_type = self.extract_collection_element_type(&column.data_type, "set")?;
-            let mut elements = Vec::with_capacity(cell_count_usize);
+            let mut elements = Vec::with_capacity(prealloc_cap);
 
             for i in 0..cell_count_usize {
                 let cell =
@@ -470,7 +478,7 @@ impl V5CompressedLegacyParser {
         {
             // Parse map entries
             let (key_type, value_type) = self.extract_map_types(&column.data_type)?;
-            let mut entries = Vec::with_capacity(cell_count_usize);
+            let mut entries = Vec::with_capacity(prealloc_cap);
 
             for i in 0..cell_count_usize {
                 let cell =

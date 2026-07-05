@@ -9,7 +9,16 @@ use crate::{
 };
 
 use super::super::types::SSTableReader;
-use super::comparator_value_parsing::parse_value_with_comparator as decode_scalar_comparator;
+use super::comparator_value_parsing::{
+    parse_value_with_comparator as decode_scalar_comparator, MAX_VALUE_NESTING_DEPTH,
+};
+
+/// Upper bound on collection capacity pre-allocated from a declared element/entry
+/// count. A corrupt or adversarial huge count (e.g. `2^30`) must not let us
+/// pre-allocate gigabytes up front; we reserve at most this many slots and grow
+/// on demand as real elements are decoded (issue #1632). Guard-only: the decoded
+/// value is unchanged, only the initial allocation is bounded.
+const REASONABLE_COLLECTION_CAPACITY: usize = 4096;
 
 // ============================================================================
 // Scalar decode shims (issue #1636 / J2)
@@ -95,17 +104,24 @@ where
     use crate::parser::vint::parse_vint_length;
 
     let mut offset = 0;
-    let mut elements = Vec::new();
 
     // Parse element count
     let (remaining, element_count) = parse_vint_length(&data[offset..])
         .map_err(|_| Error::corruption("Failed to parse list element count"))?;
     offset = data.len() - remaining.len();
 
-    // Parse each element
+    // Clamp pre-allocation: a corrupt huge count must not pre-allocate GBs (#1632).
+    let mut elements = Vec::with_capacity(element_count.min(REASONABLE_COLLECTION_CAPACITY));
+
+    // Decode EXACTLY `element_count` elements. A valid collection cell holds
+    // exactly `count` fully-encoded elements, so a buffer that runs dry before
+    // `count` elements are decoded is corrupt/truncated and must Err — silently
+    // returning a short partial list would accept a truncated cell (#1632).
     for _ in 0..element_count {
         if offset >= data.len() {
-            break;
+            return Err(Error::corruption(
+                "List declared more elements than present in buffer (truncated)",
+            ));
         }
 
         // Parse element length
@@ -160,17 +176,24 @@ where
     use crate::parser::vint::parse_vint_length;
 
     let mut offset = 0;
-    let mut entries = Vec::new();
 
     // Parse entry count
     let (remaining, entry_count) = parse_vint_length(&data[offset..])
         .map_err(|_| Error::corruption("Failed to parse map entry count"))?;
     offset = data.len() - remaining.len();
 
-    // Parse each key-value pair
+    // Clamp pre-allocation: a corrupt huge count must not pre-allocate GBs (#1632).
+    let mut entries = Vec::with_capacity(entry_count.min(REASONABLE_COLLECTION_CAPACITY));
+
+    // Decode EXACTLY `entry_count` key/value pairs. A valid map cell holds
+    // exactly `count` fully-encoded entries, so a buffer that runs dry before
+    // `count` entries are decoded is corrupt/truncated and must Err — silently
+    // returning a short partial map would accept a truncated cell (#1632).
     for _ in 0..entry_count {
         if offset >= data.len() {
-            break;
+            return Err(Error::corruption(
+                "Map declared more entries than present in buffer (truncated)",
+            ));
         }
 
         // Parse key length and data
@@ -413,52 +436,72 @@ impl SSTableReader {
         // every scalar (incl. schema-derived Custom) routes through the ONE scalar
         // decode body in `comparator_value_parsing` (issue #1636 / J2), so a scalar
         // type fix lands in exactly one place.
+        // Top-level column value enters at depth 0; nested elements/fields/frozen
+        // inner types accumulate depth and are capped by MAX_VALUE_NESTING_DEPTH
+        // (issue #1632) so a corrupt/adversarial deeply-nested type errors rather
+        // than overflowing the stack.
         match &comparator {
             ComparatorType::List(element_comparator) => {
-                self.parse_list_value(value_data, element_comparator)
+                self.parse_list_value(value_data, element_comparator, 0)
             }
             ComparatorType::Set(element_comparator) => {
-                self.parse_set_value(value_data, element_comparator)
+                self.parse_set_value(value_data, element_comparator, 0)
             }
             ComparatorType::Map(key_comparator, value_comparator) => {
-                self.parse_map_value(value_data, key_comparator, value_comparator)
+                self.parse_map_value(value_data, key_comparator, value_comparator, 0)
             }
             ComparatorType::Tuple(field_comparators) => {
-                self.parse_tuple_value(value_data, field_comparators)
+                self.parse_tuple_value(value_data, field_comparators, 0)
             }
             ComparatorType::Udt {
                 field_comparators, ..
-            } => self.parse_udt_value(value_data, field_comparators),
+            } => self.parse_udt_value(value_data, field_comparators, 0),
             ComparatorType::Frozen(inner_comparator) => {
-                // For frozen types, parse the inner type directly
-                let inner_value = self.parse_value_with_comparator(value_data, inner_comparator)?;
+                // The outer `frozen<...>` layer costs one nesting level, so enter
+                // the inner comparator at depth 1 — symmetric with the block path
+                // (`parse_value_with_comparator_at_depth`'s Frozen arm recurses at
+                // depth+1). Entering at depth 0 would silently allow one extra
+                // nested level past MAX_VALUE_NESTING_DEPTH (#1632, guard-only).
+                let inner_value =
+                    self.parse_value_with_comparator_at_depth(value_data, inner_comparator, 1)?;
                 Ok(Value::Frozen(Box::new(inner_value)))
             }
             _ => decode_scalar_comparator(value_data, &comparator),
         }
     }
 
-    /// Parse value directly using ComparatorType (helper method for nested collection elements)
+    /// Parse value directly using ComparatorType (helper for nested collection elements).
     ///
-    /// This function provides complete recursive type parsing for collection elements,
-    /// including UDTs, tuples, nested collections, and frozen types.
-    pub(in crate::storage::sstable::reader) fn parse_value_with_comparator(
+    /// Provides complete recursive type parsing for collection elements, including
+    /// UDTs, tuples, nested collections, and frozen types. Entry callers pass
+    /// `depth = 0`; every recursive descent into a nested element/field/frozen inner type
+    /// increments `depth`; exceeding [`MAX_VALUE_NESTING_DEPTH`] returns `Err`
+    /// instead of recursing to a stack overflow (issue #1632). Guard-only:
+    /// successful decoding within the depth budget is byte-identical to before.
+    pub(in crate::storage::sstable::reader) fn parse_value_with_comparator_at_depth(
         &self,
         value_data: &[u8],
         comparator: &ComparatorType,
+        depth: usize,
     ) -> Result<Value> {
+        if depth > MAX_VALUE_NESTING_DEPTH {
+            return Err(Error::corruption(format!(
+                "Value decode recursion depth {} exceeds maximum {}",
+                depth, MAX_VALUE_NESTING_DEPTH
+            )));
+        }
         match comparator {
             ComparatorType::List(element_comparator) => {
-                self.parse_list_value(value_data, element_comparator)
+                self.parse_list_value(value_data, element_comparator, depth)
             }
             ComparatorType::Set(element_comparator) => {
-                self.parse_set_value(value_data, element_comparator)
+                self.parse_set_value(value_data, element_comparator, depth)
             }
             ComparatorType::Map(key_comparator, value_comparator) => {
-                self.parse_map_value(value_data, key_comparator, value_comparator)
+                self.parse_map_value(value_data, key_comparator, value_comparator, depth)
             }
             ComparatorType::Tuple(field_comparators) => {
-                self.parse_tuple_value(value_data, field_comparators)
+                self.parse_tuple_value(value_data, field_comparators, depth)
             }
             ComparatorType::Udt {
                 keyspace,
@@ -513,8 +556,11 @@ impl SSTableReader {
                     }
 
                     let field_data = &value_data[offset..offset + field_len];
-                    let field_value =
-                        self.parse_value_with_comparator(field_data, field_comparator)?;
+                    let field_value = self.parse_value_with_comparator_at_depth(
+                        field_data,
+                        field_comparator,
+                        depth + 1,
+                    )?;
 
                     fields.push(UdtField {
                         name: field_name.clone(),
@@ -530,7 +576,11 @@ impl SSTableReader {
                 }))
             }
             ComparatorType::Frozen(inner_comparator) => {
-                let inner_value = self.parse_value_with_comparator(value_data, inner_comparator)?;
+                let inner_value = self.parse_value_with_comparator_at_depth(
+                    value_data,
+                    inner_comparator,
+                    depth + 1,
+                )?;
                 Ok(Value::Frozen(Box::new(inner_value)))
             }
             // Every scalar (incl. schema-derived Custom) routes through the ONE
@@ -544,9 +594,10 @@ impl SSTableReader {
         &self,
         value_data: &[u8],
         element_comparator: &ComparatorType,
+        depth: usize,
     ) -> Result<Value> {
         parse_list_value_with(value_data, element_comparator, |data, comp| {
-            self.parse_value_with_comparator(data, comp)
+            self.parse_value_with_comparator_at_depth(data, comp, depth + 1)
         })
     }
 
@@ -555,9 +606,10 @@ impl SSTableReader {
         &self,
         value_data: &[u8],
         element_comparator: &ComparatorType,
+        depth: usize,
     ) -> Result<Value> {
         parse_set_value_with(value_data, element_comparator, |data, comp| {
-            self.parse_value_with_comparator(data, comp)
+            self.parse_value_with_comparator_at_depth(data, comp, depth + 1)
         })
     }
 
@@ -567,12 +619,13 @@ impl SSTableReader {
         value_data: &[u8],
         key_comparator: &ComparatorType,
         value_comparator: &ComparatorType,
+        depth: usize,
     ) -> Result<Value> {
         parse_map_value_with(
             value_data,
             key_comparator,
             value_comparator,
-            |data, comp| self.parse_value_with_comparator(data, comp),
+            |data, comp| self.parse_value_with_comparator_at_depth(data, comp, depth + 1),
         )
     }
 
@@ -581,9 +634,10 @@ impl SSTableReader {
         &self,
         value_data: &[u8],
         field_comparators: &[ComparatorType],
+        depth: usize,
     ) -> Result<Value> {
         parse_tuple_value_with(value_data, field_comparators, |data, comp| {
-            self.parse_value_with_comparator(data, comp)
+            self.parse_value_with_comparator_at_depth(data, comp, depth + 1)
         })
     }
 
@@ -594,6 +648,7 @@ impl SSTableReader {
         &self,
         value_data: &[u8],
         field_comparators: &[(String, ComparatorType)],
+        depth: usize,
     ) -> Result<Value> {
         let mut offset = 0;
         let mut fields = Vec::new();
@@ -641,7 +696,8 @@ impl SSTableReader {
 
             // Parse field value using field comparator
             let field_data = &value_data[offset..offset + field_len];
-            let field_value = self.parse_value_with_comparator(field_data, field_comparator)?;
+            let field_value =
+                self.parse_value_with_comparator_at_depth(field_data, field_comparator, depth + 1)?;
             offset += field_len;
 
             fields.push(UdtField {

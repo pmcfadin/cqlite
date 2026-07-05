@@ -363,10 +363,27 @@ impl V5CompressedLegacyParser {
                     ))
                 })?;
 
+                // months/days are i32 in Cassandra's DurationType. Reject
+                // (rather than silently truncate via `as i32`) any encoded value
+                // outside the i32 range so a corrupt encoding errors instead of
+                // wrapping (issue #1632, item b).
+                let months = i32::try_from(months).map_err(|_| {
+                    Error::corruption(format!(
+                        "Frozen element '{}': duration months out of i32 range",
+                        column_name
+                    ))
+                })?;
+                let days = i32::try_from(days).map_err(|_| {
+                    Error::corruption(format!(
+                        "Frozen element '{}': duration days out of i32 range",
+                        column_name
+                    ))
+                })?;
+
                 offset += duration_len;
                 Value::Duration {
-                    months: months as i32,
-                    days: days as i32,
+                    months,
+                    days,
                     nanos,
                 }
             }
@@ -1145,5 +1162,68 @@ impl V5CompressedLegacyParser {
         };
 
         Ok((value, offset))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_support::helpers::encode_unsigned;
+    use super::*;
+    use crate::parser::vint::encode_vuint;
+
+    fn zigzag(v: i64) -> u64 {
+        ((v << 1) ^ (v >> 63)) as u64
+    }
+
+    /// Build a raw-type-value duration body: `[VInt len][months][days][nanos]`.
+    fn duration_bytes(months: i64, days: i64, nanos: i64) -> Vec<u8> {
+        let mut body = Vec::new();
+        encode_unsigned(zigzag(months), &mut body);
+        encode_unsigned(zigzag(days), &mut body);
+        encode_unsigned(zigzag(nanos), &mut body);
+        let mut out = encode_vuint(body.len() as u64);
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// Sanity: an in-range duration still decodes through `parse_raw_type_value`.
+    #[test]
+    fn test_parse_raw_type_value_duration_in_range_ok() {
+        let parser = V5CompressedLegacyParser::new("ks".to_string(), "tbl".to_string(), 0, 0, None);
+        let data = duration_bytes(1, 2, 3);
+        let (value, _off) = parser
+            .parse_raw_type_value(&data, 0, "duration", "col", 0)
+            .expect("in-range duration should decode");
+        assert_eq!(
+            value,
+            Value::Duration {
+                months: 1,
+                days: 2,
+                nanos: 3
+            }
+        );
+    }
+
+    /// Issue #1632 (item b): the frozen-element duration arm must REJECT a
+    /// months/days VInt outside the i32 range instead of wrapping via `as i32`.
+    #[test]
+    fn test_parse_raw_type_value_duration_out_of_i32_range_errors() {
+        let parser = V5CompressedLegacyParser::new("ks".to_string(), "tbl".to_string(), 0, 0, None);
+
+        let over = duration_bytes(i32::MAX as i64 + 1, 0, 0);
+        assert!(
+            parser
+                .parse_raw_type_value(&over, 0, "duration", "col", 0)
+                .is_err(),
+            "months > i32::MAX must error, not wrap via `as i32`"
+        );
+
+        let under = duration_bytes(0, i32::MIN as i64 - 1, 0);
+        assert!(
+            parser
+                .parse_raw_type_value(&under, 0, "duration", "col", 0)
+                .is_err(),
+            "days < i32::MIN must error, not wrap via `as i32`"
+        );
     }
 }
