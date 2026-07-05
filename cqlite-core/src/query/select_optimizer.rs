@@ -243,10 +243,16 @@ impl SelectOptimizer {
             plan.sstable_predicates = collect_sstable_predicates(where_clause)?;
         }
 
+        // The scan projection is the COMPLETE set of source columns any later
+        // step reads from the scanned row (see `extract_projection_columns`).
+        // Computed once and reused below to decide whether the redundant
+        // bare-column `Project` step can be skipped (issue #1587) — it can only be
+        // skipped when the scan projection is EXACTLY the selected columns.
+        let scan_projection = extract_projection_columns(&statement);
         plan.execution_steps.push(ExecutionStep::SSTableScan {
             table: table_id,
             predicates: plan.sstable_predicates.clone(),
-            projection: extract_projection_columns(&statement),
+            projection: scan_projection.clone(),
         });
 
         // If we couldn't push any predicates down, keep the original WHERE as
@@ -312,7 +318,30 @@ impl SelectOptimizer {
                         .iter()
                         .all(|e| matches!(e, SelectExpression::Column(_)));
 
-                if !is_bare_columns {
+                // The scan projection is now the COMPLETE referenced-column set, so
+                // it may carry WHERE / ORDER BY helper columns that are NOT in the
+                // SELECT list. When that happens the scan row has MORE columns than
+                // the SELECT clause, and the `Project` step is REQUIRED to trim the
+                // output back to the selected columns — otherwise those helper
+                // columns would leak into the result. Skip the redundant projection
+                // only when the scan projection is EXACTLY the bare selected columns
+                // (same names, same order).
+                let projection_is_exactly_selected = is_bare_columns && {
+                    let selected: Vec<&str> = exprs
+                        .iter()
+                        .filter_map(|e| match e {
+                            SelectExpression::Column(c) => Some(c.column.as_str()),
+                            _ => None,
+                        })
+                        .collect();
+                    scan_projection.len() == selected.len()
+                        && scan_projection
+                            .iter()
+                            .zip(&selected)
+                            .all(|(scanned, wanted)| scanned.as_str() == *wanted)
+                };
+
+                if !projection_is_exactly_selected {
                     plan.execution_steps.push(ExecutionStep::Project {
                         columns: exprs.clone(),
                     });
@@ -609,6 +638,33 @@ fn literal_value(expr: &SelectExpression) -> Option<Value> {
 /// every row's group key read `Null` and ALL groups collapsed into one, silently
 /// returning wrong grouped aggregates. Scanning the GROUP BY columns
 /// unconditionally keeps the group key correct.
+///
+/// Finally — when the projection is NON-EMPTY (and therefore FILTERS decoded
+/// cells) — the union includes every column referenced by the WHERE and ORDER BY
+/// clauses (the second #1952 regression fix):
+///   * WHERE predicate columns: a pushed predicate is re-checked per row by the
+///     backstop `evaluate_predicates`, and a non-pushed predicate by the residual
+///     `Filter` step; BOTH read the column from the scanned row. Omitting them
+///     meant `SELECT SUM(value) FROM t WHERE category = 'A'` scanned only
+///     `["value"]`, so `category` was filtered out, the backstop saw a missing
+///     column (SQL `UNKNOWN`), and EVERY row was rejected — an empty result / a
+///     zero-or-null aggregate instead of the real filtered value. (Before #1952
+///     this query had an EMPTY projection = scan-all, so `category` was present;
+///     #1952 made the projection non-empty and reintroduced the filtering.)
+///   * ORDER BY columns: for a non-aggregate query the `Sort` step evaluates each
+///     ORDER BY expression against the scanned row, so an ORDER BY on a
+///     non-selected column would otherwise sort by a filtered-away `Null`. (In the
+///     aggregate case `Sort` runs after `Aggregate` on the result rows; the extra
+///     scanned cells are simply ignored, so unioning them is safe either way.)
+///
+/// HAVING columns are intentionally NOT unioned: the executor implements no
+/// HAVING step (nothing in `select_executor` reads `having_clause`), so HAVING
+/// columns are never read from the scanned row and adding them would be dead
+/// columns.
+///
+/// An EMPTY base projection (`SELECT *`, or `SELECT COUNT(*)` with no dimension)
+/// still means scan-all, which already supplies every column any step needs, so
+/// nothing is unioned in that case and the "empty = scan all" contract holds.
 fn extract_projection_columns(statement: &SelectStatement) -> Vec<String> {
     match &statement.select_clause {
         SelectClause::All => Vec::new(),
@@ -637,6 +693,31 @@ fn extract_projection_columns(statement: &SelectStatement) -> Vec<String> {
             if let Some(group_by) = &statement.group_by {
                 for col in &group_by.columns {
                     push_unique(&mut columns, col.column.clone());
+                }
+            }
+
+            // An empty base projection means scan-all: it already supplies every
+            // referenced column, so leave it empty. Only a NON-EMPTY projection
+            // (which filters decoded cells) needs the WHERE / ORDER BY columns
+            // unioned in, or those steps read a filtered-away column.
+            if columns.is_empty() {
+                return columns;
+            }
+
+            // WHERE predicate columns (pushed backstop + residual Filter both read
+            // from the scanned row).
+            if let Some(where_clause) = &statement.where_clause {
+                for col_ref in where_clause.get_column_refs() {
+                    push_unique(&mut columns, col_ref.column);
+                }
+            }
+            // ORDER BY columns (the non-aggregate `Sort` reads from the scanned
+            // row; harmless in the aggregate case).
+            if let Some(order_by) = &statement.order_by {
+                for item in &order_by.items {
+                    for col_ref in item.expression.get_column_refs() {
+                        push_unique(&mut columns, col_ref.column);
+                    }
                 }
             }
             columns
@@ -797,6 +878,111 @@ mod tests {
             1 + project_step_count(&aplan),
             2,
             "an aliased projection must keep its Project pass"
+        );
+    }
+
+    /// Extract the SSTable-scan projection a parsed query plans to.
+    fn scan_projection_of(query: &str) -> Vec<String> {
+        let statement = crate::query::select_parser::parse_select(query)
+            .unwrap_or_else(|e| panic!("{query} must parse: {e}"));
+        extract_projection_columns(&statement)
+    }
+
+    /// #1952 REGRESSION (roborev HIGH, this round): a non-empty scan projection
+    /// must include WHERE predicate columns, or the per-row backstop
+    /// (`evaluate_predicates`) reads a filtered-away column and rejects every row.
+    /// `SELECT SUM(value) FROM t WHERE category = 'x'` must scan BOTH `value`
+    /// (the aggregate argument) AND `category` (the WHERE column).
+    #[test]
+    fn where_predicate_columns_are_scanned() {
+        let projection = scan_projection_of(
+            "SELECT SUM(value) FROM test_basic.multi_partition_table WHERE category = 'A'",
+        );
+        assert!(
+            projection.iter().any(|c| c == "value"),
+            "aggregate argument `value` must be scanned; got {projection:?}"
+        );
+        assert!(
+            projection.iter().any(|c| c == "category"),
+            "WHERE column `category` must be scanned so the predicate backstop can \
+             evaluate it; got {projection:?}"
+        );
+    }
+
+    /// The WHERE union covers columns referenced anywhere in the predicate tree
+    /// (AND/OR and both comparison operands), reusing `WhereExpression::get_column_refs`.
+    #[test]
+    fn where_columns_from_compound_predicate_are_scanned() {
+        let projection = scan_projection_of(
+            "SELECT SUM(value) FROM t WHERE category = 'A' AND (name = 'x' OR metadata = 'y')",
+        );
+        for col in ["value", "category", "name", "metadata"] {
+            assert!(
+                projection.iter().any(|c| c == col),
+                "referenced column `{col}` must be scanned; got {projection:?}"
+            );
+        }
+    }
+
+    /// ORDER BY columns are read from the scanned row by the non-aggregate `Sort`
+    /// step, so a non-selected ORDER BY column must be scanned too.
+    #[test]
+    fn order_by_columns_are_scanned() {
+        let projection = scan_projection_of("SELECT name FROM t ORDER BY value");
+        assert!(
+            projection.iter().any(|c| c == "name"),
+            "selected column `name` must be scanned; got {projection:?}"
+        );
+        assert!(
+            projection.iter().any(|c| c == "value"),
+            "ORDER BY column `value` must be scanned for the Sort step; got {projection:?}"
+        );
+    }
+
+    /// The "empty = scan all" contract holds: `SELECT *` and a bare `COUNT(*)`
+    /// with no dimension keep an EMPTY projection even with a WHERE clause (scan-all
+    /// already supplies every column), so nothing is spuriously unioned in.
+    #[test]
+    fn empty_projection_stays_empty_for_scan_all() {
+        assert!(
+            scan_projection_of("SELECT * FROM t WHERE category = 'A'").is_empty(),
+            "SELECT * must keep an empty (scan-all) projection"
+        );
+        assert!(
+            scan_projection_of("SELECT COUNT(*) FROM t WHERE category = 'A'").is_empty(),
+            "bare COUNT(*) with no dimension must keep an empty (scan-all) projection"
+        );
+    }
+
+    /// A bare-column SELECT whose WHERE references a NON-selected column must keep
+    /// its `Project` step (to trim the helper WHERE column out of the output),
+    /// while a bare-column SELECT with no extra columns still skips it (#1587).
+    #[tokio::test]
+    async fn bare_column_with_where_helper_keeps_project() {
+        let optimizer = make_optimizer().await;
+
+        // WHERE references `b`, which is NOT selected → scan projection is a
+        // superset of the selected columns → the Project step must be kept so `b`
+        // does not leak into the output.
+        let with_helper =
+            crate::query::select_parser::parse_select("SELECT a FROM t WHERE b = 1").unwrap();
+        let plan = optimizer.optimize(with_helper).await.unwrap();
+        assert_eq!(
+            project_step_count(&plan),
+            1,
+            "a bare-column SELECT with a non-selected WHERE column must keep its \
+             Project step to trim the helper column from the output"
+        );
+
+        // No extra columns → the #1587 skip still applies.
+        let no_helper =
+            crate::query::select_parser::parse_select("SELECT a, b FROM t WHERE a = 1").unwrap();
+        let plan = optimizer.optimize(no_helper).await.unwrap();
+        assert_eq!(
+            project_step_count(&plan),
+            0,
+            "a bare-column SELECT whose WHERE only references selected columns must \
+             still skip the redundant Project step (#1587)"
         );
     }
 

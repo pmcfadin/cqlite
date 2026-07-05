@@ -273,6 +273,127 @@ async fn grouped_count_column_with_unselected_dimension_is_per_group() {
     }
 }
 
+/// #1952 REGRESSION (roborev HIGH, second round): a non-empty scan projection
+/// must ALSO include WHERE predicate columns. `SELECT SUM(value) ... WHERE
+/// category = 'A'` has projection `["value"]` (the aggregate argument); before
+/// this fix `category` was filtered out of every scanned row, so the per-row
+/// backstop (`evaluate_predicates`) saw a missing column (SQL UNKNOWN) and
+/// REJECTED every row — an empty result / zero-or-null SUM. `category` is neither
+/// selected nor an aggregate argument, so only unioning WHERE columns fixes it.
+/// Asserts the exact single-group total from the committed JSONL golden.
+#[tokio::test]
+async fn single_sum_filtered_by_unselected_where_column_is_exact() {
+    let db = match setup("basic-types.cql", "/test_basic/").await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let result = db
+        .execute(
+            "SELECT SUM(value) \
+             FROM test_basic.multi_partition_table WHERE category = 'A'",
+        )
+        .await
+        .expect("filtered SUM query must execute");
+
+    // Ground truth: category A sum = 18_785_439 (from GROUPS / the golden).
+    assert_eq!(
+        result.rows.len(),
+        1,
+        "an ungrouped SUM returns exactly one row; got {}",
+        result.rows.len()
+    );
+    let sum = result.rows[0].values.get("Sum_value");
+    assert_eq!(
+        sum,
+        Some(&Value::Float(18_785_439.0)),
+        "SUM(value) WHERE category = 'A' must equal the category-A total; the WHERE \
+         column `category` must be in the scan projection so the predicate backstop \
+         can evaluate it (pre-fix: `category` filtered out → every row rejected → \
+         empty / zero SUM)",
+    );
+}
+
+/// #1952 REGRESSION companion: a compound WHERE that filters on BOTH a
+/// non-projected dimension (`category`, dropped pre-fix) AND the aggregate
+/// argument column (`value`, "the predicate on the aggregate arg column too")
+/// must compute the exact filtered sum. Pre-fix `category` was filtered out so
+/// the backstop rejected every row (empty / zero SUM).
+#[tokio::test]
+async fn single_sum_filtered_by_unselected_and_agg_arg_columns_is_exact() {
+    let db = match setup("basic-types.cql", "/test_basic/").await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let result = db
+        .execute(
+            "SELECT SUM(value) \
+             FROM test_basic.multi_partition_table \
+             WHERE category = 'A' AND value > 500000",
+        )
+        .await
+        .expect("compound-filtered SUM query must execute");
+
+    // Ground truth: category A with value > 500000 → count 17, sum 12_520_796.
+    assert_eq!(result.rows.len(), 1, "an ungrouped SUM returns one row");
+    assert_eq!(
+        result.rows[0].values.get("Sum_value"),
+        Some(&Value::Float(12_520_796.0)),
+        "SUM(value) WHERE category = 'A' AND value > 500000 must equal the exact \
+         filtered subtotal; `category` (WHERE-only) must be scanned alongside \
+         `value` (the aggregate argument)",
+    );
+}
+
+/// #1952 correctness: `SELECT category, SUM(value) ... WHERE value > n GROUP BY
+/// category` — a predicate on the aggregate-argument column combined with GROUP
+/// BY must compute correct PER-GROUP sums over only the filtered rows. This
+/// exercises the combined WHERE + GROUP BY + aggregate-argument projection path.
+#[tokio::test]
+async fn grouped_sum_filtered_by_agg_arg_column_is_per_group() {
+    let db = match setup("basic-types.cql", "/test_basic/").await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let result = db
+        .execute(
+            "SELECT category, SUM(value) \
+             FROM test_basic.multi_partition_table \
+             WHERE value > 500000 GROUP BY category",
+        )
+        .await
+        .expect("grouped filtered SUM query must execute");
+
+    // Ground truth (value > 500000, from the golden):
+    //   A: sum 12_520_796   B: sum 11_760_014   C: sum 12_302_991
+    let filtered: &[(&str, i64)] = &[("A", 12_520_796), ("B", 11_760_014), ("C", 12_302_991)];
+    assert_eq!(
+        result.rows.len(),
+        filtered.len(),
+        "one row per group; got {}",
+        result.rows.len()
+    );
+    for &(cat, sum) in filtered {
+        assert_eq!(
+            agg_value(&result.rows, cat, "Sum_value"),
+            Some(&Value::Float(sum as f64)),
+            "SUM(value) WHERE value > 500000 for category {cat} must be the exact \
+             per-group filtered subtotal",
+        );
+    }
+}
+
 /// Regression guard: `COUNT(*)` grouped needs no argument column and must stay
 /// correct after the projection change (the group size per category).
 #[tokio::test]
