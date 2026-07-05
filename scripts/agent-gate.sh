@@ -2458,6 +2458,14 @@ dispatch_component() {
     binding-unwind-profile) run_component binding-unwind-profile bash "$REPO_ROOT/scripts/tests/test_binding_unwind_profile.sh" ;;
     tooling-tests) run_tooling_tests ;;
     minimal-build) run_component minimal-build bash -c '
+  # Match the CI "All Compression Build & Test" job byte-for-byte (issue #1981):
+  # that job sets RUSTFLAGS=-D warnings, so a warning-class error (e.g. an unused
+  # `#[cfg(test)]` helper whose only caller is feature-gated out under the minimal
+  # feature set — the dead-code lint) hard-fails CI but slipped past this gate,
+  # which ran WITHOUT -D warnings (#1972/#1978/#1981 all escaped locally this way).
+  # Export it for BOTH the build and the test-compile so this component enforces
+  # exactly what CI enforces.
+  export RUSTFLAGS="-D warnings" &&
   cargo build --package cqlite-core --no-default-features --features all-compression &&
   # Test-compile the minimal lane (issue #1978): the CI "All Compression Build &
   # Test" job runs `cargo test --no-default-features --features=all-compression

@@ -66,7 +66,7 @@ pub mod fuzz_support;
 // allocation regression test in the SELECT executor's `lookup` module). It
 // delegates every operation to the system allocator and only bumps a per-thread
 // counter while a measurement is ACTIVE, so it is inert for every other test.
-#[cfg(test)]
+#[cfg(all(test, feature = "state_machine"))] // sole `measure` caller lives in the state_machine `query` module; else `-D dead-code` under minimal (#1981)
 pub(crate) mod test_alloc_probe {
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::cell::Cell;
@@ -120,7 +120,7 @@ pub(crate) mod test_alloc_probe {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "state_machine"))]
 #[global_allocator]
 static TEST_ALLOC: test_alloc_probe::CountingAllocator = test_alloc_probe::CountingAllocator;
 
