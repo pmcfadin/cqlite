@@ -227,20 +227,61 @@ Rust-side re-compaction byte-parity subset:
   claim.
 - **Promotion.** Terminal tier — it is the strongest, broadest gate. New
   format-matrix scenarios are *added* here once their generation command exists.
-- **Backing lane (issue #1026).** This tier is realized by
+- **Gate strength — COVERAGE/PRESENCE, not byte-drift (issue #2009).** This tier
+  is a **coverage/presence audit**: it proves that every manifest-referenced +
+  committed-golden component identity is **PRODUCED** by a fresh regeneration. It
+  is explicitly **NOT** a byte-drift/checksum tier — a component that is present
+  passes **regardless of its SHA256**. Byte-for-byte parity stays with the
+  [`sstabledump-parity-gate`](../../.github/workflows/) (canonical-semantic /
+  byte-for-byte on committed goldens) and `nightly_docker` (live-Cassandra byte
+  compare) tiers, which validate the *bytes* of the committed corpus. Two defects
+  motivated the relaxation: `regenerate-datasets.sh` writetimes are wall-clock
+  (localDeletionTime, counter shard clocks) so a fresh regen is **not**
+  byte-reproducible against committed goldens; and `system*` keyspaces
+  (`system`, `system_schema`, `system_auth`, `system_distributed`,
+  `system_traces`, `system_views`, `system_virtual_schema`) are inherently
+  run-dependent, so they are **excluded from the expected inventory** entirely.
+- **Backing lane (issue #1026, #2009).** This tier is realized by
   [`.github/workflows/exhaustive-regeneration.yml`](../../.github/workflows/exhaustive-regeneration.yml)
   — a `workflow_dispatch` + weekly-cron lane (never on PRs) that orchestrates the
-  existing generators (`regenerate-datasets.sh`, `generate-deltas.sh`,
-  `generate-corruption-corpus.sh`), records a per-run provenance record (Cassandra
-  version/ref/sha, Docker image, generator commands, dataset asset name + SHA256),
-  and runs the corpus audit:
+  full generator set (`regenerate-datasets.sh`, `generate-deltas.sh`,
+  `generate-compression-parity.sh`, `gen-wide-bti.sh`,
+  `generate-corruption-corpus.sh`, plus the extended-keyspace generators wired in
+  #2009 — see the regen-matrix table below), records a per-run provenance record
+  (Cassandra version/ref/sha, Docker image, generator commands, dataset asset name
+  + SHA256), and runs the corpus audit:
   `cargo run -p cassandra-parity -- corpus-audit --corpus . --manifest <manifest> --provenance <record>`.
   The audit **hard-fails** (non-zero exit, naming the offender) on a missing/stale
-  manifest reference, an unclassified high-relevance Cassandra file, an unexpected
-  component presence/checksum change, a provenance/manifest version divergence, or a
-  corruption-fixture coverage gap. The lane uploads ONE report artifact (provenance +
-  audit report + generator logs) and never commits regenerated binaries or publishes a
-  dataset asset.
+  manifest reference, an unclassified high-relevance Cassandra file, an
+  **absent** expected (non-`system*`) component identity (the presence check), a
+  provenance/manifest version divergence, or a corruption-fixture coverage gap. The
+  lane uploads ONE report artifact (provenance + audit report + generator logs) and
+  never commits regenerated binaries or publishes a dataset asset.
+
+#### Regen-matrix coverage (issue #2009)
+
+Every corpus keyspace MUST have its owning generator invoked by
+`exhaustive-regeneration.yml`, or the coverage/presence audit cannot certify it.
+When you add a new corpus you **MUST** wire its generator into
+`exhaustive-regeneration.yml` **and** add a row here, so coverage cannot silently
+regress.
+
+| Corpus keyspace(s) | Owning generator script | Invoked by the workflow? |
+|--------------------|-------------------------|--------------------------|
+| `test_basic`, `test_collections`, `test_timeseries`, `test_wide_rows`, `test_oa`, `test_da` | `regenerate-datasets.sh` | yes |
+| `test_deltas` | `generate-deltas.sh` | yes |
+| `test_comp` (compression) + BTI sources | `generate-compression-parity.sh` | yes |
+| `test_da` wide (BTI wide-partition) | `gen-wide-bti.sh` | yes |
+| corruption corpus (`corruption/test_comp_corrupt`) | `generate-corruption-corpus.sh` | yes |
+| `test_types` | `generate-cql-type-parity.sh` | yes (wired #2009) |
+| `test_tomb` | `generate-tombstone-parity.sh` | yes (wired #2009) |
+| `test_compactionparity` | `generate-compaction-parity.sh` | yes (wired #2009) |
+| `test_compactionparityudt` | `generate-compaction-parity-udt.sh` | yes (wired #2009) |
+| `test_writeparity` | `generate-write-load-parity.sh` | yes (wired #2009) |
+| `test_signed_coll` | `generate-signed-collection-parity.sh` | yes (wired #2009) |
+| `test_compaction_tombstone_ttl` | `generate-compaction-tombstone-ttl-parity.sh` | yes (wired #2009) |
+| `test_big` (wide-partition BIG) | `gen-wide-big.sh` | yes (wired #2009) |
+| `system*` (`system`, `system_schema`, …) | n/a — Cassandra-internal | excluded from the expected inventory (run-dependent) |
 
 ### `manual_debug`
 
