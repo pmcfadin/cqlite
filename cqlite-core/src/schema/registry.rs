@@ -95,11 +95,82 @@ pub struct SchemaRegistry {
     update_locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
+/// Derived parsing state precomputed once at schema registration (issue #1709).
+///
+/// [`SchemaRegistry::get_parsing_context`] is on the read path (called per
+/// Index.db lookup via `key_digest`). Re-deriving the comparators — which are
+/// CONSTANT for a registered schema — on every call cost four `TableSchema`
+/// deep clones and one `CqlType::parse` per column per call. We instead compute
+/// these once when the [`SchemaEntry`] is created and hand them out as `Arc`
+/// clones (a pointer bump). The state lives ON the entry so it is invalidated
+/// atomically whenever the entry is replaced.
+#[derive(Debug, Clone)]
+struct DerivedParsingState {
+    /// The complete table schema, shared.
+    schema: Arc<TableSchema>,
+    /// Comparators for partition key components, in key order.
+    partition_comparators: Arc<Vec<ComparatorType>>,
+    /// Comparators for clustering key components, in key order.
+    clustering_comparators: Arc<Vec<ComparatorType>>,
+    /// Comparators for all columns, keyed by column name.
+    column_comparators: Arc<HashMap<String, ComparatorType>>,
+}
+
+impl DerivedParsingState {
+    /// Compute the derived comparators for a schema. Runs `CqlType::parse` per
+    /// key/column exactly once, at registration time.
+    fn compute(schema: &TableSchema) -> Result<Self> {
+        let mut partition_comparators = Vec::new();
+        for key_column in schema.ordered_partition_keys() {
+            let cql_type = CqlType::parse(&key_column.data_type)?;
+            partition_comparators.push(ComparatorType::from_cql_type(&cql_type)?);
+        }
+
+        let mut clustering_comparators = Vec::new();
+        for key_column in schema.ordered_clustering_keys() {
+            let cql_type = CqlType::parse(&key_column.data_type)?;
+            clustering_comparators.push(ComparatorType::from_cql_type(&cql_type)?);
+        }
+
+        let mut column_comparators = HashMap::new();
+        for column in &schema.columns {
+            let cql_type = CqlType::parse(&column.data_type)?;
+            column_comparators.insert(
+                column.name.clone(),
+                ComparatorType::from_cql_type(&cql_type)?,
+            );
+        }
+
+        Ok(Self {
+            schema: Arc::new(schema.clone()),
+            partition_comparators: Arc::new(partition_comparators),
+            clustering_comparators: Arc::new(clustering_comparators),
+            column_comparators: Arc::new(column_comparators),
+        })
+    }
+
+    /// Build a [`ParsingContext`] by cloning the shared `Arc`s (pointer bumps,
+    /// no deep clone, no parse).
+    fn to_parsing_context(&self) -> ParsingContext {
+        ParsingContext {
+            schema: self.schema.clone(),
+            partition_comparators: self.partition_comparators.clone(),
+            clustering_comparators: self.clustering_comparators.clone(),
+            column_comparators: self.column_comparators.clone(),
+        }
+    }
+}
+
 /// Schema entry in the registry
 #[derive(Debug, Clone)]
 struct SchemaEntry {
     /// The table schema
     schema: TableSchema,
+    /// Precomputed derived parsing state (comparators), or `None` if it could
+    /// not be derived at registration (e.g. a malformed type string). When
+    /// `None`, `get_parsing_context` recomputes on demand, preserving the exact
+    /// original error behavior without deep-cloning the schema.
+    derived: Option<DerivedParsingState>,
     /// Extended schema information if available
     extended_info: Option<SchemaInfo>,
     /// When the schema was registered/updated
@@ -375,9 +446,14 @@ impl SchemaRegistry {
             SchemaValidationStatus::NotValidated
         };
 
-        // Create schema entry
+        // Create schema entry, precomputing the derived comparators once so the
+        // read-path `get_parsing_context` is a pointer bump (issue #1709). A
+        // malformed type leaves `derived = None`; the error then surfaces on the
+        // context path exactly as before (never fails registration).
+        let derived = DerivedParsingState::compute(&schema).ok();
         let entry = SchemaEntry {
             schema: schema.clone(),
+            derived,
             extended_info: None,
             registered_at: SystemTime::now(),
             source,
@@ -426,6 +502,8 @@ impl SchemaRegistry {
                     drop(schemas); // Release read lock
                     return self.refresh_schema(keyspace, table).await;
                 }
+                #[cfg(test)]
+                crate::schema::work_counters::record_schema_clone();
                 Ok(entry.schema.clone())
             }
             None => {
@@ -854,19 +932,50 @@ impl SchemaRegistry {
         Ok(comparators)
     }
 
-    /// Get the complete schema context for parsing operations
+    /// Get the complete schema context for parsing operations.
+    ///
+    /// This is on the read path (per Index.db lookup). For a registered, fresh
+    /// entry it does ZERO `TableSchema` deep clones and ZERO `CqlType::parse`
+    /// calls: it takes ONE read guard and hands out `Arc` clones of the derived
+    /// state precomputed at registration (issue #1709).
     pub async fn get_parsing_context(&self, keyspace: &str, table: &str) -> Result<ParsingContext> {
-        let schema = self.get_schema(keyspace, table).await?;
-        let partition_comparators = self.get_partition_key_comparator(keyspace, table).await?;
-        let clustering_comparators = self.get_clustering_key_comparator(keyspace, table).await?;
-        let column_comparators = self.get_table_comparators(keyspace, table).await?;
+        let table_id = format!("{}.{}", keyspace, table);
 
-        Ok(ParsingContext {
-            schema,
-            partition_comparators,
-            clustering_comparators,
-            column_comparators,
-        })
+        // Fast path: present, fresh, precomputed. One guard, no await under it,
+        // no deep clone, no parse.
+        {
+            let schemas = self.schemas.read().await;
+            if let Some(entry) = schemas.get(&table_id) {
+                if !self.is_entry_expired(entry) {
+                    match &entry.derived {
+                        Some(derived) => return Ok(derived.to_parsing_context()),
+                        // Precompute failed (malformed type): reproduce the
+                        // original error via on-demand recompute. No await held.
+                        None => {
+                            return DerivedParsingState::compute(&entry.schema)
+                                .map(|d| d.to_parsing_context())
+                        }
+                    }
+                }
+            }
+        }
+
+        // Cold path: missing or TTL-expired. Trigger the refresh/auto-discovery
+        // seam (which reinserts the entry with derived state), then read it
+        // back. This is not the post-registration request path.
+        self.get_schema(keyspace, table).await?;
+
+        let schemas = self.schemas.read().await;
+        match schemas.get(&table_id) {
+            Some(entry) => match &entry.derived {
+                Some(derived) => Ok(derived.to_parsing_context()),
+                None => DerivedParsingState::compute(&entry.schema).map(|d| d.to_parsing_context()),
+            },
+            None => Err(Error::Schema(format!(
+                "Schema not found: {}.{}",
+                keyspace, table
+            ))),
+        }
     }
 
     /// Get ComparatorType for clustering key columns (for clustering comparison)
@@ -1025,8 +1134,12 @@ impl SchemaRegistry {
         let table_id = format!("{}.{}", schema.keyspace, schema.table);
         let source = SchemaSource::Discovered(sstable_files.clone());
 
+        // Precompute derived comparators once (issue #1709); this is the
+        // TTL-refresh / auto-discovery seam, so recompute here too.
+        let derived = DerivedParsingState::compute(&schema).ok();
         let entry = SchemaEntry {
             schema,
+            derived,
             extended_info: schema_info,
             registered_at: SystemTime::now(),
             source,
@@ -1463,20 +1576,44 @@ pub struct RegistryStatistics {
     pub cache_hit_rate: f64,
 }
 
-/// Schema-driven parsing context containing all necessary type information
+/// Schema-driven parsing context containing all necessary type information.
+///
+/// Fields are `Arc`-shared with the registry's cached [`SchemaEntry`] derived
+/// state (issue #1709), so constructing a context is a set of pointer bumps
+/// rather than deep clones + per-column type parsing.
 #[derive(Debug, Clone)]
 pub struct ParsingContext {
     /// The complete table schema
-    pub schema: TableSchema,
+    pub schema: Arc<TableSchema>,
     /// Comparators for partition key components
-    pub partition_comparators: Vec<ComparatorType>,
+    pub partition_comparators: Arc<Vec<ComparatorType>>,
     /// Comparators for clustering key components
-    pub clustering_comparators: Vec<ComparatorType>,
+    pub clustering_comparators: Arc<Vec<ComparatorType>>,
     /// Comparators for all columns by name
-    pub column_comparators: HashMap<String, ComparatorType>,
+    pub column_comparators: Arc<HashMap<String, ComparatorType>>,
 }
 
 impl ParsingContext {
+    /// Construct a context from owned parts, sharing each behind an `Arc`.
+    ///
+    /// The registry hands out contexts from precomputed `Arc`s (issue #1709);
+    /// this constructor covers callers that derive the parts ad hoc (e.g.
+    /// `schema_aware_reader`) and keeps the `Arc` wrapping an implementation
+    /// detail of `ParsingContext`.
+    pub fn from_owned(
+        schema: TableSchema,
+        partition_comparators: Vec<ComparatorType>,
+        clustering_comparators: Vec<ComparatorType>,
+        column_comparators: HashMap<String, ComparatorType>,
+    ) -> Self {
+        Self {
+            schema: Arc::new(schema),
+            partition_comparators: Arc::new(partition_comparators),
+            clustering_comparators: Arc::new(clustering_comparators),
+            column_comparators: Arc::new(column_comparators),
+        }
+    }
+
     /// Get comparator for a specific column
     pub fn get_column_comparator(&self, column_name: &str) -> Option<&ComparatorType> {
         self.column_comparators.get(column_name)
@@ -1877,6 +2014,220 @@ mod tests {
             .changes
             .iter()
             .any(|change| matches!(change.change_type, SchemaChangeType::ColumnAdded)));
+    }
+
+    /// A schema exercising every derived vector: a 2-component partition key, a
+    /// 2-component clustering key, and several regular/collection columns.
+    fn multi_column_schema(name: &str) -> TableSchema {
+        use crate::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn};
+        TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: name.to_string(),
+            partition_keys: vec![
+                KeyColumn {
+                    name: "region".to_string(),
+                    data_type: "text".to_string(),
+                    position: 0,
+                },
+                KeyColumn {
+                    name: "shard".to_string(),
+                    data_type: "int".to_string(),
+                    position: 1,
+                },
+            ],
+            clustering_keys: vec![
+                ClusteringColumn {
+                    name: "ts".to_string(),
+                    data_type: "timestamp".to_string(),
+                    position: 0,
+                    order: ClusteringOrder::Asc,
+                },
+                ClusteringColumn {
+                    name: "seq".to_string(),
+                    data_type: "bigint".to_string(),
+                    position: 1,
+                    order: ClusteringOrder::Desc,
+                },
+            ],
+            columns: vec![
+                Column {
+                    name: "region".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "shard".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "ts".to_string(),
+                    data_type: "timestamp".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "seq".to_string(),
+                    data_type: "bigint".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "payload".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "tags".to_string(),
+                    data_type: "list<text>".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
+        }
+    }
+
+    /// Issue #1709 (red on main): after registration, `get_parsing_context` must
+    /// perform ZERO `CqlType::parse` calls and ZERO `TableSchema` deep clones on
+    /// the request path. Before caching this was `O(columns)` parses and 4 deep
+    /// clones per call.
+    #[tokio::test]
+    async fn get_parsing_context_does_zero_work_after_registration() {
+        let registry = make_registry(SchemaRegistryConfig::default()).await;
+        registry
+            .register_schema(multi_column_schema("metrics"), SchemaSource::Manual)
+            .await
+            .expect("register");
+
+        // Measure only the request path.
+        crate::schema::work_counters::reset();
+        let _ctx = registry
+            .get_parsing_context("test_ks", "metrics")
+            .await
+            .expect("context");
+
+        assert_eq!(
+            crate::schema::work_counters::parse_calls(),
+            0,
+            "get_parsing_context must not parse any CQL types after registration"
+        );
+        assert_eq!(
+            crate::schema::work_counters::schema_clones(),
+            0,
+            "get_parsing_context must not deep-clone the schema after registration"
+        );
+
+        // A second call is likewise free.
+        crate::schema::work_counters::reset();
+        let _ctx2 = registry
+            .get_parsing_context("test_ks", "metrics")
+            .await
+            .expect("context2");
+        assert_eq!(crate::schema::work_counters::parse_calls(), 0);
+        assert_eq!(crate::schema::work_counters::schema_clones(), 0);
+    }
+
+    /// The cached context must be field-by-field IDENTICAL to the pre-cache path
+    /// (schema + the three comparator collections derived on demand).
+    #[tokio::test]
+    async fn cached_parsing_context_matches_on_demand_derivation() {
+        for schema in [simple_schema("simple"), multi_column_schema("wide")] {
+            let table = schema.table.clone();
+            let registry = make_registry(SchemaRegistryConfig::default()).await;
+            registry
+                .register_schema(schema, SchemaSource::Manual)
+                .await
+                .expect("register");
+
+            let ctx = registry
+                .get_parsing_context("test_ks", &table)
+                .await
+                .expect("context");
+
+            // Reference: the original per-call derivation helpers.
+            let ref_schema = registry
+                .get_schema("test_ks", &table)
+                .await
+                .expect("schema");
+            let ref_partition = registry
+                .get_partition_key_comparator("test_ks", &table)
+                .await
+                .expect("partition");
+            let ref_clustering = registry
+                .get_clustering_key_comparator("test_ks", &table)
+                .await
+                .expect("clustering");
+            let ref_columns = registry
+                .get_table_comparators("test_ks", &table)
+                .await
+                .expect("columns");
+
+            // TableSchema has no PartialEq; compare structurally via serde_json
+            // (order-independent for maps), which is a true field-by-field check.
+            assert_eq!(
+                serde_json::to_value(&*ctx.schema).expect("ctx schema json"),
+                serde_json::to_value(&ref_schema).expect("ref schema json"),
+                "schema mismatch for {}",
+                table
+            );
+            assert_eq!(
+                *ctx.partition_comparators, ref_partition,
+                "partition comparators mismatch for {}",
+                table
+            );
+            assert_eq!(
+                *ctx.clustering_comparators, ref_clustering,
+                "clustering comparators mismatch for {}",
+                table
+            );
+            assert_eq!(
+                *ctx.column_comparators, ref_columns,
+                "column comparators mismatch for {}",
+                table
+            );
+        }
+    }
+
+    /// Two contexts handed out for the same registered schema share the same
+    /// underlying `Arc` allocations (pointer bump, not deep copy).
+    #[tokio::test]
+    async fn parsing_contexts_share_arc_backing() {
+        let registry = make_registry(SchemaRegistryConfig::default()).await;
+        registry
+            .register_schema(multi_column_schema("shared"), SchemaSource::Manual)
+            .await
+            .expect("register");
+
+        let a = registry
+            .get_parsing_context("test_ks", "shared")
+            .await
+            .expect("a");
+        let b = registry
+            .get_parsing_context("test_ks", "shared")
+            .await
+            .expect("b");
+
+        assert!(Arc::ptr_eq(&a.schema, &b.schema));
+        assert!(Arc::ptr_eq(
+            &a.partition_comparators,
+            &b.partition_comparators
+        ));
+        assert!(Arc::ptr_eq(
+            &a.clustering_comparators,
+            &b.clustering_comparators
+        ));
+        assert!(Arc::ptr_eq(&a.column_comparators, &b.column_comparators));
     }
 
     #[tokio::test]

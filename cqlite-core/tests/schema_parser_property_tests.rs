@@ -26,12 +26,7 @@ fn create_test_context(columns: Vec<Column>) -> ParsingContext {
         dropped_columns: HashMap::new(),
     };
 
-    ParsingContext {
-        partition_comparators: vec![ComparatorType::Int],
-        clustering_comparators: vec![],
-        column_comparators: HashMap::new(),
-        schema,
-    }
+    ParsingContext::from_owned(schema, vec![ComparatorType::Int], vec![], HashMap::new())
 }
 
 /// Property: Parsing a value and re-encoding it should consume exactly the right number of bytes
@@ -59,7 +54,7 @@ fn test_primitive_types_consumed_bytes() {
         }];
 
         let mut context = create_test_context(columns);
-        context.column_comparators.insert(
+        std::sync::Arc::make_mut(&mut context.column_comparators).insert(
             "test_col".to_string(),
             ComparatorType::from_cql_type(&CqlType::parse(type_name).unwrap()).unwrap(),
         );
@@ -106,8 +101,7 @@ fn test_variable_length_types_consumed_bytes() {
     }];
 
     let mut context = create_test_context(columns);
-    context
-        .column_comparators
+    std::sync::Arc::make_mut(&mut context.column_comparators)
         .insert("text_col".to_string(), ComparatorType::Text);
 
     let parser = SchemaParser::new(context).unwrap();
@@ -150,7 +144,7 @@ fn test_list_consumed_bytes() {
     }];
 
     let mut context = create_test_context(columns);
-    context.column_comparators.insert(
+    std::sync::Arc::make_mut(&mut context.column_comparators).insert(
         "list_col".to_string(),
         ComparatorType::from_cql_type(&CqlType::parse("list<int>").unwrap()).unwrap(),
     );
@@ -198,7 +192,7 @@ fn test_map_consumed_bytes() {
     }];
 
     let mut context = create_test_context(columns);
-    context.column_comparators.insert(
+    std::sync::Arc::make_mut(&mut context.column_comparators).insert(
         "map_col".to_string(),
         ComparatorType::from_cql_type(&CqlType::parse("map<int, int>").unwrap()).unwrap(),
     );
@@ -250,7 +244,7 @@ fn test_nested_list_consumed_bytes() {
     }];
 
     let mut context = create_test_context(columns);
-    context.column_comparators.insert(
+    std::sync::Arc::make_mut(&mut context.column_comparators).insert(
         "nested_col".to_string(),
         ComparatorType::from_cql_type(&CqlType::parse("list<list<int>>").unwrap()).unwrap(),
     );
@@ -303,8 +297,8 @@ fn test_null_handling_in_row() {
         },
     ];
 
-    let context = ParsingContext {
-        schema: TableSchema {
+    let context = ParsingContext::from_owned(
+        TableSchema {
             keyspace: "test_ks".to_string(),
             table: "test_table".to_string(),
             partition_keys: vec![KeyColumn {
@@ -317,15 +311,15 @@ fn test_null_handling_in_row() {
             comments: HashMap::new(),
             dropped_columns: HashMap::new(),
         },
-        partition_comparators: vec![ComparatorType::Int],
-        clustering_comparators: vec![],
-        column_comparators: {
+        vec![ComparatorType::Int],
+        vec![],
+        {
             let mut map = HashMap::new();
             map.insert("id".to_string(), ComparatorType::Int);
             map.insert("nullable_col".to_string(), ComparatorType::Text);
             map
         },
-    };
+    );
 
     let parser = SchemaParser::new(context).unwrap();
 
@@ -365,7 +359,7 @@ fn test_tuple_consumed_bytes() {
     }];
 
     let mut context = create_test_context(columns);
-    context.column_comparators.insert(
+    std::sync::Arc::make_mut(&mut context.column_comparators).insert(
         "tuple_col".to_string(),
         ComparatorType::from_cql_type(&CqlType::parse("tuple<int, text>").unwrap()).unwrap(),
     );

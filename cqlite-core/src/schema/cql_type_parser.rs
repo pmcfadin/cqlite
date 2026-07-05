@@ -58,6 +58,8 @@ impl CqlType {
 
     /// Parse CQL type string into structured type
     pub fn parse(type_str: &str) -> Result<Self> {
+        #[cfg(test)]
+        crate::schema::work_counters::record_parse_call();
         Self::parse_with_depth(type_str, 0)
     }
 
