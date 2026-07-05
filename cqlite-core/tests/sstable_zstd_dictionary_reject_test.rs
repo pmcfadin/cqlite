@@ -67,16 +67,22 @@ fn datasets_root() -> PathBuf {
         })
 }
 
-/// True when fixture absence must be a hard failure (full-dataset CI / nightly).
+/// True when fixture absence must be a hard failure (nightly / exhaustive tiers).
 ///
-/// Delegates to the single shared strict-fixture gate
-/// (`cqlite_core::testing::require_fixtures_strict`, issue #1230) so this suite
-/// fails closed under BOTH `CQLITE_REQUIRE_FIXTURES` and
-/// `CQLITE_PARITY_REQUIRE_DATASETS`. A local `CQLITE_REQUIRE_FIXTURES`-only copy
-/// would false-green in parity CI lanes that set the latter, so we must NOT fork
-/// a parallel definition.
+/// Issue #2017 / PR #1996: gate ONLY on `CQLITE_REQUIRE_FIXTURES`, NOT on the
+/// shared `require_fixtures_strict()` (which also fires under
+/// `CQLITE_PARITY_REQUIRE_DATASETS`, the #1230 main-corpus guard). The
+/// dictionary-compressed fixture (`test_comp/zstd_dictionary_table/`, #1399) is
+/// UNCOMMISSIONED — no stock Apache Cassandra can flush it, so it is NOT part of
+/// the fetched main dataset corpus and is provisioned only in tiers that set
+/// `CQLITE_REQUIRE_FIXTURES=1`. Letting `CQLITE_PARITY_REQUIRE_DATASETS=1` (now
+/// set on the general `ci.yml` lanes) turn this suite's clean SKIP into a hard
+/// panic is exactly the flag conflation that left main CI red.
 fn require_fixtures() -> bool {
-    cqlite_core::testing::require_fixtures_strict()
+    matches!(
+        std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE")
+    )
 }
 
 /// The full component set a commissioned `nb`/BIG zstd(+dictionary) fixture MUST
@@ -387,9 +393,9 @@ fn zstd_dictionary_reader_fails_closed_current_behavior() {
     // guarding against a regression back to returning rows.
     //
     // Fixture-gated identically to the other reader oracle: SKIPs cleanly without
-    // the commissioned fixture, hard-FAILs under either strict flag
-    // (`require_fixtures()` -> `require_fixtures_strict()`), and requires the FULL
-    // component set before exercising the decompressing read path.
+    // the commissioned fixture, hard-FAILs under `CQLITE_REQUIRE_FIXTURES=1`
+    // (`require_fixtures()`, #2017), and requires the FULL component set before
+    // exercising the decompressing read path.
     let data_db = datasets_root().join(format!("{DICT_FIXTURE_REL}-Data.db"));
     if !data_db.exists() {
         let msg = format!(
