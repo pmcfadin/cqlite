@@ -36,8 +36,6 @@ use std::sync::Arc;
 /// Relative path of the corrupt uncompressed Data.db under the datasets root.
 const CORRUPT_DATA_DB: &str =
     "corruption/test_comp_corrupt/uncompressed_data_bit_flip/nb-1-big-Data.db";
-/// Directory of the corrupt fixture (for `verify_sstable`).
-const CORRUPT_DIR: &str = "corruption/test_comp_corrupt/uncompressed_data_bit_flip";
 /// Fully-qualified table the fixture was derived from.
 const TABLE: &str = "test_comp.uncompressed_table";
 
@@ -367,9 +365,19 @@ async fn clean_uncompressed_scan_verifies_and_returns_rows() {
 /// on the corrupt fixture, and reports NONE on the clean source.
 #[tokio::test]
 async fn verify_full_reports_uncompressed_chunk_crc_mismatch() {
-    let Some(dir) = dataset_path_or_gate(CORRUPT_DIR, "corrupt uncompressed fixture dir") else {
+    // #2017 follow-up: gate on the Data.db FILE, not the directory. The corruption
+    // fixture dir ships COMMITTED metadata (Digest.crc32 / TOC.txt), so CORRUPT_DIR
+    // EXISTS in CI even when the gitignored `nb-1-big-Data.db` is absent. Gating on
+    // the dir let these tests slip past the skip and then hard-fail inside
+    // `verify_sstable` on the missing Data.db. Gate on the Data.db and derive the dir.
+    let Some(data_db) = dataset_path_or_gate(CORRUPT_DATA_DB, "corrupt uncompressed fixture")
+    else {
         return;
     };
+    let dir = data_db
+        .parent()
+        .expect("Data.db has a parent dir")
+        .to_path_buf();
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await.expect("platform"));
     let report = verify_sstable(&dir, VerifyMode::Full, &config, platform)
@@ -454,9 +462,19 @@ async fn manifest_carries_cassandra_oracle_and_cqlite_matches() {
     );
 
     // CQLite's verdict must match the Cassandra oracle (corrupt == corrupt).
-    let Some(dir) = dataset_path_or_gate(CORRUPT_DIR, "corrupt uncompressed fixture dir") else {
+    // #2017 follow-up: gate on the Data.db FILE, not the directory. The corruption
+    // fixture dir ships COMMITTED metadata (Digest.crc32 / TOC.txt), so CORRUPT_DIR
+    // EXISTS in CI even when the gitignored `nb-1-big-Data.db` is absent. Gating on
+    // the dir let these tests slip past the skip and then hard-fail inside
+    // `verify_sstable` on the missing Data.db. Gate on the Data.db and derive the dir.
+    let Some(data_db) = dataset_path_or_gate(CORRUPT_DATA_DB, "corrupt uncompressed fixture")
+    else {
         return;
     };
+    let dir = data_db
+        .parent()
+        .expect("Data.db has a parent dir")
+        .to_path_buf();
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await.expect("platform"));
     let report = verify_sstable(&dir, VerifyMode::Full, &config, platform)
