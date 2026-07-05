@@ -402,25 +402,28 @@ impl SSTableReader {
         // that block the earliest clustering rows precede every stored block, so the
         // decode MUST begin at the partition body start (rel 0) or those rows are
         // silently dropped (the pre-fix bug returned `ck=8..19` for `ck < 20`).
-        let includes_implicit_first_block = entries
-            .first()
+        // Bind the first stored entry ONCE and reuse it for both the predicate and
+        // the entirely-within-implicit-block window below, so the window end can
+        // never diverge from the predicate (no `usize::MAX` over-read fallback).
+        let first_entry = entries.first();
+        let includes_implicit_first_block = first_entry
             .map(|(sep, _)| start_bytes.as_slice() < sep.as_slice())
             .unwrap_or(false);
 
         if blocks.is_empty() {
-            if includes_implicit_first_block {
+            // `includes_implicit_first_block` is true only when `first_entry` is
+            // `Some`; the `if let` makes that invariant explicit and reuses the exact
+            // entry that satisfied the predicate (its start is the window end).
+            if let (true, Some((_sep, first_block))) = (includes_implicit_first_block, first_entry)
+            {
                 // The range lies ENTIRELY within the implicit first block (its
                 // physical-upper is also below the first separator, e.g. `ck <= 3`
                 // or `ck = 0`): no stored block overlaps, but the implicit block
                 // does. Narrow to [partition body start, first stored block start);
                 // the post-scan backstop trims to the exact predicate.
-                let body_end_rel = entries
-                    .first()
-                    .map(|(_sep, b)| b.data_offset as usize)
-                    .unwrap_or(usize::MAX);
                 return Ok(Some(ClusteringRowWindow {
                     body_start_rel: 0,
-                    body_end_rel,
+                    body_end_rel: first_block.data_offset as usize,
                 }));
             }
             // No block (implicit or stored) overlaps the range. The slice may still

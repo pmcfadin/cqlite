@@ -193,7 +193,15 @@ async fn open_lower_bound_lt_keeps_first_block() {
         Some(AccessPath::ClusteringSlice),
         "Issue #1968: `ck < ?` must engage the clustering slice, not fall back to a full scan",
     );
-    let bound = expected.len() as u64 + 64;
+    // A BTI clustering slice decodes whole row-index blocks, so `rows_decoded`
+    // overshoots the exact 20-row predicate match by up to (roughly) one row-index
+    // block. Rather than bake in a magic per-block row count tied to this fixture's
+    // exact block sizing (a benign regeneration could change it and flip the test to
+    // a false failure), derive the slack from the fixture's known partition size:
+    // half the partition stays well clear of a full-partition regression
+    // (~PARTITION_ROW_COUNT) yet is robust to block-layout changes. The strict
+    // `< PARTITION_ROW_COUNT` assertion below is the primary bounded-decode guard.
+    let bound = expected.len() as u64 + (PARTITION_ROW_COUNT as u64 / 2);
     assert!(
         rows_decoded > 0 && rows_decoded <= bound,
         "Issue #1968: rows_decoded ({rows_decoded}) must be in (0, {bound}] for a 20-row `ck < 20` \
