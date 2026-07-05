@@ -30,16 +30,15 @@ The `DataWriter` produces valid Cassandra 5.0 BIG format Data.db files with:
 
 ### CompressionInfo.db Writing
 
-**Status**: IMPLEMENTED
+**Status**: BUILDING BLOCKS (test-only)
 
-Full compression support via `CompressedDataWriter` and `CompressionInfoWriter`:
+CQLite's production SSTable writer emits uncompressed Data.db only. Compressed-write infrastructure exists to synthesize fixtures for the read path and is fail-closed for production — see #1406.
 
-- **LZ4**: Fast compression (default, requires `lz4` feature)
-- **Snappy**: Very fast compression (requires `snappy` feature)
-- **Deflate**: Better compression ratio (requires `deflate` feature)
-- **Zstd**: Balanced speed/ratio (requires `zstd` feature)
+The `CompressedDataWriter` and `CompressionInfoWriter` types are UNWIRED building blocks: no path from flush or compaction reaches them, and no Cassandra-side byte-parity coverage exists for a CQLite-emitted CompressionInfo.db. Any attempt to configure compressed production writing returns `Error::UnsupportedFormat`:
 
-CompressionInfo.db format includes:
+- `SSTableWriter::with_compression` and `CompressionInfoWriter::guard_unsupported_production_write` accept only `CompressionAlgorithm::None`; every real algorithm (LZ4, Snappy, Deflate, Zstd) errors.
+
+These building blocks are used solely to synthesize compressed SSTables for exercising the decompressing reader. The CompressionInfo.db binary format CQLite can *parse* on read is:
 - Algorithm name with BE u16 length prefix
 - Chunk length (default 64KB)
 - Chunk offset table (u64 BE per chunk)

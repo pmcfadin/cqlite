@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Typed inner-UDT decode for frozen-UDT elements inside frozen collections (#1340, PR #1960)
+- RF-correct logical-optimizer row-count estimate for the Flight/Trino connector (#1336, PR #1954)
+- Byte-bounded result budget: `Error::ResultTooLarge` and `QueryConfig.max_result_bytes` (default 64 MiB) (#1582, PR #1890)
+- Per-surface SSTable freshness contract plus explicit `Database::refresh()` (#1749, PR #1761)
+- Compaction drops fully-expired SSTables whole via metadata only, overlap-safe (#1388, PR #1740)
+- fsync the data directory before WAL truncate for SSTable durability (#1392, PR #1421)
+- Intern per-cell column names as `Arc<str>` to cut row-decode allocations (#1334, PR #1533)
+- Recursive comparator for composite collection element/key ordering (#1296, PR #1317)
+- Preserve repaired metadata through compaction (Cassandra 5.0) (#1021, PR #1250)
+
 ### Changed
 
 - **BREAKING (Python bindings):** CQL `duration` and `time` now decode to exact,
@@ -38,8 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `uuid id` default schema. `SchemaManager::load_schema` previously invented a
   hardcoded schema for unknown tables, so queries against an undefined table
   returned fabricated-shape rows rather than failing — a no-heuristics violation.
-  Unknown tables now fail honestly with `Error::Schema("unknown table <name>;
-  no schema registered or discovered")`, mirroring the I3 hard-fail precedent
+  Unknown tables now fail honestly with `Table schema not found: {table_name}`,
+  mirroring the I3 hard-fail precedent
   (#1626). Tables with real registered/discovered schemas (including all corpus
   parity tables) are unaffected (#1710).
 
@@ -74,6 +86,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Full-scan no longer issues duplicate scans.** Retired
   `execute_parallel_table_scan` in favor of bounded streaming, eliminating the
   4× duplicate table scan on the full-scan path (#1691).
+- Pre-admission memtable size check with a bounded iterative estimator (#1625, PR #1957)
+- Grouped/filtered non-star aggregates now read the input columns they were missing (#1952, PR #1971)
+- Parser hardening bundle: recursion-depth guards, duration i32 bounds, collection capacity limits (#1632, PR #1970)
+- Aggregate/grouped result metadata names now match row value keys (#1763, PR #1953)
+- Data-safe logging: log shapes not values — removed eprintln/WHERE-literal logging that could leak data (#1694, PR #1958)
+- Surface chunk-CRC corruption on point lookups instead of silently proceeding (#1411, PR #1777)
 
 ### Performance
 
@@ -82,14 +100,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Read-path constant-factor bundle (Epic E):** query-engine hot-path cleanups
   (schema `Arc`, single projection, cached sort keys, plan cache, GROUP BY hash;
-  #1587), read-path idiom bundle (de-async, `FxHash`, OFFSET skip/take,
-  per-partition digest, IN-expansion allocation cuts; #1590), and dropping the
-  `table_readers` read guard before scanning (#1591).
+  #1587, PR #1867), read-path idiom bundle (de-async, `FxHash`, OFFSET skip/take,
+  per-partition digest, IN-expansion allocation cuts; #1590, PR #1877), and dropping the
+  `table_readers` read guard before scanning (#1591, PR #1882).
 - **Point-read I/O (C2):** a `ReadAt` positional-read trait removes the point-read
   cursor convoy and the per-lookup `open(2)` (#1573).
 - **Node bindings throughput:** batch-fetch streaming rows per async task (#1443),
   move (not deep-clone) row values in `executeNative` (#1447), and cache `Set`/`Map`
   constructors per result conversion (#1448).
+- Cache derived comparators on `SchemaEntry` (#1709, PR #1963)
+- One payload+CRC read per compressed chunk (E3 A5 read-path bundle) (#1585, PR #1955)
 
 ## [v0.12.0] - 2026-06-22
 
