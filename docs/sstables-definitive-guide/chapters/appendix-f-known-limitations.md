@@ -38,12 +38,17 @@ The `CompressedDataWriter` and `CompressionInfoWriter` types are UNWIRED buildin
 
 - `SSTableWriter::with_compression` and `CompressionInfoWriter::guard_unsupported_production_write` accept only `CompressionAlgorithm::None`; every real algorithm (LZ4, Snappy, Deflate, Zstd) errors.
 
-These building blocks are used solely to synthesize compressed SSTables for exercising the decompressing reader. The CompressionInfo.db binary format CQLite can *parse* on read is:
-- Algorithm name with BE u16 length prefix
-- Chunk length (default 64KB)
-- Chunk offset table (u64 BE per chunk)
-- Per-chunk CRC32 checksums
-- Trailing metadata CRC32
+These building blocks are used solely to synthesize compressed SSTables for exercising the decompressing reader. The CompressionInfo.db binary format CQLite actually *parses* on read (see `cqlite-core/src/storage/sstable/compression_info.rs:132-249`, mirroring Cassandra's `CompressionMetadata.java:375-392`) is, in exact on-disk order:
+- Compressor simple name — Java `writeUTF`: BE `u16` byte-length prefix followed by the UTF-8 name (e.g. `LZ4Compressor`)
+- `option_count` — BE `i32`
+- `option_count` × option pairs — each pair is two `writeUTF` strings (key, then value), each a BE `u16` length prefix + UTF-8 bytes
+- `chunk_length` — BE `i32`, the uncompressed chunk size (default 64 KB)
+- `max_compressed_length` — BE `i32` (present on all Cassandra 5.0 / version ≥ `na` files; equals `i32::MAX` when `minCompressRatio=0`)
+- `data_length` — BE `i64`, total uncompressed data length
+- `chunk_count` — BE `i32`
+- `chunk_count` × chunk offset — BE `i64` per chunk, the byte offset of each compressed chunk record in Data.db
+
+CompressionInfo.db ends immediately after the chunk offset table — it contains **no CRC bytes**. The per-chunk CRC32 checksums live inline in Data.db: each compressed chunk is followed by a 4-byte big-endian CRC32 of its compressed bytes (`CompressedSequentialWriter.java:192`), so consecutive chunk offsets differ by `compressedLength + 4`. There is likewise no trailing metadata CRC32 in CompressionInfo.db.
 
 ### Frozen Collection Serialization
 
