@@ -10,112 +10,65 @@ use crate::{
 
 use super::super::types::SSTableReader;
 use super::comparator_value_parsing::parse_value_with_comparator as decode_scalar_comparator;
-use super::custom_scalar::decode_custom_scalar;
 
 // ============================================================================
-// Standalone Pure Parsing Functions
+// Scalar decode shims (issue #1636 / J2)
+//
+// These are thin delegations to the ONE scalar decode body in
+// `comparator_value_parsing::parse_value_with_comparator` — the single owner of
+// per-type scalar decoding. They exist only to preserve the small
+// `parse_*_value` test/call surface; they carry no decode logic of their own, so
+// a scalar type fix still lands in exactly one place.
 // ============================================================================
 
-/// Parse boolean value from raw bytes
+/// Decode a scalar value through the single scalar decode body.
 pub(crate) fn parse_boolean_value(data: &[u8]) -> Result<Value> {
-    if data.len() == 1 {
-        Ok(Value::Boolean(data[0] != 0))
-    } else {
-        Err(Error::corruption("Invalid boolean value length"))
-    }
+    decode_scalar_comparator(data, &ComparatorType::Boolean)
 }
 
-/// Parse tinyint value from raw bytes
+/// Decode a scalar value through the single scalar decode body.
 pub(crate) fn parse_tinyint_value(data: &[u8]) -> Result<Value> {
-    if data.len() == 1 {
-        Ok(Value::TinyInt(data[0] as i8))
-    } else {
-        Err(Error::corruption("Invalid tinyint value length"))
-    }
+    decode_scalar_comparator(data, &ComparatorType::TinyInt)
 }
 
-/// Parse smallint value from raw bytes
+/// Decode a scalar value through the single scalar decode body.
 pub(crate) fn parse_smallint_value(data: &[u8]) -> Result<Value> {
-    if data.len() == 2 {
-        let val = i16::from_be_bytes([data[0], data[1]]);
-        Ok(Value::SmallInt(val))
-    } else {
-        Err(Error::corruption("Invalid smallint value length"))
-    }
+    decode_scalar_comparator(data, &ComparatorType::SmallInt)
 }
 
-/// Parse int value from raw bytes
+/// Decode a scalar value through the single scalar decode body.
 pub(crate) fn parse_int_value(data: &[u8]) -> Result<Value> {
-    if data.len() == 4 {
-        let val = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-        Ok(Value::Integer(val))
-    } else {
-        Err(Error::corruption("Invalid int value length"))
-    }
+    decode_scalar_comparator(data, &ComparatorType::Int)
 }
 
-/// Parse bigint value from raw bytes
+/// Decode a scalar value through the single scalar decode body.
 pub(crate) fn parse_bigint_value(data: &[u8]) -> Result<Value> {
-    if data.len() == 8 {
-        let val = i64::from_be_bytes([
-            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-        ]);
-        Ok(Value::BigInt(val))
-    } else {
-        Err(Error::corruption("Invalid bigint value length"))
-    }
+    decode_scalar_comparator(data, &ComparatorType::BigInt)
 }
 
-/// Parse counter value from raw bytes
-///
-/// Counter values at this stage are already extracted i64 values (8 bytes big-endian).
-/// The CounterContext parsing happens earlier in V5CompressedLegacyParser.
+/// Decode a scalar value through the single scalar decode body.
 pub(crate) fn parse_counter_value(data: &[u8]) -> Result<Value> {
-    if data.len() == 8 {
-        let val = i64::from_be_bytes([
-            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-        ]);
-        Ok(Value::Counter(val))
-    } else {
-        Err(Error::corruption("Invalid counter value length"))
-    }
+    decode_scalar_comparator(data, &ComparatorType::Counter)
 }
 
-/// Parse text value from raw bytes
+/// Decode a scalar value through the single scalar decode body.
 pub(crate) fn parse_text_value(data: &[u8]) -> Result<Value> {
-    String::from_utf8(data.to_vec())
-        .map(Value::Text)
-        .map_err(|_| Error::corruption("Invalid UTF-8 in text value"))
+    decode_scalar_comparator(data, &ComparatorType::Text)
 }
 
-/// Parse blob value from raw bytes
+/// Decode a scalar value through the single scalar decode body.
 pub(crate) fn parse_blob_value(data: &[u8]) -> Result<Value> {
-    Ok(Value::Blob(data.to_vec()))
+    decode_scalar_comparator(data, &ComparatorType::Blob)
 }
 
-/// Parse UUID value from raw bytes
+/// Decode a scalar value through the single scalar decode body.
 pub(crate) fn parse_uuid_value(data: &[u8]) -> Result<Value> {
-    if data.len() == 16 {
-        let uuid_bytes: [u8; 16] = data
-            .try_into()
-            .map_err(|_| Error::corruption("Invalid UUID byte array"))?;
-        Ok(Value::Uuid(uuid_bytes))
-    } else {
-        Err(Error::corruption("Invalid UUID value length"))
-    }
+    decode_scalar_comparator(data, &ComparatorType::Uuid)
 }
 
-/// Parse DATE value from raw bytes
+/// Decode a scalar value through the single scalar decode body.
 pub(crate) fn parse_date_value(data: &[u8]) -> Result<Value> {
-    if data.len() == 4 {
-        // Cassandra DATE: 4-byte big-endian unsigned int with Integer.MIN_VALUE offset
-        // for byte-order comparability. Decode by adding i32::MIN back.
-        let stored = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-        let days_since_epoch = stored.wrapping_add(i32::MIN as u32) as i32;
-        Ok(Value::Date(days_since_epoch))
-    } else {
-        Err(Error::corruption("Invalid DATE value length"))
-    }
+    decode_scalar_comparator(data, &ComparatorType::Date)
 }
 
 /// Parse list value with recursive element parsing via closure
@@ -446,18 +399,11 @@ impl SSTableReader {
         // Convert data type string directly to ComparatorType for decoding
         let comparator = ComparatorType::from_data_type(data_type)?;
 
-        // Use comparator to decode the value properly
+        // Structural types keep this reader's recursion + modern-format guards;
+        // every scalar (incl. schema-derived Custom) routes through the ONE scalar
+        // decode body in `comparator_value_parsing` (issue #1636 / J2), so a scalar
+        // type fix lands in exactly one place.
         match &comparator {
-            ComparatorType::Boolean => parse_boolean_value(value_data),
-            ComparatorType::TinyInt => parse_tinyint_value(value_data),
-            ComparatorType::SmallInt => parse_smallint_value(value_data),
-            ComparatorType::Int => parse_int_value(value_data),
-            ComparatorType::BigInt => parse_bigint_value(value_data),
-            ComparatorType::Counter => parse_counter_value(value_data),
-            ComparatorType::Text => parse_text_value(value_data),
-            ComparatorType::Blob => parse_blob_value(value_data),
-            ComparatorType::Uuid => parse_uuid_value(value_data),
-            ComparatorType::Date => parse_date_value(value_data),
             ComparatorType::List(element_comparator) => {
                 self.parse_list_value(value_data, element_comparator)
             }
@@ -478,19 +424,7 @@ impl SSTableReader {
                 let inner_value = self.parse_value_with_comparator(value_data, inner_comparator)?;
                 Ok(Value::Frozen(Box::new(inner_value)))
             }
-            // Scalar types with no self-recursion: delegate to the authoritative
-            // standalone decoder (issue #1627 — these previously fell through to a
-            // wrong-typed Value::Blob).
-            ComparatorType::Float32
-            | ComparatorType::Float
-            | ComparatorType::Timestamp
-            | ComparatorType::Varint
-            | ComparatorType::Decimal
-            | ComparatorType::Duration
-            | ComparatorType::Json => decode_scalar_comparator(value_data, &comparator),
-            // `time`/`inet` arrive as schema-derived Custom(name); genuinely-unknown
-            // custom types remain the only legitimate blob fallback.
-            ComparatorType::Custom(name) => decode_custom_scalar(name, value_data),
+            _ => decode_scalar_comparator(value_data, &comparator),
         }
     }
 
@@ -504,16 +438,6 @@ impl SSTableReader {
         comparator: &ComparatorType,
     ) -> Result<Value> {
         match comparator {
-            ComparatorType::Boolean => parse_boolean_value(value_data),
-            ComparatorType::TinyInt => parse_tinyint_value(value_data),
-            ComparatorType::SmallInt => parse_smallint_value(value_data),
-            ComparatorType::Int => parse_int_value(value_data),
-            ComparatorType::BigInt => parse_bigint_value(value_data),
-            ComparatorType::Counter => parse_counter_value(value_data),
-            ComparatorType::Text => parse_text_value(value_data),
-            ComparatorType::Blob => parse_blob_value(value_data),
-            ComparatorType::Uuid => parse_uuid_value(value_data),
-            ComparatorType::Date => parse_date_value(value_data),
             ComparatorType::List(element_comparator) => {
                 self.parse_list_value(value_data, element_comparator)
             }
@@ -599,18 +523,9 @@ impl SSTableReader {
                 let inner_value = self.parse_value_with_comparator(value_data, inner_comparator)?;
                 Ok(Value::Frozen(Box::new(inner_value)))
             }
-            // Scalar collection elements: delegate to the authoritative standalone
-            // decoder rather than blob-decoding them (issue #1627, same defect
-            // class as parse_value_with_schema_type).
-            ComparatorType::Float32
-            | ComparatorType::Float
-            | ComparatorType::Timestamp
-            | ComparatorType::Varint
-            | ComparatorType::Decimal
-            | ComparatorType::Duration
-            | ComparatorType::Json => decode_scalar_comparator(value_data, comparator),
-            // `time`/`inet` as schema-derived Custom(name); unknown custom → blob.
-            ComparatorType::Custom(name) => decode_custom_scalar(name, value_data),
+            // Every scalar (incl. schema-derived Custom) routes through the ONE
+            // scalar decode body in `comparator_value_parsing` (issue #1636 / J2).
+            _ => decode_scalar_comparator(value_data, comparator),
         }
     }
 
