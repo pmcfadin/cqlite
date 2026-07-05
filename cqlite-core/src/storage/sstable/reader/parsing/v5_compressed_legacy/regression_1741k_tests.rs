@@ -262,6 +262,12 @@ async fn da_reader() -> (
 /// A full DELETED-partition buffer that parses cleanly: the deleted header
 /// followed by an END_OF_PARTITION marker (0x01) so the row loop terminates with
 /// zero rows.
+///
+/// Gated `write-support` (issue #1981) to match its only callers — the two
+/// `#[cfg(feature = "write-support")]` sliding-parser tests below (and the
+/// sibling `tiny_schema`/`da_reader` helpers) — so it is not dead-code under the
+/// minimal feature set's `-D warnings` build.
+#[cfg(feature = "write-support")]
 fn deleted_partition_full_buffer() -> Vec<u8> {
     let mut buf = deleted_oa_partition_header();
     buf.push(0x01); // END_OF_PARTITION

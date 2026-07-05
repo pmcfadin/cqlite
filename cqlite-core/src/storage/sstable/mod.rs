@@ -1803,7 +1803,7 @@ impl SSTableManager {
     /// The next `scan` on this manager pauses at its per-reader I/O, signalling
     /// [`Gate::reached`](scan_gate::Gate) and blocking on
     /// [`Gate::release`](scan_gate::Gate) until the test lets it continue.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "write-support", feature = "state_machine"))] // gated to sole caller issue_1591_scan_lock_test; not dead-code under minimal (#1981)
     fn arm_scan_gate(&self) -> Arc<scan_gate::Gate> {
         let gate = Arc::new(scan_gate::Gate::default());
         if let Ok(mut slot) = self.scan_gate.lock() {
