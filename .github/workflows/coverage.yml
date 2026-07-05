@@ -61,17 +61,17 @@ jobs:
         
     # Install PREBUILT pinned binaries instead of `cargo install` from source
     # (issue #1990). Source-building cargo-tarpaulin v0.37.0 fails on newer
-    # rustc; a prebuilt binary can't be broken by a toolchain/edition drift and
-    # runs against the pinned 1.88.0 toolchain.
+    # rustc; a prebuilt pinned binary avoids toolchain/edition drift breaking
+    # the install and runs against the pinned 1.88.0 toolchain.
     - name: Install tarpaulin (prebuilt, pinned)
       uses: taiki-e/install-action@v2
       with:
         tool: cargo-tarpaulin@0.37.0
 
-    - name: Install llvm-cov (validation, prebuilt)
+    - name: Install llvm-cov (validation, prebuilt, pinned)
       uses: taiki-e/install-action@v2
       with:
-        tool: cargo-llvm-cov
+        tool: cargo-llvm-cov@0.8.7
       
     - name: Restore datasets-v3 cache (same as ci.yml)
       uses: actions/cache/restore@v5

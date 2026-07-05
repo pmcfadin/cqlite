@@ -64,10 +64,28 @@ Release/publish lanes build shipping artifacts and intentionally use `stable` (s
 rust-toolchain.toml`); they are **not** product-validation lanes. If we later want release
 artifacts pinned too, that is a separate change.
 
-## Bumping the pin
+## Bumping the pin — lockstep checklist
 
-1. Update `channel` in `rust-toolchain.toml`.
-2. Update every explicit `dtolnay/rust-toolchain@<old>` ref (grep
-   `dtolnay/rust-toolchain@` under `.github/workflows/`) and the `coverage`/`coverage-baseline`
-   references. Lanes that omit `toolchain:` follow the pin file automatically.
-3. Watch `future-rust-canary` beforehand — it is the early-warning lane for the next stable.
+Several places hardcode the pinned version as a **literal** and MUST be bumped in lockstep
+with `rust-toolchain.toml`, or CI silently drifts from the pin again. Exact files to touch
+on the next pin bump:
+
+1. `rust-toolchain.toml` — update `channel` (the source of truth).
+2. `.github/actions/setup-rust-ci/action.yml` — the composite action hardcodes `1.88.0` as
+   its `toolchain` input **default**, which its `rustup toolchain install` + `rustup
+   default` step consumes. Every workflow that calls it without a `toolchain:` input
+   (e.g. `sstabledump-parity-gate.yml`, `pr-gate.yml`) inherits this default — bump it.
+3. Every literal `dtolnay/rust-toolchain@<old>` ref — grep
+   `dtolnay/rust-toolchain@` under `.github/workflows/` and bump each `@1.88.0`
+   (these action refs cannot read the pin file; see policy rule 1).
+4. `nightly-docker-parity.yml` — passes an explicit `toolchain: 1.88.0` to `setup-rust-ci`.
+5. Re-check the prebuilt coverage-tool pins (`cargo-tarpaulin@<ver>`,
+   `cargo-llvm-cov@<ver>` in `coverage.yml` / `coverage-baseline.yml`) still run on the
+   new toolchain.
+
+Lanes that **omit** `toolchain:` (`actions-rust-lang/setup-rust-toolchain@v1` callers)
+follow the pin file automatically — no action needed for those.
+
+Watch `future-rust-canary` beforehand — it is the early-warning lane for the next stable.
+(No CI check enforces this lockstep today; this checklist is the doc-only guard, per the
+lead's scope call on #1990.)
