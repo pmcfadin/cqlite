@@ -98,10 +98,11 @@ fn no_stdio_writes_in_query_execution_path() {
 /// `sig` (e.g. `"fn execute(&self, sql: &str)"`). Returns the substring from the
 /// opening `{` through its matching `}`. Format strings in library code keep
 /// their `{`/`}` balanced, so the simple depth counter is sufficient here.
+/// Generic over the source string, so it serves any module (not just src/lib.rs).
 fn fn_body(src: &str, sig: &str) -> String {
     let start = src
         .find(sig)
-        .unwrap_or_else(|| panic!("signature not found in src/lib.rs: {sig}"));
+        .unwrap_or_else(|| panic!("signature not found: {sig}"));
     let rest = &src[start..];
     let bytes = rest.as_bytes();
     let open = rest.find('{').expect("function has no opening brace");
@@ -215,6 +216,62 @@ fn lib_execute_does_not_log_raw_sql() {
         leaks.is_empty(),
         "Database::execute must not log the raw `sql` text (data-safety #1694); \
          found value-bearing diagnostic(s): {leaks:#?}"
+    );
+}
+
+/// True if `arg` (a diagnostic macro's full argument text) formats a predicate
+/// VALUE rather than its SHAPE. Two value-bearing patterns are rejected. First, a
+/// debug format spec (`{:?}`, `{:#?}`, `{predicates:?}`) whose text also names the
+/// `predicate`/`filter` — i.e. `Debug`-dumping the predicate list, which prints
+/// the underlying `Value` literals (the exact #1694 leak `predicates={:?}`).
+/// Second, a field access of `SSTablePredicate.values` (`p.values`, `.values,`) —
+/// the `Vec<Value>` literal store — as opposed to a `.values()` iterator method
+/// (allowed: shapes can be iterated). Shape-only references (`predicates.len()`,
+/// `p.column`, column names, counts) are NOT flagged.
+fn references_predicate_value(arg: &str) -> bool {
+    // Debug-format of the predicate/filter (`?}` closes {:?} / {:#?} / {x:?}).
+    let has_debug_fmt = arg.contains("?}");
+    let names_predicate = arg.contains("predicate") || arg.contains("filter");
+    if has_debug_fmt && names_predicate {
+        return true;
+    }
+    // `.values` field access (not the `.values()` iterator method).
+    let bytes = arg.as_bytes();
+    let mut i = 0;
+    while let Some(rel) = arg[i..].find(".values") {
+        let pos = i + rel;
+        let after = pos + ".values".len();
+        if bytes.get(after).copied() != Some(b'(') {
+            return true;
+        }
+        i = after;
+    }
+    false
+}
+
+/// Issue #1694: `execute_sstable_scan` (query/select_executor/execute.rs) must
+/// log the scan SHAPE only (predicate count, constrained column names) and NEVER
+/// predicate VALUES. Pre-fix it logged `Executing SSTableScan … predicates={:?}`
+/// at INFO (CLI default), dumping the WHERE-clause literals. The runtime sentinel
+/// guard (`where_clause_literal_is_never_logged`) exercises this path but is
+/// feature+Data.db-gated and can skip; this ALWAYS-ON source guard rejects a
+/// regression to a value-bearing scan diagnostic unconditionally.
+#[test]
+fn execute_sstable_scan_does_not_log_predicate_values() {
+    let path = format!(
+        "{}/src/query/select_executor/execute.rs",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let body = fn_body(&src, "fn execute_sstable_scan(");
+    let leaks: Vec<String> = diagnostic_macro_args(&body)
+        .into_iter()
+        .filter(|arg| references_predicate_value(arg))
+        .collect();
+    assert!(
+        leaks.is_empty(),
+        "execute_sstable_scan must log predicate SHAPE only (counts, column names), never \
+         predicate VALUES (data-safety #1694); found value-bearing diagnostic(s): {leaks:#?}"
     );
 }
 
@@ -388,7 +445,11 @@ mod integration {
         // row matches — only that the sentinel literal is never logged.
         let query =
             format!("SELECT id, name FROM test_basic.simple_table WHERE name = '{SENTINEL}'");
-        let _ = db.execute(&query).await;
+        // The query MUST run to completion — a failed execute would make the
+        // no-leak assertion vacuous (nothing was scanned/logged).
+        db.execute(&query)
+            .await
+            .expect("WHERE-clause scan query should execute successfully");
 
         let logs = captured_logs();
         let leaked: Vec<&String> = logs.iter().filter(|l| l.contains(SENTINEL)).collect();
@@ -397,11 +458,14 @@ mod integration {
             "WHERE-clause literal / SQL text leaked into diagnostic logs (data-safety #1694): \
              {leaked:#?}"
         );
-        // Sanity: the query actually produced diagnostic output, so a pass here
-        // is meaningful rather than vacuous.
+        // Non-vacuous: prove the SSTableScan diagnostic path actually ran and was
+        // logged. This is the exact site that pre-fix leaked `predicates={:?}`, so
+        // if the scan log stops being emitted the test fails (rather than passing
+        // trivially because nothing was logged).
         assert!(
-            !logs.is_empty(),
-            "expected some diagnostic logs from the scan (test would be vacuous otherwise)"
+            logs.iter().any(|l| l.contains("Executing SSTableScan")),
+            "expected an `Executing SSTableScan` diagnostic proving the scan path ran \
+             (test would be vacuous otherwise); captured: {logs:#?}"
         );
     }
 }
