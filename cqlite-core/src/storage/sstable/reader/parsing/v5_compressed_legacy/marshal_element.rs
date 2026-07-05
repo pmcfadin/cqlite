@@ -20,12 +20,15 @@
 use super::*;
 
 /// Marshal element type(s) extracted from a frozen collection's marshal type.
+///
+/// Borrows directly from the input `header_type` str (no owned `String`s) so the
+/// per-cell frozen-decode path stays allocation-free (<128MB budget).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum MarshalCollectionElements {
+pub(super) enum MarshalCollectionElements<'a> {
     /// `ListType(X)` / `SetType(X)` element marshal type `X`.
-    Sequence(String),
+    Sequence(&'a str),
     /// `MapType(K, V)` key and value marshal types.
-    Map(String, String),
+    Map(&'a str, &'a str),
 }
 
 const FROZEN_LOWER: &str = "org.apache.cassandra.db.marshal.frozentype(";
@@ -98,11 +101,11 @@ impl V5CompressedLegacyParser {
     /// panics — for any non-collection or malformed marshal string, so the caller
     /// falls back to the CQL short form.
     ///
-    /// Parse this ONCE per column (not per element): the per-element hot loop must
-    /// not gain allocations (<128MB budget).
+    /// Parse this ONCE per frozen cell (not per element): the result borrows from
+    /// `header_type`, so the per-element hot loop gains no allocations (<128MB budget).
     pub(super) fn extract_marshal_collection_elements(
         header_type: &str,
-    ) -> Option<MarshalCollectionElements> {
+    ) -> Option<MarshalCollectionElements<'_>> {
         let s = header_type.trim();
         // Strip at most one outer FrozenType(...) wrapper (a frozen collection
         // column's header is `FrozenType(ListType(...))` etc.); tolerate a bare
@@ -112,14 +115,11 @@ impl V5CompressedLegacyParser {
         if let Some(elem) =
             balanced_inner(inner, LIST_LOWER).or_else(|| balanced_inner(inner, SET_LOWER))
         {
-            return Some(MarshalCollectionElements::Sequence(elem.trim().to_string()));
+            return Some(MarshalCollectionElements::Sequence(elem.trim()));
         }
         if let Some(kv) = balanced_inner(inner, MAP_LOWER) {
             let (k, v) = split_top_level_comma(kv)?;
-            return Some(MarshalCollectionElements::Map(
-                k.trim().to_string(),
-                v.trim().to_string(),
-            ));
+            return Some(MarshalCollectionElements::Map(k.trim(), v.trim()));
         }
         None
     }
@@ -153,7 +153,7 @@ mod tests {
         assert_eq!(
             P::extract_marshal_collection_elements(ht),
             Some(MarshalCollectionElements::Sequence(
-                "org.apache.cassandra.db.marshal.Int32Type".to_string()
+                "org.apache.cassandra.db.marshal.Int32Type"
             ))
         );
     }
@@ -164,7 +164,7 @@ mod tests {
         assert_eq!(
             P::extract_marshal_collection_elements(ht),
             Some(MarshalCollectionElements::Sequence(
-                "org.apache.cassandra.db.marshal.UTF8Type".to_string()
+                "org.apache.cassandra.db.marshal.UTF8Type"
             ))
         );
     }
@@ -177,7 +177,7 @@ mod tests {
         assert_eq!(
             P::extract_marshal_collection_elements(ht),
             Some(MarshalCollectionElements::Sequence(
-                "org.apache.cassandra.db.marshal.Int32Type".to_string()
+                "org.apache.cassandra.db.marshal.Int32Type"
             ))
         );
     }
@@ -191,7 +191,7 @@ mod tests {
             MarshalCollectionElements::Map(k, v) => {
                 assert_eq!(k, "org.apache.cassandra.db.marshal.UTF8Type");
                 assert!(
-                    P::is_udt_type(&v),
+                    P::is_udt_type(v),
                     "map value marshal must carry UserType: {v}"
                 );
                 // The comma INSIDE the value's UserType(...) must NOT split the pair.
@@ -208,7 +208,7 @@ mod tests {
         let got = P::extract_marshal_collection_elements(ht).expect("list elements");
         match got {
             MarshalCollectionElements::Sequence(elem) => {
-                assert!(P::is_udt_type(&elem), "element marshal must carry UserType");
+                assert!(P::is_udt_type(elem), "element marshal must carry UserType");
                 assert!(elem.starts_with("org.apache.cassandra.db.marshal.FrozenType("));
             }
             other => panic!("expected Sequence, got {other:?}"),
@@ -221,7 +221,7 @@ mod tests {
         assert_eq!(
             P::extract_marshal_collection_elements(ht),
             Some(MarshalCollectionElements::Sequence(
-                "org.apache.cassandra.db.marshal.TupleType(org.apache.cassandra.db.marshal.Int32Type,org.apache.cassandra.db.marshal.UTF8Type)".to_string()
+                "org.apache.cassandra.db.marshal.TupleType(org.apache.cassandra.db.marshal.Int32Type,org.apache.cassandra.db.marshal.UTF8Type)"
             ))
         );
     }

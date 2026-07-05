@@ -856,37 +856,36 @@ impl V5CompressedLegacyParser {
                 );
 
                 // Issue #1340: extract the AUTHORITATIVE marshal element type(s)
-                // ONCE per column from the on-disk SerializationHeader marshal type
-                // (`header_type`). When an element is a `frozen<UDT>`, threading the
-                // marshal type lets it decode to a typed `Value::Frozen(Value::Udt)`
-                // registry-free (precedence: header marshal → registry → Blob, no
-                // byte-pattern inference — no-heuristics #28). Parsed here, not in
-                // the per-element loop, to keep the hot path allocation-free.
+                // from the on-disk SerializationHeader marshal type (`header_type`).
+                // When an element is a `frozen<UDT>`, threading the marshal type lets
+                // it decode to a typed `Value::Frozen(Value::Udt)` registry-free
+                // (precedence: header marshal → registry → Blob, no byte-pattern
+                // inference — no-heuristics #28). Extracted once per frozen cell
+                // (before the element loop); the result borrows from `header_type`,
+                // so the per-element loop is allocation-free.
                 let marshal_elems = header_type.and_then(Self::extract_marshal_collection_elements);
+                // Shared for list & set (both are `Sequence`): the borrowed element
+                // marshal type, or `None` for a map / absent / mismatched marshal.
+                let sequence_marshal_elem = match &marshal_elems {
+                    Some(MarshalCollectionElements::Sequence(m)) => Some(*m),
+                    _ => None,
+                };
 
                 // Route to appropriate frozen collection parser
                 let (inner_value, new_offset) = if inner_type.starts_with("list<") {
                     let schema_elem = self.extract_collection_element_type(&inner_type, "list")?;
-                    let marshal_elem = match &marshal_elems {
-                        Some(MarshalCollectionElements::Sequence(m)) => Some(m.as_str()),
-                        _ => None,
-                    };
-                    let element_type = Self::prefer_udt_marshal_element(marshal_elem, &schema_elem);
+                    let element_type =
+                        Self::prefer_udt_marshal_element(sequence_marshal_elem, &schema_elem);
                     self.parse_frozen_list_value(data, offset, element_type, column, _reader)?
                 } else if inner_type.starts_with("set<") {
                     let schema_elem = self.extract_collection_element_type(&inner_type, "set")?;
-                    let marshal_elem = match &marshal_elems {
-                        Some(MarshalCollectionElements::Sequence(m)) => Some(m.as_str()),
-                        _ => None,
-                    };
-                    let element_type = Self::prefer_udt_marshal_element(marshal_elem, &schema_elem);
+                    let element_type =
+                        Self::prefer_udt_marshal_element(sequence_marshal_elem, &schema_elem);
                     self.parse_frozen_set_value(data, offset, element_type, column, _reader)?
                 } else if inner_type.starts_with("map<") {
                     let (schema_key, schema_val) = self.extract_map_types(&inner_type)?;
                     let (marshal_key, marshal_val) = match &marshal_elems {
-                        Some(MarshalCollectionElements::Map(k, v)) => {
-                            (Some(k.as_str()), Some(v.as_str()))
-                        }
+                        Some(MarshalCollectionElements::Map(k, v)) => (Some(*k), Some(*v)),
                         _ => (None, None),
                     };
                     let key_type = Self::prefer_udt_marshal_element(marshal_key, &schema_key);
