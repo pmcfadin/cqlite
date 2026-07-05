@@ -654,10 +654,27 @@ impl V5CompressedLegacyParser {
                     );
                 }
 
+                // months/days are i32 in Cassandra's DurationType. Reject
+                // (rather than silently truncate via `as i32`) any encoded value
+                // outside the i32 range so a corrupt encoding errors instead of
+                // wrapping (issue #1632, item b).
+                let months = i32::try_from(months).map_err(|_| {
+                    Error::corruption(format!(
+                        "Cell '{}': duration months out of i32 range",
+                        column.name
+                    ))
+                })?;
+                let days = i32::try_from(days).map_err(|_| {
+                    Error::corruption(format!(
+                        "Cell '{}': duration days out of i32 range",
+                        column.name
+                    ))
+                })?;
+
                 offset += duration_len;
                 Value::Duration {
-                    months: months as i32,
-                    days: days as i32,
+                    months,
+                    days,
                     nanos,
                 }
             }

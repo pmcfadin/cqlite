@@ -897,3 +897,63 @@ mod write_read {
         }
     }
 }
+
+// ===========================================================================
+// Issue #1632 (item b) — per-cell v5 duration i32 overflow hardening
+// ===========================================================================
+
+/// Frame a v5 per-cell `duration` body from three signed VInt components:
+/// `[flags 0x08][VUInt body_len][months][days][nanos]`.
+#[cfg(test)]
+fn frame_v5_duration_cell(months: i64, days: i64, nanos: i64) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(&encode_vint(months));
+    body.extend_from_slice(&encode_vint(days));
+    body.extend_from_slice(&encode_vint(nanos));
+    frame_v5_cell(V5Framing::VintLen, &body)
+}
+
+/// Sanity: an in-range per-cell duration still decodes through the v5 ladder
+/// (`parse_cell_value_schema_order`) — the guard rejects nothing valid.
+#[tokio::test]
+async fn v5_cell_duration_in_range_ok() {
+    let Some(reader) = open_reader().await else {
+        return;
+    };
+    let parser = v5_parser();
+    let cell = frame_v5_duration_cell(1, 2, 3);
+    let v = decode_v5(&parser, &reader, "duration", &cell)
+        .expect("in-range duration should decode through the v5 cell path");
+    assert_eq!(
+        v,
+        Value::Duration {
+            months: 1,
+            days: 2,
+            nanos: 3
+        }
+    );
+}
+
+/// Issue #1632 (item b): the per-cell `duration` arm (`cell_value.rs`) must
+/// REJECT a months/days VInt outside the i32 range instead of silently wrapping
+/// via `as i32`. Pre-fix, `months as i32` wraps `i32::MAX + 1` to a negative
+/// value and returns Ok; the guard turns it into an error.
+#[tokio::test]
+async fn v5_cell_duration_out_of_i32_range_errors() {
+    let Some(reader) = open_reader().await else {
+        return;
+    };
+    let parser = v5_parser();
+
+    let over = frame_v5_duration_cell(i32::MAX as i64 + 1, 0, 0);
+    assert!(
+        decode_v5(&parser, &reader, "duration", &over).is_err(),
+        "months > i32::MAX must error, not wrap via `as i32`"
+    );
+
+    let under = frame_v5_duration_cell(0, i32::MIN as i64 - 1, 0);
+    assert!(
+        decode_v5(&parser, &reader, "duration", &under).is_err(),
+        "days < i32::MIN must error, not wrap via `as i32`"
+    );
+}
