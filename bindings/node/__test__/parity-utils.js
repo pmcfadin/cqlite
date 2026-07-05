@@ -125,11 +125,58 @@ function findOaJsonlFile(keyspace, table) {
 // =============================================================================
 
 /**
- * Count total non-tombstone rows in a JSONL file.
+ * Parse a golden `liveness_info.expires_at` / cell `expires_at` ISO-8601 stamp
+ * (e.g. "2025-10-07T01:12:06Z") to a millisecond epoch. Mirrors Python's
+ * `_parse_golden_expires_at` (bindings/python/tests/test_parity.py). Returns
+ * `null` when the value is missing or unparseable, so callers can treat "no
+ * per-cell expiry" and "unparseable" identically to the Python helper.
+ *
+ * @param {*} expiresAt - ISO-8601 timestamp string (or anything else)
+ * @returns {number|null} - Epoch milliseconds, or null if missing/unparseable
+ */
+function parseGoldenExpiresAt(expiresAt) {
+  if (typeof expiresAt !== 'string') return null;
+  const ms = new Date(expiresAt).getTime();
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/**
+ * Count golden rows that are LIVE under Cassandra `SELECT` semantics NOW.
  * Results are cached for performance.
  *
+ * This MUST stay in lockstep with the reader and the Python parity harness.
+ * Issue #1741 / #1742: the read path applies partition/range-tombstone shadowing
+ * and WALL-CLOCK TTL expiry (matching a Cassandra `SELECT`), so a TTL-expired row
+ * is correctly HIDDEN from query results. The physical sstabledump golden does
+ * NOT apply wall-clock TTL — it lists every on-disk row — so a raw physical count
+ * over-counts once TTLs elapse. This function derives the expected LIVE count from
+ * the same authoritative metadata the reader uses.
+ *
+ * Ported faithfully from Python `count_live_rows_in_jsonl`
+ * (bindings/python/tests/test_parity.py); keep the two harnesses in lockstep on
+ * any future reader-semantics change. Exclusions applied, in order:
+ *   1. range-tombstone markers (`type != "row"`);
+ *   2. row tombstones (`deletion_info` with no surviving cells);
+ *   3. a row whose row-level `liveness_info` carries a `ttl` whose `expires_at`
+ *      is at/before now, UNLESS a non-deleted cell keeps it alive — mirroring the
+ *      reader's has_live_forever_data_cell aggregate (row_data.rs). A cell keeps
+ *      the row visible when it is either:
+ *        - explicitly still-live: it carries its own `expires_at` in the future; or
+ *        - live-forever: it carries NO `expires_at` AND an own `tstamp` (written by
+ *          a separate non-TTL mutation). A cell with neither shares the row
+ *          liveness (USE_ROW_TTL) and expires with it. A collection `path` alone is
+ *          NOT a live-forever signal (the golden cannot distinguish an inherited
+ *          `default_time_to_live` element from a live-forever one, so keying off it
+ *          would diverge from the reader — see the Python docstring for app_metrics).
+ *
+ * For a table with NO TTL metadata this is identical to the plain tombstone-only
+ * count (nothing extra excluded), so non-TTL tables keep asserting exact physical
+ * parity. `now` is captured once per call via the wall clock (same basis as the
+ * reader's `new Date()`); the fixtures' expiries are far from the present, so no
+ * one-second-boundary race is possible.
+ *
  * @param {string} jsonlPath - Path to JSONL file
- * @returns {number} - Total row count (excluding tombstones)
+ * @returns {number} - Wall-clock-live row count
  */
 function countRowsInJsonl(jsonlPath) {
   if (rowCountCache.has(jsonlPath)) {
@@ -138,6 +185,7 @@ function countRowsInJsonl(jsonlPath) {
 
   const content = fs.readFileSync(jsonlPath, 'utf8');
   const lines = content.split('\n');
+  const now = Date.now(); // wall clock, same basis as the reader (new Date())
   let totalRows = 0;
 
   for (let lineNum = 0; lineNum < lines.length; lineNum++) {
@@ -149,12 +197,45 @@ function countRowsInJsonl(jsonlPath) {
       const rows = partition.rows || [];
 
       for (const row of rows) {
-        // Count live rows only — exclude range_tombstone_bound entries and
-        // row-level tombstones (rows with deletion_info but no cells).
-        // CQLite suppresses deleted rows from query results, so expected count
-        // must match what the engine returns (VG6, Issue #672).
+        // Exclude range_tombstone_bound entries and row-level tombstones (rows
+        // with deletion_info but no cells). CQLite suppresses deleted rows from
+        // query results (VG6, Issue #672).
         if (row.type !== 'row') continue;
-        if (row.deletion_info && (!row.cells || row.cells.length === 0)) continue;
+        const cells = row.cells || [];
+        if (row.deletion_info && cells.length === 0) continue;
+
+        // TTL-aware liveness (Issue #1741, ported from Python
+        // count_live_rows_in_jsonl). A row whose row-liveness TTL has elapsed
+        // survives only if some non-deleted cell keeps it alive.
+        const liveness = row.liveness_info || {};
+        const rowExpiresAt = parseGoldenExpiresAt(liveness.expires_at);
+        if (liveness.ttl && rowExpiresAt !== null && rowExpiresAt <= now) {
+          let cellStillLive = false;
+          for (const cell of cells) {
+            // A cell/collection tombstone is not live data.
+            if (cell.deletion_info) continue;
+            const cellExp = parseGoldenExpiresAt(cell.expires_at);
+            if (cellExp !== null) {
+              // Explicit per-cell TTL: live iff still in the future.
+              if (cellExp > now) {
+                cellStillLive = true;
+                break;
+              }
+              continue;
+            }
+            // No per-cell expiry -> live-forever ONLY if written by a separate
+            // non-TTL mutation, which the golden marks with an own `tstamp`
+            // distinct from the row liveness. A cell with neither `expires_at`
+            // nor own `tstamp` inherits the elapsed row TTL (USE_ROW_TTL) and
+            // does NOT keep the row alive.
+            if (cell.tstamp != null) {
+              cellStillLive = true;
+              break;
+            }
+          }
+          if (!cellStillLive) continue; // Every cell shadowed/expired: SELECT hides the row.
+        }
+
         totalRows++;
       }
     } catch (error) {
