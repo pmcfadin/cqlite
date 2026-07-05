@@ -4,6 +4,18 @@ on:
   push:
     tags:
       - 'v*'
+  # Manual re-publish path (issue #2026). Re-running a tag-triggered run uses the
+  # workflow YAML as of that tag (the broken one), and we must NOT rewrite a
+  # published tag. workflow_dispatch runs THIS file from the selected branch
+  # (e.g. main after the fix lands) and publishes the version in
+  # bindings/node/package.json without touching the git tag. Pick the release
+  # branch in the "Run workflow" UI; publish_version must match package.json.
+  workflow_dispatch:
+    inputs:
+      publish_version:
+        description: 'npm version to publish; MUST equal bindings/node/package.json (e.g. 0.13.0). Republishes from the selected branch WITHOUT rewriting the git tag.'
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -95,6 +107,13 @@ jobs:
       # aarch64-linux CROSS build, which cannot be executed on the x86_64 host.
       - name: Verify release artifact can write (write-smoke)
         if: matrix.target != 'aarch64-unknown-linux-gnu'
+        # Windows (x86_64-pc-windows-msvc) is a best-effort, waived platform for
+        # this release (issues #2007, #2026). Its own file-handle/rmdir cleanup
+        # race must never block the npm publish, so the step is non-fatal ONLY on
+        # Windows. linux/macOS stay strict and still catch a write-support-stripped
+        # build — the `--features write-support` flag is set in package.json, so a
+        # strip fails the smoke on every platform, not just Windows.
+        continue-on-error: ${{ runner.os == 'Windows' }}
         working-directory: bindings/node
         shell: bash
         run: npx jest __test__/write-smoke.test.js --runInBand
@@ -131,6 +150,35 @@ jobs:
         run: |
           node --version
           npm --version
+
+      # Resolve the version to publish from either the pushed tag or the
+      # workflow_dispatch input, fail-closed on anything that is not strict
+      # semver. Inputs/context are passed via env (never inlined into the shell).
+      - name: Determine publish version
+        id: ver
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.publish_version }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="$INPUT_VERSION"
+          else
+            VERSION="${REF_NAME#v}"
+          fi
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Refusing to publish: resolved version '$VERSION' is not valid semver"
+            exit 1
+          fi
+          if printf '%s' "$VERSION" | grep -q -- '-'; then
+            PRERELEASE=true
+          else
+            PRERELEASE=false
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "Resolved publish version: $VERSION (prerelease=$PRERELEASE)"
 
       - name: Download all artifacts
         uses: actions/download-artifact@v7
@@ -184,17 +232,17 @@ jobs:
 
       - name: Validate version consistency
         working-directory: bindings/node
+        env:
+          EXPECTED_VERSION: ${{ steps.ver.outputs.version }}
         run: |
-          TAG_VERSION="${{ github.ref_name }}"
-          TAG_VERSION="${TAG_VERSION#v}"
-
+          set -euo pipefail
           PKG_VERSION=$(node -p "require('./package.json').version")
 
-          echo "Tag version: $TAG_VERSION"
+          echo "Expected version: $EXPECTED_VERSION"
           echo "package.json version: $PKG_VERSION"
 
-          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
-            echo "::error::Version mismatch! Tag is $TAG_VERSION but package.json has $PKG_VERSION"
+          if [ "$EXPECTED_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Version mismatch! Expected $EXPECTED_VERSION but package.json has $PKG_VERSION"
             exit 1
           fi
 
@@ -209,7 +257,7 @@ jobs:
       # Trusted Publishing: OIDC authentication, no token needed
       # Provenance attestations are automatic with trusted publishing
       - name: Publish to npm (stable)
-        if: ${{ !contains(github.ref_name, '-') }}
+        if: steps.ver.outputs.prerelease == 'false'
         working-directory: bindings/node
         env:
           NODE_AUTH_TOKEN: ""
@@ -217,7 +265,7 @@ jobs:
         run: npm publish --access public --provenance
 
       - name: Publish to npm (pre-release)
-        if: contains(github.ref_name, '-')
+        if: steps.ver.outputs.prerelease == 'true'
         working-directory: bindings/node
         env:
           NODE_AUTH_TOKEN: ""
@@ -225,19 +273,22 @@ jobs:
         run: npm publish --access public --tag next --provenance
 
       - name: Summary
+        env:
+          PKG_VERSION: ${{ steps.ver.outputs.version }}
+          PRERELEASE: ${{ steps.ver.outputs.prerelease }}
+          TRIGGER: ${{ github.event_name }}
         run: |
-          TAG="${{ github.ref_name }}"
-          PKG_VERSION="${TAG#v}"
+          set -euo pipefail
+          echo "## npm Publish Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Version**: $PKG_VERSION" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Trigger**: $TRIGGER" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Package**: [@cqlite/node](https://www.npmjs.com/package/@cqlite/node/v/$PKG_VERSION)" >> "$GITHUB_STEP_SUMMARY"
 
-          echo "## npm Publish Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Tag**: $TAG" >> $GITHUB_STEP_SUMMARY
-          echo "**Package**: [@cqlite/node](https://www.npmjs.com/package/@cqlite/node/v/$PKG_VERSION)" >> $GITHUB_STEP_SUMMARY
-
-          if [[ "$TAG" == *"-"* ]]; then
-            echo "**Dist Tag**: \`next\` (pre-release)" >> $GITHUB_STEP_SUMMARY
+          if [ "$PRERELEASE" = "true" ]; then
+            echo "**Dist Tag**: \`next\` (pre-release)" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "**Dist Tag**: \`latest\` (stable)" >> $GITHUB_STEP_SUMMARY
+            echo "**Dist Tag**: \`latest\` (stable)" >> "$GITHUB_STEP_SUMMARY"
           fi
 
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -261,6 +312,34 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      # Same fail-closed version resolution as publish-npm, so the release can be
+      # (re)created on workflow_dispatch (branch ref has no tag) against the
+      # existing v<version> tag WITHOUT rewriting the git tag.
+      - name: Determine release version
+        id: ver
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.publish_version }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="$INPUT_VERSION"
+          else
+            VERSION="${REF_NAME#v}"
+          fi
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Refusing to release: resolved version '$VERSION' is not valid semver"
+            exit 1
+          fi
+          if printf '%s' "$VERSION" | grep -q -- '-'; then
+            PRERELEASE=true
+          else
+            PRERELEASE=false
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+
       - name: Download all artifacts
         uses: actions/download-artifact@v7
         with:
@@ -279,8 +358,9 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: v${{ steps.ver.outputs.version }}
           files: dist/*
           generate_release_notes: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ steps.ver.outputs.prerelease }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
