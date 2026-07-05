@@ -384,10 +384,49 @@ impl SSTableReader {
         }
 
         let blocks = select_row_index_blocks_for_range(&entries, &start_bytes, &end_bytes);
+
+        // IMPLICIT FIRST BLOCK (issue #1968). A `Rows.db` row-index trie stores a
+        // separator per block EXCEPT the first: the block covering keys BELOW the
+        // first separator lives at the partition body start and has NO trie entry
+        // (mirroring Cassandra `RowIndexReader.separatorFloor`, which returns the
+        // partition start for a key below the first separator). Consequently
+        // `select_row_index_blocks_for_range` — which operates purely over the
+        // stored (separator, block) entries — can NEVER return that implicit block.
+        //
+        // The requested range overlaps the implicit first block iff its
+        // physical-lower bound sorts strictly BELOW the first separator
+        // (`start_bytes < entries[0].sep`). The canonical trigger is an OPEN lower
+        // bound (`ck < N` / `ck <= N`), whose physical-lower sentinel is `-∞` = the
+        // empty slice `b""`, but a closed lower bound below the first separator
+        // (`ck >= 2 AND ck < 20`, `ck = 0`) hits it too. When the range includes
+        // that block the earliest clustering rows precede every stored block, so the
+        // decode MUST begin at the partition body start (rel 0) or those rows are
+        // silently dropped (the pre-fix bug returned `ck=8..19` for `ck < 20`).
+        let includes_implicit_first_block = entries
+            .first()
+            .map(|(sep, _)| start_bytes.as_slice() < sep.as_slice())
+            .unwrap_or(false);
+
         if blocks.is_empty() {
-            // No block overlaps the range. The slice may still select rows that
-            // share the floor block's separator boundary; to stay correct we fall
-            // back to a full-partition decode rather than risk dropping a row.
+            if includes_implicit_first_block {
+                // The range lies ENTIRELY within the implicit first block (its
+                // physical-upper is also below the first separator, e.g. `ck <= 3`
+                // or `ck = 0`): no stored block overlaps, but the implicit block
+                // does. Narrow to [partition body start, first stored block start);
+                // the post-scan backstop trims to the exact predicate.
+                let body_end_rel = entries
+                    .first()
+                    .map(|(_sep, b)| b.data_offset as usize)
+                    .unwrap_or(usize::MAX);
+                return Ok(Some(ClusteringRowWindow {
+                    body_start_rel: 0,
+                    body_end_rel,
+                }));
+            }
+            // No block (implicit or stored) overlaps the range. The slice may still
+            // select rows that share the floor block's separator boundary; to stay
+            // correct we fall back to a full-partition decode rather than risk
+            // dropping a row.
             return Ok(None);
         }
 
@@ -405,7 +444,12 @@ impl SSTableReader {
         let has_static = schema
             .map(|s| s.columns.iter().any(|c| c.is_static))
             .unwrap_or(false);
-        let body_start_rel = if has_static {
+        // Start at the earliest selected STORED block — UNLESS the table has a
+        // static row, or the range also covers the implicit first block (issue
+        // #1968); either case must decode from the partition body start (rel 0) so
+        // the static prefix / the implicit block's rows are seen. The END bound
+        // still narrows the decode in both cases.
+        let body_start_rel = if has_static || includes_implicit_first_block {
             0
         } else {
             blocks

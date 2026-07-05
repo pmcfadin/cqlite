@@ -224,7 +224,7 @@ async fn single_bound_lt_slice_parity_and_bounded_decode() {
     // Skip if no data.
     let probe = db
         .execute(&format!(
-            "SELECT ck FROM {QUALIFIED_TABLE} WHERE pk = 2 LIMIT 1"
+            "SELECT pk, ck FROM {QUALIFIED_TABLE} WHERE pk = 2 LIMIT 1"
         ))
         .await
         .expect("probe must succeed");
