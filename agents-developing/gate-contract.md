@@ -84,14 +84,21 @@ empty dataset by returning 0 rows.
 # Full gate — the only run that counts
 scripts/agent-gate.sh
 
+# Fast iteration loop — NOT the gate of record (issue #1821)
+scripts/agent-gate.sh --lite
+
+# Test/docs-only re-cert after a full PASS at X — NOT the gate of record (issue #1892)
+scripts/agent-gate.sh --delta X --anchor-run-id <X's full-gate run-id>
+
 # Debugging aid only — output marked PARTIAL, never counts
 scripts/agent-gate.sh --only fmt,clippy
 
-# List components without running
+# List components without running (also --lite-list / --delta-list)
 scripts/agent-gate.sh --list
 ```
 
-Exit codes: `0` = PASS, `1` = FAIL, `3` = PARTIAL (--only mode).
+Exit codes: `0` = PASS, `1` = FAIL/REFUSED (`--delta`), `2` = usage/anchor error
+(`--delta`), `3` = PARTIAL (`--only` mode).
 
 ## Tiered gate: `--lite` iterate, full gate once (issue #1821)
 
@@ -109,6 +116,49 @@ with `--lite`/targeted tests **only** — it must **never** invoke the full gate
 worker/orchestrator runs the FULL gate itself, exactly once. A subagent idle-waiting
 on a 12–20 min full gate gets killed by the stall watchdog and takes its child gate
 process down with it.
+
+## Test/docs-only delta re-certification: `--delta` (issue #1892)
+
+Once the full gate has PASSed at a commit `X`, a post-review polish round whose
+only changes are **tests and/or docs** does not need a whole new full gate — the
+full gate at `X` already validated clippy, core-tests, bindings, parity, and smoke
+against the production code, none of which the polish round touched. Re-certify the
+`X..Y` diff with:
+
+```bash
+scripts/agent-gate.sh --delta X --anchor-run-id <X's full-gate run-id>
+# or read the run-id from the recorded full SUMMARY (refuses a non-full block):
+scripts/agent-gate.sh --delta X --anchor-summary-file <path-to-X-full-SUMMARY>
+```
+
+`--delta` verifies the diff `X..Y` (committed + working tree) touches **ONLY** what
+the re-cert can **EXECUTE**: rust cargo test code (`.rs` under `tests/` dirs,
+`*_test(s).rs` anywhere), python binding tests (`bindings/python/tests/` — run by
+the issue-1893 python tier), and/or docs (`*.md` anywhere; **top-level-anchored**
+`docs/`, `website/` only). It is **fail-closed**: anything else (src, scripts,
+workflows, `Cargo.*`, config, test-data) makes it **REFUSE** and name the
+offending files — a production change always requires a fresh full gate. The
+refusal deliberately includes two *test* classes the delta components cannot
+execute (roborev job 1452): node `__test__/` files (scoped-tests only
+compile-checks `cqlite-node`; it never runs jest) and shell self-tests
+(`scripts/tests/*.sh`, run only by the full gate's tooling-tests) — allowing them
+would mint a PASS DELTA block for an untested change. On pass it runs **only**
+file-size + fmt + the diff's changed test targets (the same blast-radius scoper
+`--lite` uses) and emits a DISTINCT `==== AGENT-GATE DELTA SUMMARY ====` block
+(`MODE: delta`, recovery default `.agent-gate-delta-summary.txt`).
+
+The delta block is **not the gate of record** and carries an explicit
+`gate-of-record:` line naming the full PASS at `X` plus the anchor run-id, so it can
+never be pasted as a full SUMMARY. **Record BOTH artifacts in the PR:** the anchor's
+full SUMMARY (the gate of record) AND the `X..Y` DELTA block. Any production change
+resets this — the next gate of record is a fresh full `scripts/agent-gate.sh` PASS.
+
+**Standing backstop (owner condition, 2026-07-04).** Long-term quality is
+backstopped by the nightly full run on `main`: `.github/workflows/gate.yml`
+(deep-check) re-runs the FULL gate with `CQLITE_CLIPPY_FULL=1`, deeper than the local
+gate. Delta re-certification leans on that nightly as the net for anything a
+test/docs round scoped past. `--delta` (like `--lite` and `--only`) is EXEMPT from
+the machine-wide concurrency cap.
 
 ## New-machine setup
 
@@ -149,9 +199,9 @@ now takes a **cross-process bounded semaphore**: at most **N** full
 proceed when a slot frees. **They never fail from the cap**, and a non-interactive
 caller blocks cleanly rather than spin-failing.
 
-- **`--lite` and `--only` runs are EXEMPT** — never queued. `--lite` is cheap by
-  design; `--only` is a PARTIAL run (and is used by nested tooling self-tests, so
-  capping it could self-deadlock the queue).
+- **`--lite`, `--delta`, and `--only` runs are EXEMPT** — never queued. `--lite`
+  and `--delta` are cheap by design; `--only` is a PARTIAL run (and is used by
+  nested tooling self-tests, so capping it could self-deadlock the queue).
 - **N** defaults to `max(2, floor((ncpu-2)/4))` — a conservative fraction of cores
   that still lets a couple of gates run on a small box. Override with
   `CQLITE_GATE_MAX_CONCURRENCY`.

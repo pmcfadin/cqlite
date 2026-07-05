@@ -581,15 +581,23 @@ This prevents the failure mode where dataset-dependent tests silently pass on an
 scripts/agent-gate.sh
 
 
+# Fast iteration loop — NOT the gate of record (issue #1821)
+scripts/agent-gate.sh --lite
+
+
+# Test/docs-only re-cert after a full PASS at X — NOT the gate of record (issue #1892)
+scripts/agent-gate.sh --delta X --anchor-run-id <X's full-gate run-id>
+
+
 # Debugging aid only — output marked PARTIAL, never counts
 scripts/agent-gate.sh --only fmt,clippy
 
 
-# List components without running
+# List components without running (also --lite-list / --delta-list)
 scripts/agent-gate.sh --list
 ```
 
-Exit codes: `0` = PASS, `1` = FAIL, `3` = PARTIAL (—only mode).
+Exit codes: `0` = PASS, `1` = FAIL/REFUSED (`--delta`), `2` = usage/anchor error (`--delta`), `3` = PARTIAL (`--only` mode).
 
 ## Tiered gate: `--lite` iterate, full gate once (issue #1821)
 
@@ -598,6 +606,24 @@ Exit codes: `0` = PASS, `1` = FAIL, `3` = PARTIAL (—only mode).
 The gate is tiered. `scripts/agent-gate.sh --lite` runs only the fast subset (file-size + fmt + scoped workspace clippy + blast-radius-scoped tests, \~1–5 min). It is the **fast iteration loop, NOT the gate of record** — it emits a DISTINCT `==== AGENT-GATE LITE SUMMARY ====` block (`MODE: lite`) that must **never** be pasted as the full SUMMARY. Iterate on `--lite` every fix round; run the FULL `scripts/agent-gate.sh` **exactly once** before merge. `--lite` never replaces the full gate.
 
 **Division of labor (issue #1855).** In the worker → subagent model, an implementer subagent (`sstable-developer`) edits, commits, pushes, and verifies with `--lite`/targeted tests **only** — it must **never** invoke the full gate. The worker/orchestrator runs the FULL gate itself, exactly once. A subagent idle-waiting on a 12–20 min full gate gets killed by the stall watchdog and takes its child gate process down with it.
+
+## Test/docs-only delta re-certification: `--delta` (issue #1892)
+
+[Section titled “Test/docs-only delta re-certification: --delta (issue #1892)”](#testdocs-only-delta-re-certification---delta-issue-1892)
+
+Once the full gate has PASSed at a commit `X`, a post-review polish round whose only changes are **tests and/or docs** does not need a whole new full gate — the full gate at `X` already validated clippy, core-tests, bindings, parity, and smoke against the production code, none of which the polish round touched. Re-certify the `X..Y` diff with:
+
+```bash
+scripts/agent-gate.sh --delta X --anchor-run-id <X's full-gate run-id>
+# or read the run-id from the recorded full SUMMARY (refuses a non-full block):
+scripts/agent-gate.sh --delta X --anchor-summary-file <path-to-X-full-SUMMARY>
+```
+
+`--delta` verifies the diff `X..Y` (committed + working tree) touches **ONLY** what the re-cert can **EXECUTE**: rust cargo test code (`.rs` under `tests/` dirs, `*_test(s).rs` anywhere), python binding tests (`bindings/python/tests/` — run by the issue-1893 python tier), and/or docs (`*.md` anywhere; **top-level-anchored** `docs/`, `website/` only). It is **fail-closed**: anything else (src, scripts, workflows, `Cargo.*`, config, test-data) makes it **REFUSE** and name the offending files — a production change always requires a fresh full gate. The refusal deliberately includes two *test* classes the delta components cannot execute (roborev job 1452): node `__test__/` files (scoped-tests only compile-checks `cqlite-node`; it never runs jest) and shell self-tests (`scripts/tests/*.sh`, run only by the full gate’s tooling-tests) — allowing them would mint a PASS DELTA block for an untested change. On pass it runs **only** file-size + fmt + the diff’s changed test targets (the same blast-radius scoper `--lite` uses) and emits a DISTINCT `==== AGENT-GATE DELTA SUMMARY ====` block (`MODE: delta`, recovery default `.agent-gate-delta-summary.txt`).
+
+The delta block is **not the gate of record** and carries an explicit `gate-of-record:` line naming the full PASS at `X` plus the anchor run-id, so it can never be pasted as a full SUMMARY. **Record BOTH artifacts in the PR:** the anchor’s full SUMMARY (the gate of record) AND the `X..Y` DELTA block. Any production change resets this — the next gate of record is a fresh full `scripts/agent-gate.sh` PASS.
+
+**Standing backstop (owner condition, 2026-07-04).** Long-term quality is backstopped by the nightly full run on `main`: `.github/workflows/gate.yml` (deep-check) re-runs the FULL gate with `CQLITE_CLIPPY_FULL=1`, deeper than the local gate. Delta re-certification leans on that nightly as the net for anything a test/docs round scoped past. `--delta` (like `--lite` and `--only`) is EXEMPT from the machine-wide concurrency cap.
 
 ## New-machine setup
 
@@ -627,7 +653,7 @@ State values: **`on`** (detected & used) · **`absent`** (missing → the gate p
 
 Running many sessions/worktrees at once used to let \~15 full gates hit the CPU simultaneously (load 30–60), which SIGKILLed gates mid-`core-tests`. The full gate now takes a **cross-process bounded semaphore**: at most **N** full `agent-gate.sh` runs execute machine-wide at once. Excess invocations **queue** (block) for a slot and print one line — `waiting for gate slot (N in use)…` — then proceed when a slot frees. **They never fail from the cap**, and a non-interactive caller blocks cleanly rather than spin-failing.
 
-* **`--lite` and `--only` runs are EXEMPT** — never queued. `--lite` is cheap by design; `--only` is a PARTIAL run (and is used by nested tooling self-tests, so capping it could self-deadlock the queue).
+* **`--lite`, `--delta`, and `--only` runs are EXEMPT** — never queued. `--lite` and `--delta` are cheap by design; `--only` is a PARTIAL run (and is used by nested tooling self-tests, so capping it could self-deadlock the queue).
 * **N** defaults to `max(2, floor((ncpu-2)/4))` — a conservative fraction of cores that still lets a couple of gates run on a small box. Override with `CQLITE_GATE_MAX_CONCURRENCY`.
 * **SIGKILL-safe stale-slot reaping:** each slot is an `fcntl.flock` held by a small background daemon (`scripts/lib/gate_slot_daemon.py`) that the gate starts and monitors. Because the daemon opens the lock fd *after* it is forked, the gate’s heavy children (`cargo`/`nextest`) never inherit the lock — a SIGKILLed gate frees its slot within one poll interval even while orphaned children run on. A crashed gate can never permanently leak a slot.
 * Works **across worktrees** (shared slot dir, not per-checkout) and composes with the per-gate component parallelism (`AGENT_GATE_JOBS`) and `sccache`: the cap bounds the *worst case* (several sessions hitting their one full gate at once), the others cut average load and per-compile time.
