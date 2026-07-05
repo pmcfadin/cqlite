@@ -182,6 +182,78 @@ console.log(`Total rows: ${stats.totalRows}`);
 console.log(`Memory: ${stats.memoryUsedBytes} bytes`);
 ```
 
+### Refreshing SSTables (v0.13)
+
+If Cassandra (or another process) writes new SSTables while your `Database` handle
+is open, call `refresh()` to re-discover them. Refresh is **explicit-only** (CQLite
+never rescans behind your back) and **atomic / fail-closed**: if any newly found
+generation fails to open, the swap is rolled back and the handle keeps serving the
+prior, consistent set of readers.
+
+```typescript
+// ... time passes; Cassandra flushes/compacts new SSTables to disk ...
+
+const report = await db.refresh();
+console.log(`Tables scanned:  ${report.tablesScanned}`);
+console.log(`Readers added:   ${report.readersAdded}`);
+console.log(`Readers removed: ${report.readersRemoved}`);
+
+// Subsequent queries see the newly discovered data
+const result = await db.executeNative('SELECT * FROM keyspace.table');
+```
+
+`refresh(): Promise<RefreshReport>` resolves to a `RefreshReport` with the numeric
+fields `tablesScanned`, `readersAdded`, and `readersRemoved`.
+
+### Result Byte Budget (v0.13)
+
+Non-streaming queries are bounded by a result-size budget of **64 MiB** by default.
+When the materialized result's running byte estimate exceeds the budget, the query
+rejects with a `CqliteError` whose `code === 'QUERY'`, directing you to add a
+`LIMIT` clause or use `executeStreaming()`. Streaming queries are **not** subject
+to this budget.
+
+```typescript
+try {
+  const result = await db.executeNative('SELECT * FROM keyspace.big_table');
+  for (const row of result.rows) {
+    process(row);
+  }
+} catch (e) {
+  if (e.code === 'QUERY') {
+    // Result exceeded the 64 MiB byte budget — add a LIMIT or stream instead
+    for await (const row of db.executeStreaming('SELECT * FROM keyspace.big_table')) {
+      process(row);
+    }
+  } else {
+    throw e;
+  }
+}
+```
+
+### OpenTelemetry Tracing (v0.13)
+
+CQLite can emit OpenTelemetry traces when built with the `observability` Cargo
+feature; without that feature the configuration is accepted but is a no-op. Pass an
+`otel` option to `Database.open()`:
+
+```typescript
+const db = await Database.open('path/to/sstables', {
+  schema: 'schema.cql',
+  otel: {
+    enabled: true,                       // default false
+    endpoint: 'http://localhost:4317',   // default 'http://localhost:4317'
+    protocol: 'grpc',                    // 'grpc' (default) or 'http'
+    serviceName: 'cqlite',               // default 'cqlite'
+    serviceVersion: '0.13.0',            // default: package version
+    samplingRatio: 1.0,                  // default 1.0
+    timeoutMs: 10000,                    // default 10000
+  },
+});
+```
+
+Options are layered over the `CQLITE_OTEL_*` environment variables.
+
 ### Error Handling
 
 All errors include structured metadata for programmatic handling:

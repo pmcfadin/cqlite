@@ -86,6 +86,7 @@ await db.close(); // safe to call again
 | `cacheEnabled` | `boolean` (optional) | `true` | Enable block, row, and query caches |
 | `writable` | `boolean` (optional) | `false` | Enable INSERT/UPDATE/DELETE |
 | `writeDir` | `string` (optional) | — | Directory for WAL and flushed SSTables; required when `writable: true` |
+| `otel` | `OtelOptions` (optional) | — | OpenTelemetry tracing config (requires an `observability` build) |
 
 ## executeNative() — recommended
 
@@ -315,6 +316,54 @@ await db.close();
 - Counter columns cannot be written; `execute()` throws `CqliteError` for counter mutations.
 - The writer produces BIG-format index files, not BTI format.
 
+## Refreshing SSTables
+
+If Cassandra or another process writes new SSTables into the directory after you
+open the database, call `db.refresh()` to re-discover them. Discovery is
+**explicit-only** (CQLite never re-scans behind your back) and **atomic** — the new
+view is swapped in as a whole, so concurrent queries never see a partial set.
+
+```javascript
+const report = await db.refresh(); // Promise<RefreshReport>
+console.log(`Scanned ${report.tablesScanned} tables`);
+console.log(`Added ${report.readersAdded}, removed ${report.readersRemoved} readers`);
+```
+
+`RefreshReport` has the numeric fields `tablesScanned`, `readersAdded`, and
+`readersRemoved`.
+
+## Limiting result size
+
+Non-streaming queries respect a **byte-bounded result budget** with a core default of
+**64 MiB**. A query whose materialized result would exceed the budget fails fast — the
+thrown `CqliteError` has `code === "QUERY"` — instead of exhausting memory.
+
+To recover, add a `LIMIT` clause or switch to `executeStreaming()`, which is **not
+subject to the result budget**.
+
+## OpenTelemetry
+
+Builds compiled with the `observability` feature can emit OpenTelemetry traces. Pass
+an `otel` option to `Database.open()`:
+
+```javascript
+const db = await Database.open('/path/to/sstables', {
+  schema: '/path/to/schema.cql',
+  otel: {
+    enabled: true,
+    endpoint: 'http://localhost:4317',
+    protocol: 'grpc',            // 'grpc' or 'http'
+    serviceName: 'my-service',
+    serviceVersion: '1.2.3',
+    samplingRatio: 0.1,
+    timeoutMs: 5000,
+  },
+});
+```
+
+The `otel` config layers over the `CQLITE_OTEL_*` environment variables (explicit
+keys win). Omit it to leave tracing driven by the environment alone.
+
 ## TypeScript support
 
 Complete TypeScript definitions are included in `lib/index.d.ts`:
@@ -350,6 +399,7 @@ async function query(): Promise<void> {
 | `db.executeStreaming(query, config?)` | `StreamingResult` | Memory-bounded async iteration |
 | `db.exportParquet(query, path, options?)` | `Promise<number>` | Stream query results to a Parquet file |
 | `db.getStats()` | `Promise<DatabaseStats>` | Storage and memory metrics |
+| `db.refresh()` | `Promise<RefreshReport>` | Re-discover SSTables on disk |
 | `db.prepare(query)` | `Promise<PreparedStatement>` | Parse and plan a query |
 | `db.flushRun()` | `Promise<string>` | Flush memtable; returns Data.db path |
 | `db.maintenanceStep(options?)` | `Promise<MaintenanceReport>` | Incremental compaction |

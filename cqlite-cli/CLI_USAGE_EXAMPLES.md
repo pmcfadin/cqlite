@@ -9,7 +9,9 @@ This document provides comprehensive usage examples for the CQLite CLI in M2 mil
 - [One-Shot Mode Examples](#one-shot-mode-examples)
 - [REPL Mode Examples](#repl-mode-examples)
 - [Output Formats](#output-formats)
+- [Verifying SSTable Integrity](#verifying-sstable-integrity)
 - [Exporting Data (M3)](#exporting-data-m3)
+- [Delta Export (CDC)](#delta-export-cdc)
 - [Write Support (M5)](#write-support-m5)
 - [Command Reference](#command-reference)
 
@@ -546,6 +548,55 @@ id,name,email
 
 ---
 
+## Verifying SSTable Integrity
+
+`cqlite verify` checks the integrity of a single SSTable generation. It is
+**always available** (no feature flag) and short-circuits before any database
+initialization, so it works on a bare SSTable directory without a schema. The
+exit code is non-zero when verification fails, making it suitable for CI and
+health checks.
+
+### Syntax
+
+```bash
+cqlite verify <PATH> [--mode quick|full] [--out text|json]
+```
+
+- `<PATH>` — SSTable generation directory (the directory containing `*-Data.db`).
+- `--mode <MODE>` — `quick` or `full` (default `full`).
+  - **quick**: checks component presence, `TOC.txt` completeness, `Digest.crc32`,
+    `CompressionInfo.db` (including chunk-offset bounds), and BTI trie structure.
+  - **full**: everything in quick, plus inline `Data.db` chunk-CRC validation,
+    `Statistics.db`/`Summary.db` parse, and a complete row scan that fails loudly
+    on corrupt index/BTI components (no silent empty results).
+- `--out <OUT>` — report output format, `text` (default) or `json`.
+
+### Examples
+
+```bash
+# Full verification (default) with a human-readable report
+cqlite verify test-data/datasets/sstables/test_basic/simple_table-<uuid>
+
+# Fast structural check only (component presence, CRC, BTI structure)
+cqlite verify test-data/datasets/sstables/test_basic/simple_table-<uuid> --mode quick
+
+# Machine-readable JSON report (for CI / scripting)
+cqlite verify test-data/datasets/sstables/test_comp/lz4_table-<uuid> \
+       --mode full --out json
+```
+
+A failed verification returns a non-zero exit code, so you can gate automation on it:
+
+```bash
+if cqlite verify ./my-sstable-dir --mode quick --out json > report.json; then
+  echo "SSTable OK"
+else
+  echo "SSTable failed verification (see report.json)"
+fi
+```
+
+---
+
 ## Exporting Data (M3)
 
 CQLite M3 adds file-based export functionality for extracting data to various formats.
@@ -693,6 +744,72 @@ cqlite --schema schema.cql --data-dir ./large-dataset \
 ```
 
 No configuration needed - CQLite automatically streams the data efficiently.
+
+---
+
+## Delta Export (CDC)
+
+`cqlite delta-export` scans a single SSTable generation as a CDC delta and writes
+a Parquet file using the CQLite **delta envelope** — one record per change event.
+Each non-key column becomes a nullable struct carrying its value plus metadata,
+and dedicated envelope columns carry delete semantics.
+
+> **Note**: `delta-export` requires building with `--features delta-export`.
+>
+> ```bash
+> cargo build --package cqlite-cli --features delta-export
+> ```
+
+> **Schema requirement**: The `--schema` file must be a **bare `CREATE TABLE`
+> statement** (no `CREATE KEYSPACE` / `USE` preamble), consistent with the
+> CLAUDE.md guidance for delta-export.
+
+### Syntax
+
+```bash
+cqlite delta-export <SSTABLE_DIR> --schema <FILE> -o <FILE.parquet> [OPTIONS]
+```
+
+- `<SSTABLE_DIR>` — SSTable directory containing the `Data.db` file to scan.
+- `--schema <FILE>` (required) — CQL (`.cql`) or JSON (`.json`) schema for the table.
+- `--out <OUT>` — output format (default `parquet`; only `parquet` is supported).
+- `-o, --output <FILE>` (required) — output Parquet file path. Binary output cannot
+  be written to stdout, so this is mandatory.
+- `--envelope-prefix <PREFIX>` — envelope column prefix (default `__`). Change it to
+  avoid collisions with user columns named `__op`, `__ts`, `__range_start`, or
+  `__range_end`.
+- `--row-group-size <N>` — Parquet row-group size in records per row group
+  (default `10000`).
+- `--compression <C>` — Parquet compression codec: `snappy` (default), `zstd`, or
+  `uncompressed`.
+- `--source <ID>` — SSTable identity string written to the `cqlite.delta.source`
+  Parquet footer key. Defaults to the SSTable directory base name.
+- `--overwrite` — overwrite the output file if it exists (default: error if it exists).
+
+### Examples
+
+```bash
+# Export one SSTable generation as a delta-envelope Parquet file
+cqlite delta-export test-data/datasets/sstables/test_basic/simple_table-<uuid> \
+       --schema test-data/schemas/simple_table.cql \
+       --out parquet \
+       -o /tmp/delta.parquet
+
+# Use a custom envelope prefix to resolve __op / __ts column collisions
+cqlite delta-export test-data/datasets/sstables/test_basic/simple_table-<uuid> \
+       --schema test-data/schemas/simple_table.cql \
+       -o /tmp/delta.parquet \
+       --envelope-prefix _cqlite_
+
+# Tune Parquet output: zstd compression, larger row groups, overwrite existing file
+cqlite delta-export test-data/datasets/sstables/test_basic/simple_table-<uuid> \
+       --schema test-data/schemas/simple_table.cql \
+       -o /tmp/delta.parquet \
+       --compression zstd \
+       --row-group-size 50000 \
+       --source my-sstable-id \
+       --overwrite
+```
 
 ---
 
@@ -879,6 +996,66 @@ Packaging options:
 | `--compact` | Run compaction before export to merge multiple SSTables |
 | `--skip-validate` | Skip validation after export |
 
+#### One-Shot Compaction (`compact`)
+
+`cqlite compact` performs a **one-shot, policy-free compaction** over exactly the
+SSTables found in `<input_dir>` and writes the merged result to `--output`. It is
+distinct from the other compaction paths:
+
+- **`compact`** — explicit, deterministic merge of a fixed set of SSTables (no
+  managed write-dir, no LSM policy). Used by the compaction-parity harness.
+- **`maintenance`** — incremental *background* compaction inside a managed
+  `--write-dir`, bounded by a time budget (see below).
+- **`export-sstable`** — packages write-engine data for Cassandra import (with an
+  optional `--compact` step); it does not compact an arbitrary external directory.
+
+`compact` is separate from `admin compact` (a database-level command whose only
+flag is `--force`).
+
+The `<input_dir>` is scanned for `nb-*-big-Data.db` files.
+
+```bash
+cqlite compact <INPUT_DIR> -o <OUTPUT> --schema <PATH> [OPTIONS]
+```
+
+| Flag | Description |
+|------|-------------|
+| `input_dir` (positional) | Directory scanned for `nb-*-big-Data.db` inputs |
+| `-o, --output <OUTPUT>` (required) | Output directory (`keyspace/table/` is appended) |
+| `--schema <PATH>` (required) | CQL or JSON schema for the table |
+| `--gc-before <SECS>` | gc_grace cutoff, epoch seconds (`i64`); see caveat below |
+| `--now-sec <SECS>` | "now" epoch seconds (`i64`) for TTL expiry; see caveat below |
+| `--generation <N>` | Output SSTable generation number (`u64`, default `1`) |
+| `--major` (alias `--purge-tombstones`) | Treat as MAJOR compaction and purge gc-expired tombstones (default off) |
+
+> **Caveat — purging is not yet applied during the merge (issues #845/#848).**
+> `--gc-before` and `--now-sec` are accepted and threaded through, but they do not
+> currently drop purgeable data or expire TTLs during the merge. Do not rely on
+> them to remove data yet.
+
+> **Safety — `--major`/`--purge-tombstones`.** Purging tombstones is only correct
+> when `<input_dir>` contains **all** overlapping SSTables for the table; otherwise
+> a purged tombstone could resurrect data still shadowed elsewhere. This flag is
+> the operator's assertion that the input set is complete. Default (flag absent) is
+> conservative — tombstones are retained and nothing is purged.
+
+```bash
+# Merge every SSTable in ./inputs into one output SSTable
+cqlite compact ./inputs -o ./out \
+       --schema test-data/schemas/basic-types.cql
+
+# Deterministic parity-style run with an explicit generation number
+cqlite compact ./inputs -o ./out \
+       --schema test-data/schemas/basic-types.cql \
+       --generation 3 \
+       --gc-before 1700000000
+
+# MAJOR compaction that purges gc-expired tombstones (input set MUST be complete)
+cqlite compact ./inputs -o ./out \
+       --schema test-data/schemas/basic-types.cql \
+       --major
+```
+
 ### REPL Write Meta-Commands
 
 When running in REPL mode with write support enabled, additional meta-commands are available:
@@ -959,8 +1136,17 @@ cqlite --schema <PATH> --data-dir <DIR> -f <CQL_FILE> [--out <FORMAT>]
 # Low-level SSTable inspection
 cqlite read-sstable <sstable_or_dir> --schema <FILE> --format <FORMAT>
 
-# SSTable metadata
-cqlite info <sstable_or_dir> [--validate]
+# SSTable metadata (-f/--format text|json, -d/--detailed for extended stats)
+cqlite info <sstable_or_dir> [-f json] [-d]
+
+# Verify SSTable integrity (always available)
+cqlite verify <sstable_dir> [--mode quick|full] [--out text|json]
+
+# One-shot compaction (requires --features write-support)
+cqlite compact <input_dir> -o <output_dir> --schema <FILE> [--major]
+
+# CDC delta-envelope Parquet export (requires --features delta-export)
+cqlite delta-export <sstable_dir> --schema <FILE> -o <FILE.parquet>
 ```
 
 ### Global Flags
@@ -969,8 +1155,9 @@ cqlite info <sstable_or_dir> [--validate]
 |------|-------------|---------|
 | `--config <FILE>` | Load config (TOML/YAML/JSON) | `--config config.toml` |
 | `--schema <PATH>` | Schema file/directory (repeatable) | `--schema schemas/` |
-| `--data-dir <DIR>` | Cassandra data directory | `--data-dir /var/lib/cassandra/data` |
-| `-e, --execute <CQL>` | Execute single statement | `-e "SELECT * FROM users"` |
+| `--data-dir <DIR>` | Cassandra data directory (env `CQLITE_DATA_DIR`; mutually exclusive with `--dataset`) | `--data-dir /var/lib/cassandra/data` |
+| `--dataset <DATASET>` | Test dataset name; resolves under `CQLITE_DATASETS_ROOT/sstables/{dataset}/` (mutually exclusive with `--data-dir`) | `--dataset test_basic` |
+| `-e, --execute <CQL>` | Execute single statement (alias `--query`) | `-e "SELECT * FROM users"` |
 | `-f, --file <FILE>` | Execute statements from file | `-f script.cql` |
 | `--out <FORMAT>` | Output format (table/json/csv) | `--out json` |
 | `--limit <N>` | Cap rows returned | `--limit 100` |
@@ -980,6 +1167,55 @@ cqlite info <sstable_or_dir> [--validate]
 | `-v, --verbose` | Increase verbosity | `-vvv` |
 | `-q, --quiet` | Suppress output | `--quiet` |
 | `--no-color` | Disable colored output | `--no-color` |
+
+#### `--dataset` vs `--data-dir`
+
+`--dataset <NAME>` is a convenience for the bundled test data: it resolves the
+SSTables under `CQLITE_DATASETS_ROOT/sstables/{dataset}/` so you do not have to
+type the full path. It is **mutually exclusive** with `--data-dir` (clap rejects
+using both). Use `--data-dir` for a production Cassandra directory layout.
+
+```bash
+# Query a bundled test dataset by name
+export CQLITE_DATASETS_ROOT=/Users/patrick/local_projects/cqlite/test-data/datasets
+cqlite --dataset test_basic \
+       --schema /Users/patrick/local_projects/cqlite/test-data/schemas/basic-types.cql \
+       -e "SELECT * FROM test_basic.simple_table LIMIT 5"
+```
+
+#### OpenTelemetry Export Flags
+
+These flags configure OpenTelemetry (OTLP) export. The config plumbing is always
+compiled and parses regardless of build features, but **actual export requires a
+build with `--features observability`**; without it these flags are accepted and
+become a no-op. Each flag has a `CQLITE_OTEL_*` environment-variable fallback — an
+explicit flag wins over the env var.
+
+| Flag | Env fallback | Description |
+|------|-------------|-------------|
+| `--otel-enabled <BOOL>` | `CQLITE_OTEL_ENABLED` | Enable OTLP export (needs `--otel-endpoint` + `observability` feature) |
+| `--otel-endpoint <URL>` | `CQLITE_OTEL_ENDPOINT` | OTLP collector endpoint (gRPC endpoint or HTTP base URL) |
+| `--otel-protocol <PROTO>` | `CQLITE_OTEL_PROTOCOL` | Wire protocol: `grpc` or `http` |
+| `--otel-service-name <NAME>` | `CQLITE_OTEL_SERVICE_NAME` | `service.name` resource attribute |
+| `--otel-service-version <VER>` | `CQLITE_OTEL_SERVICE_VERSION` | `service.version` resource attribute |
+| `--otel-sampling-ratio <RATIO>` | `CQLITE_OTEL_SAMPLING_RATIO` | Trace sampling ratio in `[0.0, 1.0]` |
+| `--otel-timeout-ms <MS>` | `CQLITE_OTEL_TIMEOUT_MS` | OTLP exporter timeout in milliseconds |
+
+```bash
+# Export traces to a local OTLP collector (build with --features observability)
+cqlite --otel-enabled true \
+       --otel-endpoint http://localhost:4317 \
+       --otel-protocol grpc \
+       --otel-service-name cqlite-cli \
+       --otel-sampling-ratio 1.0 \
+       --schema schemas/ --data-dir /var/lib/cassandra/data \
+       -e "SELECT * FROM ks.users LIMIT 5"
+
+# Equivalent via environment variables
+export CQLITE_OTEL_ENABLED=true
+export CQLITE_OTEL_ENDPOINT=http://localhost:4317
+cqlite --schema schemas/ --data-dir /var/lib/cassandra/data -e "SELECT * FROM ks.users LIMIT 5"
+```
 
 ### Exit Codes
 
@@ -1120,7 +1356,7 @@ cqlite> :help
 ### M5 Features (Issue #392)
 - **Write support**: Mutation-based writes to local SSTables
 - **Write flags**: `--writable`, `--write-dir`, `--mutation`, `--mutations-file`, `--flush`
-- **Write subcommands**: `maintenance`, `write-stats`, `export-sstable`
+- **Write subcommands**: `maintenance`, `write-stats`, `export-sstable`, `compact`
 - **REPL meta-commands**: `.flush`, `.stats`, `.maintenance`
 - **SSTable export**: Cassandra-compatible SSTable generation for `sstableloader`
 - **Feature flag**: Requires `--features write-support` to build
