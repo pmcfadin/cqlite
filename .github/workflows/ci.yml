@@ -158,10 +158,15 @@ jobs:
       - name: Run core lib/doc tests with timings
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
-          # Issue #1230: fail-closed. The ~70 legacy dataset-dependent tests skip
-          # on missing data; with these flags an absent/empty fixture FAILS the
-          # lane (via require_fixtures_strict) instead of false-greening.
-          CQLITE_REQUIRE_FIXTURES: "1"
+          # Issue #1230: fail-closed on the MAIN dataset corpus — the ~70 legacy
+          # dataset-dependent tests skip on missing data; this flag makes an
+          # absent/empty fetched corpus FAIL the lane instead of false-greening.
+          # NOTE (#1995): CQLITE_REQUIRE_FIXTURES is deliberately NOT set on this
+          # general fast lane — it additionally demands Docker/corruption-corpus/
+          # byte-oracle fixtures this lane does not provision (hard-panicking the
+          # skip-clean tests). That strict enforcement lives in the provisioned
+          # nightly tiers (nightly-docker-parity, compression-corruption-parity,
+          # sstabledump-parity-gate, exhaustive-regeneration).
           CQLITE_PARITY_REQUIRE_DATASETS: "1"
           RUST_LOG: debug
           RUST_BACKTRACE: full
@@ -257,7 +262,6 @@ jobs:
       - name: Archive core integration tests
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
-          CQLITE_REQUIRE_FIXTURES: "1"
           CQLITE_PARITY_REQUIRE_DATASETS: "1"
           RUST_LOG: debug
           RUST_BACKTRACE: full
@@ -384,7 +388,6 @@ jobs:
       - name: Run core integration nextest partition
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
-          CQLITE_REQUIRE_FIXTURES: "1"
           CQLITE_PARITY_REQUIRE_DATASETS: "1"
           RUST_LOG: debug
           RUST_BACKTRACE: full
@@ -548,7 +551,6 @@ jobs:
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
           # Issue #1230: fail-closed for the dataset-dependent golden-path lane.
-          CQLITE_REQUIRE_FIXTURES: "1"
           CQLITE_PARITY_REQUIRE_DATASETS: "1"
         run: |
           bash scripts/ci/ci-timing-summary.sh measure "integration tests" -- bash <<'BASH'
