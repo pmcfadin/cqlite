@@ -2494,12 +2494,11 @@ CREATE TABLE IF NOT EXISTS simple_table (
 
 [Section titled “Failure modes”](#failure-modes)
 
-| Symptom                         | Cause                                               | Fix                                                        |
-| ------------------------------- | --------------------------------------------------- | ---------------------------------------------------------- |
-| Zero rows returned              | Data.db file missing (only JSONL goldens present)   | Run `bash test-data/scripts/fetch-datasets.sh`             |
-| `Schema not found` error        | Wrong table name in query, or wrong `--schema` file | Check schema file for exact table name                     |
-| WARN about BTI format on stderr | `da-` prefixed SSTables in the directory            | BTI format not supported; only `nb-` SSTables are readable |
-| Empty `ls` output               | Dataset not fetched                                 | Run `bash test-data/scripts/fetch-datasets.sh`             |
+| Symptom                  | Cause                                               | Fix                                            |
+| ------------------------ | --------------------------------------------------- | ---------------------------------------------- |
+| Zero rows returned       | Data.db file missing (only JSONL goldens present)   | Run `bash test-data/scripts/fetch-datasets.sh` |
+| `Schema not found` error | Wrong table name in query, or wrong `--schema` file | Check schema file for exact table name         |
+| Empty `ls` output        | Dataset not fetched                                 | Run `bash test-data/scripts/fetch-datasets.sh` |
 
 # Handle missing-schema errors
 
@@ -3249,12 +3248,11 @@ Use `--overwrite` to replace an existing file (exit code `6` if the file exists 
 
 [Section titled “Failure modes”](#failure-modes)
 
-| Symptom            | Error text                                         | Fix                                                  |
-| ------------------ | -------------------------------------------------- | ---------------------------------------------------- |
-| No `--schema` flag | `Error: Schema not found for table 'simple_table'` | Add `--schema path/to/schema.cql`                    |
-| Wrong table name   | `Error: Schema not found for table 'bad_name'`     | Check table name matches schema                      |
-| Output file exists | exit code `6`                                      | Add `--overwrite`                                    |
-| BTI-format SSTable | WARN on stderr, 0 rows returned                    | BTI (`da-` prefix) not supported; use `nb-` SSTables |
+| Symptom            | Error text                                         | Fix                               |
+| ------------------ | -------------------------------------------------- | --------------------------------- |
+| No `--schema` flag | `Error: Schema not found for table 'simple_table'` | Add `--schema path/to/schema.cql` |
+| Wrong table name   | `Error: Schema not found for table 'bad_name'`     | Check table name matches schema   |
+| Output file exists | exit code `6`                                      | Add `--overwrite`                 |
 
 ## Type mapping
 
@@ -5402,22 +5400,26 @@ The `DataWriter` produces valid Cassandra 5.0 BIG format Data.db files with:
 
 [Section titled “CompressionInfo.db Writing”](#compressioninfodb-writing)
 
-**Status**: IMPLEMENTED
+**Status**: BUILDING BLOCKS (test-only)
 
-Full compression support via `CompressedDataWriter` and `CompressionInfoWriter`:
+CQLite’s production SSTable writer emits uncompressed Data.db only. Compressed-write infrastructure exists to synthesize fixtures for the read path and is fail-closed for production — see #1406.
 
-* **LZ4**: Fast compression (default, requires `lz4` feature)
-* **Snappy**: Very fast compression (requires `snappy` feature)
-* **Deflate**: Better compression ratio (requires `deflate` feature)
-* **Zstd**: Balanced speed/ratio (requires `zstd` feature)
+The `CompressedDataWriter` and `CompressionInfoWriter` types are UNWIRED building blocks: no path from flush or compaction reaches them, and no Cassandra-side byte-parity coverage exists for a CQLite-emitted CompressionInfo.db. Any attempt to configure compressed production writing returns `Error::UnsupportedFormat`:
 
-CompressionInfo.db format includes:
+* `SSTableWriter::with_compression` and `CompressionInfoWriter::guard_unsupported_production_write` accept only `CompressionAlgorithm::None`; every real algorithm (LZ4, Snappy, Deflate, Zstd) errors.
 
-* Algorithm name with BE u16 length prefix
-* Chunk length (default 64KB)
-* Chunk offset table (u64 BE per chunk)
-* Per-chunk CRC32 checksums
-* Trailing metadata CRC32
+These building blocks are used solely to synthesize compressed SSTables for exercising the decompressing reader. The CompressionInfo.db binary format CQLite actually *parses* on read (see `cqlite-core/src/storage/sstable/compression_info.rs:132-249`, mirroring Cassandra’s `CompressionMetadata.java:375-392`) is, in exact on-disk order:
+
+* Compressor simple name — Java `writeUTF`: BE `u16` byte-length prefix followed by the UTF-8 name (e.g. `LZ4Compressor`)
+* `option_count` — BE `i32`
+* `option_count` × option pairs — each pair is two `writeUTF` strings (key, then value), each a BE `u16` length prefix + UTF-8 bytes
+* `chunk_length` — BE `i32`, the uncompressed chunk size (default 64 KB)
+* `max_compressed_length` — BE `i32` (present on all Cassandra 5.0 / version ≥ `na` files; equals `i32::MAX` when `minCompressRatio=0`)
+* `data_length` — BE `i64`, total uncompressed data length
+* `chunk_count` — BE `i32`
+* `chunk_count` × chunk offset — BE `i64` per chunk, the byte offset of each compressed chunk record in Data.db
+
+CompressionInfo.db ends immediately after the chunk offset table — it contains **no CRC bytes**. The per-chunk CRC32 checksums live inline in Data.db: each compressed chunk is followed by a 4-byte big-endian CRC32 of its compressed bytes (`CompressedSequentialWriter.java:192`), so consecutive chunk offsets differ by `compressedLength + 4`. There is likewise no trailing metadata CRC32 in CompressionInfo.db.
 
 ### Frozen Collection Serialization
 
@@ -5510,14 +5512,11 @@ The following limitations from M5.0 have been resolved in M5.1:
 
 [Section titled “CompressionInfo.db Writing”](#compressioninfodb-writing-1)
 
-**Status**: RESOLVED (was “NOT IMPLEMENTED” in M5.0)
+**Status**: NOT IMPLEMENTED for production writes (building blocks are test-only, fail-closed — #1406)
 
-M5.0 produced only uncompressed SSTables. M5.1 implements full compression support with:
+CQLite’s production SSTable writer emits uncompressed Data.db only and never writes a CompressionInfo.db. The `CompressedDataWriter` / `CompressionInfoWriter` types exist solely to synthesize compressed fixtures for exercising the decompressing reader; they are UNWIRED (no flush/compaction path reaches them) and any attempt to configure compressed production writing returns `Error::UnsupportedFormat`.
 
-* All four compression algorithms (LZ4, Snappy, Deflate, Zstd)
-* Chunk-based compression with configurable chunk size
-* Trailing CRC32 checksums per chunk
-* CompressionInfo.db metadata file generation
+The READ/decompression path fully supports all four compression algorithms (LZ4, Snappy, Deflate, Zstd) — CQLite reads compressed Cassandra SSTables end-to-end. See the “CompressionInfo.db Writing” entry under “M5.1 Write Support Capabilities” above for the exact fail-closed boundary and the parseable on-read format.
 
 ### Collection Serialization
 
@@ -5682,11 +5681,11 @@ CQLite has defined k-way merge compaction API with STCS (Size-Tiered Compaction 
 
 [Section titled “BTI Format Writing”](#bti-format-writing)
 
-**Status**: NOT IMPLEMENTED
+**Status**: IMPLEMENTED (canonical `da` BTI write since v0.12 — #872)
 
-M5.1 produces BIG format SSTables only. BTI (trie-based) index writing is not supported.
+CQLite emits canonical BTI (`da`) format SSTables, including trie-based `Partitions.db` and `Rows.db`. BIG (`nb`) remains the DEFAULT write target; BTI (`da`) is an explicit, supported alternative. BTI read is fully supported end-to-end.
 
-**Rationale**: BTI is opt-in/experimental in Cassandra 5.0. BIG format covers >95% of production use cases.
+**Rationale**: BIG format covers the majority of production use cases and remains the default, while `da` BTI write/read achieves byte-parity with Cassandra 5.0 for callers that select it.
 
 ### Index.db/Summary.db Full Format
 
@@ -5701,8 +5700,9 @@ Current implementation:
 
 Not implemented:
 
-* Full promoted index data in Index.db entries
-* BTI trie format
+* Full promoted index data in Index.db entries (BIG `nb` format)
+
+BTI (`da`) trie format write/read IS supported (see “BTI Format Writing” above).
 
 ### Statistics.db Full TOC Format
 
@@ -5982,53 +5982,38 @@ if entries.is_empty() {
 
 ***
 
-### BTI End-to-End Validation (Issue #36 - Deferred to Post-M2)
+### BTI End-to-End Support (Issue #36 → resolved by v0.12 #872)
 
-[Section titled “BTI End-to-End Validation (Issue #36 - Deferred to Post-M2)”](#bti-end-to-end-validation-issue-36---deferred-to-post-m2)
+[Section titled “BTI End-to-End Support (Issue #36 → resolved by v0.12 #872)”](#bti-end-to-end-support-issue-36--resolved-by-v012-872)
 
-**Status**: 🔄 **DEFERRED** (Issue #36) **Impact**: No full BTI parity testing against sstabledump **Decision**: BTI validation deferred to future milestone per team agreement
+**Status**: ✅ **RESOLVED** (canonical `da` BTI write/read since v0.12 — #872) **Note**: The narrative below is historical (the original Issue #36 deferral). It has since been superseded: BTI read is fully supported end-to-end, and CQLite emits canonical `da`-format SSTables (trie-based `Partitions.db`/`Rows.db`) with byte-parity vs Cassandra 5.0. BIG (`nb`) remains the DEFAULT write target.
 
-**Background**: Issue #36 requested comprehensive BTI validation including:
+**Historical background**: Issue #36 originally requested comprehensive BTI validation including:
 
 * TDD tests for trie traversal lookups and iteration
 * Rows.db decoding tests with range tombstones and complex types
 * Round-trip byte-comparable invariants
 * Zero-diff vs sstabledump on BTI datasets
 
-**Key Findings**:
+**Historical findings** (at time of deferral):
 
 1. **BIG format is Cassandra 5.0 default** - BTI requires explicit opt-in via `selected_format: bti` in cassandra.yaml
-2. **All test data uses BIG format** - 100% of 354 SSTable files use `nb-` prefix (BIG format)
-3. **0% BTI test data exists** - No Partitions.db/Rows.db trie files in test datasets
-4. **BTI is experimental** - Cassandra 5.0 marks BTI as opt-in, expected <5% production adoption
+2. **Test data used BIG format** - the original SSTable corpus used the `nb-` prefix (BIG format)
+3. **BTI is opt-in** - Cassandra 5.0 marks BTI as opt-in
 
-**Current Implementation** (\~3,200 LOC in `cqlite-core/src/storage/sstable/bti/`):
+**Current implementation** (`cqlite-core/src/storage/sstable/bti/`):
 
 * ✅ Format detection (magic number `0x6461`)
 * ✅ Byte-comparable encoding (CEP-25 compliant)
 * ✅ Trie node structures (all 4 types)
 * ✅ SizedInts encoding
-* ⚠️ Trie traversal (stub implementation)
-* ❌ Range queries (not implemented)
-* ❌ Full partition iteration (not implemented)
+* ✅ Trie traversal (fully implemented)
+* ✅ Range queries and full partition iteration
+* ✅ Canonical `da` BTI write (`Partitions.db`/`Rows.db`) with Cassandra byte-parity (#872)
 
-**Decision Rationale**:
+**Reference**: `docs/sstables-definitive-guide/references/bti-v1-status.md`
 
-* No BTI test data available for validation
-* BTI is opt-in/experimental in Cassandra 5.0
-* BIG format covers 100% of current test scenarios
-* Production BTI code preserved for future validation
-
-**Future Work** (new issue when BTI demand emerges):
-
-1. Configure test cluster with `selected_format: bti`
-2. Generate real BTI SSTables (Partitions.db, Rows.db)
-3. Validate CQLite BTI parser vs sstabledump output
-4. Complete trie traversal implementation
-
-**Reference**: Full status documented in `docs/sstables-definitive-guide/references/bti-v1-status.md`
-
-**Tracking**: Issue #36 (DEFERRED - see issue comments for full discussion)
+**Tracking**: Issue #36 (resolved by v0.12 #872)
 
 ***
 
@@ -6924,25 +6909,22 @@ The `StatisticsWriter` now produces complete Cassandra 5.0 compatible Statistics
 
 ***
 
-### ~~CompressionInfo.db Not Implemented~~ - RESOLVED
+### CompressionInfo.db Writing — production writes NOT implemented (test-only, fail-closed)
 
-[Section titled “CompressionInfo.db Not Implemented - RESOLVED”](#compressioninfodb-not-implemented---resolved)
+[Section titled “CompressionInfo.db Writing — production writes NOT implemented (test-only, fail-closed)”](#compressioninfodb-writing--production-writes-not-implemented-test-only-fail-closed)
 
-**Status**: ✅ **RESOLVED** (M5.1) **Resolution**: Full compression support implemented in M5.1
+**Status**: ⚠️ Production write NOT implemented; READ/decompression fully supported (#1406)
 
-M5.0 produced only uncompressed SSTables. M5.1 implements full compression support via:
+CQLite’s production SSTable writer emits uncompressed Data.db only and never writes a CompressionInfo.db. The `CompressedDataWriter` / `CompressionInfoWriter` types are UNWIRED building blocks that synthesize compressed fixtures for the decompressing reader; configuring compressed production writing returns `Error::UnsupportedFormat`.
 
-* `CompressedDataWriter`: Chunk-based compression with LZ4/Snappy/Deflate/Zstd
-* `CompressionInfoWriter`: Compression metadata file generation
-* Trailing CRC32 checksums per chunk
-* Feature-gated compression algorithms
+The READ path fully supports all four algorithms (LZ4, Snappy, Deflate, Zstd) — CQLite reads compressed Cassandra SSTables end-to-end.
 
-See “M5.1 Write Support Capabilities” section at the top of this document for details.
+See “M5.1 Write Support Capabilities” section at the top of this document for the exact fail-closed boundary.
 
-**Files Added**:
+**Files**:
 
-* `cqlite-core/src/storage/sstable/writer/compressed_data_writer.rs`
-* `cqlite-core/src/storage/sstable/writer/compression_info_writer.rs`
+* `cqlite-core/src/storage/sstable/writer/compressed_data_writer.rs` (test-only building block)
+* `cqlite-core/src/storage/sstable/writer/compression_info_writer.rs` (test-only building block)
 
 ***
 
@@ -6958,7 +6940,7 @@ See “M5.1 Write Support Capabilities” section at the top of this document fo
 
 * **M5.1 Write Support**: Feature-complete with documented trade-offs
 
-  * ✅ CompressionInfo.db: Full compression support (LZ4, Snappy, Deflate, Zstd)
+  * ⚠️ CompressionInfo.db: production writer emits uncompressed Data.db only; compressed-write infra is test-only/fail-closed (#1406). READ/decompression fully supports LZ4, Snappy, Deflate, Zstd
   * ✅ Collection serialization: Frozen and non-frozen collections
   * ✅ Static columns: Extended flags format with EXTENDED\_IS\_STATIC
   * ✅ Composite partition keys: Multi-component encoding
@@ -6974,7 +6956,7 @@ See “M5.1 Write Support Capabilities” section at the top of this document fo
   * ✅ Issue #220: UDT (User-Defined Type) support
   * ✅ Issue #221: Complex cell flag handling for non-frozen collections
 
-* **Milestone achieved**: M5.1 completion (write support with compression, collections, static columns)
+* **Milestone achieved**: M5.1 completion (uncompressed SSTable write support, collections, static columns). Compression is read-only — the production writer emits uncompressed Data.db; compressed-write infra is test-only/fail-closed (#1406)
 
 ***
 
@@ -13655,16 +13637,6 @@ SSTables **written** by CQLite emit `promoted_index_length = 0`, so within-parti
 
 Reading SSTables written by Cassandra is unaffected — this only concerns the CQLite write path. The promoted-index writer and BTI-based O(log n) seeks are on the [roadmap](/cqlite/user-docs/roadmap/) (epic [#751](https://github.com/pmcfadin/cqlite/issues/751)).
 
-## Format coverage
-
-[Section titled “Format coverage”](#format-coverage)
-
-### BTI (`da`) SSTables are rejected, not read
-
-[Section titled “BTI (da) SSTables are rejected, not read”](#bti-da-sstables-are-rejected-not-read)
-
-BTI/trie-index SSTables (`da-*-bti-*`, opt-in in Cassandra 5.0) are detected and rejected with a clear error rather than misread. This is by design until the dedicated BTI read path lands — see [Limitations](/cqlite/user-docs/limitations/) and roadmap item [#660](https://github.com/pmcfadin/cqlite/issues/660).
-
 ## Reporting something new
 
 [Section titled “Reporting something new”](#reporting-something-new)
@@ -13695,14 +13667,14 @@ For the exhaustive engineering detail, see [Appendix F: Known Limitations](/cqli
 
 [Section titled “Format support”](#format-support)
 
-| SSTable format                                      | Cassandra versions   | CQLite support                                                          |
-| --------------------------------------------------- | -------------------- | ----------------------------------------------------------------------- |
-| `nb-*-big-*` (BIG format)                           | Cassandra 5.0+       | **Full** — all 33 test tables pass                                      |
-| `oa-*-big-*` (BIG format)                           | Cassandra 5.0        | **Full** — 6 `oa` fixture tables pass `sstabledump` parity              |
-| `md-*`                                              | Cassandra 4.0–4.1    | **Not supported**                                                       |
-| `mc-*`                                              | Cassandra 3.11       | **Not supported**                                                       |
-| `la-*`, `ma-*`                                      | Cassandra 3.x        | **Not supported**                                                       |
-| `da-*-bti-*` / BTI format (Partitions.db / Rows.db) | Cassandra 5.0 opt-in | **Not supported** — detected and rejected with a clear error; see below |
+| SSTable format                                      | Cassandra versions   | CQLite support                                                  |
+| --------------------------------------------------- | -------------------- | --------------------------------------------------------------- |
+| `nb-*-big-*` (BIG format)                           | Cassandra 5.0+       | **Full** — all 33 test tables pass                              |
+| `oa-*-big-*` (BIG format)                           | Cassandra 5.0        | **Full** — 6 `oa` fixture tables pass `sstabledump` parity      |
+| `md-*`                                              | Cassandra 4.0–4.1    | **Not supported**                                               |
+| `mc-*`                                              | Cassandra 3.11       | **Not supported**                                               |
+| `la-*`, `ma-*`                                      | Cassandra 3.x        | **Not supported**                                               |
+| `da-*-bti-*` / BTI format (Partitions.db / Rows.db) | Cassandra 5.0 opt-in | **Full** — read end-to-end and canonical `da` write since v0.12 |
 
 CQLite targets Cassandra 5.0 exclusively. If you need older formats, export your data with Cassandra’s `sstabledump` tool first.
 
@@ -13716,9 +13688,9 @@ CQLite targets Cassandra 5.0 exclusively. If you need older formats, export your
 
 The default Cassandra 5.0 index format (`nb-*-big-Index.db` / `nb-*-big-Summary.db`) is fully supported. All 33 test tables in the CQLite test corpus use this format and pass validation against `sstabledump` output.
 
-### BTI format (`da`) — not yet supported, fails cleanly
+### BTI format (`da`) — supported (read + write)
 
-[Section titled “BTI format (da) — not yet supported, fails cleanly”](#bti-format-da--not-yet-supported-fails-cleanly)
+[Section titled “BTI format (da) — supported (read + write)”](#bti-format-da--supported-read--write)
 
 BTI (trie-based index) is an opt-in feature in Cassandra 5.0, enabled with `selected_format: bti` in `cassandra.yaml`. It produces `da-*-bti-*` SSTables with `Partitions.db` and `Rows.db` trie indexes instead of the standard `Index.db` / `Summary.db`.
 
@@ -13759,13 +13731,11 @@ CQLite M5.1 introduces SSTable write support. The implementation is correct and 
 * Narrow partitions (less than 100 rows): no impact
 * Wide partitions (10 000+ rows): O(n) linear scan within the partition
 
-### BTI format writing not implemented
+### BTI format writing supported
 
-[Section titled “BTI format writing not implemented”](#bti-format-writing-not-implemented)
+[Section titled “BTI format writing supported”](#bti-format-writing-supported)
 
-The write engine produces BIG-format SSTables only. BTI-format writing (`Partitions.db`, `Rows.db`) is not implemented.
-
-**Rationale**: BTI is opt-in in Cassandra 5.0 and covers less than 5% of production deployments. BIG format covers all current use cases.
+Since v0.12, the write engine emits canonical `da`-format (BTI) SSTables with `Partitions.db` / `Rows.db` trie indexes in addition to the default BIG format (#872). BIG remains the default write target.
 
 ### IndexWriter memory buffering
 
@@ -13827,7 +13797,7 @@ or use Cassandra’s `sstabledump` to export to JSON and reimport.
 
 [Section titled “BTI format (trie index)”](#bti-format-trie-index)
 
-If your Cassandra cluster is configured with `selected_format: bti`, CQLite detects the `da-*-bti-*` SSTables and rejects them with a clear error rather than misreading them. Convert them to the default BIG format first — run `nodetool upgradesstables` after switching `selected_format` back to `big`, or export with `sstabledump`. End-to-end BTI read support is on the [roadmap](/cqlite/user-docs/roadmap/) ([#660](https://github.com/pmcfadin/cqlite/issues/660)).
+If your Cassandra cluster is configured with `selected_format: bti`, CQLite reads the `da-*-bti-*` SSTables end-to-end via a dedicated trie-walk read path (#897) and can also write canonical `da`-format SSTables (#872) — no conversion needed.
 
 ### Wide partitions
 

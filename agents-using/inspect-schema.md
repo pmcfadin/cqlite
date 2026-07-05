@@ -131,5 +131,4 @@ CREATE TABLE IF NOT EXISTS simple_table (
 |---------|-------|-----|
 | Zero rows returned | Data.db file missing (only JSONL goldens present) | Run `bash test-data/scripts/fetch-datasets.sh` |
 | `Schema not found` error | Wrong table name in query, or wrong `--schema` file | Check schema file for exact table name |
-| WARN about BTI format on stderr | `da-` prefixed SSTables in the directory | BTI format not supported; only `nb-` SSTables are readable |
 | Empty `ls` output | Dataset not fetched | Run `bash test-data/scripts/fetch-datasets.sh` |
