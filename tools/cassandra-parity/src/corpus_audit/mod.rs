@@ -260,7 +260,7 @@ pub fn check_component_changes(
         .map(|p| refs::component_identity(p))
         .collect();
 
-    for (path, _expected_sha) in &expected.components {
+    for path in expected.components.keys() {
         // `system*` keyspaces are inherently run-dependent; exclude them from the
         // expected inventory entirely (issue #2009).
         if refs::is_system_keyspace_path(path) {
