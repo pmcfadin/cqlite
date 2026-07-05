@@ -336,7 +336,7 @@ run_test_suite() {
     # Test 2: Basic SELECT with CSV output (simple_table)
     run_test \
         "test_select_csv_simple" \
-        "SELECT * FROM test_basic.simple_table LIMIT 3" \
+        "SELECT * FROM test_basic.simple_table ORDER BY id LIMIT 3" \
         "csv" \
         0 \
         "${SNAPSHOTS_DIR}/select_simple_csv.golden"
@@ -344,7 +344,7 @@ run_test_suite() {
     # Test 3: Basic SELECT with table output (simple_table)
     run_test \
         "test_select_table_simple" \
-        "SELECT * FROM test_basic.simple_table LIMIT 2" \
+        "SELECT * FROM test_basic.simple_table ORDER BY id LIMIT 2" \
         "table" \
         0 \
         "${SNAPSHOTS_DIR}/select_simple_table.golden"
@@ -352,7 +352,7 @@ run_test_suite() {
     # Test 4: Column projection
     run_test \
         "test_select_columns" \
-        "SELECT id, name FROM test_basic.simple_table LIMIT 3" \
+        "SELECT id, name FROM test_basic.simple_table ORDER BY id LIMIT 3" \
         "json" \
         0 \
         "${SNAPSHOTS_DIR}/select_columns_json.golden"
@@ -372,7 +372,7 @@ run_test_suite() {
 
         run_test \
             "test_select_collections" \
-            "SELECT * FROM test_collections.collection_table LIMIT 2" \
+            "SELECT * FROM test_collections.collection_table ORDER BY id LIMIT 2" \
             "json" \
             0 \
             "${SNAPSHOTS_DIR}/select_collections_json.golden"
