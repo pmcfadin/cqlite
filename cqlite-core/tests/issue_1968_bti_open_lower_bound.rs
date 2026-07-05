@@ -45,6 +45,12 @@ const QUALIFIED_TABLE: &str = "test_da.wide_table";
 const KEYSPACE_FILTER: &str = "/test_da/";
 /// Clustering rows per partition in the fixture (ck = 0..299).
 const PARTITION_ROW_COUNT: usize = 300;
+/// The `ck` of the FIRST STORED row-index separator for pk=2. The block covering
+/// ck 0..(this-1) is the implicit first block with no trie entry; the first trie
+/// separator sits at this value. Matches the other tests' documented layout (the
+/// implicit first block is ck 0..7). Used to pin the equality-boundary case where a
+/// closed lower bound lands EXACTLY on this separator.
+const FIRST_SEPARATOR_CK: i32 = 8;
 
 /// Serialize the tests: the work counters and access-path probe are process-global,
 /// so two of these running concurrently would clobber each other's `reset()` / read.
@@ -285,6 +291,86 @@ async fn closed_lower_bound_below_first_separator_keeps_first_block() {
         "Issue #1968: pk=2 AND ck = 0 must return exactly ck=0 (implicit first block)",
     );
     assert_eq!(path0, Some(AccessPath::ClusteringSlice));
+}
+
+// ---------------------------------------------------------------------------
+// 3b. EQUALITY BOUNDARY: a closed lower bound EQUAL to the first stored separator
+//     (`ck >= FIRST_SEPARATOR_CK`) must select the first STORED block, NOT the
+//     implicit first block. This pins Cassandra `RowIndexReader.separatorFloor`
+//     semantics and guards against a naive `<=` regression.
+//
+//     WHY `<` (STRICT), not `<=`, is the correct comparison against `entries[0].sep`:
+//     a key EQUAL to the first separator belongs to the first STORED block (the
+//     separator is the block's INCLUSIVE start — Cassandra floors a lookup key to
+//     the greatest separator <= key). The implicit first block holds only keys
+//     STRICTLY BELOW the first separator, so it must be included ONLY when the
+//     range's physical-lower bound sorts STRICTLY below `entries[0].sep`. For a
+//     lower bound exactly equal to the separator (`ck >= 8`, sep = 8), `8 < 8` is
+//     false, so the implicit block is correctly EXCLUDED from the decode.
+//
+//     A naive `<=` (`8 <= 8` true) would wrongly re-include the implicit block for
+//     `ck >= 8`. The returned rows stay ck=8..=19 either way (the `ck >= 8` row
+//     predicate filters out ck 0..7 post-decode), so this test asserts the DECODE
+//     WORK: `ck >= 8` (equal to the separator, implicit block excluded) must decode
+//     strictly FEWER rows than `ck >= 2` (below the separator, implicit block
+//     included) over the same upper bound. Under a `<=` regression both would start
+//     at the partition body and decode the implicit block, making the counts equal —
+//     which this strict-`<` assertion catches.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn closed_lower_bound_equal_to_first_separator_excludes_implicit_block() {
+    let _g = PROBE_LOCK.lock().await;
+    let Some(db) = skip_or_db().await else {
+        return;
+    };
+    let Some(all_cks) = db_and_pk2(&db).await else {
+        return;
+    };
+
+    let sep = FIRST_SEPARATOR_CK;
+    let upper = 20;
+
+    // Primary correctness: `ck >= sep AND ck < 20` returns exactly ck=sep..=19.
+    let expected: Vec<i32> = all_cks
+        .iter()
+        .copied()
+        .filter(|c| (sep..upper).contains(c))
+        .collect();
+    let (returned, decoded_at_sep, path) =
+        run_slice(&db, &format!("pk = 2 AND ck >= {sep} AND ck < {upper}")).await;
+    assert_eq!(
+        returned, expected,
+        "Issue #1968: pk=2 AND ck in [{sep},{upper}) must return ck={sep}..=19 (a lower bound EQUAL \
+         to the first separator lands on the first STORED block; the implicit block ck 0..{} is \
+         correctly EXCLUDED)",
+        sep - 1,
+    );
+    assert_eq!(
+        path,
+        Some(AccessPath::ClusteringSlice),
+        "Issue #1968: `ck >= {sep} AND ck < {upper}` must engage the clustering slice",
+    );
+
+    // Regression guard on DECODE WORK: a lower bound BELOW the first separator
+    // (`ck >= 2`) includes the implicit first block, so it must decode STRICTLY MORE
+    // rows than the equality-boundary slice (`ck >= sep`), which excludes it. A naive
+    // `<=` against `entries[0].sep` would re-include the implicit block for `ck >= sep`
+    // and flatten this inequality.
+    let (_below, decoded_below_sep, _p) =
+        run_slice(&db, &format!("pk = 2 AND ck >= 2 AND ck < {upper}")).await;
+    assert!(
+        decoded_at_sep > 0 && decoded_below_sep > 0,
+        "Issue #1968: both equality-boundary and below-separator slices must decode some rows \
+         (at_sep={decoded_at_sep}, below_sep={decoded_below_sep})",
+    );
+    assert!(
+        decoded_at_sep < decoded_below_sep,
+        "Issue #1968: `ck >= {sep}` (equal to the first separator, implicit block EXCLUDED) must \
+         decode strictly fewer rows ({decoded_at_sep}) than `ck >= 2` (below the separator, \
+         implicit block INCLUDED, {decoded_below_sep}); equal counts would mean a naive `<=` \
+         wrongly re-included the implicit block at the equality boundary",
+    );
 }
 
 // ---------------------------------------------------------------------------
