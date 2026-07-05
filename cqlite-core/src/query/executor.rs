@@ -90,14 +90,6 @@ impl QueryExecutor {
         let is_create_table =
             plan.steps.is_empty() && plan.table.is_some() && plan.estimated_rows == 0;
 
-        #[cfg(debug_assertions)]
-        eprintln!(
-            "DEBUG: Plan steps: {:?}, has_insert_step: {}, is_create_table: {}",
-            plan.steps.iter().map(|s| &s.step_type).collect::<Vec<_>>(),
-            has_insert_step,
-            is_create_table
-        );
-
         let result = match plan.plan_type {
             super::planner::PlanType::PointLookup => self.execute_point_lookup(plan).await,
             super::planner::PlanType::IndexScan => self.execute_index_scan(plan).await,
@@ -127,12 +119,6 @@ impl QueryExecutor {
 
         let mut query_result = result?;
         let elapsed_ms = start_time.elapsed().as_millis() as u64;
-
-        #[cfg(debug_assertions)]
-        eprintln!(
-            "DEBUG: Final result before metadata update - rows_affected: {}",
-            query_result.rows_affected
-        );
 
         query_result.execution_time_ms = elapsed_ms;
         query_result.metadata.plan_info = Some(super::result::PlanInfo {
@@ -346,12 +332,6 @@ impl QueryExecutor {
             .ok_or_else(|| Error::query_execution("No lookup condition found"))?;
 
         let row_key = self.condition_to_row_key(lookup_condition)?;
-
-        #[cfg(debug_assertions)]
-        eprintln!(
-            "DEBUG: SELECT point lookup using row key: {:?}",
-            std::str::from_utf8(row_key.as_bytes()).unwrap_or("<invalid-utf8>")
-        );
 
         let mut rows = Vec::new();
         if let Some(row_data) = self.storage.get(table, &row_key).await? {
@@ -789,9 +769,6 @@ impl QueryExecutor {
                 continue;
             }
 
-            #[cfg(debug_assertions)]
-            eprintln!("DEBUG: INSERT step conditions: {:?}", step.conditions);
-
             // Default key uses the running insert index; an explicit "id"
             // condition wins so SELECT and INSERT share the same key shape.
             let mut key_value = format!("test_key_{}", inserted_count);
@@ -803,9 +780,6 @@ impl QueryExecutor {
                     }
                 }
             }
-
-            #[cfg(debug_assertions)]
-            eprintln!("DEBUG: Using row key: {}", key_value);
 
             let row_key = RowKey::new(key_value.into_bytes());
 
@@ -829,12 +803,6 @@ impl QueryExecutor {
 
             self.storage.put(table_id, row_key, row_value).await?;
             inserted_count += 1;
-
-            #[cfg(debug_assertions)]
-            eprintln!(
-                "DEBUG: execute_insert_operation - stored row {} in table {}",
-                inserted_count, table_id
-            );
         }
 
         // No explicit INSERT steps — emit a single placeholder row to keep
@@ -850,12 +818,6 @@ impl QueryExecutor {
                 .await?;
             inserted_count = 1;
         }
-
-        #[cfg(debug_assertions)]
-        eprintln!(
-            "DEBUG: execute_insert_operation called, returning rows_affected: {}",
-            inserted_count
-        );
 
         Ok(QueryResult {
             rows: vec![],

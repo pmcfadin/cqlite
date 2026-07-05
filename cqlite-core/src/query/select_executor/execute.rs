@@ -617,7 +617,12 @@ impl SelectExecutor {
                 // Projection and predicate filtering are pushed into SSTableScan above.
                 ExecutionStep::Project { .. } | ExecutionStep::Filter { .. } => {}
                 _ => {
-                    log::warn!("Streaming execution: skipping unsupported step {:?}", step);
+                    // Data-safety (issue #1694): log the step's variant name only,
+                    // never its contents (which carry query literals/values).
+                    log::warn!(
+                        "Streaming execution: skipping unsupported step {}",
+                        step.variant_name()
+                    );
                 }
             }
         }
@@ -657,10 +662,17 @@ impl SelectExecutor {
         // wrong. Reject (Cassandra-style) before scanning/evaluating.
         validate_token_predicates(predicates, schema_opt)?;
 
-        log::info!(
-            "Executing SSTableScan: table=\"{}\", predicates={:?}, include_cell_metadata={}",
+        // Data-safety (issue #1694): log the SHAPE of the scan — predicate count
+        // and the constrained column names — never the predicate literals/values.
+        log::debug!(
+            "Executing SSTableScan: table=\"{}\", predicates={} on [{}], include_cell_metadata={}",
             table,
-            predicates,
+            predicates.len(),
+            predicates
+                .iter()
+                .map(|p| p.column.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
             context.projection_flags.include_cell_metadata,
         );
 

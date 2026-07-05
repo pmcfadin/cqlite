@@ -423,11 +423,12 @@ impl Database {
     pub async fn execute(&self, sql: &str) -> Result<query::result::QueryResult> {
         let result = self.query.execute(sql).await;
 
+        // Data-safety (issue #1694): log the SHAPE (rows affected), never the SQL
+        // text — a query string carries user data (WHERE-clause literals).
         #[cfg(debug_assertions)]
         if let Ok(ref query_result) = result {
             log::debug!(
-                "Database::execute('{}') returning rows_affected: {}",
-                sql,
+                "Database::execute returning rows_affected: {}",
                 query_result.rows_affected
             );
         }
