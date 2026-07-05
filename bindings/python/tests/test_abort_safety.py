@@ -16,12 +16,18 @@ the child exited 0 while emitting a terminal sentinel on stdout.
 DEBUG vs RELEASE (important):
   Under the normal debug/test profile used by the agent gate, ``[profile.dev]``
   is ``panic = "unwind"``, so PyO3 converts any core panic into a catchable
-  Python exception and the child survives — these tests therefore PASS
-  trivially in debug and do NOT by themselves prove the release guarantee.
-  The release-profile proof (flipping the release panic strategy so the same
-  child survives a *release* wheel) lands with issue #1440.  This harness is
-  the machinery that #1440 turns green on a release build; it FAILS on an
-  unmodified ``main`` release wheel because the abort kills the child.
+  Python exception and the child survives.  The host must ALSO survive on a
+  ``panic = "abort"`` RELEASE wheel (CI builds with ``--release``).  Two
+  independent mechanisms deliver that survival, and the harness accepts either:
+    * the abort boundary contains a panic (the ``panic=unwind`` firewall from
+      issue #1440 turns a would-be SIGABRT into a caught exception), OR
+    * the parser never panics in the first place — parser hardening (issue
+      #1632 guards + the #1614 fuzz mandate to return ``Ok``/``Err`` on
+      arbitrary bytes) makes the corrupt-input path return a clean
+      ``cqlite.CqliteError`` so there is no panic to abort on.
+  Because of the hardening, the corrupt uncompressed path now survives
+  GRACEFULLY on both strategies; a genuine post-entry abort on an abort wheel,
+  if one still occurs, is accepted as an xfail (see the uncompressed test).
 
 Two fixture flavors are exercised (see ``corrupt_fixture``):
   * ``compressed`` — the exact issue recipe (mutate the Snappy-compressed
@@ -29,14 +35,18 @@ Two fixture flavors are exercised (see ``corrupt_fixture``):
     entry points survive today in BOTH debug and release. This proves graceful
     containment on the compressed path.
   * ``uncompressed`` — additionally drops ``CompressionInfo.db`` so the corrupt
-    bytes reach the raw VInt/row parser, which is where the audited
-    corrupt-input panics live. ``execute``/``streaming`` panic here: caught by
-    PyO3 under debug (survives, green) but SIGABRT under an unmodified ``main``
-    RELEASE wheel (this is the DoD "fails on release" proof); #1440 turns it
-    green on release too. ``parquet`` is intentionally NOT run on this flavor:
-    it triggers a SEPARATE non-panic HANG (infinite loop / pathological
-    allocation) that ``panic=unwind`` does not fix — reported for follow-up,
-    out of scope for this harness.
+    bytes reach the raw VInt/row parser. This path historically PANICKED on
+    corrupt input, so on a ``panic=abort`` RELEASE wheel it SIGABRTed the child.
+    Parser hardening (issue #1632 recursion/bounds/capacity guards, and the
+    #1614 fuzz mandate that the parser return ``Ok``/``Err`` and never panic on
+    arbitrary bytes) has since made ``execute``/``streaming`` return a clean
+    ``cqlite.CqliteError`` instead of panicking — so the child now GRACEFULLY
+    SURVIVES on BOTH panic strategies. That graceful containment is the correct
+    outcome and is an ACCEPTED PASS; a genuine post-entry abort, if one still
+    occurs on an abort wheel, is accepted as an xfail. ``parquet`` is
+    intentionally NOT run on this flavor: it triggers a SEPARATE non-panic HANG
+    (infinite loop / pathological allocation) — reported for follow-up, out of
+    scope for this harness.
 
 These tests actually run and assert (no silent skip) whenever the dataset is
 present; a present-but-empty source Data.db FAILs loudly per issue #1437.
@@ -237,43 +247,46 @@ def test_compressed_corrupt_sstable_survives(mode, entry):
     _assert_drove_entry_point(result, entry, ctx)
 
 
-# The uncompressed flavor reaches the raw-parser panic. parquet is excluded
+# The uncompressed flavor reaches the raw VInt/row parser. parquet is excluded
 # because it hangs there (a separate non-panic bug); see the module docstring.
 #
-# CONDITIONAL STRICT XFAIL, applied IMPERATIVELY (issue #1437, roborev fix): the
-# expected-abort logic is keyed on the ACTUAL compiled panic strategy of the
-# loaded wheel and scoped to JUST the child-survival (rc==0) assertion -- it is
-# deliberately NOT a function-level ``@pytest.mark.xfail`` decorator. A decorator
-# marker masks EVERY exception in the test's setup AND call phase (verified:
-# both a fixture failure and a call-phase ``pytest.fail`` are swallowed as
-# XFAIL), which would let a fail-closed dataset gate (missing datasets under
-# ``CQLITE_REQUIRE_FIXTURES=1``) be silently recorded as an expected xfail
-# instead of the hard failure it must be. By running ``_require_source_or_skip``
-# first (unmasked) and only then branching on the compiled panic strategy, a
-# strict fixture failure stays a real error/skip while the rc-survival keeps
-# strict xfail semantics:
-#   * debug/unwind, or a post-#1440 release=unwind wheel (`_PANIC_ABORT` False):
-#     no xfail branch -> hard-assert the interpreter SURVIVES (rc==0) and PASS.
-#     Preserves the gate's teeth: a boundary regression under unwind is a FAIL.
-#   * release=abort, pre-#1440 (`_PANIC_ABORT` True): a dead child (rc!=0) is the
-#     expected abort -> ``pytest.xfail`` (green); an unexpectedly SURVIVING child
-#     (rc==0) is a hard FAIL, mirroring ``strict=True`` XPASS.
-# Once #1440 flips the release profile to `panic = "unwind"`,
-# `_built_with_panic_abort()` goes False on every wheel, the abort branch never
-# fires, and these cases hard-assert again -- self-cleaning, no follow-up edit.
+# GRACEFUL CONTAINMENT IS THE EXPECTED OUTCOME (issue #1973). This path once
+# PANICKED on corrupt input, so on a ``panic=abort`` release wheel the child
+# SIGABRTed. Parser hardening (issue #1632 recursion/bounds/capacity guards +
+# the #1614 fuzz mandate that the parser return ``Ok``/``Err`` and never panic
+# on arbitrary bytes) made the corrupt-input path return a clean
+# ``cqlite.CqliteError`` instead of panicking. So the child now SURVIVES on
+# BOTH panic strategies, and a surviving child that drove corrupt input through
+# the entry point is an ACCEPTED PASS.
+#
+# The gate keeps its teeth, and the abort branch keeps its guards, applied
+# IMPERATIVELY (not a function-level ``@pytest.mark.xfail`` decorator, which
+# would mask setup-phase failures — e.g. a fail-closed dataset gate under
+# ``CQLITE_REQUIRE_FIXTURES=1`` — as an expected xfail). ``_require_source_or_skip``
+# runs FIRST and UNMASKED, then the outcome is judged:
+#   * ANY wheel, child SURVIVES (rc==0): hard-assert it drove corrupt input
+#     through the entry point and reached a catchable terminal sentinel -> PASS.
+#     This is the hardened-parser (or contained-panic) success path.
+#   * unwind wheel (`_PANIC_ABORT` False), rc!=0: the boundary regressed under a
+#     build that must contain panics -> hard FAIL.
+#   * abort wheel (`_PANIC_ABORT` True), rc!=0: accepted only as a genuine
+#     post-entry abort. A non-zero exit AFTER reaching the entry point is the
+#     tolerated xfail (a still-panicking parser path SIGABRTing on abort); a
+#     non-zero exit that never reached the entry point is a setup/open/lookup
+#     failure and hard-FAILs (never masquerades as the expected abort).
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("entry", ("execute", "streaming"))
 def test_uncompressed_corrupt_sstable_panic_is_contained(mode, entry):
-    """The raw parse path panics on corrupt input; the boundary must contain it.
+    """Corrupt raw-parse input must never kill the host; graceful survival wins.
 
-    RELEASE-vs-DEBUG: this ASSERTS the interpreter survives (rc==0). Under the
-    debug/test profile (``panic=unwind``) PyO3 converts the core panic into a
-    catchable ``PanicException`` and the child exits 0 -> PASS. Under an
-    unmodified ``main`` RELEASE wheel (``panic=abort``) the same panic raises
-    SIGABRT, the child dies with a signal, ``returncode != 0`` -> this case is
-    an expected (strict) xfail. That expected abort is the point (issue #1437
-    DoD): it proves the harness exercises a real abort. Issue #1440 flips the
-    release panic strategy so this goes green on release too.
+    The hardened parser (issue #1632 guards + the #1614 fuzz mandate) returns a
+    clean ``cqlite.CqliteError`` on this corrupt input rather than panicking, so
+    the child SURVIVES (rc==0) and reaches a catchable terminal sentinel on
+    BOTH the debug/unwind and the release/abort wheel -> PASS. If a still-
+    panicking path ever SIGABRTs on an abort wheel (rc!=0 AFTER reaching the
+    entry point) that is accepted as an xfail; issue #1440's panic=unwind
+    firewall would contain even that. A non-zero exit that never reached the
+    entry point is a setup/open/lookup failure and hard-FAILs.
     """
     # Dataset/schema gating runs FIRST and UNMASKED: a strict fail-closed
     # dataset failure here is a hard error, never swallowed as an expected xfail.
@@ -283,37 +296,33 @@ def test_uncompressed_corrupt_sstable_panic_is_contained(mode, entry):
         f"mode={mode} entry={entry} rc={result.returncode}\n"
         f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
     )
-    if _PANIC_ABORT:
-        # release=abort, pre-#1440. Strict xfail scoped to the rc assertion only.
-        if result.returncode != 0:
-            # A non-zero exit is the EXPECTED abort ONLY if it happened AFTER the
-            # child opened the DB and reached the entry-point call. A non-zero
-            # exit lacking the ``OPENED``/``CALLING <entry>`` ordering sentinels
-            # is a setup/import/open/API-lookup failure that never drove corrupt
-            # input through the boundary -- that must hard-FAIL, never masquerade
-            # as the expected abort (false-green on the release harness).
-            if not _reached_entry_point_call(result, entry):
-                pytest.fail(
-                    "child exited non-zero WITHOUT reaching the entry point "
-                    f"(missing OPENED/CALLING {entry}): a setup/open/lookup "
-                    "failure, not the expected post-call abort.\n"
-                    f"{ctx}",
-                    pytrace=False,
-                )
-            pytest.xfail(
-                "corrupt uncompressed SSTable aborts the interpreter until "
-                f"#1440 lands panic=unwind (#1437)\n{ctx}"
+    if result.returncode != 0:
+        # A non-zero exit lacking the ``OPENED``/``CALLING <entry>`` ordering
+        # sentinels is a setup/import/open/API-lookup failure that never drove
+        # corrupt input through the boundary -- always a hard FAIL, never a
+        # false-green.
+        if not _reached_entry_point_call(result, entry):
+            pytest.fail(
+                "child exited non-zero WITHOUT reaching the entry point "
+                f"(missing OPENED/CALLING {entry}): a setup/open/lookup "
+                "failure, not a post-call abort.\n"
+                f"{ctx}",
+                pytrace=False,
             )
-        # Child unexpectedly survived on an abort wheel -> strict XPASS = FAIL.
+        if _PANIC_ABORT:
+            # abort wheel: a genuine post-entry abort is tolerated as an xfail.
+            pytest.xfail(
+                "corrupt uncompressed SSTable still aborts the interpreter on a "
+                f"panic=abort wheel; #1440's panic=unwind firewall contains it "
+                f"(#1437/#1973)\n{ctx}"
+            )
+        # unwind wheel: the boundary MUST contain the panic and the child MUST live.
         pytest.fail(
-            "child survived corrupt input on a panic=abort wheel: the abort "
-            "boundary unexpectedly held. Remove the abort xfail branch (#1440 "
-            f"may have landed early).\n{ctx}",
+            "child process aborted on corrupt input under a DEBUG/unwind build "
+            f"-- the boundary regressed.\n{ctx}",
             pytrace=False,
         )
-    # unwind build: the boundary MUST contain the panic and the child MUST live.
-    assert result.returncode == 0, (
-        "child process aborted on corrupt input under a DEBUG/unwind build -- "
-        f"the boundary regressed.\n{ctx}"
-    )
+    # rc==0: the child SURVIVED. Prove it actually drove corrupt input through
+    # the entry point and reached a catchable terminal sentinel (never a silent
+    # setup-skip). This is the correct, hardened-parser outcome on ANY wheel.
     _assert_drove_entry_point(result, entry, ctx)
