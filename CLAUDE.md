@@ -6,7 +6,7 @@ Guidance for Claude Code when working with CQLite.
 
 CQLite is a Rust library for local Apache Cassandra SSTable access. It reads Cassandra 5.0 data files without cluster dependencies.
 
-**Status**: v0.12.0 (Jun 2026) - Core reading (M1), CLI (M2), Output Writers (M3), Python & Node.js Bindings (M4), and Write Support + STCS compaction (M5) are complete. v0.12.0 adds byte-for-byte compaction parity vs Apache Cassandra, an Arrow Flight + Trino connector, canonical BTI (`da`) write/read, CDC-style delta-export, and `WRITETIME()`/`TTL()` in `SELECT`. Next: M6 (WASM bindings), M7 (perf validation + v1.0).
+**Status**: v0.13.0 (Jul 2026) - the performance release. Core reading (M1), CLI (M2), Output Writers (M3), Python & Node.js Bindings (M4), and Write Support + STCS compaction (M5) are complete. v0.13.0 adds read-path constant-factor speedups (Epic E, C2), Node bindings throughput, byte-bounded result budgets (`Error::ResultTooLarge`), explicit `Database::refresh()`, and no-heuristics correctness fixes, on top of v0.12.0's byte-for-byte compaction parity vs Apache Cassandra, Arrow Flight + Trino connector, canonical BTI (`da`) write/read, CDC-style delta-export, and `WRITETIME()`/`TTL()` in `SELECT`. Next: M6 (WASM bindings), M7 (perf validation + v1.0).
 
 ## Documentation
 
