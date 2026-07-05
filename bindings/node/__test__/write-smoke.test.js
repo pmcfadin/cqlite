@@ -111,7 +111,22 @@ describe('release-artifact write smoke (Issue #1460)', () => {
       if (db) {
         await db.close();
       }
-      fs.rmSync(tmp, { recursive: true, force: true });
+      // Windows can briefly retain the WAL file handle after close(), so an
+      // immediate rmdir races the OS handle release and throws ENOTEMPTY/EBUSY
+      // (issue #2026). Retry the removal, and never let temp-dir cleanup red the
+      // release smoke — cleanup is not the assertion, and the OS reaps tmp.
+      try {
+        fs.rmSync(tmp, {
+          recursive: true,
+          force: true,
+          maxRetries: 10,
+          retryDelay: 100,
+        });
+      } catch (err) {
+        console.warn(
+          `write-smoke: temp cleanup incomplete for ${tmp}: ${err.message}`
+        );
+      }
     }
   });
 });
