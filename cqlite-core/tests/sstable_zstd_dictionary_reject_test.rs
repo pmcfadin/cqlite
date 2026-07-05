@@ -27,9 +27,10 @@
 //! chunk would contain), lays it out in the Cassandra `Data.db` chunk framing
 //! (`[compressed_payload][4-byte BE CRC32]`), and drives it through the shipped
 //! `ChunkDecompressor` — the same decode path a real SSTable read uses. It
-//! proves CQLite rejects the frame (never decodes it to the original bytes) and
-//! characterizes the CURRENT error, whose class is a KNOWN LIMITATION tracked in
-//! the production-hardening issue referenced below.
+//! proves CQLite rejects the frame (never decodes it to the original bytes) and,
+//! since #1414, that the reader detects the dictionary from the AUTHORITATIVE
+//! zstd frame header (nonzero `Dictionary_ID`) and fails closed with a typed
+//! `Error::UnsupportedFormat` that names the feature — distinct from corruption.
 //!
 //! ## Feature gate
 //!
@@ -151,6 +152,36 @@ fn zstd_single_chunk_info(plaintext_len: usize) -> CompressionInfo {
     }
 }
 
+/// Independently recover the nonzero `Dictionary_ID` from a raw zstd frame, so
+/// the reader's reported ID can be cross-checked without trusting the reader's
+/// own parser. Mirrors the zstd frame spec (RFC 8878 §3.1): 4-byte magic
+/// `0xFD2FB528` (LE) + `Frame_Header_Descriptor` (low two bits = 0/1/2/4 ID
+/// bytes; bit 5 = Single_Segment_flag; a Window_Descriptor byte follows the
+/// descriptor iff that flag is 0) + little-endian `Dictionary_ID`.
+fn expected_dictionary_id(frame: &[u8]) -> Option<u32> {
+    if frame.len() < 5 || frame[0..4] != [0x28, 0xB5, 0x2F, 0xFD] {
+        return None;
+    }
+    let fhd = frame[4];
+    let did_size = match fhd & 0x03 {
+        0 => return None,
+        1 => 1usize,
+        2 => 2usize,
+        _ => 4usize,
+    };
+    let single_segment = (fhd & 0x20) != 0;
+    let start = 5 + usize::from(!single_segment);
+    let end = start + did_size;
+    if frame.len() < end {
+        return None;
+    }
+    let mut id = 0u32;
+    for (i, &b) in frame[start..end].iter().enumerate() {
+        id |= u32::from(b) << (8 * i);
+    }
+    (id != 0).then_some(id)
+}
+
 /// Deterministic, structured sample corpus for dictionary training. Repeated
 /// shared substrings give `zdict` enough signal to train on tiny inputs.
 fn training_corpus() -> Vec<Vec<u8>> {
@@ -235,43 +266,57 @@ fn zstd_dictionary_frame_rejected_fail_closed() {
         !matches!(err, Error::Corruption(_)),
         "dictionary rejection must not be misclassified as Error::Corruption; got: {err}"
     );
-    assert!(
-        matches!(err, Error::InvalidFormat(_) | Error::UnsupportedFormat(_)),
-        "dictionary rejection must be a typed format error; got: {err}"
-    );
 
-    // KNOWN LIMITATION: see issue #1414. The *desired* end state (issue #1399
-    // acceptance criterion 2) is `Error::UnsupportedFormat` explicitly NAMING the
-    // dictionary feature (e.g. "zstd dictionary compression (Dictionary_ID=N) is
-    // not supported"). Today CQLite fails closed but surfaces the generic
-    // `Error::InvalidFormat("Zstd decompression failed …")` — it does not detect
-    // or name the dictionary. This test asserts the CURRENT fail-closed behavior;
-    // #1414 tracks upgrading the message/class to a typed dictionary rejection
-    // (reader) and a dedicated verify class (see the verify oracle below).
-    let msg = err.to_string();
+    // #1414: the reader now detects the dictionary from the AUTHORITATIVE zstd
+    // frame header (a nonzero Dictionary_ID) and fails closed with a typed
+    // `Error::UnsupportedFormat` that NAMES the feature — BEFORE attempting a
+    // plain decode. It must NOT be the generic `Error::InvalidFormat("Zstd
+    // decompression failed …")` a plain-decode failure produced.
     assert!(
-        msg.to_ascii_lowercase().contains("zstd"),
-        "rejection message should identify the zstd path; got: {msg}"
+        matches!(err, Error::UnsupportedFormat(_)),
+        "dictionary rejection must be Error::UnsupportedFormat naming the feature (#1414); got: {err}"
+    );
+    let msg = err.to_string();
+    let lower = msg.to_ascii_lowercase();
+    assert!(
+        lower.contains("zstd") && lower.contains("dictionary"),
+        "rejection message must name the zstd dictionary feature; got: {msg}"
+    );
+    assert!(
+        lower.contains("dictionary_id="),
+        "rejection message must name the authoritative Dictionary_ID from the frame header; got: {msg}"
+    );
+    // The dictionary ID named in the message must be the actual ID encoded in the
+    // frame header — proof the reader parsed the real frame, not a placeholder.
+    // Independently recover it here from the raw frame bytes (magic 0xFD2FB528 LE
+    // + Frame_Header_Descriptor: low two bits = Dictionary_ID size 1/2/4, bit 5 =
+    // Single_Segment_flag gating the Window_Descriptor byte).
+    let expected_id = expected_dictionary_id(&dict_frame)
+        .expect("trained-dictionary frame must carry a nonzero Dictionary_ID");
+    assert!(
+        msg.contains(&format!("Dictionary_ID={expected_id}")),
+        "message must name the frame's real Dictionary_ID {expected_id}; got: {msg}"
+    );
+    // Not a checksum/CRC finding: the inline chunk CRC over the compressed bytes
+    // is valid — the dictionary, not corruption, is why the frame is undecodable.
+    assert!(
+        !lower.contains("crc") && !lower.contains("checksum") && !lower.contains("digest"),
+        "dictionary rejection must not be a CRC/checksum/digest failure; got: {msg}"
     );
 }
 
 #[test]
-#[ignore = "expected typed rejection; blocked on #1414 — the full-scan stitch path currently wraps zstd-dictionary decompression failures as Error::Corruption. Enable when #1414 lands the typed UnsupportedFormat rejection."]
 fn zstd_dictionary_sstable_rejected_via_reader_fixture() {
     // AC#1/#2 oracle: a real commissioned Cassandra zstd+dictionary SSTable,
     // opened via the reader/query path, must fail closed (typed rejection, no
     // rows). Fixture-gated: SKIP clean, hard-FAIL under CQLITE_REQUIRE_FIXTURES=1.
     //
-    // IGNORED pending #1414 (mirrors the #1397 ignored-expected-behavior
-    // precedent). The strict assertions below encode the TARGET end state —
-    // a typed InvalidFormat/UnsupportedFormat rejection naming the
-    // zstd/dictionary decompression path, explicitly excluding CRC/checksum
-    // and never Corruption, never rows. That is NOT today's behavior: the
-    // current full-scan stitch path wraps a dictionary decode failure as
-    // `Error::Corruption`, so with the fixture present this oracle would fail.
-    // Returning a typed format error from the reader path is #1414's scope (a
-    // production change, out of scope for this test-only issue). This test is a
-    // ready-to-enable regression: the #1414 fixer just removes the #[ignore].
+    // #1414 landed the typed rejection: the reader detects the dictionary from the
+    // authoritative zstd frame header (nonzero Dictionary_ID) and fails closed with
+    // `Error::UnsupportedFormat` naming the feature, BEFORE a plain decode. The
+    // assertions below encode that end state — a typed UnsupportedFormat rejection
+    // naming the zstd/dictionary path, explicitly excluding CRC/checksum, never
+    // Corruption, never rows.
     let data_db = datasets_root().join(format!("{DICT_FIXTURE_REL}-Data.db"));
     if !data_db.exists() {
         let msg = format!(
@@ -319,34 +364,26 @@ fn zstd_dictionary_sstable_rejected_via_reader_fixture() {
                         rows.len()
                     ),
                     Err(e) => {
-                        // Must be the SPECIFIC zstd-dictionary decompression
-                        // rejection — never data Corruption, never a panic/partial
-                        // decode, and never an unrelated open/metadata error.
-                        //
-                        // KNOWN LIMITATION: see #1414. The target end state is a
-                        // clean `Error::UnsupportedFormat` explicitly naming zstd
-                        // dictionary compression. Today CQLite fails closed on a
-                        // real trained-dict frame as `Error::InvalidFormat` whose
-                        // message names the zstd decompression path
-                        // (chunk_decompressor.rs:461); this assertion tracks that
-                        // CURRENT behavior until #1414 upgrades the class.
+                        // Must be the SPECIFIC zstd-dictionary rejection — a typed
+                        // `Error::UnsupportedFormat` naming the feature, never data
+                        // Corruption, never a panic/partial decode, and never an
+                        // unrelated open/metadata error (#1414).
                         assert!(
                             !matches!(e, Error::Corruption(_)),
                             "scan rejection of a dictionary SSTable must not be \
                              misclassified as Corruption; got: {e}"
                         );
                         assert!(
-                            matches!(e, Error::InvalidFormat(_)),
-                            "scan rejection must be the InvalidFormat zstd-dictionary \
-                             decompression class (see #1414); got: {e}"
+                            matches!(e, Error::UnsupportedFormat(_)),
+                            "scan rejection must be the typed UnsupportedFormat \
+                             zstd-dictionary rejection (#1414); got: {e}"
                         );
                         let msg = e.to_string().to_ascii_lowercase();
-                        // Must name the zstd/dictionary decompression path
-                        // (chunk_decompressor.rs:461) …
+                        // Must name the zstd dictionary feature …
                         assert!(
-                            msg.contains("zstd") || msg.contains("dictionary"),
-                            "scan rejection message must name the zstd/dictionary \
-                             decompression path (chunk_decompressor.rs:461); got: {e}"
+                            msg.contains("zstd") && msg.contains("dictionary"),
+                            "scan rejection message must name the zstd dictionary \
+                             feature (#1414); got: {e}"
                         );
                         // … and must NOT be an inline-CRC / chunk-checksum failure:
                         // the compressed-byte CRC is valid; the dictionary, not
@@ -440,16 +477,20 @@ fn zstd_dictionary_reader_fails_closed_current_behavior() {
                 rows.len()
             ),
             Err(e) => {
-                // CURRENT behavior: accept EITHER Corruption OR InvalidFormat. The
-                // stitch path wraps dict-decode failures as Corruption today; #1414
-                // will upgrade this to a typed InvalidFormat/UnsupportedFormat
-                // rejection (asserted by the ignored sibling test). We intentionally
-                // do NOT require the typed variant here — only that the reader
-                // hard-errors and returns no rows.
+                // SAFETY-PROPERTY oracle: the reader must fail closed and return no
+                // rows. Accept any of the fail-closed typed variants — #1414 makes
+                // the reader-level rejection a typed `UnsupportedFormat` (asserted
+                // precisely by the sibling `..._via_reader_fixture`), but this test
+                // guards only that the scan hard-errors, so it stays green whether
+                // the stitch path surfaces UnsupportedFormat, InvalidFormat, or
+                // (legacy) Corruption.
                 assert!(
-                    matches!(e, Error::Corruption(_) | Error::InvalidFormat(_)),
-                    "scan of a dictionary SSTable must fail closed as Corruption or \
-                     InvalidFormat (current behavior; #1414 tracks the typed upgrade); got: {e}"
+                    matches!(
+                        e,
+                        Error::Corruption(_) | Error::InvalidFormat(_) | Error::UnsupportedFormat(_)
+                    ),
+                    "scan of a dictionary SSTable must fail closed (Corruption, \
+                     InvalidFormat, or UnsupportedFormat); got: {e}"
                 );
             }
         }
@@ -508,39 +549,43 @@ fn zstd_dictionary_verify_reports_unsupported_not_checksum_fixture() {
             "dictionary rejection must not be reported as a Digest/checksum mismatch: {:?}",
             report.findings
         );
-        // Must report the SPECIFIC decompression-path rejection on the data
-        // component — not ONLY unrelated setup/metadata findings. The verify
-        // FULL row scan decompresses every Data.db chunk; the dict frame fails
-        // there and `classify_scan_error` maps the "Zstd decompression failed"
-        // message onto `VerifyErrorClass::ChunkDecompressionError` on `Data.db`.
-        //
-        // KNOWN LIMITATION: see #1414. `ChunkDecompressionError` is shared with
-        // truncation/bit-flip; the target end state is an explicit
-        // unsupported-compression verify class. This assertion tracks the CURRENT
-        // behavior until #1414 upgrades it.
+        // Must report the SPECIFIC unsupported-feature rejection on the data
+        // component — not ONLY unrelated setup/metadata findings, and NOT the
+        // truncation/bit-flip `ChunkDecompressionError` class. The verify FULL row
+        // scan decompresses every Data.db chunk; the dict frame fails closed with
+        // `Error::UnsupportedFormat`, and `classify_scan_error` maps it onto the
+        // dedicated `VerifyErrorClass::UnsupportedCompressionFeature` (#1414) —
+        // distinct from checksum/corruption.
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|f| f.class != VerifyErrorClass::ChunkDecompressionError),
+            "dictionary rejection must NOT be reported as the truncation/bit-flip \
+             ChunkDecompressionError class (#1414): {:?}",
+            report.findings
+        );
         assert!(
             report.findings.iter().any(|f| {
-                if f.class != VerifyErrorClass::ChunkDecompressionError {
+                if f.class != VerifyErrorClass::UnsupportedCompressionFeature {
                     return false;
                 }
                 if f.component != "Data.db" && f.component != "CompressionInfo.db" {
                     return false;
                 }
                 let detail = f.detail.to_ascii_lowercase();
-                // Must name the decompression path …
-                let names_decompression = detail.contains("zstd")
-                    || detail.contains("dictionary")
-                    || detail.contains("decompress");
+                // Must name the zstd dictionary feature …
+                let names_dictionary = detail.contains("zstd") && detail.contains("dictionary");
                 // … and must NOT be an inline-CRC / chunk-checksum finding: the
-                // compressed-byte CRC is valid, so a CRC-flavored decompression
-                // finding must not be allowed to satisfy this oracle.
+                // compressed-byte CRC is valid, so a CRC-flavored finding must not
+                // be allowed to satisfy this oracle.
                 let is_crc = detail.contains("crc")
                     || detail.contains("checksum")
                     || detail.contains("digest");
-                names_decompression && !is_crc
+                names_dictionary && !is_crc
             }),
-            "verify must report the dictionary rejection as a ChunkDecompressionError on \
-             Data.db/CompressionInfo.db whose detail names the zstd/dictionary/decompress path \
+            "verify must report the dictionary rejection as an UnsupportedCompressionFeature on \
+             Data.db/CompressionInfo.db whose detail names the zstd dictionary feature \
              (see #1414) — not a CRC/checksum/digest finding and not only unrelated \
              setup/metadata findings: {:?}",
             report.findings
