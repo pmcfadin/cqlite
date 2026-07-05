@@ -257,10 +257,10 @@ impl SchemaAwareReader {
         let column_comparators = schema.get_all_comparators()?;
 
         Ok(ParsingContext {
-            schema: schema.clone(),
-            partition_comparators,
-            clustering_comparators,
-            column_comparators,
+            schema: std::sync::Arc::new(schema.clone()),
+            partition_comparators: std::sync::Arc::new(partition_comparators),
+            clustering_comparators: std::sync::Arc::new(clustering_comparators),
+            column_comparators: std::sync::Arc::new(column_comparators),
         })
     }
 
@@ -552,7 +552,7 @@ impl SchemaAwareReader {
         let mut key_bytes = Vec::new();
         for (value, comparator) in partition_key
             .iter()
-            .zip(&self.context.partition_comparators)
+            .zip(self.context.partition_comparators.iter())
         {
             let serialized = self.serialize_value_with_comparator(value, comparator)?;
             key_bytes.extend_from_slice(&serialized);
@@ -560,7 +560,7 @@ impl SchemaAwareReader {
 
         // Serialize clustering key if provided
         if let Some(ck) = clustering_key {
-            for (value, comparator) in ck.iter().zip(&self.context.clustering_comparators) {
+            for (value, comparator) in ck.iter().zip(self.context.clustering_comparators.iter()) {
                 let serialized = self.serialize_value_with_comparator(value, comparator)?;
                 key_bytes.extend_from_slice(&serialized);
             }
@@ -584,7 +584,7 @@ impl SchemaAwareReader {
         let mut total_length = 0;
         for (value, comparator) in partition_values
             .iter()
-            .zip(&self.context.partition_comparators)
+            .zip(self.context.partition_comparators.iter())
         {
             let serialized = self.serialize_value_with_comparator(value, comparator)?;
             total_length += serialized.len();
@@ -705,14 +705,20 @@ mod tests {
         // Build the context directly from the schema (create_parsing_context
         // ignores the registry) so the test needs no async registry/platform.
         let context = ParsingContext {
-            partition_comparators: schema
-                .get_partition_key_comparators()
-                .expect("partition comparators"),
-            clustering_comparators: schema
-                .get_clustering_key_comparators()
-                .expect("clustering comparators"),
-            column_comparators: schema.get_all_comparators().expect("column comparators"),
-            schema,
+            partition_comparators: std::sync::Arc::new(
+                schema
+                    .get_partition_key_comparators()
+                    .expect("partition comparators"),
+            ),
+            clustering_comparators: std::sync::Arc::new(
+                schema
+                    .get_clustering_key_comparators()
+                    .expect("clustering comparators"),
+            ),
+            column_comparators: std::sync::Arc::new(
+                schema.get_all_comparators().expect("column comparators"),
+            ),
+            schema: std::sync::Arc::new(schema),
         };
         let parser = SchemaParser::new(context.clone()).expect("schema parser");
         (context, parser)

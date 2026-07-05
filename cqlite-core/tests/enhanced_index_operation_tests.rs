@@ -127,12 +127,12 @@ async fn test_sstable_reader_index_operations(reader: &SSTableReader) {
         dropped_columns: HashMap::new(),
     };
 
-    let parsing_context = ParsingContext {
-        schema: simple_schema,
-        partition_comparators: vec![ComparatorType::Text],
-        clustering_comparators: vec![],
-        column_comparators: HashMap::new(),
-    };
+    let parsing_context = ParsingContext::from_owned(
+        simple_schema,
+        vec![ComparatorType::Text],
+        vec![],
+        HashMap::new(),
+    );
     let _schema_lookup = reader
         .lookup_partition_with_schema_context(schema_test_key, &parsing_context)
         .await;

@@ -33,10 +33,10 @@ mod tests {
         };
 
         ParsingContext {
-            schema,
-            partition_comparators,
-            clustering_comparators: vec![],
-            column_comparators: HashMap::new(),
+            schema: std::sync::Arc::new(schema),
+            partition_comparators: std::sync::Arc::new(partition_comparators),
+            clustering_comparators: std::sync::Arc::new(vec![]),
+            column_comparators: std::sync::Arc::new(HashMap::new()),
         }
     }
 

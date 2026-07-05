@@ -82,12 +82,12 @@ mod parser_tests {
             ComparatorType::List(Box::new(ComparatorType::Text)),
         );
 
-        ParsingContext {
+        ParsingContext::from_owned(
             schema,
-            partition_comparators: vec![ComparatorType::Int],
-            clustering_comparators: vec![ComparatorType::BigInt],
+            vec![ComparatorType::Int],
+            vec![ComparatorType::BigInt],
             column_comparators,
-        }
+        )
     }
 
     #[test]
@@ -198,12 +198,12 @@ mod parser_tests {
         column_comparators.insert("id".to_string(), ComparatorType::Int);
         column_comparators.insert("region".to_string(), ComparatorType::Text);
 
-        let context = ParsingContext {
+        let context = ParsingContext::from_owned(
             schema,
-            partition_comparators: vec![ComparatorType::Int, ComparatorType::Text],
-            clustering_comparators: vec![],
+            vec![ComparatorType::Int, ComparatorType::Text],
+            vec![],
             column_comparators,
-        };
+        );
 
         let parser = SchemaParser::new(context).unwrap();
 
@@ -235,12 +235,7 @@ mod parser_tests {
         let mut column_comparators = HashMap::new();
         column_comparators.insert("user_id".to_string(), ComparatorType::Uuid);
 
-        let context = ParsingContext {
-            schema,
-            partition_comparators: vec![],
-            clustering_comparators: vec![],
-            column_comparators,
-        };
+        let context = ParsingContext::from_owned(schema, vec![], vec![], column_comparators);
 
         let parser = SchemaParser::new(context).unwrap();
 
@@ -275,12 +270,7 @@ mod parser_tests {
         let mut column_comparators = HashMap::new();
         column_comparators.insert("nested".to_string(), map_comparator);
 
-        let context = ParsingContext {
-            schema,
-            partition_comparators: vec![],
-            clustering_comparators: vec![],
-            column_comparators,
-        };
+        let context = ParsingContext::from_owned(schema, vec![], vec![], column_comparators);
 
         let parser = SchemaParser::new(context).unwrap();
 
@@ -318,12 +308,7 @@ mod parser_tests {
         let mut column_comparators = HashMap::new();
         column_comparators.insert("frozen_set".to_string(), frozen_comparator);
 
-        let context = ParsingContext {
-            schema,
-            partition_comparators: vec![],
-            clustering_comparators: vec![],
-            column_comparators,
-        };
+        let context = ParsingContext::from_owned(schema, vec![], vec![], column_comparators);
 
         let parser = SchemaParser::new(context).unwrap();
 
@@ -369,8 +354,8 @@ mod parser_tests {
 
     #[test]
     fn test_incomplete_context_rejected() {
-        let context = ParsingContext {
-            schema: TableSchema {
+        let context = ParsingContext::from_owned(
+            TableSchema {
                 keyspace: "test".to_string(),
                 table: "test".to_string(),
                 partition_keys: vec![],
@@ -379,10 +364,10 @@ mod parser_tests {
                 comments: HashMap::new(),
                 dropped_columns: HashMap::new(),
             },
-            partition_comparators: vec![],
-            clustering_comparators: vec![],
-            column_comparators: HashMap::new(),
-        };
+            vec![],
+            vec![],
+            HashMap::new(),
+        );
 
         let result = SchemaParser::new(context);
         assert!(result.is_err());
@@ -472,12 +457,12 @@ mod parser_tests {
         column_comparators.insert("sequence".to_string(), ComparatorType::BigInt);
         column_comparators.insert("value".to_string(), ComparatorType::Float);
 
-        let context = ParsingContext {
+        let context = ParsingContext::from_owned(
             schema,
-            partition_comparators: vec![ComparatorType::Text, ComparatorType::Int],
-            clustering_comparators: vec![ComparatorType::Timestamp, ComparatorType::BigInt],
+            vec![ComparatorType::Text, ComparatorType::Int],
+            vec![ComparatorType::Timestamp, ComparatorType::BigInt],
             column_comparators,
-        };
+        );
 
         let parser = SchemaParser::new(context).unwrap();
 
@@ -543,12 +528,12 @@ mod parser_tests {
         );
         column_comparators.insert("user_profiles".to_string(), frozen_list_comparator);
 
-        let context = ParsingContext {
+        let context = ParsingContext::from_owned(
             schema,
-            partition_comparators: vec![ComparatorType::Int],
-            clustering_comparators: vec![ComparatorType::BigInt],
+            vec![ComparatorType::Int],
+            vec![ComparatorType::BigInt],
             column_comparators,
-        };
+        );
 
         let parser = SchemaParser::new(context).unwrap();
 

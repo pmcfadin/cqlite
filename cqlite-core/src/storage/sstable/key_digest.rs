@@ -46,7 +46,7 @@ impl KeyDigestComputer {
         // Step 1: Parse partition key bytes into typed values
         let partition_values = self.parse_partition_key_bytes(
             partition_key_bytes,
-            &parsing_context.partition_comparators,
+            parsing_context.partition_comparators.as_slice(),
         )?;
 
         // Step 2: Create byte-comparable encoding for the composite key
@@ -303,10 +303,10 @@ mod tests {
         };
 
         ParsingContext {
-            schema,
-            partition_comparators,
-            clustering_comparators: vec![],
-            column_comparators: HashMap::new(),
+            schema: std::sync::Arc::new(schema),
+            partition_comparators: std::sync::Arc::new(partition_comparators),
+            clustering_comparators: std::sync::Arc::new(vec![]),
+            column_comparators: std::sync::Arc::new(HashMap::new()),
         }
     }
 

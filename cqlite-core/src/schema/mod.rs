@@ -22,6 +22,53 @@ mod udt_registry;
 
 pub use udt_registry::UdtRegistry;
 
+/// Test-only work counters for the derived-comparator caching path (issue #1709).
+///
+/// Compiled out entirely in non-test builds (`#[cfg(test)]`), so they impose
+/// zero cost on production code. They let the registry unit tests assert that,
+/// after a schema is registered, [`registry::SchemaRegistry::get_parsing_context`]
+/// performs ZERO `CqlType::parse` calls and ZERO `TableSchema` deep clones on the
+/// request path (both were `O(columns)` / `4` per call before caching).
+///
+/// The counters are **thread-local**, not global atomics: with the default
+/// `#[tokio::test]` current-thread runtime, a test's awaited async work runs on
+/// the test's own OS thread, so each test observes only its own parse/clone work
+/// and is immune to pollution from tests running concurrently on other threads.
+#[cfg(test)]
+pub(crate) mod work_counters {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Incremented once per [`super::CqlType::parse`] invocation.
+        static PARSE_CALLS: Cell<usize> = const { Cell::new(0) };
+        /// Incremented once per `TableSchema` deep clone performed by
+        /// [`super::registry::SchemaRegistry::get_schema`].
+        static SCHEMA_CLONES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn record_parse_call() {
+        PARSE_CALLS.with(|c| c.set(c.get() + 1));
+    }
+
+    pub(crate) fn record_schema_clone() {
+        SCHEMA_CLONES.with(|c| c.set(c.get() + 1));
+    }
+
+    /// Reset both counters to zero (call before the measured request path).
+    pub(crate) fn reset() {
+        PARSE_CALLS.with(|c| c.set(0));
+        SCHEMA_CLONES.with(|c| c.set(0));
+    }
+
+    pub(crate) fn parse_calls() -> usize {
+        PARSE_CALLS.with(|c| c.get())
+    }
+
+    pub(crate) fn schema_clones() -> usize {
+        SCHEMA_CLONES.with(|c| c.get())
+    }
+}
+
 // Re-export aggregator components
 pub use aggregator::{
     AggregatorConfig, LoadErrorType, LoadResult, SchemaAggregator, SchemaLoadError,
