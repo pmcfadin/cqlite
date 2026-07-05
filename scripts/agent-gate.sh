@@ -111,7 +111,8 @@
 #                      the machine-wide full-gate concurrency cap queues at N,
 #                      exempts --lite, and releases a slot on SIGKILL (uses the
 #                      gate's hermetic stub mode, never real gate work).
-#   minimal-build      cargo build -p cqlite-core --no-default-features --features all-compression
+#   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
+#                      -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
 #   file-size          campsite-rule ratchet (epic #1116 / #1135): lists changed
 #                      .rs files over threshold (800 src / 1500 test, total lines)
@@ -2317,7 +2318,8 @@ run_file_size
 #     delivery-telemetry + tooling-tests (pure shell/stdlib tool tests; the lone
 #     CQLITE_DATASETS_ROOT in test_agent_gate_summary.sh *sets an empty* root to
 #     exercise the preflight, it consumes no real data), minimal-build (a cargo
-#     build, no tests run), and format-compat. format-compat is excluded (#1175
+#     build plus a compile-only `cargo test --lib --no-run`; no tests run, no
+#     data — issue #1978), and format-compat. format-compat is excluded (#1175
 #     finding 1): its sole target (cargo test -p format-compatibility-tests,
 #     tests/format-compatibility) is pure in-memory byte-level format-compliance
 #     assertions with hardcoded vectors — it reads no CQLITE_DATASETS_ROOT and no
@@ -2455,7 +2457,15 @@ dispatch_component() {
     parity-report) run_parity_report ;;
     binding-unwind-profile) run_component binding-unwind-profile bash "$REPO_ROOT/scripts/tests/test_binding_unwind_profile.sh" ;;
     tooling-tests) run_tooling_tests ;;
-    minimal-build) run_component minimal-build cargo build --package cqlite-core --no-default-features --features all-compression ;;
+    minimal-build) run_component minimal-build bash -c '
+  cargo build --package cqlite-core --no-default-features --features all-compression &&
+  # Test-compile the minimal lane (issue #1978): the CI "All Compression Build &
+  # Test" job runs `cargo test --no-default-features --features=all-compression
+  # --lib`, which compiles the test targets. A plain `cargo build` never does, so
+  # a `#[cfg(test)]` module referencing a write-support-gated item (e.g.
+  # storage::serialization) silently escaped this gate. Compile-only (--no-run)
+  # keeps it fast; no data fixtures needed for a compile check.
+  cargo test --package cqlite-core --no-default-features --features all-compression --lib --no-run' ;;
     smoke) run_component smoke bash -c '
   cargo build --package cqlite-cli --bin cqlite &&
   CQLITE_CLI="${CARGO_TARGET_DIR:-$PWD/target}/debug/cqlite" bash test-data/scripts/smoke-test-all-tables.sh' ;;
