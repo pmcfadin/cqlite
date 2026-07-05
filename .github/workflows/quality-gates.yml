@@ -40,7 +40,7 @@ jobs:
           fetch-depth: 0
 
       - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.88.0  # pinned to rust-toolchain.toml (issue #1990)
         with:
           components: rustfmt, clippy
 

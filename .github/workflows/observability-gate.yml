@@ -104,9 +104,9 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Setup Rust toolchain
+        # No `toolchain:` input: setup-rust-toolchain reads rust-toolchain.toml
+        # (pinned 1.88.0) instead of overriding it with stable (issue #1990).
         uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
 
       - name: Cache Cargo registry
         uses: actions/cache@v5

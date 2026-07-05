@@ -123,13 +123,14 @@ jobs:
       # This lane RUNS the gate's clippy + fmt components, so it needs a
       # toolchain that has clippy + rustfmt. Follow the quality-gates.yml
       # pattern (the other lane that runs clippy): request the components
-      # explicitly on @stable rather than the node-ci/python-ci
+      # explicitly rather than the node-ci/python-ci
       # `rustup component remove clippy` normalization (#1217), which is for
-      # build-only lanes that must NOT reinstall clippy-preview. cargo/clippy
-      # invocations still honor rust-toolchain.toml (pins 1.88.0 w/ clippy +
-      # rustfmt), matching how the gate runs locally.
+      # build-only lanes that must NOT reinstall clippy-preview. Pinned to
+      # rust-toolchain.toml (1.88.0) via the @1.88.0 ref so the nightly deep
+      # gate matches how the gate runs locally instead of tracking latest
+      # stable (issue #1990; dtolnay/rust-toolchain cannot read the pin file).
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: rustfmt, clippy
 
