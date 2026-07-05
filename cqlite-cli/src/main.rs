@@ -1,11 +1,8 @@
 // TODO(M3): Address 105 clippy warnings in cqlite-cli
 // See Issue #204 for tracking
 #![allow(clippy::all)]
-// Raise the query/recursion depth limit above the default 128 (issue #1990).
-// The bin target compiles its own copy of the module tree, so it needs the same
-// attribute as lib.rs. rustc >= 1.96 overflows the default depth computing the
-// async-future layout of `tui::events::run_tui<B>()`; benign on 1.88.0. See the
-// lib.rs comment for the full root-cause note.
+// Raise the query/recursion depth limit (issue #1990); the bin compiles its own
+// module tree so it needs this too. Root-cause note: see lib.rs.
 #![recursion_limit = "256"]
 
 use anyhow::Result;
