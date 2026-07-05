@@ -1,0 +1,57 @@
+name: "Canary: future Rust (latest stable) — advisory"
+
+# ADVISORY / NON-REQUIRED forward-compatibility canary (issue #1990).
+#
+# Every other product-validation workflow pins the repository toolchain
+# (rust-toolchain.toml = 1.88.0) so CI matches local builds. THIS is the single
+# deliberate exception: it builds the workspace on the *latest* `stable` rustc to
+# surface forward-incompatibilities (new trait-solver depth limits, deprecations,
+# tightened lints) BEFORE we bump the pin — exactly the class of drift that broke
+# the compaction-parity and coverage lanes in #1990.
+#
+# It runs on a weekly schedule and on manual dispatch ONLY — never on
+# `pull_request`/`push` — so it can never become a PR-required check. A red run
+# here is an early-warning signal to investigate, not a merge blocker.
+on:
+  schedule:
+    # Mondays 07:00 UTC
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  future-rust-build:
+    name: build + clippy on latest stable (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+
+      # Intentionally tracks latest `stable` (overrides rust-toolchain.toml).
+      # This is the ONE lane allowed to do so; every other lane honors the pin.
+      - name: Setup latest stable Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Report toolchain (advisory context)
+        run: |
+          set -euo pipefail
+          rustc --version
+          cargo --version
+          echo "Pinned repo toolchain (rust-toolchain.toml):"
+          grep -E '^channel' rust-toolchain.toml || true
+
+      # Cheap: build + clippy only, no full test matrix. Mirrors the two build
+      # surfaces that drifted in #1990 (the workspace and the write-support CLI).
+      - name: Build workspace (default features)
+        run: cargo build --workspace
+
+      - name: Build cqlite-cli (write-support) — the #1990 red-lane build
+        run: cargo build --package cqlite-cli --features write-support
+
+      - name: Clippy (advisory — surfaces new lints/forward-incompat)
+        run: cargo clippy --workspace

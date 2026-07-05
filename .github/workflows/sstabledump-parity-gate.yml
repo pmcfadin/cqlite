@@ -101,9 +101,10 @@ jobs:
 
       - name: Setup Rust toolchain
         if: steps.scope.outputs.run_smoke == 'true'
+        # No `toolchain:` input: setup-rust-ci defaults to the pinned 1.88.0
+        # (matches rust-toolchain.toml) instead of stable (issue #1990).
         uses: ./.github/actions/setup-rust-ci
         with:
-          toolchain: stable
           cache-key: sstabledump-parity-smoke
 
       - name: Start dataset restore timer
@@ -295,9 +296,10 @@ jobs:
           fetch-depth: 0
 
       - name: Setup Rust toolchain
+        # No `toolchain:` input: setup-rust-ci defaults to the pinned 1.88.0
+        # (matches rust-toolchain.toml) instead of stable (issue #1990).
         uses: ./.github/actions/setup-rust-ci
         with:
-          toolchain: stable
           cache-key: sstabledump-parity-full
 
       - name: Start dataset restore timer

@@ -1,6 +1,9 @@
 // TODO(M3): Address 105 clippy warnings in cqlite-cli
 // See Issue #204 for tracking
 #![allow(clippy::all)]
+// Raise the query/recursion depth limit (issue #1990); the bin compiles its own
+// module tree so it needs this too. Root-cause note: see lib.rs.
+#![recursion_limit = "256"]
 
 use anyhow::Result;
 use clap::Parser;

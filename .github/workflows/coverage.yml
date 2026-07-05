@@ -42,8 +42,11 @@ jobs:
     steps:
     - uses: actions/checkout@v5
     
+    # Pin to the repo toolchain (rust-toolchain.toml = 1.88.0), issue #1990.
+    # dtolnay/rust-toolchain cannot read the pin file, so pin the version ref
+    # explicitly (bump alongside rust-toolchain.toml).
     - name: Setup Rust
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@1.88.0
       with:
         components: llvm-tools-preview
         
@@ -56,11 +59,19 @@ jobs:
           target/
         key: coverage-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
         
-    - name: Install tarpaulin
-      run: cargo install cargo-tarpaulin
-      
-    - name: Install llvm-cov (validation)
-      run: cargo install cargo-llvm-cov
+    # Install PREBUILT pinned binaries instead of `cargo install` from source
+    # (issue #1990). Source-building cargo-tarpaulin v0.37.0 fails on newer
+    # rustc; a prebuilt pinned binary avoids toolchain/edition drift breaking
+    # the install and runs against the pinned 1.88.0 toolchain.
+    - name: Install tarpaulin (prebuilt, pinned)
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-tarpaulin@0.37.0
+
+    - name: Install llvm-cov (validation, prebuilt, pinned)
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-llvm-cov@0.8.7
       
     - name: Restore datasets-v3 cache (same as ci.yml)
       uses: actions/cache/restore@v5

@@ -100,7 +100,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.88.0  # pinned to rust-toolchain.toml (issue #1990)
 
       - name: Cache Cargo build
         uses: Swatinem/rust-cache@v2

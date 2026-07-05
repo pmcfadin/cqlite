@@ -67,7 +67,7 @@ jobs:
           df -h / | tail -1
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.88.0  # pinned to rust-toolchain.toml (issue #1990)
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.10
@@ -205,7 +205,7 @@ jobs:
           df -h / | tail -1
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.88.0  # pinned to rust-toolchain.toml (issue #1990)
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
@@ -342,7 +342,7 @@ jobs:
           df -h / | tail -1
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.88.0  # pinned to rust-toolchain.toml (issue #1990)
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
@@ -499,7 +499,7 @@ jobs:
           df -h / | tail -1
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.88.0  # pinned to rust-toolchain.toml (issue #1990)
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.10
@@ -598,7 +598,7 @@ jobs:
           df -h / | tail -1
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.88.0  # pinned to rust-toolchain.toml (issue #1990)
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.10
@@ -655,7 +655,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.88.0  # pinned to rust-toolchain.toml (issue #1990)
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.10
@@ -713,7 +713,7 @@ jobs:
           df -h / | tail -1
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.88.0  # pinned to rust-toolchain.toml (issue #1990)
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.10
@@ -907,7 +907,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.88.0  # pinned to rust-toolchain.toml (issue #1990)
 
       - name: Run validation script
         env:
@@ -934,7 +934,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.88.0  # pinned to rust-toolchain.toml (issue #1990)
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.10

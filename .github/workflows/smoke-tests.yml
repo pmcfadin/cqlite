@@ -59,7 +59,7 @@ jobs:
         uses: actions/checkout@v5
 
       # Issue #1209/#1217: GitHub runner images ship a stable toolchain that
-      # already provides bin/cargo-clippy. The dtolnay/rust-toolchain@stable
+      # already provides bin/cargo-clippy. The dtolnay/rust-toolchain@1.88.0
       # action performs a rustup reconcile that can intermittently try to
       # (re)install the 'clippy-preview' component and fail with
       # "detected conflict: 'bin/cargo-clippy'". Remove the conflicting
@@ -73,7 +73,7 @@ jobs:
         run: rustup component remove clippy --toolchain stable 2>/dev/null || true
 
       - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.88.0  # pinned to rust-toolchain.toml (issue #1990)
 
       - name: Cache cargo dependencies
         uses: actions/cache@v5
