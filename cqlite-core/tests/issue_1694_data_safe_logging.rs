@@ -22,6 +22,10 @@
 
 /// A recognizable, otherwise-nonexistent value we plant in the WHERE clause. If
 /// it appears anywhere in captured logs, user data leaked.
+/// Only used by the cli-helpers-gated `where_clause_literal_is_never_logged`
+/// test; gate the const identically so default-feature builds don't see it as
+/// dead code under `-D warnings`.
+#[cfg(all(feature = "state_machine", feature = "cli-helpers"))]
 const SENTINEL: &str = "CQLITE_SENTINEL_1694_DO_NOT_LOG";
 
 /// Runtime source modules on the `Database::execute` SELECT path. They diagnose
