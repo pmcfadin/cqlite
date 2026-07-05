@@ -33,7 +33,11 @@ use crate::types::{ComparatorType, Value};
 
 /// Decode value bytes through decoder #1 (the `SSTableReader` method) using a
 /// `ComparatorType` directly (no type-string round-trip).
-fn decode_method(reader: &SSTableReader, comp: &ComparatorType, bytes: &[u8]) -> crate::Result<Value> {
+fn decode_method(
+    reader: &SSTableReader,
+    comp: &ComparatorType,
+    bytes: &[u8],
+) -> crate::Result<Value> {
     reader.parse_value_with_comparator(bytes, comp)
 }
 
@@ -85,8 +89,7 @@ async fn consolidation_tuple_i32_framing_method_eq_free() {
     push_i32_field(&mut bytes, b"hi");
     let comp = ComparatorType::Tuple(vec![ComparatorType::Int, ComparatorType::Text]);
 
-    let method = decode_method(&reader, &comp, &bytes)
-        .expect("decoder #1 decodes i32-BE tuple");
+    let method = decode_method(&reader, &comp, &bytes).expect("decoder #1 decodes i32-BE tuple");
     let free = decode_free(&bytes, &comp).expect("decoder #2 must decode i32-BE tuple after J2");
     assert_eq!(
         method,
