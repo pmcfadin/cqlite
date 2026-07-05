@@ -224,8 +224,11 @@ try:
             return {}
         return dict(zip(row.field_names, row.field_types))
 
-    # Discover and register all UDTs in this keyspace so the driver can
-    # serialize UDT values as dicts (the same approach used for test_oa.udt_table).
+    # Discover all UDTs in this keyspace and cache their authoritative field
+    # order from system_schema.types; build_udt_value() emits POSITIONAL TUPLES
+    # in that declared order, which is what prepared-statement UDT serialization
+    # requires (issue #1991). register_user_type(..., dict) only affects how the
+    # driver DESERIALIZES UDTs read back — inserts never bind dicts here.
     udt_fields_cache = {}
     try:
         udts_rs = session.execute(
@@ -243,14 +246,26 @@ try:
         print(f"  [udt] Could not discover/register UDTs: {udt_exc}", flush=True)
 
     def build_udt_value(type_name, depth=0):
-        """Construct a plain dict for a UDT, recursing for nested UDTs."""
-        if depth > 5:
-            return {}
+        """Construct a POSITIONAL TUPLE for a UDT (declared field order),
+        recursing for nested UDTs.
+
+        The value MUST be a tuple/sequence in field-declaration order, NOT a
+        dict: prepared-statement binary UDT serialization in cassandra-driver
+        (UserType.serialize_safe) reads fields positionally via `val[i]`, so a
+        dict raises `KeyError: 0` on the very first field and every row is
+        skipped (issue #1991 — a driver-version-independent contract; observed
+        with cassandra-driver 3.30.0 against cassandra:5.0.2). The unprepared
+        `%s` path used by test_oa/test_da accepts a dict via CQL-literal
+        encoding, but this generic path prepares its INSERTs, so it needs a
+        tuple. udt_fields_cache preserves schema field order (dict(zip(...))),
+        so iterating fields.values() yields fields in declared order.
+        """
         fields = udt_fields_cache.get(type_name.lower(), {})
-        result = {}
-        for fname, ftype in fields.items():
-            result[fname] = sample_val(ftype, depth=depth + 1)
-        return result
+        if depth > 5:
+            # Recursion guard: emit an all-null tuple of the correct arity
+            # (never reached by the current corpus, whose UDTs nest 1 level).
+            return tuple(None for _ in fields)
+        return tuple(sample_val(ftype, depth=depth + 1) for ftype in fields.values())
 
     def sample_val(ctype, depth=0):
         """Generate a value for any CQL type, including nested collections and UDTs."""
@@ -313,7 +328,8 @@ try:
         if bare == 'duration':
             return Duration(months=random.randint(0, 12), days=random.randint(0, 30),
                             nanoseconds=random.randint(0, 10**9))
-        # UDT: if the bare type name is a known UDT in this keyspace, build a dict
+        # UDT: if the bare type name is a known UDT in this keyspace, build a
+        # positional tuple in declared field order (issue #1991)
         if bare in udt_fields_cache:
             return build_udt_value(bare, depth=depth)
         # text, varchar, ascii, and anything unrecognized
@@ -337,12 +353,12 @@ try:
             print(f"  [skip] {tbl}: no partition key found", flush=True)
             continue
 
-        # Detect tables that have UDT columns; they are now handled by the
-        # generic path via build_udt_value() + registered dict UDTs above.
+        # Detect tables that have UDT columns; they are handled by the generic
+        # path via build_udt_value(), which emits positional tuples (issue #1991).
         all_types_list = [t for _, (_, t) in cols.items()]
         has_udt = any(has_udt_type(t) for t in all_types_list)
         if has_udt:
-            print(f"  [udt-table] {tbl}: UDT columns detected — using registered dict path", flush=True)
+            print(f"  [udt-table] {tbl}: UDT columns detected — using positional-tuple UDT path", flush=True)
 
         # Counter tables require UPDATE, not INSERT. Detect by checking if all
         # regular columns are of type 'counter'.
@@ -353,6 +369,7 @@ try:
 
         n_inserted = 0
         n_skipped = 0
+        first_tb = None  # full traceback of the first failed row (for an actionable abort)
 
         if is_counter_table:
             # Counter tables use UPDATE ... SET col = col + N WHERE pk_col = ?
@@ -370,6 +387,8 @@ try:
                     n_inserted += 1
                 except Exception as e:
                     n_skipped += 1
+                    if first_tb is None:
+                        first_tb = traceback.format_exc()
                     if n_skipped <= 3:
                         print(f"  [row-skip] {tbl}: {type(e).__name__}: {e}", flush=True)
         else:
@@ -388,11 +407,25 @@ try:
                     # Only skip type-incompatible individual rows (e.g. duration literals).
                     # Print every skip so failures are visible.
                     n_skipped += 1
+                    if first_tb is None:
+                        first_tb = traceback.format_exc()
                     if n_skipped <= 3:
                         print(f"  [row-skip] {tbl}: {type(e).__name__}: {e}", flush=True)
 
         if n_inserted == 0:
-            print(f"[ERROR] 0 rows inserted into {tbl} ({n_skipped} skipped) — aborting!", flush=True)
+            # Fail-closed, ACTIONABLE abort (issue #1991): a present table whose
+            # every insert failed is a hard error, never a silent skip. Name the
+            # offending table and print the FIRST row's full traceback so a
+            # future breakage (e.g. a cassandra-driver upgrade changing UDT/tuple
+            # representation) is diagnosable straight from the CI log, without a
+            # local Docker repro. sys.exit() here also stops before the next
+            # table, so one table's failure can't leave a misleading mid-matrix
+            # partially-regenerated state.
+            print(f"[ERROR] Table '$keyspace.{tbl}': 0 rows inserted ({n_skipped} attempts, all failed) — aborting keyspace regeneration.", flush=True)
+            print(f"[ERROR] Table '$keyspace.{tbl}': first-row failure traceback (fix this table's row-builder shape; see issue #1991):", flush=True)
+            if first_tb:
+                sys.stdout.write(first_tb)
+                sys.stdout.flush()
             sys.exit(1)
         print(f"  {tbl}: {n_inserted} rows inserted ({n_skipped} skipped)", flush=True)
         total_inserted += n_inserted
