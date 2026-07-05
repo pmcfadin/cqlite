@@ -2129,7 +2129,8 @@ mod tests {
         use std::io::Cursor;
 
         let plaintext =
-            b"cqlite|zstd|dictionary|row=verify|table=zstd_dictionary_table|value=payload-7".to_vec();
+            b"cqlite|zstd|dictionary|row=verify|table=zstd_dictionary_table|value=payload-7"
+                .to_vec();
         let samples: Vec<Vec<u8>> = (0..1024u32)
             .map(|i| format!("cqlite|zstd|dictionary|row={i}|value={}", i % 37).into_bytes())
             .collect();

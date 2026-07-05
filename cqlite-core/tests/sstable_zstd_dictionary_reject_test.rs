@@ -487,7 +487,9 @@ fn zstd_dictionary_reader_fails_closed_current_behavior() {
                 assert!(
                     matches!(
                         e,
-                        Error::Corruption(_) | Error::InvalidFormat(_) | Error::UnsupportedFormat(_)
+                        Error::Corruption(_)
+                            | Error::InvalidFormat(_)
+                            | Error::UnsupportedFormat(_)
                     ),
                     "scan of a dictionary SSTable must fail closed (Corruption, \
                      InvalidFormat, or UnsupportedFormat); got: {e}"

@@ -22,6 +22,8 @@ pub mod reader;
 pub mod summary_reader;
 pub mod version_gate;
 pub mod work_counters;
+/// Authoritative zstd frame-header parsing for dictionary detection (issue #1414).
+pub mod zstd_frame;
 pub use reader::SSTableReader;
 pub mod schema_aware_reader;
 pub use schema_aware_reader::SchemaAwareReader;
