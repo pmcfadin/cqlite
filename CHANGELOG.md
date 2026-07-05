@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.13.0] - 2026-07-05
+
+_The performance release._ Read-path constant-factor wins (Epic E, C2), Node
+bindings throughput, and byte-bounded result budgets, on top of v0.12.0's
+byte-for-byte compaction parity — plus no-heuristics correctness fixes.
+
+### Known Issues
+
+- **Node.js `Test (windows-latest)` CI leg** is failing and is **waived** for the
+  v0.13.0 release (best-effort, not release-gated) — tracked in [#2007](https://github.com/pmcfadin/cqlite/issues/2007).
+- **Coverage Gate `(enforced)` (90%) leg** is not green and is **waived** for the
+  v0.13.0 release; restoration is post-0.13 — tracked in [#2022](https://github.com/pmcfadin/cqlite/issues/2022).
+
 ### Added
 
 - Typed inner-UDT decode for frozen-UDT elements inside frozen collections (#1340, PR #1960)
@@ -75,10 +88,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-<!-- DRAFT (release-prep): curated from the merge log since v0.12.0; owner to
-     verify/trim wording before the release commit. See
-     docs/development/release-0.13-checklist.md. -->
-
 - **No-heuristics: removed blob-decode byte-pattern guessing.** The raw-decode
   path no longer infers a value's type from its byte pattern; blobs that happened
   to look like other types are returned faithfully as blobs, per the no-heuristics
@@ -101,9 +110,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Surface chunk-CRC corruption on point lookups instead of silently proceeding (#1411, PR #1777)
 
 ### Performance
-
-<!-- DRAFT (release-prep): this release's headline theme is read-path + bindings
-     performance. Owner to confirm framing before the release commit. -->
 
 - **Read-path constant-factor bundle (Epic E):** query-engine hot-path cleanups
   (schema `Arc`, single projection, cached sort keys, plan cache, GROUP BY hash;

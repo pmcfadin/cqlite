@@ -16,7 +16,7 @@
   <a href="https://cassandra.apache.org"><img src="https://img.shields.io/badge/cassandra-5.0+-green.svg" alt="Cassandra"></a>
 </p>
 
-> **Status**: v0.12.0 — Core reading, CLI, output writers, Python & Node.js bindings, and write support are production-ready, now with **byte-for-byte compaction parity against Apache Cassandra**, an Arrow Flight + Trino connector, canonical BTI (`da`) write/read, and CDC-style delta export. See [CHANGELOG.md](CHANGELOG.md).
+> **Status**: v0.13.0 — the performance release. Core reading, CLI, output writers, Python & Node.js bindings, and write support are production-ready, now with **read-path constant-factor speedups**, **byte-bounded result budgets**, explicit `Database.refresh()`, no-heuristics correctness fixes, and **byte-for-byte compaction parity against Apache Cassandra**, an Arrow Flight + Trino connector, canonical BTI (`da`) write/read, and CDC-style delta export. See [CHANGELOG.md](CHANGELOG.md).
 
 > **Upgrading to v0.13?** See the [v0.13 Migration Guide](docs/development/v0.13-migration-guide.md) for the 3 breaking changes (Python duration/time types, unknown-table errors, CLI YAML removal).
 
@@ -316,6 +316,14 @@ cargo build -p cqlite-core --no-default-features
 - [x] Real BTI trie node-type dispatch and schema-typed query result columns
 - [x] Published documentation site at [pmcfadin.github.io/cqlite](https://pmcfadin.github.io/cqlite/)
 
+### ✅ v0.13.0 (Jul 2026) — the performance release
+- [x] **Read-path constant-factor speedups** — query-engine hot-path cleanups (schema `Arc`, single projection, cached sort keys, plan cache), read-path idiom bundle, and point-read I/O via a positional-read (`ReadAt`) trait
+- [x] **Node.js bindings throughput** — batch-fetch streaming rows, move (not clone) row values in `executeNative`, cached `Set`/`Map` constructors
+- [x] **Byte-bounded result budget** — `Error::ResultTooLarge` + `QueryConfig.max_result_bytes` (default 64 MiB)
+- [x] **Per-surface SSTable freshness contract** + explicit `Database.refresh()`
+- [x] **No-heuristics correctness** — removed blob-decode byte-pattern guessing; unknown-table reads fail honestly instead of fabricating a default schema
+- See [CHANGELOG.md](CHANGELOG.md) for the full per-release detail
+
 ### ✅ v0.12.0 (Jun 2026) — the compaction release
 - [x] **Byte-for-byte compaction parity vs Apache Cassandra** — `cqlite compact` + a differential harness in CI, full reconciliation rule set (complex deletions, tombstone tie-breaks, `gc_grace` purging, range tombstones, per-cell/dropped-column purging, non-frozen UDT multi-cell)
 - [x] **Arrow Flight server + Trino connector** — query SSTables as a federated source with predicate, token-range, and aggregation pushdown
@@ -331,7 +339,7 @@ See the [**Roadmap**](#roadmap) section below for in-flight epics and milestones
 
 ## Roadmap
 
-CQLite is at **v0.12.0** and production-ready for the use cases above. The path to
+CQLite is at **v0.13.0** and production-ready for the use cases above. The path to
 **v1.0** is tracked in the open. Full detail, with milestones, lives at
 [pmcfadin.github.io/cqlite → Roadmap](https://pmcfadin.github.io/cqlite/user-docs/roadmap/).
 
@@ -349,7 +357,7 @@ The roadmap follows real-world use. Want something prioritized?
 
 ## Known Issues
 
-CQLite is honest about its sharp edges. The current release (`v0.12.0`) has a few
+CQLite is honest about its sharp edges. The current release (`v0.13.0`) has a few
 known gaps — none of which block the core read/export workflows. Full, dated list:
 [pmcfadin.github.io/cqlite → Known Issues](https://pmcfadin.github.io/cqlite/user-docs/known-issues/).
 
@@ -504,4 +512,4 @@ Special thanks to the Apache Cassandra community and the many contributors who m
 
 ---
 
-**Note**: M1 through M5 milestones are complete and the project is at **v0.12.0**. Core SSTable reading, CLI, output writers (including Parquet), Python and Node.js bindings, and write support with STCS compaction and **byte-for-byte compaction parity vs Apache Cassandra** are production-ready, alongside an Arrow Flight + Trino connector, canonical BTI (`da`) write/read, and CDC-style delta export. Next: M6 (WASM bindings) and M7 (performance validation + v1.0).
+**Note**: M1 through M5 milestones are complete and the project is at **v0.13.0**. Core SSTable reading, CLI, output writers (including Parquet), Python and Node.js bindings, and write support with STCS compaction and **byte-for-byte compaction parity vs Apache Cassandra** are production-ready, alongside read-path performance wins, byte-bounded result budgets, an Arrow Flight + Trino connector, canonical BTI (`da`) write/read, and CDC-style delta export. Next: M6 (WASM bindings) and M7 (performance validation + v1.0).
