@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["ingest"],"struct":["DiscoverySummary","IngestionConfig","IngestionResult"]};

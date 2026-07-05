@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create_default_parser","is_dml_statement"],"mod":["antlr_backend","ast","config","error","factory","mutation_parser","nom_backend","schema_integration","traits","visitor"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["UseCase"],"fn":["register_global_factory"],"mod":["benchmarks"],"struct":["ParserFactory","ParserRegistry"]};

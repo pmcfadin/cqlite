@@ -1,0 +1,778 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `cqlite-core/src/storage/sstable/chunk_decompressor.rs`."><title>chunk_decompressor.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../../static.files/src-script-813739b1.js"></script><script defer src="../../../../src-files.js"></script><script defer src="../../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">cqlite_core/storage/sstable/</div>chunk_decompressor.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Bulletproof chunk-based decompression for SSTable Data.db files
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! This module implements the proper decompression strategy for Cassandra SSTable files
+<a href=#4 id=4 data-nosnippet>4</a>//! using CompressionInfo.db metadata to decompress chunks on-demand.
+<a href=#5 id=5 data-nosnippet>5</a>
+<a href=#6 id=6 data-nosnippet>6</a></span><span class="kw">use </span><span class="kw">super</span>::compression_info::CompressionInfo;
+<a href=#7 id=7 data-nosnippet>7</a><span class="kw">use </span><span class="kw">crate</span>::parser::header::CassandraVersion;
+<a href=#8 id=8 data-nosnippet>8</a><span class="kw">use </span>crate::{Error, <span class="prelude-ty">Result</span>};
+<a href=#9 id=9 data-nosnippet>9</a><span class="kw">use </span>rustc_hash::FxHashMap;
+<a href=#10 id=10 data-nosnippet>10</a><span class="kw">use </span>std::io::{Read, Seek, SeekFrom};
+<a href=#11 id=11 data-nosnippet>11</a>
+<a href=#12 id=12 data-nosnippet>12</a><span class="doccomment">/// Chunk-based decompressor for SSTable Data.db files
+<a href=#13 id=13 data-nosnippet>13</a></span><span class="kw">pub struct </span>ChunkDecompressor {
+<a href=#14 id=14 data-nosnippet>14</a>    <span class="doccomment">/// Compression metadata from CompressionInfo.db
+<a href=#15 id=15 data-nosnippet>15</a>    </span>compression_info: CompressionInfo,
+<a href=#16 id=16 data-nosnippet>16</a>    <span class="doccomment">/// Cache of decompressed chunks
+<a href=#17 id=17 data-nosnippet>17</a>    </span>chunk_cache: FxHashMap&lt;usize, Vec&lt;u8&gt;&gt;,
+<a href=#18 id=18 data-nosnippet>18</a>    <span class="doccomment">/// Maximum number of chunks to cache
+<a href=#19 id=19 data-nosnippet>19</a>    </span>max_cached_chunks: usize,
+<a href=#20 id=20 data-nosnippet>20</a>    <span class="doccomment">/// Data file path for error reporting
+<a href=#21 id=21 data-nosnippet>21</a>    </span>data_file_path: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#22 id=22 data-nosnippet>22</a>    <span class="doccomment">/// Cached Data.db length, captured on the first chunk read (issue #1586).
+<a href=#23 id=23 data-nosnippet>23</a>    ///
+<a href=#24 id=24 data-nosnippet>24</a>    /// The file is an immutable SSTable, so its size is derived exactly once
+<a href=#25 id=25 data-nosnippet>25</a>    /// with a single seek probe and then reused for every subsequent chunk's
+<a href=#26 id=26 data-nosnippet>26</a>    /// `compressed_chunk_size` bounds math — instead of re-seeking to `End(0)`
+<a href=#27 id=27 data-nosnippet>27</a>    /// (and back) on every chunk read.
+<a href=#28 id=28 data-nosnippet>28</a>    </span>cached_data_file_size: <span class="prelude-ty">Option</span>&lt;u64&gt;,
+<a href=#29 id=29 data-nosnippet>29</a>    <span class="doccomment">/// The reader's logical position after the most recent chunk read within the
+<a href=#30 id=30 data-nosnippet>30</a>    /// current `read_data` / `decompress_chunk_by_index` call (issue #1586).
+<a href=#31 id=31 data-nosnippet>31</a>    ///
+<a href=#32 id=32 data-nosnippet>32</a>    /// Sequential chunk reads leave the reader positioned exactly at the next
+<a href=#33 id=33 data-nosnippet>33</a>    /// chunk's offset, so the explicit `seek(Start(offset))` can be skipped when
+<a href=#34 id=34 data-nosnippet>34</a>    /// it would be a no-op. Reset to `None` at each public entry point so it is
+<a href=#35 id=35 data-nosnippet>35</a>    /// only ever trusted within a single call against a single reader.
+<a href=#36 id=36 data-nosnippet>36</a>    </span>stream_pos: <span class="prelude-ty">Option</span>&lt;u64&gt;,
+<a href=#37 id=37 data-nosnippet>37</a>}
+<a href=#38 id=38 data-nosnippet>38</a>
+<a href=#39 id=39 data-nosnippet>39</a><span class="kw">impl </span>ChunkDecompressor {
+<a href=#40 id=40 data-nosnippet>40</a>    <span class="doccomment">/// Create a new chunk decompressor with compression metadata.
+<a href=#41 id=41 data-nosnippet>41</a>    ///
+<a href=#42 id=42 data-nosnippet>42</a>    /// The `cassandra_version` parameter is accepted for API compatibility but is no longer
+<a href=#43 id=43 data-nosnippet>43</a>    /// used: the NB format (all Cassandra 5.0 files) always has inline CRC32 in Data.db
+<a href=#44 id=44 data-nosnippet>44</a>    /// regardless of version, which is handled deterministically in decompress_chunk().
+<a href=#45 id=45 data-nosnippet>45</a>    </span><span class="kw">pub fn </span>new(
+<a href=#46 id=46 data-nosnippet>46</a>        compression_info: CompressionInfo,
+<a href=#47 id=47 data-nosnippet>47</a>        _cassandra_version: CassandraVersion,
+<a href=#48 id=48 data-nosnippet>48</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>&gt; {
+<a href=#49 id=49 data-nosnippet>49</a>        compression_info.validate()<span class="question-mark">?</span>;
+<a href=#50 id=50 data-nosnippet>50</a>
+<a href=#51 id=51 data-nosnippet>51</a>        <span class="prelude-val">Ok</span>(<span class="self">Self </span>{
+<a href=#52 id=52 data-nosnippet>52</a>            compression_info,
+<a href=#53 id=53 data-nosnippet>53</a>            chunk_cache: FxHashMap::default(),
+<a href=#54 id=54 data-nosnippet>54</a>            max_cached_chunks: <span class="number">16</span>, <span class="comment">// Cache up to 16 chunks (16 * 16KB = 256KB max memory)
+<a href=#55 id=55 data-nosnippet>55</a>            </span>data_file_path: <span class="prelude-val">None</span>,
+<a href=#56 id=56 data-nosnippet>56</a>            cached_data_file_size: <span class="prelude-val">None</span>,
+<a href=#57 id=57 data-nosnippet>57</a>            stream_pos: <span class="prelude-val">None</span>,
+<a href=#58 id=58 data-nosnippet>58</a>        })
+<a href=#59 id=59 data-nosnippet>59</a>    }
+<a href=#60 id=60 data-nosnippet>60</a>
+<a href=#61 id=61 data-nosnippet>61</a>    <span class="doccomment">/// Create a new chunk decompressor with file path for enhanced error reporting.
+<a href=#62 id=62 data-nosnippet>62</a>    ///
+<a href=#63 id=63 data-nosnippet>63</a>    /// See `new()` for notes on `cassandra_version`.
+<a href=#64 id=64 data-nosnippet>64</a>    </span><span class="kw">pub fn </span>new_with_path(
+<a href=#65 id=65 data-nosnippet>65</a>        compression_info: CompressionInfo,
+<a href=#66 id=66 data-nosnippet>66</a>        _cassandra_version: CassandraVersion,
+<a href=#67 id=67 data-nosnippet>67</a>        data_file_path: String,
+<a href=#68 id=68 data-nosnippet>68</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>&gt; {
+<a href=#69 id=69 data-nosnippet>69</a>        compression_info.validate()<span class="question-mark">?</span>;
+<a href=#70 id=70 data-nosnippet>70</a>
+<a href=#71 id=71 data-nosnippet>71</a>        <span class="prelude-val">Ok</span>(<span class="self">Self </span>{
+<a href=#72 id=72 data-nosnippet>72</a>            compression_info,
+<a href=#73 id=73 data-nosnippet>73</a>            chunk_cache: FxHashMap::default(),
+<a href=#74 id=74 data-nosnippet>74</a>            max_cached_chunks: <span class="number">16</span>,
+<a href=#75 id=75 data-nosnippet>75</a>            data_file_path: <span class="prelude-val">Some</span>(data_file_path),
+<a href=#76 id=76 data-nosnippet>76</a>            cached_data_file_size: <span class="prelude-val">None</span>,
+<a href=#77 id=77 data-nosnippet>77</a>            stream_pos: <span class="prelude-val">None</span>,
+<a href=#78 id=78 data-nosnippet>78</a>        })
+<a href=#79 id=79 data-nosnippet>79</a>    }
+<a href=#80 id=80 data-nosnippet>80</a>
+<a href=#81 id=81 data-nosnippet>81</a>    <span class="doccomment">/// Read data from compressed SSTable at specified offset and length
+<a href=#82 id=82 data-nosnippet>82</a>    </span><span class="kw">pub fn </span>read_data&lt;R: Read + Seek&gt;(
+<a href=#83 id=83 data-nosnippet>83</a>        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
+<a href=#84 id=84 data-nosnippet>84</a>        reader: <span class="kw-2">&amp;mut </span>R,
+<a href=#85 id=85 data-nosnippet>85</a>        offset: u64,
+<a href=#86 id=86 data-nosnippet>86</a>        length: usize,
+<a href=#87 id=87 data-nosnippet>87</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;u8&gt;&gt; {
+<a href=#88 id=88 data-nosnippet>88</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = Vec::with_capacity(length);
+<a href=#89 id=89 data-nosnippet>89</a>        <span class="kw">let </span><span class="kw-2">mut </span>remaining = length;
+<a href=#90 id=90 data-nosnippet>90</a>        <span class="kw">let </span><span class="kw-2">mut </span>current_offset = offset;
+<a href=#91 id=91 data-nosnippet>91</a>
+<a href=#92 id=92 data-nosnippet>92</a>        <span class="comment">// The reader's logical position is unknown at the start of a call (the
+<a href=#93 id=93 data-nosnippet>93</a>        // caller may have passed a fresh reader), so the first chunk read always
+<a href=#94 id=94 data-nosnippet>94</a>        // seeks; subsequent sequential reads within this call skip the redundant
+<a href=#95 id=95 data-nosnippet>95</a>        // seek (issue #1586).
+<a href=#96 id=96 data-nosnippet>96</a>        </span><span class="self">self</span>.stream_pos = <span class="prelude-val">None</span>;
+<a href=#97 id=97 data-nosnippet>97</a>
+<a href=#98 id=98 data-nosnippet>98</a>        <span class="kw">while </span>remaining &gt; <span class="number">0 </span>{
+<a href=#99 id=99 data-nosnippet>99</a>            <span class="comment">// Determine which chunk contains this offset
+<a href=#100 id=100 data-nosnippet>100</a>            </span><span class="kw">let </span>chunk_index = <span class="self">self</span>.compression_info.chunk_for_offset(current_offset);
+<a href=#101 id=101 data-nosnippet>101</a>            <span class="kw">let </span>offset_in_chunk = <span class="self">self</span>.compression_info.offset_within_chunk(current_offset);
+<a href=#102 id=102 data-nosnippet>102</a>
+<a href=#103 id=103 data-nosnippet>103</a>            <span class="comment">// Get the decompressed chunk
+<a href=#104 id=104 data-nosnippet>104</a>            </span><span class="kw">let </span>chunk_data = <span class="self">self</span>.get_decompressed_chunk(reader, chunk_index)<span class="question-mark">?</span>;
+<a href=#105 id=105 data-nosnippet>105</a>
+<a href=#106 id=106 data-nosnippet>106</a>            <span class="comment">// Extract the requested data from this chunk
+<a href=#107 id=107 data-nosnippet>107</a>            </span><span class="kw">let </span>chunk_start = offset_in_chunk <span class="kw">as </span>usize;
+<a href=#108 id=108 data-nosnippet>108</a>            <span class="kw">let </span>chunk_end = std::cmp::min(chunk_start + remaining, chunk_data.len());
+<a href=#109 id=109 data-nosnippet>109</a>
+<a href=#110 id=110 data-nosnippet>110</a>            <span class="kw">if </span>chunk_start &gt;= chunk_data.len() {
+<a href=#111 id=111 data-nosnippet>111</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(Error::InvalidFormat(<span class="macro">format!</span>(
+<a href=#112 id=112 data-nosnippet>112</a>                    <span class="string">"Offset {} beyond chunk {} size {}"</span>,
+<a href=#113 id=113 data-nosnippet>113</a>                    chunk_start,
+<a href=#114 id=114 data-nosnippet>114</a>                    chunk_index,
+<a href=#115 id=115 data-nosnippet>115</a>                    chunk_data.len()
+<a href=#116 id=116 data-nosnippet>116</a>                )));
+<a href=#117 id=117 data-nosnippet>117</a>            }
+<a href=#118 id=118 data-nosnippet>118</a>
+<a href=#119 id=119 data-nosnippet>119</a>            <span class="kw">let </span>chunk_slice = <span class="kw-2">&amp;</span>chunk_data[chunk_start..chunk_end];
+<a href=#120 id=120 data-nosnippet>120</a>            result.extend_from_slice(chunk_slice);
+<a href=#121 id=121 data-nosnippet>121</a>
+<a href=#122 id=122 data-nosnippet>122</a>            <span class="kw">let </span>bytes_read = chunk_slice.len();
+<a href=#123 id=123 data-nosnippet>123</a>            remaining -= bytes_read;
+<a href=#124 id=124 data-nosnippet>124</a>            current_offset += bytes_read <span class="kw">as </span>u64;
+<a href=#125 id=125 data-nosnippet>125</a>        }
+<a href=#126 id=126 data-nosnippet>126</a>
+<a href=#127 id=127 data-nosnippet>127</a>        <span class="prelude-val">Ok</span>(result)
+<a href=#128 id=128 data-nosnippet>128</a>    }
+<a href=#129 id=129 data-nosnippet>129</a>
+<a href=#130 id=130 data-nosnippet>130</a>    <span class="doccomment">/// Get a decompressed chunk, using cache if available
+<a href=#131 id=131 data-nosnippet>131</a>    </span><span class="kw">fn </span>get_decompressed_chunk&lt;R: Read + Seek&gt;(
+<a href=#132 id=132 data-nosnippet>132</a>        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
+<a href=#133 id=133 data-nosnippet>133</a>        reader: <span class="kw-2">&amp;mut </span>R,
+<a href=#134 id=134 data-nosnippet>134</a>        chunk_index: usize,
+<a href=#135 id=135 data-nosnippet>135</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;u8&gt;&gt; {
+<a href=#136 id=136 data-nosnippet>136</a>        <span class="comment">// Check cache first
+<a href=#137 id=137 data-nosnippet>137</a>        </span><span class="kw">if let </span><span class="prelude-val">Some</span>(cached_chunk) = <span class="self">self</span>.chunk_cache.get(<span class="kw-2">&amp;</span>chunk_index) {
+<a href=#138 id=138 data-nosnippet>138</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(cached_chunk.clone());
+<a href=#139 id=139 data-nosnippet>139</a>        }
+<a href=#140 id=140 data-nosnippet>140</a>
+<a href=#141 id=141 data-nosnippet>141</a>        <span class="comment">// Decompress the chunk
+<a href=#142 id=142 data-nosnippet>142</a>        </span><span class="kw">let </span>chunk_data = <span class="self">self</span>.decompress_chunk(reader, chunk_index)<span class="question-mark">?</span>;
+<a href=#143 id=143 data-nosnippet>143</a>
+<a href=#144 id=144 data-nosnippet>144</a>        <span class="comment">// Add to cache (with LRU eviction if necessary)
+<a href=#145 id=145 data-nosnippet>145</a>        </span><span class="kw">if </span><span class="self">self</span>.chunk_cache.len() &gt;= <span class="self">self</span>.max_cached_chunks {
+<a href=#146 id=146 data-nosnippet>146</a>            <span class="comment">// Simple eviction: remove first entry
+<a href=#147 id=147 data-nosnippet>147</a>            </span><span class="kw">if let </span><span class="prelude-val">Some</span>(first_key) = <span class="self">self</span>.chunk_cache.keys().next().copied() {
+<a href=#148 id=148 data-nosnippet>148</a>                <span class="self">self</span>.chunk_cache.remove(<span class="kw-2">&amp;</span>first_key);
+<a href=#149 id=149 data-nosnippet>149</a>            }
+<a href=#150 id=150 data-nosnippet>150</a>        }
+<a href=#151 id=151 data-nosnippet>151</a>
+<a href=#152 id=152 data-nosnippet>152</a>        <span class="self">self</span>.chunk_cache.insert(chunk_index, chunk_data.clone());
+<a href=#153 id=153 data-nosnippet>153</a>        <span class="prelude-val">Ok</span>(chunk_data)
+<a href=#154 id=154 data-nosnippet>154</a>    }
+<a href=#155 id=155 data-nosnippet>155</a>
+<a href=#156 id=156 data-nosnippet>156</a>    <span class="doccomment">/// Exact uncompressed size Cassandra wrote for chunk `chunk_index`, derived from
+<a href=#157 id=157 data-nosnippet>157</a>    /// `data_length` and `chunk_length`.
+<a href=#158 id=158 data-nosnippet>158</a>    ///
+<a href=#159 id=159 data-nosnippet>159</a>    /// Cassandra lays chunks out so that random access works via
+<a href=#160 id=160 data-nosnippet>160</a>    /// `position / chunk_length`: every chunk that holds data up to the final byte is
+<a href=#161 id=161 data-nosnippet>161</a>    /// exactly `chunk_length`, the chunk containing the final byte is the partial
+<a href=#162 id=162 data-nosnippet>162</a>    /// remainder, and any chunk whose start is at/after `data_length` is empty (some
+<a href=#163 id=163 data-nosnippet>163</a>    /// flush/close paths append a degenerate trailing chunk — e.g. `system/local`:
+<a href=#164 id=164 data-nosnippet>164</a>    /// data_length 708, chunk_length 16384, chunk 0 = 708 bytes, chunk 1 = 0). This is
+<a href=#165 id=165 data-nosnippet>165</a>    /// the precise per-chunk invariant: stricter than `&lt;= chunk_length` (it still
+<a href=#166 id=166 data-nosnippet>166</a>    /// rejects a short chunk that has addressable data after it — corruption that would
+<a href=#167 id=167 data-nosnippet>167</a>    /// also break Cassandra's own position→chunk mapping), but not the over-strict
+<a href=#168 id=168 data-nosnippet>168</a>    /// `== chunk_length` that rejected valid partial/trailing chunks.
+<a href=#169 id=169 data-nosnippet>169</a>    </span><span class="kw">fn </span>expected_decompressed_len(<span class="kw-2">&amp;</span><span class="self">self</span>, chunk_index: usize) -&gt; u64 {
+<a href=#170 id=170 data-nosnippet>170</a>        <span class="kw">let </span>chunk_length = <span class="self">self</span>.compression_info.chunk_length <span class="kw">as </span>u64;
+<a href=#171 id=171 data-nosnippet>171</a>        <span class="kw">let </span>start = (chunk_index <span class="kw">as </span>u64).saturating_mul(chunk_length);
+<a href=#172 id=172 data-nosnippet>172</a>        <span class="self">self</span>.compression_info
+<a href=#173 id=173 data-nosnippet>173</a>            .data_length
+<a href=#174 id=174 data-nosnippet>174</a>            .saturating_sub(start)
+<a href=#175 id=175 data-nosnippet>175</a>            .min(chunk_length)
+<a href=#176 id=176 data-nosnippet>176</a>    }
+<a href=#177 id=177 data-nosnippet>177</a>
+<a href=#178 id=178 data-nosnippet>178</a>    <span class="doccomment">/// Decompress a specific chunk from the compressed data file
+<a href=#179 id=179 data-nosnippet>179</a>    </span><span class="kw">fn </span>decompress_chunk&lt;R: Read + Seek&gt;(
+<a href=#180 id=180 data-nosnippet>180</a>        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
+<a href=#181 id=181 data-nosnippet>181</a>        reader: <span class="kw-2">&amp;mut </span>R,
+<a href=#182 id=182 data-nosnippet>182</a>        chunk_index: usize,
+<a href=#183 id=183 data-nosnippet>183</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;u8&gt;&gt; {
+<a href=#184 id=184 data-nosnippet>184</a>        <span class="comment">// Get compressed chunk offset
+<a href=#185 id=185 data-nosnippet>185</a>        </span><span class="kw">let </span>compressed_offset = <span class="self">self
+<a href=#186 id=186 data-nosnippet>186</a>            </span>.compression_info
+<a href=#187 id=187 data-nosnippet>187</a>            .compressed_chunk_offset(chunk_index)
+<a href=#188 id=188 data-nosnippet>188</a>            .ok_or_else(|| Error::InvalidFormat(<span class="macro">format!</span>(<span class="string">"No offset for chunk {}"</span>, chunk_index)))<span class="question-mark">?</span>;
+<a href=#189 id=189 data-nosnippet>189</a>
+<a href=#190 id=190 data-nosnippet>190</a>        <span class="comment">// Determine record size (compressed payload + 4-byte inline CRC) using the
+<a href=#191 id=191 data-nosnippet>191</a>        // Data.db length. The SSTable is immutable, so its size is derived once
+<a href=#192 id=192 data-nosnippet>192</a>        // with a single seek probe and cached — never re-probed per chunk (#1586).
+<a href=#193 id=193 data-nosnippet>193</a>        </span><span class="kw">let </span>file_size = <span class="kw">match </span><span class="self">self</span>.cached_data_file_size {
+<a href=#194 id=194 data-nosnippet>194</a>            <span class="prelude-val">Some</span>(size) =&gt; size,
+<a href=#195 id=195 data-nosnippet>195</a>            <span class="prelude-val">None </span>=&gt; {
+<a href=#196 id=196 data-nosnippet>196</a>                <span class="kw">let </span>current_pos = reader.stream_position().map_err(Error::Io)<span class="question-mark">?</span>;
+<a href=#197 id=197 data-nosnippet>197</a>                <span class="kw">let </span>size = reader.seek(SeekFrom::End(<span class="number">0</span>)).map_err(Error::Io)<span class="question-mark">?</span>;
+<a href=#198 id=198 data-nosnippet>198</a>                reader
+<a href=#199 id=199 data-nosnippet>199</a>                    .seek(SeekFrom::Start(current_pos))
+<a href=#200 id=200 data-nosnippet>200</a>                    .map_err(Error::Io)<span class="question-mark">?</span>;
+<a href=#201 id=201 data-nosnippet>201</a>                <span class="self">self</span>.cached_data_file_size = <span class="prelude-val">Some</span>(size);
+<a href=#202 id=202 data-nosnippet>202</a>                <span class="comment">// The probe restored the reader to `current_pos`.
+<a href=#203 id=203 data-nosnippet>203</a>                </span><span class="self">self</span>.stream_pos = <span class="prelude-val">Some</span>(current_pos);
+<a href=#204 id=204 data-nosnippet>204</a>                size
+<a href=#205 id=205 data-nosnippet>205</a>            }
+<a href=#206 id=206 data-nosnippet>206</a>        };
+<a href=#207 id=207 data-nosnippet>207</a>
+<a href=#208 id=208 data-nosnippet>208</a>        <span class="comment">// compressed_chunk_size returns the full record delta including the 4-byte inline CRC.
+<a href=#209 id=209 data-nosnippet>209</a>        // CompressedSequentialWriter.java:203: chunkOffset += compressedLength + 4
+<a href=#210 id=210 data-nosnippet>210</a>        </span><span class="kw">let </span>record_size = <span class="self">self
+<a href=#211 id=211 data-nosnippet>211</a>            </span>.compression_info
+<a href=#212 id=212 data-nosnippet>212</a>            .compressed_chunk_size(chunk_index, file_size)
+<a href=#213 id=213 data-nosnippet>213</a>            .ok_or_else(|| {
+<a href=#214 id=214 data-nosnippet>214</a>                Error::InvalidFormat(<span class="macro">format!</span>(<span class="string">"Cannot determine size for chunk {}"</span>, chunk_index))
+<a href=#215 id=215 data-nosnippet>215</a>            })<span class="question-mark">?</span>;
+<a href=#216 id=216 data-nosnippet>216</a>
+<a href=#217 id=217 data-nosnippet>217</a>        <span class="comment">// Bug #639 fix: subtract the 4-byte inline CRC from the delta.
+<a href=#218 id=218 data-nosnippet>218</a>        // The old code passed all (delta) bytes to the decompressor, which included the
+<a href=#219 id=219 data-nosnippet>219</a>        // trailing CRC and caused decompression failures on well-formed chunks.
+<a href=#220 id=220 data-nosnippet>220</a>        </span><span class="kw">if </span>record_size &lt; <span class="number">4 </span>{
+<a href=#221 id=221 data-nosnippet>221</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(Error::InvalidFormat(<span class="macro">format!</span>(
+<a href=#222 id=222 data-nosnippet>222</a>                <span class="string">"Chunk {} record size {} is too small (minimum 4 bytes for inline CRC)"</span>,
+<a href=#223 id=223 data-nosnippet>223</a>                chunk_index, record_size
+<a href=#224 id=224 data-nosnippet>224</a>            )));
+<a href=#225 id=225 data-nosnippet>225</a>        }
+<a href=#226 id=226 data-nosnippet>226</a>        <span class="kw">let </span>compressed_len = (record_size - <span class="number">4</span>) <span class="kw">as </span>usize;
+<a href=#227 id=227 data-nosnippet>227</a>
+<a href=#228 id=228 data-nosnippet>228</a>        <span class="comment">// Seek to compressed chunk offset and read compressed payload only.
+<a href=#229 id=229 data-nosnippet>229</a>        // Skip the seek when the previous sequential chunk read already left the
+<a href=#230 id=230 data-nosnippet>230</a>        // reader positioned exactly here (issue #1586 step 3).
+<a href=#231 id=231 data-nosnippet>231</a>        </span><span class="kw">if </span><span class="self">self</span>.stream_pos != <span class="prelude-val">Some</span>(compressed_offset) {
+<a href=#232 id=232 data-nosnippet>232</a>            reader
+<a href=#233 id=233 data-nosnippet>233</a>                .seek(SeekFrom::Start(compressed_offset))
+<a href=#234 id=234 data-nosnippet>234</a>                .map_err(Error::Io)<span class="question-mark">?</span>;
+<a href=#235 id=235 data-nosnippet>235</a>        }
+<a href=#236 id=236 data-nosnippet>236</a>        <span class="comment">// Position is unknown until the record's bytes are fully read.
+<a href=#237 id=237 data-nosnippet>237</a>        </span><span class="self">self</span>.stream_pos = <span class="prelude-val">None</span>;
+<a href=#238 id=238 data-nosnippet>238</a>
+<a href=#239 id=239 data-nosnippet>239</a>        <span class="kw">let </span><span class="kw-2">mut </span>compressed_data = <span class="macro">vec!</span>[<span class="number">0u8</span>; compressed_len];
+<a href=#240 id=240 data-nosnippet>240</a>        reader.read_exact(<span class="kw-2">&amp;mut </span>compressed_data).map_err(Error::Io)<span class="question-mark">?</span>;
+<a href=#241 id=241 data-nosnippet>241</a>
+<a href=#242 id=242 data-nosnippet>242</a>        <span class="comment">// Read the 4-byte inline CRC32 (big-endian) and validate it over the compressed bytes.
+<a href=#243 id=243 data-nosnippet>243</a>        // Authority: CompressedSequentialWriter.java:192 + read path lines 275-282.
+<a href=#244 id=244 data-nosnippet>244</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>crc_bytes = [<span class="number">0u8</span>; <span class="number">4</span>];
+<a href=#245 id=245 data-nosnippet>245</a>        reader.read_exact(<span class="kw-2">&amp;mut </span>crc_bytes).map_err(Error::Io)<span class="question-mark">?</span>;
+<a href=#246 id=246 data-nosnippet>246</a>        <span class="comment">// The record (payload + 4-byte CRC) has been consumed; the reader now sits
+<a href=#247 id=247 data-nosnippet>247</a>        // at the next chunk's offset, so a subsequent sequential read can skip its
+<a href=#248 id=248 data-nosnippet>248</a>        // seek (issue #1586).
+<a href=#249 id=249 data-nosnippet>249</a>        </span><span class="self">self</span>.stream_pos = <span class="prelude-val">Some</span>(compressed_offset.saturating_add(record_size));
+<a href=#250 id=250 data-nosnippet>250</a>        <span class="kw">let </span>stored_crc = u32::from_be_bytes(crc_bytes);
+<a href=#251 id=251 data-nosnippet>251</a>        <span class="kw">let </span>computed_crc = crc32fast::hash(<span class="kw-2">&amp;</span>compressed_data);
+<a href=#252 id=252 data-nosnippet>252</a>        <span class="kw">if </span>stored_crc != computed_crc {
+<a href=#253 id=253 data-nosnippet>253</a>            <span class="kw">let </span>file_info = <span class="kw">match </span><span class="kw-2">&amp;</span><span class="self">self</span>.data_file_path {
+<a href=#254 id=254 data-nosnippet>254</a>                <span class="prelude-val">Some</span>(path) =&gt; <span class="macro">format!</span>(<span class="string">" in file {}"</span>, path),
+<a href=#255 id=255 data-nosnippet>255</a>                <span class="prelude-val">None </span>=&gt; String::new(),
+<a href=#256 id=256 data-nosnippet>256</a>            };
+<a href=#257 id=257 data-nosnippet>257</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(Error::InvalidFormat(<span class="macro">format!</span>(
+<a href=#258 id=258 data-nosnippet>258</a>                <span class="string">"CRC32 mismatch for chunk {} at offset 0x{:x}{}: stored=0x{:08x}, computed=0x{:08x}, compressed_len={}"</span>,
+<a href=#259 id=259 data-nosnippet>259</a>                chunk_index, compressed_offset, file_info, stored_crc, computed_crc, compressed_len
+<a href=#260 id=260 data-nosnippet>260</a>            )));
+<a href=#261 id=261 data-nosnippet>261</a>        }
+<a href=#262 id=262 data-nosnippet>262</a>
+<a href=#263 id=263 data-nosnippet>263</a>        <span class="macro">log::debug!</span>(
+<a href=#264 id=264 data-nosnippet>264</a>            <span class="string">"Reading chunk {} at offset {} ({} bytes compressed, CRC OK)"</span>,
+<a href=#265 id=265 data-nosnippet>265</a>            chunk_index,
+<a href=#266 id=266 data-nosnippet>266</a>            compressed_offset,
+<a href=#267 id=267 data-nosnippet>267</a>            compressed_len
+<a href=#268 id=268 data-nosnippet>268</a>        );
+<a href=#269 id=269 data-nosnippet>269</a>
+<a href=#270 id=270 data-nosnippet>270</a>        <span class="comment">// Incompressible-chunk fallback (Bug #639):
+<a href=#271 id=271 data-nosnippet>271</a>        // When compressedLength &gt;= maxCompressedLength, Cassandra stored the chunk uncompressed.
+<a href=#272 id=272 data-nosnippet>272</a>        // CompressedSequentialWriter.java:160-177: if compressedLen &gt;= maxCompressedLen, use raw buffer.
+<a href=#273 id=273 data-nosnippet>273</a>        </span><span class="kw">let </span>max_compressed_length = <span class="self">self</span>.compression_info.max_compressed_length <span class="kw">as </span>usize;
+<a href=#274 id=274 data-nosnippet>274</a>        <span class="kw">if </span>compressed_len &gt;= max_compressed_length {
+<a href=#275 id=275 data-nosnippet>275</a>            <span class="macro">log::debug!</span>(
+<a href=#276 id=276 data-nosnippet>276</a>                <span class="string">"Chunk {} is incompressible (compressed_len={} &gt;= max_compressed_length={}), returning raw bytes"</span>,
+<a href=#277 id=277 data-nosnippet>277</a>                chunk_index, compressed_len, max_compressed_length
+<a href=#278 id=278 data-nosnippet>278</a>            );
+<a href=#279 id=279 data-nosnippet>279</a>            <span class="comment">// A raw chunk's stored bytes ARE the uncompressed bytes, so they must match
+<a href=#280 id=280 data-nosnippet>280</a>            // the exact size Cassandra wrote for this chunk index — the same invariant
+<a href=#281 id=281 data-nosnippet>281</a>            // the compressed path checks below (see `expected_decompressed_len`).
+<a href=#282 id=282 data-nosnippet>282</a>            </span><span class="kw">let </span>expected_size = <span class="self">self</span>.expected_decompressed_len(chunk_index);
+<a href=#283 id=283 data-nosnippet>283</a>            <span class="kw">if </span>compressed_data.len() <span class="kw">as </span>u64 != expected_size {
+<a href=#284 id=284 data-nosnippet>284</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(Error::InvalidFormat(<span class="macro">format!</span>(
+<a href=#285 id=285 data-nosnippet>285</a>                    <span class="string">"Raw (incompressible) chunk {} size {} != expected {} (data_length {}, chunk_length {}) — corrupt or misdecoded"</span>,
+<a href=#286 id=286 data-nosnippet>286</a>                    chunk_index,
+<a href=#287 id=287 data-nosnippet>287</a>                    compressed_data.len(),
+<a href=#288 id=288 data-nosnippet>288</a>                    expected_size,
+<a href=#289 id=289 data-nosnippet>289</a>                    <span class="self">self</span>.compression_info.data_length,
+<a href=#290 id=290 data-nosnippet>290</a>                    <span class="self">self</span>.compression_info.chunk_length,
+<a href=#291 id=291 data-nosnippet>291</a>                )));
+<a href=#292 id=292 data-nosnippet>292</a>            }
+<a href=#293 id=293 data-nosnippet>293</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(compressed_data);
+<a href=#294 id=294 data-nosnippet>294</a>        }
+<a href=#295 id=295 data-nosnippet>295</a>
+<a href=#296 id=296 data-nosnippet>296</a>        <span class="comment">// Decompress based on algorithm
+<a href=#297 id=297 data-nosnippet>297</a>        </span><span class="kw">let </span>decompressed = <span class="kw">match </span><span class="self">self</span>.compression_info.algorithm.as_str() {
+<a href=#298 id=298 data-nosnippet>298</a>            <span class="string">"LZ4Compressor" </span>=&gt; <span class="self">self</span>.decompress_lz4_chunk(<span class="kw-2">&amp;</span>compressed_data, chunk_index),
+<a href=#299 id=299 data-nosnippet>299</a>            <span class="string">"SnappyCompressor" </span>=&gt; <span class="self">self</span>.decompress_snappy_chunk(<span class="kw-2">&amp;</span>compressed_data, chunk_index),
+<a href=#300 id=300 data-nosnippet>300</a>            <span class="string">"DeflateCompressor" </span>=&gt; <span class="self">self</span>.decompress_deflate_chunk(<span class="kw-2">&amp;</span>compressed_data, chunk_index),
+<a href=#301 id=301 data-nosnippet>301</a>            <span class="string">"ZstdCompressor" </span>=&gt; <span class="self">self</span>.decompress_zstd_chunk(<span class="kw-2">&amp;</span>compressed_data, chunk_index),
+<a href=#302 id=302 data-nosnippet>302</a>            algorithm =&gt; <span class="prelude-val">Err</span>(Error::UnsupportedFormat(<span class="macro">format!</span>(
+<a href=#303 id=303 data-nosnippet>303</a>                <span class="string">"Unknown compression algorithm: {}"</span>,
+<a href=#304 id=304 data-nosnippet>304</a>                algorithm
+<a href=#305 id=305 data-nosnippet>305</a>            ))),
+<a href=#306 id=306 data-nosnippet>306</a>        }<span class="question-mark">?</span>;
+<a href=#307 id=307 data-nosnippet>307</a>
+<a href=#308 id=308 data-nosnippet>308</a>        <span class="comment">// Validate the decompressed chunk size against the exact size Cassandra wrote
+<a href=#309 id=309 data-nosnippet>309</a>        // for this chunk index (see `expected_decompressed_len`). This handles full
+<a href=#310 id=310 data-nosnippet>310</a>        // chunks, the partial final-data chunk, and degenerate empty trailing chunks,
+<a href=#311 id=311 data-nosnippet>311</a>        // while still rejecting a short non-final chunk that has addressable data after
+<a href=#312 id=312 data-nosnippet>312</a>        // it (corruption). The inline CRC above is the primary integrity guard.
+<a href=#313 id=313 data-nosnippet>313</a>        </span><span class="kw">let </span>expected_size = <span class="self">self</span>.expected_decompressed_len(chunk_index);
+<a href=#314 id=314 data-nosnippet>314</a>        <span class="kw">if </span>decompressed.len() <span class="kw">as </span>u64 != expected_size {
+<a href=#315 id=315 data-nosnippet>315</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(Error::InvalidFormat(<span class="macro">format!</span>(
+<a href=#316 id=316 data-nosnippet>316</a>                <span class="string">"Decompressed chunk {} size {} != expected {} (data_length {}, chunk_length {}) — corrupt or misdecoded"</span>,
+<a href=#317 id=317 data-nosnippet>317</a>                chunk_index,
+<a href=#318 id=318 data-nosnippet>318</a>                decompressed.len(),
+<a href=#319 id=319 data-nosnippet>319</a>                expected_size,
+<a href=#320 id=320 data-nosnippet>320</a>                <span class="self">self</span>.compression_info.data_length,
+<a href=#321 id=321 data-nosnippet>321</a>                <span class="self">self</span>.compression_info.chunk_length,
+<a href=#322 id=322 data-nosnippet>322</a>            )));
+<a href=#323 id=323 data-nosnippet>323</a>        }
+<a href=#324 id=324 data-nosnippet>324</a>
+<a href=#325 id=325 data-nosnippet>325</a>        <span class="prelude-val">Ok</span>(decompressed)
+<a href=#326 id=326 data-nosnippet>326</a>    }
+<a href=#327 id=327 data-nosnippet>327</a>
+<a href=#328 id=328 data-nosnippet>328</a>    <span class="doccomment">/// Decompress LZ4 chunk - Cassandra uses 4-byte little-endian length prefix
+<a href=#329 id=329 data-nosnippet>329</a>    /// Upper bound on a single decompressed chunk: the configured uncompressed
+<a href=#330 id=330 data-nosnippet>330</a>    /// chunk length (the final chunk is shorter, never larger). Used to bound the
+<a href=#331 id=331 data-nosnippet>331</a>    /// streaming Deflate/Zstd decoders against decompression bombs. Falls back to
+<a href=#332 id=332 data-nosnippet>332</a>    /// the 128MB global cap if chunk_length is unset/zero.
+<a href=#333 id=333 data-nosnippet>333</a>    ///
+<a href=#334 id=334 data-nosnippet>334</a>    /// Only the Snappy/Deflate/Zstd paths consume this bound, so the method is
+<a href=#335 id=335 data-nosnippet>335</a>    /// gated to match its callers and stay dead-code-free under minimal builds.
+<a href=#336 id=336 data-nosnippet>336</a>    </span><span class="attr">#[cfg(any(feature = <span class="string">"snappy"</span>, feature = <span class="string">"deflate"</span>, feature = <span class="string">"zstd"</span>))]
+<a href=#337 id=337 data-nosnippet>337</a>    </span><span class="kw">fn </span>chunk_size_guard(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; u64 {
+<a href=#338 id=338 data-nosnippet>338</a>        <span class="kw">match </span><span class="self">self</span>.compression_info.chunk_length {
+<a href=#339 id=339 data-nosnippet>339</a>            <span class="number">0 </span>=&gt; <span class="number">128 </span>* <span class="number">1024 </span>* <span class="number">1024</span>,
+<a href=#340 id=340 data-nosnippet>340</a>            n =&gt; n <span class="kw">as </span>u64,
+<a href=#341 id=341 data-nosnippet>341</a>        }
+<a href=#342 id=342 data-nosnippet>342</a>    }
+<a href=#343 id=343 data-nosnippet>343</a>
+<a href=#344 id=344 data-nosnippet>344</a>    <span class="kw">fn </span>decompress_lz4_chunk(<span class="kw-2">&amp;</span><span class="self">self</span>, compressed_data: <span class="kw-2">&amp;</span>[u8], chunk_index: usize) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;u8&gt;&gt; {
+<a href=#345 id=345 data-nosnippet>345</a>        <span class="kw">let </span>file_info = <span class="kw">match </span><span class="kw-2">&amp;</span><span class="self">self</span>.data_file_path {
+<a href=#346 id=346 data-nosnippet>346</a>            <span class="prelude-val">Some</span>(path) =&gt; <span class="macro">format!</span>(<span class="string">" in file {}"</span>, path),
+<a href=#347 id=347 data-nosnippet>347</a>            <span class="prelude-val">None </span>=&gt; String::new(),
+<a href=#348 id=348 data-nosnippet>348</a>        };
+<a href=#349 id=349 data-nosnippet>349</a>
+<a href=#350 id=350 data-nosnippet>350</a>        <span class="kw">if </span>compressed_data.len() &lt; <span class="number">4 </span>{
+<a href=#351 id=351 data-nosnippet>351</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(Error::InvalidFormat(<span class="macro">format!</span>(
+<a href=#352 id=352 data-nosnippet>352</a>                <span class="string">"LZ4 compressed data too short for chunk {}{} (need at least 4 bytes for length prefix, got {})"</span>,
+<a href=#353 id=353 data-nosnippet>353</a>                chunk_index, file_info, compressed_data.len()
+<a href=#354 id=354 data-nosnippet>354</a>            )));
+<a href=#355 id=355 data-nosnippet>355</a>        }
+<a href=#356 id=356 data-nosnippet>356</a>
+<a href=#357 id=357 data-nosnippet>357</a>        <span class="comment">// CRITICAL: Cassandra's LZ4Compressor prepends a 4-byte little-endian length prefix
+<a href=#358 id=358 data-nosnippet>358</a>        // See: org.apache.cassandra.io.compress.LZ4Compressor.decompress() lines 169-172
+<a href=#359 id=359 data-nosnippet>359</a>        // This is NOT the lz4_flex size-prepended format (which uses varint encoding)
+<a href=#360 id=360 data-nosnippet>360</a>        </span><span class="kw">let </span>decompressed_length = u32::from_le_bytes([
+<a href=#361 id=361 data-nosnippet>361</a>            compressed_data[<span class="number">0</span>],
+<a href=#362 id=362 data-nosnippet>362</a>            compressed_data[<span class="number">1</span>],
+<a href=#363 id=363 data-nosnippet>363</a>            compressed_data[<span class="number">2</span>],
+<a href=#364 id=364 data-nosnippet>364</a>            compressed_data[<span class="number">3</span>],
+<a href=#365 id=365 data-nosnippet>365</a>        ]) <span class="kw">as </span>usize;
+<a href=#366 id=366 data-nosnippet>366</a>
+<a href=#367 id=367 data-nosnippet>367</a>        <span class="comment">// Validate the LZ4 length prefix against the exact size Cassandra wrote for
+<a href=#368 id=368 data-nosnippet>368</a>        // this chunk index (full / partial-final / empty-trailing — see
+<a href=#369 id=369 data-nosnippet>369</a>        // `expected_decompressed_len`). Fails fast on a misdecoded prefix before
+<a href=#370 id=370 data-nosnippet>370</a>        // attempting decompression.
+<a href=#371 id=371 data-nosnippet>371</a>        </span><span class="kw">let </span>expected_size = <span class="self">self</span>.expected_decompressed_len(chunk_index) <span class="kw">as </span>usize;
+<a href=#372 id=372 data-nosnippet>372</a>        <span class="kw">if </span>decompressed_length != expected_size {
+<a href=#373 id=373 data-nosnippet>373</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(Error::InvalidFormat(<span class="macro">format!</span>(
+<a href=#374 id=374 data-nosnippet>374</a>                <span class="string">"LZ4 length prefix mismatch for chunk {} at offset 0x{:x}: expected {}, got {} (first 4 bytes: {:02x} {:02x} {:02x} {:02x}){}"</span>,
+<a href=#375 id=375 data-nosnippet>375</a>                chunk_index,
+<a href=#376 id=376 data-nosnippet>376</a>                <span class="self">self</span>.compression_info
+<a href=#377 id=377 data-nosnippet>377</a>                    .chunk_offsets
+<a href=#378 id=378 data-nosnippet>378</a>                    .get(chunk_index)
+<a href=#379 id=379 data-nosnippet>379</a>                    .unwrap_or(<span class="kw-2">&amp;</span><span class="number">0</span>),
+<a href=#380 id=380 data-nosnippet>380</a>                expected_size,
+<a href=#381 id=381 data-nosnippet>381</a>                decompressed_length,
+<a href=#382 id=382 data-nosnippet>382</a>                compressed_data[<span class="number">0</span>],
+<a href=#383 id=383 data-nosnippet>383</a>                compressed_data[<span class="number">1</span>],
+<a href=#384 id=384 data-nosnippet>384</a>                compressed_data[<span class="number">2</span>],
+<a href=#385 id=385 data-nosnippet>385</a>                compressed_data[<span class="number">3</span>],
+<a href=#386 id=386 data-nosnippet>386</a>                file_info
+<a href=#387 id=387 data-nosnippet>387</a>            )));
+<a href=#388 id=388 data-nosnippet>388</a>        }
+<a href=#389 id=389 data-nosnippet>389</a>
+<a href=#390 id=390 data-nosnippet>390</a>        <span class="comment">// Skip the 4-byte length prefix and decompress the actual LZ4 data
+<a href=#391 id=391 data-nosnippet>391</a>        </span><span class="kw">let </span>lz4_data = <span class="kw-2">&amp;</span>compressed_data[<span class="number">4</span>..];
+<a href=#392 id=392 data-nosnippet>392</a>
+<a href=#393 id=393 data-nosnippet>393</a>        <span class="kw">match </span>lz4_flex::decompress(lz4_data, decompressed_length) {
+<a href=#394 id=394 data-nosnippet>394</a>            <span class="prelude-val">Ok</span>(decompressed) =&gt; {
+<a href=#395 id=395 data-nosnippet>395</a>                <span class="kw">if </span>decompressed.len() != decompressed_length {
+<a href=#396 id=396 data-nosnippet>396</a>                    <span class="kw">return </span><span class="prelude-val">Err</span>(Error::InvalidFormat(<span class="macro">format!</span>(
+<a href=#397 id=397 data-nosnippet>397</a>                        <span class="string">"LZ4 decompression size mismatch for chunk {} at offset 0x{:x}: expected {}, got {}{}"</span>,
+<a href=#398 id=398 data-nosnippet>398</a>                        chunk_index,
+<a href=#399 id=399 data-nosnippet>399</a>                        <span class="self">self</span>.compression_info
+<a href=#400 id=400 data-nosnippet>400</a>                            .chunk_offsets
+<a href=#401 id=401 data-nosnippet>401</a>                            .get(chunk_index)
+<a href=#402 id=402 data-nosnippet>402</a>                            .unwrap_or(<span class="kw-2">&amp;</span><span class="number">0</span>),
+<a href=#403 id=403 data-nosnippet>403</a>                        decompressed_length,
+<a href=#404 id=404 data-nosnippet>404</a>                        decompressed.len(),
+<a href=#405 id=405 data-nosnippet>405</a>                        file_info
+<a href=#406 id=406 data-nosnippet>406</a>                    )));
+<a href=#407 id=407 data-nosnippet>407</a>                }
+<a href=#408 id=408 data-nosnippet>408</a>                <span class="prelude-val">Ok</span>(decompressed)
+<a href=#409 id=409 data-nosnippet>409</a>            }
+<a href=#410 id=410 data-nosnippet>410</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="prelude-val">Err</span>(Error::InvalidFormat(<span class="macro">format!</span>(
+<a href=#411 id=411 data-nosnippet>411</a>                <span class="string">"LZ4 decompression failed for chunk {} at offset 0x{:x}: {}{}"</span>,
+<a href=#412 id=412 data-nosnippet>412</a>                chunk_index,
+<a href=#413 id=413 data-nosnippet>413</a>                <span class="self">self</span>.compression_info
+<a href=#414 id=414 data-nosnippet>414</a>                    .chunk_offsets
+<a href=#415 id=415 data-nosnippet>415</a>                    .get(chunk_index)
+<a href=#416 id=416 data-nosnippet>416</a>                    .unwrap_or(<span class="kw-2">&amp;</span><span class="number">0</span>),
+<a href=#417 id=417 data-nosnippet>417</a>                e,
+<a href=#418 id=418 data-nosnippet>418</a>                file_info
+<a href=#419 id=419 data-nosnippet>419</a>            ))),
+<a href=#420 id=420 data-nosnippet>420</a>        }
+<a href=#421 id=421 data-nosnippet>421</a>    }
+<a href=#422 id=422 data-nosnippet>422</a>
+<a href=#423 id=423 data-nosnippet>423</a>    <span class="doccomment">/// Decompress Snappy chunk - strict mode for modern formats
+<a href=#424 id=424 data-nosnippet>424</a>    </span><span class="kw">fn </span>decompress_snappy_chunk(
+<a href=#425 id=425 data-nosnippet>425</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#426 id=426 data-nosnippet>426</a>        compressed_data: <span class="kw-2">&amp;</span>[u8],
+<a href=#427 id=427 data-nosnippet>427</a>        chunk_index: usize,
+<a href=#428 id=428 data-nosnippet>428</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;u8&gt;&gt; {
+<a href=#429 id=429 data-nosnippet>429</a>        <span class="attr">#[cfg(feature = <span class="string">"snappy"</span>)]
+<a href=#430 id=430 data-nosnippet>430</a>        </span>{
+<a href=#431 id=431 data-nosnippet>431</a>            <span class="kw">use </span>snap::raw::Decoder;
+<a href=#432 id=432 data-nosnippet>432</a>
+<a href=#433 id=433 data-nosnippet>433</a>            <span class="comment">// Decompression-bomb guard (issue #1588): a raw Snappy block advertises
+<a href=#434 id=434 data-nosnippet>434</a>            // its decompressed length as a leading varint, and `decompress_vec`
+<a href=#435 id=435 data-nosnippet>435</a>            // pre-allocates that size BEFORE decoding. Reject an over-limit advertised
+<a href=#436 id=436 data-nosnippet>436</a>            // length up front — a chunk decodes to at most `chunk_length` bytes — so a
+<a href=#437 id=437 data-nosnippet>437</a>            // crafted block cannot force a huge allocation (mirrors the Deflate/Zstd
+<a href=#438 id=438 data-nosnippet>438</a>            // chunk guards, which bound by `chunk_size_guard()`).
+<a href=#439 id=439 data-nosnippet>439</a>            </span><span class="kw">let </span>max_chunk = <span class="self">self</span>.chunk_size_guard();
+<a href=#440 id=440 data-nosnippet>440</a>            <span class="kw">let </span>advertised = snap::raw::decompress_len(compressed_data).map_err(|e| {
+<a href=#441 id=441 data-nosnippet>441</a>                Error::InvalidFormat(<span class="macro">format!</span>(
+<a href=#442 id=442 data-nosnippet>442</a>                    <span class="string">"Snappy length decode failed for chunk {}: {}"</span>,
+<a href=#443 id=443 data-nosnippet>443</a>                    chunk_index, e
+<a href=#444 id=444 data-nosnippet>444</a>                ))
+<a href=#445 id=445 data-nosnippet>445</a>            })<span class="question-mark">?</span>;
+<a href=#446 id=446 data-nosnippet>446</a>            <span class="kw">if </span>advertised <span class="kw">as </span>u64 &gt; max_chunk {
+<a href=#447 id=447 data-nosnippet>447</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(Error::InvalidFormat(<span class="macro">format!</span>(
+<a href=#448 id=448 data-nosnippet>448</a>                    <span class="string">"Snappy chunk {} advertises {} bytes, beyond chunk_length {} (decompression-bomb guard)"</span>,
+<a href=#449 id=449 data-nosnippet>449</a>                    chunk_index, advertised, max_chunk
+<a href=#450 id=450 data-nosnippet>450</a>                )));
+<a href=#451 id=451 data-nosnippet>451</a>            }
+<a href=#452 id=452 data-nosnippet>452</a>
+<a href=#453 id=453 data-nosnippet>453</a>            <span class="kw">let </span><span class="kw-2">mut </span>decoder = Decoder::new();
+<a href=#454 id=454 data-nosnippet>454</a>            <span class="kw">match </span>decoder.decompress_vec(compressed_data) {
+<a href=#455 id=455 data-nosnippet>455</a>                <span class="prelude-val">Ok</span>(decompressed) =&gt; <span class="prelude-val">Ok</span>(decompressed),
+<a href=#456 id=456 data-nosnippet>456</a>                <span class="prelude-val">Err</span>(e) =&gt; <span class="prelude-val">Err</span>(Error::InvalidFormat(<span class="macro">format!</span>(
+<a href=#457 id=457 data-nosnippet>457</a>                    <span class="string">"Snappy decompression failed for chunk {} at offset 0x{:x}: {}. No fallback allowed for modern formats."</span>,
+<a href=#458 id=458 data-nosnippet>458</a>                    chunk_index,
+<a href=#459 id=459 data-nosnippet>459</a>                    <span class="self">self</span>.compression_info
+<a href=#460 id=460 data-nosnippet>460</a>                        .chunk_offsets
+<a href=#461 id=461 data-nosnippet>461</a>                        .get(chunk_index)
+<a href=#462 id=462 data-nosnippet>462</a>                        .unwrap_or(<span class="kw-2">&amp;</span><span class="number">0</span>),
+<a href=#463 id=463 data-nosnippet>463</a>                    e
+<a href=#464 id=464 data-nosnippet>464</a>                ))),
+<a href=#465 id=465 data-nosnippet>465</a>            }
+<a href=#466 id=466 data-nosnippet>466</a>        }
+<a href=#467 id=467 data-nosnippet>467</a>
+<a href=#468 id=468 data-nosnippet>468</a>        <span class="attr">#[cfg(not(feature = <span class="string">"snappy"</span>))]
+<a href=#469 id=469 data-nosnippet>469</a>        </span>{
+<a href=#470 id=470 data-nosnippet>470</a>            <span class="kw">let _ </span>= (compressed_data, chunk_index); <span class="comment">// Suppress unused warnings
+<a href=#471 id=471 data-nosnippet>471</a>            </span><span class="prelude-val">Err</span>(Error::UnsupportedFormat(
+<a href=#472 id=472 data-nosnippet>472</a>                <span class="string">"Snappy support not compiled in"</span>.to_string(),
+<a href=#473 id=473 data-nosnippet>473</a>            ))
+<a href=#474 id=474 data-nosnippet>474</a>        }
+<a href=#475 id=475 data-nosnippet>475</a>    }
+<a href=#476 id=476 data-nosnippet>476</a>
+<a href=#477 id=477 data-nosnippet>477</a>    <span class="doccomment">/// Decompress Deflate chunk - strict mode for modern formats
+<a href=#478 id=478 data-nosnippet>478</a>    </span><span class="kw">fn </span>decompress_deflate_chunk(
+<a href=#479 id=479 data-nosnippet>479</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#480 id=480 data-nosnippet>480</a>        compressed_data: <span class="kw-2">&amp;</span>[u8],
+<a href=#481 id=481 data-nosnippet>481</a>        chunk_index: usize,
+<a href=#482 id=482 data-nosnippet>482</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;u8&gt;&gt; {
+<a href=#483 id=483 data-nosnippet>483</a>        <span class="attr">#[cfg(feature = <span class="string">"deflate"</span>)]
+<a href=#484 id=484 data-nosnippet>484</a>        </span>{
+<a href=#485 id=485 data-nosnippet>485</a>            <span class="comment">// Cassandra's DeflateCompressor uses java.util.zip.Deflater/Inflater,
+<a href=#486 id=486 data-nosnippet>486</a>            // which emit zlib-wrapped streams (2-byte header 0x78 0x9c + Adler-32
+<a href=#487 id=487 data-nosnippet>487</a>            // trailer), NOT raw DEFLATE. Decode with ZlibDecoder to match. (#1082)
+<a href=#488 id=488 data-nosnippet>488</a>            </span><span class="kw">use </span>flate2::read::ZlibDecoder;
+<a href=#489 id=489 data-nosnippet>489</a>            <span class="kw">use </span>std::io::Read;
+<a href=#490 id=490 data-nosnippet>490</a>
+<a href=#491 id=491 data-nosnippet>491</a>            <span class="comment">// Decompression-bomb guard: a chunk decompresses to at most
+<a href=#492 id=492 data-nosnippet>492</a>            // `chunk_length` bytes (the final chunk is shorter). Cap the reader at
+<a href=#493 id=493 data-nosnippet>493</a>            // chunk_length + 1 so a crafted zlib stream cannot expand into an
+<a href=#494 id=494 data-nosnippet>494</a>            // unbounded Vec before we validate the size (roborev).
+<a href=#495 id=495 data-nosnippet>495</a>            </span><span class="kw">let </span>max_chunk = <span class="self">self</span>.chunk_size_guard();
+<a href=#496 id=496 data-nosnippet>496</a>            <span class="kw">let </span><span class="kw-2">mut </span>decoder = ZlibDecoder::new(compressed_data).take(max_chunk + <span class="number">1</span>);
+<a href=#497 id=497 data-nosnippet>497</a>            <span class="kw">let </span><span class="kw-2">mut </span>decompressed = Vec::new();
+<a href=#498 id=498 data-nosnippet>498</a>
+<a href=#499 id=499 data-nosnippet>499</a>            <span class="kw">match </span>decoder.read_to_end(<span class="kw-2">&amp;mut </span>decompressed) {
+<a href=#500 id=500 data-nosnippet>500</a>                <span class="prelude-val">Ok</span>(<span class="kw">_</span>) <span class="kw">if </span>decompressed.len() <span class="kw">as </span>u64 &gt; max_chunk =&gt; <span class="prelude-val">Err</span>(Error::InvalidFormat(<span class="macro">format!</span>(
+<a href=#501 id=501 data-nosnippet>501</a>                    <span class="string">"Deflate chunk {} expands beyond chunk_length {} (decompression-bomb guard)"</span>,
+<a href=#502 id=502 data-nosnippet>502</a>                    chunk_index, max_chunk
+<a href=#503 id=503 data-nosnippet>503</a>                ))),
+<a href=#504 id=504 data-nosnippet>504</a>                <span class="prelude-val">Ok</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">Ok</span>(decompressed),
+<a href=#505 id=505 data-nosnippet>505</a>                <span class="prelude-val">Err</span>(e) =&gt; <span class="prelude-val">Err</span>(Error::InvalidFormat(<span class="macro">format!</span>(
+<a href=#506 id=506 data-nosnippet>506</a>                    <span class="string">"Deflate decompression failed for chunk {} at offset 0x{:x}: {}. No fallback allowed for modern formats."</span>,
+<a href=#507 id=507 data-nosnippet>507</a>                    chunk_index,
+<a href=#508 id=508 data-nosnippet>508</a>                    <span class="self">self</span>.compression_info
+<a href=#509 id=509 data-nosnippet>509</a>                        .chunk_offsets
+<a href=#510 id=510 data-nosnippet>510</a>                        .get(chunk_index)
+<a href=#511 id=511 data-nosnippet>511</a>                        .unwrap_or(<span class="kw-2">&amp;</span><span class="number">0</span>),
+<a href=#512 id=512 data-nosnippet>512</a>                    e
+<a href=#513 id=513 data-nosnippet>513</a>                ))),
+<a href=#514 id=514 data-nosnippet>514</a>            }
+<a href=#515 id=515 data-nosnippet>515</a>        }
+<a href=#516 id=516 data-nosnippet>516</a>
+<a href=#517 id=517 data-nosnippet>517</a>        <span class="attr">#[cfg(not(feature = <span class="string">"deflate"</span>))]
+<a href=#518 id=518 data-nosnippet>518</a>        </span>{
+<a href=#519 id=519 data-nosnippet>519</a>            <span class="kw">let _ </span>= (compressed_data, chunk_index); <span class="comment">// Suppress unused warnings
+<a href=#520 id=520 data-nosnippet>520</a>            </span><span class="prelude-val">Err</span>(Error::UnsupportedFormat(
+<a href=#521 id=521 data-nosnippet>521</a>                <span class="string">"Deflate support not compiled in"</span>.to_string(),
+<a href=#522 id=522 data-nosnippet>522</a>            ))
+<a href=#523 id=523 data-nosnippet>523</a>        }
+<a href=#524 id=524 data-nosnippet>524</a>    }
+<a href=#525 id=525 data-nosnippet>525</a>
+<a href=#526 id=526 data-nosnippet>526</a>    <span class="doccomment">/// Decompress Zstd chunk - strict mode for modern formats
+<a href=#527 id=527 data-nosnippet>527</a>    </span><span class="kw">fn </span>decompress_zstd_chunk(<span class="kw-2">&amp;</span><span class="self">self</span>, compressed_data: <span class="kw-2">&amp;</span>[u8], chunk_index: usize) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;u8&gt;&gt; {
+<a href=#528 id=528 data-nosnippet>528</a>        <span class="attr">#[cfg(feature = <span class="string">"zstd"</span>)]
+<a href=#529 id=529 data-nosnippet>529</a>        </span>{
+<a href=#530 id=530 data-nosnippet>530</a>            <span class="kw">use </span>std::io::Read;
+<a href=#531 id=531 data-nosnippet>531</a>            <span class="kw">use </span>zstd::stream::read::Decoder <span class="kw">as </span>ZstdDecoder;
+<a href=#532 id=532 data-nosnippet>532</a>
+<a href=#533 id=533 data-nosnippet>533</a>            <span class="comment">// Decompression-bomb guard: stream through a reader capped at
+<a href=#534 id=534 data-nosnippet>534</a>            // chunk_length + 1 rather than `decode_all`, which would pre-allocate
+<a href=#535 id=535 data-nosnippet>535</a>            // whatever content size the frame declares (roborev).
+<a href=#536 id=536 data-nosnippet>536</a>            </span><span class="kw">let </span>max_chunk = <span class="self">self</span>.chunk_size_guard();
+<a href=#537 id=537 data-nosnippet>537</a>            <span class="kw">let </span><span class="kw-2">mut </span>decoder = <span class="kw">match </span>ZstdDecoder::new(compressed_data) {
+<a href=#538 id=538 data-nosnippet>538</a>                <span class="prelude-val">Ok</span>(d) =&gt; d.take(max_chunk + <span class="number">1</span>),
+<a href=#539 id=539 data-nosnippet>539</a>                <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#540 id=540 data-nosnippet>540</a>                    <span class="kw">return </span><span class="prelude-val">Err</span>(Error::InvalidFormat(<span class="macro">format!</span>(
+<a href=#541 id=541 data-nosnippet>541</a>                        <span class="string">"Zstd decoder init failed for chunk {}: {}"</span>,
+<a href=#542 id=542 data-nosnippet>542</a>                        chunk_index, e
+<a href=#543 id=543 data-nosnippet>543</a>                    )))
+<a href=#544 id=544 data-nosnippet>544</a>                }
+<a href=#545 id=545 data-nosnippet>545</a>            };
+<a href=#546 id=546 data-nosnippet>546</a>            <span class="kw">let </span><span class="kw-2">mut </span>decompressed = Vec::new();
+<a href=#547 id=547 data-nosnippet>547</a>            <span class="kw">match </span>decoder.read_to_end(<span class="kw-2">&amp;mut </span>decompressed) {
+<a href=#548 id=548 data-nosnippet>548</a>                <span class="prelude-val">Ok</span>(<span class="kw">_</span>) <span class="kw">if </span>decompressed.len() <span class="kw">as </span>u64 &gt; max_chunk =&gt; <span class="prelude-val">Err</span>(Error::InvalidFormat(<span class="macro">format!</span>(
+<a href=#549 id=549 data-nosnippet>549</a>                    <span class="string">"Zstd chunk {} expands beyond chunk_length {} (decompression-bomb guard)"</span>,
+<a href=#550 id=550 data-nosnippet>550</a>                    chunk_index, max_chunk
+<a href=#551 id=551 data-nosnippet>551</a>                ))),
+<a href=#552 id=552 data-nosnippet>552</a>                <span class="prelude-val">Ok</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">Ok</span>(decompressed),
+<a href=#553 id=553 data-nosnippet>553</a>                <span class="prelude-val">Err</span>(e) =&gt; <span class="prelude-val">Err</span>(Error::InvalidFormat(<span class="macro">format!</span>(
+<a href=#554 id=554 data-nosnippet>554</a>                    <span class="string">"Zstd decompression failed for chunk {} at offset 0x{:x}: {}. No fallback allowed for modern formats."</span>,
+<a href=#555 id=555 data-nosnippet>555</a>                    chunk_index,
+<a href=#556 id=556 data-nosnippet>556</a>                    <span class="self">self</span>.compression_info
+<a href=#557 id=557 data-nosnippet>557</a>                        .chunk_offsets
+<a href=#558 id=558 data-nosnippet>558</a>                        .get(chunk_index)
+<a href=#559 id=559 data-nosnippet>559</a>                        .unwrap_or(<span class="kw-2">&amp;</span><span class="number">0</span>),
+<a href=#560 id=560 data-nosnippet>560</a>                    e
+<a href=#561 id=561 data-nosnippet>561</a>                ))),
+<a href=#562 id=562 data-nosnippet>562</a>            }
+<a href=#563 id=563 data-nosnippet>563</a>        }
+<a href=#564 id=564 data-nosnippet>564</a>
+<a href=#565 id=565 data-nosnippet>565</a>        <span class="attr">#[cfg(not(feature = <span class="string">"zstd"</span>))]
+<a href=#566 id=566 data-nosnippet>566</a>        </span>{
+<a href=#567 id=567 data-nosnippet>567</a>            <span class="kw">let _ </span>= (compressed_data, chunk_index); <span class="comment">// Suppress unused warnings
+<a href=#568 id=568 data-nosnippet>568</a>            </span><span class="prelude-val">Err</span>(Error::UnsupportedFormat(
+<a href=#569 id=569 data-nosnippet>569</a>                <span class="string">"Zstd support not compiled in"</span>.to_string(),
+<a href=#570 id=570 data-nosnippet>570</a>            ))
+<a href=#571 id=571 data-nosnippet>571</a>        }
+<a href=#572 id=572 data-nosnippet>572</a>    }
+<a href=#573 id=573 data-nosnippet>573</a>
+<a href=#574 id=574 data-nosnippet>574</a>    <span class="doccomment">/// Clear the chunk cache to free memory
+<a href=#575 id=575 data-nosnippet>575</a>    </span><span class="kw">pub fn </span>clear_cache(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
+<a href=#576 id=576 data-nosnippet>576</a>        <span class="self">self</span>.chunk_cache.clear();
+<a href=#577 id=577 data-nosnippet>577</a>    }
+<a href=#578 id=578 data-nosnippet>578</a>
+<a href=#579 id=579 data-nosnippet>579</a>    <span class="doccomment">/// Get cache statistics
+<a href=#580 id=580 data-nosnippet>580</a>    </span><span class="kw">pub fn </span>cache_stats(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; (usize, usize) {
+<a href=#581 id=581 data-nosnippet>581</a>        (<span class="self">self</span>.chunk_cache.len(), <span class="self">self</span>.max_cached_chunks)
+<a href=#582 id=582 data-nosnippet>582</a>    }
+<a href=#583 id=583 data-nosnippet>583</a>
+<a href=#584 id=584 data-nosnippet>584</a>    <span class="doccomment">/// Read all data from the compressed file (for testing/debugging).
+<a href=#585 id=585 data-nosnippet>585</a>    ///
+<a href=#586 id=586 data-nosnippet>586</a>    /// Bounded by `data_length`, so it does NOT touch a degenerate empty trailing
+<a href=#587 id=587 data-nosnippet>587</a>    /// chunk that holds no addressable data. To validate EVERY chunk record's inline
+<a href=#588 id=588 data-nosnippet>588</a>    /// CRC (including such trailing chunks), iterate `chunk_count()` and call
+<a href=#589 id=589 data-nosnippet>589</a>    /// `decompress_chunk_by_index`.
+<a href=#590 id=590 data-nosnippet>590</a>    </span><span class="kw">pub fn </span>read_all_data&lt;R: Read + Seek&gt;(<span class="kw-2">&amp;mut </span><span class="self">self</span>, reader: <span class="kw-2">&amp;mut </span>R) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;u8&gt;&gt; {
+<a href=#591 id=591 data-nosnippet>591</a>        <span class="self">self</span>.read_data(reader, <span class="number">0</span>, <span class="self">self</span>.compression_info.data_length <span class="kw">as </span>usize)
+<a href=#592 id=592 data-nosnippet>592</a>    }
+<a href=#593 id=593 data-nosnippet>593</a>
+<a href=#594 id=594 data-nosnippet>594</a>    <span class="doccomment">/// Number of compressed chunk records (the CompressionInfo.db offset-table length).
+<a href=#595 id=595 data-nosnippet>595</a>    </span><span class="kw">pub fn </span>chunk_count(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+<a href=#596 id=596 data-nosnippet>596</a>        <span class="self">self</span>.compression_info.chunk_offsets.len()
+<a href=#597 id=597 data-nosnippet>597</a>    }
+<a href=#598 id=598 data-nosnippet>598</a>
+<a href=#599 id=599 data-nosnippet>599</a>    <span class="doccomment">/// Decompress a single chunk by index, validating its inline CRC32 trailer.
+<a href=#600 id=600 data-nosnippet>600</a>    ///
+<a href=#601 id=601 data-nosnippet>601</a>    /// Exposed for strict per-chunk parity tests that must exercise every chunk record
+<a href=#602 id=602 data-nosnippet>602</a>    /// — including degenerate trailing chunks that `read_all_data` (bounded by
+<a href=#603 id=603 data-nosnippet>603</a>    /// `data_length`) never reads.
+<a href=#604 id=604 data-nosnippet>604</a>    </span><span class="kw">pub fn </span>decompress_chunk_by_index&lt;R: Read + Seek&gt;(
+<a href=#605 id=605 data-nosnippet>605</a>        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
+<a href=#606 id=606 data-nosnippet>606</a>        reader: <span class="kw-2">&amp;mut </span>R,
+<a href=#607 id=607 data-nosnippet>607</a>        chunk_index: usize,
+<a href=#608 id=608 data-nosnippet>608</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;u8&gt;&gt; {
+<a href=#609 id=609 data-nosnippet>609</a>        <span class="comment">// Single-chunk entry point: the reader position is unknown here too, so
+<a href=#610 id=610 data-nosnippet>610</a>        // force the first (only) read to seek (issue #1586).
+<a href=#611 id=611 data-nosnippet>611</a>        </span><span class="self">self</span>.stream_pos = <span class="prelude-val">None</span>;
+<a href=#612 id=612 data-nosnippet>612</a>        <span class="self">self</span>.get_decompressed_chunk(reader, chunk_index)
+<a href=#613 id=613 data-nosnippet>613</a>    }
+<a href=#614 id=614 data-nosnippet>614</a>
+<a href=#615 id=615 data-nosnippet>615</a>    <span class="doccomment">/// Get compression info
+<a href=#616 id=616 data-nosnippet>616</a>    </span><span class="kw">pub fn </span>compression_info(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>CompressionInfo {
+<a href=#617 id=617 data-nosnippet>617</a>        <span class="kw-2">&amp;</span><span class="self">self</span>.compression_info
+<a href=#618 id=618 data-nosnippet>618</a>    }
+<a href=#619 id=619 data-nosnippet>619</a>}
+<a href=#620 id=620 data-nosnippet>620</a>
+<a href=#621 id=621 data-nosnippet>621</a><span class="doccomment">/// Utility function to create a chunk decompressor from CompressionInfo.db file
+<a href=#622 id=622 data-nosnippet>622</a></span><span class="kw">pub fn </span>create_decompressor_from_file(
+<a href=#623 id=623 data-nosnippet>623</a>    compression_info_path: <span class="kw-2">&amp;</span>std::path::Path,
+<a href=#624 id=624 data-nosnippet>624</a>) -&gt; <span class="prelude-ty">Result</span>&lt;ChunkDecompressor&gt; {
+<a href=#625 id=625 data-nosnippet>625</a>    <span class="kw">let </span>compression_data = std::fs::read(compression_info_path).map_err(Error::Io)<span class="question-mark">?</span>;
+<a href=#626 id=626 data-nosnippet>626</a>
+<a href=#627 id=627 data-nosnippet>627</a>    <span class="comment">// Parse CompressionInfo using the deterministic Cassandra format.
+<a href=#628 id=628 data-nosnippet>628</a>    // (Bug #638: old heuristic parse_alternative_format violated the no-heuristics mandate
+<a href=#629 id=629 data-nosnippet>629</a>    // and has been removed.  The standard parse() is authoritative for all supported files.)
+<a href=#630 id=630 data-nosnippet>630</a>    </span><span class="kw">let </span>compression_info = CompressionInfo::parse(<span class="kw-2">&amp;</span>compression_data)<span class="question-mark">?</span>;
+<a href=#631 id=631 data-nosnippet>631</a>
+<a href=#632 id=632 data-nosnippet>632</a>    <span class="macro">log::info!</span>(<span class="string">"Loaded compression info:"</span>);
+<a href=#633 id=633 data-nosnippet>633</a>    <span class="macro">log::info!</span>(<span class="string">"   Algorithm: {}"</span>, compression_info.algorithm);
+<a href=#634 id=634 data-nosnippet>634</a>    <span class="macro">log::info!</span>(<span class="string">"   Chunk Length: {} bytes"</span>, compression_info.chunk_length);
+<a href=#635 id=635 data-nosnippet>635</a>    <span class="macro">log::info!</span>(<span class="string">"   Data Length: {} bytes"</span>, compression_info.data_length);
+<a href=#636 id=636 data-nosnippet>636</a>    <span class="macro">log::info!</span>(<span class="string">"   Chunk Count: {}"</span>, compression_info.chunk_offsets.len());
+<a href=#637 id=637 data-nosnippet>637</a>
+<a href=#638 id=638 data-nosnippet>638</a>    ChunkDecompressor::new(compression_info, CassandraVersion::V5_0Release)
+<a href=#639 id=639 data-nosnippet>639</a>}
+<a href=#640 id=640 data-nosnippet>640</a>
+<a href=#641 id=641 data-nosnippet>641</a><span class="attr">#[cfg(test)]
+<a href=#642 id=642 data-nosnippet>642</a></span><span class="kw">mod </span>tests {
+<a href=#643 id=643 data-nosnippet>643</a>    <span class="kw">use </span>super::<span class="kw-2">*</span>;
+<a href=#644 id=644 data-nosnippet>644</a>
+<a href=#645 id=645 data-nosnippet>645</a>    <span class="attr">#[test]
+<a href=#646 id=646 data-nosnippet>646</a>    </span><span class="kw">fn </span>test_chunk_decompressor_creation() {
+<a href=#647 id=647 data-nosnippet>647</a>        <span class="kw">let </span>compression_info = CompressionInfo {
+<a href=#648 id=648 data-nosnippet>648</a>            algorithm: <span class="string">"LZ4Compressor"</span>.to_string(),
+<a href=#649 id=649 data-nosnippet>649</a>            chunk_length: <span class="number">16384</span>,
+<a href=#650 id=650 data-nosnippet>650</a>            data_length: <span class="number">32768</span>,
+<a href=#651 id=651 data-nosnippet>651</a>            chunk_offsets: <span class="macro">vec!</span>[<span class="number">0</span>, <span class="number">8192</span>, <span class="number">16384</span>],
+<a href=#652 id=652 data-nosnippet>652</a>            option_pairs: <span class="macro">vec!</span>[],
+<a href=#653 id=653 data-nosnippet>653</a>            max_compressed_length: i32::MAX <span class="kw">as </span>u32,
+<a href=#654 id=654 data-nosnippet>654</a>        };
+<a href=#655 id=655 data-nosnippet>655</a>
+<a href=#656 id=656 data-nosnippet>656</a>        <span class="kw">let </span>decompressor =
+<a href=#657 id=657 data-nosnippet>657</a>            ChunkDecompressor::new(compression_info, CassandraVersion::V5_0Release).unwrap();
+<a href=#658 id=658 data-nosnippet>658</a>        <span class="macro">assert_eq!</span>(decompressor.compression_info.algorithm, <span class="string">"LZ4Compressor"</span>);
+<a href=#659 id=659 data-nosnippet>659</a>        <span class="macro">assert_eq!</span>(decompressor.compression_info.chunk_length, <span class="number">16384</span>);
+<a href=#660 id=660 data-nosnippet>660</a>        <span class="macro">assert_eq!</span>(decompressor.compression_info.chunk_offsets.len(), <span class="number">3</span>);
+<a href=#661 id=661 data-nosnippet>661</a>    }
+<a href=#662 id=662 data-nosnippet>662</a>
+<a href=#663 id=663 data-nosnippet>663</a>    <span class="attr">#[test]
+<a href=#664 id=664 data-nosnippet>664</a>    </span><span class="kw">fn </span>test_chunk_cache() {
+<a href=#665 id=665 data-nosnippet>665</a>        <span class="kw">let </span>compression_info = CompressionInfo {
+<a href=#666 id=666 data-nosnippet>666</a>            algorithm: <span class="string">"LZ4Compressor"</span>.to_string(),
+<a href=#667 id=667 data-nosnippet>667</a>            chunk_length: <span class="number">16384</span>,
+<a href=#668 id=668 data-nosnippet>668</a>            data_length: <span class="number">16384</span>,
+<a href=#669 id=669 data-nosnippet>669</a>            chunk_offsets: <span class="macro">vec!</span>[<span class="number">0</span>],
+<a href=#670 id=670 data-nosnippet>670</a>            option_pairs: <span class="macro">vec!</span>[],
+<a href=#671 id=671 data-nosnippet>671</a>            max_compressed_length: i32::MAX <span class="kw">as </span>u32,
+<a href=#672 id=672 data-nosnippet>672</a>        };
+<a href=#673 id=673 data-nosnippet>673</a>
+<a href=#674 id=674 data-nosnippet>674</a>        <span class="kw">let </span><span class="kw-2">mut </span>decompressor =
+<a href=#675 id=675 data-nosnippet>675</a>            ChunkDecompressor::new(compression_info, CassandraVersion::V5_0Release).unwrap();
+<a href=#676 id=676 data-nosnippet>676</a>
+<a href=#677 id=677 data-nosnippet>677</a>        <span class="kw">let </span>(cached, max) = decompressor.cache_stats();
+<a href=#678 id=678 data-nosnippet>678</a>        <span class="macro">assert_eq!</span>(cached, <span class="number">0</span>);
+<a href=#679 id=679 data-nosnippet>679</a>        <span class="macro">assert_eq!</span>(max, <span class="number">16</span>);
+<a href=#680 id=680 data-nosnippet>680</a>
+<a href=#681 id=681 data-nosnippet>681</a>        decompressor.clear_cache();
+<a href=#682 id=682 data-nosnippet>682</a>        <span class="kw">let </span>(cached_after_clear, <span class="kw">_</span>) = decompressor.cache_stats();
+<a href=#683 id=683 data-nosnippet>683</a>        <span class="macro">assert_eq!</span>(cached_after_clear, <span class="number">0</span>);
+<a href=#684 id=684 data-nosnippet>684</a>    }
+<a href=#685 id=685 data-nosnippet>685</a>
+<a href=#686 id=686 data-nosnippet>686</a>    <span class="doccomment">/// A `Read + Seek` wrapper that counts every `seek()` call (which includes
+<a href=#687 id=687 data-nosnippet>687</a>    /// `stream_position()`, since the default `Seek::stream_position` is
+<a href=#688 id=688 data-nosnippet>688</a>    /// `seek(SeekFrom::Current(0))`). Used to prove the chunk read path does not
+<a href=#689 id=689 data-nosnippet>689</a>    /// re-derive the immutable file size with a seek probe on every chunk
+<a href=#690 id=690 data-nosnippet>690</a>    /// (issue #1586).
+<a href=#691 id=691 data-nosnippet>691</a>    </span><span class="kw">struct </span>SeekCountingReader {
+<a href=#692 id=692 data-nosnippet>692</a>        inner: std::io::Cursor&lt;Vec&lt;u8&gt;&gt;,
+<a href=#693 id=693 data-nosnippet>693</a>        seeks: std::rc::Rc&lt;std::cell::Cell&lt;usize&gt;&gt;,
+<a href=#694 id=694 data-nosnippet>694</a>    }
+<a href=#695 id=695 data-nosnippet>695</a>
+<a href=#696 id=696 data-nosnippet>696</a>    <span class="kw">impl </span>std::io::Read <span class="kw">for </span>SeekCountingReader {
+<a href=#697 id=697 data-nosnippet>697</a>        <span class="kw">fn </span>read(<span class="kw-2">&amp;mut </span><span class="self">self</span>, buf: <span class="kw-2">&amp;mut </span>[u8]) -&gt; std::io::Result&lt;usize&gt; {
+<a href=#698 id=698 data-nosnippet>698</a>            <span class="self">self</span>.inner.read(buf)
+<a href=#699 id=699 data-nosnippet>699</a>        }
+<a href=#700 id=700 data-nosnippet>700</a>    }
+<a href=#701 id=701 data-nosnippet>701</a>
+<a href=#702 id=702 data-nosnippet>702</a>    <span class="kw">impl </span>Seek <span class="kw">for </span>SeekCountingReader {
+<a href=#703 id=703 data-nosnippet>703</a>        <span class="kw">fn </span>seek(<span class="kw-2">&amp;mut </span><span class="self">self</span>, pos: SeekFrom) -&gt; std::io::Result&lt;u64&gt; {
+<a href=#704 id=704 data-nosnippet>704</a>            <span class="self">self</span>.seeks.set(<span class="self">self</span>.seeks.get() + <span class="number">1</span>);
+<a href=#705 id=705 data-nosnippet>705</a>            <span class="self">self</span>.inner.seek(pos)
+<a href=#706 id=706 data-nosnippet>706</a>        }
+<a href=#707 id=707 data-nosnippet>707</a>    }
+<a href=#708 id=708 data-nosnippet>708</a>
+<a href=#709 id=709 data-nosnippet>709</a>    <span class="doccomment">/// Build a synthetic `k`-chunk LZ4 Data.db body plus its `CompressionInfo`.
+<a href=#710 id=710 data-nosnippet>710</a>    /// Each chunk record is `[LE u32 uncompressed_len][lz4 bytes][BE u32 CRC32]`
+<a href=#711 id=711 data-nosnippet>711</a>    /// exactly as Cassandra's `CompressedSequentialWriter` lays them out.
+<a href=#712 id=712 data-nosnippet>712</a>    </span><span class="attr">#[cfg(feature = <span class="string">"lz4"</span>)]
+<a href=#713 id=713 data-nosnippet>713</a>    </span><span class="kw">fn </span>build_multichunk_lz4(
+<a href=#714 id=714 data-nosnippet>714</a>        k: usize,
+<a href=#715 id=715 data-nosnippet>715</a>        chunk_len: usize,
+<a href=#716 id=716 data-nosnippet>716</a>        last_len: usize,
+<a href=#717 id=717 data-nosnippet>717</a>    ) -&gt; (Vec&lt;u8&gt;, CompressionInfo) {
+<a href=#718 id=718 data-nosnippet>718</a>        <span class="kw">let </span><span class="kw-2">mut </span>data_db: Vec&lt;u8&gt; = Vec::new();
+<a href=#719 id=719 data-nosnippet>719</a>        <span class="kw">let </span><span class="kw-2">mut </span>offsets: Vec&lt;u64&gt; = Vec::new();
+<a href=#720 id=720 data-nosnippet>720</a>        <span class="kw">let </span><span class="kw-2">mut </span>data_length: u64 = <span class="number">0</span>;
+<a href=#721 id=721 data-nosnippet>721</a>        <span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..k {
+<a href=#722 id=722 data-nosnippet>722</a>            offsets.push(data_db.len() <span class="kw">as </span>u64);
+<a href=#723 id=723 data-nosnippet>723</a>            <span class="kw">let </span>unclen = <span class="kw">if </span>i + <span class="number">1 </span>== k { last_len } <span class="kw">else </span>{ chunk_len };
+<a href=#724 id=724 data-nosnippet>724</a>            <span class="kw">let </span>uncompressed: Vec&lt;u8&gt; = (<span class="number">0</span>..unclen).map(|j| ((i * <span class="number">7 </span>+ j) % <span class="number">251</span>) <span class="kw">as </span>u8).collect();
+<a href=#725 id=725 data-nosnippet>725</a>            data_length += unclen <span class="kw">as </span>u64;
+<a href=#726 id=726 data-nosnippet>726</a>            <span class="kw">let </span><span class="kw-2">mut </span>payload = (unclen <span class="kw">as </span>u32).to_le_bytes().to_vec();
+<a href=#727 id=727 data-nosnippet>727</a>            payload.extend_from_slice(<span class="kw-2">&amp;</span>lz4_flex::compress(<span class="kw-2">&amp;</span>uncompressed));
+<a href=#728 id=728 data-nosnippet>728</a>            <span class="kw">let </span>crc = crc32fast::hash(<span class="kw-2">&amp;</span>payload);
+<a href=#729 id=729 data-nosnippet>729</a>            data_db.extend_from_slice(<span class="kw-2">&amp;</span>payload);
+<a href=#730 id=730 data-nosnippet>730</a>            data_db.extend_from_slice(<span class="kw-2">&amp;</span>crc.to_be_bytes());
+<a href=#731 id=731 data-nosnippet>731</a>        }
+<a href=#732 id=732 data-nosnippet>732</a>        <span class="kw">let </span>info = CompressionInfo {
+<a href=#733 id=733 data-nosnippet>733</a>            algorithm: <span class="string">"LZ4Compressor"</span>.to_string(),
+<a href=#734 id=734 data-nosnippet>734</a>            chunk_length: chunk_len <span class="kw">as </span>u32,
+<a href=#735 id=735 data-nosnippet>735</a>            data_length,
+<a href=#736 id=736 data-nosnippet>736</a>            chunk_offsets: offsets,
+<a href=#737 id=737 data-nosnippet>737</a>            option_pairs: <span class="macro">vec!</span>[],
+<a href=#738 id=738 data-nosnippet>738</a>            max_compressed_length: i32::MAX <span class="kw">as </span>u32,
+<a href=#739 id=739 data-nosnippet>739</a>        };
+<a href=#740 id=740 data-nosnippet>740</a>        (data_db, info)
+<a href=#741 id=741 data-nosnippet>741</a>    }
+<a href=#742 id=742 data-nosnippet>742</a>
+<a href=#743 id=743 data-nosnippet>743</a>    <span class="doccomment">/// Issue #1586: reading every chunk of a K-chunk file must NOT re-probe the
+<a href=#744 id=744 data-nosnippet>744</a>    /// immutable file size with a `seek(End)`/`seek(Start)` dance on each chunk.
+<a href=#745 id=745 data-nosnippet>745</a>    /// A full `read_all_data` scan must issue `&lt;= K + O(1)` seeks, not the ~4*K
+<a href=#746 id=746 data-nosnippet>746</a>    /// seeks the per-chunk size probe produced. On unfixed code this asserts
+<a href=#747 id=747 data-nosnippet>747</a>    /// ~4*K and FAILS; after threading the cached file size it passes.
+<a href=#748 id=748 data-nosnippet>748</a>    </span><span class="attr">#[cfg(feature = <span class="string">"lz4"</span>)]
+<a href=#749 id=749 data-nosnippet>749</a>    #[test]
+<a href=#750 id=750 data-nosnippet>750</a>    </span><span class="kw">fn </span>read_all_data_does_not_reprobe_file_size_per_chunk() {
+<a href=#751 id=751 data-nosnippet>751</a>        <span class="kw">let </span>k = <span class="number">8usize</span>;
+<a href=#752 id=752 data-nosnippet>752</a>        <span class="kw">let </span>(data_db, info) = build_multichunk_lz4(k, <span class="number">200</span>, <span class="number">50</span>);
+<a href=#753 id=753 data-nosnippet>753</a>        <span class="kw">let </span><span class="kw-2">mut </span>decompressor = ChunkDecompressor::new(info, CassandraVersion::V5_0Release).unwrap();
+<a href=#754 id=754 data-nosnippet>754</a>
+<a href=#755 id=755 data-nosnippet>755</a>        <span class="kw">let </span>seeks = std::rc::Rc::new(std::cell::Cell::new(<span class="number">0usize</span>));
+<a href=#756 id=756 data-nosnippet>756</a>        <span class="kw">let </span><span class="kw-2">mut </span>reader = SeekCountingReader {
+<a href=#757 id=757 data-nosnippet>757</a>            inner: std::io::Cursor::new(data_db),
+<a href=#758 id=758 data-nosnippet>758</a>            seeks: seeks.clone(),
+<a href=#759 id=759 data-nosnippet>759</a>        };
+<a href=#760 id=760 data-nosnippet>760</a>
+<a href=#761 id=761 data-nosnippet>761</a>        <span class="kw">let </span>out = decompressor
+<a href=#762 id=762 data-nosnippet>762</a>            .read_all_data(<span class="kw-2">&amp;mut </span>reader)
+<a href=#763 id=763 data-nosnippet>763</a>            .expect(<span class="string">"read_all_data"</span>);
+<a href=#764 id=764 data-nosnippet>764</a>        <span class="macro">assert_eq!</span>(out.len(), <span class="number">7 </span>* <span class="number">200 </span>+ <span class="number">50</span>, <span class="string">"all decompressed bytes returned"</span>);
+<a href=#765 id=765 data-nosnippet>765</a>
+<a href=#766 id=766 data-nosnippet>766</a>        <span class="comment">// Budget: one initial size probe (a small constant) plus at most one
+<a href=#767 id=767 data-nosnippet>767</a>        // positioning seek per chunk. The per-chunk file-size re-probe (3 extra
+<a href=#768 id=768 data-nosnippet>768</a>        // seeks/chunk) must be gone.
+<a href=#769 id=769 data-nosnippet>769</a>        </span><span class="kw">let </span>total = seeks.get();
+<a href=#770 id=770 data-nosnippet>770</a>        <span class="kw">let </span>budget = k + <span class="number">4</span>;
+<a href=#771 id=771 data-nosnippet>771</a>        <span class="macro">assert!</span>(
+<a href=#772 id=772 data-nosnippet>772</a>            total &lt;= budget,
+<a href=#773 id=773 data-nosnippet>773</a>            <span class="string">"expected &lt;= {budget} seeks for {k} chunks (K + O(1)), got {total} \
+<a href=#774 id=774 data-nosnippet>774</a>             — per-chunk file-size re-probe not eliminated (issue #1586)"
+<a href=#775 id=775 data-nosnippet>775</a>        </span>);
+<a href=#776 id=776 data-nosnippet>776</a>    }
+<a href=#777 id=777 data-nosnippet>777</a>}
+</code></pre></div></section></main></body></html>

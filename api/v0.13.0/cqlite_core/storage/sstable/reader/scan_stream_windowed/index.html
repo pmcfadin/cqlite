@@ -1,0 +1,116 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Sliding-window stitch+parse driver for the user-facing streaming scan (issue #1143)."><title>cqlite_core::storage::sstable::reader::scan_stream_windowed - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module scan_stream_windowed</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.13.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module scan_<wbr>stream_<wbr>windowed</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#design-issue-1143-regression-fix" title="Design (issue #1143 regression fix)">Design (issue #1143 regression fix)</a><ul><li><a href="#backpressure-preserved-end-to-end" title="Backpressure (preserved end-to-end)">Backpressure (preserved end-to-end)</a></li><li><a href="#worst-case-resident-rows-issue-1143-roborev" title="Worst-case resident rows (issue #1143, roborev)">Worst-case resident rows (issue #1143, roborev)</a></li><li><a href="#cancellation-issue-1143-finding-2" title="Cancellation (issue #1143 finding 2)">Cancellation (issue #1143 finding 2)</a></li><li><a href="#parity" title="Parity">Parity</a></li></ul></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In cqlite_<wbr>core::<wbr>storage::<wbr>sstable::<wbr>reader</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../../index.html">cqlite_core</a>::<wbr><a href="../../../index.html">storage</a>::<wbr><a href="../../index.html">sstable</a>::<wbr><a href="../index.html">reader</a></div><h1>Module <span>scan_<wbr>stream_<wbr>windowed</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../../src/cqlite_core/storage/sstable/reader/scan_stream_windowed.rs.html#1-838">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Sliding-window stitch+parse driver for the user-facing streaming scan
+(issue #1143).</p>
+<h2 id="design-issue-1143-regression-fix"><a class="doc-anchor" href="#design-issue-1143-regression-fix">§</a>Design (issue #1143 regression fix)</h2>
+<p>The V5CompressedLegacy full scan must reconcile two goals that PR #1156
+treated as mutually exclusive:</p>
+<ol>
+<li><strong>Bounded heap.</strong> Keep only a sliding <code>window: Vec&lt;u8&gt;</code> of decompressed
+bytes (peak <code>max_partition_size + one_chunk</code>), not an O(file) stitched
+buffer per scan. (PR #1156’s contribution — KEPT.)</li>
+<li><strong>CPU off the async worker pool.</strong> Decompress +
+<code>parse_one_partition_with_timestamps</code> are CPU-bound; running them inline
+on the small async worker pool (as PR #1156 did, relying on
+<code>yield_now()</code>) lets a scan starve everything else scheduled there
+(writer flush/compaction in production), halving reader throughput under
+concurrent write load. The pre-#1156 path ran the whole parse under a
+dedicated <code>spawn_blocking</code> thread — restore that.</li>
+</ol>
+<p>Both are achievable together. This driver splits the work across THREE stages
+of one bounded pipeline (issue #1143 contention fix):</p>
+<ul>
+<li><strong>Async I/O half</strong> (<code>run_scan_stream_windowed</code>): the only thing that must
+touch the async runtime is the chunk read (<code>read_next_block().await</code>
+awaits the per-scan cursor’s async file lock). It does ONLY I/O: read the
+next raw compressed chunk and hand it to the parse half over a small
+bounded channel (<code>raw</code> channel, capacity [<code>RAW_CHUNK_CHANNEL_CAP</code>] = 8 so
+the I/O half can read ahead instead of ping-ponging on every chunk).</li>
+<li><strong>Blocking parse half</strong> (<code>drain_scan_window_blocking</code>): a single
+<code>spawn_blocking</code> task owns the parser, the schema, and the sliding
+window. It pulls raw chunks with <code>blocking_recv</code>, decompresses, appends to
+the window, drains every confirmed partition, and accumulates surviving
+<code>(RowKey, ScanRow)</code> entries into a BATCH of up to [<code>BATCH_EMIT_ROWS</code>], which
+it hands across the blocking→async seam via <code>tx.blocking_send</code> as ONE
+<code>Vec</code> item. ALL decompress+parse CPU runs here, off the async worker pool.
+Batching is the key contention fix: PR #1156 <code>blocking_send</code>’d one row at
+a time, so a <code>SELECT *</code> full scan woke the consuming async task O(rows)
+times across the blocking-pool ↔ async-worker boundary; samply attributed
+~31.5% of read wall time under <code>mixed.read_while_write</code> conc=8 to that one
+<code>parking_lot</code> condvar. Batching amortizes the wake ~<code>BATCH_EMIT_ROWS</code>×.
+To keep that win WITHOUT regressing incremental delivery, the pending
+batch is flushed at a BOUNDED CADENCE — at each chunk/window drain
+boundary (after the per-chunk drain returns NeedMore / empties the
+window) as well as on reaching <code>BATCH_EMIT_ROWS</code> — so a sparse or
+sub-<code>BATCH_EMIT_ROWS</code> scan (e.g. a <code>LIMIT</code>) still delivers its confirmed
+rows promptly instead of waiting for the whole scan to finish. The wake
+rate is thus ~one-per-chunk (plus one-per-full-batch in dense windows),
+far below PR #1156’s one-per-row.</li>
+<li><strong>Async forwarder task</strong> (in <code>run_scan_stream_windowed</code>): flattens each
+<code>Vec</code> batch back into the caller’s per-item <code>tx</code>, preserving the public
+<code>scan_stream</code> contract (item type, order, backpressure) unchanged. Runs on
+the async runtime concurrently with the I/O half (both are needed at once;
+running them sequentially would deadlock), so its wakes are cheap
+async-worker wakes, not blocking-pool condvar wakes.</li>
+</ul>
+<h3 id="backpressure-preserved-end-to-end"><a class="doc-anchor" href="#backpressure-preserved-end-to-end">§</a>Backpressure (preserved end-to-end)</h3>
+<p>A slow consumer blocks the forwarder’s <code>tx.send().await</code>, which stops draining
+the bounded batch channel, which blocks the parse half’s <code>tx.blocking_send</code>,
+which stops the parse loop, which stops draining the <code>raw</code> channel, which
+(being bounded) blocks <code>raw_tx.send().await</code> in the I/O half, which stops
+reading from disk. Nothing buffers the whole file; live heap stays
+<code>window + RAW_CHUNK_CHANNEL_CAP</code> raw chunks + at most
+[<code>MAX_INFLIGHT_BATCH_ROWS</code>] buffered rows ahead of the caller.</p>
+<h3 id="worst-case-resident-rows-issue-1143-roborev"><a class="doc-anchor" href="#worst-case-resident-rows-issue-1143-roborev">§</a>Worst-case resident rows (issue #1143, roborev)</h3>
+<p>Be honest and COMPLETE: against a stalled consumer the resident <code>(RowKey, ScanRow)</code>
+count is the SUM of three inherent terms, not one constant —
+<code>buffer_size + max_partition_size + MAX_INFLIGHT_BATCH_ROWS</code>:</p>
+<ul>
+<li><strong><code>buffer_size</code></strong> — the public per-item channel, sized from the caller’s
+<code>StreamingConfig::buffer_size</code>.</li>
+<li><strong><code>max_partition_size</code></strong> — INHERENT to any row-materializing partition scan and
+PRE-DATES this change: <code>drain_scan_window</code> parses one CONFIRMED partition fully
+into a reused <code>scratch: Vec&lt;(RowKey, ScanRow)&gt;</code> before batching (the parser’s <code>FnMut</code>
+emit is synchronous, so a partition’s rows cannot stream out mid-parse), so if
+<code>blocking_send</code> stalls mid-iteration the producer still owns that Vec’s
+not-yet-batched tail. This is the pre-existing #1156 windowed-scan heap term
+(heap was always <code>~max_partition_size + one_chunk</code>); this PR neither introduced
+it nor restructures emission to observe backpressure mid-partition — that is a
+separate #1156 redesign, deliberately out of scope here.</li>
+<li><strong><code>MAX_INFLIGHT_BATCH_ROWS</code></strong> — the <em>additional</em> bound this PR’s batching adds:
+a SECOND in-flight pool NOT sized by <code>buffer_size</code>. The bounded batch channel
+(<code>BATCH_CHANNEL_CAP</code> batches), the one batch the forwarder <code>recv()</code>’d and is
+flattening, AND the one batch the producer is parked-in-<code>blocking_send</code> holding
+can ALL be live at once — even when <code>buffer_size == 1</code>: a deliberate, BOUNDED
+read-ahead, the price of amortizing the blocking-&gt;async wake. It bounds the
+BATCHING subsystem ALONE; it does NOT — and is not claimed to — cover the
+<code>max_partition_size</code> term. The public <code>scan_stream</code> doc states the full
+three-term sum so callers know the true worst case.</li>
+</ul>
+<h3 id="cancellation-issue-1143-finding-2"><a class="doc-anchor" href="#cancellation-issue-1143-finding-2">§</a>Cancellation (issue #1143 finding 2)</h3>
+<p>The outer scan runs inside the <code>tokio::spawn</code> in <code>scan_stream</code>; if that task
+is dropped/cancelled at an <code>await</code>, the parse task’s <code>JoinHandle</code> (held in
+<code>run_scan_stream_windowed</code>) is dropped too. Dropping a <code>spawn_blocking</code>
+<code>JoinHandle</code> DETACHES the task — it does NOT abort it (there is no portable
+way to interrupt a running blocking thread). The detached parse task keeps
+running: <code>raw_rx.blocking_recv()</code> observes the dropped <code>raw_tx</code>, and because a
+clean cancellation leaves <code>io_failed == false</code>, it proceeds to a final drain
+and <code>tx.blocking_send</code>s its trailing batch into the batch channel.</p>
+<p>This is harmless in practice and needs no abort machinery: on cancellation
+the consumer drops the <code>mpsc::Receiver</code> (<code>rx</code>) returned by <code>scan_stream</code>, so
+the forwarder’s next <code>fwd_tx.send</code> fails, the forwarder returns and drops the
+batch receiver, so the parse half’s next <code>tx.blocking_send</code> fails
+(<code>*broke = true</code>), the parse loop returns immediately, and the task — and the
+<code>reader: Arc&lt;Self&gt;</code> it holds — are released. The only window in which it can
+still emit is when a batch was already in flight AND the consumer’s <code>rx</code> has
+not yet dropped, i.e. the consumer is still reading; those rows are valid scan
+output, not garbage. Worst case the task lingers for one partition’s parse
+before its <code>blocking_send</code> fails, keeping <code>Arc&lt;Self&gt;</code> alive only that long.
+Pre-#1156 the parse ran inline on the cancellable async task, so this detach
+window is new to the offload split; it is bounded and self-terminating, so we
+document it rather than add abort plumbing.</p>
+<h3 id="parity"><a class="doc-anchor" href="#parity">§</a>Parity</h3>
+<p>The emitted set/order is byte-identical to the prior inline driver: same
+schema resolution, same incompressible-chunk raw fallback, same
+<code>table_ids_match</code> / key-range / <code>filter_tombstone</code> filters, same
+NeedMore/Done straddle handling and final-chunk semantics, same
+<code>READ_SCAN_WINDOW_REFILL</code> counter. The only change is WHERE the CPU runs.</p>
+</div></details></section></div></main></body></html>
