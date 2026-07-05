@@ -30,7 +30,11 @@ const SENTINEL: &str = "CQLITE_SENTINEL_1694_DO_NOT_LOG";
 
 /// Runtime source modules on the `Database::execute` SELECT path. They diagnose
 /// exclusively through `log`; none may contain a stdout/stderr write macro.
+/// `src/lib.rs` is included because it hosts `Database::execute` itself — the
+/// SQL-leak fix removed a raw-SQL log from that function (see
+/// `lib_execute_does_not_log_raw_sql` for the value-bearing-log guard).
 const QUERY_EXECUTION_MODULES: &[&str] = &[
+    "src/lib.rs",
     "src/query/executor.rs",
     "src/query/engine.rs",
     "src/query/select_executor/execute.rs",
@@ -87,6 +91,130 @@ fn no_stdio_writes_in_query_execution_path() {
         all.is_empty(),
         "Query-execution modules must diagnose via `log`, never stdout/stderr \
          (data-safety #1694); found: {all:#?}"
+    );
+}
+
+/// Extract the brace-delimited body of the first function whose text contains
+/// `sig` (e.g. `"fn execute(&self, sql: &str)"`). Returns the substring from the
+/// opening `{` through its matching `}`. Format strings in library code keep
+/// their `{`/`}` balanced, so the simple depth counter is sufficient here.
+fn fn_body(src: &str, sig: &str) -> String {
+    let start = src
+        .find(sig)
+        .unwrap_or_else(|| panic!("signature not found in src/lib.rs: {sig}"));
+    let rest = &src[start..];
+    let bytes = rest.as_bytes();
+    let open = rest.find('{').expect("function has no opening brace");
+    let mut depth = 0usize;
+    for (i, &b) in bytes.iter().enumerate().skip(open) {
+        match b {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return rest[open..=i].to_string();
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unbalanced braces after signature: {sig}");
+}
+
+/// Return the full parenthesized argument text of every diagnostic/print macro
+/// call in `text` (multi-line aware via paren balancing). Covers both `log::`
+/// macros (the leak's actual channel) and the stdout/stderr macros.
+fn diagnostic_macro_args(text: &str) -> Vec<String> {
+    const MACROS: &[&str] = &[
+        "log::error!",
+        "log::warn!",
+        "log::info!",
+        "log::debug!",
+        "log::trace!",
+        "eprintln!",
+        "eprint!",
+        "println!",
+        "print!",
+    ];
+    let bytes = text.as_bytes();
+    let mut args = Vec::new();
+    for mac in MACROS {
+        let mut from = 0;
+        while let Some(rel) = text[from..].find(mac) {
+            let after = from + rel + mac.len();
+            // Skip whitespace to the opening paren.
+            let mut i = after;
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b'(' {
+                let mut depth = 0i32;
+                let mut j = i;
+                while j < bytes.len() {
+                    match bytes[j] {
+                        b'(' => depth += 1,
+                        b')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                args.push(text[i..=j.min(bytes.len() - 1)].to_string());
+                from = j + 1;
+            } else {
+                from = after;
+            }
+        }
+    }
+    args
+}
+
+/// True if `arg` references the raw `sql` query text: either an inline
+/// `{sql...}` capture in a format string or the bare `sql` identifier as a
+/// value argument.
+fn references_raw_sql(arg: &str) -> bool {
+    if arg.contains("{sql") {
+        return true;
+    }
+    let bytes = arg.as_bytes();
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut i = 0;
+    while let Some(rel) = arg[i..].find("sql") {
+        let pos = i + rel;
+        let before_ok = pos == 0 || !is_word(bytes[pos - 1]);
+        let after = pos + 3;
+        let after_ok = after >= bytes.len() || !is_word(bytes[after]);
+        if before_ok && after_ok {
+            return true;
+        }
+        i = pos + 3;
+    }
+    false
+}
+
+/// Issue #1694: `Database::execute` (src/lib.rs) must diagnose the SHAPE only
+/// (rows affected), NEVER the raw `sql` query text — a query string carries user
+/// data (WHERE-clause literals). Pre-fix it logged `Database::execute('{sql}')`
+/// at DEBUG. The runtime sentinel guard (`where_clause_literal_is_never_logged`)
+/// covers this path but is feature+Data.db-gated and can skip; this ALWAYS-ON
+/// source guard rejects a regression unconditionally.
+#[test]
+fn lib_execute_does_not_log_raw_sql() {
+    let path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+    let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let body = fn_body(&src, "fn execute(&self, sql: &str)");
+    let leaks: Vec<String> = diagnostic_macro_args(&body)
+        .into_iter()
+        .filter(|arg| references_raw_sql(arg))
+        .collect();
+    assert!(
+        leaks.is_empty(),
+        "Database::execute must not log the raw `sql` text (data-safety #1694); \
+         found value-bearing diagnostic(s): {leaks:#?}"
     );
 }
 
