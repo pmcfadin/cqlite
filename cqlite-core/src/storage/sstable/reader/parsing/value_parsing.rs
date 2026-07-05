@@ -312,7 +312,6 @@ where
 /// Cassandra UDT field lengths are encoded as 4-byte big-endian signed int32
 /// (TupleType.java / UserType.java use `accessor.putInt`), with -1 meaning null.
 /// This is NOT VInt encoding.
-#[allow(dead_code)] // Used in tests; may be used by future refactoring
 pub(crate) fn parse_udt_value_with<F>(
     data: &[u8],
     field_comparators: &[(String, ComparatorType)],

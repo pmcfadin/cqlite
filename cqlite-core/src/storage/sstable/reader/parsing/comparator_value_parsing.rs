@@ -13,8 +13,8 @@
 //! `AbstractType.writeValue()`.
 
 use crate::{
-    parser::vint::{parse_vint, parse_vint_length},
-    types::{ComparatorType, UdtField, UdtValue, Value},
+    parser::vint::parse_vint,
+    types::{ComparatorType, UdtValue, Value},
     Error, Result,
 };
 
@@ -205,21 +205,52 @@ pub fn parse_value_with_comparator(
                 .map_err(|_| Error::corruption("Invalid JSON value"))?;
             Ok(Value::Json(json_value))
         }
-        ComparatorType::List(element_comparator) => {
-            parse_list_value(value_data, element_comparator)
-        }
-        ComparatorType::Set(element_comparator) => parse_set_value(value_data, element_comparator),
+        // Structural types route through the ONE shared structural body in
+        // `value_parsing` (issue #1636 / J2). Non-frozen collections use VInt
+        // element framing; tuple/UDT use Cassandra's 4-byte i32-BE field framing
+        // (`TupleType`/`UserType` `putInt`, `-1` == null) — the same framing the
+        // live block path (decoder #1) and the v5 frozen path already use.
+        ComparatorType::List(element_comparator) => super::value_parsing::parse_list_value_with(
+            value_data,
+            element_comparator,
+            parse_value_with_comparator,
+        ),
+        ComparatorType::Set(element_comparator) => super::value_parsing::parse_set_value_with(
+            value_data,
+            element_comparator,
+            parse_value_with_comparator,
+        ),
         ComparatorType::Map(key_comparator, value_comparator) => {
-            parse_map_value(value_data, key_comparator, value_comparator)
+            super::value_parsing::parse_map_value_with(
+                value_data,
+                key_comparator,
+                value_comparator,
+                parse_value_with_comparator,
+            )
         }
-        ComparatorType::Tuple(field_comparators) => {
-            parse_tuple_value(value_data, field_comparators)
-        }
+        ComparatorType::Tuple(field_comparators) => super::value_parsing::parse_tuple_value_with(
+            value_data,
+            field_comparators,
+            parse_value_with_comparator,
+        ),
         ComparatorType::Udt {
             type_name,
             keyspace,
             field_comparators,
-        } => parse_udt_value(value_data, type_name, keyspace, field_comparators),
+        } => {
+            let udt = super::value_parsing::parse_udt_value_with(
+                value_data,
+                field_comparators,
+                parse_value_with_comparator,
+            )?;
+            // Preserve decoder #2's provenance (type_name/keyspace from the
+            // comparator) rather than the helper's "unknown" placeholders.
+            Ok(Value::Udt(UdtValue {
+                keyspace: keyspace.clone().unwrap_or_else(|| "unknown".to_string()),
+                type_name: type_name.to_string(),
+                fields: udt.fields,
+            }))
+        }
         ComparatorType::Frozen(inner_comparator) => {
             let inner_value = parse_value_with_comparator(value_data, inner_comparator)?;
             Ok(Value::Frozen(Box::new(inner_value)))
@@ -277,192 +308,6 @@ fn parse_duration_value(value_data: &[u8]) -> Result<Value> {
         days,
         nanos,
     })
-}
-
-/// Parse a list value using the element comparator
-fn parse_list_value(value_data: &[u8], element_comparator: &ComparatorType) -> Result<Value> {
-    let mut offset = 0;
-    let mut elements = Vec::new();
-
-    // Parse element count
-    let (remaining, element_count) = parse_vint_length(&value_data[offset..])
-        .map_err(|_| Error::corruption("Failed to parse list element count"))?;
-    offset = value_data.len() - remaining.len();
-
-    // Parse each element
-    for _ in 0..element_count {
-        if offset >= value_data.len() {
-            break;
-        }
-
-        // Parse element length
-        let (remaining, element_len) = parse_vint_length(&value_data[offset..])
-            .map_err(|_| Error::corruption("Failed to parse list element length"))?;
-        offset = value_data.len() - remaining.len();
-
-        if element_len > remaining.len() {
-            return Err(Error::corruption(
-                "List element length exceeds available data",
-            ));
-        }
-
-        // Parse element value using element comparator (recursive)
-        let element_data = &remaining[..element_len];
-        let element_value = parse_value_with_comparator(element_data, element_comparator)?;
-        elements.push(element_value);
-        offset += element_len;
-    }
-
-    Ok(Value::List(elements))
-}
-
-/// Parse a set value using the element comparator
-fn parse_set_value(value_data: &[u8], element_comparator: &ComparatorType) -> Result<Value> {
-    // Sets are parsed similarly to lists
-    let list_value = parse_list_value(value_data, element_comparator)?;
-    if let Value::List(elements) = list_value {
-        Ok(Value::Set(elements))
-    } else {
-        Err(Error::corruption("Failed to parse set value"))
-    }
-}
-
-/// Parse a map value using key and value comparators
-fn parse_map_value(
-    value_data: &[u8],
-    key_comparator: &ComparatorType,
-    value_comparator: &ComparatorType,
-) -> Result<Value> {
-    let mut offset = 0;
-    let mut entries = Vec::new();
-
-    // Parse entry count
-    let (remaining, entry_count) = parse_vint_length(&value_data[offset..])
-        .map_err(|_| Error::corruption("Failed to parse map entry count"))?;
-    offset = value_data.len() - remaining.len();
-
-    // Parse each key-value pair
-    for _ in 0..entry_count {
-        if offset >= value_data.len() {
-            break;
-        }
-
-        // Parse key length and data
-        let (remaining, key_len) = parse_vint_length(&value_data[offset..])
-            .map_err(|_| Error::corruption("Failed to parse map key length"))?;
-        offset = value_data.len() - remaining.len();
-
-        if key_len > remaining.len() {
-            return Err(Error::corruption("Map key length exceeds available data"));
-        }
-
-        let key_data = &remaining[..key_len];
-        let key_value = parse_value_with_comparator(key_data, key_comparator)?;
-        offset += key_len;
-
-        // Parse value length and data
-        let (remaining, value_len) = parse_vint_length(&value_data[offset..])
-            .map_err(|_| Error::corruption("Failed to parse map value length"))?;
-        offset = value_data.len() - remaining.len();
-
-        if value_len > remaining.len() {
-            return Err(Error::corruption("Map value length exceeds available data"));
-        }
-
-        let value_data_slice = &remaining[..value_len];
-        let value = parse_value_with_comparator(value_data_slice, value_comparator)?;
-        offset += value_len;
-
-        entries.push((key_value, value));
-    }
-
-    Ok(Value::Map(entries))
-}
-
-/// Parse a tuple value using field comparators
-fn parse_tuple_value(value_data: &[u8], field_comparators: &[ComparatorType]) -> Result<Value> {
-    let mut offset = 0;
-    let mut fields = Vec::new();
-
-    // Parse each field
-    for field_comparator in field_comparators {
-        if offset >= value_data.len() {
-            // Remaining fields are null
-            fields.push(Value::Null);
-            continue;
-        }
-
-        // Parse field length
-        let (remaining, field_len) = parse_vint_length(&value_data[offset..])
-            .map_err(|_| Error::corruption("Failed to parse tuple field length"))?;
-        offset = value_data.len() - remaining.len();
-
-        if field_len > remaining.len() {
-            return Err(Error::corruption(
-                "Tuple field length exceeds available data",
-            ));
-        }
-
-        // Parse field value using field comparator (recursive)
-        let field_data = &remaining[..field_len];
-        let field_value = parse_value_with_comparator(field_data, field_comparator)?;
-        fields.push(field_value);
-        offset += field_len;
-    }
-
-    Ok(Value::Tuple(fields))
-}
-
-/// Parse a UDT value using field comparators
-fn parse_udt_value(
-    value_data: &[u8],
-    type_name: &str,
-    keyspace: &Option<String>,
-    field_comparators: &[(String, ComparatorType)],
-) -> Result<Value> {
-    let mut offset = 0;
-    let mut fields = Vec::new();
-
-    // Parse each field
-    for (field_name, field_comparator) in field_comparators {
-        if offset >= value_data.len() {
-            // Remaining fields are null
-            fields.push(UdtField {
-                name: field_name.clone(),
-                value: None,
-            });
-            continue;
-        }
-
-        // Parse field length
-        let (remaining, field_len) = parse_vint_length(&value_data[offset..]).map_err(|_| {
-            Error::corruption(format!("Failed to parse UDT field {} length", field_name))
-        })?;
-        offset = value_data.len() - remaining.len();
-
-        if field_len > remaining.len() {
-            return Err(Error::corruption(format!(
-                "UDT field {} length exceeds available data",
-                field_name
-            )));
-        }
-
-        // Parse field value using field comparator (recursive)
-        let field_data = &remaining[..field_len];
-        let field_value = parse_value_with_comparator(field_data, field_comparator)?;
-
-        fields.push(UdtField {
-            name: field_name.clone(),
-            value: Some(field_value),
-        });
-        offset += field_len;
-    }
-
-    Ok(Value::Udt(UdtValue {
-        keyspace: keyspace.clone().unwrap_or_else(|| "unknown".to_string()),
-        type_name: type_name.to_string(),
-        fields,
-    }))
 }
 
 #[cfg(test)]
