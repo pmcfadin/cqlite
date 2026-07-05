@@ -1101,9 +1101,15 @@ impl SelectExecutor {
     /// its shape) — this is purely query-side de-duplication.
     async fn resolve_table_schema(&self, table: &TableId) -> Option<Arc<TableSchema>> {
         let (keyspace, table_name) = parse_table_id(table);
+        // The registry owns freshness (issue #1708): an expired entry that cannot
+        // be refreshed surfaces as `Err`; schema resolution here is best-effort
+        // (missing/unresolvable schema falls back to row-derived columns), so a
+        // refresh error folds to `None` rather than aborting the query.
         self._schema
             .find_schema_by_table(&keyspace, &table_name)
             .await
+            .ok()
+            .flatten()
             .map(Arc::new)
     }
 
