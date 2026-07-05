@@ -18,6 +18,7 @@
 use std::path::{Path, PathBuf};
 
 use cqlite_core::ingestion::{ingest, IngestionConfig};
+use cqlite_core::query::result::StreamingConfig;
 use cqlite_core::types::Value;
 use cqlite_core::{Database, QueryRow};
 
@@ -391,6 +392,142 @@ async fn grouped_sum_filtered_by_agg_arg_column_is_per_group() {
             "SUM(value) WHERE value > 500000 for category {cat} must be the exact \
              per-group filtered subtotal",
         );
+    }
+}
+
+/// Collect all rows from a streaming query into a Vec.
+async fn stream_all(db: &Database, sql: &str) -> Vec<QueryRow> {
+    let mut iter = db
+        .execute_streaming(sql, StreamingConfig::default())
+        .await
+        .expect("streaming query must start");
+    let mut rows = Vec::new();
+    while let Some(item) = iter.next_async().await {
+        rows.push(item.expect("streamed row must decode"));
+    }
+    rows
+}
+
+/// #1952 STREAMING follow-up (roborev HIGH): the broadened scan projection now
+/// includes UNSELECTED WHERE helper columns, relying on the `Project` step to
+/// trim them. The streaming producer ignores a plain-column `Project`, so before
+/// the `requires_materialization` fix, `SELECT value ... WHERE category = 'A'`
+/// scanned `[value, category]` and STREAMED both — leaking the WHERE helper
+/// column `category` into every streamed row. After the fix the plan routes
+/// through the materialized-then-stream path and each streamed row carries ONLY
+/// the selected column `value`.
+#[tokio::test]
+async fn streaming_trims_unselected_where_helper_column() {
+    let db = match setup("basic-types.cql", "/test_basic/").await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let rows = stream_all(
+        &db,
+        "SELECT value FROM test_basic.multi_partition_table WHERE category = 'A'",
+    )
+    .await;
+
+    // Ground truth: category A has 36 rows.
+    assert_eq!(
+        rows.len(),
+        36,
+        "streaming SELECT value WHERE category='A' must yield the 36 category-A rows"
+    );
+    for row in &rows {
+        let keys: Vec<&str> = row.values.keys().map(|k| k.as_ref()).collect();
+        assert_eq!(
+            keys,
+            vec!["value"],
+            "streamed row must contain ONLY the selected column `value`; the WHERE \
+             helper column `category` must be trimmed, not leaked (pre-fix the \
+             streaming path ignored the Project step and leaked `category`)"
+        );
+        assert!(
+            !row.values.contains_key("category"),
+            "the unselected WHERE helper column `category` must NOT appear in a \
+             streamed row"
+        );
+    }
+}
+
+/// #1952 STREAMING follow-up: a query with BOTH an ORDER BY helper and a WHERE
+/// helper (neither selected) must stream only the selected column. `SELECT value
+/// ... WHERE category = 'A' ORDER BY item_id` scans `[value, category, item_id]`
+/// and must trim `category` and `item_id` from every streamed row.
+#[tokio::test]
+async fn streaming_trims_unselected_where_and_order_by_helpers() {
+    let db = match setup("basic-types.cql", "/test_basic/").await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let rows = stream_all(
+        &db,
+        "SELECT value FROM test_basic.multi_partition_table \
+         WHERE category = 'A' ORDER BY item_id",
+    )
+    .await;
+
+    assert_eq!(rows.len(), 36, "category A has 36 rows");
+    for row in &rows {
+        let keys: Vec<&str> = row.values.keys().map(|k| k.as_ref()).collect();
+        assert_eq!(
+            keys,
+            vec!["value"],
+            "streamed row must contain ONLY `value`; WHERE helper `category` and \
+             ORDER BY helper `item_id` must be trimmed"
+        );
+    }
+}
+
+/// #1952 STREAMING regression guard: when the selected columns EXACTLY equal the
+/// scan projection (no helper columns to trim), the query must still stream
+/// directly and return correct rows — the fix must not force materialization for
+/// the common case. `SELECT value ... WHERE value > 500000` scans exactly
+/// `[value]` (the WHERE column is already selected), so no `Project`-trim is
+/// needed.
+#[tokio::test]
+async fn streaming_exact_match_projection_still_streams_correctly() {
+    let db = match setup("basic-types.cql", "/test_basic/").await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let rows = stream_all(
+        &db,
+        "SELECT value FROM test_basic.multi_partition_table WHERE value > 500000",
+    )
+    .await;
+
+    assert!(
+        !rows.is_empty(),
+        "there are rows with value > 500000; streaming must return them"
+    );
+    for row in &rows {
+        let keys: Vec<&str> = row.values.keys().map(|k| k.as_ref()).collect();
+        assert_eq!(
+            keys,
+            vec!["value"],
+            "each streamed row carries only `value`"
+        );
+        match row.values.get("value") {
+            Some(Value::BigInt(v)) => assert!(
+                *v > 500_000,
+                "streamed value {v} must satisfy the WHERE predicate value > 500000"
+            ),
+            other => panic!("expected BigInt value, got {other:?}"),
+        }
     }
 }
 
