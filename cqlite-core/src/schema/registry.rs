@@ -558,6 +558,44 @@ impl SchemaRegistry {
         Ok(results)
     }
 
+    /// Find a schema by table name, optionally scoped to a keyspace, cloning
+    /// only the matched schema (issue #1708).
+    ///
+    /// This is the single freshness-preserving lookup that [`crate::schema::SchemaManager`]
+    /// delegates to. Unlike [`Self::get_schema`] it reads the LIVE `schemas` map
+    /// directly (no TTL gate, no auto-discovery, no fabrication): a registry-side
+    /// TTL-refresh / re-registration is observed immediately by the manager, so
+    /// the manager can never serve a stale by-value snapshot. Returns `None` when
+    /// no schema matches (the manager maps that to its own not-found error).
+    pub async fn find_schema_by_table(
+        &self,
+        keyspace: &Option<String>,
+        table: &str,
+    ) -> Option<TableSchema> {
+        let schemas = self.schemas.read().await;
+
+        // Exact `keyspace.table` match first when a keyspace is provided.
+        if let Some(ks) = keyspace {
+            let key = format!("{}.{}", ks, table);
+            if let Some(entry) = schemas.get(&key) {
+                return Some(entry.schema.clone());
+            }
+        }
+
+        // Otherwise match any registered schema by table name (keyspace-aware).
+        schemas
+            .values()
+            .find(|entry| {
+                crate::schema::table_name_matches(
+                    &Some(entry.schema.keyspace.clone()),
+                    &entry.schema.table,
+                    keyspace,
+                    table,
+                )
+            })
+            .map(|entry| entry.schema.clone())
+    }
+
     /// Validate a schema
     #[allow(dead_code)]
     pub async fn validate_schema(&self, keyspace: &str, table: &str) -> Result<ValidationReport> {

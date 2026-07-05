@@ -764,17 +764,38 @@ impl TableSchema {
     }
 }
 
-/// Schema management service for handling table schemas and UDT definitions
+/// Schema management service for handling table schemas and UDT definitions.
+///
+/// Issue #1708 (one schema source of truth): the manager holds an
+/// `Arc<RwLock<SchemaRegistry>>` and RESOLVES every schema/UDT lookup THROUGH
+/// that registry (and REGISTERS manager-side loads INTO it). It keeps NO
+/// by-value schema/UDT copy of its own, so registry-side TTL-refresh /
+/// auto-discovery and manager-side loads are always mutually visible — the two
+/// can never silently diverge. The registry owns freshness (TTL/refresh); the
+/// manager delegates.
 #[derive(Debug)]
 pub struct SchemaManager {
     #[allow(dead_code)]
     storage: Arc<StorageEngine>,
-    schemas: Arc<RwLock<HashMap<String, TableSchema>>>,
-    /// UDT registry for managing User Defined Types (internal, use accessor methods)
-    pub(crate) udt_registry: Arc<RwLock<UdtRegistry>>,
+    /// The single source of truth for table schemas and UDTs.
+    registry: Arc<RwLock<registry::SchemaRegistry>>,
 }
 
 impl SchemaManager {
+    /// Build a default schema registry sharing the given platform/config.
+    async fn default_registry(
+        platform: Arc<crate::platform::Platform>,
+        config: &Config,
+    ) -> Result<Arc<RwLock<registry::SchemaRegistry>>> {
+        let registry = registry::SchemaRegistry::new(
+            registry::SchemaRegistryConfig::default(),
+            platform,
+            config.clone(),
+        )
+        .await?;
+        Ok(Arc::new(RwLock::new(registry)))
+    }
+
     /// Create a new schema manager from a path
     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
         // Create temporary storage engine (not actually used in this context)
@@ -784,27 +805,22 @@ impl SchemaManager {
             StorageEngine::open(
                 path.as_ref(),
                 &config,
-                platform,
+                platform.clone(),
                 #[cfg(feature = "state_machine")]
                 None,
             )
             .await?,
         );
 
-        Ok(Self {
-            storage,
-            schemas: Arc::new(RwLock::new(HashMap::new())),
-            udt_registry: Arc::new(RwLock::new(UdtRegistry::new())),
-        })
+        let registry = Self::default_registry(platform, &config).await?;
+        Ok(Self { storage, registry })
     }
 
     /// Create a new schema manager with storage
-    pub async fn new_with_storage(storage: Arc<StorageEngine>, _config: &Config) -> Result<Self> {
-        let manager = Self {
-            storage,
-            schemas: Arc::new(RwLock::new(HashMap::new())),
-            udt_registry: Arc::new(RwLock::new(UdtRegistry::new())),
-        };
+    pub async fn new_with_storage(storage: Arc<StorageEngine>, config: &Config) -> Result<Self> {
+        let platform = Arc::new(crate::platform::Platform::new(config).await?);
+        let registry = Self::default_registry(platform, config).await?;
+        let manager = Self { storage, registry };
 
         // Load built-in UDT definitions for Cassandra 5.0 compatibility
         manager.load_default_udts().await;
@@ -817,6 +833,10 @@ impl SchemaManager {
     /// This constructor is used when schemas are loaded from external .cql files
     /// during ingestion, allowing the pre-loaded schemas to be used by the query engine.
     ///
+    /// Issue #1708: the registry is SHARED by reference (not snapshotted). Every
+    /// subsequent registry-side update is immediately visible to this manager,
+    /// and every manager-side load is registered back into this same registry.
+    ///
     /// # Arguments
     ///
     /// * `storage` - The storage engine instance
@@ -827,28 +847,16 @@ impl SchemaManager {
         registry: Arc<tokio::sync::RwLock<registry::SchemaRegistry>>,
         _config: &Config,
     ) -> Result<Self> {
-        // Acquire both schemas and UDT registry in a single lock scope to prevent deadlocks
-        let (loaded_schemas, udt_registry) = {
-            let registry_guard = registry.read().await;
-            let schemas = registry_guard.list_schemas(None).await?;
-            let udt_reg = registry_guard.get_udt_registry();
-            (schemas, udt_reg)
-        }; // Lock is dropped here before further processing
+        Ok(Self { storage, registry })
+    }
 
-        // Populate internal schemas map
-        let mut schemas_map = HashMap::new();
-        for schema in loaded_schemas {
-            let table_id = format!("{}.{}", schema.keyspace, schema.table);
-            schemas_map.insert(table_id, schema);
-        }
-
-        let manager = Self {
-            storage,
-            schemas: Arc::new(RwLock::new(schemas_map)),
-            udt_registry,
-        };
-
-        Ok(manager)
+    /// Access the shared schema registry (test-only).
+    ///
+    /// Lets tests register schemas/UDTs into the single source of truth the
+    /// manager resolves through, to assert cross-visibility (issue #1708).
+    #[cfg(test)]
+    pub(crate) fn registry(&self) -> Arc<RwLock<registry::SchemaRegistry>> {
+        self.registry.clone()
     }
 
     /// Load default UDT definitions that are commonly used in Cassandra
@@ -861,7 +869,7 @@ impl SchemaManager {
             .with_field("zip_code".to_string(), CqlType::Text, true)
             .with_field("country".to_string(), CqlType::Text, true);
 
-        self.udt_registry.write().await.register_udt(address_udt);
+        self.register_udt(address_udt).await;
 
         // Enhanced person UDT with nested address
         let person_udt = UdtTypeDef::new("test_keyspace".to_string(), "person".to_string())
@@ -888,7 +896,7 @@ impl SchemaManager {
                 true,
             );
 
-        self.udt_registry.write().await.register_udt(person_udt);
+        self.register_udt(person_udt).await;
 
         // Company UDT with nested person and address relationships
         let company_udt = UdtTypeDef::new("test_keyspace".to_string(), "company".to_string())
@@ -914,21 +922,25 @@ impl SchemaManager {
             )
             .with_field("founded_year".to_string(), CqlType::Int, true);
 
-        self.udt_registry.write().await.register_udt(company_udt);
+        self.register_udt(company_udt).await;
     }
 
-    /// Register a new UDT type definition
+    /// Register a new UDT type definition into the shared registry (issue #1708).
     pub async fn register_udt(&self, udt_def: UdtTypeDef) {
-        self.udt_registry.write().await.register_udt(udt_def);
+        // `SchemaRegistry::register_udt` is infallible in practice (it only
+        // inserts into the in-memory UDT registry); ignore the `Ok(())`.
+        let _ = self.registry.read().await.register_udt(udt_def).await;
     }
 
-    /// Get a UDT definition (returns a cloned UdtTypeDef)
+    /// Get a UDT definition from the shared registry (returns a cloned UdtTypeDef).
     pub async fn get_udt(&self, keyspace: &str, name: &str) -> Option<UdtTypeDef> {
-        self.udt_registry
+        self.registry
             .read()
             .await
             .get_udt(keyspace, name)
-            .cloned()
+            .await
+            .ok()
+            .flatten()
     }
 
     /// Load schema for a table.
@@ -938,59 +950,59 @@ impl SchemaManager {
     /// fabricated-shape rows for undefined tables, violating the no-heuristics
     /// mandate. This mirrors the I3 (#1626) hard-fail precedent (issue #1710).
     ///
-    /// This is a pure read-lock lookup: no write happens on the unknown-table
-    /// path, so there is no read-drop-write TOCTOU here.
+    /// This resolves THROUGH the shared registry (issue #1708), so a
+    /// registry-side TTL-refresh / auto-discovery is always observed and a
+    /// stale by-value snapshot can never be served. No write happens on the
+    /// unknown-table path.
     pub async fn load_schema(&self, table_name: &str) -> Result<TableSchema> {
-        let schemas = self.schemas.read().await;
-        schemas.get(table_name).cloned().ok_or_else(|| {
-            Error::schema(format!(
-                "unknown table {}; no schema registered or discovered",
-                table_name
-            ))
-        })
+        // A `keyspace.table` name resolves as an exact scoped lookup; a bare
+        // name matches by table name across keyspaces.
+        let (keyspace, table) = match table_name.split_once('.') {
+            Some((ks, tbl)) => (Some(ks.to_string()), tbl),
+            None => (None, table_name),
+        };
+        self.find_schema_by_table(&keyspace, table)
+            .await
+            .ok_or_else(|| {
+                Error::schema(format!(
+                    "unknown table {}; no schema registered or discovered",
+                    table_name
+                ))
+            })
     }
 
-    /// Parse and register a schema from a CQL CREATE TABLE statement
+    /// Parse and register a schema from a CQL CREATE TABLE statement.
+    ///
+    /// Registers INTO the shared registry (issue #1708) so the parsed schema is
+    /// immediately visible to every other holder of the registry (parsing paths,
+    /// other managers), not stored in a private manager-only map.
     pub async fn parse_and_register_cql_schema(&self, cql: &str) -> Result<TableSchema> {
         let schema = cql_parser::parse_cql_schema(cql)?;
-        let table_key = format!("{}.{}", schema.keyspace, schema.table);
-        self.schemas
-            .write()
+        self.registry
+            .read()
             .await
-            .insert(table_key.clone(), schema.clone());
+            .register_schema(schema.clone(), registry::SchemaSource::Cql(cql.to_string()))
+            .await?;
         Ok(schema)
     }
 
-    /// Find schema by table name with optional keyspace matching
+    /// Find schema by table name with optional keyspace matching.
+    ///
+    /// Resolves THROUGH the shared registry (issue #1708); the registry clones
+    /// only the matched schema.
     pub async fn find_schema_by_table(
         &self,
         keyspace: &Option<String>,
         table: &str,
     ) -> Option<TableSchema> {
-        let schemas = self.schemas.read().await;
-
-        // First try exact match if keyspace provided
-        if let Some(ks) = keyspace {
-            let key = format!("{}.{}", ks, table);
-            if let Some(schema) = schemas.get(&key) {
-                #[cfg(test)]
-                TABLE_SCHEMA_CLONES.with(|c| c.set(c.get() + 1));
-                return Some(schema.clone());
-            }
-        }
-
-        // Then try to find any schema matching the table name
-        let found = schemas
-            .values()
-            .find(|schema| {
-                cql_parser::table_name_matches(
-                    &Some(schema.keyspace.clone()),
-                    &schema.table,
-                    keyspace,
-                    table,
-                )
-            })
-            .cloned();
+        let found = self
+            .registry
+            .read()
+            .await
+            .find_schema_by_table(keyspace, table)
+            .await;
+        // Preserve the issue #1587 (E5) once-per-query deep-clone accounting: the
+        // registry performs exactly one `TableSchema` clone on a hit.
         #[cfg(test)]
         if found.is_some() {
             TABLE_SCHEMA_CLONES.with(|c| c.set(c.get() + 1));
@@ -1265,11 +1277,11 @@ mod tests {
             .expect("primitive/collection-only schema should validate");
     }
 
-    async fn test_manager() -> Arc<SchemaManager> {
+    async fn build_storage() -> Arc<StorageEngine> {
         let config = Config::default();
         let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
         let temp_dir = tempfile::tempdir().unwrap();
-        let storage = Arc::new(
+        Arc::new(
             StorageEngine::open(
                 temp_dir.path(),
                 &config,
@@ -1279,7 +1291,26 @@ mod tests {
             )
             .await
             .unwrap(),
-        );
+        )
+    }
+
+    async fn build_shared_registry() -> Arc<RwLock<registry::SchemaRegistry>> {
+        let config = Config::default();
+        let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
+        Arc::new(RwLock::new(
+            registry::SchemaRegistry::new(
+                registry::SchemaRegistryConfig::default(),
+                platform,
+                config,
+            )
+            .await
+            .unwrap(),
+        ))
+    }
+
+    async fn test_manager() -> Arc<SchemaManager> {
+        let config = Config::default();
+        let storage = build_storage().await;
         Arc::new(
             SchemaManager::new_with_storage(storage, &config)
                 .await
@@ -1310,29 +1341,37 @@ mod tests {
             "error must name the unknown table, got: {err}"
         );
 
-        // And the failed lookup must NOT insert a fabricated entry.
-        assert!(
-            manager.schemas.read().await.is_empty(),
+        // And the failed lookup must NOT register a fabricated entry.
+        let stats = manager
+            .registry()
+            .read()
+            .await
+            .get_statistics()
+            .await
+            .unwrap();
+        assert_eq!(
+            stats.total_schemas, 0,
             "unknown-table lookup must not mutate the registry"
         );
     }
 
     /// Issue #1710: concurrent `load_schema` of a registered table returns the
-    /// real schema from every task, and never mutates the registry (the
-    /// unknown-table path no longer does a read-drop-write, so there is no
-    /// lost-update TOCTOU).
+    /// real schema from every task, and never mutates the registry.
     #[tokio::test]
     async fn test_concurrent_schema_access() {
         let manager = test_manager().await;
 
-        // Register 3 real schemas up front (authoritative metadata only).
+        // Register 3 real schemas up front THROUGH the shared registry (issue
+        // #1708 single source of truth; authoritative metadata only).
         for i in 0..3 {
             let name = format!("table_{}", i);
             manager
-                .schemas
-                .write()
+                .registry()
+                .read()
                 .await
-                .insert(name.clone(), table_schema_named(&name));
+                .register_schema(table_schema_named(&name), registry::SchemaSource::Manual)
+                .await
+                .unwrap();
         }
 
         // Spawn 10 concurrent tasks loading the 3 tables.
@@ -1351,11 +1390,142 @@ mod tests {
         }
 
         // Registry is unchanged: exactly the 3 registered entries, no fabrication.
-        let schemas = manager.schemas.read().await;
-        assert_eq!(schemas.len(), 3);
-        assert!(schemas.contains_key("table_0"));
-        assert!(schemas.contains_key("table_1"));
-        assert!(schemas.contains_key("table_2"));
+        let stats = manager
+            .registry()
+            .read()
+            .await
+            .get_statistics()
+            .await
+            .unwrap();
+        assert_eq!(stats.total_schemas, 3);
+        for i in 0..3 {
+            assert!(manager.load_schema(&format!("table_{}", i)).await.is_ok());
+        }
+    }
+
+    /// Issue #1708: the manager must resolve THROUGH the shared registry, never a
+    /// stale by-value snapshot captured at construction. Register v1, build the
+    /// manager, then update the schema THROUGH the registry (simulating a
+    /// TTL-refresh / auto-discovery re-registration) and confirm the manager
+    /// observes v2. RED on main (returned the snapshotted v1).
+    #[tokio::test]
+    async fn test_manager_reflects_registry_updates_no_stale_snapshot() {
+        let registry = build_shared_registry().await;
+
+        // v1: two columns (id uuid, value text).
+        let v1 = table_schema_named("evolving");
+        assert_eq!(v1.columns.len(), 2);
+        registry
+            .read()
+            .await
+            .register_schema(v1.clone(), registry::SchemaSource::Manual)
+            .await
+            .unwrap();
+
+        let storage = build_storage().await;
+        let config = Config::default();
+        let manager = SchemaManager::new_with_registry(storage, registry.clone(), &config)
+            .await
+            .unwrap();
+
+        let got_v1 = manager.get_table_schema("evolving").await.unwrap();
+        assert_eq!(got_v1.columns.len(), 2, "manager must see v1");
+
+        // Update THROUGH the registry: v2 adds a column.
+        let mut v2 = v1.clone();
+        v2.columns.push(Column {
+            name: "extra".to_string(),
+            data_type: "int".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        });
+        registry
+            .read()
+            .await
+            .register_schema(v2, registry::SchemaSource::Manual)
+            .await
+            .unwrap();
+
+        let got_v2 = manager.get_table_schema("evolving").await.unwrap();
+        assert_eq!(
+            got_v2.columns.len(),
+            3,
+            "manager must resolve THROUGH the registry, not a stale by-value snapshot"
+        );
+    }
+
+    /// Issue #1708: UDT-registry sharing must be constructor-INDEPENDENT. A UDT
+    /// registered into the shared registry is visible via the manager's `get_udt`
+    /// for EVERY constructor path, and a UDT registered via the manager is
+    /// visible via the shared registry. RED on main for `new`/`new_with_storage`
+    /// (they built an unshared private UDT-registry copy).
+    #[tokio::test]
+    async fn test_all_constructors_share_udt_registry() {
+        // Manager built via `new`.
+        let temp = tempfile::tempdir().unwrap();
+        let via_new = SchemaManager::new(temp.path()).await.unwrap();
+
+        // Manager built via `new_with_storage`.
+        let config = Config::default();
+        let via_storage = {
+            let storage = build_storage().await;
+            SchemaManager::new_with_storage(storage, &config)
+                .await
+                .unwrap()
+        };
+
+        // Manager built via `new_with_registry`.
+        let via_registry = {
+            let registry = build_shared_registry().await;
+            let storage = build_storage().await;
+            SchemaManager::new_with_registry(storage, registry, &config)
+                .await
+                .unwrap()
+        };
+
+        for (label, manager) in [
+            ("new", &via_new),
+            ("new_with_storage", &via_storage),
+            ("new_with_registry", &via_registry),
+        ] {
+            // registry -> manager visibility
+            let point = UdtTypeDef::new("ks_share".to_string(), "point".to_string()).with_field(
+                "x".to_string(),
+                CqlType::Int,
+                true,
+            );
+            manager
+                .registry()
+                .read()
+                .await
+                .register_udt(point)
+                .await
+                .unwrap();
+            assert!(
+                manager.get_udt("ks_share", "point").await.is_some(),
+                "[{label}] UDT registered in the shared registry must be visible via the manager"
+            );
+
+            // manager -> registry visibility
+            let line = UdtTypeDef::new("ks_share".to_string(), "line".to_string()).with_field(
+                "len".to_string(),
+                CqlType::Int,
+                true,
+            );
+            manager.register_udt(line).await;
+            let seen = manager
+                .registry()
+                .read()
+                .await
+                .get_udt("ks_share", "line")
+                .await
+                .unwrap();
+            assert!(
+                seen.is_some(),
+                "[{label}] UDT registered via the manager must be visible in the shared registry"
+            );
+        }
     }
 
     #[test]
