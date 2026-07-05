@@ -673,6 +673,115 @@ async fn nonaggregate_select_value_parity_with_golden() {
     }
 }
 
+/// #1952 (roborev LOW): `SELECT DISTINCT` also produces a bare-column `Project`
+/// step. Distinct is deliberately scoped OUT of the #1587 "skip redundant
+/// Project" optimization (`is_bare_columns` requires `SelectClause::Columns`, so
+/// a `SelectClause::Distinct` ALWAYS pushes a `Project`) AND DISTINCT forces
+/// materialization (`requires_materialization`, mod.rs:596). So a DISTINCT query
+/// whose WHERE filters on an UNSELECTED column now flows through the new
+/// key-preserving `trim_projection` (the plain-column arm of the `Project` step
+/// in `execute.rs`): the scan projection is WIDENED with the WHERE helper
+/// (`category`), and the DISTINCT `Project` must TRIM that helper back out while
+/// preserving each row's real partition key.
+///
+/// `SELECT DISTINCT tenant_id, user_id ... WHERE category = 'A'` selects the two
+/// partition-key columns and filters on the clustering column `category` (NOT in
+/// the SELECT list). This asserts: (a) `category` is trimmed, never leaked; (b)
+/// the selected DISTINCT columns are present; (c) the result equals the exact
+/// distinct set from the golden — the 36 category-A partitions, all unique; (d)
+/// every returned row keeps a real (non-empty) composite partition key.
+#[tokio::test]
+async fn distinct_partition_key_trims_unselected_where_helper() {
+    let db = match setup("basic-types.cql", "/test_basic/").await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let result = db
+        .execute(
+            "SELECT DISTINCT tenant_id, user_id \
+             FROM test_basic.multi_partition_table WHERE category = 'A'",
+        )
+        .await
+        .expect("DISTINCT filtered query must execute");
+
+    // (c) Ground truth: category A has 36 rows, each a distinct single-row
+    // partition, so DISTINCT over the partition key returns 36 rows.
+    assert_eq!(
+        result.rows.len(),
+        36,
+        "DISTINCT tenant_id, user_id WHERE category='A' must return the 36 \
+         category-A partitions; got {}",
+        result.rows.len()
+    );
+
+    let mut seen_pairs: std::collections::HashSet<([u8; 16], [u8; 16])> =
+        std::collections::HashSet::new();
+    for row in &result.rows {
+        // (a) The unselected WHERE helper `category` must be TRIMMED, not leaked.
+        assert!(
+            !row.values.contains_key("category"),
+            "the unselected WHERE helper column `category` must be trimmed from a \
+             DISTINCT row, not leaked (DISTINCT routes through trim_projection)"
+        );
+        // (b) Exactly the two selected DISTINCT columns are present.
+        let mut keys: Vec<&str> = row.values.keys().map(|k| k.as_ref()).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["tenant_id", "user_id"],
+            "a DISTINCT row must contain exactly the selected partition-key columns"
+        );
+        // (d) The trim path must PRESERVE the real composite partition key (it is
+        // NOT rebuilt to an empty vec![] the way `execute_projection` would).
+        assert!(
+            !row.key.0.is_empty(),
+            "each DISTINCT row must carry its real (non-empty) composite partition \
+             key; the key-preserving trim must not destroy it to vec![]"
+        );
+
+        let tid = match row.values.get("tenant_id") {
+            Some(Value::Uuid(b)) => *b,
+            other => panic!("tenant_id must be a Uuid, got {other:?}"),
+        };
+        let uid = match row.values.get("user_id") {
+            Some(Value::Uuid(b)) => *b,
+            other => panic!("user_id must be a Uuid, got {other:?}"),
+        };
+        // (c) DISTINCT contract: no (tenant_id, user_id) pair repeats.
+        assert!(
+            seen_pairs.insert((tid, uid)),
+            "DISTINCT must not return a duplicate (tenant_id, user_id) pair"
+        );
+        // The preserved key must embed the partition-key bytes, proving it is the
+        // real on-disk key rather than a fabricated empty one.
+        assert!(
+            row.key.0.windows(16).any(|w| w == tid),
+            "the preserved partition key must contain the tenant_id bytes"
+        );
+    }
+
+    // (c) Three known category-A partitions (tenant_ids drawn from
+    // nb-1-big-Data.db.jsonl) must appear in the distinct set.
+    for tid in [
+        "98e05820-982d-411c-961f-26d1057474e4",
+        "a75b0a43-21c4-4561-8331-472a710f2e37",
+        "17213719-bb70-453b-8398-7cd097ca9d11",
+    ] {
+        let bytes = uuid_bytes(tid);
+        assert!(
+            result
+                .rows
+                .iter()
+                .any(|r| matches!(r.values.get("tenant_id"), Some(Value::Uuid(b)) if *b == bytes)),
+            "distinct set must contain the known category-A tenant_id {tid}"
+        );
+    }
+}
+
 /// Regression guard: `COUNT(*)` grouped needs no argument column and must stay
 /// correct after the projection change (the group size per category).
 #[tokio::test]
