@@ -106,7 +106,11 @@
 #                      (#1232) — fails if a generate-*.sh enumerates the whole
 #                      SSTable corpus and grep -z filters by keyspace; needs no
 #                      python3 so it runs even on the SKIP path, and any failure
-#                      hard-FAILs this component. On the python3 path also runs
+#                      hard-FAILs this component. Also runs (no python3 needed)
+#                      scripts/tests/test_udt_rowbuilder_tuple_shape.sh (#1991) —
+#                      pins the nb row-builder's UDT value to a positional tuple
+#                      (a dict → KeyError: 0 under prepared inserts) + an
+#                      actionable 0-row abort. On the python3 path also runs
 #                      scripts/tests/test_gate_concurrency_cap.sh (#1825) — proves
 #                      the machine-wide full-gate concurrency cap queues at N,
 #                      exempts --lite, and releases a slot on SIGKILL (uses the
@@ -1441,6 +1445,22 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_generator_keyspace_scoping.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (keyspace-scoping guard); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # UDT row-builder tuple-shape guard (#1991): no python3/Docker needed, always
+  # runs. Pins build_udt_value() to a positional tuple (a dict → KeyError: 0
+  # under prepared inserts, aborting the exhaustive regen) + an actionable 0-row
+  # abort. A failure FAILs the component, mirroring the keyspace-scoping guard.
+  echo ">>> [$name] bash scripts/tests/test_udt_rowbuilder_tuple_shape.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_udt_rowbuilder_tuple_shape.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (udt-rowbuilder tuple-shape guard); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
