@@ -10,15 +10,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **BREAKING (Python bindings):** CQL `duration` and `time` now decode to exact,
-  lossless Python types, matching the Node binding (#1450). The previous mapping
-  (M4 §5.2) was lossy and disagreed with Node, the CLI, and Cassandra:
+  lossless Python types, matching the Node binding (#1450). See the
+  [v0.13 Migration Guide](docs/development/v0.13-migration-guide.md) for
+  before/after examples. The previous mapping (M4 §5.2) was lossy and disagreed
+  with Node, the CLI, and Cassandra:
   - `time` → `int` (nanoseconds since midnight), was `datetime.time` (which
     truncated sub-microsecond nanoseconds).
   - `duration` → `cqlite.Duration(months, days, nanos)`, was `datetime.timedelta`
     (which approximated months as 30 days and truncated nanoseconds to
     microseconds).
 
-  Migration for code that relied on the old types:
+  Migration for code that relied on the old types (the
+  [v0.13 Migration Guide](docs/development/v0.13-migration-guide.md) expands on
+  this):
   ```python
   # OLD: t was a datetime.time; d was a datetime.timedelta
   # NEW: t is an int (nanoseconds); d is a cqlite.Duration
@@ -41,7 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Unknown tables now fail honestly with `Error::Schema("unknown table <name>;
   no schema registered or discovered")`, mirroring the I3 hard-fail precedent
   (#1626). Tables with real registered/discovered schemas (including all corpus
-  parity tables) are unaffected (#1710).
+  parity tables) are unaffected (#1710). See the
+  [v0.13 Migration Guide](docs/development/v0.13-migration-guide.md) for the
+  per-surface error (Rust/Python/Node/CLI) and how to register a schema.
 
 ### Removed
 
@@ -52,7 +58,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unused `OutputMode`/`OutputFormat` variant), so this removes a dead surface
   rather than working behavior; anyone scripting `--out yaml`/`--format yaml`
   must switch to a supported format. A parse-rejection regression test guards
-  against the variant being silently re-added (#283).
+  against the variant being silently re-added (#283). See the
+  [v0.13 Migration Guide](docs/development/v0.13-migration-guide.md).
 
 ### Fixed
 

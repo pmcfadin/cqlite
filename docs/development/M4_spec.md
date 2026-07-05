@@ -534,6 +534,8 @@ napi-build = "2.1"
 | `udt` | `UdtValue` | `dict` | `object` |
 | `null` | `Value::Null` | `None` | `null` |
 
+> **Note:** superseded in v0.13 — the Python `time`/`duration` mappings above are the pre-0.13 (lossy) types. As of v0.13, `time`→`int` (ns since midnight) and `duration`→`cqlite.Duration(months, days, nanos)`. See the [v0.13 Migration Guide](./v0.13-migration-guide.md).
+
 ### 5.2 Implementation Notes
 
 **Python Collection Behavior (Issue #301)**:
@@ -559,6 +561,8 @@ napi-build = "2.1"
    - `LIST<FROZEN<udt>>` → `list[dict]` with UDT metadata
 
 **Temporal Type Precision Notes (Issue #299)**:
+
+> **Note:** superseded in v0.13 (#1450) — the `duration`/`time` precision losses below no longer apply. `duration`→`cqlite.Duration(months, days, nanos)` and `time`→`int` (ns since midnight) are both exact/lossless. See the [v0.13 Migration Guide](./v0.13-migration-guide.md).
 
 When converting CQL temporal types to Python, the following precision limitations apply:
 

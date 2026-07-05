@@ -324,6 +324,8 @@ with cqlite.open("path/to/sstables", schema="schema.cql") as db:
 | `tuple` | `tuple` | |
 | UDT | `dict` | With `_type`, `_keyspace` fields |
 
+> **Note:** the `time`/`duration` rows above are the pre-0.13 mapping and were superseded in v0.13 — see the [v0.13 Migration Guide](./v0.13-migration-guide.md): `time`→`int` (ns since midnight), `duration`→`cqlite.Duration(months, days, nanos)`.
+
 ### Type Checking
 
 CQLite ships with PEP 561 type stubs for full mypy/pyright support:
